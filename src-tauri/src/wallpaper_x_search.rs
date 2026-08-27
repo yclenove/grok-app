@@ -102,7 +102,10 @@ fn counts_toward_circuit(kind: ResponsesSearchErrorKind) -> bool {
 }
 
 fn should_fallback(kind: ResponsesSearchErrorKind) -> bool {
-    kind != ResponsesSearchErrorKind::RateLimited
+    !matches!(
+        kind,
+        ResponsesSearchErrorKind::RateLimited | ResponsesSearchErrorKind::SearchBudgetExceeded
+    )
 }
 
 pub(crate) async fn search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
@@ -115,12 +118,7 @@ pub(crate) async fn search(query: &str, sort: Option<&str>) -> WallpaperSearchRe
         requested_mode,
         credential_revision,
         responses_circuit(),
-        || async {
-            let mut result = wallpaper_x_responses::search(query, sort).await?;
-            result.items = wallpaper_source::filter_reachable_gallery_items(result.items).await;
-            result.valid_count = result.items.len();
-            Ok(result)
-        },
+        || wallpaper_x_responses::search(query, sort),
         || wallpaper_source::x_search_cli_outcome(query, sort),
     )
     .await
@@ -196,23 +194,32 @@ where
                 started,
             )
         }
-        Err(error) if !should_fallback(error.kind) => WallpaperSearchResult {
-            items: Vec::new(),
-            error_code: Some(error.code().into()),
-            message: None,
-            meta: Some(WallpaperSearchMeta {
-                requested_mode: requested_mode.into(),
-                route_used: "responses".into(),
-                fallback_reason: None,
-                duration_ms: elapsed_ms(started),
-                cache_hit: false,
-                search_calls: None,
-                candidate_count: 0,
-                valid_count: 0,
-                model: Some(wallpaper_x_responses::RESPONSES_MODEL.into()),
-                effort: Some(wallpaper_x_responses::RESPONSES_EFFORT.into()),
-            }),
-        },
+        Err(error) if !should_fallback(error.kind) => {
+            if counts_toward_circuit(error.kind) {
+                circuit.lock().record_failure(
+                    error.kind,
+                    error.credential_revision.clone().or(credential_revision),
+                    Instant::now(),
+                );
+            }
+            WallpaperSearchResult {
+                items: Vec::new(),
+                error_code: Some(error.code().into()),
+                message: None,
+                meta: Some(WallpaperSearchMeta {
+                    requested_mode: requested_mode.into(),
+                    route_used: "responses".into(),
+                    fallback_reason: None,
+                    duration_ms: elapsed_ms(started),
+                    cache_hit: false,
+                    search_calls: None,
+                    candidate_count: 0,
+                    valid_count: 0,
+                    model: Some(wallpaper_x_responses::RESPONSES_MODEL.into()),
+                    effort: Some(wallpaper_x_responses::RESPONSES_EFFORT.into()),
+                }),
+            }
+        }
         Err(error) => {
             circuit.lock().record_failure(
                 error.kind,
@@ -281,6 +288,9 @@ mod tests {
             likes: None,
             local_path: None,
             prompt: None,
+            status_id: None,
+            media_index: None,
+            media_quality: None,
         }
     }
 
@@ -396,24 +406,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wallpaper_x_search_rate_limit_never_double_spends_on_cli() {
-        let cli_calls = Arc::new(AtomicUsize::new(0));
-        let calls = Arc::clone(&cli_calls);
-        let result = route_with_providers(
-            store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
-            Some(revision(1)),
-            &Mutex::new(ResponsesCircuitBreaker::default()),
-            || async { Err(responses_error(ResponsesSearchErrorKind::RateLimited)) },
-            move || async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-                cli_success()
-            },
-        )
-        .await;
-        assert_eq!(cli_calls.load(Ordering::SeqCst), 0);
-        assert!(result.items.is_empty());
-        assert_eq!(result.error_code.as_deref(), Some("responses_rate_limited"));
-        assert_eq!(result.meta.expect("route meta").route_used, "responses");
+    async fn wallpaper_x_search_rate_limit_and_budget_overrun_never_double_spend_on_cli() {
+        for kind in [
+            ResponsesSearchErrorKind::RateLimited,
+            ResponsesSearchErrorKind::SearchBudgetExceeded,
+        ] {
+            let cli_calls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::clone(&cli_calls);
+            let result = route_with_providers(
+                store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+                Some(revision(1)),
+                &Mutex::new(ResponsesCircuitBreaker::default()),
+                move || async move { Err(responses_error(kind)) },
+                move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    cli_success()
+                },
+            )
+            .await;
+            assert_eq!(cli_calls.load(Ordering::SeqCst), 0);
+            assert!(result.items.is_empty());
+            assert_eq!(result.error_code.as_deref(), Some(kind.code()));
+            assert_eq!(result.meta.expect("route meta").route_used, "responses");
+        }
     }
 
     #[tokio::test]

@@ -13,13 +13,15 @@ use crate::account::{
 };
 use crate::proxy;
 use crate::wallpaper_source::{
-    filter_gallery_candidates, parse_gallery_items, WallpaperGalleryItem,
+    filter_reachable_gallery_items, merge_rank_x_gallery_items, parse_gallery_items,
+    x_gallery_needs_supplement, x_gallery_reference_ids, WallpaperGalleryItem,
+    X_SEARCH_FIRST_ROUND_CALLS, X_SEARCH_SUPPLEMENT_CALLS, X_SEARCH_TOTAL_CALLS,
 };
 
 pub(crate) const RESPONSES_ENDPOINT: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 pub(crate) const RESPONSES_MODEL: &str = "grok-4.6";
 pub(crate) const RESPONSES_EFFORT: &str = "low";
-pub(crate) const RESPONSES_MAX_X_SEARCH_CALLS: u32 = 3;
+pub(crate) const RESPONSES_MAX_X_SEARCH_CALLS: u32 = X_SEARCH_TOTAL_CALLS;
 
 const RESPONSES_TIMEOUT: Duration = Duration::from_secs(90);
 const RESPONSES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -102,7 +104,78 @@ pub(crate) async fn search(
     sort: Option<&str>,
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     let auth = account::read_build_oauth_access_token().map_err(auth_error)?;
-    search_with_auth(query, sort, &auth, RESPONSES_ENDPOINT, RESPONSES_TIMEOUT).await
+    let mut first = search_with_auth(
+        query,
+        sort,
+        &auth,
+        RESPONSES_ENDPOINT,
+        RESPONSES_TIMEOUT,
+        X_SEARCH_FIRST_ROUND_CALLS,
+        false,
+        &[],
+    )
+    .await?;
+    let mut candidate_count = first.candidate_count;
+    let mut search_calls = first.search_calls;
+    let seen_ids = x_gallery_reference_ids(&first.items);
+    let mut items = filter_reachable_gallery_items(std::mem::take(&mut first.items)).await;
+
+    if x_gallery_needs_supplement(items.len()) {
+        match search_with_auth(
+            query,
+            sort,
+            &auth,
+            RESPONSES_ENDPOINT,
+            RESPONSES_TIMEOUT,
+            X_SEARCH_SUPPLEMENT_CALLS,
+            true,
+            &seen_ids,
+        )
+        .await
+        {
+            Ok(mut supplement) => {
+                search_calls = search_calls.saturating_add(supplement.search_calls);
+                if search_calls > RESPONSES_MAX_X_SEARCH_CALLS {
+                    return Err(ResponsesSearchError::new(
+                        ResponsesSearchErrorKind::SearchBudgetExceeded,
+                        Some(auth.revision.clone()),
+                    ));
+                }
+                candidate_count = candidate_count.saturating_add(supplement.candidate_count);
+                let supplement_items =
+                    filter_reachable_gallery_items(std::mem::take(&mut supplement.items)).await;
+                items.extend(supplement_items);
+                items = merge_rank_x_gallery_items(items);
+            }
+            Err(error)
+                if items.is_empty()
+                    || error.kind == ResponsesSearchErrorKind::SearchBudgetExceeded =>
+            {
+                return Err(error);
+            }
+            Err(_) => {
+                // A useful partial first round is better than discarding honest
+                // results because the optional supplement failed.
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return Err(ResponsesSearchError::new(
+            ResponsesSearchErrorKind::Empty,
+            Some(auth.revision.clone()),
+        ));
+    }
+
+    Ok(ResponsesSearchSuccess {
+        valid_count: items.len(),
+        items,
+        candidate_count,
+        search_calls,
+        model: RESPONSES_MODEL,
+        effort: RESPONSES_EFFORT,
+        credential_revision: auth.revision.clone(),
+    })
 }
 
 fn auth_error(error: BuildOauthTokenError) -> ResponsesSearchError {
@@ -119,6 +192,9 @@ async fn search_with_auth(
     auth: &BuildOauthAccessToken,
     endpoint: &str,
     timeout: Duration,
+    max_search_calls: u32,
+    is_supplement: bool,
+    seen_ids: &[String],
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     search_with_credentials(
         query,
@@ -126,6 +202,9 @@ async fn search_with_auth(
         Ok((auth.expose_to_build_proxy(), auth.revision.clone())),
         endpoint,
         timeout,
+        max_search_calls,
+        is_supplement,
+        seen_ids,
     )
     .await
 }
@@ -136,6 +215,9 @@ async fn search_with_credentials(
     credentials: Result<(&str, BuildOauthCredentialRevision), BuildOauthTokenError>,
     endpoint: &str,
     timeout: Duration,
+    max_search_calls: u32,
+    is_supplement: bool,
+    seen_ids: &[String],
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     let (token, credential_revision) = credentials.map_err(auth_error)?;
     let error_revision = || Some(credential_revision.clone());
@@ -158,7 +240,13 @@ async fn search_with_credentials(
         .header("x-grok-client-mode", "cli")
         .header("x-grok-client-identifier", "grok-shell")
         .header("x-grok-client-version", "1.0.5")
-        .json(&responses_request(query, sort))
+        .json(&responses_request(
+            query,
+            sort,
+            max_search_calls,
+            is_supplement,
+            seen_ids,
+        ))
         .send()
         .await
         .map_err(|error| {
@@ -200,7 +288,7 @@ async fn search_with_credentials(
             ResponsesSearchError::new(ResponsesSearchErrorKind::Protocol, error_revision())
         })?;
     let search_calls = count_x_search_calls(output);
-    if search_calls > RESPONSES_MAX_X_SEARCH_CALLS {
+    if search_calls > max_search_calls {
         return Err(ResponsesSearchError::new(
             ResponsesSearchErrorKind::SearchBudgetExceeded,
             error_revision(),
@@ -216,14 +304,7 @@ async fn search_with_credentials(
         .ok_or_else(|| {
             ResponsesSearchError::new(ResponsesSearchErrorKind::Protocol, error_revision())
         })?;
-    let mut items = parse_gallery_items(&gallery, "x");
-    filter_gallery_candidates(&mut items);
-    if items.is_empty() {
-        return Err(ResponsesSearchError::new(
-            ResponsesSearchErrorKind::Empty,
-            error_revision(),
-        ));
-    }
+    let items = parse_gallery_items(&gallery, "x");
     let valid_count = items.len();
 
     Ok(ResponsesSearchSuccess {
@@ -237,13 +318,19 @@ async fn search_with_credentials(
     })
 }
 
-fn responses_request(query: &str, sort: Option<&str>) -> Value {
+fn responses_request(
+    query: &str,
+    sort: Option<&str>,
+    max_search_calls: u32,
+    is_supplement: bool,
+    seen_ids: &[String],
+) -> Value {
     json!({
         "model": RESPONSES_MODEL,
-        "input": responses_prompt(query, sort),
+        "input": responses_prompt(query, sort, max_search_calls, is_supplement, seen_ids),
         "tools": [{ "type": "x_search" }],
         "tool_choice": "auto",
-        "max_tool_calls": RESPONSES_MAX_X_SEARCH_CALLS,
+        "max_tool_calls": max_search_calls,
         "reasoning": {
             "effort": RESPONSES_EFFORT,
             "summary": "concise"
@@ -260,10 +347,28 @@ fn responses_request(query: &str, sort: Option<&str>) -> Value {
     })
 }
 
-fn responses_prompt(query: &str, sort: Option<&str>) -> String {
+fn responses_prompt(
+    query: &str,
+    sort: Option<&str>,
+    max_search_calls: u32,
+    is_supplement: bool,
+    seen_ids: &[String],
+) -> String {
     let sort = match sort.unwrap_or("top") {
         "latest" | "Latest" => "Latest",
         _ => "Top",
+    };
+    let round_guidance = if is_supplement {
+        format!(
+            "Supplement round: use one new query with a different visual angle (alternate composition, lighting, setting, season, or medium). Exclude candidates carrying these opaque media/post ids: {}",
+            if seen_ids.is_empty() {
+                "none from the empty first round".to_string()
+            } else {
+                seen_ids.join(", ")
+            }
+        )
+    } else {
+        "First round: use complementary direct and visual/style query variants.".to_string()
     };
     format!(
         r#"You collect high-quality still images from X (Twitter) for a wallpaper picker.
@@ -271,9 +376,11 @@ fn responses_prompt(query: &str, sort: Option<&str>) -> String {
 User topic: {query}
 Sort preference: {sort}
 
-Use X search only. Use no more than 3 x_search calls in total. Search useful query variants with image or media filters. Prefer real photography or polished AI art suitable as wallpaper. Prefer posts that include both a prompt and attached images when relevant. Skip memes, screenshots, text cards, avatars, emoji packs, ads, blurry thumbnails, and placeholder links.
+{round_guidance}
 
-Return 8-16 distinct items when possible. fullUrl must be a direct full-size media CDN URL, preferably https://pbs.twimg.com/media/... with name=orig. postUrl must be a confirmed canonical https://x.com/<user>/status/<id>; omit it rather than guessing. Return metadata only and do not download files."#
+Use X search only. Use no more than {max_search_calls} x_search call(s) in this request. Search useful query variants with image filters. Prefer real photography or polished AI art suitable as wallpaper. Prefer posts that include both a prompt and attached images when relevant. Skip memes, screenshots, text cards, avatars, emoji packs, ads, blurry thumbnails, videos, and placeholder links.
+
+Return 8-16 distinct items when possible. fullUrl must be a direct HTTPS full-size image CDN URL, preferably https://pbs.twimg.com/media/... with name=orig. postUrl must be a confirmed canonical https://x.com/<user>/status/<id>; omit it rather than guessing. Include mediaIndex 1-4 only when the status media position is known. Return metadata only and do not download files."#
     )
 }
 
@@ -292,7 +399,10 @@ fn gallery_schema() -> Value {
                         "postUrl": { "type": "string" },
                         "textPreview": { "type": "string" },
                         "likes": { "type": "number" },
-                        "kind": { "type": "string" }
+                        "kind": { "type": "string" },
+                        "width": { "type": "number" },
+                        "height": { "type": "number" },
+                        "mediaIndex": { "type": "number" }
                     },
                     "required": ["fullUrl"],
                     "additionalProperties": false
@@ -361,7 +471,12 @@ fn count_x_search_calls(output: &[Value]) -> u32 {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if item_type.contains("x_search") || item_type.contains("xsearch") {
+            if item_type.contains("x_search")
+                || item_type.contains("xsearch")
+                // Only x_search is registered in this fixed request. Current
+                // Build responses may emit an unnamed custom_tool_call.
+                || item_type.contains("custom_tool")
+            {
                 return true;
             }
             item_type.contains("tool_call")
@@ -527,12 +642,19 @@ mod tests {
             Ok(("test-token", test_revision())),
             endpoint,
             timeout,
+            X_SEARCH_FIRST_ROUND_CALLS,
+            false,
+            &[],
         )
         .await
     }
 
     #[tokio::test]
     async fn wallpaper_x_responses_success_parses_gallery_and_fixed_contract() {
+        assert_eq!(
+            count_x_search_calls(&[json!({ "type": "custom_tool_call" })]),
+            1
+        );
         let (endpoint, state, task) =
             spawn_mock(StatusCode::OK, success_payload(2), Duration::ZERO).await;
         let result = test_search(&endpoint, Duration::from_secs(2))
@@ -559,7 +681,7 @@ mod tests {
         assert_eq!(request.get("model"), Some(&json!("grok-4.6")));
         assert_eq!(request.pointer("/reasoning/effort"), Some(&json!("low")));
         assert_eq!(request.get("store"), Some(&json!(false)));
-        assert_eq!(request.get("max_tool_calls"), Some(&json!(3)));
+        assert_eq!(request.get("max_tool_calls"), Some(&json!(2)));
         assert_eq!(request.pointer("/tools/0/type"), Some(&json!("x_search")));
         assert_eq!(
             request.pointer("/text/format/type"),
@@ -573,7 +695,24 @@ mod tests {
         assert!(request
             .get("input")
             .and_then(Value::as_str)
-            .is_some_and(|prompt| prompt.contains("no more than 3 x_search calls")));
+            .is_some_and(|prompt| prompt.contains("no more than 2 x_search call")));
+        let supplement = responses_request(
+            "misty mountains",
+            Some("top"),
+            X_SEARCH_SUPPLEMENT_CALLS,
+            true,
+            &["twimg:seen-id".into(), "status:12345678".into()],
+        );
+        assert_eq!(supplement.get("max_tool_calls"), Some(&json!(1)));
+        assert!(supplement
+            .get("input")
+            .and_then(Value::as_str)
+            .is_some_and(|prompt| {
+                prompt.contains("different visual angle")
+                    && prompt.contains("twimg:seen-id")
+                    && prompt.contains("no more than 1 x_search call")
+            }));
+        assert_eq!(RESPONSES_MAX_X_SEARCH_CALLS, 3);
     }
 
     #[tokio::test]
@@ -685,6 +824,9 @@ mod tests {
                 Err(oauth_error),
                 &endpoint,
                 Duration::from_secs(2),
+                X_SEARCH_FIRST_ROUND_CALLS,
+                false,
+                &[],
             )
             .await
             .expect_err("oauth failure must stop before HTTP");
