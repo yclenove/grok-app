@@ -32,6 +32,7 @@ describe("parseAppSettingsPrefs", () => {
     expect(p.subagentsEnabled).toBe(true);
     expect(p.planEnabled).toBe(true);
     expect(p.prefsScope).toBeNull();
+    expect(p.wallpaperXSearchMode).toBe("cli");
   });
 
   it("clamps process and stall budgets", () => {
@@ -76,5 +77,21 @@ describe("parseAppSettingsPrefs", () => {
     expect(p.disallowedTools).toEqual(["shell"]);
     expect(p.allowedTools).toEqual(["read"]);
     expect(p.lastSessionId).toBe("abc");
+  });
+
+  it("normalizes wallpaper X search modes without opting into preview", () => {
+    expect(
+      parseAppSettingsPrefs(
+        settings({ wallpaperXSearchMode: "responses_preview" }),
+      ).wallpaperXSearchMode,
+    ).toBe("responses_preview");
+    expect(
+      parseAppSettingsPrefs(settings({ wallpaperXSearchMode: "auto" }))
+        .wallpaperXSearchMode,
+    ).toBe("auto");
+    expect(
+      parseAppSettingsPrefs(settings({ wallpaperXSearchMode: "future_mode" }))
+        .wallpaperXSearchMode,
+    ).toBe("cli");
   });
 });

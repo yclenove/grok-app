@@ -508,6 +508,13 @@ pub struct AppSettings {
     /// Sent as the `prompt` field when Chinese dictation applies.
     #[serde(default = "default_stt_zh_script")]
     pub stt_zh_script: String,
+    /// Wallpaper X search route contract. `cli` remains the public default;
+    /// `responses_preview` is opt-in and `auto` is reserved for a later gate.
+    #[serde(
+        default = "default_wallpaper_x_search_mode",
+        deserialize_with = "deserialize_wallpaper_x_search_mode"
+    )]
+    pub wallpaper_x_search_mode: String,
     /// Outbound proxy mode: `system` (default; OS proxy / env vars), `none`
     /// (force direct), or `manual` (use [`Self::proxy_url`]). NEW-02: without
     /// this, restricted-network users cannot reach Grok backends at all —
@@ -600,6 +607,37 @@ fn default_stt_engine() -> String {
 
 fn default_stt_zh_script() -> String {
     "auto".into()
+}
+
+pub const WALLPAPER_X_SEARCH_MODE_CLI: &str = "cli";
+pub const WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW: &str = "responses_preview";
+pub const WALLPAPER_X_SEARCH_MODE_AUTO: &str = "auto";
+
+/// Normalize persisted / IPC values without ever opting an unknown value into
+/// an experimental route.
+pub fn normalize_wallpaper_x_search_mode(raw: &str) -> &'static str {
+    match raw.trim() {
+        WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW => WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        WALLPAPER_X_SEARCH_MODE_AUTO => WALLPAPER_X_SEARCH_MODE_AUTO,
+        WALLPAPER_X_SEARCH_MODE_CLI | "" => WALLPAPER_X_SEARCH_MODE_CLI,
+        _ => WALLPAPER_X_SEARCH_MODE_CLI,
+    }
+}
+
+fn default_wallpaper_x_search_mode() -> String {
+    WALLPAPER_X_SEARCH_MODE_CLI.into()
+}
+
+fn deserialize_wallpaper_x_search_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .map(normalize_wallpaper_x_search_mode)
+        .unwrap_or(WALLPAPER_X_SEARCH_MODE_CLI)
+        .into())
 }
 
 fn default_close_to_tray() -> bool {
@@ -700,6 +738,7 @@ impl Default for AppSettings {
             stt_custom_model: None,
             stt_custom_language: None,
             stt_zh_script: default_stt_zh_script(),
+            wallpaper_x_search_mode: default_wallpaper_x_search_mode(),
 
             close_to_tray: default_close_to_tray(),
             keep_tray_for_schedules: true,
@@ -3424,6 +3463,51 @@ mod tests {
     fn disable_web_search_defaults_when_missing_from_json() {
         let s: AppSettings = serde_json::from_str(legacy_settings_json()).expect("deserialize");
         assert!(!s.disable_web_search);
+    }
+
+    #[test]
+    fn wallpaper_x_search_mode_defaults_to_cli_when_missing() {
+        let s: AppSettings = serde_json::from_str(legacy_settings_json()).expect("deserialize");
+        assert_eq!(s.wallpaper_x_search_mode, WALLPAPER_X_SEARCH_MODE_CLI);
+        assert_eq!(
+            AppSettings::default().wallpaper_x_search_mode,
+            WALLPAPER_X_SEARCH_MODE_CLI
+        );
+    }
+
+    #[test]
+    fn wallpaper_x_search_mode_normalizes_unknown_values_to_cli() {
+        for raw in ["", "responses", "RESPONSES_PREVIEW", "future_mode"] {
+            assert_eq!(
+                normalize_wallpaper_x_search_mode(raw),
+                WALLPAPER_X_SEARCH_MODE_CLI
+            );
+        }
+
+        let mut json = serde_json::to_value(AppSettings::default()).expect("serialize");
+        json["wallpaperXSearchMode"] = serde_json::json!("future_mode");
+        let parsed: AppSettings = serde_json::from_value(json).expect("deserialize unknown mode");
+        assert_eq!(parsed.wallpaper_x_search_mode, WALLPAPER_X_SEARCH_MODE_CLI);
+    }
+
+    #[test]
+    fn wallpaper_x_search_mode_round_trips_known_values() {
+        for mode in [
+            WALLPAPER_X_SEARCH_MODE_CLI,
+            WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+            WALLPAPER_X_SEARCH_MODE_AUTO,
+        ] {
+            let settings = AppSettings {
+                theme: "light".into(),
+                wallpaper_x_search_mode: mode.into(),
+                ..AppSettings::default()
+            };
+            let json = serde_json::to_string(&settings).expect("serialize");
+            assert!(json.contains("\"wallpaperXSearchMode\""));
+            let parsed: AppSettings = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed.wallpaper_x_search_mode, mode);
+            assert_eq!(parsed.theme, "light");
+        }
     }
 
     #[test]

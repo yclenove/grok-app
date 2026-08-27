@@ -14,6 +14,10 @@ import {
   DEFAULT_SESSION_DATA_MODE,
   normalizeSessionDataMode,
 } from "@/lib/sessionDataMode";
+import {
+  normalizeWallpaperXSearchMode,
+  type WallpaperXSearchMode,
+} from "@/lib/wallpaperXSearch";
 
 export type AppSettingsPrefsSnapshot = {
   sessionDataMode: ReturnType<typeof normalizeSessionDataMode>;
@@ -68,6 +72,7 @@ export type AppSettingsPrefsSnapshot = {
   notifyOnPermission: boolean;
   lastSessionId: string | null;
   manualCliPath: string;
+  wallpaperXSearchMode: WallpaperXSearchMode;
 };
 
 export function parseAppSettingsPrefs(
@@ -187,5 +192,8 @@ export function parseAppSettingsPrefs(
         ? settings.lastSessionId.trim() || null
         : null,
     manualCliPath: settings.manualCliPath || opts?.fallbackCliPath || "",
+    wallpaperXSearchMode: normalizeWallpaperXSearchMode(
+      settings.wallpaperXSearchMode,
+    ),
   };
 }

@@ -205,6 +205,8 @@ export interface AppSettings {
    * Sent as the OpenAI-compatible `prompt` field.
    */
   sttZhScript?: string;
+  /** Wallpaper X search route: stable CLI, opt-in Responses preview, or reserved auto. */
+  wallpaperXSearchMode?: string;
   /** Window close hides to tray when true (default). */
   closeToTray?: boolean;
   /**
