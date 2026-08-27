@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { GlassModal } from "@/components/GlassModal";
 import { Select } from "@/components/Select";
 import { useImageViewerOptional } from "@/components/ImageViewer";
+import { useWallpaperXSearch } from "@/hooks/useWallpaperXSearch";
 import * as api from "@/lib/api";
 import { isDesktopHost } from "@/lib/api";
 import {
@@ -46,6 +47,7 @@ import {
   wallpaperXSearchCitationSummaryKey,
 } from "@/lib/xEvidenceCitation";
 import {
+  wallpaperXSearchProgressMessageKey,
   wallpaperXSearchRouteSummary,
   type WallpaperXSearchMeta,
 } from "@/lib/wallpaperXSearch";
@@ -121,6 +123,12 @@ export function WallpaperSourceModal({
   onRequestLogin,
 }: WallpaperSourceModalProps) {
   const viewer = useImageViewerOptional();
+  const {
+    busy: xSearchBusy,
+    stage: xSearchStage,
+    search: searchX,
+    cancel: cancelXSearch,
+  } = useWallpaperXSearch();
   const [tab, setTab] = useState<WallpaperSourceTab>(initialTab);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"top" | "latest">("top");
@@ -134,7 +142,7 @@ export function WallpaperSourceModal({
   /** True after at least one search/generate finished this open. */
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [sourceBusy, setSourceBusy] = useState(false);
   const [applying, setApplying] = useState(false);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -145,6 +153,7 @@ export function WallpaperSourceModal({
   /** Soft citation honesty after an X search (verified / unverified counts). */
   const [citeSummary, setCiteSummary] = useState<string | null>(null);
   const [routeMeta, setRouteMeta] = useState<WallpaperXSearchMeta | null>(null);
+  const busy = sourceBusy || xSearchBusy;
 
   useEffect(() => {
     if (!open) return;
@@ -161,6 +170,12 @@ export function WallpaperSourceModal({
     setHasSearched(false);
     setItems([]);
   }, [open, initialTab]);
+
+  useEffect(() => {
+    if (!open || tab !== "x") {
+      void cancelXSearch();
+    }
+  }, [open, tab, cancelXSearch]);
 
   const kindCounts = useMemo(() => countGalleryByKind(items), [items]);
 
@@ -247,13 +262,22 @@ export function WallpaperSourceModal({
   const routeStatus = useMemo(() => {
     const summary = wallpaperXSearchRouteSummary(routeMeta);
     if (!summary) return null;
-    return t(summary.key as MessageKey, {
+    const route = t(summary.key as MessageKey, {
       seconds: summary.seconds,
       reason: summary.reasonKey
         ? t(summary.reasonKey as MessageKey)
         : undefined,
     });
+    return summary.cacheHit
+      ? t("settings.wallpaperSource.route.cached", { route })
+      : route;
   }, [routeMeta, t]);
+
+  const xProgressStatus = useMemo(() => {
+    if (!xSearchBusy) return null;
+    const key = wallpaperXSearchProgressMessageKey(xSearchStage);
+    return key ? t(key as MessageKey) : null;
+  }, [xSearchBusy, xSearchStage, t]);
 
   const aspectOptions = useMemo(
     () => [
@@ -282,17 +306,16 @@ export function WallpaperSourceModal({
       setRouteMeta(null);
       return;
     }
-    setBusy(true);
     setError(null);
     setErrorCode(null);
     setCiteSummary(null);
     setRouteMeta(null);
-    setStatusHint(t("settings.wallpaperSource.searching"));
     setSelectedId(null);
     setGalleryFilter("");
     setKindFilter("all");
     try {
-      const res = await api.wallpaperXSearch(q, sort);
+      const res = await searchX(q, sort);
+      if (!res) return;
       setRouteMeta(res.meta ?? null);
       const list = dedupeGalleryItems(res.items || []);
       const code = errorCodeFromSearchResult({ ...res, items: list });
@@ -340,11 +363,8 @@ export function WallpaperSourceModal({
       const code = parseWallpaperSourceError(e);
       setErrorCode(code);
       setError(errorMessage(t, code));
-    } finally {
-      setBusy(false);
-      setStatusHint(null);
     }
-  }, [query, sort, t]);
+  }, [query, sort, t, searchX]);
 
   const runImagine = useCallback(async () => {
     const p = prompt.trim();
@@ -358,7 +378,7 @@ export function WallpaperSourceModal({
       setError(t("settings.wallpaperSource.err.desktopOnly"));
       return;
     }
-    setBusy(true);
+    setSourceBusy(true);
     setError(null);
     setErrorCode(null);
     setCiteSummary(null);
@@ -388,7 +408,7 @@ export function WallpaperSourceModal({
       setErrorCode(code);
       setError(errorMessage(t, code));
     } finally {
-      setBusy(false);
+      setSourceBusy(false);
       setStatusHint(null);
     }
   }, [prompt, aspect, t]);
@@ -404,7 +424,7 @@ export function WallpaperSourceModal({
       setError(t("settings.wallpaperSource.err.desktopOnly"));
       return;
     }
-    setBusy(true);
+    setSourceBusy(true);
     setError(null);
     setErrorCode(null);
     setStatusHint(t("settings.wallpaperSource.libraryLoading"));
@@ -426,7 +446,7 @@ export function WallpaperSourceModal({
       setErrorCode(code);
       setError(errorMessage(t, code));
     } finally {
-      setBusy(false);
+      setSourceBusy(false);
       setStatusHint(null);
     }
   }, [t]);
@@ -609,8 +629,15 @@ export function WallpaperSourceModal({
     }
   }, [selected, t, onPickFile, onClose]);
 
+  const closeModal = useCallback(() => {
+    if (xSearchBusy) void cancelXSearch();
+    onClose();
+  }, [xSearchBusy, cancelXSearch, onClose]);
+
   const authNeeded = errorCode === "auth_required";
   const locked = busy || applying || previewingId !== null;
+  const tabSwitchLocked =
+    applying || previewingId !== null || (sourceBusy && !xSearchBusy);
   const isImagineLayout = tab === "imagine";
   const isLibraryTab = tab === "library";
   const showGalleryFilters = items.length > 0 || filtersActive;
@@ -629,7 +656,7 @@ export function WallpaperSourceModal({
     <>
     <GlassModal
       open={open}
-      onClose={onClose}
+      onClose={closeModal}
       title={t("settings.wallpaperSource.title")}
       size="lg"
       className="wallpaper-source-modal"
@@ -646,7 +673,7 @@ export function WallpaperSourceModal({
           <button
             type="button"
             className="btn btn--ghost"
-            onClick={onClose}
+            onClick={closeModal}
             disabled={applying}
           >
             {t("common.cancel")}
@@ -680,8 +707,10 @@ export function WallpaperSourceModal({
             setSelectedId(null);
             setError(null);
             setErrorCode(null);
+            setCiteSummary(null);
+            setRouteMeta(null);
           }}
-          disabled={locked}
+          disabled={tabSwitchLocked}
         >
           {t("settings.wallpaperFromX")}
         </button>
@@ -700,8 +729,10 @@ export function WallpaperSourceModal({
             setSelectedId(null);
             setError(null);
             setErrorCode(null);
+            setCiteSummary(null);
+            setRouteMeta(null);
           }}
-          disabled={locked}
+          disabled={tabSwitchLocked}
         >
           {t("settings.wallpaperImagine")}
         </button>
@@ -717,8 +748,10 @@ export function WallpaperSourceModal({
             setTab("library");
             setError(null);
             setErrorCode(null);
+            setCiteSummary(null);
+            setRouteMeta(null);
           }}
-          disabled={locked}
+          disabled={tabSwitchLocked}
         >
           {t("settings.wallpaperLibrary")}
         </button>
@@ -755,12 +788,14 @@ export function WallpaperSourceModal({
             />
             <button
               type="button"
-              className="btn btn--solid"
-              disabled={locked || !query.trim()}
-              onClick={() => void runXSearch()}
+              className={xSearchBusy ? "btn btn--ghost" : "btn btn--solid"}
+              disabled={!xSearchBusy && (locked || !query.trim())}
+              onClick={() =>
+                void (xSearchBusy ? cancelXSearch() : runXSearch())
+              }
             >
-              {busy
-                ? t("settings.wallpaperSource.searching")
+              {xSearchBusy
+                ? t("settings.wallpaperSource.cancelSearch")
                 : t("settings.wallpaperSource.search")}
             </button>
           </div>
@@ -820,9 +855,9 @@ export function WallpaperSourceModal({
         </div>
       )}
 
-      {statusHint ? (
+      {xProgressStatus || statusHint ? (
         <p className="wallpaper-source-status" role="status">
-          {statusHint}
+          {xProgressStatus || statusHint}
         </p>
       ) : null}
 

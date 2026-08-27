@@ -13,8 +13,9 @@ use crate::account::{
 };
 use crate::proxy;
 use crate::wallpaper_source::{
-    filter_reachable_gallery_items, merge_rank_x_gallery_items, parse_gallery_items,
+    filter_reachable_gallery_items_cancellable, merge_rank_x_gallery_items, parse_gallery_items,
     x_gallery_needs_supplement, x_gallery_reference_ids, WallpaperGalleryItem,
+    WallpaperSearchCancellation, WallpaperXSearchRuntime, WallpaperXSearchStage,
     X_SEARCH_FIRST_ROUND_CALLS, X_SEARCH_SUPPLEMENT_CALLS, X_SEARCH_TOTAL_CALLS,
 };
 
@@ -41,6 +42,7 @@ pub(crate) enum ResponsesSearchErrorKind {
     InvalidJson,
     Protocol,
     SearchBudgetExceeded,
+    Cancelled,
 }
 
 impl ResponsesSearchErrorKind {
@@ -59,6 +61,7 @@ impl ResponsesSearchErrorKind {
             Self::InvalidJson => "responses_invalid_json",
             Self::Protocol => "responses_protocol",
             Self::SearchBudgetExceeded => "responses_search_budget_exceeded",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -102,7 +105,14 @@ pub(crate) struct ResponsesSearchSuccess {
 pub(crate) async fn search(
     query: &str,
     sort: Option<&str>,
+    runtime: &WallpaperXSearchRuntime,
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
+    if runtime.is_cancelled() {
+        return Err(ResponsesSearchError::new(
+            ResponsesSearchErrorKind::Cancelled,
+            None,
+        ));
+    }
     let auth = account::read_build_oauth_access_token().map_err(auth_error)?;
     let mut first = search_with_auth(
         query,
@@ -113,14 +123,27 @@ pub(crate) async fn search(
         X_SEARCH_FIRST_ROUND_CALLS,
         false,
         &[],
+        runtime.cancellation(),
     )
     .await?;
     let mut candidate_count = first.candidate_count;
     let mut search_calls = first.search_calls;
     let seen_ids = x_gallery_reference_ids(&first.items);
-    let mut items = filter_reachable_gallery_items(std::mem::take(&mut first.items)).await;
+    runtime.report(WallpaperXSearchStage::Validating);
+    let mut items = filter_reachable_gallery_items_cancellable(
+        std::mem::take(&mut first.items),
+        Some(runtime.cancellation()),
+    )
+    .await;
+    if runtime.is_cancelled() {
+        return Err(ResponsesSearchError::new(
+            ResponsesSearchErrorKind::Cancelled,
+            Some(auth.revision.clone()),
+        ));
+    }
 
     if x_gallery_needs_supplement(items.len()) {
+        runtime.report(WallpaperXSearchStage::Supplementing);
         match search_with_auth(
             query,
             sort,
@@ -130,6 +153,7 @@ pub(crate) async fn search(
             X_SEARCH_SUPPLEMENT_CALLS,
             true,
             &seen_ids,
+            runtime.cancellation(),
         )
         .await
         {
@@ -142,13 +166,24 @@ pub(crate) async fn search(
                     ));
                 }
                 candidate_count = candidate_count.saturating_add(supplement.candidate_count);
-                let supplement_items =
-                    filter_reachable_gallery_items(std::mem::take(&mut supplement.items)).await;
+                runtime.report(WallpaperXSearchStage::Validating);
+                let supplement_items = filter_reachable_gallery_items_cancellable(
+                    std::mem::take(&mut supplement.items),
+                    Some(runtime.cancellation()),
+                )
+                .await;
+                if runtime.is_cancelled() {
+                    return Err(ResponsesSearchError::new(
+                        ResponsesSearchErrorKind::Cancelled,
+                        Some(auth.revision.clone()),
+                    ));
+                }
                 items.extend(supplement_items);
                 items = merge_rank_x_gallery_items(items);
             }
             Err(error)
-                if items.is_empty()
+                if error.kind == ResponsesSearchErrorKind::Cancelled
+                    || items.is_empty()
                     || error.kind == ResponsesSearchErrorKind::SearchBudgetExceeded =>
             {
                 return Err(error);
@@ -195,6 +230,7 @@ async fn search_with_auth(
     max_search_calls: u32,
     is_supplement: bool,
     seen_ids: &[String],
+    cancellation: &WallpaperSearchCancellation,
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     search_with_credentials(
         query,
@@ -205,6 +241,7 @@ async fn search_with_auth(
         max_search_calls,
         is_supplement,
         seen_ids,
+        cancellation,
     )
     .await
 }
@@ -218,6 +255,7 @@ async fn search_with_credentials(
     max_search_calls: u32,
     is_supplement: bool,
     seen_ids: &[String],
+    cancellation: &WallpaperSearchCancellation,
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     let (token, credential_revision) = credentials.map_err(auth_error)?;
     let error_revision = || Some(credential_revision.clone());
@@ -234,7 +272,7 @@ async fn search_with_credentials(
     .build()
     .map_err(|_| ResponsesSearchError::new(ResponsesSearchErrorKind::Network, error_revision()))?;
 
-    let response = client
+    let request = client
         .post(endpoint)
         .bearer_auth(token)
         .header("x-grok-client-mode", "cli")
@@ -247,11 +285,18 @@ async fn search_with_credentials(
             is_supplement,
             seen_ids,
         ))
-        .send()
-        .await
-        .map_err(|error| {
-            ResponsesSearchError::new(transport_error_kind(&error), error_revision())
-        })?;
+        .send();
+    let response = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(ResponsesSearchError::new(
+                ResponsesSearchErrorKind::Cancelled,
+                error_revision(),
+            ));
+        }
+        response = request => response,
+    }
+    .map_err(|error| ResponsesSearchError::new(transport_error_kind(&error), error_revision()))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -271,7 +316,16 @@ async fn search_with_credentials(
         ));
     }
 
-    let body = read_bounded_body(response, error_revision()).await?;
+    let body = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(ResponsesSearchError::new(
+                ResponsesSearchErrorKind::Cancelled,
+                error_revision(),
+            ));
+        }
+        body = read_bounded_body(response, error_revision()) => body?,
+    };
     if body.is_empty() {
         return Err(ResponsesSearchError::new(
             ResponsesSearchErrorKind::Empty,
@@ -636,6 +690,7 @@ mod tests {
         endpoint: &str,
         timeout: Duration,
     ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
+        let cancellation = WallpaperSearchCancellation::default();
         search_with_credentials(
             "misty mountains",
             Some("top"),
@@ -645,6 +700,7 @@ mod tests {
             X_SEARCH_FIRST_ROUND_CALLS,
             false,
             &[],
+            &cancellation,
         )
         .await
     }
@@ -779,6 +835,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wallpaper_x_responses_cancellation_aborts_inflight_http() {
+        let (endpoint, state, task) =
+            spawn_mock(StatusCode::OK, success_payload(1), Duration::from_secs(10)).await;
+        let cancellation = WallpaperSearchCancellation::default();
+        let cancellation_for_request = cancellation.clone();
+        let request = tokio::spawn(async move {
+            search_with_credentials(
+                "misty mountains",
+                Some("top"),
+                Ok(("test-token", test_revision())),
+                &endpoint,
+                Duration::from_secs(30),
+                X_SEARCH_FIRST_ROUND_CALLS,
+                false,
+                &[],
+                &cancellation_for_request,
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.requests.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("mock request did not start");
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .expect("cancelled request did not return")
+            .expect("request task panicked")
+            .expect_err("cancelled request must fail");
+        task.abort();
+        assert_eq!(error.kind, ResponsesSearchErrorKind::Cancelled);
+    }
+
+    #[tokio::test]
     async fn wallpaper_x_responses_rejects_bad_structured_output_and_tool_overrun() {
         let invalid_output = json!({
             "output": [{
@@ -818,6 +912,7 @@ mod tests {
                 ResponsesSearchErrorKind::OauthExpired,
             ),
         ] {
+            let cancellation = WallpaperSearchCancellation::default();
             let error = search_with_credentials(
                 "misty mountains",
                 Some("top"),
@@ -827,6 +922,7 @@ mod tests {
                 X_SEARCH_FIRST_ROUND_CALLS,
                 false,
                 &[],
+                &cancellation,
             )
             .await
             .expect_err("oauth failure must stop before HTTP");

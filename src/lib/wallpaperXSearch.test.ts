@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  createWallpaperXSearchRequestId,
   DEFAULT_WALLPAPER_X_SEARCH_MODE,
+  isWallpaperXSearchProgress,
   normalizeWallpaperXSearchMode,
   wallpaperXSearchFallbackReasonKey,
+  wallpaperXSearchProgressMessageKey,
   wallpaperXSearchRouteSummary,
   WALLPAPER_X_SEARCH_MODES,
 } from "./wallpaperXSearch";
@@ -43,6 +46,7 @@ describe("wallpaper X search settings contract", () => {
     ).toEqual({
       key: "settings.wallpaperSource.route.responses",
       seconds: "12.3",
+      cacheHit: false,
     });
 
     expect(
@@ -59,6 +63,7 @@ describe("wallpaper X search settings contract", () => {
       key: "settings.wallpaperSource.route.fallback",
       seconds: "1.0",
       reasonKey: "settings.wallpaperSource.route.fallback.auth",
+      cacheHit: false,
     });
   });
 
@@ -89,5 +94,48 @@ describe("wallpaper X search settings contract", () => {
         validCount: 0,
       }),
     ).toBeNull();
+  });
+
+  it("creates canonical UUID request ids and validates progress payloads", () => {
+    const requestId = createWallpaperXSearchRequestId();
+    expect(requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(
+      isWallpaperXSearchProgress({ requestId, stage: "validating" }),
+    ).toBe(true);
+    expect(
+      isWallpaperXSearchProgress({ requestId, stage: "invented" }),
+    ).toBe(false);
+    expect(isWallpaperXSearchProgress({ stage: "validating" })).toBe(false);
+  });
+
+  it("maps only visible progress stages to localized copy", () => {
+    expect(wallpaperXSearchProgressMessageKey("preparing")).toBe(
+      "settings.wallpaperSource.progress.preparing",
+    );
+    expect(wallpaperXSearchProgressMessageKey("searching_x")).toBe(
+      "settings.wallpaperSource.searching",
+    );
+    expect(wallpaperXSearchProgressMessageKey("done")).toBeNull();
+  });
+
+  it("keeps cache honesty alongside the actual route", () => {
+    expect(
+      wallpaperXSearchRouteSummary({
+        requestId: "request-2",
+        requestedMode: "responses_preview",
+        routeUsed: "cli",
+        fallbackReason: "oauth_expired",
+        durationMs: 1,
+        cacheHit: true,
+        candidateCount: 8,
+        validCount: 6,
+      }),
+    ).toMatchObject({
+      key: "settings.wallpaperSource.route.fallback",
+      cacheHit: true,
+      reasonKey: "settings.wallpaperSource.route.fallback.auth",
+    });
   });
 });

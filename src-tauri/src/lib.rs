@@ -1634,6 +1634,8 @@ pub fn run() {
 
             commands::wallpaper_x_search,
 
+            commands::wallpaper_x_search_cancel,
+
             commands::wallpaper_fetch_media,
 
             commands::wallpaper_imagine,

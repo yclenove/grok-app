@@ -6,6 +6,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +92,8 @@ pub struct WallpaperSearchResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WallpaperSearchMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub requested_mode: String,
     pub route_used: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,6 +108,100 @@ pub struct WallpaperSearchMeta {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WallpaperSearchCancellation {
+    inner: Arc<WallpaperSearchCancellationInner>,
+}
+
+struct WallpaperSearchCancellationInner {
+    cancelled: AtomicBool,
+    signal: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for WallpaperSearchCancellation {
+    fn default() -> Self {
+        let (signal, _receiver) = tokio::sync::watch::channel(false);
+        Self {
+            inner: Arc::new(WallpaperSearchCancellationInner {
+                cancelled: AtomicBool::new(false),
+                signal,
+            }),
+        }
+    }
+}
+
+impl WallpaperSearchCancellation {
+    pub(crate) fn cancel(&self) {
+        if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            self.inner.signal.send_replace(true);
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut receiver = self.inner.signal.subscribe();
+        while !self.is_cancelled() && !*receiver.borrow() {
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WallpaperXSearchStage {
+    Preparing,
+    SearchingX,
+    Validating,
+    Supplementing,
+    FallingBack,
+    Done,
+}
+
+#[derive(Clone)]
+pub(crate) struct WallpaperXSearchRuntime {
+    cancellation: WallpaperSearchCancellation,
+    progress: Arc<dyn Fn(WallpaperXSearchStage) + Send + Sync>,
+}
+
+impl WallpaperXSearchRuntime {
+    pub(crate) fn new(
+        cancellation: WallpaperSearchCancellation,
+        progress: Arc<dyn Fn(WallpaperXSearchStage) + Send + Sync>,
+    ) -> Self {
+        Self {
+            cancellation,
+            progress,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quiet() -> Self {
+        Self::new(WallpaperSearchCancellation::default(), Arc::new(|_| {}))
+    }
+
+    pub(crate) fn cancellation(&self) -> &WallpaperSearchCancellation {
+        &self.cancellation
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    pub(crate) fn report(&self, stage: WallpaperXSearchStage) {
+        if !self.is_cancelled() || stage == WallpaperXSearchStage::Done {
+            (self.progress)(stage);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -664,6 +762,66 @@ pub(crate) fn run_grok_headless(
     timeout: Duration,
     cwd: Option<&Path>,
 ) -> Result<String, String> {
+    run_grok_headless_cancellable(cli_path, prompt, schema, max_turns, timeout, cwd, None)
+}
+
+fn configure_wallpaper_process_tree(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: this runs in the child immediately before exec. A dedicated
+        // session lets cancellation terminate the CLI and all descendants.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    let _ = cmd;
+}
+
+fn terminate_wallpaper_process_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(windows)]
+    {
+        let _ = process_util::command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // The child called setsid(), so its pid is also the process-group id.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub(crate) fn run_grok_headless_cancellable(
+    cli_path: &str,
+    prompt: &str,
+    schema: &str,
+    max_turns: u32,
+    timeout: Duration,
+    cwd: Option<&Path>,
+    cancellation: Option<&WallpaperSearchCancellation>,
+) -> Result<String, String> {
+    if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
+        return Err("cancelled".into());
+    }
     let mut cmd = Command::new(cli_path);
     cmd.arg("-p")
         .arg(prompt)
@@ -690,6 +848,7 @@ pub(crate) fn run_grok_headless(
         cmd.current_dir(dir);
     }
     process_util::apply_no_window_std(&mut cmd);
+    configure_wallpaper_process_tree(&mut cmd);
     if let Some(path_env) = process_util::enriched_path_env() {
         cmd.env("PATH", path_env);
     }
@@ -699,8 +858,16 @@ pub(crate) fn run_grok_headless(
     let started = Instant::now();
     let mut child = cmd.spawn().map_err(|e| format!("cli spawn: {e}"))?;
     loop {
+        if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
+            terminate_wallpaper_process_tree(&mut child);
+            return Err("cancelled".into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
+                if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
+                    terminate_wallpaper_process_tree(&mut child);
+                    return Err("cancelled".into());
+                }
                 let mut stdout = String::new();
                 let mut _stderr = String::new();
                 if let Some(mut pipe) = child.stdout.take() {
@@ -721,13 +888,15 @@ pub(crate) fn run_grok_headless(
             }
             Ok(None) => {
                 if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_wallpaper_process_tree(&mut child);
                     return Err("timeout".into());
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return Err(format!("cli wait: {e}")),
+            Err(e) => {
+                terminate_wallpaper_process_tree(&mut child);
+                return Err(format!("cli wait: {e}"));
+            }
         }
     }
 }
@@ -1348,10 +1517,20 @@ pub(crate) fn x_gallery_needs_supplement(valid_count: usize) -> bool {
 
 /// Drop items whose fullUrl cannot be fetched as an image.
 pub async fn filter_reachable_gallery_items(
+    items: Vec<WallpaperGalleryItem>,
+) -> Vec<WallpaperGalleryItem> {
+    filter_reachable_gallery_items_cancellable(items, None).await
+}
+
+pub(crate) async fn filter_reachable_gallery_items_cancellable(
     mut items: Vec<WallpaperGalleryItem>,
+    cancellation: Option<&WallpaperSearchCancellation>,
 ) -> Vec<WallpaperGalleryItem> {
     if items.is_empty() {
         return items;
+    }
+    if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
+        return Vec::new();
     }
     filter_gallery_candidates(&mut items);
     items = dedupe_gallery_items(items, false);
@@ -1376,7 +1555,16 @@ pub async fn filter_reachable_gallery_items(
                 }
             })
             .collect();
-        let results = futures_util::future::join_all(futs).await;
+        let joined = futures_util::future::join_all(futs);
+        let results = if let Some(cancellation) = cancellation {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Vec::new(),
+                results = joined => results,
+            }
+        } else {
+            joined.await
+        };
         for (probe, mut it) in results {
             if let Some(probe) = probe {
                 if let Some((width, height)) = probe.dimensions {
@@ -1394,6 +1582,9 @@ pub async fn filter_reachable_gallery_items(
                 tracing::debug!("wallpaper gallery: drop unreachable media");
             }
         }
+        if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
+            return Vec::new();
+        }
     }
     merge_rank_x_gallery_items(out)
 }
@@ -1404,7 +1595,11 @@ fn x_search_round(
     max_search_calls: u32,
     is_supplement: bool,
     seen_ids: &[String],
+    cancellation: Option<&WallpaperSearchCancellation>,
 ) -> WallpaperSearchResult {
+    if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
+        return cancelled_search_result();
+    }
     let q = query.trim();
     if q.is_empty() {
         return WallpaperSearchResult {
@@ -1459,7 +1654,15 @@ fn x_search_round(
 
     let prompt = build_x_search_prompt(q, sort, max_search_calls, is_supplement, seen_ids);
 
-    let stdout = match run_grok_headless(&cli, &prompt, schema, 14, X_SEARCH_TIMEOUT, None) {
+    let stdout = match run_grok_headless_cancellable(
+        &cli,
+        &prompt,
+        schema,
+        14,
+        X_SEARCH_TIMEOUT,
+        None,
+        cancellation,
+    ) {
         Ok(s) => s,
         Err(code) => {
             return WallpaperSearchResult {
@@ -1511,7 +1714,7 @@ fn x_search_round(
 /// Sync first-round headless search only (no network probe). Prefer
 /// [`x_search_async`] for the complete quality and supplement pipeline.
 pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
-    x_search_round(query, sort, X_SEARCH_FIRST_ROUND_CALLS, false, &[])
+    x_search_round(query, sort, X_SEARCH_FIRST_ROUND_CALLS, false, &[], None)
 }
 
 fn extract_media_index_from_status_url(url: &str) -> Option<u8> {
@@ -1594,15 +1797,20 @@ pub(crate) fn x_gallery_reference_ids(items: &[WallpaperGalleryItem]) -> Vec<Str
 
 /// Headless X search + drop unreachable media URLs before returning to UI.
 pub async fn x_search_async(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
-    x_search_cli_outcome(query, sort).await.result
+    x_search_cli_outcome(query, sort, None).await.result
 }
 
 pub(crate) async fn x_search_cli_outcome(
     query: &str,
     sort: Option<&str>,
+    runtime: Option<&WallpaperXSearchRuntime>,
 ) -> WallpaperCliSearchOutcome {
+    if runtime.is_some_and(WallpaperXSearchRuntime::is_cancelled) {
+        return cancelled_cli_outcome();
+    }
     let first_query = query.to_string();
     let first_sort = sort.map(str::to_string);
+    let first_cancellation = runtime.map(|runtime| runtime.cancellation().clone());
     let mut result = match tauri::async_runtime::spawn_blocking(move || {
         x_search_round(
             &first_query,
@@ -1610,6 +1818,7 @@ pub(crate) async fn x_search_cli_outcome(
             X_SEARCH_FIRST_ROUND_CALLS,
             false,
             &[],
+            first_cancellation.as_ref(),
         )
     })
     .await
@@ -1629,6 +1838,12 @@ pub(crate) async fn x_search_cli_outcome(
         }
     };
 
+    if runtime.is_some_and(WallpaperXSearchRuntime::is_cancelled)
+        || result.error_code.as_deref() == Some("cancelled")
+    {
+        return cancelled_cli_outcome();
+    }
+
     let mut candidate_count = result.items.len();
     if result
         .error_code
@@ -1643,11 +1858,25 @@ pub(crate) async fn x_search_cli_outcome(
     }
 
     let seen_ids = x_gallery_reference_ids(&result.items);
-    let mut filtered = filter_reachable_gallery_items(std::mem::take(&mut result.items)).await;
+    if let Some(runtime) = runtime {
+        runtime.report(WallpaperXSearchStage::Validating);
+    }
+    let mut filtered = filter_reachable_gallery_items_cancellable(
+        std::mem::take(&mut result.items),
+        runtime.map(WallpaperXSearchRuntime::cancellation),
+    )
+    .await;
+    if runtime.is_some_and(WallpaperXSearchRuntime::is_cancelled) {
+        return cancelled_cli_outcome();
+    }
     if x_gallery_needs_supplement(filtered.len()) {
+        if let Some(runtime) = runtime {
+            runtime.report(WallpaperXSearchStage::Supplementing);
+        }
         let supplement_query = query.to_string();
         let supplement_sort = sort.map(str::to_string);
         let supplement_seen = seen_ids;
+        let supplement_cancellation = runtime.map(|runtime| runtime.cancellation().clone());
         if let Ok(supplement) = tauri::async_runtime::spawn_blocking(move || {
             x_search_round(
                 &supplement_query,
@@ -1655,14 +1884,30 @@ pub(crate) async fn x_search_cli_outcome(
                 X_SEARCH_SUPPLEMENT_CALLS,
                 true,
                 &supplement_seen,
+                supplement_cancellation.as_ref(),
             )
         })
         .await
         {
+            if runtime.is_some_and(WallpaperXSearchRuntime::is_cancelled)
+                || supplement.error_code.as_deref() == Some("cancelled")
+            {
+                return cancelled_cli_outcome();
+            }
             candidate_count = candidate_count.saturating_add(supplement.items.len());
             if supplement.error_code.is_none() || supplement.error_code.as_deref() == Some("empty")
             {
-                let supplement_items = filter_reachable_gallery_items(supplement.items).await;
+                if let Some(runtime) = runtime {
+                    runtime.report(WallpaperXSearchStage::Validating);
+                }
+                let supplement_items = filter_reachable_gallery_items_cancellable(
+                    supplement.items,
+                    runtime.map(WallpaperXSearchRuntime::cancellation),
+                )
+                .await;
+                if runtime.is_some_and(WallpaperXSearchRuntime::is_cancelled) {
+                    return cancelled_cli_outcome();
+                }
                 filtered.extend(supplement_items);
                 filtered = merge_rank_x_gallery_items(filtered);
             }
@@ -1688,6 +1933,23 @@ pub(crate) async fn x_search_cli_outcome(
         result,
         candidate_count,
         valid_count,
+    }
+}
+
+fn cancelled_search_result() -> WallpaperSearchResult {
+    WallpaperSearchResult {
+        items: Vec::new(),
+        error_code: Some("cancelled".into()),
+        message: None,
+        meta: None,
+    }
+}
+
+fn cancelled_cli_outcome() -> WallpaperCliSearchOutcome {
+    WallpaperCliSearchOutcome {
+        result: cancelled_search_result(),
+        candidate_count: 0,
+        valid_count: 0,
     }
 }
 
@@ -2326,6 +2588,92 @@ mod tests {
                 "status:1234567890123456789:3"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn wallpaper_x_cancellation_signal_is_sticky_for_all_waiters() {
+        let pre_cancelled = WallpaperSearchCancellation::default();
+        pre_cancelled.cancel();
+        tokio::time::timeout(Duration::from_millis(100), pre_cancelled.cancelled())
+            .await
+            .expect("pre-cancelled waiter must return immediately");
+
+        let cancellation = WallpaperSearchCancellation::default();
+        let waiters = (0..8)
+            .map(|_| {
+                let cancellation = cancellation.clone();
+                tokio::spawn(async move { cancellation.cancelled().await })
+            })
+            .collect::<Vec<_>>();
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for waiter in waiters {
+                waiter.await.expect("cancellation waiter panicked");
+            }
+        })
+        .await
+        .expect("all cancellation waiters must be released");
+    }
+
+    #[tokio::test]
+    async fn wallpaper_x_cli_cancellation_returns_within_two_seconds() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "grok-app-wallpaper-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&test_dir).expect("create cancellation test directory");
+
+        #[cfg(windows)]
+        let fake_cli = test_dir.join("grok.cmd");
+        #[cfg(windows)]
+        std::fs::write(
+            &fake_cli,
+            "@echo off\r\nif \"%1\"==\"--version\" (\r\n  echo grok 1.0.5\r\n  exit /b 0\r\n)\r\nping 127.0.0.1 -n 60 >nul\r\n",
+        )
+        .expect("write fake Windows CLI");
+
+        #[cfg(unix)]
+        let fake_cli = test_dir.join("grok");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(
+                &fake_cli,
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'grok 1.0.5'\n  exit 0\nfi\nsleep 60\n",
+            )
+            .expect("write fake Unix CLI");
+            let mut permissions = std::fs::metadata(&fake_cli)
+                .expect("stat fake CLI")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&fake_cli, permissions).expect("make fake CLI executable");
+        }
+
+        let cancellation = WallpaperSearchCancellation::default();
+        let cancellation_for_task = cancellation.clone();
+        let fake_cli_for_task = fake_cli.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            run_grok_headless_cancellable(
+                &fake_cli_for_task.to_string_lossy(),
+                "hang",
+                r#"{"type":"object"}"#,
+                1,
+                Duration::from_secs(30),
+                None,
+                Some(&cancellation_for_task),
+            )
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancelled CLI did not return within two seconds")
+            .expect("CLI cancellation task panicked");
+        assert_eq!(result.expect_err("cancelled CLI must stop"), "cancelled");
+
+        let _ = std::fs::remove_file(fake_cli);
+        let _ = std::fs::remove_dir(test_dir);
     }
 
     #[test]
