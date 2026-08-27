@@ -30,7 +30,7 @@
 | 3 手动灰度路由 | `d7770c30` | 设置 UI、一次回退、429 防双花、凭证感知熔断、真实 route meta |
 | 4 共用质量管线 | `81f24bfd` | normalize/validate/dedupe/rank、条件补搜、媒体安全与质量报告 |
 | 5 生命周期 | `ef7089f4` | UUID、进度、取消、迟到结果保护、32 项/10 分钟内存缓存、真机 QA |
-| 6 收口 | `a401e4aa` + 本报告提交 | 维护文档、Windows 全量 harness、CI PATH 误删修正和完整门禁记录 |
+| 6 收口 | `a401e4aa`、`e1d3f41a`、`4c54fa1c`、`f0405d66`、`111cd7cc`、`e514c689` + 本报告提交 | 维护文档、跨平台 source guard、Rust 格式/Clippy、Windows harness 与测试隔离全部收口 |
 
 没有向 `App.tsx` 增加状态；`AppWorkbench.tsx` 只有阶段 3 的既有参数接线，没有新增 `useState` 或大块产品逻辑。搜索状态位于 `useWallpaperXSearch`，Host 逻辑按 `wallpaper_x_search.rs` / `wallpaper_x_responses.rs` 分域。
 
@@ -42,21 +42,27 @@
 | `pnpm audit:prod` | 通过 | 无已知 production 漏洞；Node 只提示既有 `url.parse()` 弃用 |
 | `pnpm lint` | 通过 | 全量 ESLint 通过 |
 | `pnpm typecheck` | 通过 | TypeScript 类型检查通过 |
-| `pnpm build:ui` | 通过 | 只有既有动态导入与大 chunk 警告 |
-| `pnpm test` | 基线阻塞 | 543 个文件通过、2 个 guard 文件失败；6759/6761 条断言通过 |
-| `cargo test --no-run` | 通过 | Windows test harness 编译完成；有 2 条既有 Rust/linker warning |
-| Windows manifest 全量 harness | 通过 | 1560 passed、0 failed、1 ignored，耗时约 8 秒 |
-| `cargo fmt --all -- --check` | 基线阻塞 | 仅 `models_aux.rs`、`process_util.rs`、`providers.rs` 三个无关既有文件漂移 |
-| `cargo clippy --all-targets -- -D warnings` | 环境阻塞 | 本机 stable toolchain 未安装 `cargo-clippy`，未自动变更工具链 |
+| `pnpm build:ui` | 通过 | 8077 modules，16.94 秒；只有既有动态导入与大 chunk 警告 |
+| `pnpm test` | 通过 | 545 个文件、6761 条测试全部通过，119.75 秒 |
+| `cargo test --no-run` | 通过 | Windows lib/main test harness 编译完成；仅 MSVC linker stdout 提示 |
+| Windows manifest 全量 harness | 通过 | 1560 passed、0 failed、1 ignored，最终耗时 6.79 秒 |
+| `cargo fmt --all -- --check` | 通过 | 全工作区 Rust 格式检查通过 |
+| `cargo clippy --all-targets -- -D warnings` | 通过 | stable Clippy 全 targets、warnings-as-errors 通过 |
 
-### Vitest 的两条基线失败
+### Vitest 收口
+
+首轮全量测试曾有两条 Windows 专属 source guard 失败：
 
 - `src/lib/extensionsSurface.guard.test.ts`
 - `src/lib/welcomeIntro.guard.test.ts`
 
-两条 guard 都直接用含 `\n` 的字面串/正则读取 CRLF 源码，因此只在 Windows 工作树中匹配失败。将读取内容仅在内存中把 CRLF 规范成 LF 后，两个 guard 的目标内容都存在。相关业务文件不属于本功能，本阶段没有为通过门禁而改写它们。
+两条 guard 直接用含 `\n` 的字面串/正则读取源码，在 CRLF 工作树上产生假阴性。`4c54fa1c` 只在测试读取时规范成 LF，没有改写被检查的业务文件；定向 4/4 通过，最终全量 6761/6761 通过。首轮还遇到本机 `canvas.node` 缺失；执行 `pnpm rebuild canvas` 后相关 16 条测试恢复，全量结果不再有环境阻塞。
 
-首轮全量测试还因本机 `canvas.node` 缺失导致两个 suite 无法载入；执行 `pnpm rebuild canvas` 后，对应 16 条测试全部通过，最终全量结果只剩上述 2 条 CRLF guard。
+### Rust 格式与 Clippy 收口
+
+- `f0405d66` 只对 `models_aux.rs`、`process_util.rs`、`providers.rs` 应用仓库 rustfmt，没有逻辑改动。
+- 安装官方 stable `clippy` 组件后，首轮严格检查发现 7 类告警。`111cd7cc` 用请求上下文结构收敛 wallpaper provider/cache 的长参数列表，并应用等价的标准写法；没有使用宽泛 `allow`，22 个 `wallpaper_x` 定向测试全部通过。
+- 最终 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo test --no-run` 全部通过。
 
 ### Windows Rust harness
 
@@ -66,7 +72,9 @@
 2. 使用 Windows SDK `mt.exe` 把 `windows-test-manifest.xml` 写入 `grok_app_lib-*.exe` 的 `RT_MANIFEST #1`；
 3. 直接运行完整 harness，而非只过滤 `wallpaper_x`。
 
-首次照抄 PATH 清理逻辑时得到 1558 passed / 2 failed：一个 hook 测试明确提示 `findstr` 不存在，壁纸 CLI 取消测试返回 `search_failed`。原因是规则误删了同样含 `api-ms-win-*.dll` 的 `%SystemRoot%\System32`。在正常 PATH 下两条分别通过，取消测试为 0.83 秒；CI 脚本随后改为保留 Windows 目录、继续删除 5 个第三方冲突目录。使用修正后的清理 PATH 再跑完整 harness为 1560/1560 通过，且 `findstr.exe`、`ping.exe`、`taskkill.exe` 均解析到 System32。
+首次照抄 PATH 清理逻辑时得到 1558 passed / 2 failed：一个 hook 测试明确提示 `findstr` 不存在，壁纸 CLI 取消测试返回 `search_failed`。原因是规则误删了同样含 `api-ms-win-*.dll` 的 `%SystemRoot%\System32`。在正常 PATH 下两条分别通过，取消测试为 0.83 秒；`a401e4aa` 随后让 CI 保留 Windows 目录、继续删除第三方冲突目录，`findstr.exe`、`ping.exe`、`taskkill.exe` 均解析到 System32。
+
+最终全量复核的首轮又发现既有 `settings_default_factory_and_disk_roundtrip` 并行竞态：1559 passed / 1 failed / 1 ignored，round-trip 前后分别读到 `always_approve` 与 `ask`。该测试原本直接读写当前用户目录，且没有参与仓库已有的 `GROK_APP_HOME` 全局锁。`e514c689` 将它放入现有临时应用目录 helper，既避免测试碰真实用户设置，也避免与并行环境切换互相污染；复跑得到 1560 passed / 0 failed / 1 ignored。
 
 产品 `build.rs` 没有加入第二份 manifest，避免 Tauri 产品链接的 `CVT1100 duplicate resource`。
 
