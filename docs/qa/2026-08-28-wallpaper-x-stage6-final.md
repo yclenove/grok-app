@@ -4,7 +4,7 @@
 
 分支：`feat/wallpaper-responses-search`
 
-范围：阶段 0–5 的实现收口、完整自动检查、Windows harness、灰度结论和维护文档
+范围：前置本地媒体应用兼容修复、阶段 0–5 的实现收口、完整自动检查、Windows harness、灰度结论和维护文档
 
 发布状态：仅本地分支；未 push，未创建或更新 PR
 
@@ -24,6 +24,7 @@
 
 | 阶段 | 本地提交 | 结果 |
 |---|---|---|
+| 前置修复 | `7af9caa6` | 绕过 WebView2 loopback fetch 限制，以有界 Tauri IPC 安全读取并应用本地壁纸 |
 | 0 基线与计划 | `a53ae5f6` | 8 个固定主题的脱敏 CLI/Responses 基线和六阶段门槛 |
 | 1 设置契约 | `ed1eeaa2` | `cli / responses_preview / auto` 持久化；未知值回 CLI；无 UI/路由变化 |
 | 2 Responses 客户端 | `959a9a6c` | 固定只读契约、OAuth 过期保护、错误分类、无凭证重定向 |
