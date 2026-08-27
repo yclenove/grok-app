@@ -1,10 +1,13 @@
 # 壁纸 X 搜索：Responses API 灰度开发计划
 
 **日期**：2026-08-28
-**状态**：阶段 0 已完成，停在 go / no-go 验收点；产品实现尚未开始
+**状态**：阶段 0–6 已完成，等待用户本地审核；`cli` 仍为默认，`responses_preview` 仅手动预览，`auto` 未开放
 **基线**：`main` @ `91bf92286988ad74708381ee2983a94bf65b625d`
 **关联设计**：[`2026-07-28-wallpaper-x-imagine-design.md`](./2026-07-28-wallpaper-x-imagine-design.md)
 **阶段 0 报告**：[`2026-08-28-wallpaper-x-search-baseline.md`](./2026-08-28-wallpaper-x-search-baseline.md)
+**阶段 4 报告**：[`../qa/2026-08-28-wallpaper-x-stage4-quality.md`](../qa/2026-08-28-wallpaper-x-stage4-quality.md)
+**阶段 5 报告**：[`../qa/2026-08-28-wallpaper-x-stage5-lifecycle.md`](../qa/2026-08-28-wallpaper-x-stage5-lifecycle.md)
+**阶段 6 报告**：[`../qa/2026-08-28-wallpaper-x-stage6-final.md`](../qa/2026-08-28-wallpaper-x-stage6-final.md)
 
 ## 1. 执行规则
 
