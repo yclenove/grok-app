@@ -2050,7 +2050,7 @@ fn json_positive_u64(v: &serde_json::Value, keys: &[&str]) -> Option<u64> {
                 continue;
             }
         } else if let Some(s) = raw.as_str() {
-            match s.replace('_', "").replace(',', "").parse::<u64>() {
+            match s.replace(['_', ','], "").parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => continue,
             }

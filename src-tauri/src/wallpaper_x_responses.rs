@@ -99,6 +99,17 @@ pub(crate) struct ResponsesSearchSuccess {
     pub(crate) credential_revision: BuildOauthCredentialRevision,
 }
 
+struct ResponsesSearchRequest<'a> {
+    query: &'a str,
+    sort: Option<&'a str>,
+    endpoint: &'a str,
+    timeout: Duration,
+    max_search_calls: u32,
+    is_supplement: bool,
+    seen_ids: &'a [String],
+    cancellation: &'a WallpaperSearchCancellation,
+}
+
 /// Run the fixed, read-only Responses preview request.
 ///
 /// No endpoint, model, tool, or credential is accepted from the frontend.
@@ -115,15 +126,17 @@ pub(crate) async fn search(
     }
     let auth = account::read_build_oauth_access_token().map_err(auth_error)?;
     let mut first = search_with_auth(
-        query,
-        sort,
+        ResponsesSearchRequest {
+            query,
+            sort,
+            endpoint: RESPONSES_ENDPOINT,
+            timeout: RESPONSES_TIMEOUT,
+            max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
+            is_supplement: false,
+            seen_ids: &[],
+            cancellation: runtime.cancellation(),
+        },
         &auth,
-        RESPONSES_ENDPOINT,
-        RESPONSES_TIMEOUT,
-        X_SEARCH_FIRST_ROUND_CALLS,
-        false,
-        &[],
-        runtime.cancellation(),
     )
     .await?;
     let mut candidate_count = first.candidate_count;
@@ -145,15 +158,17 @@ pub(crate) async fn search(
     if x_gallery_needs_supplement(items.len()) {
         runtime.report(WallpaperXSearchStage::Supplementing);
         match search_with_auth(
-            query,
-            sort,
+            ResponsesSearchRequest {
+                query,
+                sort,
+                endpoint: RESPONSES_ENDPOINT,
+                timeout: RESPONSES_TIMEOUT,
+                max_search_calls: X_SEARCH_SUPPLEMENT_CALLS,
+                is_supplement: true,
+                seen_ids: &seen_ids,
+                cancellation: runtime.cancellation(),
+            },
             &auth,
-            RESPONSES_ENDPOINT,
-            RESPONSES_TIMEOUT,
-            X_SEARCH_SUPPLEMENT_CALLS,
-            true,
-            &seen_ids,
-            runtime.cancellation(),
         )
         .await
         {
@@ -222,41 +237,30 @@ fn auth_error(error: BuildOauthTokenError) -> ResponsesSearchError {
 }
 
 async fn search_with_auth(
-    query: &str,
-    sort: Option<&str>,
+    request: ResponsesSearchRequest<'_>,
     auth: &BuildOauthAccessToken,
-    endpoint: &str,
-    timeout: Duration,
-    max_search_calls: u32,
-    is_supplement: bool,
-    seen_ids: &[String],
-    cancellation: &WallpaperSearchCancellation,
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     search_with_credentials(
+        request,
+        Ok((auth.expose_to_build_proxy(), auth.revision.clone())),
+    )
+    .await
+}
+
+async fn search_with_credentials(
+    request: ResponsesSearchRequest<'_>,
+    credentials: Result<(&str, BuildOauthCredentialRevision), BuildOauthTokenError>,
+) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
+    let ResponsesSearchRequest {
         query,
         sort,
-        Ok((auth.expose_to_build_proxy(), auth.revision.clone())),
         endpoint,
         timeout,
         max_search_calls,
         is_supplement,
         seen_ids,
         cancellation,
-    )
-    .await
-}
-
-async fn search_with_credentials(
-    query: &str,
-    sort: Option<&str>,
-    credentials: Result<(&str, BuildOauthCredentialRevision), BuildOauthTokenError>,
-    endpoint: &str,
-    timeout: Duration,
-    max_search_calls: u32,
-    is_supplement: bool,
-    seen_ids: &[String],
-    cancellation: &WallpaperSearchCancellation,
-) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
+    } = request;
     let (token, credential_revision) = credentials.map_err(auth_error)?;
     let error_revision = || Some(credential_revision.clone());
 
@@ -545,7 +549,6 @@ fn count_x_search_calls(output: &[Value]) -> u32 {
 }
 
 fn gallery_from_output(output: &[Value]) -> Result<Value, ResponsesSearchErrorKind> {
-    let mut saw_output_text = false;
     let mut saw_invalid_json = false;
     for item in output.iter().rev() {
         let Some(content) = item.get("content").and_then(Value::as_array) else {
@@ -555,7 +558,6 @@ fn gallery_from_output(output: &[Value]) -> Result<Value, ResponsesSearchErrorKi
             if part.get("type").and_then(Value::as_str) != Some("output_text") {
                 continue;
             }
-            saw_output_text = true;
             let Some(text) = part.get("text").and_then(Value::as_str) else {
                 continue;
             };
@@ -573,8 +575,6 @@ fn gallery_from_output(output: &[Value]) -> Result<Value, ResponsesSearchErrorKi
     }
     if saw_invalid_json {
         Err(ResponsesSearchErrorKind::InvalidJson)
-    } else if saw_output_text {
-        Err(ResponsesSearchErrorKind::Empty)
     } else {
         Err(ResponsesSearchErrorKind::Empty)
     }
@@ -692,15 +692,17 @@ mod tests {
     ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
         let cancellation = WallpaperSearchCancellation::default();
         search_with_credentials(
-            "misty mountains",
-            Some("top"),
+            ResponsesSearchRequest {
+                query: "misty mountains",
+                sort: Some("top"),
+                endpoint,
+                timeout,
+                max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
+                is_supplement: false,
+                seen_ids: &[],
+                cancellation: &cancellation,
+            },
             Ok(("test-token", test_revision())),
-            endpoint,
-            timeout,
-            X_SEARCH_FIRST_ROUND_CALLS,
-            false,
-            &[],
-            &cancellation,
         )
         .await
     }
@@ -842,15 +844,17 @@ mod tests {
         let cancellation_for_request = cancellation.clone();
         let request = tokio::spawn(async move {
             search_with_credentials(
-                "misty mountains",
-                Some("top"),
+                ResponsesSearchRequest {
+                    query: "misty mountains",
+                    sort: Some("top"),
+                    endpoint: &endpoint,
+                    timeout: Duration::from_secs(30),
+                    max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
+                    is_supplement: false,
+                    seen_ids: &[],
+                    cancellation: &cancellation_for_request,
+                },
                 Ok(("test-token", test_revision())),
-                &endpoint,
-                Duration::from_secs(30),
-                X_SEARCH_FIRST_ROUND_CALLS,
-                false,
-                &[],
-                &cancellation_for_request,
             )
             .await
         });
@@ -914,15 +918,17 @@ mod tests {
         ] {
             let cancellation = WallpaperSearchCancellation::default();
             let error = search_with_credentials(
-                "misty mountains",
-                Some("top"),
+                ResponsesSearchRequest {
+                    query: "misty mountains",
+                    sort: Some("top"),
+                    endpoint: &endpoint,
+                    timeout: Duration::from_secs(2),
+                    max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
+                    is_supplement: false,
+                    seen_ids: &[],
+                    cancellation: &cancellation,
+                },
                 Err(oauth_error),
-                &endpoint,
-                Duration::from_secs(2),
-                X_SEARCH_FIRST_ROUND_CALLS,
-                false,
-                &[],
-                &cancellation,
             )
             .await
             .expect_err("oauth failure must stop before HTTP");

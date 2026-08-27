@@ -60,6 +60,17 @@ struct SearchCache {
     lru: VecDeque<SearchCacheKey>,
 }
 
+struct CachedSearchContext<'a> {
+    request_id: &'a str,
+    query: &'a str,
+    sort: Option<&'a str>,
+    requested_mode: &'a str,
+    credential_revision: Option<BuildOauthCredentialRevision>,
+    cache: &'a Mutex<SearchCache>,
+    circuit: &'a Mutex<ResponsesCircuitBreaker>,
+    runtime: &'a WallpaperXSearchRuntime,
+}
+
 impl SearchCache {
     fn new(capacity: usize, ttl: Duration) -> Self {
         Self {
@@ -313,14 +324,16 @@ pub(crate) async fn search(
     let credential_revision = account::build_oauth_credential_revision();
 
     Ok(search_with_cache_and_providers(
-        request_id,
-        query,
-        sort,
-        requested_mode,
-        credential_revision,
-        response_cache(),
-        responses_circuit(),
-        &runtime,
+        CachedSearchContext {
+            request_id,
+            query,
+            sort,
+            requested_mode,
+            credential_revision,
+            cache: response_cache(),
+            circuit: responses_circuit(),
+            runtime: &runtime,
+        },
         || wallpaper_x_responses::search(query, sort, &runtime),
         || wallpaper_source::x_search_cli_outcome(query, sort, Some(&runtime)),
     )
@@ -376,14 +389,7 @@ fn prepare_cache_entry(mut result: WallpaperSearchResult) -> WallpaperSearchResu
 }
 
 async fn search_with_cache_and_providers<R, RFut, C, CFut>(
-    request_id: &str,
-    query: &str,
-    sort: Option<&str>,
-    requested_mode: &str,
-    credential_revision: Option<BuildOauthCredentialRevision>,
-    cache: &Mutex<SearchCache>,
-    circuit: &Mutex<ResponsesCircuitBreaker>,
-    runtime: &WallpaperXSearchRuntime,
+    context: CachedSearchContext<'_>,
     responses: R,
     cli: C,
 ) -> WallpaperSearchResult
@@ -393,6 +399,16 @@ where
     C: FnOnce() -> CFut,
     CFut: Future<Output = WallpaperCliSearchOutcome>,
 {
+    let CachedSearchContext {
+        request_id,
+        query,
+        sort,
+        requested_mode,
+        credential_revision,
+        cache,
+        circuit,
+        runtime,
+    } = context;
     let started = Instant::now();
     runtime.report(WallpaperXSearchStage::Preparing);
     let key = search_cache_key(query, sort, requested_mode, credential_revision.as_ref());
@@ -796,14 +812,16 @@ mod tests {
         let first_calls = Arc::clone(&cli_calls);
         let first_runtime = WallpaperXSearchRuntime::quiet();
         let first = search_with_cache_and_providers(
-            "request-1",
-            "  Misty   Mountains ",
-            Some("top"),
-            store::WALLPAPER_X_SEARCH_MODE_CLI,
-            Some(revision(1)),
-            &cache,
-            &circuit,
-            &first_runtime,
+            CachedSearchContext {
+                request_id: "request-1",
+                query: "  Misty   Mountains ",
+                sort: Some("top"),
+                requested_mode: store::WALLPAPER_X_SEARCH_MODE_CLI,
+                credential_revision: Some(revision(1)),
+                cache: &cache,
+                circuit: &circuit,
+                runtime: &first_runtime,
+            },
             || async { Ok(responses_success()) },
             move || async move {
                 first_calls.fetch_add(1, Ordering::SeqCst);
@@ -816,14 +834,16 @@ mod tests {
         let second_calls = Arc::clone(&cli_calls);
         let second_runtime = WallpaperXSearchRuntime::quiet();
         let second = search_with_cache_and_providers(
-            "request-2",
-            "misty mountains",
-            Some("top"),
-            store::WALLPAPER_X_SEARCH_MODE_CLI,
-            Some(revision(9)),
-            &cache,
-            &circuit,
-            &second_runtime,
+            CachedSearchContext {
+                request_id: "request-2",
+                query: "misty mountains",
+                sort: Some("top"),
+                requested_mode: store::WALLPAPER_X_SEARCH_MODE_CLI,
+                credential_revision: Some(revision(9)),
+                cache: &cache,
+                circuit: &circuit,
+                runtime: &second_runtime,
+            },
             || async { Ok(responses_success()) },
             move || async move {
                 second_calls.fetch_add(1, Ordering::SeqCst);

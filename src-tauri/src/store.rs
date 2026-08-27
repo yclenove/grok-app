@@ -2420,6 +2420,7 @@ pub fn set_session_fork_agent_session(
 }
 
 /// Clear the one-shot fork flag after a connect attempt (success or fallthrough).
+#[cfg(test)]
 pub fn clear_session_fork_agent_session(id: &str) -> Result<SessionMeta, String> {
     set_session_fork_agent_session(id, false)
 }

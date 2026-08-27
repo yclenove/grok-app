@@ -1506,7 +1506,7 @@ pub(crate) fn merge_rank_x_gallery_items(
     items: Vec<WallpaperGalleryItem>,
 ) -> Vec<WallpaperGalleryItem> {
     let mut items = dedupe_gallery_items(items, true);
-    items.sort_by(|left, right| gallery_rank_score(right).cmp(&gallery_rank_score(left)));
+    items.sort_by_key(|item| std::cmp::Reverse(gallery_rank_score(item)));
     items.truncate(MAX_X_GALLERY_RESULTS);
     items
 }
