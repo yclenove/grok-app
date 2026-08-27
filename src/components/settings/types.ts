@@ -14,6 +14,7 @@ import type { CostRollupProjectMeta, CostRollupSessionMeta } from "@/lib/costRol
 import type { ArchiveAgeSessionLike } from "@/lib/sessionArchiveAge";
 import type { TodoGateFireSignal } from "@/lib/todoGate";
 import type { Vars } from "@/i18n";
+import type { WallpaperXSearchMode } from "@/lib/wallpaperXSearch";
 
 export type { SettingsSectionId } from "@/lib/settingsCatalog";
 
@@ -86,6 +87,8 @@ export interface SettingsPageProps {
   onWallpaperScrim?: (value: number) => void;
   wallpaperBlur?: number;
   onWallpaperBlur?: (value: number) => void;
+  wallpaperXSearchMode?: WallpaperXSearchMode;
+  onWallpaperXSearchMode?: (value: WallpaperXSearchMode) => void;
   sessionDataMode: string;
   onSessionDataMode: (v: string) => void;
   onCliSessionsImported?: () => void;

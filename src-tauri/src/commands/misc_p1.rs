@@ -1114,7 +1114,7 @@ pub async fn wallpaper_x_search(
     sort: Option<String>,
 ) -> Result<crate::wallpaper_source::WallpaperSearchResult, String> {
     crate::wallpaper_source::ensure_wallpaper_dirs();
-    Ok(crate::wallpaper_source::x_search_async(&query, sort.as_deref()).await)
+    Ok(crate::wallpaper_x_search::search(&query, sort.as_deref()).await)
 }
 
 #[tauri::command]

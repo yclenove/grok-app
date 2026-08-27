@@ -45,6 +45,10 @@ import {
   wallpaperXEvidenceFromGalleryItem,
   wallpaperXSearchCitationSummaryKey,
 } from "@/lib/xEvidenceCitation";
+import {
+  wallpaperXSearchRouteSummary,
+  type WallpaperXSearchMeta,
+} from "@/lib/wallpaperXSearch";
 import { WallpaperPrepareError } from "@/lib/themeSkin";
 import { resolveImageSrcSync } from "@/lib/imageSrc";
 import type { MessageKey } from "@/i18n";
@@ -140,6 +144,7 @@ export function WallpaperSourceModal({
   const [statusHint, setStatusHint] = useState<string | null>(null);
   /** Soft citation honesty after an X search (verified / unverified counts). */
   const [citeSummary, setCiteSummary] = useState<string | null>(null);
+  const [routeMeta, setRouteMeta] = useState<WallpaperXSearchMeta | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -148,6 +153,7 @@ export function WallpaperSourceModal({
     setErrorCode(null);
     setStatusHint(null);
     setCiteSummary(null);
+    setRouteMeta(null);
     setSelectedId(null);
     setPreviewingId(null);
     setGalleryFilter("");
@@ -238,6 +244,17 @@ export function WallpaperSourceModal({
     [t],
   );
 
+  const routeStatus = useMemo(() => {
+    const summary = wallpaperXSearchRouteSummary(routeMeta);
+    if (!summary) return null;
+    return t(summary.key as MessageKey, {
+      seconds: summary.seconds,
+      reason: summary.reasonKey
+        ? t(summary.reasonKey as MessageKey)
+        : undefined,
+    });
+  }, [routeMeta, t]);
+
   const aspectOptions = useMemo(
     () => [
       { value: "16:9", label: "16:9" },
@@ -255,24 +272,28 @@ export function WallpaperSourceModal({
       setErrorCode("empty");
       setError(errorMessage(t, "empty"));
       setCiteSummary(null);
+      setRouteMeta(null);
       return;
     }
     if (!isDesktopHost()) {
       setErrorCode("generic");
       setError(t("settings.wallpaperSource.err.desktopOnly"));
       setCiteSummary(null);
+      setRouteMeta(null);
       return;
     }
     setBusy(true);
     setError(null);
     setErrorCode(null);
     setCiteSummary(null);
+    setRouteMeta(null);
     setStatusHint(t("settings.wallpaperSource.searching"));
     setSelectedId(null);
     setGalleryFilter("");
     setKindFilter("all");
     try {
       const res = await api.wallpaperXSearch(q, sort);
+      setRouteMeta(res.meta ?? null);
       const list = dedupeGalleryItems(res.items || []);
       const code = errorCodeFromSearchResult({ ...res, items: list });
       setHasSearched(true);
@@ -315,6 +336,7 @@ export function WallpaperSourceModal({
       setHasSearched(true);
       setItems([]);
       setCiteSummary(null);
+      setRouteMeta(null);
       const code = parseWallpaperSourceError(e);
       setErrorCode(code);
       setError(errorMessage(t, code));
@@ -801,6 +823,12 @@ export function WallpaperSourceModal({
       {statusHint ? (
         <p className="wallpaper-source-status" role="status">
           {statusHint}
+        </p>
+      ) : null}
+
+      {routeStatus && tab === "x" ? (
+        <p className="wallpaper-source-route-summary" role="status">
+          {routeStatus}
         </p>
       ) : null}
 

@@ -343,6 +343,7 @@
   font-style: italic;
 }
 
+.wallpaper-source-route-summary,
 .wallpaper-source-cite-summary {
   flex: 0 0 auto;
   margin: 0 0 8px;
@@ -365,6 +366,7 @@
 .wallpaper-source-modal__body > .wallpaper-source-tabs,
 .wallpaper-source-modal__body > .wallpaper-source-form,
 .wallpaper-source-modal__body > .wallpaper-source-status,
+.wallpaper-source-modal__body > .wallpaper-source-route-summary,
 .wallpaper-source-modal__body > .wallpaper-source-cite-summary,
 .wallpaper-source-modal__body > .wallpaper-source-error,
 .wallpaper-source-modal__body > .wallpaper-source-filters {
@@ -413,6 +415,28 @@
   height: auto;
 }
 
+.settings-wallpaper__search-mode {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-hover) 72%, transparent);
+}
+
+.settings-wallpaper__search-mode .settings-row__text {
+  min-width: 0;
+}
+
+.settings-wallpaper__search-mode .c-select {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
 .settings-wallpaper__sliders {
   display: flex;
   flex-direction: column;
@@ -429,6 +453,7 @@
   .settings-wallpaper--split .settings-wallpaper__preview {
     min-height: 180px;
   }
+
 }
 
 /* Window-shaped preview (~desktop frame). Empty state click → file picker. */

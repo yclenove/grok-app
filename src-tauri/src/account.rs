@@ -305,6 +305,19 @@ pub(crate) fn read_build_oauth_access_token() -> Result<BuildOauthAccessToken, B
     read_build_oauth_access_token_from_path_at(&cli_default_auth_json_path(), Utc::now())
 }
 
+/// Current non-secret revision of canonical Grok Build credentials.
+pub(crate) fn build_oauth_credential_revision() -> Option<BuildOauthCredentialRevision> {
+    build_oauth_credential_revision_from_path(&cli_default_auth_json_path())
+}
+
+fn build_oauth_credential_revision_from_path(path: &Path) -> Option<BuildOauthCredentialRevision> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(BuildOauthCredentialRevision {
+        file_len: metadata.len(),
+        modified_ms: metadata.modified().ok().and_then(system_time_millis),
+    })
+}
+
 fn read_build_oauth_access_token_from_path_at(
     path: &Path,
     now: DateTime<Utc>,
@@ -325,16 +338,10 @@ fn read_build_oauth_access_token_from_path_at(
     let token = access_token_from_auth_entry(entry)
         .ok_or(BuildOauthTokenError::Unavailable)?
         .to_string();
-    let metadata = fs::metadata(path).map_err(|_| BuildOauthTokenError::Unavailable)?;
-    let modified_ms = metadata.modified().ok().and_then(system_time_millis);
+    let revision =
+        build_oauth_credential_revision_from_path(path).ok_or(BuildOauthTokenError::Unavailable)?;
 
-    Ok(BuildOauthAccessToken {
-        token,
-        revision: BuildOauthCredentialRevision {
-            file_len: metadata.len(),
-            modified_ms,
-        },
-    })
+    Ok(BuildOauthAccessToken { token, revision })
 }
 
 fn system_time_millis(value: SystemTime) -> Option<u128> {

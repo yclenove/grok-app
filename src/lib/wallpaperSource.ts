@@ -2,6 +2,8 @@
  * Wallpaper source helpers — X search + Imagine gallery types and pure logic.
  */
 
+import type { WallpaperXSearchMeta } from "./wallpaperXSearch";
+
 export type WallpaperSourceKind = "x" | "imagine" | "library";
 
 export type WallpaperGalleryItem = {
@@ -24,6 +26,7 @@ export type WallpaperSearchResult = {
   items: WallpaperGalleryItem[];
   errorCode?: string | null;
   message?: string | null;
+  meta?: WallpaperXSearchMeta | null;
 };
 
 export type WallpaperFetchResult = {
@@ -50,6 +53,7 @@ export type WallpaperSourceErrorCode =
   | "download_failed"
   | "url_blocked"
   | "imagine_failed"
+  | "rate_limited"
   | "timeout"
   | "generic";
 
@@ -83,6 +87,7 @@ export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCod
     return "download_failed";
   }
   if (s.includes("desktop_only")) return "generic";
+  if (s.includes("responses_rate_limited")) return "rate_limited";
   // timeout before imagine so "imagine timeout" is not swallowed as imagine_failed
   if (s.includes("timeout") || s.includes("timed out")) return "timeout";
   if (s.includes("imagine_failed")) return "imagine_failed";
@@ -107,6 +112,7 @@ export function errorCodeFromSearchResult(
   if (code === "cli_missing") return "cli_missing";
   if (code === "search_failed") return "search_failed";
   if (code === "imagine_failed") return "imagine_failed";
+  if (code === "responses_rate_limited") return "rate_limited";
   if (code === "empty") return "empty";
   if (code === "timeout") return "timeout";
   return "generic";

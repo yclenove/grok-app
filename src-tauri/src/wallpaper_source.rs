@@ -58,6 +58,34 @@ pub struct WallpaperSearchResult {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<WallpaperSearchMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperSearchMeta {
+    pub requested_mode: String,
+    pub route_used: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    pub duration_ms: u64,
+    pub cache_hit: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_calls: Option<u32>,
+    pub candidate_count: usize,
+    pub valid_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct WallpaperCliSearchOutcome {
+    pub(crate) result: WallpaperSearchResult,
+    pub(crate) candidate_count: usize,
+    pub(crate) valid_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,7 +899,7 @@ pub async fn filter_reachable_gallery_items(
             if ok {
                 out.push(it);
             } else {
-                tracing::debug!("wallpaper gallery: drop unreachable {}", it.full_url);
+                tracing::debug!("wallpaper gallery: drop unreachable media");
             }
         }
     }
@@ -886,6 +914,7 @@ pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
             items: vec![],
             error_code: Some("empty".into()),
             message: Some("empty query".into()),
+            meta: None,
         };
     }
     let cli = match require_cli_ready() {
@@ -895,6 +924,7 @@ pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
                 items: vec![],
                 error_code: Some(code),
                 message: None,
+                meta: None,
             };
         }
     };
@@ -936,6 +966,7 @@ pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
                 items: vec![],
                 error_code: Some(code),
                 message: None,
+                meta: None,
             };
         }
     };
@@ -947,6 +978,7 @@ pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
                 items: vec![],
                 error_code: Some("search_failed".into()),
                 message: Some("could not parse search JSON".into()),
+                meta: None,
             };
         }
     };
@@ -966,6 +998,7 @@ pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
             items: vec![],
             error_code: Some("empty".into()),
             message: Some("no images found".into()),
+            meta: None,
         };
     }
 
@@ -973,11 +1006,19 @@ pub fn x_search(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
         items,
         error_code: None,
         message: None,
+        meta: None,
     }
 }
 
 /// Headless X search + drop unreachable media URLs before returning to UI.
 pub async fn x_search_async(query: &str, sort: Option<&str>) -> WallpaperSearchResult {
+    x_search_cli_outcome(query, sort).await.result
+}
+
+pub(crate) async fn x_search_cli_outcome(
+    query: &str,
+    sort: Option<&str>,
+) -> WallpaperCliSearchOutcome {
     let query = query.to_string();
     let sort = sort.map(|s| s.to_string());
     let mut result =
@@ -985,28 +1026,48 @@ pub async fn x_search_async(query: &str, sort: Option<&str>) -> WallpaperSearchR
         {
             Ok(r) => r,
             Err(e) => {
-                return WallpaperSearchResult {
-                    items: vec![],
-                    error_code: Some("search_failed".into()),
-                    message: Some(format!("join: {e}")),
+                return WallpaperCliSearchOutcome {
+                    result: WallpaperSearchResult {
+                        items: vec![],
+                        error_code: Some("search_failed".into()),
+                        message: Some(format!("join: {e}")),
+                        meta: None,
+                    },
+                    candidate_count: 0,
+                    valid_count: 0,
                 };
             }
         };
 
+    let candidate_count = result.items.len();
     if result.error_code.is_some() || result.items.is_empty() {
-        return result;
+        return WallpaperCliSearchOutcome {
+            result,
+            candidate_count,
+            valid_count: 0,
+        };
     }
 
     let filtered = filter_reachable_gallery_items(result.items).await;
     if filtered.is_empty() {
-        return WallpaperSearchResult {
-            items: vec![],
-            error_code: Some("empty".into()),
-            message: Some("no downloadable images".into()),
+        return WallpaperCliSearchOutcome {
+            result: WallpaperSearchResult {
+                items: vec![],
+                error_code: Some("empty".into()),
+                message: Some("no downloadable images".into()),
+                meta: None,
+            },
+            candidate_count,
+            valid_count: 0,
         };
     }
     result.items = filtered;
-    result
+    let valid_count = result.items.len();
+    WallpaperCliSearchOutcome {
+        result,
+        candidate_count,
+        valid_count,
+    }
 }
 
 pub async fn fetch_media(url: &str, source: Option<&str>) -> Result<WallpaperFetchResult, String> {
@@ -1124,6 +1185,7 @@ pub fn imagine(prompt: &str, aspect_ratio: Option<&str>) -> WallpaperSearchResul
             items: vec![],
             error_code: Some("empty".into()),
             message: Some("empty prompt".into()),
+            meta: None,
         };
     }
     let cli = match require_cli_ready() {
@@ -1133,6 +1195,7 @@ pub fn imagine(prompt: &str, aspect_ratio: Option<&str>) -> WallpaperSearchResul
                 items: vec![],
                 error_code: Some(code),
                 message: None,
+                meta: None,
             };
         }
     };
@@ -1197,6 +1260,7 @@ Requirements:
                 items: vec![],
                 error_code: Some(code),
                 message: None,
+                meta: None,
             };
         }
     };
@@ -1211,12 +1275,14 @@ Requirements:
                     items: vec![],
                     error_code: Some("imagine_failed".into()),
                     message: Some("could not parse imagine result".into()),
+                    meta: None,
                 };
             }
             return WallpaperSearchResult {
                 items: scanned,
                 error_code: None,
                 message: None,
+                meta: None,
             };
         }
     };
@@ -1251,12 +1317,14 @@ Requirements:
                 items: vec![],
                 error_code: Some("empty".into()),
                 message: Some("no image produced".into()),
+                meta: None,
             };
         }
         return WallpaperSearchResult {
             items: scanned,
             error_code: None,
             message: None,
+            meta: None,
         };
     }
 
@@ -1264,6 +1332,7 @@ Requirements:
         items,
         error_code: None,
         message: None,
+        meta: None,
     }
 }
 

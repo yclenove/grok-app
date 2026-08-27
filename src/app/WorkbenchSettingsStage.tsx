@@ -32,6 +32,7 @@ import {
 import { isValidPolicy, isValidPrefsScope } from "@/lib/grokCatalog";
 import { mapProbeToCliInfo } from "@/lib/cliVersionStatus";
 import type { SessionRow } from "@/lib/app/sidebarModels";
+import { normalizeWallpaperXSearchMode } from "@/lib/wallpaperXSearch";
 
 export type WorkbenchSettingsStageProps = {
   [key: string]: any;
@@ -74,7 +75,7 @@ export function WorkbenchSettingsStage(p: WorkbenchSettingsStageProps) {
     sttCustomLanguage, sttCustomModel, sttEngine, sttZhScript, subagentWorktreeSnapshotEnabled, subagentsEnabled,
     submitAccountLoginCode, theme, themePreference, themeSchedule, todoGateEnabled, todoGateMaxFiresPerPrompt,
     tr, trayBusyBadge, trayHandlersRef, twoPassCompactionEnabled, unreadSessionIds, useLeader,
-    voiceDictationAutoSend, voiceId, voiceKeepAgentsOnEnd, wallpaperRecord, wallpaperScrim, wallpaperBlur, wallpaperUrl,
+    voiceDictationAutoSend, voiceId, voiceKeepAgentsOnEnd, wallpaperRecord, wallpaperScrim, wallpaperBlur, wallpaperUrl, wallpaperXSearchMode, setWallpaperXSearchMode,
     winTaskbarOverlay, windowAlwaysOnTop, workflowsEnabled, zenMode,
     welcomeMotionEnabled, setWelcomeMotionEnabled,
   } = p;
@@ -173,6 +174,14 @@ export function WorkbenchSettingsStage(p: WorkbenchSettingsStageProps) {
           onWallpaperScrim={applyWallpaperScrimChoice}
           wallpaperBlur={wallpaperBlur}
           onWallpaperBlur={applyWallpaperBlurChoice}
+          wallpaperXSearchMode={wallpaperXSearchMode}
+          onWallpaperXSearchMode={(value) => {
+          const next = normalizeWallpaperXSearchMode(value);
+          setWallpaperXSearchMode(next);
+          void api.settingsGet().then((s) =>
+          api.settingsSet({ ...s, wallpaperXSearchMode: next }),
+          );
+          }}
           sessionDataMode={sessionDataMode}
           onCliSessionsImported={() => {
           void refreshSessions();

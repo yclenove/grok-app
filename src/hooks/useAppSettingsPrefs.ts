@@ -11,6 +11,10 @@ import {
 import { writeOpenTargetStorage } from "@/lib/openEditorHonesty";
 import { DEFAULT_SANDBOX_PROFILE } from "@/lib/sandboxProfile";
 import { DEFAULT_SESSION_DATA_MODE } from "@/lib/sessionDataMode";
+import {
+  DEFAULT_WALLPAPER_X_SEARCH_MODE,
+  type WallpaperXSearchMode,
+} from "@/lib/wallpaperXSearch";
 
 export function useAppSettingsPrefs() {
   const [sessionDataMode, setSessionDataMode] = useState(
@@ -82,6 +86,8 @@ export function useAppSettingsPrefs() {
   notifyPrefsRef.current = { notifyOnTurnDone, notifyOnPermission };
   const [lastSessionId, setLastSessionId] = useState<string | null>(null);
   const [manualCliPath, setManualCliPath] = useState("");
+  const [wallpaperXSearchMode, setWallpaperXSearchMode] =
+    useState<WallpaperXSearchMode>(DEFAULT_WALLPAPER_X_SEARCH_MODE);
 
   const applySnapshot = useCallback((p: AppSettingsPrefsSnapshot) => {
     setSessionDataMode(p.sessionDataMode);
@@ -137,6 +143,7 @@ export function useAppSettingsPrefs() {
     setNotifyOnPermission(p.notifyOnPermission);
     setLastSessionId(p.lastSessionId);
     setManualCliPath(p.manualCliPath);
+    setWallpaperXSearchMode(p.wallpaperXSearchMode);
   }, []);
 
   const hydrateFromSettings = useCallback(
@@ -254,6 +261,8 @@ export function useAppSettingsPrefs() {
     setLastSessionId,
     manualCliPath,
     setManualCliPath,
+    wallpaperXSearchMode,
+    setWallpaperXSearchMode,
     hydrateFromSettings,
   };
 }

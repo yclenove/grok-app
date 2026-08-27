@@ -37,6 +37,9 @@ describe("wallpaperSource", () => {
     expect(parseWallpaperSourceError("url_blocked")).toBe("url_blocked");
     expect(parseWallpaperSourceError("path_not_allowed")).toBe("url_blocked");
     expect(parseWallpaperSourceError("timeout")).toBe("timeout");
+    expect(parseWallpaperSourceError("responses_rate_limited")).toBe(
+      "rate_limited",
+    );
     expect(parseWallpaperSourceError("imagine_failed")).toBe("imagine_failed");
     expect(parseWallpaperSourceError("wallpaper_imagine: boom")).toBe(
       "imagine_failed",
@@ -55,6 +58,12 @@ describe("wallpaperSource", () => {
     expect(
       errorCodeFromSearchResult({ items: [], errorCode: "timeout" }),
     ).toBe("timeout");
+    expect(
+      errorCodeFromSearchResult({
+        items: [],
+        errorCode: "responses_rate_limited",
+      }),
+    ).toBe("rate_limited");
     expect(errorCodeFromSearchResult({ items: [], errorCode: null })).toBe("empty");
     expect(
       errorCodeFromSearchResult({

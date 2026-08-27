@@ -94,6 +94,27 @@ export const APPEARANCE_ENTRIES: readonly SettingsEntry[] = [
     ],
   },
   {
+    id: "appearance.wallpaperXSearchMode",
+    section: "appearance",
+    tab: "theme",
+    anchorId: "settings-anchor-wallpaper-x-search-mode",
+    labelKey: "settings.wallpaperXSearchMode",
+    descKeys: [
+      "settings.wallpaperXSearchModeDesc",
+      "settings.wallpaperXSearchMode.cli",
+      "settings.wallpaperXSearchMode.responsesPreview",
+    ],
+    keywords: [
+      "x search route",
+      "responses api",
+      "grok build cli",
+      "preview",
+      "twitter wallpaper",
+      "X 搜索渠道",
+      "壁纸搜索模式",
+    ],
+  },
+  {
     id: "appearance.composerOpacity",
     section: "appearance",
     tab: "theme",

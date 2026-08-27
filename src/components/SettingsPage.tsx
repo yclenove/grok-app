@@ -100,6 +100,7 @@ import {
   type SidebarDensity,
 } from "@/lib/sidebarDensity";
 import type { WallpaperSourceTab } from "@/components/WallpaperSourceModal";
+import { DEFAULT_WALLPAPER_X_SEARCH_MODE } from "@/lib/wallpaperXSearch";
 import { detectAppPlatform } from "@/lib/appPlatform";
 import {
   tauriDragRegion,
@@ -288,6 +289,8 @@ export function SettingsPage({
   onWallpaperScrim,
   wallpaperBlur = 100,
   onWallpaperBlur,
+  wallpaperXSearchMode = DEFAULT_WALLPAPER_X_SEARCH_MODE,
+  onWallpaperXSearchMode,
   onWallpaper,
   onWallpaperAdjust,
   onWallpaperMediaSize,
@@ -1494,6 +1497,8 @@ export function SettingsPage({
     onWallpaperScrim,
     wallpaperBlur,
     onWallpaperBlur,
+    wallpaperXSearchMode,
+    onWallpaperXSearchMode,
     sessionDataMode,
     onSessionDataMode,
     onCliSessionsImported,

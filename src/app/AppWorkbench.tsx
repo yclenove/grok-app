@@ -2029,8 +2029,8 @@ export function AppWorkbench() {
     notifyPrefsRef,
     lastSessionId,
     setLastSessionId,
-    manualCliPath,
-    setManualCliPath,
+    manualCliPath, wallpaperXSearchMode,
+    setManualCliPath, setWallpaperXSearchMode,
     hydrateFromSettings,
   } = useAppSettingsPrefs();
   /** Last process_limit event for Settings / Reliability honesty (ids only). */
@@ -13650,7 +13650,7 @@ export function AppWorkbench() {
         locale={locale}
         localePreference={localePreference}
         loginHint={loginHint}
-        manualCliPath={manualCliPath}
+        manualCliPath={manualCliPath} wallpaperXSearchMode={wallpaperXSearchMode}
         maxAgentTurns={maxAgentTurns}
         maxConcurrentAgents={maxConcurrentAgents}
         messageTimeFormat={messageTimeFormat}
@@ -13724,7 +13724,7 @@ export function AppWorkbench() {
         setLaunchAtLogin={setLaunchAtLogin}
         setLocale={setLocale}
         setLocalePreference={setLocalePreference}
-        setManualCliPath={setManualCliPath}
+        setManualCliPath={setManualCliPath} setWallpaperXSearchMode={setWallpaperXSearchMode}
         setMaxAgentTurns={setMaxAgentTurns}
         setMaxConcurrentAgents={setMaxConcurrentAgents}
         setMessageTimeFormat={setMessageTimeFormat}

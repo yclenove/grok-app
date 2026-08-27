@@ -51,6 +51,7 @@ import { SettingsTabStrip, SettingsLabelWithTip, UiCheck } from "./shared";
 import { SkinPresetsCard } from "./SkinPresetsCard";
 import { AppearanceChromeCard } from "./AppearanceChromeCard";
 import { AppearanceOpacityCard } from "./AppearanceOpacityCard";
+import { normalizeWallpaperXSearchMode } from "@/lib/wallpaperXSearch";
 
 export function AppearanceSection() {
   const s = useSettingsModel() as SettingsViewModel & Record<string, any>;
@@ -154,6 +155,8 @@ export function AppearanceSection() {
     wallpaperSourceOpen,
     wallpaperSourceTab,
     wallpaperUrl,
+    wallpaperXSearchMode = "cli",
+    onWallpaperXSearchMode,
     welcomeMotionEnabled = true,
     zenMode,
   } = s;
@@ -512,6 +515,51 @@ export function AppearanceSection() {
                           {t("settings.wallpaperLibrary")}
                         </button>
                       </div>
+                      {onWallpaperXSearchMode ? (
+                        <div
+                          id="settings-anchor-wallpaper-x-search-mode"
+                          className={
+                            "settings-wallpaper__search-mode" +
+                            rowHighlight(
+                              "settings-anchor-wallpaper-x-search-mode",
+                            )
+                          }
+                        >
+                          <div className="settings-row__text">
+                            <SettingsLabelWithTip
+                              label={t("settings.wallpaperXSearchMode")}
+                              tip={t("settings.wallpaperXSearchModeDesc")}
+                            />
+                          </div>
+                          <Select
+                            value={
+                              wallpaperXSearchMode === "responses_preview"
+                                ? "responses_preview"
+                                : "cli"
+                            }
+                            options={[
+                              {
+                                value: "cli",
+                                label: t("settings.wallpaperXSearchMode.cli"),
+                              },
+                              {
+                                value: "responses_preview",
+                                label: t(
+                                  "settings.wallpaperXSearchMode.responsesPreview",
+                                ),
+                              },
+                            ]}
+                            disabled={wallpaperBusy}
+                            aria-label={t("settings.wallpaperXSearchMode")}
+                            onChange={(value) =>
+                              onWallpaperXSearchMode(
+                                normalizeWallpaperXSearchMode(value),
+                              )
+                            }
+                            placement="auto"
+                          />
+                        </div>
+                      ) : null}
                       {wallpaperUrl && (onWallpaperScrim || onWallpaperBlur) ? (
                         <div className="settings-wallpaper__sliders">
                           {onWallpaperScrim ? (

@@ -3,7 +3,7 @@
 //! explicitly opts into it.
 
 use std::error::Error as _;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -89,7 +89,6 @@ pub(crate) struct ResponsesSearchSuccess {
     pub(crate) candidate_count: usize,
     pub(crate) valid_count: usize,
     pub(crate) search_calls: u32,
-    pub(crate) duration_ms: u64,
     pub(crate) model: &'static str,
     pub(crate) effort: &'static str,
     pub(crate) credential_revision: BuildOauthCredentialRevision,
@@ -139,7 +138,6 @@ async fn search_with_credentials(
     timeout: Duration,
 ) -> Result<ResponsesSearchSuccess, ResponsesSearchError> {
     let (token, credential_revision) = credentials.map_err(auth_error)?;
-    let started = Instant::now();
     let error_revision = || Some(credential_revision.clone());
 
     let client = proxy::apply_to_reqwest(
@@ -233,7 +231,6 @@ async fn search_with_credentials(
         candidate_count,
         valid_count,
         search_calls,
-        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         model: RESPONSES_MODEL,
         effort: RESPONSES_EFFORT,
         credential_revision,
