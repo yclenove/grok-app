@@ -2,14 +2,15 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const app = readFileSync(resolve(__dirname, "../app/AppWorkbench.tsx"), "utf8") +
-  readFileSync(resolve(__dirname, "../app/WorkbenchComposerColumn.tsx"), "utf8") +
-  readFileSync(resolve(__dirname, "../hooks/useSessionNavigation.ts"), "utf8");
-const css = readFileSync(resolve(__dirname, "../styles/chat.part1.css"), "utf8");
-const phoneCss = readFileSync(
-  resolve(__dirname, "../styles/phone.part1.css"),
-  "utf8",
-);
+const read = (path: string) =>
+  readFileSync(resolve(__dirname, path), "utf8").replace(/\r\n?/g, "\n");
+
+const app =
+  read("../app/AppWorkbench.tsx") +
+  read("../app/WorkbenchComposerColumn.tsx") +
+  read("../hooks/useSessionNavigation.ts");
+const css = read("../styles/chat.part1.css");
+const phoneCss = read("../styles/phone.part1.css");
 
 describe("new-chat welcome intro", () => {
   it("runs only on the empty welcome surface and settles after the type reveal", () => {
