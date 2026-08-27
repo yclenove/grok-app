@@ -658,7 +658,10 @@ pub(crate) fn run_grok_headless(
 
 // ── Parse gallery from model JSON ───────────────────────────────────────────
 
-fn parse_gallery_items(value: &serde_json::Value, source: &str) -> Vec<WallpaperGalleryItem> {
+pub(crate) fn parse_gallery_items(
+    value: &serde_json::Value,
+    source: &str,
+) -> Vec<WallpaperGalleryItem> {
     let arr = value
         .get("items")
         .and_then(|v| v.as_array())
@@ -779,7 +782,7 @@ Do not download files — metadata only.
 }
 
 /// Keep only gallery-worthy media URLs (static filter before network probe).
-fn filter_gallery_candidates(items: &mut Vec<WallpaperGalleryItem>) {
+pub(crate) fn filter_gallery_candidates(items: &mut Vec<WallpaperGalleryItem>) {
     items.retain(|it| {
         let u = it.full_url.trim();
         (u.starts_with("http://") || u.starts_with("https://")) && is_gallery_media_url(u)

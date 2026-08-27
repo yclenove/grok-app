@@ -222,6 +222,8 @@ mod voice_tools;
 
 mod wallpaper_source;
 
+mod wallpaper_x_responses;
+
 mod window_min;
 
 mod skin_catalog;

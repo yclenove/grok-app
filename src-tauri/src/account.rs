@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -251,6 +251,116 @@ fn cli_default_auth_json_path() -> PathBuf {
     crate::process_util::user_home()
         .join(".grok")
         .join("auth.json")
+}
+
+/// Non-secret identity of the canonical Grok Build credential file.
+///
+/// The wallpaper Responses router uses this to forget credential-specific
+/// failures after Grok Build refreshes or replaces `auth.json`. It intentionally
+/// contains neither the path nor any credential material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BuildOauthCredentialRevision {
+    pub(crate) file_len: u64,
+    pub(crate) modified_ms: Option<u128>,
+}
+
+/// Host-only Build OAuth access-token snapshot.
+///
+/// Deliberately does not implement `Debug` or `Serialize`: the token must never
+/// cross IPC, enter diagnostics, or be formatted into an error/log message.
+pub(crate) struct BuildOauthAccessToken {
+    token: String,
+    pub(crate) revision: BuildOauthCredentialRevision,
+}
+
+impl BuildOauthAccessToken {
+    pub(crate) fn expose_to_build_proxy(&self) -> &str {
+        &self.token
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuildOauthTokenError {
+    Unavailable,
+    Expired,
+}
+
+impl BuildOauthTokenError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Unavailable => "oauth_unavailable",
+            Self::Expired => "oauth_expired",
+        }
+    }
+}
+
+/// Read the canonical Grok Build OAuth access token for Host-only side routes.
+///
+/// This intentionally ignores process `GROK_HOME`: a custom provider or an
+/// independent agent home must never redirect the official wallpaper side
+/// route to different credentials. Tokens expiring within 60 seconds are
+/// rejected so a long-running search does not start with a stale credential.
+pub(crate) fn read_build_oauth_access_token() -> Result<BuildOauthAccessToken, BuildOauthTokenError>
+{
+    read_build_oauth_access_token_from_path_at(&cli_default_auth_json_path(), Utc::now())
+}
+
+fn read_build_oauth_access_token_from_path_at(
+    path: &Path,
+    now: DateTime<Utc>,
+) -> Result<BuildOauthAccessToken, BuildOauthTokenError> {
+    let raw = fs::read_to_string(path).map_err(|_| BuildOauthTokenError::Unavailable)?;
+    let value: Value = serde_json::from_str(&raw).map_err(|_| BuildOauthTokenError::Unavailable)?;
+    let entry = first_access_token_auth_entry(&value).ok_or(BuildOauthTokenError::Unavailable)?;
+
+    if let Some(expires_at) = entry.get("expires_at").and_then(Value::as_str) {
+        let expires_at = DateTime::parse_from_rfc3339(expires_at)
+            .map_err(|_| BuildOauthTokenError::Expired)?
+            .with_timezone(&Utc);
+        if expires_at <= now + ChronoDuration::seconds(60) {
+            return Err(BuildOauthTokenError::Expired);
+        }
+    }
+
+    let token = access_token_from_auth_entry(entry)
+        .ok_or(BuildOauthTokenError::Unavailable)?
+        .to_string();
+    let metadata = fs::metadata(path).map_err(|_| BuildOauthTokenError::Unavailable)?;
+    let modified_ms = metadata.modified().ok().and_then(system_time_millis);
+
+    Ok(BuildOauthAccessToken {
+        token,
+        revision: BuildOauthCredentialRevision {
+            file_len: metadata.len(),
+            modified_ms,
+        },
+    })
+}
+
+fn system_time_millis(value: SystemTime) -> Option<u128> {
+    value.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis())
+}
+
+fn access_token_from_auth_entry(entry: &Value) -> Option<&str> {
+    entry
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            entry
+                .get("access_token")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+/// Prefer an entry with an access token. A refresh-only entry cannot authorize
+/// a Responses request and must not mask a later usable credential.
+fn first_access_token_auth_entry(value: &Value) -> Option<&Value> {
+    value
+        .as_object()?
+        .values()
+        .find(|entry| access_token_from_auth_entry(entry).is_some())
 }
 
 fn agent_home_auth_json_path() -> PathBuf {
@@ -1942,6 +2052,135 @@ fn open_url(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_auth_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "grok-app-build-oauth-{label}-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ))
+    }
+
+    fn fixed_oauth_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-08-28T00:00:00Z")
+            .expect("fixed timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn expect_build_oauth_error(
+        result: Result<BuildOauthAccessToken, BuildOauthTokenError>,
+    ) -> BuildOauthTokenError {
+        match result {
+            Ok(_) => panic!("expected Build OAuth token read to fail"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn build_oauth_prefers_access_token_over_refresh_only_entry() {
+        let path = temp_auth_path("prefer-access");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "first": {
+                    "refresh_token": "refresh-only"
+                },
+                "second": {
+                    "key": "test-access-token",
+                    "expires_at": "2026-08-28T01:00:00Z"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write auth fixture");
+
+        let snapshot = read_build_oauth_access_token_from_path_at(&path, fixed_oauth_now())
+            .expect("usable access token");
+        assert_eq!(snapshot.expose_to_build_proxy(), "test-access-token");
+        assert!(snapshot.revision.file_len > 0);
+
+        fs::remove_file(path).expect("remove auth fixture");
+    }
+
+    #[test]
+    fn build_oauth_rejects_missing_refresh_only_and_malformed_files() {
+        let missing = temp_auth_path("missing");
+        assert_eq!(
+            expect_build_oauth_error(read_build_oauth_access_token_from_path_at(
+                &missing,
+                fixed_oauth_now(),
+            )),
+            BuildOauthTokenError::Unavailable
+        );
+
+        let refresh_only = temp_auth_path("refresh-only");
+        fs::write(
+            &refresh_only,
+            serde_json::json!({ "issuer": { "refresh_token": "refresh-only" } }).to_string(),
+        )
+        .expect("write refresh-only fixture");
+        assert_eq!(
+            expect_build_oauth_error(read_build_oauth_access_token_from_path_at(
+                &refresh_only,
+                fixed_oauth_now(),
+            )),
+            BuildOauthTokenError::Unavailable
+        );
+        fs::remove_file(refresh_only).expect("remove refresh-only fixture");
+
+        let malformed = temp_auth_path("malformed");
+        fs::write(&malformed, "not-json").expect("write malformed fixture");
+        assert_eq!(
+            expect_build_oauth_error(read_build_oauth_access_token_from_path_at(
+                &malformed,
+                fixed_oauth_now(),
+            )),
+            BuildOauthTokenError::Unavailable
+        );
+        fs::remove_file(malformed).expect("remove malformed fixture");
+    }
+
+    #[test]
+    fn build_oauth_rejects_expired_near_expiry_and_invalid_expiry() {
+        for (label, expires_at) in [
+            ("expired", "2026-08-27T23:59:59Z"),
+            ("near-expiry", "2026-08-28T00:01:00Z"),
+            ("invalid-expiry", "not-a-date"),
+        ] {
+            let path = temp_auth_path(label);
+            fs::write(
+                &path,
+                serde_json::json!({
+                    "issuer": {
+                        "access_token": "test-access-token",
+                        "expires_at": expires_at
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write expiry fixture");
+            assert_eq!(
+                expect_build_oauth_error(read_build_oauth_access_token_from_path_at(
+                    &path,
+                    fixed_oauth_now(),
+                )),
+                BuildOauthTokenError::Expired
+            );
+            fs::remove_file(path).expect("remove expiry fixture");
+        }
+    }
+
+    #[test]
+    fn build_oauth_error_codes_are_stable_and_secret_free() {
+        assert_eq!(
+            BuildOauthTokenError::Unavailable.code(),
+            "oauth_unavailable"
+        );
+        assert_eq!(BuildOauthTokenError::Expired.code(), "oauth_expired");
+    }
 
     #[test]
     fn parse_billing_accepts_cli_shape() {
