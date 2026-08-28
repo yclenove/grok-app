@@ -122,6 +122,7 @@ CI 清理第三方 PATH 中的旧 `api-ms-win-*.dll` 转发器时必须保留 `%
 
 历史基线与决策见：
 
+- [`../qa/2026-08-29-wallpaper-responses-output-latency.md`](../qa/2026-08-29-wallpaper-responses-output-latency.md)
 - [`../plans/2026-08-28-wallpaper-x-search-baseline.md`](../plans/2026-08-28-wallpaper-x-search-baseline.md)
 - [`../plans/2026-08-28-wallpaper-x-responses-preview-plan.md`](../plans/2026-08-28-wallpaper-x-responses-preview-plan.md)
 - [`../qa/2026-08-28-wallpaper-x-stage4-quality.md`](../qa/2026-08-28-wallpaper-x-stage4-quality.md)

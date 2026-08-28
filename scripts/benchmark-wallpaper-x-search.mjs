@@ -9,6 +9,7 @@
  *   node scripts/benchmark-wallpaper-x-search.mjs --route responses --limit 1
  *   node scripts/benchmark-wallpaper-x-search.mjs --route cli --topic misty-mountain
  *   node scripts/benchmark-wallpaper-x-search.mjs --route responses --effort medium
+ *   node scripts/benchmark-wallpaper-x-search.mjs --batch-strategy staggered --stagger-ms 10000 --topic ocean-ultrawide
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -29,6 +30,9 @@ const DEFAULT_RESPONSES_TIMEOUT_MS = 90_000;
 const DEFAULT_CLI_TIMEOUT_MS = 155_000;
 const PROBE_TIMEOUT_MS = 15_000;
 const PROBE_CONCURRENCY = 8;
+const DEFAULT_BATCH_TARGET_COUNT = 12;
+const DEFAULT_STAGGER_MS = 10_000;
+const USEFUL_GALLERY_COUNT = 6;
 
 const TOPICS = [
   {
@@ -73,63 +77,77 @@ const TOPICS = [
   },
 ];
 
-const GALLERY_SCHEMA = {
-  type: "object",
-  properties: {
-    items: {
-      type: "array",
+function gallerySchema(targetCount = null) {
+  return {
+    type: "object",
+    properties: {
       items: {
-        type: "object",
-        properties: {
-          fullUrl: { type: "string" },
-          thumbUrl: { type: "string" },
-          username: { type: "string" },
-          postUrl: { type: "string" },
-          textPreview: { type: "string" },
-          likes: { type: "number" },
-          kind: { type: "string" },
+        type: "array",
+        ...(targetCount == null ? {} : { maxItems: targetCount }),
+        items: {
+          type: "object",
+          properties: {
+            fullUrl: { type: "string" },
+            thumbUrl: { type: "string" },
+            username: { type: "string" },
+            postUrl: { type: "string" },
+            textPreview: { type: "string" },
+            likes: { type: "number" },
+            kind: { type: "string" },
+          },
+          required: ["fullUrl"],
+          additionalProperties: false,
         },
-        required: ["fullUrl"],
-        additionalProperties: false,
       },
     },
-  },
-  required: ["items"],
-  additionalProperties: false,
-};
+    required: ["items"],
+    additionalProperties: false,
+  };
+}
 
 // Keep this permissive shape aligned with the current Rust product path.
-const CLI_GALLERY_SCHEMA = {
-  type: "object",
-  properties: {
-    items: {
-      type: "array",
+function cliGallerySchema(targetCount = null) {
+  return {
+    type: "object",
+    properties: {
       items: {
-        type: "object",
-        properties: {
-          fullUrl: { type: "string" },
-          thumbUrl: { type: "string" },
-          username: { type: "string" },
-          postUrl: { type: "string" },
-          textPreview: { type: "string" },
-          likes: { type: "number" },
-          kind: { type: "string" },
+        type: "array",
+        ...(targetCount == null ? {} : { maxItems: targetCount }),
+        items: {
+          type: "object",
+          properties: {
+            fullUrl: { type: "string" },
+            thumbUrl: { type: "string" },
+            username: { type: "string" },
+            postUrl: { type: "string" },
+            textPreview: { type: "string" },
+            likes: { type: "number" },
+            kind: { type: "string" },
+          },
+          required: ["fullUrl"],
         },
-        required: ["fullUrl"],
       },
     },
-  },
-  required: ["items"],
-};
+    required: ["items"],
+  };
+}
 
 function parseArgs(argv) {
   const opts = {
     route: "responses",
     effort: DEFAULT_EFFORT,
     maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
+    targetCount: null,
+    batchStrategy: "single",
+    batchCount: 2,
+    staggerMs: DEFAULT_STAGGER_MS,
     limit: TOPICS.length,
     topic: null,
     probe: true,
+    allowToolOverrun: false,
+    maxToolCallsExplicit: false,
+    batchCountExplicit: false,
+    staggerMsExplicit: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -140,10 +158,21 @@ function parseArgs(argv) {
     };
     if (arg === "--route") opts.route = next();
     else if (arg === "--effort") opts.effort = next();
-    else if (arg === "--max-tool-calls") opts.maxToolCalls = Number(next());
-    else if (arg === "--limit") opts.limit = Number(next());
+    else if (arg === "--max-tool-calls") {
+      opts.maxToolCalls = Number(next());
+      opts.maxToolCallsExplicit = true;
+    } else if (arg === "--target-count") opts.targetCount = Number(next());
+    else if (arg === "--batch-strategy") opts.batchStrategy = next();
+    else if (arg === "--batch-count") {
+      opts.batchCount = Number(next());
+      opts.batchCountExplicit = true;
+    } else if (arg === "--stagger-ms") {
+      opts.staggerMs = Number(next());
+      opts.staggerMsExplicit = true;
+    } else if (arg === "--limit") opts.limit = Number(next());
     else if (arg === "--topic") opts.topic = next();
     else if (arg === "--no-probe") opts.probe = false;
+    else if (arg === "--allow-tool-overrun") opts.allowToolOverrun = true;
     else if (arg === "--help" || arg === "-h") opts.help = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -153,8 +182,38 @@ function parseArgs(argv) {
   if (!new Set(["low", "medium"]).has(opts.effort)) {
     throw new Error("--effort must be low or medium");
   }
+  if (
+    !new Set(["single", "serial", "parallel", "staggered"]).has(opts.batchStrategy)
+  ) {
+    throw new Error("--batch-strategy must be single, serial, parallel, or staggered");
+  }
+  if (!Number.isInteger(opts.staggerMs) || opts.staggerMs < 0 || opts.staggerMs > 60_000) {
+    throw new Error("--stagger-ms must be an integer from 0 to 60000");
+  }
+  if (opts.staggerMsExplicit && opts.batchStrategy !== "staggered") {
+    throw new Error("--stagger-ms requires --batch-strategy staggered");
+  }
+  if (!Number.isInteger(opts.batchCount) || opts.batchCount < 2 || opts.batchCount > 4) {
+    throw new Error("--batch-count must be an integer from 2 to 4");
+  }
+  if (opts.batchCountExplicit && opts.batchStrategy === "single") {
+    throw new Error("--batch-count requires a multi-batch strategy");
+  }
+  if (opts.batchStrategy !== "single") {
+    if (opts.route !== "responses") {
+      throw new Error("multi-batch strategies require --route responses");
+    }
+    if (!opts.maxToolCallsExplicit) opts.maxToolCalls = 1;
+    opts.targetCount ??= DEFAULT_BATCH_TARGET_COUNT;
+  }
   if (!Number.isInteger(opts.maxToolCalls) || opts.maxToolCalls < 1 || opts.maxToolCalls > 3) {
     throw new Error("--max-tool-calls must be an integer from 1 to 3");
+  }
+  if (
+    opts.targetCount != null &&
+    (!Number.isInteger(opts.targetCount) || opts.targetCount < 4 || opts.targetCount > 16)
+  ) {
+    throw new Error("--target-count must be an integer from 4 to 16");
   }
   if (!Number.isInteger(opts.limit) || opts.limit < 1 || opts.limit > TOPICS.length) {
     throw new Error(`--limit must be an integer from 1 to ${TOPICS.length}`);
@@ -167,7 +226,13 @@ function usage() {
     "Usage: node scripts/benchmark-wallpaper-x-search.mjs [options]",
     "  --route responses|cli|both",
     "  --effort low|medium",
-    "  --max-tool-calls 1..3  Responses only (default 3)",
+    "  --max-tool-calls 1..3  Responses only (single default 3; multi-batch default 1 per lane)",
+    "  --target-count 4..16    Cap requested/returned items (multi-batch default 12 per lane)",
+    "  --batch-strategy single|serial|parallel|staggered",
+    "                           Responses scheduling strategy (default single)",
+    "  --batch-count 2..4       Lane count for multi-batch strategies (default 2)",
+    "  --stagger-ms 0..60000    Per-lane delay increment (staggered default 10000)",
+    "  --allow-tool-overrun     Benchmark only: score outputs beyond the declared budget",
     "  --topic <id>            Run one fixed topic",
     `  --limit 1..${TOPICS.length}             Run the first N topics`,
     "  --no-probe              Skip remote image reachability probes",
@@ -211,20 +276,44 @@ async function readBuildOauth() {
   return entry.key || entry.access_token;
 }
 
-function responsesPromptFor(topic, maxToolCalls) {
+function responsesPromptFor(
+  topic,
+  maxToolCalls,
+  targetCount,
+  batchIndex = null,
+  batchCount = null,
+) {
   const sort = topic.sort === "latest" ? "Latest" : "Top";
+  const resultTarget =
+    targetCount == null
+      ? "Return 8-16 distinct items when possible."
+      : `Return ${targetCount} distinct items when possible. Return fewer only when you cannot confirm enough candidates; never pad, duplicate, or guess metadata.`;
+  const batchRoles = [
+    null,
+    "Primary batch: search the strongest direct interpretation of the topic and prioritize immediately recognizable wallpaper candidates.",
+    "Visual-variation batch: avoid repeating the primary lane; emphasize alternate composition, lighting, season, or medium.",
+    "Discovery batch: use different viewpoint, palette, time or weather, cultural framing, or bilingual keywords; avoid the obvious direct and visual-variation queries.",
+    "Long-tail batch: explore less obvious related scenes, synonyms, and niche high-quality interpretations; avoid the direct, visual-variation, and discovery lanes.",
+  ];
+  const batchGuidance = batchIndex
+    ? `Concurrent batch ${batchIndex} of ${batchCount}: ${batchRoles[batchIndex]}`
+    : null;
   return `You collect high-quality still images from X (Twitter) for a wallpaper picker.
 
 User topic: ${topic.query}
 Sort preference: ${sort}
 
-Use X search only. Use no more than ${maxToolCalls} x_search ${maxToolCalls === 1 ? "call" : "calls"}. Search useful query variants with image/media filters. Prefer real photography or polished AI art suitable as wallpaper. Prefer posts that include both a prompt and attached images when relevant. Skip memes, screenshots, text cards, avatars, emoji packs, ads, blurry thumbnails, and placeholder links.
+${batchGuidance ? `${batchGuidance}\n\n` : ""}Use X search only. Use no more than ${maxToolCalls} x_search ${maxToolCalls === 1 ? "call" : "calls"}. Search useful query variants with image/media filters. Prefer real photography or polished AI art suitable as wallpaper. Prefer posts that include both a prompt and attached images when relevant. Skip memes, screenshots, text cards, avatars, emoji packs, ads, blurry thumbnails, and placeholder links.
 
-Return 8-16 distinct items when possible. fullUrl must be a direct full-size media CDN URL, preferably https://pbs.twimg.com/media/... with name=orig. postUrl must be a confirmed canonical https://x.com/<user>/status/<id>; omit it rather than guessing. Return metadata only and do not download files.`;
+${resultTarget} fullUrl must be a direct full-size media CDN URL, preferably https://pbs.twimg.com/media/... with name=orig. postUrl must be a confirmed canonical https://x.com/<user>/status/<id>; omit it rather than guessing. Return metadata only and do not download files.`;
 }
 
-function cliPromptFor(topic) {
+function cliPromptFor(topic, targetCount) {
   const sort = topic.sort === "latest" ? "Latest" : "Top";
+  const resultTarget =
+    targetCount == null
+      ? "items array, 12-28 when possible"
+      : `items array, ${targetCount} when possible; return fewer only when you cannot confirm enough candidates, and never pad, duplicate, or guess metadata`;
   return `You collect high-quality still images from X (Twitter) for a desktop wallpaper picker.
 
 User topic (raw): ${topic.query}
@@ -238,7 +327,7 @@ Search strategy (use X tools; sort = ${sort}):
 4. Skip low quality: memes with heavy text overlays, screenshots of chat UI, profile avatars, emoji packs, ads, pure text cards, blurry thumbs, broken/placeholder links.
 5. Collect distinct direct IMAGE CDN URLs only for fullUrl - prefer https://pbs.twimg.com/media/... (name=orig or full size). Never put status page URLs in fullUrl.
 6. Always set postUrl to the real canonical status link https://x.com/<user>/status/<id> when the post is known. Never invent or guess a status id. If you cannot confirm the status URL, omit postUrl (client will mark the tile Unverified).
-7. Return exactly ONE JSON object matching the schema (items array, 12-28 when possible). No prose, no second JSON object, no placeholder.jpg.
+7. Return exactly ONE JSON object matching the schema (${resultTarget}). No prose, no second JSON object, no placeholder.jpg.
 
 Do not download files - metadata only.`;
 }
@@ -528,23 +617,30 @@ async function qualityMetrics(items, shouldProbe) {
   const uniqueMedia = [...new Set(media)];
   const allowed = uniqueMedia.filter(allowedMediaUrl);
   const probeStarted = Date.now();
-  const reachable = shouldProbe
-    ? (await mapConcurrent(allowed, PROBE_CONCURRENCY, probeOne)).filter(Boolean).length
+  const probeResults = shouldProbe
+    ? await mapConcurrent(allowed, PROBE_CONCURRENCY, probeOne)
     : null;
+  const validMedia = shouldProbe
+    ? allowed.filter((_, index) => probeResults[index])
+    : allowed;
   return {
-    candidateCount: rawItems.length,
-    uniqueMediaCount: uniqueMedia.length,
-    duplicateCount: Math.max(0, media.length - uniqueMedia.length),
-    allowedMediaCount: allowed.length,
-    reachableCount: reachable,
-    canonicalPostCount: rawItems.filter((item) =>
-      canonicalPostUrl(item?.postUrl ?? item?.post_url ?? item?.statusUrl ?? ""),
-    ).length,
-    probeMs: shouldProbe ? Date.now() - probeStarted : 0,
+    metrics: {
+      candidateCount: rawItems.length,
+      uniqueMediaCount: uniqueMedia.length,
+      duplicateCount: Math.max(0, media.length - uniqueMedia.length),
+      allowedMediaCount: allowed.length,
+      reachableCount: shouldProbe ? validMedia.length : null,
+      canonicalPostCount: rawItems.filter((item) =>
+        canonicalPostUrl(item?.postUrl ?? item?.post_url ?? item?.statusUrl ?? ""),
+      ).length,
+      probeMs: shouldProbe ? Date.now() - probeStarted : 0,
+    },
+    // Kept in memory only for cross-batch dedupe; callers never serialize it.
+    validMedia,
   };
 }
 
-async function runResponses(topic, opts, token) {
+async function runResponses(topic, opts, token, batchIndex = null) {
   const started = Date.now();
   try {
     const body = await withAbortTimeout(DEFAULT_RESPONSES_TIMEOUT_MS, async (signal) => {
@@ -563,7 +659,13 @@ async function runResponses(topic, opts, token) {
         },
         body: JSON.stringify({
           model: DEFAULT_MODEL,
-          input: responsesPromptFor(topic, opts.maxToolCalls),
+          input: responsesPromptFor(
+            topic,
+            opts.maxToolCalls,
+            opts.targetCount,
+            batchIndex,
+            opts.batchCount,
+          ),
           tools: [{ type: "x_search" }],
           tool_choice: "auto",
           max_tool_calls: opts.maxToolCalls,
@@ -573,7 +675,7 @@ async function runResponses(topic, opts, token) {
               type: "json_schema",
               name: "wallpaper_gallery",
               strict: true,
-              schema: GALLERY_SCHEMA,
+              schema: gallerySchema(opts.targetCount),
             },
           },
           store: false,
@@ -588,41 +690,189 @@ async function runResponses(topic, opts, token) {
     const searchMs = Date.now() - started;
     const items = galleryFromResponses(body);
     if (!items.length) throw new Error("parse_failed");
-    const quality = await qualityMetrics(items, opts.probe);
     const xSearchCalls = (body.output ?? []).filter((item) =>
       /(?:x_?search|custom_tool)/i.test(String(item?.type ?? "")),
     ).length;
-    const result = {
+    const baseResult = {
       topic: topic.id,
       sort: topic.sort,
       route: "responses",
-      ok: true,
       model: typeof body.model === "string" ? body.model : DEFAULT_MODEL,
       effort: opts.effort,
       maxToolCalls: opts.maxToolCalls,
+      targetCount: opts.targetCount,
       xSearchCalls,
+      toolBudgetExceeded: xSearchCalls > opts.maxToolCalls,
       searchMs,
-      totalMs: searchMs + quality.probeMs,
       inputTokens: Number.isFinite(body?.usage?.input_tokens) ? body.usage.input_tokens : null,
       outputTokens: Number.isFinite(body?.usage?.output_tokens) ? body.usage.output_tokens : null,
-      ...quality,
     };
-    const validCount = opts.probe ? quality.reachableCount : quality.allowedMediaCount;
-    return validCount === 0
-      ? { ...result, ok: false, durationMs: result.totalMs, errorCode: "no_valid_images" }
-      : result;
+    if (xSearchCalls > opts.maxToolCalls && !opts.allowToolOverrun) {
+      return {
+        row: {
+          ...baseResult,
+          ok: false,
+          candidateCount: items.length,
+          durationMs: searchMs,
+          errorCode: "tool_budget_exceeded",
+        },
+        validMedia: [],
+      };
+    }
+    const quality = await qualityMetrics(items, opts.probe);
+    const result = {
+      ...baseResult,
+      ok: true,
+      totalMs: searchMs + quality.metrics.probeMs,
+      ...quality.metrics,
+    };
+    const validCount = opts.probe
+      ? quality.metrics.reachableCount
+      : quality.metrics.allowedMediaCount;
+    return {
+      row:
+        validCount === 0
+          ? { ...result, ok: false, durationMs: result.totalMs, errorCode: "no_valid_images" }
+          : result,
+      validMedia: quality.validMedia,
+    };
   } catch (error) {
     return {
-      topic: topic.id,
-      sort: topic.sort,
-      route: "responses",
-      ok: false,
-      effort: opts.effort,
-      maxToolCalls: opts.maxToolCalls,
-      durationMs: Date.now() - started,
-      errorCode: safeErrorCategory(error),
+      row: {
+        topic: topic.id,
+        sort: topic.sort,
+        route: "responses",
+        ok: false,
+        effort: opts.effort,
+        maxToolCalls: opts.maxToolCalls,
+        targetCount: opts.targetCount,
+        durationMs: Date.now() - started,
+        errorCode: safeErrorCategory(error),
+      },
+      validMedia: [],
     };
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function thresholdCompletionMs(completions, threshold) {
+  const seen = new Set();
+  const chronological = [...completions].sort((a, b) => a.completedAtMs - b.completedAtMs);
+  for (const completion of chronological) {
+    for (const media of completion.execution.validMedia) seen.add(media);
+    if (seen.size >= threshold) return completion.completedAtMs;
+  }
+  return null;
+}
+
+function sanitizedBatchResult(completion, shouldProbe) {
+  const { row } = completion.execution;
+  return {
+    batch: completion.batchIndex,
+    completedAtMs: completion.completedAtMs,
+    ok: row.ok,
+    errorCode: row.errorCode ?? null,
+    searchMs: row.searchMs ?? null,
+    totalMs: row.totalMs ?? row.durationMs ?? null,
+    candidateCount: row.candidateCount ?? 0,
+    validCount: shouldProbe
+      ? (row.reachableCount ?? 0)
+      : (row.allowedMediaCount ?? 0),
+    xSearchCalls: row.xSearchCalls ?? null,
+    toolBudgetExceeded: row.toolBudgetExceeded ?? false,
+  };
+}
+
+async function runResponsesBatchStrategy(topic, opts, token) {
+  const started = Date.now();
+  const completions = [];
+  const executeBatch = async (batchIndex) => {
+    const execution = await runResponses(topic, opts, token, batchIndex);
+    const completion = {
+      batchIndex,
+      completedAtMs: Date.now() - started,
+      execution,
+    };
+    completions.push(completion);
+    return completion;
+  };
+  const batchIndexes = Array.from({ length: opts.batchCount }, (_, index) => index + 1);
+
+  let completed;
+  if (opts.batchStrategy === "serial") {
+    completed = [];
+    for (const batchIndex of batchIndexes) {
+      completed.push(await executeBatch(batchIndex));
+    }
+  } else if (opts.batchStrategy === "parallel") {
+    completed = await Promise.all(batchIndexes.map(executeBatch));
+  } else {
+    completed = await Promise.all(
+      batchIndexes.map(async (batchIndex) => {
+        if (batchIndex > 1) await delay(opts.staggerMs * (batchIndex - 1));
+        return executeBatch(batchIndex);
+      }),
+    );
+  }
+
+  const rows = completed.map((completion) => completion.execution.row);
+  const allValidMedia = completed.flatMap((completion) => completion.execution.validMedia);
+  const uniqueValidMedia = new Set(allValidMedia);
+  const validCount = uniqueValidMedia.size;
+  const totalMs = Date.now() - started;
+  const candidateCount = rows.reduce((sum, row) => sum + (row.candidateCount ?? 0), 0);
+  const withinBatchDuplicates = rows.reduce((sum, row) => sum + (row.duplicateCount ?? 0), 0);
+  const crossBatchDuplicates = Math.max(0, allValidMedia.length - validCount);
+  const errorCodes = [...new Set(rows.map((row) => row.errorCode).filter(Boolean))];
+  const ok = validCount > 0;
+
+  return {
+    topic: topic.id,
+    sort: topic.sort,
+    route: "responses",
+    ok,
+    ...(ok
+      ? {}
+      : {
+          durationMs: totalMs,
+          errorCode: errorCodes.length === 1 ? errorCodes[0] : "all_batches_failed",
+        }),
+    model: DEFAULT_MODEL,
+    effort: opts.effort,
+    maxToolCalls: opts.maxToolCalls,
+    targetCount: opts.targetCount,
+    batchStrategy: opts.batchStrategy,
+    batchCount: opts.batchCount,
+    staggerMs: opts.batchStrategy === "staggered" ? opts.staggerMs : 0,
+    targetTotal: opts.targetCount * opts.batchCount,
+    firstDisplayMs: thresholdCompletionMs(completions, 1),
+    firstUsefulMs: thresholdCompletionMs(completions, USEFUL_GALLERY_COUNT),
+    first18Ms: thresholdCompletionMs(completions, 18),
+    first24Ms: thresholdCompletionMs(completions, 24),
+    first30Ms: thresholdCompletionMs(completions, 30),
+    totalMs,
+    successfulBatches: rows.filter((row) => row.ok).length,
+    candidateCount,
+    uniqueMediaCount: validCount,
+    duplicateCount: withinBatchDuplicates + crossBatchDuplicates,
+    crossBatchDuplicateCount: crossBatchDuplicates,
+    allowedMediaCount: opts.probe
+      ? rows.reduce((sum, row) => sum + (row.allowedMediaCount ?? 0), 0)
+      : validCount,
+    reachableCount: opts.probe ? validCount : null,
+    canonicalPostCount: rows.reduce((sum, row) => sum + (row.canonicalPostCount ?? 0), 0),
+    probeMs: rows.reduce((sum, row) => sum + (row.probeMs ?? 0), 0),
+    xSearchCalls: rows.reduce((sum, row) => sum + (row.xSearchCalls ?? 0), 0),
+    toolOverrunBatches: rows.filter((row) => row.toolBudgetExceeded).length,
+    inputTokens: rows.reduce((sum, row) => sum + (row.inputTokens ?? 0), 0),
+    outputTokens: rows.reduce((sum, row) => sum + (row.outputTokens ?? 0), 0),
+    batches: completions
+      .sort((a, b) => a.batchIndex - b.batchIndex)
+      .map((completion) => sanitizedBatchResult(completion, opts.probe)),
+  };
 }
 
 function resolveGrokPath() {
@@ -676,14 +926,14 @@ async function runCli(topic, opts) {
     resolveGrokPath(),
     [
       "-p",
-      cliPromptFor(topic),
+      cliPromptFor(topic, opts.targetCount),
       "--always-approve",
       "--max-turns",
       "14",
       "--effort",
       "low",
       "--json-schema",
-      JSON.stringify(CLI_GALLERY_SCHEMA),
+      JSON.stringify(cliGallerySchema(opts.targetCount)),
       "--output-format",
       "json",
     ],
@@ -696,6 +946,7 @@ async function runCli(topic, opts) {
       sort: topic.sort,
       route: "cli",
       ok: false,
+      targetCount: opts.targetCount,
       durationMs: searchMs,
       errorCode: "timeout",
     };
@@ -706,6 +957,7 @@ async function runCli(topic, opts) {
       sort: topic.sort,
       route: "cli",
       ok: false,
+      targetCount: opts.targetCount,
       durationMs: searchMs,
       errorCode: "process_failed",
     };
@@ -723,6 +975,7 @@ async function runCli(topic, opts) {
       sort: topic.sort,
       route: "cli",
       ok: false,
+      targetCount: opts.targetCount,
       durationMs: searchMs,
       errorCode: "empty",
     };
@@ -734,17 +987,20 @@ async function runCli(topic, opts) {
     route: "cli",
     ok: true,
     effort: "low",
+    targetCount: opts.targetCount,
     searchMs,
-    totalMs: searchMs + quality.probeMs,
+    totalMs: searchMs + quality.metrics.probeMs,
     inputTokens: Number.isFinite(envelope?.usage?.input_tokens)
       ? envelope.usage.input_tokens
       : null,
     outputTokens: Number.isFinite(envelope?.usage?.output_tokens)
       ? envelope.usage.output_tokens
       : null,
-    ...quality,
+    ...quality.metrics,
   };
-  const validCount = opts.probe ? quality.reachableCount : quality.allowedMediaCount;
+  const validCount = opts.probe
+    ? quality.metrics.reachableCount
+    : quality.metrics.allowedMediaCount;
   return validCount === 0
     ? { ...result, ok: false, durationMs: result.totalMs, errorCode: "no_valid_images" }
     : result;
@@ -759,8 +1015,15 @@ function percentile(values, fraction) {
 function aggregate(route, rows) {
   const matching = rows.filter((row) => row.route === route);
   const success = matching.filter((row) => row.ok);
+  const batches = matching.flatMap((row) => row.batches ?? []);
   const totals = success.map((row) => row.totalMs);
   const validCounts = success.map((row) => row.reachableCount ?? row.allowedMediaCount);
+  const firstDisplayTimes = matching
+    .map((row) => row.firstDisplayMs)
+    .filter(Number.isFinite);
+  const firstUsefulTimes = matching
+    .map((row) => row.firstUsefulMs)
+    .filter(Number.isFinite);
   const citations = matching.reduce((sum, row) => sum + (row.canonicalPostCount ?? 0), 0);
   const candidates = matching.reduce((sum, row) => sum + (row.candidateCount ?? 0), 0);
   const validImages = matching.reduce(
@@ -774,10 +1037,34 @@ function aggregate(route, rows) {
     samples: matching.length,
     successes: success.length,
     successRate: matching.length ? success.length / matching.length : 0,
+    batchSamples: batches.length,
+    batchSuccessRate: batches.length
+      ? batches.filter((batch) => batch.ok).length / batches.length
+      : null,
     latencyPopulation: "successful_samples",
     p50Ms: percentile(totals, 0.5),
     p95Ms: percentile(totals, 0.95),
+    p50FirstDisplayMs: percentile(firstDisplayTimes, 0.5),
+    p95FirstDisplayMs: percentile(firstDisplayTimes, 0.95),
+    p50FirstUsefulMs: percentile(firstUsefulTimes, 0.5),
+    p95FirstUsefulMs: percentile(firstUsefulTimes, 0.95),
     medianValidImages: percentile(validCounts, 0.5),
+    atLeast6Rate: matching.length
+      ? matching.filter((row) => (row.reachableCount ?? row.allowedMediaCount ?? 0) >= 6).length /
+        matching.length
+      : 0,
+    atLeast18Rate: matching.length
+      ? matching.filter((row) => (row.reachableCount ?? row.allowedMediaCount ?? 0) >= 18).length /
+        matching.length
+      : 0,
+    atLeast24Rate: matching.length
+      ? matching.filter((row) => (row.reachableCount ?? row.allowedMediaCount ?? 0) >= 24).length /
+        matching.length
+      : 0,
+    atLeast30Rate: matching.length
+      ? matching.filter((row) => (row.reachableCount ?? row.allowedMediaCount ?? 0) >= 30).length /
+        matching.length
+      : 0,
     totalCandidateCount: candidates,
     totalValidImages: validImages,
     validImageRate: candidates ? validImages / candidates : null,
@@ -789,6 +1076,14 @@ function aggregate(route, rows) {
         code,
         matching.filter((row) => !row.ok && row.errorCode === code).length,
       ]),
+    ),
+    batchErrorCounts: Object.fromEntries(
+      [...new Set(batches.filter((batch) => !batch.ok).map((batch) => batch.errorCode))].map(
+        (code) => [
+          code,
+          batches.filter((batch) => !batch.ok && batch.errorCode === code).length,
+        ],
+      ),
     ),
   };
 }
@@ -807,7 +1102,9 @@ async function main() {
     for (const route of routes) {
       const row =
         route === "responses"
-          ? await runResponses(topic, opts, token)
+          ? opts.batchStrategy === "single"
+            ? (await runResponses(topic, opts, token)).row
+            : await runResponsesBatchStrategy(topic, opts, token)
           : await runCli(topic, opts);
       results.push(row);
       process.stdout.write(`${JSON.stringify({ type: "sample", ...row })}\n`);
@@ -820,6 +1117,10 @@ async function main() {
       generatedAt: new Date().toISOString(),
       topics: topics.map((topic) => topic.id),
       probeEnabled: opts.probe,
+      batchStrategy: opts.batchStrategy,
+      batchCount: opts.batchStrategy === "single" ? 1 : opts.batchCount,
+      staggerMs: opts.batchStrategy === "staggered" ? opts.staggerMs : null,
+      allowToolOverrun: opts.allowToolOverrun,
       routes: summary,
     })}\n`,
   );
