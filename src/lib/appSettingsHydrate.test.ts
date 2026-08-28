@@ -94,4 +94,24 @@ describe("parseAppSettingsPrefs", () => {
         .wallpaperXSearchMode,
     ).toBe("cli");
   });
+
+  it("hydrates the legacy use proxy mode only with a valid saved URL", () => {
+    expect(
+      parseAppSettingsPrefs(
+        settings({
+          proxyMode: "use",
+          proxyUrl: "http://127.0.0.1:10809",
+        }),
+      ).proxyMode,
+    ).toBe("manual");
+    expect(
+      parseAppSettingsPrefs(
+        settings({ proxyMode: "use", proxyUrl: "127.0.0.1:10809" }),
+      ).proxyMode,
+    ).toBe("system");
+    expect(
+      parseAppSettingsPrefs(settings({ proxyMode: "use", proxyUrl: null }))
+        .proxyMode,
+    ).toBe("system");
+  });
 });
