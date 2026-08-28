@@ -342,6 +342,8 @@ export const idSettingsUi = {
   "wallpaper.library.deleteConfirm": "Ini menghapus permanen berkas dari pustaka lokal. Tindakan ini tidak dapat dibatalkan.",
   "wallpaper.library.deleteConfirmAction": "Hapus",
   "settings.wallpaperSource.search": "Cari",
+  "settings.wallpaperSource.loadMore": "Muat lainnya",
+  "settings.wallpaperSource.noMore": "Tidak ada gambar lain yang ditemukan.",
   "settings.wallpaperSource.searching": "Mencari di X…",
   "settings.wallpaperSource.cancelSearch": "Batalkan pencarian",
   "settings.wallpaperSource.progress.preparing": "Menyiapkan pencarian…",

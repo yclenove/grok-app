@@ -35,6 +35,18 @@ export async function wallpaperXSearch(
   });
 }
 
+export async function wallpaperXSearchMore(
+  query: string,
+  sort?: "top" | "latest",
+  requestId?: string,
+): Promise<WallpaperSearchResult> {
+  return invoke<WallpaperSearchResult>("wallpaper_x_search_more", {
+    query,
+    sort: sort ?? null,
+    requestId: requestId ?? null,
+  });
+}
+
 export async function wallpaperXSearchCancel(
   requestId: string,
 ): Promise<boolean> {

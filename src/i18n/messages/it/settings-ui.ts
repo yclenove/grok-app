@@ -342,6 +342,8 @@ export const itSettingsUi = {
   "wallpaper.library.deleteConfirm": "Questo elimina definitivamente il file dalla libreria locale. L’operazione non si può annullare.",
   "wallpaper.library.deleteConfirmAction": "Elimina",
   "settings.wallpaperSource.search": "Cerca",
+  "settings.wallpaperSource.loadMore": "Carica altro",
+  "settings.wallpaperSource.noMore": "Nessun'altra immagine trovata.",
   "settings.wallpaperSource.searching": "Ricerca su X…",
   "settings.wallpaperSource.cancelSearch": "Annulla ricerca",
   "settings.wallpaperSource.progress.preparing": "Preparazione della ricerca…",

@@ -342,6 +342,8 @@ export const taSettingsUi = {
   "wallpaper.library.deleteConfirm": "இது உள்ளூர் நூலகத்திலிருந்து கோப்பை நிரந்தரமாக நீக்குகிறது. இதை செயல்தவிர்க்க முடியாது.",
   "wallpaper.library.deleteConfirmAction": "நீக்கு",
   "settings.wallpaperSource.search": "தேடு",
+  "settings.wallpaperSource.loadMore": "மேலும் ஏற்று",
+  "settings.wallpaperSource.noMore": "மேலும் படங்கள் கிடைக்கவில்லை.",
   "settings.wallpaperSource.searching": "X ஐத் தேடுகிறது…",
   "settings.wallpaperSource.cancelSearch": "தேடலை ரத்துசெய்",
   "settings.wallpaperSource.progress.preparing": "தேடல் தயாராகிறது…",

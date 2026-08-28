@@ -18,6 +18,7 @@ import type {
 
 const cancelSearch = vi.hoisted(() => vi.fn(async () => true));
 const searchX = vi.hoisted(() => vi.fn());
+const loadMoreX = vi.hoisted(() => vi.fn());
 const xSearchState = vi.hoisted(() => ({
   busy: true,
   requestId: "request-active" as string | null,
@@ -31,6 +32,7 @@ vi.mock("@/hooks/useWallpaperXSearch", () => ({
   useWallpaperXSearch: () => ({
     ...xSearchState,
     search: searchX,
+    loadMore: loadMoreX,
     cancel: cancelSearch,
   }),
 }));
@@ -81,6 +83,7 @@ afterEach(() => {
   cleanup();
   cancelSearch.mockClear();
   searchX.mockReset();
+  loadMoreX.mockReset();
   xSearchState.busy = true;
   xSearchState.requestId = "request-active";
   xSearchState.stage = "validating";
@@ -250,6 +253,220 @@ describe("WallpaperSourceModal X search lifecycle", () => {
       pending.reject(new Error("transport failed"));
       await pending.promise.catch(() => undefined);
     });
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("loads one more Responses batch and lets final item metadata replace the live batch", async () => {
+    xSearchState.busy = false;
+    xSearchState.requestId = null;
+    searchX.mockResolvedValue({
+      items: [galleryItem("initial")],
+      meta: {
+        requestId: "request-initial",
+        requestedMode: "responses_preview",
+        routeUsed: "responses",
+        durationMs: 20,
+        cacheHit: false,
+        candidateCount: 1,
+        validCount: 1,
+      },
+    } satisfies WallpaperSearchResult);
+    const pendingMore = deferred<WallpaperSearchResult>();
+    loadMoreX.mockReturnValue(pendingMore.promise);
+    const props = {
+      open: true,
+      t: t as never,
+      onClose: vi.fn(),
+      onPickFile: vi.fn(),
+    };
+    const view = render(<WallpaperSourceModal {...props} />);
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.xPlaceholder"),
+      { target: { value: "misty mountains" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    const loadMoreButton = await screen.findByRole("button", {
+      name: "settings.wallpaperSource.loadMore",
+    });
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.xPlaceholder"),
+      { target: { value: "edited but not searched" } },
+    );
+    fireEvent.click(loadMoreButton);
+    expect(loadMoreX).toHaveBeenCalledWith("misty mountains", "top");
+
+    xSearchState.busy = true;
+    xSearchState.requestId = "request-more";
+    xSearchState.progressiveItems = [galleryItem("fresh")];
+    xSearchState.progressiveCount = 1;
+    view.rerender(<WallpaperSourceModal {...props} />);
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(2));
+
+    await act(async () => {
+      pendingMore.resolve({
+        items: [
+          galleryItem("initial"),
+          galleryItem("fresh", { username: "final-author", likes: 9 }),
+        ],
+        meta: {
+          requestId: "request-more",
+          requestedMode: "responses_preview",
+          routeUsed: "responses",
+          durationMs: 18,
+          cacheHit: false,
+          candidateCount: 2,
+          validCount: 2,
+        },
+      });
+      await pendingMore.promise;
+    });
+
+    await waitFor(() => expect(screen.getByText(/@final-author/)).toBeTruthy());
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", {
+        name: "settings.wallpaperSource.loadMore",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps the existing gallery when load more finds no new images", async () => {
+    xSearchState.busy = false;
+    xSearchState.requestId = null;
+    searchX.mockResolvedValue({
+      items: [galleryItem("initial")],
+      meta: {
+        requestId: "request-initial",
+        requestedMode: "responses_preview",
+        routeUsed: "responses",
+        durationMs: 20,
+        cacheHit: false,
+        candidateCount: 1,
+        validCount: 1,
+      },
+    } satisfies WallpaperSearchResult);
+    loadMoreX.mockResolvedValue({
+      items: [],
+      errorCode: "empty",
+      meta: {
+        requestId: "request-more",
+        requestedMode: "responses_preview",
+        routeUsed: "responses",
+        durationMs: 15,
+        cacheHit: false,
+        candidateCount: 0,
+        validCount: 0,
+      },
+    } satisfies WallpaperSearchResult);
+    render(
+      <WallpaperSourceModal
+        open
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.xPlaceholder"),
+      { target: { value: "ocean" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.wallpaperSource.loadMore",
+      }),
+    );
+
+    await screen.findByText("settings.wallpaperSource.noMore");
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not offer load more for a CLI result", async () => {
+    xSearchState.busy = false;
+    xSearchState.requestId = null;
+    searchX.mockResolvedValue({
+      items: [galleryItem("cli-result")],
+      meta: {
+        requestId: "request-cli",
+        requestedMode: "cli",
+        routeUsed: "cli",
+        durationMs: 20,
+        cacheHit: false,
+        candidateCount: 1,
+        validCount: 1,
+      },
+    } satisfies WallpaperSearchResult);
+    render(
+      <WallpaperSourceModal
+        open
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.xPlaceholder"),
+      { target: { value: "forest" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(1));
+    expect(
+      screen.queryByRole("button", {
+        name: "settings.wallpaperSource.loadMore",
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves existing images when load more fails", async () => {
+    xSearchState.busy = false;
+    xSearchState.requestId = null;
+    searchX.mockResolvedValue({
+      items: [galleryItem("survivor")],
+      meta: {
+        requestId: "request-initial",
+        requestedMode: "responses_preview",
+        routeUsed: "responses",
+        durationMs: 20,
+        cacheHit: false,
+        candidateCount: 1,
+        validCount: 1,
+      },
+    } satisfies WallpaperSearchResult);
+    loadMoreX.mockRejectedValue(new Error("transport failed"));
+    render(
+      <WallpaperSourceModal
+        open
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.xPlaceholder"),
+      { target: { value: "forest" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.wallpaperSource.loadMore",
+      }),
+    );
 
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
     expect(screen.getAllByRole("listitem")).toHaveLength(1);

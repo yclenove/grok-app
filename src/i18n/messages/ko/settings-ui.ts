@@ -342,6 +342,8 @@ export const koSettingsUi = {
   "wallpaper.library.deleteConfirm": "로컬 라이브러리에서 파일이 영구 삭제되며 되돌릴 수 없습니다.",
   "wallpaper.library.deleteConfirmAction": "삭제",
   "settings.wallpaperSource.search": "검색",
+  "settings.wallpaperSource.loadMore": "더 불러오기",
+  "settings.wallpaperSource.noMore": "더 이상 이미지를 찾지 못했습니다.",
   "settings.wallpaperSource.searching": "X 검색 중…",
   "settings.wallpaperSource.cancelSearch": "검색 취소",
   "settings.wallpaperSource.progress.preparing": "검색 준비 중…",

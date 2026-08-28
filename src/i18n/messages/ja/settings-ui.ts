@@ -342,6 +342,8 @@ export const jaSettingsUi = {
   "wallpaper.library.deleteConfirm": "ローカルライブラリからこのファイルを完全に削除します。元に戻せません。",
   "wallpaper.library.deleteConfirmAction": "削除",
   "settings.wallpaperSource.search": "検索",
+  "settings.wallpaperSource.loadMore": "さらに読み込む",
+  "settings.wallpaperSource.noMore": "これ以上画像は見つかりませんでした。",
   "settings.wallpaperSource.searching": "X を検索中…",
   "settings.wallpaperSource.cancelSearch": "検索をキャンセル",
   "settings.wallpaperSource.progress.preparing": "検索を準備中…",

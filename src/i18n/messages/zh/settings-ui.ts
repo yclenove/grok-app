@@ -342,6 +342,8 @@ export const zhSettingsUi = {
   "wallpaper.library.deleteConfirm": "将从本机图库永久删除该文件，无法撤销。",
   "wallpaper.library.deleteConfirmAction": "删除",
   "settings.wallpaperSource.search": "搜索",
+  "settings.wallpaperSource.loadMore": "加载更多",
+  "settings.wallpaperSource.noMore": "没有找到更多图片。",
   "settings.wallpaperSource.searching": "正在搜索 X…",
   "settings.wallpaperSource.cancelSearch": "取消搜索",
   "settings.wallpaperSource.progress.preparing": "正在准备搜索…",

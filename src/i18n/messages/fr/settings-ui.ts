@@ -342,6 +342,8 @@ export const frSettingsUi = {
   "wallpaper.library.deleteConfirm": "Cela supprime définitivement le fichier de la bibliothèque locale. Irréversible.",
   "wallpaper.library.deleteConfirmAction": "Supprimer",
   "settings.wallpaperSource.search": "Rechercher",
+  "settings.wallpaperSource.loadMore": "Charger plus",
+  "settings.wallpaperSource.noMore": "Aucune autre image trouvée.",
   "settings.wallpaperSource.searching": "Recherche X…",
   "settings.wallpaperSource.cancelSearch": "Annuler la recherche",
   "settings.wallpaperSource.progress.preparing": "Préparation de la recherche…",

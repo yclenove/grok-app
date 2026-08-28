@@ -19,6 +19,9 @@ use crate::wallpaper_source::{
     WallpaperXSearchBatch, WallpaperXSearchRuntime, WallpaperXSearchStage,
 };
 
+mod more;
+pub(crate) use more::search_more;
+
 pub(crate) const RESPONSES_ENDPOINT: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 pub(crate) const RESPONSES_MODEL: &str = "grok-4.6";
 pub(crate) const RESPONSES_EFFORT: &str = "low";
@@ -116,6 +119,7 @@ struct ResponsesSearchRequest<'a> {
     max_search_calls: u32,
     lane_index: usize,
     target_count: usize,
+    excluded_ids: &'a [String],
     cancellation: &'a WallpaperSearchCancellation,
 }
 
@@ -157,6 +161,7 @@ async fn search_lane(
             max_search_calls: RESPONSES_LANE_MAX_X_SEARCH_CALLS,
             lane_index,
             target_count: RESPONSES_LANE_TARGET_COUNT,
+            excluded_ids: &[],
             cancellation: runtime.cancellation(),
         },
         client,
@@ -355,6 +360,7 @@ async fn search_with_client(
         max_search_calls,
         lane_index,
         target_count,
+        excluded_ids,
         cancellation,
     } = request;
     let error_revision = || Some(credential_revision.clone());
@@ -371,6 +377,7 @@ async fn search_with_client(
             max_search_calls,
             lane_index,
             target_count,
+            excluded_ids,
         ))
         .send();
     let response = tokio::select! {
@@ -466,6 +473,7 @@ fn responses_request(
     max_search_calls: u32,
     lane_index: usize,
     target_count: usize,
+    excluded_ids: &[String],
 ) -> Value {
     json!({
         "model": RESPONSES_MODEL,
@@ -475,6 +483,7 @@ fn responses_request(
             max_search_calls,
             lane_index,
             target_count,
+            excluded_ids,
         ),
         "tools": [{ "type": "x_search" }],
         "tool_choice": "auto",
@@ -501,6 +510,7 @@ fn responses_prompt(
     max_search_calls: u32,
     lane_index: usize,
     target_count: usize,
+    excluded_ids: &[String],
 ) -> String {
     let sort = match sort.unwrap_or("top") {
         "latest" | "Latest" => "Latest",
@@ -510,7 +520,16 @@ fn responses_prompt(
         1 => "Concurrent batch 1 of 3. Primary batch: search the strongest direct interpretation of the topic and prioritize immediately recognizable wallpaper candidates.",
         2 => "Concurrent batch 2 of 3. Visual-variation batch: avoid repeating the primary lane; emphasize alternate composition, lighting, season, or medium.",
         3 => "Concurrent batch 3 of 3. Discovery batch: use different viewpoint, palette, time or weather, cultural framing, or bilingual keywords; avoid the obvious direct and visual-variation queries.",
+        4 => "User-requested load-more batch: search fresh long-tail variants with a different viewpoint, palette, setting, time, weather, cultural framing, or bilingual keywords. Do not repeat the initial three batches.",
         _ => "Concurrent wallpaper batch: use complementary direct and visual/style query variants.",
+    };
+    let exclusion_guidance = if excluded_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nExclude candidates carrying these opaque media/post ids from the existing validated gallery: {}",
+            excluded_ids.join(", ")
+        )
     };
     format!(
         r#"You collect high-quality still images from X (Twitter) for a wallpaper picker.
@@ -518,7 +537,7 @@ fn responses_prompt(
 User topic: {query}
 Sort preference: {sort}
 
-{lane_guidance}
+{lane_guidance}{exclusion_guidance}
 
 Use X search only. Use no more than {max_search_calls} x_search call(s) in this request. Search useful query variants with image filters. Prefer real photography or polished AI art suitable as wallpaper. Prefer posts that include both a prompt and attached images when relevant. Skip memes, screenshots, text cards, avatars, emoji packs, ads, blurry thumbnails, videos, and placeholder links.
 
@@ -838,6 +857,7 @@ mod tests {
                 max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
                 lane_index: 1,
                 target_count: 16,
+                excluded_ids: &[],
                 cancellation: &cancellation,
             },
             timeout,
@@ -1044,6 +1064,7 @@ mod tests {
             RESPONSES_LANE_MAX_X_SEARCH_CALLS,
             2,
             RESPONSES_LANE_TARGET_COUNT,
+            &[],
         );
         assert_eq!(visual_lane.get("max_tool_calls"), Some(&json!(3)));
         assert_eq!(
@@ -1061,6 +1082,23 @@ mod tests {
             RESPONSES_LANE_COUNT as u32 * RESPONSES_LANE_MAX_X_SEARCH_CALLS,
             9
         );
+        let excluded = vec!["twimg:seen-id".into(), "status:12345678:1".into()];
+        let load_more = responses_request(
+            "misty mountains",
+            Some("top"),
+            RESPONSES_LANE_MAX_X_SEARCH_CALLS,
+            4,
+            RESPONSES_LANE_TARGET_COUNT,
+            &excluded,
+        );
+        assert!(load_more
+            .get("input")
+            .and_then(Value::as_str)
+            .is_some_and(|prompt| {
+                prompt.contains("User-requested load-more batch")
+                    && prompt.contains("twimg:seen-id")
+                    && prompt.contains("status:12345678:1")
+            }));
     }
 
     #[tokio::test]
@@ -1246,6 +1284,7 @@ mod tests {
                     max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
                     lane_index: 1,
                     target_count: 16,
+                    excluded_ids: &[],
                     cancellation: &cancellation_for_request,
                 },
                 Duration::from_secs(30),
@@ -1320,6 +1359,7 @@ mod tests {
                     max_search_calls: X_SEARCH_FIRST_ROUND_CALLS,
                     lane_index: 1,
                     target_count: 16,
+                    excluded_ids: &[],
                     cancellation: &cancellation,
                 },
                 Duration::from_secs(2),

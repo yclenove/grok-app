@@ -342,6 +342,8 @@ export const ptBRSettingsUi = {
   "wallpaper.library.deleteConfirm": "Isto exclui permanentemente o arquivo da biblioteca local. Isso não pode ser desfeito.",
   "wallpaper.library.deleteConfirmAction": "Excluir",
   "settings.wallpaperSource.search": "Buscar",
+  "settings.wallpaperSource.loadMore": "Carregar mais",
+  "settings.wallpaperSource.noMore": "Nenhuma outra imagem foi encontrada.",
   "settings.wallpaperSource.searching": "Buscando no X…",
   "settings.wallpaperSource.cancelSearch": "Cancelar busca",
   "settings.wallpaperSource.progress.preparing": "Preparando a busca…",

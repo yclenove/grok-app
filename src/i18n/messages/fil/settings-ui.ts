@@ -342,6 +342,8 @@ export const filSettingsUi = {
   "wallpaper.library.deleteConfirm": "Permanenteng binubura nito ang file mula sa lokal na library. Hindi ito mababawi.",
   "wallpaper.library.deleteConfirmAction": "Burahin",
   "settings.wallpaperSource.search": "Maghanap",
+  "settings.wallpaperSource.loadMore": "Mag-load pa",
+  "settings.wallpaperSource.noMore": "Wala nang ibang larawang nahanap.",
   "settings.wallpaperSource.searching": "Naghahanap sa X…",
   "settings.wallpaperSource.cancelSearch": "Kanselahin ang paghahanap",
   "settings.wallpaperSource.progress.preparing": "Inihahanda ang paghahanap…",

@@ -342,6 +342,8 @@ export const zhTWSettingsUi = {
   "wallpaper.library.deleteConfirm": "將從本機圖庫永久刪除該檔案，無法復原。",
   "wallpaper.library.deleteConfirmAction": "刪除",
   "settings.wallpaperSource.search": "搜尋",
+  "settings.wallpaperSource.loadMore": "載入更多",
+  "settings.wallpaperSource.noMore": "找不到更多圖片。",
   "settings.wallpaperSource.searching": "正在搜尋 X…",
   "settings.wallpaperSource.cancelSearch": "取消搜尋",
   "settings.wallpaperSource.progress.preparing": "正在準備搜尋…",

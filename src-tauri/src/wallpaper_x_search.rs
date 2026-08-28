@@ -20,6 +20,9 @@ use crate::wallpaper_x_responses::{
     self, ResponsesSearchError, ResponsesSearchErrorKind, ResponsesSearchSuccess,
 };
 
+mod more;
+pub(crate) use more::search_more;
+
 const CIRCUIT_FAILURE_THRESHOLD: u8 = 3;
 const CIRCUIT_OPEN_DURATION: Duration = Duration::from_secs(10 * 60);
 const CIRCUIT_OPEN_REASON: &str = "responses_circuit_open";

@@ -1121,6 +1121,17 @@ pub async fn wallpaper_x_search(
 }
 
 #[tauri::command]
+pub async fn wallpaper_x_search_more(
+    app: tauri::AppHandle,
+    query: String,
+    sort: Option<String>,
+    request_id: Option<String>,
+) -> Result<crate::wallpaper_source::WallpaperSearchResult, String> {
+    let request_id = crate::wallpaper_x_search::request_id(request_id.as_deref())?;
+    crate::wallpaper_x_search::search_more(&app, &request_id, &query, sort.as_deref()).await
+}
+
+#[tauri::command]
 pub async fn wallpaper_x_search_cancel(request_id: String) -> Result<bool, String> {
     let request_id = crate::wallpaper_x_search::request_id(Some(&request_id))?;
     Ok(crate::wallpaper_x_search::cancel(&request_id))
@@ -1288,4 +1299,3 @@ pub async fn batch_agents_headless(
     .await
     .map_err(|e| format!("batch_agents_headless: {e}"))
 }
-

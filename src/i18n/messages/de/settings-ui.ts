@@ -342,6 +342,8 @@ export const deSettingsUi = {
   "wallpaper.library.deleteConfirm": "Die Datei wird dauerhaft aus der lokalen Bibliothek gelöscht. Das lässt sich nicht rückgängig machen.",
   "wallpaper.library.deleteConfirmAction": "Löschen",
   "settings.wallpaperSource.search": "Suchen",
+  "settings.wallpaperSource.loadMore": "Mehr laden",
+  "settings.wallpaperSource.noMore": "Keine weiteren Bilder gefunden.",
   "settings.wallpaperSource.searching": "X wird durchsucht…",
   "settings.wallpaperSource.cancelSearch": "Suche abbrechen",
   "settings.wallpaperSource.progress.preparing": "Suche wird vorbereitet…",

@@ -63,6 +63,7 @@ function clientHarness() {
   const unlisten = vi.fn();
   const client: WallpaperXSearchClient = {
     search: vi.fn(),
+    searchMore: vi.fn(),
     cancel: vi.fn(async () => true),
     listenProgress: vi.fn(async (handler) => {
       progressHandler = handler;
@@ -285,5 +286,29 @@ describe("useWallpaperXSearch", () => {
       expect(harness.client.cancel).toHaveBeenCalledWith("request-unmount"),
     );
     await waitFor(() => expect(harness.unlisten).toHaveBeenCalledTimes(2));
+  });
+
+  it("runs user-triggered load more through the same isolated lifecycle", async () => {
+    const harness = clientHarness();
+    vi.mocked(harness.client.searchMore).mockResolvedValue(
+      searchResult("request-more"),
+    );
+    const hook = renderHook(() =>
+      useWallpaperXSearch(harness.client, () => "request-more"),
+    );
+
+    let result: WallpaperSearchResult | null = null;
+    await act(async () => {
+      result = await hook.result.current.loadMore("forest", "latest");
+    });
+
+    expect(harness.client.searchMore).toHaveBeenCalledWith(
+      "forest",
+      "latest",
+      "request-more",
+    );
+    expect(harness.client.search).not.toHaveBeenCalled();
+    expect(result).toEqual(searchResult("request-more"));
+    expect(hook.result.current.busy).toBe(false);
   });
 });

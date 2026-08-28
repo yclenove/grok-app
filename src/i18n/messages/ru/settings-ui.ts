@@ -342,6 +342,8 @@ export const ruSettingsUi = {
   "wallpaper.library.deleteConfirm": "Файл будет безвозвратно удалён из локальной библиотеки. Это действие нельзя отменить.",
   "wallpaper.library.deleteConfirmAction": "Удалить",
   "settings.wallpaperSource.search": "Поиск",
+  "settings.wallpaperSource.loadMore": "Загрузить ещё",
+  "settings.wallpaperSource.noMore": "Других изображений не найдено.",
   "settings.wallpaperSource.searching": "Поиск в X…",
   "settings.wallpaperSource.cancelSearch": "Отменить поиск",
   "settings.wallpaperSource.progress.preparing": "Подготовка поиска…",

@@ -342,6 +342,8 @@ export const enSettingsUi = {
   "wallpaper.library.deleteConfirm": "This permanently deletes the file from the local library. This cannot be undone.",
   "wallpaper.library.deleteConfirmAction": "Delete",
   "settings.wallpaperSource.search": "Search",
+  "settings.wallpaperSource.loadMore": "Load more",
+  "settings.wallpaperSource.noMore": "No more images found.",
   "settings.wallpaperSource.searching": "Searching X…",
   "settings.wallpaperSource.cancelSearch": "Cancel search",
   "settings.wallpaperSource.progress.preparing": "Preparing search…",

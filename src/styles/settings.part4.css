@@ -138,6 +138,13 @@
   color: var(--text-secondary);
 }
 
+.wallpaper-source-load-more {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding-top: 6px;
+}
+
 .wallpaper-source-error {
   display: flex;
   flex-wrap: wrap;
@@ -369,7 +376,8 @@
 .wallpaper-source-modal__body > .wallpaper-source-route-summary,
 .wallpaper-source-modal__body > .wallpaper-source-cite-summary,
 .wallpaper-source-modal__body > .wallpaper-source-error,
-.wallpaper-source-modal__body > .wallpaper-source-filters {
+.wallpaper-source-modal__body > .wallpaper-source-filters,
+.wallpaper-source-modal__body > .wallpaper-source-load-more {
   flex: 0 0 auto;
 }
 

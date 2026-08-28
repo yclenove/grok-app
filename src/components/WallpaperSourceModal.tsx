@@ -129,6 +129,7 @@ export function WallpaperSourceModal({
     stage: xSearchStage,
     progressiveItems: xProgressiveItems,
     search: searchX,
+    loadMore: loadMoreX,
     cancel: cancelXSearch,
   } = useWallpaperXSearch();
   const [tab, setTab] = useState<WallpaperSourceTab>(initialTab);
@@ -155,6 +156,11 @@ export function WallpaperSourceModal({
   /** Soft citation honesty after an X search (verified / unverified counts). */
   const [citeSummary, setCiteSummary] = useState<string | null>(null);
   const [routeMeta, setRouteMeta] = useState<WallpaperXSearchMeta | null>(null);
+  const [loadMoreAttempted, setLoadMoreAttempted] = useState(false);
+  const responseContinuationRef = useRef<{
+    query: string;
+    sort: "top" | "latest";
+  } | null>(null);
   const progressiveRequestRef = useRef<string | null>(null);
   const appliedProgressiveKeysRef = useRef<Set<string>>(new Set());
   const busy = sourceBusy || xSearchBusy;
@@ -167,6 +173,8 @@ export function WallpaperSourceModal({
     setStatusHint(null);
     setCiteSummary(null);
     setRouteMeta(null);
+    setLoadMoreAttempted(false);
+    responseContinuationRef.current = null;
     setSelectedId(null);
     setPreviewingId(null);
     setGalleryFilter("");
@@ -310,6 +318,30 @@ export function WallpaperSourceModal({
     return key ? t(key as MessageKey) : null;
   }, [xSearchBusy, xSearchStage, t]);
 
+  const updateXCitationSummary = useCallback(
+    (
+      list: WallpaperGalleryItem[],
+      resultErrorCode?: WallpaperSourceErrorCode | null,
+    ) => {
+      const counts = countWallpaperXCitations(list);
+      const key = wallpaperXSearchCitationSummaryKey({
+        itemCount: counts.total,
+        verified: counts.verified,
+        unverified: counts.unverified,
+        errorCode: resultErrorCode ?? undefined,
+      });
+      setCiteSummary(
+        key
+          ? t(key as MessageKey, {
+              verified: counts.verified,
+              unverified: counts.unverified,
+            })
+          : null,
+      );
+    },
+    [t],
+  );
+
   const aspectOptions = useMemo(
     () => [
       { value: "16:9", label: "16:9" },
@@ -341,6 +373,9 @@ export function WallpaperSourceModal({
     setErrorCode(null);
     setCiteSummary(null);
     setRouteMeta(null);
+    setStatusHint(null);
+    setLoadMoreAttempted(false);
+    responseContinuationRef.current = null;
     setSelectedId(null);
     setGalleryFilter("");
     setKindFilter("all");
@@ -356,39 +391,19 @@ export function WallpaperSourceModal({
       const code = errorCodeFromSearchResult({ ...res, items: list });
       setHasSearched(true);
       if (code) {
+        responseContinuationRef.current = null;
         // Honest empty/error — never invent CDN gallery cards
         setItems([]);
         setErrorCode(code);
         setError(errorMessage(t, code));
-        const emptyKey = wallpaperXSearchCitationSummaryKey({
-          itemCount: 0,
-          verified: 0,
-          unverified: 0,
-          errorCode: code,
-        });
-        setCiteSummary(
-          emptyKey
-            ? t(emptyKey as MessageKey, { verified: 0, unverified: 0 })
-            : null,
-        );
+        updateXCitationSummary([], code);
       } else {
+        responseContinuationRef.current =
+          res.meta?.routeUsed === "responses" ? { query: q, sort } : null;
         setItems(list);
         setError(null);
         setErrorCode(null);
-        const counts = countWallpaperXCitations(list);
-        const sumKey = wallpaperXSearchCitationSummaryKey({
-          itemCount: counts.total,
-          verified: counts.verified,
-          unverified: counts.unverified,
-        });
-        setCiteSummary(
-          sumKey
-            ? t(sumKey as MessageKey, {
-                verified: counts.verified,
-                unverified: counts.unverified,
-              })
-            : null,
-        );
+        updateXCitationSummary(list);
       }
     } catch (e) {
       setHasSearched(true);
@@ -397,11 +412,66 @@ export function WallpaperSourceModal({
       // Host result and is reconciled by the authoritative list above.
       setCiteSummary(null);
       setRouteMeta(null);
+      responseContinuationRef.current = null;
       const code = parseWallpaperSourceError(e);
       setErrorCode(code);
       setError(errorMessage(t, code));
     }
-  }, [query, sort, t, searchX]);
+  }, [query, sort, t, searchX, updateXCitationSummary]);
+
+  const runXLoadMore = useCallback(async () => {
+    const continuation = responseContinuationRef.current;
+    if (
+      !continuation ||
+      loadMoreAttempted ||
+      routeMeta?.routeUsed !== "responses"
+    ) {
+      return;
+    }
+
+    const initialItems = items;
+    setLoadMoreAttempted(true);
+    setError(null);
+    setErrorCode(null);
+    setStatusHint(null);
+    progressiveRequestRef.current = null;
+    appliedProgressiveKeysRef.current.clear();
+    try {
+      const res = await loadMoreX(continuation.query, continuation.sort);
+      if (!res) {
+        setLoadMoreAttempted(false);
+        return;
+      }
+      const extra = dedupeGalleryItems(res.items || []);
+      const code = errorCodeFromSearchResult({ ...res, items: extra });
+      if (code) {
+        if (code === "empty") {
+          setStatusHint(t("settings.wallpaperSource.noMore"));
+        } else {
+          setErrorCode(code);
+          setError(errorMessage(t, code));
+        }
+        return;
+      }
+
+      const merged = dedupeGalleryItems([...initialItems, ...extra]);
+      setItems(merged);
+      setError(null);
+      setErrorCode(null);
+      updateXCitationSummary(merged);
+    } catch (e) {
+      const code = parseWallpaperSourceError(e);
+      setErrorCode(code);
+      setError(errorMessage(t, code));
+    }
+  }, [
+    items,
+    routeMeta,
+    loadMoreAttempted,
+    loadMoreX,
+    t,
+    updateXCitationSummary,
+  ]);
 
   const runImagine = useCallback(async () => {
     const p = prompt.trim();
@@ -677,6 +747,13 @@ export function WallpaperSourceModal({
     applying || previewingId !== null || (sourceBusy && !xSearchBusy);
   const isImagineLayout = tab === "imagine";
   const isLibraryTab = tab === "library";
+  const canLoadMore =
+    tab === "x" &&
+    !busy &&
+    !loadMoreAttempted &&
+    routeMeta?.routeUsed === "responses" &&
+    responseContinuationRef.current !== null &&
+    items.length > 0;
   const showGalleryFilters = items.length > 0 || filtersActive;
   const softFailError =
     galleryErrorKind != null && isWallpaperGallerySoftFail(galleryErrorKind);
@@ -746,6 +823,7 @@ export function WallpaperSourceModal({
             setErrorCode(null);
             setCiteSummary(null);
             setRouteMeta(null);
+            responseContinuationRef.current = null;
           }}
           disabled={tabSwitchLocked}
         >
@@ -768,6 +846,7 @@ export function WallpaperSourceModal({
             setErrorCode(null);
             setCiteSummary(null);
             setRouteMeta(null);
+            responseContinuationRef.current = null;
           }}
           disabled={tabSwitchLocked}
         >
@@ -787,6 +866,7 @@ export function WallpaperSourceModal({
             setErrorCode(null);
             setCiteSummary(null);
             setRouteMeta(null);
+            responseContinuationRef.current = null;
           }}
           disabled={tabSwitchLocked}
         >
@@ -1166,6 +1246,17 @@ export function WallpaperSourceModal({
           })}
         </div>
       </div>
+      {canLoadMore ? (
+        <div className="wallpaper-source-load-more">
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={() => void runXLoadMore()}
+          >
+            {t("settings.wallpaperSource.loadMore")}
+          </button>
+        </div>
+      ) : null}
     </GlassModal>
     <GlassModal
       open={!!deleteConfirm}

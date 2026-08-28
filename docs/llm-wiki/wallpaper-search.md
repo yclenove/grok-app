@@ -41,6 +41,8 @@ AppearanceSection（模式设置）
 - 一次搜索并发启动 3 路互补请求：直接主题、视觉变化、发现/双语扩展。每路目标 8 张、最多 3 次 `x_search`，因此单次用户搜索的硬上限是 3 个 HTTP 请求、9 次工具调用和 24 张最终结果；客户端必须同时用提示词限制并核验每路响应中的真实工具调用数，不能只相信 `max_tool_calls`。
 - 三路只读取一次 OAuth，并复用同一个 HTTP client；按真实完成顺序处理，每路通过共用验图管线后立即发送一批。跨路按媒体和 status + media index 去重，一路失败不得抹掉其他路的有效结果。
 - 当前不做自动单路重试，也不再执行旧的 2+1 补搜。三路全部失败时才进入既有错误优先级和至多一次 CLI 回退；任一路已有有效图即返回真实部分结果，不得为了补满 24 张触发回退。
+- 初始搜索成功结束后，Responses 画廊允许用户主动点击一次“加载更多”。该操作仅启动 1 路目标 8 张、最多 3 次 `x_search` 的请求，因此一次 UI 搜索最多约展示 32 张；它不自动重试、不回退 CLI，也不会在初始三路仍活跃时启动。
+- 加载更多从 Host 的初始成功缓存读取既有媒体与 status identity 作为排除上下文，并在验图后再次去重；这些 Host-only 字段不由前端回传，也不跨 IPC。空结果只表示“没有更多”，不会计入熔断。
 - `responses_preview` 是依赖 Grok Build 兼容接口的实验能力，不是独立 xAI API Key 路径，也不承诺接口长期稳定或零账号风险。
 
 ## 凭证与安全边界
@@ -74,7 +76,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 1. 只接受 HTTPS 且属于明确 X/xAI 媒体 allowlist 的 URL，拒绝 user-info、非默认端口和私网/非媒体目标。
 2. 最多跟随 6 跳媒体重定向，每一跳重新验证目标；探测只流式读取最多 64 KiB，完整下载上限 200 MiB。
 3. 校验状态码、MIME、真实文件签名和可获得的图片尺寸；拒绝伪装成图片的 HTML/文本。
-4. 按规范媒体 URL、twimg CDN 变体、X status id + media index 去重，最多保留 40 个候选；CLI 最多返回 16 张，Responses 三路聚合最多返回 24 张。
+4. 按规范媒体 URL、twimg CDN 变体、X status id + media index 去重，最多保留 40 个候选；CLI 最多返回 16 张，Responses 初始三路聚合最多返回 24 张，用户主动加载更多后 UI 最多约 32 张。
 5. 综合真实图片 MIME、可验证尺寸/像素、宽高比、规范原帖引用和可靠互动量排序；未知数据不能伪造成 0。
 6. Host-only `status_id`、`media_index` 和探测质量字段不得跨 IPC。
 
@@ -86,6 +88,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 - 阶段为 `preparing → searching_x → validating → supplementing/falling_back → done`；进度只是提示，最终 invoke 结果仍是权威。
 - Responses 实时结果通过 `wallpaper://x-search-batch` 发送，字段固定为 `requestId`、`batchIndex`、`items`、`accumulatedCount`、`done`。批次按完成顺序追加，不要求 `batchIndex` 递增；前端必须忽略重复批次、跨批 URL 去重，并只接受当前 requestId/generation。Host-only 探测字段不得进入批次 DTO。
 - 实时 Responses 搜索只在各路完成时发送批次，最后完成的一路标记 `done=true`；若最后一路失败，可以发送空终态批次。缓存命中发送一份终态批次；CLI 路由不发送批次。
+- 加载更多复用同一批次事件和 requestId/generation 隔离，但只发送该次新增项；有结果或空结果都必须以 `done=true` 收口。最终 invoke 结果仍负责替换新增项的稀疏批次元数据，原画廊不得被空结果或失败清除。
 - 点击取消、关闭弹窗、切到 Imagine/图库、替换搜索或组件卸载都会使当前 generation 失效并请求 Host 取消。
 - 前端必须拒绝 generation 或 requestId 不匹配的迟到结果；Host 取消信号为 sticky，覆盖 Responses 请求/正文读取、图片探测和 CLI 两轮搜索。
 - 缓存为 Host 进程内 32 项 LRU、TTL 10 分钟，只缓存成功且非空的安全结果 DTO。key 包含规范 query、排序、请求模式、契约版本；Responses 还包含非秘密的凭证文件修订。

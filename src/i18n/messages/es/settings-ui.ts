@@ -342,6 +342,8 @@ export const esSettingsUi = {
   "wallpaper.library.deleteConfirm": "Esto elimina el archivo de forma permanente de la biblioteca local. No se puede deshacer.",
   "wallpaper.library.deleteConfirmAction": "Eliminar",
   "settings.wallpaperSource.search": "Buscar",
+  "settings.wallpaperSource.loadMore": "Cargar más",
+  "settings.wallpaperSource.noMore": "No se encontraron más imágenes.",
   "settings.wallpaperSource.searching": "Buscando en X…",
   "settings.wallpaperSource.cancelSearch": "Cancelar búsqueda",
   "settings.wallpaperSource.progress.preparing": "Preparando la búsqueda…",

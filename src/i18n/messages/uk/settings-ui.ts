@@ -342,6 +342,8 @@ export const ukSettingsUi = {
   "wallpaper.library.deleteConfirm": "Файл буде остаточно видалено з локальної бібліотеки. Скасувати це неможливо.",
   "wallpaper.library.deleteConfirmAction": "Видалити",
   "settings.wallpaperSource.search": "Пошук",
+  "settings.wallpaperSource.loadMore": "Завантажити ще",
+  "settings.wallpaperSource.noMore": "Інших зображень не знайдено.",
   "settings.wallpaperSource.searching": "Пошук у X…",
   "settings.wallpaperSource.cancelSearch": "Скасувати пошук",
   "settings.wallpaperSource.progress.preparing": "Підготовка пошуку…",

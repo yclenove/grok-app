@@ -20,6 +20,11 @@ export type WallpaperXSearchClient = {
     sort: "top" | "latest",
     requestId: string,
   ) => Promise<WallpaperSearchResult>;
+  searchMore: (
+    query: string,
+    sort: "top" | "latest",
+    requestId: string,
+  ) => Promise<WallpaperSearchResult>;
   cancel: (requestId: string) => Promise<boolean>;
   listenProgress: (
     handler: (progress: WallpaperXSearchProgress) => void,
@@ -31,6 +36,7 @@ export type WallpaperXSearchClient = {
 
 const DEFAULT_CLIENT: WallpaperXSearchClient = {
   search: api.wallpaperXSearch,
+  searchMore: api.wallpaperXSearchMore,
   cancel: api.wallpaperXSearchCancel,
   listenProgress: api.listenWallpaperXSearchProgress,
   listenBatch: api.listenWallpaperXSearchBatch,
@@ -44,6 +50,10 @@ export type UseWallpaperXSearchResult = {
   progressiveCount: number;
   progressiveDone: boolean;
   search: (
+    query: string,
+    sort: "top" | "latest",
+  ) => Promise<WallpaperSearchResult | null>;
+  loadMore: (
     query: string,
     sort: "top" | "latest",
   ) => Promise<WallpaperSearchResult | null>;
@@ -178,8 +188,9 @@ export function useWallpaperXSearch(
     }
   }, [client]);
 
-  const search = useCallback(
+  const runSearch = useCallback(
     async (
+      operation: "initial" | "more",
       query: string,
       sort: "top" | "latest",
     ): Promise<WallpaperSearchResult | null> => {
@@ -199,7 +210,9 @@ export function useWallpaperXSearch(
       }
 
       try {
-        const result = await client.search(query, sort, nextRequestId);
+        const result = await (operation === "more"
+          ? client.searchMore(query, sort, nextRequestId)
+          : client.search(query, sort, nextRequestId));
         if (
           generationRef.current !== generation ||
           activeRequestRef.current !== nextRequestId
@@ -235,6 +248,18 @@ export function useWallpaperXSearch(
     [cancel, client, requestIdFactory],
   );
 
+  const search = useCallback(
+    (query: string, sort: "top" | "latest") =>
+      runSearch("initial", query, sort),
+    [runSearch],
+  );
+
+  const loadMore = useCallback(
+    (query: string, sort: "top" | "latest") =>
+      runSearch("more", query, sort),
+    [runSearch],
+  );
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -256,6 +281,7 @@ export function useWallpaperXSearch(
     progressiveCount: progressive.accumulatedCount,
     progressiveDone: progressive.done,
     search,
+    loadMore,
     cancel,
   };
 }
