@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createWallpaperXSearchRequestId,
   DEFAULT_WALLPAPER_X_SEARCH_MODE,
+  isWallpaperXSearchBatch,
   isWallpaperXSearchProgress,
   normalizeWallpaperXSearchMode,
   wallpaperXSearchFallbackReasonKey,
@@ -152,6 +153,53 @@ describe("wallpaper X search settings contract", () => {
       isWallpaperXSearchProgress({ requestId, stage: "invented" }),
     ).toBe(false);
     expect(isWallpaperXSearchProgress({ stage: "validating" })).toBe(false);
+  });
+
+  it("validates only structurally safe batch payloads", () => {
+    const requestId = createWallpaperXSearchRequestId();
+    const item = {
+      id: "image-1",
+      thumbUrl: "https://example.test/thumb.jpg",
+      fullUrl: "https://example.test/full.jpg",
+      kind: "image",
+      source: "x",
+    };
+    expect(
+      isWallpaperXSearchBatch({
+        requestId,
+        batchIndex: 1,
+        items: [item],
+        accumulatedCount: 1,
+        done: false,
+      }),
+    ).toBe(true);
+    expect(
+      isWallpaperXSearchBatch({
+        requestId,
+        batchIndex: 0,
+        items: [item],
+        accumulatedCount: 1,
+        done: false,
+      }),
+    ).toBe(false);
+    expect(
+      isWallpaperXSearchBatch({
+        requestId,
+        batchIndex: 1,
+        items: [item],
+        accumulatedCount: 0,
+        done: false,
+      }),
+    ).toBe(false);
+    expect(
+      isWallpaperXSearchBatch({
+        requestId,
+        batchIndex: 1,
+        items: [{ ...item, fullUrl: "" }],
+        accumulatedCount: 1,
+        done: true,
+      }),
+    ).toBe(false);
   });
 
   it("maps only visible progress stages to localized copy", () => {

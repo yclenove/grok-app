@@ -10,7 +10,10 @@ import type {
   WallpaperLibraryEntry,
   WallpaperSearchResult,
 } from "../wallpaperSource";
-import type { WallpaperXSearchProgress } from "../wallpaperXSearch";
+import type {
+  WallpaperXSearchBatch,
+  WallpaperXSearchProgress,
+} from "../wallpaperXSearch";
 export type {
   WallpaperFetchResult,
   WallpaperGalleryItem,
@@ -45,6 +48,12 @@ export function listenWallpaperXSearchProgress(
     "wallpaper://x-search-progress",
     handler,
   );
+}
+
+export function listenWallpaperXSearchBatch(
+  handler: (batch: WallpaperXSearchBatch) => void,
+): Promise<() => void> {
+  return listen<WallpaperXSearchBatch>("wallpaper://x-search-batch", handler);
 }
 
 export async function wallpaperFetchMedia(

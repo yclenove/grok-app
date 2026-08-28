@@ -14,7 +14,7 @@ use crate::account::{self, BuildOauthCredentialRevision};
 use crate::store;
 use crate::wallpaper_source::{
     self, WallpaperCliSearchOutcome, WallpaperSearchCancellation, WallpaperSearchMeta,
-    WallpaperSearchResult, WallpaperXSearchRuntime, WallpaperXSearchStage,
+    WallpaperSearchResult, WallpaperXSearchBatch, WallpaperXSearchRuntime, WallpaperXSearchStage,
 };
 use crate::wallpaper_x_responses::{
     self, ResponsesSearchError, ResponsesSearchErrorKind, ResponsesSearchSuccess,
@@ -29,12 +29,23 @@ const CACHE_CONTRACT_VERSION: u8 = 1;
 const PRE_CANCEL_TTL: Duration = Duration::from_secs(30);
 const PRE_CANCEL_CAPACITY: usize = 64;
 pub(crate) const WALLPAPER_X_SEARCH_PROGRESS_EVENT: &str = "wallpaper://x-search-progress";
+pub(crate) const WALLPAPER_X_SEARCH_BATCH_EVENT: &str = "wallpaper://x-search-batch";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WallpaperXSearchProgress {
     request_id: String,
     stage: WallpaperXSearchStage,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WallpaperXSearchBatchEvent {
+    request_id: String,
+    batch_index: usize,
+    items: Vec<wallpaper_source::WallpaperGalleryItem>,
+    accumulated_count: usize,
+    done: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -317,7 +328,21 @@ pub(crate) async fn search(
             },
         );
     });
-    let runtime = WallpaperXSearchRuntime::new(request.cancellation.clone(), progress);
+    let batch_app = app.clone();
+    let batch_request_id = request_id.to_string();
+    let batch = Arc::new(move |batch: WallpaperXSearchBatch| {
+        let _ = batch_app.emit(
+            WALLPAPER_X_SEARCH_BATCH_EVENT,
+            WallpaperXSearchBatchEvent {
+                request_id: batch_request_id.clone(),
+                batch_index: batch.batch_index,
+                items: batch.items,
+                accumulated_count: batch.accumulated_count,
+                done: batch.done,
+            },
+        );
+    });
+    let runtime = WallpaperXSearchRuntime::new(request.cancellation.clone(), progress, batch);
     let settings = store::load_settings();
     let requested_mode =
         store::normalize_wallpaper_x_search_mode(&settings.wallpaper_x_search_mode);
@@ -417,8 +442,10 @@ where
     runtime.report(WallpaperXSearchStage::Preparing);
     let key = search_cache_key(query, sort, requested_mode, credential_revision.as_ref());
     if let Some(result) = cache.lock().get(&key, Instant::now()) {
+        let result = prepare_cached_result(result, request_id, started);
+        report_terminal_responses_batch(runtime, &result);
         runtime.report(WallpaperXSearchStage::Done);
-        return prepare_cached_result(result, request_id, started);
+        return result;
     }
     if runtime.is_cancelled() {
         runtime.report(WallpaperXSearchStage::Done);
@@ -437,6 +464,7 @@ where
     if let Some(meta) = result.meta.as_mut() {
         meta.request_id = Some(request_id.to_string());
     }
+    report_terminal_responses_batch(runtime, &result);
     if result.error_code.is_none() && !result.items.is_empty() && !runtime.is_cancelled() {
         cache
             .lock()
@@ -444,6 +472,25 @@ where
     }
     runtime.report(WallpaperXSearchStage::Done);
     result
+}
+
+fn report_terminal_responses_batch(
+    runtime: &WallpaperXSearchRuntime,
+    result: &WallpaperSearchResult,
+) {
+    let is_responses = result
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.route_used == "responses");
+    if !is_responses || result.error_code.is_some() || result.items.is_empty() {
+        return;
+    }
+    runtime.report_batch(WallpaperXSearchBatch {
+        batch_index: 1,
+        items: result.items.clone(),
+        accumulated_count: result.items.len(),
+        done: true,
+    });
 }
 
 async fn route_with_providers<R, RFut, C, CFut>(
@@ -773,6 +820,68 @@ mod tests {
             kind,
             credential_revision: Some(revision(1)),
         }
+    }
+
+    #[test]
+    fn wallpaper_x_search_batch_event_serializes_safe_camel_case_payload() {
+        let mut batch_item = item("batch");
+        batch_item.status_id = Some("host-only-status".into());
+        batch_item.media_index = Some(2);
+        let payload = serde_json::to_value(WallpaperXSearchBatchEvent {
+            request_id: "request-1".into(),
+            batch_index: 2,
+            items: vec![batch_item],
+            accumulated_count: 7,
+            done: false,
+        })
+        .expect("serialize batch event");
+
+        assert_eq!(payload["requestId"], "request-1");
+        assert_eq!(payload["batchIndex"], 2);
+        assert_eq!(payload["accumulatedCount"], 7);
+        assert_eq!(payload["done"], false);
+        assert_eq!(payload["items"][0]["id"], "batch");
+        assert!(payload["items"][0].get("statusId").is_none());
+        assert!(payload["items"][0].get("mediaIndex").is_none());
+        assert!(payload.get("request_id").is_none());
+    }
+
+    #[test]
+    fn wallpaper_x_search_terminal_batch_only_reports_live_responses_results() {
+        let captured = Arc::new(Mutex::new(Vec::<WallpaperXSearchBatch>::new()));
+        let captured_batches = Arc::clone(&captured);
+        let cancellation = WallpaperSearchCancellation::default();
+        let runtime = WallpaperXSearchRuntime::new(
+            cancellation.clone(),
+            Arc::new(|_| {}),
+            Arc::new(move |batch| captured_batches.lock().push(batch)),
+        );
+        let mut responses = finish_cli(
+            cli_success(),
+            "responses_preview",
+            None,
+            Instant::now(),
+            None,
+            0,
+        );
+        responses.meta.as_mut().expect("responses meta").route_used = "responses".into();
+
+        report_terminal_responses_batch(&runtime, &responses);
+        let batches = captured.lock();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].batch_index, 1);
+        assert_eq!(batches[0].items[0].id, "cli");
+        assert_eq!(batches[0].accumulated_count, 1);
+        assert!(batches[0].done);
+        drop(batches);
+
+        let cli = finish_cli(cli_success(), "cli", None, Instant::now(), None, 0);
+        report_terminal_responses_batch(&runtime, &cli);
+        assert_eq!(captured.lock().len(), 1, "CLI never emits a batch event");
+
+        cancellation.cancel();
+        report_terminal_responses_batch(&runtime, &responses);
+        assert_eq!(captured.lock().len(), 1, "cancelled requests stay silent");
     }
 
     #[tokio::test]

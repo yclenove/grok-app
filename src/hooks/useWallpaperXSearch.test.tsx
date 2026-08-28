@@ -7,8 +7,14 @@ import {
   useWallpaperXSearch,
   type WallpaperXSearchClient,
 } from "./useWallpaperXSearch";
-import type { WallpaperSearchResult } from "@/lib/wallpaperSource";
-import type { WallpaperXSearchProgress } from "@/lib/wallpaperXSearch";
+import type {
+  WallpaperGalleryItem,
+  WallpaperSearchResult,
+} from "@/lib/wallpaperSource";
+import type {
+  WallpaperXSearchBatch,
+  WallpaperXSearchProgress,
+} from "@/lib/wallpaperXSearch";
 
 afterEach(() => cleanup());
 
@@ -37,9 +43,23 @@ function searchResult(requestId: string): WallpaperSearchResult {
   };
 }
 
+function galleryItem(
+  id: string,
+  fullUrl = `https://example.test/${id}.jpg`,
+): WallpaperGalleryItem {
+  return {
+    id,
+    thumbUrl: fullUrl,
+    fullUrl,
+    kind: "image",
+    source: "x",
+  };
+}
+
 function clientHarness() {
   let progressHandler: ((progress: WallpaperXSearchProgress) => void) | null =
     null;
+  let batchHandler: ((batch: WallpaperXSearchBatch) => void) | null = null;
   const unlisten = vi.fn();
   const client: WallpaperXSearchClient = {
     search: vi.fn(),
@@ -48,11 +68,18 @@ function clientHarness() {
       progressHandler = handler;
       return unlisten;
     }),
+    listenBatch: vi.fn(async (handler) => {
+      batchHandler = handler;
+      return unlisten;
+    }),
   };
   return {
     client,
     emit(progress: WallpaperXSearchProgress) {
       progressHandler?.(progress);
+    },
+    emitBatch(batch: WallpaperXSearchBatch) {
+      batchHandler?.(batch);
     },
     unlisten,
   };
@@ -104,15 +131,108 @@ describe("useWallpaperXSearch", () => {
       searchPromise = hook.result.current.search("ocean", "latest");
     });
     await waitFor(() => expect(hook.result.current.busy).toBe(true));
+    await waitFor(() => expect(harness.client.listenBatch).toHaveBeenCalled());
+    act(() => {
+      harness.emitBatch({
+        requestId: "request-2",
+        batchIndex: 1,
+        items: [galleryItem("before-cancel")],
+        accumulatedCount: 1,
+        done: false,
+      });
+    });
+    expect(hook.result.current.progressiveItems).toHaveLength(1);
     await act(async () => {
       expect(await hook.result.current.cancel()).toBe(true);
     });
     expect(harness.client.cancel).toHaveBeenCalledWith("request-2");
     expect(hook.result.current.busy).toBe(false);
+    expect(hook.result.current.progressiveItems).toEqual([]);
+
+    act(() => {
+      harness.emitBatch({
+        requestId: "request-2",
+        batchIndex: 2,
+        items: [galleryItem("after-cancel")],
+        accumulatedCount: 2,
+        done: true,
+      });
+    });
+    expect(hook.result.current.progressiveItems).toEqual([]);
 
     pending.resolve(searchResult("request-2"));
     await expect(searchPromise).resolves.toBeNull();
     expect(hook.result.current.requestId).toBeNull();
+  });
+
+  it("accepts out-of-order active batches, dedupes items, and ignores repeats", async () => {
+    const pending = deferred<WallpaperSearchResult>();
+    const harness = clientHarness();
+    vi.mocked(harness.client.search).mockReturnValue(pending.promise);
+    const hook = renderHook(() =>
+      useWallpaperXSearch(harness.client, () => "request-batches"),
+    );
+
+    let searchPromise!: Promise<WallpaperSearchResult | null>;
+    act(() => {
+      searchPromise = hook.result.current.search("forest", "top");
+    });
+    await waitFor(() => expect(harness.client.listenBatch).toHaveBeenCalled());
+
+    act(() => {
+      harness.emitBatch({
+        requestId: "other-request",
+        batchIndex: 1,
+        items: [galleryItem("ignored")],
+        accumulatedCount: 1,
+        done: false,
+      });
+      harness.emitBatch({
+        requestId: "request-batches",
+        batchIndex: 2,
+        items: [galleryItem("b"), galleryItem("shared")],
+        accumulatedCount: 2,
+        done: false,
+      });
+      harness.emitBatch({
+        requestId: "request-batches",
+        batchIndex: 1,
+        items: [galleryItem("a"), galleryItem("shared")],
+        accumulatedCount: 3,
+        done: false,
+      });
+      harness.emitBatch({
+        requestId: "request-batches",
+        batchIndex: 2,
+        items: [galleryItem("duplicate-batch")],
+        accumulatedCount: 4,
+        done: false,
+      });
+    });
+
+    expect(hook.result.current.progressiveItems.map((item) => item.id)).toEqual([
+      "b",
+      "shared",
+      "a",
+    ]);
+    expect(hook.result.current.progressiveCount).toBe(3);
+    expect(hook.result.current.progressiveDone).toBe(false);
+
+    act(() => {
+      harness.emitBatch({
+        requestId: "request-batches",
+        batchIndex: 3,
+        items: [],
+        accumulatedCount: 3,
+        done: true,
+      });
+    });
+    expect(hook.result.current.progressiveDone).toBe(true);
+
+    pending.resolve(searchResult("request-batches"));
+    await act(async () => {
+      expect(await searchPromise).toEqual(searchResult("request-batches"));
+    });
   });
 
   it("cancels the prior generation before a replacement search", async () => {
@@ -164,6 +284,6 @@ describe("useWallpaperXSearch", () => {
     await waitFor(() =>
       expect(harness.client.cancel).toHaveBeenCalledWith("request-unmount"),
     );
-    await waitFor(() => expect(harness.unlisten).toHaveBeenCalled());
+    await waitFor(() => expect(harness.unlisten).toHaveBeenCalledTimes(2));
   });
 });

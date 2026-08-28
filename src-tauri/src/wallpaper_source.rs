@@ -171,26 +171,41 @@ pub(crate) enum WallpaperXSearchStage {
     Done,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct WallpaperXSearchBatch {
+    pub(crate) batch_index: usize,
+    pub(crate) items: Vec<WallpaperGalleryItem>,
+    pub(crate) accumulated_count: usize,
+    pub(crate) done: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct WallpaperXSearchRuntime {
     cancellation: WallpaperSearchCancellation,
     progress: Arc<dyn Fn(WallpaperXSearchStage) + Send + Sync>,
+    batch: Arc<dyn Fn(WallpaperXSearchBatch) + Send + Sync>,
 }
 
 impl WallpaperXSearchRuntime {
     pub(crate) fn new(
         cancellation: WallpaperSearchCancellation,
         progress: Arc<dyn Fn(WallpaperXSearchStage) + Send + Sync>,
+        batch: Arc<dyn Fn(WallpaperXSearchBatch) + Send + Sync>,
     ) -> Self {
         Self {
             cancellation,
             progress,
+            batch,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn quiet() -> Self {
-        Self::new(WallpaperSearchCancellation::default(), Arc::new(|_| {}))
+        Self::new(
+            WallpaperSearchCancellation::default(),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
     }
 
     pub(crate) fn cancellation(&self) -> &WallpaperSearchCancellation {
@@ -204,6 +219,12 @@ impl WallpaperXSearchRuntime {
     pub(crate) fn report(&self, stage: WallpaperXSearchStage) {
         if !self.is_cancelled() || stage == WallpaperXSearchStage::Done {
             (self.progress)(stage);
+        }
+    }
+
+    pub(crate) fn report_batch(&self, batch: WallpaperXSearchBatch) {
+        if !self.is_cancelled() {
+            (self.batch)(batch);
         }
     }
 }
