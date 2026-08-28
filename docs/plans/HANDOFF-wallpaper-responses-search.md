@@ -4,20 +4,26 @@
 
 仓库：`yclenove/grok-app`
 
-分支：`feat/wallpaper-responses-search`
+当前维护分支：`fix/wallpaper-responses-network-observability`
 
 基线：`91bf92286988ad74708381ee2983a94bf65b625d`
 
-状态：阶段 0–6 已实现并完成全量 QA；当前默认仍为 CLI，Responses 只作为手动预览。尚未创建或更新 PR。
+状态：阶段 0–6 已实现；旧代理模式迁移、Responses 回退分段耗时和网络分类补测已完成全量 QA 与脱敏代理 A/B。当前默认仍为 CLI，Responses 只作为手动预览。维护分支尚未 push，也未创建或更新 PR。
 
 ## 1. 新电脑如何接手
 
-已有仓库：
+用户审核通过后，先在当前电脑发布维护分支：
+
+```powershell
+git push -u origin fix/wallpaper-responses-network-observability
+```
+
+维护分支经用户审核并 push 后，已有仓库：
 
 ```powershell
 git fetch origin
-git switch feat/wallpaper-responses-search
-git branch --set-upstream-to=origin/feat/wallpaper-responses-search
+git switch fix/wallpaper-responses-network-observability
+git branch --set-upstream-to=origin/fix/wallpaper-responses-network-observability
 git pull --ff-only
 pnpm install --frozen-lockfile
 rustup component add rustfmt clippy
@@ -29,7 +35,7 @@ rustup component add rustfmt clippy
 git clone https://github.com/yclenove/grok-app.git
 cd grok-app
 git fetch origin
-git switch --track origin/feat/wallpaper-responses-search
+git switch --track origin/fix/wallpaper-responses-network-observability
 pnpm install --frozen-lockfile
 rustup component add rustfmt clippy
 ```
@@ -48,8 +54,8 @@ rustup component add rustfmt clippy
 
 2026-08-28 交接前已执行 `git fetch --prune origin` 和 `git fetch --prune upstream`：
 
-- `origin/main` 仍在本分支基线，本分支相对它有 15 个功能提交。
-- `upstream/main` 相对共同基线新增 3 个提交，本分支有 15 个独有提交。
+- `origin/main` 仍在本分支基线；包含本文档更新后，维护分支相对它有 19 个提交。
+- `upstream/main` 相对共同基线新增 3 个提交；包含本文档更新后，维护分支有 19 个独有提交。
 - 源项目 `d88dc135 fix(wallpaper): bypass WebView2 loopback fetch when applying local media (#939)` 与本分支的 `7af9caa6` 是同一前置修复的上游落地版本。
 - 另外两个上游提交是 `cc51db56`（partial fork rewind recovery）和 `ca3203d5`（prompt fallback turn scope）。
 
@@ -68,6 +74,9 @@ rustup component add rustfmt clippy
 - 其他可回退错误最多回退一次 CLI；取消不回退、不补搜、不写缓存。
 - Host 缓存为 32 项、10 分钟、仅内存；同 key 再搜实测约 1.1 秒稳定显示。
 - 前端已有真实阶段进度、显式取消、request ID 和迟到结果隔离。
+- 旧 `proxyMode = "use"` 会按已保存 URL 安全迁移：合法 URL → `manual`，缺失或非法 URL → `system`；Rust 加载/保存/实际路由和 TypeScript hydrate 使用同一规则。
+- `durationMs` 保留为本次总耗时；非缓存回退另带 `responsesDurationMs` / `cliDurationMs`，旧 Host 或不完整数据仍显示旧总耗时文案。
+- 缓存命中会清空原请求的分段耗时，避免把历史 provider 成本冒充成本次缓存耗时；本次没有增加 Responses 自动重试或第二次 CLI 回退。
 
 主要实现位置：
 
@@ -97,6 +106,9 @@ rustup component add rustfmt clippy
 | `e514c689` | 设置 round-trip 测试隔离，避免并行环境污染和触碰真实用户设置 |
 | `3f9e56bd` | 最终全绿 QA 结果 |
 | `f933e3ae` | 最终报告补齐前置媒体修复范围 |
+| `80337538` | 增加跨电脑开发交接文档 |
+| `72b95349` | 修复旧 `proxyMode = "use"` 迁移，统一 Rust/TypeScript/IPC 的实际路由语义 |
+| `b9f65d6b` | 增加 Responses/CLI 回退分段耗时、旧 Host 与缓存兼容、15 语言文案和传输错误分类测试；不增加自动重试 |
 
 本文档本身是最后一笔交接提交；以 `git log -1 --oneline` 查看其完整提交号。
 
@@ -110,15 +122,17 @@ rustup component add rustfmt clippy
 | `pnpm audit:prod` | 通过，0 个已知 production 漏洞 |
 | `pnpm lint` | 通过 |
 | `pnpm typecheck` | 通过 |
-| `pnpm test` | 545 文件、6761 测试全部通过 |
+| `pnpm test` | 545 文件、6766 测试全部通过（本机以 `--maxWorkers=4` 消除无关源码扫描的并发超时） |
 | `pnpm build:ui` | 通过；只有既有动态导入和大 chunk 警告 |
 | `cargo fmt --all -- --check` | 通过 |
 | `cargo clippy --all-targets -- -D warnings` | 通过 |
 | `cargo test --no-run` | 通过 |
-| Windows manifest 全量 harness | 1560 passed、0 failed、1 ignored |
-| 壁纸 Rust 定向测试 | 22 passed、0 failed |
+| Windows manifest 全量 harness | 1567 passed、0 failed、1 ignored |
+| 壁纸 Rust 定向测试 | 25 passed、0 failed |
 
 Windows 不要直接把裸 `cargo test` 的 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 当成断言失败。按 `.github/workflows/ci.yml` 的 Windows `cargo test` 步骤：先 `cargo test --no-run`，再用 Windows SDK `mt.exe` 把 `src-tauri/windows-test-manifest.xml` 嵌入 `grok_app_lib-*.exe` 的 `RT_MANIFEST #1`，最后直接执行 harness。
+
+本机默认高并发全量 Vitest 两次都只有 `settingsCatalog > mounts every searchable anchor in production` 超过固定 5 秒门槛（5.75 秒、5.08 秒），其余 6765 条通过。该测试单独运行 2.19 秒、16/16 通过；限制 4 workers 后完整 6766/6766 通过。没有修改这条无关测试或放宽超时。
 
 新改动提交前至少运行定向测试；准备交付时重跑：
 
@@ -143,7 +157,7 @@ cargo test --no-run
 
 阶段 5 真机数据：CLI 首搜 54.8 秒并返回 14 张有效图；相同 key 缓存约 1.1 秒；取消约 0.8 秒恢复空闲，无回退和迟到污染。
 
-## 6. 最新待查问题：Responses 网络回退 84.9 秒
+## 6. Responses 网络回退 84.9 秒：结论与修复
 
 用户在 2026-08-28 看到：
 
@@ -151,33 +165,53 @@ cargo test --no-run
 已回退 Grok Build CLI（Responses 网络不可用）· 84.9 秒
 ```
 
-准确含义：Responses 请求先得到 `responses_network`，随后完整执行 CLI；84.9 秒是 Responses 尝试、CLI 搜索和图片校验的总耗时。当前 meta 没有分别记录两段耗时，所以不能从 UI 反推出 Responses 和 CLI 各花多少秒。
+准确含义：Responses 请求先得到 `responses_network`，随后完整执行 CLI；84.9 秒是 Responses 尝试、CLI 搜索和图片校验的总耗时，并不是 Responses 单独等待 84.9 秒。
+
+`b9f65d6b` 已补齐分段观测。新 Host 的非缓存回退会显示类似：
+
+```text
+Responses 18.4 秒后失败（Responses 网络不可用）；CLI 用时 66.5 秒完成；共 84.9 秒
+```
+
+旧 Host、不完整 meta 和缓存命中继续使用总耗时文案；没有为了提速增加不确定是否重复计费的自动请求重放。
 
 当前机器的只读诊断证据：
 
 - Responses 的 `Network` 只表示 reqwest 在收到 HTTP 响应前失败；OAuth、401/403、429、5xx、TLS 和 timeout 均有其他独立分类。
 - 直连固定 Build Responses 主机在 10 秒连接超时。
-- 经 Windows 系统 HTTP 代理 `127.0.0.1:10808`，不带凭证的最小 POST 约 2.36 秒返回 401；这是预期的可达性证明，不是接口故障。
-- 本地 Xray 同时监听 10808 和 10809；两条代理在诊断时都能约 2.2 秒到达端点。
+- Windows 系统代理为 `127.0.0.1:10808`；`10809` 是手动配置的家宽出口。本地 Xray 同时监听两端口。
+- 交付前不带凭证的最小 POST 均按预期返回 401：10808 约 6.14 秒，10809 约 3.06 秒。这证明两条链路当时都可达，不代表完整搜索耗时。
 - v2rayN 日志在 08:48:52 记录过一次 connect timeout，并在 08:59:53 退出、09:00:03 重新启动。它能证明代理链路当时有波动，但不能单独证明哪一条日志就是该次壁纸请求。
 - Windows curl 首次还出现过 Schannel 吊销服务器离线；加入 `--ssl-no-revoke` 后代理请求成功。产品 reqwest 使用 rustls，因此不要把这个 curl/Schannel 现象直接归因给产品 TLS。
 
-另有一处需要继续追查的配置兼容性：当前机器持久化的是旧值 `proxyMode = "use"`，并保存了 10809 的手动 URL；现有 Host 和前端都只承认 `system / manual / none`，未知的 `use` 会归一为 `system`，所以产品实际使用 WinINET 的 10808，保存的 10809 没有生效。
+### 6.1 旧代理模式已修复
 
-不要未经考证就把所有 `use` 映射成 `manual`。先查清旧值是如何被写入的，以及它代表“有效代理决策”还是“用户手动模式”；然后同时修正 Rust 反序列化/迁移、TypeScript hydrate/normalize 和测试，保证 UI 展示与 Host 实际路由一致。
+旧 `proxyMode = "use"` 已确认来自网络探测的“实际使用代理”决策标签，不是正式设置枚举。`72b95349` 使用保存 URL 做无歧义迁移：合法 URL → `manual`；缺失/非法 URL → `system`。测试全部使用临时 `GROK_APP_HOME`，没有修改真实用户设置。
+
+### 6.2 10808 / 10809 脱敏 A/B
+
+2026-08-28 使用同一固定主题 `ocean-ultrawide`、同一 `grok-4.6 + low` / CLI `low` 契约并启用图片可达性探测。脚本未输出 token、搜索原词、媒体 URL、用户名、出口 IP或原始响应。
+
+| 代理 | 渠道 | 搜索耗时 | 含探测总耗时 | 可达 / 候选 | 规范引用 |
+|---|---|---:|---:|---:|---:|
+| 10808（系统） | Responses | 62.9 秒 | 73.6 秒 | 3 / 8 | 8 / 8 |
+| 10808（系统） | CLI | 85.6 秒 | 93.8 秒 | 26 / 26 | 26 / 26 |
+| 10809（家宽） | Responses | 49.8 秒 | 62.4 秒 | 12 / 12 | 12 / 12 |
+| 10809（家宽） | CLI | 91.1 秒 | 98.2 秒 | 26 / 26 | 26 / 26 |
+
+本轮两条代理、两个渠道都成功，未触发回退。10809 的 Responses 比 10808 快约 15.2%，有效图从 3 张提高到 12 张；CLI 在 10809 反而慢约 4.7%。只有一个主题、每条路径各一次，不能据此自动选择代理、修改用户设置或宣布家宽稳定更快。代理进程重启和真实断网恢复会影响用户全机网络，本轮未主动执行；失败/恢复矩阵由本地确定性测试覆盖。
 
 ## 7. 建议的下一开发批次
 
 保持一次一提交，建议顺序：
 
-1. 在新电脑复现代理模式读写，确定旧 `use` 的来源和预期语义，增加脱敏 fixture。
-2. 实现一次性兼容迁移，覆盖旧值、有无 `proxyUrl`、系统代理、手动代理和直连；不要修改真实用户设置做测试。
-3. 为 Responses 回退增加安全的分段耗时，例如 Responses 尝试耗时和 CLI 回退耗时；只传数字与稳定错误码，不传底层错误串、主机、请求头或 URL。
-4. 用本地 mock 覆盖 DNS、连接拒绝、连接重置、TLS、timeout、5xx、401、429和取消，确认分类与回退矩阵不漂移。
-5. 再做真实代理 A/B：系统 10808、手动 10809、代理进程重启、短暂断网和恢复。
-6. 根据实测决定是否缩短 20 秒 connect timeout；不要在无法确认服务端是否已计费时盲目自动重放 Responses 请求。
+1. 先由用户在 Tauri UI 手动切换“系统代理 10808 / 手动代理 10809”，确认设置显示、实际路由和新的分段文案一致。
+2. 再收集至少 2–3 个不同主题、交错顺序和不同时间窗的代理配对样本；在此之前不自动选择 10809，也不改变 `cli` 默认渠道。
+3. 若要测代理进程重启或短暂断网，安排明确的维护窗口，先确认不会中断其他应用；继续禁止 Responses 自动重放。
+4. 样本足够后再评估 20 秒 connect timeout。缩短只影响更快回退，不能解决服务端搜索本身 50–75 秒的常见延迟。
+5. 通用网络图片搜索如要扩展，应作为独立来源/标签，保留来源与引用，不在 X 空结果时静默混入。
 
-可以考虑把 UI 总耗时改成类似“Responses 3.2 秒失败；CLI 81.7 秒完成”，这样下次不再把 84.9 秒误认为 Responses 单独等待时长。
+本批已完成分段文案；下一阶段的重点应是跨主题样本和真实 UI 验收，不再重复实现计时。
 
 ## 8. 安全与范围红线
 
@@ -191,4 +225,4 @@ cargo test --no-run
 
 ## 9. 当前工作区说明
 
-本机 `src-tauri/Cargo.toml` 进入本任务前就有行尾状态，`git diff --ignore-space-at-eol` 为空；它从未纳入任何提交。远端分支只包含已提交内容，新电脑正常 checkout 应为干净工作区。
+本机 `src-tauri/Cargo.toml` 进入本任务前就有行尾状态，`git diff --ignore-space-at-eol` 为空；它从未纳入任何提交。维护分支当前仅在本机，等待用户审核后再 push；未创建或更新 PR。
