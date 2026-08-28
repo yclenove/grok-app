@@ -8,7 +8,7 @@
 
 基线：`91bf92286988ad74708381ee2983a94bf65b625d`
 
-状态：阶段 0–6 已实现；旧代理模式迁移、Responses 回退分段耗时和网络分类补测已完成全量 QA 与脱敏代理 A/B。当前默认仍为 CLI，Responses 只作为手动预览。维护分支尚未 push，也未创建或更新 PR。
+状态：阶段 0–6、渐进式 `3 × 8` Responses 首屏和显式 `1 × 8` 加载更多均已实现并完成确定性测试与真实 Tauri 验收。当前默认仍为 CLI，Responses 只作为手动预览；`auto` 继续隐藏。维护分支尚未 push，也未创建或更新 PR。
 
 ## 1. 新电脑如何接手
 
@@ -50,17 +50,19 @@ rustup component add rustfmt clippy
 4. [阶段 4 质量报告](../qa/2026-08-28-wallpaper-x-stage4-quality.md)
 5. [阶段 5 生命周期报告](../qa/2026-08-28-wallpaper-x-stage5-lifecycle.md)
 6. [Responses 出图数量 / 时间校准](../qa/2026-08-29-wallpaper-responses-output-latency.md)
+7. [渐进搜索与加载更多最终验收](../qa/2026-08-29-wallpaper-responses-progressive-load-more.md)
 
 ### 1.1 与源项目主线的关系
 
-2026-08-28 交接前已执行 `git fetch --prune origin` 和 `git fetch --prune upstream`：
+2026-08-29 最终交接前重新执行了 `git fetch --prune origin` 和 `git fetch --prune upstream`。在最终 QA 文档提交前，`git rev-list --left-right --count` 的快照为：
 
-- `origin/main` 仍在本分支基线；包含本文档更新后，维护分支相对它有 19 个提交。
-- `upstream/main` 相对共同基线新增 3 个提交；包含本文档更新后，维护分支有 19 个独有提交。
-- 源项目 `d88dc135 fix(wallpaper): bypass WebView2 loopback fetch when applying local media (#939)` 与本分支的 `7af9caa6` 是同一前置修复的上游落地版本。
-- 另外两个上游提交是 `cc51db56`（partial fork rewind recovery）和 `ca3203d5`（prompt fallback turn scope）。
+- `HEAD...origin/main`：本分支 24、`origin/main` 3；最终 QA 交接提交会使本分支侧增加到 25。
+- `HEAD...upstream/main`：本分支 24、`upstream/main` 50；最终 QA 交接提交会使本分支侧增加到 25。
+- 源项目 `d88dc135 fix(wallpaper): bypass WebView2 loopback fetch when applying local media (#939)` 与本分支的 `7af9caa6` 是同一前置修复的上游落地版本；使用 `--cherry-pick` 计数时双方各减少一个。
+- `origin/main` 另外两个独有提交仍是 `cc51db56`（partial fork rewind recovery）和 `ca3203d5`（prompt fallback turn scope）。
+- `upstream/main` 已推进到 `939202b0` / `v0.2.28`，包含大量与本功能无关的新变化。
 
-本次没有 merge 或 rebase，因为那会改变已经完整验证的提交链。新电脑若要先同步 `upstream/main`，应注意不要重复应用 `#939`；完成整合后必须重跑全量门禁。不要对共享远端分支做未经确认的 force-push。
+本次没有 merge 或 rebase，因为同步 50 个上游提交会显著扩大当前已验收功能的范围并使本轮 QA 失效。新电脑若要同步最新 `upstream/main`，应单独安排整合提交，注意不要重复应用 `#939`，解决冲突后重跑全部门禁和真实壁纸搜索验收。不要对共享远端分支做未经确认的 force-push。
 
 ## 2. 已交付行为
 
@@ -70,11 +72,12 @@ rustup component add rustfmt clippy
 - Responses 固定使用 Grok Build OAuth、官方兼容端点、`grok-4.6`、`low` 和只读 `x_search`。
 - 前端不能传 endpoint、model、tool 或 credential；不使用单独计费的 xAI API Key。
 - Responses 禁止凭证重定向；token 不跨 IPC，不进入日志、缓存、错误文案或诊断包。
-- CLI 与 Responses 共用 normalize、媒体安全校验、去重、排序和条件补搜。
-- 单次搜索总 X 工具预算不超过 3；429 和工具预算超限不再走 CLI，避免双重消耗。
+- CLI 与 Responses 共用 normalize、媒体安全校验、去重和排序；CLI 保留自己的条件补搜，Responses 改为三路首屏和显式加载更多，不复用旧的自动补搜。
+- Responses 首屏为三路各最多 3 次 `x_search`，单次用户初始搜索上限 9 次；用户主动加载更多再增加一路最多 3 次。429 和工具预算超限不再走 CLI，避免双重消耗。
 - 其他可回退错误最多回退一次 CLI；取消不回退、不补搜、不写缓存。
-- Host 缓存为 32 项、10 分钟、仅内存；同 key 再搜实测约 1.1 秒稳定显示。
-- 前端已有真实阶段进度、显式取消、request ID 和迟到结果隔离。
+- Host 缓存为 32 项、10 分钟、仅内存；本轮同 key 再搜实测约 1.37 秒稳定显示。
+- Responses 每路完成校验后按真实完成顺序发送批次；前端已有真实阶段进度、显式取消、request ID、generation 和迟到结果隔离。
+- 初始 Responses 完成后允许一次显式 `1 × 8` 加载更多；它从 Host 初始成功缓存读取排除 identity，追加去重，不自动重试、不回退 CLI，失败或空结果不清空原画廊。
 - 旧 `proxyMode = "use"` 会按已保存 URL 安全迁移：合法 URL → `manual`，缺失或非法 URL → `system`；Rust 加载/保存/实际路由和 TypeScript hydrate 使用同一规则。
 - `durationMs` 保留为本次总耗时；非缓存回退另带 `responsesDurationMs` / `cliDurationMs`，旧 Host 或不完整数据仍显示旧总耗时文案。
 - 缓存命中会清空原请求的分段耗时，避免把历史 provider 成本冒充成本次缓存耗时；本次没有增加 Responses 自动重试或第二次 CLI 回退。
@@ -110,8 +113,14 @@ rustup component add rustfmt clippy
 | `80337538` | 增加跨电脑开发交接文档 |
 | `72b95349` | 修复旧 `proxyMode = "use"` 迁移，统一 Rust/TypeScript/IPC 的实际路由语义 |
 | `b9f65d6b` | 增加 Responses/CLI 回退分段耗时、旧 Host 与缓存兼容、15 语言文案和传输错误分类测试；不增加自动重试 |
+| `29bfc6e2` | 记录脱敏代理 A/B、最终验证和交接结论 |
+| `0a40cb50` | 增加渐进搜索批次事件契约与确定性 DTO 测试 |
+| `ba93bc30` | Responses 并发三路 `3 × 8`，按完成顺序发送已校验批次 |
+| `82f8327c` | UI 渐进渲染批次，保留 request ID/generation 隔离与最终权威 meta |
+| `bf2cb867` | 增加一次显式 `1 × 8` 加载更多，失败、空结果和取消均保留原画廊 |
+| `f55277a2` | 增加并发/数量 benchmark 支持和脱敏输出延迟校准报告 |
 
-本文档本身是最后一笔交接提交；以 `git log -1 --oneline` 查看其完整提交号。
+本文档随最终 QA 交接提交更新；以 `git log -1 --oneline` 查看该提交的完整提交号。
 
 ## 4. 已验证基线
 
@@ -123,17 +132,18 @@ rustup component add rustfmt clippy
 | `pnpm audit:prod` | 通过，0 个已知 production 漏洞 |
 | `pnpm lint` | 通过 |
 | `pnpm typecheck` | 通过 |
-| `pnpm test` | 545 文件、6766 测试全部通过（本机以 `--maxWorkers=4` 消除无关源码扫描的并发超时） |
+| `pnpm exec vitest run --maxWorkers=4` | 545 文件、6775 测试全部通过 |
 | `pnpm build:ui` | 通过；只有既有动态导入和大 chunk 警告 |
 | `cargo fmt --all -- --check` | 通过 |
 | `cargo clippy --all-targets -- -D warnings` | 通过 |
 | `cargo test --no-run` | 通过 |
-| Windows manifest 全量 harness | 1567 passed、0 failed、1 ignored |
-| 壁纸 Rust 定向测试 | 25 passed、0 failed |
+| Windows manifest 全量 harness | 1574 passed、0 failed、1 ignored |
+| 壁纸 Rust 定向测试 | 32 passed、0 failed |
+| 最终代码质量闸门 | 除既有 `FILES_OVER_1K_BUDGET`（78 > 69）外全部通过；本轮没有新增源码跨过千行阈值 |
 
 Windows 不要直接把裸 `cargo test` 的 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 当成断言失败。按 `.github/workflows/ci.yml` 的 Windows `cargo test` 步骤：先 `cargo test --no-run`，再用 Windows SDK `mt.exe` 把 `src-tauri/windows-test-manifest.xml` 嵌入 `grok_app_lib-*.exe` 的 `RT_MANIFEST #1`，最后直接执行 harness。
 
-本机默认高并发全量 Vitest 两次都只有 `settingsCatalog > mounts every searchable anchor in production` 超过固定 5 秒门槛（5.75 秒、5.08 秒），其余 6765 条通过。该测试单独运行 2.19 秒、16/16 通过；限制 4 workers 后完整 6766/6766 通过。没有修改这条无关测试或放宽超时。
+本轮全量 Vitest 使用 4 workers，以避免该仓库已知的高并发源码扫描超时；6775/6775 全部通过，没有修改无关测试或放宽超时。
 
 新改动提交前至少运行定向测试；准备交付时重跑：
 
@@ -144,6 +154,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build:ui
+py -3 scripts/check-code-quality-gates.py --mode final --json
 cd src-tauri
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
@@ -158,13 +169,15 @@ cargo test --no-run
 
 阶段 5 真机数据：CLI 首搜 54.8 秒并返回 14 张有效图；相同 key 缓存约 1.1 秒；取消约 0.8 秒恢复空闲，无回退和迟到污染。
 
-2026-08-29 的等输出量校准显示，已测 first-round 组合里“一次 `x_search`、目标 12 张”平衡最好：8 主题中 6/8 达到至少 6 张有效图，成功样本 p50 69.0 秒、p95 78.6 秒、中位 12 张，成功样本每张有效图约 5.9 秒。目标 16 只把中位数提高到 13 张，p95 增至 89.0 秒且达标率降至 62.5%；两次搜索目标 8 张仅 2/4 达标。该结论只确定下一轮候选契约，尚未修改产品；75% 仍低于 80% 灰度线，所以 CLI 默认和隐藏 `auto` 的决定不变。
+2026-08-29 的单路等输出量校准先显示“一次 `x_search`、目标 12 张”在单路组合里平衡最好：8 主题中 6/8 达到至少 6 张有效图，成功样本 p50 69.0 秒、p95 78.6 秒、中位 12 张，成功样本每张有效图约 5.9 秒。目标 16 只把中位数提高到 13 张，p95 增至 89.0 秒且达标率降至 62.5%；两次搜索目标 8 张仅 2/4 达标。该结论随后被并发与每路数量实验继续收敛，不是最终产品契约。
 
-随后按“总时间 + 最终唯一有效图”扩展并发批次。三路各目标 12 张时，8/8 主题达到至少 6 张，6/8 达到 18 张，4/8 达到 24 张；总耗时 p50/p95 为 88.0/93.2 秒，中位 21 张，22/24 个子批可用。四路虽然个别样本达到 35–41 张，但正式矩阵有 2/8 个主题四路同时连接超时、最终 0 张，整体中位降至 15 张。当前大批量候选拐点是三路；这些仍是脚本级探索数据，尚未修改产品或授权开放 `auto`。
+随后按“总时间 + 最终唯一有效图”扩展并发批次。三路各目标 12 张时，8/8 主题达到至少 6 张，6/8 达到 18 张，4/8 达到 24 张；总耗时 p50/p95 为 88.0/93.2 秒，中位 21 张，22/24 个子批可用。四路虽然个别样本达到 35–41 张，但正式矩阵有 2/8 个主题四路同时连接超时、最终 0 张，整体中位降至 15 张。大批量并发拐点因此确定为三路。
 
-三路每路数量继续筛选后，`3 × 8` 是当前首屏候选甜点位：8 主题中 7/8 达到至少 6 张，6/8 达到 18 张，首批 6 张 p50/p95 为 58.9/66.3 秒，最终 p50/p95 为 78.8/91.8 秒，中位 19 张。相对 `3 × 12`，首批 p50 提前 12.6 秒、最终 p50 提前 9.2 秒，但没有主题达到 24 张，且有 1/8 主题三路同时连接超时。`3 × 6` 中位只有 12 张且首批没有更快；`3 × 10` 的成功样本 p50 已到 90.0 秒，因此都不进入下一轮首屏候选。
+三路每路数量继续筛选后，`3 × 8` 被选为并已实现的首屏甜点位：8 主题中 7/8 达到至少 6 张，6/8 达到 18 张，首批 6 张 p50/p95 为 58.9/66.3 秒，最终 p50/p95 为 78.8/91.8 秒，中位 19 张。相对 `3 × 12`，首批 p50 提前 12.6 秒、最终 p50 提前 9.2 秒，但没有主题达到 24 张，且有 1/8 主题三路同时连接超时。`3 × 6` 中位只有 12 张且首批没有更快；`3 × 10` 的成功样本 p50 已到 90.0 秒，因此均未采用。
 
-紧接着的同 8 主题 CLI 邻近窗口中，CLI p50/p95 为 103.0/125.5 秒，中位 28 张且 8/8 成功。`3 × 8` 的成功样本最终 p50/p95 分别快 23.5%/26.9%，首批可用相对等待 CLI 完成的 p50 提前 44.1 秒，但中位少 9 张并有一次整组连接失败。这不是严格交错 A/B，结论只支持“手动预览的渐进首屏候选”，仍不足以改变 CLI 默认或开放 `auto`。完整口径见 `docs/qa/2026-08-29-wallpaper-responses-output-latency.md`。
+紧接着的同 8 主题 CLI 邻近窗口中，CLI p50/p95 为 103.0/125.5 秒，中位 28 张且 8/8 成功。`3 × 8` 的成功样本最终 p50/p95 分别快 23.5%/26.9%，首批可用相对等待 CLI 完成的 p50 提前 44.1 秒，但中位少 9 张并有一次整组连接失败。这不是严格交错 A/B，因此只支持在手动预览中落地渐进首屏，仍不足以改变 CLI 默认或开放 `auto`。完整口径见 `docs/qa/2026-08-29-wallpaper-responses-output-latency.md`。
+
+真实 Tauri 最终验收进一步确认：一个未缓存搜索 65.4 秒返回 20 张；另一个搜索在 62.1 秒先显示 5 张，最终 89.3 秒返回 13 张。显式加载更多的失败不会清空原画廊，取消约 0.254 秒恢复且无迟到污染，成功时从 20 张追加到 28 张；相同初始查询缓存约 1.37 秒恢复。完整脱敏证据见 `docs/qa/2026-08-29-wallpaper-responses-progressive-load-more.md`。
 
 ## 6. Responses 网络回退 84.9 秒：结论与修复
 
@@ -210,19 +223,19 @@ Responses 18.4 秒后失败（Responses 网络不可用）；CLI 用时 66.5 秒
 
 本轮两条代理、两个渠道都成功，未触发回退。10809 的 Responses 比 10808 快约 15.2%，有效图从 3 张提高到 12 张；CLI 在 10809 反而慢约 4.7%。只有一个主题、每条路径各一次，不能据此自动选择代理、修改用户设置或宣布家宽稳定更快。代理进程重启和真实断网恢复会影响用户全机网络，本轮未主动执行；失败/恢复矩阵由本地确定性测试覆盖。
 
-## 7. 建议的下一开发批次
+## 7. 本轮开发计划与完成状态
 
-保持一次一提交，建议顺序：
+| 计划 | 状态 | 落地 |
+|---|---|---|
+| 批次事件协议与乱序/重复/迟到隔离 | 完成 | `0a40cb50` |
+| Host 三路 `3 × 8`、共享 OAuth/client、逐路校验发送 | 完成 | `ba93bc30` |
+| UI 渐进追加、15 locale、最终结果权威替换 | 完成 | `82f8327c` |
+| 失败策略：有部分结果不回退、无自动单路重试、整组失败沿用一次 CLI 回退 | 完成 | `ba93bc30`、`82f8327c` |
+| 真实 Host/Tauri 首批、最终、失败保留、缓存、取消和迟到验收 | 完成 | `docs/qa/2026-08-29-wallpaper-responses-progressive-load-more.md` |
+| 显式 `1 × 8` 加载更多，追加去重且不回退 | 完成 | `bf2cb867` |
+| 通用 Web 图片搜索 | 后续独立功能，不属于本轮 X 搜索计划 | 必须使用独立来源/标签和引用，禁止静默混入 X |
 
-1. 协议提交：增加独立的批次结果事件 DTO，至少包含 `requestId`、批次序号、已校验 items、累计数量和 done 状态；保留现有最终 invoke 结果作为权威 meta。先用确定性 mock 验证乱序、重复批次、取消和迟到事件，不改变真实搜索策略。
-2. Host 提交：只在手动 `responses_preview` 灰度路径接入三路各目标 8 张，复用一次读取的认证和 HTTP client，三路角色分离、最多三路同时活跃；每路完成校验后立即去重并发事件。Responses 使用独立预算和常量，不修改稳定 CLI 路线。
-3. UI 提交：Hook 继续用 request ID/generation 拒绝迟到结果，Modal 对批次做去重追加而不是最终整批替换；首批到达即解除空白等待，剩余批次以后台补充状态显示。所有新增文案同步 15 个 locale。
-4. 失败策略提交：只有在零结果且明确属于连接前失败时，单独评审“一路、一次”重试；429、认证、协议、工具超预算和已有可用部分结果均不得自动重放。整组失败后是否回退 CLI 继续沿用可观测、最多一次的规则。
-5. 通过真实 Host 管线做交错 A/B：当前 CLI、现有单路 Responses、渐进 `3 × 8`。分别记录首批 6 张、最终耗时、18/24 张比例、重复/坏图、子批失败、取消和迟到污染；达标前不改变 `cli` 默认渠道，也不展示 `auto`。
-6. 数量扩展作为后续独立提交：首屏后由“加载更多”或接近列表末端触发额外一批，保持同时活跃不超过三路。不得为了预热在用户搜索前发 authenticated `x_search`。
-7. 通用网络图片搜索如要扩展，应作为独立来源/标签，保留来源与引用，不在 X 空结果时静默混入。
-
-本批已完成分段文案；下一阶段的重点应是跨主题样本和真实 UI 验收，不再重复实现计时。
+当前计划内的 Responses 壁纸搜索开发已经完成。后续若继续灰度，只应收集更多跨时间窗真实样本；在达到既有门槛前，不改变 `cli` 默认渠道，也不展示 `auto`。
 
 ## 8. 安全与范围红线
 
