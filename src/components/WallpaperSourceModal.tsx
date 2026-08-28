@@ -10,7 +10,7 @@
  * - Click loads original → ImageViewer preview → footer to set background
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GlassModal } from "@/components/GlassModal";
 import { Select } from "@/components/Select";
 import { useImageViewerOptional } from "@/components/ImageViewer";
@@ -125,7 +125,9 @@ export function WallpaperSourceModal({
   const viewer = useImageViewerOptional();
   const {
     busy: xSearchBusy,
+    requestId: xSearchRequestId,
     stage: xSearchStage,
+    progressiveItems: xProgressiveItems,
     search: searchX,
     cancel: cancelXSearch,
   } = useWallpaperXSearch();
@@ -153,6 +155,8 @@ export function WallpaperSourceModal({
   /** Soft citation honesty after an X search (verified / unverified counts). */
   const [citeSummary, setCiteSummary] = useState<string | null>(null);
   const [routeMeta, setRouteMeta] = useState<WallpaperXSearchMeta | null>(null);
+  const progressiveRequestRef = useRef<string | null>(null);
+  const appliedProgressiveKeysRef = useRef<Set<string>>(new Set());
   const busy = sourceBusy || xSearchBusy;
 
   useEffect(() => {
@@ -176,6 +180,31 @@ export function WallpaperSourceModal({
       void cancelXSearch();
     }
   }, [open, tab, cancelXSearch]);
+
+  useEffect(() => {
+    if (!open || tab !== "x" || !xSearchBusy || !xSearchRequestId) return;
+    if (progressiveRequestRef.current !== xSearchRequestId) {
+      progressiveRequestRef.current = xSearchRequestId;
+      appliedProgressiveKeysRef.current.clear();
+    }
+
+    const fresh = xProgressiveItems.filter((item) => {
+      const key = (item.localPath || item.fullUrl || item.id).trim();
+      if (!key || appliedProgressiveKeysRef.current.has(key)) return false;
+      appliedProgressiveKeysRef.current.add(key);
+      return true;
+    });
+    if (fresh.length === 0) return;
+
+    setItems((current) => dedupeGalleryItems([...current, ...fresh]));
+    setHasSearched(true);
+  }, [
+    open,
+    tab,
+    xSearchBusy,
+    xSearchRequestId,
+    xProgressiveItems,
+  ]);
 
   const kindCounts = useMemo(() => countGalleryByKind(items), [items]);
 
@@ -315,6 +344,10 @@ export function WallpaperSourceModal({
     setSelectedId(null);
     setGalleryFilter("");
     setKindFilter("all");
+    setHasSearched(false);
+    setItems([]);
+    progressiveRequestRef.current = null;
+    appliedProgressiveKeysRef.current.clear();
     try {
       const res = await searchX(q, sort);
       if (!res) return;
@@ -359,7 +392,9 @@ export function WallpaperSourceModal({
       }
     } catch (e) {
       setHasSearched(true);
-      setItems([]);
+      // Keep already validated batches visible if the final invoke transport
+      // fails. A normal lane failure is represented by a successful partial
+      // Host result and is reconciled by the authoritative list above.
       setCiteSummary(null);
       setRouteMeta(null);
       const code = parseWallpaperSourceError(e);
