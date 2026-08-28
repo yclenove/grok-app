@@ -319,6 +319,7 @@ export const ukSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} с",
   "settings.wallpaperSource.route.responses": "Перегляд Responses · {seconds} с",
   "settings.wallpaperSource.route.fallback": "Перехід до Grok Build CLI ({reason}) · {seconds} с",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses завершився помилкою через {responsesSeconds} с ({reason}); CLI завершено за {cliSeconds} с · усього {seconds} с",
   "settings.wallpaperSource.route.fallback.auth": "офіційний вхід недоступний або прострочений",
   "settings.wallpaperSource.route.fallback.network": "мережа Responses недоступна",
   "settings.wallpaperSource.route.fallback.compatibility": "сумісність Responses змінилася",

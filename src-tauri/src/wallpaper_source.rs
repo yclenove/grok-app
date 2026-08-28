@@ -99,6 +99,10 @@ pub struct WallpaperSearchMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_duration_ms: Option<u64>,
     pub cache_hit: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_calls: Option<u32>,

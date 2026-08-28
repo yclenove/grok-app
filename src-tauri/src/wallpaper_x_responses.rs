@@ -2,7 +2,6 @@
 //! endpoint. This module is Host-internal until the wallpaper search router
 //! explicitly opts into it.
 
-use std::error::Error as _;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -502,10 +501,17 @@ fn status_error_kind(status: StatusCode) -> ResponsesSearchErrorKind {
 }
 
 fn transport_error_kind(error: &reqwest::Error) -> ResponsesSearchErrorKind {
-    if error.is_timeout() {
+    classify_transport_error(error.is_timeout(), error)
+}
+
+fn classify_transport_error(
+    is_timeout: bool,
+    error: &(dyn std::error::Error + 'static),
+) -> ResponsesSearchErrorKind {
+    if is_timeout {
         return ResponsesSearchErrorKind::Timeout;
     }
-    let mut source = error.source();
+    let mut source = Some(error);
     while let Some(cause) = source {
         let message = cause.to_string().to_ascii_lowercase();
         if message.contains("tls")
@@ -582,6 +588,7 @@ fn gallery_from_output(output: &[Value]) -> Result<Value, ResponsesSearchErrorKi
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -591,6 +598,7 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use axum::routing::post;
     use axum::Router;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
@@ -604,6 +612,50 @@ mod tests {
         requests: Arc<AtomicUsize>,
         authorization_ok: Arc<AtomicBool>,
         request_body: Arc<Mutex<Option<Value>>>,
+    }
+
+    struct FailingDnsResolver;
+
+    #[derive(Debug)]
+    struct SyntheticTransportError(&'static str);
+
+    impl std::fmt::Display for SyntheticTransportError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for SyntheticTransportError {}
+
+    impl reqwest::dns::Resolve for FailingDnsResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(async {
+                let error: Box<dyn std::error::Error + Send + Sync> = Box::new(
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "synthetic DNS failure"),
+                );
+                Err::<reqwest::dns::Addrs, _>(error)
+            })
+        }
+    }
+
+    async fn spawn_raw_response(
+        response: &'static [u8],
+        delay: Duration,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw server");
+        let address = listener.local_addr().expect("raw server address");
+        let task = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let _ = stream.write_all(response).await;
+        });
+        (address, task)
     }
 
     async fn mock_responses(
@@ -834,6 +886,111 @@ mod tests {
             .expect_err("empty response must fail");
         task.abort();
         assert_eq!(error.kind, ResponsesSearchErrorKind::Empty);
+    }
+
+    #[tokio::test]
+    async fn wallpaper_x_responses_classifies_proxy_dns_and_connection_failures_as_network() {
+        let (proxy_address, proxy_task) = spawn_raw_response(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            Duration::ZERO,
+        )
+        .await;
+        let proxy_client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(
+                reqwest::Proxy::all(format!("http://{proxy_address}"))
+                    .expect("synthetic proxy URL"),
+            )
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("proxy client");
+        let proxy_error = proxy_client
+            .get("https://wallpaper-search.invalid")
+            .send()
+            .await
+            .expect_err("proxy must reject the CONNECT request");
+        proxy_task.abort();
+        assert_eq!(
+            transport_error_kind(&proxy_error),
+            ResponsesSearchErrorKind::Network,
+            "proxy error: {proxy_error:?}"
+        );
+
+        let dns_client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FailingDnsResolver))
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("DNS client");
+        let dns_error = dns_client
+            .get("http://wallpaper-search.invalid")
+            .send()
+            .await
+            .expect_err("synthetic DNS must fail");
+        assert_eq!(
+            transport_error_kind(&dns_error),
+            ResponsesSearchErrorKind::Network
+        );
+
+        let (reset_address, reset_task) = spawn_raw_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\npartial",
+            Duration::ZERO,
+        )
+        .await;
+        let reset_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("reset client");
+        let reset_error = match reset_client
+            .get(format!("http://{reset_address}"))
+            .send()
+            .await
+        {
+            Ok(response) => response
+                .bytes()
+                .await
+                .expect_err("truncated response body must fail"),
+            Err(error) => error,
+        };
+        reset_task.abort();
+        assert_eq!(
+            transport_error_kind(&reset_error),
+            ResponsesSearchErrorKind::Network
+        );
+    }
+
+    #[tokio::test]
+    async fn wallpaper_x_responses_classifies_tls_markers_and_timeout_transport_failures() {
+        for message in [
+            "TLS handshake failed",
+            "invalid peer certificate: UnknownIssuer",
+        ] {
+            assert_eq!(
+                classify_transport_error(false, &SyntheticTransportError(message)),
+                ResponsesSearchErrorKind::Tls
+            );
+        }
+        assert_eq!(
+            classify_transport_error(false, &SyntheticTransportError("connection reset by peer")),
+            ResponsesSearchErrorKind::Network
+        );
+
+        let (timeout_address, timeout_task) =
+            spawn_raw_response(b"HTTP/1.1 204 No Content\r\n\r\n", Duration::from_secs(1)).await;
+        let timeout_error = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(25))
+            .build()
+            .expect("timeout client")
+            .get(format!("http://{timeout_address}"))
+            .send()
+            .await
+            .expect_err("delayed response must time out");
+        timeout_task.abort();
+        assert_eq!(
+            transport_error_kind(&timeout_error),
+            ResponsesSearchErrorKind::Timeout
+        );
     }
 
     #[tokio::test]

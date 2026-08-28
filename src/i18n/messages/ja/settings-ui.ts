@@ -319,6 +319,7 @@ export const jaSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI・{seconds}秒",
   "settings.wallpaperSource.route.responses": "Responses プレビュー・{seconds}秒",
   "settings.wallpaperSource.route.fallback": "Grok Build CLI に切り替えました（{reason}）・{seconds}秒",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses は {responsesSeconds}秒後に失敗（{reason}）。CLI は {cliSeconds}秒で完了・合計 {seconds}秒",
   "settings.wallpaperSource.route.fallback.auth": "公式ログインが利用できないか期限切れ",
   "settings.wallpaperSource.route.fallback.network": "Responses のネットワークを利用不可",
   "settings.wallpaperSource.route.fallback.compatibility": "Responses の互換性が変更された",

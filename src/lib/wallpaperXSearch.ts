@@ -16,6 +16,8 @@ export type WallpaperXSearchMeta = {
   routeUsed: WallpaperXSearchRoute;
   fallbackReason?: string | null;
   durationMs: number;
+  responsesDurationMs?: number | null;
+  cliDurationMs?: number | null;
   cacheHit: boolean;
   searchCalls?: number | null;
   candidateCount: number;
@@ -53,8 +55,11 @@ export type WallpaperXSearchRouteSummary = {
   key:
     | "settings.wallpaperSource.route.cli"
     | "settings.wallpaperSource.route.responses"
-    | "settings.wallpaperSource.route.fallback";
+    | "settings.wallpaperSource.route.fallback"
+    | "settings.wallpaperSource.route.fallbackTimed";
   seconds: string;
+  responsesSeconds?: string;
+  cliSeconds?: string;
   reasonKey?: WallpaperXSearchFallbackReasonKey;
   cacheHit: boolean;
 };
@@ -158,6 +163,22 @@ export function wallpaperXSearchRouteSummary(
   }
   const seconds = (meta.durationMs / 1000).toFixed(1);
   if (meta.routeUsed === "cli" && meta.fallbackReason) {
+    const responsesSeconds = durationSeconds(meta.responsesDurationMs);
+    const cliSeconds = durationSeconds(meta.cliDurationMs);
+    if (
+      !meta.cacheHit &&
+      responsesSeconds !== null &&
+      cliSeconds !== null
+    ) {
+      return {
+        key: "settings.wallpaperSource.route.fallbackTimed",
+        seconds,
+        responsesSeconds,
+        cliSeconds,
+        reasonKey: wallpaperXSearchFallbackReasonKey(meta.fallbackReason),
+        cacheHit: false,
+      };
+    }
     return {
       key: "settings.wallpaperSource.route.fallback",
       seconds,
@@ -180,4 +201,10 @@ export function wallpaperXSearchRouteSummary(
     };
   }
   return null;
+}
+
+function durationSeconds(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? (value / 1000).toFixed(1)
+    : null;
 }

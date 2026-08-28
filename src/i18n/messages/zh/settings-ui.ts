@@ -319,6 +319,7 @@ export const zhSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} 秒",
   "settings.wallpaperSource.route.responses": "Responses 预览 · {seconds} 秒",
   "settings.wallpaperSource.route.fallback": "已回退 Grok Build CLI（{reason}）· {seconds} 秒",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses {responsesSeconds} 秒后失败（{reason}）；CLI 用时 {cliSeconds} 秒完成；共 {seconds} 秒",
   "settings.wallpaperSource.route.fallback.auth": "官方登录不可用或已过期",
   "settings.wallpaperSource.route.fallback.network": "Responses 网络不可用",
   "settings.wallpaperSource.route.fallback.compatibility": "Responses 兼容协议已变化",

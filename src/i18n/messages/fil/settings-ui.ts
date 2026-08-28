@@ -319,6 +319,7 @@ export const filSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds}s",
   "settings.wallpaperSource.route.responses": "Responses preview · {seconds}s",
   "settings.wallpaperSource.route.fallback": "Bumalik sa Grok Build CLI ({reason}) · {seconds}s",
+  "settings.wallpaperSource.route.fallbackTimed": "Nabigo ang Responses pagkalipas ng {responsesSeconds}s ({reason}); natapos ang CLI sa {cliSeconds}s · {seconds}s lahat",
   "settings.wallpaperSource.route.fallback.auth": "hindi available o paso ang opisyal na sign-in",
   "settings.wallpaperSource.route.fallback.network": "hindi available ang Responses network",
   "settings.wallpaperSource.route.fallback.compatibility": "nagbago ang compatibility ng Responses",

@@ -319,6 +319,7 @@ export const esSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} s",
   "settings.wallpaperSource.route.responses": "Vista previa de Responses · {seconds} s",
   "settings.wallpaperSource.route.fallback": "Se usó Grok Build CLI como alternativa ({reason}) · {seconds} s",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses falló tras {responsesSeconds} s ({reason}); CLI terminó en {cliSeconds} s · {seconds} s en total",
   "settings.wallpaperSource.route.fallback.auth": "inicio de sesión oficial no disponible o caducado",
   "settings.wallpaperSource.route.fallback.network": "red de Responses no disponible",
   "settings.wallpaperSource.route.fallback.compatibility": "cambió la compatibilidad de Responses",

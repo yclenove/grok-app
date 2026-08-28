@@ -319,6 +319,7 @@ export const koSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds}초",
   "settings.wallpaperSource.route.responses": "Responses 미리보기 · {seconds}초",
   "settings.wallpaperSource.route.fallback": "Grok Build CLI로 대체됨({reason}) · {seconds}초",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses가 {responsesSeconds}초 후 실패({reason}); CLI는 {cliSeconds}초 만에 완료 · 총 {seconds}초",
   "settings.wallpaperSource.route.fallback.auth": "공식 로그인을 사용할 수 없거나 만료됨",
   "settings.wallpaperSource.route.fallback.network": "Responses 네트워크를 사용할 수 없음",
   "settings.wallpaperSource.route.fallback.compatibility": "Responses 호환성이 변경됨",

@@ -376,6 +376,10 @@ fn prepare_cached_result(
         meta.request_id = Some(request_id.to_string());
         meta.cache_hit = true;
         meta.duration_ms = elapsed_ms(started);
+        // Provider timings belong to the original request that populated the
+        // cache, not this lookup. Do not present stale work as a cache cost.
+        meta.responses_duration_ms = None;
+        meta.cli_duration_ms = None;
     }
     result
 }
@@ -418,7 +422,7 @@ where
     }
     if runtime.is_cancelled() {
         runtime.report(WallpaperXSearchStage::Done);
-        return cancelled_result(requested_mode, "cli", started);
+        return cancelled_result(requested_mode, "cli", started, None, None);
     }
 
     let mut result = route_with_providers(
@@ -463,7 +467,7 @@ where
     // and the public default execute the established CLI route.
     if requested_mode != store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW {
         runtime.report(WallpaperXSearchStage::SearchingX);
-        return finish_cli(cli().await, requested_mode, None, started);
+        return run_cli(cli, requested_mode, None, started, None).await;
     }
 
     if !circuit
@@ -471,19 +475,30 @@ where
         .allows_attempt(credential_revision.clone(), Instant::now())
     {
         runtime.report(WallpaperXSearchStage::FallingBack);
-        return finish_cli(
-            cli().await,
+        return run_cli(
+            cli,
             requested_mode,
             Some(CIRCUIT_OPEN_REASON),
             started,
-        );
+            None,
+        )
+        .await;
     }
 
     runtime.report(WallpaperXSearchStage::SearchingX);
-    match responses().await {
+    let responses_started = Instant::now();
+    let responses_result = responses().await;
+    let responses_duration_ms = elapsed_ms(responses_started);
+    match responses_result {
         Ok(result) if !result.items.is_empty() && result.valid_count > 0 => {
             if runtime.is_cancelled() {
-                return cancelled_result(requested_mode, "responses", started);
+                return cancelled_result(
+                    requested_mode,
+                    "responses",
+                    started,
+                    Some(responses_duration_ms),
+                    None,
+                );
             }
             circuit
                 .lock()
@@ -498,6 +513,8 @@ where
                     route_used: "responses".into(),
                     fallback_reason: None,
                     duration_ms: elapsed_ms(started),
+                    responses_duration_ms: Some(responses_duration_ms),
+                    cli_duration_ms: None,
                     cache_hit: false,
                     search_calls: Some(result.search_calls),
                     candidate_count: result.candidate_count,
@@ -509,7 +526,13 @@ where
         }
         Ok(result) => {
             if runtime.is_cancelled() {
-                return cancelled_result(requested_mode, "responses", started);
+                return cancelled_result(
+                    requested_mode,
+                    "responses",
+                    started,
+                    Some(responses_duration_ms),
+                    None,
+                );
             }
             circuit.lock().record_failure(
                 ResponsesSearchErrorKind::Empty,
@@ -518,18 +541,30 @@ where
             );
             runtime.report(WallpaperXSearchStage::FallingBack);
             if runtime.is_cancelled() {
-                return cancelled_result(requested_mode, "responses", started);
+                return cancelled_result(
+                    requested_mode,
+                    "responses",
+                    started,
+                    Some(responses_duration_ms),
+                    None,
+                );
             }
-            finish_cli(
-                cli().await,
+            run_cli(
+                cli,
                 requested_mode,
                 Some(ResponsesSearchErrorKind::Empty.code()),
                 started,
+                Some(responses_duration_ms),
             )
+            .await
         }
-        Err(error) if error.kind == ResponsesSearchErrorKind::Cancelled => {
-            cancelled_result(requested_mode, "responses", started)
-        }
+        Err(error) if error.kind == ResponsesSearchErrorKind::Cancelled => cancelled_result(
+            requested_mode,
+            "responses",
+            started,
+            Some(responses_duration_ms),
+            None,
+        ),
         Err(error) if !should_fallback(error.kind) => {
             if counts_toward_circuit(error.kind) {
                 circuit.lock().record_failure(
@@ -548,6 +583,8 @@ where
                     route_used: "responses".into(),
                     fallback_reason: None,
                     duration_ms: elapsed_ms(started),
+                    responses_duration_ms: Some(responses_duration_ms),
+                    cli_duration_ms: None,
                     cache_hit: false,
                     search_calls: None,
                     candidate_count: 0,
@@ -565,11 +602,47 @@ where
             );
             runtime.report(WallpaperXSearchStage::FallingBack);
             if runtime.is_cancelled() {
-                return cancelled_result(requested_mode, "responses", started);
+                return cancelled_result(
+                    requested_mode,
+                    "responses",
+                    started,
+                    Some(responses_duration_ms),
+                    None,
+                );
             }
-            finish_cli(cli().await, requested_mode, Some(error.code()), started)
+            run_cli(
+                cli,
+                requested_mode,
+                Some(error.code()),
+                started,
+                Some(responses_duration_ms),
+            )
+            .await
         }
     }
+}
+
+async fn run_cli<C, CFut>(
+    cli: C,
+    requested_mode: &str,
+    fallback_reason: Option<&str>,
+    started: Instant,
+    responses_duration_ms: Option<u64>,
+) -> WallpaperSearchResult
+where
+    C: FnOnce() -> CFut,
+    CFut: Future<Output = WallpaperCliSearchOutcome>,
+{
+    let cli_started = Instant::now();
+    let outcome = cli().await;
+    finish_cli(
+        outcome,
+        requested_mode,
+        fallback_reason,
+        started,
+        responses_duration_ms,
+        elapsed_ms(cli_started),
+    )
 }
 
 fn finish_cli(
@@ -577,6 +650,8 @@ fn finish_cli(
     requested_mode: &str,
     fallback_reason: Option<&str>,
     started: Instant,
+    responses_duration_ms: Option<u64>,
+    cli_duration_ms: u64,
 ) -> WallpaperSearchResult {
     outcome.result.meta = Some(WallpaperSearchMeta {
         request_id: None,
@@ -584,6 +659,8 @@ fn finish_cli(
         route_used: "cli".into(),
         fallback_reason: fallback_reason.map(str::to_string),
         duration_ms: elapsed_ms(started),
+        responses_duration_ms,
+        cli_duration_ms: Some(cli_duration_ms),
         cache_hit: false,
         // Grok Build does not currently expose a reliable hosted X call count
         // or selected official model through this headless result contract.
@@ -600,6 +677,8 @@ fn cancelled_result(
     requested_mode: &str,
     route_used: &str,
     started: Instant,
+    responses_duration_ms: Option<u64>,
+    cli_duration_ms: Option<u64>,
 ) -> WallpaperSearchResult {
     WallpaperSearchResult {
         items: Vec::new(),
@@ -611,6 +690,8 @@ fn cancelled_result(
             route_used: route_used.into(),
             fallback_reason: None,
             duration_ms: elapsed_ms(started),
+            responses_duration_ms,
+            cli_duration_ms,
             cache_hit: false,
             search_calls: None,
             candidate_count: 0,
@@ -719,6 +800,8 @@ mod tests {
             assert_eq!(meta.requested_mode, mode);
             assert_eq!(meta.route_used, "cli");
             assert_eq!(meta.fallback_reason, None);
+            assert_eq!(meta.responses_duration_ms, None);
+            assert!(meta.cli_duration_ms.is_some());
         }
     }
 
@@ -741,6 +824,8 @@ mod tests {
         assert_eq!(meta.valid_count, 1);
         assert_eq!(meta.model.as_deref(), Some("grok-4.6"));
         assert_eq!(meta.effort.as_deref(), Some("low"));
+        assert!(meta.responses_duration_ms.is_some());
+        assert_eq!(meta.cli_duration_ms, None);
     }
 
     #[tokio::test]
@@ -773,6 +858,8 @@ mod tests {
             let meta = result.meta.expect("route meta");
             assert_eq!(meta.route_used, "cli");
             assert_eq!(meta.fallback_reason.as_deref(), Some(kind.code()));
+            assert!(meta.responses_duration_ms.is_some());
+            assert!(meta.cli_duration_ms.is_some());
         }
     }
 
@@ -799,8 +886,41 @@ mod tests {
             assert_eq!(cli_calls.load(Ordering::SeqCst), 0);
             assert!(result.items.is_empty());
             assert_eq!(result.error_code.as_deref(), Some(kind.code()));
-            assert_eq!(result.meta.expect("route meta").route_used, "responses");
+            let meta = result.meta.expect("route meta");
+            assert_eq!(meta.route_used, "responses");
+            assert!(meta.responses_duration_ms.is_some());
+            assert_eq!(meta.cli_duration_ms, None);
         }
+    }
+
+    #[tokio::test]
+    async fn wallpaper_x_search_fallback_reports_split_and_total_timings() {
+        let result = route_with_providers(
+            store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+            Some(revision(1)),
+            &Mutex::new(ResponsesCircuitBreaker::default()),
+            &WallpaperXSearchRuntime::quiet(),
+            || async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Err(responses_error(ResponsesSearchErrorKind::Network))
+            },
+            || async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                cli_success()
+            },
+        )
+        .await;
+
+        let meta = result.meta.expect("route meta");
+        let responses_ms = meta.responses_duration_ms.expect("responses timing");
+        let cli_ms = meta.cli_duration_ms.expect("cli timing");
+        assert!(responses_ms >= 10, "responses_ms={responses_ms}");
+        assert!(cli_ms >= 10, "cli_ms={cli_ms}");
+        assert!(
+            meta.duration_ms >= responses_ms.saturating_add(cli_ms),
+            "total={} responses={responses_ms} cli={cli_ms}",
+            meta.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -857,6 +977,8 @@ mod tests {
         assert!(meta.cache_hit);
         assert_eq!(meta.request_id.as_deref(), Some("request-2"));
         assert_eq!(meta.route_used, "cli");
+        assert_eq!(meta.responses_duration_ms, None);
+        assert_eq!(meta.cli_duration_ms, None);
     }
 
     #[test]
@@ -881,7 +1003,7 @@ mod tests {
         assert_ne!(cli_a, preview_a);
         assert_ne!(preview_a, preview_a_new_credential);
 
-        let cached = prepare_cache_entry(finish_cli(cli_success(), "cli", None, now));
+        let cached = prepare_cache_entry(finish_cli(cli_success(), "cli", None, now, None, 0));
         cache.insert(cli_a.clone(), cached.clone(), now);
         cache.insert(cli_b.clone(), cached.clone(), now);
         assert!(cache.get(&cli_a, now).is_some(), "touch A as most recent");

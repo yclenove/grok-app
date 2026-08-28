@@ -319,6 +319,7 @@ export const taSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} வி",
   "settings.wallpaperSource.route.responses": "Responses முன்னோட்டம் · {seconds} வி",
   "settings.wallpaperSource.route.fallback": "Grok Build CLI-க்கு மாற்றப்பட்டது ({reason}) · {seconds} வி",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses {responsesSeconds} வி-க்குப் பிறகு தோல்வியடைந்தது ({reason}); CLI {cliSeconds} வி-ல் முடிந்தது · மொத்தம் {seconds} வி",
   "settings.wallpaperSource.route.fallback.auth": "அதிகாரப்பூர்வ உள்நுழைவு கிடைக்கவில்லை அல்லது காலாவதியானது",
   "settings.wallpaperSource.route.fallback.network": "Responses பிணையம் கிடைக்கவில்லை",
   "settings.wallpaperSource.route.fallback.compatibility": "Responses இணக்கத்தன்மை மாறியுள்ளது",

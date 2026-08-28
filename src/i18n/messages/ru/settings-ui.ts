@@ -319,6 +319,7 @@ export const ruSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} с",
   "settings.wallpaperSource.route.responses": "Предпросмотр Responses · {seconds} с",
   "settings.wallpaperSource.route.fallback": "Выполнен откат к Grok Build CLI ({reason}) · {seconds} с",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses завершился ошибкой через {responsesSeconds} с ({reason}); CLI завершён за {cliSeconds} с · всего {seconds} с",
   "settings.wallpaperSource.route.fallback.auth": "официальный вход недоступен или истёк",
   "settings.wallpaperSource.route.fallback.network": "сеть Responses недоступна",
   "settings.wallpaperSource.route.fallback.compatibility": "совместимость Responses изменилась",

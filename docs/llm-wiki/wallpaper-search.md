@@ -10,7 +10,7 @@
 | `responses_preview` | 用户主动选择的预览渠道 | 优先请求固定的 Build Responses 兼容端点；按规则至多回退一次 CLI |
 | `auto` | 协议保留，不在 UI 展示 | 当前按 `cli` 处理；没有 QA 决议前不得自动灰度或改成默认 |
 
-缺失、空白、损坏或未知设置值必须归一为 `cli`。UI 必须展示 `meta.routeUsed`、回退原因、耗时和缓存命中等真实结果，不得根据用户选择猜测实际路由。
+缺失、空白、损坏或未知设置值必须归一为 `cli`。UI 必须展示 `meta.routeUsed`、回退原因、耗时和缓存命中等真实结果，不得根据用户选择猜测实际路由。`durationMs` 始终表示本次请求总耗时；非缓存回退可额外提供 `responsesDurationMs` 和 `cliDurationMs`，让 UI 分开说明两段时间。旧 Host 或不完整分段数据继续显示总耗时，不能猜测缺失值。
 
 入口和职责：
 
@@ -85,7 +85,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 - 点击取消、关闭弹窗、切到 Imagine/图库、替换搜索或组件卸载都会使当前 generation 失效并请求 Host 取消。
 - 前端必须拒绝 generation 或 requestId 不匹配的迟到结果；Host 取消信号为 sticky，覆盖 Responses 请求/正文读取、图片探测和 CLI 两轮搜索。
 - 缓存为 Host 进程内 32 项 LRU、TTL 10 分钟，只缓存成功且非空的安全结果 DTO。key 包含规范 query、排序、请求模式、契约版本；Responses 还包含非秘密的凭证文件修订。
-- 命中缓存要保留原 `routeUsed`/回退信息，换成本次 requestId，并标记 `cacheHit=true`。缓存不落盘，重启即清空。
+- 命中缓存要保留原 `routeUsed`/回退信息，换成本次 requestId，并标记 `cacheHit=true`。分段 provider 耗时属于写入缓存的原请求，命中时必须清空，不能把旧搜索耗时冒充为本次缓存成本。缓存不落盘，重启即清空。
 
 ## 测试与排障
 
@@ -103,7 +103,7 @@ CI 清理第三方 PATH 中的旧 `api-ms-win-*.dll` 转发器时必须保留 `%
 
 排障顺序：
 
-1. 查看结果 `meta.routeUsed`、`fallbackReason`、`durationMs` 和 `cacheHit`，不要从设置值推断。
+1. 查看结果 `meta.routeUsed`、`fallbackReason`、`durationMs`、可选分段耗时和 `cacheHit`，不要从设置值推断。分段耗时只增加观测，不引入 Responses 自动重试或额外 CLI 回退。
 2. Responses 总是回退时检查 Grok Build 是否已登录、access token 是否临近过期、系统/手动代理是否能访问固定端点。
 3. 同查询很快返回属于预期缓存行为；改变 query、Top/Latest、模式或凭证修订后不应误命中。
 4. 429 或工具超预算后没有 CLI 回退是防止重复消耗的设计，不是路由遗漏。

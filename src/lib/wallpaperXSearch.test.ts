@@ -82,6 +82,50 @@ describe("wallpaper X search settings contract", () => {
     );
   });
 
+  it("separates Responses, CLI, and total time for a real fallback", () => {
+    expect(
+      wallpaperXSearchRouteSummary({
+        requestedMode: "responses_preview",
+        routeUsed: "cli",
+        fallbackReason: "responses_network",
+        durationMs: 84_900,
+        responsesDurationMs: 18_400,
+        cliDurationMs: 66_500,
+        cacheHit: false,
+        candidateCount: 8,
+        validCount: 6,
+      }),
+    ).toEqual({
+      key: "settings.wallpaperSource.route.fallbackTimed",
+      seconds: "84.9",
+      responsesSeconds: "18.4",
+      cliSeconds: "66.5",
+      reasonKey: "settings.wallpaperSource.route.fallback.network",
+      cacheHit: false,
+    });
+  });
+
+  it("keeps valid zero-millisecond split timings", () => {
+    expect(
+      wallpaperXSearchRouteSummary({
+        requestedMode: "responses_preview",
+        routeUsed: "cli",
+        fallbackReason: "oauth_expired",
+        durationMs: 0,
+        responsesDurationMs: 0,
+        cliDurationMs: 0,
+        cacheHit: false,
+        candidateCount: 0,
+        validCount: 0,
+      }),
+    ).toMatchObject({
+      key: "settings.wallpaperSource.route.fallbackTimed",
+      seconds: "0.0",
+      responsesSeconds: "0.0",
+      cliSeconds: "0.0",
+    });
+  });
+
   it("ignores absent or invalid legacy metadata", () => {
     expect(wallpaperXSearchRouteSummary(undefined)).toBeNull();
     expect(
@@ -128,6 +172,8 @@ describe("wallpaper X search settings contract", () => {
         routeUsed: "cli",
         fallbackReason: "oauth_expired",
         durationMs: 1,
+        responsesDurationMs: 18_400,
+        cliDurationMs: 66_500,
         cacheHit: true,
         candidateCount: 8,
         validCount: 6,
@@ -136,6 +182,25 @@ describe("wallpaper X search settings contract", () => {
       key: "settings.wallpaperSource.route.fallback",
       cacheHit: true,
       reasonKey: "settings.wallpaperSource.route.fallback.auth",
+    });
+  });
+
+  it("falls back to total-only copy for invalid or legacy split timings", () => {
+    expect(
+      wallpaperXSearchRouteSummary({
+        requestedMode: "responses_preview",
+        routeUsed: "cli",
+        fallbackReason: "responses_network",
+        durationMs: 900,
+        responsesDurationMs: Number.NaN,
+        cliDurationMs: -1,
+        cacheHit: false,
+        candidateCount: 1,
+        validCount: 1,
+      }),
+    ).toMatchObject({
+      key: "settings.wallpaperSource.route.fallback",
+      seconds: "0.9",
     });
   });
 });

@@ -264,6 +264,8 @@ export function WallpaperSourceModal({
     if (!summary) return null;
     const route = t(summary.key as MessageKey, {
       seconds: summary.seconds,
+      responsesSeconds: summary.responsesSeconds,
+      cliSeconds: summary.cliSeconds,
       reason: summary.reasonKey
         ? t(summary.reasonKey as MessageKey)
         : undefined,

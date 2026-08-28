@@ -319,6 +319,7 @@ export const idSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} dtk",
   "settings.wallpaperSource.route.responses": "Pratinjau Responses · {seconds} dtk",
   "settings.wallpaperSource.route.fallback": "Beralih kembali ke Grok Build CLI ({reason}) · {seconds} dtk",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses gagal setelah {responsesSeconds} dtk ({reason}); CLI selesai dalam {cliSeconds} dtk · total {seconds} dtk",
   "settings.wallpaperSource.route.fallback.auth": "login resmi tidak tersedia atau kedaluwarsa",
   "settings.wallpaperSource.route.fallback.network": "jaringan Responses tidak tersedia",
   "settings.wallpaperSource.route.fallback.compatibility": "kompatibilitas Responses berubah",

@@ -319,6 +319,7 @@ export const deSettingsUi = {
   "settings.wallpaperSource.route.cli": "Grok Build CLI · {seconds} s",
   "settings.wallpaperSource.route.responses": "Responses-Vorschau · {seconds} s",
   "settings.wallpaperSource.route.fallback": "Auf Grok Build CLI zurückgefallen ({reason}) · {seconds} s",
+  "settings.wallpaperSource.route.fallbackTimed": "Responses nach {responsesSeconds} s fehlgeschlagen ({reason}); CLI in {cliSeconds} s abgeschlossen · insgesamt {seconds} s",
   "settings.wallpaperSource.route.fallback.auth": "offizielle Anmeldung fehlt oder ist abgelaufen",
   "settings.wallpaperSource.route.fallback.network": "Responses-Netzwerk nicht erreichbar",
   "settings.wallpaperSource.route.fallback.compatibility": "Responses-Kompatibilität hat sich geändert",
