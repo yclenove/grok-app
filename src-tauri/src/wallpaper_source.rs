@@ -1530,10 +1530,38 @@ fn gallery_rank_score(item: &WallpaperGalleryItem) -> i64 {
 pub(crate) fn merge_rank_x_gallery_items(
     items: Vec<WallpaperGalleryItem>,
 ) -> Vec<WallpaperGalleryItem> {
+    merge_rank_x_gallery_items_with_limit(items, MAX_X_GALLERY_RESULTS)
+}
+
+pub(crate) fn merge_rank_x_gallery_items_with_limit(
+    items: Vec<WallpaperGalleryItem>,
+    max_results: usize,
+) -> Vec<WallpaperGalleryItem> {
     let mut items = dedupe_gallery_items(items, true);
     items.sort_by_key(|item| std::cmp::Reverse(gallery_rank_score(item)));
-    items.truncate(MAX_X_GALLERY_RESULTS);
+    items.truncate(max_results.min(MAX_X_GALLERY_CANDIDATES));
     items
+}
+
+pub(crate) fn x_gallery_new_items(
+    previous: &[WallpaperGalleryItem],
+    current: &[WallpaperGalleryItem],
+) -> Vec<WallpaperGalleryItem> {
+    current
+        .iter()
+        .filter(|candidate| {
+            let media_key = normalized_media_identity(&candidate.full_url);
+            let status_key = status_media_identity(candidate);
+            !previous.iter().any(|existing| {
+                let same_media = media_key.is_some()
+                    && normalized_media_identity(&existing.full_url) == media_key;
+                let same_status =
+                    status_key.is_some() && status_media_identity(existing) == status_key;
+                same_media || same_status
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn x_gallery_needs_supplement(valid_count: usize) -> bool {

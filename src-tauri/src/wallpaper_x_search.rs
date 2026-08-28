@@ -25,7 +25,7 @@ const CIRCUIT_OPEN_DURATION: Duration = Duration::from_secs(10 * 60);
 const CIRCUIT_OPEN_REASON: &str = "responses_circuit_open";
 const CACHE_CAPACITY: usize = 32;
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-const CACHE_CONTRACT_VERSION: u8 = 1;
+const CACHE_CONTRACT_VERSION: u8 = 2;
 const PRE_CANCEL_TTL: Duration = Duration::from_secs(30);
 const PRE_CANCEL_CAPACITY: usize = 64;
 pub(crate) const WALLPAPER_X_SEARCH_PROGRESS_EVENT: &str = "wallpaper://x-search-progress";
@@ -464,7 +464,6 @@ where
     if let Some(meta) = result.meta.as_mut() {
         meta.request_id = Some(request_id.to_string());
     }
-    report_terminal_responses_batch(runtime, &result);
     if result.error_code.is_none() && !result.items.is_empty() && !runtime.is_cancelled() {
         cache
             .lock()
@@ -819,6 +818,7 @@ mod tests {
         ResponsesSearchError {
             kind,
             credential_revision: Some(revision(1)),
+            observed_search_calls: None,
         }
     }
 
@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn wallpaper_x_search_terminal_batch_only_reports_live_responses_results() {
+    fn wallpaper_x_search_terminal_batch_only_reports_cached_responses_results() {
         let captured = Arc::new(Mutex::new(Vec::<WallpaperXSearchBatch>::new()));
         let captured_batches = Arc::clone(&captured);
         let cancellation = WallpaperSearchCancellation::default();
