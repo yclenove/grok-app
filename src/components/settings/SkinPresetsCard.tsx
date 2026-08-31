@@ -38,7 +38,7 @@ import {
   type PresetCardMedia,
 } from "@/lib/skinPresetCardMedia";
 import { useThemeShell } from "@/providers/ThemeShellContext";
-import { useSkinShare } from "@/providers/SkinShareProvider";
+import { useSkinShare } from "@/providers/SkinShareContext";
 import { useSettingsModel } from "@/providers/SettingsModelContext";
 import { GlassModal } from "@/components/GlassModal";
 import { Tip } from "@/components/ui/tooltip";

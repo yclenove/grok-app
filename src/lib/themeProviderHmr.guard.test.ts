@@ -11,12 +11,24 @@ const context = readFileSync(
   resolve(sourceRoot, "providers/ThemeShellContext.ts"),
   "utf8",
 );
+const skinProvider = readFileSync(
+  resolve(sourceRoot, "providers/SkinShareProvider.tsx"),
+  "utf8",
+);
+const skinContext = readFileSync(
+  resolve(sourceRoot, "providers/SkinShareContext.ts"),
+  "utf8",
+);
 const consumers = [
   "app/AppWorkbench.tsx",
   "hooks/useAppearanceEditorModel.ts",
   "providers/SkinShareProvider.tsx",
   "components/settings/AppearanceOpacityCard.tsx",
   "components/settings/AppearanceChromeCard.tsx",
+  "components/settings/SkinPresetsCard.tsx",
+] as const;
+const skinConsumers = [
+  "components/settings/SkinCatalogModal.tsx",
   "components/settings/SkinPresetsCard.tsx",
 ] as const;
 
@@ -38,4 +50,27 @@ describe("ThemeProvider HMR boundary", () => {
       'import { useThemeShell } from "@/providers/ThemeProvider";',
     );
   });
+
+  it("keeps the skin-share context identity outside the component module", () => {
+    expect(skinProvider).toContain('from "@/providers/SkinShareContext"');
+    expect(skinProvider).not.toContain("createContext(");
+    expect(skinProvider).not.toContain("export function useSkinShare");
+    expect(skinContext).toContain(
+      "export const SkinShareContext = createContext",
+    );
+    expect(skinContext).toContain("export function useSkinShare");
+  });
+
+  it.each(skinConsumers)(
+    "imports the stable skin-share context from %s",
+    (relativePath) => {
+      const consumer = readFileSync(resolve(sourceRoot, relativePath), "utf8");
+      expect(consumer).toContain(
+        'import { useSkinShare } from "@/providers/SkinShareContext";',
+      );
+      expect(consumer).not.toContain(
+        'import { useSkinShare } from "@/providers/SkinShareProvider";',
+      );
+    },
+  );
 });
