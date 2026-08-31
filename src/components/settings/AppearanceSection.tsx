@@ -510,6 +510,14 @@ export function AppearanceSection() {
                           type="button"
                           className="btn btn--ghost btn--sm"
                           disabled={wallpaperBusy}
+                          onClick={() => openWallpaperSource("grok_album")}
+                        >
+                          {t("settings.wallpaperGrokAlbum")}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          disabled={wallpaperBusy}
                           onClick={() => openWallpaperSource("library")}
                         >
                           {t("settings.wallpaperLibrary")}

@@ -4,7 +4,7 @@
 
 import type { WallpaperXSearchMeta } from "./wallpaperXSearch";
 
-export type WallpaperSourceKind = "x" | "imagine" | "library";
+export type WallpaperSourceKind = "x" | "imagine" | "grok_album" | "library";
 
 export type WallpaperGalleryItem = {
   id: string;
@@ -408,7 +408,7 @@ export function resolveApplySource(
   return { kind: "url", url: item.fullUrl };
 }
 
-// ── Library (x / imagine disk cache) ─────────────────────────────────────────
+// ── Library (X / Imagine / Grok album disk cache) ────────────────────────────
 
 /** Stable id for a library disk row (path + mtime). */
 export function libraryEntryId(entry: WallpaperLibraryEntry): string {

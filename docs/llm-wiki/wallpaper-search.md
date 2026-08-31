@@ -82,6 +82,26 @@ CLI 与 Responses 的候选必须经过同一套处理：
 
 “从 X 搜索”只能返回 X 来源。通用 Web 图片搜索如需实现，必须成为独立来源和独立 UI 标签，保留来源/引用说明，不能在 X 空结果时静默混入。
 
+## Grok Imagine 已保存相册（独立实验来源）
+
+`Grok 相册` 不是 X 搜索的回退渠道，也不使用 Grok Build OAuth。它只在专用远程 WebView 中打开官方 `https://grok.com/imagine/saved` 页面：
+
+- 窗口标签 `grok-imagine-saved` 不得加入任何 Tauri capability。远程页面没有 IPC 权限；主窗口只能调用固定的 `wallpaper_grok_album_*` Host 命令。
+- Windows/Linux 使用独立 `data_directory`，macOS 14+ 同时使用稳定的独立 data-store identifier。Cookie 只由 WebView 管理；禁止读取、导出、记录或通过 IPC 返回 Cookie、Token、storage、请求签名和原始 API 响应。
+- Windows/Linux 的手动 `http` / `socks5` 代理必须通过 Tauri `proxy_url` 固定到远程 WebView；`socks5h` 规范化为 WebView SOCKSv5。系统/PAC/env 模式继续由原生 WebView 跟随。带认证的代理、不支持的手动协议、Direct 模式及 macOS 手动模式必须结构化失败，禁止静默换路由。代理设置变化时销毁旧相册窗口，下次打开按新路由重建；独立持久 profile 继续保留官方登录态。
+- 顶层导航仅允许 HTTPS Grok/xAI 与明确支持的登录提供商；禁止新窗口与下载。新增登录方式时必须先补 allowlist 测试，不能改为任意 HTTPS。
+- 未登录时，官方 Saved 路由可能只渲染空壳并返回 401/403；固定启动脚本只检查正常页面壳是否出现，若没有则回到 `https://grok.com/` 展示官方登录入口。脚本不读取 Cookie、storage、响应或账号内容，登录完成后仍由用户打开 Saved。
+- Host 只执行仓库内固定的 DOM 快照/滚动脚本，前端不得传入 JavaScript。DOM 脚本在数据离开页面前先剔除未知 URL 查询参数并限制字段长度，Host 再做独立校验和总载荷上限；DTO 只包含 `assets.grok.com/.../generated/...` 媒体 URL、缩略图、类型、尺寸、创建时间和 post id，最多缓存 480 条且不落盘。
+- 用户先看到 20 条；当官方相册窗口不在前台时，可用官方页面自身的无限滚动预取下一批 20 条。点击“加载更多”优先瞬时展开缓存，再补热下一批。不得直接调用未公开 `/rest/media/*` 接口。
+- `assets.grok.com` 会拒绝主应用 WebView 的跨站 `<img>` 请求。画廊缩略图在严格 `assets.grok.com/.../generated/...` 校验后，并发竞速两条只读路径：隔离 Saved WebView 使用自身登录态抓取并在页内压缩，credential-free Host 使用当前代理抓取并在本地压缩；首个成功结果胜出并取消另一条。输出统一为最长边 480 px、至多 512 KiB 的 JPEG，只以 `data:` URL 暂存在当前前端生命周期内；前端最多 4 路并发，预热范围固定为当前 20 条加下一批 20 条。禁止把这批缩略图写入磁盘或壁纸库。
+- 缩略图等待态使用静态占位；不得用无限 shimmer 制造“反复重载”的错觉。轮询和下一批预热必须保留已有卡片及其内存缩略图，不得清空、重排或重新挂载已显示结果。
+- 多张未缓存卡片可以共用同一静态占位图，但查看器必须按原始输入索引打开用户点击的媒体，禁止按占位图 URL 反查索引。各 slide 的可显示 URL 并发解析；选中的 lazy 原图在 Lightbox 立即挂载后按需升级，不能被慢兄弟项串行阻塞。
+- 搜索/筛选由官方页面自身完成，之后用户同步当前已加载结果；弹窗内的画廊筛选仍只是本地筛选。只有用户预览或应用某条媒体时，才允许下载原始媒体：credential-free Host 当前代理请求与隔离 Saved WebView 的固定 `credentials: include` 请求同时启动，首个成功结果胜出。Host 胜出会协作取消并清理 WebView 作业；WebView 胜出时 Blob 留在远程页内，Host 以最多 512 KiB 二进制分块读取。两路在唯一保存点前汇合，每次 eval 必须低于桥接载荷上限，最终仍执行 URL allowlist、200 MiB 上限、MIME/真实签名校验并写入独立 `grok_album` 壁纸目录；禁止读取或桥接 Cookie、Token、storage、请求头及原始 API 响应。
+- 登录中、空相册、桥接失败和窗口关闭必须展示真实状态；顶层导航、关闭窗口或进入非 Saved 页面都会清空内存缓存，不得伪造 CDN 占位图，也不得把历史账号的缓存带入下一页面实例。
+- 每次进入相册来源时，首个 Host 快照返回前必须显示明确的加载状态；不得先用默认 `closed` 闪现“窗口未打开”。首次快照失败必须结束加载并显示结构化错误，后续静默轮询失败才允许保留已有画廊。
+
+完整安全契约与分阶段计划见 [`../plans/WALLPAPER-GROK-SAVED-ALBUM.md`](../plans/WALLPAPER-GROK-SAVED-ALBUM.md)。
+
 ## 请求生命周期
 
 - 前端生成 UUID `requestId`；Host 注册表、进度事件、搜索结果和取消命令必须使用同一 id。

@@ -116,6 +116,82 @@
   line-height: 1;
 }
 
+.wallpaper-grok-album__head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.wallpaper-grok-album__head .wallpaper-source-form__hint {
+  flex: 1 1 auto;
+}
+
+.wallpaper-grok-album__badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border-subtle));
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.wallpaper-grok-album__status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  min-height: 24px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.wallpaper-grok-album__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.wallpaper-grok-album__dot[data-status="ready"] {
+  background: var(--success, #45b97c);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success, #45b97c) 14%, transparent);
+}
+
+.wallpaper-grok-album__dot[data-status="loading"] {
+  background: var(--accent);
+}
+
+.wallpaper-grok-album__dot[data-status="sign_in"],
+.wallpaper-grok-album__dot[data-status="verification"],
+.wallpaper-grok-album__dot[data-status="other_page"] {
+  background: var(--warning, #d99b38);
+}
+
+.wallpaper-grok-album__count {
+  color: var(--text-tertiary);
+}
+
+.wallpaper-grok-album__actions {
+  flex-wrap: wrap;
+}
+
+.wallpaper-grok-album__privacy,
+.wallpaper-grok-album__error {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.wallpaper-grok-album__privacy {
+  color: var(--text-tertiary);
+}
+
+.wallpaper-grok-album__error {
+  color: var(--danger, #e55);
+}
+
 .wallpaper-source-modal .modal-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -143,6 +219,10 @@
   flex: 0 0 auto;
   justify-content: center;
   padding-top: 6px;
+}
+
+.wallpaper-source-load-more .btn {
+  min-width: 116px;
 }
 
 .wallpaper-source-error {
@@ -213,6 +293,26 @@
   column-gap: 0;
 }
 
+/*
+ * Saved media arrives in append-only pages. A balanced multi-column layout
+ * redistributes earlier cards whenever a page is revealed, so keep this source
+ * in DOM order with a normal grid. Natural media height remains uncropped.
+ */
+.wallpaper-masonry--stable {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: start;
+  column-count: auto;
+  column-gap: normal;
+}
+
+.wallpaper-masonry--stable .wallpaper-masonry__card-wrap {
+  display: block;
+  width: auto;
+  margin: 0;
+}
+
 .wallpaper-masonry__empty {
   column-span: all;
   margin: 24px 8px;
@@ -277,6 +377,22 @@
   background: color-mix(in srgb, var(--bg-hover) 80%, #000);
   border: none;
   object-fit: contain;
+}
+
+.wallpaper-masonry__thumb-placeholder {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  background: color-mix(in srgb, var(--bg-hover) 86%, #000);
+}
+
+.wallpaper-masonry__thumb-placeholder[data-state="loading"] {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--bg-hover) 86%, #000) 25%,
+    color-mix(in srgb, var(--text-tertiary) 16%, var(--bg-hover)) 45%,
+    color-mix(in srgb, var(--bg-hover) 86%, #000) 65%
+  );
 }
 
 .wallpaper-masonry__meta {
@@ -364,8 +480,12 @@
 }
 
 @media (max-width: 640px) {
-  .wallpaper-masonry:not(.wallpaper-masonry--full) {
+  .wallpaper-masonry:not(.wallpaper-masonry--full):not(.wallpaper-masonry--stable) {
     column-count: 2;
+  }
+
+  .wallpaper-masonry--stable {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -196,19 +196,28 @@ fn decode_image_bytes(bytes: &[u8]) -> Result<DynamicImage, String> {
     image::load_from_memory(bytes).map_err(|e| format!("decode image: {e}"))
 }
 
-fn build_thumb_from_bytes(bytes: &[u8], out: &Path) -> Result<(u32, u32, bool), String> {
+/// Decode an image and return a bounded card-size JPEG without persisting it.
+///
+/// Grok album previews use this path because `assets.grok.com` rejects the
+/// main app WebView's cross-site `<img>` requests. Keeping the encoded result
+/// in memory preserves the album contract: only an explicitly previewed or
+/// applied original is written to the wallpaper library.
+pub fn thumbnail_jpeg_from_bytes(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let img = decode_image_bytes(bytes)?;
     let width = img.width();
     let height = img.height();
     let long = width.max(height);
-    // Already tiny and under edge: write original-ish JPEG for format unify.
     let thumb_img = if long <= THUMB_MAX_EDGE && bytes.len() as u64 <= SKIP_IF_SMALLER_THAN {
-        // Still re-encode small sources so cache is always JPEG under path_scope.
         img
     } else {
         resize_to_thumb(img)
     };
     let jpeg = encode_jpeg(&thumb_img)?;
+    Ok((jpeg, width, height))
+}
+
+fn build_thumb_from_bytes(bytes: &[u8], out: &Path) -> Result<(u32, u32, bool), String> {
+    let (jpeg, width, height) = thumbnail_jpeg_from_bytes(bytes)?;
     write_atomic(out, &jpeg)?;
     write_source_dims_sidecar(out, width, height);
     Ok((width, height, false))
@@ -372,6 +381,25 @@ mod tests {
         assert!(out.is_file());
         assert!(fs::metadata(&out).unwrap().len() > 32);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builds_in_memory_thumb_without_persisting() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            960,
+            540,
+            image::Rgb([24, 96, 180]),
+        ));
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+
+        let (jpeg, width, height) = thumbnail_jpeg_from_bytes(&png).unwrap();
+        assert_eq!((width, height), (960, 540));
+        assert!(jpeg.starts_with(&[0xff, 0xd8, 0xff]));
+        assert!(jpeg.len() < 512 * 1024);
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (480, 270));
     }
 
     #[test]
