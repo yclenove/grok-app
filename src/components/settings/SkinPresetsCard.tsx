@@ -37,7 +37,7 @@ import {
   resolvePresetCardMedia,
   type PresetCardMedia,
 } from "@/lib/skinPresetCardMedia";
-import { useThemeShell } from "@/providers/ThemeProvider";
+import { useThemeShell } from "@/providers/ThemeShellContext";
 import { useSkinShare } from "@/providers/SkinShareProvider";
 import { useSettingsModel } from "@/providers/SettingsModelContext";
 import { GlassModal } from "@/components/GlassModal";

@@ -42,7 +42,7 @@ import {
   type SkinPackPreview,
 } from "@/lib/skinPack";
 import { OFFICIAL_SKIN_CATALOG_URL } from "@/lib/skinCatalog";
-import { useThemeShell } from "@/providers/ThemeProvider";
+import { useThemeShell } from "@/providers/ThemeShellContext";
 import { SkinImportPreviewModal } from "@/components/settings/SkinImportPreviewModal";
 
 export type SkinShareNotice = {
