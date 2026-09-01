@@ -154,4 +154,35 @@ describe("WallpaperSourceGallery", () => {
       "settings.wallpaperOpenverse",
     );
   });
+
+  it("renders only one clear action when filters hide the collection", () => {
+    render(
+      <WallpaperSourceGallery
+        {...galleryProps({
+          kindCounts: { all: 3, image: 3, video: 0 },
+          galleryFilter: "no-match",
+          filtersActive: true,
+          showFilters: true,
+          showTextFilter: true,
+          emptyState: {
+            kind: "filter_empty",
+            titleKey: "settings.wallpaperSource.empty.filterEmpty",
+            hintKey: "settings.wallpaperSource.empty.filterEmptyHint",
+            showClearFilters: true,
+            softFail: true,
+          },
+          showEmptyBlock: true,
+        })}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", {
+        name: "settings.wallpaperSource.clearFilters",
+      }),
+    ).toHaveLength(1);
+    expect(
+      screen.getByText("settings.wallpaperSource.empty.filterEmpty"),
+    ).toBeTruthy();
+  });
 });

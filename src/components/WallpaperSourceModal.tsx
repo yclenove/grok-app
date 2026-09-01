@@ -217,6 +217,15 @@ export function WallpaperSourceModal({
   }, [open, tab, grokAlbum.items, grokAlbum.hasSynced]);
 
   useEffect(() => {
+    if (!open || tab !== "grok_album" || grokAlbum.status === "ready") return;
+    // Album navigation or verification can temporarily replace the collection
+    // with an empty snapshot. A filter from the previous ready snapshot is no
+    // longer meaningful and otherwise leaves a misleading zero-count toolbar.
+    setGalleryFilter("");
+    setKindFilter("all");
+  }, [open, tab, grokAlbum.status]);
+
+  useEffect(() => {
     if (!open || tab !== "x" || !xSearchBusy || !xSearchRequestId) return;
     if (progressiveRequestRef.current !== xSearchRequestId) {
       progressiveRequestRef.current = xSearchRequestId;

@@ -210,7 +210,7 @@ export function WallpaperSourceGallery({
               <p className="wallpaper-masonry__empty-title">
                 {t(emptyState.titleKey as MessageKey)}
               </p>
-              {emptyState.showClearFilters ? (
+              {emptyState.showClearFilters && !showFilters ? (
                 <button
                   type="button"
                   className="btn btn--ghost btn--sm"

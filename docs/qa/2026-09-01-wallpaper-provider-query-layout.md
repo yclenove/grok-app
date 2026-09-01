@@ -31,6 +31,10 @@ contracts.
 - Group frames, group headings, persistent source descriptions, empty-state
   teaching copy, and footer instructions are absent. At narrow widths the four
   discovery sources get a scrollable row without hiding their text labels.
+- When the official Grok Saved page leaves its ready state, stale local text and
+  media-kind filters are cleared with the transient album snapshot. Verification
+  or navigation therefore cannot leave a misleading zero-count filter row, and
+  a filtered empty state exposes only one clear action.
 
 ## Real Windows Tauri acceptance
 
@@ -41,19 +45,23 @@ network-exit details.
 
 | Scenario | Result |
 |---|---|
-| Corrected direct-library initial search | 20 validated cards in 25.3 seconds |
-| Prefetched load more | Added 19 cards, reaching 39 total |
-| Existing-card interaction after paging | A previously rendered card remained selectable and opened the real Lightbox |
-| Viewer identity | The selected item opened as slide 16 of 39 |
-| Stacked Escape ownership | Escape closed only the Lightbox and preserved the wallpaper dialog |
-| Attribution | Source, author, and license actions remained attached to results |
-| Source navigation | The three semantic segments used the available row instead of clustering at the left |
+| Source navigation | Seven sources rendered as four discovery choices, one Imagine choice, and two personal choices across the available row; no group frames, headings, persistent descriptions, or footer instruction remained |
+| Grok album verification | The dedicated official-page window opened and presented its verification state; the main dialog kept the actionable guidance while hiding stale zero-count filters and duplicate clear actions |
+| Openverse fresh search | 18 validated cards arrived in 9.1 seconds |
+| Openverse cached search | The first batch restored immediately from the in-process cache |
+| Openverse load more | 20 prefetched cards appended immediately, taking the gallery from 18 to 38 |
+| Openverse interaction after paging | A card from the original batch remained selectable and opened the real Lightbox; source, author, and license actions remained available |
+| Pexels without a key | The dialog showed the required-key state, kept search and the empty save action disabled, and made no provider request |
+| Web fresh search | Four validated cards arrived in about 32 seconds; a card clicked while validation was still running opened in the real Lightbox after the concurrent update |
+| Web load-more failure | The request reported a network timeout and appended no cards; all four existing cards stayed in place and remained selectable afterward |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
 degraded by display-purpose and resolution modifiers in the query. Web results
 can still be smaller because source discovery, page access, image validation,
-quality filtering, and deduplication are separate attrition stages.
+quality filtering, and deduplication are separate attrition stages. The Web
+run also verifies the interaction-preservation contract, but it does not count
+as successful Web pagination because the load-more request timed out.
 
 ## Deterministic verification
 
@@ -61,16 +69,21 @@ quality filtering, and deduplication are separate attrition stages.
 |---|---|
 | `pnpm deps:check` | Passed |
 | `pnpm audit:prod` | Passed; no known production vulnerability |
-| `pnpm test` | 565 files, 6875 tests passed |
+| `pnpm test` | 565 files, 6877 tests passed |
 | `pnpm typecheck` | Passed |
 | `pnpm lint` | Passed |
 | `pnpm build:ui` | Passed; only existing dynamic-import and large-chunk warnings |
 | `cargo fmt --all -- --check` | Passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo test --no-run` | Passed |
-| Manifest-embedded Windows Rust harness | 1600 passed, 0 failed, 1 ignored |
+| Manifest-embedded Windows Rust harness | 1646 passed, 0 failed, 1 ignored |
 | `git diff --check` | Passed |
 | `python scripts/check-code-quality-gates.py` | One inherited failure: 77 files at or above 1,000 lines against a budget of 69; every other gate passed |
+
+The post-acceptance album-filter regression suite adds focused coverage for the
+ready-to-verification transition and the single clear-action invariant. The two
+affected component suites pass 13 tests in total. A fresh full gate run is
+recorded before the final local commit.
 
 No production file crossed the 1,000-line threshold in this scope. The Rust
 provider module remains below the threshold at 986 lines; the two modified CSS

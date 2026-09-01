@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@/test/jsdomStubs";
+import type { GrokAlbumStatus } from "@/lib/grokAlbum";
 import type { WallpaperGalleryItem } from "@/lib/wallpaperSource";
 
 const cancelSearch = vi.hoisted(() => vi.fn(async () => true));
@@ -45,7 +46,7 @@ const xSearchState = vi.hoisted(() => ({
   progressiveDone: false,
 }));
 const grokAlbumState = vi.hoisted(() => ({
-  status: "closed" as "closed" | "ready",
+  status: "closed" as GrokAlbumStatus,
   cachedCount: 0,
   visibleCount: 0,
   busy: false,
@@ -168,7 +169,14 @@ afterEach(() => {
   remoteControllerState.canLoadMore = false;
   remoteControllerState.searchItems = [];
   grokAlbumState.status = "closed";
+  grokAlbumState.cachedCount = 0;
+  grokAlbumState.visibleCount = 0;
   grokAlbumState.busy = false;
+  grokAlbumState.syncing = false;
+  grokAlbumState.loadingMore = false;
+  grokAlbumState.hasSynced = false;
+  grokAlbumState.errorCode = null;
+  grokAlbumState.canLoadMore = false;
   grokAlbumState.items = [];
 });
 
@@ -234,6 +242,15 @@ describe("WallpaperSourceModal source workspace", () => {
       ["settings.wallpaperImagine"],
       ["settings.wallpaperGrokAlbum", "settings.wallpaperLibrary"],
     ]);
+    expect(
+      screen.queryByText("settings.wallpaperSource.xHint"),
+    ).toBeNull();
+    expect(
+      screen.queryByText("settings.wallpaperSource.imagineHint"),
+    ).toBeNull();
+    expect(
+      screen.queryByText("settings.wallpaperSource.libraryHint"),
+    ).toBeNull();
 
     const layout = view.container.querySelector(".wallpaper-source-layout");
     expect(layout?.firstElementChild).toBe(tablist);
@@ -289,6 +306,54 @@ describe("WallpaperSourceModal source workspace", () => {
       screen.queryByRole("button", {
         name: "settings.wallpaperSource.clearFilters",
       }),
+    ).toBeNull();
+  });
+
+  it("clears stale album filters when the official page leaves ready state", async () => {
+    grokAlbumState.status = "ready";
+    grokAlbumState.hasSynced = true;
+    grokAlbumState.cachedCount = 2;
+    grokAlbumState.visibleCount = 2;
+    grokAlbumState.items = [
+      galleryItem("album-image", { source: "grok_album", kind: "image" }),
+      galleryItem("album-video", { source: "grok_album", kind: "video" }),
+    ];
+    const props = {
+      open: true,
+      initialTab: "grok_album" as const,
+      t: t as never,
+      onClose: vi.fn(),
+      onPickFile: vi.fn(),
+    };
+    const view = render(<WallpaperSourceModal {...props} />);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /^settings\.wallpaperSource\.kind\.video/,
+      }),
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.clearFilters",
+      }),
+    ).toBeTruthy();
+
+    grokAlbumState.status = "verification";
+    grokAlbumState.hasSynced = false;
+    grokAlbumState.cachedCount = 0;
+    grokAlbumState.visibleCount = 0;
+    grokAlbumState.items = [];
+    view.rerender(<WallpaperSourceModal {...props} />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: "settings.wallpaperSource.clearFilters",
+        }),
+      ).toBeNull(),
+    );
+    expect(
+      screen.queryByText("settings.wallpaperSource.empty.filterEmpty"),
     ).toBeNull();
   });
 
