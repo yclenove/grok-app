@@ -56,7 +56,11 @@ export type RewindTimelineState = {
 
 export type RewindConfirmState = {
   sessionId: string;
-  targetPromptIndex: number;
+  /**
+   * Keep through this 0-based user prompt. `null` = undo the last / only
+   * user turn (drop it), matching CLI `/undo` on the latest prompt.
+   */
+  targetPromptIndex: number | null;
   preview?: string;
 };
 

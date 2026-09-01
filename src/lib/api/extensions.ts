@@ -66,6 +66,12 @@ export interface McpDto {
   compatibilityStatus?: string | null;
   /** App Extensions enable flag (default true when omitted). */
   enabled?: boolean;
+  /** True when Host discovered this server from an installed plugin `.mcp.json`. */
+  fromPlugin?: boolean;
+  /** Owning plugin id when `fromPlugin`. */
+  pluginName?: string | null;
+  /** `x-api` when the plugin ships `scripts/x-api.mjs` (GUI auth). */
+  authKind?: string | null;
 }
 
 /** Claude/Cursor skill discovery snapshot from `skills_list` / `skills_compat_set`. */
@@ -398,9 +404,13 @@ export async function resetAppData(keepSecrets = true) {
  * (`{project}/.grok/skills`). Optional project cwd; project rows win on name
  * collision and carry `source: "project"`.
  */
-export async function skillsList(projectPath?: string | null) {
+export async function skillsList(
+  projectPath?: string | null,
+  opts?: { sshAlias?: string | null },
+) {
   return invoke<SkillsListResult>("skills_list", {
     projectPath: projectPath ?? null,
+    sshAlias: opts?.sshAlias?.trim() || null,
   });
 }
 
@@ -594,5 +604,53 @@ export async function pluginValidate(pathOrName?: string | null) {
   return invoke<PluginValidateResult>("plugin_validate", {
     pathOrName: raw ? raw : null,
   });
+}
+
+export interface PluginMcpAuthStatus {
+  server: string;
+  authKind?: string | null;
+  authorized: boolean;
+  username: string;
+  method: string;
+  shortestPath?: string;
+  pluginRoot?: string;
+  hasCli: boolean;
+  callback?: string;
+}
+
+export async function pluginMcpAuthStatus(name: string) {
+  return invoke<PluginMcpAuthStatus>("plugin_mcp_auth_status", { name });
+}
+
+export async function pluginMcpAuthSaveTokens(input: {
+  name: string;
+  apiKey: string;
+  apiSecret: string;
+  accessToken: string;
+  accessTokenSecret: string;
+}) {
+  return invoke<PluginMcpAuthStatus>("plugin_mcp_auth_save_tokens", {
+    name: input.name,
+    apiKey: input.apiKey,
+    apiSecret: input.apiSecret,
+    accessToken: input.accessToken,
+    accessTokenSecret: input.accessTokenSecret,
+  });
+}
+
+export async function pluginMcpAuthOauth2(input: {
+  name: string;
+  clientId: string;
+  clientSecret?: string;
+}) {
+  return invoke<PluginMcpAuthStatus>("plugin_mcp_auth_oauth2", {
+    name: input.name,
+    clientId: input.clientId,
+    clientSecret: input.clientSecret ?? "",
+  });
+}
+
+export async function pluginMcpAuthLogout(name: string) {
+  return invoke<PluginMcpAuthStatus>("plugin_mcp_auth_logout", { name });
 }
 

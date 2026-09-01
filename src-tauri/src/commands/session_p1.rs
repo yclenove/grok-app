@@ -33,8 +33,10 @@ pub async fn session_connect(
     project_path: Option<String>,
     session_id: Option<String>,
     mode: Option<String>,
+    ssh_alias: Option<String>,
 ) -> Result<SessionSnapshot, String> {
-    mgr.connect(app, project_path, session_id, mode).await
+    mgr.connect(app, project_path, session_id, mode, ssh_alias)
+        .await
 }
 
 /// Fire-and-forget prewarm: spawn + initialize + auth a CLI process while the
@@ -294,6 +296,18 @@ pub async fn session_pending_permission(
     Ok(mgr.pending_permission(session_id))
 }
 
+/// Still-pending questionnaire for a chat. Pulled on session open to recover an
+/// ask-user gate whose one-shot `session://ask_user` emit was missed (WebView
+/// reload / window remount) — otherwise the agent stays blocked on the reverse
+/// RPC and the chat looks stuck "thinking" with nothing to answer.
+#[tauri::command]
+pub async fn session_pending_ask_user(
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<Option<crate::session_manager::UiAskUserRequest>, String> {
+    Ok(mgr.pending_ask_user(session_id))
+}
+
 #[tauri::command]
 pub async fn probe_cli(manual_path: Option<String>) -> Result<CliProbeResult, String> {
     // probe_cli runs `grok --version` (sync I/O). Never block a Tokio worker —
@@ -511,6 +525,15 @@ pub async fn general_workspace_path() -> Result<String, String> {
 #[tauri::command]
 pub async fn project_add(path: String, trust: bool) -> Result<Project, String> {
     store::add_project(path, trust)
+}
+
+#[tauri::command]
+pub async fn project_add_ssh(
+    alias: String,
+    path: String,
+    trust: bool,
+) -> Result<Project, String> {
+    store::add_ssh_project(&alias, path, trust)
 }
 
 #[tauri::command]

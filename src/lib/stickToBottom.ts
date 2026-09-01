@@ -61,6 +61,16 @@ export const STICK_ESCAPE_MIN_DELTA_PX = 10;
  */
 export const STICK_ESCAPE_WHEEL_DELTA = 10;
 
+/**
+ * Keep a recent gesture toward the tail alive across compositor rubber-band.
+ * WebView2 may report the rebound as a decreasing `scrollTop` even though the
+ * user never reversed direction.
+ */
+export const STICK_BOTTOM_REBOUND_INTENT_MS = 320;
+
+/** Quiet window after the last rebound scroll event before snapping to max. */
+export const STICK_BOTTOM_REBOUND_SETTLE_MS = 96;
+
 /** True when the upward scroll is large enough to intentionally leave the bottom. */
 export function isMeaningfulScrollUp(
   scrollTop: number,
@@ -83,6 +93,53 @@ export function shouldClampPinnedOverscroll(
 }
 
 /**
+ * A downward wheel/touch gesture can overshoot the tail and rebound upward.
+ * That decreasing `scrollTop` is not a request to read history. Recover only
+ * inside the near-bottom band and only while the downward intent is current;
+ * a real reverse wheel/touch gesture clears that intent before scroll events.
+ */
+export function shouldSettleBottomRebound(input: {
+  downIntentActive: boolean;
+  scrollTop: number;
+  previousScrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  thresholdPx?: number;
+}): boolean {
+  if (!input.downIntentActive) return false;
+  if (input.previousScrollTop - input.scrollTop < 0.5) return false;
+  return isNearBottom(
+    input.scrollTop,
+    input.scrollHeight,
+    input.clientHeight,
+    input.thresholdPx,
+  );
+}
+
+/**
+ * At the locked hard bottom, a wheel/trackpad tick *toward* later content
+ * cannot reveal more transcript. Letting it through rubber-bands then the
+ * pin snap pulls the last lines back under the floating composer.
+ * Scroll-up (history) must never be blocked.
+ */
+export function shouldPreventPinnedBottomWheel(input: {
+  pinned: boolean;
+  escaped?: boolean;
+  deltaY: number;
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+}): boolean {
+  if (!input.pinned || input.escaped) return false;
+  if (!(input.deltaY > 0)) return false;
+  return isHardBottom(
+    input.scrollTop,
+    input.scrollHeight,
+    input.clientHeight,
+  );
+}
+
+/**
  * `stickBump` on streaming/permission edge: only when this is the *same*
  * user turn (regenerate / approval). A new last user id already force-sticks.
  */
@@ -91,6 +148,20 @@ export function shouldBumpStickOnBusyEdge(
   prevLastUserId: string | null,
 ): boolean {
   return lastUserId === prevLastUserId;
+}
+
+/**
+ * When a live turn settles, keep a following viewport on the stream tail.
+ * Thinking / work auto-collapse shrinks the last row; that remount can drop
+ * pin and window from scrollTop 0 ("jump to top when the task finishes").
+ * A user who already left the tail mid-stream is not yanked.
+ */
+export function shouldSnapToTailOnTurnSettle(input: {
+  wasBusy: boolean;
+  nowBusy: boolean;
+  wasPinned: boolean;
+}): boolean {
+  return input.wasBusy && !input.nowBusy && input.wasPinned;
 }
 
 /**
@@ -318,6 +389,54 @@ export function shouldEscapePinnedScroll(input: {
  * are ignored (a missed event must not swallow a later flick).
  */
 export const PROGRAMMATIC_STICK_SCROLL_TTL_MS = 100;
+
+/**
+ * Below this, clientHeight is not a real chat viewport (hidden WebView,
+ * App switch occlusion, or a 0-height layout pass). Pin/escape/follow
+ * math using maxTop = scrollHeight - 0 parks scrollTop in the middle
+ * of the transcript when the window comes back.
+ */
+export const STICK_MIN_VIEWPORT_HEIGHT_PX = 32;
+
+/** True when metrics must not drive pin, escape, follow, or virtual snap. */
+export function isStickViewportUnreliable(input: {
+  clientHeight: number;
+  hidden?: boolean;
+}): boolean {
+  if (input.hidden === true) return true;
+  return (
+    !Number.isFinite(input.clientHeight) ||
+    input.clientHeight < STICK_MIN_VIEWPORT_HEIGHT_PX
+  );
+}
+
+/**
+ * App became visible again with a real viewport. Restore tail follow only
+ * if the user was still pinned — never yank someone who scrolled into history.
+ */
+export function shouldRestorePinnedFollowOnViewportReady(input: {
+  pinned: boolean;
+  escaped: boolean;
+  viewportWasUnreliable: boolean;
+  viewportIsReliable: boolean;
+}): boolean {
+  if (!input.viewportWasUnreliable || !input.viewportIsReliable) return false;
+  return input.pinned && !input.escaped;
+}
+
+/**
+ * Stick follow / virtual-list pin-snap write scrollTop and then fire
+ * `scroll`. Treating that as a user leave drops pin mid-stream so the
+ * answer grows above the fold.
+ *
+ * Wheel/touch already unpin on their own listeners. Scrollbar-only leave
+ * still works on events that are not tagged programmatic.
+ */
+export function shouldIgnoreProgrammaticStickLeave(
+  ignoreTop: number | undefined,
+): boolean {
+  return ignoreTop != null;
+}
 
 type ProgrammaticStickScroll = { top: number; at: number };
 

@@ -124,6 +124,7 @@ html[data-wallpaper="1"] .app-wallpaper-media {
  * none (no native vibrancy), so the wallpaper stays sharp under a 72%/24%
  * mix — session titles and the empty-chat welcome sit on the raw picture.
  * Blur the replaced element instead. Mac keeps the container filter.
+ * Live-turn CSS must not override this element blur (#941).
  */
 html.platform-win[data-wallpaper="1"] .app-wallpaper-media {
   filter: none;
@@ -410,8 +411,11 @@ html[data-wallpaper="1"] .platform-mac .settings-page__nav {
 
 /*
  * Live turn: AppWorkbench sets html[data-stream-perf="1"].
- * Frosted wallpaper panes on a playing video are a WebView2 GPU sink.
- * Video pause is JS (WallpaperMediaLayer).
+ * Drop pane backdrop-filter (sidebar / settings / aside) — those are the
+ * GPU sink on WebView2. Keep wallpaper media frost and its inset bleed.
+ * Clearing filter + collapsing inset in the same frame pops the picture
+ * (empty chat vs live turn, #941) and fights the independent blur slider.
+ * Video already pauses in WallpaperMediaLayer.
  */
 html[data-stream-perf="1"][data-wallpaper="1"] .app-settings-stage,
 html[data-stream-perf="1"][data-wallpaper="1"] .sidebar,
@@ -422,17 +426,6 @@ html[data-stream-perf="1"][data-wallpaper="1"] .platform-other .settings-page__n
 html[data-stream-perf="1"][data-wallpaper="1"] .platform-mac .settings-page__nav {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
-}
-
-html[data-stream-perf="1"][data-wallpaper="1"] .app-wallpaper-media {
-  filter: none;
-  transform: none;
-  inset: 0;
-}
-
-html.platform-win[data-stream-perf="1"][data-wallpaper="1"]
-  .app-wallpaper-media__el {
-  filter: none;
 }
 
 html[data-wallpaper="1"] .settings-page__content,
@@ -464,7 +457,7 @@ html[data-wallpaper="1"].platform-mac[data-theme="light"] .main {
 }
 
 /* Composer + workspace bar: independent slider, never merged with scrim. */
-html[data-wallpaper="1"] :is(.composer, .composer__context-bar) {
+html[data-wallpaper="1"] :is(.composer, .composer__chip-shell) {
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -531,11 +524,7 @@ html[data-wallpaper="1"][data-wallpaper-clear="1"].platform-mac[data-theme="ligh
   box-shadow: none !important;
 }
 
-html[data-wallpaper="1"][data-wallpaper-clear="1"] .app-wallpaper-media {
-  filter: none;
-  transform: none;
-  inset: 0;
-}
+/* Scrim 0% clears pane mix only. Media frost stays on the blur slider. */
 
 /*
  * Custom text color (Settings → Appearance): only exposed chrome that sits
@@ -543,7 +532,15 @@ html[data-wallpaper="1"][data-wallpaper-clear="1"] .app-wallpaper-media {
  * Theme --text-primary on <html> stays the light/dark default.
  */
 html[data-text-color="custom"]
-  :is(.sidebar, .main__top, .composer-welcome-mark, .pane-toggle--pinned) {
+  :is(
+    .sidebar,
+    .main__top,
+    .composer-welcome-mark,
+    .pane-toggle--pinned,
+    .conn-bar,
+    .aside .rp-chrome,
+    .aside .rp__empty-state
+  ) {
   --text-primary: var(--appearance-chrome-ink);
   --text-secondary: color-mix(
     in srgb,
@@ -615,12 +612,17 @@ html[data-theme="light"][data-wallpaper="1"] .lobe-chat-empty {
   --chat-text-3: color-mix(in srgb, var(--text-primary) 72%, transparent);
 }
 
-html[data-theme="light"][data-wallpaper="1"] .main__stage > .conn-bar strong {
-  color: color-mix(in srgb, var(--text-primary) 84%, transparent);
+html[data-theme="light"][data-wallpaper="1"] .conn-bar,
+html[data-theme="light"][data-wallpaper="1"] .conn-bar strong {
+  color: var(--text-primary);
 }
 
 html[data-theme="dark"][data-wallpaper="1"]
-  :is(.lobe-chat-empty, .main__stage > .conn-bar) {
+  :is(.lobe-chat-empty, .conn-bar) {
+  color: var(--text-primary);
+}
+
+html[data-theme="dark"][data-wallpaper="1"] .conn-bar strong {
   color: var(--text-primary);
 }
 
@@ -637,7 +639,7 @@ html[data-font-shadow="1"]
     .composer-welcome-mark,
     .lobe-chat-assistant-timeline,
     .lobe-chat-empty,
-    .main__stage > .conn-bar,
+    .conn-bar,
     .pane-toggle--pinned,
     .aside .rp-chrome,
     .aside .rp__empty-state,
@@ -677,9 +679,7 @@ html[data-font-shadow="1"] .theme-editor-shell svg {
   filter: none;
 }
 
-html[data-theme="dark"][data-wallpaper="1"] .main__stage > .conn-bar strong {
-  color: color-mix(in srgb, var(--text-primary) 84%, transparent);
-}
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * ROSE — “Salon blush”

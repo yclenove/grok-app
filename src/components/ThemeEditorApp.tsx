@@ -59,6 +59,25 @@ function ThemeEditorBody() {
       cancelled = true;
     };
   }, []);
+
+  // Cache main-workbench aspect so wallpaper focus / export bake match the
+  // main window — not this editor window's own size.
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let disposed = false;
+    void import("@/lib/wallpaperExportBake").then(({ watchWallpaperViewportAspect }) =>
+      watchWallpaperViewportAspect(() => {
+        /* cache side-effect only */
+      }).then((unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      }),
+    );
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
   useEffect(() => {
     const root = document.documentElement;
     root.classList.remove(

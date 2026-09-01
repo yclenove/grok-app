@@ -1,5 +1,13 @@
 /** Pure helpers for sidebar multi-select (archive / restore). */
 
+/** Cmd (macOS) or Ctrl (Windows/Linux) — Finder-style additive select. */
+export function isSelectModifierEvent(e: {
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+}): boolean {
+  return !!(e.metaKey || e.ctrlKey);
+}
+
 /** Toggle `id` membership; always returns a new Set. */
 export function toggleIdInSet(set: ReadonlySet<string>, id: string): Set<string> {
   const next = new Set(set);

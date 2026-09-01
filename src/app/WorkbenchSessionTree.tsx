@@ -34,13 +34,18 @@ import { projectDisplayName } from "@/lib/app/sidebarModels";
 import type { ContextMenuState } from "@/lib/app/appDialogTypes";
 import { areAllIdsSelected } from "@/lib/sessionSelect";
 import { sortSessionsForSidebar } from "@/lib/sidebarDateGroups";
-import { isProjectPathMissing } from "@/lib/projectPath";
+import {
+  hideSshProjectInLocalTree,
+  isProjectFolderMissing,
+} from "@/lib/projectPath";
+import { useSshWatch } from "@/providers/SshWatchProvider";
 import { resolveProjectColorCss } from "@/lib/projectColor";
 import { notePreview } from "@/lib/sessionNotes";
 import { SESSION_DROP_ORPHAN } from "@/lib/sessionMoveProject";
 import { isMirrorClient } from "@/lib/mirrorTransport";
 import type { SidebarProjectReorderApi } from "@/hooks/useSidebarProjectReorder";
 import type { ProjectSpacesState } from "@/lib/projectSpaces";
+import { SshRemoteSessionRail } from "@/components/SshRemoteSessionRail";
 
 type TFn = ReturnType<typeof createT>;
 
@@ -77,6 +82,8 @@ export type WorkbenchSessionTreeProps = {
   projectReorder: SidebarProjectReorderApi;
   openProjectMenu: (e: MouseEvent, proj: Project) => void;
   newChat: (project?: Project | null) => void | Promise<void>;
+  onNewRemoteConversation?: (alias: string, cwd: string) => void;
+  onImportedSessionsChanged?: () => void;
   relocateProject: (proj: Project) => void | Promise<void>;
   trustProject: (proj?: Project | null) => void | Promise<void>;
   viewingSessionId: string | null;
@@ -132,6 +139,8 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
     projectReorder,
     openProjectMenu,
     newChat,
+    onNewRemoteConversation,
+    onImportedSessionsChanged,
     relocateProject,
     trustProject,
     viewingSessionId,
@@ -154,6 +163,10 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
     deleteSessionsConfirm,
   } = props;
 
+  const { watchAliases } = useSshWatch();
+  const treeProjects = visibleProjects.filter(
+    (p) => !hideSshProjectInLocalTree(p, watchAliases),
+  );
   const sessionsForProject = (projectId: string) =>
     sessions.filter((s) => s.projectId === projectId && !s.archived);
   const orphanSessions = sessions.filter(
@@ -305,6 +318,14 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
               </div>
             </div>
 
+            <SshRemoteSessionRail
+              t={tr}
+              locale={locale}
+              showRelativeTime={sidebarShowRelativeTime}
+              onOpenSession={(id) => onSidebarSessionOpen({ id })}
+              onNewConversation={onNewRemoteConversation}
+              onImportedSessionsChanged={onImportedSessionsChanged}
+            />
             <SidebarTreeReveal open={projectsOpen} className="tree-reveal--projects">
             {projects.length === 0 && (
               <div className="sidebar-empty">
@@ -323,7 +344,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
               </div>
             )}
 
-            {visibleProjects.map((proj) => {
+            {treeProjects.map((proj) => {
                 const open = expandedProjects[proj.id] !== false;
                 const projSessions = sessionsForProject(proj.id);
                 const projSessionIds = projSessions.map((s) => s.id);
@@ -337,7 +358,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                     <div
                       className={
                         "tree-l2" +
-                        (isProjectPathMissing(proj.pathOk)
+                        (isProjectFolderMissing(proj)
                           ? " tree-l2--path-missing"
                           : "") +
                         (sessionSelectMode ? " tree-l2--select-mode" : "") +
@@ -388,7 +409,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                       ) : null}
                       <Tip
                         label={
-                          isProjectPathMissing(proj.pathOk)
+                          isProjectFolderMissing(proj)
                             ? tr("project.pathMissing", { name: proj.name })
                             : proj.path
                         }
@@ -400,7 +421,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                           {projectDisplayName(proj, tr)}
                         </span>
                       </Tip>
-                      {isProjectPathMissing(proj.pathOk) ? (
+                      {isProjectFolderMissing(proj) ? (
                         <span className="project-row__badge project-row__badge--path-missing">
                           {tr("sidebar.pathMissing")}
                         </span>
@@ -464,7 +485,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                                 className="tree-icon-btn"
                                 disabled={
                                   !proj.trusted ||
-                                  isProjectPathMissing(proj.pathOk)
+                                  isProjectFolderMissing(proj)
                                 }
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -490,7 +511,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
 
                     <SidebarTreeReveal open={open}>
                       <div className="tree-l3-list-wrap">
-                        {isProjectPathMissing(proj.pathOk) && (
+                        {isProjectFolderMissing(proj) && (
                           <button
                             type="button"
                             className="tree-l3 tree-l3--hint"
@@ -502,7 +523,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                             {tr("sidebar.relocateProject")}
                           </button>
                         )}
-                        {!proj.trusted && !isProjectPathMissing(proj.pathOk) && (
+                        {!proj.trusted && !isProjectFolderMissing(proj) && (
                           <button
                             type="button"
                             className="tree-l3 tree-l3--hint"

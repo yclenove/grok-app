@@ -601,7 +601,7 @@ async fn execute_tool_inner(
             )?;
             // Connect + send on that session (becomes live host).
             let path = snap.project_path.clone();
-            mgr.connect(app.clone(), path, Some(meta.id.clone()), None)
+            mgr.connect(app.clone(), path, Some(meta.id.clone()), None, None)
                 .await?;
             mgr.send_message(
                 app.clone(),
@@ -632,6 +632,7 @@ async fn execute_tool_inner(
                     snap.project_path.clone(),
                     Some(sid.clone()),
                     None,
+                    None,
                 )
                 .await?;
                 host.push_delegated(sid);
@@ -659,6 +660,7 @@ async fn execute_tool_inner(
                         app.clone(),
                         snap.project_path.clone(),
                         Some(sid.clone()),
+                        None,
                         None,
                     )
                     .await;
@@ -688,6 +690,7 @@ async fn execute_tool_inner(
                         app.clone(),
                         snap.project_path.clone(),
                         Some(sid.clone()),
+                        None,
                         None,
                     )
                     .await;

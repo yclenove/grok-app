@@ -938,6 +938,16 @@ fn yield_key_to_main(app: &AppHandle, after_show: bool) {
         return;
     }
     let _ = main.set_focus();
+    // `set_focus` uses tao's deprecated `activateIgnoringOtherApps`. On macOS
+    // 14+ a background-launched / tray-restored app can end up with a key
+    // window while NSApp stays INACTIVE, so the next click only activates the
+    // app and is eaten. Re-assert modern activation + first responder exactly
+    // like the launch focus guardian does (no-op on non-macOS).
+    let main_for_keys = main.clone();
+    let _ = main.run_on_main_thread(move || {
+        crate::force_ns_app_activate();
+        crate::point_keys_at_webview(&main_for_keys);
+    });
 }
 
 fn emit_prefs(app: &AppHandle, prefs: &PetPrefs) {
@@ -1016,17 +1026,17 @@ pub fn ensure_pet_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String
                     persist_window_pos(&handle);
                 }
             }
-            tauri::WindowEvent::Focused(true) => {
-                // show() uses makeKeyAndOrderFront even when focused(false).
-                // Do not yield on a user press — that raised the workbench
-                // when the user only meant to drag. show_pet already yields.
+            tauri::WindowEvent::Focused(true)
                 if should_yield_key_on_pet_focus(
                     cfg!(target_os = "linux"),
                     DRAGGING.load(Ordering::Relaxed),
                     MENU_OPEN.load(Ordering::Relaxed),
-                ) {
-                    yield_key_to_main(&handle, false);
-                }
+                ) =>
+            {
+                // show() uses makeKeyAndOrderFront even when focused(false).
+                // Do not yield on a user press — that raised the workbench
+                // when the user only meant to drag. show_pet already yields.
+                yield_key_to_main(&handle, false);
             }
             tauri::WindowEvent::Destroyed => {
                 WEBVIEW_READY.store(false, Ordering::SeqCst);

@@ -18,6 +18,7 @@ import {
 } from "@/lib/app/sidebarModels";
 import * as api from "@/lib/api";
 import type { MessageKey } from "@/i18n";
+import { isProjectFolderMissing } from "@/lib/projectPath";
 import {
   applySessionMoveMeta,
   buildSessionMoveMenuTargets,
@@ -274,7 +275,7 @@ export function useSessionMoveProject(opts: {
                 .map((p) => ({
                   id: p.id as string | null,
                   label: p.name,
-                  disabled: !p.trusted || p.pathOk === false,
+                  disabled: !p.trusted || isProjectFolderMissing(p),
                 })),
             ]
           : targets;

@@ -35,6 +35,9 @@ import {
   sortSkillsByName,
 } from "@/lib/extensionsUi";
 import {
+  buildPluginValidateExceptionPresentation,
+  buildPluginValidatePreflightError,
+  buildPluginValidatePresentation,
   formatPluginValidateMessages,
   pluginValidateBadgeTone,
   pluginValidateHint,
@@ -83,6 +86,8 @@ import {
   ExtensionsBuildExtras,
   type ExtAgentsTabActions,
 } from "@/components/ExtensionsBuildExtras";
+import { PluginPathInstallCard } from "@/components/PluginPathInstallCard";
+import { PluginMcpAuthWizard } from "@/components/PluginMcpAuthWizard";
 import {
   ExtensionsHooksPanel,
   type ExtHooksTabActions,
@@ -95,7 +100,9 @@ import {
 } from "@/lib/pluginMarketplace";
 import {
   CHATCUT_CODEX_INSTALL_SOURCE,
+  X_API_INSTALL_SOURCE,
   isChatCutInstalled,
+  isXApiInstalled,
   pluginDisplayName,
   resolveExtensionsTabId,
 } from "@/lib/pluginRecommended";
@@ -261,6 +268,16 @@ export function ExtensionsPanel({
   const [detailsModel, setDetailsModel] =
     useState<AvailablePluginDetailModel | null>(null);
   const [installSource, setInstallSource] = useState("");
+  const [pathInstallError, setPathInstallError] = useState<string | null>(null);
+  const [pathValidate, setPathValidate] =
+    useState<PluginValidatePresentation | null>(null);
+  /** Confirm before `plugin install --trust` from the path-install modal. */
+  const [installConfirmSource, setInstallConfirmSource] = useState<
+    string | null
+  >(null);
+  const pathInstallInputRef = useRef<HTMLInputElement>(null);
+  /** Discover + button: install from local path / git. */
+  const [pathInstallOpen, setPathInstallOpen] = useState(false);
   /** GlassModal result for last validate (row or advanced install). */
   const [validateModal, setValidateModal] = useState<{
     open: boolean;
@@ -322,10 +339,16 @@ export function ExtensionsPanel({
   const [expandedMcpNames, setExpandedMcpNames] = useState<
     Record<string, boolean>
   >({});
-  /** Confirm Modal for recommended ChatCut install (never auto-install). */
-  const [chatcutInstallOpen, setChatcutInstallOpen] = useState(false);
-  /** Marketplace sources + advanced install live in a modal (not page body). */
+  /** Confirm modal for a recommended plugin (never auto-install). */
+  const [recommendedInstall, setRecommendedInstall] = useState<
+    "chatcut" | "x-api" | null
+  >(null);
+  /** Marketplace sources live in a modal (not page body). */
   const [sourcesModalOpen, setSourcesModalOpen] = useState(false);
+  const [pluginAuthServer, setPluginAuthServer] = useState<string | null>(null);
+  const [pluginAuthStatus, setPluginAuthStatus] = useState<
+    Record<string, api.PluginMcpAuthStatus>
+  >({});
   /** Enriched cards (manifest + logo) for installed plugins. */
   const [pluginCards, setPluginCards] = useState<PluginCardModel[]>([]);
   /** Discover catalog (available plugins) — own state so we render Featured 2-col. */
@@ -1262,16 +1285,83 @@ export function ExtensionsPanel({
     });
   };
 
-  const installPlugin = async () => {
+  const openPathInstall = useCallback(() => {
+    setSourcesModalOpen(false);
+    setPathInstallOpen(true);
+  }, []);
+
+  const browsePluginFolder = async () => {
+    if (!api.isTauri() || actionBusy || cliMissing) return;
+    try {
+      const dir = await api.pickDirectory();
+      if (!dir) return;
+      setInstallSource(dir);
+      setPathInstallError(null);
+      setPathValidate(null);
+      pathInstallInputRef.current?.focus();
+    } catch (e) {
+      setPathInstallError(String(e));
+    }
+  };
+
+  const validatePathInstall = async () => {
+    if (actionBusy || cliMissing) return;
+    const source = normalizePluginInstallSource(installSource);
+    const pre = buildPluginValidatePreflightError(source, {
+      isTauri: api.isTauri(),
+      emptyMessage: tr("ext.plugins.validate.hint.emptySource"),
+      pathOnlyMessage: tr("ext.plugins.validatePathOnly"),
+      hostOnlyMessage: tr("ext.plugins.validate.hint.hostOnly"),
+      labels: { kinds: pluginValidateKindLabels },
+    });
+    if (pre) {
+      setPathValidate(pre);
+      return;
+    }
+    setActionBusy("validate-path");
+    setPathInstallError(null);
+    try {
+      const res = await api.pluginValidate(source);
+      setPathValidate(
+        buildPluginValidatePresentation(res, {
+          kinds: pluginValidateKindLabels,
+          okTitle: tr("ext.plugins.validateOk"),
+          failTitle: tr("ext.plugins.validateFailed"),
+        }),
+      );
+    } catch (e) {
+      setPathValidate(
+        buildPluginValidateExceptionPresentation(e, {
+          kinds: pluginValidateKindLabels,
+          failTitle: tr("ext.plugins.validateFailed"),
+        }),
+      );
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const requestPathInstall = () => {
     if (!api.isTauri() || actionBusy || cliMissing) return;
     const source = normalizePluginInstallSource(installSource);
     if (!source) {
-      setActionError(tr("ext.plugins.installEmpty"));
+      setPathInstallError(tr("ext.plugins.installEmpty"));
       return;
     }
+    setPathInstallError(null);
+    setPathInstallOpen(false);
+    setInstallConfirmSource(source);
+  };
+
+  const confirmPathInstall = async () => {
+    const source = installConfirmSource;
+    if (!source || actionBusy) return;
+    setInstallConfirmSource(null);
     await runPluginAction("install", async () => {
       await api.pluginInstall(source);
       setInstallSource("");
+      setPathValidate(null);
+      setPathInstallError(null);
     });
   };
 
@@ -1472,6 +1562,7 @@ export function ExtensionsPanel({
     () => isChatCutInstalled(plugins),
     [plugins],
   );
+  const xApiInstalled = useMemo(() => isXApiInstalled(plugins), [plugins]);
 
   const q = extQuery.trim().toLowerCase();
   const filterText = useCallback(
@@ -1500,7 +1591,7 @@ export function ExtensionsPanel({
         vendor.includes("plugin") ||
         src.includes("plugin:") ||
         src.includes("/plugins/") ||
-        !!(s as { fromPlugin?: boolean }).fromPlugin;
+        !!s.fromPlugin;
       if (looksPlugin) fromPlugin.push(s);
       else user.push(s);
     }
@@ -1521,6 +1612,42 @@ export function ExtensionsPanel({
     );
   }, [pluginMcpServers, q, filterText]);
 
+  const pluginAuthNames = useMemo(
+    () =>
+      pluginMcpServers
+        .filter((s) => (s.authKind ?? "") === "x-api")
+        .map((s) => s.name),
+    [pluginMcpServers],
+  );
+
+  useEffect(() => {
+    if (tab !== "mcp" || !api.isTauri() || pluginAuthNames.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      pluginAuthNames.map(async (name) => {
+        try {
+          const st = await api.pluginMcpAuthStatus(name);
+          return [name, st] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((rows) => {
+      if (cancelled) return;
+      setPluginAuthStatus((prev) => {
+        const next = { ...prev };
+        for (const row of rows) {
+          if (!row) continue;
+          next[row[0]] = row[1];
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, pluginAuthNames]);
+
   const mcpCount = servers.length;
   const searchPlaceholder =
     tab === "mcp"
@@ -1532,11 +1659,13 @@ export function ExtensionsPanel({
   const showTabSearch =
     tab === "plugins" || tab === "mcp" || tab === "skills";
 
-  const installChatCut = async () => {
+  const installRecommended = async (kind: "chatcut" | "x-api") => {
     if (!api.isTauri() || actionBusy || cliMissing) return;
-    setChatcutInstallOpen(false);
-    await runPluginAction("install:chatcut", async () => {
-      await api.pluginInstall(CHATCUT_CODEX_INSTALL_SOURCE);
+    setRecommendedInstall(null);
+    const source =
+      kind === "x-api" ? X_API_INSTALL_SOURCE : CHATCUT_CODEX_INSTALL_SOURCE;
+    await runPluginAction(`install:${kind}`, async () => {
+      await api.pluginInstall(source);
     });
   };
 
@@ -1902,8 +2031,8 @@ export function ExtensionsPanel({
           ) : null}
         </section>
 
-        {/* Recommended ChatCut if missing */}
-        {!chatcutInstalled ? (
+        {/* Recommended plugins if missing — never auto-install */}
+        {!chatcutInstalled || !xApiInstalled ? (
           <section
             className="ext-ref-block"
             id="settings-anchor-ext-plugins-recommended"
@@ -1912,31 +2041,60 @@ export function ExtensionsPanel({
               {tr("ext.plugins.recommendedTitle")}
             </div>
             <ul className="ext-ref-featured">
-              <li className="ext-ref-featured__item">
-                <div className="ext-ref-featured__icon" aria-hidden>
-                  <IconPuzzle size={18} />
-                </div>
-                <div className="ext-ref-featured__body">
-                  <div className="ext-ref-featured__title">
-                    {tr("ext.plugins.recommended.chatcutName")}
+              {!chatcutInstalled ? (
+                <li className="ext-ref-featured__item">
+                  <div className="ext-ref-featured__icon" aria-hidden>
+                    <IconPuzzle size={18} />
                   </div>
-                  <div className="ext-ref-featured__desc">
-                    {tr("ext.plugins.recommended.chatcutDesc")}
+                  <div className="ext-ref-featured__body">
+                    <div className="ext-ref-featured__title">
+                      {tr("ext.plugins.recommended.chatcutName")}
+                    </div>
+                    <div className="ext-ref-featured__desc">
+                      {tr("ext.plugins.recommended.chatcutDesc")}
+                    </div>
                   </div>
-                </div>
-                <div className="ext-ref-featured__end">
-                  <button
-                    type="button"
-                    className="btn btn--solid btn--sm"
-                    disabled={!!actionBusy || cliMissing}
-                    onClick={() => setChatcutInstallOpen(true)}
-                  >
-                    {actionBusy === "install:chatcut"
-                      ? tr("ext.plugins.installing")
-                      : tr("ext.plugins.recommended.install")}
-                  </button>
-                </div>
-              </li>
+                  <div className="ext-ref-featured__end">
+                    <button
+                      type="button"
+                      className="btn btn--solid btn--sm"
+                      disabled={!!actionBusy || cliMissing}
+                      onClick={() => setRecommendedInstall("chatcut")}
+                    >
+                      {actionBusy === "install:chatcut"
+                        ? tr("ext.plugins.installing")
+                        : tr("ext.plugins.recommended.install")}
+                    </button>
+                  </div>
+                </li>
+              ) : null}
+              {!xApiInstalled ? (
+                <li className="ext-ref-featured__item">
+                  <div className="ext-ref-featured__icon" aria-hidden>
+                    <IconPlug size={18} />
+                  </div>
+                  <div className="ext-ref-featured__body">
+                    <div className="ext-ref-featured__title">
+                      {tr("ext.plugins.recommended.xApiName")}
+                    </div>
+                    <div className="ext-ref-featured__desc">
+                      {tr("ext.plugins.recommended.xApiDesc")}
+                    </div>
+                  </div>
+                  <div className="ext-ref-featured__end">
+                    <button
+                      type="button"
+                      className="btn btn--solid btn--sm"
+                      disabled={!!actionBusy || cliMissing}
+                      onClick={() => setRecommendedInstall("x-api")}
+                    >
+                      {actionBusy === "install:x-api"
+                        ? tr("ext.plugins.installing")
+                        : tr("ext.plugins.recommended.install")}
+                    </button>
+                  </div>
+                </li>
+              ) : null}
             </ul>
           </section>
         ) : null}
@@ -1979,6 +2137,17 @@ export function ExtensionsPanel({
                 aria-label={tr("ext.plugins.sourcesAndInstall")}
               >
                 <IconSettings size={16} />
+              </button>
+              <button
+                type="button"
+                className="ext-ref-icon-btn"
+                id="settings-anchor-ext-plugins-install"
+                disabled={cliMissing}
+                onClick={openPathInstall}
+                title={tr("ext.plugins.advancedInstall")}
+                aria-label={tr("ext.plugins.advancedInstall")}
+              >
+                <IconPlus size={16} />
               </button>
             </span>
           </div>
@@ -2634,21 +2803,57 @@ export function ExtensionsPanel({
               <p className="ext-ref-empty">{tr("ext.mcp.fromPluginsEmpty")}</p>
             ) : (
               <ul className="ext-ref-list">
-                {filteredPluginMcp.map((s) => (
-                  <li key={`plugin-mcp:${s.name}`} className="ext-ref-row">
+                {filteredPluginMcp.map((s) => {
+                  const on = isExtensionEnabled(s.enabled);
+                  const auth = pluginAuthStatus[s.name];
+                  const canAuth = (s.authKind ?? "") === "x-api";
+                  const signedIn = !!auth?.authorized;
+                  const desc = signedIn
+                    ? tr("ext.mcp.pluginAuth.signedIn", {
+                        user: auth.username ? `@${auth.username}` : s.name,
+                      })
+                    : canAuth
+                      ? tr("ext.mcp.pluginAuth.unauthorized")
+                      : mcpMetaLine(s) || s.target || s.vendor || "—";
+                  return (
+                  <li
+                    key={`plugin-mcp:${s.name}`}
+                    className={
+                      "ext-ref-row" + (on ? "" : " ext-ref-row--off")
+                    }
+                  >
                     <div className="ext-ref-row__main">
                       <div className="ext-ref-row__icon" aria-hidden>
                         <IconPlug size={16} />
                       </div>
                       <div className="ext-ref-row__body">
                         <div className="ext-ref-row__title">{s.name}</div>
-                        <div className="ext-ref-row__desc">
-                          {mcpMetaLine(s) || s.vendor || "—"}
-                        </div>
+                        <div className="ext-ref-row__desc">{desc}</div>
+                      </div>
+                      <div className="ext-ref-row__end">
+                        {canAuth ? (
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            disabled={!api.isTauri()}
+                            onClick={() => setPluginAuthServer(s.name)}
+                          >
+                            {signedIn
+                              ? tr("ext.mcp.pluginAuth.reauth")
+                              : tr("ext.mcp.pluginAuth")}
+                          </button>
+                        ) : null}
+                        <UiSwitch
+                          checked={on}
+                          disabled={!!busyKey}
+                          label={on ? tr("ext.enabled") : tr("ext.disabled")}
+                          onChange={(next) => void toggleMcp(s.name, next)}
+                        />
                       </div>
                     </div>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             )}
           </section>
@@ -2690,11 +2895,17 @@ export function ExtensionsPanel({
       </div>
 
       <GlassModal
-        open={chatcutInstallOpen}
+        open={!!recommendedInstall}
         onClose={() => {
-          if (actionBusy !== "install:chatcut") setChatcutInstallOpen(false);
+          const busy =
+            actionBusy === "install:chatcut" || actionBusy === "install:x-api";
+          if (!busy) setRecommendedInstall(null);
         }}
-        title={tr("ext.plugins.recommended.installTitle")}
+        title={
+          recommendedInstall === "x-api"
+            ? tr("ext.plugins.recommended.xApiInstallTitle")
+            : tr("ext.plugins.recommended.installTitle")
+        }
         size="sm"
         closeLabel={tr("common.close")}
         footer={
@@ -2702,18 +2913,29 @@ export function ExtensionsPanel({
             <button
               type="button"
               className="btn btn--ghost"
-              disabled={actionBusy === "install:chatcut"}
-              onClick={() => setChatcutInstallOpen(false)}
+              disabled={
+                actionBusy === "install:chatcut" ||
+                actionBusy === "install:x-api"
+              }
+              onClick={() => setRecommendedInstall(null)}
             >
               {tr("common.cancel")}
             </button>
             <button
               type="button"
               className="btn btn--solid"
-              disabled={actionBusy === "install:chatcut" || cliMissing}
-              onClick={() => void installChatCut()}
+              disabled={
+                actionBusy === "install:chatcut" ||
+                actionBusy === "install:x-api" ||
+                cliMissing ||
+                !recommendedInstall
+              }
+              onClick={() => {
+                if (recommendedInstall) void installRecommended(recommendedInstall);
+              }}
             >
-              {actionBusy === "install:chatcut"
+              {actionBusy === "install:chatcut" ||
+              actionBusy === "install:x-api"
                 ? tr("ext.plugins.installing")
                 : tr("ext.plugins.recommended.install")}
             </button>
@@ -2721,8 +2943,97 @@ export function ExtensionsPanel({
         }
       >
         <p className="app-dialog__msg">
-          {tr("ext.plugins.recommended.installConfirm", {
-            source: CHATCUT_CODEX_INSTALL_SOURCE,
+          {recommendedInstall === "x-api"
+            ? tr("ext.plugins.recommended.xApiInstallConfirm", {
+                source: X_API_INSTALL_SOURCE,
+              })
+            : tr("ext.plugins.recommended.installConfirm", {
+                source: CHATCUT_CODEX_INSTALL_SOURCE,
+              })}
+        </p>
+        <p className="ext-field-hint">{tr("ext.market.installTrustNote")}</p>
+      </GlassModal>
+
+      <PluginMcpAuthWizard
+        open={!!pluginAuthServer}
+        locale={locale}
+        serverName={pluginAuthServer ?? ""}
+        onClose={() => setPluginAuthServer(null)}
+        onChanged={(st) => {
+          setPluginAuthStatus((prev) => ({ ...prev, [st.server]: st }));
+        }}
+      />
+
+      <GlassModal
+        open={pathInstallOpen}
+        onClose={() => setPathInstallOpen(false)}
+        title={tr("ext.plugins.advancedInstall")}
+        size="lg"
+        closeLabel={tr("common.close")}
+        wrapBody
+        initialFocus={() => pathInstallInputRef.current}
+      >
+        <PluginPathInstallCard
+          locale={locale}
+          source={installSource}
+          onSourceChange={(next) => {
+            setInstallSource(next);
+            setPathInstallError(null);
+            setPathValidate(null);
+          }}
+          disabled={!!actionBusy || cliMissing}
+          installing={actionBusy === "install"}
+          validating={actionBusy === "validate-path"}
+          formError={pathInstallError}
+          validatePresentation={pathValidate}
+          kindLabels={pluginValidateKindLabels}
+          kindHints={pluginValidateKindHints}
+          onBrowse={() => void browsePluginFolder()}
+          onValidate={() => void validatePathInstall()}
+          onInstall={requestPathInstall}
+          inputRef={pathInstallInputRef}
+        />
+      </GlassModal>
+
+      <GlassModal
+        open={!!installConfirmSource}
+        onClose={() => {
+          if (actionBusy === "install") return;
+          setInstallConfirmSource(null);
+          setPathInstallOpen(true);
+        }}
+        title={tr("ext.plugins.installConfirmTitle")}
+        size="sm"
+        closeLabel={tr("common.close")}
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={actionBusy === "install"}
+              onClick={() => {
+                setInstallConfirmSource(null);
+                setPathInstallOpen(true);
+              }}
+            >
+              {tr("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn btn--solid"
+              disabled={actionBusy === "install" || cliMissing}
+              onClick={() => void confirmPathInstall()}
+            >
+              {actionBusy === "install"
+                ? tr("ext.plugins.installing")
+                : tr("ext.plugins.install")}
+            </button>
+          </>
+        }
+      >
+        <p className="app-dialog__msg">
+          {tr("ext.plugins.installConfirm", {
+            source: installConfirmSource ?? "",
           })}
         </p>
         <p className="ext-field-hint">{tr("ext.market.installTrustNote")}</p>
@@ -2965,13 +3276,22 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         wrapBody
         footer={
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={() => setSourcesModalOpen(false)}
-          >
-            {tr("common.close")}
-          </button>
+          <>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={openPathInstall}
+            >
+              {tr("ext.plugins.advancedInstall")}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => setSourcesModalOpen(false)}
+            >
+              {tr("common.close")}
+            </button>
+          </>
         }
       >
         <p className="ext-ref-block__lead" style={{ marginBottom: 12 }}>
@@ -3004,57 +3324,6 @@ export function ExtensionsPanel({
               void refresh({ forcePlugins: true });
             }}
           />
-        </div>
-        <div className="ext-ref-advanced" style={{ borderRadius: 12 }}>
-          <div style={{ padding: "12px 14px" }}>
-            <div className="ext-ref-block__title" style={{ marginBottom: 8 }}>
-              {tr("ext.plugins.advancedInstall")}
-            </div>
-            <div className="ext-plugin-install">
-              <label
-                className="ext-plugin-install__label"
-                htmlFor="ext-plugin-source-modal"
-              >
-                {tr("ext.plugins.installLabel")}
-              </label>
-              <div className="ext-plugin-install__row">
-                <input
-                  id="ext-plugin-source-modal"
-                  type="text"
-                  className="settings-input ext-plugin-install__input"
-                  value={installSource}
-                  placeholder={tr("ext.plugins.installPlaceholder")}
-                  disabled={!!actionBusy || cliMissing}
-                  autoComplete="off"
-                  spellCheck={false}
-                  onChange={(e) => setInstallSource(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void installPlugin();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn btn--solid btn--sm"
-                  disabled={
-                    !!actionBusy ||
-                    cliMissing ||
-                    !normalizePluginInstallSource(installSource)
-                  }
-                  onClick={() => void installPlugin()}
-                >
-                  {actionBusy === "install"
-                    ? tr("ext.plugins.installing")
-                    : tr("ext.plugins.install")}
-                </button>
-              </div>
-              <p className="ext-plugin-install__hint">
-                {tr("ext.plugins.installHint")}
-              </p>
-            </div>
-          </div>
         </div>
       </GlassModal>
 

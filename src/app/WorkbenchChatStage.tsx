@@ -452,6 +452,7 @@ export function WorkbenchChatStage(p: WorkbenchChatStageProps) {
             }
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={effectiveProjectPath}
+            sshAlias={activeProject?.sshAlias ?? null}
             suppressEmptyCopy={welcomeSession}
             journalLoading={journalPending}
             hasExistingSession={!!session.sessionId}

@@ -16,7 +16,9 @@ use crate::process_limits::{can_spawn_process, normalize_max_concurrent, process
 use crate::session_fsm::{SessionFsm, SessionState};
 use crate::store::{self};
 
-use super::fork_trim::{child_trim_plan, fork_trimmed_outcome, ChildTrimPlan};
+use super::fork_trim::{
+    apply_child_rewind_fail_safe, child_trim_plan, fork_trimmed_outcome, ChildTrimPlan,
+};
 use super::*;
 
 /// Drops `connect_lock` holder diagnostics when the lock guard goes out of
@@ -61,6 +63,7 @@ impl SessionManager {
         project_path: Option<String>,
         app_session_id: Option<String>,
         mock_mode: Option<String>,
+        ssh_alias: Option<String>,
     ) -> Result<SessionSnapshot, String> {
         // Enqueue is logged before `connect_lock` so a stuck holder still
         // leaves a trail. The 90s timer runs *inside* the sibling so dropping
@@ -97,8 +100,14 @@ impl SessionManager {
                         connect_gave_up_reason(false)
                     ));
                 }
-                mgr.connect_inner(app_task.clone(), project_path, sid.clone(), mock_mode)
-                    .await
+                mgr.connect_inner(
+                    app_task.clone(),
+                    project_path,
+                    sid.clone(),
+                    mock_mode,
+                    ssh_alias,
+                )
+                .await
             })
             .await
             {
@@ -244,6 +253,7 @@ impl SessionManager {
         project_path: Option<String>,
         app_session_id: Option<String>,
         mock_mode: Option<String>,
+        ssh_alias_explicit: Option<String>,
     ) -> Result<SessionSnapshot, String> {
         let settings = store::load_settings();
         let max_concurrent = normalize_max_concurrent(settings.max_concurrent_agents);
@@ -281,6 +291,29 @@ impl SessionManager {
             let _ = store::update_session_meta(&meta);
         }
 
+        let projects = store::load_projects();
+        let bound_alias = meta.project_id.as_deref().and_then(|pid| {
+            projects
+                .iter()
+                .find(|p| p.id == pid)
+                .and_then(|p| p.ssh_alias.as_deref())
+        });
+        let path_hint = project_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let path_alias = path_hint.and_then(|path| {
+            projects
+                .iter()
+                .find(|p| p.path == path)
+                .and_then(|p| p.ssh_alias.as_deref())
+        });
+        let ssh_alias = crate::ssh_remote::pick_ssh_alias(
+            ssh_alias_explicit.as_deref(),
+            bound_alias,
+            path_alias,
+        );
+
         // Resolve cwd: explicit path → session's project path → general workspace.
         // Never use process cwd (Dock-launched macOS apps often have cwd `/`).
         let cwd = {
@@ -293,10 +326,10 @@ impl SessionManager {
                 if pid == store::GENERAL_PROJECT_ID {
                     return None;
                 }
-                store::load_projects()
-                    .into_iter()
+                projects
+                    .iter()
                     .find(|p| p.id == pid)
-                    .map(|p| std::path::PathBuf::from(p.path))
+                    .map(|p| std::path::PathBuf::from(&p.path))
             });
             from_arg.or(from_meta).unwrap_or_else(|| {
                 let _ = store::ensure_general_workspace_dir();
@@ -304,6 +337,16 @@ impl SessionManager {
             })
         };
         let project_path = Some(cwd.to_string_lossy().to_string());
+        if meta.project_id.is_none() {
+            if let Some(alias) = ssh_alias.as_deref() {
+                if let Some(p) = projects.iter().find(|p| {
+                    p.ssh_alias.as_deref() == Some(alias) && p.path == cwd.to_string_lossy()
+                }) {
+                    meta.project_id = Some(p.id.clone());
+                    let _ = store::update_session_meta(&meta);
+                }
+            }
+        }
 
         tracing::info!(
             target: "session",
@@ -324,7 +367,16 @@ impl SessionManager {
         let prefs =
             store::resolve_composer_prefs(meta.project_id.as_deref(), Some(meta.id.as_str()));
         let policy = PermissionPolicy::parse(&prefs.permission_policy);
-        let agent_model = crate::providers::agent_spawn_model_id(&prefs.model_id);
+        let agent_model = if ssh_alias.is_some() {
+            let m = prefs.model_id.trim();
+            if m.is_empty() || crate::providers::is_custom_provider_id(m) {
+                crate::providers::OFFICIAL_CATALOG_MODEL.to_string()
+            } else {
+                m.to_string()
+            }
+        } else {
+            crate::providers::agent_spawn_model_id(&prefs.model_id)
+        };
 
         // Pending CLI --fork-session: must cold-spawn so open can call session/fork.
         // Never no-op / unpark a warm process that still holds the source agent id.
@@ -629,6 +681,7 @@ impl SessionManager {
                 pending_permission_tool_name: None,
                 pending_permission_ui: None,
                 pending_ask_user_rpc_id: None,
+                pending_ask_user_ui: None,
                 last_activity: now,
                 last_stream_progress: now,
                 last_stall_emit: None,
@@ -672,7 +725,12 @@ impl SessionManager {
         // attached to their owner; sharing an Arc across sessions lets
         // unstamped load replay and process-level kill paths corrupt or abort
         // a co-tenant.
-        if !pending_fork {
+        //
+        // #986: when the process OS sandbox is not `off`, spawn cwd is the
+        // Seatbelt/Landlock write root for the process lifetime. Prewarm
+        // always starts in `workspaces/general` — never reuse it for a
+        // project-bound session (open_session_at cannot widen the sandbox).
+        if !pending_fork && ssh_alias.is_none() {
             let eff_sandbox = {
                 let project_sandbox = meta.project_id.as_deref().and_then(|pid| {
                     store::load_projects()
@@ -768,7 +826,22 @@ impl SessionManager {
                         let mut pw = self.prewarm.lock();
                         match std::mem::replace(&mut *pw, PrewarmState::None) {
                             PrewarmState::Ready(p) => {
-                                if gate(
+                                let process_cwd = p.acp.cwd().to_string_lossy();
+                                let target_cwd = cwd.to_string_lossy();
+                                if !Self::reuse_sandbox_cwd_ok(
+                                    p.sandbox_profile.as_deref(),
+                                    process_cwd.as_ref(),
+                                    target_cwd.as_ref(),
+                                ) {
+                                    // Keep the general-workspace prewarm for a
+                                    // later unbound chat; only cold-spawn this
+                                    // project session (#986).
+                                    rejected.push(format!(
+                                        "prewarm: sandbox cwd {process_cwd}≠{target_cwd}"
+                                    ));
+                                    *pw = PrewarmState::Ready(p);
+                                    None
+                                } else if gate(
                                     p.acp.is_alive(),
                                     p.policy,
                                     p.effort.as_deref(),
@@ -997,17 +1070,18 @@ impl SessionManager {
 
         // Real ACP cold spawn (one process per App session — no cross-session rebind).
         // WSL backend probes inside the distro (a WSL-only install has no native grok.exe).
-        let probe = crate::wsl_backend::probe_cli_for_settings(
-            &settings,
-            settings.manual_cli_path.as_deref(),
-        );
-        if !probe.found {
+        // SSH: grok lives on the host — do not require a local binary.
+        // A remote path that is not a local directory must never hit local spawn
+        // (ENOENT was mislabeled CLI_NOT_FOUND).
+        if ssh_alias.is_none()
+            && !crate::ssh_remote::local_acp_cwd_ok(None, cwd.to_string_lossy().as_ref())
+        {
             {
                 let mut guard = self.inner.lock();
                 if let Some(s) = guard.as_mut() {
                     let _ = s.fsm.connect_failed(AgentError::new(
-                        AgentErrorCode::CliNotFound,
-                        "Grok Build CLI not found. Install Grok Build or set path in Settings.",
+                        AgentErrorCode::ConnectFailed,
+                        "This folder is not on this computer. Open it from the SSH host list.",
                     ));
                 }
             }
@@ -1015,8 +1089,29 @@ impl SessionManager {
             Self::emit_state(&app, &snap);
             return Ok(snap);
         }
-
-        let cli_path = std::path::PathBuf::from(probe.path.unwrap());
+        let cli_path = if ssh_alias.is_some() {
+            std::path::PathBuf::from("grok")
+        } else {
+            let probe = crate::wsl_backend::probe_cli_for_settings(
+                &settings,
+                settings.manual_cli_path.as_deref(),
+            );
+            if !probe.found {
+                {
+                    let mut guard = self.inner.lock();
+                    if let Some(s) = guard.as_mut() {
+                        let _ = s.fsm.connect_failed(AgentError::new(
+                            AgentErrorCode::CliNotFound,
+                            "Grok Build CLI not found. Install Grok Build or set path in Settings.",
+                        ));
+                    }
+                }
+                let snap = self.snapshot();
+                Self::emit_state(&app, &snap);
+                return Ok(snap);
+            }
+            std::path::PathBuf::from(probe.path.unwrap())
+        };
         // Effective sandbox: project override > app Settings (affects --sandbox / GROK_SANDBOX).
         let project_sandbox = meta.project_id.as_deref().and_then(|pid| {
             store::load_projects()
@@ -1043,13 +1138,24 @@ impl SessionManager {
                 .as_ref()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            plugin_dirs: meta.plugin_dirs.clone(),
-            extra_rules: crate::official_aux::merge_extra_rules(
+            plugin_dirs: if ssh_alias.is_some() {
+                Vec::new()
+            } else {
+                meta.plugin_dirs.clone()
+            },
+            extra_rules: if ssh_alias.is_some() {
                 meta.extra_rules
                     .as_ref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty()),
-            ),
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                crate::official_aux::merge_extra_rules(
+                    meta.extra_rules
+                        .as_ref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty()),
+                )
+            },
             max_agent_turns: meta.max_agent_turns,
             system_prompt_override: meta
                 .system_prompt_override
@@ -1060,6 +1166,7 @@ impl SessionManager {
             fork_session: fork_agent,
             grok_home_override: None,
             empty_mcp_servers: false,
+            ssh_alias: ssh_alias.clone(),
         };
 
         let cwd_str = cwd.to_string_lossy().to_string();
@@ -1175,9 +1282,16 @@ impl SessionManager {
 
                 match plan {
                     ChildTrimPlan::RewindChild { prompt_index } => {
-                        match client
-                            .rewind_execute_for(&agent_sid, prompt_index, false)
-                            .await
+                        // Post-open RPC, so it runs outside `with_handshake_budget`
+                        // while `connect_lock` is still held. Unbounded, it pinned
+                        // the lock for the handshake *plus* the rewind probe chain,
+                        // stalling every other chat's send/connect behind one fork.
+                        match Self::with_soft_rpc_budget(client.rewind_execute_for(
+                            &agent_sid,
+                            prompt_index,
+                            false,
+                        ))
+                        .await
                         {
                             Ok(_) => {
                                 rewind_ok = Some(true);
@@ -1197,9 +1311,31 @@ impl SessionManager {
                                     target: "session",
                                     session = %meta.id,
                                     agent = %agent_sid,
+                                    prompt_index,
                                     error = %e,
-                                    "child rewind failed; session/new + bootstrap (will not keep untrimmed fork)"
+                                    "child rewind failed; will not keep untrimmed fork"
                                 );
+                                let fail_safe =
+                                    apply_child_rewind_fail_safe(&meta.id, prompt_index);
+                                match &fail_safe {
+                                    Ok(fs) => tracing::info!(
+                                        target: "session",
+                                        session = %meta.id,
+                                        prompt_index,
+                                        before = fs.before_len,
+                                        after = fs.after_len,
+                                        persisted = fs.persisted,
+                                        need_bootstrap = fs.need_bootstrap,
+                                        "rewind-fail child journal re-cut before session/new"
+                                    ),
+                                    Err(trim_err) => tracing::warn!(
+                                        target: "session",
+                                        session = %meta.id,
+                                        prompt_index,
+                                        error = %trim_err,
+                                        "rewind-fail child journal re-cut failed; refusing bootstrap"
+                                    ),
+                                }
                                 match Self::with_handshake_budget(
                                     client.open_session_at(None, false, &cwd_str),
                                 )
@@ -1207,7 +1343,8 @@ impl SessionManager {
                                 {
                                     Ok((new_sid, _)) => {
                                         agent_sid = new_sid;
-                                        need_bootstrap = journal_has_history;
+                                        need_bootstrap =
+                                            fail_safe.map(|fs| fs.need_bootstrap).unwrap_or(false);
                                         skip_set_mode = false;
                                     }
                                     Err(new_err) => {
@@ -1450,6 +1587,7 @@ impl SessionManager {
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
+            pending_ask_user_ui: None,
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -1475,14 +1613,18 @@ impl SessionManager {
 
     /// Short event name for diagnostics (no payload — journals stay readable).
     /// Prewarm a CLI process while the user is composing a new chat: spawn +
-    /// initialize + auth only — NO session (the chat's project cwd is bound
-    /// later at `session/new` on submit). Connect reuses this process first,
-    /// so the first send in a new chat is near-instant.
+    /// initialize + auth only — NO session. Spawn cwd is always the App
+    /// default workspace (`workspaces/general`).
+    ///
+    /// Connect reuses this process only when process-level flags match **and**
+    /// (when OS sandbox ≠ `off`) the session cwd matches that spawn cwd.
+    /// Project-bound chats with `workspace` sandbox always cold-spawn so
+    /// Seatbelt/Landlock write roots cover the project (#986).
     ///
     /// Idempotent: skips when a prewarm already lives, or when any warm
     /// process already exists (parked / background covers connect). Uses the
     /// global/default channel prefs — if the submitted session differs in
-    /// policy/effort/sandbox/route, connect falls back to a cold spawn.
+    /// policy/effort/sandbox/route/cwd, connect falls back to a cold spawn.
     ///
     /// `force` kills any current prewarm first (detach uses it to swap in a
     /// fresh process whose CLI has no accumulated session actors, so the next
@@ -1579,9 +1721,9 @@ impl SessionManager {
         let prefs = store::resolve_composer_prefs(None, last_sid.as_deref());
         let policy = PermissionPolicy::parse(&prefs.permission_policy);
         let agent_model = crate::providers::agent_spawn_model_id(&prefs.model_id);
-        // Placeholder cwd — session cwd is a per-session parameter, so this
-        // never binds the upcoming chat to a project. Must exist for
-        // Command::current_dir (spawn fails silently otherwise).
+        // Default-workspace cwd only. Project sessions with a non-off OS
+        // sandbox must cold-spawn (#986) — Seatbelt locks write roots here.
+        // Must exist for Command::current_dir (spawn fails silently otherwise).
         let _ = store::ensure_general_workspace_dir();
         let cwd = crate::paths::general_workspace_dir();
         let effective_sandbox = store::resolve_sandbox_profile(&settings.sandbox_profile, None);
@@ -1706,6 +1848,9 @@ impl SessionManager {
     /// Sandbox: the CLI normalizes "off" to no `--sandbox` flag (stored as
     /// `None` on the client), while settings resolve to the string "off".
     /// Treat None as "off" so both representations match.
+    ///
+    /// Callers must also pass [`Self::reuse_sandbox_cwd_ok`] when the process
+    /// may have been spawned under a non-`off` OS sandbox (#986).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn reuse_gate(
         alive: bool,
@@ -1723,6 +1868,24 @@ impl SessionManager {
             && p_effort == Some(effort)
             && p_sandbox.unwrap_or("off") == sandbox
             && p_custom_route == target_custom_route
+    }
+
+    /// Whether warm-reuse is safe for OS sandbox vs spawn cwd (#986).
+    ///
+    /// `off` does not lock filesystem roots to spawn cwd, so a different
+    /// session cwd (via `session/new|load`) is fine. Any other profile
+    /// (workspace / read-only / strict / …) applies Seatbelt/Landlock at
+    /// process start — spawn cwd and target session cwd must match.
+    pub(super) fn reuse_sandbox_cwd_ok(
+        process_sandbox: Option<&str>,
+        process_spawn_cwd: &str,
+        target_cwd: &str,
+    ) -> bool {
+        let sandbox = process_sandbox.unwrap_or("off");
+        if sandbox == "off" {
+            return true;
+        }
+        crate::cli_sessions::cwd_paths_match(process_spawn_cwd, target_cwd)
     }
 
     pub(super) fn event_kind_name(ev: &AcpEvent) -> &'static str {
@@ -1974,6 +2137,7 @@ mod connect_preserve_tests {
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
+            pending_ask_user_ui: None,
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -2069,6 +2233,7 @@ mod connect_preserve_tests {
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
+            pending_ask_user_ui: None,
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -2194,6 +2359,48 @@ mod reuse_gate_tests {
             "high",
             "off",
             true,
+        ));
+    }
+
+    #[test]
+    fn reuse_sandbox_cwd_blocks_project_on_general_prewarm() {
+        // #986: workspace sandbox + prewarm(general) must not serve a project.
+        let general =
+            "/Users/me/Library/Application Support/com.grokapp.desktop/workspaces/general";
+        let project = "/Users/me/Projects/AI_conference";
+        assert!(
+            !SessionManager::reuse_sandbox_cwd_ok(Some("workspace"), general, project),
+            "workspace sandbox cannot widen from general to project"
+        );
+        assert!(
+            SessionManager::reuse_sandbox_cwd_ok(Some("workspace"), general, general),
+            "same general cwd stays reusable"
+        );
+        assert!(
+            SessionManager::reuse_sandbox_cwd_ok(
+                Some("workspace"),
+                project,
+                &format!("{project}/")
+            ),
+            "trailing slash still matches"
+        );
+        // off: Seatbelt not applied — session cwd may differ (open_session_at).
+        assert!(SessionManager::reuse_sandbox_cwd_ok(
+            Some("off"),
+            general,
+            project
+        ));
+        assert!(SessionManager::reuse_sandbox_cwd_ok(None, general, project));
+        // Other non-off profiles also lock spawn cwd.
+        assert!(!SessionManager::reuse_sandbox_cwd_ok(
+            Some("strict"),
+            general,
+            project
+        ));
+        assert!(!SessionManager::reuse_sandbox_cwd_ok(
+            Some("read-only"),
+            general,
+            project
         ));
     }
 

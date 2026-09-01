@@ -23,6 +23,8 @@ export interface Project {
   sandboxProfile?: string | null;
   /** Optional sidebar accent: token or #hex. Null/undefined → none. */
   color?: string | null;
+  /** When set, `path` is on this OpenSSH Host. */
+  sshAlias?: string | null;
 }
 
 /** Retired sidebar project id — sessions rehomed to orphan ("其他会话"). */

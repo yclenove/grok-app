@@ -102,6 +102,19 @@ describe("evaluateBatchProject", () => {
     ).toMatchObject({ reason: "empty_path" });
     expect(evaluateBatchProject(null)).toMatchObject({ reason: "empty_id" });
   });
+
+  it("accepts a trusted SSH remote even if local pathOk is false", () => {
+    expect(
+      evaluateBatchProject({
+        id: "ssh",
+        name: "UTS:work",
+        path: "/data/work",
+        trusted: true,
+        pathOk: false,
+        sshAlias: "UTS",
+      }),
+    ).toEqual({ ok: true, projectId: "ssh" });
+  });
 });
 
 describe("filterBatchProjects", () => {

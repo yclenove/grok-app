@@ -121,16 +121,22 @@ fn apply_cli_color_env(cmd: &mut CommandBuilder) {
 ///
 /// `session_id` from the client is **ignored** for identity — we always allocate
 /// a fresh UUID so remounts / Strict Mode cannot collide with a dying reader.
+///
+/// When `ssh_alias` is set, spawn `ssh -tt` (ControlMaster) instead of a local
+/// `$SHELL`. The remote path is not a local `std::fs` cwd.
 pub fn spawn(
     app: AppHandle,
     _session_id: Option<String>,
     project_path: Option<String>,
+    ssh_alias: Option<String>,
     cols: u16,
     rows: u16,
 ) -> Result<PtySpawnResult, String> {
     let sid = format!("pty_{}", Uuid::new_v4());
-    let shell = resolve_shell();
-    let cwd = resolve_cwd(project_path.as_deref());
+    let alias = ssh_alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let cols = cols.max(20);
     let rows = rows.max(5);
 
@@ -144,17 +150,45 @@ pub fn spawn(
         })
         .map_err(|e| format!("openpty: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(&shell);
-    let lower = shell.to_lowercase();
-    if !lower.contains("powershell") && !lower.ends_with("cmd.exe") {
-        // Login + interactive so user rc / oh-my-zsh load (PLAN).
-        cmd.arg("-l");
-        cmd.arg("-i");
-    }
-    cmd.cwd(&cwd);
+    let (shell, cwd, mut cmd) = if let Some(alias) = alias {
+        if !crate::ssh_remote::is_safe_ssh_alias(alias) {
+            return Err("invalid SSH host alias".into());
+        }
+        let remote_cwd = project_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let argv = crate::ssh_remote::ssh_pty_argv(alias, remote_cwd)?;
+        let mut cmd = CommandBuilder::new(&argv[0]);
+        for a in argv.iter().skip(1) {
+            cmd.arg(a);
+        }
+        // GUI Windows processes often have USERPROFILE but no HOME. Git's
+        // OpenSSH reads ~/.ssh/config from HOME.
+        let home = crate::process_util::user_home();
+        if !home.as_os_str().is_empty() && home != *std::path::Path::new(".") {
+            cmd.env("HOME", home.as_os_str());
+        }
+        if let Some(path) = crate::process_util::enriched_path_env() {
+            cmd.env("PATH", path);
+        }
+        let cwd = remote_cwd.unwrap_or("").to_string();
+        (format!("ssh {alias}"), cwd, cmd)
+    } else {
+        let shell = resolve_shell();
+        let cwd = resolve_cwd(project_path.as_deref());
+        let mut cmd = CommandBuilder::new(&shell);
+        let lower = shell.to_lowercase();
+        if !lower.contains("powershell") && !lower.ends_with("cmd.exe") {
+            // Login + interactive so user rc / oh-my-zsh load (PLAN).
+            cmd.arg("-l");
+            cmd.arg("-i");
+        }
+        cmd.cwd(&cwd);
+        cmd.env("SHELL", &shell);
+        (shell, cwd, cmd)
+    };
     apply_interactive_term_env(&mut cmd);
-    // Avoid shells treating the session as non-interactive in edge cases.
-    cmd.env("SHELL", &shell);
     // UTF-8 locale so multi-byte / OMZ glyphs render correctly.
     let lang = std::env::var("LANG")
         .ok()

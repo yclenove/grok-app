@@ -22,6 +22,8 @@ import {
 import {
   STICK_ESCAPE_MIN_DELTA_PX,
   STICK_ESCAPE_WHEEL_DELTA,
+  STICK_BOTTOM_REBOUND_INTENT_MS,
+  STICK_BOTTOM_REBOUND_SETTLE_MS,
   STICK_OPEN_FOLLOW_MS,
   STICK_TO_BOTTOM_THRESHOLD_PX,
   bottomScrollTop,
@@ -31,9 +33,14 @@ import {
   isNearBottom,
   nextStickPinState,
   pinnedFollowDelayForLayout,
+  isStickViewportUnreliable,
   shouldClampPinnedOverscroll,
   shouldClampPinnedStreamDrift,
   shouldEscapePinnedScroll,
+  shouldIgnoreProgrammaticStickLeave,
+  shouldPreventPinnedBottomWheel,
+  shouldRestorePinnedFollowOnViewportReady,
+  shouldSettleBottomRebound,
   takeProgrammaticStickScroll,
 } from "@/lib/stickToBottom";
 
@@ -62,6 +69,13 @@ export type UseStickToBottomResult = {
   subscribeShowBack: (cb: (val: boolean) => void) => () => void;
 };
 
+function stickNowMs(): number {
+  return typeof performance !== "undefined" &&
+    typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
 export function useStickToBottom(
   options: UseStickToBottomOptions = {},
 ): UseStickToBottomResult {
@@ -87,6 +101,8 @@ export function useStickToBottom(
    * final scroll event has no positive delta.
    */
   const userIntentDownRef = useRef(false);
+  /** Recent real wheel/touch intent toward the tail; survives elastic rebound. */
+  const bottomIntentUntilRef = useRef(0);
   const lastScrollTopRef = useRef(0);
   /** scrollTop we just wrote — used to ignore synthetic scroll events. */
   const ignoreScrollTopRef = useRef<number | undefined>(undefined);
@@ -107,6 +123,7 @@ export function useStickToBottom(
     escapedRef.current = false;
     isPinnedRef.current = true;
     userIntentDownRef.current = false;
+    bottomIntentUntilRef.current = 0;
     lastScrollTopRef.current = 0;
     const now =
       typeof performance !== "undefined" && typeof performance.now === "function"
@@ -208,6 +225,14 @@ export function useStickToBottom(
     if (!isPinnedRef.current || !enabledRef.current) return;
     const el = viewportRef.current;
     if (!el) return;
+    if (
+      isStickViewportUnreliable({
+        clientHeight: el.clientHeight,
+        hidden: typeof document !== "undefined" && document.hidden,
+      })
+    ) {
+      return;
+    }
     applyScrollTop(bottomScrollTop(el.scrollHeight, el.clientHeight));
   }, [applyScrollTop]);
 
@@ -223,20 +248,96 @@ export function useStickToBottom(
     const el = viewportRef.current;
     if (!el) return;
 
+    let bottomReboundTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearBottomRebound = () => {
+      bottomIntentUntilRef.current = 0;
+      if (bottomReboundTimer != null) {
+        clearTimeout(bottomReboundTimer);
+        bottomReboundTimer = null;
+      }
+    };
+    const armBottomIntent = () => {
+      bottomIntentUntilRef.current =
+        stickNowMs() + STICK_BOTTOM_REBOUND_INTENT_MS;
+    };
+    const scheduleBottomReboundSettle = () => {
+      if (bottomReboundTimer != null) clearTimeout(bottomReboundTimer);
+      bottomReboundTimer = setTimeout(() => {
+        bottomReboundTimer = null;
+        const v = viewportRef.current;
+        if (!v || stickNowMs() > bottomIntentUntilRef.current) return;
+        if (
+          !isNearBottom(
+            v.scrollTop,
+            v.scrollHeight,
+            v.clientHeight,
+            thresholdRef.current,
+          )
+        ) {
+          return;
+        }
+        escapedRef.current = false;
+        isPinnedRef.current = true;
+        userIntentDownRef.current = false;
+        bottomIntentUntilRef.current = 0;
+        applyScrollTop(bottomScrollTop(v.scrollHeight, v.clientHeight));
+        syncShowBack();
+      }, STICK_BOTTOM_REBOUND_SETTLE_MS);
+    };
+
     const handleScroll = () => {
       const scrollTop = el.scrollTop;
+      if (
+        isStickViewportUnreliable({
+          clientHeight: el.clientHeight,
+          hidden: typeof document !== "undefined" && document.hidden,
+        })
+      ) {
+        lastScrollTopRef.current = scrollTop;
+        ignoreScrollTopRef.current = undefined;
+        return;
+      }
       let lastScrollTop = lastScrollTopRef.current;
       const ignore =
         ignoreScrollTopRef.current ?? takeProgrammaticStickScroll(el);
       lastScrollTopRef.current = scrollTop;
       ignoreScrollTopRef.current = undefined;
 
-      // Programmatic follow can interleave with a user scroll-up in one event.
-      if (ignore != null && ignore > scrollTop) {
-        lastScrollTop = ignore;
+      // Follow / virtual pin-snap wrote scrollTop. That is not a user leave.
+      // Using ignore as previousScrollTop used to invent a 10px+ "scroll-up"
+      // and drop pin for the rest of the stream.
+      if (shouldIgnoreProgrammaticStickLeave(ignore)) {
+        if (
+          isPinnedRef.current &&
+          !escapedRef.current &&
+          shouldClampPinnedOverscroll(
+            scrollTop,
+            bottomScrollTop(el.scrollHeight, el.clientHeight),
+          )
+        ) {
+          applyScrollTop(bottomScrollTop(el.scrollHeight, el.clientHeight));
+        }
+        return;
       }
 
       const maxTop = bottomScrollTop(el.scrollHeight, el.clientHeight);
+      const isMovingUp = scrollTop < lastScrollTop - 0.5;
+      const bottomRebound = shouldSettleBottomRebound({
+        downIntentActive: stickNowMs() <= bottomIntentUntilRef.current,
+        scrollTop,
+        previousScrollTop: lastScrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        thresholdPx: thresholdRef.current,
+      });
+      if (bottomRebound) {
+        if (scrollDebounceTimerRef.current != null) {
+          clearTimeout(scrollDebounceTimerRef.current);
+          scrollDebounceTimerRef.current = null;
+        }
+        scheduleBottomReboundSettle();
+        return;
+      }
       // Default 10px event + slow-trackpad accumulation from the locked
       // bottom. Never use a sub-pixel minDelta: thinking / tool collapse and
       // the next body round routinely move 2–8px off hard bottom, and that
@@ -249,7 +350,6 @@ export function useStickToBottom(
         scrollHeight: el.scrollHeight,
         clientHeight: el.clientHeight,
       });
-      const isMovingUp = scrollTop < lastScrollTop - 0.5;
       const meaningfulDown =
         scrollTop - lastScrollTop >= STICK_ESCAPE_MIN_DELTA_PX;
 
@@ -345,6 +445,23 @@ export function useStickToBottom(
     };
 
     const handleWheel = (e: WheelEvent) => {
+      if (
+        shouldPreventPinnedBottomWheel({
+          pinned: isPinnedRef.current,
+          escaped: escapedRef.current,
+          deltaY: e.deltaY,
+          scrollTop: el.scrollTop,
+          scrollHeight: el.scrollHeight,
+          clientHeight: el.clientHeight,
+        })
+      ) {
+        // Still a downward intent: WebView may rubber-band anyway, and the
+        // composer can grow during settle. Arm rebound snap to the new max.
+        armBottomIntent();
+        userIntentDownRef.current = true;
+        e.preventDefault();
+        return;
+      }
       // Small ticks at the locked bottom (trackpad / elastic) — stay pinned.
       if (
         isPinnedRef.current &&
@@ -359,6 +476,7 @@ export function useStickToBottom(
         e.deltaY <= -STICK_ESCAPE_WHEEL_DELTA &&
         el.scrollHeight > el.clientHeight
       ) {
+        clearBottomRebound();
         userIntentDownRef.current = false;
         if (isPinnedRef.current) {
           escapedRef.current = true;
@@ -370,6 +488,7 @@ export function useStickToBottom(
       // deltaY > 0 → scrolling toward latest. Mark intent so a no-delta
       // hard-bottom landing (max scrollTop) still re-pins.
       if (e.deltaY >= STICK_ESCAPE_WHEEL_DELTA) {
+        armBottomIntent();
         userIntentDownRef.current = true;
         if (escapedRef.current) {
           requestAnimationFrame(() => {
@@ -405,6 +524,7 @@ export function useStickToBottom(
       // Require a clear drag so a light touch at the locked bottom does not
       // unstick and then snap back (bounce + flash).
       if (dy > STICK_ESCAPE_MIN_DELTA_PX) {
+        clearBottomRebound();
         userIntentDownRef.current = false;
         if (isPinnedRef.current) {
           escapedRef.current = true;
@@ -413,6 +533,7 @@ export function useStickToBottom(
         }
       } else if (dy < -STICK_ESCAPE_MIN_DELTA_PX) {
         // Finger moves up → content moves down (toward latest)
+        armBottomIntent();
         userIntentDownRef.current = true;
       }
       touchY = y;
@@ -435,7 +556,10 @@ export function useStickToBottom(
     };
 
     el.addEventListener("scroll", handleScroll, { passive: true });
-    el.addEventListener("wheel", handleWheel, { passive: true });
+    // Non-passive: at the locked bottom we preventDefault downward
+    // overscroll so WKWebView cannot rubber-band the last lines under
+    // the floating composer. Scroll-up is never blocked.
+    el.addEventListener("wheel", handleWheel, { passive: false });
     el.addEventListener("touchstart", onTouchStart, { passive: true });
     el.addEventListener("touchmove", onTouchMove, { passive: true });
     el.addEventListener("touchend", onTouchEnd, { passive: true });
@@ -453,6 +577,10 @@ export function useStickToBottom(
       if (scrollDebounceTimerRef.current != null) {
         clearTimeout(scrollDebounceTimerRef.current);
         scrollDebounceTimerRef.current = null;
+      }
+      if (bottomReboundTimer != null) {
+        clearTimeout(bottomReboundTimer);
+        bottomReboundTimer = null;
       }
     };
   }, [enabled, conversationKey, syncShowBack, applyScrollTop]);
@@ -515,6 +643,15 @@ export function useStickToBottom(
     let mediaFollowTimer: ReturnType<typeof setTimeout> | null = null;
 
     const onHeightChange = (height: number) => {
+      if (
+        isStickViewportUnreliable({
+          clientHeight: el.clientHeight,
+          hidden: typeof document !== "undefined" && document.hidden,
+        })
+      ) {
+        previousHeight = height;
+        return;
+      }
       const widthMoved = viewportWidthChanged;
       viewportWidthChanged = false;
       const difference = height - (previousHeight ?? height);
@@ -663,10 +800,49 @@ export function useStickToBottom(
     // Viewport size changes (window / stage chrome) also need a re-follow.
     ro.observe(el);
 
+    let viewportWasUnreliable =
+      typeof document !== "undefined" &&
+      isStickViewportUnreliable({
+        clientHeight: el.clientHeight,
+        hidden: document.hidden,
+      });
+
+    const restoreAfterOcclusion = () => {
+      const v = viewportRef.current;
+      if (!v) return;
+      const hidden = typeof document !== "undefined" && document.hidden;
+      const unreliable = isStickViewportUnreliable({
+        clientHeight: v.clientHeight,
+        hidden,
+      });
+      if (
+        shouldRestorePinnedFollowOnViewportReady({
+          pinned: isPinnedRef.current,
+          escaped: escapedRef.current,
+          viewportWasUnreliable,
+          viewportIsReliable: !unreliable,
+        })
+      ) {
+        applyScrollTop(bottomScrollTop(v.scrollHeight, v.clientHeight));
+        lastScrollTopRef.current = v.scrollTop;
+      }
+      viewportWasUnreliable = unreliable;
+    };
+
+    const onVisibility = () => {
+      restoreAfterOcclusion();
+      requestAnimationFrame(restoreAfterOcclusion);
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onVisibility);
+
     return () => {
       if (raf) cancelAnimationFrame(raf);
       if (mediaFollowTimer != null) clearTimeout(mediaFollowTimer);
       ro.disconnect();
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onVisibility);
     };
   }, [enabled, conversationKey, applyScrollTop, followIfPinned]);
 

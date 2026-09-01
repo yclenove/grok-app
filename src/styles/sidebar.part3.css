@@ -702,6 +702,10 @@
   justify-content: space-between;
 }
 
+.ssh-remote-rail {
+  padding: 4px 0 8px;
+}
+
 .project-block {
   margin-bottom: 2px;
 }
@@ -811,6 +815,10 @@ html[data-sidebar-density="compact"] .tree-l3 {
   gap: 4px;
   padding: 0 4px 0 10px;
   font-size: 12px;
+}
+
+html[data-sidebar-density="compact"] .tree-l3.tree-l3--nested {
+  padding-left: 24px;
 }
 
 html[data-sidebar-density="compact"] .tree-l3__title {

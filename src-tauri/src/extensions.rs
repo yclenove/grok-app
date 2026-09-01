@@ -723,6 +723,7 @@ pub fn list_mcp_server_defs(project_cwd: Option<&str>) -> Vec<McpServerDef> {
     if defs.is_empty() {
         defs = fetch_mcp_from_inspect(project_cwd);
     }
+    defs = crate::plugin_mcp::merge_plugin_mcp_defs(defs);
 
     if let Ok(mut guard) = MCP_CACHE.lock() {
         *guard = Some(McpCache {
@@ -1328,8 +1329,11 @@ pub fn build_session_mcp_servers_with_opts(
         let prefs = load_prefs();
         let defs = if opts.config_only {
             // Fast path: no `grok mcp list` / version probe (connect).
+            // Still merge installed-plugin `.mcp.json` (filesystem, no CLI).
             let settings = store::load_settings();
-            load_mcp_defs_from_configs(&settings.session_data_mode)
+            crate::plugin_mcp::merge_plugin_mcp_defs(load_mcp_defs_from_configs(
+                &settings.session_data_mode,
+            ))
         } else {
             list_mcp_server_defs(project_cwd)
         };

@@ -115,6 +115,9 @@ pub struct Project {
     /// `None` → no color accent (migration-safe default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// When set, `path` is on this OpenSSH Host, not the local disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_alias: Option<String>,
 }
 
 impl Project {
@@ -122,6 +125,115 @@ impl Project {
     pub fn is_legacy_general(&self) -> bool {
         self.id == GENERAL_PROJECT_ID || self.system
     }
+
+    /// `path` lives on this OpenSSH Host — never a local `is_dir` check.
+    pub fn is_ssh_remote(&self) -> bool {
+        ssh_alias_of(self).is_some()
+    }
+}
+
+fn ssh_alias_of(p: &Project) -> Option<&str> {
+    p.ssh_alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && crate::ssh_remote::is_safe_ssh_alias(s))
+}
+
+/// `add_ssh_project` names rows `{alias}:{path_basename}` with a POSIX cwd.
+/// Used to repair rows that lost `ssh_alias` and were then marked path-missing.
+pub(crate) fn infer_ssh_alias_from_name(name: &str, path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || !path.starts_with('/') {
+        return None;
+    }
+    let (alias, rest) = name.split_once(':')?;
+    let alias = alias.trim();
+    if !crate::ssh_remote::is_safe_ssh_alias(alias) {
+        return None;
+    }
+    let base = Path::new(path).file_name()?.to_string_lossy();
+    if rest.trim() != base.as_ref() {
+        return None;
+    }
+    Some(alias.to_string())
+}
+
+fn apply_ssh_path_health(list: &mut [Project]) -> bool {
+    let mut dirty = false;
+    for p in list {
+        if ssh_alias_of(p).is_some() {
+            if !p.path_ok {
+                p.path_ok = true;
+                dirty = true;
+            }
+            continue;
+        }
+        if PathBuf::from(&p.path).is_dir() {
+            p.path_ok = true;
+            continue;
+        }
+        if let Some(alias) = infer_ssh_alias_from_name(&p.name, &p.path) {
+            p.ssh_alias = Some(alias);
+            p.path_ok = true;
+            dirty = true;
+            continue;
+        }
+        p.path_ok = false;
+    }
+    dirty
+}
+
+fn rehome_sessions_project_id(from_id: &str, to_id: &str) {
+    if from_id == to_id {
+        return;
+    }
+    let _ = update_sessions_index(|sessions| {
+        for s in sessions {
+            if s.project_id.as_deref() == Some(from_id) {
+                s.project_id = Some(to_id.to_string());
+            }
+        }
+        Ok(())
+    });
+}
+
+/// Same OpenSSH alias + remote cwd must be one sidebar folder.
+fn dedup_ssh_projects_by_alias_path(list: &mut Vec<Project>) -> bool {
+    use std::collections::{HashMap, HashSet};
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, p) in list.iter().enumerate() {
+        let Some(alias) = ssh_alias_of(p) else {
+            continue;
+        };
+        groups
+            .entry((alias.to_string(), p.path.clone()))
+            .or_default()
+            .push(i);
+    }
+    let mut drop_ids = HashSet::new();
+    for idxs in groups.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let winner = idxs
+            .iter()
+            .copied()
+            .max_by_key(|&i| list[i].last_opened_at)
+            .expect("non-empty group");
+        let winner_id = list[winner].id.clone();
+        for &i in idxs {
+            if i == winner {
+                continue;
+            }
+            rehome_sessions_project_id(&list[i].id, &winner_id);
+            drop_ids.insert(list[i].id.clone());
+        }
+    }
+    if drop_ids.is_empty() {
+        return false;
+    }
+    list.retain(|p| !drop_ids.contains(&p.id));
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +571,10 @@ pub struct AppSettings {
     /// process (`--no-leader`). Advanced; multiple clients can share one backend.
     #[serde(default)]
     pub use_leader: bool,
+    /// OpenSSH Host aliases with watch enabled: keep a ControlMaster and
+    /// scan remote Grok sessions. Empty = none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_watch_aliases: Vec<String>,
     /// xAI realtime voice id (e.g. `eve`).
     #[serde(default = "default_voice_id")]
     pub voice_id: String,
@@ -785,6 +901,7 @@ impl Default for AppSettings {
             agent_profile_path: String::new(),
             agents_json: String::new(),
             use_leader: false,
+            ssh_watch_aliases: Vec::new(),
             voice_id: default_voice_id(),
             voice_dictation_auto_send: false,
             voice_keep_agents_on_end: true,
@@ -1273,11 +1390,17 @@ pub fn load_projects() -> Vec<Project> {
     // One-shot migration: drop the temporary system:general project row and
     // rehome its sessions to orphan (`project_id = None`) under "其他会话".
     migrate_legacy_general_project(&mut list);
-    for p in &mut list {
-        p.path_ok = PathBuf::from(&p.path).is_dir();
-    }
+    let mut dirty = apply_ssh_path_health(&mut list);
+    dirty |= dedup_ssh_projects_by_alias_path(&mut list);
     // Pin group first; keep manual order within each group (no last_opened sort).
     apply_project_pin_partition(&mut list);
+    if dirty {
+        // Persist repaired ssh_alias / merged duplicates. Nested load via
+        // path_scope is a no-op once the file already has the alias.
+        if let Err(e) = save_projects(&list) {
+            tracing::warn!("repair ssh project rows: {e}");
+        }
+    }
     list
 }
 
@@ -1363,8 +1486,72 @@ pub fn add_project(path: String, trust: bool) -> Result<Project, String> {
         permission_policy: None,
         sandbox_profile: None,
         color: None,
+        ssh_alias: None,
     };
     // New projects land at the end of the unpinned group (after pin partition).
+    list.push(p.clone());
+    apply_project_pin_partition(&mut list);
+    save_projects(&list)?;
+    Ok(p)
+}
+
+/// Register a remote OpenSSH folder as a project. `path` is the remote cwd.
+pub fn add_ssh_project(alias: &str, path: String, trust: bool) -> Result<Project, String> {
+    if !crate::ssh_remote::is_safe_ssh_alias(alias) {
+        return Err("invalid SSH alias".into());
+    }
+    let path = path.trim().to_string();
+    if path.is_empty() || path.contains('\0') {
+        return Err("invalid remote path".into());
+    }
+    let name = PathBuf::from(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path.clone());
+    let label = format!("{alias}:{name}");
+    let mut list = load_projects();
+    if let Some(existing) = list
+        .iter_mut()
+        .find(|p| ssh_alias_of(p) == Some(alias) && p.path == path)
+    {
+        existing.trusted = trust || existing.trusted;
+        existing.last_opened_at = Utc::now();
+        existing.path_ok = true;
+        let clone = existing.clone();
+        save_projects(&list)?;
+        return Ok(clone);
+    }
+    // Same remote cwd, alias dropped (older builds) — restore instead of duplicating.
+    if let Some(existing) = list
+        .iter_mut()
+        .find(|p| p.path == path && ssh_alias_of(p).is_none())
+    {
+        existing.ssh_alias = Some(alias.to_string());
+        existing.trusted = trust || existing.trusted;
+        existing.last_opened_at = Utc::now();
+        existing.path_ok = true;
+        let clone = existing.clone();
+        save_projects(&list)?;
+        return Ok(clone);
+    }
+    let p = Project {
+        id: Uuid::new_v4().to_string(),
+        name: label,
+        path,
+        trusted: trust,
+        last_opened_at: Utc::now(),
+        path_ok: true,
+        pinned: false,
+        system: false,
+        model_id: None,
+        effort: None,
+        mode: None,
+        permission_policy: None,
+        sandbox_profile: None,
+        color: None,
+        ssh_alias: Some(alias.to_string()),
+    };
     list.push(p.clone());
     apply_project_pin_partition(&mut list);
     save_projects(&list)?;
@@ -2100,7 +2287,7 @@ fn validate_move_target(pid: &Option<String>) -> Result<(), String> {
         if !proj.trusted {
             return Err("session_move_untrusted".into());
         }
-        if !proj.path_ok {
+        if !proj.path_ok && !proj.is_ssh_remote() {
             return Err("session_move_path_missing".into());
         }
     } else {
@@ -2345,6 +2532,35 @@ pub fn truncate_through_user_prompt(
     Ok(messages[..end].to_vec())
 }
 
+/// Re-cut a child journal to `through_user_prompt_index` if it grew past the cut.
+///
+/// Partial-fork children can be inflated back to the parent transcript (for
+/// example by a linked reconcile). After a failed child rewind, call this
+/// before `session/new` / history bootstrap so the new agent cannot ingest the
+/// untrimmed copy. Read, truncate, and optional persist share the messages-path
+/// exclusive lock so a concurrent append cannot sneak in and then be dropped.
+/// Persists only when the stored journal is longer than the intended cut.
+///
+/// Returns `(before_len, after_len, persisted)`.
+pub fn retruncate_child_journal_to_cut(
+    session_id: &str,
+    through_user_prompt_index: u32,
+) -> Result<(usize, usize, bool), String> {
+    let path = session_dir(session_id).join("messages.json");
+    crate::store_lock::with_exclusive_lock(&path, || {
+        let msgs: Vec<ChatMessageStored> = read_json_recover(&path);
+        let before_len = msgs.len();
+        let truncated = truncate_through_user_prompt(&msgs, through_user_prompt_index)?;
+        let after_len = truncated.len();
+        if after_len < before_len {
+            write_messages_locked(&path, &truncated)?;
+            Ok((before_len, after_len, true))
+        } else {
+            Ok((before_len, after_len, false))
+        }
+    })
+}
+
 /// Count real user prompts (excludes mid-turn `interjection` markers).
 pub fn user_prompt_count(messages: &[ChatMessageStored]) -> u32 {
     messages
@@ -2490,12 +2706,6 @@ pub fn set_session_fork_agent_session(
         s.updated_at = Utc::now();
         Ok(s.clone())
     })
-}
-
-/// Clear the one-shot fork flag after a connect attempt (success or fallthrough).
-#[cfg(test)]
-pub fn clear_session_fork_agent_session(id: &str) -> Result<SessionMeta, String> {
-    set_session_fork_agent_session(id, false)
 }
 
 /// After a failed connect, drop the one-shot fork flags.
@@ -4112,6 +4322,90 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    fn eight_turn_parent_msgs() -> Vec<ChatMessageStored> {
+        (1u32..=8)
+            .flat_map(|i| {
+                [
+                    stored_msg(&format!("u{i}"), "user", &format!("q{i}"), None),
+                    stored_msg(&format!("a{i}"), "assistant", &format!("a{i}"), None),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retruncate_child_journal_to_cut_persists_inflated_partial_fork() {
+        let _g = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-retruncate-inflated-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("tmp home");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let _ = ensure_app_dirs();
+
+        let mut src = create_session(None, Some("src".into()), false).expect("create");
+        src.agent_session_id = Some("agent-parent".into());
+        update_session_meta(&src).expect("meta");
+        let parent_msgs = eight_turn_parent_msgs();
+        save_messages(&src.id, &parent_msgs).expect("msgs");
+
+        let child = fork_session(&src.id, Some(4), None, true).expect("partial");
+        assert_eq!(load_messages(&child.id).len(), 10);
+        replace_messages(&child.id, &parent_msgs).expect("inflate");
+        assert_eq!(load_messages(&child.id).len(), 16);
+
+        let (before, after, persisted) =
+            retruncate_child_journal_to_cut(&child.id, 4).expect("retruncate");
+        assert_eq!(before, 16);
+        assert_eq!(after, 10, "through fifth turn only");
+        assert!(persisted);
+        let kept = load_messages(&child.id);
+        assert_eq!(kept.len(), 10);
+        assert_eq!(kept.last().map(|m| m.content.as_str()), Some("a5"));
+        assert_eq!(load_messages(&src.id).len(), 16, "parent journal unchanged");
+
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn retruncate_child_journal_to_cut_skips_unchanged_partial_fork() {
+        let _g = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-retruncate-unchanged-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("tmp home");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let _ = ensure_app_dirs();
+
+        let mut src = create_session(None, Some("src".into()), false).expect("create");
+        src.agent_session_id = Some("agent-parent".into());
+        update_session_meta(&src).expect("meta");
+        save_messages(&src.id, &eight_turn_parent_msgs()).expect("msgs");
+        let child = fork_session(&src.id, Some(4), None, true).expect("partial");
+        assert_eq!(load_messages(&child.id).len(), 10);
+
+        let (before, after, persisted) =
+            retruncate_child_journal_to_cut(&child.id, 4).expect("retruncate");
+        assert_eq!(before, 10);
+        assert_eq!(after, 10);
+        assert!(!persisted);
+        assert_eq!(load_messages(&child.id).len(), 10);
+
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn clear_fork_oneshots_clears_rewind_index() {
         let _g = crate::paths::APP_HOME_ENV_LOCK
@@ -4140,7 +4434,7 @@ mod tests {
         .expect("msgs");
         let child = fork_session(&src.id, Some(0), None, true).expect("partial");
         assert_eq!(child.fork_rewind_prompt_index, Some(0));
-        let cleared = clear_session_fork_agent_session(&child.id).expect("clear");
+        let cleared = set_session_fork_agent_session(&child.id, false).expect("clear");
         assert!(!cleared.fork_agent_session);
         assert_eq!(cleared.fork_rewind_prompt_index, None);
         assert_eq!(cleared.agent_session_id.as_deref(), Some("agent-parent"));
@@ -4292,6 +4586,7 @@ mod tests {
             permission_policy: None,
             sandbox_profile: None,
             color: None,
+            ssh_alias: None,
         });
         write_json(&projects_file(), &projects).expect("seed projects");
         let mut sessions: Vec<SessionMeta> = read_json_recover(&sessions_index_file());
@@ -4372,6 +4667,7 @@ mod tests {
             permission_policy: None,
             sandbox_profile: None,
             color: None,
+            ssh_alias: None,
         }
     }
 
@@ -4954,6 +5250,115 @@ mod tests {
         );
 
         let _ = delete_session(&meta.id);
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn infer_ssh_alias_from_add_ssh_name() {
+        assert_eq!(
+            infer_ssh_alias_from_name("UTS:2026-07-25-ICLR", "/data/pengqlu/code/2026-07-25-ICLR",),
+            Some("UTS".into())
+        );
+        assert_eq!(
+            infer_ssh_alias_from_name("UTS:pengqlu", "/home/pengqlu"),
+            Some("UTS".into())
+        );
+        assert_eq!(
+            infer_ssh_alias_from_name("UTS:other", "/data/pengqlu/code/2026-07-25-ICLR"),
+            None
+        );
+        assert_eq!(infer_ssh_alias_from_name("UTS:foo", "foo"), None);
+        assert_eq!(infer_ssh_alias_from_name("*:foo", "/data/foo"), None);
+    }
+
+    #[test]
+    fn load_projects_repairs_ssh_alias_and_merges_duplicates() {
+        let _g = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-ssh-repair-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("tmp home");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let _ = ensure_app_dirs();
+
+        let older = Utc.with_ymd_and_hms(2026, 8, 24, 11, 0, 0).unwrap();
+        let newer = Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap();
+        let remote = "/data/pengqlu/code/2026-07-25-ICLR";
+        let mut stale = sample_project("stale-ssh", false, older);
+        stale.name = "UTS:2026-07-25-ICLR".into();
+        stale.path = remote.into();
+        stale.path_ok = false;
+        stale.ssh_alias = None;
+        let mut good = sample_project("good-ssh", false, newer);
+        good.name = "UTS:2026-07-25-ICLR".into();
+        good.path = remote.into();
+        good.path_ok = true;
+        good.ssh_alias = Some("UTS".into());
+        write_json(&projects_file(), &vec![stale.clone(), good.clone()]).expect("seed");
+
+        let mut sess = sample_session("bound-stale", false, older);
+        sess.project_id = Some(stale.id.clone());
+        write_json(&sessions_index_file(), &vec![sess]).expect("seed sessions");
+
+        let listed = load_projects();
+        let hits: Vec<&Project> = listed.iter().filter(|p| p.path == remote).collect();
+        assert_eq!(hits.len(), 1, "duplicate remote folders merged");
+        assert_eq!(hits[0].ssh_alias.as_deref(), Some("UTS"));
+        assert!(hits[0].path_ok, "remote path is not local-missing");
+        assert_eq!(hits[0].id, good.id);
+
+        let reloaded = load_sessions_index();
+        let hit = reloaded
+            .iter()
+            .find(|s| s.id == "bound-stale")
+            .expect("sess");
+        assert_eq!(hit.project_id.as_deref(), Some(good.id.as_str()));
+
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn add_ssh_project_rebinds_same_path_without_alias() {
+        let _g = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-ssh-rebind-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("tmp home");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let _ = ensure_app_dirs();
+
+        let mut orphan = sample_project("orphan-ssh", false, Utc::now());
+        orphan.name = "my remote".into();
+        orphan.path = "/data/pengqlu/work".into();
+        orphan.path_ok = false;
+        orphan.ssh_alias = None;
+        write_json(&projects_file(), &vec![orphan.clone()]).expect("seed");
+
+        let added = add_ssh_project("UTS", "/data/pengqlu/work".into(), true).expect("add");
+        assert_eq!(added.id, orphan.id);
+        assert_eq!(added.ssh_alias.as_deref(), Some("UTS"));
+        assert!(added.path_ok);
+        let listed = load_projects();
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|p| p.path == "/data/pengqlu/work")
+                .count(),
+            1
+        );
+
         std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }

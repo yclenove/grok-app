@@ -31,6 +31,7 @@ export type SkillsTabProps = {
   skills: readonly SkillInfo[];
   loading?: boolean;
   hostError?: string | null;
+  sshAlias?: string | null;
   onSelectSkill: (skill: SkillsPickerSkill) => void;
 };
 
@@ -49,6 +50,7 @@ export function SkillsTab({
   skills,
   loading = false,
   hostError = null,
+  sshAlias = null,
   onSelectSkill,
 }: SkillsTabProps) {
   const tr = useMemo(() => createT(locale as Locale), [locale]);
@@ -101,7 +103,11 @@ export function SkillsTab({
   };
 
   return (
-    <div className="sw-skills" data-testid="side-skills-tab">
+    <div
+      className="sw-skills"
+      data-testid="side-skills-tab"
+      data-ssh-alias={sshAlias || ""}
+    >
       <div className="sw-skills__head">
         <div className="sw-skills__title-row">
           <IconSkills size={16} aria-hidden />
@@ -111,6 +117,14 @@ export function SkillsTab({
           </span>
         </div>
         <p className="sw-skills__hint">{tr("side.skills.hint")}</p>
+        {sshAlias ? (
+          <p
+            className="sw-skills__hint"
+            data-testid="side-skills-remote-hint"
+          >
+            {tr("side.skills.remoteHint", { alias: sshAlias })}
+          </p>
+        ) : null}
         <label className="sw-skills__filter">
           <IconSearch size={14} aria-hidden />
           <input

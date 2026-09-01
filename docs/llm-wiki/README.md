@@ -12,6 +12,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [slash-composer.md](./slash-composer.md) | 斜杠面板、技能标签、Goal 模式、Doctor |
 | [session-continuity.md](./session-continuity.md) | Agent 续会话（load/bootstrap）、自动压缩归属 |
 | [session-api.md](./session-api.md) | **本机会话接口**：列表 + session id 续跑（#626 第一刀；非新建、非打断） |
+| [ssh-remote.md](./ssh-remote.md) | **SSH 远端工作区**：OpenSSH Host、Watch、远端会话/文件/终端/Skills/localhost 转发；远端路径不当本地盘 |
 | [account.md](./account.md) | 官方登录 / 会员额度 / 热力图 / 调用日志 |
 | [providers.md](./providers.md) | 自定义中转、agent GROK_HOME、编辑器探测 |
 | [model-routing.md](./model-routing.md) | **模型分层**：识图 / 搜索 / 摘要 / 提示建议辅槽；省 Grok / 还原官方默认 |
@@ -20,6 +21,12 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [website-downloads.md](./website-downloads.md) | **官网下载对接**：grok-app.com 按钮、稳定别名、`downloads.json`、禁止反代 |
 | [maintain.md](./maintain.md) | **开源维护**：Issue 分拣、PR 审核、社区反馈入库、修复闭环；**已合并分支 / worktree 及时安全清理** |
 | [chatcut.md](./chatcut.md) | **ChatCut Codex 插件**：适配器、MCP surface、Resources 内嵌浏览器 handoff、re-pull 迁移 |
+| [agent-gui-reference.md](./agent-gui-reference.md) | **Agent GUI 参考**：桌面客户端与 CLI 的交互界面规范 |
+| [git-worktrees.md](./git-worktrees.md) | **Git worktree**：分支菜单、创建/移除/GC、会话绑定与徽章 |
+| [icons.md](./icons.md) | **图标**：应用 Dock 图标 vs 托盘/状态栏图标，不得混用 |
+| [media-delivery.md](./media-delivery.md) | **本地媒体投递**：loopback HTTP + path resolve（产品路径不直接用 `media://`） |
+| [plugins-marketplace.md](./plugins-marketplace.md) | **插件市场**：插件目录、安装流与兼容性约束 |
+| [remote-im.md](./remote-im.md) | **Remote IM**：GUI 配置全渠道 · Bridge · Grok Build；goal 见 `docs/plans/GOAL-remote-im.md` |
 | [appearance-skins.md](./appearance-skins.md) | **外观皮肤包**：`.grokskin` 布局、K19 allowlist、`grok://` + `grok-app:`、从不自动 apply、网站只用 `url=` |
 
 ## 原则

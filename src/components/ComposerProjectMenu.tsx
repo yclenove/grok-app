@@ -13,6 +13,7 @@ import {
 } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { useFloatingMenu } from "@/lib/floatingMenu";
+import { isProjectFolderMissing } from "@/lib/projectPath";
 
 export type ProjectOption = {
   id: string;
@@ -21,6 +22,7 @@ export type ProjectOption = {
   trusted: boolean;
   pathOk: boolean;
   pinned?: boolean;
+  sshAlias?: string | null;
 };
 
 type Props = {
@@ -78,7 +80,7 @@ export function ComposerProjectMenu({
   });
 
   const label = activeProject?.name ?? labels.noProject;
-  const activeMissing = activeProject?.pathOk === false;
+  const activeMissing = isProjectFolderMissing(activeProject);
   const tip = activeMissing
     ? (labels.pathMissing
         ? `${labels.pathMissing}: ${activeProject?.path || ""}`.trim()
@@ -169,7 +171,7 @@ export function ComposerProjectMenu({
               >
                 {projects.map((p) => {
                   const active = activeProject?.id === p.id;
-                  const missing = p.pathOk === false;
+                  const missing = isProjectFolderMissing(p);
                   return (
                     <button
                       key={p.id}

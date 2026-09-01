@@ -16,6 +16,7 @@ export const koSettingsUi = {
   "settings.tab.interface": "인터페이스",
   "settings.tab.cli": "CLI",
   "settings.tab.connection": "연결",
+  "settings.tab.ssh": "SSH",
   "settings.tab.network": "네트워크",
   "settings.proxyMode": "프록시",
   "settings.proxyModeDesc": "앱과 에이전트 프로세스가 네트워크에 도달하는 방식입니다. 시스템은 OS 프록시를 따르고(루프백 PAC 포함), 수동은 URL을 고정하며, 직접은 프록시 없음을 강제합니다. 가능하면 TUN보다 시스템 HTTP 또는 수동 http://127.0.0.1:7890을 권장합니다.",

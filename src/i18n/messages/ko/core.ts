@@ -2,7 +2,7 @@
 export const koCore = {
   "app.name": "Grok",
   "app.tagline": "MIT · 비공식 · 자매 프로젝트 grok-go",
-  "app.versionFooter": "Grok v0.2.27 · MIT · 비공식 · 자매 프로젝트 grok-go",
+  "app.versionFooter": "Grok v0.2.30 · MIT · 비공식 · 자매 프로젝트 grok-go",
   "window.minimize": "최소화",
   "window.maximize": "최대화",
   "window.restore": "이전 크기로",
@@ -245,7 +245,7 @@ export const koCore = {
   "askUser.minimize": "접기",
   "askUser.restore": "복원",
   "askUser.pendingChip": "에이전트 질문 · 답변 대기",
-  "remoteIm.msgTag": "Remote IM",
+  "remoteIm.msgTag": "원격 IM",
   "tray.recent": "최근",
   "tray.noRecent": "최근 대화 없음",
   "tray.untitled": "제목 없음",

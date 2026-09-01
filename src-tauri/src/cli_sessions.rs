@@ -1095,6 +1095,11 @@ fn content_to_text(content: &Value) -> String {
 /// Parse CLI `chat_history.jsonl` into (role, content) pairs for the App journal.
 pub fn parse_chat_history_jsonl(path: &Path) -> Result<Vec<(String, String)>, String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("read chat_history: {e}"))?;
+    parse_chat_history_text(&raw)
+}
+
+/// Same as [`parse_chat_history_jsonl`] for an already-read buffer (SSH import).
+pub fn parse_chat_history_text(raw: &str) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -1134,6 +1139,55 @@ pub fn parse_chat_history_jsonl(path: &Path) -> Result<Vec<(String, String)>, St
         return Err("no user/assistant messages in chat_history.jsonl".into());
     }
     Ok(out)
+}
+
+/// Fold ACP `updates.jsonl` text chunks into user/assistant pairs.
+pub fn parse_acp_updates_text(raw: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Some(up) = v.pointer("/params/update").or_else(|| v.get("update")) else {
+            continue;
+        };
+        let kind = up
+            .get("sessionUpdate")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let role = match kind {
+            "user_message_chunk" => "user",
+            "agent_message_chunk" => "assistant",
+            _ => continue,
+        };
+        let text = up.get("content").map(content_to_text).unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        match current.as_mut() {
+            Some((r, buf)) if r == role => buf.push_str(&text),
+            _ => {
+                if let Some(prev) = current.take() {
+                    if !prev.1.trim().is_empty() {
+                        out.push(prev);
+                    }
+                }
+                current = Some((role.to_string(), text));
+            }
+        }
+    }
+    if let Some(prev) = current {
+        if !prev.1.trim().is_empty() {
+            out.push(prev);
+        }
+    }
+    out
 }
 
 /// Walk CLI `chat_history.jsonl` in stream order keeping tool rows:
@@ -1240,7 +1294,7 @@ fn imported_user_content(v: &Value, raw: &str) -> Option<String> {
     if let Some(q) = extract_user_query(raw) {
         return Some(q);
     }
-    if raw.contains("<system-reminder>") {
+    if raw.contains("<system-reminder>") || raw.contains("<user_info>") {
         return None;
     }
     if let Some(reason) = chat_history_synthetic_reason(v) {
@@ -2049,6 +2103,23 @@ mod tests {
         let enc = percent_encode_path_component("/Users/me/Code/oss/pq");
         assert!(enc.contains("%2F"));
         assert_eq!(percent_decode_component(&enc), "/Users/me/Code/oss/pq");
+    }
+
+    #[test]
+    fn parse_acp_updates_concatenates_chunks() {
+        let raw = r#"
+{"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Hi"}}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello "}}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world."}}}}
+"#;
+        let pairs = parse_acp_updates_text(raw);
+        assert_eq!(
+            pairs,
+            vec![
+                ("user".into(), "Hi".into()),
+                ("assistant".into(), "Hello world.".into()),
+            ]
+        );
     }
 
     #[test]

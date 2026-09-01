@@ -112,6 +112,27 @@
   content-visibility: auto;
   contain-intrinsic-size: auto 36px;
 }
+/* Expanded / speech rows cannot keep the collapsed 36px intrinsic size.
+ * WebView2 then paints the title, command, and child steps in one box
+ * (stacked glyphs on the last tool). */
+.grok-act__step.is-expanded,
+.grok-act__step[data-expanded="1"],
+.grok-act__step--speech {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+  min-height: min-content;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+.grok-act__steps--virtual .grok-act__step.is-expanded,
+.grok-act__steps--virtual .grok-act__step[data-expanded="1"],
+.grok-act__steps--virtual .grok-act__step--speech {
+  height: auto;
+  min-height: min-content;
+  max-height: none;
+  overflow: visible;
+}
 .grok-act__step.is-error {
   color: var(--chat-danger, #c44);
 }
@@ -539,9 +560,16 @@
   padding: 0 0 2px;
   max-height: min(32vh, 220px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   color: color-mix(in srgb, var(--chat-text-3, #9ca3af) 95%, transparent);
   font-size: 12.5px;
   line-height: 1.5;
+}
+/* Live thinking is the current turn — do not nest a 220px scroller that
+ * clips the stream and fights the transcript stick-to-bottom. */
+.grok-thought.is-live .grok-thought__body {
+  max-height: none;
+  overflow: visible;
 }
 .grok-thought__body .chat-md,
 .grok-thought__body .chat-md--muted,

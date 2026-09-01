@@ -198,7 +198,7 @@ pub async fn dispatch(
             let session_id = param_string(&params, &["sessionId", "session_id"]);
             let mode = param_string(&params, &["mode"]);
             let snap = mgr
-                .connect(app, project_path, session_id, mode)
+                .connect(app, project_path, session_id, mode, None)
                 .await
                 .map_err(RpcError::host)?;
             Ok(serde_json::to_value(snap).map_err(|e| RpcError::host(e.to_string()))?)
@@ -264,7 +264,7 @@ pub async fn dispatch(
             if let Some(sid) = target.clone() {
                 let focused = mgr.snapshot().session_id;
                 if focused.as_deref() != Some(sid.as_str()) {
-                    mgr.connect(app.clone(), None, Some(sid), None)
+                    mgr.connect(app.clone(), None, Some(sid), None, None)
                         .await
                         .map_err(RpcError::host)?;
                 }

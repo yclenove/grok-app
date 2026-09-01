@@ -58,6 +58,7 @@ export type SettingsTabId =
   // runtime
   | "cli"
   | "connection"
+  | "ssh"
   | "network"
   | "pool"
   | "tools"

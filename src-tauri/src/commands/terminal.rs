@@ -30,18 +30,20 @@ pub async fn path_exists_many(paths: Vec<String>) -> Result<PathExistsManyResult
 }
 
 /// Spawn interactive login shell PTY (`$SHELL -l -i`). Streams on `terminal://data`.
+/// When `ssh_alias` is set, the PTY runs `ssh -tt` on that host instead.
 #[tauri::command]
 pub async fn terminal_pty_spawn(
     app: AppHandle,
     session_id: Option<String>,
     project_path: Option<String>,
+    ssh_alias: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
 ) -> Result<pty_host::PtySpawnResult, String> {
     let cols = cols.unwrap_or(80);
     let rows = rows.unwrap_or(24);
     tauri::async_runtime::spawn_blocking(move || {
-        pty_host::spawn(app, session_id, project_path, cols, rows)
+        pty_host::spawn(app, session_id, project_path, ssh_alias, cols, rows)
     })
     .await
     .map_err(|e| format!("terminal_pty_spawn join: {e}"))?

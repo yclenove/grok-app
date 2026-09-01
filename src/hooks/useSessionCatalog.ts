@@ -108,6 +108,7 @@ export function useSessionCatalog(opts: {
 
   const toggleSessionSelected = useCallback(
     (id: string, toggleOpts?: { shiftKey?: boolean }) => {
+      setSessionSelectMode(true);
       if (toggleOpts?.shiftKey) {
         const anchor = sessionSelectAnchorIdRef.current;
         if (anchor) {

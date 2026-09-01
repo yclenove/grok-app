@@ -6,6 +6,7 @@
  * module stays unit-testable.
  */
 
+import { isProjectFolderMissing } from "./projectPath";
 import { pruneSelectedIds, toggleIdInSet } from "./sessionSelect";
 
 /** Soft cap so batch never saturates the process pool by design. */
@@ -35,6 +36,8 @@ export type BatchProjectInput = {
   trusted?: boolean;
   /** Host path-ok flag; false → skip. Default true when omitted. */
   pathOk?: boolean | null;
+  /** When set, `path` is a remote OpenSSH cwd — not a local missing-folder. */
+  sshAlias?: string | null;
   /** System / general workspace — excluded from batch. */
   system?: boolean;
 };
@@ -134,7 +137,7 @@ export function evaluateBatchProject(
   if (project.trusted === false) {
     return { ok: false, projectId: id, reason: "untrusted" };
   }
-  if (project.pathOk === false) {
+  if (isProjectFolderMissing(project)) {
     return { ok: false, projectId: id, reason: "path_missing" };
   }
   return { ok: true, projectId: id };

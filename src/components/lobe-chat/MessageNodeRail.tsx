@@ -157,13 +157,15 @@ export function MessageNodeRail({
       const viewportRect = viewport.getBoundingClientRect();
       const focusY = viewportRect.top + viewport.clientHeight * 0.28;
 
-      // Single pass over mounted message rows (virtual window only).
+      // Mounted rows beat height estimates — one tall imported assistant
+      // answer otherwise keeps the active tick in the middle of the rail.
       const mounted = viewport.querySelectorAll<HTMLElement>("[data-message-id]");
       const rects: { id: string; top: number; bottom: number }[] = [];
       for (const row of mounted) {
         const id = row.getAttribute("data-message-id");
         if (!id || !nodeIdSet.has(id)) continue;
         const r = row.getBoundingClientRect();
+        if (r.height <= 0) continue;
         rects.push({ id, top: r.top, bottom: r.bottom });
       }
 

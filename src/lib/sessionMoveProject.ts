@@ -9,6 +9,7 @@
 
 import { GENERAL_PROJECT_ID } from "@/lib/app/sidebarModels";
 import type { MessageKey } from "@/i18n";
+import { isProjectFolderMissing } from "@/lib/projectPath";
 
 export type SessionMoveReason =
   | "ok"
@@ -24,6 +25,7 @@ export type SessionMoveProject = {
   path: string;
   trusted: boolean;
   pathOk: boolean;
+  sshAlias?: string | null;
 };
 
 export type SessionMoveRow = {
@@ -57,7 +59,7 @@ export function sessionMoveCwdChanges(
 export function evaluateSessionMove(input: {
   session: Pick<SessionMoveRow, "projectId">;
   targetProjectId: string | null;
-  projects: Array<Pick<SessionMoveProject, "id" | "trusted" | "pathOk">>;
+  projects: Array<Pick<SessionMoveProject, "id" | "trusted" | "pathOk" | "sshAlias">>;
   busy: boolean;
 }): {
   allowed: boolean;
@@ -88,7 +90,7 @@ export function evaluateSessionMove(input: {
     if (!proj.trusted) {
       return fail("untrusted", cwdChanges);
     }
-    if (proj.pathOk === false) {
+    if (isProjectFolderMissing(proj)) {
       return fail("path_missing", cwdChanges);
     }
   }
@@ -173,7 +175,7 @@ export function buildSessionMoveMenuTargets(input: {
       out.push({ id, label: p.name, disabled: true, reason: "untrusted" });
       continue;
     }
-    if (p.pathOk === false) {
+    if (isProjectFolderMissing(p)) {
       out.push({ id, label: p.name, disabled: true, reason: "path_missing" });
       continue;
     }

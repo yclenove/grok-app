@@ -1,5 +1,91 @@
 /* domain CSS chunk (move-only split; selectors unchanged) */
 
+.settings-ssh-hostline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-ssh-hostline__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-ssh-hostline__controls .ext-switch {
+  margin-left: 0;
+}
+
+.settings-ssh-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-ssh-cmd {
+  margin-top: 8px;
+}
+
+.settings-ssh-probe {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-ssh-sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-ssh-session__title {
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.settings-ssh-session__cwd {
+  display: block;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+}
+
+.settings-ssh-host__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ssh-path-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.ssh-path-list__row {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ssh-path-list__row:hover {
+  background: var(--bg-hover);
+}
+
 
 .settings-acp-chip.is-ok .settings-acp-chip__dot {
   background: var(--success, #3d9a5f);

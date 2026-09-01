@@ -294,6 +294,14 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // Same macOS 14+ activation repair as the launch guardian: `set_focus`
+        // may leave NSApp INACTIVE after a tray/dock restore, so the first
+        // click only activates and is eaten. No-op on non-macOS.
+        let w_for_keys = w.clone();
+        let _ = w.run_on_main_thread(move || {
+            crate::force_ns_app_activate();
+            crate::point_keys_at_webview(&w_for_keys);
+        });
         #[cfg(windows)]
         {
             // After show/focus, re-assert styles + taskbar tab once more.

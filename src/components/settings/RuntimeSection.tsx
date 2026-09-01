@@ -17,6 +17,7 @@ import { CliWorktreeDbPanel } from "@/components/CliWorktreeDbPanel";
 import { SdkConnectWizard } from "@/components/SdkConnectWizard";
 import { SessionApiPanel } from "@/components/SessionApiPanel";
 import { CliUpdateRow } from "@/components/CliUpdateRow";
+import { CliRepairPanel } from "@/components/CliRepairPanel";
 import { CostRollupPanel } from "@/components/CostRollupPanel";
 import { StreamingMessagesJsonPanel } from "@/components/StreamingMessagesJsonPanel";
 import { StreamingAcpNdjsonPanel } from "@/components/StreamingAcpNdjsonPanel";
@@ -34,6 +35,7 @@ import { IconArchive, IconDoctor } from "@/components/icons";
 import { NetworkProbeField } from "./NetworkProbeField";
 import { AcpServerField } from "./AcpServerField";
 import { WslBackendField } from "./WslBackendField";
+import { SshHostsPanel } from "./SshHostsPanel";
 import { detectAppPlatform } from "@/lib/appPlatform";
 import { resolveLocale, type MessageKey } from "@/i18n";
 import {
@@ -233,6 +235,14 @@ export function RuntimeSection() {
                     </div>
                   ) : null}
                 </div>
+                {!cliInfo.found ? (
+                  <CliRepairPanel
+                    allowUnverifiedCliInstall={allowUnverifiedCliInstall}
+                    onCliInfoRefresh={onCliInfoRefresh}
+                    showSettingsToast={showSettingsToast}
+                    t={t}
+                  />
+                ) : null}
                 {detectAppPlatform() === "win" ? (
                   <div
                     className={
@@ -307,6 +317,11 @@ export function RuntimeSection() {
                 }
               >
                 <CliWorktreeDbPanel t={t} />
+              </div>
+            )}
+            {activeTab === "ssh" && (
+              <div className={rowHighlight("settings-anchor-sshHosts")}>
+                <SshHostsPanel t={t} />
               </div>
             )}
             {activeTab === "connection" && (

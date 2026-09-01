@@ -37,6 +37,7 @@ import {
   shouldDeferWarmConnectForForeignBusy,
   shouldSkipWarmConnect,
 } from "@/lib/multiWindow";
+import { isSshRemoteProject } from "@/lib/projectPath";
 import { sessionShellStore } from "@/lib/sessionShellStore";
 import { sessionTranscriptStore } from "@/lib/sessionTranscriptStore";
 import { useSessionShellActions } from "@/hooks/useSessionShell";
@@ -440,6 +441,7 @@ export function useSessionNavigation(opts: {
               const snap = await api.sessionConnect({
                 projectPath: warmProjPath,
                 sessionId: warmId,
+                sshAlias: proj?.sshAlias ?? null,
               });
               if (!stillThisOpen()) return;
               setLiveHost(snap);
@@ -539,7 +541,9 @@ export function useSessionNavigation(opts: {
         );
       }
       host.composer.requestFocus();
-      api.sessionPrewarm();
+      if (!isSshRemoteProject(proj)) {
+        api.sessionPrewarm();
+      }
     },
     [
       bumpViewEpoch,

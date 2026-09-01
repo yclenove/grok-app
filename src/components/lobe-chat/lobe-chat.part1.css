@@ -191,7 +191,7 @@
   /* Default = medium; overridden by html[data-chat-width] (Appearance). */
   max-width: var(--chat-width-max, 800px);
   margin: 0 auto;
-  padding: 20px 20px 32px;
+  padding: 20px 20px 8px;
   /*
    * Extra end pad only when the reading column fills the scrollport
    * (aside squeeze). Wide panes already gap the centered 800px column
@@ -208,6 +208,19 @@
   flex-direction: column;
   gap: var(--chat-list-gap, 4px);
   contain: layout style;
+}
+
+/*
+ * Real box in the scroll height (not only padding-bottom on this column).
+ * WKWebView often omits inner padding from scrollHeight, so stick-to-bottom
+ * parks the last lines under the floating composer. This spacer is what
+ * "at the bottom" actually clears.
+ */
+.lobe-chat__end-pad {
+  flex-shrink: 0;
+  width: 100%;
+  height: calc(var(--composer-float-pad, 168px) + 20px);
+  pointer-events: none;
 }
 
 html[data-chat-width="full"] .lobe-chat__inner,
@@ -431,24 +444,24 @@ html[data-chat-width="full"] .lobe-chat__inner,
   color: var(--chat-text, inherit);
 }
 
-/* Hover actions (default) — focus-within keeps keyboard a11y */
+/* Message actions stay visible (default). Hover is opt-in via Appearance. */
 .lobe-chat-item__actions {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+/* Settings → Appearance: show on hover / focus-within (keyboard a11y) */
+html[data-msg-actions="hover"] .lobe-chat-item__actions {
   opacity: 0;
   pointer-events: none;
   transition: opacity 160ms ease;
 }
 
-.lobe-chat-item:hover .lobe-chat-item__actions,
-.lobe-chat-item:focus-within .lobe-chat-item__actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* Settings → Appearance: always show message action buttons */
-html[data-msg-actions="always"] .lobe-chat-item__actions {
+html[data-msg-actions="hover"] .lobe-chat-item:hover .lobe-chat-item__actions,
+html[data-msg-actions="hover"]
+  .lobe-chat-item:focus-within
+  .lobe-chat-item__actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -546,6 +559,16 @@ html[data-msg-actions="always"] .lobe-chat-item__actions {
 }
 .chat-md p:last-child {
   margin-bottom: 0;
+}
+
+.chat-md .katex {
+  font-size: 1.05em;
+}
+
+.chat-md .katex-display {
+  margin: 0.65em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .chat-md h1,

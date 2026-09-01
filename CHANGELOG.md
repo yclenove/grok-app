@@ -13,13 +13,151 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.30] - 2026-09-02
+
+> **Highlight:** Install plugins from a local folder, and add X API from Recommended.
+>
+> **中文 · 亮点：** 设置里可从本地装插件，推荐里可一键加 X API。
+
+### Added
+- Settings can install a plugin from a local folder or git URL.
+- Installed plugins that ship MCP appear under Extensions → MCP.
+- X API is a recommended plugin you can install from Settings.
+- You can authorize the X API plugin from the MCP list.
+
+**中文 · 新增**
+- 设置 → 插件可以从本地文件夹或 git 安装。
+- 带 MCP 的已装插件会出现在扩展 → MCP。
+- 推荐插件里增加了 X API。
+- 可在 MCP 列表里给 X API 授权。
+
+### Changed
+- More UI languages fill in strings that still matched English. Remaining locales including Japanese, Korean, Russian, Ukrainian, and Tamil follow the locale (#972–#975, #977–#980).
+- Background git and worktree Host work stays off the async runtime. Status, diffs, review loads, and worktree ops no longer stall other commands (#988, #990–#993).
+- Opening a chat with media settles with fewer polls. Reveal still waits on load events; the safety net is slower (#989).
+
+**中文 · 变更**
+- 更多界面语言补上了原先还跟英文重复的可见文案。含日/韩/俄/乌/泰米尔等剩余语言跟语言走（#972–#975、#977–#980）。
+- 后台 git / worktree 更省。状态、diff、Review 与 worktree 操作不再堵其它 Host 命令（#988、#990–#993）。
+- 打开带媒体的会话少扫 DOM。仍靠加载事件揭开，兜底轮询更慢（#989）。
+
 ### Fixed
-- Windows wallpaper frost reaches the sidebar and empty chat. WebView2 skipped container blur.
-- Fork from a middle turn no longer brings back later parent messages.
+- Sidebar header is now one row: logo, search, and pane toggle. Search sits next to the toggle on the right (#996).
+- Desktop composer now shows localized labels for all reasoning tiers. The top tier no longer shows a raw internal id (#994).
+- Project chats no longer inherit the default-workspace sandbox. Writes inside the selected project work again (#986).
+- Expanded tool steps no longer stack title and command on one line. The last row in a Worked-for list keeps its real height (#983).
+- Thinking no longer stays on screen as the final reply. The real answer paints in place; switching chats is not required (#968).
+- Settings search finds Chinese keywords for permission, telemetry, login, and more. Bilingual keywords stay locked by catalog test (#970).
+- Queue edit and other glass dialogs stay above the embedded browser. Native webviews hide while the modal is open (#976).
+- Doctor and the agent dashboard no longer use native dropdowns. They use the same app Select as settings (#981).
+- Screen-reader labels for the files pane and setup steps follow the UI language. They no longer stay English (#982).
+- Wallpaper crop in the theme editor matches the main window.
 
 **中文 · 修复**
-- 修复 Windows 壁纸透过侧栏和空会话。WebView2 会跳过容器模糊。
+- 桌面侧栏顶栏收成一行，搜索与侧栏按钮同在右侧。折叠时仍可在主栏左上角打开侧栏（#996）。
+- 桌面 Composer 推理强度最高档已与其它档位一样显示本地化名称。例如最高档显示「极高」（#994）。
+- 项目会话不再误用默认工作区的沙箱。在选中项目里写文件又能成功了（#986）。
+- 展开的工具步骤不再把标题和命令叠在同一行。工作列表最后一行会按真实高度排开（#983）。
+- 思考结束后不再把思考过程当成最终回复。正文会直接画出来，不用切走再切回来（#968）。
+- 设置搜索补上了中文关键词，权限、遥测、登录等能搜到了。目录测试会锁住双语关键词（#970）。
+- 打开内置浏览器时，队列编辑等毛玻璃弹窗不再被挡住。弹窗打开期间会暂时藏起原生页面（#976）。
+- Doctor 和智能体面板不再用系统原生下拉。跟设置一样走项目 Select（#981）。
+- 文件面板和设置向导的读屏标签跟界面语言走。不再固定英文（#982）。
+- 主题编辑器里的壁纸裁切跟主窗口比例一致。
+
+## [0.2.29] - 2026-08-31
+
+> **Highlight:** One-click CLI install, complete translations, and smoother long chats.
+>
+> **中文 · 亮点：** 一键装 CLI、翻译补全、长对话更顺。
+
+### Added
+- When the Grok Build CLI is missing, Runtime settings offers a one-click install.
+
+**中文 · 新增**
+- 找不到 Grok Build CLI 时，运行时设置里可以直接一键安装。
+
+### Changed
+- Missing translations are filled in. SSH, IM security, permission rules, and Doctor checks follow the UI language.
+- Scrolling a long chat does less work per frame. Three full-journal scans no longer run on every render.
+- Long chats scroll more smoothly. Measuring one row no longer re-adds every row above it.
+
+**中文 · 变更**
+- 补上缺的翻译。SSH、IM 安全、权限规则和 Doctor 检查跟界面语言。
+- 长会话滚动每帧少做一些活。三处全量遍历不再每次渲染都跑。
+- 长会话滚动更顺。测量一行不再把它上面所有行的高度重新加一遍。
+
+### Fixed
+- CLI update banner and empty side-tab hint follow Appearance text color on wallpaper. They sat outside the old chrome list and used tertiary ink.
+- Opening a remote file no longer shows a failed banner when the file already loaded. Listing a parent folder is not treated as an SSH outage.
+- Rewind puts the discarded user prompt back in the composer. Edit it and send again, including attachments.
+- Chat no longer jumps while the agent is streaming. Switching away and back no longer lands in the middle.
+- Live thinking is not clipped in a 220px box. The transcript follows the stream.
+- Opening an SSH path chip no longer blanks the window. The files pane shows a loading state instead of an empty Suspense.
+- A question from the agent comes back after a reload instead of leaving the chat stuck. Reopening the chat restores it.
+- Rollback no longer spins for minutes when the agent is slow to answer. Forking a chat also stops holding up other chats' sends.
+- Rewind is refused while a chat you switched away from is still streaming. It used to cut that chat's history mid-turn.
+
+**中文 · 修复**
+- 壁纸上 CLI 更新条和「未打开标签」跟外观文字色。原先不在暴露层名单里，用了过淡的 tertiary。
+- 修复远端文件已经打开仍显示 failed。展开目录失败不再盖住已经读出来的正文。
+- 修复回退后用户那句从对话里消失、没法改。会回到输入框，带上原来的附件。
+- 修复对话输出时屏幕往上跳、切出 App 再回来落到中间。正在看历史时不会被拽回底部。
+- 修复 Live Thinking 被 220px 小框截断。主对话跟着流式输出走。
+- 修复点 SSH 路径 chip 整窗变白。文件面板先显示加载，不再空白。
+- 修复重载后 agent 的提问消失、会话卡在思考中。重新打开会话会把提问恢复出来。
+- 修复回退在 agent 迟迟不应答时转好几分钟。分叉会话也不再占住别的会话的发送。
+- 修复切走的会话还在输出时仍允许回退。原先会截断那条会话的历史。
+
+## [0.2.28] - 2026-08-29
+
+> **Highlight:** SSH remote hosts, a combined model chip, and chat that stays with the stream.
+>
+> **中文 · 亮点：** SSH 远端主机、模型推理合一芯片，对话跟住输出。
+
+### Added
+- SSH remote hosts can be watched from Settings. Runtime → SSH; list, open, and start remote chats over OpenSSH.
+
+**中文 · 新增**
+- 设置里可 Watch SSH 远端主机。运行时 → SSH；列出、打开，并在远端文件夹开新对话。
+
+### Changed
+- Composer model chip is one control for model + effort. Advanced hub; empty and active chats share the same width.
+- Message action buttons stay visible. Appearance still has On hover.
+- Opening a file uses the full preview. The tree stays closed unless you pick Files or jump from env.
+
+**中文 · 变更**
+- 输入框模型按钮改为模型+推理一颗芯片。高级悬停侧出选项；空对话和进行中对话同一列宽。
+- 消息操作按钮默认始终显示。外观里仍可改回悬停显示。
+- 打开文件用满宽预览。除非点 Files 或从环境跳转，文件树保持收起。
+
+### Fixed
+- Last chat lines stay above the composer. Bottom overscroll no longer hides the tail.
+- Rewind on the last user bubble undoes that turn. Local journal still truncates if agent rewind fails.
+- First send on a new chat is not dropped when the agent is parked as viewed-only.
+- SSH path chips in chat open the files tree like local projects.
+- Long live thinking stays on the latest tokens. After a turn finishes, the view stays on the stream.
+- Wallpaper frost stays on during a live turn. Overlay at 0% no longer clears blur.
+- Windows taskbar keeps the Grok mark after an update.
+- Mac Steer is Ctrl+Enter only, matching Grok Build CLI. Cmd+Enter no longer steers.
+- Windows wallpaper frost reaches the sidebar and empty chat.
+- Fork from a middle turn no longer brings back later parent messages.
+- Rapid follow-up messages no longer lose the next reply.
+- Cmd/Ctrl click keeps multi-select in the session list.
+
+**中文 · 修复**
+- 修复对话最后几行压在输入框上。底部超滚不再把尾巴藏起来。
+- 修复点最后一条用户消息无法回退。Agent rewind 失败时仍截断本地记录。
+- 修复新会话第一轮发出去没有真正开跑。
+- 修复 SSH 会话里点路径 chip 不能跳到侧栏文件树。
+- 修复思考过长时看不到最新内容。任务结束后视口留在流式输出结尾。
+- 修复进会话、开始直播时壁纸突然变清楚。遮罩拉到 0% 也不会关掉模糊。
+- 修复 Windows 更新后任务栏变成空白文档图标。
+- 修复 Mac 引导快捷键。对标 Grok Build CLI，只用 Ctrl+Enter。
+- 修复 Windows 壁纸透过侧栏和空会话。
 - 修复从中间分叉时后面的父会话消息又回来。
+- 修复连续快速发送时下一条回复丢失。
+- 修复按住 Cmd/Ctrl 点选会话时只留下最后一条。
 
 ## [0.2.27] - 2026-08-27
 

@@ -5,13 +5,16 @@
  */
 import { ThemeProvider } from "@/providers/ThemeProvider";
 import { SkinShareProvider } from "@/providers/SkinShareProvider";
+import { SshWatchProvider } from "@/providers/SshWatchProvider";
 import { AppWorkbench } from "@/app/AppWorkbench";
 
 export default function App() {
   return (
     <ThemeProvider>
       <SkinShareProvider>
-        <AppWorkbench />
+        <SshWatchProvider>
+          <AppWorkbench />
+        </SshWatchProvider>
       </SkinShareProvider>
     </ThemeProvider>
   );

@@ -16,6 +16,7 @@ export const frSettingsUi = {
   "settings.tab.interface": "Interface",
   "settings.tab.cli": "CLI",
   "settings.tab.connection": "Connexion",
+  "settings.tab.ssh": "SSH",
   "settings.tab.network": "Réseau",
   "settings.proxyMode": "Proxy",
   "settings.proxyModeDesc": "Comment l’app et les processus d’agent joignent le réseau. Système suit le proxy OS (y compris PAC loopback) ; Manuel fixe une URL ; Direct force l’absence de proxy. Préférez HTTP système ou Manuel http://127.0.0.1:7890 plutôt que TUN si possible.",

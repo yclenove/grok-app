@@ -124,17 +124,38 @@ export function OverlayScroll({
     });
   }, [measure, syncTreeReveal]);
 
-  const flash = () => {
+  const flash = useCallback(() => {
     setActive(true);
     if (hideTimer.current) window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => setActive(false), 900);
-  };
+  }, []);
 
   const handleScroll = (e: UIEvent<HTMLDivElement>) => {
     measure();
     flash();
     onScroll?.(e);
   };
+
+  // Native listener: React onScroll can skip frames on fast wheel, so the
+  // overlay thumb lags behind the real scrollTop (tall imported transcripts).
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    let raf = 0;
+    const onNativeScroll = () => {
+      if (raf) return;
+      raf = window.requestAnimationFrame(() => {
+        raf = 0;
+        measure();
+        flash();
+      });
+    };
+    el.addEventListener("scroll", onNativeScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onNativeScroll);
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+  }, [measure, flash, children]);
 
   return (
     <div

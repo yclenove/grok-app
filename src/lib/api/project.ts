@@ -15,6 +15,7 @@ export async function projectsList() {
       pinned?: boolean;
       /** Legacy flag; retired system:general is no longer listed. */
       system?: boolean;
+      sshAlias?: string | null;
     }>
   >("projects_list");
 }
@@ -26,6 +27,18 @@ export async function generalWorkspacePath() {
 
 export async function projectAdd(path: string, trust: boolean) {
   return invoke("project_add", { path, trust });
+}
+
+export async function projectAddSsh(alias: string, path: string, trust: boolean) {
+  return invoke<{
+    id: string;
+    name: string;
+    path: string;
+    trusted: boolean;
+    pathOk: boolean;
+    pinned?: boolean;
+    sshAlias?: string | null;
+  }>("project_add_ssh", { alias, path, trust });
 }
 
 /**

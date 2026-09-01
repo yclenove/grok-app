@@ -43,12 +43,14 @@ export type TerminalPtyExitEvent = {
 export async function terminalPtySpawn(opts: {
   sessionId?: string | null;
   projectPath?: string | null;
+  sshAlias?: string | null;
   cols?: number;
   rows?: number;
 }) {
   return invoke<TerminalPtySpawnResult>("terminal_pty_spawn", {
     sessionId: opts.sessionId ?? null,
     projectPath: opts.projectPath ?? null,
+    sshAlias: opts.sshAlias ?? null,
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
   });

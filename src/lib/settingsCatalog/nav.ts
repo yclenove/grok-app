@@ -82,6 +82,7 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     tabs: [
       { id: "cli", labelKey: "settings.tab.cli" },
       { id: "connection", labelKey: "settings.tab.connection" },
+      { id: "ssh", labelKey: "settings.tab.ssh" },
       { id: "network", labelKey: "settings.tab.network" },
       { id: "pool", labelKey: "settings.tab.pool" },
       { id: "tools", labelKey: "settings.tab.tools" },

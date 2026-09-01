@@ -157,6 +157,7 @@ export const TimelineToolRow = memo(function TimelineToolRow({
         "grok-act__step lobe-timeline-tool" +
         (failed ? " is-error" : "") +
         (running ? " is-running" : "") +
+        (showBody ? " is-expanded" : "") +
         " is-last"
       }
       role="status"

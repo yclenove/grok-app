@@ -49,6 +49,7 @@ export type TerminalTabProps = {
   locale: Locale | string;
   tabId: string;
   projectPath?: string | null;
+  sshAlias?: string | null;
   active?: boolean;
 };
 
@@ -85,6 +86,7 @@ export function TerminalTab({
   locale,
   tabId,
   projectPath,
+  sshAlias = null,
   active = true,
 }: TerminalTabProps) {
   const tr = useMemo(() => createT(locale as Locale), [locale]);
@@ -101,6 +103,7 @@ export function TerminalTab({
   }>({ unlistenData: null, unlistenExit: null, dataDisp: null });
   /** Project path at last successful/failed boot (for honesty, not auto-respawn). */
   const bootProjectRef = useRef<string | null>(null);
+  const bootSshAliasRef = useRef<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -280,6 +283,7 @@ export function TerminalTab({
     let sessionId: string | null = null;
     const gen = ++bootGenRef.current;
     bootProjectRef.current = (projectPath || "").trim() || null;
+    bootSshAliasRef.current = (sshAlias || "").trim() || null;
 
     const boot = async () => {
       setError(null);
@@ -314,6 +318,7 @@ export function TerminalTab({
         const spawned = await api.terminalPtySpawn({
           sessionId: null,
           projectPath: bootProjectRef.current,
+          sshAlias: bootSshAliasRef.current,
           cols,
           rows,
         });
@@ -530,6 +535,7 @@ export function TerminalTab({
       data-ready={ready ? "1" : "0"}
       data-bound-cwd={boundCwd || ""}
       data-cwd-honesty={honesty.kind}
+      data-ssh-alias={sshAlias || ""}
       data-interactive="1"
     >
       {error ? (

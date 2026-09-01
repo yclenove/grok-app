@@ -2,7 +2,7 @@
 export const ukCore = {
   "app.name": "Grok",
   "app.tagline": "MIT · Неофіційний · Сестринський проєкт grok-go",
-  "app.versionFooter": "Grok v0.2.27 · MIT · Неофіційний · Сестринський проєкт grok-go",
+  "app.versionFooter": "Grok v0.2.30 · MIT · Неофіційний · Сестринський проєкт grok-go",
   "window.minimize": "Згорнути",
   "window.maximize": "Розгорнути",
   "window.restore": "Відновити",
@@ -245,7 +245,7 @@ export const ukCore = {
   "askUser.minimize": "Згорнути",
   "askUser.restore": "Відновити",
   "askUser.pendingChip": "Запитання агента · очікує відповіді",
-  "remoteIm.msgTag": "Remote IM",
+  "remoteIm.msgTag": "Віддалені чати",
   "tray.recent": "Нещодавні",
   "tray.noRecent": "Немає нещодавніх чатів",
   "tray.untitled": "Без назви",

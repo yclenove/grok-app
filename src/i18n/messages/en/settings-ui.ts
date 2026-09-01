@@ -16,6 +16,7 @@ export const enSettingsUi = {
   "settings.tab.interface": "Interface",
   "settings.tab.cli": "CLI",
   "settings.tab.connection": "Connection",
+  "settings.tab.ssh": "SSH",
   "settings.tab.network": "Network",
   "settings.proxyMode": "Proxy",
   "settings.proxyModeDesc": "How the app and agent processes reach the network. System follows the OS proxy (including loopback PAC); Manual pins a URL; Direct forces no proxy. Prefer system HTTP or Manual http://127.0.0.1:7890 over TUN when possible.",

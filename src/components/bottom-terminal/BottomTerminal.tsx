@@ -27,6 +27,7 @@ import type { BottomTerminalState } from "@/lib/bottomTerminal";
 export type BottomTerminalProps = {
   locale: Locale | string;
   projectPath?: string | null;
+  sshAlias?: string | null;
   state: BottomTerminalState;
   onAddTab: () => void;
   onCloseTab: (id: string) => void;
@@ -39,6 +40,7 @@ export type BottomTerminalProps = {
 export function BottomTerminal({
   locale,
   projectPath = null,
+  sshAlias = null,
   state,
   onAddTab,
   onCloseTab,
@@ -217,6 +219,7 @@ export function BottomTerminal({
                 locale={locale}
                 tabId={tab.id}
                 projectPath={projectPath}
+                sshAlias={sshAlias}
                 active={isActive}
               />
             </div>

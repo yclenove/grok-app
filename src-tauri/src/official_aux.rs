@@ -418,6 +418,7 @@ No repo edits. Prefer built-in tools. Keep the final answer concise and complete
         fork_session: false,
         grok_home_override: Some(home.clone()),
         empty_mcp_servers: true,
+        ssh_alias: None,
     };
 
     tracing::info!(

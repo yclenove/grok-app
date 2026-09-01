@@ -1,3 +1,4 @@
+import { currentTurnHasEndMarker } from "../endOfTurn";
 import { bashArgFromToolTitle, inferKindFromToolCallId } from "../toolDisplay";
 import type {
   ChatMessage,
@@ -1037,6 +1038,13 @@ export function applyTurnMarker(
 ): ChatMessage[] {
   const id = payload.messageId || `marker-${Date.now()}`;
   if (messages.some((m) => m.id === id)) return messages;
+  // Local Stop already painted a chip; Host `turn_marker` must not add a twin.
+  if (currentTurnHasEndMarker(messages)) {
+    const frozen = messages.map((m) =>
+      m.streaming ? { ...m, streaming: false } : m,
+    );
+    return frozen.some((m, i) => m !== messages[i]) ? frozen : messages;
+  }
   const marker = payload.marker || "turn_cancelled";
   const reason = (payload.reason || "cancelled").toLowerCase();
   // Match Host journal: user_stop is a neutral stop chip (not an error row).

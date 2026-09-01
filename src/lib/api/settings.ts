@@ -36,6 +36,8 @@ export interface AppSettings {
   /** API mode: `host:port` of a remote ACP server. When set, sessions connect
    *  over TCP instead of spawning the local CLI. Empty/unset = local spawn. */
   acpServerAddr?: string | null;
+  /** OpenSSH Host aliases with watch enabled. */
+  sshWatchAliases?: string[] | null;
   /** Max warm/live agent processes (default 3). */
   maxConcurrentAgents?: number;
   /** Recycle idle agent processes after N minutes (default 30). */

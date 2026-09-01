@@ -7,7 +7,8 @@ import { useEffect, useRef } from "react";
 import * as api from "@/lib/api";
 import { isMirrorClient } from "@/lib/mirrorTransport";
 import { isValidAskUserPayload } from "@/lib/askUserPayload";
-import { forkTrimmedToastKey } from "@/lib/sessionFork";
+import { planForkTrimmedFollowUp } from "@/lib/sessionFork";
+import { projectTrimmedJournalToChat } from "@/lib/sessionJournalHydrate";
 import {
   applyContextCompact,
   applyGeneratedImage,
@@ -49,7 +50,10 @@ import {
 import {
   reconcileSessionState,
 } from "@/lib/sessionPhase";
-import { createStopLatchState } from "@/lib/stopLatch";
+import {
+  createStopLatchState,
+  projectStateAfterUserStop,
+} from "@/lib/stopLatch";
 import {
   isTurnDoneReadyTransition,
   markUnread as markSessionUnread,
@@ -593,13 +597,29 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                 markSessionUnread(s.sessionId);
               }
             }
-            c.setLiveHost(s);
-            c.liveHostRef.current = s;
+            const stopLatch = c.stopLatchRef.current;
+            const heldState = projectStateAfterUserStop(
+              s.state,
+              stopLatch,
+              s.sessionId,
+            );
+            const heldStreamingMessageId =
+              heldState !== s.state ? null : s.streamingMessageId;
+            const heldSnapshot =
+              heldState === s.state
+                ? s
+                : {
+                    ...s,
+                    state: heldState,
+                    streamingMessageId: heldStreamingMessageId,
+                  };
+            c.setLiveHost(heldSnapshot);
+            c.liveHostRef.current = heldSnapshot;
             c.setLiveMap((prev) =>
               projectHostIntoLiveMap(prev, {
                 sessionId: s.sessionId,
-                state: s.state,
-                streamingMessageId: s.streamingMessageId,
+                state: heldState,
+                streamingMessageId: heldStreamingMessageId,
               }),
             );
             if (
@@ -643,11 +663,19 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
               s.sessionId === c.viewingSessionIdRef.current
             ) {
               c.setSession((prev) => ({
-                ...s,
-                state: reconcileSessionState(s.state, prev.state),
+                ...heldSnapshot,
+                state: reconcileSessionState(s.state, prev.state, {
+                  stopLatch,
+                  sessionId: s.sessionId,
+                }),
               }));
-              // Clear retry chip / turn timer / stall banner when turn ends or errors out
-              if (s.state !== "streaming" && s.state !== "awaiting_permission") {
+              // Clear retry chip / turn timer / stall banner when turn ends or errors out.
+              // Use heldState so a Stop latch does not restart the clock on late
+              // Host "streaming" while the composer is already unlocked.
+              if (
+                heldState !== "streaming" &&
+                heldState !== "awaiting_permission"
+              ) {
                 // Drain coalesced stream/tool so final tokens land before streaming=false.
                 flushHostCoalescers();
                 c.setRetryStatus(null);
@@ -673,8 +701,8 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                   void c.tryApplyAutomationFromSession(s.sessionId);
                 }
               } else if (
-                s.state === "streaming" ||
-                s.state === "awaiting_permission"
+                heldState === "streaming" ||
+                heldState === "awaiting_permission"
               ) {
                 // Runs for background chats too — each keeps its own start, so
                 // returning to one mid-turn resumes instead of restarting.
@@ -726,13 +754,22 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                 markSessionUnread(s.sessionId);
               }
             }
-            c.setLiveMap((prev) =>
-              projectHostIntoLiveMap(prev, {
-                sessionId: s.sessionId,
-                state: s.state,
-                streamingMessageId: s.streamingMessageId,
-              }),
-            );
+            {
+              const stopLatch = c.stopLatchRef.current;
+              const heldState = projectStateAfterUserStop(
+                s.state,
+                stopLatch,
+                s.sessionId,
+              );
+              c.setLiveMap((prev) =>
+                projectHostIntoLiveMap(prev, {
+                  sessionId: s.sessionId,
+                  state: heldState,
+                  streamingMessageId:
+                    heldState !== s.state ? null : s.streamingMessageId,
+                }),
+              );
+            }
             // Background / demoted turn finished → unread + desktop notify.
             if (
               s.state === "ready" &&
@@ -755,11 +792,21 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             }
             // If user is viewing this demoted session, keep workbench state in sync.
             if (s.sessionId === c.viewingSessionIdRef.current) {
+              const stopLatch = c.stopLatchRef.current;
+              const heldState = projectStateAfterUserStop(
+                s.state,
+                stopLatch,
+                s.sessionId,
+              );
               c.setSession((prev) => ({
                 ...prev,
                 sessionId: s.sessionId,
-                state: reconcileSessionState(s.state, prev.state),
-                streamingMessageId: s.streamingMessageId,
+                state: reconcileSessionState(s.state, prev.state, {
+                  stopLatch,
+                  sessionId: s.sessionId,
+                }),
+                streamingMessageId:
+                  heldState !== s.state ? null : s.streamingMessageId,
                 lastError: s.lastError ?? prev.lastError,
                 title: s.title || prev.title,
               }));
@@ -1016,8 +1063,13 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
        track(
           listenWithRetry<StreamPayload>("session://stream", (chunk) => {
             if (cancelled) return;
-            // Turn-end honesty: drain pending tool progress before applying done.
-            if (chunk.done) toolEventCoalescer?.flushAll();
+            // Turn-end honesty: drain pending tool + thought/body before done
+            // settles the bubble. Leaving thought in the coalesce buffer made
+            // CoT paint as the final reply until remount.
+            if (chunk.done) {
+              toolEventCoalescer?.flushAll();
+              streamCoalescer?.flushAll();
+            }
             streamCoalescer?.push(chunk);
           }),
         );
@@ -1334,10 +1386,29 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             "session://fork_trimmed",
             (p) => {
               if (cancelled || !p) return;
-              const key = forkTrimmedToastKey(p.outcome);
-              if (!key) return;
-              c.setToast(c.tr(key));
-              window.setTimeout(() => c.setToast(null), 4200);
+              const followUp = planForkTrimmedFollowUp(p);
+              if (followUp.toastKey) {
+                c.setToast(c.tr(followUp.toastKey));
+                window.setTimeout(() => c.setToast(null), 4200);
+              }
+              const sid = followUp.sessionId;
+              if (!sid) return;
+              // Disk is the cut journal. Do not merge/upgrade the live cache —
+              // leftover parent turns would stick.
+              void api
+                .sessionMessages(sid, { reconcile: false })
+                .then((stored) => {
+                  if (cancelled) return;
+                  const woven = projectTrimmedJournalToChat(stored);
+                  c.patchSessionMessages(sid, () => woven);
+                  if (c.viewingSessionIdRef.current === sid) {
+                    void c.tryApplyAutomationFromSession(sid);
+                    applyResolvedRelativeMedia(sid, woven);
+                  }
+                })
+                .catch(() => {
+                  /* disk reload is best-effort */
+                });
             },
           ),
         );

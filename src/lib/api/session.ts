@@ -5,7 +5,11 @@ import {
   isTauri,
   isMirrorClient,
 } from "./host";
-import type { PermissionPayload, SessionSnapshot } from "../session";
+import type {
+  AskUserPayload,
+  PermissionPayload,
+  SessionSnapshot,
+} from "../session";
 import { IDLE_SNAPSHOT } from "../session";
 import {
   SESSION_CONNECT_CLIENT_TIMEOUT_MS,
@@ -23,14 +27,17 @@ export async function sessionConnect(opts?: {
   projectPath?: string;
   sessionId?: string;
   mode?: string;
+  sshAlias?: string | null;
 }): Promise<SessionSnapshot> {
+  const payload = {
+    projectPath: opts?.projectPath ?? null,
+    sessionId: opts?.sessionId ?? null,
+    mode: opts?.mode ?? null,
+    sshAlias: opts?.sshAlias?.trim() || null,
+  };
   if (isMirrorClient()) {
     return withDeadline(
-      invoke("session_connect", {
-        projectPath: opts?.projectPath ?? null,
-        sessionId: opts?.sessionId ?? null,
-        mode: opts?.mode ?? null,
-      }),
+      invoke("session_connect", payload),
       SESSION_CONNECT_CLIENT_TIMEOUT_MS,
       () => sessionConnectTimeoutError(),
     );
@@ -45,11 +52,7 @@ export async function sessionConnect(opts?: {
     };
   }
   return withDeadline(
-    invoke("session_connect", {
-      projectPath: opts?.projectPath ?? null,
-      sessionId: opts?.sessionId ?? null,
-      mode: opts?.mode ?? null,
-    }),
+    invoke("session_connect", payload),
     SESSION_CONNECT_CLIENT_TIMEOUT_MS,
     () => sessionConnectTimeoutError(),
   );
@@ -279,6 +282,18 @@ export async function sessionPendingPermission(
   sessionId: string,
 ): Promise<PermissionPayload | null> {
   return invoke("session_pending_permission", { sessionId });
+}
+
+/**
+ * Still-pending questionnaire for a chat, if any. Same one-shot recovery as
+ * `sessionPendingPermission`, and more urgent: the agent stays blocked on the
+ * `_x.ai/ask_user_question` reverse RPC, so a missed event leaves the chat
+ * "thinking" forever with no gate to answer.
+ */
+export async function sessionPendingAskUser(
+  sessionId: string,
+): Promise<AskUserPayload | null> {
+  return invoke("session_pending_ask_user", { sessionId });
 }
 
 /** Approve / revise / abandon pending `_x.ai/exit_plan_mode`. */

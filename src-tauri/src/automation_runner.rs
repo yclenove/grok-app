@@ -359,7 +359,7 @@ async fn run_one(
         if !p.trusted {
             return Err(format!("project not trusted: {}", p.name));
         }
-        if !p.path_ok {
+        if !p.path_ok && !p.is_ssh_remote() {
             return Err(format!("project path missing: {}", p.name));
         }
     }
@@ -388,7 +388,13 @@ async fn run_one(
 
     let project_path = proj.map(|p| p.path.clone());
     let snap = mgr
-        .connect(app.clone(), project_path, Some(session_id.clone()), None)
+        .connect(
+            app.clone(),
+            project_path,
+            Some(session_id.clone()),
+            None,
+            None,
+        )
         .await
         .map_err(|e| {
             // Drop empty shell so sidebar stays clean.

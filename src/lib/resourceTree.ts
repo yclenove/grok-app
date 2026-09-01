@@ -184,6 +184,35 @@ export function filterResourceTreeNodes<T extends ResourceTreeNodeLike>(
  * Relative paths of dirs that should stay expanded so filter hits remain
  * reachable (ancestors of matching leaves + matching dirs).
  */
+/** Ancestor relative dirs for a file or folder path (`src/lib/a.ts` → `src`, `src/lib`). */
+export function ancestorRelativePaths(relative: string): string[] {
+  const parts = (relative || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((p) => p && p !== ".");
+  const out: string[] = [];
+  let acc = "";
+  for (const p of parts) {
+    acc = acc ? `${acc}/${p}` : p;
+    out.push(acc);
+  }
+  return out;
+}
+
+/**
+ * Dir keys to expand so `relative` is visible. File paths expand parents only;
+ * directory paths include themselves.
+ */
+export function expandKeysForResourcePath(
+  relative: string,
+  opts?: { includeSelfIfDir?: boolean },
+): string[] {
+  const parts = ancestorRelativePaths(relative);
+  if (!parts.length) return [];
+  if (opts?.includeSelfIfDir) return parts;
+  return parts.slice(0, -1);
+}
+
 export function expandKeysForResourceTreeFilter(
   nodes: readonly ResourceTreeNodeLike[],
   query: string,

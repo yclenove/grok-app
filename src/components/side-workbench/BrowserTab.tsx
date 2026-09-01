@@ -32,6 +32,10 @@ import {
   type DesignModePromptLabels,
 } from "@/lib/browserDesignMode";
 import { setDraft } from "@/lib/composerDraftStore";
+import {
+  isLoopbackHttpUrl,
+  normalizeBrowserUrl,
+} from "@/lib/sshLoopbackUrl";
 import { BrowserDesignModePanel } from "./BrowserDesignModePanel";
 
 export type BrowserTabProps = {
@@ -40,15 +44,9 @@ export type BrowserTabProps = {
   url?: string;
   title?: string;
   active?: boolean;
+  sshAlias?: string | null;
   onUrlChange?: (url: string) => void;
 };
-
-function normalizeBrowserUrl(raw: string): string {
-  const next = raw.trim() || "https://www.google.com";
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(next)
-    ? next
-    : `https://${next}`;
-}
 
 /** True while CJK IME candidate UI is open / committing (do not treat as action Enter). */
 function isImeKeyEvent(e: {
@@ -66,13 +64,23 @@ export function BrowserTab({
   url: initialUrl,
   title,
   active = true,
+  sshAlias = null,
   onUrlChange,
 }: BrowserTabProps) {
   const tr = useMemo(() => createT(locale as Locale), [locale]);
+  const preferHttpLoopback = !!(sshAlias || "").trim();
   const [url, setUrl] = useState(
-    () => normalizeBrowserUrl((initialUrl || "").trim() || "https://www.google.com"),
+    () =>
+      normalizeBrowserUrl(
+        (initialUrl || "").trim() || "https://www.google.com",
+        { preferHttpLoopback },
+      ),
   );
   const [draft, setAddressDraft] = useState(url);
+  /** Webview URL — loopback on SSH is rewritten to 127.0.0.1:forwardedPort. */
+  const [viewUrl, setViewUrl] = useState(url);
+  const [tunnelOn, setTunnelOn] = useState(false);
+  const [tunnelError, setTunnelError] = useState<string | null>(null);
   /** Bumped on refresh / Enter-same-URL so EmbeddedBrowser reloads the page. */
   const [reloadKey, setReloadKey] = useState(0);
   const [pageLoading, setPageLoading] = useState(true);
@@ -94,10 +102,36 @@ export function BrowserTab({
     pageLoading,
   });
 
-  const applyUrl = (nextRaw: string, forceReload: boolean) => {
-    const withScheme = normalizeBrowserUrl(nextRaw);
+  const applyUrl = async (nextRaw: string, forceReload: boolean) => {
+    const withScheme = normalizeBrowserUrl(nextRaw, { preferHttpLoopback });
     setAddressDraft(withScheme);
-    if (withScheme === url) {
+    const alias = (sshAlias || "").trim();
+    let nextView = withScheme;
+    let tunneled = false;
+    let err: string | null = null;
+    if (alias && api.isTauri()) {
+      try {
+        const prepared = await api.sshBrowserPrepare(alias, withScheme);
+        if (prepared.ok && prepared.url) {
+          nextView = prepared.url;
+          tunneled = !!prepared.tunneled;
+        } else {
+          err = (prepared.error || "").trim() || tr("side.browser.sshTunnelHint");
+        }
+      } catch (e) {
+        err = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (alias && isLoopbackHttpUrl(withScheme) && !tunneled) {
+      setTunnelOn(false);
+      setTunnelError(err || tr("side.browser.sshTunnelHint"));
+      setUrl(withScheme);
+      onUrlChange?.(withScheme);
+      return;
+    }
+    setTunnelOn(tunneled);
+    setTunnelError(err);
+    if (withScheme === url && nextView === viewUrl) {
       if (forceReload) {
         setPageLoading(true);
         setReloadKey((k) => k + 1);
@@ -106,13 +140,21 @@ export function BrowserTab({
     }
     setPageLoading(true);
     setUrl(withScheme);
+    setViewUrl(nextView);
     onUrlChange?.(withScheme);
   };
 
   /** Address-bar commit: navigate, or hard-reload when the URL is unchanged. */
   const go = () => {
-    applyUrl(draft, true);
+    void applyUrl(draft, true);
   };
+
+  // Re-prepare when the SSH host changes under a persist-mounted tab.
+  useEffect(() => {
+    void applyUrl(url, false);
+    // applyUrl reads the latest sshAlias; do not re-run on every address edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sshAlias]);
 
   /** Toolbar refresh always reloads the current page. */
   const reload = () => {
@@ -193,6 +235,8 @@ export function BrowserTab({
       data-browser-engine="system"
       data-page-loading={pageLoading ? "1" : "0"}
       data-design-mode={designMode ? "1" : "0"}
+      data-ssh-alias={sshAlias || ""}
+      data-ssh-tunneled={tunnelOn ? "1" : "0"}
     >
       <div className="embedded-browser__bar">
         <div className="rp-tree-search sw-browser__url-wrap">
@@ -269,10 +313,11 @@ export function BrowserTab({
             type="button"
             className="chrome-btn"
             onClick={() => {
+              const open = tunnelOn ? viewUrl : url;
               void api
-                .openExternalUrl(url)
+                .openExternalUrl(open)
                 .catch(() =>
-                  window.open(url, "_blank", "noopener,noreferrer"),
+                  window.open(open, "_blank", "noopener,noreferrer"),
                 );
             }}
             aria-label={tr("resources.openExternal")}
@@ -281,6 +326,22 @@ export function BrowserTab({
           </button>
         </Tip>
       </div>
+      {sshAlias && (tunnelOn || tunnelError) ? (
+        <div
+          className={
+            "sw-terminal__notice" + (tunnelError ? " rp__error" : "")
+          }
+          role="status"
+          data-testid="side-browser-ssh-tunnel"
+          data-tunneled={tunnelOn ? "1" : "0"}
+        >
+          <span className="sw-terminal__notice-text">
+            {tunnelError
+              ? tunnelError
+              : tr("side.browser.sshTunnel", { alias: sshAlias })}
+          </span>
+        </div>
+      ) : null}
       {designMode ? (
         <BrowserDesignModePanel
           locale={locale}
@@ -301,7 +362,7 @@ export function BrowserTab({
       ) : null}
       <div className="embedded-browser__host sw-browser__host">
         <EmbeddedBrowser
-          url={url}
+          url={viewUrl}
           title={title}
           locale={locale as Locale}
           active={active}

@@ -16,6 +16,7 @@ export const taSettingsUi = {
   "settings.tab.interface": "இடைமுகம்",
   "settings.tab.cli": "CLI",
   "settings.tab.connection": "இணைப்பு",
+  "settings.tab.ssh": "SSH",
   "settings.tab.network": "பிணையம்",
   "settings.proxyMode": "ப்ராக்சி",
   "settings.proxyModeDesc": "செயலி மற்றும் முகவர் செயல்முறைகள் நெட்வொர்க்கை எவ்வாறு அடைகின்றன. கணினி OS ப்ராக்ஸியைப் பின்பற்றுகிறது (லூப்பேக் PAC உட்பட); கையேடு பின்கள் ஒரு URL; நேரடி சக்திகள் ப்ராக்ஸி இல்லை. முடிந்தால் TUN ஐ விட சிஸ்டம் HTTP அல்லது கையேடு http://127.0.0.1:7890 ஐ விரும்பவும்.",

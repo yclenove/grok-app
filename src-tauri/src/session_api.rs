@@ -859,7 +859,7 @@ pub fn prepare_send(session_id: &str, prompt: &str) -> Result<PreparedSend, Box<
                 format!("project not trusted: {}", p.name),
             )));
         }
-        if !p.path_ok {
+        if !p.path_ok && !p.is_ssh_remote() {
             return Err(Box::new(TurnResult::fail(
                 TurnStatus::Error,
                 session_id,
@@ -936,7 +936,7 @@ pub async fn dispatch_turn(
         return enqueue_while_busy(app, &sid, &req.prompt);
     }
     if let Err(e) = mgr
-        .connect(app.clone(), req.project_path, Some(sid.clone()), None)
+        .connect(app.clone(), req.project_path, Some(sid.clone()), None, None)
         .await
     {
         return TurnResult::fail(TurnStatus::Error, sid, format!("connect failed: {e}"));

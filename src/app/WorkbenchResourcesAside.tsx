@@ -10,6 +10,7 @@ import {
   type SetStateAction,
 } from "react";
 import { PaneToggleButton } from "@/components/PaneToggleButton";
+import { UiErrorBoundary } from "@/components/UiErrorBoundary";
 import { createT, type Locale } from "@/i18n";
 import { usePaneUnreadDot } from "@/hooks/usePaneUnreadDot";
 import { DEFAULT_LAYOUT } from "@/lib/layout";
@@ -40,6 +41,7 @@ export type WorkbenchResourcesAsideProps = {
   asidePaint: number;
   beginAsideResize: (width: number) => void;
   effectiveProjectPath: string | null;
+  sshAlias?: string | null;
   projectName: string;
   sideIsGitProject: boolean;
   sideWorkbench: SideWorkbenchState;
@@ -83,6 +85,7 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
     asidePaint,
     beginAsideResize,
     effectiveProjectPath,
+    sshAlias = null,
     projectName,
     sideIsGitProject,
     sideWorkbench,
@@ -126,6 +129,8 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
     ),
     resetKey: sessionId || "",
   });
+
+  const t = createT(locale);
 
   return (
     <>
@@ -189,7 +194,7 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
           className="aside-resizer"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize files pane"
+          aria-label={t("resources.resizeFilesPane")}
           onPointerDown={(e) => {
             e.preventDefault();
             beginAsideResize(asideMin);
@@ -197,10 +202,25 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
         />
       )}
       <div className="aside__inner">
-        <Suspense fallback={null}>
+        <Suspense
+          fallback={
+            <div className="rp__empty-state" data-testid="side-loading">
+              <div className="rp__empty-desc">{tr("resources.loading")}</div>
+            </div>
+          }
+        >
+          <UiErrorBoundary
+            resetKey={`${sshAlias || ""}:${effectiveProjectPath || ""}`}
+            labels={{
+              title: tr("ui.errorBoundary.title"),
+              body: tr("resources.openFailed"),
+              retry: tr("ui.errorBoundary.retry"),
+            }}
+          >
           <SideWorkbench
             locale={locale}
             projectPath={effectiveProjectPath}
+            sshAlias={sshAlias}
             projectName={projectName}
             isGitProject={sideIsGitProject}
             state={sideWorkbench}
@@ -235,6 +255,7 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
             skillsLoadError={skillsLoadError}
             onSelectSkill={onSelectSkill}
           />
+          </UiErrorBoundary>
         </Suspense>
       </div>
       </aside>

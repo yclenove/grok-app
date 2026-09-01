@@ -12,6 +12,7 @@ export type SideTabBodyProps = {
   locale: Locale | string;
   tab: SideTab;
   projectPath?: string | null;
+  sshAlias?: string | null;
   active?: boolean;
 };
 
@@ -19,6 +20,7 @@ export function SideTabBody({
   locale,
   tab,
   projectPath = null,
+  sshAlias = null,
   active = true,
 }: SideTabBodyProps) {
   const tr = useMemo(() => createT(locale as Locale), [locale]);
@@ -31,6 +33,7 @@ export function SideTabBody({
         url={tab.url}
         title={tab.title || tab.name}
         active={active}
+        sshAlias={sshAlias}
       />
     );
   }
@@ -41,6 +44,7 @@ export function SideTabBody({
         locale={locale}
         tabId={tab.id}
         projectPath={projectPath}
+        sshAlias={sshAlias}
         active={active}
       />
     );

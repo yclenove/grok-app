@@ -1,7 +1,8 @@
 /**
  * Files workbench (Phase 1): dual-row chrome under shared SideTabBar —
- * breadcrumb + tree toggle +「打开」; one shared tree; multi-file preview
- * driven by parent SideTab file paths. Preview | tree split (not exclusive stack).
+ * editor actions (or breadcrumb) + tree toggle +「打开」; one shared tree;
+ * multi-file preview driven by parent SideTab file paths.
+ * Preview | tree split (not exclusive stack).
  */
 
 import {
@@ -27,6 +28,7 @@ import { VirtualList } from "@/components/VirtualList";
 import { Tip } from "@/components/ui/tooltip";
 import { GlassModal } from "@/components/GlassModal";
 import { FileKindMark } from "@/components/resource-viewer/FileKindMark";
+import { ResourceEditorActions } from "@/components/resource-viewer/ResourceEditorActions";
 import { ResourcePreviewBody } from "@/components/resource-viewer/ResourcePreviewBody";
 import {
   clampTreeWidth,
@@ -46,6 +48,7 @@ import { resolveFilesWorkbenchSplitLayout } from "@/lib/resourceTabs";
 import {
   RESOURCE_TREE_ROW_HEIGHT_PX,
   RESOURCE_TREE_VIRTUALIZE_THRESHOLD,
+  expandKeysForResourcePath,
   expandKeysForResourceTreeFilter,
   filterResourceTreeNodes,
   flattenVisibleResourceTree,
@@ -60,10 +63,14 @@ import {
   pathBaseName,
   type SessionFileChange,
 } from "@/lib/sessionChanges";
+import { sshChatRelative, sshRemoteDirToList } from "@/lib/sshChatPath";
+import { sshListDirShouldSetPaneError } from "@/lib/sshListDirHonesty";
 
 export type FilesWorkspaceProps = {
   locale: Locale | string;
   projectPath: string | null;
+  /** OpenSSH Host alias — list/read/write go over SSH. */
+  sshAlias?: string | null;
   projectName?: string | null;
   /** Shared tree visibility (SideWorkbenchState.treeVisible). */
   treeVisible: boolean;
@@ -96,6 +103,7 @@ const NOOP_ASYNC = async () => {};
 export function FilesWorkspace({
   locale,
   projectPath,
+  sshAlias = null,
   projectName,
   treeVisible,
   onTreeVisibleChange,
@@ -139,6 +147,7 @@ export function FilesWorkspace({
 
   const fileTabs = useResourceFileTabs({
     projectPath,
+    sshAlias,
     sideMode: "files",
     tr,
     setError,
@@ -146,6 +155,7 @@ export function FilesWorkspace({
 
   const {
     activeTab,
+    activeTabEditable,
     openFile,
     openAbsoluteFile,
     updateActiveDraft,
@@ -188,18 +198,58 @@ export function FilesWorkspace({
   const loadDir = useCallback(
     async (relative: string): Promise<TreeNode[]> => {
       if (!projectPath || !api.isTauri()) return [];
-      const entries = await api.fsListDir(projectPath, relative);
-      return (entries || []).map((e) => ({
-        name: e.name,
-        relativePath: e.relativePath || e.name,
-        isDir: !!e.isDir,
-        size: typeof e.size === "number" ? e.size : 0,
-        ext: e.ext || "",
-        children: e.isDir ? [] : undefined,
-        loaded: !e.isDir,
-      }));
+      try {
+        if (sshAlias) {
+          const dir = sshRemoteDirToList(projectPath, relative);
+          if (!dir) {
+            setError(tr("resources.openFailed"));
+            return [];
+          }
+          const listing = await api.sshListDir(sshAlias, dir);
+          if (!listing.ok) {
+            if (
+              sshListDirShouldSetPaneError({
+                relative,
+                result: listing,
+              })
+            ) {
+              setError(listing.error || tr("resources.openFailed"));
+            }
+            return [];
+          }
+          setError(null);
+          return (listing.entries || []).map((e) => {
+            const rel = relative ? `${relative.replace(/\/+$/, "")}/${e.name}` : e.name;
+            const ext = e.isDir
+              ? ""
+              : (e.name.split(".").pop() || "").toLowerCase();
+            return {
+              name: e.name,
+              relativePath: rel,
+              isDir: !!e.isDir,
+              size: 0,
+              ext,
+              children: e.isDir ? [] : undefined,
+              loaded: !e.isDir,
+            };
+          });
+        }
+        const entries = await api.fsListDir(projectPath, relative);
+        return (entries || []).map((e) => ({
+          name: e.name,
+          relativePath: e.relativePath || e.name,
+          isDir: !!e.isDir,
+          size: typeof e.size === "number" ? e.size : 0,
+          ext: e.ext || "",
+          children: e.isDir ? [] : undefined,
+          loaded: !e.isDir,
+        }));
+      } catch (e) {
+        setError(String(e));
+        throw e;
+      }
     },
-    [projectPath],
+    [projectPath, sshAlias, tr],
   );
 
   const refresh = useCallback(async () => {
@@ -325,7 +375,7 @@ export function FilesWorkspace({
   ]);
 
   // Focus/open when Side Workbench active file path changes.
-  // Directories (project root / folder tab) stay on empty preview — never "not a file".
+  // Directories stay on empty preview; always expand the tree to that path.
   useEffect(() => {
     if (!paneActive || !activePath?.trim()) return;
     const p = activePath.trim();
@@ -335,28 +385,69 @@ export function FilesWorkspace({
         .replace(/[/\\]+$/, "")
         .replace(/\\/g, "/");
       const norm = p.replace(/[/\\]+$/, "").replace(/\\/g, "/");
-      // Bound project folder itself → tree only, no preview tab.
       if (root && (norm === root || norm === "")) return;
 
-      // Skip dir-check IPC when path has a clear file extension (chat cards).
-      // Full classify only for extension-less names that might be folders.
-      const base = norm.split("/").pop() || norm;
-      const looksLikeFile = base.includes(".") && !base.endsWith(".");
-      if (!looksLikeFile && api.isTauri()) {
+      const rel = root
+        ? sshChatRelative(root, norm) ||
+          (norm.startsWith(`${root}/`) ? norm.slice(root.length + 1) : norm)
+        : norm;
+      {
         try {
-          const classified = await api.pathsClassify([p]);
+          const top = await loadDir("");
           if (cancelled) return;
-          const entry = classified?.[0];
-          if (entry?.exists && entry.isDir) {
-            // Folder targets: leave preview empty ("请选择文件"); expand tree later if needed.
-            return;
-          }
+          setRoot(top);
         } catch {
-          /* classify soft-fail → try open as file */
+          if (cancelled) return;
         }
       }
-      if (cancelled) return;
-      // Prefer absolute open (handles chat paths); falls back internally.
+
+      const base = norm.split("/").pop() || norm;
+      const looksLikeFile = base.includes(".") && !base.endsWith(".");
+      let isDir = false;
+      if (!looksLikeFile && api.isTauri()) {
+        if (sshAlias) {
+          try {
+            const listing = await api.sshListDir(sshAlias, norm);
+            if (cancelled) return;
+            isDir = !!listing.ok;
+          } catch {
+            /* try as file */
+          }
+        } else {
+          try {
+            const classified = await api.pathsClassify([p]);
+            if (cancelled) return;
+            const entry = classified?.[0];
+            if (entry?.exists && entry.isDir) isDir = true;
+          } catch {
+            /* classify soft-fail → try open as file */
+          }
+        }
+      }
+
+      const dirKeys = expandKeysForResourcePath(rel, { includeSelfIfDir: isDir });
+      if (dirKeys.length) {
+        setExpanded((e) => {
+          const next = { ...e };
+          for (const k of dirKeys) next[k] = true;
+          return next;
+        });
+        let loadedRel = "";
+        for (const key of dirKeys) {
+          if (cancelled) return;
+          try {
+            const kids = await loadDir(key);
+            if (cancelled) return;
+            setRoot((r) => replaceResourceTreeChildren(r, key, kids));
+            loadedRel = key;
+          } catch {
+            if (cancelled) return;
+          }
+        }
+        void loadedRel;
+      }
+
+      if (cancelled || isDir) return;
       void openAbsoluteFile(p, undefined, {
         line: activeLine,
         column: activeColumn,
@@ -365,7 +456,7 @@ export function FilesWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [activePath, activeLine, activeColumn, paneActive, projectPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activePath, activeLine, activeColumn, paneActive, projectPath, sshAlias]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleDir = useCallback(
     async (node: TreeNode) => {
@@ -466,6 +557,11 @@ export function FilesWorkspace({
     previewTab.tabKind !== "url" &&
     !previewTab.loading &&
     !previewDirty;
+  const showEditorChrome =
+    !!previewTab &&
+    previewTab.tabKind !== "url" &&
+    !!activeTabEditable &&
+    previewTab.draftText != null;
 
   if (!projectPath) {
     return (
@@ -480,36 +576,56 @@ export function FilesWorkspace({
 
   return (
     <div className="sw-files rp--embedded" data-testid="files-workspace">
-      {/* Row 2 (image-5/6): crumbs LEFT · tree + 打开 RIGHT */}
+      {/* Dual-row chrome: editor actions (or crumbs) LEFT · tree + 打开 RIGHT */}
       <div className="rp-files-toolbar" data-testid="files-toolbar">
-        <div
-          className="rp-files-toolbar__crumbs"
-          title={activeTab?.relativePath || projectName || ""}
-        >
-          {crumbs.length === 0 ? (
-            <span className="rp-files-toolbar__muted">
-              {projectName || tr("resources.files")}
-            </span>
-          ) : (
-            crumbs.map((c, i) => (
-              <span key={`${c}-${i}`} className="rp-files-toolbar__crumb-wrap">
-                {i > 0 ? (
-                  <span className="rp-files-toolbar__sep" aria-hidden>
-                    ›
-                  </span>
-                ) : null}
-                <span
-                  className={
-                    "rp-files-toolbar__crumb" +
-                    (i === crumbs.length - 1 ? " is-current" : "")
-                  }
-                >
-                  {c}
-                </span>
+        {showEditorChrome ? (
+          <ResourceEditorActions
+            tr={tr}
+            editMode={!!previewTab?.editMode}
+            saving={!!previewTab?.saving}
+            dirty={previewDirty}
+            onToggleEdit={toggleActiveEditMode}
+            onSave={() => void saveActiveFile()}
+            onRevert={() => revertActiveDraft()}
+            align="start"
+            className="rp-files-toolbar__editor"
+            title={previewTab?.relativePath || projectName || ""}
+            testIds={{
+              edit: "files-editor-edit",
+              save: "files-editor-save",
+              revert: "files-editor-revert",
+            }}
+          />
+        ) : (
+          <div
+            className="rp-files-toolbar__crumbs"
+            title={activeTab?.relativePath || projectName || ""}
+          >
+            {crumbs.length === 0 ? (
+              <span className="rp-files-toolbar__muted">
+                {projectName || tr("resources.files")}
               </span>
-            ))
-          )}
-        </div>
+            ) : (
+              crumbs.map((c, i) => (
+                <span key={`${c}-${i}`} className="rp-files-toolbar__crumb-wrap">
+                  {i > 0 ? (
+                    <span className="rp-files-toolbar__sep" aria-hidden>
+                      ›
+                    </span>
+                  ) : null}
+                  <span
+                    className={
+                      "rp-files-toolbar__crumb" +
+                      (i === crumbs.length - 1 ? " is-current" : "")
+                    }
+                  >
+                    {c}
+                  </span>
+                </span>
+              ))
+            )}
+          </div>
+        )}
         <div className="rp-files-toolbar__actions">
           <Tip
             label={
@@ -663,6 +779,7 @@ export function FilesWorkspace({
                 runRejectHunk={NOOP_ASYNC}
                 requestBatchAcceptHunks={NOOP}
                 requestBatchRejectHunks={NOOP}
+                hideToolbar={showEditorChrome}
               />
             );
           })()}

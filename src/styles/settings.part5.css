@@ -652,9 +652,9 @@
   min-width: 0;
 }
 
-/* Clear floating composer for Lobe list bottom */
+/* Composer clearance is .lobe-chat__end-pad (scrollHeight). Keep inner pad small. */
 .main__stage .lobe-chat__inner {
-  padding-bottom: calc(var(--composer-float-pad, 168px) + 16px);
+  padding-bottom: 8px;
 }
 
 /* Clear the overlay plan card — pad matches measured card height, not a full-width strip. */
@@ -665,6 +665,9 @@
 /* Welcome: composer is centered, not bottom-docked — no extra chat pad */
 .main__stage:has(.composer-wrap--welcome) .lobe-chat__inner {
   padding-bottom: 16px;
+}
+.main__stage:has(.composer-wrap--welcome) .lobe-chat__end-pad {
+  height: 0;
 }
 
 /* Legacy list hooks (non-chat surfaces) */
@@ -828,4 +831,14 @@
 
 .md-body p:last-child {
   margin-bottom: 0;
+}
+
+.md-body .katex {
+  font-size: 1.05em;
+}
+
+.md-body .katex-display {
+  margin: 0.65em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }

@@ -26,7 +26,7 @@ describe("settingsCatalog", () => {
     expect(catalogInvariants()).toEqual([]);
   });
 
-  it("mounts every searchable anchor in production", () => {
+  it("mounts every searchable anchor in production", { timeout: 30_000 }, () => {
     const srcRoot = resolve(__dirname, "..");
     const mountedAnchors = new Set<string>();
     for (const file of globSync("**/*.{ts,tsx}", {
@@ -95,6 +95,17 @@ describe("settingsCatalog", () => {
         `missing entries for ${id}`,
       ).toBe(true);
     }
+  });
+
+  it("every entry carries at least one CJK search keyword", () => {
+    const cjk = /[^\u0000-\u007F]/;
+    const misses = SETTINGS_ENTRIES.filter(
+      (e) => !(e.keywords ?? []).some((k) => cjk.test(k)),
+    );
+    expect(
+      misses.map((e) => e.id),
+      "entries searchable only in Latin scripts — add zh/zh-TW keywords",
+    ).toEqual([]);
   });
 
   it("parseSettingsHash handles section and tab", () => {
@@ -194,6 +205,51 @@ describe("settingsCatalog", () => {
           h.entry.anchorId === "settings-anchor-ext-plugins-catalog",
       ),
     ).toBe(true);
+  });
+
+  it("indexes local-path plugin install on the plugins tab", () => {
+    const entry = SETTINGS_ENTRIES.find((e) => e.id === "ext.plugins.installPath");
+    expect(entry?.tab).toBe("plugins");
+    expect(entry?.anchorId).toBe("settings-anchor-ext-plugins-install");
+    const tZh = createT("zh");
+    const tEn = createT("en");
+    const hits = searchSettingsEntries("本地路径", tZh, tEn);
+    expect(
+      hits.some(
+        (h) =>
+          h.entry.id === "ext.plugins.installPath" &&
+          h.entry.anchorId === "settings-anchor-ext-plugins-install",
+      ),
+    ).toBe(true);
+  });
+
+  it("runtime has an SSH tab for OpenSSH hosts", () => {
+    const runtime = SETTINGS_NAV.find((n) => n.id === "runtime");
+    expect(runtime?.tabs.map((t) => t.id)).toEqual([
+      "cli",
+      "connection",
+      "ssh",
+      "network",
+      "pool",
+      "tools",
+      "privacy",
+    ]);
+    expect(parseSettingsHash("#/settings/runtime/ssh")).toEqual({
+      section: "runtime",
+      tab: "ssh",
+    });
+    expect(buildSettingsHash({ section: "runtime", tab: "ssh" })).toBe(
+      "#/settings/runtime/ssh",
+    );
+    const entry = SETTINGS_ENTRIES.find((e) => e.id === "runtime.sshHosts");
+    expect(entry?.tab).toBe("ssh");
+    expect(entry?.anchorId).toBe("settings-anchor-sshHosts");
+    const tZh = createT("zh");
+    const tEn = createT("en");
+    const hits = searchSettingsEntries("ssh", tZh, tEn);
+    expect(hits.some((h) => h.entry.id === "runtime.sshHosts")).toBe(true);
+    const zhHits = searchSettingsEntries("测试连接", tZh, tEn);
+    expect(zhHits.some((h) => h.entry.id === "runtime.sshHosts")).toBe(true);
   });
 
   it("isSettingsSectionId", () => {

@@ -7,11 +7,11 @@
 
 import { useMemo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import type { Locale } from "@/i18n";
 import {
   MARKDOWN_REHYPE_PLUGINS,
   MARKDOWN_REMARK_PLUGINS,
 } from "@/lib/markdownMath";
-import type { Locale } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { VideoUi, videoUiLabels } from "@/components/VideoUi";
 import {

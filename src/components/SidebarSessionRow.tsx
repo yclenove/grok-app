@@ -11,6 +11,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
+import { isSelectModifierEvent } from "@/lib/sessionSelect";
 import { nextSessionTitle } from "@/lib/sidebarSessionRename";
 import type { Locale } from "@/i18n";
 import {
@@ -134,6 +135,8 @@ function SidebarSessionRowInner({
   const [draft, setDraft] = useState("");
   const editingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  /** Cmd/Ctrl mousedown already toggled — ignore the following click. */
+  const modSelectLockRef = useRef(false);
 
   const className =
     (variant === "orphan" ? "tree-l3 tree-l3--orphan" : "tree-l3") +
@@ -182,10 +185,27 @@ function SidebarSessionRowInner({
    * opens the chat — delaying onOpen would make single-click feel laggy.
    * `detail > 1` skips the extra click so open is not invoked twice.
    */
+  const handleMouseDown = (e: MouseEvent) => {
+    if (editingRef.current) return;
+    if (e.button !== 0) return;
+    if (!isSelectModifierEvent(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    modSelectLockRef.current = true;
+    onToggleSelect(session.id, { shiftKey: e.shiftKey });
+  };
+
   const handleClick = (e: MouseEvent) => {
     if (editingRef.current) return;
     if (e.detail > 1) return;
-    if (selectMode) {
+    if (modSelectLockRef.current) {
+      modSelectLockRef.current = false;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (selectMode || isSelectModifierEvent(e)) {
+      e.preventDefault();
       onToggleSelect(session.id, { shiftKey: e.shiftKey });
       return;
     }
@@ -240,6 +260,7 @@ function SidebarSessionRowInner({
       role="button"
       tabIndex={0}
       aria-checked={selectMode ? checked : undefined}
+      onMouseDown={handleMouseDown}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onContextMenu={(e) => onContextMenu(e, session)}

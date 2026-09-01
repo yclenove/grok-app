@@ -18,6 +18,15 @@ describe("extensions settings surface guard", () => {
     }
   });
 
+  it("keeps local-path plugin install on the plugins Discover + control", () => {
+    const component = read("../components/ExtensionsPanel.tsx");
+    expect(component).toContain("settings-anchor-ext-plugins-install");
+    expect(component).toContain("PluginPathInstallCard");
+    expect(component).toContain("pickDirectory");
+    expect(component).toContain("openPathInstall");
+    expect(component).toContain("pathInstallOpen");
+  });
+
   it("reuses the shared card material and keeps its modifier layout-only", () => {
     const extensionCss = read("../styles/extensions-ref.part1.css");
     const settingsCss = read("../styles/settings.part1.css");

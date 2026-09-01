@@ -31,6 +31,7 @@ import {
   getCachedFileResolve,
   setCachedFileResolve,
 } from "@/lib/filePathResolveCache";
+import { resolveSshChatPath } from "@/lib/sshChatPath";
 import {
   IconClose,
   IconCopy,
@@ -83,6 +84,8 @@ export interface FilePathCardProps {
   kind?: FilePathCardKind;
   /** Project root for monorepo suffix search. */
   projectPath?: string | null;
+  /** OpenSSH alias — resolve via remote ls, never local std::fs. */
+  sshAlias?: string | null;
   subtitle?: string;
   /**
    * 1-based line from a `path:line` citation.
@@ -155,6 +158,7 @@ export function FilePathCard({
   absolutePath,
   kind = "file",
   projectPath,
+  sshAlias = null,
   subtitle: _subtitle,
   line = null,
   column = null,
@@ -232,6 +236,29 @@ export function FilePathCard({
       absolutePath && isRealLocalAbsolutePath(absolutePath)
         ? normalizeLocalPathToken(absolutePath) || absolutePath
         : null;
+
+    const alias = sshAlias?.trim() || "";
+    if (alias && projectPath) {
+      try {
+        const hit = await resolveSshChatPath(
+          alias,
+          projectPath,
+          absHint || pathNorm,
+          (a, p) => api.sshListDir(a, p),
+        );
+        if (hit) {
+          setCachedFileResolve(path, projectPath, hit.abs);
+          setResolvedAbs(hit.abs);
+          setMissing(false);
+          return hit.abs;
+        }
+      } catch {
+        /* fall through to missing */
+      }
+      setCachedFileResolve(path, projectPath, null);
+      setMissing(true);
+      return null;
+    }
 
     if (!api.isTauri()) {
       // Browser preview: only absolute-looking tokens; no host smart open.
@@ -332,7 +359,7 @@ export function FilePathCard({
     setCachedFileResolve(path, projectPath, null);
     setMissing(true);
     return null;
-  }, [absolutePath, isUrl, path, projectPath, resolvedAbs]);
+  }, [absolutePath, isUrl, path, projectPath, resolvedAbs, sshAlias]);
 
   // Verify once per token; cache makes scroll remounts instant (no plain→card).
   useEffect(() => {

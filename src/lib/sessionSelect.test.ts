@@ -2,11 +2,23 @@ import { describe, expect, it } from "vitest";
 import {
   addIdsToSet,
   areAllIdsSelected,
+  isSelectModifierEvent,
   pruneSelectedIds,
   rangeIdsInclusive,
   toggleIdInSet,
   toggleIdsInSet,
 } from "./sessionSelect";
+
+describe("isSelectModifierEvent", () => {
+  it("is true for Cmd or Ctrl", () => {
+    expect(isSelectModifierEvent({ metaKey: true })).toBe(true);
+    expect(isSelectModifierEvent({ ctrlKey: true })).toBe(true);
+    expect(isSelectModifierEvent({})).toBe(false);
+    expect(isSelectModifierEvent({ metaKey: false, ctrlKey: false })).toBe(
+      false,
+    );
+  });
+});
 
 describe("toggleIdInSet", () => {
   it("adds a missing id", () => {

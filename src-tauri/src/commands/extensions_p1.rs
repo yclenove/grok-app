@@ -8,17 +8,53 @@
 /// Always returns Ok; on CLI missing / timeout, `skills` may still include
 /// project-scanned rows and `error` is set for the inspect failure.
 /// Each skill includes `enabled` from App Extensions prefs (default true).
+///
+/// When `ssh_alias` is set, inspect and the project skill scan run on the
+/// remote host. Do not treat the remote path as a local `std::fs` cwd.
 #[tauri::command]
-pub async fn skills_list(project_path: Option<String>) -> Result<serde_json::Value, String> {
-    let path = project_path.clone();
-    let path_for_scan = project_path.clone();
-    let (parsed, error, project_skills) = tauri::async_runtime::spawn_blocking(move || {
-        let (parsed, error) = run_grok_inspect(path.as_deref());
-        let project_skills = scan_project_skills(path_for_scan.as_deref());
-        (parsed, error, project_skills)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+pub async fn skills_list(
+    project_path: Option<String>,
+    ssh_alias: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let alias = ssh_alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let (parsed, error, project_skills, skill_roots) = if let Some(alias) = alias {
+        let fetch = crate::ssh_remote::ssh_fetch_skills(&alias, project_path.as_deref()).await;
+        let project_skills: Vec<SkillDto> = fetch
+            .project_skills
+            .into_iter()
+            .map(|s| SkillDto {
+                name: s.name,
+                description: s.description,
+                source: s.source,
+                path: s.path,
+                user_invocable: s.user_invocable,
+                plugin_name: None,
+            })
+            .collect();
+        (
+            fetch.inspect,
+            fetch.error,
+            project_skills,
+            Vec::<String>::new(),
+        )
+    } else {
+        let path = project_path.clone();
+        let path_for_scan = project_path.clone();
+        let (parsed, error, project_skills) = tauri::async_runtime::spawn_blocking(move || {
+            let (parsed, error) = run_grok_inspect(path.as_deref());
+            let project_skills = scan_project_skills(path_for_scan.as_deref());
+            (parsed, error, project_skills)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let skill_roots = crate::skill_edit::skill_roots_list(project_path.as_deref());
+        (parsed, error, project_skills, skill_roots)
+    };
 
     let inspect_skills = parsed.as_ref().map(parse_skills).unwrap_or_default();
     let skills = merge_skills_prefer_project(inspect_skills, project_skills);
@@ -35,7 +71,6 @@ pub async fn skills_list(project_path: Option<String>) -> Result<serde_json::Val
         .collect();
     let discover = crate::skill_compat::snapshot_from(&flags, hidden_count);
     let skills = attach_skill_enabled(skills);
-    let skill_roots = crate::skill_edit::skill_roots_list(project_path.as_deref());
     let mut out = serde_json::json!({
         "skills": skills,
         "skillRoots": skill_roots,
@@ -141,18 +176,44 @@ pub async fn inspect_mcp(project_path: Option<String>) -> Result<serde_json::Val
 
     let mut servers = parsed.as_ref().map(parse_mcp_servers).unwrap_or_default();
     let prefs = crate::extensions::load_prefs();
+    let plugin_defs = crate::plugin_mcp::discover_plugin_mcp_servers();
+    let plugin_names: std::collections::HashSet<String> =
+        plugin_defs.iter().map(|d| d.name.clone()).collect();
     // Enrich with enable state for UI toggles.
-    let mut server_json = Vec::with_capacity(servers.len());
+    let mut server_json = Vec::with_capacity(servers.len() + plugin_defs.len());
+    let mut listed: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in servers.drain(..) {
         let enabled = crate::extensions::is_enabled(&prefs.mcp, &s.name);
+        let from_plugin = plugin_names.contains(&s.name);
+        listed.insert(s.name.clone());
+        let plugin_name = from_plugin.then(|| s.name.clone());
+        let auth_kind = plugin_defs
+            .iter()
+            .find(|d| d.name == s.name)
+            .and_then(crate::plugin_mcp::plugin_auth_kind_for_def);
         server_json.push(serde_json::json!({
             "name": s.name,
             "transport": s.transport,
             "target": s.target,
-            "vendor": s.vendor,
+            "vendor": if from_plugin {
+                Some("plugin".to_string())
+            } else {
+                s.vendor
+            },
             "compatibilityStatus": s.compatibility_status,
+            "fromPlugin": from_plugin,
+            "pluginName": plugin_name,
+            "authKind": auth_kind,
             "enabled": enabled,
         }));
+    }
+    for def in plugin_defs {
+        if listed.contains(&def.name) {
+            continue;
+        }
+        let enabled = crate::extensions::is_enabled(&prefs.mcp, &def.name);
+        listed.insert(def.name.clone());
+        server_json.push(crate::plugin_mcp::mcp_def_to_inspect_json(&def, enabled));
     }
     let mut out = serde_json::json!({ "servers": server_json });
     if let Some(err) = error {

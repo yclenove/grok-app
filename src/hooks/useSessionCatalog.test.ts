@@ -73,6 +73,19 @@ describe("useSessionCatalog", () => {
     expect(result.current.selectedSessionIds.size).toBe(0);
   });
 
+  it("Cmd-style toggle enters select mode and keeps prior ids", () => {
+    const { result } = setup();
+    act(() => {
+      result.current.toggleSessionSelected("a");
+    });
+    expect(result.current.sessionSelectMode).toBe(true);
+    expect([...result.current.selectedSessionIds]).toEqual(["a"]);
+    act(() => {
+      result.current.toggleSessionSelected("b");
+    });
+    expect([...result.current.selectedSessionIds].sort()).toEqual(["a", "b"]);
+  });
+
   it("Shift-click selects a contiguous range in sidebar order", () => {
     const { result } = setup();
     act(() => {

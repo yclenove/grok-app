@@ -20,7 +20,7 @@ import {
 } from "@/lib/app/sidebarModels";
 import { isActiveJsonSchema } from "@/lib/jsonSchema";
 import { canLiveParticipate } from "@/lib/multiWindow";
-import { isProjectPathMissing } from "@/lib/projectPath";
+import { isProjectFolderMissing } from "@/lib/projectPath";
 import { resolveSessionWorktreeBadge } from "@/lib/gitWorktree";
 import { isViewedSessionConnecting } from "@/lib/connStatus";
 import { migrateDraftSendClaim, queueSessionKey } from "@/lib/sendQueue";
@@ -173,7 +173,7 @@ export function useSessionConnect(opts: {
         );
         return null;
       }
-      if (connectProject && isProjectPathMissing(connectProject.pathOk)) {
+      if (connectProject && isProjectFolderMissing(connectProject)) {
         h.setLocalError(
           h.tr("project.pathMissing", {
             name: projectDisplayName(connectProject, h.tr),
@@ -321,6 +321,7 @@ export function useSessionConnect(opts: {
             connectProject?.path || h.generalWorkspacePath || undefined,
           sessionId: sessionId ?? undefined,
           mode: h.mode,
+          sshAlias: connectProject?.sshAlias ?? null,
         });
         h.setLiveHost(snap);
         h.liveHostRef.current = snap;
@@ -329,17 +330,36 @@ export function useSessionConnect(opts: {
           shouldAdoptView(originView, h.currentViewFocus(), snap.sessionId)
         ) {
           h.viewingSessionIdRef.current = snap.sessionId;
-          h.setSession((prev) => ({
-            ...snap,
-            state: reconcileSessionState(snap.state, prev.state),
-          }));
+          // Mid-send connect paints Host Ready before sessionSend. Keep the
+          // optimistic streaming busy so Stop stays up with no Send flash.
+          const sendKey = queueSessionKey(snap.sessionId);
+          const draftKey = queueSessionKey(null);
+          const preserveStreaming =
+            h.sendInFlightBySessionRef.current.has(sendKey) ||
+            h.sendInFlightBySessionRef.current.has(draftKey);
+          h.setSession((prev) => {
+            const state = reconcileSessionState(snap.state, prev.state, {
+              preserveStreaming,
+            });
+            return { ...snap, state };
+          });
+          const mapState =
+            preserveStreaming && snap.state === "ready"
+              ? ("streaming" as const)
+              : snap.state;
           h.setLiveMap((prev) =>
             projectHostIntoLiveMap(prev, {
               sessionId: snap.sessionId,
-              state: snap.state,
-              streamingMessageId: snap.streamingMessageId,
+              state: mapState,
+              streamingMessageId:
+                mapState === "streaming" ? snap.streamingMessageId : null,
             }),
           );
+          if (mapState === "streaming" && snap.state !== "streaming") {
+            const held = { ...snap, state: "streaming" as const };
+            h.setLiveHost(held);
+            h.liveHostRef.current = held;
+          }
         }
         if (snap.lastError || snap.state !== "ready") {
           const code = snap.lastError?.code ?? "AGENT_CRASHED";

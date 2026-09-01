@@ -218,6 +218,10 @@ html[data-sidebar-density="compact"] .tree-date-group__head {
   contain: layout style;
 }
 
+.tree-l3.tree-l3--nested {
+  padding-left: calc(var(--tree-text-inset) + 14px);
+}
+
 .tree-l3:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -423,6 +427,10 @@ html[data-sidebar-density="compact"] .tree-date-group__head {
   100% {
     transform: translateX(var(--marquee-shift, 0px));
   }
+}
+
+.tree-l3:hover .tree-l3__name--scrollable {
+  overflow: hidden;
 }
 
 .tree-l3:hover .tree-l3__name--scrollable .tree-l3__name-text {

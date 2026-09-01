@@ -5,6 +5,8 @@ import {
   TREE_WIDTH_MAX,
   TREE_WIDTH_MIN,
   clampTreeWidth,
+  ancestorRelativePaths,
+  expandKeysForResourcePath,
   expandKeysForResourceTreeFilter,
   filterResourceTreeNodes,
   flattenVisibleResourceTree,
@@ -174,6 +176,23 @@ describe("flattenVisibleResourceTree", () => {
     const rows = flattenVisibleResourceTree(many, { "": true });
     expect(rows).toHaveLength(5000);
     expect(rows.length).toBeGreaterThan(RESOURCE_TREE_VIRTUALIZE_THRESHOLD);
+  });
+});
+
+describe("expandKeysForResourcePath", () => {
+  it("lists ancestors and optionally the dir itself", () => {
+    expect(ancestorRelativePaths("src/lib/a.ts")).toEqual([
+      "src",
+      "src/lib",
+      "src/lib/a.ts",
+    ]);
+    expect(expandKeysForResourcePath("src/lib/a.ts")).toEqual([
+      "src",
+      "src/lib",
+    ]);
+    expect(
+      expandKeysForResourcePath("src/lib", { includeSelfIfDir: true }),
+    ).toEqual(["src", "src/lib"]);
   });
 });
 

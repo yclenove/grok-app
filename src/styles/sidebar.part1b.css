@@ -293,6 +293,11 @@
   position: relative;
 }
 
+/* SSH host → remote cwd → sessions */
+.tree-l2--nested {
+  padding-left: calc(var(--tree-l2-pad) + 14px);
+}
+
 .tree-l2:hover {
   background: var(--bg-hover);
   color: var(--text-primary);

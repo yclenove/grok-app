@@ -132,6 +132,24 @@ describe("evaluateSessionMove", () => {
     ).toBe("project_not_found");
   });
 
+  it("allows a trusted SSH remote even if local pathOk is false", () => {
+    const r = evaluateSessionMove({
+      session,
+      targetProjectId: "ssh",
+      projects: [
+        {
+          id: "ssh",
+          trusted: true,
+          pathOk: false,
+          sshAlias: "UTS",
+        },
+      ],
+      busy: false,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.reason).toBe("ok");
+  });
+
   it("allows project → other sessions with confirm", () => {
     const r = evaluateSessionMove({
       session: { ...session, projectId: "a" },

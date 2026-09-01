@@ -11,11 +11,11 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import type { Locale } from "@/i18n";
 import {
   MARKDOWN_REHYPE_PLUGINS,
   MARKDOWN_REMARK_PLUGINS,
 } from "@/lib/markdownMath";
-import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { VideoUi, videoUiLabels } from "@/components/VideoUi";
@@ -268,6 +268,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   pathCards = true,
   imagePathMap,
   projectPath,
+  sshAlias,
   onOpenResource,
   onOpenError,
   onOpenExternalLink,
@@ -284,6 +285,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   pathCards?: boolean;
   imagePathMap?: Record<string, string>;
   projectPath?: string | null;
+  sshAlias?: string | null;
   onOpenResource?: (target: ResourceOpenTarget) => void;
   /** Soft-fail when a file card cannot resolve / open (missing, denied). */
   onOpenError?: (message: string) => void;
@@ -409,6 +411,7 @@ export const MarkdownChat = memo(function MarkdownChat({
           path={url}
           kind="url"
           projectPath={projectPath}
+          sshAlias={sshAlias}
           labels={fileLabels}
           onOpenError={onOpenError}
           onOpenInPanel={(t) => {
@@ -586,6 +589,7 @@ export const MarkdownChat = memo(function MarkdownChat({
           resolved && isRealLocalAbsolutePath(resolved) ? resolved : undefined
         }
         projectPath={projectPath}
+        sshAlias={sshAlias}
         kind="file"
         line={line}
         column={column}

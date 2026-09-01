@@ -13,6 +13,7 @@ import {
 import { useThemeShell } from "@/providers/ThemeShellContext";
 import { usePetCompanion } from "@/hooks/usePetCompanion";
 import { useFloatingMenu } from "@/lib/floatingMenu";
+import { restoreSessionGate } from "@/lib/sessionGateRestore";
 import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
 import { formatRelativeTime } from "@/lib/accountUi";
 import {
@@ -103,7 +104,7 @@ import {
   weaveToolsIntoAssistantSegments,
   truncateBeforeLastUser,
   truncateThroughUserPrompt,
-  canRewindToUserPrompt,
+  rewindKeepPromptIndex,
   canRegenerateAssistant,
   userPromptIndexOf,
   userPromptIndexContaining,
@@ -189,6 +190,7 @@ import {
 import {
   armStopLatch,
   createStopLatchState,
+  settleStopLatchAfterSessionStop,
   tickStopLatch,
   STOP_LATCH_MS,
 } from "@/lib/stopLatch";
@@ -197,7 +199,10 @@ import {
   shouldEscapeCloseSettings,
   shouldEscapeStopGeneration,
 } from "@/lib/escapeStop";
-import { endOfTurnMarkerContent } from "@/lib/endOfTurn";
+import {
+  currentTurnHasEndMarker,
+  endOfTurnMarkerContent,
+} from "@/lib/endOfTurn";
 import {
   isMirrorClient,
   mirrorEnsureTransport,
@@ -433,6 +438,7 @@ import {
 import {
   makeQueuedSend,
   queueSessionKey,
+  releaseSendClaimsOnUserStop,
   resolveSendQueueStripState,
   type QueuedSend,
 } from "@/lib/sendQueue";
@@ -526,7 +532,10 @@ import {
   canOfferResumeWithCodeRestore,
   canRestoreCodeOnResume,
 } from "@/lib/sessionResumeRestore";
-import { isProjectPathMissing } from "@/lib/projectPath";
+import {
+  isProjectFolderMissing,
+  isProjectWarmable,
+} from "@/lib/projectPath";
 import {
   normalizeProjectColor,
   type ProjectColorToken,
@@ -602,6 +611,7 @@ import {
   summarizeGitDirty,
   type GitDirtySummary,
 } from "@/lib/workspaceGit";
+import { startVisibilityPoll } from "@/lib/visibilityPoll";
 
 const AutomationsPage = lazy(async () => {
   const m = await import("@/components/AutomationsPage");
@@ -702,6 +712,8 @@ import { useCompactDialog } from "@/hooks/useCompactDialog";
 import { useQueueEditDialog } from "@/hooks/useQueueEditDialog";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
 import { useComposerSend } from "@/hooks/useComposerSend";
+import { useComposerEndPad } from "@/hooks/useComposerEndPad";
+import { useRewindComposerRestore } from "@/hooks/useRewindComposerRestore";
 import { useSessionCatalog } from "@/hooks/useSessionCatalog";
 import {
   createSessionNavHost,
@@ -1910,6 +1922,27 @@ export function AppWorkbench() {
   const html5DragDepthRef = useRef(0);
   const [, setSetup] = useState({ cli: false, auth: false, project: false });
   const [localError, setLocalError] = useState<string | null>(null);
+
+  const newRemoteChat = useCallback(
+    async (alias: string, cwd: string) => {
+      const path = cwd.trim();
+      if (!path) return;
+      try {
+        const added = (await api.projectAddSsh(alias, path, true)) as Project;
+        setProjects(mapProjectsList((await api.projectsList()) as Project[]));
+        const full: Project = {
+          ...added,
+          trusted: true,
+          pathOk: true,
+          sshAlias: added.sshAlias?.trim() || alias,
+        };
+        await newChat(full);
+      } catch (e) {
+        setLocalError(String(e));
+      }
+    },
+    [newChat],
+  );
   const ensureConnectedRef = useRef<() => Promise<string | null>>(
     async () => null,
   );
@@ -3357,7 +3390,7 @@ export function AppWorkbench() {
         setLocalError(tr("project.trustFirst", { name: project.name }));
         return true;
       }
-      if (project && isProjectPathMissing(project.pathOk)) {
+      if (project && isProjectFolderMissing(project)) {
         setLocalError(tr("project.pathMissing", { name: project.name }));
         return true;
       }
@@ -3476,20 +3509,18 @@ export function AppWorkbench() {
       void tryApplyAutomationFromSession(sessionId);
     };
     host.gates.restoreForSession = (sessionId, { stillThisOpen, liveSessionId }) => {
-      const parkedPerm = pendingPermBySessionRef.current.get(sessionId) ?? null;
-      setPerm(parkedPerm);
-      if (!parkedPerm && api.isTauri()) {
-        void api
-          .sessionPendingPermission(sessionId)
-          .then((p) => {
-            if (!p || !stillThisOpen()) return;
-            if (pendingPermBySessionRef.current.has(sessionId)) return;
-            pendingPermBySessionRef.current.set(sessionId, p);
-            setPerm(p);
-          })
-          .catch(() => {});
-      }
-      setAskUser(pendingAskUserBySessionRef.current.get(sessionId) ?? null);
+      restoreSessionGate(sessionId, stillThisOpen, {
+        parked: pendingPermBySessionRef,
+        apply: setPerm,
+        pull: api.sessionPendingPermission,
+        enabled: api.isTauri(),
+      });
+      restoreSessionGate(sessionId, stillThisOpen, {
+        parked: pendingAskUserBySessionRef,
+        apply: setAskUser,
+        pull: api.sessionPendingAskUser,
+        enabled: api.isTauri(),
+      });
       setTurnStartedAt(turnStartedAtBySessionRef.current.get(sessionId) ?? null);
       if (liveSessionId !== sessionId) setRetryStatus(null);
     };
@@ -3536,8 +3567,7 @@ export function AppWorkbench() {
     host.connect.release = (sessionId) =>
       releaseSessionConnection([queueSessionKey(sessionId)]);
     host.connect.workspacePath = () => generalWorkspacePath || undefined;
-    host.connect.isProjectWarmable = (project) =>
-      !project || (project.trusted && !isProjectPathMissing(project.pathOk));
+    host.connect.isProjectWarmable = (project) => isProjectWarmable(project);
   }
 
   const searchPaletteHostRef = useRef({
@@ -4032,7 +4062,7 @@ export function AppWorkbench() {
           });
           return false;
         }
-        if (proj && isProjectPathMissing(proj.pathOk)) {
+        if (proj && isProjectFolderMissing(proj)) {
           const detail = tr("project.pathMissing", { name: proj.name });
           setLocalError(detail);
           recordAutomationRun({
@@ -4122,6 +4152,7 @@ export function AppWorkbench() {
           projectPath: proj?.path || generalWorkspacePath || undefined,
           sessionId: sessionId ?? undefined,
           mode: "agent",
+          sshAlias: proj?.sshAlias ?? null,
         });
         setLiveHost(snap);
         liveHostRef.current = snap;
@@ -5867,6 +5898,12 @@ export function AppWorkbench() {
     executeSendFromQueueRef,
     executeSendLatestRef,
     claimSendForSession,
+    clearStopLatch: () => {
+      if (stopLatchRef.current.phase === "idle") return;
+      const cleared = createStopLatchState();
+      stopLatchRef.current = cleared;
+      setStopLatch(cleared);
+    },
     currentViewFocus,
     patchSessionMessages,
     ensureConnected,
@@ -6532,7 +6569,9 @@ export function AppWorkbench() {
     let cancelled = false;
     setSkillsLoading(true);
     void api
-      .skillsList(activeProject?.path ?? null)
+      .skillsList(activeProject?.path ?? null, {
+        sshAlias: activeProject?.sshAlias ?? null,
+      })
       .then((res) => {
         if (cancelled) return;
         const err = (res.error ?? "").trim();
@@ -6561,7 +6600,7 @@ export function AppWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.path, skillsReloadToken]);
+  }, [activeProject?.path, activeProject?.sshAlias, skillsReloadToken]);
 
   const slashCatalog = useMemo(
     () => buildSlashCatalog(skillInfos),
@@ -8692,6 +8731,13 @@ export function AppWorkbench() {
     ],
   );
 
+  const { captureRewindComposerRestore, applyRewindComposerRestore } =
+    useRewindComposerRestore({
+      viewingSessionIdRef, composerInputRef, messagesRef, messagesBySessionRef,
+      setDraft, setAttachments, setChatAttachments, setQuotes,
+      setEditingUserMessageId, setEditAttachments,
+    });
+
   /**
    * Apply rewind: truncate local journal (+ agent when live), refresh messages UI.
    * `restoreFiles` is opt-in (safe default off) — reverts workspace files when agent supports it.
@@ -8717,6 +8763,7 @@ export function AppWorkbench() {
       setRewindError(null);
       setRewindBusy(true);
       try {
+        const restore = captureRewindComposerRestore(sessionId, targetPromptIndex);
         // Prefer live connect so agent rewind can run; local truncate still works if not.
         if (
           (session.sessionId === sessionId ||
@@ -8757,8 +8804,11 @@ export function AppWorkbench() {
         setRewindConfirm(null);
         setRewindRestoreFiles(false);
         setRewindError(null);
+        applyRewindComposerRestore(sessionId, restore);
         if (!result.agentOk) {
           showToast(tr("session.rewindLocalOnly"), 4200);
+        } else {
+          showToast(tr("session.rewindOk"));
         }
         await refreshSessions();
       } catch (e) {
@@ -8771,11 +8821,69 @@ export function AppWorkbench() {
     },
     // ensureConnected / refreshSessions via closure
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [canRewindSession, session.sessionId, session.state, showToast, tr],
+    [applyRewindComposerRestore, captureRewindComposerRestore, canRewindSession, session.sessionId, session.state, showToast, tr],
+  );
+
+  const runRewindDropLastUser = useCallback(
+    async (sessionId: string) => {
+      if (!api.isTauri()) {
+        const msg = tr("error.needTauri");
+        setRewindError(msg);
+        showToast(msg);
+        return;
+      }
+      if (!canRewindSession) {
+        const msg = tr("session.rewindBusy");
+        setRewindError(msg);
+        showToast(msg);
+        return;
+      }
+      setRewindError(null);
+      setRewindBusy(true);
+      try {
+        const restore = captureRewindComposerRestore(sessionId, null);
+        if (
+          (session.sessionId === sessionId ||
+            viewingSessionIdRef.current === sessionId) &&
+          session.state !== "ready"
+        ) {
+          try {
+            await ensureConnected();
+          } catch {
+            /* local-only path */
+          }
+        }
+        await api.sessionRewindDropLastUser(sessionId);
+        if (viewingSessionIdRef.current === sessionId) {
+          const stored = await api.sessionMessages(sessionId);
+          const mapped = mapStoredMessagesToChat(stored);
+          const woven = weaveToolsIntoAssistantSegments(mapped);
+          messagesBySessionRef.current.set(sessionId, woven);
+          setMessages(woven);
+        } else {
+          messagesBySessionRef.current.delete(sessionId);
+        }
+        setRewindTimeline(null);
+        setRewindConfirm(null);
+        setRewindRestoreFiles(false);
+        setRewindError(null);
+        applyRewindComposerRestore(sessionId, restore);
+        showToast(tr("session.rewindOk"));
+        await refreshSessions();
+      } catch (e) {
+        const msg = tr("session.rewindFailed") + ": " + String(e);
+        setRewindError(msg);
+        showToast(msg, 4500);
+      } finally {
+        setRewindBusy(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [applyRewindComposerRestore, captureRewindComposerRestore, canRewindSession, session.sessionId, session.state, showToast, tr],
   );
 
   const confirmRewindToPrompt = useCallback(
-    (sessionId: string, targetPromptIndex: number, preview?: string) => {
+    (sessionId: string, targetPromptIndex: number | null, preview?: string) => {
       setCtxMenu(null);
       // GlassModal with restore-files checkbox (default off) — not bare setAppDialog.
       // Close the timeline first so two overlays cannot swallow the confirm click.
@@ -8851,15 +8959,16 @@ export function AppWorkbench() {
         return;
       }
       const idx = userPromptIndexOf(messages, msg.id);
-      if (idx < 0) return;
-      if (!canRewindToUserPrompt(messages, idx)) {
+      if (idx < 0) {
+        showToast(tr("session.rewindFailed"));
         return;
       }
+      const keep = rewindKeepPromptIndex(messages, idx);
       const preview = (msg.content || "")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 80);
-      confirmRewindToPrompt(sid, idx, preview);
+      confirmRewindToPrompt(sid, keep, preview);
     },
     [
       canRewindSession,
@@ -8887,7 +8996,10 @@ export function AppWorkbench() {
           updatedAt: new Date().toISOString(),
         } satisfies SessionRow);
       const idx = userPromptIndexContaining(messages, msg.id);
-      if (idx < 0) return;
+      if (idx < 0) {
+        showToast(tr("session.forkFailed"));
+        return;
+      }
       confirmForkSession(row, idx);
     },
     [
@@ -9850,31 +9962,12 @@ export function AppWorkbench() {
     return null;
   }, [customRouteActive, activeCustomProvider]);
 
-  // Floating composer height → chat bottom pad so messages can scroll under it.
-  // ResizeObserver covers typing growth; no draft subscription (would thrash shell).
-  useEffect(() => {
-    if (mainPane !== "chat") return;
-    const el = composerWrapRef.current;
-    if (!el) return;
-    const measure = () => {
-      const h = Math.ceil(el.getBoundingClientRect().height);
-      if (h <= 0) return;
-      // Ignore 1px subpixel flicker — pad thrash reflows chat scrollHeight
-      // and looks like the transcript bouncing while you type/scroll.
-      setComposerFloatPad((prev) => (Math.abs(prev - h) <= 1 ? prev : h));
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [
-    mainPane,
-    attachments.length,
-    showComposerPlus,
-    messages.length,
-    welcomeSession,
-    welcomeBrandKind,
-  ]);
+  useComposerEndPad(
+    composerWrapRef,
+    setComposerFloatPad,
+    mainPane === "chat",
+    `${attachments.length}:${showComposerPlus}:${messages.length}:${welcomeSession}:${String(welcomeBrandKind)}`,
+  );
 
   const sidebarPaint =
     layout.sidebarCollapsed || sidebarOverlay
@@ -9976,17 +10069,9 @@ export function AppWorkbench() {
         m.map((x) => ({ ...x, streaming: false })),
       );
       patchSessionMessages(id, (prev) => {
-        if (
-          prev.some(
-            (x) =>
-              x.marker === "turn_end" ||
-              x.marker === "turn_cancelled" ||
-              x.content?.startsWith("turn_end|") ||
-              x.content?.startsWith("turn_cancelled|"),
-          )
-        ) {
-          return prev;
-        }
+        // Only the *current* turn — a prior stop chip must not block this one,
+        // and Host `turn_marker` must not twin a local chip already painted.
+        if (currentTurnHasEndMarker(prev)) return prev;
         return applyTurnMarker(prev, {
           sessionId: id,
           messageId: `end-stop-${reason}-${Date.now()}`,
@@ -10003,6 +10088,18 @@ export function AppWorkbench() {
     // Optimistic unlock: sticky "thinking" + wedged cancel used to keep the
     // UI busy until `sessionStop` returned (or forever on Host hang).
     forceUnlockLocal(sid, "force");
+    // Free the send claim immediately. Otherwise a hung ensureConnected /
+    // sessionSend keeps claimSendForSession false and the next Send no-ops
+    // while the button still looks enabled (Tip still says 发送).
+    {
+      const freed = releaseSendClaimsOnUserStop(
+        sendInFlightBySessionRef.current,
+        sendEpochBySessionRef.current,
+        sid,
+      );
+      sendInFlightRef.current = freed.inFlight;
+      sendEpochRef.current += 1;
+    }
 
     let timeoutSettledSessionId: string | null = sid;
     // Force-unlock again if Host stays busy past STOP_LATCH_MS.
@@ -10050,16 +10147,19 @@ export function AppWorkbench() {
           m.map((x) => ({ ...x, streaming: false })),
         );
       }
-      const cleared = createStopLatchState();
-      stopLatchRef.current = cleared;
-      setStopLatch(cleared);
+      // sessionStop often returns before Host leaves streaming. Keep force_idle
+      // until a Host ready event clears the latch — do not trust the optimistic
+      // local Ready map (that used to drop the latch and re-lock Send).
+      const settled = settleStopLatchAfterSessionStop(stopLatchRef.current);
+      stopLatchRef.current = settled;
+      setStopLatch(settled);
     } catch (e) {
       // Host stop can fail ("no active session") while UI still shows thinking.
       // Always finish local unlock so Stop never leaves a dead busy shell.
       forceUnlockLocal(sid || liveHostRef.current.sessionId, "force");
-      const cleared = createStopLatchState();
-      stopLatchRef.current = cleared;
-      setStopLatch(cleared);
+      const settled = settleStopLatchAfterSessionStop(stopLatchRef.current);
+      stopLatchRef.current = settled;
+      setStopLatch(settled);
       setLocalError(String(e));
     }
   };
@@ -10298,26 +10398,24 @@ export function AppWorkbench() {
     void refreshGitDirtyStatus();
     // Soft poll while a project is bound; refresh sooner on focus.
     // Faster while a turn is live — agent may `git switch` mid-session.
+    // Ticks pause while the window is hidden — a minimized app has nothing
+    // to paint, and `git status` is a process spawn per poll.
     const path = activeProject?.path?.trim() || null;
     if (!path || !api.isTauri()) return;
     const busy =
       session.state === "streaming" || session.state === "awaiting_permission";
     const intervalMs = busy ? 2000 : 8000;
-    const id = window.setInterval(() => {
-      void refreshGitDirtyStatus();
-    }, intervalMs);
+    const poll = startVisibilityPoll({
+      tick: () => void refreshGitDirtyStatus(),
+      setIntervalFn: (handler) => window.setInterval(handler, intervalMs),
+    });
     const onFocus = () => {
       void refreshGitDirtyStatus();
     };
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") onFocus();
-    };
     window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.clearInterval(id);
+      poll.dispose();
       window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [
     activeProject?.path,
@@ -11175,6 +11273,7 @@ export function AppWorkbench() {
             projectPath: proj.path || undefined,
             sessionId: createdId,
             mode: "agent",
+            sshAlias: proj.sshAlias ?? null,
           });
           if (
             snap.lastError ||
@@ -12839,7 +12938,8 @@ export function AppWorkbench() {
           if (
             decision.shouldReveal &&
             decision.revealPath &&
-            api.isTauri()
+            api.isTauri() &&
+            !activeProject?.sshAlias
           ) {
             void api.pathReveal(decision.revealPath).catch(() => {
               /* reveal is best-effort fallback */
@@ -13888,6 +13988,8 @@ export function AppWorkbench() {
           activeCustomProvider={activeCustomProvider}
           mainPane={mainPane}
           onOpenSearch={() => searchPalette.openBlank()}
+          sidebarToggleUnread={unreadSessionIds.size > 0}
+          onToggleSidebar={closeSidebarPane}
           onNewChat={() => void newChat(null)}
           onNavigateAutomations={navigateAutomations}
           onNavigateKanban={navigateKanban}
@@ -13959,6 +14061,8 @@ export function AppWorkbench() {
             projectReorder={projectReorder}
             openProjectMenu={openProjectMenu}
             newChat={newChat}
+            onNewRemoteConversation={newRemoteChat}
+            onImportedSessionsChanged={() => void refreshSessions()}
             relocateProject={relocateProject}
             trustProject={trustProject}
             viewingSessionId={session.sessionId}
@@ -14105,7 +14209,7 @@ export function AppWorkbench() {
               />            </Suspense>
           ) : (
           <>
-          {activeProject && isProjectPathMissing(activeProject.pathOk) && (
+          {activeProject && isProjectFolderMissing(activeProject) && (
             <div className="conn-bar">
               <span style={{ fontSize: 12, opacity: 0.9, marginRight: 8 }}>
                 {tr("project.pathMissingShort")}
@@ -14121,7 +14225,7 @@ export function AppWorkbench() {
             </div>
           )}
           {activeProject &&
-            !isProjectPathMissing(activeProject.pathOk) &&
+            !isProjectFolderMissing(activeProject) &&
             !activeProject.trusted && (
             <div className="conn-bar">
               <button
@@ -14328,6 +14432,8 @@ export function AppWorkbench() {
             attachments={attachments}
             availableModels={availableModels}
             bindSessionProject={bindSessionProject}
+            setProjects={setProjects}
+            setLocalError={setLocalError}
             canGuideQueuedMessage={canGuideQueuedMessage}
             channelEffortOptions={channelEffortOptions}
             chatAttachments={chatAttachments}
@@ -14501,6 +14607,7 @@ export function AppWorkbench() {
               <BottomTerminal
                 locale={locale}
                 projectPath={effectiveProjectPath}
+                sshAlias={activeProject?.sshAlias ?? null}
                 state={bottomTerminal.state}
                 onAddTab={bottomTerminal.addTab}
                 onCloseTab={bottomTerminal.closeTab}
@@ -14525,6 +14632,7 @@ export function AppWorkbench() {
           asidePaint={asidePaint}
           beginAsideResize={beginAsideResize}
           effectiveProjectPath={effectiveProjectPath}
+          sshAlias={activeProject?.sshAlias ?? null}
           projectName={
             activeProject
               ? projectDisplayName(activeProject, tr)
@@ -14949,6 +15057,7 @@ export function AppWorkbench() {
         runForkSession={runForkSession}
         runMcpDoctor={runMcpDoctor}
         runResumeWithCodeRestore={runResumeWithCodeRestore}
+        runRewindDropLastUser={runRewindDropLastUser}
         runRewindToPrompt={runRewindToPrompt}
         saveSessionMaxTurnsModal={saveSessionMaxTurnsModal}
         saveSessionNoteModal={saveSessionNoteModal}
