@@ -59,11 +59,7 @@ fn name_listed(set: &HashSet<String>, name: &str) -> bool {
 }
 
 /// Parse Claude/Grok `.mcp.json` (`mcpServers` object or array).
-pub fn parse_plugin_mcp_json(
-    raw: &str,
-    plugin_root: &str,
-    plugin_name: &str,
-) -> Vec<McpServerDef> {
+pub fn parse_plugin_mcp_json(raw: &str, plugin_root: &str, plugin_name: &str) -> Vec<McpServerDef> {
     let Ok(v) = serde_json::from_str::<Value>(raw) else {
         return Vec::new();
     };
@@ -294,7 +290,11 @@ pub fn discover_plugin_mcp_servers_in(grok_home: &Path) -> Vec<McpServerDef> {
     if let Ok(raw) = fs::read_to_string(&registry_path) {
         if let Ok(reg) = serde_json::from_str::<RegistryFile>(&raw) {
             for (repo_key, repo) in reg.repos {
-                let Some(repo_path) = repo.path.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                let Some(repo_path) = repo
+                    .path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
                 else {
                     continue;
                 };
@@ -310,19 +310,16 @@ pub fn discover_plugin_mcp_servers_in(grok_home: &Path) -> Vec<McpServerDef> {
                     continue;
                 }
                 for (plugin_name, meta) in repo.plugins {
-                    let dir = match meta.subdir.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                    let dir = match meta
+                        .subdir
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
                     {
                         Some(sub) => PathBuf::from(repo_path).join(sub),
                         None => PathBuf::from(repo_path),
                     };
-                    push_mcp_dir(
-                        &dir,
-                        &plugin_name,
-                        &enabled,
-                        &disabled,
-                        &mut seen,
-                        &mut out,
-                    );
+                    push_mcp_dir(&dir, &plugin_name, &enabled, &disabled, &mut seen, &mut out);
                 }
             }
         }
@@ -398,10 +395,7 @@ fn push_mcp_dir(
     seen: &mut HashSet<String>,
     out: &mut Vec<McpServerDef>,
 ) {
-    let leaf = dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let leaf = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if !looks_enabled(enabled, disabled, &[plugin_name, leaf]) {
         return;
     }
@@ -442,11 +436,7 @@ pub fn mcp_def_to_inspect_json(def: &McpServerDef, enabled: bool) -> Value {
         url.to_string()
     } else {
         let cmd = def.command.as_deref().unwrap_or("").trim();
-        let args = def
-            .args
-            .as_ref()
-            .map(|a| a.join(" "))
-            .unwrap_or_default();
+        let args = def.args.as_ref().map(|a| a.join(" ")).unwrap_or_default();
         format!("{cmd} {args}").trim().to_string()
     };
     let plugin_name = def
@@ -503,9 +493,8 @@ fn def_for_server(name: &str) -> Option<McpServerDef> {
 }
 
 fn run_x_api_cli(plugin_root: &Path, args: &[String], timeout_secs: u64) -> Result<String, String> {
-    let script = x_api_cli_path(plugin_root).ok_or_else(|| {
-        "this plugin has no scripts/x-api.mjs auth CLI".to_string()
-    })?;
+    let script = x_api_cli_path(plugin_root)
+        .ok_or_else(|| "this plugin has no scripts/x-api.mjs auth CLI".to_string())?;
     let (tx, rx) = std::sync::mpsc::channel();
     let script_owned = script.clone();
     let args_owned = args.to_vec();
@@ -579,13 +568,23 @@ fn last_json_object(stdout: &str) -> Option<Value> {
 fn status_from_cli_json(server: &str, plugin_root: &Path, raw: &Value) -> Value {
     let o1 = raw.get("oauth1").cloned().unwrap_or(Value::Null);
     let o2 = raw.get("oauth2").cloned().unwrap_or(Value::Null);
-    let authorized = o1.get("configured").and_then(|x| x.as_bool()).unwrap_or(false)
-        || o2.get("configured").and_then(|x| x.as_bool()).unwrap_or(false);
+    let authorized = o1
+        .get("configured")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+        || o2
+            .get("configured")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
     let username = o1
         .get("username")
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty())
-        .or_else(|| o2.get("username").and_then(|x| x.as_str()).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            o2.get("username")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or("")
         .to_string();
     serde_json::json!({
@@ -610,12 +609,9 @@ fn status_from_cli_json(server: &str, plugin_root: &Path, raw: &Value) -> Value 
 }
 
 pub fn plugin_mcp_auth_status(server: &str) -> Result<Value, String> {
-    let def = def_for_server(server).ok_or_else(|| {
-        format!("plugin MCP '{server}' not found")
-    })?;
-    let root = plugin_root_from_def(&def).ok_or_else(|| {
-        "plugin MCP has no local plugin root".to_string()
-    })?;
+    let def = def_for_server(server).ok_or_else(|| format!("plugin MCP '{server}' not found"))?;
+    let root = plugin_root_from_def(&def)
+        .ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
     if x_api_cli_path(&root).is_none() {
         return Ok(serde_json::json!({
             "server": server,
@@ -641,7 +637,8 @@ pub fn plugin_mcp_auth_save_tokens(
     access_token_secret: &str,
 ) -> Result<Value, String> {
     let def = def_for_server(server).ok_or_else(|| format!("plugin MCP '{server}' not found"))?;
-    let root = plugin_root_from_def(&def).ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
+    let root = plugin_root_from_def(&def)
+        .ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
     let stdout = run_x_api_cli(
         &root,
         &[
@@ -669,7 +666,8 @@ pub fn plugin_mcp_auth_oauth2(
     client_secret: &str,
 ) -> Result<Value, String> {
     let def = def_for_server(server).ok_or_else(|| format!("plugin MCP '{server}' not found"))?;
-    let root = plugin_root_from_def(&def).ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
+    let root = plugin_root_from_def(&def)
+        .ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
     let stdout = run_x_api_cli(
         &root,
         &[
@@ -689,7 +687,8 @@ pub fn plugin_mcp_auth_oauth2(
 
 pub fn plugin_mcp_auth_logout(server: &str) -> Result<Value, String> {
     let def = def_for_server(server).ok_or_else(|| format!("plugin MCP '{server}' not found"))?;
-    let root = plugin_root_from_def(&def).ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
+    let root = plugin_root_from_def(&def)
+        .ok_or_else(|| "plugin MCP has no local plugin root".to_string())?;
     let _ = run_x_api_cli(&root, &["logout".into()], 20)?;
     plugin_mcp_auth_status(server)
 }
@@ -732,8 +731,14 @@ mod tests {
             vec!["/opt/x-api/mcp/server.mjs".to_string()]
         );
         let env = defs[0].env.as_ref().expect("env");
-        assert_eq!(env.get("CLAUDE_PLUGIN_ROOT").map(String::as_str), Some("/opt/x-api"));
-        assert_eq!(env.get("GROK_PLUGIN_ROOT").map(String::as_str), Some("/opt/x-api"));
+        assert_eq!(
+            env.get("CLAUDE_PLUGIN_ROOT").map(String::as_str),
+            Some("/opt/x-api")
+        );
+        assert_eq!(
+            env.get("GROK_PLUGIN_ROOT").map(String::as_str),
+            Some("/opt/x-api")
+        );
         assert_eq!(defs[0].scope.as_deref(), Some("plugin:x-api"));
         assert_eq!(defs[0].transport.as_deref(), Some("stdio"));
     }
@@ -749,7 +754,11 @@ mod tests {
         let mut enabled = HashSet::new();
         enabled.insert("x-api".into());
         let disabled = HashSet::new();
-        assert!(looks_enabled(&enabled, &disabled, &["x-api", "x-api-bcc58898"]));
+        assert!(looks_enabled(
+            &enabled,
+            &disabled,
+            &["x-api", "x-api-bcc58898"]
+        ));
         assert!(!looks_enabled(&enabled, &disabled, &["other"]));
         assert!(!looks_enabled(&HashSet::new(), &disabled, &["x-api"]));
         let mut disabled = HashSet::new();
@@ -782,16 +791,16 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::write(root.join("config.toml"), "[plugins]\nenabled = [\"x-api\"]\n").unwrap();
+        fs::write(
+            root.join("config.toml"),
+            "[plugins]\nenabled = [\"x-api\"]\n",
+        )
+        .unwrap();
 
         let defs = discover_plugin_mcp_servers_in(&root);
         assert_eq!(defs.len(), 1, "{defs:?}");
         assert_eq!(defs[0].name, "x-api");
-        assert!(defs[0]
-            .args
-            .as_ref()
-            .unwrap()[0]
-            .ends_with("mcp/server.mjs"));
+        assert!(defs[0].args.as_ref().unwrap()[0].ends_with("mcp/server.mjs"));
 
         fs::write(root.join("config.toml"), "[plugins]\nenabled = []\n").unwrap();
         assert!(discover_plugin_mcp_servers_in(&root).is_empty());

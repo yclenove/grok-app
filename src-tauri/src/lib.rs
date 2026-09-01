@@ -78,8 +78,8 @@ mod editors;
 mod error;
 
 mod extensions;
-mod plugin_mcp;
 mod mcp_oauth;
+mod plugin_mcp;
 
 mod fs_browser;
 
