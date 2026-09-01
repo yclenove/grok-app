@@ -41,6 +41,14 @@ concurrently, and hydrates the selected original without blocking the initial
 Lightbox mount. Deterministic coverage locks both the duplicate-placeholder
 selection and concurrent-resolution behavior.
 
+The final source-dialog pass grouped the seven labeled sources into compact
+`4 + 1 + 2` segments above the full-width gallery. It removed repeated Grok
+album source captions from cards and reduced the ready toolbar to its status
+dot and visible/cached counts; the complete status and privacy contract remain
+available to assistive technology and the existing info tooltip. A stacked
+layer regression also keeps Escape ownership with the Lightbox first, so one
+key press closes the preview without closing the wallpaper dialog underneath.
+
 The available Saved page contained no blob-backed video. That bounded transfer
 path is covered by deterministic tests, but this report deliberately does not
 claim a live blob-video result.
@@ -76,7 +84,8 @@ claim a live blob-video result.
 | `pnpm audit:prod` | Passed; no known production vulnerability |
 | `pnpm lint` | Passed |
 | `pnpm typecheck` | Passed |
-| `pnpm exec vitest run --maxWorkers=4` | 558 files, 6845 tests passed on the current Saved album implementation |
+| `pnpm exec vitest run --maxWorkers=4` | 565 files, 6875 tests passed on the finalized wallpaper source dialog |
+| Focused source-dialog Vitest | 5 files, 16 tests passed; compact album status, grouped layout, HMR boundary, load-more card interaction, and stacked Escape ownership are covered |
 | Targeted Saved album Vitest | 13 files, 68 tests passed; lifecycle, initial sign-in confirmation, old and current Cloudflare challenge markup, background warming and recovery, load-more state, thumbnail invalidation, gallery, HMR, viewer identity/concurrency, and media preparation paths are covered |
 | Targeted Saved album Rust tests | 16 passed after manifest embedding; page lifecycle, navigation, metadata validation, bridge limits, media races, and cancellation are covered |
 | Targeted WebView proxy Rust tests | 3 passed after manifest embedding; manual pin, SOCKS normalization, native system route, credential rejection, unsupported scheme, and Direct fail-closed are covered |
@@ -84,14 +93,14 @@ claim a live blob-video result.
 | `cargo fmt --all -- --check` | Passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo test --no-run` | Passed |
-| Manifest-embedded Windows Rust harness | 1600 passed, 0 failed, 1 ignored |
+| Manifest-embedded Windows Rust harness | 1645 passed, 0 failed, 1 ignored |
 | `py -3 scripts/check-code-quality-gates.py --mode final --json` | One existing failure: `FILES_OVER_1K_BUDGET` is 77 > 69; every other gate passed |
 | `git diff --check` | Passed after the first-snapshot UX fix |
 
-No production file introduced by the Saved album work crosses the 1,000-line
-threshold. The Host is split between a 911-line facade and a 181-line cache
-module; the refactored source modal is 979 lines, and the shared viewer remains
-375 lines after the lazy-media and HMR hardening.
+No production file introduced by the Saved album or source-dialog cleanup
+crosses the 1,000-line threshold. The Host is split between a 911-line facade
+and a 181-line cache module; the source modal is 920 lines, and the shared
+viewer is 381 lines after the lazy-media, HMR, and stacked-layer hardening.
 
 ## Real Windows Tauri acceptance
 
@@ -110,6 +119,8 @@ exit information.
 | Stable layout during challenge polling | Passed | Existing modal content stayed mounted with no blank WebView or repeated shimmer |
 | Persistent isolated sign-in | Passed | After a full development-app restart, the dedicated WebView reused its isolated profile and opened Saved without another login |
 | Fast Refresh with the Saved modal mounted | Passed | After a cold reload discarded a stale pre-fix module graph, editing the shared viewer while the modal stayed open preserved the stable Context boundary; the next card click mounted Lightbox and played the real Saved video |
+| Minimum-width source layout | Passed | At the app minimum of 886 x 948, all three labeled source segments stayed on one unclipped line; the ready album toolbar showed 20 visible / 48 cached items without repeated explanatory copy |
+| Stacked Escape ownership | Passed | Opening a real album card mounted Lightbox; Escape closed only Lightbox and left the wallpaper dialog open for the next action |
 
 ## Ready-state media matrix
 
@@ -126,11 +137,15 @@ exit information.
 | Preview and apply a blob-backed generated video | Not observed | No blob-backed video existed in the live account sample; deterministic bounded-chunk and cleanup coverage passed |
 | Cancel thumbnail/original work when closing the modal or changing source | Passed | Cancellation/cleanup tests passed and the live wallpaper directory contained no residual `.partial` file |
 | Clear cached account media on navigation, logout, window close, and page revision | Passed | Lifecycle invalidation tests passed; live close/reopen and full-restart flows did not expose stale gallery state |
+| Keep existing cards interactive during paging and warming | Passed | Existing album and remote-source cards remained selectable while later pages were being prefetched or loaded; the focused real-Lightbox regression keeps this behavior locked |
 
-## Finalization requirements
+## Finalization outcome
 
-Rerun the complete frontend and Rust gates, run a final
-secret/temporary-marker scan, and commit only the Saved album scope. Do not
-create a pull request, tag, release, or push as part of this acceptance. Retest
-the blob-backed video path if a real Saved sample becomes available; absence of
-that sample does not change the supported validation and cleanup contract.
+The complete frontend and Rust gates, manifest-injected Windows harness,
+code-quality audit, diff check, and secret/temporary-marker scan were rerun on
+2026-09-01. The only non-green quality metric is the inherited repository-wide
+`FILES_OVER_1K_BUDGET` count of 77 against 69; this scope added no new
+1,000-line production file. This acceptance remains local-only: no pull
+request, tag, release, or push is part of the work. Retest the blob-backed video
+path if a real Saved sample becomes available; absence of that sample does not
+change the supported validation and cleanup contract.

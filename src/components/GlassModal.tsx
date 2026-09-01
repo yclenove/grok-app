@@ -33,6 +33,8 @@ export type GlassModalSize = "sm" | "md" | "lg";
 export type GlassModalProps = {
   open: boolean;
   onClose: () => void;
+  /** Optional Escape owner for stacked layers; defaults to onClose. */
+  onEscape?: () => void;
   title: ReactNode;
   children: ReactNode;
   /** Right-aligned footer actions (Cancel / Save / Close, etc.) */
@@ -65,6 +67,7 @@ function cx(...parts: Array<string | false | null | undefined>) {
 export function GlassModal({
   open,
   onClose,
+  onEscape,
   title,
   children,
   footer,
@@ -87,6 +90,8 @@ export function GlassModal({
   // effect on every parent render steals focus and makes modals flicker.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onEscapeRef = useRef(onEscape);
+  onEscapeRef.current = onEscape;
   const initialFocusRef = useRef(initialFocus);
   initialFocusRef.current = initialFocus;
 
@@ -94,7 +99,7 @@ export function GlassModal({
     if (!open) return;
     // Shared trap: Tab cycle + Escape + restore previous focus.
     return installDialogFocus(() => panelRef.current, {
-      onEscape: () => onCloseRef.current(),
+      onEscape: () => (onEscapeRef.current ?? onCloseRef.current)(),
       // Bubble phase so nested capture handlers (permission bar, appDialog)
       // can still claim Escape first when stacked.
       capture: false,

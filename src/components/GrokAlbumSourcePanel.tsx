@@ -58,20 +58,33 @@ export function GrokAlbumSourcePanel({
   const ready = status === "ready";
   const otherPage = status === "other_page";
   const verification = status === "verification";
+  const showStatusLabel = !ready || cachedCount === 0;
+  const countLabel =
+    cachedCount > 0
+      ? t("settings.wallpaperSource.grokAlbum.count", {
+          shown: visibleCount,
+          cached: cachedCount,
+        })
+      : null;
   return (
     <div className="wallpaper-source-form wallpaper-grok-album">
       <div className="wallpaper-grok-album__toolbar">
-        <div className="wallpaper-grok-album__status" role="status">
+        <div
+          className="wallpaper-grok-album__status"
+          role="status"
+          aria-label={[t(statusKey(status)), countLabel]
+            .filter(Boolean)
+            .join(" · ")}
+        >
           <span className="wallpaper-grok-album__dot" data-status={status} />
-          <span className="wallpaper-grok-album__status-label">
-            {t(statusKey(status))}
-          </span>
-          {cachedCount > 0 ? (
+          {showStatusLabel ? (
+            <span className="wallpaper-grok-album__status-label">
+              {t(statusKey(status))}
+            </span>
+          ) : null}
+          {countLabel ? (
             <span className="wallpaper-grok-album__count">
-              {t("settings.wallpaperSource.grokAlbum.count", {
-                shown: visibleCount,
-                cached: cachedCount,
-              })}
+              {countLabel}
             </span>
           ) : null}
           <span

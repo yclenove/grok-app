@@ -137,7 +137,9 @@ The first implementation keeps all seven sources in one dialog without mixing
 their contracts:
 
 - A labeled, horizontally scrollable source strip sits above one continuous
-  full-width workspace; it is never collapsed into seven unlabeled icons.
+  full-width workspace. The seven sources use three compact segments (four
+  discovery sources, Imagine, then Grok album and local library) instead of
+  seven unlabeled icons or a second navigation column.
 - Controls, progress, route details, and errors appear only when relevant.
   Persistent source-description paragraphs and footer instructions are not
   rendered. Provenance remains attached to each result card.
@@ -160,3 +162,17 @@ also completed in 55.0 seconds, returning 11 candidates and retaining nine that
 decoded successfully. These runs validate the `3 x 8` lane shape and the bounded
 7-12 reported-tool-call compatibility window; they are smoke evidence rather
 than a broad latency benchmark.
+
+A Windows Tauri provider and minimum-width pass also exercised the direct
+library route. Two observed Openverse initial searches each retained 20
+validated cards, completing in 26.5 seconds and 4.3 seconds under different
+live network/cache conditions. Every visible thumbnail decoded and every card
+kept its source, author, and license actions. An immediate cache repeat returned
+the same 20 cards in 0.0 seconds; consuming the first prefetched page expanded
+the gallery from 20 to 39 in about 0.3 seconds, and continued paging reached 99
+cards without disabling existing previews. At the app's 886 x 948 minimum
+window, the three source segments, Openverse results, and Pexels missing-key
+state remained unclipped. No Pexels key was configured, so this pass does not
+claim a live Pexels API request. These observations confirm that one- or
+two-card Web outcomes are downstream discovery/validation attrition rather
+than a requested page-size of one or two.

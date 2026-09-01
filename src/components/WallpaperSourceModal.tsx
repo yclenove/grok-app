@@ -726,6 +726,14 @@ export function WallpaperSourceModal({
     onClose();
   }, [xSearchBusy, cancelXSearch, remoteController, onClose]);
 
+  const closeModalOnEscape = useCallback(() => {
+    if (viewer.isOpen()) {
+      viewer.close();
+      return;
+    }
+    closeModal();
+  }, [closeModal, viewer]);
+
   const authNeeded = errorCode === "auth_required";
   const locked = busy || applying || previewingId !== null;
   const tabSwitchLocked =
@@ -771,6 +779,7 @@ export function WallpaperSourceModal({
       <GlassModal
         open={open}
         onClose={closeModal}
+        onEscape={closeModalOnEscape}
         title={t("settings.wallpaperSource.title")}
         size="lg"
         className="wallpaper-source-modal"

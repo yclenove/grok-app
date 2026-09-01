@@ -95,6 +95,7 @@ export function ImageViewerProvider({
   const [isOpen, setIsOpen] = useState(false);
   const [index, setIndex] = useState(0);
   const [slides, setSlides] = useState<ResolvedSlide[]>([]);
+  const isOpenRef = useRef(false);
   const slidesRef = useRef(slides);
   const generationRef = useRef(0);
   const originalLoadsRef = useRef(new Set<string>());
@@ -103,8 +104,11 @@ export function ImageViewerProvider({
   const close = useCallback(() => {
     generationRef.current += 1;
     originalLoadsRef.current.clear();
+    isOpenRef.current = false;
     setIsOpen(false);
   }, []);
+
+  const viewerIsOpen = useCallback(() => isOpenRef.current, []);
 
   const openViewer = useCallback(
     (input: ImageSlideInput[] | string[], startIndex = 0) => {
@@ -182,6 +186,7 @@ export function ImageViewerProvider({
         if (generationRef.current !== generation) return;
         setSlides(next);
         setIndex(idx);
+        isOpenRef.current = true;
         setIsOpen(true);
       })();
     },
@@ -307,9 +312,10 @@ export function ImageViewerProvider({
     () => ({
       open: openViewer,
       close,
+      isOpen: viewerIsOpen,
       copyImage,
     }),
-    [openViewer, close, copyImage],
+    [openViewer, close, viewerIsOpen, copyImage],
   );
 
   // Right-click inside lightbox → copy current image (keeps Zoom plugin intact).

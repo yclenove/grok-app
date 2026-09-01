@@ -12,7 +12,7 @@ const sourceCss = readFileSync(
 );
 
 describe("wallpaper source layout guard", () => {
-  it("keeps a labeled source strip above the full-width workspace", () => {
+  it("keeps grouped source controls above the full-width workspace", () => {
     expect(modalCss).toMatch(
       /\.modal\.glass-modal\.wallpaper-source-modal\s*\{[^}]*width:\s*min\(1080px,/s,
     );
@@ -21,6 +21,9 @@ describe("wallpaper source layout guard", () => {
     );
     expect(modalCss).toMatch(
       /\.wallpaper-source-tabs\s*\{[^}]*flex-direction:\s*row[^}]*overflow-x:\s*auto[^}]*border-bottom:/s,
+    );
+    expect(modalCss).toMatch(
+      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*border:\s*1px solid/s,
     );
   });
 

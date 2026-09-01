@@ -212,13 +212,24 @@ describe("WallpaperSourceModal source workspace", () => {
     expect(
       tabs.every((tab) => tab.getAttribute("aria-controls") === panel.id),
     ).toBe(true);
+    const groups = Array.from(
+      tablist.querySelectorAll(".wallpaper-source-tabs__group"),
+    );
     expect(
-      tabs
-        .filter((tab) => tab.getAttribute("data-group-start") === "true")
-        .map((tab) => tab.getAttribute("aria-label")),
+      groups.map((group) =>
+        Array.from(group.querySelectorAll('[role="tab"]')).map((tab) =>
+          tab.getAttribute("aria-label"),
+        ),
+      ),
     ).toEqual([
-      "settings.wallpaperImagine",
-      "settings.wallpaperGrokAlbum",
+      [
+        "settings.wallpaperFromX",
+        "settings.wallpaperWeb",
+        "settings.wallpaperOpenverse",
+        "settings.wallpaperPexels",
+      ],
+      ["settings.wallpaperImagine"],
+      ["settings.wallpaperGrokAlbum", "settings.wallpaperLibrary"],
     ]);
 
     const layout = view.container.querySelector(".wallpaper-source-layout");

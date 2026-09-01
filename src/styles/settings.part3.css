@@ -1097,13 +1097,24 @@ html[data-theme-editor-shell] #root {
   flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   min-width: 0;
   padding: 0 0 10px;
   overflow-x: auto;
   overflow-y: hidden;
   border-bottom: 1px solid var(--border-subtle);
   scrollbar-width: thin;
+}
+
+.wallpaper-source-tabs__group {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-hover) 76%, transparent);
 }
 
 .wallpaper-source-tabs__btn {
@@ -1113,7 +1124,7 @@ html[data-theme-editor-shell] #root {
   justify-content: center;
   gap: 6px;
   flex: 0 0 auto;
-  min-height: 34px;
+  min-height: 30px;
   width: auto;
   border: none;
   background: transparent;
@@ -1121,7 +1132,7 @@ html[data-theme-editor-shell] #root {
   font: inherit;
   font-size: 13px;
   font-weight: 500;
-  padding: 6px 10px;
+  padding: 4px 9px;
   border-radius: calc(var(--radius-md) - 2px);
   cursor: pointer;
   white-space: nowrap;

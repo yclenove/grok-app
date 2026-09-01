@@ -67,8 +67,6 @@ function sourceLabelKey(
   item: WallpaperGalleryItem,
   library: boolean,
 ): MessageKey | null {
-  if (!library && item.source === "imagine") return "settings.wallpaperImagine";
-  if (!library && item.source === "grok_album") return "settings.wallpaperGrokAlbum";
   if (!library) return null;
   if (item.source === "imagine") return "settings.wallpaperImagine";
   if (item.source === "grok_album") return "settings.wallpaperGrokAlbum";

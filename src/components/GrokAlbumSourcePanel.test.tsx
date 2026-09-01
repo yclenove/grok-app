@@ -58,7 +58,27 @@ describe("GrokAlbumSourcePanel", () => {
     expect(props.onOpen).toHaveBeenCalledTimes(1);
     expect(props.onRefresh).toHaveBeenCalledTimes(1);
 
-    view.rerender(<GrokAlbumSourcePanel {...props} status="ready" />);
+    view.rerender(
+      <GrokAlbumSourcePanel
+        {...props}
+        status="ready"
+        cachedCount={48}
+        visibleCount={20}
+      />,
+    );
+    expect(
+      screen.getByRole("status", {
+        name:
+          "settings.wallpaperSource.grokAlbum.status.ready · " +
+          "settings.wallpaperSource.grokAlbum.count",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("settings.wallpaperSource.grokAlbum.status.ready"),
+    ).toBeNull();
+    expect(
+      screen.getByText("settings.wallpaperSource.grokAlbum.count"),
+    ).toBeTruthy();
     expect(
       (
         screen.getByRole("button", {

@@ -19,21 +19,6 @@
   cursor: not-allowed;
 }
 
-.wallpaper-source-tabs__btn[data-group-start="true"] {
-  margin-left: 8px;
-}
-
-.wallpaper-source-tabs__btn[data-group-start="true"]::before {
-  content: "";
-  position: absolute;
-  top: 7px;
-  bottom: 7px;
-  left: -6px;
-  width: 1px;
-  background: var(--border-subtle);
-  pointer-events: none;
-}
-
 .wallpaper-source-layout {
   display: flex;
   flex-direction: column;

@@ -154,13 +154,14 @@ afterEach(() => {
 
 describe("WallpaperSourceModal image viewer integration", () => {
   it("opens the real lightbox portal for a lazy Grok album card", async () => {
+    const onClose = vi.fn();
     render(
       <ImageViewerProvider locale="en">
         <WallpaperSourceModal
           open
           initialTab="grok_album"
           t={(key) => key}
-          onClose={vi.fn()}
+          onClose={onClose}
           onPickFile={vi.fn()}
         />
       </ImageViewerProvider>,
@@ -176,6 +177,22 @@ describe("WallpaperSourceModal image viewer integration", () => {
       expect(document.querySelector(".yarl__portal")).not.toBeNull();
     });
     expect(document.querySelector(".yarl__root")).not.toBeNull();
+
+    // The card keeps focus when the portal mounts. Exercise the real keyboard
+    // path through the parent dialog instead of dispatching inside Lightbox.
+    fireEvent.keyDown(document.activeElement ?? document, {
+      key: "Escape",
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".yarl__portal")).toBeNull();
+    });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("dialog", { name: "settings.wallpaperSource.title" }),
+    ).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("opens the real lightbox while Web load more is still running", async () => {
