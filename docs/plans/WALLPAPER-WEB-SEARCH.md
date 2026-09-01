@@ -194,11 +194,11 @@ kept its source, author, and license actions. An immediate cache repeat returned
 the same 20 cards in 0.0 seconds; consuming the first prefetched page expanded
 the gallery from 20 to 39 in about 0.3 seconds, and continued paging reached 99
 cards without disabling existing previews. At the app's 886 x 948 minimum
-window, the three source segments, Openverse results, and Pexels missing-key
-state remained unclipped. No Pexels key was configured, so this pass does not
-claim a live Pexels API request. These observations confirm that one- or
-two-card Web outcomes are downstream discovery/validation attrition rather
-than a requested page-size of one or two.
+window, the single horizontally scrollable source row, Openverse results, and
+Pexels missing-key state remained unclipped. No Pexels key was configured, so
+this pass does not claim a live Pexels API request. These observations confirm
+that one- or two-card Web outcomes are downstream discovery/validation
+attrition rather than a requested page-size of one or two.
 
 A final contract-v2 provider pass used a modifier-heavy library query without
 recording its text. Openverse retained 20 validated cards in 25.3 seconds, and

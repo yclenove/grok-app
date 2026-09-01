@@ -1,6 +1,6 @@
 # Wallpaper provider query and source-layout acceptance
 
-Date: 2026-09-01 (Asia/Shanghai)
+Date: 2026-09-02 (Asia/Shanghai)
 
 Branch: `fix/wallpaper-responses-network-observability`
 
@@ -88,12 +88,13 @@ is now covered under both failed and successful paging.
 | `pnpm typecheck` | Passed |
 | `pnpm lint` | Passed |
 | `pnpm build:ui` | Passed; only existing dynamic-import and large-chunk warnings |
-| `cargo fmt --all -- --check` | Inherited failure only: existing formatting drift in unmodified `src-tauri/src/lib.rs` and `src-tauri/src/plugin_mcp.rs` |
+| `cargo fmt --all -- --check` | Passed; the inherited drift in `src-tauri/src/lib.rs` and `src-tauri/src/plugin_mcp.rs` was normalized in an isolated formatting-only commit |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo test --no-run` | Passed |
 | Manifest-embedded Windows Rust harness | 1712 passed, 0 failed, 1 ignored |
+| Manifest-embedded `wallpaper_x` tests after the module split | 32 passed, 0 failed |
 | `git diff --check` | Passed |
-| `python scripts/check-code-quality-gates.py` | One inherited failure: 79 files at or above 1,000 lines against a budget of 77; every other gate passed |
+| `python scripts/check-code-quality-gates.py` | Passed; 77 files at or above 1,000 lines against the 77-file budget |
 
 The post-acceptance album-filter regression suite adds focused coverage for the
 ready-to-verification transition and the single clear-action invariant. The
@@ -103,9 +104,13 @@ preservation path. The full and focused suite counts above include these final
 pagination cases.
 
 No production file crossed the 1,000-line threshold in this scope. The Rust
-provider module remains below the threshold at 986 lines; the two modified CSS
-parts were already above the threshold before this pass, and the edited part 3
-file decreased by three lines.
+provider module remains below the threshold at 986 lines. Inline tests were
+mechanically moved out of `wallpaper_x_responses.rs` and
+`wallpaper_x_search.rs`, leaving the production modules at 691 and 760 lines
+without changing behavior or reducing the test count. The repository-wide
+budget is therefore back to 77/77. The two modified CSS parts were already
+above the threshold before this pass, and the edited part 3 file decreased by
+three lines.
 
 ## Privacy and release state
 
