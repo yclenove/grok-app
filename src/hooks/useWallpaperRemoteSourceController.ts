@@ -340,7 +340,10 @@ export function useWallpaperRemoteSourceController({
         prefetched = null;
       }
       if (prefetched) prefetchOutcomeRef.current = null;
-      if (prefetched?.error) throw prefetched.error;
+      // A hidden prefetch failure is not a user-visible paging attempt. An
+      // explicit click gets one fresh foreground request; failure there is
+      // surfaced normally, without an automatic retry loop.
+      if (prefetched?.error) prefetched = null;
       const result =
         prefetched?.result ??
         (await remote.loadMore(continuation.source, continuation.query));

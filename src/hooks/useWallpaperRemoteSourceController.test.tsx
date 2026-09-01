@@ -222,6 +222,53 @@ describe("useWallpaperRemoteSourceController", () => {
     });
   });
 
+  it("issues a fresh foreground request after a hidden prefetch failure", async () => {
+    remote.search.mockResolvedValue(
+      result([galleryItem("first")], { hasMore: true }),
+    );
+    remote.loadMore
+      .mockRejectedValueOnce(new Error("provider_timeout"))
+      .mockResolvedValueOnce(result([galleryItem("second")]));
+    const hook = renderHook(() => useHarness({ query: "rainforest" }));
+
+    await act(async () => hook.result.current.controller.search());
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(1));
+    expect(hook.result.current.items.map((item) => item.id)).toEqual(["first"]);
+    expect(hook.result.current.error).toBeNull();
+
+    await act(async () => hook.result.current.controller.loadMore());
+
+    expect(remote.loadMore).toHaveBeenCalledTimes(2);
+    expect(remote.loadMore).toHaveBeenLastCalledWith("web", "rainforest");
+    expect(hook.result.current.items.map((item) => item.id)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.controller.canLoadMore).toBe(false);
+  });
+
+  it("preserves existing cards when the fresh foreground request also fails", async () => {
+    remote.search.mockResolvedValue(
+      result([galleryItem("survivor")], { hasMore: true }),
+    );
+    remote.loadMore
+      .mockRejectedValueOnce(new Error("provider_timeout"))
+      .mockRejectedValueOnce(new Error("provider_timeout"));
+    const hook = renderHook(() => useHarness({ query: "coast" }));
+
+    await act(async () => hook.result.current.controller.search());
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(1));
+    await act(async () => hook.result.current.controller.loadMore());
+
+    expect(remote.loadMore).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.items.map((item) => item.id)).toEqual([
+      "survivor",
+    ]);
+    expect(hook.result.current.error).not.toBeNull();
+    expect(hook.result.current.controller.canLoadMore).toBe(true);
+  });
+
   it("appends each progressive item once and exposes real progress", async () => {
     remote.busy = true;
     remote.source = "web";

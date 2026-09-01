@@ -24,6 +24,9 @@ contracts.
 - Existing gallery cards remain selectable while foreground paging is active.
   The real Lightbox integration test covers that interaction, and background
   prefetch remains invisible until the user requests more results.
+- A failed hidden prefetch stays silent and does not consume the user's explicit
+  load-more action. That click starts one fresh foreground paging request; a
+  second failure keeps the existing gallery and the manual retry available.
 - The source navigation remains above one full-width workspace but no longer
   bunches all seven choices into one framed cluster. Discovery sources use the
   left side, Imagine occupies the middle segment, and personal sources use the
@@ -54,6 +57,8 @@ network-exit details.
 | Pexels without a key | The dialog showed the required-key state, kept search and the empty save action disabled, and made no provider request |
 | Web fresh search | Four validated cards arrived in about 32 seconds; a card clicked while validation was still running opened in the real Lightbox after the concurrent update |
 | Web load-more failure | The request reported a network timeout and appended no cards; all four existing cards stayed in place and remained selectable afterward |
+| Web post-fix fresh search | Three validated cards arrived in 55.0 seconds |
+| Web post-fix load more | The explicit action remained active for about 70 seconds before reporting a network timeout instead of immediately replaying the hidden failure; the three existing cards stayed selectable and opened in the real Lightbox while paging was active, no result was falsely appended, and manual load more remained available |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
@@ -70,6 +75,8 @@ as successful Web pagination because the load-more request timed out.
 | `pnpm deps:check` | Passed |
 | `pnpm audit:prod` | Passed; no known production vulnerability |
 | `pnpm test` | 565 files, 6877 tests passed |
+| Focused post-change Vitest | 3 files, 22 tests passed |
+| Focused post-change ESLint | Passed for the pagination controller and its regression suite |
 | `pnpm typecheck` | Passed |
 | `pnpm lint` | Passed |
 | `pnpm build:ui` | Passed; only existing dynamic-import and large-chunk warnings |
@@ -81,9 +88,11 @@ as successful Web pagination because the load-more request timed out.
 | `python scripts/check-code-quality-gates.py` | One inherited failure: 77 files at or above 1,000 lines against a budget of 69; every other gate passed |
 
 The post-acceptance album-filter regression suite adds focused coverage for the
-ready-to-verification transition and the single clear-action invariant. The two
-affected component suites pass 13 tests in total. A fresh full gate run is
-recorded before the final local commit.
+ready-to-verification transition and the single clear-action invariant. The
+pagination controller also covers both the successful fresh request after a
+hidden prefetch failure and the foreground-failure preservation path. The full
+suite count above predates these final two pagination cases; focused post-change
+checks passed 3 files and 22 tests before the final local commit.
 
 No production file crossed the 1,000-line threshold in this scope. The Rust
 provider module remains below the threshold at 986 lines; the two modified CSS
