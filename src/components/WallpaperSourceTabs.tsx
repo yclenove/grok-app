@@ -19,48 +19,62 @@ type SourceTab = {
   icon: ReactNode;
 };
 
-const SOURCE_TAB_GROUPS: ReadonlyArray<ReadonlyArray<SourceTab>> = [
-  [
-    {
-      id: "x",
-      labelKey: "settings.wallpaperFromX",
-      icon: <IconSearch size={15} />,
-    },
-    {
-      id: "web",
-      labelKey: "settings.wallpaperWeb",
-      icon: <IconWorld size={15} />,
-    },
-    {
-      id: "openverse",
-      labelKey: "settings.wallpaperOpenverse",
-      icon: <IconPhotoSearch size={15} />,
-    },
-    {
-      id: "pexels",
-      labelKey: "settings.wallpaperPexels",
-      icon: <IconCamera size={15} />,
-    },
-  ],
-  [
-    {
-      id: "imagine",
-      labelKey: "settings.wallpaperImagine",
-      icon: <IconImagine size={15} />,
-    },
-  ],
-  [
-    {
-      id: "grok_album",
-      labelKey: "settings.wallpaperGrokAlbum",
-      icon: <IconExportImage size={15} />,
-    },
-    {
-      id: "library",
-      labelKey: "settings.wallpaperLibrary",
-      icon: <IconFolder size={15} />,
-    },
-  ],
+type SourceTabGroup = {
+  id: "discovery" | "create" | "personal";
+  tabs: ReadonlyArray<SourceTab>;
+};
+
+const SOURCE_TAB_GROUPS: ReadonlyArray<SourceTabGroup> = [
+  {
+    id: "discovery",
+    tabs: [
+      {
+        id: "x",
+        labelKey: "settings.wallpaperFromX",
+        icon: <IconSearch size={15} />,
+      },
+      {
+        id: "web",
+        labelKey: "settings.wallpaperWeb",
+        icon: <IconWorld size={15} />,
+      },
+      {
+        id: "openverse",
+        labelKey: "settings.wallpaperOpenverse",
+        icon: <IconPhotoSearch size={15} />,
+      },
+      {
+        id: "pexels",
+        labelKey: "settings.wallpaperPexels",
+        icon: <IconCamera size={15} />,
+      },
+    ],
+  },
+  {
+    id: "create",
+    tabs: [
+      {
+        id: "imagine",
+        labelKey: "settings.wallpaperImagine",
+        icon: <IconImagine size={15} />,
+      },
+    ],
+  },
+  {
+    id: "personal",
+    tabs: [
+      {
+        id: "grok_album",
+        labelKey: "settings.wallpaperGrokAlbum",
+        icon: <IconExportImage size={15} />,
+      },
+      {
+        id: "library",
+        labelKey: "settings.wallpaperLibrary",
+        icon: <IconFolder size={15} />,
+      },
+    ],
+  },
 ];
 
 export type WallpaperSourceTabsProps = {
@@ -94,13 +108,14 @@ export function WallpaperSourceTabs({
       aria-orientation="horizontal"
       aria-label={t("settings.wallpaperSource.title")}
     >
-      {SOURCE_TAB_GROUPS.map((group, groupIndex) => (
+      {SOURCE_TAB_GROUPS.map((group) => (
         <div
-          key={group[0]?.id ?? groupIndex}
-          className="wallpaper-source-tabs__group"
+          key={group.id}
+          className={`wallpaper-source-tabs__group wallpaper-source-tabs__group--${group.id}`}
+          data-source-group={group.id}
           role="presentation"
         >
-          {group.map((tab) => {
+          {group.tabs.map((tab) => {
             const active = value === tab.id;
             return (
               <button

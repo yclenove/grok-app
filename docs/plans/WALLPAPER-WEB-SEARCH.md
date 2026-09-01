@@ -104,6 +104,12 @@ response, or user query is written to logs or returned in diagnostics.
   clear existing cards and are not automatically retried.
 - Openverse and Pexels use their documented page parameter. The Host owns the
   next-page state; the frontend cannot request arbitrary URLs.
+- Before calling either direct library, the Host derives a provider-only query
+  by dropping standalone wallpaper-purpose, resolution, and localized
+  wallpaper modifiers. An empty derived query falls back to the original.
+  Cache and paging identity continue to use the original normalized query, and
+  changing this derivation requires a contract-version bump. Web, X, and
+  Imagine queries are not rewritten by this rule.
 - Search cache keys include source, normalized query, source-specific options,
   credential revision where applicable, and a contract version.
 - Closing the modal, switching source, starting a replacement search, or using
@@ -137,9 +143,10 @@ The first implementation keeps all seven sources in one dialog without mixing
 their contracts:
 
 - A labeled, horizontally scrollable source strip sits above one continuous
-  full-width workspace. The seven sources use three compact segments (four
-  discovery sources, Imagine, then Grok album and local library) instead of
-  seven unlabeled icons or a second navigation column.
+  full-width workspace. The seven sources use three semantic segments (four
+  discovery sources, Imagine, then Grok album and local library), spread across
+  the available row without group frames or headings. At narrow widths the
+  discovery segment receives its own scrollable row instead of clipping labels.
 - Controls, progress, route details, and errors appear only when relevant.
   Persistent source-description paragraphs and footer instructions are not
   rendered. Provenance remains attached to each result card.
@@ -176,3 +183,10 @@ state remained unclipped. No Pexels key was configured, so this pass does not
 claim a live Pexels API request. These observations confirm that one- or
 two-card Web outcomes are downstream discovery/validation attrition rather
 than a requested page-size of one or two.
+
+A final contract-v2 provider pass used a modifier-heavy library query without
+recording its text. Openverse retained 20 validated cards in 25.3 seconds, and
+the prefetched expansion added 19 cards for a total of 39. A previously
+rendered card still selected and opened the real Lightbox after paging; Escape
+closed only the Lightbox and preserved the source dialog. Source, author, and
+license actions remained attached to the cards.

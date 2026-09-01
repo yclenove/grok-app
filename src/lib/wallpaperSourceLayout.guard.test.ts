@@ -23,7 +23,13 @@ describe("wallpaper source layout guard", () => {
       /\.wallpaper-source-tabs\s*\{[^}]*flex-direction:\s*row[^}]*overflow-x:\s*auto[^}]*border-bottom:/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*border:\s*1px solid/s,
+      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*min-width:\s*0/s,
+    );
+    expect(modalCss).toMatch(
+      /\.wallpaper-source-tabs\s*\{[^}]*justify-content:\s*space-between/s,
+    );
+    expect(sourceCss).toMatch(
+      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*flex-wrap:\s*wrap/s,
     );
   });
 

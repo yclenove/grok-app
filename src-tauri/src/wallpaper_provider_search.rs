@@ -29,7 +29,7 @@ use crate::wallpaper_source::{
 const OPENVERSE_ENDPOINT: &str = "https://api.openverse.org/v1/images/";
 const PEXELS_ENDPOINT: &str = "https://api.pexels.com/v1/search";
 const PEXELS_LICENSE_URL: &str = "https://www.pexels.com/license/";
-const CONTRACT_VERSION: u8 = 1;
+const CONTRACT_VERSION: u8 = 2;
 const RESULT_LIMIT: usize = 20;
 const OPENVERSE_PAGE_SIZE: usize = 20;
 const OPENVERSE_PAGES_PER_BATCH: usize = 2;
@@ -215,6 +215,36 @@ pub(crate) fn cancel(request_id: &str) -> bool {
     }
 }
 
+fn library_provider_query(query: &str) -> String {
+    const CJK_WALLPAPER_TERMS: [&str; 4] = ["壁纸", "壁紙", "桌布", "배경화면"];
+
+    let mut stripped = query.to_string();
+    for term in CJK_WALLPAPER_TERMS {
+        stripped = stripped.replace(term, " ");
+    }
+
+    let normalized = stripped
+        .split_whitespace()
+        .filter(|token| {
+            let comparison = token
+                .trim_matches(|ch: char| !ch.is_alphanumeric())
+                .to_ascii_lowercase();
+            !comparison.is_empty()
+                && !matches!(
+                    comparison.as_str(),
+                    "wallpaper" | "wallpapers" | "4k" | "8k" | "uhd"
+                )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if normalized.is_empty() {
+        query.trim().to_string()
+    } else {
+        normalized
+    }
+}
+
 fn provider_context(
     source: RemoteWallpaperSource,
     query: &str,
@@ -251,6 +281,7 @@ pub(crate) async fn search(
     query: &str,
 ) -> Result<RemoteSearchResult, String> {
     let query = remote_search::validate_query(query)?;
+    let provider_query = library_provider_query(&query);
     let started = Instant::now();
     let context = match provider_context(source, &query) {
         Ok(context) => context,
@@ -280,7 +311,14 @@ pub(crate) async fn search(
         return Ok(result);
     }
 
-    let page = search_page(source, &query, 1, context.api_key.as_deref(), &runtime).await;
+    let page = search_page(
+        source,
+        &provider_query,
+        1,
+        context.api_key.as_deref(),
+        &runtime,
+    )
+    .await;
     let mut result = result_from_page(source, page.as_ref(), started);
     if runtime.is_cancelled() {
         result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
@@ -306,6 +344,7 @@ pub(crate) async fn search_more(
     query: &str,
 ) -> Result<RemoteSearchResult, String> {
     let query = remote_search::validate_query(query)?;
+    let provider_query = library_provider_query(&query);
     let started = Instant::now();
     let context = match provider_context(source, &query) {
         Ok(context) => context,
@@ -344,7 +383,7 @@ pub(crate) async fn search_more(
 
     let page = search_page(
         source,
-        &query,
+        &provider_query,
         first_page,
         context.api_key.as_deref(),
         &runtime,

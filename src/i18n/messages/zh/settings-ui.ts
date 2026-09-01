@@ -318,7 +318,7 @@ export const zhSettingsUi = {
   "settings.wallpaperPexels": "Pexels",
   "settings.wallpaperSource.web.hint": "通过 Grok 网络搜索找到公开来源页，再由本机校验页面中的结构化图片与画质；每项结果都会保留来源链接。",
   "settings.wallpaperSource.web.placeholder": "例如：薄雾森林风景摄影",
-  "settings.wallpaperSource.openverse.placeholder": "例如：日出时的高山湖泊",
+  "settings.wallpaperSource.openverse.placeholder": "例如：aurora mountain lake",
   "settings.wallpaperSource.pexels.placeholder": "例如：极简建筑壁纸",
   "settings.wallpaperSource.remote.progress.preparing": "正在准备搜索…",
   "settings.wallpaperSource.remote.progress.searchingWeb": "正在查找公开来源页…",

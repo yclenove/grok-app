@@ -17,6 +17,23 @@ fn endpoints_and_page_sizes_are_fixed() {
 }
 
 #[test]
+fn library_queries_drop_wallpaper_and_resolution_modifiers() {
+    assert_eq!(
+        library_provider_query("aurora mountain lake wallpaper"),
+        "aurora mountain lake"
+    );
+    assert_eq!(
+        library_provider_query("极光雪山湖泊 4K 壁纸"),
+        "极光雪山湖泊"
+    );
+    assert_eq!(library_provider_query("富士山 壁紙 8K"), "富士山");
+    assert_eq!(library_provider_query("海岸 桌布 UHD"), "海岸");
+    assert_eq!(library_provider_query("오로라 배경화면 4k"), "오로라");
+    assert_eq!(library_provider_query("wallpaper"), "wallpaper");
+    assert_eq!(library_provider_query("wallpaper !!!"), "wallpaper !!!");
+}
+
+#[test]
 fn openverse_parser_requires_real_provenance_and_license() {
     let page = parse_openverse_page(
         &json!({

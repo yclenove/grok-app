@@ -216,6 +216,9 @@ describe("WallpaperSourceModal source workspace", () => {
       tablist.querySelectorAll(".wallpaper-source-tabs__group"),
     );
     expect(
+      groups.map((group) => group.getAttribute("data-source-group")),
+    ).toEqual(["discovery", "create", "personal"]);
+    expect(
       groups.map((group) =>
         Array.from(group.querySelectorAll('[role="tab"]')).map((tab) =>
           tab.getAttribute("aria-label"),

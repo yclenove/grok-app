@@ -318,7 +318,7 @@ export const zhTWSettingsUi = {
   "settings.wallpaperPexels": "Pexels",
   "settings.wallpaperSource.web.hint": "透過 Grok 網路搜尋找到公開來源頁，再由本機驗證頁面中的結構化圖片與畫質；每項結果都會保留來源連結。",
   "settings.wallpaperSource.web.placeholder": "例如：薄霧森林風景攝影",
-  "settings.wallpaperSource.openverse.placeholder": "例如：日出時的高山湖泊",
+  "settings.wallpaperSource.openverse.placeholder": "例如：aurora mountain lake",
   "settings.wallpaperSource.pexels.placeholder": "例如：極簡建築桌布",
   "settings.wallpaperSource.remote.progress.preparing": "正在準備搜尋…",
   "settings.wallpaperSource.remote.progress.searchingWeb": "正在尋找公開來源頁…",
