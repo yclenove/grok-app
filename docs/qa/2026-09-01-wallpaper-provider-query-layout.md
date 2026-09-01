@@ -27,13 +27,15 @@ contracts.
 - A failed hidden prefetch stays silent and does not consume the user's explicit
   load-more action. That click starts one fresh foreground paging request; a
   second failure keeps the existing gallery and the manual retry available.
-- The source navigation remains above one full-width workspace but no longer
-  bunches all seven choices into one framed cluster. Discovery sources use the
-  left side, Imagine occupies the middle segment, and personal sources use the
-  right side.
+  The regression covers both a rejected Promise and the real Host shape: a
+  resolved result carrying `errorCode: "provider_timeout"`.
+- The source navigation remains above one full-width workspace. Desktop widths
+  present all seven labeled choices with an even rhythm; narrow widths keep one
+  horizontally scrollable row instead of stacking the choices into several
+  crowded lines.
 - Group frames, group headings, persistent source descriptions, empty-state
-  teaching copy, and footer instructions are absent. At narrow widths the four
-  discovery sources get a scrollable row without hiding their text labels.
+  teaching copy, and footer instructions are absent. Every source keeps both its
+  icon and text label.
 - When the official Grok Saved page leaves its ready state, stale local text and
   media-kind filters are cleared with the transient album snapshot. Verification
   or navigation therefore cannot leave a misleading zero-count filter row, and
@@ -48,7 +50,7 @@ network-exit details.
 
 | Scenario | Result |
 |---|---|
-| Source navigation | Seven sources rendered as four discovery choices, one Imagine choice, and two personal choices across the available row; no group frames, headings, persistent descriptions, or footer instruction remained |
+| Source navigation | Seven labeled sources rendered in one compact, even desktop row; no group frames, headings, persistent descriptions, or footer instruction remained |
 | Grok album verification | The dedicated official-page window opened and presented its verification state; the main dialog kept the actionable guidance while hiding stale zero-count filters and duplicate clear actions |
 | Openverse fresh search | 18 validated cards arrived in 9.1 seconds |
 | Openverse cached search | The first batch restored immediately from the in-process cache |
@@ -59,14 +61,20 @@ network-exit details.
 | Web load-more failure | The request reported a network timeout and appended no cards; all four existing cards stayed in place and remained selectable afterward |
 | Web post-fix fresh search | Three validated cards arrived in 55.0 seconds |
 | Web post-fix load more | The explicit action remained active for about 70 seconds before reporting a network timeout instead of immediately replaying the hidden failure; the three existing cards stayed selectable and opened in the real Lightbox while paging was active, no result was falsely appended, and manual load more remained available |
+| Current Web fresh search | 19 validated cards arrived in 59.9 seconds; all visible cards retained their source action |
+| Current first load more | The prefetched result appended five cards in about 0.2 seconds, expanding the gallery from 19 to 24 |
+| Current foreground load more | The next operation waited about 60 seconds before reporting a network timeout; an original card selected normally and opened as slide 19 of 24 in the real Lightbox while paging was active, all 24 cards remained afterward, and manual retry stayed available |
+| Repeated Web fresh search | 13 validated cards arrived in 55.0 seconds, providing another non-low-yield result from the three-lane route |
+| Repeated Web paging interaction | The buffered page added three cards; during the next paging request an existing card selected, enabled the apply action, and opened as slide 14 of 16 in the real Lightbox; the request then added six cards for 22 total |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
 degraded by display-purpose and resolution modifiers in the query. Web results
 can still be smaller because source discovery, page access, image validation,
 quality filtering, and deduplication are separate attrition stages. The Web
-run also verifies the interaction-preservation contract, but it does not count
-as successful Web pagination because the load-more request timed out.
+timeout run verifies the failure-preservation contract. The repeated run also
+completed a foreground Web expansion successfully, so the interaction contract
+is now covered under both failed and successful paging.
 
 ## Deterministic verification
 
@@ -74,30 +82,30 @@ as successful Web pagination because the load-more request timed out.
 |---|---|
 | `pnpm deps:check` | Passed |
 | `pnpm audit:prod` | Passed; no known production vulnerability |
-| `pnpm test` | 565 files, 6877 tests passed |
-| Focused post-change Vitest | 3 files, 22 tests passed |
+| `pnpm test` | 587 files, 7052 tests passed |
+| Focused post-change Vitest | 6 files, 44 tests passed |
 | Focused post-change ESLint | Passed for the pagination controller and its regression suite |
 | `pnpm typecheck` | Passed |
 | `pnpm lint` | Passed |
 | `pnpm build:ui` | Passed; only existing dynamic-import and large-chunk warnings |
-| `cargo fmt --all -- --check` | Passed |
+| `cargo fmt --all -- --check` | Inherited failure only: existing formatting drift in unmodified `src-tauri/src/lib.rs` and `src-tauri/src/plugin_mcp.rs` |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo test --no-run` | Passed |
-| Manifest-embedded Windows Rust harness | 1646 passed, 0 failed, 1 ignored |
+| Manifest-embedded Windows Rust harness | 1712 passed, 0 failed, 1 ignored |
 | `git diff --check` | Passed |
-| `python scripts/check-code-quality-gates.py` | One inherited failure: 77 files at or above 1,000 lines against a budget of 69; every other gate passed |
+| `python scripts/check-code-quality-gates.py` | One inherited failure: 79 files at or above 1,000 lines against a budget of 77; every other gate passed |
 
 The post-acceptance album-filter regression suite adds focused coverage for the
 ready-to-verification transition and the single clear-action invariant. The
-pagination controller also covers both the successful fresh request after a
-hidden prefetch failure and the foreground-failure preservation path. The full
-suite count above predates these final two pagination cases; focused post-change
-checks passed 3 files and 22 tests before the final local commit.
+pagination controller also covers both resolved and rejected hidden-prefetch
+failures, the successful fresh foreground request, and the foreground-failure
+preservation path. The full and focused suite counts above include these final
+pagination cases.
 
 No production file crossed the 1,000-line threshold in this scope. The Rust
 provider module remains below the threshold at 986 lines; the two modified CSS
 parts were already above the threshold before this pass, and the edited part 3
-file decreased by two lines.
+file decreased by three lines.
 
 ## Privacy and release state
 

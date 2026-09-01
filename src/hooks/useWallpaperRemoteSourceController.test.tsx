@@ -223,12 +223,13 @@ describe("useWallpaperRemoteSourceController", () => {
   });
 
   it("issues a fresh foreground request after a hidden prefetch failure", async () => {
+    const foreground = deferred<WallpaperRemoteSearchResult>();
     remote.search.mockResolvedValue(
       result([galleryItem("first")], { hasMore: true }),
     );
     remote.loadMore
-      .mockRejectedValueOnce(new Error("provider_timeout"))
-      .mockResolvedValueOnce(result([galleryItem("second")]));
+      .mockResolvedValueOnce(result([], { errorCode: "provider_timeout" }))
+      .mockReturnValueOnce(foreground.promise);
     const hook = renderHook(() => useHarness({ query: "rainforest" }));
 
     await act(async () => hook.result.current.controller.search());
@@ -236,10 +237,24 @@ describe("useWallpaperRemoteSourceController", () => {
     expect(hook.result.current.items.map((item) => item.id)).toEqual(["first"]);
     expect(hook.result.current.error).toBeNull();
 
-    await act(async () => hook.result.current.controller.loadMore());
+    let paging!: Promise<void>;
+    act(() => {
+      paging = hook.result.current.controller.loadMore();
+    });
 
     expect(remote.loadMore).toHaveBeenCalledTimes(2);
     expect(remote.loadMore).toHaveBeenLastCalledWith("web", "rainforest");
+    await waitFor(() =>
+      expect(hook.result.current.controller.loadingMore).toBe(true),
+    );
+    expect(hook.result.current.items.map((item) => item.id)).toEqual(["first"]);
+    expect(hook.result.current.error).toBeNull();
+
+    await act(async () => {
+      foreground.resolve(result([galleryItem("second")]));
+      await paging;
+    });
+
     expect(hook.result.current.items.map((item) => item.id)).toEqual([
       "first",
       "second",
@@ -248,13 +263,34 @@ describe("useWallpaperRemoteSourceController", () => {
     expect(hook.result.current.controller.canLoadMore).toBe(false);
   });
 
+  it("also retries when the hidden prefetch rejects", async () => {
+    remote.search.mockResolvedValue(
+      result([galleryItem("first")], { hasMore: true }),
+    );
+    remote.loadMore
+      .mockRejectedValueOnce(new Error("provider_timeout"))
+      .mockResolvedValueOnce(result([galleryItem("second")]));
+    const hook = renderHook(() => useHarness({ query: "waterfall" }));
+
+    await act(async () => hook.result.current.controller.search());
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(1));
+    await act(async () => hook.result.current.controller.loadMore());
+
+    expect(remote.loadMore).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.items.map((item) => item.id)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(hook.result.current.error).toBeNull();
+  });
+
   it("preserves existing cards when the fresh foreground request also fails", async () => {
     remote.search.mockResolvedValue(
       result([galleryItem("survivor")], { hasMore: true }),
     );
     remote.loadMore
-      .mockRejectedValueOnce(new Error("provider_timeout"))
-      .mockRejectedValueOnce(new Error("provider_timeout"));
+      .mockResolvedValueOnce(result([], { errorCode: "provider_timeout" }))
+      .mockResolvedValueOnce(result([], { errorCode: "provider_timeout" }));
     const hook = renderHook(() => useHarness({ query: "coast" }));
 
     await act(async () => hook.result.current.controller.search());

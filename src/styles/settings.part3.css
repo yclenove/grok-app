@@ -1179,26 +1179,20 @@ html[data-theme-editor-shell] #root {
 }
 
 .wallpaper-source-tabs {
-  display: flex;
+  display: grid;
   flex: 0 0 auto;
-  flex-direction: row;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 4px;
   min-width: 0;
-  padding: 0 0 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border-bottom: 1px solid var(--border-subtle);
-  scrollbar-width: thin;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
 }
 
 .wallpaper-source-tabs__group {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 2px;
-  min-width: 0;
+  display: contents;
 }
 
 .wallpaper-source-tabs__btn {
@@ -1207,16 +1201,16 @@ html[data-theme-editor-shell] #root {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  flex: 0 0 auto;
-  min-height: 30px;
-  width: auto;
+  min-width: 0;
+  min-height: 32px;
+  width: 100%;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
-  padding: 4px 8px;
+  padding: 5px 7px;
   border-radius: var(--radius-md);
   cursor: pointer;
   white-space: nowrap;
@@ -1224,5 +1218,8 @@ html[data-theme-editor-shell] #root {
 }
 
 .wallpaper-source-tabs__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }

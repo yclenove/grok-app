@@ -12,7 +12,7 @@ const sourceCss = readFileSync(
 );
 
 describe("wallpaper source layout guard", () => {
-  it("keeps grouped source controls above the full-width workspace", () => {
+  it("keeps a compact source switcher above the full-width workspace", () => {
     expect(modalCss).toMatch(
       /\.modal\.glass-modal\.wallpaper-source-modal\s*\{[^}]*width:\s*min\(1080px,/s,
     );
@@ -20,16 +20,16 @@ describe("wallpaper source layout guard", () => {
       /\.wallpaper-source-layout\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs\s*\{[^}]*flex-direction:\s*row[^}]*overflow-x:\s*auto[^}]*border-bottom:/s,
+      /\.wallpaper-source-tabs\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(7,\s*minmax\(0,\s*1fr\)\)/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*min-width:\s*0/s,
-    );
-    expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs\s*\{[^}]*justify-content:\s*space-between/s,
+      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*contents/s,
     );
     expect(sourceCss).toMatch(
-      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*flex-wrap:\s*wrap/s,
+      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto/s,
+    );
+    expect(sourceCss).toMatch(
+      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs__btn\s*\{[^}]*flex:\s*0 0 auto[^}]*min-width:\s*max-content/s,
     );
   });
 

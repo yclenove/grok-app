@@ -101,7 +101,10 @@ response, or user query is written to logs or returned in diagnostics.
   can spend one paging request even when the user never expands the gallery.
   Switching source, replacing the search, closing the modal, or cancelling
   invalidates the buffer and cancels its active request. Failed prefetches never
-  clear existing cards and are not automatically retried.
+  clear existing cards and are not automatically retried. Host paging failures
+  normally resolve as a structured result with `errorCode` rather than rejecting
+  the Promise; both forms invalidate the hidden result so the user's next click
+  performs one real foreground request.
 - Openverse and Pexels use their documented page parameter. The Host owns the
   next-page state; the frontend cannot request arbitrary URLs.
 - Before calling either direct library, the Host derives a provider-only query
@@ -142,11 +145,10 @@ invalid rather than filled with guessed values.
 The first implementation keeps all seven sources in one dialog without mixing
 their contracts:
 
-- A labeled, horizontally scrollable source strip sits above one continuous
-  full-width workspace. The seven sources use three semantic segments (four
-  discovery sources, Imagine, then Grok album and local library), spread across
-  the available row without group frames or headings. At narrow widths the
-  discovery segment receives its own scrollable row instead of clipping labels.
+- A compact labeled source switcher sits above one continuous full-width
+  workspace. Desktop widths give all seven sources an even, single-row rhythm;
+  narrow widths keep the same labeled row horizontally scrollable instead of
+  wrapping it into several crowded lines. There are no group frames or headings.
 - Controls, progress, route details, and errors appear only when relevant.
   Persistent source-description paragraphs and footer instructions are not
   rendered. Provenance remains attached to each result card.
@@ -159,7 +161,13 @@ their contracts:
 
 Focused frontend verification covers the remote controller, Web load-more card
 interaction, the real Lightbox integration, Pexels key handling, gallery
-rendering, and responsive layout guards. Two live Responses smoke runs exercised
+rendering, and responsive layout guards. A current Windows run retained 19
+validated Web cards in 59.9 seconds. Its first load-more click consumed the
+hidden buffer in about 0.2 seconds and appended five cards, for 24 total. The
+next load-more operation waited about 60 seconds before a real network timeout;
+throughout that wait an original card remained selectable and opened as slide
+19 of 24 in the real Lightbox. The timeout preserved all 24 cards and the manual
+retry entry. Earlier live Responses smoke runs exercised
 the three-lane Web route. `薄雾森林风景摄影` completed in 55.0 seconds with seven
 rendered images; two prefetched load-more batches then expanded the gallery from
 7 to 10 and from 10 to 12 in about 0.2 seconds each. A third load-more operation
@@ -169,6 +177,14 @@ also completed in 55.0 seconds, returning 11 candidates and retaining nine that
 decoded successfully. These runs validate the `3 x 8` lane shape and the bounded
 7-12 reported-tool-call compatibility window; they are smoke evidence rather
 than a broad latency benchmark.
+
+A repeated Windows Tauri run returned 13 validated Web cards in 55.0 seconds.
+The first buffered expansion added three cards; the next paging operation kept
+an existing card selectable, enabled the apply action, and opened the real
+Lightbox at slide 14 of 16 while the request was active. That operation then
+added six more cards for 22 total. This is direct evidence that paging does not
+lock existing results and that one- or two-card outcomes are not a fixed request
+limit.
 
 A Windows Tauri provider and minimum-width pass also exercised the direct
 library route. Two observed Openverse initial searches each retained 20
