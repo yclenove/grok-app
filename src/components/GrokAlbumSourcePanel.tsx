@@ -63,7 +63,9 @@ export function GrokAlbumSourcePanel({
       <div className="wallpaper-grok-album__toolbar">
         <div className="wallpaper-grok-album__status" role="status">
           <span className="wallpaper-grok-album__dot" data-status={status} />
-          <span>{t(statusKey(status))}</span>
+          <span className="wallpaper-grok-album__status-label">
+            {t(statusKey(status))}
+          </span>
           {cachedCount > 0 ? (
             <span className="wallpaper-grok-album__count">
               {t("settings.wallpaperSource.grokAlbum.count", {
@@ -72,9 +74,6 @@ export function GrokAlbumSourcePanel({
               })}
             </span>
           ) : null}
-          <span className="wallpaper-grok-album__badge">
-            {t("settings.wallpaperSource.grokAlbum.beta")}
-          </span>
           <span
             className="wallpaper-grok-album__privacy-info"
             role="img"

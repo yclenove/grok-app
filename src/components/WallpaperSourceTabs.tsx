@@ -86,6 +86,7 @@ export function WallpaperSourceTabs({
     <div
       className="wallpaper-source-tabs"
       role="tablist"
+      aria-orientation="horizontal"
       aria-label={t("settings.wallpaperSource.title")}
     >
       {SOURCE_TABS.map((tab) => {

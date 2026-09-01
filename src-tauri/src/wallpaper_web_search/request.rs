@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde_json::{json, Value};
 use url::Url;
 
-use super::{SourcePage, MAX_WEB_SEARCH_CALLS, PAGES_PER_LANE};
+use super::{SourcePage, MAX_OBSERVED_WEB_SEARCH_CALLS, MAX_WEB_SEARCH_CALLS, PAGES_PER_LANE};
 use crate::wallpaper_responses_client::{self, ErrorKind};
 
 pub(super) fn parse_source_pages(value: &Value) -> Vec<SourcePage> {
@@ -45,7 +45,7 @@ pub(super) fn validate_web_search_tool_calls(output: &[Value]) -> Result<u32, (E
     let calls = wallpaper_responses_client::count_tool_calls(output, "web_search");
     match calls {
         0 => Err((ErrorKind::ToolNotCalled, calls)),
-        1..=MAX_WEB_SEARCH_CALLS => Ok(calls),
+        1..=MAX_OBSERVED_WEB_SEARCH_CALLS => Ok(calls),
         _ => Err((ErrorKind::ToolBudgetExceeded, calls)),
     }
 }
@@ -115,6 +115,7 @@ pub(super) fn responses_prompt(query: &str, exclusions: &[String], lane_index: u
     let lane = match lane_index {
         1 => "Primary lane: find the strongest direct photographic or visual interpretation.",
         2 => "Bilingual variation lane: retain useful original-language terms, translate the topic into concise English search terms, and search complementary composition, lighting, season, or cultural variants in both forms.",
+        3 => "Visual diversity lane: search a distinct viewpoint, palette, setting, season, weather, or editorial framing without repeating the first two lanes.",
         _ => "Load-more lane: use fresh long-tail and bilingual variants, avoiding the initial results.",
     };
     let exclusions = if exclusions.is_empty() {

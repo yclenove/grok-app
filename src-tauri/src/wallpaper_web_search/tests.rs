@@ -74,7 +74,10 @@ fn fixed_request_bounds_web_tool_calls_and_never_accepts_an_endpoint() {
         request["text"]["format"]["schema"]["properties"]["pages"]["maxItems"],
         PAGES_PER_LANE
     );
-    assert_eq!(PAGES_PER_LANE * LANE_COUNT, MAX_RESULTS);
+    const {
+        assert!(PAGES_PER_LANE * LANE_COUNT >= MAX_RESULTS);
+        assert!(PAGES_PER_LANE * (LANE_COUNT - 1) < MAX_RESULTS);
+    }
     assert!(request.get("endpoint").is_none());
     assert_eq!(request["text"]["format"]["schema"]["required"][0], "pages");
     assert!(responses_prompt("misty mountains", &[], 1)
@@ -82,6 +85,8 @@ fn fixed_request_bounds_web_tool_calls_and_never_accepts_an_endpoint() {
     let bilingual = responses_prompt("极光雪山湖泊", &[], 2);
     assert!(bilingual.contains("translate the topic into concise English"));
     assert!(bilingual.contains("watermarked or paid-stock previews"));
+    assert!(responses_prompt("misty mountains", &[], 3).contains("Visual diversity lane"));
+    assert!(responses_prompt("misty mountains", &[], LANE_COUNT + 1).contains("Load-more lane"));
 }
 
 #[test]
@@ -124,7 +129,7 @@ fn source_page_parser_rejects_insecure_userinfo_and_duplicates() {
 }
 
 #[test]
-fn accepts_the_configured_web_search_budget_and_rejects_the_boundary() {
+fn tolerates_bounded_provider_overrun_and_rejects_the_hard_boundary() {
     let call = || json!({ "type": "web_search_call", "status": "completed" });
     assert_eq!(validate_web_search_tool_calls(&[call()]), Ok(1));
     let mut calls = (0..MAX_WEB_SEARCH_CALLS)
@@ -138,10 +143,18 @@ fn accepts_the_configured_web_search_budget_and_rejects_the_boundary() {
         validate_web_search_tool_calls(&[]),
         Err((ErrorKind::ToolNotCalled, 0))
     );
+    calls.extend((MAX_WEB_SEARCH_CALLS..MAX_OBSERVED_WEB_SEARCH_CALLS).map(|_| call()));
+    assert_eq!(
+        validate_web_search_tool_calls(&calls),
+        Ok(MAX_OBSERVED_WEB_SEARCH_CALLS)
+    );
     calls.push(call());
     assert_eq!(
         validate_web_search_tool_calls(&calls),
-        Err((ErrorKind::ToolBudgetExceeded, MAX_WEB_SEARCH_CALLS + 1))
+        Err((
+            ErrorKind::ToolBudgetExceeded,
+            MAX_OBSERVED_WEB_SEARCH_CALLS + 1
+        ))
     );
 }
 

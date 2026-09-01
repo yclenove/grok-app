@@ -24,9 +24,13 @@ use crate::wallpaper_source::{
 use crate::wallpaper_web_page::{parse_web_page, WebPageMetadata};
 
 const SOURCE: &str = "web";
-const LANE_COUNT: usize = 2;
-const PAGES_PER_LANE: usize = 10;
+const LANE_COUNT: usize = 3;
+const PAGES_PER_LANE: usize = 8;
 const MAX_WEB_SEARCH_CALLS: u32 = 6;
+// The compatibility endpoint has occasionally reported more completed tool
+// calls than the requested max_tool_calls value. Keep the request budget at 6,
+// but retain already-paid results within a separate, bounded protocol ceiling.
+const MAX_OBSERVED_WEB_SEARCH_CALLS: u32 = MAX_WEB_SEARCH_CALLS * 2;
 const MAX_RESULTS: usize = 20;
 const LOW_YIELD_WARNING_THRESHOLD: usize = 2;
 const MAX_IMAGES_PER_SOURCE_PAGE: usize = 2;
@@ -401,6 +405,7 @@ async fn search_fresh(
     } else {
         (1..=LANE_COUNT).collect()
     };
+    let requested_lanes = lane_indexes.len();
     let mut lanes = FuturesUnordered::new();
     for lane_index in lane_indexes {
         let lane_client = Arc::clone(&client);
@@ -423,6 +428,7 @@ async fn search_fresh(
         });
     }
 
+    let mut succeeded_lanes = 0usize;
     let mut accumulated = Vec::new();
     let mut errors = Vec::new();
     while let Some((lane_index, result)) = tokio::select! {
@@ -438,6 +444,7 @@ async fn search_fresh(
         let done = lanes.is_empty();
         match result {
             Ok(lane) => {
+                succeeded_lanes += 1;
                 let before = accumulated.clone();
                 accumulated = merge_items(accumulated, lane.items, MAX_RESULTS);
                 let fresh = new_items(&before, accumulated.clone());
@@ -464,6 +471,17 @@ async fn search_fresh(
     }
     if accumulated.is_empty() {
         return Err(select_error(errors, client.credential_revision().clone()));
+    }
+    if succeeded_lanes < requested_lanes || accumulated.len() <= LOW_YIELD_WARNING_THRESHOLD {
+        tracing::warn!(
+            source = SOURCE,
+            load_more,
+            lanes_requested = requested_lanes,
+            lanes_succeeded = succeeded_lanes,
+            lanes_failed = errors.len(),
+            result_count = accumulated.len(),
+            "wallpaper remote search completed with partial lane coverage"
+        );
     }
     Ok(accumulated)
 }
@@ -500,6 +518,15 @@ async fn search_lane(
             .with_observed_tool_calls(observed)
             .with_tool_call_breakdown(tool_breakdown)
     })?;
+    if tool_calls > MAX_WEB_SEARCH_CALLS {
+        tracing::warn!(
+            source = SOURCE,
+            lane = lane_index,
+            requested_tool_calls = MAX_WEB_SEARCH_CALLS,
+            observed_tool_calls = tool_calls,
+            "wallpaper remote search response exceeded its requested tool budget"
+        );
+    }
     let structured = wallpaper_responses_client::output_json(output)
         .map_err(|kind| ClientError::new(kind, Some(client.credential_revision().clone())))?;
     let pages = parse_source_pages(&structured);

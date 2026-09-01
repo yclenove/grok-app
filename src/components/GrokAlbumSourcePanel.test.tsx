@@ -26,6 +26,12 @@ describe("GrokAlbumSourcePanel", () => {
     );
 
     expect(
+      screen.queryByText("settings.wallpaperSource.grokAlbum.beta"),
+    ).toBeNull();
+    expect(
+      screen.getByLabelText("settings.wallpaperSource.grokAlbum.privacy"),
+    ).toBeTruthy();
+    expect(
       screen.queryByRole("button", {
         name: "settings.wallpaperSource.grokAlbum.sync",
       }),

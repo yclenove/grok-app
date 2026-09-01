@@ -33,13 +33,14 @@ augment the existing X source.
 
 The frontend cannot provide or override an endpoint, model, tool, bearer
 token, redirect policy, or HTTP header. Responses requests use `grok-4.6`, low
-reasoning effort, `store: false`, no redirect following, and at most six
-`web_search` calls per lane. The prompt asks the model to stop after one call
-when it already has enough real source pages; the Host rejects a response that
-exceeds the six-call ceiling. The explicit ceiling matches observed Build
-Responses behavior, which can execute six distinct calls even when an earlier
-request asked for three, so completed results are not discarded after the
-network cost has already been paid.
+reasoning effort, `store: false`, no redirect following, and request at most
+six `web_search` calls per lane. The prompt asks the model to stop after one
+call when it already has enough real source pages. Because the compatibility
+endpoint has returned seven to nine completed calls despite that explicit
+request limit, the Host records the overrun and accepts at most twelve observed
+calls. A response above that separate hard ceiling is rejected. This keeps the
+requested budget unchanged without discarding an already-paid, otherwise
+valid result for a bounded provider-side overrun.
 
 ## Safe network pipeline
 
@@ -65,13 +66,15 @@ response, or user query is written to logs or returned in diagnostics.
 
 ## Search, paging, cache, and cancellation
 
-- Web search runs two complementary Responses lanes concurrently. The second
+- Web search runs three complementary Responses lanes concurrently. The second
   lane explicitly combines the original topic with concise English search
-  terms for non-English queries. Each lane aims for ten source pages and
-  returns source metadata only. The initial search therefore has a hard ceiling
-  of two HTTP requests and twelve `web_search` calls; `Load more` uses one HTTP
-  request and at most six additional calls. Responses discovery is bounded to
-  55 seconds.
+  terms for non-English queries, while the third uses a distinct visual and
+  editorial framing. Each lane aims for eight source pages and returns source
+  metadata only. The initial search therefore sends at most three HTTP
+  requests and asks for at most eighteen `web_search` calls; `Load more` uses
+  one HTTP request and asks for at most six additional calls. The separate
+  observed-response ceilings are thirty-six and twelve calls respectively.
+  Responses discovery is bounded to 55 seconds.
   Source-page fetch and image validation then receive up to 30 seconds, with a
   20-second minimum after a slow Responses result so already-discovered pages
   are not discarded without validation. A complete lane remains bounded to
@@ -133,9 +136,8 @@ invalid rather than filled with guessed values.
 The first implementation keeps all seven sources in one dialog without mixing
 their contracts:
 
-- A labeled source rail is shown beside one continuous workspace on wide
-  windows. Narrow windows keep the labels in a horizontally scrollable tab
-  strip; they are not collapsed into seven unlabeled icons.
+- A labeled, horizontally scrollable source strip sits above one continuous
+  full-width workspace; it is never collapsed into seven unlabeled icons.
 - Controls, progress, route details, and errors appear only when relevant.
   Persistent source-description paragraphs and footer instructions are not
   rendered. Provenance remains attached to each result card.
@@ -148,9 +150,13 @@ their contracts:
 
 Focused frontend verification covers the remote controller, Web load-more card
 interaction, the real Lightbox integration, Pexels key handling, gallery
-rendering, and responsive layout guards. A live `aurora mountains` smoke sample
-returned 19 Openverse images in 6.1 seconds and 20 Web images in 63.8 seconds.
-Those two runs prove the paths can fill a useful first page; they are not a
-broad latency benchmark. The Web result confirms that source-page discovery,
-fetching, and image validation, rather than a small result-count parameter, are
-the dominant latency costs.
+rendering, and responsive layout guards. Two live Responses smoke runs exercised
+the three-lane Web route. `薄雾森林风景摄影` completed in 55.0 seconds with seven
+rendered images; two prefetched load-more batches then expanded the gallery from
+7 to 10 and from 10 to 12 in about 0.2 seconds each. A third load-more operation
+waited for its in-flight prefetch while existing cards remained clickable, and
+the eventual prefetch timeout preserved all 12 images. `极光雪山湖泊 4K 壁纸`
+also completed in 55.0 seconds, returning 11 candidates and retaining nine that
+decoded successfully. These runs validate the `3 x 8` lane shape and the bounded
+7-12 reported-tool-call compatibility window; they are smoke evidence rather
+than a broad latency benchmark.
