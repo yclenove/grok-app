@@ -1,4 +1,5 @@
 import { GrokAlbumThumbnail } from "@/components/GrokAlbumThumbnail";
+import { WallpaperSourceAttribution } from "@/components/WallpaperSourceAttribution";
 import type { MessageKey } from "@/i18n";
 import { resolveImageSrcSync } from "@/lib/imageSrc";
 import type {
@@ -32,6 +33,7 @@ export type WallpaperSourceGalleryProps = {
   galleryFilter: string;
   filtersActive: boolean;
   showFilters: boolean;
+  showTextFilter: boolean;
   emptyState: WallpaperGalleryEmptyPresentation | null;
   showEmptyBlock: boolean;
   canLoadMore: boolean;
@@ -42,6 +44,7 @@ export type WallpaperSourceGalleryProps = {
   onPreview: (item: WallpaperGalleryItem) => void;
   onDropItem: (id: string) => void;
   onOpenXStatus: (url: string) => void;
+  onOpenSource: (url: string) => void;
   onDeleteLibraryItem: (
     item: WallpaperGalleryItem,
     event: { preventDefault(): void; stopPropagation(): void },
@@ -70,6 +73,9 @@ function sourceLabelKey(
   if (item.source === "imagine") return "settings.wallpaperImagine";
   if (item.source === "grok_album") return "settings.wallpaperGrokAlbum";
   if (item.source === "x") return "settings.wallpaperFromX";
+  if (item.source === "web") return "settings.wallpaperWeb";
+  if (item.source === "openverse") return "settings.wallpaperOpenverse";
+  if (item.source === "pexels") return "settings.wallpaperPexels";
   return "settings.wallpaperLibrary";
 }
 
@@ -86,6 +92,7 @@ export function WallpaperSourceGallery({
   galleryFilter,
   filtersActive,
   showFilters,
+  showTextFilter,
   emptyState,
   showEmptyBlock,
   canLoadMore,
@@ -96,54 +103,71 @@ export function WallpaperSourceGallery({
   onPreview,
   onDropItem,
   onOpenXStatus,
+  onOpenSource,
   onDeleteLibraryItem,
   onLoadMore,
 }: WallpaperSourceGalleryProps) {
   const library = tab === "library";
   const imagineLayout = tab === "imagine";
-  const stableAppendLayout = tab === "grok_album";
+  const stableAppendLayout =
+    tab === "grok_album" ||
+    tab === "x" ||
+    tab === "web" ||
+    tab === "openverse" ||
+    tab === "pexels";
+  const showKindFilters =
+    kindFilter !== "all" || (kindCounts.image > 0 && kindCounts.video > 0);
 
   return (
     <>
       {showFilters ? (
-        <div className="wallpaper-source-filters">
-          <div
-            className="wallpaper-source-chips"
-            role="toolbar"
-            aria-label={t("settings.wallpaperSource.kindLabel")}
-          >
-            {WALLPAPER_GALLERY_KIND_FILTERS.map((id) => {
-              const count = kindCounts[id];
-              if (id !== "all" && count === 0 && kindFilter !== id) return null;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={
-                    "wallpaper-source-chip" +
-                    (kindFilter === id ? " is-active" : "")
-                  }
-                  aria-pressed={kindFilter === id}
-                  disabled={locked && id !== kindFilter}
-                  onClick={() => onKindFilterChange(id)}
-                >
-                  <span>{t(wallpaperGalleryKindFilterLabelKey(id) as MessageKey)}</span>
-                  <span className="wallpaper-source-chip-count">{count}</span>
-                </button>
-              );
-            })}
-          </div>
-          <input
-            type="search"
-            className="wallpaper-source-form__input wallpaper-source-filters__query"
-            value={galleryFilter}
-            placeholder={t("settings.wallpaperSource.filterPlaceholder")}
-            disabled={locked}
-            onChange={(event) => onGalleryFilterChange(event.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-            aria-label={t("settings.wallpaperSource.filterPlaceholder")}
-          />
+        <div
+          className={
+            "wallpaper-source-filters" +
+            (!showKindFilters ? " wallpaper-source-filters--query-only" : "")
+          }
+        >
+          {showKindFilters ? (
+            <div
+              className="wallpaper-source-chips"
+              role="toolbar"
+              aria-label={t("settings.wallpaperSource.kindLabel")}
+            >
+              {WALLPAPER_GALLERY_KIND_FILTERS.map((id) => {
+                const count = kindCounts[id];
+                if (id !== "all" && count === 0 && kindFilter !== id) return null;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    className={
+                      "wallpaper-source-chip" +
+                      (kindFilter === id ? " is-active" : "")
+                    }
+                    aria-pressed={kindFilter === id}
+                    disabled={locked && id !== kindFilter}
+                    onClick={() => onKindFilterChange(id)}
+                  >
+                    <span>{t(wallpaperGalleryKindFilterLabelKey(id) as MessageKey)}</span>
+                    <span className="wallpaper-source-chip-count">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+          {showTextFilter ? (
+            <input
+              type="search"
+              className="wallpaper-source-form__input wallpaper-source-filters__query"
+              value={galleryFilter}
+              placeholder={t("settings.wallpaperSource.filterPlaceholder")}
+              disabled={locked}
+              onChange={(event) => onGalleryFilterChange(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label={t("settings.wallpaperSource.filterPlaceholder")}
+            />
+          ) : null}
           {filtersActive ? (
             <button
               type="button"
@@ -188,11 +212,6 @@ export function WallpaperSourceGallery({
               <p className="wallpaper-masonry__empty-title">
                 {t(emptyState.titleKey as MessageKey)}
               </p>
-              {emptyState.hintKey ? (
-                <p className="wallpaper-masonry__empty-hint">
-                  {t(emptyState.hintKey as MessageKey)}
-                </p>
-              ) : null}
               {emptyState.showClearFilters ? (
                 <button
                   type="button"
@@ -216,6 +235,15 @@ export function WallpaperSourceGallery({
                 ? resolveWallpaperXCitation(item)
                 : null;
             const labelKey = sourceLabelKey(item, library);
+            const meta = loading
+              ? t("settings.wallpaperSource.loadingOriginal")
+              : [
+                  item.username ? `@${item.username}` : null,
+                  item.likes != null ? `♥ ${item.likes}` : null,
+                  labelKey ? t(labelKey) : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
             return (
               <div
                 key={item.id}
@@ -263,12 +291,9 @@ export function WallpaperSourceGallery({
                       onError={() => onDropItem(item.id)}
                     />
                   )}
-                  <span className="wallpaper-masonry__meta">
-                    {loading ? t("settings.wallpaperSource.loadingOriginal") : null}
-                    {!loading && item.username ? `@${item.username}` : null}
-                    {!loading && item.likes != null ? ` · ♥ ${item.likes}` : null}
-                    {!loading && labelKey ? t(labelKey) : null}
-                  </span>
+                  {meta ? (
+                    <span className="wallpaper-masonry__meta">{meta}</span>
+                  ) : null}
                 </button>
 
                 {citation && !loading ? (
@@ -304,6 +329,15 @@ export function WallpaperSourceGallery({
                   </div>
                 ) : null}
 
+                {!loading ? (
+                  <WallpaperSourceAttribution
+                    item={item}
+                    t={t}
+                    disabled={locked}
+                    onOpen={onOpenSource}
+                  />
+                ) : null}
+
                 {library ? (
                   <button
                     type="button"
@@ -320,25 +354,25 @@ export function WallpaperSourceGallery({
             );
           })}
         </div>
-      </div>
 
-      {canLoadMore ? (
-        <div className="wallpaper-source-load-more">
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={locked || loadingMore}
-            aria-busy={loadingMore}
-            onClick={onLoadMore}
-          >
-            {t(
-              loadingMore
-                ? "settings.wallpaperSource.loadingMore"
-                : "settings.wallpaperSource.loadMore",
-            )}
-          </button>
-        </div>
-      ) : null}
+        {canLoadMore ? (
+          <div className="wallpaper-source-load-more">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={locked || loadingMore}
+              aria-busy={loadingMore}
+              onClick={onLoadMore}
+            >
+              {t(
+                loadingMore
+                  ? "settings.wallpaperSource.loadingMore"
+                  : "settings.wallpaperSource.loadMore",
+              )}
+            </button>
+          </div>
+        ) : null}
+      </div>
     </>
   );
 }

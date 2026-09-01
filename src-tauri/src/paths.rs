@@ -47,6 +47,9 @@ pub fn ensure_app_dirs() -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(root.join("wallpapers").join("x"))?;
     std::fs::create_dir_all(root.join("wallpapers").join("imagine"))?;
     std::fs::create_dir_all(root.join("wallpapers").join("library"))?;
+    std::fs::create_dir_all(root.join("wallpapers").join("web"))?;
+    std::fs::create_dir_all(root.join("wallpapers").join("openverse"))?;
+    std::fs::create_dir_all(root.join("wallpapers").join("pexels"))?;
     // Chat video cover frames (ffmpeg / client canvas JPEG).
     std::fs::create_dir_all(root.join("cache").join("video-posters"))?;
     // Chat image thumbs (resized JPEG for virtual-list remounts).

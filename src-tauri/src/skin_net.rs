@@ -11,6 +11,20 @@ use url::Url;
 pub const MAX_REDIRECTS: usize = 3;
 pub const REQUEST_TIMEOUT_SECS: u64 = 60;
 
+const BROWSER_DOCUMENT_USER_AGENT: &str =
+    "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 GrokApp/WallpaperDiscovery";
+const BROWSER_DOCUMENT_ACCEPT: &str =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+const BROWSER_DOCUMENT_ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9,*;q=0.5";
+const BROWSER_IMAGE_ACCEPT: &str = "image/avif,image/webp,image/*,*/*;q=0.8";
+
+#[derive(Debug, Clone)]
+pub struct SafeHttpsResponse {
+    pub final_url: Url,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 pub const OFFICIAL_SKIN_CATALOG_ID: &str = "official";
 pub const OFFICIAL_SKIN_CATALOG_URL: &str = "";
 pub const OFFICIAL_SKIN_DOWNLOAD_ORIGINS: &[&str] = &[
@@ -30,6 +44,14 @@ pub enum OriginPolicy {
     Official,
     /// User source: hop must stay same origin as the catalog URL.
     UserSameOrigin { catalog: Url },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SafeHttpsRequestProfile {
+    #[default]
+    Default,
+    BrowserDocument,
+    BrowserImage,
 }
 
 pub type ResolveFn = fn(&str) -> Result<Vec<IpAddr>, String>;
@@ -143,14 +165,43 @@ pub fn check_hop(raw: &str, policy: &OriginPolicy, resolve: ResolveFn) -> Result
     Ok(url)
 }
 
-fn client_no_redirect() -> Result<reqwest::Client, String> {
+fn client_no_redirect(profile: SafeHttpsRequestProfile) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .redirect(Policy::none())
-        .user_agent("Grok App");
+        .redirect(Policy::none());
+    let builder = match profile {
+        SafeHttpsRequestProfile::Default => builder.user_agent("Grok App"),
+        SafeHttpsRequestProfile::BrowserDocument | SafeHttpsRequestProfile::BrowserImage => {
+            builder.user_agent(BROWSER_DOCUMENT_USER_AGENT)
+        }
+    };
     crate::proxy::apply_to_reqwest(builder)
         .build()
         .map_err(|e| format!("network: {e}"))
+}
+
+fn request_for_profile(
+    client: &reqwest::Client,
+    url: &Url,
+    profile: SafeHttpsRequestProfile,
+) -> reqwest::RequestBuilder {
+    let request = client.get(url.as_str());
+    match profile {
+        SafeHttpsRequestProfile::Default => request,
+        SafeHttpsRequestProfile::BrowserDocument => request
+            .header(reqwest::header::ACCEPT, BROWSER_DOCUMENT_ACCEPT)
+            .header(
+                reqwest::header::ACCEPT_LANGUAGE,
+                BROWSER_DOCUMENT_ACCEPT_LANGUAGE,
+            )
+            .header("Upgrade-Insecure-Requests", "1"),
+        SafeHttpsRequestProfile::BrowserImage => request
+            .header(reqwest::header::ACCEPT, BROWSER_IMAGE_ACCEPT)
+            .header(
+                reqwest::header::ACCEPT_LANGUAGE,
+                BROWSER_DOCUMENT_ACCEPT_LANGUAGE,
+            ),
+    }
 }
 
 /// Fetch bytes with hop-rechecked redirects. Writes optional dest path as a stream.
@@ -160,21 +211,88 @@ pub async fn safe_https_get(
     max_bytes: u64,
     dest: Option<&std::path::Path>,
 ) -> Result<Vec<u8>, String> {
-    safe_https_get_resolved(start, policy, max_bytes, dest, default_resolve).await
+    safe_https_get_response(start, policy, max_bytes, dest)
+        .await
+        .map(|response| response.bytes)
 }
 
-pub async fn safe_https_get_resolved(
+/// Fetch a bounded HTTPS resource and retain response metadata needed by
+/// callers that must validate the final page or media hop.
+pub async fn safe_https_get_response(
+    start: &str,
+    policy: OriginPolicy,
+    max_bytes: u64,
+    dest: Option<&std::path::Path>,
+) -> Result<SafeHttpsResponse, String> {
+    safe_https_get_response_resolved(start, policy, max_bytes, dest, default_resolve).await
+}
+
+/// Fetch a public HTML document with a fixed browser-compatible request
+/// profile. The caller cannot inject headers, credentials, or referrers.
+pub async fn safe_https_get_browser_document_response(
+    start: &str,
+    policy: OriginPolicy,
+    max_bytes: u64,
+) -> Result<SafeHttpsResponse, String> {
+    safe_https_get_response_profile_resolved(
+        start,
+        policy,
+        max_bytes,
+        None,
+        default_resolve,
+        SafeHttpsRequestProfile::BrowserDocument,
+    )
+    .await
+}
+
+/// Fetch public image bytes with the same fixed browser-compatible identity
+/// used by discovery probes. Redirect and address checks remain unchanged.
+pub async fn safe_https_get_browser_image_response(
+    start: &str,
+    policy: OriginPolicy,
+    max_bytes: u64,
+) -> Result<SafeHttpsResponse, String> {
+    safe_https_get_response_profile_resolved(
+        start,
+        policy,
+        max_bytes,
+        None,
+        default_resolve,
+        SafeHttpsRequestProfile::BrowserImage,
+    )
+    .await
+}
+
+pub async fn safe_https_get_response_resolved(
     start: &str,
     policy: OriginPolicy,
     max_bytes: u64,
     dest: Option<&std::path::Path>,
     resolve: ResolveFn,
-) -> Result<Vec<u8>, String> {
-    let client = client_no_redirect()?;
+) -> Result<SafeHttpsResponse, String> {
+    safe_https_get_response_profile_resolved(
+        start,
+        policy,
+        max_bytes,
+        dest,
+        resolve,
+        SafeHttpsRequestProfile::Default,
+    )
+    .await
+}
+
+async fn safe_https_get_response_profile_resolved(
+    start: &str,
+    policy: OriginPolicy,
+    max_bytes: u64,
+    dest: Option<&std::path::Path>,
+    resolve: ResolveFn,
+    profile: SafeHttpsRequestProfile,
+) -> Result<SafeHttpsResponse, String> {
+    let client = client_no_redirect(profile)?;
     let mut current = check_hop(start, &policy, resolve)?;
     for hop in 0..=MAX_REDIRECTS {
-        let resp = client
-            .get(current.as_str())
+        let resp = request_for_profile(&client, &current, profile)
             .send()
             .await
             .map_err(|e| format!("network: {e}"))?;
@@ -196,6 +314,17 @@ pub async fn safe_https_get_resolved(
         }
         if !status.is_success() {
             return Err(format!("network: http {status}"));
+        }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let content_length = resp.content_length();
+        if content_length.is_some_and(|length| length > max_bytes) {
+            return Err("too_large: download exceeds limit".into());
         }
         let mut bytes = Vec::new();
         let stream = resp;
@@ -221,7 +350,11 @@ pub async fn safe_https_get_resolved(
             }
             bytes.extend_from_slice(&chunk);
         }
-        return Ok(bytes);
+        return Ok(SafeHttpsResponse {
+            final_url: current,
+            content_type,
+            bytes,
+        });
     }
     Err("url_blocked: too many redirects".into())
 }
@@ -361,6 +494,32 @@ mod tests {
     fn official_url_empty() {
         assert_eq!(OFFICIAL_SKIN_CATALOG_URL, "");
         assert!(!official_configured());
+    }
+
+    #[test]
+    fn browser_document_profile_is_fixed_and_credential_free() {
+        let client = reqwest::Client::builder().build().unwrap();
+        let url = Url::parse("https://photos.example/page?private=path").unwrap();
+        let request = request_for_profile(&client, &url, SafeHttpsRequestProfile::BrowserDocument)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers().get(reqwest::header::ACCEPT).unwrap(),
+            BROWSER_DOCUMENT_ACCEPT
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::ACCEPT_LANGUAGE)
+                .unwrap(),
+            BROWSER_DOCUMENT_ACCEPT_LANGUAGE
+        );
+        assert!(request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .is_none());
+        assert!(request.headers().get(reqwest::header::COOKIE).is_none());
+        assert!(request.headers().get(reqwest::header::REFERER).is_none());
     }
 
     #[test]

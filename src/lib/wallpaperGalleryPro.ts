@@ -216,6 +216,7 @@ export function classifyWallpaperGalleryError(
   if (
     code === "auth_required" ||
     code === "imagine_failed" ||
+    code === "service_unavailable" ||
     code === "generic" ||
     code === "other"
   ) {

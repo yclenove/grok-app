@@ -15,7 +15,6 @@ export type WallpaperSourceFeedbackProps = {
   tab: WallpaperSourceKind;
   progress: string | null;
   routeStatus: string | null;
-  citationSummary: string | null;
   error: string | null;
   errorKind: WallpaperGalleryErrorKind | null;
   softFail: boolean;
@@ -28,7 +27,6 @@ export function WallpaperSourceFeedback({
   tab,
   progress,
   routeStatus,
-  citationSummary,
   error,
   errorKind,
   softFail,
@@ -39,26 +37,15 @@ export function WallpaperSourceFeedback({
 
   return (
     <>
-      {progress ? (
-        <p className="wallpaper-source-status" role="status">
-          {progress}
-        </p>
-      ) : null}
-
-      {routeStatus && showXFeedback ? (
-        <p className="wallpaper-source-route-summary" role="status">
-          {routeStatus}
-        </p>
-      ) : null}
-
-      {citationSummary && showXFeedback ? (
-        <p
-          className="wallpaper-source-cite-summary"
-          role="status"
-          data-soft-fail="1"
-        >
-          {citationSummary}
-        </p>
+      {progress || (routeStatus && showXFeedback) ? (
+        <div className="wallpaper-source-feedback" role="status">
+          {progress ? (
+            <span className="wallpaper-source-status">{progress}</span>
+          ) : null}
+          {routeStatus && showXFeedback ? (
+            <span className="wallpaper-source-route-summary">{routeStatus}</span>
+          ) : null}
+        </div>
       ) : null}
 
       {error ? (

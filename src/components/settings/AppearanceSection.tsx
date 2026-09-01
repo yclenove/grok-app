@@ -6,7 +6,13 @@ import type { SettingsViewModel } from "./types";
 
 import { Select } from "@/components/Select";
 import { FontFamilySelect } from "./FontFamilySelect";
-import { IconAppearance, IconCrop, IconHelp } from "@/components/icons";
+import {
+  IconAppearance,
+  IconCrop,
+  IconHelp,
+  IconSearch,
+  IconUpload,
+} from "@/components/icons";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { Tip } from "@/components/ui/tooltip";
 import {
@@ -479,95 +485,74 @@ export function AppearanceSection() {
                         )}
                       </div>
                       <div className="settings-wallpaper__side">
-                      <div className="settings-wallpaper__actions">
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          disabled={wallpaperBusy}
-                          onClick={() => wallpaperInputRef.current?.click()}
-                        >
-                          {wallpaperUrl
-                            ? t("settings.wallpaperReplace")
-                            : t("settings.wallpaperUpload")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          disabled={wallpaperBusy}
-                          onClick={() => openWallpaperSource("x")}
-                        >
-                          {t("settings.wallpaperFromX")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          disabled={wallpaperBusy}
-                          onClick={() => openWallpaperSource("imagine")}
-                        >
-                          {t("settings.wallpaperImagine")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          disabled={wallpaperBusy}
-                          onClick={() => openWallpaperSource("grok_album")}
-                        >
-                          {t("settings.wallpaperGrokAlbum")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          disabled={wallpaperBusy}
-                          onClick={() => openWallpaperSource("library")}
-                        >
-                          {t("settings.wallpaperLibrary")}
-                        </button>
-                      </div>
-                      {onWallpaperXSearchMode ? (
-                        <div
-                          id="settings-anchor-wallpaper-x-search-mode"
-                          className={
-                            "settings-wallpaper__search-mode" +
-                            rowHighlight(
-                              "settings-anchor-wallpaper-x-search-mode",
-                            )
-                          }
-                        >
-                          <div className="settings-row__text">
-                            <SettingsLabelWithTip
-                              label={t("settings.wallpaperXSearchMode")}
-                              tip={t("settings.wallpaperXSearchModeDesc")}
-                            />
-                          </div>
-                          <Select
-                            value={
-                              wallpaperXSearchMode === "responses_preview"
-                                ? "responses_preview"
-                                : "cli"
-                            }
-                            options={[
-                              {
-                                value: "cli",
-                                label: t("settings.wallpaperXSearchMode.cli"),
-                              },
-                              {
-                                value: "responses_preview",
-                                label: t(
-                                  "settings.wallpaperXSearchMode.responsesPreview",
-                                ),
-                              },
-                            ]}
+                        <div className="settings-wallpaper__actions">
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
                             disabled={wallpaperBusy}
-                            aria-label={t("settings.wallpaperXSearchMode")}
-                            onChange={(value) =>
-                              onWallpaperXSearchMode(
-                                normalizeWallpaperXSearchMode(value),
+                            onClick={() => wallpaperInputRef.current?.click()}
+                          >
+                            <IconUpload size={14} aria-hidden />
+                            {wallpaperUrl
+                              ? t("settings.wallpaperReplace")
+                              : t("settings.wallpaperUpload")}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--solid btn--sm"
+                            disabled={wallpaperBusy}
+                            onClick={() => openWallpaperSource("x")}
+                          >
+                            <IconSearch size={14} aria-hidden />
+                            {t("settings.wallpaperFind")}
+                          </button>
+                        </div>
+                        {onWallpaperXSearchMode ? (
+                          <div
+                            id="settings-anchor-wallpaper-x-search-mode"
+                            className={
+                              "settings-wallpaper__search-mode" +
+                              rowHighlight(
+                                "settings-anchor-wallpaper-x-search-mode",
                               )
                             }
-                            placement="auto"
-                          />
-                        </div>
-                      ) : null}
+                          >
+                            <div className="settings-row__text">
+                              <SettingsLabelWithTip
+                                label={t("settings.wallpaperXSearchMode")}
+                                tip={t("settings.wallpaperXSearchModeDesc")}
+                              />
+                            </div>
+                            <Select
+                              value={
+                                wallpaperXSearchMode === "responses_preview"
+                                  ? "responses_preview"
+                                  : "cli"
+                              }
+                              options={[
+                                {
+                                  value: "cli",
+                                  label: t("settings.wallpaperXSearchMode.cli"),
+                                },
+                                {
+                                  value: "responses_preview",
+                                  label: t(
+                                    "settings.wallpaperXSearchMode.responsesPreview",
+                                  ),
+                                },
+                              ]}
+                              disabled={wallpaperBusy}
+                              aria-label={t("settings.wallpaperXSearchMode")}
+                              onChange={(value) =>
+                                onWallpaperXSearchMode(
+                                  normalizeWallpaperXSearchMode(value),
+                                )
+                              }
+                              placement="auto"
+                            />
+                          </div>
+                        ) : null}
+                      </div>
                       {wallpaperUrl && (onWallpaperScrim || onWallpaperBlur) ? (
                         <div className="settings-wallpaper__sliders">
                           {onWallpaperScrim ? (
@@ -691,7 +676,6 @@ export function AppearanceSection() {
                           {wallpaperError}
                         </p>
                       ) : null}
-                      </div>
                       <WallpaperSourceModal
                         open={wallpaperSourceOpen}
                         onClose={() => setWallpaperSourceOpen(false)}

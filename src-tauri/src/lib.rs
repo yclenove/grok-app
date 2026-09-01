@@ -224,9 +224,23 @@ mod wallpaper_source;
 
 mod wallpaper_grok_album;
 
+mod wallpaper_remote_media;
+
+mod wallpaper_remote_commands;
+
+mod wallpaper_remote_search;
+
+mod wallpaper_provider_search;
+
+mod wallpaper_responses_client;
+
 mod wallpaper_x_responses;
 
 mod wallpaper_x_search;
+
+mod wallpaper_web_page;
+
+mod wallpaper_web_search;
 
 mod window_min;
 
@@ -1639,6 +1653,18 @@ pub fn run() {
             commands::wallpaper_x_search_more,
 
             commands::wallpaper_x_search_cancel,
+
+            wallpaper_remote_commands::wallpaper_remote_search,
+
+            wallpaper_remote_commands::wallpaper_remote_search_more,
+
+            wallpaper_remote_commands::wallpaper_remote_search_cancel,
+
+            wallpaper_remote_commands::wallpaper_remote_fetch_media,
+
+            wallpaper_remote_commands::wallpaper_remote_cancel_media_requests,
+
+            wallpaper_remote_commands::wallpaper_remote_cancel_all_media_requests,
 
             commands::wallpaper_fetch_media,
 

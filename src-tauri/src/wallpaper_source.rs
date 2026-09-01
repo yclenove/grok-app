@@ -38,6 +38,36 @@ const IMAGINE_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WallpaperProvenance {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
+}
+
+impl WallpaperProvenance {
+    pub(crate) fn empty() -> Self {
+        Self {
+            source_url: None,
+            source_name: None,
+            author_name: None,
+            author_url: None,
+            license: None,
+            license_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WallpaperGalleryItem {
     pub id: String,
     pub thumb_url: String,
@@ -60,6 +90,8 @@ pub struct WallpaperGalleryItem {
     pub local_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(flatten)]
+    pub provenance: WallpaperProvenance,
     /// Host-only evidence used by the shared X quality pipeline. These fields
     /// never cross IPC and cannot expose extra account or post information.
     #[serde(skip)]
@@ -68,6 +100,10 @@ pub struct WallpaperGalleryItem {
     pub(crate) media_index: Option<u8>,
     #[serde(skip)]
     pub(crate) media_quality: Option<WallpaperMediaQuality>,
+    /// Host-only digest for deduplicating identical bytes served through
+    /// different remote URLs. It is never serialized across IPC.
+    #[serde(skip)]
+    pub(crate) media_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1025,9 +1061,11 @@ pub(crate) fn parse_gallery_items(
                 .get("prompt")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            provenance: WallpaperProvenance::empty(),
             status_id,
             media_index,
             media_quality: None,
+            media_fingerprint: None,
         });
     }
     out
@@ -1168,6 +1206,12 @@ struct ImageProbe {
     content_length: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedImagePrefix {
+    pub(crate) mime: &'static str,
+    pub(crate) dimensions: Option<(u32, u32)>,
+}
+
 fn detect_media_signature(bytes: &[u8]) -> Option<DetectedMedia> {
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         return Some(DetectedMedia::Jpeg);
@@ -1290,6 +1334,23 @@ fn content_type_matches_signature(content_type: &str, media: DetectedMedia) -> b
         DetectedMedia::Mp4 => matches!(content_type, "video/mp4" | "application/mp4"),
         DetectedMedia::Webm => content_type == "video/webm",
     }
+}
+
+pub(crate) fn validate_image_prefix(
+    content_type: &str,
+    bytes: &[u8],
+) -> Option<ValidatedImagePrefix> {
+    if bytes.len() < MIN_IMAGE_PROBE_BYTES {
+        return None;
+    }
+    let media = detect_media_signature(bytes)?;
+    if !media.is_image() || !content_type_matches_signature(content_type, media) {
+        return None;
+    }
+    Some(ValidatedImagePrefix {
+        mime: media.mime(),
+        dimensions: image_dimensions_from_prefix(bytes, media),
+    })
 }
 
 fn response_total_length(response: &reqwest::Response) -> Option<u64> {
@@ -2380,9 +2441,11 @@ fn scan_dir_as_gallery(
             likes: None,
             local_path: Some(path_str),
             prompt: prompt.map(|s| s.to_string()),
+            provenance: WallpaperProvenance::empty(),
             status_id: None,
             media_index: None,
             media_quality: None,
+            media_fingerprint: None,
         });
     }
     out
@@ -2518,6 +2581,9 @@ pub fn ensure_wallpaper_dirs() {
     let _ = fs::create_dir_all(root.join("grok_album"));
     let _ = fs::create_dir_all(root.join("grok_album").join("originals"));
     let _ = fs::create_dir_all(root.join("library"));
+    let _ = fs::create_dir_all(root.join("web"));
+    let _ = fs::create_dir_all(root.join("openverse"));
+    let _ = fs::create_dir_all(root.join("pexels"));
 }
 
 #[cfg(test)]

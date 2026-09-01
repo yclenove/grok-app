@@ -28,6 +28,7 @@ import {
   IconBoxMultiple as TbBoxMultiple,
   IconBrush as TbBrush,
   IconCalendarTime as TbCalendarTime,
+  IconCamera as TbCamera,
   IconCheck as TbCheck,
   IconClearAll as TbClearAll,
   IconClipboardList as TbClipboardList,
@@ -66,6 +67,7 @@ import {
   IconHexagon as TbHexagon,
   IconInfoCircle as TbInfoCircle,
   IconKeyboard as TbKeyboard,
+  IconKey as TbKey,
   IconLanguage as TbLanguage,
   IconExternalLink as TbExternalLink,
   IconLayoutSidebar as TbLayoutSidebar,
@@ -114,6 +116,7 @@ import {
   IconUpload as TbUpload,
   IconUser as TbUser,
   IconPhoto as TbPhoto,
+  IconPhotoSearch as TbPhotoSearch,
   IconMovie as TbMovie,
   IconWand as TbWand,
   IconWorld as TbWorld,
@@ -234,6 +237,7 @@ export const IconSearch = wrap(TbSearch);
 /** New chat / compose — Tabler Edit (pencil writing on paper). */
 export const IconNewChat = wrap(TbEdit);
 export const IconEdit = wrap(TbEdit);
+export const IconCamera = wrap(TbCamera);
 /** Markdown / TipTap format toolbar */
 export const IconBold = wrap(TbBold);
 export const IconItalic = wrap(TbItalic);
@@ -392,6 +396,7 @@ export const IconDeviceMobile = wrap(TbDeviceMobile);
 export const IconExportMd = wrap(TbMarkdown);
 /** Conversation share-card / export as image. */
 export const IconExportImage = wrap(TbPhoto);
+export const IconPhotoSearch = wrap(TbPhotoSearch);
 export const IconArchive = wrap(TbArchive);
 export const IconChat = wrap(TbMessage);
 export const IconFileText = wrap(TbFileText);
@@ -420,6 +425,7 @@ export const IconInfo = wrap(TbInfoCircle);
 /** Help / “?” tip trigger next to settings labels. */
 export const IconHelp = wrap(TbHelp);
 export const IconKeyboard = wrap(TbKeyboard);
+export const IconKey = wrap(TbKey);
 /** Slash palette / goal mode */
 export const IconTarget = wrap(TbTarget);
 /** Side-browser Design Mode — click to inspect. */

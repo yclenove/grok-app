@@ -1074,8 +1074,8 @@ html[data-theme-editor-shell] #root {
 }
 
 /* ── Wallpaper source modal (X + Imagine) ── */
-.modal.wallpaper-source-modal {
-  width: min(860px, calc(100vw - 28px));
+.modal.glass-modal.wallpaper-source-modal {
+  width: min(1080px, calc(100vw - 28px));
   max-height: min(92vh, 860px);
   /* Prefer a tall shell so multi-result galleries can use the viewport */
   min-height: min(72vh, 640px);
@@ -1084,7 +1084,7 @@ html[data-theme-editor-shell] #root {
 .wallpaper-source-modal__body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
   min-height: 0;
   /* Body fills modal; gallery scroll lives inside (not on multi-column) */
   flex: 1 1 auto;
@@ -1094,21 +1094,40 @@ html[data-theme-editor-shell] #root {
 
 .wallpaper-source-tabs {
   display: flex;
-  gap: 6px;
-  padding: 2px;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-hover) 80%, transparent);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  padding: 0 12px 0 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-subtle);
 }
 
 .wallpaper-source-tabs__btn {
-  flex: 1;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-width: 0;
+  min-height: 36px;
+  width: 100%;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border-radius: calc(var(--radius-md) - 2px);
   cursor: pointer;
+  white-space: nowrap;
+  letter-spacing: 0;
+}
+
+.wallpaper-source-tabs__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

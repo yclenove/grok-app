@@ -365,12 +365,8 @@ async fn search_with_client(
     } = request;
     let error_revision = || Some(credential_revision.clone());
 
-    let request = client
-        .post(endpoint)
-        .bearer_auth(token)
-        .header("x-grok-client-mode", "cli")
-        .header("x-grok-client-identifier", "grok-shell")
-        .header("x-grok-client-version", "1.0.5")
+    let request = client.post(endpoint).bearer_auth(token);
+    let request = crate::wallpaper_responses_client::apply_build_proxy_headers(request)
         .json(&responses_request(
             query,
             sort,
@@ -881,9 +877,11 @@ mod tests {
             likes: None,
             local_path: None,
             prompt: None,
+            provenance: crate::wallpaper_source::WallpaperProvenance::empty(),
             status_id: Some(id.into()),
             media_index: Some(1),
             media_quality: None,
+            media_fingerprint: None,
         }
     }
 

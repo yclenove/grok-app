@@ -18,6 +18,12 @@ import type {
   WallpaperXSearchBatch,
   WallpaperXSearchProgress,
 } from "../wallpaperXSearch";
+import type {
+  WallpaperRemoteSearchBatch,
+  WallpaperRemoteSearchProgress,
+  WallpaperRemoteSearchResult,
+  WallpaperRemoteSource,
+} from "../wallpaperRemoteSearch";
 export type {
   WallpaperFetchResult,
   WallpaperGalleryItem,
@@ -70,6 +76,82 @@ export function listenWallpaperXSearchBatch(
   handler: (batch: WallpaperXSearchBatch) => void,
 ): Promise<() => void> {
   return listen<WallpaperXSearchBatch>("wallpaper://x-search-batch", handler);
+}
+
+export async function wallpaperRemoteSearch(
+  source: WallpaperRemoteSource,
+  query: string,
+  requestId?: string,
+): Promise<WallpaperRemoteSearchResult> {
+  return invoke<WallpaperRemoteSearchResult>("wallpaper_remote_search", {
+    source,
+    query,
+    requestId: requestId ?? null,
+  });
+}
+
+export async function wallpaperRemoteSearchMore(
+  source: WallpaperRemoteSource,
+  query: string,
+  requestId?: string,
+): Promise<WallpaperRemoteSearchResult> {
+  return invoke<WallpaperRemoteSearchResult>("wallpaper_remote_search_more", {
+    source,
+    query,
+    requestId: requestId ?? null,
+  });
+}
+
+export async function wallpaperRemoteSearchCancel(
+  source: WallpaperRemoteSource,
+  requestId: string,
+): Promise<boolean> {
+  return invoke<boolean>("wallpaper_remote_search_cancel", {
+    source,
+    requestId,
+  });
+}
+
+export function listenWallpaperRemoteSearchProgress(
+  handler: (progress: WallpaperRemoteSearchProgress) => void,
+): Promise<() => void> {
+  return listen<WallpaperRemoteSearchProgress>(
+    "wallpaper://remote-search-progress",
+    handler,
+  );
+}
+
+export function listenWallpaperRemoteSearchBatch(
+  handler: (batch: WallpaperRemoteSearchBatch) => void,
+): Promise<() => void> {
+  return listen<WallpaperRemoteSearchBatch>(
+    "wallpaper://remote-search-batch",
+    handler,
+  );
+}
+
+export async function wallpaperRemoteFetchMedia(
+  source: WallpaperRemoteSource,
+  url: string,
+  requestId: string,
+): Promise<WallpaperFetchResult> {
+  return invoke<WallpaperFetchResult>("wallpaper_remote_fetch_media", {
+    source,
+    url,
+    requestId,
+  });
+}
+
+export async function wallpaperRemoteCancelMediaRequests(
+  requestIds: string[],
+): Promise<number> {
+  return invoke<number>("wallpaper_remote_cancel_media_requests", {
+    requestIds,
+  });
+}
+
+export async function wallpaperRemoteCancelAllMediaRequests(): Promise<number> {
+  return invoke<number>("wallpaper_remote_cancel_all_media_requests");
 }
 
 export async function wallpaperFetchMedia(

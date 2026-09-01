@@ -5,12 +5,18 @@ import {
   type WallpaperGalleryItem,
 } from "@/lib/wallpaperSource";
 import { createWallpaperRequestId } from "@/lib/wallpaperRequest";
+import {
+  isWallpaperRemoteSource,
+  type WallpaperRemoteSource,
+} from "@/lib/wallpaperRemoteSearch";
 
 export const EMPTY_WALLPAPER_IMAGE_PLACEHOLDER =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 const activeAlbumMediaRequests = new Set<string>();
 const pendingAlbumMedia = new Map<string, Promise<WallpaperFetchResult>>();
+const activeRemoteMediaRequests = new Set<string>();
+const pendingRemoteMedia = new Map<string, Promise<WallpaperFetchResult>>();
 
 export function cancelGrokAlbumMediaRequests(): void {
   const requestIds = Array.from(activeAlbumMediaRequests);
@@ -26,6 +32,20 @@ export function cancelGrokAlbumMediaRequests(): void {
   void Promise.allSettled([
     targeted,
     api.wallpaperGrokAlbumCancelAllRequests(),
+  ]);
+}
+
+export function cancelRemoteWallpaperMediaRequests(): void {
+  const requestIds = Array.from(activeRemoteMediaRequests);
+  activeRemoteMediaRequests.clear();
+  pendingRemoteMedia.clear();
+  const targeted =
+    requestIds.length > 0
+      ? api.wallpaperRemoteCancelMediaRequests(requestIds)
+      : Promise.resolve(0);
+  void Promise.allSettled([
+    targeted,
+    api.wallpaperRemoteCancelAllMediaRequests(),
   ]);
 }
 
@@ -53,6 +73,24 @@ export async function ensureLocalWallpaperMedia(
         }
       });
       pendingAlbumMedia.set(key, request);
+    }
+    fetched = await request;
+  } else if (isWallpaperRemoteSource(item.source)) {
+    const remoteSource: WallpaperRemoteSource = item.source;
+    const key = `${remoteSource}:${source.url.trim()}`;
+    let request = pendingRemoteMedia.get(key);
+    if (!request) {
+      const requestId = createWallpaperRequestId();
+      activeRemoteMediaRequests.add(requestId);
+      request = api
+        .wallpaperRemoteFetchMedia(remoteSource, source.url, requestId)
+        .finally(() => {
+          activeRemoteMediaRequests.delete(requestId);
+          if (pendingRemoteMedia.get(key) === request) {
+            pendingRemoteMedia.delete(key);
+          }
+        });
+      pendingRemoteMedia.set(key, request);
     }
     fetched = await request;
   } else {

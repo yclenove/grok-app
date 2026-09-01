@@ -4,7 +4,14 @@
 
 import type { WallpaperXSearchMeta } from "./wallpaperXSearch";
 
-export type WallpaperSourceKind = "x" | "imagine" | "grok_album" | "library";
+export type WallpaperSourceKind =
+  | "x"
+  | "imagine"
+  | "grok_album"
+  | "web"
+  | "openverse"
+  | "pexels"
+  | "library";
 
 export type WallpaperGalleryItem = {
   id: string;
@@ -20,6 +27,12 @@ export type WallpaperGalleryItem = {
   likes?: number | null;
   localPath?: string | null;
   prompt?: string | null;
+  sourceUrl?: string | null;
+  sourceName?: string | null;
+  authorName?: string | null;
+  authorUrl?: string | null;
+  license?: string | null;
+  licenseUrl?: string | null;
 };
 
 export type WallpaperSearchResult = {
@@ -48,7 +61,10 @@ export type WallpaperLibraryEntry = {
 export type WallpaperSourceErrorCode =
   | "auth_required"
   | "cli_missing"
+  | "pexels_key_required"
+  | "pexels_key_invalid"
   | "search_failed"
+  | "service_unavailable"
   | "empty"
   | "download_failed"
   | "url_blocked"
@@ -70,6 +86,8 @@ export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCod
   const s = raw.toLowerCase();
   if (s.includes("auth_required")) return "auth_required";
   if (s.includes("cli_missing")) return "cli_missing";
+  if (s.includes("pexels_key_missing")) return "pexels_key_required";
+  if (s.includes("pexels_key_invalid")) return "pexels_key_invalid";
   if (
     s.includes("url_blocked") ||
     s.includes("path_not_allowed") ||
@@ -88,6 +106,7 @@ export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCod
   }
   if (s.includes("desktop_only")) return "generic";
   if (s.includes("responses_rate_limited")) return "rate_limited";
+  if (s.includes("service_unavailable")) return "service_unavailable";
   // timeout before imagine so "imagine timeout" is not swallowed as imagine_failed
   if (s.includes("timeout") || s.includes("timed out")) return "timeout";
   if (s.includes("imagine_failed")) return "imagine_failed";
@@ -110,7 +129,10 @@ export function errorCodeFromSearchResult(
   if (!code) return "empty";
   if (code === "auth_required") return "auth_required";
   if (code === "cli_missing") return "cli_missing";
+  if (code === "pexels_key_missing") return "pexels_key_required";
+  if (code === "pexels_key_invalid") return "pexels_key_invalid";
   if (code === "search_failed") return "search_failed";
+  if (code === "service_unavailable") return "service_unavailable";
   if (code === "imagine_failed") return "imagine_failed";
   if (code === "responses_rate_limited") return "rate_limited";
   if (code === "empty") return "empty";
@@ -505,4 +527,3 @@ export function libraryEntriesToGalleryItems(
       : [...entries];
   return dedupeGalleryItems(ordered.map(libraryEntryToGalleryItem));
 }
-

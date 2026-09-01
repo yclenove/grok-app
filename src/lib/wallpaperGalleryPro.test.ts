@@ -290,6 +290,13 @@ describe("resolveWallpaperGalleryEmptyState", () => {
     expect(net?.softFail).toBe(false);
     expect(net?.titleKey).toBe("settings.wallpaperSource.errKind.network");
 
+    const service = resolveWallpaperGalleryEmptyState({
+      ...base,
+      error: "service_unavailable",
+    });
+    expect(service?.kind).toBe("error");
+    expect(service?.errorKind).toBe("other");
+
     const host = resolveWallpaperGalleryEmptyState({
       ...base,
       error: "cli_missing",

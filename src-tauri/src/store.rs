@@ -827,6 +827,9 @@ pub struct SecretsFile {
     pub official_api_key: Option<String>,
     pub relay_base_url: Option<String>,
     pub relay_api_key: Option<String>,
+    /// Pexels API key for the licensed wallpaper-library adapter.
+    #[serde(default)]
+    pub pexels_api_key: Option<String>,
     pub default_model: Option<String>,
     /// Custom STT endpoint API key (OpenAI-compatible `stt.engine = custom`).
     /// Deprecated single slot (ADR-0001): folded into `stt_custom_api_keys`
@@ -847,6 +850,9 @@ pub struct SecretsFile {
     /// Relay API key lives in OS keychain (value not on disk).
     #[serde(default)]
     pub keychain_has_relay: bool,
+    /// Pexels API key lives in OS keychain (value not on disk).
+    #[serde(default)]
+    pub keychain_has_pexels: bool,
     /// Custom STT key lives in OS keychain (value not on disk).
     #[serde(default)]
     pub keychain_has_stt_custom: bool,

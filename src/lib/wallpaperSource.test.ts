@@ -31,6 +31,12 @@ function item(
 describe("wallpaperSource", () => {
   it("parses host error codes", () => {
     expect(parseWallpaperSourceError("auth_required")).toBe("auth_required");
+    expect(parseWallpaperSourceError("pexels_key_missing")).toBe(
+      "pexels_key_required",
+    );
+    expect(parseWallpaperSourceError("pexels_key_invalid")).toBe(
+      "pexels_key_invalid",
+    );
     expect(parseWallpaperSourceError(new Error("download_failed: HTTP 403"))).toBe(
       "download_failed",
     );
@@ -55,6 +61,12 @@ describe("wallpaperSource", () => {
     expect(
       errorCodeFromSearchResult({ items: [], errorCode: "imagine_failed" }),
     ).toBe("imagine_failed");
+    expect(
+      errorCodeFromSearchResult({ items: [], errorCode: "pexels_key_missing" }),
+    ).toBe("pexels_key_required");
+    expect(
+      errorCodeFromSearchResult({ items: [], errorCode: "pexels_key_invalid" }),
+    ).toBe("pexels_key_invalid");
     expect(
       errorCodeFromSearchResult({ items: [], errorCode: "timeout" }),
     ).toBe("timeout");

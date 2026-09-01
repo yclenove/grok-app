@@ -5,6 +5,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@/test/jsdomStubs";
 
+vi.mock("@/lib/imageLightboxFit", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/imageLightboxFit")>(
+    "@/lib/imageLightboxFit",
+  );
+  return {
+    ...actual,
+    loadImageNaturalSize: vi.fn(async () => ({ width: 1920, height: 1080 })),
+  };
+});
+
 const fetchAlbumMedia = vi.hoisted(() =>
   vi.fn(async () => ({
     path: "H:\\wallpapers\\integration-video.mp4",
@@ -18,6 +28,25 @@ const xSearchState = vi.hoisted(() => ({
   loadMore: vi.fn(),
   cancel: vi.fn(),
 }));
+const remoteControllerState = vi.hoisted(() => ({
+  busy: false,
+  loadingMore: false,
+  progress: null as string | null,
+  canLoadMore: true,
+}));
+const webItems = vi.hoisted(() => [
+  {
+    id: "web-integration-image",
+    thumbUrl: "https://images.example.test/wallpaper.jpg",
+    fullUrl: "https://images.example.test/wallpaper.jpg",
+    kind: "image" as const,
+    source: "web" as const,
+    width: 1920,
+    height: 1080,
+    sourceUrl: "https://photos.example.test/wallpaper",
+    sourceName: "photos.example.test",
+  },
+]);
 const albumState = vi.hoisted(() => {
   const albumUrl =
     "https://assets.grok.com/users/test/generated/fake/integration-video.mp4";
@@ -71,10 +100,26 @@ vi.mock("@/hooks/useWallpaperGrokAlbum", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useWallpaperRemoteSourceController", () => ({
+  useWallpaperRemoteSourceController: (options: {
+    setItems: (items: typeof webItems) => void;
+    setHasSearched: (value: boolean) => void;
+  }) => ({
+    ...remoteControllerState,
+    search: async () => {
+      options.setItems(webItems);
+      options.setHasSearched(true);
+    },
+    loadMore: vi.fn(),
+    cancel: vi.fn(async () => false),
+  }),
+}));
+
 vi.mock("@/lib/api", () => ({
   isDesktopHost: () => true,
   isTauri: () => false,
   wallpaperFetchMedia: vi.fn(),
+  wallpaperRemoteFetchMedia: vi.fn(),
   wallpaperGrokAlbumFetchMedia: fetchAlbumMedia,
   wallpaperGrokAlbumThumbnail: vi.fn(async () => ({
     dataUrl: "data:image/jpeg;base64,YWJj",
@@ -83,6 +128,8 @@ vi.mock("@/lib/api", () => ({
   })),
   wallpaperGrokAlbumCancelRequests: vi.fn(async () => 0),
   wallpaperGrokAlbumCancelAllRequests: vi.fn(async () => 0),
+  wallpaperRemoteCancelMediaRequests: vi.fn(async () => 0),
+  wallpaperRemoteCancelAllMediaRequests: vi.fn(async () => 0),
   wallpaperImagine: vi.fn(),
   wallpaperLibraryList: vi.fn(),
   wallpaperLibraryDelete: vi.fn(),
@@ -99,6 +146,10 @@ import { WallpaperSourceModal } from "./WallpaperSourceModal";
 afterEach(() => {
   cleanup();
   fetchAlbumMedia.mockClear();
+  remoteControllerState.busy = false;
+  remoteControllerState.loadingMore = false;
+  remoteControllerState.progress = null;
+  remoteControllerState.canLoadMore = true;
 });
 
 describe("WallpaperSourceModal image viewer integration", () => {
@@ -125,5 +176,50 @@ describe("WallpaperSourceModal image viewer integration", () => {
       expect(document.querySelector(".yarl__portal")).not.toBeNull();
     });
     expect(document.querySelector(".yarl__root")).not.toBeNull();
+  });
+
+  it("opens the real lightbox while Web load more is still running", async () => {
+    const view = render(
+      <ImageViewerProvider locale="en">
+        <WallpaperSourceModal
+          open
+          initialTab="web"
+          t={(key) => key}
+          onClose={vi.fn()}
+          onPickFile={vi.fn()}
+        />
+      </ImageViewerProvider>,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.web.placeholder"),
+      { target: { value: "night skyline" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    const card = await screen.findByRole("button", {
+      name: "settings.wallpaperSource.openPreview",
+    });
+
+    remoteControllerState.busy = true;
+    remoteControllerState.loadingMore = true;
+    view.rerender(
+      <ImageViewerProvider locale="en">
+        <WallpaperSourceModal
+          open
+          initialTab="web"
+          t={(key) => key}
+          onClose={vi.fn()}
+          onPickFile={vi.fn()}
+        />
+      </ImageViewerProvider>,
+    );
+
+    expect((card as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(card);
+    await waitFor(() => {
+      expect(document.querySelector(".yarl__portal")).not.toBeNull();
+    });
   });
 });

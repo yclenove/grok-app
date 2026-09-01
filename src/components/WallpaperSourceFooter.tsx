@@ -4,7 +4,6 @@ type Translate = (key: MessageKey) => string;
 
 export type WallpaperSourceFooterProps = {
   t: Translate;
-  hasSelection: boolean;
   applying: boolean;
   applyDisabled: boolean;
   onClose: () => void;
@@ -13,7 +12,6 @@ export type WallpaperSourceFooterProps = {
 
 export function WallpaperSourceFooter({
   t,
-  hasSelection,
   applying,
   applyDisabled,
   onClose,
@@ -21,11 +19,6 @@ export function WallpaperSourceFooter({
 }: WallpaperSourceFooterProps) {
   return (
     <>
-      <span className="wallpaper-source-footer-hint">
-        {hasSelection
-          ? t("settings.wallpaperSource.previewThenApply")
-          : t("settings.wallpaperSource.clickToPreview")}
-      </span>
       <button
         type="button"
         className="btn btn--ghost"

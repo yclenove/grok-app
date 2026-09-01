@@ -25,10 +25,26 @@ const refreshGrokAlbum = vi.hoisted(() => vi.fn(async () => undefined));
 const loadMoreGrokAlbum = vi.hoisted(() => vi.fn(async () => undefined));
 const grokAlbumItems = vi.hoisted(() => [] as WallpaperGalleryItem[]);
 const fetchWallpaperMedia = vi.hoisted(() => vi.fn());
+const fetchRemoteWallpaperMedia = vi.hoisted(() => vi.fn());
 const fetchGrokAlbumMedia = vi.hoisted(() => vi.fn());
 const fetchGrokAlbumThumbnail = vi.hoisted(() => vi.fn());
 const cancelGrokAlbumRequests = vi.hoisted(() => vi.fn(async () => 0));
 const openViewer = vi.hoisted(() => vi.fn());
+const searchRemote = vi.hoisted(() => vi.fn(async () => null));
+const loadMoreRemote = vi.hoisted(() => vi.fn(async () => null));
+const cancelRemote = vi.hoisted(() => vi.fn(async () => true));
+const wallpaperLibraryList = vi.hoisted(() => vi.fn(async () => []));
+const secretsGetMasked = vi.hoisted(() =>
+  vi.fn(async () => ({ hasPexelsKey: false })),
+);
+const secretsSet = vi.hoisted(() => vi.fn(async () => undefined));
+const remoteControllerState = vi.hoisted(() => ({
+  busy: false,
+  loadingMore: false,
+  progress: null as string | null,
+  canLoadMore: false,
+  searchItems: [] as WallpaperGalleryItem[],
+}));
 const grokAlbumState = vi.hoisted(() => ({
   status: "closed" as "closed" | "ready",
   cachedCount: 0,
@@ -69,18 +85,42 @@ vi.mock("@/hooks/useWallpaperGrokAlbum", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useWallpaperRemoteSourceController", () => ({
+  useWallpaperRemoteSourceController: (options: {
+    setItems: (items: WallpaperGalleryItem[]) => void;
+    setHasSearched: (value: boolean) => void;
+  }) => ({
+    ...remoteControllerState,
+    search: async () => {
+      const result = await searchRemote();
+      if (remoteControllerState.searchItems.length > 0) {
+        options.setItems(remoteControllerState.searchItems);
+        options.setHasSearched(true);
+      }
+      return result;
+    },
+    loadMore: loadMoreRemote,
+    cancel: cancelRemote,
+  }),
+}));
+
 vi.mock("@/lib/api", () => ({
   isDesktopHost: () => true,
   isTauri: () => false,
   wallpaperFetchMedia: fetchWallpaperMedia,
+  wallpaperRemoteFetchMedia: fetchRemoteWallpaperMedia,
   wallpaperGrokAlbumFetchMedia: fetchGrokAlbumMedia,
   wallpaperGrokAlbumThumbnail: fetchGrokAlbumThumbnail,
   wallpaperGrokAlbumCancelRequests: cancelGrokAlbumRequests,
   wallpaperGrokAlbumCancelAllRequests: vi.fn(async () => 0),
+  wallpaperRemoteCancelMediaRequests: vi.fn(async () => 0),
+  wallpaperRemoteCancelAllMediaRequests: vi.fn(async () => 0),
   wallpaperImagine: vi.fn(),
-  wallpaperLibraryList: vi.fn(),
+  wallpaperLibraryList,
   wallpaperLibraryDelete: vi.fn(),
   openExternalUrl: vi.fn(),
+  secretsGetMasked,
+  secretsSet,
 }));
 
 vi.mock("@/components/ImageViewerContext", () => ({
@@ -126,10 +166,24 @@ afterEach(() => {
   refreshGrokAlbum.mockClear();
   loadMoreGrokAlbum.mockClear();
   fetchWallpaperMedia.mockReset();
+  fetchRemoteWallpaperMedia.mockReset();
   fetchGrokAlbumMedia.mockReset();
   fetchGrokAlbumThumbnail.mockReset();
   cancelGrokAlbumRequests.mockClear();
   openViewer.mockReset();
+  searchRemote.mockClear();
+  loadMoreRemote.mockClear();
+  cancelRemote.mockClear();
+  wallpaperLibraryList.mockClear();
+  wallpaperLibraryList.mockResolvedValue([]);
+  secretsGetMasked.mockClear();
+  secretsGetMasked.mockResolvedValue({ hasPexelsKey: false });
+  secretsSet.mockClear();
+  remoteControllerState.busy = false;
+  remoteControllerState.loadingMore = false;
+  remoteControllerState.progress = null;
+  remoteControllerState.canLoadMore = false;
+  remoteControllerState.searchItems = [];
   grokAlbumItems.splice(0, grokAlbumItems.length);
   grokAlbumState.status = "closed";
   grokAlbumState.cachedCount = 0;
@@ -236,7 +290,7 @@ describe("WallpaperSourceModal X search lifecycle", () => {
         .getAttribute("aria-selected"),
     ).toBe("true");
     expect(
-      screen.getByText("settings.wallpaperSource.grokAlbum.privacy"),
+      screen.getByLabelText("settings.wallpaperSource.grokAlbum.privacy"),
     ).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", {
@@ -244,32 +298,6 @@ describe("WallpaperSourceModal X search lifecycle", () => {
       }),
     );
     expect(openGrokAlbum).toHaveBeenCalledWith("settings.wallpaperGrokAlbum");
-  });
-
-  it("uses an append-stable gallery only for Grok album results", () => {
-    xSearchState.busy = false;
-    xSearchState.requestId = null;
-    const view = render(
-      <WallpaperSourceModal
-        open
-        initialTab="grok_album"
-        t={t as never}
-        onClose={vi.fn()}
-        onPickFile={vi.fn()}
-      />,
-    );
-
-    expect(
-      view.container.querySelector(".wallpaper-masonry")?.classList,
-    ).toContain("wallpaper-masonry--stable");
-
-    fireEvent.click(
-      screen.getByRole("tab", { name: "settings.wallpaperFromX" }),
-    );
-
-    expect(
-      view.container.querySelector(".wallpaper-masonry")?.classList,
-    ).not.toContain("wallpaper-masonry--stable");
   });
 
   it("keeps honest controls visible while an album page loads more", async () => {
@@ -307,6 +335,13 @@ describe("WallpaperSourceModal X search lifecycle", () => {
     });
     expect((loadMore as HTMLButtonElement).disabled).toBe(true);
     expect(loadMore.getAttribute("aria-busy")).toBe("true");
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "settings.wallpaperSource.openPreview",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
     expect(
       (
         screen.getByRole("button", {
@@ -781,6 +816,13 @@ describe("WallpaperSourceModal X search lifecycle", () => {
     xSearchState.progressiveCount = 1;
     view.rerender(<WallpaperSourceModal {...props} />);
     await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(2));
+    expect(
+      (
+        screen.getAllByRole("button", {
+          name: "settings.wallpaperSource.openPreview",
+        })[0] as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
 
     await act(async () => {
       pendingMore.resolve({

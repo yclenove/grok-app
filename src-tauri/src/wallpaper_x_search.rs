@@ -786,9 +786,11 @@ mod tests {
             likes: None,
             local_path: None,
             prompt: None,
+            provenance: crate::wallpaper_source::WallpaperProvenance::empty(),
             status_id: None,
             media_index: None,
             media_quality: None,
+            media_fingerprint: None,
         }
     }
 

@@ -1,11 +1,13 @@
 import { GrokAlbumSourcePanel } from "@/components/GrokAlbumSourcePanel";
 import { Select } from "@/components/Select";
+import { WallpaperPexelsKeyControl } from "@/components/WallpaperPexelsKeyControl";
 import type { MessageKey } from "@/i18n";
 import type {
   GrokAlbumErrorCode,
   GrokAlbumStatus,
 } from "@/lib/grokAlbum";
 import type { WallpaperSourceKind } from "@/lib/wallpaperSource";
+import { isWallpaperRemoteSource } from "@/lib/wallpaperRemoteSearch";
 
 type Translate = (
   key: MessageKey,
@@ -20,6 +22,10 @@ export type WallpaperSourceControlsProps = {
   locked: boolean;
   busy: boolean;
   xSearchBusy: boolean;
+  remoteSearchBusy: boolean;
+  remoteSearchDisabled: boolean;
+  hasPexelsKey: boolean | null;
+  pexelsKeyInvalid: boolean;
   query: string;
   sort: "top" | "latest";
   sortOptions: SelectOption[];
@@ -35,6 +41,9 @@ export type WallpaperSourceControlsProps = {
   onSortChange: (value: "top" | "latest") => void;
   onSearchX: () => void;
   onCancelX: () => void;
+  onSearchRemote: () => void;
+  onCancelRemote: () => void;
+  onSavePexelsKey: (key: string) => Promise<boolean>;
   onPromptChange: (value: string) => void;
   onAspectChange: (value: string) => void;
   onGenerate: () => void;
@@ -50,6 +59,10 @@ export function WallpaperSourceControls({
   locked,
   busy,
   xSearchBusy,
+  remoteSearchBusy,
+  remoteSearchDisabled,
+  hasPexelsKey,
+  pexelsKeyInvalid,
   query,
   sort,
   sortOptions,
@@ -65,6 +78,9 @@ export function WallpaperSourceControls({
   onSortChange,
   onSearchX,
   onCancelX,
+  onSearchRemote,
+  onCancelRemote,
+  onSavePexelsKey,
   onPromptChange,
   onAspectChange,
   onGenerate,
@@ -76,10 +92,7 @@ export function WallpaperSourceControls({
   if (tab === "x") {
     return (
       <div className="wallpaper-source-form">
-        <p className="wallpaper-source-form__hint">
-          {t("settings.wallpaperSource.xHint")}
-        </p>
-        <div className="wallpaper-source-form__row">
+        <div className="wallpaper-source-form__row wallpaper-source-form__row--search wallpaper-source-form__row--x">
           <input
             type="search"
             className="wallpaper-source-form__input"
@@ -121,15 +134,12 @@ export function WallpaperSourceControls({
   if (tab === "imagine") {
     return (
       <div className="wallpaper-source-form">
-        <p className="wallpaper-source-form__hint">
-          {t("settings.wallpaperSource.imagineHint")}
-        </p>
         <textarea
           className="wallpaper-source-form__textarea"
           value={prompt}
           placeholder={t("settings.wallpaperSource.imaginePlaceholder")}
           disabled={locked}
-          rows={3}
+          rows={2}
           onChange={(event) => onPromptChange(event.target.value)}
         />
         <div className="wallpaper-source-form__row">
@@ -157,6 +167,57 @@ export function WallpaperSourceControls({
     );
   }
 
+  if (isWallpaperRemoteSource(tab)) {
+    const placeholderKey =
+      `settings.wallpaperSource.${tab}.placeholder` as MessageKey;
+    return (
+      <div className="wallpaper-source-form">
+        <div className="wallpaper-source-form__row wallpaper-source-form__row--search wallpaper-source-form__row--remote">
+          <input
+            type="search"
+            className="wallpaper-source-form__input"
+            value={query}
+            placeholder={t(placeholderKey)}
+            disabled={locked}
+            onChange={(event) => onQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                !locked &&
+                !remoteSearchDisabled
+              ) {
+                event.preventDefault();
+                onSearchRemote();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className={remoteSearchBusy ? "btn btn--ghost" : "btn btn--solid"}
+            disabled={
+              !remoteSearchBusy &&
+              (locked || remoteSearchDisabled || !query.trim())
+            }
+            onClick={remoteSearchBusy ? onCancelRemote : onSearchRemote}
+          >
+            {remoteSearchBusy
+              ? t("settings.wallpaperSource.cancelSearch")
+              : t("settings.wallpaperSource.search")}
+          </button>
+        </div>
+        {tab === "pexels" ? (
+          <WallpaperPexelsKeyControl
+            t={t}
+            hasKey={hasPexelsKey}
+            invalid={pexelsKeyInvalid}
+            disabled={locked}
+            onSave={onSavePexelsKey}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
   if (tab === "grok_album") {
     return (
       <GrokAlbumSourcePanel
@@ -176,9 +237,6 @@ export function WallpaperSourceControls({
 
   return (
     <div className="wallpaper-source-form">
-      <p className="wallpaper-source-form__hint">
-        {t("settings.wallpaperSource.libraryHint")}
-      </p>
       <div className="wallpaper-source-form__row">
         <button
           type="button"

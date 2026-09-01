@@ -590,6 +590,7 @@ pub async fn secrets_get_masked() -> Result<serde_json::Value, String> {
         "hasOfficialKey": crate::secrets::has_official_key_configured(&s),
         "hasRelayKey": has_provider_key
             || crate::secrets::has_relay_key_configured(&s),
+        "hasPexelsKey": crate::secrets::has_pexels_key_configured(&s),
         "hasSttCustomKey": crate::secrets::has_stt_custom_key_configured(&s),
         "sttCustomKeys": crate::secrets::stt_custom_key_presence(&s),
         "relayBaseUrl": relay_base,
@@ -613,6 +614,7 @@ pub async fn secrets_set(
     official_api_key: Option<String>,
     relay_base_url: Option<String>,
     relay_api_key: Option<String>,
+    pexels_api_key: Option<String>,
     default_model: Option<String>,
     stt_custom_api_key: Option<String>,
     stt_custom_api_key_provider: Option<String>,
@@ -631,6 +633,13 @@ pub async fn secrets_set(
     }
     if let Some(k) = relay_api_key {
         s.relay_api_key = if k.trim().is_empty() {
+            None
+        } else {
+            Some(k)
+        };
+    }
+    if let Some(k) = pexels_api_key {
+        s.pexels_api_key = if k.trim().is_empty() {
             None
         } else {
             Some(k)
