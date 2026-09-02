@@ -42,6 +42,13 @@ calls. A response above that separate hard ceiling is rejected. This keeps the
 requested budget unchanged without discarding an already-paid, otherwise
 valid result for a bounded provider-side overrun.
 
+Pexels requests use the documented `query` parameter. Every real upstream
+request also carries a fresh Host-generated `_grokapp_cache_bust` value made
+only from a per-process random UUID prefix and an atomic request sequence. This
+prevents a shared intermediary from replaying a cached success from a different
+authorization context. The nonce contains no API key, key hash, user query, or
+paging state and is not part of the Host search-cache identity.
+
 ## Safe network pipeline
 
 1. Accept only HTTPS URLs without userinfo.
@@ -115,6 +122,9 @@ response, or user query is written to logs or returned in diagnostics.
   Imagine queries are not rewritten by this rule.
 - Search cache keys include source, normalized query, source-specific options,
   credential revision where applicable, and a contract version.
+- The direct-library contract is version 3. Pexels' per-request cache-busting
+  nonce affects only the outgoing URL; it does not fragment the Host cache or
+  alter the Host-owned continuation page.
 - Closing the modal, switching source, starting a replacement search, or using
   Cancel stops outstanding Responses, page-fetch, probe, and provider work.
 - Cache entries contain only safe gallery DTOs and paging metadata. They never

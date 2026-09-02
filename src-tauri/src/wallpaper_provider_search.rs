@@ -26,10 +26,14 @@ use crate::wallpaper_source::{
     WallpaperGalleryItem, WallpaperProvenance, WallpaperSearchCancellation,
 };
 
-const OPENVERSE_ENDPOINT: &str = "https://api.openverse.org/v1/images/";
-const PEXELS_ENDPOINT: &str = "https://api.pexels.com/v1/search";
+mod request_url;
+
+use request_url::provider_request_url;
+#[cfg(test)]
+use request_url::{provider_url, PEXELS_CACHE_BUST_PARAM};
+
 const PEXELS_LICENSE_URL: &str = "https://www.pexels.com/license/";
-const CONTRACT_VERSION: u8 = 2;
+const CONTRACT_VERSION: u8 = 3;
 const RESULT_LIMIT: usize = 20;
 const OPENVERSE_PAGE_SIZE: usize = 20;
 const OPENVERSE_PAGES_PER_BATCH: usize = 2;
@@ -558,7 +562,7 @@ async fn fetch_api_page(
     api_key: Option<&str>,
     cancellation: &WallpaperSearchCancellation,
 ) -> Result<ApiPage, ProviderError> {
-    let url = provider_url(source, query, page)?;
+    let url = provider_request_url(source, query, page)?;
     let checked = skin_net::check_hop(
         url.as_str(),
         &OriginPolicy::AnyHttps,
@@ -642,32 +646,6 @@ fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
     } else {
         ProviderError::Network
     }
-}
-
-fn provider_url(
-    source: RemoteWallpaperSource,
-    query: &str,
-    page: usize,
-) -> Result<Url, ProviderError> {
-    let (endpoint, page_size) = match source {
-        RemoteWallpaperSource::Openverse => (OPENVERSE_ENDPOINT, OPENVERSE_PAGE_SIZE),
-        RemoteWallpaperSource::Pexels => (PEXELS_ENDPOINT, PEXELS_PAGE_SIZE),
-        RemoteWallpaperSource::Web => return Err(ProviderError::Protocol),
-    };
-    let mut url = Url::parse(endpoint).map_err(|_| ProviderError::Protocol)?;
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("q", query);
-        pairs.append_pair("page", &page.max(1).to_string());
-        if source == RemoteWallpaperSource::Openverse {
-            pairs.append_pair("page_size", &page_size.to_string());
-            pairs.append_pair("mature", "false");
-        } else {
-            pairs.append_pair("per_page", &page_size.to_string());
-            pairs.append_pair("orientation", "landscape");
-        }
-    }
-    Ok(url)
 }
 
 fn parse_api_page(

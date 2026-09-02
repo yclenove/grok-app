@@ -3,17 +3,66 @@ use serde_json::json;
 
 #[test]
 fn endpoints_and_page_sizes_are_fixed() {
-    let openverse = provider_url(RemoteWallpaperSource::Openverse, "misty lake", 3).unwrap();
+    let openverse = provider_url(RemoteWallpaperSource::Openverse, "misty lake", 3, None).unwrap();
     assert_eq!(openverse.host_str(), Some("api.openverse.org"));
     assert_eq!(openverse.path(), "/v1/images/");
     assert!(openverse.as_str().contains("page_size=20"));
     assert!(openverse.as_str().contains("page=3"));
+    assert_eq!(
+        openverse
+            .query_pairs()
+            .find(|(key, _)| key == PEXELS_CACHE_BUST_PARAM),
+        None
+    );
 
-    let pexels = provider_url(RemoteWallpaperSource::Pexels, "misty lake", 2).unwrap();
+    let pexels = provider_url(
+        RemoteWallpaperSource::Pexels,
+        "misty lake",
+        2,
+        Some("000000000000000000000000000000010000000000000001"),
+    )
+    .unwrap();
     assert_eq!(pexels.host_str(), Some("api.pexels.com"));
     assert_eq!(pexels.path(), "/v1/search");
     assert!(pexels.as_str().contains("per_page=40"));
     assert!(pexels.as_str().contains("orientation=landscape"));
+    assert_eq!(
+        pexels
+            .query_pairs()
+            .find(|(key, _)| key == "query")
+            .map(|(_, value)| value.into_owned())
+            .as_deref(),
+        Some("misty lake")
+    );
+    assert!(!pexels.query_pairs().any(|(key, _)| key == "q"));
+}
+
+#[test]
+fn pexels_requests_use_fresh_credential_free_cache_busters() {
+    let first = provider_request_url(RemoteWallpaperSource::Pexels, "misty lake", 1).unwrap();
+    let second = provider_request_url(RemoteWallpaperSource::Pexels, "misty lake", 1).unwrap();
+    let nonce = |url: &Url| {
+        url.query_pairs()
+            .find(|(key, _)| key == PEXELS_CACHE_BUST_PARAM)
+            .map(|(_, value)| value.into_owned())
+            .unwrap()
+    };
+    let first_nonce = nonce(&first);
+    let second_nonce = nonce(&second);
+
+    assert_ne!(first_nonce, second_nonce);
+    for value in [&first_nonce, &second_nonce] {
+        assert_eq!(value.len(), 48);
+        assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+    assert!(provider_url(RemoteWallpaperSource::Pexels, "misty lake", 1, None).is_err());
+    assert!(provider_url(
+        RemoteWallpaperSource::Pexels,
+        "misty lake",
+        1,
+        Some("pexels-api-key-sentinel"),
+    )
+    .is_err());
 }
 
 #[test]
