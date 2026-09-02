@@ -52,7 +52,7 @@ SHA-256 credential revision and never stores the API key itself.
 | Focused provider harness | 8 passed, 0 failed |
 | Focused Pexels source UI | 9 passed, including saved key rejection, inline replacement, Host-only save, error clearance, and search recovery |
 | Manifest-embedded Windows Rust harness | 1713 passed, 0 failed, 1 ignored |
-| Frontend suite | 587 files, 7054 tests passed |
+| Frontend suite | 587 files, 7055 tests passed |
 | ESLint | Passed with zero warnings |
 | TypeScript typecheck | Passed |
 | Production UI build | Passed; existing Rollup chunk warnings remain non-fatal |

@@ -115,7 +115,7 @@ more Web cards surviving the full foreground paging and validation path.
 |---|---|
 | `pnpm deps:check` | Passed |
 | `pnpm audit:prod` | Passed; no known production vulnerability |
-| `pnpm test` | 587 files, 7053 tests passed |
+| `pnpm test` | 587 files, 7055 tests passed |
 | Focused pagination Vitest | 6 files, 44 tests passed |
 | Focused layout and Lightbox Vitest | 3 files, 13 tests passed |
 | Focused post-change ESLint | Passed for the pagination controller and its regression suite |
