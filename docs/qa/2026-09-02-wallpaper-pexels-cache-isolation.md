@@ -50,8 +50,9 @@ SHA-256 credential revision and never stores the API key itself.
 |---|---|
 | Header-only official endpoint probe | Cached canonical URL reproduced `200`; two fresh nonce URLs returned `401` |
 | Focused provider harness | 8 passed, 0 failed |
+| Focused Pexels source UI | 9 passed, including saved key rejection, inline replacement, Host-only save, error clearance, and search recovery |
 | Manifest-embedded Windows Rust harness | 1713 passed, 0 failed, 1 ignored |
-| Frontend suite | 587 files, 7052 tests passed |
+| Frontend suite | 587 files, 7054 tests passed |
 | ESLint | Passed with zero warnings |
 | TypeScript typecheck | Passed |
 | Production UI build | Passed; existing Rollup chunk warnings remain non-fatal |
@@ -74,3 +75,10 @@ claim a successful authenticated Pexels search, paging/prefetch, attribution
 link, preview/apply, key-recovery, or source-switch cancellation run. Those
 checks require the user to save a valid key through the in-app Pexels control;
 the key must not be pasted into chat or added to repository fixtures.
+
+The deterministic UI regression does cover the recovery lifecycle without a
+real credential: it starts from a masked saved-key state, simulates the Host
+returning `pexels_key_invalid`, exposes the replacement field, saves a
+non-secret fixture through the Host API boundary, clears the rejected-key
+error, and re-enables search. This confirms the interaction wiring while
+leaving authenticated upstream acceptance explicitly open.

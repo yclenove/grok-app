@@ -11,7 +11,10 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@/test/jsdomStubs";
 import type { GrokAlbumStatus } from "@/lib/grokAlbum";
-import type { WallpaperGalleryItem } from "@/lib/wallpaperSource";
+import type {
+  WallpaperGalleryItem,
+  WallpaperSourceErrorCode,
+} from "@/lib/wallpaperSource";
 
 const cancelSearch = vi.hoisted(() => vi.fn(async () => true));
 const searchX = vi.hoisted(() => vi.fn());
@@ -36,6 +39,7 @@ const remoteControllerState = vi.hoisted(() => ({
   progress: null as string | null,
   canLoadMore: false,
   searchItems: [] as WallpaperGalleryItem[],
+  searchErrorCode: null as WallpaperSourceErrorCode | null,
 }));
 const xSearchState = vi.hoisted(() => ({
   busy: false,
@@ -81,10 +85,17 @@ vi.mock("@/hooks/useWallpaperRemoteSourceController", () => ({
   useWallpaperRemoteSourceController: (options: {
     setItems: (items: WallpaperGalleryItem[]) => void;
     setHasSearched: (value: boolean) => void;
+    setError: (value: string | null) => void;
+    setErrorCode: (value: WallpaperSourceErrorCode | null) => void;
   }) => ({
     ...remoteControllerState,
     search: async () => {
       const result = await searchRemote();
+      if (remoteControllerState.searchErrorCode) {
+        options.setHasSearched(true);
+        options.setErrorCode(remoteControllerState.searchErrorCode);
+        options.setError("provider error");
+      }
       if (remoteControllerState.searchItems.length > 0) {
         options.setItems(remoteControllerState.searchItems);
         options.setHasSearched(true);
@@ -168,6 +179,7 @@ afterEach(() => {
   remoteControllerState.progress = null;
   remoteControllerState.canLoadMore = false;
   remoteControllerState.searchItems = [];
+  remoteControllerState.searchErrorCode = null;
   grokAlbumState.status = "closed";
   grokAlbumState.cachedCount = 0;
   grokAlbumState.visibleCount = 0;
@@ -408,6 +420,72 @@ describe("WallpaperSourceModal source workspace", () => {
         name: "settings.wallpaperSource.search",
       }).disabled,
     ).toBe(false);
+  });
+
+  it("recovers Pexels search after replacing a rejected key", async () => {
+    secretsGetMasked.mockResolvedValue({ hasPexelsKey: true });
+    remoteControllerState.searchErrorCode = "pexels_key_invalid";
+    render(
+      <WallpaperSourceModal
+        open
+        initialTab="pexels"
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText("settings.wallpaperSource.pexels.keySaved"),
+    ).toBeTruthy();
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.pexels.placeholder"),
+      { target: { value: "mountain lake" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+
+    expect(
+      await screen.findByText("settings.wallpaperSource.pexels.keyInvalid"),
+    ).toBeTruthy();
+    fireEvent.change(
+      await screen.findByLabelText(
+        "settings.wallpaperSource.pexels.keyPlaceholder",
+      ),
+      { target: { value: "replacement-pexels-key" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.pexels.keySave",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(secretsSet).toHaveBeenCalledWith({
+        pexelsApiKey: "replacement-pexels-key",
+      }),
+    );
+    expect(
+      await screen.findByText("settings.wallpaperSource.pexels.keySaved"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("settings.wallpaperSource.pexels.keyInvalid"),
+    ).toBeNull();
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "settings.wallpaperSource.search",
+      }).disabled,
+    ).toBe(false);
+
+    remoteControllerState.searchErrorCode = null;
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    await waitFor(() => expect(searchRemote).toHaveBeenCalledTimes(2));
+    expect(
+      screen.queryByText("settings.wallpaperSource.pexels.keyInvalid"),
+    ).toBeNull();
   });
 });
 
