@@ -25,7 +25,8 @@
   }
 
   .wallpaper-source-tabs__btn {
-    flex: 0 0 auto;
+    /* Fill ordinary desktop widths; overflow only when labels truly need it. */
+    flex: 1 0 auto;
     width: auto;
     min-width: max-content;
   }

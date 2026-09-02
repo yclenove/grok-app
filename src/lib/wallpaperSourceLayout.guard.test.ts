@@ -29,7 +29,7 @@ describe("wallpaper source layout guard", () => {
       /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto/s,
     );
     expect(sourceCss).toMatch(
-      /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs__btn\s*\{[^}]*flex:\s*0 0 auto[^}]*min-width:\s*max-content/s,
+      /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs__btn\s*\{[^}]*flex:\s*1 0 auto[^}]*min-width:\s*max-content/s,
     );
     expect(sourceCss).toMatch(
       /@media \(min-width: 1320px\)[\s\S]*\.wallpaper-source-modal \.wallpaper-masonry--stable\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s,
