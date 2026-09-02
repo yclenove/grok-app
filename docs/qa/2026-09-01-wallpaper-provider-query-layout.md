@@ -66,6 +66,14 @@ network-exit details.
 | Current foreground load more | The next operation waited about 60 seconds before reporting a network timeout; an original card selected normally and opened as slide 19 of 24 in the real Lightbox while paging was active, all 24 cards remained afterward, and manual retry stayed available |
 | Repeated Web fresh search | 13 validated cards arrived in 55.0 seconds, providing another non-low-yield result from the three-lane route |
 | Repeated Web paging interaction | The buffered page added three cards; during the next paging request an existing card selected, enabled the apply action, and opened as slide 14 of 16 in the real Lightbox; the request then added six cards for 22 total |
+| Final 1024 px layout pass | All seven icon-and-label sources remained in one row above the full-width workspace; X, Web, Openverse, Pexels, Imagine, Grok album, and library exposed only their actionable controls and real state, with no persistent source teaching or footer copy |
+| Final Grok album first page | The official Saved page synchronized 20 visible items while 44 validated entries were already warm |
+| Final Grok album load more | The first explicit action revealed 40 items immediately, then background warming advanced the cache to 62 without clearing, reordering, or remounting the visible gallery |
+| Final Grok album interaction | Existing images remained selectable and opened in the real Lightbox; the local video filter exposed two available entries and their preview path opened normally |
+| Final Web fresh search | 15 validated cards arrived in 56.5 seconds |
+| Final Web foreground paging | Five new cards expanded the gallery from 15 to 20; an existing card selected and opened in the real Lightbox while the request was active, and the original selection remained afterward |
+| Final Openverse fresh search | 11 validated cards arrived in 4.2 seconds; source, author, and Creative Commons license metadata remained visible and actionable |
+| Localized Openverse no-result case | A long localized query returned no cards; this is the honest provider result because the source contract forbids silently translating the user's theme |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
@@ -74,7 +82,10 @@ can still be smaller because source discovery, page access, image validation,
 quality filtering, and deduplication are separate attrition stages. The Web
 timeout run verifies the failure-preservation contract. The repeated run also
 completed a foreground Web expansion successfully, so the interaction contract
-is now covered under both failed and successful paging.
+is now covered under both failed and successful paging. The final repeat pass
+also confirms the one- or two-card symptom is not a fixed request-size limit:
+the same production UI returned 15 Web cards and 11 Openverse cards, with five
+more Web cards surviving the full foreground paging and validation path.
 
 ## Deterministic verification
 
@@ -116,5 +127,9 @@ three lines.
 
 No account identifier, credential, raw provider response, original query,
 media URL, or proxy-exit detail is present in this report or the new tests.
+The final live Saved sample did not contain a blob-backed video, so this report
+does not upgrade that deterministic-only path to a real-device claim. A valid
+Pexels key also remains unavailable; authenticated Pexels acceptance is still
+bounded by the separate 2026-09-02 cache-isolation report.
 This acceptance is local-only: no push, pull request, tag, release, or
 deployment is part of the work.
