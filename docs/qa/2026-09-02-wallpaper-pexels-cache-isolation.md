@@ -68,6 +68,11 @@ explanation or footer teaching copy. The Pexels missing-key state showed only
 the required status and key action. No grouped source frames, repeated source
 descriptions, wrapping, clipping, or modal stacking issue was visible.
 
+A final 1024 px recheck produced the same compact state: the query action was
+correctly unavailable without a key, the key field and save action occupied one
+short row, and the remaining workspace stayed visually quiet. No credential was
+entered or read during this check.
+
 ## Remaining live acceptance boundary
 
 No valid Pexels key is configured on this machine. This pass therefore does not

@@ -96,6 +96,9 @@ network-exit details.
 | Latest Openverse provenance actions | Source, author profile, and Creative Commons license actions all opened their exact external destinations. At 1024 px the repeated provider label was replaced by an accessible source icon, the author ellipsized cleanly, and the license remained readable |
 | Post-layout Openverse recheck | A separate fresh run returned 20 validated cards in 4.2 seconds. Selection and the real Lightbox opened as slide 1 of 20; the same result then restored from Host cache in 0.0 seconds without changing the compact attribution layout |
 | Post-layout Web recheck | A fresh run returned 12 validated cards in 55.0 seconds. Every card retained a visible source domain; cards with author metadata displayed both domain and author without overlap, and the same set restored from Host cache in 0.0 seconds |
+| Final Grok album rerun | The first page contained 20 items (18 images and two videos). Background warming advanced the in-memory cache through 48 to 62 items; load more expanded 20 to 40 in about 0.47 seconds, and an original item still opened as slide 13 of 40 |
+| Final Web rerun | Six validated cards first appeared in about 56.5 seconds and the final state settled at about 67 seconds. A foreground load-more operation took about 101.5 seconds, added three cards for nine total, and left original cards selectable; one opened as slide 1 of 6 while paging was active |
+| Current Openverse availability check | The official query endpoint returned no bytes before the 25-second provider timeout. The production UI exited its busy state and showed the compact structured Network / timeout error; prior successful live samples above establish that this was an upstream or current-route availability failure, not a reduced request-size regression |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
