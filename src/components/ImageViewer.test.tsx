@@ -15,6 +15,7 @@ const loadImageNaturalSize = vi.hoisted(() =>
   vi.fn(async () => ({ width: 640, height: 480 })),
 );
 const capturedSlides = vi.hoisted(() => vi.fn());
+const capturedOpen = vi.hoisted(() => vi.fn());
 const viewedOriginal = vi.hoisted(() => vi.fn());
 const loadOriginal = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -58,19 +59,25 @@ vi.mock("@/lib/imageLightboxFit", async (importOriginal) => {
 
 vi.mock("./ImageLightbox", () => ({
   ImageLightbox: (props: {
+    open: boolean;
+    close: () => void;
     index: number;
     slides: unknown[];
     onView: (index: number) => void;
   }) => {
     capturedSlides(props.slides);
+    capturedOpen(props.open);
     return (
-      <div data-testid="lightbox">
+      <div data-testid="lightbox" data-open={String(props.open)}>
         <button
           type="button"
           data-testid="lightbox-next"
           onClick={() => props.onView(props.index + 1)}
         >
           next
+        </button>
+        <button type="button" data-testid="lightbox-close" onClick={props.close}>
+          close
         </button>
       </div>
     );
@@ -176,6 +183,7 @@ afterEach(() => {
   cleanup();
   loadImageNaturalSize.mockClear();
   capturedSlides.mockClear();
+  capturedOpen.mockClear();
   viewedOriginal.mockClear();
   loadOriginal.mockClear();
   loadFirstDuplicateOriginal.mockClear();
@@ -207,6 +215,25 @@ describe("ImageViewerProvider", () => {
     expect(slides[0]?.width).toBeUndefined();
     expect(slides[1]?.width).toBeGreaterThan(0);
     expect(slides[2]?.width).toBeUndefined();
+  });
+
+  it("keeps the lightbox mounted with open=false so its exit lifecycle completes", async () => {
+    render(
+      <ImageViewerProvider locale="en">
+        <GalleryTrigger />
+      </ImageViewerProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    const lightbox = await screen.findByTestId("lightbox");
+    expect(lightbox.getAttribute("data-open")).toBe("true");
+
+    fireEvent.click(screen.getByTestId("lightbox-close"));
+
+    expect(screen.getByTestId("lightbox").getAttribute("data-open")).toBe(
+      "false",
+    );
+    expect(capturedOpen.mock.calls.map(([open]) => open)).toContain(false);
   });
 
   it("resolves all slide sources without serializing on the first one", async () => {

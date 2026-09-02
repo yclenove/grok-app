@@ -358,7 +358,8 @@ export function ImageViewerProvider({
   return (
     <ImageViewerContext.Provider value={api}>
       {children}
-      {isOpen ? (
+      {/* Keep YARL mounted after first use so open=false can complete exit cleanup. */}
+      {slides.length > 0 ? (
         <Suspense fallback={null}>
           <ImageLightbox
             open={isOpen}
