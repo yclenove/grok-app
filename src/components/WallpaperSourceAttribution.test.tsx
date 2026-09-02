@@ -23,9 +23,9 @@ function item(
 }
 
 describe("WallpaperSourceAttribution", () => {
-  it("opens the exact source, author, and license links", () => {
+  it("keeps licensed attribution compact and opens every exact link", () => {
     const onOpen = vi.fn();
-    render(
+    const { container } = render(
       <WallpaperSourceAttribution
         item={item({
           sourceName: "Openverse",
@@ -41,7 +41,13 @@ describe("WallpaperSourceAttribution", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Openverse" }));
+    const source = screen.getByRole("button", { name: "Openverse" });
+    expect(container.querySelector(".wallpaper-attribution--licensed")).not.toBeNull();
+    expect(source.querySelector("svg")).not.toBeNull();
+    expect(source.textContent).toBe("");
+    expect(screen.queryByText("·")).toBeNull();
+
+    fireEvent.click(source);
     fireEvent.click(
       screen.getByRole("button", { name: "A. Photographer" }),
     );
@@ -51,6 +57,39 @@ describe("WallpaperSourceAttribution", () => {
       ["https://openverse.org/image/source"],
       ["https://example.test/author"],
       ["https://creativecommons.org/licenses/by/4.0/"],
+    ]);
+  });
+
+  it("keeps the Web source label visible when author metadata exists", () => {
+    const onOpen = vi.fn();
+    const { container } = render(
+      <WallpaperSourceAttribution
+        item={item({
+          source: "web",
+          sourceName: "photos.example.test",
+          sourceUrl: "https://photos.example.test/story",
+          authorName: "A. Reporter",
+          authorUrl: "https://photos.example.test/authors/reporter",
+        })}
+        t={(key: MessageKey) => key}
+        disabled={false}
+        onOpen={onOpen}
+      />,
+    );
+
+    const source = screen.getByRole("button", {
+      name: "photos.example.test",
+    });
+    expect(source.textContent).toBe("photos.example.test");
+    expect(source.querySelector("svg")).toBeNull();
+    expect(screen.getByRole("button", { name: "A. Reporter" })).toBeTruthy();
+    expect(container.querySelector(".wallpaper-attribution--licensed")).toBeNull();
+
+    fireEvent.click(source);
+    fireEvent.click(screen.getByRole("button", { name: "A. Reporter" }));
+    expect(onOpen.mock.calls).toEqual([
+      ["https://photos.example.test/story"],
+      ["https://photos.example.test/authors/reporter"],
     ]);
   });
 

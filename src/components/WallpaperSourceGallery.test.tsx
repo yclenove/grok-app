@@ -102,7 +102,7 @@ describe("WallpaperSourceGallery", () => {
     ["openverse", "Openverse"],
     ["pexels", "Pexels"],
   ] as const)(
-    "shows %s provenance once on its own source tab",
+    "keeps %s provenance accessible without repeating the provider label",
     (source, sourceName) => {
       const { container } = render(
         <WallpaperSourceGallery
@@ -124,7 +124,9 @@ describe("WallpaperSourceGallery", () => {
         />,
       );
 
-      expect(screen.getAllByText(sourceName)).toHaveLength(1);
+      const sourceAction = screen.getByRole("button", { name: sourceName });
+      expect(sourceAction.querySelector("svg")).not.toBeNull();
+      expect(screen.queryByText(sourceName)).toBeNull();
       expect(container.querySelector(".wallpaper-masonry__meta")).toBeNull();
       expect(container.querySelector(".wallpaper-attribution")).not.toBeNull();
       expect(

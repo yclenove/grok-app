@@ -37,6 +37,15 @@ describe("wallpaper source layout guard", () => {
     expect(sourceCss).toMatch(
       /\.wallpaper-masonry--stable \.wallpaper-masonry__media\s*\{[^}]*aspect-ratio:\s*16 \/ 10/s,
     );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-attribution--licensed \.wallpaper-attribution__author\s*\{[^}]*flex:\s*1 1 0/s,
+    );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-attribution--licensed \.wallpaper-attribution__license\s*\{[^}]*max-width:\s*52%/s,
+    );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-attribution:not\(\.wallpaper-attribution--licensed\)\s*\.wallpaper-attribution__source\s*\{[^}]*flex:\s*1 1 auto/s,
+    );
   });
 
   it("keeps every source label visible in the scrollable strip", () => {

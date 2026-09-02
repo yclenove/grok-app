@@ -38,6 +38,9 @@ contracts.
   use one consistent ratio, and the Lightbox keeps the original media ratio.
 - Provider, author, and license remain available as one compact low-emphasis
   attribution row instead of competing with the images for vertical space.
+- Openverse and Pexels cards replace the provider name repeated on every card
+  with one accessible external-link action. Web cards keep their concrete
+  source domain visible even when author metadata is also present.
 - Group frames, group headings, persistent source descriptions, empty-state
   teaching copy, and footer instructions are absent. Every source keeps both its
   icon and text label.
@@ -88,6 +91,11 @@ network-exit details.
 | Latest Grok album warm-page check | The first page showed 20 items, background warming advanced the cache from 20 to 51, and the first explicit expansion revealed 40 items in about 0.2 seconds. Warming then reached 61 cached items, and an existing card still opened as slide 20 of 40 |
 | Low-yield Web diagnosis | Three validated cards survived the full initial route. One lane discovered eight source pages but none could be fetched, while another lane produced one accepted card; this confirms source-page accessibility, rather than a one- or two-item request size, caused the low yield |
 | Low-yield paging interaction | A foreground expansion timed out after about 55 seconds. During the request an original card selected, enabled apply, and opened as slide 1 of 3 in the real Lightbox; the error preserved the gallery, selection, and retry action |
+| Latest Grok album staged expansion | The first page showed 20 items while 61 were cached; load more expanded the visible gallery from 20 to 40 in about 0.22 seconds. Existing images remained selectable and opened in the Lightbox, and the two available video entries played in preview |
+| Latest Openverse staged expansion | A fresh search returned 20 validated cards in 4.7 seconds. The prefetched page appended 19 deduplicated cards in about 0.25 seconds for 39 total; a newly appended card selected and opened as slide 21 of 39 |
+| Latest Openverse provenance actions | Source, author profile, and Creative Commons license actions all opened their exact external destinations. At 1024 px the repeated provider label was replaced by an accessible source icon, the author ellipsized cleanly, and the license remained readable |
+| Post-layout Openverse recheck | A separate fresh run returned 20 validated cards in 4.2 seconds. Selection and the real Lightbox opened as slide 1 of 20; the same result then restored from Host cache in 0.0 seconds without changing the compact attribution layout |
+| Post-layout Web recheck | A fresh run returned 12 validated cards in 55.0 seconds. Every card retained a visible source domain; cards with author metadata displayed both domain and author without overlap, and the same set restored from Host cache in 0.0 seconds |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
