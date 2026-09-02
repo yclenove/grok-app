@@ -84,6 +84,8 @@ network-exit details.
 | Current Openverse pagination | The first action appended 20 cards for 38 total; the second appended 20 upstream cards and produced 57 total after deduplication |
 | Current paged-result preview | A card from the second appended page opened normally as slide 53 of 57, confirming that later-page results remain selectable |
 | Current Lightbox close lifecycle | Closing the preview entered the normal exit state; after about 0.8 seconds the overlay, counter, navigation controls, and Lightbox accessibility node were all gone while the 57-card gallery remained intact |
+| Latest Web continuation check | Six validated cards were already present; the first buffered expansion appended one immediately for seven total. A following foreground request timed out without clearing the gallery, and an original card selected and opened as slide 1 of 7 while paging was active |
+| Latest Grok album warm-page check | The first page showed 20 items, background warming advanced the cache from 20 to 51, and the first explicit expansion revealed 40 items in about 0.2 seconds. Warming then reached 61 cached items, and an existing card still opened as slide 20 of 40 |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
