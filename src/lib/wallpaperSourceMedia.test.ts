@@ -4,16 +4,23 @@ const fetchAlbumMedia = vi.hoisted(() => vi.fn());
 const cancelAlbumRequests = vi.hoisted(() => vi.fn());
 const cancelAllAlbumRequests = vi.hoisted(() => vi.fn());
 const fetchMedia = vi.hoisted(() => vi.fn());
+const fetchRemoteMedia = vi.hoisted(() => vi.fn());
+const cancelRemoteRequests = vi.hoisted(() => vi.fn());
+const cancelAllRemoteRequests = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({
   wallpaperGrokAlbumFetchMedia: fetchAlbumMedia,
   wallpaperGrokAlbumCancelRequests: cancelAlbumRequests,
   wallpaperGrokAlbumCancelAllRequests: cancelAllAlbumRequests,
+  wallpaperRemoteFetchMedia: fetchRemoteMedia,
+  wallpaperRemoteCancelMediaRequests: cancelRemoteRequests,
+  wallpaperRemoteCancelAllMediaRequests: cancelAllRemoteRequests,
   wallpaperFetchMedia: fetchMedia,
 }));
 
 import {
   cancelGrokAlbumMediaRequests,
+  cancelRemoteWallpaperMediaRequests,
   EMPTY_WALLPAPER_IMAGE_PLACEHOLDER,
   ensureLocalWallpaperMedia,
 } from "./wallpaperSourceMedia";
@@ -28,6 +35,11 @@ beforeEach(() => {
   cancelAllAlbumRequests.mockReset();
   cancelAllAlbumRequests.mockResolvedValue(0);
   fetchMedia.mockReset();
+  fetchRemoteMedia.mockReset();
+  cancelRemoteRequests.mockReset();
+  cancelRemoteRequests.mockResolvedValue(0);
+  cancelAllRemoteRequests.mockReset();
+  cancelAllRemoteRequests.mockResolvedValue(0);
 });
 
 describe("wallpaper source media lifecycle", () => {
@@ -143,5 +155,35 @@ describe("wallpaper source media lifecycle", () => {
     );
     expect(cancelAlbumRequests).not.toHaveBeenCalled();
     expect(cancelAllAlbumRequests).not.toHaveBeenCalled();
+  });
+
+  it("keeps remote download headers behind the Host boundary", async () => {
+    fetchRemoteMedia.mockResolvedValue({
+      path: "H:\\wallpapers\\web.jpg",
+      name: "web.jpg",
+      mime: "image/jpeg",
+    });
+
+    await ensureLocalWallpaperMedia({
+      id: "web-image",
+      thumbUrl: "https://cdn.example.test/photo.jpg",
+      fullUrl: "https://cdn.example.test/photo.jpg",
+      kind: "image",
+      source: "web",
+      sourceUrl: "https://photos.example.test/item",
+    });
+
+    expect(fetchRemoteMedia).toHaveBeenCalledWith(
+      "web",
+      "https://cdn.example.test/photo.jpg",
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
+  });
+
+  it("cancels both originals and thumbnail fallbacks on source exit", () => {
+    cancelRemoteWallpaperMediaRequests();
+
+    expect(cancelRemoteRequests).not.toHaveBeenCalled();
+    expect(cancelAllRemoteRequests).toHaveBeenCalledTimes(1);
   });
 });

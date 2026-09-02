@@ -9,6 +9,7 @@ import {
   isWallpaperRemoteSource,
   type WallpaperRemoteSource,
 } from "@/lib/wallpaperRemoteSearch";
+import { clearRemoteWallpaperThumbnailCache } from "@/lib/remoteWallpaperThumbnail";
 
 export const EMPTY_WALLPAPER_IMAGE_PLACEHOLDER =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
@@ -39,6 +40,7 @@ export function cancelRemoteWallpaperMediaRequests(): void {
   const requestIds = Array.from(activeRemoteMediaRequests);
   activeRemoteMediaRequests.clear();
   pendingRemoteMedia.clear();
+  clearRemoteWallpaperThumbnailCache();
   const targeted =
     requestIds.length > 0
       ? api.wallpaperRemoteCancelMediaRequests(requestIds)

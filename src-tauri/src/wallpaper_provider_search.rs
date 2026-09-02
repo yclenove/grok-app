@@ -918,6 +918,7 @@ fn provider_item(
     candidate: ProviderCandidate,
     probe: wallpaper_remote_media::RemoteImageProbe,
 ) -> WallpaperGalleryItem {
+    wallpaper_remote_media::register_media_source(source, &probe.final_url, &candidate.source_url);
     let mut digest = Sha256::new();
     digest.update(source.as_str().as_bytes());
     digest.update(candidate.upstream_id.as_bytes());

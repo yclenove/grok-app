@@ -70,6 +70,17 @@ pub(crate) async fn wallpaper_remote_fetch_media(
 }
 
 #[tauri::command]
+pub(crate) async fn wallpaper_remote_thumbnail(
+    source: String,
+    url: String,
+    request_id: String,
+) -> Result<crate::wallpaper_remote_media::RemoteWallpaperThumbnail, String> {
+    let source = RemoteWallpaperSource::parse(&source)?;
+    let request_id = wallpaper_remote_search::request_id(Some(&request_id))?;
+    crate::wallpaper_remote_media::fetch_thumbnail(&url, source, &request_id).await
+}
+
+#[tauri::command]
 pub(crate) async fn wallpaper_remote_cancel_media_requests(
     request_ids: Vec<String>,
 ) -> Result<usize, String> {

@@ -1712,6 +1712,8 @@ pub fn run() {
 
             wallpaper_remote_commands::wallpaper_remote_fetch_media,
 
+            wallpaper_remote_commands::wallpaper_remote_thumbnail,
+
             wallpaper_remote_commands::wallpaper_remote_cancel_media_requests,
 
             wallpaper_remote_commands::wallpaper_remote_cancel_all_media_requests,

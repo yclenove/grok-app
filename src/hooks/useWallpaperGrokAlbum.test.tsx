@@ -20,7 +20,10 @@ vi.mock("@/lib/api", () => ({
   wallpaperGrokAlbumLoadMore: albumLoadMore,
   wallpaperGrokAlbumOpen: albumOpen,
   wallpaperGrokAlbumRefresh: albumRefresh,
+  wallpaperGrokAlbumCancelRequests: vi.fn(async () => 0),
   wallpaperGrokAlbumCancelAllRequests: vi.fn(async () => 0),
+  wallpaperRemoteCancelMediaRequests: vi.fn(async () => 0),
+  wallpaperRemoteCancelAllMediaRequests: vi.fn(async () => 0),
 }));
 
 vi.mock("@/lib/grokAlbumThumbnail", () => ({

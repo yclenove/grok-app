@@ -1,4 +1,5 @@
 import { GrokAlbumThumbnail } from "@/components/GrokAlbumThumbnail";
+import { RemoteWallpaperThumbnail } from "@/components/RemoteWallpaperThumbnail";
 import { WallpaperSourceAttribution } from "@/components/WallpaperSourceAttribution";
 import type { MessageKey } from "@/i18n";
 import { resolveImageSrcSync } from "@/lib/imageSrc";
@@ -14,6 +15,7 @@ import {
   type WallpaperGalleryKindFilter,
 } from "@/lib/wallpaperGalleryPro";
 import { resolveWallpaperXCitation } from "@/lib/xEvidenceCitation";
+import { isWallpaperRemoteSource } from "@/lib/wallpaperRemoteSearch";
 
 type Translate = (
   key: MessageKey,
@@ -269,6 +271,19 @@ export function WallpaperSourceGallery({
                         alt={item.textPreview || item.prompt || item.username || ""}
                         width={item.width}
                         height={item.height}
+                      />
+                    ) : !library &&
+                      !item.localPath &&
+                      isWallpaperRemoteSource(item.source) ? (
+                      <RemoteWallpaperThumbnail
+                        item={item}
+                        alt={
+                          item.textPreview ||
+                          item.prompt ||
+                          item.username ||
+                          ""
+                        }
+                        onUnavailable={onDropItem}
                       />
                     ) : localVideo ? (
                       <video

@@ -13,7 +13,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
-use image::DynamicImage;
+use image::{DynamicImage, ImageReader, Limits};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -22,6 +22,12 @@ use crate::paths;
 
 /// Longest edge for chat card thumbs (display max 240px; 2× for Retina).
 const THUMB_MAX_EDGE: u32 = 480;
+
+/// Remote wallpaper bytes are untrusted and may encode extreme dimensions in
+/// a small response. Keep one decode bounded while still accepting 8K media.
+const UNTRUSTED_THUMB_MAX_DIMENSION: u32 = 16_384;
+const UNTRUSTED_THUMB_MAX_PIXELS: u64 = 50_000_000;
+const UNTRUSTED_THUMB_MAX_ALLOC: u64 = 256 * 1024 * 1024;
 
 /// Skip re-encode when source is already small enough (bytes).
 const SKIP_IF_SMALLER_THAN: u64 = 96 * 1024; // 96 KiB
@@ -196,18 +202,65 @@ fn decode_image_bytes(bytes: &[u8]) -> Result<DynamicImage, String> {
     image::load_from_memory(bytes).map_err(|e| format!("decode image: {e}"))
 }
 
-/// Decode an image and return a bounded card-size JPEG without persisting it.
-///
-/// Grok album previews use this path because `assets.grok.com` rejects the
-/// main app WebView's cross-site `<img>` requests. Keeping the encoded result
-/// in memory preserves the album contract: only an explicitly previewed or
-/// applied original is written to the wallpaper library.
+fn decode_untrusted_image_bytes_with_limits(
+    bytes: &[u8],
+    max_dimension: u32,
+    max_pixels: u64,
+    max_alloc: u64,
+) -> Result<DynamicImage, String> {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(max_dimension);
+    limits.max_image_height = Some(max_dimension);
+    limits.max_alloc = Some(max_alloc);
+
+    let mut dimensions_reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("decode image dimensions: {e}"))?;
+    dimensions_reader.limits(limits.clone());
+    let (width, height) = dimensions_reader
+        .into_dimensions()
+        .map_err(|e| format!("decode image dimensions: {e}"))?;
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels == 0 || pixels > max_pixels {
+        return Err("decode image: pixel limit exceeded".into());
+    }
+
+    let mut decode_reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("decode image: {e}"))?;
+    decode_reader.limits(limits);
+    decode_reader
+        .decode()
+        .map_err(|e| format!("decode image: {e}"))
+}
+
+/// Decode trusted local image bytes and return a card-size JPEG.
+/// Remote wallpaper callers must use `thumbnail_jpeg_from_untrusted_bytes`.
 pub fn thumbnail_jpeg_from_bytes(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let img = decode_image_bytes(bytes)?;
+    thumbnail_jpeg_from_image(img, bytes.len())
+}
+
+/// Decode untrusted remote wallpaper bytes with strict dimension and allocation
+/// limits, then return the same in-memory card thumbnail shape as local media.
+pub fn thumbnail_jpeg_from_untrusted_bytes(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = decode_untrusted_image_bytes_with_limits(
+        bytes,
+        UNTRUSTED_THUMB_MAX_DIMENSION,
+        UNTRUSTED_THUMB_MAX_PIXELS,
+        UNTRUSTED_THUMB_MAX_ALLOC,
+    )?;
+    thumbnail_jpeg_from_image(img, bytes.len())
+}
+
+fn thumbnail_jpeg_from_image(
+    img: DynamicImage,
+    source_bytes: usize,
+) -> Result<(Vec<u8>, u32, u32), String> {
     let width = img.width();
     let height = img.height();
     let long = width.max(height);
-    let thumb_img = if long <= THUMB_MAX_EDGE && bytes.len() as u64 <= SKIP_IF_SMALLER_THAN {
+    let thumb_img = if long <= THUMB_MAX_EDGE && source_bytes as u64 <= SKIP_IF_SMALLER_THAN {
         img
     } else {
         resize_to_thumb(img)
@@ -400,6 +453,24 @@ mod tests {
         assert!(jpeg.len() < 512 * 1024);
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (480, 270));
+    }
+
+    #[test]
+    fn untrusted_thumbnail_decode_rejects_excessive_pixel_count() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            20,
+            10,
+            image::Rgb([24, 96, 180]),
+        ));
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+
+        let error = decode_untrusted_image_bytes_with_limits(&png, 64, 100, 1024 * 1024)
+            .expect_err("pixel count must be bounded before decoding");
+        assert_eq!(error, "decode image: pixel limit exceeded");
+
+        assert!(decode_untrusted_image_bytes_with_limits(&png, 16, 1_000, 1024 * 1024).is_err());
     }
 
     #[test]

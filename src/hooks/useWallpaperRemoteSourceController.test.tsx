@@ -35,6 +35,7 @@ vi.mock("@/hooks/useWallpaperRemoteSearch", () => ({
 
 vi.mock("@/lib/api", () => ({
   isDesktopHost: () => true,
+  wallpaperRemoteCancelMediaRequests: vi.fn(async () => 0),
 }));
 
 import { useWallpaperRemoteSourceController } from "./useWallpaperRemoteSourceController";

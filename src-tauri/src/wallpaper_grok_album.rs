@@ -306,11 +306,12 @@ async fn fetch_album_thumbnail(
     }
     ensure_thumbnail_active(cancellation)?;
 
-    let (jpeg, width, height) =
-        tokio::task::spawn_blocking(move || crate::image_thumb::thumbnail_jpeg_from_bytes(&bytes))
-            .await
-            .map_err(|_| "album_thumbnail_unavailable".to_string())?
-            .map_err(|_| "album_thumbnail_unavailable".to_string())?;
+    let (jpeg, width, height) = tokio::task::spawn_blocking(move || {
+        crate::image_thumb::thumbnail_jpeg_from_untrusted_bytes(&bytes)
+    })
+    .await
+    .map_err(|_| "album_thumbnail_unavailable".to_string())?
+    .map_err(|_| "album_thumbnail_unavailable".to_string())?;
     ensure_thumbnail_active(cancellation)?;
     if jpeg.is_empty() || jpeg.len() > MAX_THUMB_JPEG_BYTES || width == 0 || height == 0 {
         return Err("album_thumbnail_unavailable".to_string());

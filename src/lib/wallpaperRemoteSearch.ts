@@ -32,6 +32,12 @@ export type WallpaperRemoteSearchResult = {
   durationMs: number;
 };
 
+export type WallpaperRemoteThumbnail = {
+  dataUrl: string;
+  width: number;
+  height: number;
+};
+
 export type WallpaperRemoteSearchProgress = {
   requestId: string;
   source: WallpaperRemoteSource;

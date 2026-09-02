@@ -23,6 +23,7 @@ import type {
   WallpaperRemoteSearchProgress,
   WallpaperRemoteSearchResult,
   WallpaperRemoteSource,
+  WallpaperRemoteThumbnail,
 } from "../wallpaperRemoteSearch";
 export type {
   WallpaperFetchResult,
@@ -136,6 +137,18 @@ export async function wallpaperRemoteFetchMedia(
   requestId: string,
 ): Promise<WallpaperFetchResult> {
   return invoke<WallpaperFetchResult>("wallpaper_remote_fetch_media", {
+    source,
+    url,
+    requestId,
+  });
+}
+
+export async function wallpaperRemoteThumbnail(
+  source: WallpaperRemoteSource,
+  url: string,
+  requestId: string,
+): Promise<WallpaperRemoteThumbnail> {
+  return invoke<WallpaperRemoteThumbnail>("wallpaper_remote_thumbnail", {
     source,
     url,
     requestId,

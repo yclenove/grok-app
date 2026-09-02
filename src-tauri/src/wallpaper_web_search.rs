@@ -826,6 +826,11 @@ fn web_item(
     metadata: &WebPageMetadata,
     probe: RemoteImageProbe,
 ) -> WallpaperGalleryItem {
+    wallpaper_remote_media::register_media_source(
+        RemoteWallpaperSource::Web,
+        &probe.final_url,
+        &metadata.source_url,
+    );
     let content_fingerprint = probe.content_fingerprint;
     let title = metadata.title.clone().or_else(|| page.title.clone());
     let text_preview = title

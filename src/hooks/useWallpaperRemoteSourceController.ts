@@ -23,6 +23,7 @@ import {
   type WallpaperSourceErrorCode,
 } from "@/lib/wallpaperSource";
 import type { WallpaperGalleryKindFilter } from "@/lib/wallpaperGalleryPro";
+import { clearRemoteWallpaperThumbnailCache } from "@/lib/remoteWallpaperThumbnail";
 import { wallpaperSourceErrorMessage } from "@/lib/wallpaperSourcePresentation";
 
 type Translate = (
@@ -219,6 +220,7 @@ export function useWallpaperRemoteSourceController({
 
   const resetForSearch = useCallback(() => {
     discardPrefetch();
+    clearRemoteWallpaperThumbnailCache();
     setError(null);
     setErrorCode(null);
     setStatusHint(null);

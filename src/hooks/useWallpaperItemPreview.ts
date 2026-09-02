@@ -3,6 +3,7 @@ import type { ImageSlideInput, ImageViewerApi } from "@/components/ImageViewerCo
 import type { MessageKey } from "@/i18n";
 import { isDesktopHost } from "@/lib/api";
 import { peekGrokAlbumThumbnail } from "@/lib/grokAlbumThumbnail";
+import { peekRemoteWallpaperThumbnail } from "@/lib/remoteWallpaperThumbnail";
 import { isWallpaperRemoteSource } from "@/lib/wallpaperRemoteSearch";
 import {
   parseWallpaperSourceError,
@@ -148,6 +149,50 @@ export function useWallpaperItemPreview({
                     kind: candidate.kind === "video" ? "video" : "image",
                     mime: loaded.mime,
                     poster: candidate.kind === "video" ? thumbnail : undefined,
+                  };
+                } catch (error) {
+                  if (sourceGeneration !== sourceGenerationRef.current) {
+                    return null;
+                  }
+                  const code = parseWallpaperSourceError(error);
+                  setErrorCode(code);
+                  setError(wallpaperSourceErrorMessage(t, code));
+                  throw error;
+                }
+              },
+            };
+          }
+
+          const remoteThumbnail =
+            isWallpaperRemoteSource(candidate.source) &&
+            !candidate.localPath &&
+            candidate.fullUrl.startsWith("http")
+              ? peekRemoteWallpaperThumbnail(candidate)
+              : null;
+          if (remoteThumbnail) {
+            return {
+              src: remoteThumbnail,
+              kind: "image",
+              title: slideTitle(candidate),
+              alt: candidate.prompt || candidate.textPreview || undefined,
+              onView: () => setSelectedId(candidate.id),
+              loadOriginal: async () => {
+                try {
+                  const loaded = await ensureLocalWallpaperMedia(candidate);
+                  if (sourceGeneration !== sourceGenerationRef.current) {
+                    return null;
+                  }
+                  setItems((previous) =>
+                    previous.map((current) =>
+                      current.id === candidate.id
+                        ? { ...current, localPath: loaded.path }
+                        : current,
+                    ),
+                  );
+                  return {
+                    src: loaded.path,
+                    kind: "image" as const,
+                    mime: loaded.mime,
                   };
                 } catch (error) {
                   if (sourceGeneration !== sourceGenerationRef.current) {
