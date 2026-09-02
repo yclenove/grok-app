@@ -68,6 +68,15 @@ paging state and is not part of the Host search-cache identity.
    signature, a compatible MIME type, a bounded size, and usable dimensions.
 8. Re-run the same safety and media validation before saving a selected file.
 
+The renderer never supplies a Referer or source-page URL to thumbnail and
+original-download IPC. When a search result passes Host validation, the Host
+registers only the source page's HTTPS origin against the source-scoped,
+canonical media URL. That in-memory registry is capped at 512 entries and a
+30-minute sliding TTL. A later media request may reuse only that registered
+origin; paths, query strings, credentials, and caller-provided header values
+cannot cross the IPC boundary. Thumbnail source bytes, dimensions, total pixel
+count, decoder allocation, and encoded JPEG output are bounded independently.
+
 No Cookie, browser storage, account token, authorization header, raw provider
 response, or user query is written to logs or returned in diagnostics.
 
@@ -156,9 +165,10 @@ The first implementation keeps all seven sources in one dialog without mixing
 their contracts:
 
 - A compact labeled source switcher sits above one continuous full-width
-  workspace. Desktop widths give all seven sources an even, single-row rhythm;
-  narrow widths keep the same labeled row horizontally scrollable instead of
-  wrapping it into several crowded lines. There are no group frames or headings.
+  workspace. The seven sources form three quiet segmented clusters for search,
+  creation, and personal media without adding category headings or teaching
+  copy. Narrow widths keep the same labeled row horizontally scrollable instead
+  of wrapping it into several crowded lines.
 - Controls, progress, route details, and errors appear only when relevant.
   Persistent source-description paragraphs and footer instructions are not
   rendered. Provenance remains attached to each result card.
@@ -178,15 +188,15 @@ next load-more operation waited about 60 seconds before a real network timeout;
 throughout that wait an original card remained selectable and opened as slide
 19 of 24 in the real Lightbox. The timeout preserved all 24 cards and the manual
 retry entry. Earlier live Responses smoke runs exercised
-the three-lane Web route. `薄雾森林风景摄影` completed in 55.0 seconds with seven
-rendered images; two prefetched load-more batches then expanded the gallery from
-7 to 10 and from 10 to 12 in about 0.2 seconds each. A third load-more operation
-waited for its in-flight prefetch while existing cards remained clickable, and
-the eventual prefetch timeout preserved all 12 images. `极光雪山湖泊 4K 壁纸`
-also completed in 55.0 seconds, returning 11 candidates and retaining nine that
-decoded successfully. These runs validate the `3 x 8` lane shape and the bounded
-7-12 reported-tool-call compatibility window; they are smoke evidence rather
-than a broad latency benchmark.
+the three-lane Web route. One sanitized sample completed in 55.0 seconds with
+seven rendered images; two prefetched load-more batches then expanded the
+gallery from 7 to 10 and from 10 to 12 in about 0.2 seconds each. A third
+load-more operation waited for its in-flight prefetch while existing cards
+remained clickable, and the eventual prefetch timeout preserved all 12 images.
+A second sanitized sample also completed in 55.0 seconds, returning 11
+candidates and retaining nine that decoded successfully. These runs validate
+the `3 x 8` lane shape and the bounded 7-12 reported-tool-call compatibility
+window; they are smoke evidence rather than a broad latency benchmark.
 
 A repeated Windows Tauri run returned 13 validated Web cards in 55.0 seconds.
 The first buffered expansion added three cards; the next paging operation kept
@@ -216,3 +226,12 @@ the prefetched expansion added 19 cards for a total of 39. A previously
 rendered card still selected and opened the real Lightbox after paging; Escape
 closed only the Lightbox and preserved the source dialog. Source, author, and
 license actions remained attached to the cards.
+
+The final remote-media pass exercised the real WebView and Host fallback. A
+fresh Web search completed in 55.0 seconds with one retained card after two
+Responses lanes timed out and the remaining lane's source-page and image
+validation budgets rejected the other candidates. The existing card stayed
+enabled and opened the real Lightbox during foreground paging. That operation
+eventually appended two validated cards for three total, and all three
+thumbnails rendered. This confirms that a one- or two-card result is downstream
+discovery and validation attrition, not a requested count of one or two.

@@ -263,6 +263,15 @@ describe("WallpaperSourceModal source workspace", () => {
     expect(
       screen.queryByText("settings.wallpaperSource.libraryHint"),
     ).toBeNull();
+    expect(
+      screen.queryByText("settings.wallpaperSource.web.hint"),
+    ).toBeNull();
+    expect(
+      screen.queryByText("settings.wallpaperSource.grokAlbum.hint"),
+    ).toBeNull();
+    expect(
+      screen.queryByText("settings.wallpaperSource.footerHint"),
+    ).toBeNull();
 
     const layout = view.container.querySelector(".wallpaper-source-layout");
     expect(layout?.firstElementChild).toBe(tablist);

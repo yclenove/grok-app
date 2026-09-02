@@ -20,16 +20,13 @@ describe("wallpaper source layout guard", () => {
       /\.wallpaper-source-layout\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(7,\s*minmax\(0,\s*1fr\)\)/s,
+      /\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*space-between[^}]*overflow-x:\s*auto/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*contents/s,
+      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*min-width:\s*max-content[^}]*background:/s,
     );
     expect(sourceCss).toMatch(
-      /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto/s,
-    );
-    expect(sourceCss).toMatch(
-      /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs__btn\s*\{[^}]*flex:\s*1 0 auto[^}]*min-width:\s*max-content/s,
+      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*justify-content:\s*flex-start/s,
     );
     expect(sourceCss).toMatch(
       /@media \(min-width: 1320px\)[\s\S]*\.wallpaper-source-modal \.wallpaper-masonry--stable\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s,

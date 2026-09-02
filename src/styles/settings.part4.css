@@ -14,26 +14,10 @@
     0 1px 3px color-mix(in srgb, #000 14%, transparent);
 }
 
-/* Keep all source names readable before seven equal columns become cramped. */
-@media (max-width: 1080px) {
+/* Narrow layouts keep the grouped source strip on one readable scroll row. */
+@media (max-width: 760px) {
   .wallpaper-source-tabs {
-    display: flex;
-    align-items: center;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: thin;
-  }
-
-  .wallpaper-source-tabs__btn {
-    /* Fill ordinary desktop widths; overflow only when labels truly need it. */
-    flex: 1 0 auto;
-    width: auto;
-    min-width: max-content;
-  }
-
-  .wallpaper-source-tabs__label {
-    overflow: visible;
-    text-overflow: clip;
+    justify-content: flex-start;
   }
 }
 

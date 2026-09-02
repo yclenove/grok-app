@@ -5,9 +5,9 @@ Date: 2026-09-02 (Asia/Shanghai)
 Branch: `fix/wallpaper-responses-network-observability`
 
 Scope: fix low-yield direct-library searches, preserve gallery interaction
-during paging, and simplify the seven-source wallpaper dialog. This pass does
-not change the X, Web, Imagine, Grok album, proxy, credential, or fallback
-contracts.
+during paging, make validated remote thumbnails render reliably, and simplify
+the seven-source wallpaper dialog. This pass does not change the X, Imagine,
+proxy, credential, or fallback contracts.
 
 ## Outcome
 
@@ -29,6 +29,11 @@ contracts.
   second failure keeps the existing gallery and the manual retry available.
   The regression covers both a rejected Promise and the real Host shape: a
   resolved result carrying `errorCode: "provider_timeout"`.
+- Web, Openverse, and Pexels cards try their validated HTTPS URL first, then use
+  a Host-fetched in-memory JPEG thumbnail when the WebView cannot render it.
+  The renderer sends only source, URL, and request id; registered source
+  Referers, network validation, byte limits, pixel limits, and decoder memory
+  limits remain inside the Host.
 - The source navigation remains above one full-width workspace. Desktop widths
   present all seven labeled choices with an even rhythm; narrow widths keep one
   horizontally scrollable row instead of stacking the choices into several
@@ -58,7 +63,7 @@ network-exit details.
 
 | Scenario | Result |
 |---|---|
-| Source navigation | Seven labeled sources rendered in one compact, even desktop row; no group frames, headings, persistent descriptions, or footer instruction remained |
+| Source navigation | Seven labeled sources rendered in three quiet unlabeled groups on one desktop row; no headings, persistent descriptions, or footer instruction remained |
 | Grok album verification | The dedicated official-page window opened and presented its verification state; the main dialog kept the actionable guidance while hiding stale zero-count filters and duplicate clear actions |
 | Openverse fresh search | 18 validated cards arrived in 9.1 seconds |
 | Openverse cached search | The first batch restored immediately from the in-process cache |
@@ -99,6 +104,9 @@ network-exit details.
 | Final Grok album rerun | The first page contained 20 items (18 images and two videos). Background warming advanced the in-memory cache through 48 to 62 items; load more expanded 20 to 40 in about 0.47 seconds, and an original item still opened as slide 13 of 40 |
 | Final Web rerun | Six validated cards first appeared in about 56.5 seconds and the final state settled at about 67 seconds. A foreground load-more operation took about 101.5 seconds, added three cards for nine total, and left original cards selectable; one opened as slide 1 of 6 while paging was active |
 | Current Openverse availability check | The official query endpoint returned no bytes before the 25-second provider timeout. The production UI exited its busy state and showed the compact structured Network / timeout error; prior successful live samples above establish that this was an upstream or current-route availability failure, not a reduced request-size regression |
+| Final remote-thumbnail fallback | A fresh Web result rendered through the Host JPEG fallback after direct WebView loading failed; opening it used the same in-memory thumbnail and upgraded the selected slide to a validated original on demand |
+| Final low-yield Web run | One card survived the initial 55.0-second route after two Responses lanes timed out and later page/image validation rejected the remaining candidates; foreground paging kept that card enabled and opened it in the real Lightbox, then appended two validated cards for three total |
+| Final grouped layout | At 1024 px the search, generation, and personal-media sources formed three compact unlabeled controls above the full-width workspace; no source explanation or footer teaching text was present and no label was clipped |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
@@ -118,7 +126,7 @@ more Web cards surviving the full foreground paging and validation path.
 |---|---|
 | `pnpm deps:check` | Passed |
 | `pnpm audit:prod` | Passed; no known production vulnerability |
-| `pnpm test` | 587 files, 7055 tests passed |
+| `pnpm test` | 589 files, 7064 tests passed |
 | Focused pagination Vitest | 6 files, 44 tests passed |
 | Focused layout and Lightbox Vitest | 3 files, 13 tests passed |
 | Focused post-change ESLint | Passed for the pagination controller and its regression suite |
@@ -128,7 +136,7 @@ more Web cards surviving the full foreground paging and validation path.
 | `cargo fmt --all -- --check` | Passed; the inherited drift in `src-tauri/src/lib.rs` and `src-tauri/src/plugin_mcp.rs` was normalized in an isolated formatting-only commit |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo test --no-run` | Passed |
-| Manifest-embedded current Windows Rust harness | 1713 passed, 0 failed, 1 ignored |
+| Manifest-embedded current Windows Rust harness | 1717 passed, 0 failed, 1 ignored |
 | Manifest-embedded `wallpaper_x` tests after the module split | 32 passed, 0 failed |
 | `git diff --check` | Passed |
 | `python scripts/check-code-quality-gates.py` | Passed; 77 files at or above 1,000 lines against the 77-file budget |
