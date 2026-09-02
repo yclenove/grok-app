@@ -33,6 +33,11 @@ contracts.
   present all seven labeled choices with an even rhythm; narrow widths keep one
   horizontally scrollable row instead of stacking the choices into several
   crowded lines.
+- The desktop dialog uses the available viewport more effectively. Paged
+  galleries settle into four equal columns on wide screens, thumbnail frames
+  use one consistent ratio, and the Lightbox keeps the original media ratio.
+- Provider, author, and license remain available as one compact low-emphasis
+  attribution row instead of competing with the images for vertical space.
 - Group frames, group headings, persistent source descriptions, empty-state
   teaching copy, and footer instructions are absent. Every source keeps both its
   icon and text label.
@@ -74,6 +79,11 @@ network-exit details.
 | Final Web foreground paging | Five new cards expanded the gallery from 15 to 20; an existing card selected and opened in the real Lightbox while the request was active, and the original selection remained afterward |
 | Final Openverse fresh search | 11 validated cards arrived in 4.2 seconds; source, author, and Creative Commons license metadata remained visible and actionable |
 | Localized Openverse no-result case | A long localized query returned no cards; this is the honest provider result because the source contract forbids silently translating the user's theme |
+| Wide-screen gallery layout | The dialog used four stable image columns with consistent 16:10 thumbnail frames; attribution stayed on a compact single row and no persistent source explanation or footer instruction was present |
+| Current Openverse fresh search | 18 validated cards arrived in 14.6 seconds |
+| Current Openverse pagination | The first action appended 20 cards for 38 total; the second appended 20 upstream cards and produced 57 total after deduplication |
+| Current paged-result preview | A card from the second appended page opened normally as slide 53 of 57, confirming that later-page results remain selectable |
+| Current Lightbox close lifecycle | Closing the preview entered the normal exit state; after about 0.8 seconds the overlay, counter, navigation controls, and Lightbox accessibility node were all gone while the 57-card gallery remained intact |
 
 This confirms that the earlier one- or two-card direct-library result was not
 caused by a one- or two-item page-size parameter. Provider matching was being
@@ -93,8 +103,9 @@ more Web cards surviving the full foreground paging and validation path.
 |---|---|
 | `pnpm deps:check` | Passed |
 | `pnpm audit:prod` | Passed; no known production vulnerability |
-| `pnpm test` | 587 files, 7052 tests passed |
-| Focused post-change Vitest | 6 files, 44 tests passed |
+| `pnpm test` | 587 files, 7053 tests passed |
+| Focused pagination Vitest | 6 files, 44 tests passed |
+| Focused layout and Lightbox Vitest | 3 files, 13 tests passed |
 | Focused post-change ESLint | Passed for the pagination controller and its regression suite |
 | `pnpm typecheck` | Passed |
 | `pnpm lint` | Passed |
@@ -102,7 +113,7 @@ more Web cards surviving the full foreground paging and validation path.
 | `cargo fmt --all -- --check` | Passed; the inherited drift in `src-tauri/src/lib.rs` and `src-tauri/src/plugin_mcp.rs` was normalized in an isolated formatting-only commit |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
 | `cargo test --no-run` | Passed |
-| Manifest-embedded Windows Rust harness | 1712 passed, 0 failed, 1 ignored |
+| Manifest-embedded current Windows Rust harness | 1713 passed, 0 failed, 1 ignored |
 | Manifest-embedded `wallpaper_x` tests after the module split | 32 passed, 0 failed |
 | `git diff --check` | Passed |
 | `python scripts/check-code-quality-gates.py` | Passed; 77 files at or above 1,000 lines against the 77-file budget |

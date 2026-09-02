@@ -262,33 +262,35 @@ export function WallpaperSourceGallery({
                   onClick={() => onPreview(item)}
                   aria-label={t("settings.wallpaperSource.openPreview")}
                 >
-                  {item.source === "grok_album" && !library ? (
-                    <GrokAlbumThumbnail
-                      url={item.thumbUrl || item.fullUrl}
-                      alt={item.textPreview || item.prompt || item.username || ""}
-                      width={item.width}
-                      height={item.height}
-                    />
-                  ) : localVideo ? (
-                    <video
-                      src={itemThumbSrc(item)}
-                      className="wallpaper-masonry__img"
-                      muted
-                      playsInline
-                      preload="metadata"
-                      aria-hidden="true"
-                      onError={() => onDropItem(item.id)}
-                    />
-                  ) : (
-                    <img
-                      src={itemThumbSrc(item)}
-                      alt={item.textPreview || item.prompt || item.username || ""}
-                      className="wallpaper-masonry__img"
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      onError={() => onDropItem(item.id)}
-                    />
-                  )}
+                  <span className="wallpaper-masonry__media">
+                    {item.source === "grok_album" && !library ? (
+                      <GrokAlbumThumbnail
+                        url={item.thumbUrl || item.fullUrl}
+                        alt={item.textPreview || item.prompt || item.username || ""}
+                        width={item.width}
+                        height={item.height}
+                      />
+                    ) : localVideo ? (
+                      <video
+                        src={itemThumbSrc(item)}
+                        className="wallpaper-masonry__img"
+                        muted
+                        playsInline
+                        preload="metadata"
+                        aria-hidden="true"
+                        onError={() => onDropItem(item.id)}
+                      />
+                    ) : (
+                      <img
+                        src={itemThumbSrc(item)}
+                        alt={item.textPreview || item.prompt || item.username || ""}
+                        className="wallpaper-masonry__img"
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        onError={() => onDropItem(item.id)}
+                      />
+                    )}
+                  </span>
                   {meta ? (
                     <span className="wallpaper-masonry__meta">{meta}</span>
                   ) : null}

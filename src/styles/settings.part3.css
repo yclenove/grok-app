@@ -1161,10 +1161,10 @@ html[data-theme-editor-shell] #root {
 
 /* ── Wallpaper source modal (X + Imagine) ── */
 .modal.glass-modal.wallpaper-source-modal {
-  width: min(1080px, calc(100vw - 28px));
-  max-height: min(92vh, 860px);
+  width: min(1440px, calc(100vw - 32px));
+  max-height: min(94vh, 940px);
   /* Prefer a tall shell so multi-result galleries can use the viewport */
-  min-height: min(72vh, 640px);
+  min-height: min(78vh, 720px);
 }
 
 .wallpaper-source-modal__body {

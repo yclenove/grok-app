@@ -127,6 +127,9 @@ describe("WallpaperSourceGallery", () => {
       expect(screen.getAllByText(sourceName)).toHaveLength(1);
       expect(container.querySelector(".wallpaper-masonry__meta")).toBeNull();
       expect(container.querySelector(".wallpaper-attribution")).not.toBeNull();
+      expect(
+        container.querySelector(".wallpaper-masonry__media img"),
+      ).not.toBeNull();
     },
   );
 

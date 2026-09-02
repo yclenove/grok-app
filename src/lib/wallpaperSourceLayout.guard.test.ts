@@ -14,7 +14,7 @@ const sourceCss = readFileSync(
 describe("wallpaper source layout guard", () => {
   it("keeps a compact source switcher above the full-width workspace", () => {
     expect(modalCss).toMatch(
-      /\.modal\.glass-modal\.wallpaper-source-modal\s*\{[^}]*width:\s*min\(1080px,/s,
+      /\.modal\.glass-modal\.wallpaper-source-modal\s*\{[^}]*width:\s*min\(1440px,/s,
     );
     expect(sourceCss).toMatch(
       /\.wallpaper-source-layout\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s,
@@ -26,10 +26,16 @@ describe("wallpaper source layout guard", () => {
       /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*contents/s,
     );
     expect(sourceCss).toMatch(
-      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto/s,
+      /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto/s,
     );
     expect(sourceCss).toMatch(
-      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs__btn\s*\{[^}]*flex:\s*0 0 auto[^}]*min-width:\s*max-content/s,
+      /@media \(max-width: 1080px\)[\s\S]*\.wallpaper-source-tabs__btn\s*\{[^}]*flex:\s*0 0 auto[^}]*min-width:\s*max-content/s,
+    );
+    expect(sourceCss).toMatch(
+      /@media \(min-width: 1320px\)[\s\S]*\.wallpaper-source-modal \.wallpaper-masonry--stable\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s,
+    );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-masonry--stable \.wallpaper-masonry__media\s*\{[^}]*aspect-ratio:\s*16 \/ 10/s,
     );
   });
 

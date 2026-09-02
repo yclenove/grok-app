@@ -14,7 +14,8 @@
     0 1px 3px color-mix(in srgb, #000 14%, transparent);
 }
 
-@media (max-width: 760px) {
+/* Keep all source names readable before seven equal columns become cramped. */
+@media (max-width: 1080px) {
   .wallpaper-source-tabs {
     display: flex;
     align-items: center;
@@ -380,23 +381,64 @@
 }
 
 /*
- * Saved media arrives in append-only pages. A balanced multi-column layout
- * redistributes earlier cards whenever a page is revealed, so keep this source
- * in DOM order with a normal grid. Natural media height remains uncropped.
+ * Paged media arrives in append-only batches. A balanced multi-column layout
+ * redistributes earlier cards whenever a page is revealed, so keep DOM order
+ * in a normal grid and crop thumbnails only. The lightbox still shows the
+ * original media ratio.
  */
 .wallpaper-masonry--stable {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 14px 12px;
   align-items: start;
   column-count: auto;
   column-gap: normal;
 }
 
+@media (min-width: 1320px) {
+  .wallpaper-source-modal .wallpaper-masonry--stable {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 .wallpaper-masonry--stable .wallpaper-masonry__card-wrap {
-  display: block;
+  display: flex;
+  flex-direction: column;
   width: auto;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-elevated) 82%, transparent);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.wallpaper-masonry--stable .wallpaper-masonry__card {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  background: transparent;
+}
+
+.wallpaper-masonry__media {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-hover) 80%, #000);
+}
+
+.wallpaper-masonry--stable .wallpaper-masonry__media {
+  aspect-ratio: 16 / 10;
+}
+
+.wallpaper-masonry--stable .wallpaper-masonry__media > .wallpaper-masonry__img,
+.wallpaper-masonry--stable
+  .wallpaper-masonry__media
+  > .wallpaper-masonry__thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
 }
 
 .wallpaper-masonry__empty {
@@ -460,7 +502,7 @@
   height: auto;
   max-width: 100%;
   vertical-align: middle;
-  background: color-mix(in srgb, var(--bg-hover) 80%, #000);
+  background: transparent;
   border: none;
   object-fit: contain;
 }
@@ -559,9 +601,9 @@
   gap: 4px;
   min-width: 0;
   overflow: hidden;
-  padding: 3px 8px 7px;
+  padding: 5px 9px 7px;
   color: var(--text-tertiary);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.3;
 }
 
