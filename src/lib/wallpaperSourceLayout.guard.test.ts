@@ -20,13 +20,13 @@ describe("wallpaper source layout guard", () => {
       /\.wallpaper-source-layout\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*space-between[^}]*overflow-x:\s*auto/s,
+      /\.wallpaper-source-tabs\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*4fr\)\s+minmax\(0,\s*1fr\)\s+minmax\(0,\s*2fr\)[^}]*overflow-x:\s*auto/s,
     );
     expect(modalCss).toMatch(
-      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*min-width:\s*max-content[^}]*background:/s,
+      /\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*grid[^}]*grid-auto-columns:\s*minmax\(0,\s*1fr\)[^}]*min-width:\s*0[^}]*background:/s,
     );
     expect(sourceCss).toMatch(
-      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*justify-content:\s*flex-start/s,
+      /@media \(max-width: 760px\)[\s\S]*\.wallpaper-source-tabs\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*flex-start[\s\S]*\.wallpaper-source-tabs__group\s*\{[^}]*display:\s*inline-flex[^}]*min-width:\s*max-content/s,
     );
     expect(sourceCss).toMatch(
       /@media \(min-width: 1320px\)[\s\S]*\.wallpaper-source-modal \.wallpaper-masonry--stable\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s,
@@ -42,6 +42,15 @@ describe("wallpaper source layout guard", () => {
     );
     expect(sourceCss).toMatch(
       /\.wallpaper-attribution:not\(\.wallpaper-attribution--licensed\)\s*\.wallpaper-attribution__source\s*\{[^}]*flex:\s*1 1 auto/s,
+    );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-imagine-source\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*56px minmax\(0, 1fr\) 28px/s,
+    );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-imagine-source__thumb\s*\{[^}]*width:\s*56px[^}]*height:\s*36px[^}]*overflow:\s*hidden/s,
+    );
+    expect(sourceCss).toMatch(
+      /\.wallpaper-imagine-source__thumb img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*cover/s,
     );
   });
 

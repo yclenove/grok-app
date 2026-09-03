@@ -5,8 +5,12 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::time::Duration;
 
-use reqwest::redirect::Policy;
+use hyper::header::{
+    HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT,
+};
 use url::Url;
+
+use crate::safe_https_client::{self, SafeHttpsError, SafeHttpsErrorKind};
 
 pub const MAX_REDIRECTS: usize = 3;
 pub const REQUEST_TIMEOUT_SECS: u64 = 60;
@@ -165,42 +169,46 @@ pub fn check_hop(raw: &str, policy: &OriginPolicy, resolve: ResolveFn) -> Result
     Ok(url)
 }
 
-fn client_no_redirect(profile: SafeHttpsRequestProfile) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .redirect(Policy::none());
-    let builder = match profile {
-        SafeHttpsRequestProfile::Default => builder.user_agent("Grok App"),
-        SafeHttpsRequestProfile::BrowserDocument | SafeHttpsRequestProfile::BrowserImage => {
-            builder.user_agent(BROWSER_DOCUMENT_USER_AGENT)
+fn headers_for_profile(profile: SafeHttpsRequestProfile) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(match profile {
+            SafeHttpsRequestProfile::Default => "Grok App",
+            SafeHttpsRequestProfile::BrowserDocument | SafeHttpsRequestProfile::BrowserImage => {
+                BROWSER_DOCUMENT_USER_AGENT
+            }
+        }),
+    );
+    match profile {
+        SafeHttpsRequestProfile::Default => {}
+        SafeHttpsRequestProfile::BrowserDocument => {
+            headers.insert(ACCEPT, HeaderValue::from_static(BROWSER_DOCUMENT_ACCEPT));
+            headers.insert(
+                ACCEPT_LANGUAGE,
+                HeaderValue::from_static(BROWSER_DOCUMENT_ACCEPT_LANGUAGE),
+            );
+            headers.insert(
+                HeaderName::from_static("upgrade-insecure-requests"),
+                HeaderValue::from_static("1"),
+            );
         }
-    };
-    crate::proxy::apply_to_reqwest(builder)
-        .build()
-        .map_err(|e| format!("network: {e}"))
+        SafeHttpsRequestProfile::BrowserImage => {
+            headers.insert(ACCEPT, HeaderValue::from_static(BROWSER_IMAGE_ACCEPT));
+            headers.insert(
+                ACCEPT_LANGUAGE,
+                HeaderValue::from_static(BROWSER_DOCUMENT_ACCEPT_LANGUAGE),
+            );
+        }
+    }
+    headers
 }
 
-fn request_for_profile(
-    client: &reqwest::Client,
-    url: &Url,
-    profile: SafeHttpsRequestProfile,
-) -> reqwest::RequestBuilder {
-    let request = client.get(url.as_str());
-    match profile {
-        SafeHttpsRequestProfile::Default => request,
-        SafeHttpsRequestProfile::BrowserDocument => request
-            .header(reqwest::header::ACCEPT, BROWSER_DOCUMENT_ACCEPT)
-            .header(
-                reqwest::header::ACCEPT_LANGUAGE,
-                BROWSER_DOCUMENT_ACCEPT_LANGUAGE,
-            )
-            .header("Upgrade-Insecure-Requests", "1"),
-        SafeHttpsRequestProfile::BrowserImage => request
-            .header(reqwest::header::ACCEPT, BROWSER_IMAGE_ACCEPT)
-            .header(
-                reqwest::header::ACCEPT_LANGUAGE,
-                BROWSER_DOCUMENT_ACCEPT_LANGUAGE,
-            ),
+fn transport_error(error: SafeHttpsError) -> String {
+    match error.kind() {
+        SafeHttpsErrorKind::Blocked => "url_blocked: destination rejected".into(),
+        SafeHttpsErrorKind::Timeout => "network: timeout".into(),
+        SafeHttpsErrorKind::Network => "network: request failed".into(),
     }
 }
 
@@ -289,13 +297,17 @@ async fn safe_https_get_response_profile_resolved(
     resolve: ResolveFn,
     profile: SafeHttpsRequestProfile,
 ) -> Result<SafeHttpsResponse, String> {
-    let client = client_no_redirect(profile)?;
+    let client = safe_https_client::shared();
     let mut current = check_hop(start, &policy, resolve)?;
     for hop in 0..=MAX_REDIRECTS {
-        let resp = request_for_profile(&client, &current, profile)
-            .send()
+        let mut resp = client
+            .get(
+                &current,
+                headers_for_profile(profile),
+                Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            )
             .await
-            .map_err(|e| format!("network: {e}"))?;
+            .map_err(transport_error)?;
         let status = resp.status();
         if status.is_redirection() {
             if hop == MAX_REDIRECTS {
@@ -303,7 +315,7 @@ async fn safe_https_get_response_profile_resolved(
             }
             let loc = resp
                 .headers()
-                .get(reqwest::header::LOCATION)
+                .get(hyper::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| "url_blocked: redirect without location".to_string())?;
             let next = current
@@ -317,7 +329,7 @@ async fn safe_https_get_response_profile_resolved(
         }
         let content_type = resp
             .headers()
-            .get(reqwest::header::CONTENT_TYPE)
+            .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -327,7 +339,6 @@ async fn safe_https_get_response_profile_resolved(
             return Err("too_large: download exceeds limit".into());
         }
         let mut bytes = Vec::new();
-        let stream = resp;
         let mut writer = if let Some(p) = dest {
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("disk_budget: {e}"))?;
@@ -336,10 +347,7 @@ async fn safe_https_get_response_profile_resolved(
         } else {
             None
         };
-        use futures_util::StreamExt;
-        let mut body = stream.bytes_stream();
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| format!("network: {e}"))?;
+        while let Some(chunk) = resp.chunk().await.map_err(transport_error)? {
             if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
                 return Err("too_large: download exceeds limit".into());
             }
@@ -498,28 +506,15 @@ mod tests {
 
     #[test]
     fn browser_document_profile_is_fixed_and_credential_free() {
-        let client = reqwest::Client::builder().build().unwrap();
-        let url = Url::parse("https://photos.example/page?private=path").unwrap();
-        let request = request_for_profile(&client, &url, SafeHttpsRequestProfile::BrowserDocument)
-            .build()
-            .unwrap();
+        let headers = headers_for_profile(SafeHttpsRequestProfile::BrowserDocument);
+        assert_eq!(headers.get(ACCEPT).unwrap(), BROWSER_DOCUMENT_ACCEPT);
         assert_eq!(
-            request.headers().get(reqwest::header::ACCEPT).unwrap(),
-            BROWSER_DOCUMENT_ACCEPT
-        );
-        assert_eq!(
-            request
-                .headers()
-                .get(reqwest::header::ACCEPT_LANGUAGE)
-                .unwrap(),
+            headers.get(ACCEPT_LANGUAGE).unwrap(),
             BROWSER_DOCUMENT_ACCEPT_LANGUAGE
         );
-        assert!(request
-            .headers()
-            .get(reqwest::header::AUTHORIZATION)
-            .is_none());
-        assert!(request.headers().get(reqwest::header::COOKIE).is_none());
-        assert!(request.headers().get(reqwest::header::REFERER).is_none());
+        assert!(headers.get(hyper::header::AUTHORIZATION).is_none());
+        assert!(headers.get(hyper::header::COOKIE).is_none());
+        assert!(headers.get(hyper::header::REFERER).is_none());
     }
 
     #[test]

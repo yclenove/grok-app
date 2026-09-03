@@ -8,29 +8,31 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use hyper::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use parking_lot::Mutex;
-use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use reqwest::redirect::Policy;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use url::Url;
 
+use crate::safe_https_client::{self, SafeHttpsClient, SafeHttpsError, SafeHttpsErrorKind};
 use crate::skin_net::{self, OriginPolicy};
 use crate::wallpaper_remote_media::{self, RemoteImageProber};
 use crate::wallpaper_remote_search::{
     self as remote_search, RemoteSearchBatch, RemoteSearchResult, RemoteSearchRuntime,
     RemoteSearchStage, RemoteWallpaperSource,
 };
-use crate::wallpaper_source::{
-    WallpaperGalleryItem, WallpaperProvenance, WallpaperSearchCancellation,
-};
+use crate::wallpaper_source::{WallpaperGalleryItem, WallpaperSearchCancellation};
 
 mod request_url;
+mod response;
 
 use request_url::provider_request_url;
 #[cfg(test)]
 use request_url::{provider_url, PEXELS_CACHE_BUST_PARAM};
+use response::{parse_api_page, provider_item};
+#[cfg(test)]
+use response::{parse_openverse_page, parse_pexels_page, safe_url};
 
 const PEXELS_LICENSE_URL: &str = "https://www.pexels.com/license/";
 const CONTRACT_VERSION: u8 = 3;
@@ -46,6 +48,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
 const IMAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const CACHE_CAPACITY: usize = 64;
+const PRE_CANCEL_TTL: Duration = Duration::from_secs(30);
+const PRE_CANCEL_CAPACITY: usize = 64;
+const MAX_EMPTY_VALIDATED_BATCHES: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SearchKey {
@@ -66,35 +71,103 @@ struct CacheEntry {
     key: PageKey,
     inserted: Instant,
     result: RemoteSearchResult,
+    continuation: Option<ProviderContinuation>,
+}
+
+#[derive(Clone)]
+struct ContinuationEntry {
+    key: SearchKey,
+    inserted: Instant,
+    continuation: ProviderContinuation,
+}
+
+#[derive(Clone)]
+struct ProviderContinuation {
     next_page: usize,
+    buffered_items: Vec<WallpaperGalleryItem>,
+    upstream_has_more: bool,
+}
+
+impl ProviderContinuation {
+    fn is_available(&self) -> bool {
+        self.upstream_has_more || !self.buffered_items.is_empty()
+    }
 }
 
 #[derive(Default)]
 struct SearchCache {
     entries: VecDeque<CacheEntry>,
+    continuations: VecDeque<ContinuationEntry>,
 }
 
 impl SearchCache {
-    fn get(&mut self, key: &PageKey, now: Instant) -> Option<(RemoteSearchResult, usize)> {
+    fn purge_expired(&mut self, now: Instant) {
         self.entries
             .retain(|entry| now.duration_since(entry.inserted) <= CACHE_TTL);
+        self.continuations
+            .retain(|entry| now.duration_since(entry.inserted) <= CACHE_TTL);
+    }
+
+    fn get(
+        &mut self,
+        key: &PageKey,
+        now: Instant,
+    ) -> Option<(RemoteSearchResult, Option<ProviderContinuation>)> {
+        self.purge_expired(now);
         let index = self.entries.iter().position(|entry| &entry.key == key)?;
         let entry = self.entries.remove(index)?;
         let result = entry.result.clone();
-        let next_page = entry.next_page;
+        let continuation = entry.continuation.clone();
         self.entries.push_front(entry);
-        Some((result, next_page))
+        Some((result, continuation))
     }
 
-    fn insert(&mut self, key: PageKey, result: RemoteSearchResult, next_page: usize, now: Instant) {
+    fn insert(
+        &mut self,
+        key: PageKey,
+        result: RemoteSearchResult,
+        continuation: Option<ProviderContinuation>,
+        now: Instant,
+    ) {
+        self.purge_expired(now);
         self.entries.retain(|entry| entry.key != key);
         self.entries.push_front(CacheEntry {
             key,
             inserted: now,
             result,
-            next_page,
+            continuation,
         });
         self.entries.truncate(CACHE_CAPACITY);
+    }
+
+    fn continuation(&mut self, key: &SearchKey, now: Instant) -> Option<ProviderContinuation> {
+        self.purge_expired(now);
+        let index = self
+            .continuations
+            .iter()
+            .position(|entry| &entry.key == key)?;
+        let entry = self.continuations.remove(index)?;
+        let continuation = entry.continuation.clone();
+        self.continuations.push_front(entry);
+        Some(continuation)
+    }
+
+    fn update_continuation(
+        &mut self,
+        key: &SearchKey,
+        continuation: Option<ProviderContinuation>,
+        now: Instant,
+    ) {
+        self.purge_expired(now);
+        self.continuations.retain(|entry| &entry.key != key);
+        if let Some(continuation) = continuation.filter(ProviderContinuation::is_available) {
+            self.continuations.push_front(ContinuationEntry {
+                key: key.clone(),
+                inserted: now,
+                continuation,
+            });
+            self.continuations.truncate(CACHE_CAPACITY);
+        }
     }
 }
 
@@ -107,6 +180,35 @@ struct ProviderContext {
 struct ActiveRequest {
     token: uuid::Uuid,
     cancellation: WallpaperSearchCancellation,
+}
+
+#[derive(Default)]
+struct RequestRegistry {
+    active: HashMap<String, ActiveRequest>,
+    pre_cancelled: VecDeque<(String, Instant)>,
+}
+
+impl RequestRegistry {
+    fn purge_pre_cancelled(&mut self, now: Instant) {
+        self.pre_cancelled
+            .retain(|(_, created)| now.duration_since(*created) < PRE_CANCEL_TTL);
+    }
+
+    fn record_pre_cancel(&mut self, request_id: &str, now: Instant) {
+        self.purge_pre_cancelled(now);
+        self.pre_cancelled.retain(|(id, _)| id != request_id);
+        while self.pre_cancelled.len() >= PRE_CANCEL_CAPACITY {
+            self.pre_cancelled.pop_front();
+        }
+        self.pre_cancelled.push_back((request_id.to_string(), now));
+    }
+
+    fn take_pre_cancel(&mut self, request_id: &str, now: Instant) -> bool {
+        self.purge_pre_cancelled(now);
+        let found = self.pre_cancelled.iter().any(|(id, _)| id == request_id);
+        self.pre_cancelled.retain(|(id, _)| id != request_id);
+        found
+    }
 }
 
 #[derive(Clone)]
@@ -135,8 +237,24 @@ struct CandidateBatch {
 
 struct ValidatedPage {
     items: Vec<WallpaperGalleryItem>,
-    has_more: bool,
+    buffered_items: Vec<WallpaperGalleryItem>,
+    upstream_has_more: bool,
     next_page: usize,
+}
+
+impl ValidatedPage {
+    fn continuation(&self) -> Option<ProviderContinuation> {
+        let continuation = ProviderContinuation {
+            next_page: self.next_page,
+            buffered_items: self.buffered_items.clone(),
+            upstream_has_more: self.upstream_has_more,
+        };
+        continuation.is_available().then_some(continuation)
+    }
+
+    fn has_more(&self) -> bool {
+        self.upstream_has_more || !self.buffered_items.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,30 +284,28 @@ impl ProviderError {
     }
 }
 
-static ACTIVE: OnceLock<Mutex<HashMap<String, ActiveRequest>>> = OnceLock::new();
+static ACTIVE: OnceLock<Mutex<RequestRegistry>> = OnceLock::new();
 static CACHE: OnceLock<Mutex<SearchCache>> = OnceLock::new();
-static CONTINUATIONS: OnceLock<Mutex<HashMap<SearchKey, usize>>> = OnceLock::new();
 
-fn active() -> &'static Mutex<HashMap<String, ActiveRequest>> {
-    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+fn active() -> &'static Mutex<RequestRegistry> {
+    ACTIVE.get_or_init(|| Mutex::new(RequestRegistry::default()))
 }
 
 fn cache() -> &'static Mutex<SearchCache> {
     CACHE.get_or_init(|| Mutex::new(SearchCache::default()))
 }
 
-fn continuations() -> &'static Mutex<HashMap<SearchKey, usize>> {
-    CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn begin_request(request_id: &str) -> (uuid::Uuid, WallpaperSearchCancellation) {
     let mut requests = active().lock();
-    for (_, request) in requests.drain() {
+    for (_, request) in requests.active.drain() {
         request.cancellation.cancel();
     }
     let token = uuid::Uuid::new_v4();
     let cancellation = WallpaperSearchCancellation::default();
-    requests.insert(
+    if requests.take_pre_cancel(request_id, Instant::now()) {
+        cancellation.cancel();
+    }
+    requests.active.insert(
         request_id.to_string(),
         ActiveRequest {
             token,
@@ -202,21 +318,24 @@ fn begin_request(request_id: &str) -> (uuid::Uuid, WallpaperSearchCancellation) 
 fn finish_request(request_id: &str, token: uuid::Uuid) {
     let mut requests = active().lock();
     if requests
+        .active
         .get(request_id)
         .is_some_and(|request| request.token == token)
     {
-        requests.remove(request_id);
+        requests.active.remove(request_id);
     }
 }
 
 pub(crate) fn cancel(request_id: &str) -> bool {
-    let request = active().lock().remove(request_id);
+    let mut requests = active().lock();
+    let request = requests.active.remove(request_id);
     if let Some(request) = request {
+        drop(requests);
         request.cancellation.cancel();
-        true
     } else {
-        false
+        requests.record_pre_cancel(request_id, Instant::now());
     }
+    true
 }
 
 fn library_provider_query(query: &str) -> String {
@@ -305,10 +424,21 @@ pub(crate) async fn search(
         first_page: 1,
     };
 
-    if let Some((mut result, next_page)) = cache().lock().get(&page_key, Instant::now()) {
+    if runtime.is_cancelled() {
+        finish_request(request_id, token);
+        return Ok(RemoteSearchResult::error(
+            source.as_str(),
+            "cancelled",
+            elapsed_ms(started),
+        ));
+    }
+    let cached = { cache().lock().get(&page_key, Instant::now()) };
+    if let Some((mut result, continuation)) = cached {
         result.cache_hit = true;
         result.duration_ms = elapsed_ms(started);
-        update_continuation(&context.search_key, result.has_more, next_page);
+        cache()
+            .lock()
+            .update_continuation(&context.search_key, continuation, Instant::now());
         emit_cached_batch(&runtime, &result);
         runtime.report(RemoteSearchStage::Done);
         finish_request(request_id, token);
@@ -327,14 +457,21 @@ pub(crate) async fn search(
     if runtime.is_cancelled() {
         result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
     } else if let Ok(page) = page {
-        update_continuation(&context.search_key, page.has_more, page.next_page);
+        let continuation = page.continuation();
+        cache().lock().update_continuation(
+            &context.search_key,
+            continuation.clone(),
+            Instant::now(),
+        );
         if !page.items.is_empty() {
             cache()
                 .lock()
-                .insert(page_key, result.clone(), page.next_page, Instant::now());
+                .insert(page_key, result.clone(), continuation, Instant::now());
         }
     } else {
-        continuations().lock().remove(&context.search_key);
+        cache()
+            .lock()
+            .update_continuation(&context.search_key, None, Instant::now());
     }
     runtime.report(RemoteSearchStage::Done);
     finish_request(request_id, token);
@@ -360,25 +497,59 @@ pub(crate) async fn search_more(
             ));
         }
     };
-    let Some(first_page) = continuations().lock().get(&context.search_key).copied() else {
+    let (token, cancellation) = begin_request(request_id);
+    let runtime = remote_search::runtime(app, request_id, source, cancellation);
+    runtime.report(RemoteSearchStage::LoadingMore);
+    if runtime.is_cancelled() {
+        finish_request(request_id, token);
+        return Ok(RemoteSearchResult::error(
+            source.as_str(),
+            "cancelled",
+            elapsed_ms(started),
+        ));
+    }
+    let continuation = {
+        cache()
+            .lock()
+            .continuation(&context.search_key, Instant::now())
+    };
+    let Some(continuation) = continuation else {
+        finish_request(request_id, token);
         return Ok(RemoteSearchResult::error(
             source.as_str(),
             "provider_no_continuation",
             elapsed_ms(started),
         ));
     };
-    let (token, cancellation) = begin_request(request_id);
-    let runtime = remote_search::runtime(app, request_id, source, cancellation);
-    runtime.report(RemoteSearchStage::LoadingMore);
+    if let Some((items, next_continuation)) = take_buffered_page(continuation.clone()) {
+        let mut result = RemoteSearchResult::success(
+            source.as_str(),
+            items,
+            next_continuation.is_some(),
+            elapsed_ms(started),
+        );
+        result.cache_hit = true;
+        cache()
+            .lock()
+            .update_continuation(&context.search_key, next_continuation, Instant::now());
+        emit_cached_batch(&runtime, &result);
+        runtime.report(RemoteSearchStage::Done);
+        finish_request(request_id, token);
+        return Ok(result);
+    }
+    let first_page = continuation.next_page;
     let page_key = PageKey {
         search: context.search_key.clone(),
         first_page,
     };
 
-    if let Some((mut result, next_page)) = cache().lock().get(&page_key, Instant::now()) {
+    let cached = { cache().lock().get(&page_key, Instant::now()) };
+    if let Some((mut result, continuation)) = cached {
         result.cache_hit = true;
         result.duration_ms = elapsed_ms(started);
-        update_continuation(&context.search_key, result.has_more, next_page);
+        cache()
+            .lock()
+            .update_continuation(&context.search_key, continuation, Instant::now());
         emit_cached_batch(&runtime, &result);
         runtime.report(RemoteSearchStage::Done);
         finish_request(request_id, token);
@@ -397,11 +568,16 @@ pub(crate) async fn search_more(
     if runtime.is_cancelled() {
         result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
     } else if let Ok(page) = page {
-        update_continuation(&context.search_key, page.has_more, page.next_page);
+        let continuation = page.continuation();
+        cache().lock().update_continuation(
+            &context.search_key,
+            continuation.clone(),
+            Instant::now(),
+        );
         if !page.items.is_empty() {
             cache()
                 .lock()
-                .insert(page_key, result.clone(), page.next_page, Instant::now());
+                .insert(page_key, result.clone(), continuation, Instant::now());
         }
     }
     runtime.report(RemoteSearchStage::Done);
@@ -418,6 +594,22 @@ fn emit_cached_batch(runtime: &RemoteSearchRuntime, result: &RemoteSearchResult)
     });
 }
 
+fn take_buffered_page(
+    mut continuation: ProviderContinuation,
+) -> Option<(Vec<WallpaperGalleryItem>, Option<ProviderContinuation>)> {
+    if continuation.buffered_items.is_empty() {
+        return None;
+    }
+    let remainder = if continuation.buffered_items.len() > RESULT_LIMIT {
+        continuation.buffered_items.split_off(RESULT_LIMIT)
+    } else {
+        Vec::new()
+    };
+    let items = std::mem::replace(&mut continuation.buffered_items, remainder);
+    let next = continuation.is_available().then_some(continuation);
+    Some((items, next))
+}
+
 fn result_from_page(
     source: RemoteWallpaperSource,
     page: Result<&ValidatedPage, &ProviderError>,
@@ -427,19 +619,13 @@ fn result_from_page(
         Ok(page) if !page.items.is_empty() => RemoteSearchResult::success(
             source.as_str(),
             page.items.clone(),
-            page.has_more,
+            page.has_more(),
             elapsed_ms(started),
         ),
-        Ok(_) => RemoteSearchResult::error(source.as_str(), "empty", elapsed_ms(started)),
+        Ok(page) => {
+            RemoteSearchResult::empty(source.as_str(), page.has_more(), elapsed_ms(started))
+        }
         Err(error) => RemoteSearchResult::error(source.as_str(), error.code(), elapsed_ms(started)),
-    }
-}
-
-fn update_continuation(key: &SearchKey, has_more: bool, next_page: usize) {
-    if has_more {
-        continuations().lock().insert(key.clone(), next_page);
-    } else {
-        continuations().lock().remove(key);
     }
 }
 
@@ -458,13 +644,33 @@ async fn search_page(
     } else {
         RemoteSearchStage::LoadingMore
     });
-    let batch = fetch_candidate_batch(source, query, first_page, api_key, runtime).await?;
-    runtime.report(RemoteSearchStage::ValidatingImages);
-    let items = validate_candidates(source, batch.candidates, runtime).await?;
+    let mut page = first_page;
+    for _ in 0..MAX_EMPTY_VALIDATED_BATCHES {
+        let batch = fetch_candidate_batch(source, query, page, api_key, runtime).await?;
+        runtime.report(RemoteSearchStage::ValidatingImages);
+        let mut items = validate_candidates(source, batch.candidates, runtime).await?;
+        let buffered_items = if items.len() > RESULT_LIMIT {
+            items.split_off(RESULT_LIMIT)
+        } else {
+            Vec::new()
+        };
+        let validated = ValidatedPage {
+            items,
+            buffered_items,
+            upstream_has_more: batch.has_more,
+            next_page: batch.next_page,
+        };
+        if !validated.items.is_empty() || !validated.has_more() {
+            return Ok(validated);
+        }
+        page = validated.next_page;
+        runtime.report(RemoteSearchStage::LoadingMore);
+    }
     Ok(ValidatedPage {
-        items,
-        has_more: batch.has_more,
-        next_page: batch.next_page,
+        items: Vec::new(),
+        buffered_items: Vec::new(),
+        upstream_has_more: true,
+        next_page: page,
     })
 }
 
@@ -480,7 +686,7 @@ async fn fetch_candidate_batch(
         RemoteWallpaperSource::Pexels => 1,
         RemoteWallpaperSource::Web => return Err(ProviderError::Protocol),
     };
-    let client = Arc::new(provider_client()?);
+    let client = Arc::new(provider_client());
     let mut requests = FuturesUnordered::new();
     for page in first_page..first_page + pages_per_batch {
         let client = Arc::clone(&client);
@@ -542,20 +748,12 @@ async fn fetch_candidate_batch(
     })
 }
 
-fn provider_client() -> Result<reqwest::Client, ProviderError> {
-    crate::proxy::apply_to_reqwest(
-        reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .connect_timeout(Duration::from_secs(12))
-            .redirect(Policy::none())
-            .user_agent("GrokApp/WallpaperProviderSearch"),
-    )
-    .build()
-    .map_err(|_| ProviderError::Network)
+fn provider_client() -> SafeHttpsClient {
+    safe_https_client::shared()
 }
 
 async fn fetch_api_page(
-    client: &reqwest::Client,
+    client: &SafeHttpsClient,
     source: RemoteWallpaperSource,
     query: &str,
     page: usize,
@@ -569,16 +767,24 @@ async fn fetch_api_page(
         skin_net::default_resolve,
     )
     .map_err(|_| ProviderError::Network)?;
-    let mut request = client.get(checked).header(ACCEPT, "application/json");
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static("GrokApp/WallpaperProviderSearch"),
+    );
     if source == RemoteWallpaperSource::Pexels {
         let key = api_key.ok_or(ProviderError::PexelsKeyMissing)?;
-        let value = HeaderValue::from_str(key).map_err(|_| ProviderError::PexelsKeyInvalid)?;
-        request = request.header(AUTHORIZATION, value);
+        let mut value = HeaderValue::from_str(key).map_err(|_| ProviderError::PexelsKeyInvalid)?;
+        value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, value);
     }
     let response = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-        response = request.send() => response.map_err(|error| classify_reqwest_error(&error))?,
+        response = client.get(&checked, headers, HTTP_TIMEOUT) => {
+            response.map_err(|error| classify_transport_error(&error))?
+        },
     };
     let status = response.status();
     if status.is_redirection() {
@@ -619,7 +825,7 @@ async fn fetch_api_page(
 }
 
 async fn read_bounded_body(
-    mut response: reqwest::Response,
+    mut response: crate::safe_https_client::SafeHttpsResponse,
     cancellation: &WallpaperSearchCancellation,
 ) -> Result<Vec<u8>, ProviderError> {
     let mut bytes = Vec::new();
@@ -627,7 +833,7 @@ async fn read_bounded_body(
         let chunk = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-            chunk = response.chunk() => chunk.map_err(|error| classify_reqwest_error(&error))?,
+            chunk = response.chunk() => chunk.map_err(|error| classify_transport_error(&error))?,
         };
         let Some(chunk) = chunk else {
             break;
@@ -640,199 +846,11 @@ async fn read_bounded_body(
     Ok(bytes)
 }
 
-fn classify_reqwest_error(error: &reqwest::Error) -> ProviderError {
-    if error.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network
+fn classify_transport_error(error: &SafeHttpsError) -> ProviderError {
+    match error.kind() {
+        SafeHttpsErrorKind::Timeout => ProviderError::Timeout,
+        SafeHttpsErrorKind::Blocked | SafeHttpsErrorKind::Network => ProviderError::Network,
     }
-}
-
-fn parse_api_page(
-    source: RemoteWallpaperSource,
-    value: &Value,
-    page: usize,
-) -> Result<ApiPage, ProviderError> {
-    match source {
-        RemoteWallpaperSource::Openverse => parse_openverse_page(value, page),
-        RemoteWallpaperSource::Pexels => parse_pexels_page(value, page),
-        RemoteWallpaperSource::Web => Err(ProviderError::Protocol),
-    }
-}
-
-fn parse_openverse_page(value: &Value, page: usize) -> Result<ApiPage, ProviderError> {
-    let results = value
-        .get("results")
-        .and_then(Value::as_array)
-        .ok_or(ProviderError::Protocol)?;
-    let page_count = value.get("page_count").and_then(Value::as_u64);
-    let has_more = page_count
-        .map(|count| (page as u64) < count)
-        .unwrap_or(results.len() >= OPENVERSE_PAGE_SIZE);
-    let mut candidates = Vec::new();
-    for raw in results.iter().take(OPENVERSE_PAGE_SIZE) {
-        if raw.get("mature").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        let Some(image_url) = raw.get("url").and_then(Value::as_str).and_then(safe_url) else {
-            continue;
-        };
-        let Some(source_url) = raw
-            .get("foreign_landing_url")
-            .and_then(Value::as_str)
-            .and_then(safe_url)
-        else {
-            continue;
-        };
-        let Some(author_name) = clean_text(raw.get("creator").and_then(Value::as_str), 160) else {
-            continue;
-        };
-        let Some(license_url) = raw
-            .get("license_url")
-            .and_then(Value::as_str)
-            .and_then(safe_url)
-        else {
-            continue;
-        };
-        let Some(license) = openverse_license_label(
-            raw.get("license").and_then(Value::as_str),
-            raw.get("license_version").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        let upstream_id = clean_text(raw.get("id").and_then(Value::as_str), 160)
-            .unwrap_or_else(|| opaque_id(&image_url));
-        candidates.push(ProviderCandidate {
-            upstream_id,
-            image_url,
-            source_url,
-            source_name: "Openverse",
-            title: clean_text(raw.get("title").and_then(Value::as_str), 240),
-            author_name,
-            author_url: raw
-                .get("creator_url")
-                .and_then(Value::as_str)
-                .and_then(safe_url),
-            license,
-            license_url,
-        });
-    }
-    Ok(ApiPage {
-        candidates,
-        has_more,
-    })
-}
-
-fn parse_pexels_page(value: &Value, page: usize) -> Result<ApiPage, ProviderError> {
-    let results = value
-        .get("photos")
-        .and_then(Value::as_array)
-        .ok_or(ProviderError::Protocol)?;
-    let total = value.get("total_results").and_then(Value::as_u64);
-    let per_page = value
-        .get("per_page")
-        .and_then(Value::as_u64)
-        .unwrap_or(PEXELS_PAGE_SIZE as u64)
-        .max(1);
-    let has_more = total
-        .map(|count| (page as u64).saturating_mul(per_page) < count)
-        .unwrap_or_else(|| value.get("next_page").is_some_and(|next| !next.is_null()));
-    let mut candidates = Vec::new();
-    for raw in results.iter().take(PEXELS_PAGE_SIZE) {
-        let Some(image_url) = raw
-            .get("src")
-            .and_then(|src| src.get("original").or_else(|| src.get("large2x")))
-            .and_then(Value::as_str)
-            .and_then(safe_url)
-        else {
-            continue;
-        };
-        let Some(source_url) = raw.get("url").and_then(Value::as_str).and_then(safe_url) else {
-            continue;
-        };
-        let Some(author_name) = clean_text(raw.get("photographer").and_then(Value::as_str), 160)
-        else {
-            continue;
-        };
-        let upstream_id = raw
-            .get("id")
-            .and_then(|id| {
-                id.as_u64()
-                    .map(|value| value.to_string())
-                    .or_else(|| clean_text(id.as_str(), 160))
-            })
-            .unwrap_or_else(|| opaque_id(&image_url));
-        candidates.push(ProviderCandidate {
-            upstream_id,
-            image_url,
-            source_url,
-            source_name: "Pexels",
-            title: clean_text(raw.get("alt").and_then(Value::as_str), 240),
-            author_name,
-            author_url: raw
-                .get("photographer_url")
-                .and_then(Value::as_str)
-                .and_then(safe_url),
-            license: "Pexels License".into(),
-            license_url: PEXELS_LICENSE_URL.into(),
-        });
-    }
-    Ok(ApiPage {
-        candidates,
-        has_more,
-    })
-}
-
-fn safe_url(raw: &str) -> Option<String> {
-    if raw.len() > 2_048 {
-        return None;
-    }
-    let mut url = Url::parse(raw.trim()).ok()?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.host_str().is_none()
-        || url.port().is_some_and(|port| port != 443)
-    {
-        return None;
-    }
-    url.set_fragment(None);
-    Some(url.to_string())
-}
-
-fn clean_text(value: Option<&str>, limit: usize) -> Option<String> {
-    let value = value?.split_whitespace().collect::<Vec<_>>().join(" ");
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.chars().take(limit).collect())
-    }
-}
-
-fn openverse_license_label(code: Option<&str>, version: Option<&str>) -> Option<String> {
-    let code = code?.trim().to_ascii_lowercase();
-    if code.is_empty()
-        || !code
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-    {
-        return None;
-    }
-    let version = version.map(str::trim).filter(|value| {
-        !value.is_empty()
-            && value
-                .chars()
-                .all(|character| character.is_ascii_digit() || character == '.')
-    });
-    let base = match code.as_str() {
-        "cc0" => "CC0".to_string(),
-        "pdm" => "Public Domain Mark".to_string(),
-        other => format!("CC {}", other.to_ascii_uppercase()),
-    };
-    Some(match version {
-        Some(version) => format!("{base} {version}"),
-        None => base,
-    })
 }
 
 async fn validate_candidates(
@@ -840,31 +858,29 @@ async fn validate_candidates(
     candidates: Vec<ProviderCandidate>,
     runtime: &RemoteSearchRuntime,
 ) -> Result<Vec<WallpaperGalleryItem>, ProviderError> {
-    let prober = Arc::new(RemoteImageProber::new().map_err(|_| ProviderError::Network)?);
+    let prober = Arc::new(RemoteImageProber::new());
     let cancellation = runtime.cancellation().clone();
-    let mut probes = futures_util::stream::iter(candidates)
-        .map(|candidate| {
-            let prober = Arc::clone(&prober);
-            let cancellation = cancellation.clone();
-            async move {
-                let referer = Url::parse(&candidate.source_url)
-                    .ok()
-                    .as_ref()
-                    .and_then(wallpaper_remote_media::origin_referer);
-                let probe = tokio::time::timeout(
-                    IMAGE_PROBE_TIMEOUT,
-                    prober.probe_image(&candidate.image_url, referer.as_deref(), &cancellation),
-                )
-                .await
+    let mut probes = buffered_in_input_order(candidates, MAX_CONCURRENT_PROBES, |candidate| {
+        let prober = Arc::clone(&prober);
+        let cancellation = cancellation.clone();
+        async move {
+            let referer = Url::parse(&candidate.source_url)
                 .ok()
-                .and_then(Result::ok)?;
-                if !wallpaper_remote_media::is_wallpaper_quality_candidate(&probe) {
-                    return None;
-                }
-                Some(provider_item(source, candidate, probe))
+                .as_ref()
+                .and_then(wallpaper_remote_media::origin_referer);
+            let probe = tokio::time::timeout(
+                IMAGE_PROBE_TIMEOUT,
+                prober.probe_image(&candidate.image_url, referer.as_deref(), &cancellation),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)?;
+            if !wallpaper_remote_media::is_wallpaper_quality_candidate(&probe) {
+                return None;
             }
-        })
-        .buffer_unordered(MAX_CONCURRENT_PROBES);
+            Some(provider_item(source, candidate, probe))
+        }
+    });
 
     let mut items = Vec::new();
     let mut pending = Vec::new();
@@ -889,7 +905,9 @@ async fn validate_candidates(
         {
             continue;
         }
-        pending.push(item.clone());
+        if items.len() < RESULT_LIMIT {
+            pending.push(item.clone());
+        }
         items.push(item);
         if pending.len() >= PROGRESS_BATCH_SIZE && items.len() < RESULT_LIMIT {
             runtime.report_batch(RemoteSearchBatch {
@@ -900,61 +918,29 @@ async fn validate_candidates(
             });
             batch_index += 1;
         }
-        if items.len() == RESULT_LIMIT {
-            break;
-        }
     }
     runtime.report_batch(RemoteSearchBatch {
         batch_index,
         items: pending,
-        accumulated_count: items.len(),
+        accumulated_count: items.len().min(RESULT_LIMIT),
         done: true,
     });
     Ok(items)
 }
 
-fn provider_item(
-    source: RemoteWallpaperSource,
-    candidate: ProviderCandidate,
-    probe: wallpaper_remote_media::RemoteImageProbe,
-) -> WallpaperGalleryItem {
-    wallpaper_remote_media::register_media_source(source, &probe.final_url, &candidate.source_url);
-    let mut digest = Sha256::new();
-    digest.update(source.as_str().as_bytes());
-    digest.update(candidate.upstream_id.as_bytes());
-    digest.update(probe.content_fingerprint.as_bytes());
-    let identity = hex::encode(digest.finalize());
-    WallpaperGalleryItem {
-        id: format!("{}-{}", source.as_str(), &identity[..24]),
-        thumb_url: probe.final_url.clone(),
-        full_url: probe.final_url,
-        kind: "image".into(),
-        width: probe.width,
-        height: probe.height,
-        source: source.as_str().into(),
-        username: None,
-        post_url: None,
-        text_preview: candidate.title,
-        likes: None,
-        local_path: None,
-        prompt: None,
-        provenance: WallpaperProvenance {
-            source_url: Some(candidate.source_url),
-            source_name: Some(candidate.source_name.into()),
-            author_name: Some(candidate.author_name),
-            author_url: candidate.author_url,
-            license: Some(candidate.license),
-            license_url: Some(candidate.license_url),
-        },
-        status_id: None,
-        media_index: None,
-        media_quality: None,
-        media_fingerprint: Some(probe.content_fingerprint),
-    }
-}
-
-fn opaque_id(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))
+fn buffered_in_input_order<I, F, Fut>(
+    inputs: I,
+    concurrency: usize,
+    probe: F,
+) -> impl futures_util::Stream<Item = Fut::Output>
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> Fut,
+    Fut: std::future::Future,
+{
+    futures_util::stream::iter(inputs)
+        .map(probe)
+        .buffered(concurrency.max(1))
 }
 
 fn elapsed_ms(started: Instant) -> u64 {

@@ -25,8 +25,8 @@ const THUMB_MAX_EDGE: u32 = 480;
 
 /// Remote wallpaper bytes are untrusted and may encode extreme dimensions in
 /// a small response. Keep one decode bounded while still accepting 8K media.
-const UNTRUSTED_THUMB_MAX_DIMENSION: u32 = 16_384;
-const UNTRUSTED_THUMB_MAX_PIXELS: u64 = 50_000_000;
+pub(crate) const UNTRUSTED_THUMB_MAX_DIMENSION: u32 = 16_384;
+pub(crate) const UNTRUSTED_THUMB_MAX_PIXELS: u64 = 50_000_000;
 const UNTRUSTED_THUMB_MAX_ALLOC: u64 = 256 * 1024 * 1024;
 
 /// Skip re-encode when source is already small enough (bytes).

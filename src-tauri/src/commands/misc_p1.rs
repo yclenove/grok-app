@@ -1169,6 +1169,33 @@ pub async fn wallpaper_imagine(
 }
 
 #[tauri::command]
+pub async fn wallpaper_image_to_video(
+    request_id: String,
+    source_path: String,
+    motion_prompt: Option<String>,
+    duration: Option<u32>,
+    resolution_name: Option<String>,
+) -> Result<crate::wallpaper_source::WallpaperSearchResult, String> {
+    crate::wallpaper_source::ensure_wallpaper_dirs();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::wallpaper_imagine_video::generate(
+            &request_id,
+            &source_path,
+            motion_prompt.as_deref(),
+            duration,
+            resolution_name.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("wallpaper_image_to_video task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn wallpaper_image_to_video_cancel(request_id: String) -> Result<bool, String> {
+    crate::wallpaper_imagine_video::cancel(&request_id)
+}
+
+#[tauri::command]
 pub async fn wallpaper_library_list(
     limit: Option<u32>,
 ) -> Result<Vec<crate::wallpaper_source::WallpaperLibraryEntry>, String> {

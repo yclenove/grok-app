@@ -68,6 +68,7 @@ export type WallpaperSourceErrorCode =
   | "empty"
   | "download_failed"
   | "url_blocked"
+  | "imagine_source_invalid"
   | "imagine_failed"
   | "rate_limited"
   | "timeout"
@@ -107,6 +108,7 @@ export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCod
   if (s.includes("desktop_only")) return "generic";
   if (s.includes("responses_rate_limited")) return "rate_limited";
   if (s.includes("service_unavailable")) return "service_unavailable";
+  if (s.includes("imagine_source_invalid")) return "imagine_source_invalid";
   // timeout before imagine so "imagine timeout" is not swallowed as imagine_failed
   if (s.includes("timeout") || s.includes("timed out")) return "timeout";
   if (s.includes("imagine_failed")) return "imagine_failed";
@@ -133,6 +135,7 @@ export function errorCodeFromSearchResult(
   if (code === "pexels_key_invalid") return "pexels_key_invalid";
   if (code === "search_failed") return "search_failed";
   if (code === "service_unavailable") return "service_unavailable";
+  if (code === "imagine_source_invalid") return "imagine_source_invalid";
   if (code === "imagine_failed") return "imagine_failed";
   if (code === "responses_rate_limited") return "rate_limited";
   if (code === "empty") return "empty";
@@ -159,6 +162,7 @@ function mimeFromName(name: string): string {
   const lower = name.toLowerCase();
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".avif")) return "image/avif";
   if (lower.endsWith(".gif")) return "image/gif";
   if (lower.endsWith(".mp4") || lower.endsWith(".m4v")) return "video/mp4";
   if (lower.endsWith(".webm")) return "video/webm";

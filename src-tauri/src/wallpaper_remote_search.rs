@@ -76,6 +76,12 @@ impl RemoteSearchResult {
             duration_ms,
         }
     }
+
+    pub(crate) fn empty(source: &str, has_more: bool, duration_ms: u64) -> Self {
+        let mut result = Self::error(source, "empty", duration_ms);
+        result.has_more = has_more;
+        result
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

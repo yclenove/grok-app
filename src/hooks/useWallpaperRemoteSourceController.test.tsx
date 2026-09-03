@@ -153,6 +153,63 @@ afterEach(() => {
 });
 
 describe("useWallpaperRemoteSourceController", () => {
+  it("keeps paging available when an initial validated page is empty", async () => {
+    remote.search.mockResolvedValue(
+      result([], { errorCode: "empty", hasMore: true }),
+    );
+    remote.loadMore.mockResolvedValue(result([galleryItem("second-page")]));
+    const hook = renderHook(() => useHarness({ query: "rare subject" }));
+
+    await act(async () => hook.result.current.controller.search());
+
+    expect(hook.result.current.items).toEqual([]);
+    expect(hook.result.current.errorCode).toBe("empty");
+    expect(hook.result.current.controller.canLoadMore).toBe(true);
+    await act(async () => hook.result.current.controller.loadMore());
+    expect(remote.loadMore).toHaveBeenCalledWith("web", "rare subject");
+    expect(hook.result.current.items.map((item) => item.id)).toEqual([
+      "second-page",
+    ]);
+  });
+
+  it("isolates paging state by provider and normalized query", async () => {
+    remote.search.mockResolvedValue(
+      result([galleryItem("openverse-first", "openverse")], {
+        source: "openverse",
+        hasMore: true,
+      }),
+    );
+    remote.loadMore.mockResolvedValue(
+      result([galleryItem("openverse-second", "openverse")], {
+        source: "openverse",
+        hasMore: true,
+      }),
+    );
+    const hook = renderHook(
+      ({ source, query }) => useHarness({ source, query }),
+      {
+        initialProps: {
+          source: "openverse" as WallpaperRemoteSource,
+          query: "misty   coast",
+        },
+      },
+    );
+
+    await act(async () => hook.result.current.controller.search());
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(1));
+    expect(hook.result.current.controller.canLoadMore).toBe(true);
+
+    hook.rerender({ source: "pexels", query: "misty   coast" });
+    expect(hook.result.current.controller.canLoadMore).toBe(false);
+
+    hook.rerender({ source: "openverse", query: "different coast" });
+    await waitFor(() =>
+      expect(hook.result.current.controller.canLoadMore).toBe(false),
+    );
+    hook.rerender({ source: "openverse", query: "misty coast" });
+    expect(hook.result.current.controller.canLoadMore).toBe(false);
+  });
+
   it("normalizes a search, resets stale UI, and preserves paging state", async () => {
     remote.search.mockResolvedValue(
       result([galleryItem("first")], { hasMore: true }),
@@ -364,6 +421,26 @@ describe("useWallpaperRemoteSourceController", () => {
       "settings.wallpaperSource.noMore",
     );
     expect(hook.result.current.controller.canLoadMore).toBe(false);
+  });
+
+  it("preserves cards and the continuation across an empty intermediate page", async () => {
+    remote.search.mockResolvedValue(
+      result([galleryItem("survivor")], { hasMore: true }),
+    );
+    remote.loadMore.mockResolvedValue(
+      result([], { errorCode: "empty", hasMore: true }),
+    );
+    const hook = renderHook(() => useHarness({ query: "rare coast" }));
+
+    await act(async () => hook.result.current.controller.search());
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(1));
+    await act(async () => hook.result.current.controller.loadMore());
+
+    expect(hook.result.current.items.map((item) => item.id)).toEqual([
+      "survivor",
+    ]);
+    expect(hook.result.current.errorCode).toBe("empty");
+    expect(hook.result.current.controller.canLoadMore).toBe(true);
   });
 
   it("keeps loading-more state for the entire paging request", async () => {

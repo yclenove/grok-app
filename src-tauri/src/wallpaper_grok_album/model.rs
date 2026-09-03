@@ -55,6 +55,8 @@ pub(super) struct RawAlbumSnapshot {
     #[serde(default)]
     pub(super) has_security_challenge: bool,
     #[serde(default)]
+    pub(super) recovery_state: String,
+    #[serde(default)]
     pub(super) items: Vec<RawAlbumMedia>,
     #[serde(default)]
     pub(super) page_epoch: u64,

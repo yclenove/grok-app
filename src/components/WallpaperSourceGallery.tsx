@@ -1,4 +1,5 @@
 import { GrokAlbumThumbnail } from "@/components/GrokAlbumThumbnail";
+import { IconPlay } from "@/components/icons";
 import { RemoteWallpaperThumbnail } from "@/components/RemoteWallpaperThumbnail";
 import { WallpaperSourceAttribution } from "@/components/WallpaperSourceAttribution";
 import type { MessageKey } from "@/i18n";
@@ -16,6 +17,7 @@ import {
 } from "@/lib/wallpaperGalleryPro";
 import { resolveWallpaperXCitation } from "@/lib/xEvidenceCitation";
 import { isWallpaperRemoteSource } from "@/lib/wallpaperRemoteSearch";
+import { isWallpaperImageItem } from "@/lib/wallpaperImagine";
 
 type Translate = (
   key: MessageKey,
@@ -44,6 +46,7 @@ export type WallpaperSourceGalleryProps = {
   onGalleryFilterChange: (value: string) => void;
   onClearFilters: () => void;
   onPreview: (item: WallpaperGalleryItem) => void;
+  onGenerateVideo: (item: WallpaperGalleryItem) => void;
   onDropItem: (id: string) => void;
   onOpenXStatus: (url: string) => void;
   onOpenSource: (url: string) => void;
@@ -101,6 +104,7 @@ export function WallpaperSourceGallery({
   onGalleryFilterChange,
   onClearFilters,
   onPreview,
+  onGenerateVideo,
   onDropItem,
   onOpenXStatus,
   onOpenSource,
@@ -227,6 +231,7 @@ export function WallpaperSourceGallery({
           {visibleItems.map((item) => {
             const active = item.id === selectedId;
             const loading = previewingId === item.id;
+            const canGenerateVideo = isWallpaperImageItem(item);
             const localVideo =
               item.kind === "video" &&
               (!!item.localPath || item.fullUrl.startsWith("file://"));
@@ -253,63 +258,90 @@ export function WallpaperSourceGallery({
                 }
                 role="listitem"
               >
-                <button
-                  type="button"
+                <div
                   className={
                     "wallpaper-masonry__card" +
                     (active ? " wallpaper-masonry__card--selected" : "") +
-                    (loading ? " wallpaper-masonry__card--loading" : "")
+                    (loading ? " wallpaper-masonry__card--loading" : "") +
+                    (locked && !loading ? " wallpaper-masonry__card--locked" : "")
                   }
-                  disabled={locked && !loading}
-                  onClick={() => onPreview(item)}
-                  aria-label={t("settings.wallpaperSource.openPreview")}
                 >
-                  <span className="wallpaper-masonry__media">
-                    {item.source === "grok_album" && !library ? (
-                      <GrokAlbumThumbnail
-                        url={item.thumbUrl || item.fullUrl}
-                        alt={item.textPreview || item.prompt || item.username || ""}
-                        width={item.width}
-                        height={item.height}
-                      />
-                    ) : !library &&
-                      !item.localPath &&
-                      isWallpaperRemoteSource(item.source) ? (
-                      <RemoteWallpaperThumbnail
-                        item={item}
-                        alt={
-                          item.textPreview ||
-                          item.prompt ||
-                          item.username ||
-                          ""
-                        }
-                        onUnavailable={onDropItem}
-                      />
-                    ) : localVideo ? (
-                      <video
-                        src={itemThumbSrc(item)}
-                        className="wallpaper-masonry__img"
-                        muted
-                        playsInline
-                        preload="metadata"
-                        aria-hidden="true"
-                        onError={() => onDropItem(item.id)}
-                      />
-                    ) : (
-                      <img
-                        src={itemThumbSrc(item)}
-                        alt={item.textPreview || item.prompt || item.username || ""}
-                        className="wallpaper-masonry__img"
-                        loading="lazy"
-                        referrerPolicy="no-referrer"
-                        onError={() => onDropItem(item.id)}
-                      />
-                    )}
-                  </span>
+                  <div className="wallpaper-masonry__media-shell">
+                    <button
+                      type="button"
+                      className="wallpaper-masonry__preview"
+                      disabled={locked && !loading}
+                      onClick={() => onPreview(item)}
+                      aria-label={t("settings.wallpaperSource.openPreview")}
+                    >
+                      <span className="wallpaper-masonry__media">
+                        {item.source === "grok_album" && !library ? (
+                          <GrokAlbumThumbnail
+                            url={item.thumbUrl || item.fullUrl}
+                            alt={item.textPreview || item.prompt || item.username || ""}
+                            width={item.width}
+                            height={item.height}
+                          />
+                        ) : !library &&
+                          !item.localPath &&
+                          isWallpaperRemoteSource(item.source) ? (
+                          <RemoteWallpaperThumbnail
+                            item={item}
+                            alt={
+                              item.textPreview ||
+                              item.prompt ||
+                              item.username ||
+                              ""
+                            }
+                            onUnavailable={onDropItem}
+                          />
+                        ) : localVideo ? (
+                          <video
+                            src={itemThumbSrc(item)}
+                            className="wallpaper-masonry__img"
+                            muted
+                            playsInline
+                            preload="metadata"
+                            aria-hidden="true"
+                            onError={() => onDropItem(item.id)}
+                          />
+                        ) : (
+                          <img
+                            src={itemThumbSrc(item)}
+                            alt={item.textPreview || item.prompt || item.username || ""}
+                            className="wallpaper-masonry__img"
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            onError={() => onDropItem(item.id)}
+                          />
+                        )}
+                      </span>
+                    </button>
+                    {canGenerateVideo ? (
+                      <button
+                        type="button"
+                        className="wallpaper-masonry__video-action"
+                        disabled={locked || loading}
+                        aria-label={t(
+                          "settings.wallpaperSource.generateVideoFromImage",
+                        )}
+                        title={t(
+                          "settings.wallpaperSource.generateVideoFromImage",
+                        )}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onGenerateVideo(item);
+                        }}
+                      >
+                        <IconPlay size={16} />
+                      </button>
+                    ) : null}
+                  </div>
                   {meta ? (
                     <span className="wallpaper-masonry__meta">{meta}</span>
                   ) : null}
-                </button>
+                </div>
 
                 {citation && !loading ? (
                   <div

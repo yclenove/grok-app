@@ -65,6 +65,10 @@ function sameContinuation(
   return left.source === right.source && left.query === right.query;
 }
 
+function normalizedRemoteQuery(query: string): string {
+  return query.trim().split(/\s+/).join(" ");
+}
+
 export function useWallpaperRemoteSourceController({
   enabled,
   source,
@@ -96,6 +100,13 @@ export function useWallpaperRemoteSourceController({
   );
   const itemsRef = useRef(items);
   itemsRef.current = items;
+  const activeContinuation = continuationRef.current;
+  const continuationMatchesActiveInput =
+    enabled &&
+    source !== null &&
+    activeContinuation !== null &&
+    activeContinuation.source === source &&
+    activeContinuation.query === normalizedRemoteQuery(query);
 
   const discardPrefetch = useCallback(() => {
     prefetchGenerationRef.current += 1;
@@ -168,6 +179,24 @@ export function useWallpaperRemoteSourceController({
     setLoadingMore(false);
     void remote.cancel();
   }, [discardPrefetch, enabled, remote.cancel]);
+
+  useEffect(() => {
+    const continuation = continuationRef.current;
+    if (
+      !continuation ||
+      (enabled &&
+        source === continuation.source &&
+        normalizedRemoteQuery(query) === continuation.query)
+    ) {
+      return;
+    }
+    const hiddenPrefetchWasActive = prefetchingRef.current;
+    discardPrefetch();
+    continuationRef.current = null;
+    setHasMore(false);
+    setLoadingMore(false);
+    if (hiddenPrefetchWasActive) void remote.cancel();
+  }, [discardPrefetch, enabled, query, remote.cancel, source]);
 
   useEffect(() => {
     if (prefetching && remote.busy && remote.requestId) {
@@ -248,7 +277,7 @@ export function useWallpaperRemoteSourceController({
 
   const search = useCallback(async () => {
     const activeSource = source;
-    const normalizedQuery = query.trim().split(/\s+/).join(" ");
+    const normalizedQuery = normalizedRemoteQuery(query);
     if (!activeSource || !normalizedQuery) {
       setErrorCode("empty");
       setError(wallpaperSourceErrorMessage(t, "empty"));
@@ -270,6 +299,12 @@ export function useWallpaperRemoteSourceController({
         setItems([]);
         setErrorCode(code);
         setError(wallpaperSourceErrorMessage(t, code));
+        const continuation =
+          code === "empty" && result.hasMore
+            ? { source: activeSource, query: normalizedQuery }
+            : null;
+        continuationRef.current = continuation;
+        setHasMore(continuation !== null);
         return;
       }
       setItems(list);
@@ -376,9 +411,16 @@ export function useWallpaperRemoteSourceController({
           setItems((current) =>
             current.filter((item) => initialIds.has(item.id)),
           );
-          continuationRef.current = null;
-          setHasMore(false);
-          setStatusHint(t("settings.wallpaperSource.noMore"));
+          if (result.hasMore) {
+            continuationRef.current = continuation;
+            setHasMore(true);
+            setErrorCode(code);
+            setError(wallpaperSourceErrorMessage(t, code));
+          } else {
+            continuationRef.current = null;
+            setHasMore(false);
+            setStatusHint(t("settings.wallpaperSource.noMore"));
+          }
         } else {
           setErrorCode(code);
           setError(wallpaperSourceErrorMessage(t, code));
@@ -421,9 +463,10 @@ export function useWallpaperRemoteSourceController({
     busy: !prefetching && remote.busy && remote.source === source,
     loadingMore,
     progress,
-    canLoadMore: hasMore && items.length > 0,
+    canLoadMore: hasMore && continuationMatchesActiveInput,
     search,
     loadMore,
     cancel,
+    clear: resetForSearch,
   };
 }

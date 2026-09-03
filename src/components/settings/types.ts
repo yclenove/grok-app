@@ -88,7 +88,9 @@ export interface SettingsPageProps {
   wallpaperBlur?: number;
   onWallpaperBlur?: (value: number) => void;
   wallpaperXSearchMode?: WallpaperXSearchMode;
-  onWallpaperXSearchMode?: (value: WallpaperXSearchMode) => void;
+  onWallpaperXSearchMode?: (
+    value: WallpaperXSearchMode,
+  ) => void | Promise<void>;
   sessionDataMode: string;
   onSessionDataMode: (v: string) => void;
   onCliSessionsImported?: () => void;

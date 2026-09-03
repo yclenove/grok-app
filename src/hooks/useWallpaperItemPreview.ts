@@ -163,15 +163,19 @@ export function useWallpaperItemPreview({
             };
           }
 
-          const remoteThumbnail =
+          const lazyRemoteOriginal =
             isWallpaperRemoteSource(candidate.source) &&
             !candidate.localPath &&
-            candidate.fullUrl.startsWith("http")
-              ? peekRemoteWallpaperThumbnail(candidate)
-              : null;
-          if (remoteThumbnail) {
+            candidate.fullUrl.startsWith("http");
+          if (lazyRemoteOriginal) {
+            const remoteThumbnail = peekRemoteWallpaperThumbnail(candidate);
             return {
-              src: remoteThumbnail,
+              // A Host thumbnail normally replaces this URL shortly after the
+              // card mounts. A cache miss must not block the lightbox, though:
+              // open with the already validated result URL and let the Host
+              // original loader immediately upgrade it to a local file.
+              src:
+                remoteThumbnail || candidate.thumbUrl || candidate.fullUrl,
               kind: "image",
               title: slideTitle(candidate),
               alt: candidate.prompt || candidate.textPreview || undefined,

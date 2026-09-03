@@ -45,6 +45,9 @@ const MIN_SOURCE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const LANE_RESULT_TIMEOUT: Duration = Duration::from_secs(55);
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const CACHE_CAPACITY: usize = 32;
+const CACHE_CONTRACT_VERSION: u8 = 2;
+const PRE_CANCEL_TTL: Duration = Duration::from_secs(30);
+const PRE_CANCEL_CAPACITY: usize = 64;
 
 mod quality;
 mod request;
@@ -61,6 +64,7 @@ struct CacheKey {
     query: String,
     credential_file_len: u64,
     credential_modified_ms: Option<u128>,
+    contract_version: u8,
 }
 
 #[derive(Clone)]
@@ -68,6 +72,7 @@ struct CacheEntry {
     key: CacheKey,
     inserted: Instant,
     result: RemoteSearchResult,
+    continuation: Vec<WallpaperGalleryItem>,
 }
 
 #[derive(Default)]
@@ -76,22 +81,58 @@ struct SearchCache {
 }
 
 impl SearchCache {
-    fn get(&mut self, key: &CacheKey, now: Instant) -> Option<RemoteSearchResult> {
+    fn purge_expired(&mut self, now: Instant) {
         self.entries
             .retain(|entry| now.duration_since(entry.inserted) <= CACHE_TTL);
+    }
+
+    fn get_initial(&mut self, key: &CacheKey, now: Instant) -> Option<RemoteSearchResult> {
+        self.purge_expired(now);
         let index = self.entries.iter().position(|entry| &entry.key == key)?;
-        let entry = self.entries.remove(index)?;
+        let mut entry = self.entries.remove(index)?;
         let result = entry.result.clone();
+        entry.continuation = result.items.clone();
         self.entries.push_front(entry);
         Some(result)
     }
 
+    fn continuation(&mut self, key: &CacheKey, now: Instant) -> Option<Vec<WallpaperGalleryItem>> {
+        self.purge_expired(now);
+        let index = self.entries.iter().position(|entry| &entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        let continuation = (!entry.continuation.is_empty()).then(|| entry.continuation.clone());
+        self.entries.push_front(entry);
+        continuation
+    }
+
+    fn update_continuation(
+        &mut self,
+        key: &CacheKey,
+        items: Vec<WallpaperGalleryItem>,
+        has_more: bool,
+        now: Instant,
+    ) {
+        self.purge_expired(now);
+        let Some(index) = self.entries.iter().position(|entry| &entry.key == key) else {
+            return;
+        };
+        let Some(mut entry) = self.entries.remove(index) else {
+            return;
+        };
+        entry.inserted = now;
+        entry.continuation = if has_more { items } else { Vec::new() };
+        self.entries.push_front(entry);
+    }
+
     fn insert(&mut self, key: CacheKey, result: RemoteSearchResult, now: Instant) {
+        self.purge_expired(now);
         self.entries.retain(|entry| entry.key != key);
+        let continuation = result.items.clone();
         self.entries.push_front(CacheEntry {
             key,
             inserted: now,
             result,
+            continuation,
         });
         self.entries.truncate(CACHE_CAPACITY);
     }
@@ -101,6 +142,35 @@ impl SearchCache {
 struct ActiveRequest {
     token: uuid::Uuid,
     cancellation: WallpaperSearchCancellation,
+}
+
+#[derive(Default)]
+struct RequestRegistry {
+    active: HashMap<String, ActiveRequest>,
+    pre_cancelled: VecDeque<(String, Instant)>,
+}
+
+impl RequestRegistry {
+    fn purge_pre_cancelled(&mut self, now: Instant) {
+        self.pre_cancelled
+            .retain(|(_, created)| now.duration_since(*created) < PRE_CANCEL_TTL);
+    }
+
+    fn record_pre_cancel(&mut self, request_id: &str, now: Instant) {
+        self.purge_pre_cancelled(now);
+        self.pre_cancelled.retain(|(id, _)| id != request_id);
+        while self.pre_cancelled.len() >= PRE_CANCEL_CAPACITY {
+            self.pre_cancelled.pop_front();
+        }
+        self.pre_cancelled.push_back((request_id.to_string(), now));
+    }
+
+    fn take_pre_cancel(&mut self, request_id: &str, now: Instant) -> bool {
+        self.purge_pre_cancelled(now);
+        let found = self.pre_cancelled.iter().any(|(id, _)| id == request_id);
+        self.pre_cancelled.retain(|(id, _)| id != request_id);
+        found
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -204,33 +274,29 @@ struct PageDiscoveryResult {
     stats: PageDiscoveryStats,
 }
 
-static ACTIVE: std::sync::OnceLock<Mutex<HashMap<String, ActiveRequest>>> =
-    std::sync::OnceLock::new();
+static ACTIVE: std::sync::OnceLock<Mutex<RequestRegistry>> = std::sync::OnceLock::new();
 static CACHE: std::sync::OnceLock<Mutex<SearchCache>> = std::sync::OnceLock::new();
-static CONTINUATIONS: std::sync::OnceLock<Mutex<HashMap<CacheKey, Vec<WallpaperGalleryItem>>>> =
-    std::sync::OnceLock::new();
 
-fn active() -> &'static Mutex<HashMap<String, ActiveRequest>> {
-    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+fn active() -> &'static Mutex<RequestRegistry> {
+    ACTIVE.get_or_init(|| Mutex::new(RequestRegistry::default()))
 }
 
 fn cache() -> &'static Mutex<SearchCache> {
     CACHE.get_or_init(|| Mutex::new(SearchCache::default()))
 }
 
-fn continuations() -> &'static Mutex<HashMap<CacheKey, Vec<WallpaperGalleryItem>>> {
-    CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn begin_request(request_id: &str) -> (uuid::Uuid, WallpaperSearchCancellation) {
     let cancellation = WallpaperSearchCancellation::default();
     let token = uuid::Uuid::new_v4();
     let mut requests = active().lock();
-    for request in requests.values() {
+    for request in requests.active.values() {
         request.cancellation.cancel();
     }
-    requests.clear();
-    requests.insert(
+    requests.active.clear();
+    if requests.take_pre_cancel(request_id, Instant::now()) {
+        cancellation.cancel();
+    }
+    requests.active.insert(
         request_id.to_string(),
         ActiveRequest {
             token,
@@ -243,21 +309,24 @@ fn begin_request(request_id: &str) -> (uuid::Uuid, WallpaperSearchCancellation) 
 fn finish_request(request_id: &str, token: uuid::Uuid) {
     let mut requests = active().lock();
     if requests
+        .active
         .get(request_id)
         .is_some_and(|request| request.token == token)
     {
-        requests.remove(request_id);
+        requests.active.remove(request_id);
     }
 }
 
 pub(crate) fn cancel(request_id: &str) -> bool {
-    let request = active().lock().remove(request_id);
+    let mut requests = active().lock();
+    let request = requests.active.remove(request_id);
     if let Some(request) = request {
+        drop(requests);
         request.cancellation.cancel();
-        true
     } else {
-        false
+        requests.record_pre_cancel(request_id, Instant::now());
     }
+    true
 }
 
 fn cache_key(query: &str) -> Option<CacheKey> {
@@ -266,6 +335,7 @@ fn cache_key(query: &str) -> Option<CacheKey> {
         query: remote_search::normalized_query(query),
         credential_file_len: revision.file_len,
         credential_modified_ms: revision.modified_ms,
+        contract_version: CACHE_CONTRACT_VERSION,
     })
 }
 
@@ -282,12 +352,17 @@ pub(crate) async fn search(
     runtime.report(RemoteSearchStage::Preparing);
 
     if let Some(key) = initial_cache_key.as_ref() {
-        if let Some(mut result) = cache().lock().get(key, Instant::now()) {
+        if runtime.is_cancelled() {
+            finish_request(request_id, token);
+            return Ok(RemoteSearchResult::error(
+                SOURCE,
+                "cancelled",
+                elapsed_ms(started),
+            ));
+        }
+        if let Some(mut result) = cache().lock().get_initial(key, Instant::now()) {
             result.cache_hit = true;
             result.duration_ms = elapsed_ms(started);
-            continuations()
-                .lock()
-                .insert(key.clone(), result.items.clone());
             runtime.report(RemoteSearchStage::Done);
             finish_request(request_id, token);
             return Ok(result);
@@ -306,9 +381,6 @@ pub(crate) async fn search(
         result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
     } else if !result.items.is_empty() {
         if let Some(key) = initial_cache_key {
-            continuations()
-                .lock()
-                .insert(key.clone(), result.items.clone());
             cache().lock().insert(key, result.clone(), Instant::now());
         }
     }
@@ -331,12 +403,23 @@ pub(crate) async fn search_more(
             elapsed_ms(started),
         ));
     };
-    let existing = continuations()
+    let (token, cancellation) = begin_request(request_id);
+    let runtime = remote_search::runtime(app, request_id, RemoteWallpaperSource::Web, cancellation);
+    runtime.report(RemoteSearchStage::LoadingMore);
+    if runtime.is_cancelled() {
+        finish_request(request_id, token);
+        return Ok(RemoteSearchResult::error(
+            SOURCE,
+            "cancelled",
+            elapsed_ms(started),
+        ));
+    }
+    let existing = cache()
         .lock()
-        .get(&key)
-        .cloned()
+        .continuation(&key, Instant::now())
         .unwrap_or_default();
     if existing.is_empty() {
+        finish_request(request_id, token);
         return Ok(RemoteSearchResult::error(
             SOURCE,
             "web_search_no_continuation",
@@ -348,10 +431,8 @@ pub(crate) async fn search_more(
         .filter_map(|item| item.provenance.source_url.as_deref())
         .map(opaque_id)
         .collect::<Vec<_>>();
-    let (token, cancellation) = begin_request(request_id);
-    let runtime = remote_search::runtime(app, request_id, RemoteWallpaperSource::Web, cancellation);
-    runtime.report(RemoteSearchStage::LoadingMore);
     let result = search_fresh(&query, &exclusions, &runtime, true).await;
+    let mut continuation_update = None;
     let mut result = match result {
         Ok(items) => {
             let remaining = (MAX_RESULTS * 2).saturating_sub(existing.len());
@@ -362,7 +443,7 @@ pub(crate) async fn search_more(
             } else {
                 let merged = merge_items(existing, fresh.clone(), MAX_RESULTS * 2);
                 let has_more = merged.len() < MAX_RESULTS * 2;
-                continuations().lock().insert(key, merged);
+                continuation_update = Some((merged, has_more));
                 RemoteSearchResult::success(SOURCE, fresh, has_more, elapsed_ms(started))
             }
         }
@@ -370,6 +451,10 @@ pub(crate) async fn search_more(
     };
     if runtime.is_cancelled() {
         result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
+    } else if let Some((items, has_more)) = continuation_update {
+        cache()
+            .lock()
+            .update_continuation(&key, items, has_more, Instant::now());
     }
     runtime.report(RemoteSearchStage::Done);
     finish_request(request_id, token);
@@ -391,14 +476,7 @@ async fn search_fresh(
         RemoteSearchStage::SearchingWeb
     });
     let client = Arc::new(ResponsesClient::new(RESPONSE_TIMEOUT)?);
-    let image_prober = Arc::new(wallpaper_remote_media::RemoteImageProber::new().map_err(
-        |_| {
-            ClientError::new(
-                ErrorKind::Network,
-                Some(client.credential_revision().clone()),
-            )
-        },
-    )?);
+    let image_prober = Arc::new(wallpaper_remote_media::RemoteImageProber::new());
     let image_probe_limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_IMAGE_PROBES));
     let lane_indexes: Vec<usize> = if load_more {
         vec![LANE_COUNT + 1]

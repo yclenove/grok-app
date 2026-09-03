@@ -94,7 +94,7 @@ export const DEFAULT_SKIN: ThemeSkinId = "default";
 
 /** Accept common image types + short-loop video for wallpaper upload. */
 export const WALLPAPER_ACCEPT =
-  "image/jpeg,image/png,image/webp,image/gif,image/jpg,video/mp4,video/webm";
+  "image/jpeg,image/png,image/webp,image/avif,image/gif,image/jpg,video/mp4,video/webm";
 
 /** Longest edge after compress for still images (keeps IDB payload modest). */
 export const WALLPAPER_MAX_EDGE = 1920;
@@ -1067,7 +1067,7 @@ export async function prepareWallpaperFromFile(file: File): Promise<WallpaperRec
   }
 
   // Still image — downscale + JPEG compress.
-  const nameOk = /\.(jpe?g|png|webp)$/i.test(name);
+  const nameOk = /\.(jpe?g|png|webp|avif)$/i.test(name);
   if (type && !type.startsWith("image/")) {
     throw new WallpaperPrepareError("not_image");
   }

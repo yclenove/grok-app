@@ -497,6 +497,7 @@ fn cache_expires_and_preserves_safe_result_only() {
         query: "mountains".into(),
         credential_file_len: 1,
         credential_modified_ms: Some(2),
+        contract_version: CACHE_CONTRACT_VERSION,
     };
     let result = RemoteSearchResult::success(
         SOURCE,
@@ -511,10 +512,70 @@ fn cache_expires_and_preserves_safe_result_only() {
     let now = Instant::now();
     let mut cache = SearchCache::default();
     cache.insert(key.clone(), result, now);
-    assert!(cache.get(&key, now + Duration::from_secs(1)).is_some());
     assert!(cache
-        .get(&key, now + CACHE_TTL + Duration::from_secs(1))
+        .get_initial(&key, now + Duration::from_secs(1))
+        .is_some());
+    assert_eq!(
+        cache
+            .continuation(&key, now + Duration::from_secs(1))
+            .map(|items| items.len()),
+        Some(1)
+    );
+    assert!(cache
+        .continuation(&key, now + CACHE_TTL + Duration::from_secs(1))
         .is_none());
+}
+
+#[test]
+fn cache_bounds_continuations_with_the_same_lru_and_contract_version() {
+    let now = Instant::now();
+    let mut cache = SearchCache::default();
+    for index in 0..=CACHE_CAPACITY {
+        let key = CacheKey {
+            query: format!("query-{index}"),
+            credential_file_len: 1,
+            credential_modified_ms: Some(2),
+            contract_version: CACHE_CONTRACT_VERSION,
+        };
+        cache.insert(
+            key,
+            RemoteSearchResult::success(
+                SOURCE,
+                vec![item(
+                    "https://one.test/page",
+                    &format!("https://cdn.test/{index}.jpg"),
+                    1200,
+                )],
+                true,
+                10,
+            ),
+            now,
+        );
+    }
+    assert_eq!(cache.entries.len(), CACHE_CAPACITY);
+    let evicted = CacheKey {
+        query: "query-0".into(),
+        credential_file_len: 1,
+        credential_modified_ms: Some(2),
+        contract_version: CACHE_CONTRACT_VERSION,
+    };
+    assert!(cache.continuation(&evicted, now).is_none());
+}
+
+#[test]
+fn cancel_before_begin_remains_sticky_and_bounded() {
+    let now = Instant::now();
+    let mut registry = RequestRegistry::default();
+    registry.record_pre_cancel("late-search", now);
+    assert!(registry.take_pre_cancel("late-search", now));
+    assert!(!registry.take_pre_cancel("late-search", now));
+
+    for index in 0..=PRE_CANCEL_CAPACITY {
+        registry.record_pre_cancel(&format!("request-{index}"), now);
+    }
+    assert_eq!(registry.pre_cancelled.len(), PRE_CANCEL_CAPACITY);
+    assert!(!registry.take_pre_cancel("request-0", now));
+    assert!(!registry.take_pre_cancel("request-1", now + PRE_CANCEL_TTL + Duration::from_secs(1),));
 }
 
 #[test]

@@ -39,6 +39,7 @@ import {
   skinPreferredTheme,
   THEME_SKINS,
   WALLPAPER_BLUR_STORAGE_KEY,
+  WALLPAPER_ACCEPT,
   WALLPAPER_MAX_VIDEO_BYTES,
   WALLPAPER_SCRIM_STORAGE_KEY,
   WALLPAPER_STORAGE_KEY,
@@ -557,6 +558,10 @@ describe("wallpaper scrim", () => {
 });
 
 describe("prepareWallpaperFromFile", () => {
+  it("advertises AVIF now that remote wallpaper originals can enter the library", () => {
+    expect(WALLPAPER_ACCEPT.split(",")).toContain("image/avif");
+  });
+
   it("accepts a small mp4 as-is", async () => {
     const file = fakeFile("video/mp4", "clip.mp4", 1024);
     const rec = await prepareWallpaperFromFile(file);

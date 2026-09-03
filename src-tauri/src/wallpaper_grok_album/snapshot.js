@@ -199,6 +199,7 @@
       readyState: String(document.readyState || ""),
       hasAppShell: hasAppShell,
       hasSecurityChallenge: hasChallengeSurface || (!hasAppShell && hasChallengeAsset),
+      recoveryState: String(window.__GROK_APP_SAVED_RECOVERY_STATE__ || "").slice(0, 32),
       pageEpoch: Number((window.__GROK_APP_SAVED_PAGE_STATE__ || {}).epoch || 0),
       items: items.slice(0, 320),
       scrollTop: top,
@@ -212,6 +213,7 @@
       readyState: "",
       hasAppShell: false,
       hasSecurityChallenge: false,
+      recoveryState: "",
       items: [],
       bridgeError: true
     });

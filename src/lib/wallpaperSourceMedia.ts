@@ -36,7 +36,7 @@ export function cancelGrokAlbumMediaRequests(): void {
   ]);
 }
 
-export function cancelRemoteWallpaperMediaRequests(): void {
+export async function cancelRemoteWallpaperMediaRequests(): Promise<void> {
   const requestIds = Array.from(activeRemoteMediaRequests);
   activeRemoteMediaRequests.clear();
   pendingRemoteMedia.clear();
@@ -45,7 +45,7 @@ export function cancelRemoteWallpaperMediaRequests(): void {
     requestIds.length > 0
       ? api.wallpaperRemoteCancelMediaRequests(requestIds)
       : Promise.resolve(0);
-  void Promise.allSettled([
+  await Promise.allSettled([
     targeted,
     api.wallpaperRemoteCancelAllMediaRequests(),
   ]);

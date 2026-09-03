@@ -37,6 +37,7 @@ describe("WallpaperPexelsKeyControl", () => {
             if (saved) setHasKey(true);
             return saved;
           }}
+          onRequestDelete={vi.fn()}
         />
       );
     }
@@ -79,6 +80,7 @@ describe("WallpaperPexelsKeyControl", () => {
         invalid
         disabled={false}
         onSave={vi.fn(async () => true)}
+        onRequestDelete={vi.fn()}
       />,
     );
 
@@ -90,5 +92,26 @@ describe("WallpaperPexelsKeyControl", () => {
         "settings.wallpaperSource.pexels.keyPlaceholder",
       ),
     ).toBeTruthy();
+  });
+
+  it("requests confirmation instead of clearing a saved key directly", () => {
+    const requestDelete = vi.fn();
+    render(
+      <WallpaperPexelsKeyControl
+        t={t as never}
+        hasKey
+        invalid={false}
+        disabled={false}
+        onSave={vi.fn(async () => true)}
+        onRequestDelete={requestDelete}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.pexels.keyDelete",
+      }),
+    );
+    expect(requestDelete).toHaveBeenCalledTimes(1);
   });
 });

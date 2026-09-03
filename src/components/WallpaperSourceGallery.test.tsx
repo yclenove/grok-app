@@ -1,8 +1,8 @@
 /**
  * @vitest-environment jsdom
  */
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageKey } from "@/i18n";
 import {
   WallpaperSourceGallery,
@@ -12,6 +12,8 @@ import {
 vi.mock("@/lib/imageSrc", () => ({
   resolveImageSrcSync: (path: string) => `http://127.0.0.1/media/${encodeURIComponent(path)}`,
 }));
+
+afterEach(cleanup);
 
 function galleryProps(
   overrides: Partial<WallpaperSourceGalleryProps> = {},
@@ -38,6 +40,7 @@ function galleryProps(
     onGalleryFilterChange: vi.fn(),
     onClearFilters: vi.fn(),
     onPreview: vi.fn(),
+    onGenerateVideo: vi.fn(),
     onDropItem: vi.fn(),
     onOpenXStatus: vi.fn(),
     onOpenSource: vi.fn(),
@@ -83,6 +86,7 @@ describe("WallpaperSourceGallery", () => {
         onGalleryFilterChange={vi.fn()}
         onClearFilters={vi.fn()}
         onPreview={vi.fn()}
+        onGenerateVideo={vi.fn()}
         onDropItem={onDropItem}
         onOpenXStatus={vi.fn()}
         onOpenSource={vi.fn()}
@@ -189,5 +193,72 @@ describe("WallpaperSourceGallery", () => {
     expect(
       screen.getByText("settings.wallpaperSource.empty.filterEmpty"),
     ).toBeTruthy();
+  });
+
+  it("routes an image play action without opening the preview", () => {
+    const image = {
+      id: "search-image",
+      thumbUrl: "https://images.example.test/image.jpg",
+      fullUrl: "https://images.example.test/image.jpg",
+      kind: "image",
+      source: "openverse",
+    } satisfies WallpaperSourceGalleryProps["visibleItems"][number];
+    const video = {
+      ...image,
+      id: "search-video",
+      kind: "video",
+      fullUrl: "https://images.example.test/video.mp4",
+    };
+    const onPreview = vi.fn();
+    const onGenerateVideo = vi.fn();
+    render(
+      <WallpaperSourceGallery
+        {...galleryProps({
+          visibleItems: [image, video],
+          kindCounts: { all: 2, image: 1, video: 1 },
+          onPreview,
+          onGenerateVideo,
+        })}
+      />,
+    );
+
+    const action = screen.getByRole("button", {
+      name: "settings.wallpaperSource.generateVideoFromImage",
+    });
+    expect(
+      screen.getAllByRole("button", {
+        name: "settings.wallpaperSource.openPreview",
+      }),
+    ).toHaveLength(2);
+    fireEvent.click(action);
+
+    expect(onGenerateVideo).toHaveBeenCalledWith(image);
+    expect(onPreview).not.toHaveBeenCalled();
+  });
+
+  it("locks the image play action with the rest of the card", () => {
+    render(
+      <WallpaperSourceGallery
+        {...galleryProps({
+          locked: true,
+          visibleItems: [
+            {
+              id: "locked-image",
+              thumbUrl: "https://images.example.test/locked.jpg",
+              fullUrl: "https://images.example.test/locked.jpg",
+              kind: "image",
+              source: "x",
+            },
+          ],
+          kindCounts: { all: 1, image: 1, video: 0 },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "settings.wallpaperSource.generateVideoFromImage",
+      }).disabled,
+    ).toBe(true);
   });
 });

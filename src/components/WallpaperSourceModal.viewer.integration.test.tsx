@@ -112,6 +112,7 @@ vi.mock("@/hooks/useWallpaperRemoteSourceController", () => ({
     },
     loadMore: vi.fn(),
     cancel: vi.fn(async () => false),
+    clear: vi.fn(),
   }),
 }));
 

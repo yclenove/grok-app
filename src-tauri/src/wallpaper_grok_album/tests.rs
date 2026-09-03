@@ -73,20 +73,28 @@ fn navigation_is_https_and_first_party_or_supported_auth_only() {
 fn saved_page_requires_the_rendered_app_shell() {
     let saved = Url::parse("https://grok.com/imagine/saved").unwrap();
     assert_eq!(
-        classify_page(&saved, "complete", false, false),
-        GrokAlbumStatus::SignIn
-    );
-    assert_eq!(
-        classify_page(&saved, "complete", true, false),
-        GrokAlbumStatus::Ready
-    );
-    assert_eq!(
-        classify_page(&saved, "loading", false, false),
+        classify_page(&saved, "complete", false, false, "waiting"),
         GrokAlbumStatus::Loading
     );
     assert_eq!(
-        classify_page(&saved, "complete", false, true),
+        classify_page(&saved, "complete", true, false, "ready"),
+        GrokAlbumStatus::Ready
+    );
+    assert_eq!(
+        classify_page(&saved, "loading", false, false, "waiting"),
+        GrokAlbumStatus::Loading
+    );
+    assert_eq!(
+        classify_page(&saved, "complete", false, true, "waiting"),
         GrokAlbumStatus::Verification
+    );
+    assert_eq!(
+        classify_page(&saved, "complete", false, false, "challenge"),
+        GrokAlbumStatus::Verification
+    );
+    assert_eq!(
+        classify_page(&saved, "complete", false, false, "redirecting"),
+        GrokAlbumStatus::SignIn
     );
 }
 

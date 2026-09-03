@@ -138,6 +138,7 @@ mod provider_headers;
 mod providers;
 
 mod proxy;
+mod safe_https_client;
 
 mod relay_stream_proxy;
 
@@ -226,6 +227,8 @@ mod voice_tools;
 mod wallpaper_source;
 
 mod wallpaper_grok_album;
+
+mod wallpaper_imagine_video;
 
 mod wallpaper_remote_media;
 
@@ -1721,6 +1724,10 @@ pub fn run() {
             commands::wallpaper_fetch_media,
 
             commands::wallpaper_imagine,
+
+            commands::wallpaper_image_to_video,
+
+            commands::wallpaper_image_to_video_cancel,
 
             commands::wallpaper_library_list,
 

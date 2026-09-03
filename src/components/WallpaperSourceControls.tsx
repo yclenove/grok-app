@@ -1,5 +1,10 @@
+import { useState } from "react";
 import { GrokAlbumSourcePanel } from "@/components/GrokAlbumSourcePanel";
 import { Select } from "@/components/Select";
+import {
+  WallpaperImagineControls,
+  type WallpaperImagineControlsModel,
+} from "@/components/WallpaperImagineControls";
 import { WallpaperPexelsKeyControl } from "@/components/WallpaperPexelsKeyControl";
 import type { MessageKey } from "@/i18n";
 import type {
@@ -8,6 +13,10 @@ import type {
 } from "@/lib/grokAlbum";
 import type { WallpaperSourceKind } from "@/lib/wallpaperSource";
 import { isWallpaperRemoteSource } from "@/lib/wallpaperRemoteSearch";
+import {
+  normalizeWallpaperXSearchMode,
+  type WallpaperXSearchMode,
+} from "@/lib/wallpaperXSearch";
 
 type Translate = (
   key: MessageKey,
@@ -29,9 +38,8 @@ export type WallpaperSourceControlsProps = {
   query: string;
   sort: "top" | "latest";
   sortOptions: SelectOption[];
-  prompt: string;
-  aspect: string;
-  aspectOptions: SelectOption[];
+  xSearchMode: WallpaperXSearchMode;
+  imagine: WallpaperImagineControlsModel;
   albumStatus: GrokAlbumStatus;
   albumCachedCount: number;
   albumVisibleCount: number;
@@ -39,14 +47,16 @@ export type WallpaperSourceControlsProps = {
   albumSyncing: boolean;
   onQueryChange: (value: string) => void;
   onSortChange: (value: "top" | "latest") => void;
+  onXSearchModeChange?: (
+    value: WallpaperXSearchMode,
+  ) => void | Promise<void>;
+  onXSearchModeSaveError: () => void;
   onSearchX: () => void;
   onCancelX: () => void;
   onSearchRemote: () => void;
   onCancelRemote: () => void;
   onSavePexelsKey: (key: string) => Promise<boolean>;
-  onPromptChange: (value: string) => void;
-  onAspectChange: (value: string) => void;
-  onGenerate: () => void;
+  onRequestDeletePexelsKey: () => void;
   onOpenAlbum: () => void;
   onSyncAlbum: () => void;
   onRefreshAlbum: () => void;
@@ -66,9 +76,8 @@ export function WallpaperSourceControls({
   query,
   sort,
   sortOptions,
-  prompt,
-  aspect,
-  aspectOptions,
+  xSearchMode,
+  imagine,
   albumStatus,
   albumCachedCount,
   albumVisibleCount,
@@ -76,20 +85,37 @@ export function WallpaperSourceControls({
   albumSyncing,
   onQueryChange,
   onSortChange,
+  onXSearchModeChange,
+  onXSearchModeSaveError,
   onSearchX,
   onCancelX,
   onSearchRemote,
   onCancelRemote,
   onSavePexelsKey,
-  onPromptChange,
-  onAspectChange,
-  onGenerate,
+  onRequestDeletePexelsKey,
   onOpenAlbum,
   onSyncAlbum,
   onRefreshAlbum,
   onRefreshLibrary,
 }: WallpaperSourceControlsProps) {
+  const [xSearchModeSaving, setXSearchModeSaving] = useState(false);
+
+  const changeXSearchMode = async (value: string) => {
+    if (!onXSearchModeChange || xSearchModeSaving) return;
+    const next = normalizeWallpaperXSearchMode(value);
+    if (next === xSearchMode) return;
+    setXSearchModeSaving(true);
+    try {
+      await onXSearchModeChange(next);
+    } catch {
+      onXSearchModeSaveError();
+    } finally {
+      setXSearchModeSaving(false);
+    }
+  };
+
   if (tab === "x") {
+    const xControlsLocked = locked || xSearchModeSaving;
     return (
       <div className="wallpaper-source-form">
         <div className="wallpaper-source-form__row wallpaper-source-form__row--search wallpaper-source-form__row--x">
@@ -98,7 +124,7 @@ export function WallpaperSourceControls({
             className="wallpaper-source-form__input"
             value={query}
             placeholder={t("settings.wallpaperSource.xPlaceholder")}
-            disabled={locked}
+            disabled={xControlsLocked}
             onChange={(event) => onQueryChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
@@ -107,11 +133,32 @@ export function WallpaperSourceControls({
               }
             }}
           />
+          {onXSearchModeChange ? (
+            <Select
+              className="wallpaper-source-form__select wallpaper-source-form__select--route"
+              value={xSearchMode}
+              options={[
+                {
+                  value: "cli",
+                  label: t("settings.wallpaperXSearchMode.cli"),
+                },
+                {
+                  value: "responses_preview",
+                  label: t("settings.wallpaperXSearchMode.responsesPreview"),
+                },
+              ]}
+              disabled={xControlsLocked}
+              aria-label={t("settings.wallpaperXSearchMode")}
+              title={t("settings.wallpaperXSearchModeDesc")}
+              onChange={(value) => void changeXSearchMode(value)}
+              placement="down"
+            />
+          ) : null}
           <Select
             className="wallpaper-source-form__select"
             value={sort}
             options={sortOptions}
-            disabled={locked}
+            disabled={xControlsLocked}
             aria-label={t("settings.wallpaperSource.sort")}
             onChange={(value) => onSortChange(value === "latest" ? "latest" : "top")}
             placement="down"
@@ -119,7 +166,7 @@ export function WallpaperSourceControls({
           <button
             type="button"
             className={xSearchBusy ? "btn btn--ghost" : "btn btn--solid"}
-            disabled={!xSearchBusy && (locked || !query.trim())}
+            disabled={!xSearchBusy && (xControlsLocked || !query.trim())}
             onClick={xSearchBusy ? onCancelX : onSearchX}
           >
             {xSearchBusy
@@ -132,39 +179,7 @@ export function WallpaperSourceControls({
   }
 
   if (tab === "imagine") {
-    return (
-      <div className="wallpaper-source-form">
-        <textarea
-          className="wallpaper-source-form__textarea"
-          value={prompt}
-          placeholder={t("settings.wallpaperSource.imaginePlaceholder")}
-          disabled={locked}
-          rows={2}
-          onChange={(event) => onPromptChange(event.target.value)}
-        />
-        <div className="wallpaper-source-form__row">
-          <Select
-            className="wallpaper-source-form__select"
-            value={aspect}
-            options={aspectOptions}
-            disabled={locked}
-            aria-label={t("settings.wallpaperSource.aspect")}
-            onChange={onAspectChange}
-            placement="down"
-          />
-          <button
-            type="button"
-            className="btn btn--solid"
-            disabled={locked || !prompt.trim()}
-            onClick={onGenerate}
-          >
-            {busy
-              ? t("settings.wallpaperSource.generating")
-              : t("settings.wallpaperSource.generate")}
-          </button>
-        </div>
-      </div>
-    );
+    return <WallpaperImagineControls t={t} locked={locked} model={imagine} />;
   }
 
   if (isWallpaperRemoteSource(tab)) {
@@ -212,6 +227,7 @@ export function WallpaperSourceControls({
             invalid={pexelsKeyInvalid}
             disabled={locked}
             onSave={onSavePexelsKey}
+            onRequestDelete={onRequestDeletePexelsKey}
           />
         ) : null}
       </div>

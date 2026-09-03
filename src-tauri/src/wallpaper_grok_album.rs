@@ -53,6 +53,7 @@ const LOAD_MORE_ATTEMPTS: usize = 4;
 const LOAD_MORE_WAIT: Duration = Duration::from_millis(700);
 const MAX_THUMB_SOURCE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_THUMB_JPEG_BYTES: usize = 512 * 1024;
+const MAX_THUMB_HEADER_BYTES: usize = 64 * 1024;
 const THUMB_WEBVIEW_TIMEOUT: Duration = Duration::from_secs(18);
 const THUMB_WEBVIEW_POLL: Duration = Duration::from_millis(90);
 
@@ -146,10 +147,12 @@ fn classify_page(
     ready_state: &str,
     has_app_shell: bool,
     has_security_challenge: bool,
+    recovery_state: &str,
 ) -> GrokAlbumStatus {
     let host = url.host_str().unwrap_or("").to_ascii_lowercase();
     let path = url.path().to_ascii_lowercase();
-    if host_matches(&host, "grok.com") && has_security_challenge {
+    if host_matches(&host, "grok.com") && (has_security_challenge || recovery_state == "challenge")
+    {
         return GrokAlbumStatus::Verification;
     }
     let auth_path = path.contains("sign-in")
@@ -169,10 +172,10 @@ fn classify_page(
         return GrokAlbumStatus::SignIn;
     }
     if host_matches(&host, "grok.com") && path.starts_with("/imagine/saved") {
-        return if ready_state == "complete" && !has_app_shell {
-            GrokAlbumStatus::SignIn
-        } else if has_app_shell && (ready_state == "interactive" || ready_state == "complete") {
+        return if has_app_shell && (ready_state == "interactive" || ready_state == "complete") {
             GrokAlbumStatus::Ready
+        } else if recovery_state == "redirecting" {
+            GrokAlbumStatus::SignIn
         } else {
             GrokAlbumStatus::Loading
         };
@@ -426,6 +429,15 @@ fn thumbnail_job_start_script(url: &str) -> Result<String, String> {
             "__MAX_DATA_URL__",
             &((MAX_THUMB_JPEG_BYTES * 4 / 3) + 128).to_string(),
         )
+        .replace("__MAX_HEADER_BYTES__", &MAX_THUMB_HEADER_BYTES.to_string())
+        .replace(
+            "__MAX_DIMENSION__",
+            &crate::image_thumb::UNTRUSTED_THUMB_MAX_DIMENSION.to_string(),
+        )
+        .replace(
+            "__MAX_PIXELS__",
+            &crate::image_thumb::UNTRUSTED_THUMB_MAX_PIXELS.to_string(),
+        )
         .replace("__MAX_SOURCE_BYTES__", &MAX_THUMB_SOURCE_BYTES.to_string())
         .replace("__URL__", &url))
 }
@@ -523,6 +535,7 @@ fn snapshot_from_window(window: &WebviewWindow) -> Result<GrokAlbumSnapshot, Str
         &raw.ready_state,
         raw.has_app_shell,
         raw.has_security_challenge,
+        &raw.recovery_state,
     );
     if status != GrokAlbumStatus::Ready {
         clear_cache();

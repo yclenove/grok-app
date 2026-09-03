@@ -418,6 +418,19 @@ describe("settingsCatalog", () => {
     expect(wallpaperHits.some((h) => h.entry.id === "appearance.wallpaper")).toBe(
       true,
     );
+    const wallpaperRoute = searchSettingsEntries("Responses API", tZh, tEn);
+    expect(
+      wallpaperRoute.some(
+        (h) =>
+          h.entry.id === "appearance.wallpaperXSearchMode" &&
+          h.entry.anchorId === "settings-anchor-wallpaper-x-search-mode",
+      ),
+    ).toBe(true);
+    expect(
+      SETTINGS_ENTRIES.filter((entry) =>
+        entry.anchorId.includes("wallpaper-x-search-mode"),
+      ),
+    ).toHaveLength(1);
     const textColor = searchSettingsEntries("文字颜色", tZh, tEn);
     expect(textColor.some((h) => h.entry.id === "appearance.textColor")).toBe(
       true,

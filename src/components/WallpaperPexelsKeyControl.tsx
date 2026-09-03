@@ -10,6 +10,7 @@ export type WallpaperPexelsKeyControlProps = {
   invalid: boolean;
   disabled: boolean;
   onSave: (key: string) => Promise<boolean>;
+  onRequestDelete: () => void;
 };
 
 export function WallpaperPexelsKeyControl({
@@ -18,6 +19,7 @@ export function WallpaperPexelsKeyControl({
   invalid,
   disabled,
   onSave,
+  onRequestDelete,
 }: WallpaperPexelsKeyControlProps) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
@@ -82,14 +84,24 @@ export function WallpaperPexelsKeyControl({
           </button>
         </form>
       ) : (
-        <button
-          type="button"
-          className="btn btn--ghost btn--sm wallpaper-pexels-key__change"
-          disabled={disabled}
-          onClick={() => setEditing(true)}
-        >
-          {t("settings.wallpaperSource.pexels.keyChange")}
-        </button>
+        <div className="wallpaper-pexels-key__actions">
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            disabled={disabled}
+            onClick={() => setEditing(true)}
+          >
+            {t("settings.wallpaperSource.pexels.keyChange")}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            disabled={disabled}
+            onClick={onRequestDelete}
+          >
+            {t("settings.wallpaperSource.pexels.keyDelete")}
+          </button>
+        </div>
       )}
     </div>
   );

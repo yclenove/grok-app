@@ -90,6 +90,7 @@ import {
   IconPinned as TbPinned,
   IconPinnedOff as TbPinnedOff,
   IconPlayerStop as TbPlayerStop,
+  IconPlayerPlay as TbPlayerPlay,
   IconPlug as TbPlug,
   IconPlus as TbPlus,
   IconPuzzle as TbPuzzle,
@@ -254,6 +255,7 @@ export const IconCrop = wrap(TbCrop);
 export const IconNotes = wrap(TbNotes);
 export const IconImagine = wrap(TbWand);
 export const IconVideo = wrap(TbMovie);
+export const IconPlay = wrap(TbPlayerPlay);
 export const IconAutomations = wrap(TbBolt);
 /** Scheduled / “已安排” nav — calendar clock. */
 export const IconScheduled = wrap(TbCalendarTime);

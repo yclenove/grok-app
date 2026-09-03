@@ -62,6 +62,21 @@ describe("appearance theme layout", () => {
     );
   });
 
+  it("stacks wallpaper controls when their card becomes narrow", () => {
+    expect(section).toContain(
+      'className="settings-row settings-row--stack settings-wallpaper-host"',
+    );
+    expect(wallpaperCss).toMatch(
+      /\.settings-wallpaper-host\s*\{[^}]*container-name:\s*settings-wallpaper;[^}]*container-type:\s*inline-size;/s,
+    );
+    expect(wallpaperCss).toMatch(
+      /@container settings-wallpaper \(max-width: 520px\)\s*\{[\s\S]*?\.settings-wallpaper--split\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/s,
+    );
+    expect(wallpaperCss).toMatch(
+      /@container settings-wallpaper \(max-width: 520px\)[\s\S]*?\.settings-wallpaper--split \.settings-wallpaper__preview\s*\{[^}]*min-height:\s*0;/s,
+    );
+  });
+
   it("keeps appearance skin chips and preset cards flat (no bevel gradient)", () => {
     const presets = readFileSync(
       resolve(__dirname, "../components/settings/SkinPresetsCard.tsx"),

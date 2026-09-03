@@ -25,6 +25,10 @@ import type {
   WallpaperRemoteSource,
   WallpaperRemoteThumbnail,
 } from "../wallpaperRemoteSearch";
+import type {
+  WallpaperVideoDuration,
+  WallpaperVideoResolution,
+} from "../wallpaperImagine";
 export type {
   WallpaperFetchResult,
   WallpaperGalleryItem,
@@ -185,6 +189,28 @@ export async function wallpaperImagine(
     prompt,
     aspectRatio: aspectRatio ?? null,
   });
+}
+
+export async function wallpaperImageToVideo(
+  sourcePath: string,
+  motionPrompt: string,
+  duration: WallpaperVideoDuration,
+  resolutionName: WallpaperVideoResolution,
+  requestId: string,
+): Promise<WallpaperSearchResult> {
+  return invoke<WallpaperSearchResult>("wallpaper_image_to_video", {
+    sourcePath,
+    motionPrompt: motionPrompt.trim() || null,
+    duration,
+    resolutionName,
+    requestId,
+  });
+}
+
+export async function wallpaperImageToVideoCancel(
+  requestId: string,
+): Promise<boolean> {
+  return invoke<boolean>("wallpaper_image_to_video_cancel", { requestId });
 }
 
 export async function wallpaperLibraryList(

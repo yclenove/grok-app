@@ -175,12 +175,20 @@ export function WorkbenchSettingsStage(p: WorkbenchSettingsStageProps) {
           wallpaperBlur={wallpaperBlur}
           onWallpaperBlur={applyWallpaperBlurChoice}
           wallpaperXSearchMode={wallpaperXSearchMode}
-          onWallpaperXSearchMode={(value) => {
-          const next = normalizeWallpaperXSearchMode(value);
-          setWallpaperXSearchMode(next);
-          void api.settingsGet().then((s) =>
-          api.settingsSet({ ...s, wallpaperXSearchMode: next }),
-          );
+          onWallpaperXSearchMode={async (value) => {
+            const next = normalizeWallpaperXSearchMode(value);
+            const previous = wallpaperXSearchMode;
+            setWallpaperXSearchMode(next);
+            try {
+              const settings = await api.settingsGet();
+              await api.settingsSet({
+                ...settings,
+                wallpaperXSearchMode: next,
+              });
+            } catch (error) {
+              setWallpaperXSearchMode(previous);
+              throw error;
+            }
           }}
           sessionDataMode={sessionDataMode}
           onCliSessionsImported={() => {

@@ -2,6 +2,7 @@
  * @vitest-environment jsdom
  */
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -13,6 +14,7 @@ import "@/test/jsdomStubs";
 import type { GrokAlbumStatus } from "@/lib/grokAlbum";
 import type {
   WallpaperGalleryItem,
+  WallpaperLibraryEntry,
   WallpaperSourceErrorCode,
 } from "@/lib/wallpaperSource";
 
@@ -26,12 +28,17 @@ const loadMoreGrokAlbum = vi.hoisted(() => vi.fn(async () => undefined));
 const searchRemote = vi.hoisted(() => vi.fn(async () => null));
 const loadMoreRemote = vi.hoisted(() => vi.fn(async () => null));
 const cancelRemote = vi.hoisted(() => vi.fn(async () => true));
-const wallpaperLibraryList = vi.hoisted(() => vi.fn(async () => []));
+const clearRemote = vi.hoisted(() => vi.fn());
+const wallpaperLibraryList = vi.hoisted(() =>
+  vi.fn(async (): Promise<WallpaperLibraryEntry[]> => []),
+);
 const secretsGetMasked = vi.hoisted(() =>
   vi.fn(async () => ({ hasPexelsKey: false })),
 );
 const secretsSet = vi.hoisted(() => vi.fn(async () => undefined));
 const fetchRemoteWallpaperMedia = vi.hoisted(() => vi.fn());
+const wallpaperImageToVideo = vi.hoisted(() => vi.fn());
+const wallpaperImageToVideoCancel = vi.hoisted(() => vi.fn(async () => true));
 const openViewer = vi.hoisted(() => vi.fn());
 const remoteControllerState = vi.hoisted(() => ({
   busy: false,
@@ -104,6 +111,13 @@ vi.mock("@/hooks/useWallpaperRemoteSourceController", () => ({
     },
     loadMore: loadMoreRemote,
     cancel: cancelRemote,
+    clear: () => {
+      clearRemote();
+      options.setItems([]);
+      options.setHasSearched(false);
+      options.setError(null);
+      options.setErrorCode(null);
+    },
   }),
 }));
 
@@ -119,6 +133,8 @@ vi.mock("@/lib/api", () => ({
   wallpaperRemoteCancelMediaRequests: vi.fn(async () => 0),
   wallpaperRemoteCancelAllMediaRequests: vi.fn(async () => 0),
   wallpaperImagine: vi.fn(),
+  wallpaperImageToVideo,
+  wallpaperImageToVideoCancel,
   wallpaperLibraryList,
   wallpaperLibraryDelete: vi.fn(),
   openExternalUrl: vi.fn(),
@@ -167,12 +183,15 @@ afterEach(() => {
   searchRemote.mockClear();
   loadMoreRemote.mockClear();
   cancelRemote.mockClear();
+  clearRemote.mockClear();
   wallpaperLibraryList.mockClear();
   wallpaperLibraryList.mockResolvedValue([]);
   secretsGetMasked.mockClear();
   secretsGetMasked.mockResolvedValue({ hasPexelsKey: false });
   secretsSet.mockClear();
   fetchRemoteWallpaperMedia.mockReset();
+  wallpaperImageToVideo.mockReset();
+  wallpaperImageToVideoCancel.mockClear();
   openViewer.mockReset();
   remoteControllerState.busy = false;
   remoteControllerState.loadingMore = false;
@@ -278,6 +297,25 @@ describe("WallpaperSourceModal source workspace", () => {
     expect(layout?.lastElementChild).toBe(panel);
   });
 
+  it("clears remote paging state when switching providers", () => {
+    render(
+      <WallpaperSourceModal
+        open
+        initialTab="openverse"
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("tab", { name: "settings.wallpaperPexels" }),
+    );
+
+    expect(cancelRemote).toHaveBeenCalledTimes(1);
+    expect(clearRemote).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps paged search and album cards stable while results append", () => {
     const view = render(
       <WallpaperSourceModal
@@ -326,6 +364,59 @@ describe("WallpaperSourceModal source workspace", () => {
     expect(
       screen.queryByRole("button", {
         name: "settings.wallpaperSource.clearFilters",
+      }),
+    ).toBeNull();
+  });
+
+  it("ignores a late library list after reopening another source", async () => {
+    let resolveLibrary!: (entries: Array<{
+      path: string;
+      name: string;
+      source: string;
+      kind: string;
+      bytes: number;
+      modifiedMs: number;
+    }>) => void;
+    wallpaperLibraryList.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLibrary = resolve;
+        }),
+    );
+    const props = {
+      t: t as never,
+      onClose: vi.fn(),
+      onPickFile: vi.fn(),
+    };
+    const view = render(
+      <WallpaperSourceModal open initialTab="library" {...props} />,
+    );
+
+    await waitFor(() => expect(wallpaperLibraryList).toHaveBeenCalledWith(96));
+    view.rerender(
+      <WallpaperSourceModal open={false} initialTab="library" {...props} />,
+    );
+    view.rerender(<WallpaperSourceModal open initialTab="x" {...props} />);
+
+    await act(async () => {
+      resolveLibrary([
+        {
+          path: "C:\\wallpapers\\late-library.jpg",
+          name: "late-library.jpg",
+          source: "openverse",
+          kind: "image",
+          bytes: 1024,
+          modifiedMs: 1,
+        },
+      ]);
+    });
+
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(
+      "wallpaper-source-tab-x",
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: "settings.wallpaperSource.openPreview",
       }),
     ).toBeNull();
   });
@@ -496,9 +587,162 @@ describe("WallpaperSourceModal source workspace", () => {
       screen.queryByText("settings.wallpaperSource.pexels.keyInvalid"),
     ).toBeNull();
   });
+
+  it("confirms Pexels key removal and clears its active result state", async () => {
+    secretsGetMasked.mockResolvedValue({ hasPexelsKey: true });
+    remoteControllerState.searchItems = [
+      galleryItem("pexels-existing", { source: "pexels" }),
+    ];
+    render(
+      <WallpaperSourceModal
+        open
+        initialTab="pexels"
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("settings.wallpaperSource.pexels.keySaved");
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.pexels.placeholder"),
+      { target: { value: "mountain lake" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    await screen.findByRole("button", {
+      name: "settings.wallpaperSource.openPreview",
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.pexels.keyDelete",
+      }),
+    );
+    expect(
+      screen.getByText("settings.wallpaperSource.pexels.keyDeleteBody"),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.pexels.keyDeleteConfirm",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(secretsSet).toHaveBeenCalledWith({ pexelsApiKey: "" }),
+    );
+    expect(cancelRemote).toHaveBeenCalledTimes(1);
+    expect(clearRemote).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByText("settings.wallpaperSource.pexels.keyRequired"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: "settings.wallpaperSource.openPreview",
+      }),
+    ).toBeNull();
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "settings.wallpaperSource.search",
+      }).disabled,
+    ).toBe(true);
+  });
 });
 
 describe("WallpaperSourceModal remote source wiring", () => {
+  it("routes an image card into the Imagine video workflow", async () => {
+    remoteControllerState.searchItems = [
+      galleryItem("web-video-source", {
+        source: "web",
+        sourceUrl: "https://photos.example.test/page",
+        sourceName: "photos.example.test",
+      }),
+    ];
+    fetchRemoteWallpaperMedia.mockResolvedValue({
+      path: "H:\\wallpapers\\web\\video-source.jpg",
+      name: "video-source.jpg",
+      mime: "image/jpeg",
+      bytes: 128,
+    });
+    wallpaperImageToVideo.mockResolvedValue({
+      items: [
+        galleryItem("generated-video", {
+          source: "imagine",
+          kind: "video",
+          localPath: "H:\\wallpapers\\imagine\\generated-video.mp4",
+          fullUrl: "file:///H:/wallpapers/imagine/generated-video.mp4",
+          thumbUrl: "file:///H:/wallpapers/imagine/generated-video.mp4",
+        }),
+      ],
+    });
+    render(
+      <WallpaperSourceModal
+        open
+        initialTab="web"
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.web.placeholder"),
+      { target: { value: "night skyline" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.wallpaperSource.generateVideoFromImage",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(
+        "wallpaper-source-tab-imagine",
+      ),
+    );
+    await screen.findByText("photos.example.test");
+    expect(fetchRemoteWallpaperMedia).toHaveBeenCalledWith(
+      "web",
+      "https://example.test/web-video-source.jpg",
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
+
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "settings.wallpaperSource.generateVideo",
+      }).disabled,
+    ).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.generateVideo",
+      }),
+    );
+    await waitFor(() =>
+      expect(wallpaperImageToVideo).toHaveBeenCalledWith(
+        "H:\\wallpapers\\web\\video-source.jpg",
+        "",
+        6,
+        "480p",
+        expect.stringMatching(/^[0-9a-f-]{36}$/),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        document.querySelector("video.wallpaper-masonry__img"),
+      ).not.toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: "settings.wallpaperSource.generateVideoFromImage",
+      }),
+    ).toBeNull();
+  });
+
   it("keeps a regular Web grid free of a redundant local filter", async () => {
     remoteControllerState.searchItems = Array.from({ length: 10 }, (_, index) =>
       galleryItem(`web-${index}`, {
@@ -579,6 +823,12 @@ describe("WallpaperSourceModal remote source wiring", () => {
         sourceName: "photos.example.test",
       }),
     ];
+    fetchRemoteWallpaperMedia.mockResolvedValue({
+      path: "H:\\wallpapers\\web-existing.jpg",
+      name: "web-existing.jpg",
+      mime: "image/jpeg",
+      bytes: 128,
+    });
     const props = {
       open: true,
       initialTab: "web" as const,
@@ -607,9 +857,23 @@ describe("WallpaperSourceModal remote source wiring", () => {
     fireEvent.click(card);
     await waitFor(() => expect(openViewer).toHaveBeenCalledTimes(1));
     expect(fetchRemoteWallpaperMedia).not.toHaveBeenCalled();
-    expect(openViewer.mock.calls[0]?.[0]?.[0]).toMatchObject({
+    const slide = openViewer.mock.calls[0]?.[0]?.[0] as {
+      src: string;
+      kind: string;
+      loadOriginal?: () => Promise<{ src: string; mime?: string } | null>;
+    };
+    expect(slide).toMatchObject({
       src: "https://example.test/web-existing.jpg",
       kind: "image",
     });
+    expect(slide.loadOriginal).toBeTypeOf("function");
+    await act(async () => {
+      await slide.loadOriginal?.();
+    });
+    expect(fetchRemoteWallpaperMedia).toHaveBeenCalledWith(
+      "web",
+      "https://example.test/web-existing.jpg",
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
   });
 });

@@ -52,8 +52,26 @@ function runSignedOutRecovery(options: {
   challengeSurface?: boolean;
 }) {
   const replace = vi.fn();
+  let now = 0;
+  let nextTimerId = 1;
+  let descendants = 4;
+  const timers = new Map<
+    number,
+    { callback: () => void; dueAt: number }
+  >();
+  const body = {
+    childElementCount: 1,
+    firstElementChild: {
+      tagName: "DIV",
+      childElementCount: 2,
+    },
+    getElementsByTagName: () => ({ length: descendants }),
+  };
   const document = {
     readyState: "complete",
+    body,
+    documentElement: { scrollHeight: 900 },
+    addEventListener: vi.fn(),
     querySelector: (selector: string) => {
       if (selector === "main") return options.appShell ? {} : null;
       if (selector.includes("script[src*")) {
@@ -71,15 +89,49 @@ function runSignedOutRecovery(options: {
     pathname: "/imagine/saved",
     replace,
   };
+  const page = {
+    addEventListener: vi.fn(),
+    clearTimeout: (timerId: number) => timers.delete(timerId),
+    performance: { now: () => now },
+    setTimeout: (callback: () => void, delay = 0) => {
+      const timerId = nextTimerId;
+      nextTimerId += 1;
+      timers.set(timerId, { callback, dueAt: now + delay });
+      return timerId;
+    },
+  };
   runInNewContext(signedOutRecoveryScript, {
     document,
     location,
-    window: {
-      addEventListener: vi.fn(),
-      setTimeout: (callback: () => void) => callback(),
-    },
+    window: page,
   });
-  return replace;
+
+  const advanceTo = (target: number) => {
+    while (true) {
+      const pending = [...timers.entries()]
+        .filter(([, timer]) => timer.dueAt <= target)
+        .sort((left, right) => left[1].dueAt - right[1].dueAt)[0];
+      if (!pending) break;
+      const [timerId, timer] = pending;
+      timers.delete(timerId);
+      now = timer.dueAt;
+      timer.callback();
+    }
+    now = target;
+  };
+
+  return {
+    advanceTo,
+    replace,
+    setDescendants(value: number) {
+      descendants = value;
+    },
+    state: () =>
+      Object.getOwnPropertyDescriptor(
+        page,
+        "__GROK_APP_SAVED_RECOVERY_STATE__",
+      )?.get?.call(page) as string | undefined,
+  };
 }
 
 describe("Grok album fixed page scripts", () => {
@@ -137,17 +189,43 @@ describe("Grok album fixed page scripts", () => {
     });
   });
 
-  it("redirects only the completed signed-out Saved shell", () => {
-    expect(runSignedOutRecovery({})).toHaveBeenCalledWith("https://grok.com/");
-    expect(runSignedOutRecovery({ appShell: true })).not.toHaveBeenCalled();
+  it("redirects only after the completed signed-out Saved shell stays stable", () => {
+    const signedOut = runSignedOutRecovery({});
+    signedOut.advanceTo(11_999);
+    expect(signedOut.replace).not.toHaveBeenCalled();
+    expect(signedOut.state()).toBe("waiting");
+
+    signedOut.advanceTo(12_000);
+    expect(signedOut.replace).toHaveBeenCalledOnce();
+    expect(signedOut.replace).toHaveBeenCalledWith("https://grok.com/");
+    expect(signedOut.state()).toBe("redirecting");
+
+    const signedIn = runSignedOutRecovery({ appShell: true });
+    signedIn.advanceTo(20_000);
+    expect(signedIn.replace).not.toHaveBeenCalled();
+    expect(signedIn.state()).toBe("ready");
+  });
+
+  it("restarts the stability window when the signed-out shell changes", () => {
+    const recovery = runSignedOutRecovery({});
+    recovery.advanceTo(9_999);
+    recovery.setDescendants(5);
+    recovery.advanceTo(12_999);
+    expect(recovery.replace).not.toHaveBeenCalled();
+
+    recovery.advanceTo(13_000);
+    expect(recovery.replace).toHaveBeenCalledOnce();
   });
 
   it("does not redirect Cloudflare challenge pages", () => {
-    expect(
-      runSignedOutRecovery({ challengeAsset: true }),
-    ).not.toHaveBeenCalled();
-    expect(
-      runSignedOutRecovery({ challengeSurface: true }),
-    ).not.toHaveBeenCalled();
+    const assetChallenge = runSignedOutRecovery({ challengeAsset: true });
+    assetChallenge.advanceTo(20_000);
+    expect(assetChallenge.replace).not.toHaveBeenCalled();
+    expect(assetChallenge.state()).toBe("challenge");
+
+    const surfaceChallenge = runSignedOutRecovery({ challengeSurface: true });
+    surfaceChallenge.advanceTo(20_000);
+    expect(surfaceChallenge.replace).not.toHaveBeenCalled();
+    expect(surfaceChallenge.state()).toBe("challenge");
   });
 });

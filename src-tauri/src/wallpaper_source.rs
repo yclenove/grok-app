@@ -281,6 +281,19 @@ pub struct WallpaperFetchResult {
     pub name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalWallpaperMediaKind {
+    Image,
+    Video,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ValidatedLocalWallpaperMedia {
+    pub(crate) mime: &'static str,
+    pub(crate) extension: &'static str,
+    pub(crate) bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WallpaperLibraryEntry {
@@ -1172,6 +1185,10 @@ impl DetectedMedia {
             self,
             Self::Jpeg | Self::Png | Self::Gif | Self::Webp | Self::Avif
         )
+    }
+
+    fn is_video(self) -> bool {
+        matches!(self, Self::Mp4 | Self::Webm)
     }
 
     fn mime(self) -> &'static str {
@@ -2201,6 +2218,40 @@ pub(crate) fn validate_fetched_media_bytes(
     Ok((media.mime(), media.extension()))
 }
 
+pub(crate) fn validate_local_wallpaper_media(
+    path: &Path,
+    expected: LocalWallpaperMediaKind,
+) -> Result<ValidatedLocalWallpaperMedia, String> {
+    let metadata = fs::metadata(path).map_err(|_| "imagine_failed".to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_DOWNLOAD_BYTES {
+        return Err("imagine_failed".into());
+    }
+
+    let mut prefix = Vec::with_capacity(
+        usize::try_from(metadata.len().min(MAX_IMAGE_PROBE_BYTES as u64)).unwrap_or_default(),
+    );
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_IMAGE_PROBE_BYTES as u64)
+                .read_to_end(&mut prefix)
+        })
+        .map_err(|_| "imagine_failed".to_string())?;
+    let media = detect_media_signature(&prefix).ok_or_else(|| "imagine_failed".to_string())?;
+    let kind_matches = match expected {
+        LocalWallpaperMediaKind::Image => media.is_image(),
+        LocalWallpaperMediaKind::Video => media.is_video(),
+    };
+    if !kind_matches {
+        return Err("imagine_failed".into());
+    }
+
+    Ok(ValidatedLocalWallpaperMedia {
+        mime: media.mime(),
+        extension: media.extension(),
+        bytes: metadata.len(),
+    })
+}
+
 fn normalized_download_source(source: Option<&str>) -> &'static str {
     match source {
         Some("imagine") => "imagine",
@@ -2414,19 +2465,12 @@ fn scan_dir_as_gallery(
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !matches!(
-            ext.as_str(),
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "mp4" | "webm"
-        ) {
+        if !is_library_media_extension(&ext) {
             continue;
         }
         crate::path_scope::grant_path(&path);
         let path_str = path.display().to_string();
-        let kind = if matches!(ext.as_str(), "mp4" | "webm") {
-            "video"
-        } else {
-            "image"
-        };
+        let kind = library_media_kind(&ext);
         out.push(WallpaperGalleryItem {
             id: format!("{source}-scan-{i}-{}", short_hash(&path_str)),
             thumb_url: format!("file://{path_str}"),
@@ -2464,6 +2508,21 @@ pub fn library_list(limit: Option<u32>) -> Result<Vec<WallpaperLibraryEntry>, St
     Ok(all)
 }
 
+fn is_library_media_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "jpg" | "jpeg" | "png" | "webp" | "avif" | "gif" | "mp4" | "webm"
+    )
+}
+
+fn library_media_kind(ext: &str) -> &'static str {
+    if matches!(ext, "mp4" | "webm") {
+        "video"
+    } else {
+        "image"
+    }
+}
+
 fn collect_library(root: &Path, dir: &Path, out: &mut Vec<WallpaperLibraryEntry>) {
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
@@ -2480,10 +2539,7 @@ fn collect_library(root: &Path, dir: &Path, out: &mut Vec<WallpaperLibraryEntry>
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !matches!(
-            ext.as_str(),
-            "jpg" | "jpeg" | "png" | "webp" | "gif" | "mp4" | "webm"
-        ) {
+        if !is_library_media_extension(&ext) {
             continue;
         }
         let meta = match e.metadata() {
@@ -2508,11 +2564,7 @@ fn collect_library(root: &Path, dir: &Path, out: &mut Vec<WallpaperLibraryEntry>
             .and_then(|s| s.to_str())
             .unwrap_or("file")
             .to_string();
-        let kind = if matches!(ext.as_str(), "mp4" | "webm") {
-            "video"
-        } else {
-            "image"
-        };
+        let kind = library_media_kind(&ext);
         out.push(WallpaperLibraryEntry {
             path: path.display().to_string(),
             name,
@@ -3019,7 +3071,7 @@ and https://pbs.twimg.com/media/HNccFG2X0AE8gQ6.jpg?format=jpg&name=small
     }
 
     #[test]
-    fn library_list_collects_x_and_imagine() {
+    fn library_list_collects_supported_source_images() {
         let _lock = crate::paths::APP_HOME_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3031,18 +3083,22 @@ and https://pbs.twimg.com/media/HNccFG2X0AE8gQ6.jpg?format=jpg&name=small
         let root = wallpapers_root();
         let xdir = root.join("x").join("2026-08-01");
         let idir = root.join("imagine").join("2026-08-01");
+        let pdir = root.join("pexels").join("2026-08-01");
         fs::create_dir_all(&xdir).unwrap();
         fs::create_dir_all(&idir).unwrap();
+        fs::create_dir_all(&pdir).unwrap();
         fs::write(xdir.join("a.jpg"), b"a").unwrap();
         fs::write(idir.join("b.png"), b"b").unwrap();
+        fs::write(pdir.join("c.avif"), b"c").unwrap();
         fs::write(idir.join("skip.txt"), b"no").unwrap();
 
         let list = library_list(Some(10)).expect("list");
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), 3);
         let sources: std::collections::HashSet<_> =
             list.iter().map(|e| e.source.as_str()).collect();
         assert!(sources.contains("x"));
         assert!(sources.contains("imagine"));
+        assert!(sources.contains("pexels"));
         assert!(list.iter().all(|e| e.kind == "image"));
 
         unsafe {

@@ -3,13 +3,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GlassModal } from "@/components/GlassModal";
 import { WallpaperLibraryDeleteDialog } from "@/components/WallpaperLibraryDeleteDialog";
+import { WallpaperPexelsKeyDeleteDialog } from "@/components/WallpaperPexelsKeyDeleteDialog";
 import { WallpaperSourceControls } from "@/components/WallpaperSourceControls";
 import { WallpaperSourceFeedback } from "@/components/WallpaperSourceFeedback";
 import { WallpaperSourceFooter } from "@/components/WallpaperSourceFooter";
 import { WallpaperSourceGallery } from "@/components/WallpaperSourceGallery";
 import { WallpaperSourceTabs } from "@/components/WallpaperSourceTabs";
+import type {
+  WallpaperSourceModalProps,
+  WallpaperSourceTab,
+} from "@/components/WallpaperSourceModal.types";
+import type { MessageKey } from "@/i18n";
 import { useImageViewerOptional } from "@/components/ImageViewerContext";
 import { useWallpaperGrokAlbum } from "@/hooks/useWallpaperGrokAlbum";
+import { useWallpaperImagineController } from "@/hooks/useWallpaperImagineController";
 import { useWallpaperItemPreview } from "@/hooks/useWallpaperItemPreview";
 import { useWallpaperRemoteSourceController } from "@/hooks/useWallpaperRemoteSourceController";
 import { useWallpaperXSearch } from "@/hooks/useWallpaperXSearch";
@@ -22,7 +29,6 @@ import {
   libraryEntriesToGalleryItems,
   parseWallpaperSourceError,
   type WallpaperGalleryItem,
-  type WallpaperSourceKind,
   type WallpaperSourceErrorCode,
 } from "@/lib/wallpaperSource";
 import {
@@ -45,34 +51,24 @@ import {
   ensureLocalWallpaperMedia,
 } from "@/lib/wallpaperSourceMedia";
 import {
+  normalizeWallpaperXSearchMode,
   wallpaperXSearchProgressMessageKey,
   wallpaperXSearchRouteSummary,
   type WallpaperXSearchMeta,
+  type WallpaperXSearchMode,
 } from "@/lib/wallpaperXSearch";
 import { isWallpaperRemoteSource } from "@/lib/wallpaperRemoteSearch";
+import { isWallpaperImageItem } from "@/lib/wallpaperImagine";
 import { WallpaperPrepareError } from "@/lib/themeSkin";
 import {
-  WALLPAPER_ASPECT_OPTIONS,
   wallpaperSourceErrorMessage as errorMessage,
 } from "@/lib/wallpaperSourcePresentation";
-import type { MessageKey } from "@/i18n";
-
-export type WallpaperSourceTab = WallpaperSourceKind;
 const WALLPAPER_SOURCE_PANEL_ID = "wallpaper-source-panel";
 
-export type WallpaperSourceModalProps = {
-  open: boolean;
-  onClose: () => void;
-  initialTab?: WallpaperSourceTab;
-  t: (
-    key: MessageKey,
-    vars?: Record<string, string | number | undefined | null>,
-  ) => string;
-  /** Apply prepared File via parent (prepareWallpaperFromFile + onWallpaper). */
-  onPickFile: (file: File) => void | Promise<void>;
-  /** Jump to Account settings when login is required. */
-  onRequestLogin?: () => void;
-};
+export type {
+  WallpaperSourceModalProps,
+  WallpaperSourceTab,
+} from "@/components/WallpaperSourceModal.types";
 
 export function WallpaperSourceModal({
   open,
@@ -81,6 +77,8 @@ export function WallpaperSourceModal({
   t,
   onPickFile,
   onRequestLogin,
+  wallpaperXSearchMode = "cli",
+  onWallpaperXSearchMode,
 }: WallpaperSourceModalProps) {
   const viewer = useImageViewerOptional();
   const {
@@ -96,8 +94,6 @@ export function WallpaperSourceModal({
   const grokAlbum = useWallpaperGrokAlbum(open && tab === "grok_album");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"top" | "latest">("top");
-  const [prompt, setPrompt] = useState("");
-  const [aspect, setAspect] = useState("16:9");
   const [items, setItems] = useState<WallpaperGalleryItem[]>([]);
   /** Client-side gallery filter (not the X search box). */
   const [galleryFilter, setGalleryFilter] = useState("");
@@ -116,6 +112,8 @@ export function WallpaperSourceModal({
   const [statusHint, setStatusHint] = useState<string | null>(null);
   const [routeMeta, setRouteMeta] = useState<WallpaperXSearchMeta | null>(null);
   const [hasPexelsKey, setHasPexelsKey] = useState<boolean | null>(null);
+  const [pexelsKeyDeleteOpen, setPexelsKeyDeleteOpen] = useState(false);
+  const [pexelsKeyDeleting, setPexelsKeyDeleting] = useState(false);
   const [loadMoreAttempted, setLoadMoreAttempted] = useState(false);
   const [xLoadingMore, setXLoadingMore] = useState(false);
   const responseContinuationRef = useRef<{
@@ -125,6 +123,19 @@ export function WallpaperSourceModal({
   const progressiveRequestRef = useRef<string | null>(null);
   const appliedProgressiveKeysRef = useRef<Set<string>>(new Set());
   const sourceGenerationRef = useRef(0);
+  const imagineController = useWallpaperImagineController({
+    open,
+    enabled: open && tab === "imagine",
+    t,
+    setItems,
+    setHasSearched,
+    setSelectedId,
+    setError,
+    setErrorCode,
+    setStatusHint,
+    setGalleryFilter,
+    setKindFilter,
+  });
   const remoteSource = isWallpaperRemoteSource(tab) ? tab : null;
   const remoteController = useWallpaperRemoteSourceController({
     enabled: open && remoteSource !== null,
@@ -145,12 +156,13 @@ export function WallpaperSourceModal({
     sourceBusy ||
     xSearchBusy ||
     remoteController.busy ||
+    imagineController.busy ||
     (tab === "grok_album" && grokAlbum.busy);
   // Search and sync requests run in the background once cards exist. Keep the
   // gallery usable while they append results; only local source mutations and
   // an active preview/apply operation serialize card interaction.
   const interactionLocked =
-    sourceBusy || applying || previewingId !== null;
+    sourceBusy || imagineController.busy || applying || previewingId !== null;
 
   useEffect(() => {
     sourceGenerationRef.current += 1;
@@ -161,6 +173,9 @@ export function WallpaperSourceModal({
     setStatusHint(null);
     setRouteMeta(null);
     setHasPexelsKey(null);
+    setPexelsKeyDeleteOpen(false);
+    setPexelsKeyDeleting(false);
+    setSourceBusy(false);
     setLoadMoreAttempted(false);
     setXLoadingMore(false);
     responseContinuationRef.current = null;
@@ -326,27 +341,54 @@ export function WallpaperSourceModal({
     setKindFilter("all");
   }, []);
 
-  const switchTab = useCallback((next: WallpaperSourceTab) => {
-    sourceGenerationRef.current += 1;
-    cancelGrokAlbumMediaRequests();
-    cancelRemoteWallpaperMediaRequests();
-    void remoteController.cancel();
-    setTab(next);
-    setItems([]);
-    setHasSearched(false);
-    setSelectedId(null);
-    setError(null);
-    setErrorCode(null);
-    setStatusHint(null);
-    setRouteMeta(null);
-    setLoadMoreAttempted(false);
-    setXLoadingMore(false);
-    setGalleryFilter("");
-    setKindFilter("all");
-    responseContinuationRef.current = null;
-    progressiveRequestRef.current = null;
-    appliedProgressiveKeysRef.current.clear();
-  }, [remoteController.cancel]);
+  const changeXSearchMode = useCallback(
+    async (next: WallpaperXSearchMode) => {
+      if (!onWallpaperXSearchMode) return;
+      await onWallpaperXSearchMode(normalizeWallpaperXSearchMode(next));
+      responseContinuationRef.current = null;
+      setLoadMoreAttempted(false);
+    },
+    [onWallpaperXSearchMode],
+  );
+
+  const reportXSearchModeSaveError = useCallback(() => {
+    setErrorCode("generic");
+    setError(t("settings.wallpaperSource.routeSaveFailed"));
+  }, [t]);
+
+  const switchTab = useCallback(
+    (next: WallpaperSourceTab) => {
+      if (next === tab) return;
+      sourceGenerationRef.current += 1;
+      cancelGrokAlbumMediaRequests();
+      void cancelRemoteWallpaperMediaRequests();
+      void remoteController.cancel();
+      remoteController.clear();
+      if (tab === "imagine") imagineController.cancelAll();
+      setTab(next);
+      setSourceBusy(false);
+      setItems([]);
+      setHasSearched(false);
+      setSelectedId(null);
+      setError(null);
+      setErrorCode(null);
+      setStatusHint(null);
+      setRouteMeta(null);
+      setLoadMoreAttempted(false);
+      setXLoadingMore(false);
+      setGalleryFilter("");
+      setKindFilter("all");
+      responseContinuationRef.current = null;
+      progressiveRequestRef.current = null;
+      appliedProgressiveKeysRef.current.clear();
+    },
+    [
+      imagineController.cancelAll,
+      remoteController.cancel,
+      remoteController.clear,
+      tab,
+    ],
+  );
 
   const selected = useMemo(
     () => visibleItems.find((i) => i.id === selectedId) ?? null,
@@ -499,52 +541,6 @@ export function WallpaperSourceModal({
     t,
   ]);
 
-  const runImagine = useCallback(async () => {
-    const p = prompt.trim();
-    if (!p) {
-      setErrorCode("empty");
-      setError(errorMessage(t, "empty"));
-      return;
-    }
-    if (!isDesktopHost()) {
-      setErrorCode("generic");
-      setError(t("settings.wallpaperSource.err.desktopOnly"));
-      return;
-    }
-    setSourceBusy(true);
-    setError(null);
-    setErrorCode(null);
-    setStatusHint(t("settings.wallpaperSource.generating"));
-    setSelectedId(null);
-    setGalleryFilter("");
-    setKindFilter("all");
-    try {
-      const res = await api.wallpaperImagine(p, aspect);
-      const list = dedupeGalleryItems(res.items || []);
-      const code = errorCodeFromSearchResult({ ...res, items: list });
-      setHasSearched(true);
-      if (code) {
-        setItems([]);
-        setErrorCode(code);
-        setError(errorMessage(t, code));
-      } else {
-        setItems(list);
-        setError(null);
-        setErrorCode(null);
-        if (list[0]) setSelectedId(list[0].id);
-      }
-    } catch (e) {
-      setHasSearched(true);
-      setItems([]);
-      const code = parseWallpaperSourceError(e);
-      setErrorCode(code);
-      setError(errorMessage(t, code));
-    } finally {
-      setSourceBusy(false);
-      setStatusHint(null);
-    }
-  }, [prompt, aspect, t]);
-
   const savePexelsKey = useCallback(
     async (key: string): Promise<boolean> => {
       try {
@@ -567,6 +563,30 @@ export function WallpaperSourceModal({
     [errorCode, t],
   );
 
+  const deletePexelsKey = useCallback(async () => {
+    if (pexelsKeyDeleting) return;
+    setPexelsKeyDeleting(true);
+    setError(null);
+    setErrorCode(null);
+    try {
+      // Invalidate UI generations before the Host credential changes so an
+      // already-running search or original fetch cannot repopulate this tab.
+      sourceGenerationRef.current += 1;
+      await remoteController.cancel();
+      await cancelRemoteWallpaperMediaRequests();
+      await api.secretsSet({ pexelsApiKey: "" });
+      remoteController.clear();
+      setHasPexelsKey(false);
+      setPexelsKeyDeleteOpen(false);
+    } catch {
+      setPexelsKeyDeleteOpen(false);
+      setErrorCode("generic");
+      setError(t("settings.wallpaperSource.pexels.keyDeleteFailed"));
+    } finally {
+      setPexelsKeyDeleting(false);
+    }
+  }, [pexelsKeyDeleting, remoteController, t]);
+
   const dropItem = useCallback((id: string) => {
     setItems((prev) => prev.filter((it) => it.id !== id));
     setSelectedId((cur) => (cur === id ? null : cur));
@@ -581,6 +601,7 @@ export function WallpaperSourceModal({
       setError(t("settings.wallpaperSource.err.desktopOnly"));
       return;
     }
+    const sourceGeneration = sourceGenerationRef.current;
     setSourceBusy(true);
     setError(null);
     setErrorCode(null);
@@ -591,20 +612,24 @@ export function WallpaperSourceModal({
     setKindFilter("all");
     try {
       const entries = await api.wallpaperLibraryList(96);
+      if (sourceGeneration !== sourceGenerationRef.current) return;
       const list = libraryEntriesToGalleryItems(entries, { staticFirst: true });
       setHasSearched(true);
       setItems(list);
       setError(null);
       setErrorCode(null);
     } catch (e) {
+      if (sourceGeneration !== sourceGenerationRef.current) return;
       setHasSearched(true);
       setItems([]);
       const code = parseWallpaperSourceError(e);
       setErrorCode(code);
       setError(errorMessage(t, code));
     } finally {
-      setSourceBusy(false);
-      setStatusHint(null);
+      if (sourceGeneration === sourceGenerationRef.current) {
+        setSourceBusy(false);
+        setStatusHint(null);
+      }
     }
   }, [t]);
 
@@ -684,6 +709,23 @@ export function WallpaperSourceModal({
     });
   }, []);
 
+  const generateVideoFromItem = useCallback(
+    (item: WallpaperGalleryItem) => {
+      if (interactionLocked || !isWallpaperImageItem(item)) return;
+      // Capture any in-memory Host thumbnail before switching sources clears
+      // the remote gallery caches. The controller then materializes the
+      // validated original inside the wallpaper library.
+      imagineController.beginVideoFromItem(item);
+      if (tab !== "imagine") switchTab("imagine");
+    },
+    [
+      imagineController.beginVideoFromItem,
+      interactionLocked,
+      switchTab,
+      tab,
+    ],
+  );
+
   const applySelected = useCallback(async () => {
     if (!selected) return;
     if (!isDesktopHost()) {
@@ -729,11 +771,18 @@ export function WallpaperSourceModal({
   const closeModal = useCallback(() => {
     sourceGenerationRef.current += 1;
     cancelGrokAlbumMediaRequests();
-    cancelRemoteWallpaperMediaRequests();
+    void cancelRemoteWallpaperMediaRequests();
+    imagineController.cancelAll();
     if (xSearchBusy) void cancelXSearch();
     if (remoteController.busy) void remoteController.cancel();
     onClose();
-  }, [xSearchBusy, cancelXSearch, remoteController, onClose]);
+  }, [
+    xSearchBusy,
+    cancelXSearch,
+    imagineController.cancelAll,
+    remoteController,
+    onClose,
+  ]);
 
   const closeModalOnEscape = useCallback(() => {
     if (viewer.isOpen()) {
@@ -744,7 +793,8 @@ export function WallpaperSourceModal({
   }, [closeModal, viewer]);
 
   const authNeeded = errorCode === "auth_required";
-  const locked = busy || applying || previewingId !== null;
+  const locked =
+    busy || applying || previewingId !== null || pexelsKeyDeleting;
   const tabSwitchLocked =
     applying ||
     previewingId !== null ||
@@ -836,9 +886,8 @@ export function WallpaperSourceModal({
                 query={query}
                 sort={sort}
                 sortOptions={sortOptions}
-                prompt={prompt}
-                aspect={aspect}
-                aspectOptions={WALLPAPER_ASPECT_OPTIONS}
+                xSearchMode={wallpaperXSearchMode}
+                imagine={imagineController.controls}
                 albumStatus={grokAlbum.status}
                 albumCachedCount={grokAlbum.cachedCount}
                 albumVisibleCount={grokAlbum.visibleCount}
@@ -846,14 +895,16 @@ export function WallpaperSourceModal({
                 albumSyncing={grokAlbum.syncing}
                 onQueryChange={setQuery}
                 onSortChange={setSort}
+                onXSearchModeChange={
+                  onWallpaperXSearchMode ? changeXSearchMode : undefined
+                }
+                onXSearchModeSaveError={reportXSearchModeSaveError}
                 onSearchX={() => void runXSearch()}
                 onCancelX={() => void cancelXSearch()}
                 onSearchRemote={() => void remoteController.search()}
                 onCancelRemote={() => void remoteController.cancel()}
                 onSavePexelsKey={savePexelsKey}
-                onPromptChange={setPrompt}
-                onAspectChange={setAspect}
-                onGenerate={() => void runImagine()}
+                onRequestDeletePexelsKey={() => setPexelsKeyDeleteOpen(true)}
                 onOpenAlbum={() =>
                   void grokAlbum.open(t("settings.wallpaperGrokAlbum"))
                 }
@@ -903,6 +954,7 @@ export function WallpaperSourceModal({
               onGalleryFilterChange={setGalleryFilter}
               onClearFilters={clearGalleryFilters}
               onPreview={(item) => void openItemPreview(item)}
+              onGenerateVideo={generateVideoFromItem}
               onDropItem={dropItem}
               onOpenXStatus={openXStatus}
               onOpenSource={openXStatus}
@@ -926,6 +978,15 @@ export function WallpaperSourceModal({
           setDeleteConfirm(null);
           void deleteLibraryItem(item);
         }}
+      />
+      <WallpaperPexelsKeyDeleteDialog
+        t={t}
+        open={pexelsKeyDeleteOpen}
+        deleting={pexelsKeyDeleting}
+        onClose={() => {
+          if (!pexelsKeyDeleting) setPexelsKeyDeleteOpen(false);
+        }}
+        onConfirm={() => void deletePexelsKey()}
       />
     </>
   );

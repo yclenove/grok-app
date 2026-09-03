@@ -123,6 +123,11 @@ response, or user query is written to logs or returned in diagnostics.
   performs one real foreground request.
 - Openverse and Pexels use their documented page parameter. The Host owns the
   next-page state; the frontend cannot request arbitrary URLs.
+- Provider batches may validate more than the 20-card visible page. Those
+  excess validated DTOs stay in the same TTL-bound, source/query/credential-
+  scoped Host continuation and are returned before another upstream page is
+  requested. Replaying a cached initial page restores the matching continuation
+  snapshot, so background prefetch cannot permanently skip accepted results.
 - Before calling either direct library, the Host derives a provider-only query
   by dropping standalone wallpaper-purpose, resolution, and localized
   wallpaper modifiers. An empty derived query falls back to the original.
