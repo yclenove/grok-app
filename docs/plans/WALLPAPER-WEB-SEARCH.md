@@ -33,14 +33,17 @@ augment the existing X source.
 
 The frontend cannot provide or override an endpoint, model, tool, bearer
 token, redirect policy, or HTTP header. Responses requests use `grok-4.6`, low
-reasoning effort, `store: false`, no redirect following, and request at most
-six `web_search` calls per lane. The prompt asks the model to stop after one
-call when it already has enough real source pages. Because the compatibility
-endpoint has returned seven to nine completed calls despite that explicit
-request limit, the Host records the overrun and accepts at most twelve observed
-calls. A response above that separate hard ceiling is rejected. This keeps the
-requested budget unchanged without discarding an already-paid, otherwise
-valid result for a bounded provider-side overrun.
+reasoning effort, `store: false`, and no redirect following. Each initial lane
+requests at most six `web_search` calls and eight source pages. The single
+continuation lane requests at most three calls and four pages so an explicit
+`Load more` does not repeat the full initial-search cost. The prompt asks the
+model to stop after one call when it already has enough real source pages.
+Because the compatibility endpoint can report more completed calls than the
+explicit request limit, the Host records the overrun and accepts at most twice
+the lane's requested count: twelve for an initial lane and six for a
+continuation lane. A response above its separate hard ceiling is rejected.
+This avoids discarding an already-paid, otherwise valid result for a bounded
+provider-side overrun.
 
 Pexels requests use the documented `query` parameter. Every real upstream
 request also carries a fresh Host-generated `_grokapp_cache_bust` value made
@@ -88,8 +91,9 @@ response, or user query is written to logs or returned in diagnostics.
   editorial framing. Each lane aims for eight source pages and returns source
   metadata only. The initial search therefore sends at most three HTTP
   requests and asks for at most eighteen `web_search` calls; `Load more` uses
-  one HTTP request and asks for at most six additional calls. The separate
-  observed-response ceilings are thirty-six and twelve calls respectively.
+  one HTTP request, targets four fresh source pages, and asks for at most three
+  additional calls. The separate observed-response ceilings are thirty-six and
+  six calls respectively.
   Responses discovery is bounded to 55 seconds.
   Source-page fetch and image validation then receive up to 30 seconds, with a
   20-second minimum after a slow Responses result so already-discovered pages

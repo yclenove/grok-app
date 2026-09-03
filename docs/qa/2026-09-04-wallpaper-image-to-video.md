@@ -76,20 +76,22 @@ account details, and stored credentials are intentionally omitted.
   36 items in the first post-click frame, and the first appended item opened as
   `17 / 36`.
 - Grok Saved opened in its isolated persistent WebView through the configured
-  proxy, but Cloudflare required a human verification. No challenge was solved
-  automatically; pagination and media playback remain pending that manual
-  step.
+  proxy on the current head, but Cloudflare required a human verification. No
+  challenge was solved automatically; the earlier full Saved acceptance remains
+  historical evidence, while current-head pagination and media playback remain
+  pending that manual step.
 
 ## Automated verification
 
 Post-QA verification completed against the final working tree:
 
 - Corrected appearance and wallpaper layout guards: `6/6` passed.
-- Focused wallpaper frontend suites: `68/68` tests passed.
+- Focused wallpaper frontend suites: `15` files, `95/95` tests passed.
 - Frontend suite: `592` files, `7087/7087` tests passed.
 - TypeScript typecheck and ESLint: passed.
 - Production UI build (`pnpm build:ui`): passed.
 - Rust formatting and `cargo clippy --all-targets -- -D warnings`: passed.
+- Targeted manifest-embedded Grok Saved Rust harness: `19/19` passed.
 - Windows Rust harness, with the repository test manifest embedded according
   to CI: `1732` passed, `1` ignored, `0` failed.
 - Final code-quality gate covered `77/77` thousand-line files; `git diff
