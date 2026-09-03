@@ -3,16 +3,45 @@ use std::collections::HashSet;
 use serde_json::{json, Value};
 use url::Url;
 
-use super::{SourcePage, MAX_OBSERVED_WEB_SEARCH_CALLS, MAX_WEB_SEARCH_CALLS, PAGES_PER_LANE};
+use super::{SourcePage, LANE_COUNT};
 use crate::wallpaper_responses_client::{self, ErrorKind};
 
-pub(super) fn parse_source_pages(value: &Value) -> Vec<SourcePage> {
+pub(super) const INITIAL_PAGES_PER_LANE: usize = 8;
+pub(super) const INITIAL_MAX_WEB_SEARCH_CALLS: u32 = 6;
+pub(super) const LOAD_MORE_PAGES_PER_LANE: usize = 4;
+pub(super) const LOAD_MORE_MAX_WEB_SEARCH_CALLS: u32 = 3;
+// The compatibility endpoint has occasionally reported more completed tool
+// calls than max_tool_calls. Retain already-paid results only up to twice the
+// lane's requested budget; initial and continuation requests remain separate.
+pub(super) const OBSERVED_TOOL_CALL_MULTIPLIER: u32 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct LaneBudget {
+    pub(super) pages: usize,
+    pub(super) requested_tool_calls: u32,
+    pub(super) max_observed_tool_calls: u32,
+}
+
+pub(super) fn lane_budget(lane_index: usize) -> LaneBudget {
+    let (pages, requested_tool_calls) = if lane_index > LANE_COUNT {
+        (LOAD_MORE_PAGES_PER_LANE, LOAD_MORE_MAX_WEB_SEARCH_CALLS)
+    } else {
+        (INITIAL_PAGES_PER_LANE, INITIAL_MAX_WEB_SEARCH_CALLS)
+    };
+    LaneBudget {
+        pages,
+        requested_tool_calls,
+        max_observed_tool_calls: requested_tool_calls * OBSERVED_TOOL_CALL_MULTIPLIER,
+    }
+}
+
+pub(super) fn parse_source_pages(value: &Value, max_pages: usize) -> Vec<SourcePage> {
     let Some(raw_pages) = value.get("pages").and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut pages = Vec::new();
-    for raw in raw_pages.iter().take(PAGES_PER_LANE * 2) {
+    for raw in raw_pages.iter().take(max_pages.saturating_mul(2)) {
         let Some(url) = raw
             .get("url")
             .and_then(Value::as_str)
@@ -34,18 +63,21 @@ pub(super) fn parse_source_pages(value: &Value) -> Vec<SourcePage> {
                 .and_then(Value::as_str)
                 .and_then(clean_model_text),
         });
-        if pages.len() == PAGES_PER_LANE {
+        if pages.len() == max_pages {
             break;
         }
     }
     pages
 }
 
-pub(super) fn validate_web_search_tool_calls(output: &[Value]) -> Result<u32, (ErrorKind, u32)> {
+pub(super) fn validate_web_search_tool_calls(
+    output: &[Value],
+    max_observed_tool_calls: u32,
+) -> Result<u32, (ErrorKind, u32)> {
     let calls = wallpaper_responses_client::count_tool_calls(output, "web_search");
     match calls {
         0 => Err((ErrorKind::ToolNotCalled, calls)),
-        1..=MAX_OBSERVED_WEB_SEARCH_CALLS => Ok(calls),
+        calls if calls <= max_observed_tool_calls => Ok(calls),
         _ => Err((ErrorKind::ToolBudgetExceeded, calls)),
     }
 }
@@ -69,12 +101,13 @@ fn clean_model_text(value: &str) -> Option<String> {
 }
 
 pub(super) fn responses_request(query: &str, exclusions: &[String], lane_index: usize) -> Value {
+    let budget = lane_budget(lane_index);
     json!({
         "model": wallpaper_responses_client::MODEL,
         "input": responses_prompt(query, exclusions, lane_index),
         "tools": [{ "type": "web_search" }],
         "tool_choice": "auto",
-        "max_tool_calls": MAX_WEB_SEARCH_CALLS,
+        "max_tool_calls": budget.requested_tool_calls,
         "reasoning": {
             "effort": wallpaper_responses_client::EFFORT,
             "summary": "concise"
@@ -89,7 +122,7 @@ pub(super) fn responses_request(query: &str, exclusions: &[String], lane_index: 
                     "properties": {
                         "pages": {
                             "type": "array",
-                            "maxItems": PAGES_PER_LANE,
+                            "maxItems": budget.pages,
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -112,6 +145,7 @@ pub(super) fn responses_request(query: &str, exclusions: &[String], lane_index: 
 }
 
 pub(super) fn responses_prompt(query: &str, exclusions: &[String], lane_index: usize) -> String {
+    let budget = lane_budget(lane_index);
     let lane = match lane_index {
         1 => "Primary lane: find the strongest direct photographic or visual interpretation.",
         2 => "Bilingual variation lane: retain useful original-language terms, translate the topic into concise English search terms, and search complementary composition, lighting, season, or cultural variants in both forms.",
@@ -130,6 +164,8 @@ User topic: {query}
 Strategy: {lane}
 Opaque source ids already shown: {exclusions}
 
-Use one web_search call when it can find enough real pages. If it cannot, use at most {MAX_WEB_SEARCH_CALLS} calls total and stop as soon as you have {PAGES_PER_LANE} distinct source pages. Do not stop at one or two pages when more real matches are available, but return fewer rather than inventing a URL. Return real HTTPS source webpages, not image CDN URLs, search-result pages, social login walls, or pages that require authentication. Prefer pages whose initial HTML exposes an original or high-resolution primary image through og:image, twitter:image, or JSON-LD without JavaScript, cookies, or anti-bot challenges. Prefer photographer portfolios, editorial photo pages, museums, public institutions, and image-detail pages with a clear primary image. Skip Google/Bing image result pages, watermarked or paid-stock previews, stock index pages without a specific image, memes, screenshots, text cards, ads, and low-resolution thumbnails. Return metadata only."#
+Use one web_search call when it can find enough real pages. If it cannot, use at most {max_tool_calls} calls total and stop as soon as you have {page_target} distinct source pages. Do not stop at one or two pages when more real matches are available, but return fewer rather than inventing a URL. Return real HTTPS source webpages, not image CDN URLs, search-result pages, social login walls, or pages that require authentication. Prefer pages whose initial HTML exposes an original or high-resolution primary image through og:image, twitter:image, or JSON-LD without JavaScript, cookies, or anti-bot challenges. Prefer photographer portfolios, editorial photo pages, museums, public institutions, and image-detail pages with a clear primary image. Skip Google/Bing image result pages, watermarked or paid-stock previews, stock index pages without a specific image, memes, screenshots, text cards, ads, and low-resolution thumbnails. Return metadata only."#,
+        max_tool_calls = budget.requested_tool_calls,
+        page_target = budget.pages,
     )
 }

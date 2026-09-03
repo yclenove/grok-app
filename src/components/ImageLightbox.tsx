@@ -104,6 +104,7 @@ export function ImageLightbox({
             objectFit: "contain",
           },
           draggable: false,
+          referrerPolicy: "no-referrer",
         },
       }}
       controller={{

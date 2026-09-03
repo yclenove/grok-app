@@ -25,12 +25,6 @@ use crate::wallpaper_web_page::{parse_web_page, WebPageMetadata};
 
 const SOURCE: &str = "web";
 const LANE_COUNT: usize = 3;
-const PAGES_PER_LANE: usize = 8;
-const MAX_WEB_SEARCH_CALLS: u32 = 6;
-// The compatibility endpoint has occasionally reported more completed tool
-// calls than the requested max_tool_calls value. Keep the request budget at 6,
-// but retain already-paid results within a separate, bounded protocol ceiling.
-const MAX_OBSERVED_WEB_SEARCH_CALLS: u32 = MAX_WEB_SEARCH_CALLS * 2;
 const MAX_RESULTS: usize = 20;
 const LOW_YIELD_WARNING_THRESHOLD: usize = 2;
 const MAX_IMAGES_PER_SOURCE_PAGE: usize = 2;
@@ -55,9 +49,12 @@ mod request;
 #[cfg(test)]
 use quality::media_variant_identity;
 use quality::{merge_items, new_items};
+use request::{lane_budget, parse_source_pages, responses_request, validate_web_search_tool_calls};
 #[cfg(test)]
-use request::responses_prompt;
-use request::{parse_source_pages, responses_request, validate_web_search_tool_calls};
+use request::{
+    responses_prompt, INITIAL_MAX_WEB_SEARCH_CALLS, INITIAL_PAGES_PER_LANE,
+    LOAD_MORE_MAX_WEB_SEARCH_CALLS, LOAD_MORE_PAGES_PER_LANE, OBSERVED_TOOL_CALL_MULTIPLIER,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -574,6 +571,7 @@ async fn search_lane(
     runtime: &RemoteSearchRuntime,
 ) -> Result<LaneSearchResult, ClientError> {
     let lane_started = Instant::now();
+    let budget = lane_budget(lane_index);
     let payload = tokio::time::timeout(
         LANE_RESULT_TIMEOUT,
         client.post_json(
@@ -591,23 +589,24 @@ async fn search_lane(
     let output = wallpaper_responses_client::output_items(&payload)
         .map_err(|kind| ClientError::new(kind, Some(client.credential_revision().clone())))?;
     let tool_breakdown = wallpaper_responses_client::tool_call_breakdown(output, "web_search");
-    let tool_calls = validate_web_search_tool_calls(output).map_err(|(kind, observed)| {
-        ClientError::new(kind, Some(client.credential_revision().clone()))
-            .with_observed_tool_calls(observed)
-            .with_tool_call_breakdown(tool_breakdown)
-    })?;
-    if tool_calls > MAX_WEB_SEARCH_CALLS {
+    let tool_calls = validate_web_search_tool_calls(output, budget.max_observed_tool_calls)
+        .map_err(|(kind, observed)| {
+            ClientError::new(kind, Some(client.credential_revision().clone()))
+                .with_observed_tool_calls(observed)
+                .with_tool_call_breakdown(tool_breakdown)
+        })?;
+    if tool_calls > budget.requested_tool_calls {
         tracing::warn!(
             source = SOURCE,
             lane = lane_index,
-            requested_tool_calls = MAX_WEB_SEARCH_CALLS,
+            requested_tool_calls = budget.requested_tool_calls,
             observed_tool_calls = tool_calls,
             "wallpaper remote search response exceeded its requested tool budget"
         );
     }
     let structured = wallpaper_responses_client::output_json(output)
         .map_err(|kind| ClientError::new(kind, Some(client.credential_revision().clone())))?;
-    let pages = parse_source_pages(&structured);
+    let pages = parse_source_pages(&structured, budget.pages);
     if pages.is_empty() {
         return Err(ClientError::new(
             ErrorKind::Empty,
@@ -656,7 +655,7 @@ async fn search_lane(
         items.extend(discovery.items);
     }
     Ok(LaneSearchResult {
-        items: merge_items(Vec::new(), items, PAGES_PER_LANE),
+        items: merge_items(Vec::new(), items, budget.pages),
         tool_calls,
         tool_call_breakdown: tool_breakdown,
         responses_elapsed_ms: duration_ms(responses_elapsed),

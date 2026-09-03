@@ -62,19 +62,26 @@ describe("appearance theme layout", () => {
     );
   });
 
-  it("stacks wallpaper controls when their card becomes narrow", () => {
+  it("wraps wallpaper controls from card width without distorting the preview", () => {
     expect(section).toContain(
       'className="settings-row settings-row--stack settings-wallpaper-host"',
     );
     expect(wallpaperCss).toMatch(
-      /\.settings-wallpaper-host\s*\{[^}]*container-name:\s*settings-wallpaper;[^}]*container-type:\s*inline-size;/s,
+      /\.settings-wallpaper--split\s*\{[^}]*display:\s*flex;[^}]*flex-flow:\s*row wrap;/s,
     );
     expect(wallpaperCss).toMatch(
-      /@container settings-wallpaper \(max-width: 520px\)\s*\{[\s\S]*?\.settings-wallpaper--split\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/s,
+      /\.settings-wallpaper--split \.settings-wallpaper__preview-wrap\s*\{[^}]*flex:\s*1\.4 1 320px;[^}]*min-width:\s*min\(320px, 100%\);/s,
     );
     expect(wallpaperCss).toMatch(
-      /@container settings-wallpaper \(max-width: 520px\)[\s\S]*?\.settings-wallpaper--split \.settings-wallpaper__preview\s*\{[^}]*min-height:\s*0;/s,
+      /\.settings-wallpaper__side\s*\{[^}]*flex:\s*1 1 220px;[^}]*min-width:\s*min\(220px, 100%\);/s,
     );
+    expect(wallpaperCss).toMatch(
+      /\.settings-wallpaper--split \.settings-wallpaper__preview\s*\{[^}]*aspect-ratio:\s*16 \/ 10;[^}]*min-height:\s*0;/s,
+    );
+    expect(wallpaperCss).toMatch(
+      /\.settings-wallpaper__sliders\s*\{[^}]*flex:\s*1 0 100%;/s,
+    );
+    expect(wallpaperCss).not.toContain("@container settings-wallpaper");
   });
 
   it("keeps appearance skin chips and preset cards flat (no bevel gradient)", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toLightboxSlides } from "./ImageLightbox";
+import { ImageLightbox, toLightboxSlides } from "./ImageLightbox";
 
 describe("toLightboxSlides", () => {
   it("keeps images on the image slide path", () => {
@@ -53,5 +53,29 @@ describe("toLightboxSlides", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("ImageLightbox", () => {
+  it("does not leak the app origin when rendering remote images", () => {
+    const rendered = ImageLightbox({
+      open: true,
+      close: () => undefined,
+      index: 0,
+      slides: [{ kind: "image", src: "https://cdn.example.test/photo.jpg" }],
+      onView: () => undefined,
+      labels: {
+        next: "Next",
+        prev: "Previous",
+        close: "Close",
+        zoomIn: "Zoom in",
+        zoomOut: "Zoom out",
+      },
+    });
+    const props = rendered.props as {
+      carousel: { imageProps: { referrerPolicy?: string } };
+    };
+
+    expect(props.carousel.imageProps.referrerPolicy).toBe("no-referrer");
   });
 });

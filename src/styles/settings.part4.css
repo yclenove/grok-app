@@ -947,29 +947,25 @@
   width: 100%;
 }
 
-.settings-wallpaper-host {
-  container-name: settings-wallpaper;
-  container-type: inline-size;
-}
-
-/* Wallpaper: preview left, controls stacked right — sizes from content, not viewport. */
+/* Wallpaper: preview and controls wrap from the card's own available width. */
 .settings-wallpaper--split {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.8fr);
+  display: flex;
+  flex-flow: row wrap;
   gap: 14px 16px;
   align-items: start;
   width: 100%;
 }
 
 .settings-wallpaper--split .settings-wallpaper__preview-wrap {
-  min-width: 0;
+  flex: 1.4 1 320px;
+  min-width: min(320px, 100%);
   min-height: 0;
 }
 
 .settings-wallpaper--split .settings-wallpaper__preview {
   aspect-ratio: 16 / 10;
   width: 100%;
-  min-height: 220px;
+  min-height: 0;
   height: auto;
   max-height: none;
 }
@@ -977,9 +973,9 @@
 .settings-wallpaper__side {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
+  flex: 1 1 220px;
   gap: 12px;
-  min-width: 0;
+  min-width: min(220px, 100%);
   min-height: auto;
   height: auto;
 }
@@ -1002,37 +998,15 @@
 }
 
 .settings-wallpaper__sliders {
-  grid-column: 1 / -1;
+  flex: 1 0 100%;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px 16px;
   width: 100%;
-  flex: 0 0 auto;
 }
 
 .settings-wallpaper--split > .settings-wallpaper__error {
-  grid-column: 1 / -1;
-}
-
-@media (max-width: 720px) {
-  .settings-wallpaper--split {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-wallpaper--split .settings-wallpaper__preview {
-    min-height: 180px;
-  }
-
-}
-
-@container settings-wallpaper (max-width: 520px) {
-  .settings-wallpaper--split {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .settings-wallpaper--split .settings-wallpaper__preview {
-    min-height: 0;
-  }
+  flex: 1 0 100%;
 }
 
 /* Window-shaped preview (~desktop frame). Empty state click → file picker. */

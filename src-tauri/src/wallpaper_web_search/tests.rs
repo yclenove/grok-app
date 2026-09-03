@@ -68,25 +68,41 @@ fn fixed_request_bounds_web_tool_calls_and_never_accepts_an_endpoint() {
     let request = responses_request("misty mountains", &[], 1);
     assert_eq!(request["model"], wallpaper_responses_client::MODEL);
     assert_eq!(request["tools"][0]["type"], "web_search");
-    assert_eq!(request["max_tool_calls"], MAX_WEB_SEARCH_CALLS);
+    assert_eq!(request["max_tool_calls"], INITIAL_MAX_WEB_SEARCH_CALLS);
     assert_eq!(request["store"], false);
     assert_eq!(
         request["text"]["format"]["schema"]["properties"]["pages"]["maxItems"],
-        PAGES_PER_LANE
+        INITIAL_PAGES_PER_LANE
     );
     const {
-        assert!(PAGES_PER_LANE * LANE_COUNT >= MAX_RESULTS);
-        assert!(PAGES_PER_LANE * (LANE_COUNT - 1) < MAX_RESULTS);
+        assert!(INITIAL_PAGES_PER_LANE * LANE_COUNT >= MAX_RESULTS);
+        assert!(INITIAL_PAGES_PER_LANE * (LANE_COUNT - 1) < MAX_RESULTS);
     }
     assert!(request.get("endpoint").is_none());
     assert_eq!(request["text"]["format"]["schema"]["required"][0], "pages");
-    assert!(responses_prompt("misty mountains", &[], 1)
-        .contains(&format!("use at most {MAX_WEB_SEARCH_CALLS} calls total")));
+    assert!(
+        responses_prompt("misty mountains", &[], 1).contains(&format!(
+            "use at most {INITIAL_MAX_WEB_SEARCH_CALLS} calls total"
+        ))
+    );
     let bilingual = responses_prompt("极光雪山湖泊", &[], 2);
     assert!(bilingual.contains("translate the topic into concise English"));
     assert!(bilingual.contains("watermarked or paid-stock previews"));
     assert!(responses_prompt("misty mountains", &[], 3).contains("Visual diversity lane"));
-    assert!(responses_prompt("misty mountains", &[], LANE_COUNT + 1).contains("Load-more lane"));
+    let load_more = responses_request("misty mountains", &[], LANE_COUNT + 1);
+    assert_eq!(load_more["max_tool_calls"], LOAD_MORE_MAX_WEB_SEARCH_CALLS);
+    assert_eq!(
+        load_more["text"]["format"]["schema"]["properties"]["pages"]["maxItems"],
+        LOAD_MORE_PAGES_PER_LANE
+    );
+    let load_more_prompt = responses_prompt("misty mountains", &[], LANE_COUNT + 1);
+    assert!(load_more_prompt.contains("Load-more lane"));
+    assert!(load_more_prompt.contains(&format!(
+        "use at most {LOAD_MORE_MAX_WEB_SEARCH_CALLS} calls total"
+    )));
+    assert!(load_more_prompt.contains(&format!(
+        "have {LOAD_MORE_PAGES_PER_LANE} distinct source pages"
+    )));
 }
 
 #[test]
@@ -115,15 +131,18 @@ fn source_discovery_uses_remaining_lane_time_before_its_cap() {
 
 #[test]
 fn source_page_parser_rejects_insecure_userinfo_and_duplicates() {
-    let pages = parse_source_pages(&json!({
-        "pages": [
-            {"url":"http://example.test/a"},
-            {"url":"https://u:p@example.test/a"},
-            {"url":"https://example.test/a", "title":" A  page "},
-            {"url":"https://example.test/a"},
-            {"url":"https://example.test/b"}
-        ]
-    }));
+    let pages = parse_source_pages(
+        &json!({
+            "pages": [
+                {"url":"http://example.test/a"},
+                {"url":"https://u:p@example.test/a"},
+                {"url":"https://example.test/a", "title":" A  page "},
+                {"url":"https://example.test/a"},
+                {"url":"https://example.test/b"}
+            ]
+        }),
+        INITIAL_PAGES_PER_LANE,
+    );
     assert_eq!(pages.len(), 2);
     assert_eq!(pages[0].title.as_deref(), Some("A page"));
 }
@@ -131,30 +150,41 @@ fn source_page_parser_rejects_insecure_userinfo_and_duplicates() {
 #[test]
 fn tolerates_bounded_provider_overrun_and_rejects_the_hard_boundary() {
     let call = || json!({ "type": "web_search_call", "status": "completed" });
-    assert_eq!(validate_web_search_tool_calls(&[call()]), Ok(1));
-    let mut calls = (0..MAX_WEB_SEARCH_CALLS)
+    let initial = lane_budget(1);
+    assert_eq!(
+        validate_web_search_tool_calls(&[call()], initial.max_observed_tool_calls),
+        Ok(1)
+    );
+    let mut calls = (0..initial.requested_tool_calls)
         .map(|_| call())
         .collect::<Vec<_>>();
     assert_eq!(
-        validate_web_search_tool_calls(&calls),
-        Ok(MAX_WEB_SEARCH_CALLS)
+        validate_web_search_tool_calls(&calls, initial.max_observed_tool_calls),
+        Ok(initial.requested_tool_calls)
     );
     assert_eq!(
-        validate_web_search_tool_calls(&[]),
+        validate_web_search_tool_calls(&[], initial.max_observed_tool_calls),
         Err((ErrorKind::ToolNotCalled, 0))
     );
-    calls.extend((MAX_WEB_SEARCH_CALLS..MAX_OBSERVED_WEB_SEARCH_CALLS).map(|_| call()));
+    calls.extend((initial.requested_tool_calls..initial.max_observed_tool_calls).map(|_| call()));
     assert_eq!(
-        validate_web_search_tool_calls(&calls),
-        Ok(MAX_OBSERVED_WEB_SEARCH_CALLS)
+        validate_web_search_tool_calls(&calls, initial.max_observed_tool_calls),
+        Ok(initial.max_observed_tool_calls)
     );
     calls.push(call());
     assert_eq!(
-        validate_web_search_tool_calls(&calls),
+        validate_web_search_tool_calls(&calls, initial.max_observed_tool_calls),
         Err((
             ErrorKind::ToolBudgetExceeded,
-            MAX_OBSERVED_WEB_SEARCH_CALLS + 1
+            initial.max_observed_tool_calls + 1
         ))
+    );
+
+    let continuation = lane_budget(LANE_COUNT + 1);
+    assert_eq!(continuation.pages, LOAD_MORE_PAGES_PER_LANE);
+    assert_eq!(
+        continuation.max_observed_tool_calls,
+        LOAD_MORE_MAX_WEB_SEARCH_CALLS * OBSERVED_TOOL_CALL_MULTIPLIER
     );
 }
 
