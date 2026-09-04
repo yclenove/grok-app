@@ -1,4 +1,9 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   IconCamera,
   IconExportImage,
@@ -77,6 +82,8 @@ const SOURCE_TAB_GROUPS: ReadonlyArray<SourceTabGroup> = [
   },
 ];
 
+const SOURCE_TABS = SOURCE_TAB_GROUPS.flatMap((group) => group.tabs);
+
 export type WallpaperSourceTabsProps = {
   t: Translate;
   value: WallpaperSourceKind;
@@ -92,14 +99,38 @@ export function WallpaperSourceTabs({
   panelId,
   onChange,
 }: WallpaperSourceTabsProps) {
-  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+  const tabRefs = useRef(new Map<WallpaperSourceKind, HTMLButtonElement>());
 
   useEffect(() => {
-    activeTabRef.current?.scrollIntoView?.({
+    tabRefs.current.get(value)?.scrollIntoView?.({
       block: "nearest",
       inline: "nearest",
     });
   }, [value]);
+
+  const handleKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    current: WallpaperSourceKind,
+  ) => {
+    if (disabled) return;
+    const currentIndex = SOURCE_TABS.findIndex((tab) => tab.id === current);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % SOURCE_TABS.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + SOURCE_TABS.length) % SOURCE_TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = SOURCE_TABS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = SOURCE_TABS[nextIndex];
+    if (!next) return;
+    tabRefs.current.get(next.id)?.focus();
+    onChange(next.id);
+  };
 
   return (
     <div
@@ -120,9 +151,13 @@ export function WallpaperSourceTabs({
             return (
               <button
                 key={tab.id}
-                ref={active ? activeTabRef : undefined}
+                ref={(node) => {
+                  if (node) tabRefs.current.set(tab.id, node);
+                  else tabRefs.current.delete(tab.id);
+                }}
                 type="button"
                 role="tab"
+                tabIndex={active ? 0 : -1}
                 id={`wallpaper-source-tab-${tab.id}`}
                 aria-controls={panelId}
                 aria-selected={active}
@@ -133,6 +168,7 @@ export function WallpaperSourceTabs({
                   (active ? " wallpaper-source-tabs__btn--active" : "")
                 }
                 onClick={() => onChange(tab.id)}
+                onKeyDown={(event) => handleKeyDown(event, tab.id)}
                 disabled={disabled}
               >
                 {tab.icon}

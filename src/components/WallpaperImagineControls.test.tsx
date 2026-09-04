@@ -87,6 +87,11 @@ describe("WallpaperImagineControls", () => {
     expect(
       screen.getByPlaceholderText("settings.wallpaperSource.imaginePlaceholder"),
     ).toBeTruthy();
+    expect(
+      screen.getByRole("textbox", {
+        name: "settings.wallpaperSource.imaginePlaceholder",
+      }),
+    ).toBeTruthy();
     fireEvent.click(
       screen.getByRole("radio", {
         name: "settings.wallpaperSource.kind.video",
@@ -112,6 +117,11 @@ describe("WallpaperImagineControls", () => {
 
     expect(
       screen.getByText("settings.wallpaperSource.videoSourceMissing"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("textbox", {
+        name: "settings.wallpaperSource.videoPromptPlaceholder",
+      }),
     ).toBeTruthy();
     expect(
       screen.getByRole<HTMLButtonElement>("button", {
@@ -178,5 +188,27 @@ describe("WallpaperImagineControls", () => {
       screen.getByRole("button", { name: "common.cancel" }),
     );
     expect(onCancelGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not advertise unsupported cancellation for image generation", () => {
+    const onCancelGeneration = vi.fn();
+    render(
+      <WallpaperImagineControls
+        t={t}
+        locked
+        model={model({
+          mode: "image",
+          generating: true,
+          onCancelGeneration,
+        })}
+      />,
+    );
+
+    const action = screen.getByRole<HTMLButtonElement>("button", {
+      name: "settings.wallpaperSource.generating",
+    });
+    expect(action.disabled).toBe(true);
+    fireEvent.click(action);
+    expect(onCancelGeneration).not.toHaveBeenCalled();
   });
 });

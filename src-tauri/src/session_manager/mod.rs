@@ -27,6 +27,7 @@ mod fork_trim;
 mod journal;
 mod post_turn_reconcile;
 mod process;
+mod stop;
 mod stream;
 mod turn;
 mod types;

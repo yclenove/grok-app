@@ -82,6 +82,22 @@ function sourceLabelKey(
   return "settings.wallpaperLibrary";
 }
 
+function itemActionAccessibleName(
+  t: Translate,
+  actionKey: MessageKey,
+  item: WallpaperGalleryItem,
+  index: number,
+): string {
+  const context =
+    item.textPreview?.trim() ||
+    item.prompt?.trim() ||
+    item.username?.trim() ||
+    item.sourceName?.trim() ||
+    item.id.trim() ||
+    String(index + 1);
+  return `${t(actionKey)}: ${context}`;
+}
+
 export function WallpaperSourceGallery({
   t,
   tab,
@@ -228,7 +244,7 @@ export function WallpaperSourceGallery({
             </div>
           ) : null}
 
-          {visibleItems.map((item) => {
+          {visibleItems.map((item, index) => {
             const active = item.id === selectedId;
             const loading = previewingId === item.id;
             const canGenerateVideo = isWallpaperImageItem(item);
@@ -272,7 +288,13 @@ export function WallpaperSourceGallery({
                       className="wallpaper-masonry__preview"
                       disabled={locked && !loading}
                       onClick={() => onPreview(item)}
-                      aria-label={t("settings.wallpaperSource.openPreview")}
+                      aria-pressed={active}
+                      aria-label={itemActionAccessibleName(
+                        t,
+                        "settings.wallpaperSource.openPreview",
+                        item,
+                        index,
+                      )}
                     >
                       <span className="wallpaper-masonry__media">
                         {item.source === "grok_album" && !library ? (
@@ -322,8 +344,11 @@ export function WallpaperSourceGallery({
                         type="button"
                         className="wallpaper-masonry__video-action"
                         disabled={locked || loading}
-                        aria-label={t(
+                        aria-label={itemActionAccessibleName(
+                          t,
                           "settings.wallpaperSource.generateVideoFromImage",
+                          item,
+                          index,
                         )}
                         title={t(
                           "settings.wallpaperSource.generateVideoFromImage",

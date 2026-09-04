@@ -173,6 +173,94 @@ describe("useWallpaperImagineController", () => {
     expect(setters.setError).toHaveBeenLastCalledWith(null);
   });
 
+  it("ignores a late cancel error after leaving the Imagine source", async () => {
+    const generation = deferred<WallpaperSearchResult>();
+    const cancellation = deferred<boolean>();
+    wallpaperImageToVideo.mockReturnValue(generation.promise);
+    wallpaperImageToVideoCancel.mockReturnValue(cancellation.promise);
+    const { result, setters } = renderController();
+
+    act(() =>
+      result.current.beginVideoFromItem(
+        imageItem("local-switch", {
+          source: "library",
+          localPath: "C:\\wallpapers\\local-switch.jpg",
+          fullUrl: "file:///wallpapers/local-switch.jpg",
+        }),
+      ),
+    );
+    act(() => {
+      void result.current.generate();
+    });
+    await waitFor(() => expect(result.current.generating).toBe(true));
+
+    let cancelAttempt: Promise<void> | null = null;
+    act(() => {
+      cancelAttempt = result.current.cancelGeneration();
+    });
+    await waitFor(() => expect(result.current.cancelling).toBe(true));
+    act(() => result.current.cancelAll());
+    expect(result.current.cancelling).toBe(false);
+    setters.setError.mockClear();
+    setters.setErrorCode.mockClear();
+
+    await act(async () => {
+      cancellation.reject(new Error("cancel transport failed"));
+      await cancelAttempt;
+    });
+
+    expect(setters.setError).not.toHaveBeenCalled();
+    expect(setters.setErrorCode).not.toHaveBeenCalled();
+    await act(async () => generation.resolve(videoResult("late-after-switch")));
+    expect(setters.setItems).not.toHaveBeenCalled();
+  });
+
+  it("cancels active generation without setting state after unmount", async () => {
+    const generation = deferred<WallpaperSearchResult>();
+    wallpaperImageToVideo.mockReturnValue(generation.promise);
+    const { result, setters, unmount } = renderController();
+
+    act(() =>
+      result.current.beginVideoFromItem(
+        imageItem("local-unmount", {
+          source: "library",
+          localPath: "C:\\wallpapers\\local-unmount.jpg",
+          fullUrl: "file:///wallpapers/local-unmount.jpg",
+        }),
+      ),
+    );
+    act(() => {
+      void result.current.generate();
+    });
+    await waitFor(() => expect(result.current.generating).toBe(true));
+    const requestId = wallpaperImageToVideo.mock.calls[0]?.[4] as string;
+
+    unmount();
+    expect(wallpaperImageToVideoCancel).toHaveBeenCalledWith(requestId);
+    await act(async () => generation.resolve(videoResult("late-unmounted")));
+    expect(setters.setItems).not.toHaveBeenCalled();
+  });
+
+  it("cancels active source preparation on unmount", async () => {
+    const preparation = deferred<{ path: string; mime: string }>();
+    ensureLocalWallpaperMedia.mockReturnValue(preparation.promise);
+    const { result, unmount } = renderController();
+
+    act(() => result.current.beginVideoFromItem(imageItem("preparing")));
+    await waitFor(() =>
+      expect(ensureLocalWallpaperMedia).toHaveBeenCalledTimes(1),
+    );
+    unmount();
+
+    expect(cancelRemoteWallpaperMediaRequests).toHaveBeenCalled();
+    await act(async () =>
+      preparation.resolve({
+        path: "C:\\wallpapers\\preparing.jpg",
+        mime: "image/jpeg",
+      }),
+    );
+  });
+
   it("does not let an older source download replace a newer selection", async () => {
     const first = deferred<{ path: string; mime: string }>();
     const second = deferred<{ path: string; mime: string }>();

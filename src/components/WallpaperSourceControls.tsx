@@ -123,6 +123,7 @@ export function WallpaperSourceControls({
             type="search"
             className="wallpaper-source-form__input"
             value={query}
+            aria-label={t("settings.wallpaperSource.xPlaceholder")}
             placeholder={t("settings.wallpaperSource.xPlaceholder")}
             disabled={xControlsLocked}
             onChange={(event) => onQueryChange(event.target.value)}
@@ -192,6 +193,7 @@ export function WallpaperSourceControls({
             type="search"
             className="wallpaper-source-form__input"
             value={query}
+            aria-label={t(placeholderKey)}
             placeholder={t(placeholderKey)}
             disabled={locked}
             onChange={(event) => onQueryChange(event.target.value)}

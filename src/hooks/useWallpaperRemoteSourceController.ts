@@ -17,7 +17,9 @@ import {
   type WallpaperRemoteSource,
 } from "@/lib/wallpaperRemoteSearch";
 import {
+  appendGalleryItems,
   dedupeGalleryItems,
+  mergeAuthoritativeGalleryItems,
   parseWallpaperSourceError,
   type WallpaperGalleryItem,
   type WallpaperSourceErrorCode,
@@ -307,7 +309,7 @@ export function useWallpaperRemoteSourceController({
         setHasMore(continuation !== null);
         return;
       }
-      setItems(list);
+      setItems((current) => mergeAuthoritativeGalleryItems(current, list));
       setError(null);
       setErrorCode(null);
       setHasMore(result.hasMore);
@@ -427,8 +429,10 @@ export function useWallpaperRemoteSourceController({
         }
         return;
       }
-      const merged = dedupeGalleryItems([...itemsRef.current, ...extra]);
-      setItems(merged);
+      const authoritative = appendGalleryItems(initialItems, extra);
+      setItems((current) =>
+        mergeAuthoritativeGalleryItems(current, authoritative),
+      );
       setError(null);
       setErrorCode(null);
       setHasMore(result.hasMore);
@@ -437,7 +441,7 @@ export function useWallpaperRemoteSourceController({
       setStatusHint(
         t("settings.wallpaperSource.remote.loadedMore", {
           count: extra.length,
-          total: merged.length,
+          total: authoritative.length,
         }),
       );
       if (nextContinuation) void startPrefetch(nextContinuation);

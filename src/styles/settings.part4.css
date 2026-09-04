@@ -15,7 +15,7 @@
 }
 
 /* Narrow layouts keep the grouped source strip on one readable scroll row. */
-@media (max-width: 760px) {
+@media (max-width: 1200px) {
   .wallpaper-source-tabs {
     display: flex;
     justify-content: flex-start;
@@ -454,9 +454,9 @@
   background: transparent;
 }
 
-.wallpaper-masonry-scroll:focus,
 .wallpaper-masonry-scroll:focus-visible {
-  outline: none;
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
 }
 
 /* True 3-col masonry — height follows image, no fixed crop box */

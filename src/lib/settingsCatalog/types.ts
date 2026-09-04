@@ -114,7 +114,7 @@ export type SettingsEntry = {
   labelKey: MessageKey;
   /** Extra i18n keys included in search (descriptions, option labels). */
   descKeys?: readonly MessageKey[];
-  /** Free-form aliases (usually English) for search. */
+  /** Cross-locale aliases: English technical terms plus CJK user vocabulary. */
   keywords?: readonly string[];
 };
 

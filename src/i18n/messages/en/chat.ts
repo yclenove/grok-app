@@ -170,4 +170,10 @@ export const enChat = {
   "chat.changedFiles.viewAll": "View all",
   "chat.changedFiles.openFile": "Review changes in {name}",
   "chat.changedFiles.more": "+{n} more",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "Expand diff for {name}",
+  "chat.changedFiles.collapse": "Collapse diff for {name}",
+  "chat.changedFiles.openInReview": "Open in Review",
+  "chat.changedFiles.noDiffYet": "Diff not available yet — open Review for the full file.",
+  "chat.changedFiles.truncated": "Showing {shown} of {total} lines"
 } as const;

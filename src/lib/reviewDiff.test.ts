@@ -3,6 +3,7 @@ import {
   buildReviewTree,
   countPatchDelta,
   decodeGitPath,
+  findReviewEntryForFocusPath,
   parseReviewPatch,
   reviewFileBadge,
   truncateMiddle,
@@ -68,6 +69,35 @@ describe("buildReviewTree", () => {
     const apps = tree.find((n) => n.name === "apps");
     expect(apps?.isDir).toBe(true);
     expect(apps?.children?.[0]?.name).toBe("web");
+  });
+});
+
+describe("findReviewEntryForFocusPath", () => {
+  const entries = [
+    {
+      key: "first",
+      path: "C:/repo/src/a/index.ts",
+      relPath: "src/a/index.ts",
+    },
+    {
+      key: "second",
+      path: "C:/repo/src/b/index.ts",
+      relPath: "src/b/index.ts",
+    },
+  ];
+
+  it("prefers a later exact path over an earlier matching basename", () => {
+    expect(
+      findReviewEntryForFocusPath(
+        "C:/repo/src/b/index.ts",
+        "C:/repo",
+        entries,
+      )?.key,
+    ).toBe("second");
+  });
+
+  it("does not guess when a basename matches multiple files", () => {
+    expect(findReviewEntryForFocusPath("index.ts", "C:/repo", entries)).toBeNull();
   });
 });
 

@@ -127,6 +127,7 @@ export function useWallpaperRemoteSearch(
   );
   const activeRef = useRef<ActiveRequest | null>(null);
   const generationRef = useRef(0);
+  const invocationRef = useRef(0);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -187,7 +188,7 @@ export function useWallpaperRemoteSearch(
     dispatchProgressive({ type: "reset" });
   }, []);
 
-  const cancel = useCallback(async (): Promise<boolean> => {
+  const cancelActive = useCallback(async (): Promise<boolean> => {
     const active = activeRef.current;
     if (!active) return false;
     generationRef.current += 1;
@@ -200,13 +201,23 @@ export function useWallpaperRemoteSearch(
     }
   }, [clearUi, client]);
 
+  const cancel = useCallback((): Promise<boolean> => {
+    invocationRef.current += 1;
+    return cancelActive();
+  }, [cancelActive]);
+
   const run = useCallback(
     async (
       operation: "initial" | "more",
       source: WallpaperRemoteSource,
       query: string,
     ): Promise<WallpaperRemoteSearchResult | null> => {
-      if (activeRef.current) await cancel();
+      const invocation = invocationRef.current + 1;
+      invocationRef.current = invocation;
+      if (activeRef.current) await cancelActive();
+      if (!mountedRef.current || invocationRef.current !== invocation) {
+        return null;
+      }
       const nextRequestId = requestIdFactory();
       const generation = generationRef.current + 1;
       generationRef.current = generation;
@@ -249,13 +260,14 @@ export function useWallpaperRemoteSearch(
         }
       }
     },
-    [cancel, clearUi, client, requestIdFactory],
+    [cancelActive, clearUi, client, requestIdFactory],
   );
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      invocationRef.current += 1;
       generationRef.current += 1;
       const active = activeRef.current;
       activeRef.current = null;

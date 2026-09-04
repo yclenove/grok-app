@@ -28,8 +28,11 @@
   min-width: 0;
 }
 
+/* Match session rows: hover, or keyboard focus on the action buttons.
+   Do NOT use .tree-l2:focus-within — the row itself is focusable
+   (role=button), so a click would keep trailing icons stuck on. */
 .tree-l2:hover .tree-l2__actions,
-.tree-l2:focus-within .tree-l2__actions,
+.tree-l2:has(.tree-l2__actions:focus-within) .tree-l2__actions,
 .tree-l2--select-mode .tree-l2__actions--select-mode {
   opacity: 1;
   pointer-events: auto;

@@ -163,4 +163,10 @@ export const koChat = {
   "chat.changedFiles.viewAll": "모두 보기",
   "chat.changedFiles.openFile": "{name} 변경 검토",
   "chat.changedFiles.more": "+{n}개 더",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "{name} 차이 펼치기",
+  "chat.changedFiles.collapse": "{name} 차이 접기",
+  "chat.changedFiles.openInReview": "Review에서 열기",
+  "chat.changedFiles.noDiffYet": "아직 미리볼 차이가 없습니다 — Review에서 전체 파일을 확인하세요.",
+  "chat.changedFiles.truncated": "{total}줄 중 {shown}줄 표시"
 };

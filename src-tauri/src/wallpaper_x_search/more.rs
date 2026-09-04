@@ -25,19 +25,51 @@ pub(crate) async fn search_more(
         load_more_error_result(requested_mode, "load_more_unavailable", started, None, None)
     } else {
         let key = search_cache_key(query, sort, requested_mode, credential_revision.as_ref());
-        let previous = response_cache().lock().get(&key, Instant::now());
-        match previous.filter(is_responses_context) {
-            Some(previous) => {
-                run_load_more_provider(
+        let continuation = ResponsesContinuationLease::claim(response_cache(), key, Instant::now());
+        match continuation {
+            Some(continuation) => {
+                let result = run_load_more_provider(
                     requested_mode,
                     credential_revision,
-                    &previous.items,
+                    &continuation.previous().items,
                     query,
                     sort,
                     &runtime,
                     started,
                 )
-                .await
+                .await;
+                if runtime.is_cancelled() {
+                    drop(continuation);
+                    cancelled_result(
+                        requested_mode,
+                        "responses",
+                        started,
+                        result
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.responses_duration_ms),
+                        None,
+                    )
+                } else if consumes_responses_continuation(&result) {
+                    // Commit at the cache lock after one last cancellation
+                    // read. Failures and cancellation restore the lease.
+                    if continuation.consume_if_active(&runtime) {
+                        result
+                    } else {
+                        cancelled_result(
+                            requested_mode,
+                            "responses",
+                            started,
+                            result
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.responses_duration_ms),
+                            None,
+                        )
+                    }
+                } else {
+                    result
+                }
             }
             None => {
                 load_more_error_result(requested_mode, "load_more_unavailable", started, None, None)
@@ -93,6 +125,7 @@ async fn run_load_more_provider(
                     responses_duration_ms: Some(responses_duration_ms),
                     cli_duration_ms: None,
                     cache_hit: false,
+                    continuation_available: false,
                     search_calls: Some(result.search_calls),
                     candidate_count: result.candidate_count,
                     valid_count: result.valid_count,
@@ -163,13 +196,8 @@ fn load_more_runtime(
     WallpaperXSearchRuntime::new(cancellation, progress, batch)
 }
 
-fn is_responses_context(result: &WallpaperSearchResult) -> bool {
-    result.error_code.is_none()
-        && !result.items.is_empty()
-        && result
-            .meta
-            .as_ref()
-            .is_some_and(|meta| meta.route_used == "responses")
+fn consumes_responses_continuation(result: &WallpaperSearchResult) -> bool {
+    result.error_code.is_none() || result.error_code.as_deref() == Some("empty")
 }
 
 fn load_more_error_code(kind: ResponsesSearchErrorKind) -> &'static str {
@@ -200,6 +228,7 @@ fn load_more_error_result(
             responses_duration_ms,
             cli_duration_ms: None,
             cache_hit: false,
+            continuation_available: false,
             search_calls,
             candidate_count: 0,
             valid_count: 0,
@@ -226,5 +255,22 @@ mod tests {
         assert!(!counts_toward_circuit(
             ResponsesSearchErrorKind::RateLimited
         ));
+
+        let empty = load_more_error_result(
+            store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+            "empty",
+            Instant::now(),
+            None,
+            None,
+        );
+        let retryable = load_more_error_result(
+            store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+            "responses_network",
+            Instant::now(),
+            None,
+            None,
+        );
+        assert!(consumes_responses_continuation(&empty));
+        assert!(!consumes_responses_continuation(&retryable));
     }
 }

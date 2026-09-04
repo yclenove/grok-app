@@ -51,6 +51,54 @@ function galleryProps(
 }
 
 describe("WallpaperSourceGallery", () => {
+  it("gives each preview control an item-specific accessible name", () => {
+    render(
+      <WallpaperSourceGallery
+        {...galleryProps({
+          visibleItems: [
+            {
+              id: "first",
+              thumbUrl: "https://images.example.test/first.jpg",
+              fullUrl: "https://images.example.test/first.jpg",
+              kind: "image",
+              source: "openverse",
+              textPreview: "Misty ridge",
+            },
+            {
+              id: "second",
+              thumbUrl: "https://images.example.test/second.jpg",
+              fullUrl: "https://images.example.test/second.jpg",
+              kind: "image",
+              source: "openverse",
+              textPreview: "Night coast",
+            },
+          ],
+          kindCounts: { all: 2, image: 2, video: 0 },
+          selectedId: "first",
+        })}
+      />,
+    );
+
+    const firstPreview = screen.getByRole("button", {
+      name: "settings.wallpaperSource.openPreview: Misty ridge",
+    });
+    const secondPreview = screen.getByRole("button", {
+      name: "settings.wallpaperSource.openPreview: Night coast",
+    });
+    expect(firstPreview.getAttribute("aria-pressed")).toBe("true");
+    expect(secondPreview.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.generateVideoFromImage: Misty ridge",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: "settings.wallpaperSource.generateVideoFromImage: Night coast",
+      }),
+    ).toBeTruthy();
+  });
+
   it("renders a saved local video as video instead of a broken image", () => {
     const onDropItem = vi.fn();
     const { container } = render(
@@ -223,11 +271,11 @@ describe("WallpaperSourceGallery", () => {
     );
 
     const action = screen.getByRole("button", {
-      name: "settings.wallpaperSource.generateVideoFromImage",
+      name: "settings.wallpaperSource.generateVideoFromImage: search-image",
     });
     expect(
       screen.getAllByRole("button", {
-        name: "settings.wallpaperSource.openPreview",
+        name: /^settings\.wallpaperSource\.openPreview/,
       }),
     ).toHaveLength(2);
     fireEvent.click(action);
@@ -257,7 +305,7 @@ describe("WallpaperSourceGallery", () => {
 
     expect(
       screen.getByRole<HTMLButtonElement>("button", {
-        name: "settings.wallpaperSource.generateVideoFromImage",
+        name: "settings.wallpaperSource.generateVideoFromImage: locked-image",
       }).disabled,
     ).toBe(true);
   });

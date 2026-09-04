@@ -58,6 +58,7 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
   const prefetchInFlightRef = useRef<number | null>(null);
   const loadMoreInFlightRef = useRef<{
     generation: number;
+    backgroundOnly: boolean;
     promise: Promise<GrokAlbumSnapshot>;
   } | null>(null);
   const lastPrefetchAttemptRef = useRef(0);
@@ -244,7 +245,11 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
             loadMoreInFlightRef.current = null;
           }
         });
-      loadMoreInFlightRef.current = { generation, promise: request };
+      loadMoreInFlightRef.current = {
+        generation,
+        backgroundOnly,
+        promise: request,
+      };
       return request;
     },
     [],
@@ -271,7 +276,40 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
     setErrorCode(null);
     prefetchPausedRef.current = false;
     try {
-      const next = await requestLoadMore(false, generation);
+      const reusedBackgroundWarmup =
+        loadMoreInFlightRef.current?.generation === generation &&
+        loadMoreInFlightRef.current.backgroundOnly;
+      let next: GrokAlbumSnapshot;
+      try {
+        next = await requestLoadMore(false, generation);
+      } catch (error) {
+        // A rejected hidden warmup is not the user's foreground attempt. Once
+        // the rejected promise has cleared its in-flight slot, retry the
+        // explicit request exactly once; its own failure remains visible.
+        if (
+          !reusedBackgroundWarmup ||
+          generation !== generationRef.current ||
+          !enabledRef.current
+        ) {
+          throw error;
+        }
+        next = await requestLoadMore(false, generation);
+      }
+      // A foreground click can race the one-page-ahead warmup and reuse its
+      // promise. Retry once as the explicit foreground action when Host either
+      // skipped that background scroll or found no page while it still reports
+      // that more content may exist.
+      const warmupAvailable = grokAlbumItemsToGallery(next.items).length;
+      if (
+        next.prefetchSkipped ||
+        (reusedBackgroundWarmup &&
+          next.canLoadMore &&
+          next.newItems === 0 &&
+          warmupAvailable < target)
+      ) {
+        next = await requestLoadMore(false, generation);
+      }
+      if (next.prefetchSkipped) return;
       if (!acceptSnapshot(next, generation)) return;
       const available = grokAlbumItemsToGallery(next.items).length;
       setVisibleCount(Math.min(target, available));
@@ -343,6 +381,10 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
   ]);
 
   useEffect(() => {
+    // StrictMode replays effect cleanup/setup without rerendering. Restore the
+    // lifecycle ref before the replayed sync so cleanup cannot permanently
+    // disable the hook.
+    enabledRef.current = enabled;
     if (!enabled) {
       observedGenerationRef.current = generationRef.current;
       clearGrokAlbumThumbnailCache();
@@ -366,6 +408,12 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
 
   useEffect(
     () => () => {
+      enabledRef.current = false;
+      generationRef.current += 1;
+      syncInFlightRef.current = null;
+      prefetchInFlightRef.current = null;
+      loadMoreInFlightRef.current = null;
+      initialSignInGenerationRef.current = null;
       clearGrokAlbumThumbnailCache();
       cancelGrokAlbumMediaRequests();
     },

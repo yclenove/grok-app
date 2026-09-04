@@ -5,10 +5,7 @@ use super::*;
 use crate::wallpaper_source::WallpaperGalleryItem;
 
 fn revision(value: u64) -> BuildOauthCredentialRevision {
-    BuildOauthCredentialRevision {
-        file_len: value,
-        modified_ms: Some(value.into()),
-    }
+    BuildOauthCredentialRevision::for_test(value, Some(value.into()), value as u8)
 }
 
 fn item(id: &str) -> WallpaperGalleryItem {
@@ -57,6 +54,19 @@ fn responses_success() -> ResponsesSearchSuccess {
         effort: wallpaper_x_responses::RESPONSES_EFFORT,
         credential_revision: revision(1),
     }
+}
+
+fn cached_responses_result() -> WallpaperSearchResult {
+    let mut result = finish_cli(
+        cli_success(),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        None,
+        Instant::now(),
+        None,
+        0,
+    );
+    result.meta.as_mut().expect("responses meta").route_used = "responses".into();
+    prepare_cache_entry(result)
 }
 
 fn responses_error(kind: ResponsesSearchErrorKind) -> ResponsesSearchError {
@@ -335,6 +345,61 @@ async fn wallpaper_x_search_cache_hits_without_new_provider_work() {
     assert_eq!(meta.cli_duration_ms, None);
 }
 
+#[tokio::test]
+async fn wallpaper_x_search_pre_cancel_wins_over_a_cached_success() {
+    let requested_mode = store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW;
+    let credential_revision = revision(1);
+    let cache = Mutex::new(SearchCache::new(32, Duration::from_secs(600)));
+    let key = search_cache_key(
+        "misty mountains",
+        Some("top"),
+        requested_mode,
+        Some(&credential_revision),
+    );
+    let cached = prepare_cache_entry(finish_cli(
+        cli_success(),
+        requested_mode,
+        None,
+        Instant::now(),
+        None,
+        1,
+    ));
+    cache.lock().insert(key, cached, Instant::now());
+
+    let runtime = WallpaperXSearchRuntime::quiet();
+    runtime.cancellation().cancel();
+    let responses_calls = Arc::new(AtomicUsize::new(0));
+    let cli_calls = Arc::new(AtomicUsize::new(0));
+    let observed_responses_calls = Arc::clone(&responses_calls);
+    let observed_cli_calls = Arc::clone(&cli_calls);
+    let result = search_with_cache_and_providers(
+        CachedSearchContext {
+            request_id: "request-cancelled",
+            query: "misty mountains",
+            sort: Some("top"),
+            requested_mode,
+            credential_revision: Some(credential_revision),
+            cache: &cache,
+            circuit: &Mutex::new(ResponsesCircuitBreaker::default()),
+            runtime: &runtime,
+        },
+        move || async move {
+            observed_responses_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(responses_success())
+        },
+        move || async move {
+            observed_cli_calls.fetch_add(1, Ordering::SeqCst);
+            cli_success()
+        },
+    )
+    .await;
+
+    assert_eq!(result.error_code.as_deref(), Some("cancelled"));
+    assert!(result.items.is_empty());
+    assert_eq!(responses_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(cli_calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn wallpaper_x_search_cache_obeys_ttl_lru_mode_and_credential_revision() {
     let now = Instant::now();
@@ -365,6 +430,175 @@ fn wallpaper_x_search_cache_obeys_ttl_lru_mode_and_credential_revision() {
     assert!(cache.get(&cli_b, now).is_none(), "least-recent B evicted");
     assert!(cache.get(&cli_a, now).is_some());
     assert!(cache.get(&cli_c, now + Duration::from_secs(10)).is_none());
+}
+
+#[test]
+fn wallpaper_x_responses_continuation_claim_is_atomic() {
+    let cache = Arc::new(Mutex::new(SearchCache::new(32, Duration::from_secs(600))));
+    let key = search_cache_key(
+        "misty mountains",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&revision(1)),
+    );
+    cache
+        .lock()
+        .insert(key.clone(), cached_responses_result(), Instant::now());
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let claims = (0..8)
+        .map(|_| {
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                cache
+                    .lock()
+                    .claim_responses_continuation(&key, Instant::now())
+                    .is_some()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        claims
+            .into_iter()
+            .map(|claim| claim.join().expect("continuation claimant panicked"))
+            .filter(|claimed| *claimed)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn wallpaper_x_responses_continuation_restores_on_drop_and_consumes_once() {
+    let cache = Mutex::new(SearchCache::new(32, Duration::from_secs(600)));
+    let key = search_cache_key(
+        "misty mountains",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&revision(1)),
+    );
+    cache
+        .lock()
+        .insert(key.clone(), cached_responses_result(), Instant::now());
+
+    let failed_attempt = ResponsesContinuationLease::claim(&cache, key.clone(), Instant::now())
+        .expect("first continuation claim");
+    assert!(ResponsesContinuationLease::claim(&cache, key.clone(), Instant::now()).is_none());
+    drop(failed_attempt);
+
+    let successful_attempt = ResponsesContinuationLease::claim(&cache, key.clone(), Instant::now())
+        .expect("retry continuation claim");
+    assert!(successful_attempt.consume_if_active(&WallpaperXSearchRuntime::quiet()));
+    assert!(ResponsesContinuationLease::claim(&cache, key.clone(), Instant::now()).is_none());
+    let cached = cache
+        .lock()
+        .get(&key, Instant::now())
+        .expect("cached result");
+    assert!(!cached.meta.expect("cache metadata").continuation_available);
+}
+
+#[test]
+fn wallpaper_x_responses_continuation_survives_ttl_and_lru_while_in_flight() {
+    let now = Instant::now();
+    let mut cache = SearchCache::new(1, Duration::from_secs(10));
+    let leased_key = search_cache_key(
+        "misty mountains",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&revision(1)),
+    );
+    let other_key = search_cache_key("forest", Some("top"), "cli", Some(&revision(1)));
+    cache.insert(leased_key.clone(), cached_responses_result(), now);
+    let (lease_id, _) = cache
+        .claim_responses_continuation(&leased_key, now)
+        .expect("continuation claim");
+
+    let after_ttl = now + Duration::from_secs(11);
+    let cli = prepare_cache_entry(finish_cli(cli_success(), "cli", None, now, None, 0));
+    assert!(!cache.insert(other_key.clone(), cli, after_ttl));
+    assert_eq!(
+        cache.entries.len(),
+        1,
+        "in-flight leases keep the cache bounded"
+    );
+    assert!(!cache.entries.contains_key(&other_key));
+    cache.resolve_responses_continuation(&leased_key, lease_id, false, after_ttl);
+
+    assert!(
+        cache
+            .claim_responses_continuation(&leased_key, after_ttl)
+            .is_some(),
+        "retry lease remains available after a long failed request"
+    );
+}
+
+#[tokio::test]
+async fn wallpaper_x_responses_only_advertises_continuation_when_cache_accepts_it() {
+    let cache = Mutex::new(SearchCache::new(1, Duration::from_secs(600)));
+    let circuit = Mutex::new(ResponsesCircuitBreaker::default());
+    let occupied_key = search_cache_key(
+        "occupied",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&revision(1)),
+    );
+    assert!(cache.lock().insert(
+        occupied_key.clone(),
+        cached_responses_result(),
+        Instant::now(),
+    ));
+    let occupied = ResponsesContinuationLease::claim(&cache, occupied_key, Instant::now())
+        .expect("occupy the only cache slot");
+    let runtime = WallpaperXSearchRuntime::quiet();
+
+    let result = search_with_cache_and_providers(
+        CachedSearchContext {
+            request_id: "request-cache-full",
+            query: "fresh query",
+            sort: Some("top"),
+            requested_mode: store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+            credential_revision: Some(revision(1)),
+            cache: &cache,
+            circuit: &circuit,
+            runtime: &runtime,
+        },
+        || async { Ok(responses_success()) },
+        || async { cli_success() },
+    )
+    .await;
+
+    assert_eq!(result.error_code, None);
+    assert!(
+        !result
+            .meta
+            .expect("responses metadata")
+            .continuation_available
+    );
+    assert_eq!(cache.lock().entries.len(), 1);
+    drop(occupied);
+}
+
+#[test]
+fn wallpaper_x_responses_continuation_cancel_restores_instead_of_consuming() {
+    let cache = Mutex::new(SearchCache::new(32, Duration::from_secs(600)));
+    let key = search_cache_key(
+        "misty mountains",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&revision(1)),
+    );
+    cache
+        .lock()
+        .insert(key.clone(), cached_responses_result(), Instant::now());
+    let lease = ResponsesContinuationLease::claim(&cache, key.clone(), Instant::now())
+        .expect("continuation claim");
+    let runtime = WallpaperXSearchRuntime::quiet();
+    runtime.cancellation().cancel();
+
+    assert!(!lease.consume_if_active(&runtime));
+    assert!(ResponsesContinuationLease::claim(&cache, key, Instant::now()).is_some());
 }
 
 #[tokio::test]
@@ -463,4 +697,52 @@ fn wallpaper_x_search_circuit_resets_on_expiry_success_or_token_change() {
     circuit.record_success(revision(2));
     assert!(circuit.allows_attempt(Some(revision(2)), now));
     assert_eq!(circuit.consecutive_failures, 0);
+}
+
+#[test]
+fn wallpaper_x_search_circuit_resets_when_proxy_settings_change() {
+    let now = Instant::now();
+    let credential = revision(1);
+    let mut circuit = ResponsesCircuitBreaker::default();
+    circuit.record_failure(
+        ResponsesSearchErrorKind::BadRequest,
+        Some(credential.clone()),
+        now,
+    );
+    assert!(!circuit.allows_attempt(Some(credential.clone()), now));
+
+    circuit.reset_for_network_change();
+
+    assert!(circuit.allows_attempt(Some(credential), now));
+    assert_eq!(circuit.consecutive_failures, 0);
+    assert_eq!(circuit.open_until, None);
+}
+
+#[test]
+fn wallpaper_x_cache_and_circuit_reset_for_same_metadata_content_replacement() {
+    let first = BuildOauthCredentialRevision::for_test(10, Some(20), 1);
+    let replacement = BuildOauthCredentialRevision::for_test(10, Some(20), 2);
+    let first_key = search_cache_key(
+        "mountains",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&first),
+    );
+    let replacement_key = search_cache_key(
+        "mountains",
+        Some("top"),
+        store::WALLPAPER_X_SEARCH_MODE_RESPONSES_PREVIEW,
+        Some(&replacement),
+    );
+    assert_ne!(first_key, replacement_key);
+
+    let now = Instant::now();
+    let mut circuit = ResponsesCircuitBreaker::default();
+    circuit.record_failure(
+        ResponsesSearchErrorKind::BadRequest,
+        Some(first.clone()),
+        now,
+    );
+    assert!(!circuit.allows_attempt(Some(first), now));
+    assert!(circuit.allows_attempt(Some(replacement), now));
 }

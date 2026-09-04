@@ -163,4 +163,10 @@ export const filChat = {
   "chat.changedFiles.viewAll": "Tingnan lahat",
   "chat.changedFiles.openFile": "Suriin ang mga pagbabago sa {name}",
   "chat.changedFiles.more": "+{n} pa",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "I-expand ang diff ng {name}",
+  "chat.changedFiles.collapse": "I-collapse ang diff ng {name}",
+  "chat.changedFiles.openInReview": "Buksan sa Review",
+  "chat.changedFiles.noDiffYet": "Wala pang diff — buksan ang Review para sa buong file.",
+  "chat.changedFiles.truncated": "Ipinapakita ang {shown} sa {total} na linya"
 };

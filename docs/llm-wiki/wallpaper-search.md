@@ -38,7 +38,7 @@ AppearanceSection（模式设置）
 
 - 固定 endpoint `https://cli-chat-proxy.grok.com/v1/responses`、模型 `grok-4.6`、effort `low`、只读 `x_search` 工具和 `store: false`；前端不能传 endpoint、模型、工具或凭证。
 - 每次 HTTP 请求超时 90 秒，响应正文最多读取 2 MiB；禁止自动跟随重定向，Bearer 不得跨主机重放。
-- 一次搜索并发启动 3 路互补请求：直接主题、视觉变化、发现/双语扩展。每路目标 8 张、最多 3 次 `x_search`，因此单次用户搜索的硬上限是 3 个 HTTP 请求、9 次工具调用和 24 张最终结果；客户端必须同时用提示词限制并核验每路响应中的真实工具调用数，不能只相信 `max_tool_calls`。
+- 一次搜索并发启动 3 路互补请求：直接主题、视觉变化、发现/双语扩展。每路目标 8 张、最多 3 次 `x_search`，因此单次用户搜索的硬上限是 3 个 HTTP 请求、9 次工具调用和 24 张最终结果；客户端必须同时用提示词限制并核验每路响应中的真实工具调用数，不能只相信 `max_tool_calls`。结构化输出中没有任何真实 `x_search` 调用也必须按协议错误拒绝，不能接受模型直接编写的结果。
 - 三路只读取一次 OAuth，并复用同一个 HTTP client；按真实完成顺序处理，每路通过共用验图管线后立即发送一批。跨路按媒体和 status + media index 去重，一路失败不得抹掉其他路的有效结果。
 - 当前不做自动单路重试，也不再执行旧的 2+1 补搜。三路全部失败时才进入既有错误优先级和至多一次 CLI 回退；任一路已有有效图即返回真实部分结果，不得为了补满 24 张触发回退。
 - 初始搜索成功结束后，Responses 画廊允许用户主动点击一次“加载更多”。该操作仅启动 1 路目标 8 张、最多 3 次 `x_search` 的请求，因此一次 UI 搜索最多约展示 32 张；它不自动重试、不回退 CLI，也不会在初始三路仍活跃时启动。
@@ -88,6 +88,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 
 - `网络` 使用固定 Build Responses `web_search` 找公开来源页，再由 Host 解析页面中的结构化图片并走共用安全、签名、尺寸和去重校验。初始三路并发，每路目标 8 个来源页，全局最多返回 20 张；每个来源页最多保留两张不同的合格图片。每路请求和提示仍限制 6 次工具调用；若兼容端点无视该限制，Host 会记录并容忍至多 12 次已完成调用，超过独立硬上限仍拒绝。结果少不代表请求目标小，常见原因是 Responses 某路超时、来源页不可读、候选不是图片、尺寸/质量不足或去重淘汰。
 - `Openverse` 使用公开 Images API；`Pexels` 使用用户单独配置且只保留在 Host 的 API Key。两者必须保留提供方返回的来源页、作者和许可信息，禁止把结果描述为“免版权”。
+- `网络` 加载更多只会把已显示来源页规范成有限的 hostname/site 列表，作为数据交给新的 Responses 请求主动避开已见站点；路径、查询和 fragment 不进入模型提示，Host 的来源页与媒体去重仍是最终权威。
 - 远程缩略图与原图 IPC 只接受来源类型、规范媒体 URL 和请求 id，前端不得传 Referer、来源页或任意请求头。搜索结果通过 Host 校验时，Host 才把媒体 URL 与来源页的 HTTPS origin 登记到按来源隔离、最多 512 项、滑动 TTL 30 分钟的内存表；后续请求只能复用这个 origin，不会携带路径、查询、Cookie、Token 或 Authorization。缩略图源文件、最长边、总像素和解码分配都必须有独立上限，防止小体积高像素文件放大 Host 内存占用。
 - Pexels 使用其官方 `query` 参数。每次真实上游请求都追加一个 Host 随机生成、与凭证和查询无关的 `_grokapp_cache_bust` 值，避免共享 CDN 把其他鉴权上下文的旧 `200` 响应复用到当前请求。该值不进入 Host 搜索缓存身份；缓存仍按规范查询、凭证修订和契约版本隔离。
 - 直连图库请求会从规范查询派生一个 provider-only 查询：移除独立的 `wallpaper` / `wallpapers`、`4K` / `8K` / `UHD` 以及对应的中日韩“壁纸”修饰词，避免把展示用途和分辨率要求误当成图库主题。若移除后为空则继续使用原查询。缓存、分页身份和替换搜索仍使用原始规范查询；该规则不得改写 `网络`、X 或 Imagine 的查询，也不得静默翻译用户主题。修改净化规则时必须提升图库缓存契约版本。
@@ -125,7 +126,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 - 顶层导航仅允许 HTTPS Grok/xAI 与明确支持的登录提供商；禁止新窗口与下载。新增登录方式时必须先补 allowlist 测试，不能改为任意 HTTPS。
 - 未登录时，官方 Saved 路由可能只渲染空壳并返回 401/403；固定启动脚本只检查正常页面壳是否出现，若没有则回到 `https://grok.com/` 展示官方登录入口。脚本不读取 Cookie、storage、响应或账号内容，登录完成后仍由用户打开 Saved。
 - Host 只执行仓库内固定的 DOM 快照/滚动脚本，前端不得传入 JavaScript。DOM 脚本在数据离开页面前先剔除未知 URL 查询参数并限制字段长度，Host 再做独立校验和总载荷上限；DTO 只包含 `assets.grok.com/.../generated/...` 媒体 URL、缩略图、类型、尺寸、创建时间和 post id，最多缓存 480 条且不落盘。
-- 用户先看到 20 条；当官方相册窗口不在前台时，可用官方页面自身的无限滚动预取下一批 20 条。点击“加载更多”优先瞬时展开缓存，再补热下一批。不得直接调用未公开 `/rest/media/*` 接口。
+- 用户先看到 20 条；当官方相册窗口不在前台时，可用官方页面自身的无限滚动预取下一批 20 条。点击“加载更多”优先瞬时展开缓存，再补热下一批；若点击恰好复用了一个因相册窗口获得焦点而跳过的后台 Promise，必须补发一次真实前台分页，不能误判为耗尽。不得直接调用未公开 `/rest/media/*` 接口。
 - `assets.grok.com` 会拒绝主应用 WebView 的跨站 `<img>` 请求。画廊缩略图在严格 `assets.grok.com/.../generated/...` 校验后，并发竞速两条只读路径：隔离 Saved WebView 使用自身登录态抓取并在页内压缩，credential-free Host 使用当前代理抓取并在本地压缩；首个成功结果胜出并取消另一条。输出统一为最长边 480 px、至多 512 KiB 的 JPEG，只以 `data:` URL 暂存在当前前端生命周期内；前端最多 4 路并发，预热范围固定为当前 20 条加下一批 20 条。禁止把这批缩略图写入磁盘或壁纸库。
 - 缩略图等待态使用静态占位；不得用无限 shimmer 制造“反复重载”的错觉。轮询和下一批预热必须保留已有卡片及其内存缩略图，不得清空、重排或重新挂载已显示结果。
 - 多张未缓存卡片可以共用同一静态占位图，但查看器必须按原始输入索引打开用户点击的媒体，禁止按占位图 URL 反查索引。各 slide 的可显示 URL 并发解析；选中的 lazy 原图在 Lightbox 立即挂载后按需升级，不能被慢兄弟项串行阻塞。
@@ -152,7 +153,13 @@ CLI 与 Responses 的候选必须经过同一套处理：
 常用定向检查：
 
 ```bash
-pnpm test -- src/lib/wallpaperSource.test.ts src/lib/wallpaperXSearch.test.ts src/hooks/useWallpaperXSearch.test.tsx src/components/WallpaperSourceModal.test.tsx
+pnpm test -- \
+  src/lib/wallpaperSource.test.ts src/lib/wallpaperXSearch.test.ts \
+  src/hooks/useWallpaperXSearch.test.tsx src/hooks/useWallpaperGrokAlbum.test.tsx \
+  src/components/WallpaperSourceModal.test.tsx \
+  src/components/WallpaperSourceModal.sources.test.tsx \
+  src/components/WallpaperSourceModal.x-paging.test.tsx \
+  src/components/WallpaperSourceTabs.test.tsx
 pnpm typecheck
 cd src-tauri && cargo test wallpaper_x --no-run
 ```

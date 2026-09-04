@@ -600,9 +600,11 @@ import { WorkbenchAppDialogStage } from "@/app/WorkbenchAppDialogStage";
 import { WorkbenchComposerModals } from "@/app/WorkbenchComposerModals";
 import {
   mergeSessionChange,
+  sessionChangesFromMessages,
   summarizeSessionChanges,
   type SessionFileChange,
 } from "@/lib/sessionChanges";
+import { pinReviewFocusPath } from "@/lib/reviewFocusPaths";
 import {
   gitDirtySummariesEqual,
   summarizeGitDirty,
@@ -1095,6 +1097,16 @@ export function AppWorkbench() {
   const [sessionChangesById, setSessionChangesById] = useState<
     Record<string, SessionFileChange[]>
   >({});
+  /**
+   * Turn changed-files chip → Review focus (#998).
+   * Lifted out of SideWorkbench so open races cannot drop the path.
+   * `pinnedPaths` always appear in Review even when sessionChanges is empty.
+   */
+  const [reviewFocus, setReviewFocus] = useState<{
+    path: string;
+    token: number;
+    pinnedPaths: string[];
+  } | null>(null);
   /**
    * Workspace git dirty summary for the active project (composer chip).
    * Null when not a repo, unavailable, clean, or no active project.
@@ -2299,20 +2311,30 @@ export function AppWorkbench() {
   const dragRegion = tauriDragRegion(platform);
   const [windowMaximized, setWindowMaximized] = useState(false);
 
-  /** Route chat context opens into Side Workbench tabs.
-   * When the aside is mounted, SideWorkbench `openRequest` is the only consumer. */
+  /**
+   * Route chat context opens into Side Workbench tabs.
+   * When the aside is collapsed, open it and keep `resourceOpenTarget` so
+   * SideWorkbench can consume path (e.g. Review focus for #998). Clearing
+   * here dropped path and left Review empty / unfocused.
+   */
   useEffect(() => {
     if (!resourceOpenTarget) return;
     if (!layout.asideCollapsed) return;
     const result = applySideContextOpen(sideWorkbench, resourceOpenTarget, {
       isGitProject: sideIsGitProject,
     });
-    if (result.noticeKey) {
+    // Turn-chip opens with a path still work without git — skip the scary toast (#998).
+    const skipNotGitToast =
+      resourceOpenTarget.type === "changes" &&
+      !!(resourceOpenTarget.path || "").trim();
+    if (result.noticeKey && !skipNotGitToast) {
       showToast(tr(result.noticeKey), 2400);
     }
     if (result.needAsideOpen) {
       setSideWorkbench(result.state);
       openAsidePane();
+      // Keep target — SideWorkbench openRequest effect consumes path + clears.
+      return;
     }
     setResourceOpenTarget(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- consume once per target
@@ -12884,17 +12906,83 @@ export function AppWorkbench() {
     setEditAttachments((prev) => prev.filter((x) => x.path !== att.path));
   }, []);
 
+  /** Active session id for Changes / Review — keep seed + read on the same key. */
+  const reviewSessionId = (
+    session.sessionId ||
+    viewingSessionIdRef.current ||
+    ""
+  ).trim();
+
+  /** Ensure Review sees session tool edits even if live merge missed paths (#998). */
+  const seedSessionChangesForReview = useCallback(
+    (focusPath?: string | null) => {
+      const sid = (
+        session.sessionId ||
+        viewingSessionIdRef.current ||
+        ""
+      ).trim();
+      if (!sid) return;
+      const focus = (focusPath || "").trim();
+      // Also try the alternate id so display/seed cannot diverge.
+      const alt = (session.sessionId || "").trim();
+      const ids = Array.from(new Set([sid, alt].filter(Boolean)));
+      setSessionChangesById((prev) => {
+        let next = prev;
+        for (const id of ids) {
+          let list = next[id] ?? [];
+          const msgs = messagesBySessionRef.current.get(id) ?? [];
+          for (const c of sessionChangesFromMessages(msgs)) {
+            list = mergeSessionChange(list, {
+              toolCallId: c.toolCallId,
+              title: c.title,
+              kind: c.toolKind,
+              status: c.status,
+              path: c.path,
+              before: c.before,
+              after: c.after,
+              updatedAt: c.updatedAt,
+            });
+          }
+          if (focus) {
+            list = mergeSessionChange(list, {
+              kind: "write",
+              status: "completed",
+              path: focus,
+            });
+          }
+          next = { ...next, [id]: list };
+        }
+        return next;
+      });
+    },
+    [session.sessionId],
+  );
+
   const onThreadOpenSessionChanges = useCallback(() => {
+    seedSessionChangesForReview(null);
+    // Open Review synchronously — do not rely only on openRequest races (#998).
+    setSideWorkbench((s) => openSideTab(s, "review"));
     openAsidePane();
     setResourceOpenTarget({ type: "changes" });
-  }, [openAsidePane]);
+  }, [openAsidePane, seedSessionChangesForReview]);
 
   const onThreadOpenModifiedPath = useCallback(
     (path: string) => {
+      const p = (path || "").trim();
+      seedSessionChangesForReview(p);
+      // Synchronously ensure Review tab exists before aside paint (#998).
+      setSideWorkbench((s) => openSideTab(s, "review"));
       openAsidePane();
-      setResourceOpenTarget({ type: "changes", path });
+      if (p) {
+        setReviewFocus((prev) => ({
+          path: p,
+          token: (prev?.token ?? 0) + 1,
+          pinnedPaths: pinReviewFocusPath(prev?.pinnedPaths ?? [], p),
+        }));
+      }
+      setResourceOpenTarget({ type: "changes", path: p || undefined });
     },
-    [openAsidePane],
+    [openAsidePane, seedSessionChangesForReview],
   );
 
   const onThreadOpenResource = useCallback(
@@ -14285,6 +14373,9 @@ export function AppWorkbench() {
             retryAgentConnect={retryAgentConnect}
             runErrorBannerAction={runErrorBannerAction}
             session={session}
+            sessionChanges={
+              sessionChangesById[session.sessionId || ""] ?? []
+            }
             sessionJsonSchema={sessionJsonSchema}
             sessionTranscriptStore={sessionTranscriptStore}
             sessions={sessions}
@@ -14557,8 +14648,13 @@ export function AppWorkbench() {
           sideDockComposer={sideDockComposer}
           onToggleSideDockComposer={onToggleSideDockComposer}
           sessionChanges={
-            sessionChangesById[session.sessionId || ""] ?? []
+            sessionChangesById[reviewSessionId] ??
+            sessionChangesById[session.sessionId || ""] ??
+            []
           }
+          reviewFocusPath={reviewFocus?.path ?? null}
+          reviewFocusToken={reviewFocus?.token ?? 0}
+          reviewPinnedPaths={reviewFocus?.pinnedPaths ?? []}
           sessionId={session.sessionId}
           plan={plan}
           planFocusKey={planFocusKey}

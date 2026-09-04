@@ -173,6 +173,7 @@ import {
   buildAssistantTimeline,
   shouldShowTrailingLiveThinking,
 } from "@/lib/timelinePhases";
+import type { SessionFileChange } from "@/lib/sessionChanges";
 import { collectTurnModifiedPaths } from "@/lib/turnChangedFiles";
 import { estimateDurationSecFromTimestamps } from "@/lib/formatWorkDuration";
 import { resolveChatTranscriptEmptyState } from "@/lib/chatTranscriptEmpty";
@@ -782,6 +783,8 @@ export interface ConversationThreadProps {
   onOpenSessionChanges?: () => void;
   /** Open a modified path from turn activity. */
   onOpenModifiedPath?: (path: string) => void;
+  /** Live session file before/after for turn inline diff cards (#998). */
+  sessionChanges?: SessionFileChange[];
   /**
    * When false, hide message time labels in action rows.
    * createdAt data is still kept on messages — UI only.
@@ -905,6 +908,7 @@ type TranscriptMessageRowProps = {
   latestContinuableEndId?: string | null;
   onOpenSessionChanges?: ConversationThreadProps["onOpenSessionChanges"];
   onOpenModifiedPath?: ConversationThreadProps["onOpenModifiedPath"];
+  sessionChanges?: ConversationThreadProps["sessionChanges"];
   /**
    * Epoch ms for live thinking on the active streaming assistant
    * (turn / post-steer clock). Null for finished rows.
@@ -940,6 +944,7 @@ function transcriptRowPropsEqual(
   if (a.latestContinuableEndId !== b.latestContinuableEndId) return false;
   if (a.onOpenSessionChanges !== b.onOpenSessionChanges) return false;
   if (a.onOpenModifiedPath !== b.onOpenModifiedPath) return false;
+  if (a.sessionChanges !== b.sessionChanges) return false;
   if (a.turnLive !== b.turnLive) return false;
   if (a.canRewindSession !== b.canRewindSession) return false;
   if (a.canForkFromAssistant !== b.canForkFromAssistant) return false;
@@ -1025,6 +1030,7 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
   latestContinuableEndId,
   onOpenSessionChanges,
   onOpenModifiedPath,
+  sessionChanges,
 }: TranscriptMessageRowProps) {
   void _timeTick;
   const renderStartRef = useRef<number | null>(null);
@@ -1777,6 +1783,8 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
                   paths={modifiedPaths}
                   locale={locale}
                   streaming={!!m.streaming}
+                  sessionChanges={sessionChanges}
+                  projectPath={projectPath}
                   onOpenPath={onOpenModifiedPath}
                   onViewAll={onOpenSessionChanges}
                 />
@@ -1916,6 +1924,7 @@ export function ConversationThread({
   onLocateMessage,
   onOpenSessionChanges,
   onOpenModifiedPath,
+  sessionChanges,
   showTimestamps = true,
   messageTimeFormat = "absolute",
   showReplyLength = false,
@@ -3203,6 +3212,7 @@ export function ConversationThread({
               latestContinuableEndId={latestContinuableEndId}
               onOpenSessionChanges={onOpenSessionChanges}
               onOpenModifiedPath={onOpenModifiedPath}
+              sessionChanges={sessionChanges}
             />
           ))}
 

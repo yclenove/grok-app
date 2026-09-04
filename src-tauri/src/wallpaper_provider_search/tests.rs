@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use url::Url;
 
 fn gallery_item(id: usize) -> WallpaperGalleryItem {
     WallpaperGalleryItem {
@@ -214,6 +215,72 @@ fn cache_expires_and_keeps_the_host_owned_cursor() {
 }
 
 #[test]
+fn provider_initial_cache_hit_is_linearized_before_a_later_cancellation() {
+    let key = PageKey {
+        search: SearchKey {
+            source: RemoteWallpaperSource::Openverse,
+            query: "misty lake".into(),
+            credential_revision: None,
+            contract_version: CONTRACT_VERSION,
+        },
+        first_page: 1,
+    };
+    let mut cache = SearchCache::default();
+    cache.insert(
+        key.clone(),
+        RemoteSearchResult::success("openverse", vec![gallery_item(1)], true, 1),
+        None,
+        Instant::now(),
+    );
+    let cancellation = WallpaperSearchCancellation::default();
+    let guarded =
+        remote_search::read_cache_if_active(&cancellation, || cache.get(&key, Instant::now()));
+
+    assert!(guarded.is_ok());
+    cancellation.cancel();
+    assert!(cancellation.is_cancelled());
+}
+
+#[test]
+fn provider_load_more_cache_hit_is_linearized_before_a_later_cancellation() {
+    let search = SearchKey {
+        source: RemoteWallpaperSource::Openverse,
+        query: "misty lake".into(),
+        credential_revision: None,
+        contract_version: CONTRACT_VERSION,
+    };
+    let key = PageKey {
+        search: search.clone(),
+        first_page: 2,
+    };
+    let mut cache = SearchCache::default();
+    cache.update_continuation(
+        &search,
+        Some(ProviderContinuation {
+            next_page: 2,
+            buffered_items: Vec::new(),
+            upstream_has_more: true,
+        }),
+        Instant::now(),
+    );
+    cache.insert(
+        key.clone(),
+        RemoteSearchResult::success("openverse", vec![gallery_item(2)], true, 1),
+        None,
+        Instant::now(),
+    );
+    let cancellation = WallpaperSearchCancellation::default();
+    let guarded = remote_search::read_cache_if_active(&cancellation, || {
+        let continuation = cache.continuation(&search, Instant::now());
+        continuation.and_then(|_| cache.get(&key, Instant::now()))
+    });
+
+    assert!(guarded.is_ok());
+    cancellation.cancel();
+    assert!(cancellation.is_cancelled());
+}
+
+#[test]
 fn overfetched_results_are_paged_before_advancing_upstream() {
     let continuation = ProviderContinuation {
         next_page: 3,
@@ -301,21 +368,459 @@ fn provider_cancel_before_begin_remains_sticky_and_bounded() {
 }
 
 #[tokio::test]
-async fn concurrent_provider_probes_preserve_upstream_relevance_order() {
-    use futures_util::StreamExt as _;
-
-    let output = buffered_in_input_order(
+async fn concurrent_provider_probes_report_completion_order() {
+    let mut output = Vec::new();
+    visit_probes_as_completed(
         [("first", 30_u64), ("second", 0_u64), ("third", 5_u64)],
         3,
+        Duration::from_millis(100),
         |(name, delay_ms)| async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             name
         },
+        |_, item| output.push(item),
     )
-    .collect::<Vec<_>>()
     .await;
 
-    assert_eq!(output, ["first", "second", "third"]);
+    assert_eq!(output, ["second", "third", "first"]);
+}
+
+#[tokio::test]
+async fn provider_probe_concurrency_never_exceeds_the_configured_limit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+    let concurrency = 3;
+    visit_probes_as_completed(
+        0..9,
+        concurrency,
+        Duration::from_secs(1),
+        {
+            let in_flight = Arc::clone(&in_flight);
+            let max_in_flight = Arc::clone(&max_in_flight);
+            move |item| {
+                let in_flight = Arc::clone(&in_flight);
+                let max_in_flight = Arc::clone(&max_in_flight);
+                async move {
+                    let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    item
+                }
+            }
+        },
+        |_, _| {},
+    )
+    .await;
+
+    assert_eq!(max_in_flight.load(Ordering::SeqCst), concurrency);
+    assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn slow_first_probe_does_not_hide_later_fast_successes() {
+    let mut output = Vec::new();
+    visit_probes_as_completed(
+        [("first", 200_u64), ("second", 1_u64), ("third", 5_u64)],
+        3,
+        Duration::from_millis(40),
+        |(name, delay_ms)| async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            name
+        },
+        |_, item| output.push(item),
+    )
+    .await;
+
+    assert_eq!(output, ["second", "third"]);
+}
+
+#[tokio::test]
+async fn validation_reports_fast_batch_before_slow_first_probe() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = RemoteSearchRuntime::new(
+        cancellation,
+        Arc::new(|_| {}),
+        Arc::new(move |batch| {
+            let _ = batch_tx.send(batch);
+        }),
+    );
+    let channels = (0..5)
+        .map(|_| tokio::sync::oneshot::channel::<()>())
+        .collect::<Vec<_>>();
+    let (senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let mut senders = senders.into_iter().map(Some).collect::<Vec<_>>();
+    let partial = ProviderPartialResults::new(1);
+    let validation = validate_probe_outputs(
+        receivers.into_iter().enumerate(),
+        5,
+        Duration::from_secs(5),
+        &runtime,
+        &partial,
+        |(index, ready)| async move {
+            ready.await.ok()?;
+            Some(gallery_item(index))
+        },
+    );
+    tokio::pin!(validation);
+
+    for sender in senders.iter_mut().skip(1) {
+        sender.take().expect("fast sender").send(()).unwrap();
+    }
+    let first_batch = tokio::select! {
+        batch = batch_rx.recv() => batch.expect("first progress batch"),
+        result = &mut validation => panic!("validation finished before slow head: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+            panic!("first progress batch waited for the slow head")
+        },
+    };
+
+    assert_eq!(first_batch.items.len(), 4);
+    assert!(!first_batch.done);
+    assert!(first_batch.items.iter().all(|item| item.id != "item-0"));
+    senders[0]
+        .take()
+        .expect("slow head sender")
+        .send(())
+        .unwrap();
+    let items = validation.await.expect("validation result");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["item-0", "item-1", "item-2", "item-3", "item-4"]
+    );
+}
+
+#[tokio::test]
+async fn all_slow_probes_stop_at_the_validation_budget() {
+    let started = Instant::now();
+    let mut output = Vec::new();
+    visit_probes_as_completed(
+        [1_u8, 2, 3, 4],
+        2,
+        Duration::from_millis(30),
+        |value| async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            value
+        },
+        |_, item| output.push(item),
+    )
+    .await;
+
+    assert!(output.is_empty());
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "elapsed={:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn validation_reports_first_batch_before_slow_tail_finishes() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = RemoteSearchRuntime::new(
+        cancellation,
+        Arc::new(|_| {}),
+        Arc::new(move |batch| {
+            let _ = batch_tx.send(batch);
+        }),
+    );
+    let channels = (0..5)
+        .map(|_| tokio::sync::oneshot::channel::<()>())
+        .collect::<Vec<_>>();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let partial = ProviderPartialResults::new(1);
+    let validation = validate_probe_outputs(
+        receivers.into_iter().enumerate(),
+        5,
+        Duration::from_secs(5),
+        &runtime,
+        &partial,
+        |(index, ready)| async move {
+            ready.await.ok()?;
+            Some(gallery_item(index))
+        },
+    );
+    tokio::pin!(validation);
+
+    for sender in senders.drain(..4) {
+        sender.send(()).expect("release leading probe");
+    }
+    let first_batch = tokio::select! {
+        batch = batch_rx.recv() => batch.expect("first progress batch"),
+        result = &mut validation => panic!("validation finished before tail: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+            panic!("first progress batch waited for the slow tail")
+        },
+    };
+
+    assert_eq!(first_batch.batch_index, 1);
+    assert_eq!(first_batch.accumulated_count, 4);
+    assert!(!first_batch.done);
+    assert_eq!(
+        first_batch
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["item-0", "item-1", "item-2", "item-3"]
+    );
+
+    senders
+        .pop()
+        .expect("tail sender")
+        .send(())
+        .expect("release tail probe");
+    let items = validation.await.expect("validation result");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["item-0", "item-1", "item-2", "item-3", "item-4"]
+    );
+
+    let final_batch = tokio::time::timeout(Duration::from_secs(1), batch_rx.recv())
+        .await
+        .expect("final batch timeout")
+        .expect("final batch");
+    assert_eq!(final_batch.batch_index, 2);
+    assert_eq!(final_batch.accumulated_count, 5);
+    assert!(final_batch.done);
+    assert_eq!(
+        final_batch
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["item-4"]
+    );
+    assert!(batch_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn validation_deduplicates_in_order_and_caps_progress_at_result_limit() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let reported_batches = Arc::clone(&batches);
+    let runtime = RemoteSearchRuntime::new(
+        cancellation,
+        Arc::new(|_| {}),
+        Arc::new(move |batch| reported_batches.lock().push(batch)),
+    );
+    let mut unique = (0..=RESULT_LIMIT).map(gallery_item).collect::<Vec<_>>();
+    unique[2].media_fingerprint = Some("same-media".into());
+    let mut duplicate_url = gallery_item(100);
+    duplicate_url.full_url = unique[1].full_url.clone();
+    let mut duplicate_fingerprint = gallery_item(101);
+    duplicate_fingerprint.media_fingerprint = Some("same-media".into());
+    let mut probes = Vec::new();
+    for (index, item) in unique.into_iter().enumerate() {
+        probes.push(item);
+        if index == 1 {
+            probes.push(duplicate_url.clone());
+        } else if index == 2 {
+            probes.push(duplicate_fingerprint.clone());
+        }
+    }
+
+    let items = validate_probe_outputs(
+        probes,
+        MAX_CONCURRENT_PROBES,
+        Duration::from_secs(1),
+        &runtime,
+        &ProviderPartialResults::new(1),
+        |item| std::future::ready(Some(item)),
+    )
+    .await
+    .expect("validation result");
+
+    assert_eq!(items.len(), RESULT_LIMIT + 1);
+    assert_eq!(
+        items.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+        (0..=RESULT_LIMIT)
+            .map(|index| format!("item-{index}"))
+            .collect::<Vec<_>>()
+    );
+    let batches = batches.lock();
+    assert_eq!(batches.iter().filter(|batch| batch.done).count(), 1);
+    assert!(batches.last().is_some_and(|batch| batch.done));
+    assert_eq!(
+        batches
+            .iter()
+            .flat_map(|batch| batch.items.iter())
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>(),
+        (0..RESULT_LIMIT)
+            .map(|index| format!("item-{index}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn validation_cancellation_returns_cancelled_without_final_batch() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let reported_batches = Arc::clone(&batches);
+    let runtime = RemoteSearchRuntime::new(
+        cancellation.clone(),
+        Arc::new(|_| {}),
+        Arc::new(move |batch| reported_batches.lock().push(batch)),
+    );
+    cancellation.cancel();
+
+    let result = validate_probe_outputs(
+        [()],
+        1,
+        Duration::from_secs(5),
+        &runtime,
+        &ProviderPartialResults::new(1),
+        |_| std::future::pending::<Option<WallpaperGalleryItem>>(),
+    )
+    .await;
+
+    assert!(matches!(result, Err(ProviderError::Cancelled)));
+    assert!(batches.lock().is_empty());
+}
+
+#[tokio::test]
+async fn validation_cancellation_after_progress_omits_final_batch() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let (batch_tx, mut batch_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = RemoteSearchRuntime::new(
+        cancellation.clone(),
+        Arc::new(|_| {}),
+        Arc::new(move |batch| {
+            let _ = batch_tx.send(batch);
+        }),
+    );
+    let channels = (0..5)
+        .map(|_| tokio::sync::oneshot::channel::<()>())
+        .collect::<Vec<_>>();
+    let (mut senders, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+    let partial = ProviderPartialResults::new(1);
+    let validation = validate_probe_outputs(
+        receivers.into_iter().enumerate(),
+        5,
+        Duration::from_secs(5),
+        &runtime,
+        &partial,
+        |(index, ready)| async move {
+            ready.await.ok()?;
+            Some(gallery_item(index))
+        },
+    );
+    tokio::pin!(validation);
+
+    for sender in senders.drain(..4) {
+        sender.send(()).expect("release leading probe");
+    }
+    let first_batch = tokio::select! {
+        batch = batch_rx.recv() => batch.expect("first progress batch"),
+        result = &mut validation => panic!("validation finished before tail: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_secs(1)) => panic!("first batch timeout"),
+    };
+    assert!(!first_batch.done);
+
+    cancellation.cancel();
+    assert!(matches!(validation.await, Err(ProviderError::Cancelled)));
+    assert!(batch_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn provider_operation_timeout_is_classified() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let result = with_provider_deadline(
+        &cancellation,
+        Duration::from_millis(20),
+        std::future::pending::<Result<(), ProviderError>>(),
+    )
+    .await;
+
+    assert_eq!(result, Err(ProviderError::Timeout));
+}
+
+#[test]
+fn provider_timeout_recovers_validated_items_and_closes_progress() {
+    let partial = ProviderPartialResults::new(2);
+    partial.begin_batch(4, true);
+    for index in 0..5 {
+        partial.record(index, gallery_item(index));
+    }
+    partial.mark_batch_emitted(1);
+
+    let recovered = partial
+        .recover_timeout_page()
+        .expect("validated progress should survive the provider deadline");
+
+    assert_eq!(
+        recovered
+            .page
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["item-0", "item-1", "item-2", "item-3", "item-4"]
+    );
+    assert_eq!(recovered.page.next_page, 4);
+    assert!(recovered.page.upstream_has_more);
+    assert_eq!(recovered.terminal_batch_index, 2);
+}
+
+#[tokio::test]
+async fn provider_deadline_keeps_reported_progress_and_emits_a_terminal_batch() {
+    let cancellation = WallpaperSearchCancellation::default();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let reported_batches = Arc::clone(&batches);
+    let runtime = RemoteSearchRuntime::new(
+        cancellation.clone(),
+        Arc::new(|_| {}),
+        Arc::new(move |batch| reported_batches.lock().push(batch)),
+    );
+    let partial = ProviderPartialResults::new(2);
+    partial.begin_batch(4, true);
+    for index in 0..4 {
+        partial.record(index, gallery_item(index));
+    }
+    partial.mark_batch_emitted(1);
+    runtime.report_batch(RemoteSearchBatch {
+        batch_index: 1,
+        items: (0..4).map(gallery_item).collect(),
+        accumulated_count: 4,
+        done: false,
+    });
+
+    let timed_out = with_provider_deadline(
+        &cancellation,
+        Duration::from_millis(20),
+        std::future::pending::<Result<ValidatedPage, ProviderError>>(),
+    )
+    .await;
+    let recovered = recover_provider_timeout(timed_out, &partial, &runtime)
+        .expect("reported validated items should survive the outer deadline");
+
+    assert_eq!(
+        recovered
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["item-0", "item-1", "item-2", "item-3"]
+    );
+    assert!(recovered.has_more());
+    let batches = batches.lock();
+    assert_eq!(batches.len(), 2);
+    assert!(!batches[0].done);
+    assert!(batches[1].done);
+    assert_eq!(batches[1].batch_index, 2);
+    assert_eq!(batches[1].accumulated_count, 4);
+    assert!(batches[1].items.is_empty());
 }
 
 #[test]

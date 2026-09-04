@@ -570,8 +570,9 @@
   flex-shrink: 0;
 }
 
+/* Hover / keyboard focus only — do not keep actions visible on the
+   last-clicked / active project row (matches session-row affordance). */
 .project-row:hover .project-row__actions,
-.project-row--active .project-row__actions,
 .project-row:focus-within .project-row__actions {
   display: inline-flex;
 }

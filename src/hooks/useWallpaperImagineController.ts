@@ -89,6 +89,8 @@ export function useWallpaperImagineController({
   const operationGenerationRef = useRef(0);
   const activeVideoRequestRef = useRef<string | null>(null);
   const cancelledVideoRequestsRef = useRef(new Set<string>());
+  const videoSourceRef = useRef<WallpaperGalleryItem | null>(videoSource);
+  videoSourceRef.current = videoSource;
 
   const cancelSourcePreparation = useCallback(
     (source: WallpaperGalleryItem | null) => {
@@ -105,12 +107,19 @@ export function useWallpaperImagineController({
   const cancelGeneration = useCallback(async () => {
     const requestId = activeVideoRequestRef.current;
     if (!requestId || cancelling) return;
+    const generation = operationGenerationRef.current;
     cancelledVideoRequestsRef.current.add(requestId);
     setCancelling(true);
     try {
       await api.wallpaperImageToVideoCancel(requestId);
     } catch (error) {
       cancelledVideoRequestsRef.current.delete(requestId);
+      if (
+        generation !== operationGenerationRef.current ||
+        activeVideoRequestRef.current !== requestId
+      ) {
+        return;
+      }
       const code = parseWallpaperSourceError(error);
       setErrorCode(code);
       setError(wallpaperSourceErrorMessage(t, code));
@@ -118,20 +127,33 @@ export function useWallpaperImagineController({
     }
   }, [cancelling, setError, setErrorCode, t]);
 
-  const cancelAll = useCallback(() => {
+  const cancelInFlight = useCallback(() => {
     operationGenerationRef.current += 1;
-    cancelSourcePreparation(videoSource);
+    cancelSourcePreparation(videoSourceRef.current);
     const requestId = activeVideoRequestRef.current;
     activeVideoRequestRef.current = null;
     if (requestId) {
       cancelledVideoRequestsRef.current.add(requestId);
-      void api.wallpaperImageToVideoCancel(requestId);
+      void api.wallpaperImageToVideoCancel(requestId).catch(() => false);
     }
+  }, [cancelSourcePreparation]);
+
+  const cancelAll = useCallback(() => {
+    cancelInFlight();
     setGenerating(false);
     setCancelling(false);
     setVideoSourceStatus(videoSourcePath ? "ready" : "idle");
     setStatusHint(null);
-  }, [cancelSourcePreparation, setStatusHint, videoSource, videoSourcePath]);
+  }, [cancelInFlight, setStatusHint, videoSourcePath]);
+
+  useEffect(
+    () => () => {
+      // Do not enqueue React state updates during unmount. Generation tokens
+      // reject late completions while Host-side work is cancelled best-effort.
+      cancelInFlight();
+    },
+    [cancelInFlight],
+  );
 
   useEffect(() => {
     if (open) return;

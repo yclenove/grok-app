@@ -435,6 +435,20 @@ async fn read_prefix(
     Ok(bytes)
 }
 
+async fn check_image_hop(
+    raw: &str,
+    policy: &OriginPolicy,
+    cancellation: &WallpaperSearchCancellation,
+) -> Result<Url, RemoteImageProbeFailure> {
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(RemoteImageProbeFailure::Cancelled),
+        checked = skin_net::check_hop_async(raw, policy) => {
+            checked.map_err(|_| RemoteImageProbeFailure::Blocked)
+        },
+    }
+}
+
 async fn probe_image_with_client(
     client: &SafeHttpsClient,
     start: &str,
@@ -445,8 +459,7 @@ async fn probe_image_with_client(
         return Err(RemoteImageProbeFailure::Cancelled);
     }
     let policy = OriginPolicy::AnyHttps;
-    let mut current = skin_net::check_hop(start, &policy, skin_net::default_resolve)
-        .map_err(|_| RemoteImageProbeFailure::Blocked)?;
+    let mut current = check_image_hop(start, &policy, cancellation).await?;
 
     for hop in 0..=skin_net::MAX_REDIRECTS {
         let range = format!("bytes=0-{}", PROBE_BYTES - 1);
@@ -470,8 +483,7 @@ async fn probe_image_with_client(
             let next = current
                 .join(location)
                 .map_err(|_| RemoteImageProbeFailure::Redirect)?;
-            current = skin_net::check_hop(next.as_str(), &policy, skin_net::default_resolve)
-                .map_err(|_| RemoteImageProbeFailure::Blocked)?;
+            current = check_image_hop(next.as_str(), &policy, cancellation).await?;
             continue;
         }
 
@@ -513,8 +525,7 @@ async fn fetch_remote_image_bytes_with_client(
         return Err(RemoteImageProbeFailure::Cancelled);
     }
     let policy = OriginPolicy::AnyHttps;
-    let mut current = skin_net::check_hop(start, &policy, skin_net::default_resolve)
-        .map_err(|_| RemoteImageProbeFailure::Blocked)?;
+    let mut current = check_image_hop(start, &policy, cancellation).await?;
 
     for hop in 0..=skin_net::MAX_REDIRECTS {
         let headers = image_headers(referer_origin, None)?;
@@ -537,11 +548,15 @@ async fn fetch_remote_image_bytes_with_client(
             let next = current
                 .join(location)
                 .map_err(|_| RemoteImageProbeFailure::Redirect)?;
-            current = skin_net::check_hop(next.as_str(), &policy, skin_net::default_resolve)
-                .map_err(|_| RemoteImageProbeFailure::Blocked)?;
+            current = check_image_hop(next.as_str(), &policy, cancellation).await?;
             continue;
         }
-        if !matches!(response.status().as_u16(), 200 | 206) {
+        if !crate::wallpaper_source::is_complete_download_response(
+            response.status().as_u16(),
+            response
+                .headers()
+                .contains_key(hyper::header::CONTENT_RANGE),
+        ) {
             return Err(status_failure(response.status()));
         }
         if response_total_length(&response).is_some_and(|length| length > max_bytes) {
@@ -750,6 +765,19 @@ mod tests {
             .next()
             .and_then(|value| value.parse::<u64>().ok());
         assert_eq!(parsed, Some(1_048_576));
+    }
+
+    #[test]
+    fn full_remote_download_rejects_partial_response_shapes() {
+        assert!(crate::wallpaper_source::is_complete_download_response(
+            200, false
+        ));
+        assert!(!crate::wallpaper_source::is_complete_download_response(
+            206, true
+        ));
+        assert!(!crate::wallpaper_source::is_complete_download_response(
+            200, true
+        ));
     }
 
     #[test]

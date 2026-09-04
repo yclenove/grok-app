@@ -163,4 +163,10 @@ export const esChat = {
   "chat.changedFiles.viewAll": "Ver todo",
   "chat.changedFiles.openFile": "Revisar cambios en {name}",
   "chat.changedFiles.more": "+{n} más",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "Expandir diff de {name}",
+  "chat.changedFiles.collapse": "Contraer diff de {name}",
+  "chat.changedFiles.openInReview": "Abrir en Review",
+  "chat.changedFiles.noDiffYet": "Diff aún no disponible — abre Review para el archivo completo.",
+  "chat.changedFiles.truncated": "Mostrando {shown} de {total} líneas"
 };

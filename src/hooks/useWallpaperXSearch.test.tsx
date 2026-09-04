@@ -270,6 +270,56 @@ describe("useWallpaperXSearch", () => {
     await expect(firstPromise).resolves.toBeNull();
   });
 
+  it("does not let an invocation waiting for cancellation replace a newer search", async () => {
+    const first = deferred<WallpaperSearchResult>();
+    const newest = deferred<WallpaperSearchResult>();
+    const cancellation = deferred<boolean>();
+    const harness = clientHarness();
+    vi.mocked(harness.client.search)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(newest.promise);
+    vi.mocked(harness.client.cancel).mockReturnValue(cancellation.promise);
+    const ids = ["request-first", "request-newest"];
+    const hook = renderHook(() =>
+      useWallpaperXSearch(
+        harness.client,
+        () => ids.shift() ?? "request-unexpected",
+      ),
+    );
+
+    let firstPromise!: Promise<WallpaperSearchResult | null>;
+    let supersededPromise!: Promise<WallpaperSearchResult | null>;
+    let newestPromise!: Promise<WallpaperSearchResult | null>;
+    act(() => {
+      firstPromise = hook.result.current.search("first", "top");
+    });
+    await waitFor(() => expect(hook.result.current.busy).toBe(true));
+    act(() => {
+      supersededPromise = hook.result.current.search("superseded", "top");
+    });
+    await waitFor(() =>
+      expect(harness.client.cancel).toHaveBeenCalledWith("request-first"),
+    );
+    act(() => {
+      newestPromise = hook.result.current.search("newest", "latest");
+    });
+    await waitFor(() => expect(harness.client.search).toHaveBeenCalledTimes(2));
+    expect(harness.client.search).toHaveBeenLastCalledWith(
+      "newest",
+      "latest",
+      "request-newest",
+    );
+
+    await act(async () => cancellation.resolve(true));
+    await expect(supersededPromise).resolves.toBeNull();
+    expect(harness.client.search).toHaveBeenCalledTimes(2);
+
+    newest.resolve(searchResult("request-newest"));
+    await expect(newestPromise).resolves.toEqual(searchResult("request-newest"));
+    first.resolve(searchResult("request-first"));
+    await expect(firstPromise).resolves.toBeNull();
+  });
+
   it("cancels the active request and removes the listener on unmount", async () => {
     const pending = deferred<WallpaperSearchResult>();
     const harness = clientHarness();

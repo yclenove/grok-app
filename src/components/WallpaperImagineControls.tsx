@@ -77,6 +77,7 @@ export function WallpaperImagineControls({
   const preparingSource = videoSourceStatus === "preparing";
   const hardLocked = locked && !preparingSource && !generating;
   const sourceReady = videoSourceStatus === "ready" && !!videoSourcePath;
+  const cancellableGeneration = generating && mode === "video";
   const generateDisabled =
     hardLocked ||
     (mode === "image" ? !prompt.trim() : !sourceReady) ||
@@ -167,6 +168,11 @@ export function WallpaperImagineControls({
       <textarea
         className="wallpaper-source-form__textarea"
         value={prompt}
+        aria-label={t(
+          mode === "video"
+            ? "settings.wallpaperSource.videoPromptPlaceholder"
+            : "settings.wallpaperSource.imaginePlaceholder",
+        )}
         placeholder={t(
           mode === "video"
             ? "settings.wallpaperSource.videoPromptPlaceholder"
@@ -215,13 +221,15 @@ export function WallpaperImagineControls({
         )}
         <button
           type="button"
-          className={generating ? "btn btn--ghost" : "btn btn--solid"}
-          disabled={generating ? cancelling : generateDisabled}
+          className={cancellableGeneration ? "btn btn--ghost" : "btn btn--solid"}
+          disabled={generating ? mode === "image" || cancelling : generateDisabled}
           aria-busy={generating}
-          onClick={generating ? onCancelGeneration : onGenerate}
+          onClick={cancellableGeneration ? onCancelGeneration : onGenerate}
         >
           {generating ? (
-            cancelling ? (
+            mode === "image" ? (
+              t("settings.wallpaperSource.generating")
+            ) : cancelling ? (
               t("settings.wallpaperSource.cancellingVideo")
             ) : (
               t("common.cancel")

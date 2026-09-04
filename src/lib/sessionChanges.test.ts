@@ -10,6 +10,7 @@ import {
   parseChangeListKey,
   pathBaseName,
   pathRelativeToProject,
+  resolveSessionChangePath,
   sessionChangesFromMessages,
   sessionFileLineDelta,
   summarizeSessionChanges,
@@ -68,6 +69,44 @@ describe("isEditToolKind", () => {
   });
 });
 
+describe("resolveSessionChangePath", () => {
+  it("prefers explicit path", () => {
+    expect(
+      resolveSessionChangePath({ path: "/a/b.ts", input: "/other.ts" }),
+    ).toBe("/a/b.ts");
+  });
+
+  it("promotes relative and absolute file paths from input (#998)", () => {
+    expect(
+      resolveSessionChangePath({
+        path: "",
+        input: ".grok-app-998-mvp-b.txt",
+      }),
+    ).toBe(".grok-app-998-mvp-b.txt");
+    expect(
+      resolveSessionChangePath({
+        path: null,
+        input: "/Users/me/proj/src/a.ts",
+      }),
+    ).toBe("/Users/me/proj/src/a.ts");
+  });
+
+  it("promotes ordinary root-level file names from input (#998)", () => {
+    expect(
+      resolveSessionChangePath({ path: "", input: "README.md" }),
+    ).toBe("README.md");
+    expect(
+      resolveSessionChangePath({ path: null, input: "package.json" }),
+    ).toBe("package.json");
+  });
+
+  it("rejects shell-like input", () => {
+    expect(
+      resolveSessionChangePath({ path: "", input: "ls -la && echo hi" }),
+    ).toBe("");
+  });
+});
+
 describe("mergeSessionChange", () => {
   it("ignores non-edit tools and empty paths", () => {
     expect(
@@ -84,6 +123,19 @@ describe("mergeSessionChange", () => {
         status: "completed",
       }),
     ).toEqual([]);
+  });
+
+  it("accepts write path from input when path is empty", () => {
+    const list = mergeSessionChange([], {
+      kind: "write",
+      path: "",
+      input: ".grok-app-998-mvp-b.txt",
+      status: "completed",
+      after: "hello",
+    });
+    expect(list).toHaveLength(1);
+    expect(list[0]?.path).toBe(".grok-app-998-mvp-b.txt");
+    expect(list[0]?.after).toBe("hello");
   });
 
   it("upserts by normalized path and moves to front", () => {
@@ -169,6 +221,37 @@ describe("sessionChangesFromMessages", () => {
     expect(changes).toHaveLength(1);
     expect(changes[0]?.path).toBe("/tmp/foo.ts");
     expect(changes[0]?.toolKind).toBe("write");
+  });
+
+  it("builds from assistant-woven edit tool segments (#998)", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: "done",
+        segments: [
+          {
+            kind: "tool",
+            toolCallId: "t1",
+            title: "Write",
+            toolKind: "write",
+            status: "completed",
+            path: ".grok-app-998-mvp-b.txt",
+          },
+          {
+            kind: "tool",
+            toolCallId: "t2",
+            title: "Read",
+            toolKind: "read",
+            status: "completed",
+            path: "README.md",
+          },
+        ],
+      },
+    ];
+    const changes = sessionChangesFromMessages(messages);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]?.path).toBe(".grok-app-998-mvp-b.txt");
   });
 });
 

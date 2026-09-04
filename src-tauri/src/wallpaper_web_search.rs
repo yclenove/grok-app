@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
@@ -49,18 +50,21 @@ mod request;
 #[cfg(test)]
 use quality::media_variant_identity;
 use quality::{merge_items, new_items};
-use request::{lane_budget, parse_source_pages, responses_request, validate_web_search_tool_calls};
+use request::{
+    lane_budget, parse_source_pages, responses_request, select_error, source_page_exclusions,
+    validate_web_search_tool_calls,
+};
 #[cfg(test)]
 use request::{
     responses_prompt, INITIAL_MAX_WEB_SEARCH_CALLS, INITIAL_PAGES_PER_LANE,
-    LOAD_MORE_MAX_WEB_SEARCH_CALLS, LOAD_MORE_PAGES_PER_LANE, OBSERVED_TOOL_CALL_MULTIPLIER,
+    LOAD_MORE_MAX_WEB_SEARCH_CALLS, LOAD_MORE_PAGES_PER_LANE, MAX_SOURCE_EXCLUSIONS,
+    MAX_SOURCE_EXCLUSION_CHARS, OBSERVED_TOOL_CALL_MULTIPLIER,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
     query: String,
-    credential_file_len: u64,
-    credential_modified_ms: Option<u128>,
+    credential_revision: account::BuildOauthCredentialRevision,
     contract_version: u8,
 }
 
@@ -330,8 +334,7 @@ fn cache_key(query: &str) -> Option<CacheKey> {
     let revision = account::build_oauth_credential_revision()?;
     Some(CacheKey {
         query: remote_search::normalized_query(query),
-        credential_file_len: revision.file_len,
-        credential_modified_ms: revision.modified_ms,
+        credential_revision: revision,
         contract_version: CACHE_CONTRACT_VERSION,
     })
 }
@@ -357,7 +360,20 @@ pub(crate) async fn search(
                 elapsed_ms(started),
             ));
         }
-        if let Some(mut result) = cache().lock().get_initial(key, Instant::now()) {
+        let cached = match remote_search::read_cache_if_active(runtime.cancellation(), || {
+            cache().lock().get_initial(key, Instant::now())
+        }) {
+            Ok(cached) => cached,
+            Err(()) => {
+                finish_request(request_id, token);
+                return Ok(RemoteSearchResult::error(
+                    SOURCE,
+                    "cancelled",
+                    elapsed_ms(started),
+                ));
+            }
+        };
+        if let Some(mut result) = cached {
             result.cache_hit = true;
             result.duration_ms = elapsed_ms(started);
             runtime.report(RemoteSearchStage::Done);
@@ -374,12 +390,20 @@ pub(crate) async fn search(
         Ok(_) => RemoteSearchResult::error(SOURCE, "empty", elapsed_ms(started)),
         Err(error) => RemoteSearchResult::error(SOURCE, error.code(), elapsed_ms(started)),
     };
-    if runtime.is_cancelled() {
-        result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
-    } else if !result.items.is_empty() {
+    if !result.items.is_empty() {
         if let Some(key) = initial_cache_key {
-            cache().lock().insert(key, result.clone(), Instant::now());
+            if runtime
+                .cancellation()
+                .commit_if_active(|| cache().lock().insert(key, result.clone(), Instant::now()))
+                .is_none()
+            {
+                result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
+            }
+        } else if runtime.is_cancelled() {
+            result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
         }
+    } else if runtime.is_cancelled() {
+        result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
     }
     runtime.report(RemoteSearchStage::Done);
     finish_request(request_id, token);
@@ -411,10 +435,19 @@ pub(crate) async fn search_more(
             elapsed_ms(started),
         ));
     }
-    let existing = cache()
-        .lock()
-        .continuation(&key, Instant::now())
-        .unwrap_or_default();
+    let existing = match remote_search::read_cache_if_active(runtime.cancellation(), || {
+        cache().lock().continuation(&key, Instant::now())
+    }) {
+        Ok(existing) => existing.unwrap_or_default(),
+        Err(()) => {
+            finish_request(request_id, token);
+            return Ok(RemoteSearchResult::error(
+                SOURCE,
+                "cancelled",
+                elapsed_ms(started),
+            ));
+        }
+    };
     if existing.is_empty() {
         finish_request(request_id, token);
         return Ok(RemoteSearchResult::error(
@@ -423,11 +456,11 @@ pub(crate) async fn search_more(
             elapsed_ms(started),
         ));
     }
-    let exclusions = existing
-        .iter()
-        .filter_map(|item| item.provenance.source_url.as_deref())
-        .map(opaque_id)
-        .collect::<Vec<_>>();
+    let exclusions = source_page_exclusions(
+        existing
+            .iter()
+            .filter_map(|item| item.provenance.source_url.as_deref()),
+    );
     let result = search_fresh(&query, &exclusions, &runtime, true).await;
     let mut continuation_update = None;
     let mut result = match result {
@@ -446,12 +479,20 @@ pub(crate) async fn search_more(
         }
         Err(error) => RemoteSearchResult::error(SOURCE, error.code(), elapsed_ms(started)),
     };
-    if runtime.is_cancelled() {
+    if let Some((items, has_more)) = continuation_update {
+        if runtime
+            .cancellation()
+            .commit_if_active(|| {
+                cache()
+                    .lock()
+                    .update_continuation(&key, items, has_more, Instant::now());
+            })
+            .is_none()
+        {
+            result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
+        }
+    } else if runtime.is_cancelled() {
         result = RemoteSearchResult::error(SOURCE, "cancelled", elapsed_ms(started));
-    } else if let Some((items, has_more)) = continuation_update {
-        cache()
-            .lock()
-            .update_continuation(&key, items, has_more, Instant::now());
     }
     runtime.report(RemoteSearchStage::Done);
     finish_request(request_id, token);
@@ -942,31 +983,7 @@ fn web_item(
     }
 }
 
-fn select_error(
-    errors: Vec<ClientError>,
-    revision: account::BuildOauthCredentialRevision,
-) -> ClientError {
-    errors
-        .into_iter()
-        .min_by_key(|error| error_priority(error.kind))
-        .unwrap_or_else(|| ClientError::new(ErrorKind::Empty, Some(revision)))
-}
-
-fn error_priority(kind: ErrorKind) -> u8 {
-    match kind {
-        ErrorKind::Cancelled => 0,
-        ErrorKind::RateLimited => 1,
-        ErrorKind::ToolBudgetExceeded => 2,
-        ErrorKind::Unauthorized | ErrorKind::OauthUnavailable | ErrorKind::OauthExpired => 3,
-        ErrorKind::BadRequest
-        | ErrorKind::InvalidJson
-        | ErrorKind::Protocol
-        | ErrorKind::ToolNotCalled => 4,
-        ErrorKind::ServerError | ErrorKind::Timeout | ErrorKind::Tls | ErrorKind::Network => 5,
-        ErrorKind::Empty => 6,
-    }
-}
-
+#[cfg(test)]
 fn opaque_id(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());

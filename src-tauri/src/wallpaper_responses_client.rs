@@ -65,7 +65,7 @@ impl ErrorKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClientError {
     pub(crate) kind: ErrorKind,
-    pub(crate) credential_revision: Option<BuildOauthCredentialRevision>,
+    pub(crate) credential_revision: Option<Box<BuildOauthCredentialRevision>>,
     pub(crate) observed_tool_calls: Option<u32>,
     pub(crate) tool_call_breakdown: Option<ToolCallBreakdown>,
 }
@@ -77,7 +77,7 @@ impl ClientError {
     ) -> Self {
         Self {
             kind,
-            credential_revision,
+            credential_revision: credential_revision.map(Box::new),
             observed_tool_calls: None,
             tool_call_breakdown: None,
         }
@@ -442,6 +442,11 @@ mod tests {
             assert!(!code.contains("Bearer"));
             assert!(!code.contains("token"));
         }
+    }
+
+    #[test]
+    fn client_error_stays_small_enough_for_result_errors() {
+        assert!(std::mem::size_of::<ClientError>() <= 128);
     }
 
     #[test]

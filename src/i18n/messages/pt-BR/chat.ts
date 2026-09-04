@@ -163,4 +163,10 @@ export const ptBRChat = {
   "chat.changedFiles.viewAll": "Ver tudo",
   "chat.changedFiles.openFile": "Revisar alterações em {name}",
   "chat.changedFiles.more": "+{n} mais",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "Expandir diff de {name}",
+  "chat.changedFiles.collapse": "Recolher diff de {name}",
+  "chat.changedFiles.openInReview": "Abrir no Review",
+  "chat.changedFiles.noDiffYet": "Diff ainda indisponível — abra o Review para o arquivo completo.",
+  "chat.changedFiles.truncated": "Mostrando {shown} de {total} linhas"
 };

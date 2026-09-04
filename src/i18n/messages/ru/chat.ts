@@ -163,4 +163,10 @@ export const ruChat = {
   "chat.changedFiles.viewAll": "Смотреть все",
   "chat.changedFiles.openFile": "Проверить изменения в {name}",
   "chat.changedFiles.more": "ещё {n}",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "Развернуть diff для {name}",
+  "chat.changedFiles.collapse": "Свернуть diff для {name}",
+  "chat.changedFiles.openInReview": "Открыть в Review",
+  "chat.changedFiles.noDiffYet": "Diff пока недоступен — откройте Review для полного файла.",
+  "chat.changedFiles.truncated": "Показано {shown} из {total} строк"
 };

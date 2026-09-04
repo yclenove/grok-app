@@ -170,7 +170,7 @@ describe("WallpaperSourceModal image viewer integration", () => {
 
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "settings.wallpaperSource.openPreview",
+        name: /^settings\.wallpaperSource\.openPreview/,
       }),
     );
 
@@ -222,7 +222,7 @@ describe("WallpaperSourceModal image viewer integration", () => {
       screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
     );
     const card = await screen.findByRole("button", {
-      name: "settings.wallpaperSource.openPreview",
+      name: /^settings\.wallpaperSource\.openPreview/,
     });
 
     remoteControllerState.busy = true;

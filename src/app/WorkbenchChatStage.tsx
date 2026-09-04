@@ -42,7 +42,7 @@ export function WorkbenchChatStage(p: WorkbenchChatStageProps) {
     onForkFromAssistantMessage, onRewindToUserMessage, onThreadAddAttachmentToComposer, onThreadAddQuote, onThreadContinueInterrupted, onThreadOpenError,
     onThreadOpenModifiedPath, onThreadOpenResource, onThreadOpenSessionChanges, onThreadRemoveEditAttachment, openExternalLinkFromChat, openPlanInResource,
     openReliability, openRequestPlanChanges, openSession, plan, projects, regenerateLastAssistant,
-    requestClearLocalGoalOrchTimeline, retryAgentConnect, runErrorBannerAction, session, sessionJsonSchema, sessionTranscriptStore,
+    requestClearLocalGoalOrchTimeline, retryAgentConnect, runErrorBannerAction, session, sessionChanges, sessionJsonSchema, sessionTranscriptStore,
     sessions, setAgentDashboardOpen, setErrorDetailOpen, setGoalMode, setLiveMap, setShowChatFind,
     setStreamStall, setTasksPanelOpen, shouldDisableReconnectBecauseConnecting, showChatFind, showMessageTimestamps, showReplyLength,
     showToast, stop, stopAllBusySessions, stopGate, stopLatch, streamA11yNote,
@@ -479,6 +479,7 @@ export function WorkbenchChatStage(p: WorkbenchChatStageProps) {
             turnStartedAt={turnStartedAt}
             onOpenSessionChanges={onThreadOpenSessionChanges}
             onOpenModifiedPath={onThreadOpenModifiedPath}
+            sessionChanges={sessionChanges}
             onOpenResource={onThreadOpenResource}
             onOpenError={onThreadOpenError}
             onOpenExternalLink={openExternalLinkFromChat}

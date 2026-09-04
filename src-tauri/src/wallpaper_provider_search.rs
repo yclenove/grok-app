@@ -8,31 +8,30 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use hyper::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use hyper::header::HeaderValue;
 use parking_lot::Mutex;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
-use url::Url;
 
-use crate::safe_https_client::{self, SafeHttpsClient, SafeHttpsError, SafeHttpsErrorKind};
-use crate::skin_net::{self, OriginPolicy};
-use crate::wallpaper_remote_media::{self, RemoteImageProber};
 use crate::wallpaper_remote_search::{
     self as remote_search, RemoteSearchBatch, RemoteSearchResult, RemoteSearchRuntime,
     RemoteSearchStage, RemoteWallpaperSource,
 };
 use crate::wallpaper_source::{WallpaperGalleryItem, WallpaperSearchCancellation};
 
+mod probe;
 mod request_url;
 mod response;
+mod transport;
 
-use request_url::provider_request_url;
+use probe::validate_candidates;
 #[cfg(test)]
-use request_url::{provider_url, PEXELS_CACHE_BUST_PARAM};
-use response::{parse_api_page, provider_item};
+use probe::{validate_probe_outputs, visit_probes_as_completed};
+#[cfg(test)]
+use request_url::{provider_request_url, provider_url, PEXELS_CACHE_BUST_PARAM};
 #[cfg(test)]
 use response::{parse_openverse_page, parse_pexels_page, safe_url};
+use transport::{fetch_api_page, provider_client};
 
 const PEXELS_LICENSE_URL: &str = "https://www.pexels.com/license/";
 const CONTRACT_VERSION: u8 = 3;
@@ -40,12 +39,12 @@ const RESULT_LIMIT: usize = 20;
 const OPENVERSE_PAGE_SIZE: usize = 20;
 const OPENVERSE_PAGES_PER_BATCH: usize = 2;
 const PEXELS_PAGE_SIZE: usize = 40;
-const MAX_API_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CANDIDATES: usize = 40;
 const MAX_CONCURRENT_PROBES: usize = 10;
 const PROGRESS_BATCH_SIZE: usize = 4;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
-const IMAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
+const IMAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const IMAGE_VALIDATION_BUDGET: Duration = Duration::from_secs(12);
+const PROVIDER_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const CACHE_CAPACITY: usize = 64;
 const PRE_CANCEL_TTL: Duration = Duration::from_secs(30);
@@ -242,6 +241,93 @@ struct ValidatedPage {
     next_page: usize,
 }
 
+#[derive(Default)]
+struct ProviderPartialState {
+    completed_items: Vec<(usize, WallpaperGalleryItem)>,
+    next_page: usize,
+    upstream_has_more: bool,
+    last_emitted_batch_index: usize,
+}
+
+#[derive(Clone)]
+struct ProviderPartialResults {
+    state: Arc<Mutex<ProviderPartialState>>,
+}
+
+struct RecoveredProviderPage {
+    page: ValidatedPage,
+    terminal_batch_index: usize,
+}
+
+impl ProviderPartialResults {
+    fn new(first_page: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ProviderPartialState {
+                next_page: first_page,
+                ..ProviderPartialState::default()
+            })),
+        }
+    }
+
+    fn begin_batch(&self, next_page: usize, upstream_has_more: bool) {
+        let mut state = self.state.lock();
+        state.completed_items.clear();
+        state.next_page = next_page;
+        state.upstream_has_more = upstream_has_more;
+        state.last_emitted_batch_index = 0;
+    }
+
+    fn record(&self, index: usize, item: WallpaperGalleryItem) {
+        self.state.lock().completed_items.push((index, item));
+    }
+
+    fn mark_batch_emitted(&self, batch_index: usize) {
+        self.state.lock().last_emitted_batch_index = batch_index;
+    }
+
+    fn recover_timeout_page(&self) -> Option<RecoveredProviderPage> {
+        let state = self.state.lock();
+        let mut completed_items = state.completed_items.clone();
+        let next_page = state.next_page;
+        let upstream_has_more = state.upstream_has_more;
+        let terminal_batch_index = state.last_emitted_batch_index.saturating_add(1);
+        drop(state);
+
+        completed_items.sort_by_key(|(index, _)| *index);
+        let mut seen_urls = HashSet::new();
+        let mut seen_fingerprints = HashSet::new();
+        let mut items = completed_items
+            .into_iter()
+            .filter_map(|(_, item)| {
+                let fingerprint = item.media_fingerprint.clone().unwrap_or_default();
+                if !seen_urls.insert(item.full_url.clone())
+                    || (!fingerprint.is_empty() && !seen_fingerprints.insert(fingerprint))
+                {
+                    return None;
+                }
+                Some(item)
+            })
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return None;
+        }
+        let buffered_items = if items.len() > RESULT_LIMIT {
+            items.split_off(RESULT_LIMIT)
+        } else {
+            Vec::new()
+        };
+        Some(RecoveredProviderPage {
+            page: ValidatedPage {
+                items,
+                buffered_items,
+                upstream_has_more,
+                next_page,
+            },
+            terminal_batch_index,
+        })
+    }
+}
+
 impl ValidatedPage {
     fn continuation(&self) -> Option<ProviderContinuation> {
         let continuation = ProviderContinuation {
@@ -432,46 +518,81 @@ pub(crate) async fn search(
             elapsed_ms(started),
         ));
     }
-    let cached = { cache().lock().get(&page_key, Instant::now()) };
+    let cached = match remote_search::read_cache_if_active(runtime.cancellation(), || {
+        cache().lock().get(&page_key, Instant::now())
+    }) {
+        Ok(cached) => cached,
+        Err(()) => {
+            finish_request(request_id, token);
+            return Ok(RemoteSearchResult::error(
+                source.as_str(),
+                "cancelled",
+                elapsed_ms(started),
+            ));
+        }
+    };
     if let Some((mut result, continuation)) = cached {
         result.cache_hit = true;
         result.duration_ms = elapsed_ms(started);
-        cache()
-            .lock()
-            .update_continuation(&context.search_key, continuation, Instant::now());
+        if runtime
+            .cancellation()
+            .commit_if_active(|| {
+                cache().lock().update_continuation(
+                    &context.search_key,
+                    continuation,
+                    Instant::now(),
+                );
+            })
+            .is_none()
+        {
+            result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
+            runtime.report(RemoteSearchStage::Done);
+            finish_request(request_id, token);
+            return Ok(result);
+        }
         emit_cached_batch(&runtime, &result);
         runtime.report(RemoteSearchStage::Done);
         finish_request(request_id, token);
         return Ok(result);
     }
 
-    let page = search_page(
-        source,
-        &provider_query,
-        1,
-        context.api_key.as_deref(),
-        &runtime,
+    let partial = ProviderPartialResults::new(1);
+    let page = with_provider_deadline(
+        runtime.cancellation(),
+        PROVIDER_SEARCH_TIMEOUT,
+        search_page(
+            source,
+            &provider_query,
+            1,
+            context.api_key.as_deref(),
+            &runtime,
+            &partial,
+        ),
     )
     .await;
+    let page = recover_provider_timeout(page, &partial, &runtime);
     let mut result = result_from_page(source, page.as_ref(), started);
-    if runtime.is_cancelled() {
-        result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
-    } else if let Ok(page) = page {
+    if let Ok(page) = page {
         let continuation = page.continuation();
-        cache().lock().update_continuation(
-            &context.search_key,
-            continuation.clone(),
-            Instant::now(),
-        );
-        if !page.items.is_empty() {
-            cache()
-                .lock()
-                .insert(page_key, result.clone(), continuation, Instant::now());
+        let committed = runtime.cancellation().commit_if_active(|| {
+            let mut cache = cache().lock();
+            cache.update_continuation(&context.search_key, continuation.clone(), Instant::now());
+            if !page.items.is_empty() {
+                cache.insert(page_key, result.clone(), continuation, Instant::now());
+            }
+        });
+        if committed.is_none() {
+            result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
         }
     } else {
-        cache()
-            .lock()
-            .update_continuation(&context.search_key, None, Instant::now());
+        let committed = runtime.cancellation().commit_if_active(|| {
+            cache()
+                .lock()
+                .update_continuation(&context.search_key, None, Instant::now());
+        });
+        if committed.is_none() {
+            result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
+        }
     }
     runtime.report(RemoteSearchStage::Done);
     finish_request(request_id, token);
@@ -508,10 +629,20 @@ pub(crate) async fn search_more(
             elapsed_ms(started),
         ));
     }
-    let continuation = {
+    let continuation = match remote_search::read_cache_if_active(runtime.cancellation(), || {
         cache()
             .lock()
             .continuation(&context.search_key, Instant::now())
+    }) {
+        Ok(continuation) => continuation,
+        Err(()) => {
+            finish_request(request_id, token);
+            return Ok(RemoteSearchResult::error(
+                source.as_str(),
+                "cancelled",
+                elapsed_ms(started),
+            ));
+        }
     };
     let Some(continuation) = continuation else {
         finish_request(request_id, token);
@@ -529,9 +660,22 @@ pub(crate) async fn search_more(
             elapsed_ms(started),
         );
         result.cache_hit = true;
-        cache()
-            .lock()
-            .update_continuation(&context.search_key, next_continuation, Instant::now());
+        if runtime
+            .cancellation()
+            .commit_if_active(|| {
+                cache().lock().update_continuation(
+                    &context.search_key,
+                    next_continuation,
+                    Instant::now(),
+                );
+            })
+            .is_none()
+        {
+            result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
+            runtime.report(RemoteSearchStage::Done);
+            finish_request(request_id, token);
+            return Ok(result);
+        }
         emit_cached_batch(&runtime, &result);
         runtime.report(RemoteSearchStage::Done);
         finish_request(request_id, token);
@@ -543,42 +687,74 @@ pub(crate) async fn search_more(
         first_page,
     };
 
-    let cached = { cache().lock().get(&page_key, Instant::now()) };
+    let cached = match remote_search::read_cache_if_active(runtime.cancellation(), || {
+        cache().lock().get(&page_key, Instant::now())
+    }) {
+        Ok(cached) => cached,
+        Err(()) => {
+            finish_request(request_id, token);
+            return Ok(RemoteSearchResult::error(
+                source.as_str(),
+                "cancelled",
+                elapsed_ms(started),
+            ));
+        }
+    };
     if let Some((mut result, continuation)) = cached {
         result.cache_hit = true;
         result.duration_ms = elapsed_ms(started);
-        cache()
-            .lock()
-            .update_continuation(&context.search_key, continuation, Instant::now());
+        if runtime
+            .cancellation()
+            .commit_if_active(|| {
+                cache().lock().update_continuation(
+                    &context.search_key,
+                    continuation,
+                    Instant::now(),
+                );
+            })
+            .is_none()
+        {
+            result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
+            runtime.report(RemoteSearchStage::Done);
+            finish_request(request_id, token);
+            return Ok(result);
+        }
         emit_cached_batch(&runtime, &result);
         runtime.report(RemoteSearchStage::Done);
         finish_request(request_id, token);
         return Ok(result);
     }
 
-    let page = search_page(
-        source,
-        &provider_query,
-        first_page,
-        context.api_key.as_deref(),
-        &runtime,
+    let partial = ProviderPartialResults::new(first_page);
+    let page = with_provider_deadline(
+        runtime.cancellation(),
+        PROVIDER_SEARCH_TIMEOUT,
+        search_page(
+            source,
+            &provider_query,
+            first_page,
+            context.api_key.as_deref(),
+            &runtime,
+            &partial,
+        ),
     )
     .await;
+    let page = recover_provider_timeout(page, &partial, &runtime);
     let mut result = result_from_page(source, page.as_ref(), started);
-    if runtime.is_cancelled() {
-        result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
-    } else if let Ok(page) = page {
+    if let Ok(page) = page {
         let continuation = page.continuation();
-        cache().lock().update_continuation(
-            &context.search_key,
-            continuation.clone(),
-            Instant::now(),
-        );
-        if !page.items.is_empty() {
-            cache()
-                .lock()
-                .insert(page_key, result.clone(), continuation, Instant::now());
+        let committed = runtime.cancellation().commit_if_active(|| {
+            let mut cache = cache().lock();
+            cache.update_continuation(&context.search_key, continuation.clone(), Instant::now());
+            if !page.items.is_empty() {
+                cache.insert(page_key, result.clone(), continuation, Instant::now());
+            }
+        });
+        if committed.is_none() {
+            result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
         }
+    } else if runtime.is_cancelled() {
+        result = RemoteSearchResult::error(source.as_str(), "cancelled", elapsed_ms(started));
     }
     runtime.report(RemoteSearchStage::Done);
     finish_request(request_id, token);
@@ -629,12 +805,50 @@ fn result_from_page(
     }
 }
 
+fn recover_provider_timeout(
+    result: Result<ValidatedPage, ProviderError>,
+    partial: &ProviderPartialResults,
+    runtime: &RemoteSearchRuntime,
+) -> Result<ValidatedPage, ProviderError> {
+    if !matches!(&result, Err(ProviderError::Timeout)) {
+        return result;
+    }
+    let Some(recovered) = partial.recover_timeout_page() else {
+        return result;
+    };
+    runtime.report_batch(RemoteSearchBatch {
+        batch_index: recovered.terminal_batch_index,
+        items: Vec::new(),
+        accumulated_count: recovered.page.items.len(),
+        done: true,
+    });
+    Ok(recovered.page)
+}
+
+async fn with_provider_deadline<T, F>(
+    cancellation: &WallpaperSearchCancellation,
+    timeout: Duration,
+    operation: F,
+) -> Result<T, ProviderError>
+where
+    F: std::future::Future<Output = Result<T, ProviderError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(ProviderError::Cancelled),
+        result = tokio::time::timeout(timeout, operation) => {
+            result.unwrap_or(Err(ProviderError::Timeout))
+        },
+    }
+}
+
 async fn search_page(
     source: RemoteWallpaperSource,
     query: &str,
     first_page: usize,
     api_key: Option<&str>,
     runtime: &RemoteSearchRuntime,
+    partial: &ProviderPartialResults,
 ) -> Result<ValidatedPage, ProviderError> {
     if runtime.is_cancelled() {
         return Err(ProviderError::Cancelled);
@@ -647,8 +861,9 @@ async fn search_page(
     let mut page = first_page;
     for _ in 0..MAX_EMPTY_VALIDATED_BATCHES {
         let batch = fetch_candidate_batch(source, query, page, api_key, runtime).await?;
+        partial.begin_batch(batch.next_page, batch.has_more);
         runtime.report(RemoteSearchStage::ValidatingImages);
-        let mut items = validate_candidates(source, batch.candidates, runtime).await?;
+        let mut items = validate_candidates(source, batch.candidates, runtime, partial).await?;
         let buffered_items = if items.len() > RESULT_LIMIT {
             items.split_off(RESULT_LIMIT)
         } else {
@@ -746,201 +961,6 @@ async fn fetch_candidate_batch(
         has_more,
         next_page,
     })
-}
-
-fn provider_client() -> SafeHttpsClient {
-    safe_https_client::shared()
-}
-
-async fn fetch_api_page(
-    client: &SafeHttpsClient,
-    source: RemoteWallpaperSource,
-    query: &str,
-    page: usize,
-    api_key: Option<&str>,
-    cancellation: &WallpaperSearchCancellation,
-) -> Result<ApiPage, ProviderError> {
-    let url = provider_request_url(source, query, page)?;
-    let checked = skin_net::check_hop(
-        url.as_str(),
-        &OriginPolicy::AnyHttps,
-        skin_net::default_resolve,
-    )
-    .map_err(|_| ProviderError::Network)?;
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static("GrokApp/WallpaperProviderSearch"),
-    );
-    if source == RemoteWallpaperSource::Pexels {
-        let key = api_key.ok_or(ProviderError::PexelsKeyMissing)?;
-        let mut value = HeaderValue::from_str(key).map_err(|_| ProviderError::PexelsKeyInvalid)?;
-        value.set_sensitive(true);
-        headers.insert(AUTHORIZATION, value);
-    }
-    let response = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-        response = client.get(&checked, headers, HTTP_TIMEOUT) => {
-            response.map_err(|error| classify_transport_error(&error))?
-        },
-    };
-    let status = response.status();
-    if status.is_redirection() {
-        return Err(ProviderError::Protocol);
-    }
-    match status.as_u16() {
-        200..=299 => {}
-        401 | 403 if source == RemoteWallpaperSource::Pexels => {
-            return Err(ProviderError::PexelsKeyInvalid)
-        }
-        408 | 504 => return Err(ProviderError::Timeout),
-        429 => return Err(ProviderError::RateLimited),
-        500..=599 => return Err(ProviderError::ServiceUnavailable),
-        _ => return Err(ProviderError::Protocol),
-    }
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if content_type != "application/json" && !content_type.ends_with("+json") {
-        return Err(ProviderError::Protocol);
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_API_BYTES as u64)
-    {
-        return Err(ProviderError::Protocol);
-    }
-    let bytes = read_bounded_body(response, cancellation).await?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| ProviderError::Protocol)?;
-    parse_api_page(source, &value, page)
-}
-
-async fn read_bounded_body(
-    mut response: crate::safe_https_client::SafeHttpsResponse,
-    cancellation: &WallpaperSearchCancellation,
-) -> Result<Vec<u8>, ProviderError> {
-    let mut bytes = Vec::new();
-    loop {
-        let chunk = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
-            chunk = response.chunk() => chunk.map_err(|error| classify_transport_error(&error))?,
-        };
-        let Some(chunk) = chunk else {
-            break;
-        };
-        if bytes.len() + chunk.len() > MAX_API_BYTES {
-            return Err(ProviderError::Protocol);
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
-fn classify_transport_error(error: &SafeHttpsError) -> ProviderError {
-    match error.kind() {
-        SafeHttpsErrorKind::Timeout => ProviderError::Timeout,
-        SafeHttpsErrorKind::Blocked | SafeHttpsErrorKind::Network => ProviderError::Network,
-    }
-}
-
-async fn validate_candidates(
-    source: RemoteWallpaperSource,
-    candidates: Vec<ProviderCandidate>,
-    runtime: &RemoteSearchRuntime,
-) -> Result<Vec<WallpaperGalleryItem>, ProviderError> {
-    let prober = Arc::new(RemoteImageProber::new());
-    let cancellation = runtime.cancellation().clone();
-    let mut probes = buffered_in_input_order(candidates, MAX_CONCURRENT_PROBES, |candidate| {
-        let prober = Arc::clone(&prober);
-        let cancellation = cancellation.clone();
-        async move {
-            let referer = Url::parse(&candidate.source_url)
-                .ok()
-                .as_ref()
-                .and_then(wallpaper_remote_media::origin_referer);
-            let probe = tokio::time::timeout(
-                IMAGE_PROBE_TIMEOUT,
-                prober.probe_image(&candidate.image_url, referer.as_deref(), &cancellation),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)?;
-            if !wallpaper_remote_media::is_wallpaper_quality_candidate(&probe) {
-                return None;
-            }
-            Some(provider_item(source, candidate, probe))
-        }
-    });
-
-    let mut items = Vec::new();
-    let mut pending = Vec::new();
-    let mut seen_urls = HashSet::new();
-    let mut seen_fingerprints = HashSet::new();
-    let mut batch_index = 1;
-    loop {
-        let next = tokio::select! {
-            biased;
-            _ = runtime.cancellation().cancelled() => return Err(ProviderError::Cancelled),
-            next = probes.next() => next,
-        };
-        let Some(item) = next else {
-            break;
-        };
-        let Some(item) = item else {
-            continue;
-        };
-        let fingerprint = item.media_fingerprint.clone().unwrap_or_default();
-        if !seen_urls.insert(item.full_url.clone())
-            || (!fingerprint.is_empty() && !seen_fingerprints.insert(fingerprint))
-        {
-            continue;
-        }
-        if items.len() < RESULT_LIMIT {
-            pending.push(item.clone());
-        }
-        items.push(item);
-        if pending.len() >= PROGRESS_BATCH_SIZE && items.len() < RESULT_LIMIT {
-            runtime.report_batch(RemoteSearchBatch {
-                batch_index,
-                items: std::mem::take(&mut pending),
-                accumulated_count: items.len(),
-                done: false,
-            });
-            batch_index += 1;
-        }
-    }
-    runtime.report_batch(RemoteSearchBatch {
-        batch_index,
-        items: pending,
-        accumulated_count: items.len().min(RESULT_LIMIT),
-        done: true,
-    });
-    Ok(items)
-}
-
-fn buffered_in_input_order<I, F, Fut>(
-    inputs: I,
-    concurrency: usize,
-    probe: F,
-) -> impl futures_util::Stream<Item = Fut::Output>
-where
-    I: IntoIterator,
-    F: FnMut(I::Item) -> Fut,
-    Fut: std::future::Future,
-{
-    futures_util::stream::iter(inputs)
-        .map(probe)
-        .buffered(concurrency.max(1))
 }
 
 fn elapsed_ms(started: Instant) -> u64 {

@@ -75,6 +75,9 @@ describe("wallpaper X search settings contract", () => {
     expect(wallpaperXSearchFallbackReasonKey("responses_protocol")).toBe(
       "settings.wallpaperSource.route.fallback.compatibility",
     );
+    expect(wallpaperXSearchFallbackReasonKey("responses_tool_not_called")).toBe(
+      "settings.wallpaperSource.route.fallback.compatibility",
+    );
     expect(wallpaperXSearchFallbackReasonKey("responses_circuit_open")).toBe(
       "settings.wallpaperSource.route.fallback.circuit",
     );

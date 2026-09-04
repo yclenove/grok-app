@@ -426,6 +426,22 @@ describe("settingsCatalog", () => {
           h.entry.anchorId === "settings-anchor-wallpaper-x-search-mode",
       ),
     ).toBe(true);
+    const wallpaperAliases = [
+      ["网络图片", createT("zh"), "appearance.wallpaper"],
+      ["網路圖片", createT("zh-TW"), "appearance.wallpaper"],
+      ["图片搜索", createT("fr"), "appearance.wallpaper"],
+      ["圖片搜尋", createT("fr"), "appearance.wallpaper"],
+      ["壁纸搜索模式", createT("zh"), "appearance.wallpaperXSearchMode"],
+      ["壁紙搜尋模式", createT("zh-TW"), "appearance.wallpaperXSearchMode"],
+    ] as const;
+    for (const [query, translate, entryId] of wallpaperAliases) {
+      expect(
+        searchSettingsEntries(query, translate, tEn).some(
+          (hit) => hit.entry.id === entryId,
+        ),
+        `missing wallpaper settings alias: ${query}`,
+      ).toBe(true);
+    }
     expect(
       SETTINGS_ENTRIES.filter((entry) =>
         entry.anchorId.includes("wallpaper-x-search-mode"),

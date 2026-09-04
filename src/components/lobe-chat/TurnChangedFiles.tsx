@@ -1,39 +1,54 @@
 /**
- * Compact “changed files” strip under a finished assistant turn (#998).
- * Click opens existing Changes / Review UI — no new diff engine.
+ * Expandable “changed files” strip under a finished assistant turn (#998).
+ * Cards show +/− when known; expand reveals inline highlighted diff.
  */
 
-import { memo, useMemo } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import { IconFileDiff } from "@/components/icons";
+import type { SessionFileChange } from "@/lib/sessionChanges";
 import {
+  buildTurnChangedFileCards,
   splitTurnChangedFiles,
-  turnChangedFileItems,
 } from "@/lib/turnChangedFiles";
+import { TurnFileDiffPreview } from "./TurnFileDiffPreview";
 
 export const TurnChangedFiles = memo(function TurnChangedFiles({
   paths,
   locale,
   streaming,
+  sessionChanges,
+  projectPath,
   onOpenPath,
   onViewAll,
 }: {
   paths: string[];
   locale: Locale;
   streaming?: boolean;
+  sessionChanges?: SessionFileChange[];
+  projectPath?: string | null;
   onOpenPath?: (path: string) => void;
   onViewAll?: () => void;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
-  const items = useMemo(() => turnChangedFileItems(paths), [paths]);
-  const { visible, hiddenCount } = useMemo(
-    () => splitTurnChangedFiles(items),
-    [items],
+  const cards = useMemo(
+    () =>
+      buildTurnChangedFileCards(paths, sessionChanges ?? [], projectPath),
+    [paths, sessionChanges, projectPath],
   );
+  const { visible, hiddenCount } = useMemo(
+    () => splitTurnChangedFiles(cards),
+    [cards],
+  );
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const toggle = useCallback((path: string) => {
+    setExpanded((prev) => ({ ...prev, [path]: !prev[path] }));
+  }, []);
 
   if (streaming) return null;
-  if (!items.length) return null;
+  if (!cards.length) return null;
 
   const canOpen = typeof onOpenPath === "function";
   const canViewAll = typeof onViewAll === "function";
@@ -48,9 +63,9 @@ export const TurnChangedFiles = memo(function TurnChangedFiles({
       <div className="lobe-turn-changed__head">
         <IconFileDiff size={14} className="lobe-turn-changed__icon" />
         <span className="lobe-turn-changed__title">
-          {items.length === 1
+          {cards.length === 1
             ? tr("chat.editedFilesOne")
-            : tr("chat.editedFiles", { n: String(items.length) })}
+            : tr("chat.editedFiles", { n: String(cards.length) })}
         </span>
         {canViewAll ? (
           <button
@@ -63,35 +78,58 @@ export const TurnChangedFiles = memo(function TurnChangedFiles({
           </button>
         ) : null}
       </div>
-      <div className="lobe-turn-changed__chips">
-        {visible.map((item) => {
-          const label = tr("chat.changedFiles.openFile", {
-            name: item.name,
-          });
-          if (!canOpen) {
-            return (
-              <span
-                key={item.path}
-                className="lobe-turn-changed__chip lobe-turn-changed__chip--static"
-                title={item.path}
-              >
-                {item.name}
-              </span>
-            );
-          }
+      <div className="lobe-turn-changed__cards">
+        {visible.map((card) => {
+          const isOpen = !!expanded[card.path];
+          const hasDelta = card.added > 0 || card.removed > 0;
+          const expandLabel = isOpen
+            ? tr("chat.changedFiles.collapse", { name: card.name })
+            : tr("chat.changedFiles.expand", { name: card.name });
           return (
-            <button
-              key={item.path}
-              type="button"
-              className="lobe-turn-changed__chip"
+            <div
+              key={card.path}
+              className={
+                isOpen
+                  ? "lobe-turn-changed__card lobe-turn-changed__card--open"
+                  : "lobe-turn-changed__card"
+              }
               data-testid="turn-changed-file"
-              data-path={item.path}
-              title={item.path}
-              aria-label={label}
-              onClick={() => onOpenPath(item.path)}
+              data-path={card.path}
             >
-              {item.name}
-            </button>
+              <button
+                type="button"
+                className="lobe-turn-changed__card-head"
+                title={card.path}
+                aria-expanded={isOpen}
+                aria-label={expandLabel}
+                onClick={() => toggle(card.path)}
+              >
+                <span className="lobe-turn-changed__card-name">{card.name}</span>
+                {hasDelta ? (
+                  <span
+                    className="lobe-turn-changed__delta"
+                    aria-hidden
+                  >
+                    {tr("chat.changedFiles.delta", {
+                      added: String(card.added),
+                      removed: String(card.removed),
+                    })}
+                  </span>
+                ) : null}
+                <span className="lobe-turn-changed__chev" aria-hidden>
+                  {isOpen ? "▾" : "▸"}
+                </span>
+              </button>
+              {isOpen ? (
+                <TurnFileDiffPreview
+                  patch={card.patch}
+                  locale={locale}
+                  onOpenInReview={
+                    canOpen ? () => onOpenPath(card.path) : undefined
+                  }
+                />
+              ) : null}
+            </div>
           );
         })}
         {hiddenCount > 0 && canViewAll ? (

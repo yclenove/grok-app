@@ -22,6 +22,7 @@ export type WallpaperXSearchMeta = {
   responsesDurationMs?: number | null;
   cliDurationMs?: number | null;
   cacheHit: boolean;
+  continuationAvailable?: boolean;
   searchCalls?: number | null;
   candidateCount: number;
   validCount: number;
@@ -177,6 +178,7 @@ export function wallpaperXSearchFallbackReasonKey(
     case "responses_bad_request":
     case "responses_invalid_json":
     case "responses_protocol":
+    case "responses_tool_not_called":
     case "responses_search_budget_exceeded":
       return "settings.wallpaperSource.route.fallback.compatibility";
     case "responses_empty":

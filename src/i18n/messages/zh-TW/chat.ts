@@ -170,4 +170,10 @@ export const zhTWChat = {
   "chat.changedFiles.viewAll": "查看全部",
   "chat.changedFiles.openFile": "查看 {name} 的修改",
   "chat.changedFiles.more": "還有 {n} 個",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "展開 {name} 的差異",
+  "chat.changedFiles.collapse": "收合 {name} 的差異",
+  "chat.changedFiles.openInReview": "在 Review 中開啟",
+  "chat.changedFiles.noDiffYet": "尚無差異預覽 — 可在 Review 中查看完整檔案。",
+  "chat.changedFiles.truncated": "顯示 {shown} / {total} 行"
 };

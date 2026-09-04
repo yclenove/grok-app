@@ -139,4 +139,4 @@ Parallel non-overlapping tracks (multi-agent) — **landed**:
 | residual-appworkbench | AppWorkbench + hooks | **PASS** | WP-W27: settings nav/prefs + connect/live map extracted; #870 closed |
 | residual-settings-catalog | settingsCatalog split | **PASS** | domain entries |
 
-Follow-on: `docs/plans/HANDOFF-appworkbench-decomposition.md`. Decreasing ceilings now **15350 / 160 useState / 83 useEffect**; `files_ge_1000` **≤77** (0.2.28 tree). #870 closed.
+Follow-on: `docs/plans/HANDOFF-appworkbench-decomposition.md`. Decreasing ceilings now **15350 / 160 useState / 83 useEffect**; `files_ge_1000` **≤80** (0.2.31 tree count 79; was ≤77 at 0.2.28). #870 closed. Shrink large files in follow-on waves — do not keep raising this budget.

@@ -140,6 +140,7 @@ pub async fn settings_set(
 
     if proxy_flip {
         crate::wallpaper_grok_album::close_for_proxy_change(&app);
+        crate::wallpaper_x_search::reset_responses_circuit_for_network_change();
     }
 
     if schedules_launch_agent_flip {

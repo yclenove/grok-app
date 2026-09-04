@@ -163,4 +163,10 @@ export const deChat = {
   "chat.changedFiles.viewAll": "Alle anzeigen",
   "chat.changedFiles.openFile": "Änderungen in {name} prüfen",
   "chat.changedFiles.more": "+{n} weitere",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "Diff für {name} erweitern",
+  "chat.changedFiles.collapse": "Diff für {name} einklappen",
+  "chat.changedFiles.openInReview": "In Review öffnen",
+  "chat.changedFiles.noDiffYet": "Diff noch nicht verfügbar — in Review die ganze Datei öffnen.",
+  "chat.changedFiles.truncated": "{shown} von {total} Zeilen angezeigt"
 };

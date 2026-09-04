@@ -74,6 +74,53 @@ export type WallpaperSourceErrorCode =
   | "timeout"
   | "generic";
 
+function hostSearchErrorCode(raw: string): WallpaperSourceErrorCode | null {
+  const code = raw.toLowerCase();
+  if (
+    code.includes("oauth_unavailable") ||
+    code.includes("oauth_expired") ||
+    code.includes("responses_unauthorized")
+  ) {
+    return "auth_required";
+  }
+  if (
+    code.includes("responses_rate_limited") ||
+    code.includes("provider_rate_limited")
+  ) {
+    return "rate_limited";
+  }
+  if (
+    code.includes("responses_timeout") ||
+    code.includes("provider_timeout")
+  ) {
+    return "timeout";
+  }
+  if (
+    code.includes("responses_network") ||
+    code.includes("responses_tls") ||
+    code.includes("provider_network")
+  ) {
+    return "search_failed";
+  }
+  if (
+    code.includes("responses_server_error") ||
+    code.includes("responses_bad_request") ||
+    code.includes("responses_invalid_json") ||
+    code.includes("responses_protocol") ||
+    code.includes("responses_tool_not_called") ||
+    code.includes("responses_search_budget_exceeded") ||
+    code.includes("responses_tool_budget_exceeded") ||
+    code.includes("responses_circuit_open") ||
+    code.includes("provider_service_unavailable") ||
+    code.includes("provider_protocol") ||
+    code.includes("load_more_unavailable")
+  ) {
+    return "service_unavailable";
+  }
+  if (code === "empty" || code.includes("responses_empty")) return "empty";
+  return null;
+}
+
 /** Map host error strings / codes to a stable UI code. */
 export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCode {
   const raw =
@@ -106,7 +153,8 @@ export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCod
     return "download_failed";
   }
   if (s.includes("desktop_only")) return "generic";
-  if (s.includes("responses_rate_limited")) return "rate_limited";
+  const searchError = hostSearchErrorCode(s);
+  if (searchError) return searchError;
   if (s.includes("service_unavailable")) return "service_unavailable";
   if (s.includes("imagine_source_invalid")) return "imagine_source_invalid";
   // timeout before imagine so "imagine timeout" is not swallowed as imagine_failed
@@ -137,25 +185,120 @@ export function errorCodeFromSearchResult(
   if (code === "service_unavailable") return "service_unavailable";
   if (code === "imagine_source_invalid") return "imagine_source_invalid";
   if (code === "imagine_failed") return "imagine_failed";
-  if (code === "responses_rate_limited") return "rate_limited";
-  if (code === "empty") return "empty";
+  const searchError = hostSearchErrorCode(code);
+  if (searchError) return searchError;
   if (code === "timeout") return "timeout";
   return "generic";
 }
 
-/** Deduplicate gallery items by fullUrl / localPath. */
+function galleryItemAliases(item: WallpaperGalleryItem): string[] {
+  return [item.localPath, item.fullUrl, item.id]
+    .map((value) => value?.trim() || "")
+    .filter(Boolean);
+}
+
+/** Deduplicate gallery items by every stable path, URL, and id alias. */
 export function dedupeGalleryItems(
   items: WallpaperGalleryItem[],
 ): WallpaperGalleryItem[] {
   const seen = new Set<string>();
   const out: WallpaperGalleryItem[] = [];
   for (const it of items) {
-    const key = (it.localPath || it.fullUrl || it.id).trim();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
+    const aliases = galleryItemAliases(it);
+    if (aliases.length === 0) continue;
+    const duplicate = aliases.some((alias) => seen.has(alias));
+    // Register aliases from duplicate bridge rows too. A later remote row may
+    // only share the URL of an item already matched through its local path.
+    aliases.forEach((alias) => seen.add(alias));
+    if (duplicate) continue;
     out.push(it);
   }
   return out;
+}
+
+/**
+ * Reconcile an authoritative page with cards already visible in the gallery.
+ * Incoming metadata wins, while a local file materialized during the request
+ * remains attached to the matching remote item.
+ */
+export function mergeAuthoritativeGalleryItems(
+  current: readonly WallpaperGalleryItem[],
+  incoming: readonly WallpaperGalleryItem[],
+): WallpaperGalleryItem[] {
+  const localPathByAlias = new Map<string, string>();
+  for (const item of current) {
+    const localPath = item.localPath?.trim();
+    if (!localPath) continue;
+    for (const alias of galleryItemAliases(item)) {
+      if (!localPathByAlias.has(alias)) localPathByAlias.set(alias, localPath);
+    }
+  }
+
+  return dedupeGalleryItems([...incoming]).map((item) => {
+    const localPath =
+      item.localPath?.trim() ||
+      galleryItemAliases(item)
+        .map((alias) => localPathByAlias.get(alias))
+        .find(Boolean);
+    return localPath ? { ...item, localPath } : item;
+  });
+}
+
+/**
+ * Append a new page while allowing its metadata to refresh matching cards.
+ * Existing order and membership remain intact; genuinely new cards follow it.
+ */
+export function appendGalleryItems(
+  current: readonly WallpaperGalleryItem[],
+  incoming: readonly WallpaperGalleryItem[],
+): WallpaperGalleryItem[] {
+  const merged: WallpaperGalleryItem[] = [];
+
+  for (const item of current) {
+    const aliases = galleryItemAliases(item);
+    if (aliases.length === 0) continue;
+    const match = merged.findIndex((candidate) => {
+      const candidateAliases = new Set(galleryItemAliases(candidate));
+      return aliases.some((alias) => candidateAliases.has(alias));
+    });
+    if (match < 0) {
+      merged.push(item);
+      continue;
+    }
+    if (!merged[match]?.localPath && item.localPath?.trim()) {
+      merged[match] = { ...merged[match]!, localPath: item.localPath };
+    }
+  }
+
+  for (const item of incoming) {
+    const aliases = galleryItemAliases(item);
+    if (aliases.length === 0) continue;
+    const matches: number[] = [];
+    for (let index = 0; index < merged.length; index += 1) {
+      const candidateAliases = new Set(galleryItemAliases(merged[index]!));
+      if (aliases.some((alias) => candidateAliases.has(alias))) {
+        matches.push(index);
+      }
+    }
+    if (matches.length === 0) {
+      merged.push(item);
+      continue;
+    }
+
+    const target = matches[0]!;
+    const localPath =
+      item.localPath?.trim() ||
+      matches
+        .map((index) => merged[index]?.localPath?.trim())
+        .find(Boolean) ||
+      null;
+    merged[target] = { ...item, localPath };
+    for (let index = matches.length - 1; index >= 1; index -= 1) {
+      merged.splice(matches[index]!, 1);
+    }
+  }
+
+  return merged;
 }
 
 function mimeFromName(name: string): string {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { SessionFileChange } from "./sessionChanges";
 import type { TimelineUnit } from "./timelinePhases";
 import {
+  buildTurnChangedFileCards,
   collectTurnModifiedPaths,
   splitTurnChangedFiles,
   turnChangedFileItems,
@@ -105,5 +107,110 @@ describe("splitTurnChangedFiles", () => {
     const split = splitTurnChangedFiles(items);
     expect(split.visible).toHaveLength(TURN_CHANGED_FILES_VISIBLE_MAX);
     expect(split.hiddenCount).toBe(3);
+  });
+});
+
+function change(
+  partial: Partial<SessionFileChange> & Pick<SessionFileChange, "path">,
+): SessionFileChange {
+  const path = partial.path;
+  return {
+    name: partial.name ?? path.split("/").pop() ?? path,
+    toolKind: partial.toolKind ?? "search_replace",
+    status: partial.status ?? "completed",
+    updatedAt: partial.updatedAt ?? "2026-01-01T00:00:00.000Z",
+    ...partial,
+    path,
+  };
+}
+
+describe("buildTurnChangedFileCards", () => {
+  it("attaches unified patch and deltas when before/after exist", () => {
+    const cards = buildTurnChangedFileCards(
+      ["/proj/a.ts", "/proj/b.ts"],
+      [
+        change({
+          path: "/proj/a.ts",
+          before: "one\n",
+          after: "one\ntwo\n",
+        }),
+        change({
+          path: "/proj/b.ts",
+          before: "keep\ngone\n",
+          after: "keep\n",
+        }),
+      ],
+      "/proj",
+    );
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toMatchObject({
+      path: "/proj/a.ts",
+      name: "a.ts",
+      hasSnippet: true,
+      added: 1,
+      removed: 0,
+    });
+    expect(cards[0]!.patch).toContain("+++ b/a.ts");
+    expect(cards[0]!.patch).toContain("+two");
+    expect(cards[1]).toMatchObject({
+      path: "/proj/b.ts",
+      name: "b.ts",
+      hasSnippet: true,
+      added: 0,
+      removed: 1,
+    });
+  });
+
+  it("treats after-only as a new-file snippet", () => {
+    const cards = buildTurnChangedFileCards(
+      ["/proj/new.ts"],
+      [change({ path: "/proj/new.ts", after: "hello\nworld\n" })],
+      "/proj",
+    );
+    expect(cards[0]).toMatchObject({
+      hasSnippet: true,
+      added: 2,
+      removed: 0,
+    });
+    expect(cards[0]!.patch).toContain("+hello");
+  });
+
+  it("returns empty snippet cards when sessionChanges miss the path", () => {
+    const cards = buildTurnChangedFileCards(
+      ["/proj/orphan.ts"],
+      [change({ path: "/proj/other.ts", before: "a", after: "b" })],
+    );
+    expect(cards).toEqual([
+      {
+        path: "/proj/orphan.ts",
+        name: "orphan.ts",
+        added: 0,
+        removed: 0,
+        patch: null,
+        hasSnippet: false,
+      },
+    ]);
+  });
+
+  it("preserves path order and matches by project-relative path", () => {
+    const cards = buildTurnChangedFileCards(
+      ["src/b.ts", "src/a.ts"],
+      [
+        change({
+          path: "/work/src/a.ts",
+          before: "x\n",
+          after: "y\n",
+        }),
+        change({
+          path: "/work/src/b.ts",
+          before: "1\n",
+          after: "1\n2\n",
+        }),
+      ],
+      "/work",
+    );
+    expect(cards.map((c) => c.name)).toEqual(["b.ts", "a.ts"]);
+    expect(cards[0]!.hasSnippet).toBe(true);
+    expect(cards[1]!.hasSnippet).toBe(true);
   });
 });

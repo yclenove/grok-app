@@ -163,4 +163,10 @@ export const ukChat = {
   "chat.changedFiles.viewAll": "Переглянути всі",
   "chat.changedFiles.openFile": "Перевірити зміни в {name}",
   "chat.changedFiles.more": "ще {n}",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "Розгорнути diff для {name}",
+  "chat.changedFiles.collapse": "Згорнути diff для {name}",
+  "chat.changedFiles.openInReview": "Відкрити в Review",
+  "chat.changedFiles.noDiffYet": "Diff ще недоступний — відкрийте Review для повного файлу.",
+  "chat.changedFiles.truncated": "Показано {shown} з {total} рядків"
 };

@@ -112,8 +112,10 @@ response, or user query is written to logs or returned in diagnostics.
   from different source pages on the same site also collapse. Matching titles
   across sites do not collapse, and one source page may still contribute two
   distinct images.
-- `Load more` runs one fresh lane with opaque existing source IDs so the model
-  can avoid duplicates.
+- `Load more` runs one fresh lane with a bounded list of hostnames for existing
+  source pages. Paths, queries, and fragments never enter the model prompt. A
+  new model request can use those site identities to seek different sources;
+  Host media/source-page deduplication remains the final authority.
 - After a successful remote search, the frontend keeps at most one result page
   ahead with a cancellable hidden prefetch. The visible gallery does not change
   until the user clicks `Load more`; that click consumes the buffered page and
@@ -229,8 +231,9 @@ this pass does not claim a live Pexels API request. These observations confirm
 that one- or two-card Web outcomes are downstream discovery/validation
 attrition rather than a requested page-size of one or two.
 
-A final contract-v2 provider pass used a modifier-heavy library query without
-recording its text. Openverse retained 20 validated cards in 25.3 seconds, and
+Before the direct-library contract advanced to v3, a contract-v2 provider pass
+used a modifier-heavy library query without recording its text. Openverse
+retained 20 validated cards in 25.3 seconds, and
 the prefetched expansion added 19 cards for a total of 39. A previously
 rendered card still selected and opened the real Lightbox after paging; Escape
 closed only the Lightbox and preserved the source dialog. Source, author, and

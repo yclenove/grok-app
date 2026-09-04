@@ -1,12 +1,17 @@
 //! HTTPS transport that validates DNS at connection time and pins the socket
-//! (or proxy tunnel) to the validated public address.
+//! (or proxy tunnel) to the validated public address whenever the destination
+//! is resolved locally.
 //!
 //! `skin_net::check_hop` validates URL policy before a request. That alone is
 //! not sufficient for attacker-controlled hosts: a second resolver lookup by
 //! the HTTP stack can be rebound to loopback or a private network. This
 //! connector performs the security lookup while opening each new connection.
-//! HTTP CONNECT and SOCKS proxies receive the validated IP address, while TLS
-//! SNI and the HTTP Host header retain the original hostname.
+//! HTTP CONNECT and `socks5` proxies receive the validated IP address, while
+//! TLS SNI and the HTTP Host header retain the original hostname. `socks5h`
+//! deliberately delegates DNS to the proxy, so the Host cannot inspect or pin
+//! the resulting address. That mode is therefore fail-closed to fixed trusted
+//! service/media domains; arbitrary discovery URLs must use a locally
+//! verifiable route.
 
 use std::fmt;
 use std::future::Future;
@@ -41,6 +46,34 @@ use crate::skin_net;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PROXY_REPLY_LIMIT: usize = 16 * 1024;
+// These are fixed service hosts, not registrable-domain suffixes. In
+// particular, arbitrary GitHub Pages and githubusercontent subdomains remain
+// locally resolved and pinned because their namespace is user-controlled.
+const REMOTE_DNS_TRUSTED_HOSTS: &[&str] = &[
+    "api.openverse.org",
+    "api.pexels.com",
+    "images.pexels.com",
+    "pexels.com",
+    "www.pexels.com",
+    "pbs.twimg.com",
+    "video.twimg.com",
+    "ton.twimg.com",
+    "abs.twimg.com",
+    "cdn.grok.com",
+    "assets.grok.com",
+    "imagine-public.x.ai",
+    "imgen.x.ai",
+    "filesystem.site",
+    "x.com",
+    "twitter.com",
+    "x.ai",
+    "github.com",
+    "github.io",
+    "githubusercontent.com",
+    "raw.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+];
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ConnectorFuture =
@@ -287,6 +320,12 @@ fn build_get_request(
     uri: Uri,
     mut headers: HeaderMap,
 ) -> Result<Request<Empty<Bytes>>, SafeHttpsError> {
+    // Proxy credentials belong only to the connector's CONNECT/SOCKS
+    // handshake. Forwarding a caller-supplied value here would send it through
+    // the encrypted tunnel to the destination origin.
+    if headers.contains_key(PROXY_AUTHORIZATION) {
+        return Err(SafeHttpsError::new(SafeHttpsErrorKind::Blocked));
+    }
     let authority = uri
         .authority()
         .ok_or_else(|| SafeHttpsError::new(SafeHttpsErrorKind::Blocked))?;
@@ -352,8 +391,43 @@ async fn connect_https(
         .ok_or_else(|| io_error(io::ErrorKind::PermissionDenied, "missing host"))?
         .to_string();
     let port = destination.port_u16().unwrap_or(443);
-    let target_addrs = resolve_public_target(&host, port).await?;
-    let proxy = proxy_for_target(&route, &host, port, &target_addrs)?;
+    let literal_target = literal_socket_target(&host, port);
+    let literal_addresses = literal_target.into_iter().collect::<Vec<_>>();
+    if !literal_addresses.is_empty() {
+        validate_public_addresses(literal_addresses.clone())?;
+    }
+    let mut proxy = proxy_for_target(&route, &host, port, &literal_addresses)?;
+    let address_dependent_bypass = route
+        .no_proxy
+        .as_deref()
+        .is_some_and(no_proxy_has_address_rule);
+
+    let may_use_remote_dns =
+        remote_dns_allowed_for_connection(&host, literal_target, address_dependent_bypass);
+
+    if proxy.as_ref().is_some_and(proxy_uses_remote_dns) && may_use_remote_dns {
+        let target = TunnelTarget::Domain {
+            host: host.clone(),
+            port,
+        };
+        let stream = connect_proxy_tunnel(proxy.as_ref().expect("proxy checked"), &target).await?;
+        return tls_wrap(stream, &host).await.map(TokioIo::new);
+    }
+
+    let target_addrs = match literal_target {
+        Some(address) => vec![address],
+        None => resolve_public_target(&host, port).await?,
+    };
+    // A CIDR NO_PROXY rule can only be evaluated after local resolution.
+    proxy = proxy_for_target(&route, &host, port, &target_addrs)?;
+    if proxy.as_ref().is_some_and(proxy_uses_remote_dns) && may_use_remote_dns {
+        let target = TunnelTarget::Domain {
+            host: host.clone(),
+            port,
+        };
+        let stream = connect_proxy_tunnel(proxy.as_ref().expect("proxy checked"), &target).await?;
+        return tls_wrap(stream, &host).await.map(TokioIo::new);
+    }
 
     let mut last_error: Option<BoxError> = None;
     for plan in connection_plans(&host, target_addrs) {
@@ -363,6 +437,13 @@ async fn connect_https(
         }
     }
     Err(last_error.unwrap_or_else(|| io_error(io::ErrorKind::NotConnected, "no address")))
+}
+
+fn literal_socket_target(host: &str, port: u16) -> Option<SocketAddr> {
+    host.trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, port))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,6 +497,12 @@ struct ProxyRoute {
     url: Url,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TunnelTarget {
+    Socket(SocketAddr),
+    Domain { host: String, port: u16 },
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct RouteSnapshot {
     proxy_url: Option<String>,
@@ -437,6 +524,34 @@ fn route_snapshot() -> RouteSnapshot {
             no_proxy: first_env(&["NO_PROXY", "no_proxy"]),
         },
     }
+}
+
+/// Whether a URL is allowed to rely on an unobservable proxy-side DNS answer.
+/// This is deliberately narrower than `AnyHttps`: only fixed service/media
+/// domains may trade address pinning for genuine socks5h semantics.
+pub(crate) fn remote_dns_preflight_allowed(url: &Url) -> bool {
+    remote_dns_preflight_allowed_for_route(url, &route_snapshot())
+}
+
+fn remote_dns_preflight_allowed_for_route(url: &Url, route: &RouteSnapshot) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if literal_socket_target(host, url.port_or_known_default().unwrap_or(443)).is_some() {
+        return false;
+    }
+    if route
+        .no_proxy
+        .as_deref()
+        .is_some_and(no_proxy_has_address_rule)
+    {
+        return false;
+    }
+    let Ok(proxy) = proxy_for_target(route, host, url.port_or_known_default().unwrap_or(443), &[])
+    else {
+        return false;
+    };
+    proxy.as_ref().is_some_and(proxy_uses_remote_dns) && validate_remote_dns_host(host).is_ok()
 }
 
 fn proxy_for_target(
@@ -463,12 +578,60 @@ fn proxy_for_target(
     Ok(Some(ProxyRoute { url }))
 }
 
+fn proxy_uses_remote_dns(route: &ProxyRoute) -> bool {
+    route.url.scheme() == "socks5h"
+}
+
+fn remote_dns_allowed_for_connection(
+    host: &str,
+    literal_target: Option<SocketAddr>,
+    address_dependent_bypass: bool,
+) -> bool {
+    literal_target.is_none() && !address_dependent_bypass && validate_remote_dns_host(host).is_ok()
+}
+
+fn validate_remote_dns_host(host: &str) -> Result<(), BoxError> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let configured_catalog_host = Url::parse(skin_net::OFFICIAL_SKIN_CATALOG_URL)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    let trusted = REMOTE_DNS_TRUSTED_HOSTS.contains(&host.as_str())
+        || configured_catalog_host.as_deref() == Some(host.as_str());
+    if trusted {
+        Ok(())
+    } else {
+        Err(io_error(
+            io::ErrorKind::PermissionDenied,
+            "SOCKS remote DNS destination blocked",
+        ))
+    }
+}
+
 fn first_env(names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         std::env::var(name)
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+    })
+}
+
+fn no_proxy_has_address_rule(list: &str) -> bool {
+    list.split(',').any(|raw| {
+        let mut entry = raw.trim();
+        if let Some(rest) = entry.strip_prefix('[') {
+            let Some(end) = rest.find(']') else {
+                return false;
+            };
+            entry = &rest[..end];
+        } else if entry.matches(':').count() == 1 {
+            if let Some((candidate, port)) = entry.rsplit_once(':') {
+                if port.parse::<u16>().is_ok() {
+                    entry = candidate;
+                }
+            }
+        }
+        entry.parse::<IpAddr>().is_ok() || entry.parse::<IpNet>().is_ok()
     })
 }
 
@@ -531,12 +694,15 @@ async fn connect_target_once(
 ) -> Result<SafeIo, BoxError> {
     let transport = match proxy {
         None => SafeIo::new(connect_tcp(&[target]).await?),
-        Some(route) => connect_proxy_tunnel(route, target).await?,
+        Some(route) => connect_proxy_tunnel(route, &TunnelTarget::Socket(target)).await?,
     };
     tls_wrap(transport, target_host).await
 }
 
-async fn connect_proxy_tunnel(route: &ProxyRoute, target: SocketAddr) -> Result<SafeIo, BoxError> {
+async fn connect_proxy_tunnel(
+    route: &ProxyRoute,
+    target: &TunnelTarget,
+) -> Result<SafeIo, BoxError> {
     let scheme = route.url.scheme();
     let proxy_host = route
         .url
@@ -556,8 +722,21 @@ async fn connect_proxy_tunnel(route: &ProxyRoute, target: SocketAddr) -> Result<
         stream = tls_wrap(stream, proxy_host).await?;
     }
     match scheme {
-        "http" | "https" => http_connect(stream, &route.url, target).await,
-        "socks5" | "socks5h" => socks5_connect(stream, &route.url, target).await,
+        "http" | "https" => match target {
+            TunnelTarget::Socket(target) => http_connect(stream, &route.url, *target).await,
+            TunnelTarget::Domain { .. } => Err(io_error(
+                io::ErrorKind::PermissionDenied,
+                "HTTP proxy target must be validated",
+            )),
+        },
+        "socks5" => match target {
+            TunnelTarget::Socket(_) => socks5_connect(stream, &route.url, target).await,
+            TunnelTarget::Domain { .. } => Err(io_error(
+                io::ErrorKind::PermissionDenied,
+                "SOCKS target must be validated",
+            )),
+        },
+        "socks5h" => socks5_connect(stream, &route.url, target).await,
         _ => Err(io_error(io::ErrorKind::InvalidInput, "proxy scheme")),
     }
 }
@@ -655,7 +834,7 @@ fn http_connect_request(proxy_url: &Url, target: SocketAddr) -> Result<Vec<u8>, 
 async fn socks5_connect(
     mut stream: SafeIo,
     proxy_url: &Url,
-    target: SocketAddr,
+    target: &TunnelTarget,
 ) -> Result<SafeIo, BoxError> {
     let username = decode_component(proxy_url.username());
     let password = decode_component(proxy_url.password().unwrap_or(""));
@@ -700,7 +879,7 @@ async fn socks5_connect(
         ));
     }
 
-    let request = socks5_target_request(target);
+    let request = socks5_target_request(target)?;
     stream.write_all(&request).await?;
 
     let mut header = [0_u8; 4];
@@ -726,20 +905,30 @@ async fn socks5_connect(
     Ok(stream)
 }
 
-fn socks5_target_request(target: SocketAddr) -> Vec<u8> {
+fn socks5_target_request(target: &TunnelTarget) -> Result<Vec<u8>, BoxError> {
     let mut request = vec![5_u8, 1, 0];
-    match target.ip() {
-        IpAddr::V4(ip) => {
+    let port = match target {
+        TunnelTarget::Socket(SocketAddr::V4(target)) => {
             request.push(1);
-            request.extend_from_slice(&ip.octets());
+            request.extend_from_slice(&target.ip().octets());
+            target.port()
         }
-        IpAddr::V6(ip) => {
+        TunnelTarget::Socket(SocketAddr::V6(target)) => {
             request.push(4);
-            request.extend_from_slice(&ip.octets());
+            request.extend_from_slice(&target.ip().octets());
+            target.port()
         }
-    }
-    request.extend_from_slice(&target.port().to_be_bytes());
-    request
+        TunnelTarget::Domain { host, port } => {
+            if host.is_empty() || host.len() > u8::MAX as usize || !host.is_ascii() {
+                return Err(io_error(io::ErrorKind::InvalidInput, "SOCKS domain"));
+            }
+            request.extend_from_slice(&[3, host.len() as u8]);
+            request.extend_from_slice(host.as_bytes());
+            *port
+        }
+    };
+    request.extend_from_slice(&port.to_be_bytes());
+    Ok(request)
 }
 
 fn proxy_authorization(url: &Url) -> Result<Option<HeaderValue>, BoxError> {
@@ -774,102 +963,4 @@ fn io_error(kind: io::ErrorKind, message: &'static str) -> BoxError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
-    #[test]
-    fn destination_validation_rejects_any_private_dns_answer() {
-        let public = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
-        let private = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-        assert!(validate_public_addresses(vec![public, private]).is_err());
-        assert_eq!(
-            validate_public_addresses(vec![public, public]).unwrap(),
-            [public]
-        );
-    }
-
-    #[test]
-    fn proxy_destinations_use_ip_authorities_but_keep_original_tls_name_separate() {
-        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)), 443);
-        let plans = connection_plans("cdn.example", vec![target]);
-        assert_eq!(
-            plans,
-            [ConnectionPlan {
-                tls_host: "cdn.example".into(),
-                target,
-            }]
-        );
-
-        let proxy = Url::parse("http://proxy.example:8080").unwrap();
-        let connect = String::from_utf8(http_connect_request(&proxy, target).unwrap()).unwrap();
-        assert!(
-            connect.starts_with("CONNECT 203.0.113.8:443 HTTP/1.1\r\nHost: 203.0.113.8:443\r\n")
-        );
-        assert!(!connect.contains("cdn.example"));
-
-        let socks = socks5_target_request(target);
-        assert_eq!(socks, [5, 1, 0, 1, 203, 0, 113, 8, 1, 187]);
-        assert!(!socks
-            .windows("cdn.example".len())
-            .any(|window| window == b"cdn.example"));
-
-        assert_eq!(
-            socket_authority(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443)),
-            "[::1]:443"
-        );
-    }
-
-    #[test]
-    fn no_proxy_matches_domains_ips_cidr_and_optional_ports() {
-        let addresses = [SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)),
-            443,
-        )];
-        assert!(no_proxy_matches(
-            "cdn.example.com",
-            443,
-            &addresses,
-            ".example.com"
-        ));
-        assert!(no_proxy_matches(
-            "cdn.example.com",
-            443,
-            &addresses,
-            "*.example.com"
-        ));
-        assert!(!no_proxy_matches(
-            "notexample.com",
-            443,
-            &addresses,
-            "example.com"
-        ));
-        assert!(no_proxy_matches(
-            "cdn.example.com",
-            443,
-            &addresses,
-            "203.0.113.0/24"
-        ));
-        assert!(no_proxy_matches(
-            "cdn.example.com",
-            443,
-            &addresses,
-            "cdn.example.com:443"
-        ));
-        assert!(!no_proxy_matches(
-            "cdn.example.com",
-            8443,
-            &addresses,
-            "cdn.example.com:443"
-        ));
-    }
-
-    #[test]
-    fn request_keeps_the_original_http_host() {
-        let uri = "https://cdn.example:8443/image.jpg".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(HOST, HeaderValue::from_static("forged.example"));
-        let request = build_get_request(uri, headers).unwrap();
-        assert_eq!(request.headers().get(HOST).unwrap(), "cdn.example:8443");
-    }
-}
+mod tests;

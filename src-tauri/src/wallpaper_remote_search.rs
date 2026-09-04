@@ -145,6 +145,16 @@ impl RemoteSearchRuntime {
     }
 }
 
+/// Linearize a synchronous cache lookup with cancellation. A cancellation
+/// that wins the shared gate prevents both the lookup's LRU mutation and use
+/// of its value; a lookup that wins has completed before cancellation.
+pub(crate) fn read_cache_if_active<T>(
+    cancellation: &WallpaperSearchCancellation,
+    read: impl FnOnce() -> T,
+) -> Result<T, ()> {
+    cancellation.commit_if_active(read).ok_or(())
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProgressEvent<'a> {
@@ -266,5 +276,31 @@ mod tests {
         assert_eq!(normalized_query("  Misty   Lake  "), "misty lake");
         assert!(validate_query("   ").is_err());
         assert!(validate_query(&"x".repeat(241)).is_err());
+    }
+
+    #[test]
+    fn cache_read_is_skipped_when_already_cancelled() {
+        let cancellation = WallpaperSearchCancellation::default();
+        cancellation.cancel();
+        let mut read = false;
+
+        let result = read_cache_if_active(&cancellation, || {
+            read = true;
+            42
+        });
+
+        assert_eq!(result, Err(()));
+        assert!(!read);
+    }
+
+    #[test]
+    fn cache_read_is_linearized_before_a_later_cancellation() {
+        let cancellation = WallpaperSearchCancellation::default();
+
+        let result = read_cache_if_active(&cancellation, || 42);
+
+        assert_eq!(result, Ok(42));
+        cancellation.cancel();
+        assert!(cancellation.is_cancelled());
     }
 }

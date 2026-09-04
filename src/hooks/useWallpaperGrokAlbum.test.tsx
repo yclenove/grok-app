@@ -1,7 +1,13 @@
 /**
  * @vitest-environment jsdom
  */
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  renderHook,
+  waitFor,
+} from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GrokAlbumSnapshot } from "@/lib/grokAlbum";
 
@@ -69,6 +75,17 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("useWallpaperGrokAlbum", () => {
+  it("syncs after StrictMode replays effect cleanup and setup", async () => {
+    albumSnapshot.mockResolvedValue(readySnapshot(20));
+    const view = renderHook(() => useWallpaperGrokAlbum(true), {
+      wrapper: StrictMode,
+    });
+
+    await waitFor(() => expect(view.result.current.cachedCount).toBe(20));
+    expect(albumSnapshot).toHaveBeenCalled();
+    expect(view.result.current.status).toBe("ready");
+  });
+
   it("shows an honest loading state until the first Host snapshot arrives", async () => {
     let resolveSnapshot: ((snapshot: GrokAlbumSnapshot) => void) | null = null;
     albumSnapshot.mockImplementation(
@@ -268,6 +285,126 @@ describe("useWallpaperGrokAlbum", () => {
     expect(view.result.current.loadingMore).toBe(false);
   });
 
+  it("retries a skipped background warmup as an explicit load more", async () => {
+    let resolveWarmup: ((snapshot: GrokAlbumSnapshot) => void) | null = null;
+    albumSnapshot.mockResolvedValue(readySnapshot(20));
+    albumLoadMore
+      .mockImplementationOnce(
+        () =>
+          new Promise<GrokAlbumSnapshot>((resolve) => {
+            resolveWarmup = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        ...readySnapshot(40),
+        newItems: 20,
+      } satisfies GrokAlbumSnapshot);
+    const view = renderHook(() => useWallpaperGrokAlbum(true));
+
+    await waitFor(
+      () => expect(albumLoadMore).toHaveBeenCalledWith(true),
+      { timeout: 1_500 },
+    );
+    let manualLoad: Promise<void> | null = null;
+    await act(async () => {
+      manualLoad = view.result.current.loadMore();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveWarmup?.({
+        ...readySnapshot(20),
+        prefetchSkipped: true,
+      });
+      await manualLoad;
+    });
+
+    expect(albumLoadMore).toHaveBeenCalledTimes(2);
+    expect(albumLoadMore).toHaveBeenNthCalledWith(2, false);
+    expect(view.result.current.cachedCount).toBe(40);
+    expect(view.result.current.visibleCount).toBe(40);
+    expect(view.result.current.canLoadMore).toBe(true);
+  });
+
+  it("retries an empty in-flight background warmup as an explicit load more", async () => {
+    let resolveWarmup: ((snapshot: GrokAlbumSnapshot) => void) | null = null;
+    albumSnapshot.mockResolvedValue(readySnapshot(20));
+    albumLoadMore
+      .mockImplementationOnce(
+        () =>
+          new Promise<GrokAlbumSnapshot>((resolve) => {
+            resolveWarmup = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        ...readySnapshot(40),
+        newItems: 20,
+      } satisfies GrokAlbumSnapshot);
+    const view = renderHook(() => useWallpaperGrokAlbum(true));
+
+    await waitFor(
+      () => expect(albumLoadMore).toHaveBeenCalledWith(true),
+      { timeout: 1_500 },
+    );
+    let manualLoad: Promise<void> | null = null;
+    await act(async () => {
+      manualLoad = view.result.current.loadMore();
+      await Promise.resolve();
+    });
+    expect(albumLoadMore).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveWarmup?.(readySnapshot(20));
+      await manualLoad;
+    });
+
+    expect(albumLoadMore).toHaveBeenCalledTimes(2);
+    expect(albumLoadMore).toHaveBeenNthCalledWith(2, false);
+    expect(view.result.current.cachedCount).toBe(40);
+    expect(view.result.current.visibleCount).toBe(40);
+    expect(view.result.current.canLoadMore).toBe(true);
+  });
+
+  it("retries a rejected in-flight background warmup as an explicit load more", async () => {
+    albumSnapshot.mockResolvedValue(readySnapshot(20));
+    albumLoadMore
+      .mockRejectedValueOnce(new Error("warmup failed"))
+      .mockResolvedValueOnce({
+        ...readySnapshot(40),
+        newItems: 20,
+      } satisfies GrokAlbumSnapshot);
+    const view = renderHook(() => useWallpaperGrokAlbum(true));
+
+    await waitFor(
+      () => expect(albumLoadMore).toHaveBeenCalledWith(true),
+      { timeout: 1_500 },
+    );
+    await act(async () => view.result.current.loadMore());
+
+    expect(albumLoadMore).toHaveBeenCalledTimes(2);
+    expect(albumLoadMore).toHaveBeenNthCalledWith(2, false);
+    expect(view.result.current.cachedCount).toBe(40);
+    expect(view.result.current.visibleCount).toBe(40);
+  });
+
+  it("surfaces a foreground failure after a rejected background warmup", async () => {
+    albumSnapshot.mockResolvedValue(readySnapshot(20));
+    albumLoadMore
+      .mockRejectedValueOnce(new Error("warmup failed"))
+      .mockRejectedValueOnce(new Error("album_bridge foreground failed"));
+    const view = renderHook(() => useWallpaperGrokAlbum(true));
+
+    await waitFor(
+      () => expect(albumLoadMore).toHaveBeenCalledWith(true),
+      { timeout: 1_500 },
+    );
+    await act(async () => view.result.current.loadMore());
+
+    expect(albumLoadMore).toHaveBeenCalledTimes(2);
+    expect(albumLoadMore).toHaveBeenNthCalledWith(2, false);
+    expect(view.result.current.errorCode).toBe("bridge");
+    expect(view.result.current.cachedCount).toBe(20);
+  });
+
   it("drops cached media when the official page becomes signed out", async () => {
     albumSnapshot
       .mockResolvedValueOnce({ ...readySnapshot(20), canLoadMore: false })
@@ -348,5 +485,27 @@ describe("useWallpaperGrokAlbum", () => {
     expect(view.result.current.status).toBe("ready");
     expect(view.result.current.cachedCount).toBe(20);
     expect(view.result.current.visibleCount).toBe(20);
+  });
+
+  it("invalidates a pending snapshot when the hook unmounts", async () => {
+    let resolveSnapshot: ((snapshot: GrokAlbumSnapshot) => void) | null = null;
+    albumSnapshot.mockImplementation(
+      () =>
+        new Promise<GrokAlbumSnapshot>((resolve) => {
+          resolveSnapshot = resolve;
+        }),
+    );
+    const view = renderHook(() => useWallpaperGrokAlbum(true));
+    await waitFor(() => expect(albumSnapshot).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    await act(async () => {
+      resolveSnapshot?.(readySnapshot(20));
+      await Promise.resolve();
+    });
+
+    expect(warmAlbumThumbnails).not.toHaveBeenCalled();
+    expect(albumLoadMore).not.toHaveBeenCalled();
+    expect(clearAlbumThumbnails).toHaveBeenCalled();
   });
 });

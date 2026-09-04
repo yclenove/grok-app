@@ -47,6 +47,7 @@ pub(crate) enum ResponsesSearchErrorKind {
     Empty,
     InvalidJson,
     Protocol,
+    ToolNotCalled,
     SearchBudgetExceeded,
     Cancelled,
 }
@@ -66,6 +67,7 @@ impl ResponsesSearchErrorKind {
             Self::Empty => "responses_empty",
             Self::InvalidJson => "responses_invalid_json",
             Self::Protocol => "responses_protocol",
+            Self::ToolNotCalled => "responses_tool_not_called",
             Self::SearchBudgetExceeded => "responses_search_budget_exceeded",
             Self::Cancelled => "cancelled",
         }
@@ -302,7 +304,8 @@ fn parallel_error_priority(kind: ResponsesSearchErrorKind) -> u8 {
         | ResponsesSearchErrorKind::OauthExpired => 3,
         ResponsesSearchErrorKind::BadRequest
         | ResponsesSearchErrorKind::InvalidJson
-        | ResponsesSearchErrorKind::Protocol => 4,
+        | ResponsesSearchErrorKind::Protocol
+        | ResponsesSearchErrorKind::ToolNotCalled => 4,
         ResponsesSearchErrorKind::ServerError
         | ResponsesSearchErrorKind::Timeout
         | ResponsesSearchErrorKind::Tls
@@ -432,6 +435,13 @@ async fn search_with_client(
             ResponsesSearchError::new(ResponsesSearchErrorKind::Protocol, error_revision())
         })?;
     let search_calls = count_x_search_calls(output);
+    if search_calls == 0 {
+        return Err(ResponsesSearchError::new(
+            ResponsesSearchErrorKind::ToolNotCalled,
+            error_revision(),
+        )
+        .with_observed_search_calls(search_calls));
+    }
     if search_calls > max_search_calls {
         return Err(ResponsesSearchError::new(
             ResponsesSearchErrorKind::SearchBudgetExceeded,
@@ -636,19 +646,26 @@ fn count_x_search_calls(output: &[Value]) -> u32 {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if item_type.contains("x_search")
-                || item_type.contains("xsearch")
-                // Only x_search is registered in this fixed request. Current
-                // Build responses may emit an unnamed custom_tool_call.
-                || item_type.contains("custom_tool")
-            {
+            if item.get("status").and_then(Value::as_str) != Some("completed") {
+                return false;
+            }
+            if matches!(item_type.as_str(), "x_search_call" | "x_search_tool_call") {
                 return true;
             }
-            item_type.contains("tool_call")
-                && ["name", "tool_name", "type"]
-                    .iter()
-                    .filter_map(|field| item.get(field).and_then(Value::as_str))
-                    .any(|name| name.eq_ignore_ascii_case("x_search"))
+            // The fixed request registers only x_search. Build compatibility
+            // responses can represent that call as an unnamed custom call,
+            // but accept only the exact completed call item, never result or
+            // arbitrary custom_tool-prefixed shapes.
+            if item_type == "custom_tool_call" {
+                return true;
+            }
+            matches!(
+                item_type.as_str(),
+                "server_tool_use" | "server_tool_call" | "tool_use" | "tool_call"
+            ) && ["name", "tool_name", "tool"]
+                .iter()
+                .filter_map(|field| item.get(field).and_then(Value::as_str))
+                .any(|name| name.eq_ignore_ascii_case("x_search"))
         })
         .count()
         .try_into()

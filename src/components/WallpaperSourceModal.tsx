@@ -23,10 +23,11 @@ import { useWallpaperXSearch } from "@/hooks/useWallpaperXSearch";
 import * as api from "@/lib/api";
 import { isDesktopHost } from "@/lib/api";
 import {
+  appendGalleryItems,
   dedupeGalleryItems,
   errorCodeFromSearchResult,
-  fileFromAbsolutePath,
   libraryEntriesToGalleryItems,
+  mergeAuthoritativeGalleryItems,
   parseWallpaperSourceError,
   type WallpaperGalleryItem,
   type WallpaperSourceErrorCode,
@@ -40,20 +41,15 @@ import {
   wallpaperGalleryHasActiveFilters,
   type WallpaperGalleryKindFilter,
 } from "@/lib/wallpaperGalleryPro";
-import {
-  recordWallpaperXEvidencePick,
-  wallpaperXEvidenceFromGalleryItem,
-} from "@/lib/xEvidenceCitation";
 import { resolveGrokAlbumEmptyPresentation } from "@/lib/grokAlbum";
 import {
   cancelGrokAlbumMediaRequests,
   cancelRemoteWallpaperMediaRequests,
-  ensureLocalWallpaperMedia,
 } from "@/lib/wallpaperSourceMedia";
+import { prepareWallpaperSelection } from "@/lib/wallpaperApply";
 import {
   normalizeWallpaperXSearchMode,
   wallpaperXSearchProgressMessageKey,
-  wallpaperXSearchRouteSummary,
   type WallpaperXSearchMeta,
   type WallpaperXSearchMode,
 } from "@/lib/wallpaperXSearch";
@@ -62,6 +58,7 @@ import { isWallpaperImageItem } from "@/lib/wallpaperImagine";
 import { WallpaperPrepareError } from "@/lib/themeSkin";
 import {
   wallpaperSourceErrorMessage as errorMessage,
+  wallpaperSourceRouteStatus,
 } from "@/lib/wallpaperSourcePresentation";
 const WALLPAPER_SOURCE_PANEL_ID = "wallpaper-source-panel";
 
@@ -166,6 +163,9 @@ export function WallpaperSourceModal({
 
   useEffect(() => {
     sourceGenerationRef.current += 1;
+    // A close invalidates any pending media preparation. Reset the local busy
+    // state here as well so reopening cannot inherit a stale apply operation.
+    setApplying(false);
     if (!open) return;
     setTab(initialTab);
     setError(null);
@@ -207,10 +207,8 @@ export function WallpaperSourceModal({
   }, [hasPexelsKey, open, tab, t]);
 
   useEffect(() => {
-    if (!open || tab !== "x") {
-      void cancelXSearch();
-    }
-  }, [open, tab, cancelXSearch]);
+    if (!open) void cancelXSearch();
+  }, [open, cancelXSearch]);
 
   useEffect(() => {
     if (!open || tab !== "grok_album") return;
@@ -364,6 +362,7 @@ export function WallpaperSourceModal({
       void cancelRemoteWallpaperMediaRequests();
       void remoteController.cancel();
       remoteController.clear();
+      if (tab === "x") void cancelXSearch();
       if (tab === "imagine") imagineController.cancelAll();
       setTab(next);
       setSourceBusy(false);
@@ -384,6 +383,7 @@ export function WallpaperSourceModal({
     },
     [
       imagineController.cancelAll,
+      cancelXSearch,
       remoteController.cancel,
       remoteController.clear,
       tab,
@@ -403,21 +403,10 @@ export function WallpaperSourceModal({
     [t],
   );
 
-  const routeStatus = useMemo(() => {
-    const summary = wallpaperXSearchRouteSummary(routeMeta);
-    if (!summary) return null;
-    const route = t(summary.key as MessageKey, {
-      seconds: summary.seconds,
-      responsesSeconds: summary.responsesSeconds,
-      cliSeconds: summary.cliSeconds,
-      reason: summary.reasonKey
-        ? t(summary.reasonKey as MessageKey)
-        : undefined,
-    });
-    return summary.cacheHit
-      ? t("settings.wallpaperSource.route.cached", { route })
-      : route;
-  }, [routeMeta, t]);
+  const routeStatus = useMemo(
+    () => wallpaperSourceRouteStatus(t, routeMeta),
+    [routeMeta, t],
+  );
 
   const xProgressStatus = useMemo(() => {
     if (!xSearchBusy) return null;
@@ -439,6 +428,7 @@ export function WallpaperSourceModal({
       setRouteMeta(null);
       return;
     }
+    const sourceGeneration = sourceGenerationRef.current;
     setError(null);
     setErrorCode(null);
     setRouteMeta(null);
@@ -455,7 +445,7 @@ export function WallpaperSourceModal({
     appliedProgressiveKeysRef.current.clear();
     try {
       const res = await searchX(q, sort);
-      if (!res) return;
+      if (!res || sourceGeneration !== sourceGenerationRef.current) return;
       setRouteMeta(res.meta ?? null);
       const list = dedupeGalleryItems(res.items || []);
       const code = errorCodeFromSearchResult({ ...res, items: list });
@@ -468,12 +458,18 @@ export function WallpaperSourceModal({
         setError(errorMessage(t, code));
       } else {
         responseContinuationRef.current =
-          res.meta?.routeUsed === "responses" ? { query: q, sort } : null;
-        setItems(list);
+          res.meta?.routeUsed === "responses" &&
+          res.meta.continuationAvailable !== false
+            ? { query: q, sort }
+            : null;
+        setItems((current) =>
+          mergeAuthoritativeGalleryItems(current, list),
+        );
         setError(null);
         setErrorCode(null);
       }
     } catch (e) {
+      if (sourceGeneration !== sourceGenerationRef.current) return;
       setHasSearched(true);
       // Keep already validated batches visible if the final invoke transport
       // fails. A normal lane failure is represented by a successful partial
@@ -490,13 +486,16 @@ export function WallpaperSourceModal({
     const continuation = responseContinuationRef.current;
     if (
       !continuation ||
+      continuation.query !== query.trim() ||
+      continuation.sort !== sort ||
       loadMoreAttempted ||
       routeMeta?.routeUsed !== "responses"
     ) {
       return;
     }
 
-    const initialItems = items;
+    const sourceGeneration = sourceGenerationRef.current;
+    const baselineItems = items;
     setLoadMoreAttempted(true);
     setXLoadingMore(true);
     setError(null);
@@ -506,6 +505,7 @@ export function WallpaperSourceModal({
     appliedProgressiveKeysRef.current.clear();
     try {
       const res = await loadMoreX(continuation.query, continuation.sort);
+      if (sourceGeneration !== sourceGenerationRef.current) return;
       if (!res) {
         setLoadMoreAttempted(false);
         return;
@@ -516,35 +516,60 @@ export function WallpaperSourceModal({
         if (code === "empty") {
           setStatusHint(t("settings.wallpaperSource.noMore"));
         } else {
+          setLoadMoreAttempted(false);
           setErrorCode(code);
           setError(errorMessage(t, code));
         }
         return;
       }
 
-      const merged = dedupeGalleryItems([...initialItems, ...extra]);
-      setItems(merged);
+      const authoritativeItems = appendGalleryItems(baselineItems, extra);
+      setItems((current) =>
+        mergeAuthoritativeGalleryItems(current, authoritativeItems),
+      );
       setError(null);
       setErrorCode(null);
     } catch (e) {
+      if (sourceGeneration !== sourceGenerationRef.current) return;
+      setLoadMoreAttempted(false);
       const code = parseWallpaperSourceError(e);
       setErrorCode(code);
       setError(errorMessage(t, code));
     } finally {
-      setXLoadingMore(false);
+      if (sourceGeneration === sourceGenerationRef.current) {
+        setXLoadingMore(false);
+      }
     }
   }, [
     items,
+    query,
     routeMeta,
     loadMoreAttempted,
     loadMoreX,
+    sort,
     t,
   ]);
+
+  const runRemoteSearch = useCallback(() => {
+    // A same-tab search is a new source generation too. Invalidate any lazy
+    // original still owned by a closed Viewer before its late completion can
+    // write error or selection state into the replacement gallery.
+    sourceGenerationRef.current += 1;
+    void cancelRemoteWallpaperMediaRequests();
+    void remoteController.search();
+  }, [remoteController.search]);
 
   const savePexelsKey = useCallback(
     async (key: string): Promise<boolean> => {
       try {
+        // The Host keys provider continuation by credential revision. Cancel
+        // and discard the old generation before rotating the credential so a
+        // prefetched page cannot be consumed under the new key.
+        sourceGenerationRef.current += 1;
+        await remoteController.cancel();
+        await cancelRemoteWallpaperMediaRequests();
         await api.secretsSet({ pexelsApiKey: key });
+        remoteController.clear();
         setHasPexelsKey(true);
         if (
           errorCode === "pexels_key_required" ||
@@ -560,7 +585,7 @@ export function WallpaperSourceModal({
         return false;
       }
     },
-    [errorCode, t],
+    [errorCode, remoteController, t],
   );
 
   const deletePexelsKey = useCallback(async () => {
@@ -733,24 +758,22 @@ export function WallpaperSourceModal({
       setError(t("settings.wallpaperSource.err.desktopOnly"));
       return;
     }
+    const sourceGeneration = sourceGenerationRef.current;
     setApplying(true);
     setError(null);
     setErrorCode(null);
     setStatusHint(t("settings.wallpaperSource.applying"));
     try {
-      const local = await ensureLocalWallpaperMedia(selected);
-      // Local evidence ring for X picks only (path + status url meta; no cloud).
-      if ((selected.source || "x") === "x") {
-        const pick = wallpaperXEvidenceFromGalleryItem(selected, local.path);
-        if (pick) recordWallpaperXEvidencePick(pick);
-      }
-      const file = await fileFromAbsolutePath(local.path, {
-        name: local.name,
-        mime: local.mime,
-      });
+      const file = await prepareWallpaperSelection(
+        selected,
+        () => sourceGeneration === sourceGenerationRef.current,
+      );
+      if (!file) return;
       await onPickFile(file);
+      if (sourceGeneration !== sourceGenerationRef.current) return;
       onClose();
     } catch (e) {
+      if (sourceGeneration !== sourceGenerationRef.current) return;
       // prepareWallpaperFromFile errors use settings.wallpaper.err.* keys
       if (e instanceof WallpaperPrepareError) {
         const key = `settings.wallpaper.err.${e.code}` as MessageKey;
@@ -763,8 +786,10 @@ export function WallpaperSourceModal({
       setErrorCode(code);
       setError(errorMessage(t, code));
     } finally {
-      setApplying(false);
-      setStatusHint(null);
+      if (sourceGeneration === sourceGenerationRef.current) {
+        setApplying(false);
+        setStatusHint(null);
+      }
     }
   }, [selected, t, onPickFile, onClose]);
 
@@ -773,11 +798,10 @@ export function WallpaperSourceModal({
     cancelGrokAlbumMediaRequests();
     void cancelRemoteWallpaperMediaRequests();
     imagineController.cancelAll();
-    if (xSearchBusy) void cancelXSearch();
+    void cancelXSearch();
     if (remoteController.busy) void remoteController.cancel();
     onClose();
   }, [
-    xSearchBusy,
     cancelXSearch,
     imagineController.cancelAll,
     remoteController,
@@ -805,7 +829,8 @@ export function WallpaperSourceModal({
       (!busy || xLoadingMore) &&
       (!loadMoreAttempted || xLoadingMore) &&
       routeMeta?.routeUsed === "responses" &&
-      responseContinuationRef.current !== null &&
+      responseContinuationRef.current?.query === query.trim() &&
+      responseContinuationRef.current?.sort === sort &&
       items.length > 0) ||
     (tab === "grok_album" &&
       (!busy || grokAlbum.loadingMore) &&
@@ -901,7 +926,7 @@ export function WallpaperSourceModal({
                 onXSearchModeSaveError={reportXSearchModeSaveError}
                 onSearchX={() => void runXSearch()}
                 onCancelX={() => void cancelXSearch()}
-                onSearchRemote={() => void remoteController.search()}
+                onSearchRemote={runRemoteSearch}
                 onCancelRemote={() => void remoteController.cancel()}
                 onSavePexelsKey={savePexelsKey}
                 onRequestDeletePexelsKey={() => setPexelsKeyDeleteOpen(true)}

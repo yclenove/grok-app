@@ -181,4 +181,54 @@ describe("useWallpaperRemoteSearch", () => {
     hook.unmount();
     expect(test.unlisten).toHaveBeenCalledTimes(2);
   });
+
+  it("does not let an invocation waiting for cancellation replace a newer search", async () => {
+    const first = deferred<WallpaperRemoteSearchResult>();
+    const newest = deferred<WallpaperRemoteSearchResult>();
+    const cancellation = deferred<boolean>();
+    const test = harness();
+    vi.mocked(test.client.search)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(newest.promise);
+    vi.mocked(test.client.cancel).mockReturnValue(cancellation.promise);
+    const ids = ["remote-first", "remote-newest"];
+    const hook = renderHook(() =>
+      useWallpaperRemoteSearch(
+        test.client,
+        () => ids.shift() ?? "remote-unexpected",
+      ),
+    );
+
+    let firstPromise!: Promise<WallpaperRemoteSearchResult | null>;
+    let supersededPromise!: Promise<WallpaperRemoteSearchResult | null>;
+    let newestPromise!: Promise<WallpaperRemoteSearchResult | null>;
+    act(() => {
+      firstPromise = hook.result.current.search("web", "first");
+    });
+    await waitFor(() => expect(hook.result.current.busy).toBe(true));
+    act(() => {
+      supersededPromise = hook.result.current.search("openverse", "superseded");
+    });
+    await waitFor(() =>
+      expect(test.client.cancel).toHaveBeenCalledWith("web", "remote-first"),
+    );
+    act(() => {
+      newestPromise = hook.result.current.search("pexels", "newest");
+    });
+    await waitFor(() => expect(test.client.search).toHaveBeenCalledTimes(2));
+    expect(test.client.search).toHaveBeenLastCalledWith(
+      "pexels",
+      "newest",
+      "remote-newest",
+    );
+
+    await act(async () => cancellation.resolve(true));
+    await expect(supersededPromise).resolves.toBeNull();
+    expect(test.client.search).toHaveBeenCalledTimes(2);
+
+    newest.resolve(result("pexels"));
+    await expect(newestPromise).resolves.toEqual(result("pexels"));
+    first.resolve(result("web"));
+    await expect(firstPromise).resolves.toBeNull();
+  });
 });

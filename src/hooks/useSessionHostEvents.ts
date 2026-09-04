@@ -887,6 +887,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                   kind: p.kind,
                   status: p.status,
                   path: p.path,
+                  input: p.input,
                   detail: p.detail,
                   before: p.before,
                   after: p.after,

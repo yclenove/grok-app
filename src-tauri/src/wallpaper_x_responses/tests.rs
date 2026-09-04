@@ -117,10 +117,7 @@ async fn spawn_mock(
 }
 
 fn test_revision() -> BuildOauthCredentialRevision {
-    BuildOauthCredentialRevision {
-        file_len: 123,
-        modified_ms: Some(456),
-    }
+    BuildOauthCredentialRevision::for_test(123, Some(456), 7)
 }
 
 fn success_payload(search_calls: usize) -> String {
@@ -319,7 +316,10 @@ fn wallpaper_x_responses_parallel_error_priority_prevents_cli_double_spend() {
 #[tokio::test]
 async fn wallpaper_x_responses_success_parses_gallery_and_fixed_contract() {
     assert_eq!(
-        count_x_search_calls(&[json!({ "type": "custom_tool_call" })]),
+        count_x_search_calls(&[json!({
+            "type": "custom_tool_call",
+            "status": "completed"
+        })]),
         1
     );
     let (endpoint, state, task) =
@@ -403,6 +403,25 @@ async fn wallpaper_x_responses_success_parses_gallery_and_fixed_contract() {
                 && prompt.contains("twimg:seen-id")
                 && prompt.contains("status:12345678:1")
         }));
+}
+
+#[test]
+fn wallpaper_x_responses_counts_only_completed_call_records() {
+    let output = [
+        json!({ "type": "x_search_result", "status": "completed" }),
+        json!({ "type": "x_search_call", "status": "in_progress" }),
+        json!({ "type": "custom_tool_result", "status": "completed" }),
+        json!({ "type": "custom_tool_call_extra", "status": "completed" }),
+        json!({ "type": "tool_call", "name": "other", "status": "completed" }),
+        json!({ "type": "x_search_call", "status": "completed" }),
+        json!({
+            "type": "server_tool_use",
+            "name": "x_search",
+            "status": "completed"
+        }),
+    ];
+
+    assert_eq!(count_x_search_calls(&output), 2);
 }
 
 #[tokio::test]
@@ -614,10 +633,13 @@ async fn wallpaper_x_responses_cancellation_aborts_inflight_http() {
 #[tokio::test]
 async fn wallpaper_x_responses_rejects_bad_structured_output_and_tool_overrun() {
     let invalid_output = json!({
-        "output": [{
-            "type": "message",
-            "content": [{ "type": "output_text", "text": "not-json" }]
-        }]
+        "output": [
+            { "type": "x_search_call", "status": "completed" },
+            {
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "not-json" }]
+            }
+        ]
     })
     .to_string();
     let (endpoint, _state, task) = spawn_mock(StatusCode::OK, invalid_output, Duration::ZERO).await;
@@ -626,6 +648,15 @@ async fn wallpaper_x_responses_rejects_bad_structured_output_and_tool_overrun() 
         .expect_err("bad structured output must fail");
     task.abort();
     assert_eq!(error.kind, ResponsesSearchErrorKind::InvalidJson);
+
+    let (endpoint, _state, task) =
+        spawn_mock(StatusCode::OK, success_payload(0), Duration::ZERO).await;
+    let error = test_search(&endpoint, Duration::from_secs(2))
+        .await
+        .expect_err("structured output without a real X tool call must fail");
+    task.abort();
+    assert_eq!(error.kind, ResponsesSearchErrorKind::ToolNotCalled);
+    assert_eq!(error.observed_search_calls, Some(0));
 
     let (endpoint, _state, task) =
         spawn_mock(StatusCode::OK, success_payload(4), Duration::ZERO).await;

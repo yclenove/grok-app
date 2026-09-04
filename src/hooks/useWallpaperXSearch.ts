@@ -121,6 +121,7 @@ export function useWallpaperXSearch(
   );
   const activeRequestRef = useRef<string | null>(null);
   const generationRef = useRef(0);
+  const invocationRef = useRef(0);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -170,7 +171,7 @@ export function useWallpaperXSearch(
     };
   }, [client]);
 
-  const cancel = useCallback(async (): Promise<boolean> => {
+  const cancelActive = useCallback(async (): Promise<boolean> => {
     const activeRequest = activeRequestRef.current;
     if (!activeRequest) return false;
     generationRef.current += 1;
@@ -188,14 +189,24 @@ export function useWallpaperXSearch(
     }
   }, [client]);
 
+  const cancel = useCallback((): Promise<boolean> => {
+    invocationRef.current += 1;
+    return cancelActive();
+  }, [cancelActive]);
+
   const runSearch = useCallback(
     async (
       operation: "initial" | "more",
       query: string,
       sort: "top" | "latest",
     ): Promise<WallpaperSearchResult | null> => {
+      const invocation = invocationRef.current + 1;
+      invocationRef.current = invocation;
       if (activeRequestRef.current) {
-        await cancel();
+        await cancelActive();
+      }
+      if (!mountedRef.current || invocationRef.current !== invocation) {
+        return null;
       }
 
       const nextRequestId = requestIdFactory();
@@ -245,7 +256,7 @@ export function useWallpaperXSearch(
         }
       }
     },
-    [cancel, client, requestIdFactory],
+    [cancelActive, client, requestIdFactory],
   );
 
   const search = useCallback(
@@ -264,6 +275,7 @@ export function useWallpaperXSearch(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      invocationRef.current += 1;
       generationRef.current += 1;
       const activeRequest = activeRequestRef.current;
       activeRequestRef.current = null;

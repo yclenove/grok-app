@@ -128,6 +128,7 @@ function useHarness({
   return {
     controller,
     items,
+    setItems,
     hasSearched,
     selectedId,
     error,
@@ -385,6 +386,97 @@ describe("useWallpaperRemoteSourceController", () => {
       "first",
       "second",
     ]);
+  });
+
+  it("preserves a local path materialized before the final search result", async () => {
+    const pending = deferred<WallpaperRemoteSearchResult>();
+    remote.search.mockReturnValue(pending.promise);
+    const hook = renderHook(() => useHarness({}));
+    let searching!: Promise<void>;
+
+    act(() => {
+      searching = hook.result.current.controller.search();
+    });
+    act(() => {
+      hook.result.current.setItems([
+        {
+          ...galleryItem("materialized"),
+          localPath: "H:\\wallpapers\\materialized.jpg",
+        },
+      ]);
+    });
+    await act(async () => {
+      pending.resolve(result([galleryItem("materialized")]));
+      await searching;
+    });
+
+    expect(hook.result.current.items).toHaveLength(1);
+    expect(hook.result.current.items[0]?.localPath).toBe(
+      "H:\\wallpapers\\materialized.jpg",
+    );
+  });
+
+  it("rebuilds a loaded page from the final result and preserves materialized paths", async () => {
+    const pending = deferred<WallpaperRemoteSearchResult>();
+    remote.search.mockResolvedValue(
+      result([galleryItem("baseline")], { hasMore: true }),
+    );
+    remote.loadMore
+      .mockResolvedValueOnce(result([], { errorCode: "provider_timeout" }))
+      .mockReturnValueOnce(pending.promise);
+    const hook = renderHook(() => useHarness({}));
+
+    await act(async () => hook.result.current.controller.search());
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(1));
+    let paging!: Promise<void>;
+    act(() => {
+      paging = hook.result.current.controller.loadMore();
+    });
+    await waitFor(() => expect(remote.loadMore).toHaveBeenCalledTimes(2));
+
+    remote.busy = true;
+    remote.source = "web";
+    remote.requestId = "web-authoritative-more";
+    remote.progressiveItems = [
+      galleryItem("first"),
+      galleryItem("second"),
+      galleryItem("progressive-only"),
+    ];
+    hook.rerender();
+    await waitFor(() => expect(hook.result.current.items).toHaveLength(4));
+    act(() => {
+      hook.result.current.setItems((current) =>
+        current.map((item) =>
+          item.id === "baseline" || item.id === "second"
+            ? { ...item, localPath: `H:\\wallpapers\\${item.id}.jpg` }
+            : item,
+        ),
+      );
+    });
+
+    await act(async () => {
+      pending.resolve(
+        result([
+          { ...galleryItem("second"), sourceName: "final-second" },
+          { ...galleryItem("first"), sourceName: "final-first" },
+        ]),
+      );
+      await paging;
+    });
+
+    expect(hook.result.current.items.map((item) => item.id)).toEqual([
+      "baseline",
+      "second",
+      "first",
+    ]);
+    expect(hook.result.current.items[0]?.localPath).toBe(
+      "H:\\wallpapers\\baseline.jpg",
+    );
+    expect(hook.result.current.items[1]).toMatchObject({
+      sourceName: "final-second",
+      localPath: "H:\\wallpapers\\second.jpg",
+    });
+    expect(hook.result.current.items[2]?.sourceName).toBe("final-first");
   });
 
   it("keeps prefetched paging items hidden when load more is empty", async () => {

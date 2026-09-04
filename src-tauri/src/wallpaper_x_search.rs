@@ -57,14 +57,22 @@ struct SearchCacheKey {
     sort: String,
     requested_mode: String,
     contract_version: u8,
-    credential_file_len: Option<u64>,
-    credential_modified_ms: Option<u128>,
+    credential_revision: Option<BuildOauthCredentialRevision>,
 }
 
 #[derive(Clone)]
 struct SearchCacheEntry {
     inserted_at: Instant,
     result: WallpaperSearchResult,
+    responses_continuation: ResponsesContinuationState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponsesContinuationState {
+    Unavailable,
+    Available,
+    InFlight(u64),
+    Consumed,
 }
 
 struct SearchCache {
@@ -72,6 +80,7 @@ struct SearchCache {
     ttl: Duration,
     entries: HashMap<SearchCacheKey, SearchCacheEntry>,
     lru: VecDeque<SearchCacheKey>,
+    next_continuation_lease: u64,
 }
 
 struct CachedSearchContext<'a> {
@@ -92,31 +101,63 @@ impl SearchCache {
             ttl,
             entries: HashMap::new(),
             lru: VecDeque::new(),
+            next_continuation_lease: 0,
         }
     }
 
     fn purge_expired(&mut self, now: Instant) {
         let ttl = self.ttl;
-        self.entries
-            .retain(|_, entry| now.duration_since(entry.inserted_at) < ttl);
+        self.entries.retain(|_, entry| {
+            matches!(
+                entry.responses_continuation,
+                ResponsesContinuationState::InFlight(_)
+            ) || now.duration_since(entry.inserted_at) < ttl
+        });
         self.lru.retain(|key| self.entries.contains_key(key));
     }
 
     fn get(&mut self, key: &SearchCacheKey, now: Instant) -> Option<WallpaperSearchResult> {
         self.purge_expired(now);
-        let result = self.entries.get(key)?.result.clone();
+        let entry = self.entries.get(key)?;
+        let continuation_available =
+            entry.responses_continuation == ResponsesContinuationState::Available;
+        let mut result = entry.result.clone();
+        if let Some(meta) = result.meta.as_mut() {
+            meta.continuation_available = continuation_available;
+        }
         self.lru.retain(|candidate| candidate != key);
         self.lru.push_back(key.clone());
         Some(result)
     }
 
-    fn insert(&mut self, key: SearchCacheKey, result: WallpaperSearchResult, now: Instant) {
+    fn insert(&mut self, key: SearchCacheKey, result: WallpaperSearchResult, now: Instant) -> bool {
         self.purge_expired(now);
+        if self.capacity == 0 {
+            return false;
+        }
+        if self.entries.get(&key).is_some_and(|entry| {
+            matches!(
+                entry.responses_continuation,
+                ResponsesContinuationState::InFlight(_)
+            )
+        }) {
+            return false;
+        }
         self.entries.remove(&key);
         self.lru.retain(|candidate| candidate != &key);
         while self.entries.len() >= self.capacity {
-            let Some(oldest) = self.lru.pop_front() else {
-                break;
+            let Some(position) = self.lru.iter().position(|candidate| {
+                self.entries.get(candidate).is_some_and(|entry| {
+                    !matches!(
+                        entry.responses_continuation,
+                        ResponsesContinuationState::InFlight(_)
+                    )
+                })
+            }) else {
+                return false;
+            };
+            let Some(oldest) = self.lru.remove(position) else {
+                return false;
             };
             self.entries.remove(&oldest);
         }
@@ -124,10 +165,125 @@ impl SearchCache {
             key.clone(),
             SearchCacheEntry {
                 inserted_at: now,
+                responses_continuation: if is_responses_context(&result) {
+                    ResponsesContinuationState::Available
+                } else {
+                    ResponsesContinuationState::Unavailable
+                },
                 result,
             },
         );
         self.lru.push_back(key);
+        true
+    }
+
+    fn claim_responses_continuation(
+        &mut self,
+        key: &SearchCacheKey,
+        now: Instant,
+    ) -> Option<(u64, WallpaperSearchResult)> {
+        self.purge_expired(now);
+        let entry = self.entries.get(key)?;
+        if entry.responses_continuation != ResponsesContinuationState::Available
+            || !is_responses_context(&entry.result)
+        {
+            return None;
+        }
+
+        self.next_continuation_lease = self.next_continuation_lease.wrapping_add(1).max(1);
+        let lease_id = self.next_continuation_lease;
+        let entry = self.entries.get_mut(key)?;
+        entry.responses_continuation = ResponsesContinuationState::InFlight(lease_id);
+        let result = entry.result.clone();
+        self.lru.retain(|candidate| candidate != key);
+        self.lru.push_back(key.clone());
+        Some((lease_id, result))
+    }
+
+    fn resolve_responses_continuation(
+        &mut self,
+        key: &SearchCacheKey,
+        lease_id: u64,
+        consumed: bool,
+        now: Instant,
+    ) {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return;
+        };
+        if entry.responses_continuation != ResponsesContinuationState::InFlight(lease_id) {
+            return;
+        }
+        entry.responses_continuation = if consumed {
+            ResponsesContinuationState::Consumed
+        } else {
+            entry.inserted_at = now;
+            ResponsesContinuationState::Available
+        };
+        self.lru.retain(|candidate| candidate != key);
+        self.lru.push_back(key.clone());
+    }
+}
+
+struct ResponsesContinuationLease<'a> {
+    cache: &'a Mutex<SearchCache>,
+    key: SearchCacheKey,
+    lease_id: u64,
+    previous: WallpaperSearchResult,
+    resolved: bool,
+}
+
+impl<'a> ResponsesContinuationLease<'a> {
+    fn claim(cache: &'a Mutex<SearchCache>, key: SearchCacheKey, now: Instant) -> Option<Self> {
+        let (lease_id, previous) = cache.lock().claim_responses_continuation(&key, now)?;
+        Some(Self {
+            cache,
+            key,
+            lease_id,
+            previous,
+            resolved: false,
+        })
+    }
+
+    fn previous(&self) -> &WallpaperSearchResult {
+        &self.previous
+    }
+
+    fn consume_if_active(mut self, runtime: &WallpaperXSearchRuntime) -> bool {
+        let consumed = runtime
+            .cancellation()
+            .commit_if_active(|| {
+                self.cache.lock().resolve_responses_continuation(
+                    &self.key,
+                    self.lease_id,
+                    true,
+                    Instant::now(),
+                );
+            })
+            .is_some();
+        if !consumed {
+            self.cache.lock().resolve_responses_continuation(
+                &self.key,
+                self.lease_id,
+                false,
+                Instant::now(),
+            );
+        }
+        self.resolved = true;
+        consumed
+    }
+}
+
+impl Drop for ResponsesContinuationLease<'_> {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        self.cache.lock().resolve_responses_continuation(
+            &self.key,
+            self.lease_id,
+            false,
+            Instant::now(),
+        );
     }
 }
 
@@ -231,6 +387,11 @@ struct ResponsesCircuitBreaker {
 }
 
 impl ResponsesCircuitBreaker {
+    fn reset_for_network_change(&mut self) {
+        self.consecutive_failures = 0;
+        self.open_until = None;
+    }
+
     fn reset_for_revision(&mut self, revision: Option<BuildOauthCredentialRevision>) {
         if self.credential_revision == revision {
             return;
@@ -290,6 +451,10 @@ fn responses_circuit() -> &'static Mutex<ResponsesCircuitBreaker> {
     CIRCUIT.get_or_init(|| Mutex::new(ResponsesCircuitBreaker::default()))
 }
 
+pub(crate) fn reset_responses_circuit_for_network_change() {
+    responses_circuit().lock().reset_for_network_change();
+}
+
 fn counts_toward_circuit(kind: ResponsesSearchErrorKind) -> bool {
     matches!(
         kind,
@@ -300,6 +465,7 @@ fn counts_toward_circuit(kind: ResponsesSearchErrorKind) -> bool {
             | ResponsesSearchErrorKind::Empty
             | ResponsesSearchErrorKind::InvalidJson
             | ResponsesSearchErrorKind::Protocol
+            | ResponsesSearchErrorKind::ToolNotCalled
             | ResponsesSearchErrorKind::SearchBudgetExceeded
     )
 }
@@ -390,8 +556,7 @@ fn search_cache_key(
         },
         requested_mode: requested_mode.into(),
         contract_version: CACHE_CONTRACT_VERSION,
-        credential_file_len: credential_revision.map(|revision| revision.file_len),
-        credential_modified_ms: credential_revision.and_then(|revision| revision.modified_ms),
+        credential_revision: credential_revision.cloned(),
     }
 }
 
@@ -420,6 +585,15 @@ fn prepare_cache_entry(mut result: WallpaperSearchResult) -> WallpaperSearchResu
     result
 }
 
+fn is_responses_context(result: &WallpaperSearchResult) -> bool {
+    result.error_code.is_none()
+        && !result.items.is_empty()
+        && result
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.route_used == "responses")
+}
+
 async fn search_with_cache_and_providers<R, RFut, C, CFut>(
     context: CachedSearchContext<'_>,
     responses: R,
@@ -443,8 +617,16 @@ where
     } = context;
     let started = Instant::now();
     runtime.report(WallpaperXSearchStage::Preparing);
+    if runtime.is_cancelled() {
+        runtime.report(WallpaperXSearchStage::Done);
+        return cancelled_result(requested_mode, "cli", started, None, None);
+    }
     let key = search_cache_key(query, sort, requested_mode, credential_revision.as_ref());
     if let Some(result) = cache.lock().get(&key, Instant::now()) {
+        if runtime.is_cancelled() {
+            runtime.report(WallpaperXSearchStage::Done);
+            return cancelled_result(requested_mode, "cli", started, None, None);
+        }
         let result = prepare_cached_result(result, request_id, started);
         report_terminal_responses_batch(runtime, &result);
         runtime.report(WallpaperXSearchStage::Done);
@@ -467,10 +649,32 @@ where
     if let Some(meta) = result.meta.as_mut() {
         meta.request_id = Some(request_id.to_string());
     }
-    if result.error_code.is_none() && !result.items.is_empty() && !runtime.is_cancelled() {
-        cache
-            .lock()
-            .insert(key, prepare_cache_entry(result.clone()), Instant::now());
+    if result.error_code.is_none() && !result.items.is_empty() {
+        let inserted = runtime.cancellation().commit_if_active(|| {
+            cache
+                .lock()
+                .insert(key, prepare_cache_entry(result.clone()), Instant::now())
+        });
+        match inserted {
+            Some(inserted) => {
+                if let Some(meta) = result.meta.as_mut() {
+                    meta.continuation_available &= inserted;
+                }
+            }
+            None => {
+                let meta = result.meta.as_ref();
+                let route_used = meta.map_or("cli", |meta| meta.route_used.as_str());
+                let responses_duration_ms = meta.and_then(|meta| meta.responses_duration_ms);
+                let cli_duration_ms = meta.and_then(|meta| meta.cli_duration_ms);
+                result = cancelled_result(
+                    requested_mode,
+                    route_used,
+                    started,
+                    responses_duration_ms,
+                    cli_duration_ms,
+                );
+            }
+        }
     }
     runtime.report(WallpaperXSearchStage::Done);
     result
@@ -565,6 +769,7 @@ where
                     responses_duration_ms: Some(responses_duration_ms),
                     cli_duration_ms: None,
                     cache_hit: false,
+                    continuation_available: true,
                     search_calls: Some(result.search_calls),
                     candidate_count: result.candidate_count,
                     valid_count: result.valid_count,
@@ -635,6 +840,7 @@ where
                     responses_duration_ms: Some(responses_duration_ms),
                     cli_duration_ms: None,
                     cache_hit: false,
+                    continuation_available: false,
                     search_calls: None,
                     candidate_count: 0,
                     valid_count: 0,
@@ -711,6 +917,7 @@ fn finish_cli(
         responses_duration_ms,
         cli_duration_ms: Some(cli_duration_ms),
         cache_hit: false,
+        continuation_available: false,
         // Grok Build does not currently expose a reliable hosted X call count
         // or selected official model through this headless result contract.
         search_calls: None,
@@ -742,6 +949,7 @@ fn cancelled_result(
             responses_duration_ms,
             cli_duration_ms,
             cache_hit: false,
+            continuation_available: false,
             search_calls: None,
             candidate_count: 0,
             valid_count: 0,

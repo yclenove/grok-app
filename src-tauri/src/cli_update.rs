@@ -435,10 +435,7 @@ pub async fn install_cli_update(
             }
         }
         if behind {
-            return Err(app_behind_install_error(
-                app_ver,
-                latest_app.as_deref(),
-            ));
+            return Err(app_behind_install_error(app_ver, latest_app.as_deref()));
         }
     }
 

@@ -5,6 +5,10 @@ fn item(source_url: &str, full_url: &str, width: u32) -> WallpaperGalleryItem {
     item_with_fingerprint(source_url, full_url, width, opaque_id(full_url))
 }
 
+fn credential_revision(value: u64) -> account::BuildOauthCredentialRevision {
+    account::BuildOauthCredentialRevision::for_test(value, Some(value.into()), value as u8)
+}
+
 fn item_with_fingerprint(
     source_url: &str,
     full_url: &str,
@@ -103,6 +107,47 @@ fn fixed_request_bounds_web_tool_calls_and_never_accepts_an_endpoint() {
     assert!(load_more_prompt.contains(&format!(
         "have {LOAD_MORE_PAGES_PER_LANE} distinct source pages"
     )));
+}
+
+#[test]
+fn load_more_exclusions_are_bounded_hosts_without_url_secrets() {
+    let exclusions = source_page_exclusions([
+        "https://www.photos.test/gallery/aurora/?token=private#preview",
+        "https://photos.test/gallery/aurora/",
+        "https://museum.test/exhibits/night-sky?tracking=discard",
+        "https://vault.test/share/capability-token/image.jpg",
+        "http://insecure.test/page",
+        "https://user:password@blocked.test/page",
+    ]);
+    assert_eq!(
+        exclusions,
+        vec![
+            "photos.test".to_string(),
+            "museum.test".to_string(),
+            "vault.test".to_string(),
+        ]
+    );
+
+    let prompt = responses_prompt("night sky", &exclusions, LANE_COUNT + 1);
+    assert!(prompt.contains("Previously shown source sites"));
+    assert!(prompt.contains("photos.test"));
+    assert!(prompt.contains("museum.test"));
+    assert!(prompt.contains("vault.test"));
+    assert!(!prompt.contains("gallery/aurora"));
+    assert!(!prompt.contains("exhibits/night-sky"));
+    assert!(!prompt.contains("capability-token"));
+    assert!(!prompt.contains("private"));
+    assert!(!prompt.contains("tracking"));
+    assert!(!prompt.contains("Opaque source ids"));
+
+    let many = (0..MAX_SOURCE_EXCLUSIONS + 5)
+        .map(|index| format!("https://photos-{index}.test/{}/image", "secret/".repeat(20)))
+        .collect::<Vec<_>>();
+    let bounded = source_page_exclusions(many.iter().map(String::as_str));
+    assert_eq!(bounded.len(), MAX_SOURCE_EXCLUSIONS);
+    assert!(bounded
+        .iter()
+        .all(|identity| identity.chars().count() <= MAX_SOURCE_EXCLUSION_CHARS));
 }
 
 #[test]
@@ -525,8 +570,7 @@ fn variant_identity_keeps_semantic_query_parameters() {
 fn cache_expires_and_preserves_safe_result_only() {
     let key = CacheKey {
         query: "mountains".into(),
-        credential_file_len: 1,
-        credential_modified_ms: Some(2),
+        credential_revision: credential_revision(1),
         contract_version: CACHE_CONTRACT_VERSION,
     };
     let result = RemoteSearchResult::success(
@@ -557,14 +601,57 @@ fn cache_expires_and_preserves_safe_result_only() {
 }
 
 #[test]
+fn web_initial_cache_hit_is_linearized_before_a_later_cancellation() {
+    let key = CacheKey {
+        query: "mountains".into(),
+        credential_revision: credential_revision(1),
+        contract_version: CACHE_CONTRACT_VERSION,
+    };
+    let mut cache = SearchCache::default();
+    cache.insert(
+        key.clone(),
+        RemoteSearchResult::success(SOURCE, vec![], false, 1),
+        Instant::now(),
+    );
+    let cancellation = WallpaperSearchCancellation::default();
+    let guarded = remote_search::read_cache_if_active(&cancellation, || {
+        cache.get_initial(&key, Instant::now())
+    });
+
+    assert!(guarded.is_ok());
+    cancellation.cancel();
+    assert!(cancellation.is_cancelled());
+}
+
+#[test]
+fn web_cache_rejects_same_metadata_with_a_different_credential_tag() {
+    let first = CacheKey {
+        query: "mountains".into(),
+        credential_revision: account::BuildOauthCredentialRevision::for_test(10, Some(20), 1),
+        contract_version: CACHE_CONTRACT_VERSION,
+    };
+    let replacement = CacheKey {
+        credential_revision: account::BuildOauthCredentialRevision::for_test(10, Some(20), 2),
+        ..first.clone()
+    };
+    let mut cache = SearchCache::default();
+    cache.insert(
+        first,
+        RemoteSearchResult::success(SOURCE, vec![], false, 1),
+        Instant::now(),
+    );
+
+    assert!(cache.get_initial(&replacement, Instant::now()).is_none());
+}
+
+#[test]
 fn cache_bounds_continuations_with_the_same_lru_and_contract_version() {
     let now = Instant::now();
     let mut cache = SearchCache::default();
     for index in 0..=CACHE_CAPACITY {
         let key = CacheKey {
             query: format!("query-{index}"),
-            credential_file_len: 1,
-            credential_modified_ms: Some(2),
+            credential_revision: credential_revision(1),
             contract_version: CACHE_CONTRACT_VERSION,
         };
         cache.insert(
@@ -585,8 +672,7 @@ fn cache_bounds_continuations_with_the_same_lru_and_contract_version() {
     assert_eq!(cache.entries.len(), CACHE_CAPACITY);
     let evicted = CacheKey {
         query: "query-0".into(),
-        credential_file_len: 1,
-        credential_modified_ms: Some(2),
+        credential_revision: credential_revision(1),
         contract_version: CACHE_CONTRACT_VERSION,
     };
     assert!(cache.continuation(&evicted, now).is_none());

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  appendGalleryItems,
   dedupeGalleryItems,
   errorCodeFromSearchResult,
   fetchEntireMediaBlob,
@@ -8,6 +9,7 @@ import {
   libraryEntryToGalleryItem,
   MEDIA_IPC_CHUNK,
   MEDIA_PROTO_CHUNK,
+  mergeAuthoritativeGalleryItems,
   parseContentRangeTotal,
   parseWallpaperSourceError,
   readLocalMediaBlobViaIpc,
@@ -46,6 +48,13 @@ describe("wallpaperSource", () => {
     expect(parseWallpaperSourceError("responses_rate_limited")).toBe(
       "rate_limited",
     );
+    expect(parseWallpaperSourceError("responses_network")).toBe("search_failed");
+    expect(parseWallpaperSourceError("responses_tool_not_called")).toBe(
+      "service_unavailable",
+    );
+    expect(parseWallpaperSourceError("responses_unauthorized")).toBe(
+      "auth_required",
+    );
     expect(parseWallpaperSourceError("imagine_failed")).toBe("imagine_failed");
     expect(parseWallpaperSourceError("wallpaper_imagine: boom")).toBe(
       "imagine_failed",
@@ -76,6 +85,18 @@ describe("wallpaperSource", () => {
         errorCode: "responses_rate_limited",
       }),
     ).toBe("rate_limited");
+    expect(
+      errorCodeFromSearchResult({
+        items: [],
+        errorCode: "responses_network",
+      }),
+    ).toBe("search_failed");
+    expect(
+      errorCodeFromSearchResult({
+        items: [],
+        errorCode: "responses_tool_not_called",
+      }),
+    ).toBe("service_unavailable");
     expect(errorCodeFromSearchResult({ items: [], errorCode: null })).toBe("empty");
     expect(
       errorCodeFromSearchResult({
@@ -93,6 +114,82 @@ describe("wallpaperSource", () => {
       item({ id: "4", fullUrl: "file:///tmp/y.jpg", localPath: "/tmp/y.jpg" }),
     ]);
     expect(items.map((i) => i.id)).toEqual(["1", "3"]);
+  });
+
+  it("keeps remote identity stable after an item gains a local path", () => {
+    const remote = item({
+      id: "remote",
+      fullUrl: "https://images.example.test/wallpaper.jpg",
+    });
+    const materialized = {
+      ...remote,
+      localPath: "C:\\wallpapers\\wallpaper.jpg",
+    };
+
+    expect(dedupeGalleryItems([materialized, remote])).toEqual([materialized]);
+    expect(
+      mergeAuthoritativeGalleryItems([materialized], [
+        { ...remote, username: "final-author", likes: 12 },
+      ]),
+    ).toEqual([
+      {
+        ...remote,
+        username: "final-author",
+        likes: 12,
+        localPath: "C:\\wallpapers\\wallpaper.jpg",
+      },
+    ]);
+  });
+
+  it("uses authoritative membership and ranking while preserving local paths", () => {
+    const first = item({
+      id: "first",
+      fullUrl: "https://images.example.test/first.jpg",
+      localPath: "C:\\wallpapers\\first.jpg",
+    });
+    const second = item({
+      id: "second",
+      fullUrl: "https://images.example.test/second.jpg",
+    });
+    const progressiveOnly = item({
+      id: "progressive-only",
+      fullUrl: "https://images.example.test/progressive-only.jpg",
+    });
+
+    const merged = mergeAuthoritativeGalleryItems(
+      [first, second, progressiveOnly],
+      [
+        { ...second, username: "ranked-first" },
+        { ...first, username: "ranked-second", localPath: null },
+      ],
+    );
+
+    expect(merged.map((entry) => entry.id)).toEqual(["second", "first"]);
+    expect(merged[1]?.localPath).toBe("C:\\wallpapers\\first.jpg");
+    expect(merged.some((entry) => entry.id === "progressive-only")).toBe(false);
+  });
+
+  it("appends a page without replacing the existing gallery", () => {
+    const first = item({
+      id: "first",
+      fullUrl: "https://images.example.test/first.jpg",
+      localPath: "C:\\wallpapers\\first.jpg",
+    });
+    const extra = item({
+      id: "extra",
+      fullUrl: "https://images.example.test/extra.jpg",
+    });
+
+    const merged = appendGalleryItems(
+      [first],
+      [{ ...first, username: "final-author", localPath: null }, extra],
+    );
+
+    expect(merged.map((entry) => entry.id)).toEqual(["first", "extra"]);
+    expect(merged[0]).toMatchObject({
+      username: "final-author",
+      localPath: "C:\\wallpapers\\first.jpg",
+    });
   });
 
   it("resolves apply source", () => {

@@ -101,6 +101,17 @@ function props(
 afterEach(cleanup);
 
 describe("WallpaperSourceControls X route", () => {
+  it.each([
+    ["x", "settings.wallpaperSource.xPlaceholder"],
+    ["web", "settings.wallpaperSource.web.placeholder"],
+    ["openverse", "settings.wallpaperSource.openverse.placeholder"],
+    ["pexels", "settings.wallpaperSource.pexels.placeholder"],
+  ] as const)("gives the %s query an accessible name", (tab, label) => {
+    render(<WallpaperSourceControls {...props({ tab })} />);
+
+    expect(screen.getByRole("searchbox", { name: label })).toBeTruthy();
+  });
+
   it("keeps search locked until the selected route is persisted", async () => {
     let finishSave: (() => void) | null = null;
     const onXSearchModeChange = vi.fn(

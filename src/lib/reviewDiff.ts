@@ -3,7 +3,48 @@
  * fold unmodified spans, build a simple path tree for the side list.
  */
 
-import { pathBaseName } from "@/lib/sessionChanges";
+import {
+  normalizePath,
+  pathBaseName,
+  pathRelativeToProject,
+} from "@/lib/sessionChanges";
+
+type ReviewFocusEntry = {
+  path: string;
+  relPath: string;
+};
+
+/** Match exact paths first; only use a basename when it is unambiguous. */
+export function findReviewEntryForFocusPath<T extends ReviewFocusEntry>(
+  raw: string,
+  projectPath: string | null | undefined,
+  list: T[],
+): T | null {
+  const want = normalizePath(raw);
+  if (!want) return null;
+  const wantRel = normalizePath(
+    pathRelativeToProject(want, projectPath) || want,
+  ).toLowerCase();
+  const exact = list.find((entry) => {
+    const path = normalizePath(entry.path);
+    const relPath = normalizePath(entry.relPath).toLowerCase();
+    return path === want || relPath === wantRel;
+  });
+  if (exact) return exact;
+
+  const wantBase = pathBaseName(want).toLowerCase();
+  if (!wantBase) return null;
+  const basenameMatches = list.filter((entry) => {
+    const path = normalizePath(entry.path);
+    const relPath = normalizePath(entry.relPath).toLowerCase();
+    return (
+      pathBaseName(path).toLowerCase() === wantBase ||
+      relPath === wantBase ||
+      relPath.endsWith(`/${wantBase}`)
+    );
+  });
+  return basenameMatches.length === 1 ? basenameMatches[0]! : null;
+}
 
 /**
  * Decode a git path that may be C-style quoted with octal escapes.

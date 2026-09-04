@@ -163,4 +163,10 @@ export const taChat = {
   "chat.changedFiles.viewAll": "அனைத்தையும் காண்",
   "chat.changedFiles.openFile": "{name} இல் உள்ள மாற்றங்களைப் பார்",
   "chat.changedFiles.more": "+{n} மேலும்",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "{name} வேறுபாட்டை விரிவாக்கு",
+  "chat.changedFiles.collapse": "{name} வேறுபாட்டை சுருக்கு",
+  "chat.changedFiles.openInReview": "Review-இல் திற",
+  "chat.changedFiles.noDiffYet": "வேறுபாடு இன்னும் இல்லை — முழு கோப்பிற்கு Review-ஐத் திறக்கவும்.",
+  "chat.changedFiles.truncated": "{total} வரிகளில் {shown} காட்டப்படுகிறது"
 };

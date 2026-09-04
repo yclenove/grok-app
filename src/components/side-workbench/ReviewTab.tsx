@@ -37,9 +37,14 @@ import {
   type SessionFileChange,
 } from "@/lib/sessionChanges";
 import {
+  reviewEntryCoversPath,
+  reviewFocusPathParts,
+} from "@/lib/reviewFocusPaths";
+import {
   buildReviewTree,
   countPatchDelta,
   decodeGitPath,
+  findReviewEntryForFocusPath,
   parseReviewPatch,
   reviewFileBadge,
   truncateMiddle,
@@ -74,6 +79,17 @@ export type ReviewTabProps = {
   isGitProject?: boolean;
   /** Open a workspace file in a side file tab (eye icon). */
   onOpenFile?: (path: string, name: string) => void;
+  /**
+   * Scroll/expand this file when opening from a turn changed-files chip (#998).
+   * Bump `focusToken` to re-focus the same path on repeated clicks.
+   */
+  focusPath?: string | null;
+  focusToken?: number;
+  /**
+   * Paths that must always appear in the Review stack (#998).
+   * Survives empty sessionChanges / git wipe races.
+   */
+  pinnedFocusPaths?: readonly string[];
 };
 
 type ReviewScope = "all" | "session" | "workspace";
@@ -414,6 +430,9 @@ export function ReviewTab({
   sessionChanges = [],
   isGitProject = false,
   onOpenFile,
+  focusPath = null,
+  focusToken = 0,
+  pinnedFocusPaths = [],
 }: ReviewTabProps) {
   const tr = useMemo(() => createT(locale as Locale), [locale]);
   const [scope, setScope] = useState<ReviewScope>("all");
@@ -444,9 +463,12 @@ export function ReviewTab({
   const scopeMenuRef = useRef<HTMLDivElement>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const focusSeq = useRef(0);
 
   const buildSessionEntries = useCallback((): ReviewFileEntry[] => {
-    return sessionChanges.map((c) => {
+    const entries: ReviewFileEntry[] = sessionChanges.map((c) => {
       const rel = decodeGitPath(sessionRel(c, projectPath));
       const delta = sessionFileLineDelta(c);
       let patch: string | null = null;
@@ -473,7 +495,36 @@ export function ReviewTab({
         session: c,
       };
     });
-  }, [sessionChanges, projectPath]);
+    // Pinned + current focus stubs — must survive empty sessionChanges (#998).
+    const pinList = [
+      ...(focusPath ? [focusPath] : []),
+      ...pinnedFocusPaths,
+    ];
+    const seen = new Set<string>();
+    for (const raw of pinList) {
+      const parts = reviewFocusPathParts(raw, projectPath);
+      if (!parts.path || seen.has(parts.key)) continue;
+      seen.add(parts.key);
+      if (entries.some((e) => reviewEntryCoversPath(e, parts.path, projectPath))) {
+        continue;
+      }
+      entries.unshift({
+        key: parts.key,
+        relPath: decodeGitPath(parts.relPath) || parts.relPath,
+        path: parts.path,
+        name: decodeGitPath(parts.name) || parts.name,
+        source: "session",
+        kind: "modified",
+        added: 0,
+        removed: 0,
+        patch: null,
+        binary: false,
+        loading: false,
+        error: null,
+      });
+    }
+    return entries;
+  }, [sessionChanges, projectPath, focusPath, pinnedFocusPaths]);
 
   const applyComposed = useCallback(
     (sessionEntries: ReviewFileEntry[], snap: WorkspaceSnap | null) => {
@@ -593,13 +644,21 @@ export function ReviewTab({
     applyComposed(sessionEntriesRef.current(), workspaceSnap);
   }, [applyComposed, workspaceSnap]);
 
-  // Streamed sessionChanges: local recompose only, debounced — no git IPC.
+  // Streamed sessionChanges / pinned focus: local recompose only — no git IPC.
   useEffect(() => {
+    const urgent =
+      !!(focusPath && focusPath.trim()) || pinnedFocusPaths.length > 0;
     const t = window.setTimeout(() => {
       applyComposed(sessionEntriesRef.current(), workspaceSnapRef.current);
-    }, 400);
+    }, urgent ? 0 : 400);
     return () => window.clearTimeout(t);
-  }, [sessionChanges, applyComposed]);
+  }, [
+    sessionChanges,
+    applyComposed,
+    focusPath,
+    focusToken,
+    pinnedFocusPaths,
+  ]);
 
   // Close menus on outside click
   useEffect(() => {
@@ -715,7 +774,8 @@ export function ReviewTab({
     () =>
       resolveReviewEmptyState({
         isGitProject,
-        sessionCount: sessionChanges.length,
+        // Pinned turn-chip paths count as session rows for empty honesty (#998).
+        sessionCount: sessionChanges.length + pinnedFocusPaths.length,
         projectPath,
         loading,
         loadErrorKind,
@@ -726,6 +786,7 @@ export function ReviewTab({
     [
       isGitProject,
       sessionChanges.length,
+      pinnedFocusPaths.length,
       projectPath,
       loading,
       loadErrorKind,
@@ -779,6 +840,141 @@ export function ReviewTab({
     });
   }, []);
 
+  /**
+   * Match a focus path against Review entries (abs, rel, or basename).
+   */
+  const findEntryForFocusPath = useCallback(
+    (raw: string, list: ReviewFileEntry[]): ReviewFileEntry | null =>
+      findReviewEntryForFocusPath(raw, projectPath, list),
+    [projectPath],
+  );
+
+  /**
+   * Turn changed-files chip (#998): focus the file in Review. Prefer git
+   * diff when available; otherwise read the file and show as a full add so
+   * non-git projects are not stuck on an empty Review.
+   */
+  useEffect(() => {
+    const raw = (focusPath || "").trim();
+    // Path alone is enough; token re-fires when the same file is clicked again.
+    if (!raw) return;
+    const seq = ++focusSeq.current;
+    const parts = reviewFocusPathParts(raw, projectPath);
+    const want = parts.path;
+    const rel = parts.relPath;
+    const key = parts.key;
+
+    const hit = findEntryForFocusPath(want, filesRef.current);
+    const targetKey = hit?.key ?? key;
+    if (hit?.patch) {
+      scrollToFile(hit.key);
+      return;
+    }
+
+    if (!hit) {
+      setFiles((prev) => {
+        if (findEntryForFocusPath(want, prev)) return prev;
+        return [
+          {
+            key,
+            relPath: rel,
+            path: want,
+            name: parts.name,
+            source: "session",
+            kind: "modified",
+            added: 0,
+            removed: 0,
+            patch: null,
+            binary: false,
+            loading: true,
+            error: null,
+          },
+          ...prev,
+        ];
+      });
+    } else {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.key === hit.key ? { ...f, loading: true } : f,
+        ),
+      );
+    }
+    scrollToFile(targetKey);
+
+    const project = (projectPath || "").trim();
+    if (!api.isTauri()) {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.key === targetKey || f.key === key
+            ? { ...f, loading: false }
+            : f,
+        ),
+      );
+      return;
+    }
+
+    void (async () => {
+      let patch: string | null = null;
+      try {
+        if (isGitProject && project) {
+          const g = await api.gitFileDiff(project, rel);
+          if (
+            g?.available &&
+            typeof g.diff === "string" &&
+            g.diff.trim()
+          ) {
+            patch = g.diff;
+          }
+        }
+        if (!patch) {
+          const abs = want.startsWith("/") || /^[A-Za-z]:[\\/]/.test(want);
+          const read = abs
+            ? await api.fsReadAbsolute(want)
+            : project
+              ? await api.fsReadFile(project, rel)
+              : await api.fsOpenPath(want, project || null);
+          const text = typeof read?.text === "string" ? read.text : null;
+          if (text != null) {
+            patch = buildUnifiedDiff(rel || parts.name, "", text);
+          }
+        }
+      } catch {
+        /* soft — leave row without patch */
+      }
+      if (seq !== focusSeq.current) return;
+      const delta = patch ? countPatchDelta(patch) : null;
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.key === targetKey || f.key === key
+            ? {
+                ...f,
+                loading: false,
+                patch: patch ?? f.patch,
+                added: delta?.added ?? f.added,
+                removed: delta?.removed ?? f.removed,
+              }
+            : f,
+        ),
+      );
+      scrollToFile(targetKey);
+    })();
+  }, [
+    focusPath,
+    focusToken,
+    projectPath,
+    isGitProject,
+    findEntryForFocusPath,
+    scrollToFile,
+  ]);
+
+  // After compose refreshes the list, re-scroll to the focused file.
+  useEffect(() => {
+    const raw = (focusPath || "").trim();
+    if (!raw) return;
+    const hit = findEntryForFocusPath(raw, files);
+    if (hit) scrollToFile(hit.key);
+  }, [files, focusPath, focusToken, findEntryForFocusPath, scrollToFile]);
+
   const toggleExpand = useCallback((key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -820,24 +1016,8 @@ export function ReviewTab({
     ? tr("side.review.collapseAll")
     : tr("side.review.expandAll");
 
-  if (emptyState.kind === "not_git") {
-    return (
-      <div className="sw-review" data-testid="side-review-tab">
-        <div
-          className="rp__empty-state"
-          data-testid="review-empty"
-          data-empty-kind="not_git"
-        >
-          <div className="rp__empty-title">{tr(emptyState.titleKey as MessageKey)}</div>
-          {emptyState.hintKey ? (
-            <div className="rp__empty-desc">
-              {tr(emptyState.hintKey as MessageKey)}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
+  // Do not full-page bail on not_git — session / pinned turn files (#998) still
+  // render in the stack below. not_git is shown via the shared empty overlay.
 
   return (
     <div className="sw-review" data-testid="side-review-tab">

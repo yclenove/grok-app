@@ -40,6 +40,7 @@ const fetchRemoteWallpaperMedia = vi.hoisted(() => vi.fn());
 const wallpaperImageToVideo = vi.hoisted(() => vi.fn());
 const wallpaperImageToVideoCancel = vi.hoisted(() => vi.fn(async () => true));
 const openViewer = vi.hoisted(() => vi.fn());
+const tauriInvoke = vi.hoisted(() => vi.fn());
 const remoteControllerState = vi.hoisted(() => ({
   busy: false,
   loadingMore: false,
@@ -150,6 +151,8 @@ vi.mock("@/components/Select", () => ({
   Select: ({ value }: { value: string }) => <span>{value}</span>,
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriInvoke }));
+
 vi.mock("@/components/GlassModal", () => ({
   GlassModal: ({
     open,
@@ -193,6 +196,9 @@ afterEach(() => {
   wallpaperImageToVideo.mockReset();
   wallpaperImageToVideoCancel.mockClear();
   openViewer.mockReset();
+  tauriInvoke.mockReset();
+  delete (window as typeof window & { __TAURI_INTERNALS__?: unknown })
+    .__TAURI_INTERNALS__;
   remoteControllerState.busy = false;
   remoteControllerState.loadingMore = false;
   remoteControllerState.progress = null;
@@ -416,7 +422,7 @@ describe("WallpaperSourceModal source workspace", () => {
     );
     expect(
       screen.queryByRole("button", {
-        name: "settings.wallpaperSource.openPreview",
+        name: /^settings\.wallpaperSource\.openPreview/,
       }),
     ).toBeNull();
   });
@@ -566,6 +572,8 @@ describe("WallpaperSourceModal source workspace", () => {
         pexelsApiKey: "replacement-pexels-key",
       }),
     );
+    expect(cancelRemote).toHaveBeenCalledTimes(1);
+    expect(clearRemote).toHaveBeenCalledTimes(1);
     expect(
       await screen.findByText("settings.wallpaperSource.pexels.keySaved"),
     ).toBeTruthy();
@@ -612,7 +620,7 @@ describe("WallpaperSourceModal source workspace", () => {
       screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
     );
     await screen.findByRole("button", {
-      name: "settings.wallpaperSource.openPreview",
+      name: /^settings\.wallpaperSource\.openPreview/,
     });
 
     fireEvent.click(
@@ -639,7 +647,7 @@ describe("WallpaperSourceModal source workspace", () => {
     ).toBeTruthy();
     expect(
       screen.queryByRole("button", {
-        name: "settings.wallpaperSource.openPreview",
+        name: /^settings\.wallpaperSource\.openPreview/,
       }),
     ).toBeNull();
     expect(
@@ -695,7 +703,7 @@ describe("WallpaperSourceModal remote source wiring", () => {
     );
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "settings.wallpaperSource.generateVideoFromImage",
+        name: "settings.wallpaperSource.generateVideoFromImage: photos.example.test",
       }),
     );
 
@@ -738,7 +746,7 @@ describe("WallpaperSourceModal remote source wiring", () => {
     );
     expect(
       screen.queryByRole("button", {
-        name: "settings.wallpaperSource.generateVideoFromImage",
+        name: /^settings\.wallpaperSource\.generateVideoFromImage:/,
       }),
     ).toBeNull();
   });
@@ -815,6 +823,87 @@ describe("WallpaperSourceModal remote source wiring", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("does not apply a late remote file after the source modal closes", async () => {
+    let resolveFetch:
+      | ((value: {
+          path: string;
+          name: string;
+          mime: string;
+          bytes: number;
+        }) => void)
+      | null = null;
+    fetchRemoteWallpaperMedia.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    tauriInvoke.mockImplementation(async (command: string) => {
+      if (command === "media_file_info") {
+        return { bytes: 1, mime: "image/jpeg", name: "late.jpg" };
+      }
+      if (command === "media_read_file_chunk") {
+        return Uint8Array.from([0xff]).buffer;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    remoteControllerState.searchItems = [
+      galleryItem("late-web", {
+        source: "web",
+        sourceUrl: "https://photos.example.test/page",
+        sourceName: "photos.example.test",
+      }),
+    ];
+    const onClose = vi.fn();
+    const onPickFile = vi.fn(async () => undefined);
+    render(
+      <WallpaperSourceModal
+        open
+        initialTab="web"
+        t={t as never}
+        onClose={onClose}
+        onPickFile={onPickFile}
+      />,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText("settings.wallpaperSource.web.placeholder"),
+      { target: { value: "night skyline" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /^settings\.wallpaperSource\.openPreview/,
+      }),
+    );
+    const apply = screen.getByRole("button", {
+      name: "settings.wallpaperSource.apply",
+    });
+    await waitFor(() => expect((apply as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(apply);
+    await waitFor(() => expect(fetchRemoteWallpaperMedia).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "modal-close" }));
+
+    await act(async () => {
+      resolveFetch?.({
+        path: "H:\\wallpapers\\web\\late.jpg",
+        name: "late.jpg",
+        mime: "image/jpeg",
+        bytes: 1,
+      });
+      await Promise.resolve();
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(tauriInvoke).not.toHaveBeenCalled();
+    expect(onPickFile).not.toHaveBeenCalled();
+  });
+
   it("opens an existing Web image while load more is running", async () => {
     remoteControllerState.searchItems = [
       galleryItem("web-existing", {
@@ -846,7 +935,7 @@ describe("WallpaperSourceModal remote source wiring", () => {
       screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
     );
     const card = await screen.findByRole("button", {
-      name: "settings.wallpaperSource.openPreview",
+      name: /^settings\.wallpaperSource\.openPreview/,
     });
     remoteControllerState.busy = true;
     remoteControllerState.loadingMore = true;
@@ -875,5 +964,71 @@ describe("WallpaperSourceModal remote source wiring", () => {
       "https://example.test/web-existing.jpg",
       expect.stringMatching(/^[0-9a-f-]{36}$/),
     );
+  });
+
+  it("ignores a previous Viewer original failure after a same-source search", async () => {
+    let rejectFetch: ((reason?: unknown) => void) | null = null;
+    fetchRemoteWallpaperMedia.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFetch = reject;
+        }),
+    );
+    remoteControllerState.searchItems = [
+      galleryItem("old-web", {
+        source: "web",
+        sourceName: "old.example.test",
+      }),
+    ];
+    render(
+      <WallpaperSourceModal
+        open
+        initialTab="web"
+        t={t as never}
+        onClose={vi.fn()}
+        onPickFile={vi.fn()}
+      />,
+    );
+
+    const query = screen.getByPlaceholderText(
+      "settings.wallpaperSource.web.placeholder",
+    );
+    fireEvent.change(query, { target: { value: "old query" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /settings\.wallpaperSource\.openPreview: old\.example\.test/,
+      }),
+    );
+    const oldSlide = openViewer.mock.calls[0]?.[0]?.[0] as {
+      loadOriginal?: () => Promise<unknown>;
+    };
+    let oldLoad: Promise<unknown> | undefined;
+    await act(async () => {
+      oldLoad = oldSlide.loadOriginal?.();
+      await Promise.resolve();
+    });
+
+    remoteControllerState.searchItems = [
+      galleryItem("new-web", {
+        source: "web",
+        sourceName: "new.example.test",
+      }),
+    ];
+    fireEvent.change(query, { target: { value: "new query" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.wallpaperSource.search" }),
+    );
+    await screen.findByRole("button", {
+      name: /settings\.wallpaperSource\.openPreview: new\.example\.test/,
+    });
+
+    await act(async () => {
+      rejectFetch?.(new Error("old original failed"));
+      await oldLoad;
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

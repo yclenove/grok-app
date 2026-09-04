@@ -170,4 +170,10 @@ export const zhChat = {
   "chat.changedFiles.viewAll": "查看全部",
   "chat.changedFiles.openFile": "查看 {name} 的修改",
   "chat.changedFiles.more": "还有 {n} 个",
+  "chat.changedFiles.delta": "+{added} −{removed}",
+  "chat.changedFiles.expand": "展开 {name} 的差异",
+  "chat.changedFiles.collapse": "收起 {name} 的差异",
+  "chat.changedFiles.openInReview": "在 Review 中打开",
+  "chat.changedFiles.noDiffYet": "暂无差异预览 — 可在 Review 中查看完整文件。",
+  "chat.changedFiles.truncated": "显示 {shown} / {total} 行"
 };

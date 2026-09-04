@@ -32,6 +32,8 @@ export type SessionChangeEvent = ToolEventPayload & {
   before?: string | null;
   after?: string | null;
   updatedAt?: string;
+  /** Call argument — used when Host omits `path` on write/edit (#998). */
+  input?: string | null;
 };
 
 /** Normalize path separators and strip trailing slashes (except roots). */
@@ -124,6 +126,47 @@ export function isTerminalToolStatus(status: string | null | undefined): boolean
 }
 
 /**
+ * Prefer explicit `path`; otherwise promote a single-line file path from
+ * `input` (Host write/edit often put the target only on input).
+ */
+export function resolveSessionChangePath(event: {
+  path?: string | null;
+  input?: string | null;
+}): string {
+  const direct = normalizePath(event.path || "");
+  if (direct) return direct;
+  const candidate = String(event.input || "").trim();
+  if (
+    !candidate ||
+    candidate.includes("\n") ||
+    candidate.includes("://") ||
+    /\s(-{1,2}[A-Za-z]|&&|\||;)/.test(candidate)
+  ) {
+    return "";
+  }
+  const base = candidate.split(/[/\\]/).pop() || "";
+  const looksAbs =
+    candidate.startsWith("/") ||
+    candidate.startsWith("~/") ||
+    /^[A-Za-z]:[\\/]/.test(candidate);
+  const hasFileExtension = /\.[\w]{1,12}$/.test(base);
+  const looksRelFile =
+    !candidate.startsWith("-") &&
+    (candidate.includes("/") ||
+      candidate.includes("\\") ||
+      candidate.startsWith(".") ||
+      candidate === base) &&
+    hasFileExtension;
+  if (!looksAbs && !looksRelFile) return "";
+  if (!hasFileExtension && looksAbs) {
+    // Absolute path without extension still counts (dirs / extensionless files).
+    return normalizePath(candidate);
+  }
+  if (!hasFileExtension) return "";
+  return normalizePath(candidate);
+}
+
+/**
  * Merge one write/edit tool event into the session change list (upsert by path).
  * Non-edit tools and empty paths are ignored.
  */
@@ -134,7 +177,7 @@ export function mergeSessionChange(
   const kind = (event.kind || "").trim();
   if (!isEditToolKind(kind)) return list;
 
-  const path = normalizePath(event.path || "");
+  const path = resolveSessionChangePath(event);
   if (!path) return list;
 
   const status = (event.status || "in_progress").toLowerCase() || "in_progress";
@@ -196,23 +239,47 @@ export function sessionChangesFromMessages(
 ): SessionFileChange[] {
   let list: SessionFileChange[] = [];
   for (const m of messages) {
-    if (!isToolStepMessage(m)) continue;
-    const parsed = m.content?.startsWith("tool_step|")
-      ? parseToolStepContent(m.content)
-      : null;
-    const kind = m.toolKind || parsed?.kind || "";
-    if (!isEditToolKind(kind)) continue;
-    const path = normalizePath(m.toolPath || parsed?.path || "");
-    if (!path) continue;
-    list = mergeSessionChange(list, {
-      toolCallId: m.toolCallId,
-      title: parsed?.title || m.content,
-      kind,
-      status: m.toolStatus || parsed?.status || "completed",
-      path,
-      detail: m.toolDetail || parsed?.detail,
-      updatedAt: m.createdAt,
-    });
+    // Standalone tool_step rows.
+    if (isToolStepMessage(m)) {
+      const parsed = m.content?.startsWith("tool_step|")
+        ? parseToolStepContent(m.content)
+        : null;
+      const kind = m.toolKind || parsed?.kind || "";
+      if (!isEditToolKind(kind)) continue;
+      const path = normalizePath(m.toolPath || parsed?.path || "");
+      if (!path) continue;
+      list = mergeSessionChange(list, {
+        toolCallId: m.toolCallId,
+        title: parsed?.title || m.content,
+        kind,
+        status: m.toolStatus || parsed?.status || "completed",
+        path,
+        detail: m.toolDetail || parsed?.detail,
+        updatedAt: m.createdAt,
+      });
+      continue;
+    }
+    // Assistant-woven tool segments (common live path; #998 empty Review).
+    if (m.role !== "assistant" || !m.segments?.length) continue;
+    for (const seg of m.segments) {
+      if (seg.kind !== "tool") continue;
+      const kind = seg.toolKind || "";
+      if (!isEditToolKind(kind)) continue;
+      const path = resolveSessionChangePath({
+        path: seg.path,
+        input: seg.input,
+      });
+      if (!path) continue;
+      list = mergeSessionChange(list, {
+        toolCallId: seg.toolCallId,
+        title: seg.title,
+        kind,
+        status: seg.status || "completed",
+        path,
+        detail: seg.detail,
+        updatedAt: seg.createdAt || m.createdAt,
+      });
+    }
   }
   return list;
 }
