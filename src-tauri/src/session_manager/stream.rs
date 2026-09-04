@@ -865,7 +865,8 @@ impl SessionManager {
         if p.text.is_empty() && !p.done {
             return;
         }
-        let _ = app.emit(
+        crate::mirror::fanout_event(
+            app,
             "session://stream",
             serde_json::json!({
                 "sessionId": s.app_session_id,
@@ -1193,7 +1194,8 @@ impl SessionManager {
         // Include the post-steer stream id so the FE can seed a live thinking
         // row immediately (same id Host will use for subsequent chunks).
         let post_stream_message_id = s.streaming_message_id.clone();
-        let _ = app.emit(
+        crate::mirror::fanout_event(
+            app,
             "session://interjection",
             serde_json::json!({
                 "sessionId": s.app_session_id,

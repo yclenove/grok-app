@@ -220,6 +220,7 @@ export const frComposer = {
   "composer.dropProjectTitle": "Ajouter comme projet",
   "composer.dropProjectHint": "Déposez un dossier ici pour l’ajouter à la liste des projets",
   "composer.dropProjectFilesOnly": "Seuls les dossiers peuvent être ajoutés comme projets. Déposez les fichiers dans la zone de chat pour les joindre.",
+  "composer.dropProjectNeedPath": "Impossible de lire le chemin du dossier. Utilisez Ajouter un projet, ou déposez à nouveau le dossier depuis l’Explorateur.",
   "composer.attachRemove": "Retirer la pièce jointe",
   "composer.attachCount": "{n} joint(s)",
   "composer.at.aria": "Fichiers du projet",

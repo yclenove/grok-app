@@ -53,7 +53,10 @@
             "$APPDATA/**/secrets.json"
           ]
         }
-      }
+      },
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ]
     }
   },
   "bundle": {

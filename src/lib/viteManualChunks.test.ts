@@ -27,6 +27,26 @@ describe("vendorManualChunk", () => {
     ).toBeUndefined();
   });
 
+  it("groups CodeMirror / lezer / style-mod together", () => {
+    expect(
+      vendorManualChunk("/repo/node_modules/@codemirror/view/dist/index.js"),
+    ).toBe("codemirror");
+    expect(
+      vendorManualChunk(
+        "D:\\repo\\node_modules\\@codemirror\\language\\dist\\index.js",
+      ),
+    ).toBe("codemirror");
+    expect(
+      vendorManualChunk("/repo/node_modules/@lezer/highlight/dist/index.js"),
+    ).toBe("codemirror");
+    expect(
+      vendorManualChunk("/repo/node_modules/style-mod/src/style-mod.js"),
+    ).toBe("codemirror");
+    expect(
+      vendorManualChunk("/repo/node_modules/crelt/index.js"),
+    ).toBe("codemirror");
+  });
+
   it("groups react-markdown and remark-gfm", () => {
     expect(
       vendorManualChunk("/repo/node_modules/react-markdown/index.js"),

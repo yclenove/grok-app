@@ -220,6 +220,7 @@ export const koComposer = {
   "composer.dropProjectTitle": "프로젝트로 추가",
   "composer.dropProjectHint": "폴더를 여기에 놓아 프로젝트 목록에 추가하세요",
   "composer.dropProjectFilesOnly": "프로젝트로 추가할 수 있는 것은 폴더뿐입니다. 파일은 채팅 영역에 놓아 첨부하세요.",
+  "composer.dropProjectNeedPath": "폴더 경로를 읽지 못했습니다.「프로젝트 추가」를 쓰거나 탐색기에서 폴더를 다시 놓아 주세요.",
   "composer.attachRemove": "첨부 제거",
   "composer.attachCount": "{n}개 첨부됨",
   "composer.at.aria": "프로젝트 파일",

@@ -220,6 +220,7 @@ export const esComposer = {
   "composer.dropProjectTitle": "Añadir como proyecto",
   "composer.dropProjectHint": "Suelta una carpeta aquí para añadirla a la lista de proyectos",
   "composer.dropProjectFilesOnly": "Solo se pueden añadir carpetas como proyectos. Suelta archivos en el área del chat para adjuntarlos.",
+  "composer.dropProjectNeedPath": "No se pudo leer la ruta de la carpeta. Usa Añadir proyecto o suelta la carpeta otra vez desde el Explorador.",
   "composer.attachRemove": "Quitar adjunto",
   "composer.attachCount": "{n} adjuntos",
   "composer.at.aria": "Archivos del proyecto",

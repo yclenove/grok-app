@@ -1384,13 +1384,14 @@ impl SessionManager {
     }
 
     pub(super) fn emit_state(app: &AppHandle, snap: &SessionSnapshot) {
-        let _ = app.emit("session://state", snap);
+        // Mirror phones need the same settle path as the desktop (#1001).
+        crate::mirror::fanout_event(app, "session://state", snap);
     }
 
     /// Multi-session runtime for a non-focused session (background / parked).
     /// Does **not** move the live focus slot — UI projects this into `liveMap` only.
     pub(super) fn emit_runtime(app: &AppHandle, snap: &SessionSnapshot) {
-        let _ = app.emit("session://runtime", snap);
+        crate::mirror::fanout_event(app, "session://runtime", snap);
     }
 
     pub(super) fn snapshot_from_live(s: &LiveSession) -> SessionSnapshot {

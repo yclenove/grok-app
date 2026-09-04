@@ -220,6 +220,7 @@ export const deComposer = {
   "composer.dropProjectTitle": "Als Projekt hinzufügen",
   "composer.dropProjectHint": "Ordner hier ablegen, um ihn zur Projektliste hinzuzufügen",
   "composer.dropProjectFilesOnly": "Nur Ordner können als Projekte hinzugefügt werden. Dateien im Chatbereich ablegen, um sie anzuhängen.",
+  "composer.dropProjectNeedPath": "Ordnerpfad konnte nicht gelesen werden. Nutze „Projekt hinzufügen“ oder lege den Ordner erneut aus dem Explorer ab.",
   "composer.attachRemove": "Anhang entfernen",
   "composer.attachCount": "{n} angehängt",
   "composer.at.aria": "Projektdateien",

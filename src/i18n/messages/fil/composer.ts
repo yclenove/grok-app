@@ -220,6 +220,7 @@ export const filComposer = {
   "composer.dropProjectTitle": "Idagdag bilang proyekto",
   "composer.dropProjectHint": "I-drop ang folder dito para idagdag ito sa listahan ng proyekto",
   "composer.dropProjectFilesOnly": "Mga folder lang ang maidaragdag bilang proyekto. I-drop ang mga file sa lugar ng chat para i-attach sila.",
+  "composer.dropProjectNeedPath": "Hindi mabasa ang path ng folder. Gamitin ang Add project, o i-drop ulit ang folder mula sa File Explorer.",
   "composer.attachRemove": "Alisin ang attachment",
   "composer.attachCount": "{n} ang naka-attach",
   "composer.at.aria": "Mga file ng proyekto",

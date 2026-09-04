@@ -1,9 +1,15 @@
 /**
  * File drag-drop helpers (HTML5 DataTransfer + Tauri native path events).
  *
- * Windows WebView2: Tauri's native handler *replaces* the WebView2 drop
- * target, so HTML5 `Files` is empty unless `dragDropEnabled` is false.
- * See tauri.windows.conf.json. Path-less File blobs are saved via Host temp.
+ * Windows strategy (#628 / #999):
+ * - Keep `dragDropEnabled: true` (Tauri default) so Explorer folder/file drops
+ *   deliver absolute paths via `webview.onDragDropEvent`. Sidebar "add project"
+ *   needs those paths; HTML5 alone often has empty `File.path` for folders.
+ * - HTML5 capture-phase listeners remain as a fallback (path via `File.path`
+ *   or `text/uri-list`) and for non-OS drags. When Tauri already handled the
+ *   drop, `shouldSkipHtml5AfterNative` prevents a second attach.
+ * - Path-less blob drops (some cross-app images) may still need paste / picker;
+ *   Explorer → composer attach goes through Tauri paths again.
  */
 
 /** How long HTML5 drop should yield to a just-handled Tauri OS drop. */
@@ -39,6 +45,81 @@ export function pathsFromDroppedFiles(files: Iterable<File>): string[] {
     if (!path || seen.has(path)) continue;
     seen.add(path);
     out.push(path);
+  }
+  return out;
+}
+
+/** `file://` URL → local path (Windows drive letters un-prefixed). */
+export function fileUrlToFsPath(raw: string): string | null {
+  const s = raw.trim();
+  if (!/^file:/i.test(s)) return null;
+  try {
+    const u = new URL(s);
+    if (u.protocol !== "file:") return null;
+    let path = decodeURIComponent(u.pathname);
+    // Chromium file URLs use `/C:/...` — strip the leading slash.
+    if (/^\/[A-Za-z]:[\\/]/.test(path)) path = path.slice(1);
+    // file://localhost/Users/... → pathname already `/Users/...`
+    return path || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decode `text/uri-list` lines into absolute filesystem paths.
+ * Ignores http(s) links and blank / comment lines.
+ */
+export function pathsFromUriList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    let path = "";
+    if (/^file:/i.test(t)) {
+      path = fileUrlToFsPath(t) ?? "";
+    } else if (
+      /^[A-Za-z]:[\\/]/.test(t) ||
+      t.startsWith("\\\\") ||
+      (t.startsWith("/") && !t.startsWith("//"))
+    ) {
+      path = t;
+    }
+    path = path.trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+  }
+  return out;
+}
+
+/**
+ * Best-effort absolute paths from an HTML5 drop.
+ * Prefers `File.path`, then `text/uri-list` (only reliable inside `drop`).
+ */
+export function pathsFromDataTransfer(
+  data: DataTransfer | null | undefined,
+): string[] {
+  if (!data) return [];
+  const files = data.files?.length ? Array.from(data.files) : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (p: string) => {
+    const path = p.trim();
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    out.push(path);
+  };
+  for (const p of pathsFromDroppedFiles(files)) push(p);
+  try {
+    const types = Array.from(data.types ?? []);
+    if (types.includes("text/uri-list")) {
+      for (const p of pathsFromUriList(data.getData("text/uri-list"))) push(p);
+    }
+  } catch {
+    /* getData can throw outside drop in some engines */
   }
   return out;
 }

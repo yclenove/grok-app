@@ -19,6 +19,17 @@ export function vendorManualChunk(id: string): string | undefined {
   ) {
     return "tiptap";
   }
+  // Keep CodeMirror + style-mod + lezer in one chunk so StyleModule /
+  // HighlightStyle tag identity stay single-instance after code-splitting.
+  if (
+    rest.startsWith("@codemirror/") ||
+    rest.startsWith("@lezer/") ||
+    rest.startsWith("style-mod/") ||
+    rest.startsWith("crelt/") ||
+    rest.startsWith("w3c-keyname/")
+  ) {
+    return "codemirror";
+  }
   if (
     rest.startsWith("react-markdown/") ||
     rest.startsWith("remark-gfm/") ||

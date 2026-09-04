@@ -220,6 +220,7 @@ export const ukComposer = {
   "composer.dropProjectTitle": "Додати як проєкт",
   "composer.dropProjectHint": "Перетягніть теку сюди, щоб додати її до списку проєктів",
   "composer.dropProjectFilesOnly": "Як проєкти можна додавати лише теки. Перетягніть файли в область чату, щоб прикріпити їх.",
+  "composer.dropProjectNeedPath": "Не вдалося прочитати шлях до теки. Скористайтеся «Додати проєкт» або перетягніть теку знову з Провідника.",
   "composer.attachRemove": "Прибрати вкладення",
   "composer.attachCount": "Прикріплено: {n}",
   "composer.at.aria": "Файли проєкту",

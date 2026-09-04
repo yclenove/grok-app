@@ -220,6 +220,7 @@ export const idComposer = {
   "composer.dropProjectTitle": "Tambah sebagai proyek",
   "composer.dropProjectHint": "Jatuhkan folder di sini untuk menambahkannya ke daftar proyek",
   "composer.dropProjectFilesOnly": "Hanya folder yang dapat ditambahkan sebagai proyek. Jatuhkan berkas di area obrolan untuk melampirkannya.",
+  "composer.dropProjectNeedPath": "Tidak dapat membaca jalur folder. Gunakan Tambah proyek, atau jatuhkan foldernya lagi dari File Explorer.",
   "composer.attachRemove": "Hapus lampiran",
   "composer.attachCount": "{n} terlampir",
   "composer.at.aria": "Berkas proyek",

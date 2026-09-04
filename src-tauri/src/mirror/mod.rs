@@ -659,7 +659,11 @@ async fn bind_http_with_retry(
 
 /// Emit to desktop WebView **and** mirror WS clients (DESIGN §7.3).
 /// Prefer this over bare `app.emit` for all `session://*` chat events.
-pub fn fanout_event(app: &AppHandle, name: &str, payload: impl Serialize + Clone) {
+pub fn fanout_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    name: &str,
+    payload: impl Serialize + Clone,
+) {
     let _ = app.emit(name, payload.clone());
     if let Some(host) = app.try_state::<Arc<MirrorHost>>() {
         match serde_json::to_value(&payload) {

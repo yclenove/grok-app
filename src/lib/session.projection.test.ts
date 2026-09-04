@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyInterjection,
+  applyRemoteUserMessage,
   applyStreamChunk,
   buildSegmentsFromLegacy,
   canSend,
@@ -796,6 +797,29 @@ describe("session projection", () => {
     const out = reconcileOptimisticDuplicates(msgs);
     expect(out.map((m) => m.id)).toEqual(["uuid-user", "uuid-asst"]);
     expect(out[0]!.role).toBe("user");
+  });
+
+  it("applyRemoteUserMessage appends mirror user + live shell (#1001)", () => {
+    const out = applyRemoteUserMessage(
+      [],
+      { id: "host-user", role: "user", content: "from phone" },
+      "host-stream",
+    );
+    expect(out.map((m) => m.id)).toEqual(["host-user", "host-stream"]);
+    expect(out[1]!.streaming).toBe(true);
+  });
+
+  it("applyRemoteUserMessage reconciles optimistic u-<ts> without duplicating", () => {
+    const out = applyRemoteUserMessage(
+      [
+        { id: "u-1710000000001", role: "user", content: "hello" },
+        { id: "a-pending-1", role: "assistant", content: "", streaming: true },
+      ],
+      { id: "host-user", role: "user", content: "hello" },
+      "host-stream",
+    );
+    expect(out.map((m) => m.id)).toEqual(["host-user", "a-pending-1"]);
+    expect(out.filter((m) => m.role === "user")).toHaveLength(1);
   });
 
   it("applyStreamChunk grows assistant text once per chunk", () => {

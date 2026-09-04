@@ -220,6 +220,7 @@ export const ptBRComposer = {
   "composer.dropProjectTitle": "Adicionar como projeto",
   "composer.dropProjectHint": "Solte uma pasta aqui para adicioná-la à lista de projetos",
   "composer.dropProjectFilesOnly": "Só pastas podem ser adicionadas como projetos. Solte arquivos na área do chat para anexá-los.",
+  "composer.dropProjectNeedPath": "Não foi possível ler o caminho da pasta. Use Adicionar projeto ou solte a pasta de novo no Explorador.",
   "composer.attachRemove": "Remover anexo",
   "composer.attachCount": "{n} anexados",
   "composer.at.aria": "Arquivos do projeto",

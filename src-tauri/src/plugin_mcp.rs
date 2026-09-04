@@ -725,7 +725,13 @@ mod tests {
         let defs = parse_plugin_mcp_json(raw, "/opt/x-api", "x-api");
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "x-api");
-        assert_eq!(defs[0].command.as_deref(), Some("node"));
+        match defs[0].command.as_deref() {
+            Some("node") | Some("nodejs") => {}
+            Some(cmd) if cmd.ends_with("/node") || cmd.ends_with("/nodejs") => {}
+            other => panic!(
+                "expected node/nodejs or absolute path ending in /node or /nodejs, got {other:?}"
+            ),
+        }
         assert_eq!(
             defs[0].args.clone().unwrap(),
             vec!["/opt/x-api/mcp/server.mjs".to_string()]

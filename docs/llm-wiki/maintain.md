@@ -98,10 +98,27 @@ New Issue
 
 | Kind | Policy |
 |------|--------|
-| Small bugfix, clear root cause, tests | Squash-merge after CI / local check |
+| Functional logic fix (clear root cause, tests) | Squash-merge after CI / local check |
+| Style **bug** fix (broken layout / clipping / wrong chrome / invisible control — not redesign) | Squash-merge after CI / local check |
+| Frontend **UI / visual / IA** change (new chrome, restyle, layout redesign, new panels, copy/IA that changes how a screen looks) | **Do not merge in the agent pass.** Hold until end of the PR batch; maintainer decides |
 | Feature / large refactor | Request changes or design note first |
 | i18n / permission / agent protocol | Prefer maintainer re-verify against real CLI |
 | Security | Follow SECURITY.md; do not discuss exploits in public Issues |
+
+### Agent PR batch cadence (maintainer gate)
+
+When reviewing a batch of open PRs:
+
+1. **Auto-path (agent may merge):** functional logic + style **bug** fixes only — still must pass the checklist above.
+2. **Hold for maintainer:** any PR that changes what users **see** on a screen (CSS/layout redesign, new UI chrome, component restyle, settings IA visuals, dialogs/menus look-and-feel, marketing/website visuals, etc.). Label as “UI hold”; do not squash-merge.
+3. **End-of-batch report (required before asking to merge held PRs):** list every held PR with:
+   - PR number + title
+   - Which **pages / surfaces** change (e.g. Settings → Appearance, Composer, session sidebar, What’s New, website landing)
+   - What the user would notice after merge (before → after in plain language; screenshots or `gh pr diff` path summary when helpful)
+   - Risk notes (regression surface, i18n, dialogs.md / AppWorkbench freeze)
+4. Maintainer (铁柱) **拍板** which held PRs to merge; agent merges only after explicit yes.
+
+**Style bug vs UI change:** fixing “menu is transparent / clipped / wrong z-index” is a style bug → merge. “Make the menu look like glass / restyle spacing / new visual language” is UI → hold.
 
 ### Adopted community PRs (examples)
 

@@ -13,6 +13,7 @@ import {
   applyContextCompact,
   applyGeneratedImage,
   applyInterjection,
+  applyRemoteUserMessage,
   applyStreamChunk,
   applyToolEvent,
   applyTurnError,
@@ -1095,6 +1096,28 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             // Steering restarts the thinking episode for that chat — background
             // chats keep their own clock rather than borrowing the viewed one.
             c.restartTurnClock(payload.sessionId);
+          }),
+        );
+       track(
+          listenWithRetry<{
+            sessionId: string;
+            message: ChatMessage;
+            streamMessageId?: string | null;
+          }>("session://user_message", (payload) => {
+            if (cancelled || !payload?.sessionId || !payload.message?.id) {
+              return;
+            }
+            // Mirror / API / other-window sends: paint the Host user row when
+            // this client did not run local optimistic UI (#1001). Local sends
+            // reconcile optimistic `u-…` ids to the Host UUID instead of
+            // duplicating.
+            c.patchSessionMessages(payload.sessionId, (prev) =>
+              applyRemoteUserMessage(
+                prev,
+                payload.message,
+                payload.streamMessageId,
+              ),
+            );
           }),
         );
        track(

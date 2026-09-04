@@ -485,7 +485,7 @@ impl SessionManager {
                             );
                         }
                     }
-                    let _ = app.emit("session://permission", &req);
+                    crate::mirror::fanout_event(app, "session://permission", &req);
                     Self::emit_state(app, &self.snapshot());
                 }
             }
@@ -890,7 +890,7 @@ impl SessionManager {
                     }
                 };
                 // Emit the stored payload so a restore and a live emit cannot drift.
-                let _ = app.emit("session://ask_user", &pending);
+                crate::mirror::fanout_event(app, "session://ask_user", &pending);
             }
             AcpEvent::Error { error } => {
                 {

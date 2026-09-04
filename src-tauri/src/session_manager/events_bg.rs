@@ -329,7 +329,7 @@ impl SessionManager {
                             );
                         }
                     }
-                    let _ = app.emit("session://permission", &req);
+                    crate::mirror::fanout_event(app, "session://permission", &req);
                     // Tell UI this permission belongs to a non-focused session.
                     let _ = app.emit(
                         "session://background_permission",
@@ -817,7 +817,7 @@ impl SessionManager {
                     Self::touch_activity_locked(s);
                 }
                 // Emit the stored payload so a restore and a live emit cannot drift.
-                let _ = app.emit("session://ask_user", &pending);
+                crate::mirror::fanout_event(app, "session://ask_user", &pending);
                 // Same signal as background permission — toast / sidebar attention.
                 let _ = app.emit(
                     "session://background_permission",

@@ -222,6 +222,7 @@ export const zhTWComposer = {
   "composer.dropProjectTitle": "新增為專案",
   "composer.dropProjectHint": "將資料夾拖到此處，加入專案清單",
   "composer.dropProjectFilesOnly": "左側僅支援拖入資料夾作為專案。檔案請拖到聊天區附加。",
+  "composer.dropProjectNeedPath": "無法讀取該資料夾路徑。請用「新增專案」，或從檔案總管再拖一次資料夾。",
   "composer.attachRemove": "移除附件",
   "composer.attachCount": "已附加 {n} 項",
   "composer.at.aria": "專案檔案",

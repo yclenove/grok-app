@@ -40,7 +40,7 @@ import {
 } from "@/lib/appPlatform";
 import {
   isFileDrag,
-  pathsFromDroppedFiles,
+  pathsFromDataTransfer,
   shouldSkipHtml5AfterNative,
 } from "@/lib/fileDrop";
 import { writeOpenTargetStorage } from "@/lib/openEditorHonesty";
@@ -6450,9 +6450,11 @@ export function AppWorkbench() {
     platform,
   ]);
 
-  // HTML5 fallback. Windows sets dragDropEnabled:false so WebView2 actually
-  // delivers File blobs (Tauri's native handler otherwise swallows Explorer
-  // drops). Capture phase so contenteditable cannot cancel the drop.
+  // HTML5 fallback when Tauri does not own the drop (or for path-bearing
+  // WebView File / uri-list payloads). Capture phase so contenteditable
+  // cannot cancel the drop. Windows keeps dragDropEnabled on so Explorer
+  // folder→project gets absolute paths via onDragDropEvent (#999); this
+  // path must not silently no-op on the sidebar when paths are missing.
   useEffect(() => {
     const onDragEnter = (e: DragEvent) => {
       if (!isFileDrag(e.dataTransfer)) {
@@ -6491,18 +6493,22 @@ export function AppWorkbench() {
       const files = e.dataTransfer?.files?.length
         ? Array.from(e.dataTransfer.files)
         : [];
-      const paths = pathsFromDroppedFiles(files);
+      const paths = pathsFromDataTransfer(e.dataTransfer);
       const zone = hitDragZone(e.clientX, e.clientY);
       if (paths.length) {
         if (zone === "sidebar") void addProjectsFromPaths(paths);
         else void addAttachmentsFromPaths(paths);
         return;
       }
-      // Path-less File list (Windows Explorer after dragDropEnabled:false,
-      // or an image dragged from another app).
-      if (zone !== "sidebar" && files.length) {
+      // Path-less File list (cross-app image drag, or engines without File.path).
+      // Sidebar needs a real folder path — never silent-no-op (#999).
+      if (zone === "sidebar") {
+        setLocalError(tr("composer.dropProjectNeedPath"));
+        return;
+      }
+      if (files.length) {
         void addAttachmentsFromFiles(files);
-      } else if (!files.length) {
+      } else {
         setLocalError(tr("attach.droppedNone"));
       }
     };

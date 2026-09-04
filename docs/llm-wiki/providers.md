@@ -108,6 +108,7 @@ separate from ordinary `[model.<id>]` relays:
 | ACP model | Spawn uses the real selected model id, such as `grok-4.6`, rather than the provider section alias |
 | Child environment | Only the target `grok agent stdio` process receives `GROK_MODELS_BASE_URL`, `GROK_MODELS_LIST_URL`, `GROK_CLI_CHAT_PROXY_BASE_URL`, and `XAI_API_KEY` |
 | Generic compatibility | Generic providers keep `[model.<id>]`, provider-alias spawn, and the existing stream sanitizer behavior |
+| Composer id vs CLI id (#1000) | The picker may store `app_models[].id` (request-body id). Host `agent_spawn_model_id` maps that back to the `[model.<id>]` **section** name for both `--model` and `session/set_model`, including when `[models].default` is still official. Cold connect also applies `session/set_model` after `session/new` (same as unpark) so turn 1 and turn 2 cannot diverge. Official catalog ids such as `grok-4.6` are never remapped through a relay that also lists them. |
 | Apply | Editing the active provider recycles warm ACP processes; the next send starts with the new catalog and capability contract |
 | Attachments | Unchanged: App still sends `@absolute/path` inside ACP text content; this mode does not claim or add native ACP image blocks |
 

@@ -220,6 +220,7 @@ export const ruComposer = {
   "composer.dropProjectTitle": "Добавить как проект",
   "composer.dropProjectHint": "Перетащите папку сюда, чтобы добавить её в список проектов",
   "composer.dropProjectFilesOnly": "Как проекты можно добавлять только папки. Файлы перетаскивайте в область чата, чтобы прикрепить.",
+  "composer.dropProjectNeedPath": "Не удалось прочитать путь к папке. Используйте «Добавить проект» или перетащите папку снова из Проводника.",
   "composer.attachRemove": "Удалить вложение",
   "composer.attachCount": "Вложений: {n}",
   "composer.at.aria": "Файлы проекта",

@@ -223,6 +223,7 @@ export const enComposer = {
   "composer.dropProjectTitle": "Add as project",
   "composer.dropProjectHint": "Drop a folder here to add it to the project list",
   "composer.dropProjectFilesOnly": "Only folders can be added as projects. Drop files in the chat area to attach them.",
+  "composer.dropProjectNeedPath": "Could not read that folder path. Use Add project, or drop the folder from File Explorer again.",
   "composer.attachRemove": "Remove attachment",
   "composer.attachCount": "{n} attached",
   "composer.at.aria": "Project files",

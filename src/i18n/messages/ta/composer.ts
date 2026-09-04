@@ -220,6 +220,7 @@ export const taComposer = {
   "composer.dropProjectTitle": "திட்டமாக சேர்",
   "composer.dropProjectHint": "திட்டப் பட்டியலில் சேர்க்க ஒரு கோப்புறையை இங்கே விடுங்கள்",
   "composer.dropProjectFilesOnly": "கோப்புறைகளை மட்டுமே திட்டங்களாகச் சேர்க்க முடியும். அவற்றை இணைக்க உரையாடல் பகுதியில் கோப்புகளை விடுங்கள்.",
+  "composer.dropProjectNeedPath": "அந்த கோப்புறை பாதையைப் படிக்க முடியவில்லை. திட்டம் சேர் என்பதைப் பயன்படுத்தவும், அல்லது கோப்பு எக்ஸ்ப்ளோரரிலிருந்து மீண்டும் இழுத்து விடவும்.",
   "composer.attachRemove": "இணைப்பை அகற்று",
   "composer.attachCount": "{n} இணைக்கப்பட்டுள்ளது",
   "composer.at.aria": "திட்ட கோப்புகள்",

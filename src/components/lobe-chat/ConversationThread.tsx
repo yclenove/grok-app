@@ -167,10 +167,12 @@ import {
   toolSegmentIsRunning,
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
+import { TurnTail } from "./TurnTail";
 import {
   buildAssistantTimeline,
   shouldShowTrailingLiveThinking,
 } from "@/lib/timelinePhases";
+import { estimateDurationSecFromTimestamps } from "@/lib/formatWorkDuration";
 import { resolveChatTranscriptEmptyState } from "@/lib/chatTranscriptEmpty";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -1476,13 +1478,12 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
   const isNodeFocus = focusMessageId === m.id;
   // Phase projection: thought+tools collapse when phase ends (content
   // / next thought), not only when the full answer is done.
-  const timelineUnits = useMemo(
-    () =>
-      buildAssistantTimeline(segs, {
-        streaming: !!m.streaming,
-      }),
-    [segs, m.streaming],
-  );
+  // Do NOT wrap in useMemo here — this sits after role/isError early returns.
+  // A streaming assistant that later flips to isError on the same row id would
+  // skip this hook and trip React #30 (fewer hooks than expected) (#1002).
+  const timelineUnits = buildAssistantTimeline(segs, {
+    streaming: !!m.streaming,
+  });
   // Live chrome follows the *current* episode (trailing thought / phase),
   // not “this message already has some body text”. Grok 4.x think→tool
   // loops keep reasoning after the first status sentence.
@@ -1742,6 +1743,26 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
               >
                 {tr("message.replyLength", { words, chars })}
               </div>
+            );
+          })()}
+          {(() => {
+            if (m.streaming) return null;
+            const stamps: Array<string | undefined | null> = [m.createdAt];
+            for (const u of timelineUnits) {
+              if (u.kind === "phase") {
+                for (const t of u.tools) stamps.push(t.createdAt);
+              } else if (u.kind === "tool") {
+                stamps.push(u.tool.createdAt);
+              }
+            }
+            const durationSec = estimateDurationSecFromTimestamps(stamps);
+            return (
+              <TurnTail
+                units={timelineUnits}
+                locale={locale}
+                streaming={!!m.streaming}
+                durationSec={durationSec}
+              />
             );
           })()}
         </div>

@@ -222,6 +222,7 @@ export const zhComposer = {
   "composer.dropProjectTitle": "添加为项目",
   "composer.dropProjectHint": "将文件夹拖到此处，加入项目列表",
   "composer.dropProjectFilesOnly": "左侧仅支持拖入文件夹作为项目。文件请拖到聊天区附加。",
+  "composer.dropProjectNeedPath": "无法读取该文件夹路径。请用「添加项目」，或从资源管理器再拖一次文件夹。",
   "composer.attachRemove": "移除附件",
   "composer.attachCount": "已附加 {n} 项",
   "composer.at.aria": "项目文件",

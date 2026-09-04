@@ -181,19 +181,17 @@ impl SessionManager {
             // Persist the user-facing turn before dispatching the prompt. A
             // failed journal write must not leave the runtime in Streaming
             // with a prompt that cannot be reconstructed after reload.
-            if let Err(e) = store::append_message(
-                &s.app_session_id,
-                ChatMessageStored {
-                    id: Uuid::new_v4().to_string(),
-                    role: "user".into(),
-                    content: journal_content.clone(),
-                    thought: None,
-                    created_at: chrono::Utc::now(),
-                    is_error: false,
-                    attachments: journal_attachments.clone(),
-                    marker: None,
-                },
-            ) {
+            let user_row = ChatMessageStored {
+                id: Uuid::new_v4().to_string(),
+                role: "user".into(),
+                content: journal_content.clone(),
+                thought: None,
+                created_at: chrono::Utc::now(),
+                is_error: false,
+                attachments: journal_attachments.clone(),
+                marker: None,
+            };
+            if let Err(e) = store::append_message(&s.app_session_id, user_row.clone()) {
                 let _ = s.fsm.end_stream();
                 s.prompt_in_flight = false;
                 crate::turn_lease::clear_lease(&s.app_session_id);
@@ -220,22 +218,24 @@ impl SessionManager {
                 agent_prompt,
                 mid,
                 turn_id,
+                user_row,
             ))
         });
         drop(journal_guard);
-        let (backend, app_sid, acp, agent_sid, agent_prompt, message_id, turn_id) = match open {
-            Some(Ok(v)) => v,
-            Some(Err(e)) => {
-                self.emit_for_session(&app, &app_sid);
-                return Err(e);
-            }
-            None => {
-                return Err(format!(
-                    "{}: chat {app_sid} has no live agent process — reconnect and retry",
-                    AgentErrorCode::ConnectFailed.as_str()
-                ));
-            }
-        };
+        let (backend, app_sid, acp, agent_sid, agent_prompt, message_id, turn_id, user_row) =
+            match open {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    self.emit_for_session(&app, &app_sid);
+                    return Err(e);
+                }
+                None => {
+                    return Err(format!(
+                        "{}: chat {app_sid} has no live agent process — reconnect and retry",
+                        AgentErrorCode::ConnectFailed.as_str()
+                    ));
+                }
+            };
         // The session slot is now in `Streaming` and owns its ACP client. Do
         // not hold the global connect/park lock while host vision or another
         // side-channel performs network/CLI work (official vision can take
@@ -251,6 +251,17 @@ impl SessionManager {
         // Push streaming state before long host side-channels so the pill stays
         // "进行中" (not "就绪") while recognizing.
         self.emit_for_session(&app, &app_sid);
+        // Mirror / other windows did not run local optimistic UI — publish the
+        // journal user row (+ stream shell id) so every client can paint it (#1001).
+        crate::mirror::fanout_event(
+            &app,
+            "session://user_message",
+            serde_json::json!({
+                "sessionId": app_sid,
+                "message": user_row,
+                "streamMessageId": message_id,
+            }),
+        );
 
         // ── Host vision (custom text-only main + @image only) ──────────────
         // Official Grok route: never Host-describe (native multimodal).

@@ -220,6 +220,7 @@ export const itComposer = {
   "composer.dropProjectTitle": "Aggiungi come progetto",
   "composer.dropProjectHint": "Trascina qui una cartella per aggiungerla all’elenco progetti",
   "composer.dropProjectFilesOnly": "Solo le cartelle possono essere aggiunte come progetti. Trascina i file nell’area chat per allegarli.",
+  "composer.dropProjectNeedPath": "Impossibile leggere il percorso della cartella. Usa Aggiungi progetto oppure trascina di nuovo la cartella da Esplora file.",
   "composer.attachRemove": "Rimuovi allegato",
   "composer.attachCount": "{n} allegati",
   "composer.at.aria": "File del progetto",

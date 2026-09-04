@@ -176,6 +176,83 @@ export function dedupeCurrentTurnAssistants(
 }
 
 /**
+ * Apply a Host-authored user turn (mirror / other window / API send).
+ *
+ * Local composers already paint an optimistic `u-…` bubble; when the Host
+ * UUID arrives, reconcile that row instead of duplicating. Mirror clients
+ * that never ran local optimistic UI get the user row + a live assistant shell.
+ */
+export function applyRemoteUserMessage(
+  messages: ChatMessage[],
+  user: ChatMessage,
+  streamMessageId?: string | null,
+): ChatMessage[] {
+  if (!user?.id || user.role !== "user") return messages;
+  if (messages.some((m) => m.id === user.id)) {
+    return ensureLiveAssistantAfterUser(messages, user.id, streamMessageId);
+  }
+
+  const userText = (user.content || "").trim();
+  let optimisticIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== "user" || m.marker === "interjection") continue;
+    const id = m.id || "";
+    // Optimistic composer ids: `u-<ts>` / `u-auto-…` (see isClientOptimisticId).
+    if (
+      userText &&
+      (m.content || "").trim() === userText &&
+      (/^u-\d+$/.test(id) || id.startsWith("u-auto-"))
+    ) {
+      optimisticIdx = i;
+    }
+    break;
+  }
+
+  let next: ChatMessage[];
+  if (optimisticIdx >= 0) {
+    next = messages.map((m, i) =>
+      i === optimisticIdx
+        ? {
+            ...user,
+            attachments: user.attachments?.length
+              ? user.attachments
+              : m.attachments,
+          }
+        : m,
+    );
+  } else {
+    next = [...messages, { ...user, role: "user" }];
+  }
+  return ensureLiveAssistantAfterUser(next, user.id, streamMessageId);
+}
+
+function ensureLiveAssistantAfterUser(
+  messages: ChatMessage[],
+  userId: string,
+  streamMessageId?: string | null,
+): ChatMessage[] {
+  const userIdx = messages.findIndex((m) => m.id === userId);
+  if (userIdx < 0) return messages;
+  const after = messages.slice(userIdx + 1);
+  const hasLive = after.some((m) => m.role === "assistant" && m.streaming);
+  if (hasLive) return messages;
+  const postId =
+    (typeof streamMessageId === "string" && streamMessageId.trim()) ||
+    `a-pending-${userId}`;
+  if (messages.some((m) => m.id === postId)) return messages;
+  return [
+    ...messages,
+    {
+      id: postId,
+      role: "assistant",
+      content: "",
+      streaming: true,
+    },
+  ];
+}
+
+/**
  * Insert a mid-turn user interjection and freeze the assistant segment above it.
  * Post-interjection stream chunks carry a fresh host message id and append a new row.
  *

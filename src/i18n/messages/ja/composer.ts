@@ -220,6 +220,7 @@ export const jaComposer = {
   "composer.dropProjectTitle": "プロジェクトとして追加",
   "composer.dropProjectHint": "フォルダーをここにドロップしてプロジェクト一覧に追加",
   "composer.dropProjectFilesOnly": "プロジェクトとして追加できるのはフォルダーだけです。ファイルはチャット領域にドロップして添付してください。",
+  "composer.dropProjectNeedPath": "フォルダーパスを読めませんでした。「プロジェクトを追加」を使うか、エクスプローラーからもう一度ドロップしてください。",
   "composer.attachRemove": "添付を外す",
   "composer.attachCount": "{n} 件を添付",
   "composer.at.aria": "プロジェクトファイル",
