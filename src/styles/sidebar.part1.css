@@ -46,11 +46,6 @@ button:disabled {
   opacity: 0.45;
 }
 
-/* Image lightbox must sit above GlassModal (.overlay = 12000) and Select (13000) */
-.yarl__portal {
-  z-index: 14000 !important;
-}
-
 /*
  * Lightbox images: fill the stage with object-fit contain.
  * YARL defaults only set max-width/max-height to natural px, so small images

@@ -177,6 +177,11 @@ describe("WallpaperSourceModal image viewer integration", () => {
     await waitFor(() => {
       expect(document.querySelector(".yarl__portal")).not.toBeNull();
     });
+    const portal = document.querySelector<HTMLElement>(".yarl__portal");
+    expect(portal).not.toBeNull();
+    expect(portal?.style.getPropertyValue("--yarl__portal_zindex")).toBe(
+      "14000",
+    );
     expect(document.querySelector(".yarl__root")).not.toBeNull();
 
     // The card keeps focus when the portal mounts. Exercise the real keyboard

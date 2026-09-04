@@ -9,6 +9,8 @@ import Video from "yet-another-react-lightbox/plugins/video";
 import "yet-another-react-lightbox/styles.css";
 import "yet-another-react-lightbox/plugins/counter.css";
 
+export const IMAGE_LIGHTBOX_PORTAL_Z_INDEX = 14_000;
+
 export type ImageLightboxSlide = {
   src: string;
   kind: "image" | "video";
@@ -111,6 +113,9 @@ export function ImageLightbox({
         closeOnBackdropClick: true,
       }}
       styles={{
+        root: {
+          "--yarl__portal_zindex": IMAGE_LIGHTBOX_PORTAL_Z_INDEX,
+        },
         container: { backgroundColor: "rgba(0, 0, 0, 0.92)" },
       }}
       labels={{

@@ -13,12 +13,14 @@ Branch: `fix/wallpaper-responses-network-observability`
 ## Windows Tauri device pass
 
 Tested in the debug Tauri app at approximately `902 x 948` with the repository
-dev server using the configured `127.0.0.1:10809` proxy.
+dev server and the app's configured local proxy routes.
 
 - A follow-up screenshot at the same narrow size exposed that the initial
   grid/container-query fix had not taken effect in the live WebView: the
   preview collapsed into a vertical strip beside the fixed-width actions.
-  That screenshot supersedes the earlier narrow-layout pass claim.
+  The intrinsic flex-wrap replacement was then verified in that same debug
+  window: the preview rendered as a complete `16:10` landscape frame and both
+  actions moved below it at the full card width.
 - The library rendered 78 entries after the pass (`61` images, `17` videos).
   Static cards exposed the bottom-right video action; video cards did not.
 - A Pexels landscape prepared as a local source and opened Imagine in video
@@ -76,20 +78,36 @@ account details, and stored credentials are intentionally omitted.
   36 items in the first post-click frame, and the first appended item opened as
   `17 / 36`.
 - Grok Saved opened in its isolated persistent WebView through the configured
-  proxy on the current head, but Cloudflare required a human verification. No
-  challenge was solved automatically; the earlier full Saved acceptance remains
-  historical evidence, while current-head pagination and media playback remain
-  pending that manual step.
+  proxy on the current head after Cloudflare was cleared manually. The first
+  page displayed 20 items while 42 were already cached. Its first card opened
+  above the source modal in the real Lightbox as `1 / 20`; Escape closed only
+  the Lightbox and left the source modal open.
+- The Lightbox now sets YARL's documented `--yarl__portal_zindex` root variable
+  directly instead of relying on a global rule in unrelated sidebar CSS. This
+  keeps its stacking contract above the app's modal layer local to the
+  component and testable.
+- Grok Saved `Load more` reused the warm cache and changed `20 -> 40` in about
+  `0.4` seconds. The visible cards stayed in place, the first appended card
+  opened as `21 / 40`, and the next background warmup increased the cache from
+  42 to 70 after about 12 seconds without revealing or reordering those items.
+- The appended Saved image's video action opened Imagine video mode with its
+  compact source preview intact. Both `6` / `10` second and `480p` / `720p`
+  controls changed successfully; generation was intentionally not started.
+- All first 40 entries exposed the image-to-video action, so this current Saved
+  sample contained no video entry that could honestly exercise Saved playback.
+  The separate local-library video playback pass above remains valid.
 
 ## Automated verification
 
 Post-QA verification completed against the final working tree:
 
 - Corrected appearance and wallpaper layout guards: `6/6` passed.
-- Focused wallpaper frontend suites: `15` files, `95/95` tests passed.
-- Frontend suite: `592` files, `7087/7087` tests passed.
+- Focused wallpaper frontend suites: `15` files, `93/93` tests passed.
+- Frontend suite: `592` files, `7088/7088` tests passed.
 - TypeScript typecheck and ESLint: passed.
 - Production UI build (`pnpm build:ui`): passed.
+- Production dependency audit was blocked after three npm registry socket
+  timeouts; the registry returned no vulnerability result.
 - Rust formatting and `cargo clippy --all-targets -- -D warnings`: passed.
 - Targeted manifest-embedded Grok Saved Rust harness: `19/19` passed.
 - Windows Rust harness, with the repository test manifest embedded according
