@@ -166,4 +166,8 @@ export const enChat = {
   "chat.longReplyShowFull": "Show full reply",
   "chat.longReplyCollapse": "Show preview only",
   "chat.longReplyShowingFull": "Showing the full reply",
+  "chat.changedFiles.aria": "Files changed this turn",
+  "chat.changedFiles.viewAll": "View all",
+  "chat.changedFiles.openFile": "Review changes in {name}",
+  "chat.changedFiles.more": "+{n} more",
 } as const;

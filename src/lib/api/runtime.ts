@@ -17,6 +17,16 @@ export type CliUpdateCheck = {
   message?: string | null;
   error?: string | null;
   cliPath?: string | null;
+  /** Running App version (Host enrichment, #1009). */
+  appVersion?: string | null;
+  /** Absolute App floor for CLI upgrades without acknowledge. */
+  minAppVersion?: string | null;
+  /** Latest App on GitHub when the check reached releases. */
+  latestAppVersion?: string | null;
+  /** True when GitHub reports a newer App than this binary. */
+  appUpdateAvailable?: boolean | null;
+  /** Soft gate: warn before CLI install while App is behind. */
+  appBehind?: boolean | null;
   [key: string]: unknown;
 };
 
@@ -27,6 +37,8 @@ export type CliUpdateInstallOpts = {
   version?: string | null;
   /** Pass `--force-reinstall`. */
   force?: boolean | null;
+  /** User confirmed CLI install while App is behind (#1009). */
+  acknowledgeAppBehind?: boolean | null;
 };
 
 export async function cliUpdateCheck() {
@@ -37,12 +49,14 @@ export async function cliUpdateCheck() {
  * Install / switch / pin CLI via host `cli_update_install`.
  * Plain call = current-channel update (App trust-chain fallback).
  * Channel/version soft-fail without inventing channels.
+ * When App is behind (#1009), pass `acknowledgeAppBehind: true` after UI confirm.
  */
 export async function cliUpdateInstall(opts?: CliUpdateInstallOpts | null) {
   return invoke<CliUpdateCheck>("cli_update_install", {
     channel: opts?.channel ?? null,
     version: opts?.version ?? null,
     force: opts?.force ?? null,
+    acknowledgeAppBehind: opts?.acknowledgeAppBehind ?? null,
   });
 }
 

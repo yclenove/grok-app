@@ -159,4 +159,8 @@ export const ruChat = {
   "chat.longReplyShowFull": "Показать полный ответ",
   "chat.longReplyCollapse": "Показать только сокращённую версию",
   "chat.longReplyShowingFull": "Показан полный ответ",
+  "chat.changedFiles.aria": "Файлы, изменённые в этом ходе",
+  "chat.changedFiles.viewAll": "Смотреть все",
+  "chat.changedFiles.openFile": "Проверить изменения в {name}",
+  "chat.changedFiles.more": "ещё {n}",
 };

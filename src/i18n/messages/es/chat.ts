@@ -159,4 +159,8 @@ export const esChat = {
   "chat.longReplyShowFull": "Mostrar respuesta completa",
   "chat.longReplyCollapse": "Mostrar solo la vista previa",
   "chat.longReplyShowingFull": "Mostrando la respuesta completa",
+  "chat.changedFiles.aria": "Archivos modificados en este turno",
+  "chat.changedFiles.viewAll": "Ver todo",
+  "chat.changedFiles.openFile": "Revisar cambios en {name}",
+  "chat.changedFiles.more": "+{n} más",
 };

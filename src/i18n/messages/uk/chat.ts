@@ -159,4 +159,8 @@ export const ukChat = {
   "chat.longReplyShowFull": "Показати повну відповідь",
   "chat.longReplyCollapse": "Лише попередній перегляд",
   "chat.longReplyShowingFull": "Показано повну відповідь",
+  "chat.changedFiles.aria": "Файли, змінені в цьому ході",
+  "chat.changedFiles.viewAll": "Переглянути всі",
+  "chat.changedFiles.openFile": "Перевірити зміни в {name}",
+  "chat.changedFiles.more": "ще {n}",
 };

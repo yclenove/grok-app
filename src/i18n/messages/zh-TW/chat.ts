@@ -166,4 +166,8 @@ export const zhTWChat = {
   "chat.longReplyShowFull": "顯示全文",
   "chat.longReplyCollapse": "只顯示預覽",
   "chat.longReplyShowingFull": "正在顯示全文",
+  "chat.changedFiles.aria": "本輪修改的檔案",
+  "chat.changedFiles.viewAll": "查看全部",
+  "chat.changedFiles.openFile": "查看 {name} 的修改",
+  "chat.changedFiles.more": "還有 {n} 個",
 };

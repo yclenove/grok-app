@@ -159,4 +159,8 @@ export const deChat = {
   "chat.longReplyShowFull": "Vollständige Antwort zeigen",
   "chat.longReplyCollapse": "Nur Vorschau zeigen",
   "chat.longReplyShowingFull": "Vollständige Antwort wird angezeigt",
+  "chat.changedFiles.aria": "In diesem Zug geänderte Dateien",
+  "chat.changedFiles.viewAll": "Alle anzeigen",
+  "chat.changedFiles.openFile": "Änderungen in {name} prüfen",
+  "chat.changedFiles.more": "+{n} weitere",
 };

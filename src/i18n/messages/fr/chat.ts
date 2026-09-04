@@ -159,4 +159,8 @@ export const frChat = {
   "chat.longReplyShowFull": "Afficher la réponse complète",
   "chat.longReplyCollapse": "Aperçu uniquement",
   "chat.longReplyShowingFull": "Réponse complète affichée",
+  "chat.changedFiles.aria": "Fichiers modifiés durant ce tour",
+  "chat.changedFiles.viewAll": "Tout voir",
+  "chat.changedFiles.openFile": "Examiner les modifications de {name}",
+  "chat.changedFiles.more": "+{n} de plus",
 };

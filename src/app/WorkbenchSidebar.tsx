@@ -11,7 +11,6 @@ import {
   type SetStateAction,
 } from "react";
 import { Tip } from "@/components/ui/tooltip";
-import { PaneToggleButton } from "@/components/PaneToggleButton";
 import { SidebarBrand } from "@/components/SidebarBrand";
 import { SidebarUpdateButton } from "@/components/SidebarUpdateButton";
 import { ThemeEditorModal } from "@/components/ThemeEditorModal";
@@ -89,8 +88,6 @@ export type WorkbenchSidebarProps = {
   activeCustomProvider: CustomProvider | null;
   mainPane: "chat" | "automations" | "kanban";
   onOpenSearch: () => void;
-  sidebarToggleUnread?: boolean;
-  onToggleSidebar?: () => void;
   onNewChat: () => void;
   onNavigateAutomations: () => void;
   onNavigateKanban: () => void;
@@ -152,8 +149,6 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
     activeCustomProvider,
     mainPane,
     onOpenSearch,
-    sidebarToggleUnread = false,
-    onToggleSidebar,
     onNewChat,
     onNavigateAutomations,
     onNavigateKanban,
@@ -258,35 +253,7 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
           data-tauri-drag-region={dragRegion}
           {...titlebarMax}
         >
-          <div className="sidebar-brand-row__left">
-            <SidebarBrand
-              replaceLogo={replaceProviderBrandLogo}
-              brandId={
-                replaceProviderBrandLogo &&
-                customRouteActive &&
-                activeCustomProvider
-                  ? resolveProviderBrandId({
-                      providerId: activeCustomProvider.id,
-                      baseUrl: activeCustomProvider.baseUrl,
-                    })
-                  : null
-              }
-              label={
-                replaceProviderBrandLogo &&
-                customRouteActive &&
-                activeCustomProvider
-                  ? activeCustomProvider.name.trim() ||
-                    activeCustomProvider.id
-                  : "Grok"
-              }
-            />
-            <SidebarUpdateButton t={tr} />
-          </div>
-          <div
-            className="sidebar-chrome__drag"
-            data-tauri-drag-region={dragRegion}
-            {...titlebarMax}
-          />
+          {/* Search sits just right of the fixed pane toggle (traffic-light safe inset). */}
           <div className="sidebar-chrome__actions">
             <Tip label={tr("sidebar.search")}>
               <button
@@ -298,19 +265,13 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
                 <IconSearch size={16} />
               </button>
             </Tip>
-            {!phoneLayout && onToggleSidebar ? (
-              <PaneToggleButton
-                side="left"
-                pinned={false}
-                open={!layout.sidebarCollapsed}
-                unread={sidebarToggleUnread}
-                label={tr("main.leftPaneHide")}
-                unreadLabel={tr("main.paneUnread")}
-                controlsId="workbench-sidebar"
-                onToggle={onToggleSidebar}
-              />
-            ) : null}
+            <SidebarUpdateButton t={tr} />
           </div>
+          <div
+            className="sidebar-chrome__drag"
+            data-tauri-drag-region={dragRegion}
+            {...titlebarMax}
+          />
         </div>
 
         <div className="sidebar-nav">
@@ -318,11 +279,39 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
             type="button"
             className="nav-new"
             onClick={onNewChat}
+            aria-label={tr("sidebar.newSession")}
           >
-            <span className="nav-item__icon">
-              <IconNewChat size={16} />
+            <span className="nav-new__brand">
+              <SidebarBrand
+                replaceLogo={replaceProviderBrandLogo}
+                brandId={
+                  replaceProviderBrandLogo &&
+                  customRouteActive &&
+                  activeCustomProvider
+                    ? resolveProviderBrandId({
+                        providerId: activeCustomProvider.id,
+                        baseUrl: activeCustomProvider.baseUrl,
+                      })
+                    : null
+                }
+                label={
+                  replaceProviderBrandLogo &&
+                  customRouteActive &&
+                  activeCustomProvider
+                    ? activeCustomProvider.name.trim() ||
+                      activeCustomProvider.id
+                    : "Grok"
+                }
+              />
             </span>
-            {tr("sidebar.newSession")}
+            <span className="nav-new__action" aria-hidden>
+              <span className="nav-new__edit">
+                <IconNewChat size={16} />
+              </span>
+              <span className="nav-new__label">
+                {tr("sidebar.newSession")}
+              </span>
+            </span>
           </button>
           <button
             type="button"

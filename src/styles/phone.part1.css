@@ -88,6 +88,11 @@
     display: none;
   }
 
+  /* Drawer has no traffic lights / fixed pane toggle — keep a normal inset */
+  .app-shell--phone .sidebar-chrome {
+    padding-left: 10px;
+  }
+
   .app-shell--phone .sidebar.sidebar--hidden,
   .app-shell--phone .sidebar.sidebar--collapsed {
     width: min(85vw, 320px) !important;

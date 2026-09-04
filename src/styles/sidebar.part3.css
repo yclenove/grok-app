@@ -342,7 +342,9 @@
 }
 
 .sidebar-brand-row__left .grok-logo,
-.sidebar-brand-row__left .g-icon--grok-mark {
+.sidebar-brand-row__left .g-icon--grok-mark,
+.nav-new__brand .grok-logo,
+.nav-new__brand .g-icon--grok-mark {
   color: inherit;
 }
 
@@ -353,7 +355,7 @@
 
 /* ===== Sidebar icon hover (optional micro-motion) ===== */
 .nav-item:not(:hover) .g-icon--anim svg,
-.nav-new:not(:hover) .g-icon--anim svg,
+.nav-new:not(:hover):not(:focus-visible) .g-icon--anim svg,
 .brand__collapse:not(:hover) .g-icon--anim svg,
 .section-head:not(:hover) .g-icon--anim svg,
 .section-head__action:not(:hover) .g-icon--anim svg,

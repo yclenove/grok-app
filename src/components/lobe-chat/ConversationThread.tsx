@@ -168,10 +168,12 @@ import {
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
 import { TurnTail } from "./TurnTail";
+import { TurnChangedFiles } from "./TurnChangedFiles";
 import {
   buildAssistantTimeline,
   shouldShowTrailingLiveThinking,
 } from "@/lib/timelinePhases";
+import { collectTurnModifiedPaths } from "@/lib/turnChangedFiles";
 import { estimateDurationSecFromTimestamps } from "@/lib/formatWorkDuration";
 import { resolveChatTranscriptEmptyState } from "@/lib/chatTranscriptEmpty";
 import { Spinner } from "@/components/ui/spinner";
@@ -901,6 +903,8 @@ type TranscriptMessageRowProps = {
   onAddAttachmentToComposer?: ConversationThreadProps["onAddAttachmentToComposer"];
   onContinueInterrupted?: ConversationThreadProps["onContinueInterrupted"];
   latestContinuableEndId?: string | null;
+  onOpenSessionChanges?: ConversationThreadProps["onOpenSessionChanges"];
+  onOpenModifiedPath?: ConversationThreadProps["onOpenModifiedPath"];
   /**
    * Epoch ms for live thinking on the active streaming assistant
    * (turn / post-steer clock). Null for finished rows.
@@ -934,6 +938,8 @@ function transcriptRowPropsEqual(
   if (a.canRegenerate !== b.canRegenerate) return false;
   if (a.onContinueInterrupted !== b.onContinueInterrupted) return false;
   if (a.latestContinuableEndId !== b.latestContinuableEndId) return false;
+  if (a.onOpenSessionChanges !== b.onOpenSessionChanges) return false;
+  if (a.onOpenModifiedPath !== b.onOpenModifiedPath) return false;
   if (a.turnLive !== b.turnLive) return false;
   if (a.canRewindSession !== b.canRewindSession) return false;
   if (a.canForkFromAssistant !== b.canForkFromAssistant) return false;
@@ -1017,6 +1023,8 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
   onAddAttachmentToComposer,
   onContinueInterrupted,
   latestContinuableEndId,
+  onOpenSessionChanges,
+  onOpenModifiedPath,
 }: TranscriptMessageRowProps) {
   void _timeTick;
   const renderStartRef = useRef<number | null>(null);
@@ -1756,13 +1764,23 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
               }
             }
             const durationSec = estimateDurationSecFromTimestamps(stamps);
+            const modifiedPaths = collectTurnModifiedPaths(timelineUnits);
             return (
-              <TurnTail
-                units={timelineUnits}
-                locale={locale}
-                streaming={!!m.streaming}
-                durationSec={durationSec}
-              />
+              <>
+                <TurnTail
+                  units={timelineUnits}
+                  locale={locale}
+                  streaming={!!m.streaming}
+                  durationSec={durationSec}
+                />
+                <TurnChangedFiles
+                  paths={modifiedPaths}
+                  locale={locale}
+                  streaming={!!m.streaming}
+                  onOpenPath={onOpenModifiedPath}
+                  onViewAll={onOpenSessionChanges}
+                />
+              </>
             );
           })()}
         </div>
@@ -1896,8 +1914,8 @@ export function ConversationThread({
   sessionId = null,
   locateMessageId = null,
   onLocateMessage,
-  onOpenSessionChanges: _onOpenSessionChanges,
-  onOpenModifiedPath: _onOpenModifiedPath,
+  onOpenSessionChanges,
+  onOpenModifiedPath,
   showTimestamps = true,
   messageTimeFormat = "absolute",
   showReplyLength = false,
@@ -1908,8 +1926,6 @@ export function ConversationThread({
   turnStartedAt = null,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
-  void _onOpenSessionChanges;
-  void _onOpenModifiedPath;
 
   /** Re-render relative labels roughly once a minute. */
   const [relativeTick, setRelativeTick] = useState(0);
@@ -3185,6 +3201,8 @@ export function ConversationThread({
               onAddAttachmentToComposer={onAddAttachmentToComposer}
               onContinueInterrupted={onContinueInterrupted}
               latestContinuableEndId={latestContinuableEndId}
+              onOpenSessionChanges={onOpenSessionChanges}
+              onOpenModifiedPath={onOpenModifiedPath}
             />
           ))}
 

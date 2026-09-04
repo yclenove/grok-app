@@ -493,6 +493,113 @@ html[data-msg-actions="hover"]
   opacity: 0.85;
 }
 
+/* Turn changed-files strip (#998) — solid surface, opens Changes aside */
+.lobe-turn-changed {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: color-mix(
+    in srgb,
+    var(--bg-elevated, var(--chat-card-bg, var(--bg-secondary))) 92%,
+    transparent
+  );
+  max-width: min(100%, 36rem);
+}
+
+.lobe-turn-changed__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 6px;
+}
+
+.lobe-turn-changed__icon {
+  flex-shrink: 0;
+  color: var(--chat-text-3, var(--text-tertiary));
+}
+
+.lobe-turn-changed__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--chat-text-2, var(--text-secondary));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lobe-turn-changed__view-all {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  margin: 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--accent, var(--text-link, #60a5fa));
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.lobe-turn-changed__view-all:hover {
+  text-decoration: underline;
+}
+
+.lobe-turn-changed__view-all:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 1px;
+}
+
+.lobe-turn-changed__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lobe-turn-changed__chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(100%, 12rem);
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-hover, rgba(127, 127, 127, 0.1));
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.lobe-turn-changed__chip:hover {
+  background: var(--chat-card-hover, var(--bg-active, rgba(127, 127, 127, 0.16)));
+  border-color: color-mix(in srgb, var(--border-subtle) 60%, var(--text-secondary));
+}
+
+.lobe-turn-changed__chip:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 1px;
+}
+
+.lobe-turn-changed__chip--static {
+  cursor: default;
+}
+
+.lobe-turn-changed__chip--more {
+  color: var(--chat-text-2, var(--text-secondary));
+  font-variant-numeric: tabular-nums;
+}
+
 .lobe-chat-action {
   display: inline-flex;
   align-items: center;

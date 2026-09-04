@@ -159,4 +159,8 @@ export const filChat = {
   "chat.longReplyShowFull": "Ipakita ang buong sagot",
   "chat.longReplyCollapse": "Ipakita lang ang preview",
   "chat.longReplyShowingFull": "Ipinapakita ang buong sagot",
+  "chat.changedFiles.aria": "Mga file na binago sa turn na ito",
+  "chat.changedFiles.viewAll": "Tingnan lahat",
+  "chat.changedFiles.openFile": "Suriin ang mga pagbabago sa {name}",
+  "chat.changedFiles.more": "+{n} pa",
 };

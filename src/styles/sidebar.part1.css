@@ -675,8 +675,8 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   min-height: var(--titlebar-height, 40px);
   max-height: var(--titlebar-height, 40px);
   padding: 0 10px;
-  /* Traffic lights + control width — must clear red/yellow/green entirely */
-  padding-left: var(--titlebar-safe-left, 96px);
+  /* Traffic lights + fixed pane toggle — search starts just to the right */
+  padding-left: calc(var(--titlebar-safe-left, 96px) + 34px);
   margin: 0;
   user-select: none;
   flex-shrink: 0;
@@ -687,7 +687,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .platform-win .sidebar-chrome,
 .platform-other .sidebar-chrome,
 .has-custom-chrome .sidebar-chrome {
-  padding-left: 10px;
+  padding-left: 44px;
 }
 
 .sidebar-chrome__drag {
@@ -703,30 +703,32 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   flex-shrink: 0;
 }
 
-/* Brand block lives inside the single titlebar row (logo left, actions right). */
+/* Legacy brand cluster helper (nav row styles live in sidebar.part4.css). */
 .sidebar-brand-row__left {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--text-sm);
   color: var(--text-primary);
   letter-spacing: -0.02em;
   flex-shrink: 1;
 }
 
-/* Swappable provider brand marks — height-locked for size parity.
+/* Swappable provider brand marks — height-locked for size parity with nav icons.
  * Wordmarks (DeepSeek / OpenCode) scale by height; icon-only (Volcengine /
- * Amux) use the same height via ProviderBrandIcon `size`. Override welcome
- * composer max-widths so sidebar marks stay compact. */
+ * Amux) use the same height via ProviderBrandIcon `size`. */
 .sidebar-brand-row__left .sidebar-brand-mark--wordmark,
 .sidebar-brand-row__left .deepseek-full-mark.sidebar-brand-mark,
-.sidebar-brand-row__left .opencode-wordmark.sidebar-brand-mark {
+.sidebar-brand-row__left .opencode-wordmark.sidebar-brand-mark,
+.nav-new__brand .sidebar-brand-mark--wordmark,
+.nav-new__brand .deepseek-full-mark.sidebar-brand-mark,
+.nav-new__brand .opencode-wordmark.sidebar-brand-mark {
   display: block;
-  height: 18px;
+  height: 16px;
   width: auto;
-  max-width: min(140px, 48vw);
+  max-width: min(120px, 42vw);
   flex-shrink: 1;
   min-width: 0;
 }

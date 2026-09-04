@@ -166,4 +166,8 @@ export const zhChat = {
   "chat.longReplyShowFull": "显示全文",
   "chat.longReplyCollapse": "只显示预览",
   "chat.longReplyShowingFull": "正在显示全文",
+  "chat.changedFiles.aria": "本轮修改的文件",
+  "chat.changedFiles.viewAll": "查看全部",
+  "chat.changedFiles.openFile": "查看 {name} 的修改",
+  "chat.changedFiles.more": "还有 {n} 个",
 };

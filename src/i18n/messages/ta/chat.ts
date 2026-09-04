@@ -159,4 +159,8 @@ export const taChat = {
   "chat.longReplyShowFull": "முழு பதிலைக் காட்டு",
   "chat.longReplyCollapse": "முன்னோட்டத்தை மட்டும் காட்டு",
   "chat.longReplyShowingFull": "முழு பதிலைக் காட்டுகிறது",
+  "chat.changedFiles.aria": "இந்த முறையில் மாற்றப்பட்ட கோப்புகள்",
+  "chat.changedFiles.viewAll": "அனைத்தையும் காண்",
+  "chat.changedFiles.openFile": "{name} இல் உள்ள மாற்றங்களைப் பார்",
+  "chat.changedFiles.more": "+{n} மேலும்",
 };

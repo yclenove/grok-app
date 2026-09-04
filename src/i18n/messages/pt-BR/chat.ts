@@ -159,4 +159,8 @@ export const ptBRChat = {
   "chat.longReplyShowFull": "Mostrar resposta completa",
   "chat.longReplyCollapse": "Mostrar só a prévia",
   "chat.longReplyShowingFull": "Mostrando a resposta completa",
+  "chat.changedFiles.aria": "Arquivos alterados neste turno",
+  "chat.changedFiles.viewAll": "Ver tudo",
+  "chat.changedFiles.openFile": "Revisar alterações em {name}",
+  "chat.changedFiles.more": "+{n} mais",
 };

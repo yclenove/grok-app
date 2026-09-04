@@ -159,4 +159,8 @@ export const jaChat = {
   "chat.longReplyShowFull": "全文を表示",
   "chat.longReplyCollapse": "プレビューだけ表示",
   "chat.longReplyShowingFull": "全文を表示中",
+  "chat.changedFiles.aria": "このターンで変更されたファイル",
+  "chat.changedFiles.viewAll": "すべて表示",
+  "chat.changedFiles.openFile": "{name} の変更を確認",
+  "chat.changedFiles.more": "ほか {n} 件",
 };

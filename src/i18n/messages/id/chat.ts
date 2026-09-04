@@ -159,4 +159,8 @@ export const idChat = {
   "chat.longReplyShowFull": "Tampilkan balasan penuh",
   "chat.longReplyCollapse": "Tampilkan pratinjau saja",
   "chat.longReplyShowingFull": "Menampilkan balasan penuh",
+  "chat.changedFiles.aria": "Berkas yang diubah pada giliran ini",
+  "chat.changedFiles.viewAll": "Lihat semua",
+  "chat.changedFiles.openFile": "Tinjau perubahan di {name}",
+  "chat.changedFiles.more": "+{n} lagi",
 };

@@ -159,4 +159,8 @@ export const koChat = {
   "chat.longReplyShowFull": "전체 응답 보기",
   "chat.longReplyCollapse": "미리보기만 보기",
   "chat.longReplyShowingFull": "전체 응답을 표시 중",
+  "chat.changedFiles.aria": "이번 턴에서 변경된 파일",
+  "chat.changedFiles.viewAll": "모두 보기",
+  "chat.changedFiles.openFile": "{name} 변경 검토",
+  "chat.changedFiles.more": "+{n}개 더",
 };

@@ -70,6 +70,7 @@ export type WorkbenchMainProps = {
   openPhoneDrawer: () => void;
   closePhoneDrawer: () => void;
   openSidebarPane: () => void;
+  closeSidebarPane: () => void;
   sidebarToggleUnread: boolean;
   openSessionMenu: (e: MouseEvent, s: SessionRow) => void;
   onOpenPhoneAccount: () => void;
@@ -114,6 +115,7 @@ export function WorkbenchMain(props: WorkbenchMainProps) {
     openPhoneDrawer,
     closePhoneDrawer,
     openSidebarPane,
+    closeSidebarPane,
     sidebarToggleUnread,
     openSessionMenu,
     onOpenPhoneAccount,
@@ -150,15 +152,21 @@ export function WorkbenchMain(props: WorkbenchMainProps) {
 
   return (
     <>
-      {!phoneLayout && layout.sidebarCollapsed ? (
+      {!phoneLayout ? (
         <PaneToggleButton
           side="left"
-          open={false}
+          open={!layout.sidebarCollapsed}
           unread={sidebarToggleUnread}
-          label={tr("main.leftPaneShow")}
+          label={tr(
+            layout.sidebarCollapsed
+              ? "main.leftPaneShow"
+              : "main.leftPaneHide",
+          )}
           unreadLabel={tr("main.paneUnread")}
           controlsId="workbench-sidebar"
-          onToggle={openSidebarPane}
+          onToggle={
+            layout.sidebarCollapsed ? openSidebarPane : closeSidebarPane
+          }
         />
       ) : null}
       <main
