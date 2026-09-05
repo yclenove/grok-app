@@ -28,6 +28,13 @@ not being polled or treated as passed. No push or PR.
 - Source PNGs are transient and excluded from the wallpaper library. Cancellation
   during browser conversion cannot start a late Host generation. Existing request
   IDs and sticky Host cancellation remain authoritative.
+- Cancellation originally waited for pending PNG encoding or Base64 reads to
+  return, leaving the video controls in the cancelling state. Delayed-callback
+  tests reproduced both cases. These steps now settle on cancellation, release
+  the object URL/canvas, and abort any active FileReader after detaching handlers.
+  A late encoder callback is ignored; normal bounded PNG conversion still passes.
+  The browser may finish its internal canvas encoding because `toBlob` has no
+  abort API, but this no longer delays UI cancellation or starts a Host request.
 - Production build review exposed a circular re-export warning in the existing
   Reliability Center import. It now imports the view assembler directly; the
   rebuilt bundle no longer reports that circular chunk warning.
@@ -50,12 +57,16 @@ not being polled or treated as passed. No push or PR.
 ## Verification
 
 - Focused frontend: 6 files, 57 tests passed.
+- The cancellation follow-up passed 31 tests across the browser converter, video
+  API, controller, controls, and prompt helper. New regression checks cover
+  cancellation before slow encoder/reader completion, late callbacks, temporary
+  resource cleanup, and normal completion.
 - TypeScript, ESLint, strict Clippy, and final code-quality gates passed.
 - Production dependency audit: no known vulnerabilities found.
-- Full frontend baseline: 604 files, 7,185 tests passed. The subsequent import-only
-  fix passed the 44 goal-orchestration tests. The later upstream frontend changes
-  only touched file-drop comments and release notes; their 28 file-drop/What's New
-  tests and a fresh production build/typecheck passed after the merge.
+- After the cancellation follow-up, the full frontend suite passed 605 files and
+  7,188 tests, with 0 failures. A fresh production build/typecheck, ESLint, and
+  final code-quality gates also passed. The earlier import-only and upstream
+  release-note/file-drop checks are included in this final full run.
 - Production UI build passed. Existing large-chunk advisories remain; the circular
   re-export warning is resolved.
 - After the upstream merge and OLE fix, the Windows test harness with the

@@ -4,6 +4,20 @@ const MAX_SOURCE_BYTES = 40 * 1024 * 1024;
 const MAX_PNG_BYTES = 20 * 1024 * 1024;
 const MAX_EDGE = 2048;
 
+async function waitForImageStep<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort!: () => void;
+  const cancellation = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
+  try {
+    return await Promise.race([operation, cancellation]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
 /** Browser codecs cover AVIF without adding a native decoder or shell dependency. */
 export async function prepareWallpaperVideoImage(
   path: string,
@@ -53,21 +67,27 @@ export async function videoImageToPng(blob: Blob, signal: AbortSignal): Promise<
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("imagine_source_invalid");
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-    const png = await new Promise<Blob>((resolve, reject) => {
+    const png = await waitForImageStep(new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((result) => result ? resolve(result) : reject(new Error("imagine_source_invalid")), "image/png");
-    });
+    }), signal);
     signal.throwIfAborted();
     if (!png.size || png.size > MAX_PNG_BYTES || png.type !== "image/png") {
       throw new Error("imagine_source_invalid");
     }
-    const encoded = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-      reader.onerror = () => reject(new Error("imagine_source_invalid"));
-      reader.readAsDataURL(png);
-    });
-    signal.throwIfAborted();
-    return encoded;
+    const reader = new FileReader();
+    try {
+      const encoded = await waitForImageStep(new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+        reader.onerror = () => reject(new Error("imagine_source_invalid"));
+        reader.onabort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+        reader.readAsDataURL(png);
+      }), signal);
+      signal.throwIfAborted();
+      return encoded;
+    } finally {
+      reader.onload = reader.onerror = reader.onabort = null;
+      if (reader.readyState === FileReader.LOADING) reader.abort();
+    }
   } finally {
     image.src = "";
     canvas.width = canvas.height = 0;
