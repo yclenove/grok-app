@@ -81,6 +81,13 @@ new failure gives a reason. No further background Saved polling is planned.
 - A fresh `pnpm build:ui` passed after the thumbnail and menu fixes, including
   TypeScript compilation. Existing mixed-import and large-chunk warnings remain.
   The 7,222-test full run predates these two focused follow-ups.
+- Reopening Saved from the standalone editor subsequently displayed the official
+  Cloudflare human-verification page again. Manual completion was requested;
+  no authentication UI was automated. This latest observation does not negate
+  the earlier authenticated gallery/page growth, but fresh Saved preview and
+  source handoff remain unverified. The local Grok Build source examined for
+  video capabilities is evidence for this integration, not a guarantee about
+  other or future CLI versions.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
