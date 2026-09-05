@@ -1,14 +1,17 @@
 # Wallpaper image-to-video hardening — September 5
 
 Status: local implementation and automated regression complete. Windows video,
-search, and source-preparation acceptance passed. At the user's request, the fresh
-authenticated Grok Saved check is deferred to the evening manual session; it is
-not being polled or treated as passed. No push or PR.
+search, and source-preparation acceptance passed. The manual session resumed
+across September 5-6: the rebuilt isolated app is available and the user has been
+asked to complete the official Saved login/challenge. Final interaction and
+authenticated Saved acceptance remain open. No push or PR.
 
 ## Acceptance ledger
 
-Checked against implementation commit `ad53ae93` and upstream snapshot
-`d794849f`. Later documentation-only changes do not alter these test results.
+The implementation baseline is `ad53ae93`. The resumed session merged upstream
+`ecd1d998` as `37e15a6a` and reran the full frontend suite and build gates. Rust
+sources and dependencies are identical to the previously validated baseline;
+the four Windows drop tests were also rerun successfully.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
@@ -17,16 +20,16 @@ Checked against implementation commit `ad53ae93` and upstream snapshot
 | Isolate remote captions from agent instructions | Only Imagine's original prompt is used as context; tests reject inherited copy from X, Web, Openverse, Pexels, Saved, and library sources | Passed |
 | Restrict video execution and validate its output | Dedicated CLI flags, fresh session UUID, exact source/prompt/options audit, Host-owned result copy, containment/signature/size checks and rejection tests | Passed as a result-acceptance boundary; CLI compliance limitation remains below |
 | Cancel and release temporary resources | Real running CLI cancellation below; latest delayed encoder/reader tests; late results cannot start generation | Passed; latest browser cancellation change has automated coverage |
-| Merge latest fetched upstream and preserve local changes | `13b594a4` merges `d794849f`; pipe and OLE dependencies retained; `c7ef9c2c` fixes new native drop ownership | Passed for the recorded upstream snapshot |
-| Complete automated regression and build gates | 605 frontend files / 7,188 tests; 1,808 native tests; production build/typecheck, lint, Clippy, fmt and quality gates | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
+| Merge latest fetched upstream and preserve local changes | `37e15a6a` merges `ecd1d998`; the OLE conflict keeps the validated `ReleaseStgMedium` implementation; no Rust changes relative to `2288f52f` | Passed for the recorded upstream snapshot |
+| Complete automated regression and build gates | Resumed run: 607 frontend files / 7,210 tests, production build/typecheck, lint and quality gates; unchanged Rust baseline: 1,808 native tests, Clippy and fmt; four drop tests rerun | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
-| Final Windows interaction after later code changes | Rebuilt isolated Host renders; system permission prompt still obscures the desktop | Pending manual desktop availability; Explorer drag gesture and final wallpaper/video smoke are not claimed |
-| Fresh authenticated Grok Saved gallery, paging and video handoff | Isolated window-open check only; September 4 gallery evidence is historical | Deferred by user until the manual session |
-| Review report and local commits without push/PR | This report and commits through `ad53ae93`; implementation worktree was clean at audit | Passed |
+| Final Windows interaction after later code changes | Rebuilt isolated Host renders alongside the installed app without a blocking permission prompt; Appearance and source workspace open | In progress; Explorer drag gesture and final wallpaper/video smoke are not yet claimed |
+| Fresh authenticated Grok Saved gallery, paging and video handoff | Fresh isolated window opened to the Cloudflare challenge; user asked to complete official verification/login | Awaiting user; September 4 gallery evidence remains historical |
+| Review report and local commits without push/PR | This report and local merge `37e15a6a`; implementation worktree was clean after merge | Passed |
 
-The complete objective remains open for the two pending device rows. Once the
-desktop is available, resume the final wallpaper/video smoke and Explorer folder
-drop into the sidebar/file drop into the composer using nonpersonal fixtures.
+The complete objective remains open for the two pending device rows. Continue
+the final wallpaper/video smoke and Explorer folder drop into the sidebar/file
+drop into the composer using nonpersonal fixtures after the manual login step.
 After the user completes the official Saved login/challenge, check gallery sync,
 load more, preview and source handoff without exporting authentication state.
 The completed automated suites do not need another run unless code changes or a
@@ -78,11 +81,30 @@ new failure gives a reason. No further background Saved polling is planned.
 - A later refresh found `d794849f` (Windows Explorer drag-drop, #1017). It was
   merged locally as `13b594a4`. The only conflict was the Windows feature list
   in `Cargo.toml`; both the existing pipe support and upstream COM/OLE features
-  were retained. This is the upstream snapshot used for the final checks below.
+  were retained. This was the upstream snapshot used for the earlier checks below.
+- The resumed session fetched `ecd1d998`, including the composer/selection hot-path,
+  Mac Control+Return, and duplicate image-prompt bubble fixes. Local merge
+  `37e15a6a` includes 19 changed frontend/documentation files. The only merge
+  conflict was `DragEnter` in `win_file_drop.rs`: the current `read_paths` and
+  COM-owned medium cleanup already preserve the upstream nonempty-path guard,
+  so that implementation was retained. `git diff 2288f52f 37e15a6a -- src-tauri`
+  is empty. No wallpaper modules were deleted.
 - Work remains local. No push or PR is part of this task.
 
 ## Verification
 
+- Resumed September 5-6 run on `37e15a6a`: 607 frontend files and 7,210 tests
+  passed, with 0 failures (158.97 seconds). TypeScript, ESLint, production UI
+  build and final code-quality gates passed. Four existing Windows drop-target
+  tests also passed against the unchanged native implementation. The full Rust
+  suite was not repeated because no Rust source/dependency changed in the merge.
+- `pnpm dev` rebuilt the debug Host with `tauri.dev.conf.json` and the existing
+  isolated QA app home. Its native window was selected by the exact local
+  executable path, distinct from the running installed app. No security prompt
+  blocked it. Appearance rendered the existing video preview at 902 x 928;
+  the wallpaper source workspace and the independent Saved window opened.
+  Saved is currently at the official human-verification boundary, not accepted
+  as an authenticated gallery pass.
 - Focused frontend: 6 files, 57 tests passed.
 - The cancellation follow-up passed 31 tests across the browser converter, video
   API, controller, controls, and prompt helper. New regression checks cover
@@ -174,9 +196,9 @@ new failure gives a reason. No further background Saved polling is planned.
 - Exact-call auditing is a result acceptance check after CLI execution. It
   cannot undo upstream calls that a nonconforming CLI may already have made.
 - The existing production build still reports large bundle size advisories.
-- The user deferred fresh authenticated Grok Saved regression until they can
-  assist with the manual Cloudflare verification. Its window-open boundary was
-  checked; the live saved-media gallery remains unverified in this isolated run.
+- Fresh authenticated Grok Saved regression awaits the user's manual Cloudflare
+  verification in the resumed session. Its window-open boundary was checked;
+  the live saved-media gallery remains unverified in this isolated run.
 - Web discovery can still include weak topical matches and visually similar
   crops. This sample contained one unrelated image and two near-duplicate views;
   URL/media identity deduplication does not establish semantic relevance or
