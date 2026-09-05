@@ -3,15 +3,20 @@
 Status: local implementation and automated regression complete. Windows video,
 search, and source-preparation acceptance passed. The manual session resumed
 across September 5-6: the rebuilt isolated app is available and the user has been
-asked to complete the official Saved login/challenge. Final interaction and
-authenticated Saved acceptance remain open. No push or PR.
+asked to complete the official Saved login/challenge. The login subsequently
+reached xAI's device-verification wait page; the user reports that the regular
+browser works. A follow-up now confines album initialization scripts to the
+Grok top-level page. Final interaction and authenticated Saved acceptance remain
+open. No push or PR.
 
 ## Acceptance ledger
 
 The implementation baseline is `ad53ae93`. The resumed session merged upstream
 `ecd1d998` as `37e15a6a` and reran the full frontend suite and build gates. Rust
 sources and dependencies are identical to the previously validated baseline;
-the four Windows drop tests were also rerun successfully.
+the four Windows drop tests were also rerun successfully. The later September 6
+script-scoping follow-up changes two bundled JavaScript files and has separate
+focused coverage below; the earlier full-suite counts describe `37e15a6a`.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
@@ -74,6 +79,15 @@ new failure gives a reason. No further background Saved polling is planned.
   `ReleaseStgMedium`, including invalid data. A missing final data object now
   clears hover and rejects the copy instead of reusing the previous drag paths.
   The upstream formatting and strict Clippy failures were also corrected.
+- Manual login reached the xAI Accounts "completing sign in / verifying your
+  device" page. Code inspection found that the album marker script also wrapped
+  `history.pushState`/`replaceState` and installed observers on identity-provider
+  pages. Nine regression cases reproduced unwanted instrumentation on foreign
+  origins/subframes or signed-out recovery inside a subframe. The marker now
+  runs only in the HTTPS `grok.com` top-level document; recovery also requires a
+  top-level Saved page. All 18 script tests pass, including normal Grok route
+  tracking. This removes unnecessary interference with login pages; the observed
+  device-verification stall is not claimed fixed until manual login succeeds.
 
 ## Upstream synchronization
 
@@ -93,6 +107,11 @@ new failure gives a reason. No further background Saved polling is planned.
 
 ## Verification
 
+- The later script-scoping follow-up passed 37 focused tests across the fixed
+  scripts, album controller and status panel, plus TypeScript and targeted
+  ESLint. The native debug Host rebuilt successfully with the updated bundled
+  scripts and the same isolated app home. Fresh manual login remains required
+  to determine whether the xAI device-verification wait is resolved.
 - Resumed September 5-6 run on `37e15a6a`: 607 frontend files and 7,210 tests
   passed, with 0 failures (158.97 seconds). TypeScript, ESLint, production UI
   build and final code-quality gates passed. Four existing Windows drop-target

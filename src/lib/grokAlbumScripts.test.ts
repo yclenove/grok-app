@@ -1,9 +1,31 @@
 import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 
+import bridgeMarkerScript from "../../src-tauri/src/wallpaper_grok_album/bridge_marker.js?raw";
 import scrollRestoreScript from "../../src-tauri/src/wallpaper_grok_album/scroll_restore.js?raw";
 import signedOutRecoveryScript from "../../src-tauri/src/wallpaper_grok_album/signed_out_recovery.js?raw";
 import snapshotScript from "../../src-tauri/src/wallpaper_grok_album/snapshot.js?raw";
+
+function runBridgeMarker(href: string, subframe = false) {
+  const location = new URL(href);
+  const pushState = vi.fn();
+  const replaceState = vi.fn();
+  const history = { pushState, replaceState };
+  const observe = vi.fn();
+  const page = { addEventListener: vi.fn(), top: null as object | null };
+  page.top = subframe ? {} : page;
+  const document = { addEventListener: vi.fn(), querySelector: vi.fn() };
+  runInNewContext(bridgeMarkerScript, {
+    document,
+    history,
+    location,
+    window: page,
+    MutationObserver: class {
+      observe = observe;
+    },
+  });
+  return { document, history, location, observe, page, pushState, replaceState };
+}
 
 function runSnapshot(options: {
   appShell?: boolean;
@@ -50,6 +72,7 @@ function runSignedOutRecovery(options: {
   appShell?: boolean;
   challengeAsset?: boolean;
   challengeSurface?: boolean;
+  subframe?: boolean;
 }) {
   const replace = vi.fn();
   let now = 0;
@@ -90,6 +113,7 @@ function runSignedOutRecovery(options: {
     replace,
   };
   const page = {
+    top: null as object | null,
     addEventListener: vi.fn(),
     clearTimeout: (timerId: number) => timers.delete(timerId),
     performance: { now: () => now },
@@ -100,6 +124,7 @@ function runSignedOutRecovery(options: {
       return timerId;
     },
   };
+  page.top = options.subframe ? {} : page;
   runInNewContext(signedOutRecoveryScript, {
     document,
     location,
@@ -135,6 +160,54 @@ function runSignedOutRecovery(options: {
 }
 
 describe("Grok album fixed page scripts", () => {
+  it.each([
+    "https://accounts.x.ai/sign-in",
+    "https://accounts.google.com/",
+    "https://appleid.apple.com/auth/authorize",
+    "https://x.com/i/oauth2/authorize",
+    "https://challenges.cloudflare.com/",
+    "https://grok.com.example.org/imagine/saved",
+    "http://grok.com/imagine/saved",
+  ])("leaves non-Grok page APIs untouched: %s", (href) => {
+    const marker = runBridgeMarker(href);
+    expect(marker.history.pushState).toBe(marker.pushState);
+    expect(marker.history.replaceState).toBe(marker.replaceState);
+    expect(marker.page.addEventListener).not.toHaveBeenCalled();
+    expect(marker.document.addEventListener).not.toHaveBeenCalled();
+    expect(marker.observe).not.toHaveBeenCalled();
+    expect("__GROK_APP_SAVED_PAGE_STATE__" in marker.page).toBe(false);
+  });
+
+  it("leaves subframes untouched even on the Grok origin", () => {
+    const marker = runBridgeMarker("https://grok.com/imagine/saved", true);
+    expect(marker.history.pushState).toBe(marker.pushState);
+    expect(marker.history.replaceState).toBe(marker.replaceState);
+    expect(marker.observe).not.toHaveBeenCalled();
+    expect("__GROK_APP_SAVED_PAGE_STATE__" in marker.page).toBe(false);
+  });
+
+  it("tracks top-level Grok routes while preserving history calls", () => {
+    const marker = runBridgeMarker("https://grok.com/");
+    const state = Object.getOwnPropertyDescriptor(
+      marker.page,
+      "__GROK_APP_SAVED_PAGE_STATE__",
+    )?.value as { epoch: number; href: string };
+    expect(state).toMatchObject({ epoch: 0, href: "https://grok.com/" });
+    expect(marker.observe).toHaveBeenCalledOnce();
+    marker.pushState.mockImplementation(() => {
+      marker.location.href = "https://grok.com/imagine/saved";
+    });
+    marker.history.pushState({}, "", "/imagine/saved");
+    expect(marker.pushState).toHaveBeenCalledWith({}, "", "/imagine/saved");
+    expect(state).toMatchObject({
+      epoch: 1,
+      href: "https://grok.com/imagine/saved",
+    });
+    marker.history.replaceState({}, "", "/imagine/saved");
+    expect(marker.replaceState).toHaveBeenCalledWith({}, "", "/imagine/saved");
+    expect(state.epoch).toBe(1);
+  });
+
   it("restores and clears the saved scroll offset", () => {
     const scrollTo = vi.fn();
     const root = { scrollTop: 0, scrollTo };
@@ -227,5 +300,12 @@ describe("Grok album fixed page scripts", () => {
     surfaceChallenge.advanceTo(20_000);
     expect(surfaceChallenge.replace).not.toHaveBeenCalled();
     expect(surfaceChallenge.state()).toBe("challenge");
+  });
+
+  it("does not redirect or watch a Saved subframe", () => {
+    const recovery = runSignedOutRecovery({ subframe: true });
+    recovery.advanceTo(20_000);
+    expect(recovery.replace).not.toHaveBeenCalled();
+    expect(recovery.state()).toBeUndefined();
   });
 });

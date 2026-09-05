@@ -1,5 +1,9 @@
 (function () {
   try {
+    // Album tracking must not alter identity-provider pages or embedded frames.
+    if (location.protocol !== "https:" || location.hostname !== "grok.com" ||
+        window.top !== window) return;
+
     var state = { epoch: 0, href: String(location.href || ""), main: null };
     Object.defineProperty(window, "__GROK_APP_SAVED_READ_ONLY__", {
       value: true,

@@ -124,6 +124,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 `Grok 相册` 不是 X 搜索的回退渠道，也不使用 Grok Build OAuth。它只在专用远程 WebView 中打开官方 `https://grok.com/imagine/saved` 页面：
 
 - 窗口标签 `grok-imagine-saved` 不得加入任何 Tauri capability。远程页面没有 IPC 权限；主窗口只能调用固定的 `wallpaper_grok_album_*` Host 命令。
+- 页面跟踪脚本只在 HTTPS `grok.com` 的顶层文档运行；不得包装 xAI、Google、Apple 等登录页的 History API，也不得在子框架内安装相册状态或自动恢复逻辑。未登录恢复仍仅作用于顶层 `/imagine/saved`。
 - Windows/Linux 使用独立 `data_directory`，macOS 14+ 同时使用稳定的独立 data-store identifier。Cookie 只由 WebView 管理；禁止读取、导出、记录或通过 IPC 返回 Cookie、Token、storage、请求签名和原始 API 响应。
 - Windows/Linux 的手动 `http` / `socks5` 代理必须通过 Tauri `proxy_url` 固定到远程 WebView；`socks5h` 规范化为 WebView SOCKSv5。系统/PAC/env 模式继续由原生 WebView 跟随。带认证的代理、不支持的手动协议、Direct 模式及 macOS 手动模式必须结构化失败，禁止静默换路由。代理设置变化时销毁旧相册窗口，下次打开按新路由重建；独立持久 profile 继续保留官方登录态。
 - 顶层导航仅允许 HTTPS Grok/xAI 与明确支持的登录提供商；禁止新窗口与下载。新增登录方式时必须先补 allowlist 测试，不能改为任意 HTTPS。

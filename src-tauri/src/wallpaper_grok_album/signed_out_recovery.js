@@ -1,6 +1,6 @@
 (function () {
   try {
-    if (location.protocol !== "https:" || location.hostname !== "grok.com" ||
+    if (window.top !== window || location.protocol !== "https:" || location.hostname !== "grok.com" ||
         location.pathname.indexOf("/imagine/saved") !== 0) return;
 
     var phase = "waiting";
