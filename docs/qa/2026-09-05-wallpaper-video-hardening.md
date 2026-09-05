@@ -5,6 +5,33 @@ search, and source-preparation acceptance passed. At the user's request, the fre
 authenticated Grok Saved check is deferred to the evening manual session; it is
 not being polled or treated as passed. No push or PR.
 
+## Acceptance ledger
+
+Checked against implementation commit `ad53ae93` and upstream snapshot
+`d794849f`. Later documentation-only changes do not alter these test results.
+
+| Requirement | Evidence | Status |
+| --- | --- | --- |
+| Fix unsupported image-to-video inputs | Real AVIF-to-MP4 run below; bounded browser conversion and independent native source decoding; EXIF pixel regressions | Passed, with later source fixes covered by native tests |
+| Immediate editable prompt without an extra model/network request | Synchronous `buildWallpaperVideoPrompt`, controller/editing tests, both template keys in all 15 catalogs, real edited-prompt generation below | Passed |
+| Isolate remote captions from agent instructions | Only Imagine's original prompt is used as context; tests reject inherited copy from X, Web, Openverse, Pexels, Saved, and library sources | Passed |
+| Restrict video execution and validate its output | Dedicated CLI flags, fresh session UUID, exact source/prompt/options audit, Host-owned result copy, containment/signature/size checks and rejection tests | Passed as a result-acceptance boundary; CLI compliance limitation remains below |
+| Cancel and release temporary resources | Real running CLI cancellation below; latest delayed encoder/reader tests; late results cannot start generation | Passed; latest browser cancellation change has automated coverage |
+| Merge latest fetched upstream and preserve local changes | `13b594a4` merges `d794849f`; pipe and OLE dependencies retained; `c7ef9c2c` fixes new native drop ownership | Passed for the recorded upstream snapshot |
+| Complete automated regression and build gates | 605 frontend files / 7,188 tests; 1,808 native tests; production build/typecheck, lint, Clippy, fmt and quality gates | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
+| Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
+| Final Windows interaction after later code changes | Rebuilt isolated Host renders; system permission prompt still obscures the desktop | Pending manual desktop availability; Explorer drag gesture and final wallpaper/video smoke are not claimed |
+| Fresh authenticated Grok Saved gallery, paging and video handoff | Isolated window-open check only; September 4 gallery evidence is historical | Deferred by user until the manual session |
+| Review report and local commits without push/PR | This report and commits through `ad53ae93`; implementation worktree was clean at audit | Passed |
+
+The complete objective remains open for the two pending device rows. Once the
+desktop is available, resume the final wallpaper/video smoke and Explorer folder
+drop into the sidebar/file drop into the composer using nonpersonal fixtures.
+After the user completes the official Saved login/challenge, check gallery sync,
+load more, preview and source handoff without exporting authentication state.
+The completed automated suites do not need another run unless code changes or a
+new failure gives a reason. No further background Saved polling is planned.
+
 ## Review findings and changes
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
