@@ -1,0 +1,1757 @@
+{
+  "schemaVersion": 1,
+  "objective": "浏览器重构 M0–M6 全套设计与开发计划",
+  "taskSource": "Markdown 计划；使用 verify-plan.mjs --write-index 重新生成",
+  "verificationScope": "仅验证文档结构与可追踪性；产品验收必须提供实际运行证据",
+  "taskCount": 60,
+  "requirementCount": 24,
+  "estimateEngineeringDays": {
+    "min": 241,
+    "max": 365
+  },
+  "packages": [
+    {
+      "id": "m0-preview",
+      "label": "M0-W",
+      "entryGates": [
+        "M0-W01"
+      ],
+      "taskIds": [
+        "M0-W01",
+        "M0-W02",
+        "M0-W03",
+        "M0-W04",
+        "M0-W05",
+        "M0-W06"
+      ],
+      "estimateDays": {
+        "min": 21,
+        "max": 32
+      }
+    },
+    {
+      "id": "m0-runtime",
+      "label": "M0-R",
+      "entryGates": [
+        "M0-W01"
+      ],
+      "taskIds": [
+        "M0-R01",
+        "M0-R02",
+        "M0-R03",
+        "M0-R04",
+        "M0-R05",
+        "M0-R06"
+      ],
+      "estimateDays": {
+        "min": 22,
+        "max": 34
+      }
+    },
+    {
+      "id": "m1-gateway",
+      "label": "M1-G",
+      "entryGates": [
+        "M0-W06",
+        "M0-R06"
+      ],
+      "taskIds": [
+        "M1-G01",
+        "M1-G02",
+        "M1-G03",
+        "M1-G04",
+        "M1-G05",
+        "M1-G06"
+      ],
+      "estimateDays": {
+        "min": 24,
+        "max": 36
+      }
+    },
+    {
+      "id": "m1-runtime",
+      "label": "M1-R",
+      "entryGates": [
+        "M0-R06",
+        "M0-W01"
+      ],
+      "taskIds": [
+        "M1-R01",
+        "M1-R02",
+        "M1-R03",
+        "M1-R04",
+        "M1-R05",
+        "M1-R06"
+      ],
+      "estimateDays": {
+        "min": 29,
+        "max": 41
+      }
+    },
+    {
+      "id": "m1-delivery",
+      "label": "M1-D",
+      "entryGates": [
+        "M0-R06",
+        "M1-R01"
+      ],
+      "taskIds": [
+        "M1-D01",
+        "M1-D02",
+        "M1-D03",
+        "M1-D04",
+        "M1-D05",
+        "M1-D06"
+      ],
+      "estimateDays": {
+        "min": 32,
+        "max": 45
+      }
+    },
+    {
+      "id": "m2-inspection",
+      "label": "M2",
+      "entryGates": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "taskIds": [
+        "M2-01",
+        "M2-02",
+        "M2-03",
+        "M2-04",
+        "M2-05",
+        "M2-06"
+      ],
+      "estimateDays": {
+        "min": 24,
+        "max": 37
+      }
+    },
+    {
+      "id": "m3-chrome",
+      "label": "M3",
+      "entryGates": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "taskIds": [
+        "M3-01",
+        "M3-02",
+        "M3-03",
+        "M3-04",
+        "M3-05",
+        "M3-06"
+      ],
+      "estimateDays": {
+        "min": 27,
+        "max": 43
+      }
+    },
+    {
+      "id": "m4-linux",
+      "label": "M4",
+      "entryGates": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "taskIds": [
+        "M4-01",
+        "M4-02",
+        "M4-03",
+        "M4-04",
+        "M4-05",
+        "M4-06"
+      ],
+      "estimateDays": {
+        "min": 21,
+        "max": 33
+      }
+    },
+    {
+      "id": "m5-ssh",
+      "label": "M5",
+      "entryGates": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "taskIds": [
+        "M5-01",
+        "M5-02",
+        "M5-03",
+        "M5-04",
+        "M5-05",
+        "M5-06"
+      ],
+      "estimateDays": {
+        "min": 19,
+        "max": 29
+      }
+    },
+    {
+      "id": "m6-updates",
+      "label": "M6",
+      "entryGates": [
+        "M1-R06",
+        "M1-D06"
+      ],
+      "taskIds": [
+        "M6-01",
+        "M6-02",
+        "M6-03",
+        "M6-04",
+        "M6-05",
+        "M6-06"
+      ],
+      "estimateDays": {
+        "min": 22,
+        "max": 35
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "id": "M0-W01",
+      "title": "公共模型与幂等迁移",
+      "package": "m0-preview",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "line": 33,
+      "dependencies": [],
+      "owner": "Host/前端领域工程师。",
+      "estimateDays": {
+        "min": 2,
+        "max": 3
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 0
+    },
+    {
+      "id": "M0-W02",
+      "title": "提取 WebView 生命周期与遮挡",
+      "package": "m0-preview",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "line": 64,
+      "dependencies": [
+        "M0-W01"
+      ],
+      "owner": "前端原生窗口集成工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 1
+    },
+    {
+      "id": "M0-W03",
+      "title": "Host Preview 导航与下载身份",
+      "package": "m0-preview",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "line": 96,
+      "dependencies": [
+        "M0-W01",
+        "M0-W02"
+      ],
+      "owner": "Rust/平台 WebView 工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 8
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 2
+    },
+    {
+      "id": "M0-W04",
+      "title": "工作台投影、任务分组与完整交互",
+      "package": "m0-preview",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "line": 128,
+      "dependencies": [
+        "M0-W03"
+      ],
+      "owner": "React/UX 工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 3
+    },
+    {
+      "id": "M0-W05",
+      "title": "会话生命周期与兼容清理",
+      "package": "m0-preview",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "line": 161,
+      "dependencies": [
+        "M0-W01",
+        "M0-W04"
+      ],
+      "owner": "Host 会话工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 4
+    },
+    {
+      "id": "M0-W06",
+      "title": "Preview 验收、证据与灰度",
+      "package": "m0-preview",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-preview.md",
+      "line": 188,
+      "dependencies": [
+        "M0-W02",
+        "M0-W03",
+        "M0-W04",
+        "M0-W05"
+      ],
+      "owner": "QA/前端/平台工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 4
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 5
+    },
+    {
+      "id": "M0-R01",
+      "title": "固定 Tuple 与确定性实验台",
+      "package": "m0-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "line": 31,
+      "dependencies": [
+        "M0-W01"
+      ],
+      "owner": "Runtime 工程师、供应链工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 1
+    },
+    {
+      "id": "M0-R02",
+      "title": "macOS 原生输入归属与失效探针",
+      "package": "m0-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "line": 65,
+      "dependencies": [
+        "M0-R01",
+        "M0-R04"
+      ],
+      "owner": "macOS 原生工程师、测试工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 3
+    },
+    {
+      "id": "M0-R03",
+      "title": "Windows 普通用户输入归属",
+      "package": "m0-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "line": 99,
+      "dependencies": [
+        "M0-R01",
+        "M0-R02"
+      ],
+      "owner": "Windows 原生工程师、测试工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 4
+    },
+    {
+      "id": "M0-R04",
+      "title": "独立 Guard、Job/PGID 与 Profile 锁",
+      "package": "m0-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "line": 133,
+      "dependencies": [
+        "M0-R01"
+      ],
+      "owner": "原生 Runtime 工程师、安全测试工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 2
+    },
+    {
+      "id": "M0-R05",
+      "title": "存储保护、原语取消与上传 Reader 生命周期",
+      "package": "m0-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "line": 165,
+      "dependencies": [
+        "M0-R02",
+        "M0-R03",
+        "M0-R04"
+      ],
+      "owner": "Browser Runtime 工程师、安全测试工程师。",
+      "estimateDays": {
+        "min": 6,
+        "max": 9
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 5
+    },
+    {
+      "id": "M0-R06",
+      "title": "三平台可行性结论与版本化基线",
+      "package": "m0-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m0-runtime.md",
+      "line": 205,
+      "dependencies": [
+        "M0-R01",
+        "M0-R02",
+        "M0-R03",
+        "M0-R04",
+        "M0-R05"
+      ],
+      "owner": "QA 负责人、Runtime 负责人。",
+      "estimateDays": {
+        "min": 3,
+        "max": 4
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 6
+    },
+    {
+      "id": "M1-G01",
+      "title": "认证传输与第一方 MCP 注入",
+      "package": "m1-gateway",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "line": 31,
+      "dependencies": [
+        "M0-W06",
+        "M0-R06"
+      ],
+      "owner": "Rust/ACP/MCP 工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 7
+    },
+    {
+      "id": "M1-G02",
+      "title": "Origin 解析与权限决策",
+      "package": "m1-gateway",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "line": 61,
+      "dependencies": [
+        "M1-G01"
+      ],
+      "owner": "Host 安全工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 8
+    },
+    {
+      "id": "M1-G03",
+      "title": "批准、grant 与跨轮生命周期",
+      "package": "m1-gateway",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "line": 90,
+      "dependencies": [
+        "M1-G02"
+      ],
+      "owner": "Host 权限与 React 工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 9
+    },
+    {
+      "id": "M1-G04",
+      "title": "控制租约、接管锁存与原子撤销",
+      "package": "m1-gateway",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "line": 121,
+      "dependencies": [
+        "M1-G03",
+        "M0-R06"
+      ],
+      "owner": "Host 并发/平台工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 10
+    },
+    {
+      "id": "M1-G05",
+      "title": "能力路由、审计与诊断交互",
+      "package": "m1-gateway",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "line": 150,
+      "dependencies": [
+        "M1-G04",
+        "M0-W06"
+      ],
+      "owner": "Browser 全栈工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 11
+    },
+    {
+      "id": "M1-G06",
+      "title": "真实 CLI、身份与权限验收",
+      "package": "m1-gateway",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-gateway.md",
+      "line": 180,
+      "dependencies": [
+        "M1-G01",
+        "M1-G02",
+        "M1-G03",
+        "M1-G04",
+        "M1-G05"
+      ],
+      "owner": "QA/ACP/安全工程师。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 12
+    },
+    {
+      "id": "M1-R01",
+      "title": "安全激活 Tuple、Sequence 与 LKG",
+      "package": "m1-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "line": 31,
+      "dependencies": [
+        "M0-R06",
+        "M0-W01"
+      ],
+      "owner": "Runtime 工程师、供应链工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 7
+    },
+    {
+      "id": "M1-R02",
+      "title": "生产 Supervisor 与 Guard 生命周期",
+      "package": "m1-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "line": 66,
+      "dependencies": [
+        "M1-R01",
+        "M0-R04"
+      ],
+      "owner": "Runtime 原生工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 8
+    },
+    {
+      "id": "M1-R03",
+      "title": "Framed Worker 与逐 Primitive Fence",
+      "package": "m1-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "line": 100,
+      "dependencies": [
+        "M1-R02",
+        "M1-G01",
+        "M0-R05"
+      ],
+      "owner": "Playwright Runtime 工程师、Gateway 工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 9
+    },
+    {
+      "id": "M1-R04",
+      "title": "Profile Generation、迁移与保守恢复",
+      "package": "m1-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "line": 135,
+      "dependencies": [
+        "M1-R02",
+        "M0-R05"
+      ],
+      "owner": "存储工程师、Runtime 工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 9
+    },
+    {
+      "id": "M1-R05",
+      "title": "Artifact、Runtime-owned Upload Spool 与 Export",
+      "package": "m1-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "line": 169,
+      "dependencies": [
+        "M1-R03",
+        "M1-R04",
+        "M1-G01"
+      ],
+      "owner": "存储/传输工程师、Gateway 工程师。",
+      "estimateDays": {
+        "min": 7,
+        "max": 10
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 10
+    },
+    {
+      "id": "M1-R06",
+      "title": "恢复、关闭与 Runtime 联合验收",
+      "package": "m1-runtime",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-runtime.md",
+      "line": 205,
+      "dependencies": [
+        "M1-R01",
+        "M1-R02",
+        "M1-R03",
+        "M1-R04",
+        "M1-R05",
+        "M0-W06",
+        "M1-G05"
+      ],
+      "owner": "Runtime 负责人、QA 工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 12
+    },
+    {
+      "id": "M1-D01",
+      "title": "分发资格、签名 Bootstrap 与离线策略",
+      "package": "m1-delivery",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "line": 34,
+      "dependencies": [
+        "M0-R06",
+        "M1-R01"
+      ],
+      "owner": "供应链工程师、Host 安全工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 8
+    },
+    {
+      "id": "M1-D02",
+      "title": "macOS 完整 Tuple 签名与真实包验证",
+      "package": "m1-delivery",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "line": 71,
+      "dependencies": [
+        "M1-D01",
+        "M1-R06"
+      ],
+      "owner": "macOS 发布工程师、原生 QA。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 13
+    },
+    {
+      "id": "M1-D03",
+      "title": "Windows Authenticode、NSIS 与 Portable",
+      "package": "m1-delivery",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "line": 105,
+      "dependencies": [
+        "M1-D01",
+        "M1-R06"
+      ],
+      "owner": "Windows 发布工程师、原生 QA。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 13
+    },
+    {
+      "id": "M1-D04",
+      "title": "最终安装包的确定性集成矩阵",
+      "package": "m1-delivery",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "line": 142,
+      "dependencies": [
+        "M1-D02",
+        "M1-D03",
+        "M1-R06",
+        "M1-G06"
+      ],
+      "owner": "QA 自动化工程师、三平台负责人。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 14
+    },
+    {
+      "id": "M1-D05",
+      "title": "可信客户端更新、Windows 交接与发布事务",
+      "package": "m1-delivery",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "line": 177,
+      "dependencies": [
+        "M1-D04"
+      ],
+      "owner": "发布工程师、仓库维护者。",
+      "estimateDays": {
+        "min": 9,
+        "max": 13
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 15
+    },
+    {
+      "id": "M1-D06",
+      "title": "回滚演练、发布环与运维交接",
+      "package": "m1-delivery",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m1-delivery.md",
+      "line": 230,
+      "dependencies": [
+        "M1-D05",
+        "M1-G06",
+        "M1-R06"
+      ],
+      "owner": "发布负责人、QA 负责人、安全负责人。",
+      "estimateDays": {
+        "min": 4,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 16
+    },
+    {
+      "id": "M2-01",
+      "title": "有界检查流、来源校验与脱敏",
+      "package": "m2-inspection",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "line": 31,
+      "dependencies": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "owner": "Host/安全工程师，Worker 工程师复核数据出口。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 17
+    },
+    {
+      "id": "M2-02",
+      "title": "Console 与 Network 完整面板",
+      "package": "m2-inspection",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "line": 69,
+      "dependencies": [
+        "M2-01"
+      ],
+      "owner": "前端工程师，Host 工程师联调详情与导出。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 18
+    },
+    {
+      "id": "M2-03",
+      "title": "Grok Trace、真实截图与安全导出重开",
+      "package": "m2-inspection",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "line": 104,
+      "dependencies": [
+        "M2-01"
+      ],
+      "owner": "Worker/Artifact 工程师，前端工程师完成 Trace UI。",
+      "estimateDays": {
+        "min": 5,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 18
+    },
+    {
+      "id": "M2-04",
+      "title": "Design Mode v2、多选标注与响应式验证",
+      "package": "m2-inspection",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "line": 141,
+      "dependencies": [
+        "M2-02",
+        "M2-03"
+      ],
+      "owner": "前端/Worker 工程师，安全工程师审查人工 permit。",
+      "estimateDays": {
+        "min": 5,
+        "max": 8
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 19
+    },
+    {
+      "id": "M2-05",
+      "title": "Named Profile 创建、复用、绑定与删除",
+      "package": "m2-inspection",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "line": 176,
+      "dependencies": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "owner": "Host/Profile 工程师，设置 UI 工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 17
+    },
+    {
+      "id": "M2-06",
+      "title": "整包跨平台验收与启用门",
+      "package": "m2-inspection",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m2-inspection.md",
+      "line": 211,
+      "dependencies": [
+        "M2-02",
+        "M2-03",
+        "M2-04",
+        "M2-05"
+      ],
+      "owner": "QA/发布工程师，安全与前端工程师独立复核。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 20
+    },
+    {
+      "id": "M3-01",
+      "title": "MV3 骨架、配对与 native bridge",
+      "package": "m3-chrome",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "line": 33,
+      "dependencies": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "owner": "Rust/平台工程师，扩展工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 17
+    },
+    {
+      "id": "M3-02",
+      "title": "显式 claim、任务组与 App 交互",
+      "package": "m3-chrome",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "line": 71,
+      "dependencies": [
+        "M3-01"
+      ],
+      "owner": "扩展/前端工程师，Host工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 18
+    },
+    {
+      "id": "M3-03",
+      "title": "实际进程身份与整连接原生输入 fence",
+      "package": "m3-chrome",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "line": 109,
+      "dependencies": [
+        "M3-01",
+        "M3-02"
+      ],
+      "owner": "macOS/Windows平台工程师，安全工程师。",
+      "estimateDays": {
+        "min": 5,
+        "max": 8
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 19
+    },
+    {
+      "id": "M3-04",
+      "title": "受限定位器、动作、上传与下载 broker",
+      "package": "m3-chrome",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "line": 144,
+      "dependencies": [
+        "M3-02",
+        "M3-03"
+      ],
+      "owner": "浏览器自动化/安全工程师，扩展工程师。",
+      "estimateDays": {
+        "min": 7,
+        "max": 12
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 20
+    },
+    {
+      "id": "M3-05",
+      "title": "撤销恢复、最小权限与可发布产物",
+      "package": "m3-chrome",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "line": 186,
+      "dependencies": [
+        "M3-04"
+      ],
+      "owner": "发布/平台工程师，安全与前端工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 21
+    },
+    {
+      "id": "M3-06",
+      "title": "Chrome 全连接验收与发布门",
+      "package": "m3-chrome",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m3-chrome.md",
+      "line": 223,
+      "dependencies": [
+        "M3-03",
+        "M3-04",
+        "M3-05"
+      ],
+      "owner": "QA/发布工程师，安全与平台工程师独立复核。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 22
+    },
+    {
+      "id": "M4-01",
+      "title": "建立 Linux 能力探测与支持矩阵",
+      "package": "m4-linux",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "line": 40,
+      "dependencies": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "owner": "Linux 平台工程师、QA。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 17
+    },
+    {
+      "id": "M4-02",
+      "title": "验证输入归因 Provider 并作 Go/No-go",
+      "package": "m4-linux",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "line": 68,
+      "dependencies": [
+        "M4-04"
+      ],
+      "owner": "原生输入工程师、安全复核、QA。",
+      "estimateDays": {
+        "min": 4,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 20
+    },
+    {
+      "id": "M4-03",
+      "title": "实现 sandbox 验证与 Linux 进程清理",
+      "package": "m4-linux",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "line": 93,
+      "dependencies": [
+        "M4-01"
+      ],
+      "owner": "Rust Runtime 工程师、安全工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 18
+    },
+    {
+      "id": "M4-04",
+      "title": "验证浏览器凭据静态加密与 Profile 恢复",
+      "package": "m4-linux",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "line": 114,
+      "dependencies": [
+        "M4-03"
+      ],
+      "owner": "Profile 工程师、Linux 安全 QA。",
+      "estimateDays": {
+        "min": 3,
+        "max": 4
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 19
+    },
+    {
+      "id": "M4-05",
+      "title": "完成三种 Linux 包与能力限制交互",
+      "package": "m4-linux",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "line": 143,
+      "dependencies": [
+        "M4-02"
+      ],
+      "owner": "发布工程师、前端工程师、i18n 维护者。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 21
+    },
+    {
+      "id": "M4-06",
+      "title": "执行 Linux 全链路验收与发布准入",
+      "package": "m4-linux",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m4-linux.md",
+      "line": 166,
+      "dependencies": [
+        "M4-05"
+      ],
+      "owner": "独立 QA、安全复核、发布负责人。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 22
+    },
+    {
+      "id": "M5-01",
+      "title": "将现有 prepare 迁入有归属的 Bridge 模型",
+      "package": "m5-ssh",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "line": 54,
+      "dependencies": [
+        "M1-G06",
+        "M1-R06",
+        "M1-D06"
+      ],
+      "owner": "Rust Host 工程师、SSH 模块维护者。",
+      "estimateDays": {
+        "min": 2,
+        "max": 3
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 17
+    },
+    {
+      "id": "M5-02",
+      "title": "复用 OpenSSH 并管理 tunnel 进程生命周期",
+      "package": "m5-ssh",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "line": 76,
+      "dependencies": [
+        "M5-01"
+      ],
+      "owner": "SSH/进程监管工程师。",
+      "estimateDays": {
+        "min": 7,
+        "max": 10
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 18
+    },
+    {
+      "id": "M5-03",
+      "title": "绑定 tunnel revision 与双端 origin 权限",
+      "package": "m5-ssh",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "line": 97,
+      "dependencies": [
+        "M5-01",
+        "M5-02"
+      ],
+      "owner": "Gateway/权限工程师、安全 QA。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 19
+    },
+    {
+      "id": "M5-04",
+      "title": "完成连接、取消、重连与限制视图",
+      "package": "m5-ssh",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "line": 118,
+      "dependencies": [
+        "M5-02",
+        "M5-03"
+      ],
+      "owner": "前端工程师、i18n 维护者。",
+      "estimateDays": {
+        "min": 2,
+        "max": 4
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 20
+    },
+    {
+      "id": "M5-05",
+      "title": "锁定 remote ACP 边界与协议/文件行为",
+      "package": "m5-ssh",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "line": 144,
+      "dependencies": [
+        "M5-03",
+        "M5-04"
+      ],
+      "owner": "ACP 工程师、安全 QA。",
+      "estimateDays": {
+        "min": 2,
+        "max": 3
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 21
+    },
+    {
+      "id": "M5-06",
+      "title": "执行真实包 SSH 验收与回滚演练",
+      "package": "m5-ssh",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m5-ssh.md",
+      "line": 165,
+      "dependencies": [
+        "M5-01",
+        "M5-02",
+        "M5-03",
+        "M5-04",
+        "M5-05"
+      ],
+      "owner": "独立 QA、SSH 维护者、发布负责人。",
+      "estimateDays": {
+        "min": 3,
+        "max": 4
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 22
+    },
+    {
+      "id": "M6-01",
+      "title": "定义组件 manifest、独立 key 与安全账本",
+      "package": "m6-updates",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "line": 53,
+      "dependencies": [
+        "M1-R06",
+        "M1-D06"
+      ],
+      "owner": "Runtime 安全工程师、发布工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 17
+    },
+    {
+      "id": "M6-02",
+      "title": "实现有界下载、安全提取与最终文件验证",
+      "package": "m6-updates",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "line": 86,
+      "dependencies": [
+        "M6-01"
+      ],
+      "owner": "Runtime 安装器工程师、安全 QA。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 18
+    },
+    {
+      "id": "M6-03",
+      "title": "实现 canary、活跃 tuple 固定与 Profile 迁移",
+      "package": "m6-updates",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "line": 112,
+      "dependencies": [
+        "M6-01",
+        "M6-02"
+      ],
+      "owner": "Runtime/Profile 工程师。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 19
+    },
+    {
+      "id": "M6-04",
+      "title": "接入 policy、完整更新视图与独立发布流程",
+      "package": "m6-updates",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "line": 133,
+      "dependencies": [
+        "M6-01",
+        "M6-02",
+        "M6-03"
+      ],
+      "owner": "Host/前端工程师、发布负责人、i18n 维护者。",
+      "estimateDays": {
+        "min": 4,
+        "max": 6
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 20
+    },
+    {
+      "id": "M6-05",
+      "title": "完成容量优化与独立 CEF 实验决策",
+      "package": "m6-updates",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "line": 156,
+      "dependencies": [
+        "M6-03"
+      ],
+      "owner": "Runtime 性能工程师、原生平台工程师、无障碍 QA。",
+      "estimateDays": {
+        "min": 4,
+        "max": 7
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 20
+    },
+    {
+      "id": "M6-06",
+      "title": "执行更新生命周期、回滚与发布最终验收",
+      "package": "m6-updates",
+      "plan": "docs/superpowers/plans/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "spec": "docs/superpowers/specs/2026-09-05-browser-rearchitecture/m6-updates.md",
+      "line": 177,
+      "dependencies": [
+        "M6-01",
+        "M6-02",
+        "M6-03",
+        "M6-04",
+        "M6-05"
+      ],
+      "owner": "独立安全 QA、平台 QA、发布负责人。",
+      "estimateDays": {
+        "min": 3,
+        "max": 5
+      },
+      "steps": 6,
+      "completedSteps": 0,
+      "status": "not_started",
+      "dependencyLevel": 21
+    }
+  ],
+  "requirements": [
+    {
+      "id": "BR-01",
+      "outcome": "长期 Preview、任务分组、导航/标题/停止/下载真实可用",
+      "tasks": [
+        "M0-W01",
+        "M0-W03",
+        "M0-W04",
+        "M0-W06"
+      ],
+      "evidence": "macOS/Windows原生fixture；同URL双tab/双下载、内部跳转、停止慢请求"
+    },
+    {
+      "id": "BR-02",
+      "outcome": "AppSession owner 与归档/删除/fork/rewind正确",
+      "tasks": [
+        "M0-W01",
+        "M0-W05",
+        "M1-G03"
+      ],
+      "evidence": "commands/SSH/自动化删除同门、跨会话拒绝、删除中断、fork无旧grant、rewind不重放外部效果"
+    },
+    {
+      "id": "BR-03",
+      "outcome": "投影单一、无晚回调覆盖、无原生遮挡回归",
+      "tasks": [
+        "M0-W02",
+        "M0-W04",
+        "M0-W06"
+      ],
+      "evidence": "StrictMode/快速显隐/拖拽/双modal、旧boot/generation洪泛零重取、event缺口合并重取"
+    },
+    {
+      "id": "BR-04",
+      "outcome": "按能力路由并尊重pin，后端切换不搬登录态",
+      "tasks": [
+        "M1-G05",
+        "M1-G06"
+      ],
+      "evidence": "view/act/Chrome矩阵；pin不可满足返回unsupported；Cookie不跨边界"
+    },
+    {
+      "id": "BR-05",
+      "outcome": "原生输入归因可证明、权限失败关闭writer",
+      "tasks": [
+        "M0-R02",
+        "M0-R03",
+        "M0-R05",
+        "M0-R06",
+        "M1-G04"
+      ],
+      "evidence": "签名包TCC/Raw Input探针，权限拒绝/撤销、监听失效、窗口变化"
+    },
+    {
+      "id": "BR-06",
+      "outcome": "第一方Browser MCP跨official/custom/shared/independent可用",
+      "tasks": [
+        "M1-G01",
+        "M1-G06"
+      ],
+      "evidence": "真实CLI new/load/warm/热更新矩阵；列表构建切会话拒旧；第三方超时不阻塞；SSH/侧信道不注入"
+    },
+    {
+      "id": "BR-07",
+      "outcome": "Host完整身份链、origin/frame与capability授权",
+      "tasks": [
+        "M1-G01",
+        "M1-G02",
+        "M1-G06"
+      ],
+      "evidence": "旧boot/binding/tab/nav、MCP伪造身份、跨frame/popup/redirect负例零放行"
+    },
+    {
+      "id": "BR-08",
+      "outcome": "六种policy、后果性动作、秘密与OS权限一致",
+      "tasks": [
+        "M1-G02",
+        "M1-G03",
+        "M1-G06"
+      ],
+      "evidence": "dont_ask无挂起、未知click不猜测放行、批准失效与秘密不进入输出"
+    },
+    {
+      "id": "BR-09",
+      "outcome": "单writer、接管锁存、跨轮不夺回控制",
+      "tasks": [
+        "M1-G03",
+        "M1-G04",
+        "M1-R03",
+        "M1-G06"
+      ],
+      "evidence": "Host active_turn_id/提前prompt_complete/真实结束、并发撤销/Playwright等待取消、旧ACK、新turn、共享Runtime观察停止"
+    },
+    {
+      "id": "BR-10",
+      "outcome": "project/ephemeral/named Profile与迁移不串数据",
+      "tasks": [
+        "M0-R05",
+        "M1-R04",
+        "M2-05",
+        "M2-06"
+      ],
+      "evidence": "同Profile锁、多App竞争、epoch升级/降级、named显式共享与删除确认"
+    },
+    {
+      "id": "BR-11",
+      "outcome": "固定Runtime tuple、私有worker通道、无外部PATH依赖",
+      "tasks": [
+        "M0-R01",
+        "M1-R01",
+        "M1-R03"
+      ],
+      "evidence": "manifest/hash/协议不匹配、无外部Node/Chrome机器、无调试TCP监听"
+    },
+    {
+      "id": "BR-12",
+      "outcome": "Host/worker/App崩溃均清理正确进程并守Profile锁",
+      "tasks": [
+        "M0-R04",
+        "M1-R02",
+        "M1-R06"
+      ],
+      "evidence": "PID/start-time/run nonce、用户Chrome并行、30秒descendants=0或cleanup_failed"
+    },
+    {
+      "id": "BR-13",
+      "outcome": "Artifact不泄漏路径/秘密、原子promotion与有界保留",
+      "tasks": [
+        "M1-R05",
+        "M2-01",
+        "M2-03",
+        "M2-06"
+      ],
+      "evidence": "写/rename/owner/journal各点crash、单主体capability、过期/owner重建"
+    },
+    {
+      "id": "BR-14",
+      "outcome": "上传明确披露、副本按真实读取生命周期销毁、下载恢复不重复写",
+      "tasks": [
+        "M1-R05",
+        "M1-R06"
+      ],
+      "evidence": "延迟FileReader/提交、50/200MiB边界、Runtime-owned spool预算/退出清理、源文件替换、export中断needs_review、MOTW/quarantine"
+    },
+    {
+      "id": "BR-15",
+      "outcome": "恢复上下文不恢复自动驾驶/未知副作用",
+      "tasks": [
+        "M1-G04",
+        "M1-G05",
+        "M1-R06"
+      ],
+      "evidence": "GET敏感URL、旧token/lease、inflight checkpoint、requestId重试零重放"
+    },
+    {
+      "id": "BR-16",
+      "outcome": "Console/Network/Trace完整查看与安全导出",
+      "tasks": [
+        "M2-01",
+        "M2-02",
+        "M2-03",
+        "M2-06"
+      ],
+      "evidence": "cursor/过滤/详细/重开、跨origin去敏、未知raw trace schema拒绝"
+    },
+    {
+      "id": "BR-17",
+      "outcome": "真实截图、Design Mode v2、响应式与人工检查可用",
+      "tasks": [
+        "M2-03",
+        "M2-04",
+        "M2-06"
+      ],
+      "evidence": "像素非空、选区/多选/注释、viewport恢复、user inspection permit不解除latch"
+    },
+    {
+      "id": "BR-18",
+      "outcome": "Chrome pairing、显式claim、任务组、撤销和恢复完整",
+      "tasks": [
+        "M3-01",
+        "M3-02",
+        "M3-03",
+        "M3-04",
+        "M3-05",
+        "M3-06"
+      ],
+      "evidence": "正确native进程、窗口输入撤全claims、重连不复活、原标签保留；逐claim下载归因与能力对等，无证明则M3未完成"
+    },
+    {
+      "id": "BR-19",
+      "outcome": "Linux支持矩阵真实，sandbox/输入/凭据条件明确",
+      "tasks": [
+        "M4-01",
+        "M4-02",
+        "M4-03",
+        "M4-04",
+        "M4-05",
+        "M4-06"
+      ],
+      "evidence": "Linux原生driver实控App、X11/Wayland逐组合、Secret Service、AppImage/deb/rpm真实包；未证明writer则unsupported"
+    },
+    {
+      "id": "BR-20",
+      "outcome": "SSH只走本地Browser Bridge，隧道归属与清理可靠",
+      "tasks": [
+        "M5-01",
+        "M5-02",
+        "M5-03",
+        "M5-04",
+        "M5-05",
+        "M5-06"
+      ],
+      "evidence": "Host/Guard双持有listener、ssh -W、专属mux/改alias目标、keepalive黑洞、单点kill/抢占竞态、新revision隔离Profile"
+    },
+    {
+      "id": "BR-21",
+      "outcome": "独立Runtime更新具有签名、防重放、兼容回滚",
+      "tasks": [
+        "M6-01",
+        "M6-02",
+        "M6-03",
+        "M6-04",
+        "M6-06"
+      ],
+      "evidence": "attestation组件授权/拒绝旧App越权、签名恶意archive/sequence/撤销/断点/epoch/active tuple/一次LKG矩阵"
+    },
+    {
+      "id": "BR-22",
+      "outcome": "性能/容量预算有参考机证据，CEF仅决策实验",
+      "tasks": [
+        "M0-R06",
+        "M6-05",
+        "M6-06"
+      ],
+      "evidence": "冷启动/新tab/接管/恢复、资源基线；CEF go/no-go报告且不默认替换WebView"
+    },
+    {
+      "id": "BR-23",
+      "outcome": "所有用户路径含i18n、settings、键盘和视觉验收",
+      "tasks": [
+        "M0-W04",
+        "M0-W06",
+        "M1-G03",
+        "M1-G05",
+        "M2-06",
+        "M3-06",
+        "M4-06",
+        "M5-06",
+        "M6-06"
+      ],
+      "evidence": "15目录key+非空+占位、en/zh/de/ru/ta视觉、search/deep link、focus、实体菜单"
+    },
+    {
+      "id": "BR-24",
+      "outcome": "最终包签名/发布/灰度/kill switch/回滚与本地CI一起过门",
+      "tasks": [
+        "M1-D01",
+        "M1-D02",
+        "M1-D03",
+        "M1-D04",
+        "M1-D05",
+        "M1-D06",
+        "M6-06"
+      ],
+      "evidence": "clean runner复下载、Draft不齐不发布、有效/过期bootstrap、portable手动更新、真实App updater安装交接/失败边界、完整CI"
+    }
+  ]
+}

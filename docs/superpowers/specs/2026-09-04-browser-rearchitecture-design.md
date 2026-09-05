@@ -1,6 +1,6 @@
 # 浏览器重构总体设计
 
-**状态：** 待审查的总体设计
+**状态：** 总体设计与 M0–M6 独立计划已整理；产品实现尚未开始
 
 **日期：** 2026-09-04
 
@@ -29,7 +29,7 @@ Chrome Connector
 
 所有控制统一经过 Rust Host Browser Gateway。Rust Host 是唯一权限源，也是 Grok Build ACP、第一方浏览器 MCP、Preview、Managed Chromium 与未来 Chrome Connector 的统一接入点。BrowserSession、BrowserProfile、BrowserRuntime、ControlLease、BrowserTab、Artifact 和 AgentBinding 都是彼此分离的领域对象。用户接管会原子撤销 Agent 控制、封住已派发的复合动作、暂停观察，并要求用户显式交还后才能恢复。
 
-本文是 umbrella design，只定义产品合同、架构、安全模型、发布硬门和里程碑边界。M0 至 M6 必须分别编写规格、实现计划和验收记录；不得用一份实现计划一次吞掉整条路线。
+本文是 umbrella design，只定义产品合同、架构、安全模型、发布硬门和里程碑边界。M0 至 M6 已拆为十个独立规格与开发计划，见[实施总索引](../plans/2026-09-05-browser-rearchitecture/README.md)。运行验收记录须在后续实际开发时产生，不能用文档完成代替；每个工作包按自身依赖和出口实施。
 
 ## 目标
 
@@ -70,7 +70,7 @@ Chrome Connector
 | 区域 | 当前证据 | 设计后果 |
 | --- | --- | --- |
 | 前端浏览器模型 | `src/lib/sideWorkbench.ts` 的浏览器标签主要只有 `id`、`url`、`title`、`name`。 | 引入 Host 持有的 BrowserTab 与 BackendBinding；React 只消费投影。 |
-| 浏览器组件 | `src/components/side-workbench/BrowserTab.tsx` 持有大量 loading、Design Mode 和 WebView 状态。 | 持久领域状态迁入 `src/browser/`、provider、hook 和 Host command。 |
+| 浏览器组件 | `src/components/side-workbench/BrowserTab.tsx` 持有大量 loading、Design Mode 和 WebView 状态。 | 持久领域状态迁入 `src/components/browser/`、provider、hook 和 Host command。 |
 | 自动化 | 当前 Design Mode 依赖 `side_browser_eval` 注入与轮询。 | Design Mode 可继续作为 UI 功能，但任意 eval 不能充当 Agent Gateway。 |
 | Tauri Host | `src-tauri/src/side_browser_host.rs` 创建子 WebView，并按 URL 索引待处理下载。 | 下载改用唯一 transfer ID；URL 不能作为下载身份。 |
 | 媒体交付 | `src-tauri/src/media_server.rs` 使用进程级 token，并接入范围较宽的 `path_scope`。 | Browser Artifact 使用会话级 capability token 与 opaque handle；MCP 不暴露绝对路径。 |
@@ -400,11 +400,13 @@ Linux 属于 M4，SSH Browser Bridge 属于 M5，CEF 评估属于 M6。交叉编
 
 UploadGrant 绑定 BrowserSession、BrowserTab、顶层/执行 frame origin、input binding、源 Artifact 或已批准本地文件、预期 hash/size、ControlLease fence、single-use capability 和 expiry。
 
-用户批准后重新执行 `lstat`、拒绝 symlink、进行有界复制到 App 私有 staging，并对副本再次校验 hash/size。只有 worker 能读取不可变 staging；Agent 只看到 basename 和 opaque handle。下列任一事件都会撤销未使用 grant：navigation/origin 变化、用户接管、复制前源文件变化、turn/session 结束、Host 重启、用户取消或签发已满一小时。
+用户批准后重新执行 `lstat`、拒绝 symlink、进行有界复制到 App 私有 spool，并对副本再次校验 hash/size。只有授权 Runtime 链能读取该不可变副本；Agent 只看到 basename 和 opaque handle。下列任一事件都会撤销未使用 grant：navigation/origin 变化、用户接管、复制前源文件变化、turn/session 结束、Host 重启、用户取消或签发已满一小时。
 
 M1 禁止目录上传。`attached` 不代表已经通过网络 `submitted`；最终提交仍单独经过高风险闸门。
 
-消费、撤销、到期或失败后立即关闭 staging admission；worker 释放读取句柄后删除副本，依次记录 `purging -> purged`，失败留 tombstone 由启动 reconciliation 重试。不得把秘密上传副本保留为普通 24 小时 Artifact。已附着文件可能被网页脚本立即读取或发送，因此 attach 本身按对该 origin 的文件披露授权，撤销不能声称收回已到达网页的字节；竞态只记录 `unknown_outcome`，不自动重传。
+消费、撤销、到期或失败后立即关闭上传 admission，但调用返回不等于 Chromium 已读完文件。M1 保留单文件 200 MiB 的路径上传，交付路径前持久记录绑定 runtimeId/generation 的 `UploadSpoolLease`；一旦路径交给 worker，副本保留至该 Runtime 的 Chromium/worker descendants 全部确证退出，再记录 `purging -> purged`，失败留 tombstone 由 reconciliation 重试。未派发的副本可立即清理。不能因 CDP ACK、worker 句柄关闭或 tab/Session 结束就提前删除，必须验证延迟 FileReader、延迟提交和大于 50 MiB 的真实用例。
+
+这是 Runtime 持有的私有上传副本，不是普通 24 小时 Artifact；所有尚未物理删除的副本计入总容量。Runtime Doctor 显示 cleanupPending/占用，并提供用户显式停止 Runtime 后清理的入口。接管只撤销自动控制，不为删文件强杀用户正在使用的浏览器。已附着文件可能被网页脚本立即读取或发送，因此 attach 本身按对该 origin 的文件披露授权，撤销不能声称收回已到达网页的字节；竞态只记录 `unknown_outcome`，不自动重传。Chrome Connector 不拥有用户 Chrome 的退出权，M3 必须另证字节接管和副本清理策略，不能机械复用 Managed 退出条件。
 
 ### Download
 
@@ -424,7 +426,7 @@ refCount 从可重建 owner record 派生，并由 reconciliation 校正，不�
 
 删除流程为 `tombstone -> async delete -> deleted`。cleaner 跳过 active lock、in-flight transfer 与有 durable owner 的 Artifact。project/named Profile 变为 orphan 后继续在 Settings 可见，只有用户通过应用内确认才能删除。ephemeral Profile 只在 Session、Runtime、lock 和 reference 全部结束后删除。
 
-关闭/删除 AppSession 或 BrowserSession 时，Host 先关闭命令 admission、fence 并撤销 grant/binding/lease、取消 transfer/观察，然后持久化 Session 的 closing/tombstone，最后释放 tab 和 Runtime reference。共享 Runtime 只在最后一个 reference 结束后 drain；Session 只有在自己的资源清理得到确认后才报告 closed/deleted。元数据写入失败必须显式报 degraded，继续阻止动作。删除 project/named Profile 是另一个用户确认操作，不能随会话删除执行。
+关闭/删除 AppSession 或 BrowserSession 时，Host 先关闭命令 admission、fence 并撤销 grant/binding/lease、取消 transfer/观察，然后持久化 Session 的 closing/tombstone，最后释放 tab 和 Runtime reference。共享 Runtime 只在最后一个 reference 结束后 drain；Session 只有在自己的资源清理得到确认后才报告 closed/deleted。已派发的上传副本先由 durable UploadSpoolLease 接管为 Runtime-owned cleanupPending，Session 结束不伪报副本已物理删除，也不阻塞共享 Runtime 的其他 Session。元数据写入失败必须显式报 degraded，继续阻止动作。删除 project/named Profile 是另一个用户确认操作，不能随会话删除执行。
 
 Profile cleanup 只能操作已知随机 UUID 根，不跟随 symlink，并可从 tombstone 续删。浏览器崩溃不等于 Profile 损坏，绝不自动 wipe 或 merge。
 
@@ -659,7 +661,7 @@ close admission
 
 每个新增设置必须有稳定 `anchorId`，登记到 `SETTINGS_ENTRIES`，支持搜索与 deep link，并通过 `settingsCatalog.test.ts`。仅增加展示或导航时，不得顺带改变 `settings_get/set` 或扩展 API 语义。
 
-新代码放入 `src/browser/`、领域 provider/hook/component/lib 和 `src-tauri/src/browser/`，按 gateway、adapter、runtime supervisor、profile、lease、artifact、transfer、persistence 拆分。
+新代码放入 `src/components/browser/`、领域 provider/hook/component/lib 和 `src-tauri/src/browser/`，按 gateway、adapter、runtime supervisor、profile、lease、artifact、transfer、persistence 拆分。
 
 涉及原生 WebView 遮挡的菜单、modal 和 Workbench 布局继续复用现有 native-cover 路径；本设计不替代独立的 browser-modal-cover 修复。实现开始前重新核对相关修复是否已进入基线，避免回退已修复的叠层行为。
 
@@ -687,22 +689,24 @@ Browser Artifact 遵循 `docs/llm-wiki/media-delivery.md`：稳态 UI 在适合�
 
 本路线不承诺自动导入 Chrome Profile、兼容任意浏览器扩展、M5 前支持 SSH remote Agent Browser、M4 前提供 Linux 对等能力，也不承诺最终替换 WebView。
 
-## 后续独立规格
+## 独立规格与计划
 
-后续文档必须彼此独立、可单独审查：
+[实施总索引](../plans/2026-09-05-browser-rearchitecture/README.md)汇总六十项任务的开发顺序、负责角色与工程量；[共用合同](2026-09-05-browser-rearchitecture/00-contracts.md)统一接口；[需求与验收矩阵](../plans/2026-09-05-browser-rearchitecture/acceptance-matrix.md)映射 BR-01 至 BR-24。十个工作包可以分别审查：
 
-1. M0 Workbench、任务分组与 Preview 2.0 规格。
-2. M0 Runtime tuple 打包与 ProfileGuard 可行性计划。
-3. M1 Browser Gateway、权限、lease 与接管规格。
-4. M1 Managed Playwright worker、Profile 持久化、Artifact 与恢复规格。
-5. M1 macOS/Windows installer、portable 与发布验证计划。
-6. M2 检查面板与 fixture coverage 规格。
-7. M3 Chrome Connector 扩展、认领与撤销规格。
-8. M4 Linux 打包与 sandbox 规格。
-9. M5 SSH Browser Bridge 规格。
-10. M6 Runtime component updater、容量与 CEF 评估规格。
+| 工作包 | 独立规格 | 开发计划 |
+| --- | --- | --- |
+| M0 Preview 2.0 与任务分组 | [规格](2026-09-05-browser-rearchitecture/m0-preview.md) | [M0-W01–06](../plans/2026-09-05-browser-rearchitecture/m0-preview.md) |
+| M0 Runtime 可行性 | [规格](2026-09-05-browser-rearchitecture/m0-runtime.md) | [M0-R01–06](../plans/2026-09-05-browser-rearchitecture/m0-runtime.md) |
+| M1 Browser Gateway 与权限 | [规格](2026-09-05-browser-rearchitecture/m1-gateway.md) | [M1-G01–06](../plans/2026-09-05-browser-rearchitecture/m1-gateway.md) |
+| M1 Managed Runtime、Profile 与 Artifact | [规格](2026-09-05-browser-rearchitecture/m1-runtime.md) | [M1-R01–06](../plans/2026-09-05-browser-rearchitecture/m1-runtime.md) |
+| M1 双平台分发与发布 | [规格](2026-09-05-browser-rearchitecture/m1-delivery.md) | [M1-D01–06](../plans/2026-09-05-browser-rearchitecture/m1-delivery.md) |
+| M2 检查、响应式与 named Profile | [规格](2026-09-05-browser-rearchitecture/m2-inspection.md) | [M2-01–06](../plans/2026-09-05-browser-rearchitecture/m2-inspection.md) |
+| M3 Chrome Connector | [规格](2026-09-05-browser-rearchitecture/m3-chrome.md) | [M3-01–06](../plans/2026-09-05-browser-rearchitecture/m3-chrome.md) |
+| M4 Linux | [规格](2026-09-05-browser-rearchitecture/m4-linux.md) | [M4-01–06](../plans/2026-09-05-browser-rearchitecture/m4-linux.md) |
+| M5 SSH Browser Bridge | [规格](2026-09-05-browser-rearchitecture/m5-ssh.md) | [M5-01–06](../plans/2026-09-05-browser-rearchitecture/m5-ssh.md) |
+| M6 独立 Runtime 更新与优化 | [规格](2026-09-05-browser-rearchitecture/m6-updates.md) | [M6-01–06](../plans/2026-09-05-browser-rearchitecture/m6-updates.md) |
 
-每份后续规格必须定义自己的接口、迁移步骤、测试、指标、rollout flag、回滚与验收证据。本文只完成总体方向和合同；用户审查本文并批准第一份里程碑计划后，才进入实现。
+每份规格与计划包含接口、迁移、测试、指标、rollout flag、回滚及验收证据要求。原生输入来源、动作取消、Chrome 逐 claim 下载和 Wayland 支持仍是必须取得证据的实验门；研究 No-go 不等于对应功能通过。整套设计文档交付不启动产品实现，开发按用户指定的工作包与已满足依赖推进。
 
 ## 本总体设计验收清单
 
