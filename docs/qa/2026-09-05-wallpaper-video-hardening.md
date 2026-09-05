@@ -3,7 +3,7 @@
 Status: local implementation and automated regression complete. Initial Windows
 video, search, and source-preparation acceptance passed. The resumed September 6
 session found and fixed a missing media viewer in the standalone theme editor;
-its focused regression passes, with desktop playback verification pending.
+its focused regression and standalone desktop video playback now pass.
 Saved now visibly shows media and additional pages after the user's manual
 session, but its full preview/source-handoff acceptance remains open. No push or PR.
 
@@ -26,15 +26,15 @@ focused coverage below; the earlier full-suite counts describe `37e15a6a`.
 | Merge latest fetched upstream and preserve local changes | `37e15a6a` merges `ecd1d998`; the OLE conflict keeps the validated `ReleaseStgMedium` implementation; no Rust changes relative to `2288f52f` | Passed for the recorded upstream snapshot |
 | Complete automated regression and build gates | Resumed run: 607 frontend files / 7,210 tests, production build/typecheck, lint and quality gates; unchanged Rust baseline: 1,808 native tests, Clippy and fmt; four drop tests rerun | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
-| Final Windows interaction after later code changes | Rebuilt isolated Host renders alongside the installed app without a blocking permission prompt; Appearance and source workspace open | In progress; Explorer drag gesture and final wallpaper/video smoke are not yet claimed |
+| Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the six-second fixture plays in both native lightboxes and Escape retains the library | Partial; Explorer drag and fresh generated-result preview remain pending |
 | Fresh authenticated Grok Saved gallery, paging and video handoff | September 6 desktop observations showed 40 displayed / 55 cached, then 80 displayed / 98 cached after user interaction | Gallery and page growth observed; preview and video handoff remain pending |
 | Review report and local commits without push/PR | This report and local merge `37e15a6a`; implementation worktree was clean after merge | Passed |
 
 The complete objective remains open for the two pending device rows. Continue
-the final wallpaper/video smoke and Explorer folder drop into the sidebar/file
-drop into the composer using nonpersonal fixtures after the manual login step.
-After the user completes the official Saved login/challenge, check gallery sync,
-load more, preview and source handoff without exporting authentication state.
+the generated-result preview and Explorer folder drop into the sidebar/file
+drop into the composer using nonpersonal fixtures. Saved login and page growth
+have been observed; finish preview and source handoff without exporting
+authentication state.
 The completed automated suites do not need another run unless code changes or a
 new failure gives a reason. No further background Saved polling is planned.
 
@@ -48,8 +48,7 @@ new failure gives a reason. No further background Saved polling is planned.
   The three focused suites passed 19 tests; TypeScript, targeted ESLint,
   production UI build, and final code-quality gates passed. Existing bundle
   size and mixed-import advisories remain.
-  Desktop inputs were paused when the UI tool detected concurrent user activity;
-  these automated checks are not proof of native video decoding/playback.
+  Later native standalone playback is recorded below separately from these tests.
 - Gallery cards previously forced paged media into a 16:10 crop. Cards now use
   each item's validated width/height metadata and `contain`, preserving the
   source ratio for library and remote results. The layout guard and gallery
@@ -67,6 +66,21 @@ new failure gives a reason. No further background Saved polling is planned.
   clicking the video paused it at 0:03 / 0:06 with seek controls visible.
   Escape closed only the lightbox and retained the filtered library and selected
   card. No new generation or background application was performed.
+
+- The Theme submenu opened on pointer entry but toggled closed on the following
+  click. Clicking now keeps it open. The regression reproduces pointer entry
+  followed by click and opening the editor. Four menu/editor tests and targeted
+  ESLint passed. A native click through the menu opened the standalone editor.
+- At 842 x 602, the standalone editor library showed 16 existing media items
+  (11 images and 5 videos), with distinct portrait and landscape proportions.
+  The six-second drawn mountain/lake fixture opened at 5 / 5 in the real
+  lightbox. Playback advanced from 0:00 to 0:02 / 0:06 and the mountain/water
+  frames changed. Escape closed the lightbox and retained the filtered library
+  and selected item. This verifies native decoding in the repaired editor.
+  The app's existing composer draft and user media were preserved.
+- A fresh `pnpm build:ui` passed after the thumbnail and menu fixes, including
+  TypeScript compilation. Existing mixed-import and large-chunk warnings remain.
+  The 7,222-test full run predates these two focused follow-ups.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently

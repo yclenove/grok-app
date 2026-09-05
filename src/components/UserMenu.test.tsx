@@ -94,7 +94,12 @@ it("opens the theme editor from the theme submenu footer group", async () => {
     </UserMenu>,
   );
 
-  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "Theme" }));
+  const themeItem = screen.getByRole("menuitem", { name: "Theme" });
+  fireEvent.mouseEnter(themeItem);
+  // A real pointer enters the row before clicking; clicking must not close
+  // the submenu that mouse-enter just opened.
+  fireEvent.click(themeItem);
+  expect(themeItem.getAttribute("aria-expanded")).toBe("true");
   const editor = await screen.findByRole("menuitem", { name: "Theme editor" });
   expect(document.querySelector(".user-menu__flyout-sep")).not.toBeNull();
   fireEvent.click(editor);
