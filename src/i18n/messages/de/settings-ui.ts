@@ -377,6 +377,8 @@ export const deSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Wähle ein Bild aus der Galerie",
   "settings.wallpaperSource.removeVideoSource": "Ausgangsbild entfernen",
   "settings.wallpaperSource.videoPromptPlaceholder": "Optional: Bewegung oder Kamerafahrt beschreiben",
+  "settings.wallpaperSource.videoPromptDefault": "Erwecke die Szene mit dezenten natürlichen Bewegungen und einer langsamen filmischen Kamerafahrt zum Leben. Halte das Hauptmotiv stabil und bewahre die ursprüngliche Komposition und Bildsprache.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Ausgangsszene: {context}\nErwecke sie mit dezenten natürlichen Bewegungen und einer langsamen filmischen Kamerafahrt zum Leben. Halte das Hauptmotiv stabil und bewahre die ursprüngliche Komposition und Bildsprache.",
   "settings.wallpaperSource.videoDuration": "Dauer",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} Sek.",
   "settings.wallpaperSource.videoResolution": "Auflösung",

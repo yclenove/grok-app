@@ -377,6 +377,8 @@ export const ukSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Виберіть зображення з галереї",
   "settings.wallpaperSource.removeVideoSource": "Прибрати вихідне зображення",
   "settings.wallpaperSource.videoPromptPlaceholder": "Необов’язково: опишіть рух або камеру",
+  "settings.wallpaperSource.videoPromptDefault": "Оживіть сцену легким природним рухом і повільним кінематографічним наїздом камери. Зберігайте головний об’єкт стабільним, а оригінальну композицію та візуальний стиль — незмінними.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Вихідна сцена: {context}\nОживіть її легким природним рухом і повільним кінематографічним наїздом камери. Зберігайте головний об’єкт стабільним, а оригінальну композицію та візуальний стиль — незмінними.",
   "settings.wallpaperSource.videoDuration": "Тривалість",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} с",
   "settings.wallpaperSource.videoResolution": "Роздільність",

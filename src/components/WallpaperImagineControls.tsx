@@ -93,6 +93,11 @@ export function WallpaperImagineControls({
     value,
     label: value,
   }));
+  const localizedAspectOptions = aspectOptions.map((option) =>
+    option.value === "auto"
+      ? { ...option, label: t("policy.auto") }
+      : option,
+  );
 
   return (
     <div className="wallpaper-source-form wallpaper-imagine-form">
@@ -187,7 +192,7 @@ export function WallpaperImagineControls({
           <Select
             className="wallpaper-source-form__select"
             value={aspect}
-            options={aspectOptions}
+            options={localizedAspectOptions}
             disabled={generating || cancelling || hardLocked}
             aria-label={t("settings.wallpaperSource.aspect")}
             onChange={onAspectChange}

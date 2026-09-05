@@ -377,6 +377,8 @@ export const esSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Elige una imagen de la galería",
   "settings.wallpaperSource.removeVideoSource": "Quitar imagen de origen",
   "settings.wallpaperSource.videoPromptPlaceholder": "Opcional: describe el movimiento o la cámara",
+  "settings.wallpaperSource.videoPromptDefault": "Da vida a la escena con un movimiento natural sutil y un lento acercamiento cinematográfico de cámara. Mantén estable el sujeto principal y conserva la composición y el estilo visual originales.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Escena de origen: {context}\nDale vida con un movimiento natural sutil y un lento acercamiento cinematográfico de cámara. Mantén estable el sujeto principal y conserva la composición y el estilo visual originales.",
   "settings.wallpaperSource.videoDuration": "Duración",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} s",
   "settings.wallpaperSource.videoResolution": "Resolución",

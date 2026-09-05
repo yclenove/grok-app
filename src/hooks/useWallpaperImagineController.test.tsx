@@ -105,9 +105,65 @@ function renderController() {
   return { ...hook, setters };
 }
 
-const translate = ((key: string) => key) as never;
+const translate = ((key: string, vars?: Record<string, unknown>) =>
+  vars?.context ? `${key}:${vars.context}` : key) as never;
 
 describe("useWallpaperImagineController", () => {
+  it("prefills an editable prompt and refreshes it for each source", () => {
+    const { result } = renderController();
+    const first = imageItem("first-local", {
+      source: "imagine",
+      localPath: "C:\\wallpapers\\first.jpg",
+      prompt: "Moonlit mountain lake",
+    });
+    const second = imageItem("second-local", {
+      source: "library",
+      localPath: "C:\\wallpapers\\second.jpg",
+      textPreview: "second.jpg",
+    });
+
+    act(() => result.current.setPrompt("image generation prompt"));
+    act(() => result.current.beginVideoFromItem(first));
+    expect(result.current.prompt).toBe(
+      "settings.wallpaperSource.videoPromptDefaultWithContext:Moonlit mountain lake",
+    );
+
+    act(() => result.current.setPrompt("user-edited camera orbit"));
+    expect(result.current.prompt).toBe("user-edited camera orbit");
+    act(() => result.current.beginVideoFromItem(second));
+    expect(result.current.prompt).toBe(
+      "settings.wallpaperSource.videoPromptDefault",
+    );
+
+    act(() => result.current.setMode("image"));
+    expect(result.current.prompt).toBe("image generation prompt");
+    act(() => result.current.setMode("video"));
+    expect(result.current.prompt).toBe(
+      "settings.wallpaperSource.videoPromptDefault",
+    );
+    expect(ensureLocalWallpaperMedia).not.toHaveBeenCalled();
+  });
+
+  it("clears the automatic prompt when its source is removed", () => {
+    const { result } = renderController();
+
+    act(() =>
+      result.current.beginVideoFromItem(
+        imageItem("clear-local", {
+          source: "library",
+          localPath: "C:\\wallpapers\\clear.jpg",
+        }),
+      ),
+    );
+    expect(result.current.prompt).toBe(
+      "settings.wallpaperSource.videoPromptDefault",
+    );
+
+    act(() => result.current.clearVideoSource());
+    expect(result.current.videoSource).toBeNull();
+    expect(result.current.prompt).toBe("");
+  });
+
   it("materializes a remote source before starting real video generation", async () => {
     ensureLocalWallpaperMedia.mockResolvedValue({
       path: "C:\\wallpapers\\web\\source.jpg",
@@ -124,6 +180,7 @@ describe("useWallpaperImagineController", () => {
     expect(result.current.videoSourcePreview).toBe(
       "data:image/jpeg;base64,preview",
     );
+    expect(cancelRemoteWallpaperMediaRequests).not.toHaveBeenCalled();
 
     act(() => {
       result.current.setPrompt("slow camera push");

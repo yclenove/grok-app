@@ -377,6 +377,8 @@ export const frSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Choisissez une image dans la galerie",
   "settings.wallpaperSource.removeVideoSource": "Retirer l’image source",
   "settings.wallpaperSource.videoPromptPlaceholder": "Facultatif : décrivez le mouvement ou la caméra",
+  "settings.wallpaperSource.videoPromptDefault": "Donnez vie à la scène avec des mouvements naturels subtils et un lent travelling avant cinématographique. Gardez le sujet principal stable et préservez la composition et le style visuel d’origine.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Scène source : {context}\nDonnez-lui vie avec des mouvements naturels subtils et un lent travelling avant cinématographique. Gardez le sujet principal stable et préservez la composition et le style visuel d’origine.",
   "settings.wallpaperSource.videoDuration": "Durée",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} s",
   "settings.wallpaperSource.videoResolution": "Résolution",

@@ -377,6 +377,8 @@ export const zhTWSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "請從圖庫中選擇一張圖片",
   "settings.wallpaperSource.removeVideoSource": "移除來源圖片",
   "settings.wallpaperSource.videoPromptPlaceholder": "選填：描述畫面動態或鏡頭運動",
+  "settings.wallpaperSource.videoPromptDefault": "讓畫面呈現細膩自然的動態，鏡頭緩慢以電影感推進。保持主體穩定，並保留原始構圖和視覺風格。",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "參考畫面描述：{context}\n讓畫面呈現細膩自然的動態，鏡頭緩慢以電影感推進。保持主體穩定，並保留原始構圖和視覺風格。",
   "settings.wallpaperSource.videoDuration": "時長",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} 秒",
   "settings.wallpaperSource.videoResolution": "解析度",

@@ -377,6 +377,8 @@ export const koSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "갤러리에서 이미지를 선택하세요",
   "settings.wallpaperSource.removeVideoSource": "원본 이미지 제거",
   "settings.wallpaperSource.videoPromptPlaceholder": "선택 사항: 움직임이나 카메라 동작 설명",
+  "settings.wallpaperSource.videoPromptDefault": "섬세하고 자연스러운 움직임과 느린 영화적 카메라 푸시인으로 장면에 생동감을 더합니다. 주요 피사체를 안정적으로 유지하고 원래 구도와 시각적 스타일을 보존합니다.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "원본 장면 설명: {context}\n섬세하고 자연스러운 움직임과 느린 영화적 카메라 푸시인으로 장면에 생동감을 더합니다. 주요 피사체를 안정적으로 유지하고 원래 구도와 시각적 스타일을 보존합니다.",
   "settings.wallpaperSource.videoDuration": "길이",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds}초",
   "settings.wallpaperSource.videoResolution": "해상도",

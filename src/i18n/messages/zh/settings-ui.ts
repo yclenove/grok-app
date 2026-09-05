@@ -377,6 +377,8 @@ export const zhSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "请从图库中选择一张图片",
   "settings.wallpaperSource.removeVideoSource": "移除源图片",
   "settings.wallpaperSource.videoPromptPlaceholder": "可选：描述画面运动或镜头运动",
+  "settings.wallpaperSource.videoPromptDefault": "让画面呈现细腻自然的动态，镜头缓慢电影感推进。保持主体稳定，并保留原始构图和视觉风格。",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "参考画面描述：{context}\n让画面呈现细腻自然的动态，镜头缓慢电影感推进。保持主体稳定，并保留原始构图和视觉风格。",
   "settings.wallpaperSource.videoDuration": "时长",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} 秒",
   "settings.wallpaperSource.videoResolution": "分辨率",

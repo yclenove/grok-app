@@ -377,6 +377,8 @@ export const ptBRSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Escolha uma imagem da galeria",
   "settings.wallpaperSource.removeVideoSource": "Remover imagem de origem",
   "settings.wallpaperSource.videoPromptPlaceholder": "Opcional: descreva o movimento ou a câmera",
+  "settings.wallpaperSource.videoPromptDefault": "Dê vida à cena com movimentos naturais sutis e uma lenta aproximação cinematográfica da câmera. Mantenha o assunto principal estável e preserve a composição e o estilo visual originais.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Cena de origem: {context}\nDê vida a ela com movimentos naturais sutis e uma lenta aproximação cinematográfica da câmera. Mantenha o assunto principal estável e preserve a composição e o estilo visual originais.",
   "settings.wallpaperSource.videoDuration": "Duração",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} s",
   "settings.wallpaperSource.videoResolution": "Resolução",

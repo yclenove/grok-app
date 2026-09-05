@@ -336,6 +336,22 @@ describe("wallpaperSource", () => {
     ).rejects.toThrow("short IPC read (3/4 bytes at 0)");
   });
 
+  it("stops IPC reads after cancellation and respects a smaller byte cap", async () => {
+    const controller = new AbortController();
+    const invoke = vi.fn(async (command: string): Promise<unknown> => {
+      if (command === "media_file_info") return { bytes: 8, mime: "image/png" };
+      controller.abort();
+      return new Uint8Array(4).buffer;
+    });
+    await expect(readLocalMediaBlobViaIpc("/wall.png", invoke, { maxBytes: 4 }))
+      .rejects.toThrow("invalid media size");
+    expect(invoke).toHaveBeenCalledTimes(1);
+    invoke.mockClear();
+    await expect(readLocalMediaBlobViaIpc("/wall.png", invoke, { chunkSize: 4, signal: controller.signal }))
+      .rejects.toThrow();
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
   it("maps library entries to gallery items (static first)", () => {
     const entries: WallpaperLibraryEntry[] = [
       {

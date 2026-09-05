@@ -111,8 +111,11 @@ CLI 与 Responses 的候选必须经过同一套处理：
 
 - Imagine 图片模式继续使用既有 `wallpaper_imagine` 路径。所有来源的静态图片卡右下角都提供“生成视频”按钮；视频卡不得重复显示该按钮。
 - 点击按钮后先通过来源已有的安全下载路径准备本地图片。网络图库继续走 Host allowlist/签名校验，Grok 相册继续使用隔离 WebView 与 credential-free Host 竞速；不得把 Cookie、Token 或任意请求头导出到主应用。
-- 视频模式提供可选运动/镜头提示、`6` / `10` 秒和 `480p` / `720p`；默认 `6` 秒、`480p`。源图只显示为固定 `56 x 36` 的紧凑缩略图条，长文件名截断，不能撑开工具区或遮住操作按钮。
-- `wallpaper_image_to_video` 使用本机 Grok Build CLI、`--effort low`、最多 18 turns 和 420 秒硬超时，并要求只调用一次内置 `image_to_video`。前端不能指定模型、工具、CLI 参数或输出目录。
+- 视频模式立即预填本地可编辑的运动/镜头模板，不额外请求模型或网络。只有 `imagine` 来源的原始 prompt 可作为至多 240 个 Unicode 字符的场景上下文；其他来源使用通用模板，不读取远程标题、描述或 Grok Saved 时间戳。净化明确的控制字符和 bidi 控制符，保留 ZWJ/ZWNJ。模板补充慢推镜头、自然运动、主体稳定、构图和风格保持约束；Host 把用户编辑的提示词作为场景数据，不能让它改写工具、路径、时长或分辨率。模式提供 `6` / `10` 秒和 `480p` / `720p`，默认 `6` 秒、`480p`。源图使用 `56 x 36` 紧凑缩略图，长文案截断。
+- `wallpaper_image_to_video` 使用本机 Grok Build CLI、`--effort low`、最多 3 turns 和 420 秒硬超时。专用 runner 固定 `--tools image_to_video`、`--disallowed-tools search_tool,use_tool`、`--disable-web-search`、`--no-subagents`，使用 Host 生成的新会话 UUID 和规范官方 `GROK_HOME`。前端不能指定模型、工具、CLI 参数或输出目录。
+- AVIF/WebP/GIF 由主应用 WebView 解码为最长边 2048 px 的 PNG。原图通过有上限的 raw IPC 读取，最多 40 MiB；PNG 最多 20 MiB。Host 验证原始路径位于壁纸库，再独立解码图片，限制单边 16384、5000 万像素和 256 MiB 解码分配，重新编码为本次任务的临时 PNG。禁止依赖 shell、ffmpeg 或用户安装的图像工具。临时源图不进入图库，成功或失败后清理。
+- Host 从已知 CLI session 的 `updates.jsonl` 审计恰好一个成功完成的 `image_to_video`；完整源图路径、提示词、时长和分辨率必须匹配。额外工具、参数变更、缺失或损坏日志一律拒收。此审计是结果验收边界，不保证 CLI 违约前没有产生上游调用；不自动重试。日志读取上限 4 MiB，不把原始日志写入 QA 报告。
+- Host 自行从本次会话 `videos/` 目录复制唯一成片，不接受模型指定的复制路径，也不授予 shell 文件操作能力。
 - Host 只接受当前 `{app_data}/wallpapers/imagine/<date>/video-*` 输出目录内的 MP4/WebM；落盘结果必须再通过路径 containment、文件签名、MIME、扩展名和 200 MiB 上限校验。Windows 内部可以使用 canonical extended path，但返回前端的本地路径必须移除 `\\?\` 前缀。
 - 生成使用 UUID `requestId`；取消信号 sticky，覆盖“取消先于注册”的竞态。取消、关闭弹窗或切换模式会终止进程树、忽略迟到结果并清理失败输出。成片只进入画廊和壁纸库，必须由用户明确选择后才能设为背景。
 

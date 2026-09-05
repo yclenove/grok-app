@@ -377,6 +377,8 @@ export const idSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Pilih gambar dari galeri",
   "settings.wallpaperSource.removeVideoSource": "Hapus gambar sumber",
   "settings.wallpaperSource.videoPromptPlaceholder": "Opsional: jelaskan gerakan atau kamera",
+  "settings.wallpaperSource.videoPromptDefault": "Hidupkan adegan dengan gerakan alami yang lembut dan dorongan kamera sinematik yang perlahan. Jaga subjek utama tetap stabil serta pertahankan komposisi dan gaya visual aslinya.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Adegan sumber: {context}\nHidupkan dengan gerakan alami yang lembut dan dorongan kamera sinematik yang perlahan. Jaga subjek utama tetap stabil serta pertahankan komposisi dan gaya visual aslinya.",
   "settings.wallpaperSource.videoDuration": "Durasi",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} dtk",
   "settings.wallpaperSource.videoResolution": "Resolusi",

@@ -377,6 +377,8 @@ export const jaSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "ギャラリーから画像を選択してください",
   "settings.wallpaperSource.removeVideoSource": "元画像を削除",
   "settings.wallpaperSource.videoPromptPlaceholder": "任意: 動きやカメラワークを説明",
+  "settings.wallpaperSource.videoPromptDefault": "繊細で自然な動きと、ゆっくりとした映画的なカメラの寄りでシーンに命を吹き込みます。主役を安定させ、元の構図とビジュアルスタイルを保ちます。",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "元シーンの説明：{context}\n繊細で自然な動きと、ゆっくりとした映画的なカメラの寄りでシーンに命を吹き込みます。主役を安定させ、元の構図とビジュアルスタイルを保ちます。",
   "settings.wallpaperSource.videoDuration": "長さ",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} 秒",
   "settings.wallpaperSource.videoResolution": "解像度",

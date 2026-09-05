@@ -261,7 +261,7 @@ async fn fetch_album_thumbnail(
         .get(url)
         .header(
             reqwest::header::ACCEPT,
-            "image/avif,image/webp,image/*,*/*;q=0.8",
+            "image/jpeg,image/png,image/webp;q=0.9,image/avif;q=0.8,image/*;q=0.7,*/*;q=0.5",
         )
         .header(reqwest::header::REFERER, SAVED_URL)
         .header("sec-fetch-dest", "image")

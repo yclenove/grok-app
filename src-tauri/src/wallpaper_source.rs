@@ -1176,6 +1176,79 @@ pub(crate) fn run_grok_headless_cancellable(
     cwd: Option<&Path>,
     cancellation: Option<&WallpaperSearchCancellation>,
 ) -> Result<String, String> {
+    run_grok_headless_with_options(
+        cli_path,
+        prompt,
+        schema,
+        WallpaperCliOptions {
+            max_turns,
+            timeout,
+            cwd,
+            cancellation,
+            video_session: None,
+        },
+    )
+}
+
+struct WallpaperCliOptions<'a> {
+    max_turns: u32,
+    timeout: Duration,
+    cwd: Option<&'a Path>,
+    cancellation: Option<&'a WallpaperSearchCancellation>,
+    video_session: Option<&'a str>,
+}
+
+pub(crate) fn run_grok_headless_video_cancellable(
+    cli_path: &str,
+    prompt: &str,
+    schema: &str,
+    timeout: Duration,
+    cwd: &Path,
+    cancellation: &WallpaperSearchCancellation,
+    session_id: &str,
+) -> Result<String, String> {
+    run_grok_headless_with_options(
+        cli_path,
+        prompt,
+        schema,
+        WallpaperCliOptions {
+            max_turns: 3,
+            timeout,
+            cwd: Some(cwd),
+            cancellation: Some(cancellation),
+            video_session: Some(session_id),
+        },
+    )
+}
+
+fn configure_video_command(cmd: &mut Command, session_id: &str) {
+    cmd.args([
+        "--tools",
+        "image_to_video",
+        "--disallowed-tools",
+        "search_tool,use_tool",
+        "--disable-web-search",
+        "--no-subagents",
+        "--session-id",
+        session_id,
+    ]);
+    // Same official home used by require_cli_ready and the result audit.
+    cmd.env("GROK_HOME", crate::paths::resolve_agent_grok_home("shared"));
+}
+
+fn run_grok_headless_with_options(
+    cli_path: &str,
+    prompt: &str,
+    schema: &str,
+    options: WallpaperCliOptions<'_>,
+) -> Result<String, String> {
+    let WallpaperCliOptions {
+        max_turns,
+        timeout,
+        cwd,
+        cancellation,
+        video_session,
+    } = options;
     if cancellation.is_some_and(WallpaperSearchCancellation::is_cancelled) {
         return Err("cancelled".into());
     }
@@ -1191,6 +1264,9 @@ pub(crate) fn run_grok_headless_cancellable(
         .arg(schema)
         .arg("--output-format")
         .arg("json");
+    if let Some(session_id) = video_session {
+        configure_video_command(&mut cmd, session_id);
+    }
     // Headless background-wait policy (CLI 0.2.117+); soft-fail older builds.
     {
         let settings = crate::store::load_settings();
@@ -1716,7 +1792,10 @@ async fn inspect_image_url(client: &reqwest::Client, url: &str) -> Option<ImageP
     }
     let mut response = client
         .get(url)
-        .header("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
+        .header(
+            "Accept",
+            "image/jpeg,image/png,image/webp;q=0.9,image/avif;q=0.8,image/*;q=0.7,*/*;q=0.5",
+        )
         .header(
             reqwest::header::RANGE,
             format!("bytes=0-{}", MAX_IMAGE_PROBE_BYTES - 1),
@@ -2413,9 +2492,10 @@ pub(crate) async fn fetch_remote_media_bytes(
     .build()
     .map_err(|e| format!("http client: {e}"))?;
 
-    let mut request = client
-        .get(&normalized)
-        .header("Accept", "image/avif,image/webp,image/*,video/*,*/*;q=0.8");
+    let mut request = client.get(&normalized).header(
+        "Accept",
+        "image/jpeg,image/png,image/webp;q=0.9,image/avif;q=0.8,image/*;q=0.7,video/*,*/*;q=0.5",
+    );
     if normalized_download_source(source) == "grok_album" {
         request = request
             .header(reqwest::header::REFERER, "https://grok.com/imagine/saved")
@@ -2820,6 +2900,12 @@ fn collect_library(root: &Path, dir: &Path, out: &mut Vec<WallpaperLibraryEntry>
     };
     for e in rd.flatten() {
         let path = e.path();
+        if path
+            .file_name()
+            .is_some_and(|name| name == ".video-source.png")
+        {
+            continue;
+        }
         if path.is_dir() {
             collect_library(root, &path, out);
             continue;

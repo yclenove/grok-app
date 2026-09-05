@@ -377,6 +377,8 @@ export const ruSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Выберите изображение из галереи",
   "settings.wallpaperSource.removeVideoSource": "Удалить исходное изображение",
   "settings.wallpaperSource.videoPromptPlaceholder": "Необязательно: опишите движение или камеру",
+  "settings.wallpaperSource.videoPromptDefault": "Оживите сцену с помощью лёгкого естественного движения и медленного кинематографического наезда камеры. Сохраните устойчивость главного объекта, исходную композицию и визуальный стиль.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Исходная сцена: {context}\nОживите её с помощью лёгкого естественного движения и медленного кинематографического наезда камеры. Сохраните устойчивость главного объекта, исходную композицию и визуальный стиль.",
   "settings.wallpaperSource.videoDuration": "Длительность",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} с",
   "settings.wallpaperSource.videoResolution": "Разрешение",

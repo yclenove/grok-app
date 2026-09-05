@@ -1172,6 +1172,7 @@ pub async fn wallpaper_imagine(
 pub async fn wallpaper_image_to_video(
     request_id: String,
     source_path: String,
+    source_png_base64: Option<String>,
     motion_prompt: Option<String>,
     duration: Option<u32>,
     resolution_name: Option<String>,
@@ -1181,6 +1182,7 @@ pub async fn wallpaper_image_to_video(
         crate::wallpaper_imagine_video::generate(
             &request_id,
             &source_path,
+            source_png_base64.as_deref(),
             motion_prompt.as_deref(),
             duration,
             resolution_name.as_deref(),

@@ -4,6 +4,7 @@ import {
   invoke,
   listen,
 } from "./host";
+import { prepareWallpaperVideoImage } from "../wallpaperVideoImage";
 
 import type {
   WallpaperFetchResult,
@@ -191,6 +192,8 @@ export async function wallpaperImagine(
   });
 }
 
+const videoPreparations = new Map<string, AbortController>();
+
 export async function wallpaperImageToVideo(
   sourcePath: string,
   motionPrompt: string,
@@ -198,18 +201,28 @@ export async function wallpaperImageToVideo(
   resolutionName: WallpaperVideoResolution,
   requestId: string,
 ): Promise<WallpaperSearchResult> {
-  return invoke<WallpaperSearchResult>("wallpaper_image_to_video", {
-    sourcePath,
-    motionPrompt: motionPrompt.trim() || null,
-    duration,
-    resolutionName,
-    requestId,
-  });
+  const preparation = new AbortController();
+  videoPreparations.set(requestId, preparation);
+  try {
+    const sourcePngBase64 = await prepareWallpaperVideoImage(sourcePath, preparation.signal);
+    preparation.signal.throwIfAborted();
+    return await invoke<WallpaperSearchResult>("wallpaper_image_to_video", {
+      sourcePath,
+      sourcePngBase64,
+      motionPrompt: motionPrompt.trim() || null,
+      duration,
+      resolutionName,
+      requestId,
+    });
+  } finally {
+    if (videoPreparations.get(requestId) === preparation) videoPreparations.delete(requestId);
+  }
 }
 
 export async function wallpaperImageToVideoCancel(
   requestId: string,
 ): Promise<boolean> {
+  videoPreparations.get(requestId)?.abort();
   return invoke<boolean>("wallpaper_image_to_video_cancel", { requestId });
 }
 

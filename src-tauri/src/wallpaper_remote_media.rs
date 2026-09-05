@@ -393,7 +393,9 @@ fn image_headers(
     );
     headers.insert(
         ACCEPT,
-        HeaderValue::from_static("image/avif,image/webp,image/*,*/*;q=0.8"),
+        HeaderValue::from_static(
+            "image/jpeg,image/png,image/webp;q=0.9,image/avif;q=0.8,image/*;q=0.7,*/*;q=0.5",
+        ),
     );
     headers.insert(
         ACCEPT_LANGUAGE,

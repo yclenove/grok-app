@@ -377,6 +377,8 @@ export const taSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "கேலரியில் ஒரு படத்தைத் தேர்ந்தெடுக்கவும்",
   "settings.wallpaperSource.removeVideoSource": "மூலப் படத்தை அகற்று",
   "settings.wallpaperSource.videoPromptPlaceholder": "விருப்பம்: இயக்கம் அல்லது கேமராவை விவரிக்கவும்",
+  "settings.wallpaperSource.videoPromptDefault": "நுட்பமான இயல்பான அசைவு மற்றும் மெதுவான திரைப்படப் பாணி கேமரா நெருங்கலுடன் காட்சிக்கு உயிரூட்டவும். முதன்மைப் பொருளை நிலையாக வைத்து, அசல் அமைப்பையும் காட்சி பாணியையும் பாதுகாக்கவும்.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "மூலக் காட்சி: {context}\nநுட்பமான இயல்பான அசைவு மற்றும் மெதுவான திரைப்படப் பாணி கேமரா நெருங்கலுடன் காட்சிக்கு உயிரூட்டவும். முதன்மைப் பொருளை நிலையாக வைத்து, அசல் அமைப்பையும் காட்சி பாணியையும் பாதுகாக்கவும்.",
   "settings.wallpaperSource.videoDuration": "கால அளவு",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} வி",
   "settings.wallpaperSource.videoResolution": "தெளிவுத்திறன்",

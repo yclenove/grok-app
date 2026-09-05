@@ -377,6 +377,8 @@ export const filSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Pumili ng larawan sa gallery",
   "settings.wallpaperSource.removeVideoSource": "Alisin ang larawan",
   "settings.wallpaperSource.videoPromptPlaceholder": "Opsyonal: ilarawan ang galaw o camera",
+  "settings.wallpaperSource.videoPromptDefault": "Bigyang-buhay ang eksena gamit ang banayad at natural na galaw at mabagal na cinematic camera push-in. Panatilihing matatag ang pangunahing paksa at ingatan ang orihinal na komposisyon at biswal na estilo.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Pinagmulan na eksena: {context}\nBigyang-buhay ito gamit ang banayad at natural na galaw at mabagal na cinematic camera push-in. Panatilihing matatag ang pangunahing paksa at ingatan ang orihinal na komposisyon at biswal na estilo.",
   "settings.wallpaperSource.videoDuration": "Tagal",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} seg",
   "settings.wallpaperSource.videoResolution": "Resolution",

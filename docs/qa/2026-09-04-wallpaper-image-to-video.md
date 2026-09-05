@@ -93,13 +93,19 @@ account details, and stored credentials are intentionally omitted.
 - The appended Saved image's video action opened Imagine video mode with its
   compact source preview intact. Both `6` / `10` second and `480p` / `720p`
   controls changed successfully; generation was intentionally not started.
+- Selecting a static result now fills an immediate localized motion prompt.
+  Only an Imagine image's original prompt is retained as bounded scene context;
+  remote captions and Saved timestamps are excluded (September 5 hardening). The textarea stays
+  editable, switching back to image mode preserves the image prompt, selecting
+  another source refreshes the video prompt, and removing the source clears it.
+  Prefill is deterministic and makes no additional model or network request.
 - All first 40 entries exposed the image-to-video action, so this current Saved
   sample contained no video entry that could honestly exercise Saved playback.
   The separate local-library video playback pass above remains valid.
 
 ## Automated verification
 
-Post-QA verification completed against the final working tree:
+Historical September 4 verification, before the September 5 hardening:
 
 - Corrected appearance and wallpaper layout guards: `6/6` passed.
 - Focused wallpaper frontend suites: `15` files, `93/93` tests passed.
@@ -111,11 +117,16 @@ Post-QA verification completed against the final working tree:
 - Rust formatting and `cargo clippy --all-targets -- -D warnings`: passed.
 - Targeted manifest-embedded Grok Saved Rust harness: `19/19` passed.
 - Windows Rust harness, with the repository test manifest embedded according
-  to CI: `1732` passed, `1` ignored, `0` failed.
+  to CI: `1795` passed, `1` ignored, `0` failed.
+- Automatic video-prompt, controller, controls, modal handoff, and gallery
+  focused suites: `5` files, `41/41` tests passed.
 - Final code-quality gate covered `77/77` thousand-line files; `git diff
   --check` passed.
 
 ## Notes
+
+- Current hardening and validation are tracked in
+  [2026-09-05-wallpaper-video-hardening.md](2026-09-05-wallpaper-video-hardening.md).
 
 - Generated-video containment and validation continue to use the canonical
   Windows path internally. The DTO strips the Windows extended-path prefix so

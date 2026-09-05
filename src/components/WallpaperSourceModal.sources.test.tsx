@@ -733,7 +733,7 @@ describe("WallpaperSourceModal remote source wiring", () => {
     await waitFor(() =>
       expect(wallpaperImageToVideo).toHaveBeenCalledWith(
         "H:\\wallpapers\\web\\video-source.jpg",
-        "",
+        "settings.wallpaperSource.videoPromptDefault",
         6,
         "480p",
         expect.stringMatching(/^[0-9a-f-]{36}$/),

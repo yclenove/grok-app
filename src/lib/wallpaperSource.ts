@@ -456,10 +456,11 @@ function ipcBytesToArrayBuffer(value: unknown): ArrayBuffer {
 export async function readLocalMediaBlobViaIpc(
   absolutePath: string,
   invokeImpl?: MediaInvoke,
-  opts?: { chunkSize?: number },
+  opts?: { chunkSize?: number; maxBytes?: number; signal?: AbortSignal },
 ): Promise<{ blob: Blob; info: MediaFileInfo }> {
   const invoke: MediaInvoke =
     invokeImpl ?? ((await import("@tauri-apps/api/core")).invoke as MediaInvoke);
+  opts?.signal?.throwIfAborted();
   const rawInfo = await invoke("media_file_info", {
     path: absolutePath,
   });
@@ -469,7 +470,7 @@ export async function readLocalMediaBlobViaIpc(
 
   const candidate = rawInfo as Partial<MediaFileInfo>;
   const bytes = Number(candidate.bytes);
-  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MEDIA_IPC_MAX_FILE) {
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > Math.min(opts?.maxBytes ?? MEDIA_IPC_MAX_FILE, MEDIA_IPC_MAX_FILE)) {
     throw new Error("read_failed: invalid media size");
   }
   const chunkSize = opts?.chunkSize ?? MEDIA_IPC_CHUNK;
@@ -496,6 +497,7 @@ export async function readLocalMediaBlobViaIpc(
   const parts: ArrayBuffer[] = [];
   let got = 0;
   for (let offset = 0; offset < bytes; offset += chunkSize) {
+    opts?.signal?.throwIfAborted();
     const length = Math.min(chunkSize, bytes - offset);
     const raw = await invoke("media_read_file_chunk", {
       path: absolutePath,
@@ -514,6 +516,7 @@ export async function readLocalMediaBlobViaIpc(
   if (got !== bytes) {
     throw new Error(`read_failed: short IPC read (${got}/${bytes} bytes)`);
   }
+  opts?.signal?.throwIfAborted();
   return { blob: new Blob(parts, { type: info.mime }), info };
 }
 

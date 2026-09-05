@@ -18,7 +18,7 @@ vi.mock("@/components/Select", () => ({
     "aria-label": ariaLabel,
   }: {
     value: string;
-    options: Array<{ value: string }>;
+    options: Array<{ value: string; label: string }>;
     disabled?: boolean;
     onChange: (value: string) => void;
     "aria-label"?: string;
@@ -32,7 +32,7 @@ vi.mock("@/components/Select", () => ({
         if (next) onChange(next.value);
       }}
     >
-      {value}
+      {options.find((option) => option.value === value)?.label ?? value}
     </button>
   ),
 }));
@@ -71,7 +71,11 @@ function model(
 }
 
 const t = ((key: string, vars?: Record<string, unknown>) =>
-  vars?.seconds ? `${key}:${vars.seconds}` : key) as never;
+  vars?.seconds
+    ? `${key}:${vars.seconds}`
+    : key === "policy.auto"
+      ? "Auto (localized)"
+      : key) as never;
 
 describe("WallpaperImagineControls", () => {
   it("switches between image and video modes", () => {
@@ -98,6 +102,24 @@ describe("WallpaperImagineControls", () => {
       }),
     );
     expect(onModeChange).toHaveBeenCalledWith("video");
+  });
+
+  it("localizes the automatic aspect option", () => {
+    render(
+      <WallpaperImagineControls
+        t={t}
+        locked={false}
+        model={model({
+          aspect: "auto",
+          aspectOptions: [
+            { value: "16:9", label: "16:9" },
+            { value: "auto", label: "auto" },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Auto (localized)")).toBeTruthy();
   });
 
   it("requires a prepared source and exposes supported video options", () => {
@@ -168,6 +190,30 @@ describe("WallpaperImagineControls", () => {
     );
     expect(onVideoDurationChange).toHaveBeenCalledWith(10);
     expect(onVideoResolutionChange).toHaveBeenCalledWith("720p");
+  });
+
+  it("shows the automatic video prompt as normal editable text", () => {
+    const onPromptChange = vi.fn();
+    render(
+      <WallpaperImagineControls
+        t={t}
+        locked={false}
+        model={model({
+          mode: "video",
+          prompt: "Slow cinematic push-in",
+          onPromptChange,
+        })}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "settings.wallpaperSource.videoPromptPlaceholder",
+    });
+    expect((textarea as HTMLTextAreaElement).value).toBe(
+      "Slow cinematic push-in",
+    );
+    fireEvent.change(textarea, { target: { value: "Gentle camera orbit" } });
+    expect(onPromptChange).toHaveBeenCalledWith("Gentle camera orbit");
   });
 
   it("turns the active generation action into cancel", () => {

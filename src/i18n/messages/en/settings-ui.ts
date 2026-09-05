@@ -377,6 +377,8 @@ export const enSettingsUi = {
   "settings.wallpaperSource.videoSourceMissing": "Choose an image from the gallery",
   "settings.wallpaperSource.removeVideoSource": "Remove source image",
   "settings.wallpaperSource.videoPromptPlaceholder": "Optional: describe motion or camera movement",
+  "settings.wallpaperSource.videoPromptDefault": "Bring the scene to life with subtle natural motion and a slow cinematic camera push-in. Keep the main subject stable and preserve the original composition and visual style.",
+  "settings.wallpaperSource.videoPromptDefaultWithContext": "Source scene: {context}\nBring it to life with subtle natural motion and a slow cinematic camera push-in. Keep the main subject stable and preserve the original composition and visual style.",
   "settings.wallpaperSource.videoDuration": "Duration",
   "settings.wallpaperSource.videoDurationSeconds": "{seconds} sec",
   "settings.wallpaperSource.videoResolution": "Resolution",
