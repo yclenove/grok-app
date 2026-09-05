@@ -1,8 +1,9 @@
 # Wallpaper image-to-video hardening — September 5
 
 Status: local implementation and automated regression complete. Windows video,
-search, and source-preparation acceptance passed; the fresh authenticated Grok
-Saved check remains limited by Cloudflare, as recorded below. No push or PR.
+search, and source-preparation acceptance passed. At the user's request, the fresh
+authenticated Grok Saved check is deferred to the evening manual session; it is
+not being polled or treated as passed. No push or PR.
 
 ## Review findings and changes
 
@@ -10,6 +11,11 @@ Saved check remains limited by Cloudflare, as recorded below. No push or PR.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
   decodes and snapshots all source images before invoking the CLI. No external
   image converter is required.
+- JPEG EXIF orientation was lost when Host re-encoded the source as PNG. New
+  regression tests first reproduced ignored mirroring and a rotated image keeping
+  the wrong dimensions. Host now applies the decoder's orientation after bounded
+  resizing and before stripping metadata, preserving the existing allocation
+  limits and the original file. All eight EXIF orientations are covered.
 - Source captions were being carried into a background agent prompt. Only an
   Imagine image's original prompt is retained; all other sources use a localized
   deterministic motion template. Prompt editing and separate image/video drafts
@@ -42,10 +48,20 @@ Saved check remains limited by Cloudflare, as recorded below. No push or PR.
   passed the 44 goal-orchestration tests and a fresh production build/typecheck.
 - Production UI build passed. Existing large-chunk advisories remain; the circular
   re-export warning is resolved.
-- Windows test harness, with the repository manifest embedded: 1,802 passed,
-  1 ignored, 0 failed. The video-specific subset passed 11 tests.
-- Windows device checks below use the final debug Host and Vite UI with a
-  separate temporary app data root and locally drawn, nonpersonal fixtures.
+- After the EXIF fix, the Windows test harness with the repository manifest
+  embedded passed 1,804 tests, with 1 ignored and 0 failed. The video-specific
+  subset passed 13 tests, including pixel-level checks for all eight orientations,
+  bounded rotated output, metadata removal, and no repeated rotation when a
+  normalized PNG is supplied through the browser path. Strict Clippy and final
+  code-quality gates passed again.
+- Windows device checks below used the debug Host and Vite UI before the EXIF
+  follow-up, with a separate temporary app data root and locally drawn,
+  nonpersonal fixtures. The EXIF fix was verified by native pixel-level regression;
+  it did not trigger another billable video generation.
+- The follow-up debug Host was rebuilt with `tauri.dev.conf.json` and restarted
+  against the same isolated profile. Its process remained responsive alongside
+  the installed app, and the Vite endpoint returned HTTP 200. This is a startup
+  check, not a fresh authenticated Saved or video-generation acceptance pass.
 
 ## Windows device acceptance
 
@@ -88,7 +104,8 @@ Saved check remains limited by Cloudflare, as recorded below. No push or PR.
 - Grok Saved opened its isolated WebView and encountered Cloudflare's human
   verification page. Authentication and challenge interaction were not
   automated. The September 4 authenticated gallery/paging/handoff evidence
-  remains historical and is not presented as a fresh September 5 pass.
+  remains historical and is not presented as a fresh September 5 pass. The user
+  subsequently deferred this check to the evening manual session.
 - Final file inspection retained two MP4 results and found zero transient source
   PNGs or late cancellation outputs. The temporary Pexels credential file was
   removed and its absence verified; the original profile was not modified.
@@ -103,9 +120,9 @@ Saved check remains limited by Cloudflare, as recorded below. No push or PR.
 - Exact-call auditing is a result acceptance check after CLI execution. It
   cannot undo upstream calls that a nonconforming CLI may already have made.
 - The existing production build still reports large bundle size advisories.
-- A fresh authenticated Grok Saved regression requires manual Cloudflare
-  verification. Its window-open boundary was checked, but the live saved-media
-  gallery could not be revalidated in this isolated run.
+- The user deferred fresh authenticated Grok Saved regression until they can
+  assist with the manual Cloudflare verification. Its window-open boundary was
+  checked; the live saved-media gallery remains unverified in this isolated run.
 - Web discovery can still include weak topical matches and visually similar
   crops. This sample contained one unrelated image and two near-duplicate views;
   URL/media identity deduplication does not establish semantic relevance or
