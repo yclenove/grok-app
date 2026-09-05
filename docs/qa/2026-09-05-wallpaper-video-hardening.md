@@ -1,13 +1,11 @@
 # Wallpaper image-to-video hardening — September 5
 
-Status: local implementation and automated regression complete. Windows video,
-search, and source-preparation acceptance passed. The manual session resumed
-across September 5-6: the rebuilt isolated app is available and the user has been
-asked to complete the official Saved login/challenge. The login subsequently
-reached xAI's device-verification wait page; the user reports that the regular
-browser works. A follow-up now confines album initialization scripts to the
-Grok top-level page. Final interaction and authenticated Saved acceptance remain
-open. No push or PR.
+Status: local implementation and automated regression complete. Initial Windows
+video, search, and source-preparation acceptance passed. The resumed September 6
+session found and fixed a missing media viewer in the standalone theme editor;
+its focused regression passes, with desktop playback verification pending.
+Saved now visibly shows media and additional pages after the user's manual
+session, but its full preview/source-handoff acceptance remains open. No push or PR.
 
 ## Acceptance ledger
 
@@ -29,7 +27,7 @@ focused coverage below; the earlier full-suite counts describe `37e15a6a`.
 | Complete automated regression and build gates | Resumed run: 607 frontend files / 7,210 tests, production build/typecheck, lint and quality gates; unchanged Rust baseline: 1,808 native tests, Clippy and fmt; four drop tests rerun | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
 | Final Windows interaction after later code changes | Rebuilt isolated Host renders alongside the installed app without a blocking permission prompt; Appearance and source workspace open | In progress; Explorer drag gesture and final wallpaper/video smoke are not yet claimed |
-| Fresh authenticated Grok Saved gallery, paging and video handoff | Fresh isolated window opened to the Cloudflare challenge; user asked to complete official verification/login | Awaiting user; September 4 gallery evidence remains historical |
+| Fresh authenticated Grok Saved gallery, paging and video handoff | September 6 desktop observations showed 40 displayed / 55 cached, then 80 displayed / 98 cached after user interaction | Gallery and page growth observed; preview and video handoff remain pending |
 | Review report and local commits without push/PR | This report and local merge `37e15a6a`; implementation worktree was clean after merge | Passed |
 
 The complete objective remains open for the two pending device rows. Continue
@@ -41,6 +39,17 @@ The completed automated suites do not need another run unless code changes or a
 new failure gives a reason. No further background Saved polling is planned.
 
 ## Review findings and changes
+
+- The standalone `ThemeEditorApp` did not mount `ImageViewerProvider`. Both
+  wallpaper library and Imagine result cards consequently called the optional
+  viewer's no-op fallback. The editor now provides the existing media lightbox
+  with its current locale. Two entry-point regressions failed before the fix
+  and passed afterward using the real image/video lightbox and close control.
+  The three focused suites passed 19 tests; TypeScript, targeted ESLint,
+  production UI build, and final code-quality gates passed. Existing bundle
+  size and mixed-import advisories remain.
+  Desktop inputs were paused when the UI tool detected concurrent user activity;
+  these automated checks are not proof of native video decoding/playback.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
@@ -215,9 +224,10 @@ new failure gives a reason. No further background Saved polling is planned.
 - Exact-call auditing is a result acceptance check after CLI execution. It
   cannot undo upstream calls that a nonconforming CLI may already have made.
 - The existing production build still reports large bundle size advisories.
-- Fresh authenticated Grok Saved regression awaits the user's manual Cloudflare
-  verification in the resumed session. Its window-open boundary was checked;
-  the live saved-media gallery remains unverified in this isolated run.
+- The resumed September 6 session visibly reached the Saved gallery and showed
+  additional pages after user interaction. This does not prove the earlier
+  device-verification stall was fixed by script scoping. Saved preview and
+  video-source handoff still need a fresh acceptance pass.
 - Web discovery can still include weak topical matches and visually similar
   crops. This sample contained one unrelated image and two near-duplicate views;
   URL/media identity deduplication does not establish semantic relevance or
