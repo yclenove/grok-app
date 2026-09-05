@@ -1,15 +1,19 @@
 /**
  * File drag-drop helpers (HTML5 DataTransfer + Tauri native path events).
  *
- * Windows strategy (#628 / #999):
- * - Keep `dragDropEnabled: true` (Tauri default) so Explorer folder/file drops
- *   deliver absolute paths via `webview.onDragDropEvent`. Sidebar "add project"
- *   needs those paths; HTML5 alone often has empty `File.path` for folders.
+ * Windows strategy (#628 / #999 / #1017):
+ * - Keep `dragDropEnabled: true` so Explorer folder/file drops can deliver
+ *   absolute paths. Sidebar "add project" needs those paths; HTML5 alone often
+ *   has empty `File.path` for folders. Never set `dragDropEnabled: false` —
+ *   that regresses to a forbidden cursor when paired with a hidden create.
+ * - Main window is created hidden (`visible: false`); wry's early OLE inject
+ *   can miss WebView2 child HWNDs (tauri#14643). Host re-registers drop
+ *   targets after `show()` (`win_file_drop`) and emits `tauri://drag-*`.
  * - HTML5 capture-phase listeners remain as a fallback (path via `File.path`
- *   or `text/uri-list`) and for non-OS drags. When Tauri already handled the
- *   drop, `shouldSkipHtml5AfterNative` prevents a second attach.
- * - Path-less blob drops (some cross-app images) may still need paste / picker;
- *   Explorer → composer attach goes through Tauri paths again.
+ *   or `text/uri-list`) and for non-OS drags. When a native drop already ran,
+ *   `shouldSkipHtml5AfterNative` prevents a second attach.
+ * - Zones: sidebar → add project; main/chat → attach files.
+ * - Path-less blob drops (some cross-app images) may still need paste / picker.
  */
 
 /** How long HTML5 drop should yield to a just-handled Tauri OS drop. */
