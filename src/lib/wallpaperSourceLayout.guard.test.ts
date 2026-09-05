@@ -50,7 +50,7 @@ describe("wallpaper source layout guard", () => {
       /\.wallpaper-imagine-source__thumb\s*\{[^}]*width:\s*56px[^}]*height:\s*36px[^}]*overflow:\s*hidden/s,
     );
     expect(sourceCss).toMatch(
-      /\.wallpaper-imagine-source__thumb img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*cover/s,
+      /\.wallpaper-imagine-source__thumb img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*contain/s,
     );
     expect(sourceCss).toMatch(
       /\.wallpaper-masonry-scroll:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--border-focus\)/s,

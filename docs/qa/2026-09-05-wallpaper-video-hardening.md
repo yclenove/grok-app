@@ -59,6 +59,14 @@ new failure gives a reason. No further background Saved polling is planned.
   1080p, ratio, or model selectors.
 - A fresh full frontend regression after these changes passed 608 test files
   and 7,222 tests. TypeScript and the final code-quality gates passed again.
+- A later visual follow-up changed the remaining video-source thumbnail from
+  `cover` to `contain`; its eight layout/control tests passed. The full-suite
+  count above predates this CSS-only follow-up. At 902 x 928, the main-window
+  library showed portrait and landscape cards without the old uniform crop.
+  Opening the existing six-second mountain/lake MP4 displayed changing frames;
+  clicking the video paused it at 0:03 / 0:06 with seek controls visible.
+  Escape closed only the lightbox and retained the filtered library and selected
+  card. No new generation or background application was performed.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
