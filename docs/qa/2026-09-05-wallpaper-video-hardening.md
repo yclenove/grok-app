@@ -31,12 +31,20 @@ not being polled or treated as passed. No push or PR.
 - Production build review exposed a circular re-export warning in the existing
   Reliability Center import. It now imports the view assembler directly; the
   rebuilt bundle no longer reports that circular chunk warning.
+- The later upstream Windows drop-target fix retained OLE media on drag-enter
+  and used `DragFinish` on drop, ignoring delegated COM ownership. The local
+  follow-up copies paths before releasing every acquired `STGMEDIUM` through
+  `ReleaseStgMedium`, including invalid data. A missing final data object now
+  clears hover and rejects the copy instead of reusing the previous drag paths.
+  The upstream formatting and strict Clippy failures were also corrected.
 
 ## Upstream synchronization
 
-- Refreshed `upstream/main` on September 5: `fb863234`.
-- Current branch already contains that commit; `git merge --no-edit upstream/main`
-  returned `Already up to date`. There were no new conflicts.
+- The earlier September 5 upstream baseline was `fb863234`.
+- A later refresh found `d794849f` (Windows Explorer drag-drop, #1017). It was
+  merged locally as `13b594a4`. The only conflict was the Windows feature list
+  in `Cargo.toml`; both the existing pipe support and upstream COM/OLE features
+  were retained. This is the upstream snapshot used for the final checks below.
 - Work remains local. No push or PR is part of this task.
 
 ## Verification
@@ -44,16 +52,19 @@ not being polled or treated as passed. No push or PR.
 - Focused frontend: 6 files, 57 tests passed.
 - TypeScript, ESLint, strict Clippy, and final code-quality gates passed.
 - Production dependency audit: no known vulnerabilities found.
-- Full frontend: 604 files, 7,185 tests passed. The subsequent import-only fix
-  passed the 44 goal-orchestration tests and a fresh production build/typecheck.
+- Full frontend baseline: 604 files, 7,185 tests passed. The subsequent import-only
+  fix passed the 44 goal-orchestration tests. The later upstream frontend changes
+  only touched file-drop comments and release notes; their 28 file-drop/What's New
+  tests and a fresh production build/typecheck passed after the merge.
 - Production UI build passed. Existing large-chunk advisories remain; the circular
   re-export warning is resolved.
-- After the EXIF fix, the Windows test harness with the repository manifest
-  embedded passed 1,804 tests, with 1 ignored and 0 failed. The video-specific
-  subset passed 13 tests, including pixel-level checks for all eight orientations,
-  bounded rotated output, metadata removal, and no repeated rotation when a
-  normalized PNG is supplied through the browser path. Strict Clippy and final
-  code-quality gates passed again.
+- After the upstream merge and OLE fix, the Windows test harness with the
+  repository manifest embedded passed 1,808 tests, with 1 ignored and 0 failed.
+  The 13 video tests include pixel-level checks for all eight EXIF orientations,
+  bounded rotated output, metadata removal, and no repeated rotation through the
+  browser PNG path. Four Windows drop-target tests cover path normalization,
+  delegated COM release on success/error, and lost final drop data. Strict Clippy,
+  formatting, and final code-quality gates passed again.
 - Windows device checks below used the debug Host and Vite UI before the EXIF
   follow-up, with a separate temporary app data root and locally drawn,
   nonpersonal fixtures. The EXIF fix was verified by native pixel-level regression;
@@ -62,6 +73,11 @@ not being polled or treated as passed. No push or PR.
   against the same isolated profile. Its process remained responsive alongside
   the installed app, and the Vite endpoint returned HTTP 200. This is a startup
   check, not a fresh authenticated Saved or video-generation acceptance pass.
+- After the upstream merge, the debug Host was rebuilt and its main workbench
+  visibly rendered. A Windows Firewall permission prompt for the newly linked
+  test harness obscured the window, so interactive follow-up was stopped without
+  changing system permissions. The OLE checks above are native automated tests;
+  no fresh Explorer-to-workbench drag gesture is claimed.
 
 ## Windows device acceptance
 
