@@ -32,7 +32,7 @@ describe("wallpaper source layout guard", () => {
       /@media \(min-width: 1320px\)[\s\S]*\.wallpaper-source-modal \.wallpaper-masonry--stable\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s,
     );
     expect(sourceCss).toMatch(
-      /\.wallpaper-masonry--stable \.wallpaper-masonry__media\s*\{[^}]*aspect-ratio:\s*16 \/ 10/s,
+      /\.wallpaper-masonry--stable \.wallpaper-masonry__media\s*\{[^}]*aspect-ratio:\s*auto/s,
     );
     expect(sourceCss).toMatch(
       /\.wallpaper-attribution--licensed \.wallpaper-attribution__author\s*\{[^}]*flex:\s*1 1 0/s,

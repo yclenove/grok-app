@@ -256,6 +256,10 @@ export function WallpaperSourceGallery({
                 ? resolveWallpaperXCitation(item)
                 : null;
             const labelKey = sourceLabelKey(item, library);
+            const mediaAspectRatio =
+              Number(item.width) > 0 && Number(item.height) > 0
+                ? `${Number(item.width)} / ${Number(item.height)}`
+                : undefined;
             const meta = loading
               ? t("settings.wallpaperSource.loadingOriginal")
               : [
@@ -282,7 +286,10 @@ export function WallpaperSourceGallery({
                     (locked && !loading ? " wallpaper-masonry__card--locked" : "")
                   }
                 >
-                  <div className="wallpaper-masonry__media-shell">
+                  <div
+                    className="wallpaper-masonry__media-shell"
+                    style={mediaAspectRatio ? { aspectRatio: mediaAspectRatio } : undefined}
+                  >
                     <button
                       type="button"
                       className="wallpaper-masonry__preview"

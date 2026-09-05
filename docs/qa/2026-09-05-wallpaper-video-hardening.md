@@ -50,6 +50,13 @@ new failure gives a reason. No further background Saved polling is planned.
   size and mixed-import advisories remain.
   Desktop inputs were paused when the UI tool detected concurrent user activity;
   these automated checks are not proof of native video decoding/playback.
+- Gallery cards previously forced paged media into a 16:10 crop. Cards now use
+  each item's validated width/height metadata and `contain`, preserving the
+  source ratio for library and remote results. The layout guard and gallery
+  tests pass. The current Grok Build image-to-video contract still exposes only
+  480p/720p, has no image-to-video aspect parameter, and fixes the model to
+  `grok-imagine-video-1.5`; the UI therefore does not advertise unsupported
+  1080p, ratio, or model selectors.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
