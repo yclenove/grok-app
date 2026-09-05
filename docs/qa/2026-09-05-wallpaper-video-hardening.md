@@ -57,6 +57,8 @@ new failure gives a reason. No further background Saved polling is planned.
   480p/720p, has no image-to-video aspect parameter, and fixes the model to
   `grok-imagine-video-1.5`; the UI therefore does not advertise unsupported
   1080p, ratio, or model selectors.
+- A fresh full frontend regression after these changes passed 608 test files
+  and 7,222 tests. TypeScript and the final code-quality gates passed again.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
