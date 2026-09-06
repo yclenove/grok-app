@@ -9,9 +9,15 @@ import {
   type WallpaperSourceGalleryProps,
 } from "./WallpaperSourceGallery";
 
-vi.mock("@/lib/imageSrc", () => ({
-  resolveImageSrcSync: (path: string) => `http://127.0.0.1/media/${encodeURIComponent(path)}`,
-}));
+vi.mock("@/lib/imageSrc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/imageSrc")>();
+  return {
+    ...actual,
+    ensureMediaEndpoint: vi.fn(() => Promise.resolve()),
+    resolveImageSrcSync: (path: string) =>
+      `http://127.0.0.1/media/${encodeURIComponent(path)}`,
+  };
+});
 
 afterEach(cleanup);
 

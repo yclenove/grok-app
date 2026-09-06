@@ -3,7 +3,11 @@ import { IconPlay } from "@/components/icons";
 import { RemoteWallpaperThumbnail } from "@/components/RemoteWallpaperThumbnail";
 import { WallpaperSourceAttribution } from "@/components/WallpaperSourceAttribution";
 import type { MessageKey } from "@/i18n";
-import { resolveImageSrcSync } from "@/lib/imageSrc";
+import {
+  ensureMediaEndpoint,
+  resolveImageSrcSync,
+} from "@/lib/imageSrc";
+import { useEffect, useState } from "react";
 import type {
   WallpaperGalleryItem,
   WallpaperSourceKind,
@@ -127,6 +131,18 @@ export function WallpaperSourceGallery({
   onDeleteLibraryItem,
   onLoadMore,
 }: WallpaperSourceGalleryProps) {
+  const [, refreshMediaSources] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    void ensureMediaEndpoint().then(() => {
+      if (mounted) refreshMediaSources((value) => value + 1);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const library = tab === "library";
   const imagineLayout = tab === "imagine";
   const stableAppendLayout =
