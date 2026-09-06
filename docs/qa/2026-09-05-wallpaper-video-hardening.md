@@ -10,11 +10,13 @@ session, but its full preview/source-handoff acceptance remains open. No push or
 ## Acceptance ledger
 
 The implementation baseline is `ad53ae93`. The resumed session merged upstream
-`ecd1d998` as `37e15a6a` and reran the full frontend suite and build gates. Rust
-sources and dependencies are identical to the previously validated baseline;
-the four Windows drop tests were also rerun successfully. The later September 6
-script-scoping follow-up changes two bundled JavaScript files and has separate
-focused coverage below; the earlier full-suite counts describe `37e15a6a`.
+`ecd1d998` as `37e15a6a`; a later fetch found upstream `b7196790` (v0.2.32),
+which is merged locally as `1cbbd58f`. The current branch also contains a
+search-palette lifecycle fix in `9f1aa261`. The current full frontend suite and
+UI build cover the merged frontend and lifecycle fix. The Windows Rust harness,
+strict Clippy, and formatting checks cover the merged native implementation;
+the later search fix changes only frontend files. Dependency audit and final
+quality gates also pass.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
@@ -23,12 +25,12 @@ focused coverage below; the earlier full-suite counts describe `37e15a6a`.
 | Isolate remote captions from agent instructions | Only Imagine's original prompt is used as context; tests reject inherited copy from X, Web, Openverse, Pexels, Saved, and library sources | Passed |
 | Restrict video execution and validate its output | Dedicated CLI flags, fresh session UUID, exact source/prompt/options audit, Host-owned result copy, containment/signature/size checks and rejection tests | Passed as a result-acceptance boundary; CLI compliance limitation remains below |
 | Cancel and release temporary resources | Real running CLI cancellation below; latest delayed encoder/reader tests; late results cannot start generation | Passed; latest browser cancellation change has automated coverage |
-| Merge latest fetched upstream and preserve local changes | `37e15a6a` merges `ecd1d998`; the OLE conflict keeps the validated `ReleaseStgMedium` implementation; no Rust changes relative to `2288f52f` | Passed for the recorded upstream snapshot |
-| Complete automated regression and build gates | Resumed run: 607 frontend files / 7,210 tests, production build/typecheck, lint and quality gates; unchanged Rust baseline: 1,808 native tests, Clippy and fmt; four drop tests rerun | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
+| Merge latest fetched upstream and preserve local changes | `1cbbd58f` merges upstream `b7196790` (v0.2.32); the OLE conflict keeps the validated `ReleaseStgMedium` implementation; search lifecycle fix is `9f1aa261` | Passed; upstream is an ancestor of HEAD |
+| Complete automated regression and build gates | Current run: 609 frontend files / 7,236 tests, production build/typecheck, lint and quality gates; 1,808 native tests with 1 ignored; four drop tests retained | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
 | Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the fresh generated apple MP4 plays on first open in the editor at 0:03 / 0:06 and Escape retains the library | Partial; Explorer drag remains pending |
 | Fresh authenticated Grok Saved gallery, paging and video handoff | September 6 desktop observations showed 40 displayed / 55 cached, then 80 displayed / 98 cached after user interaction | Gallery and page growth observed; preview and video handoff remain pending |
-| Review report and local commits without push/PR | This report and local merge `37e15a6a`; implementation worktree was clean after merge | Passed |
+| Review report and local commits without push/PR | Report updated after local merge `1cbbd58f` and fix `9f1aa261`; no push or PR | Passed |
 
 The complete objective remains open for the two pending device rows. Continue
 the Explorer folder drop into the sidebar/file drop into the composer using
@@ -76,11 +78,11 @@ new failure gives a reason. No further background Saved polling is planned.
   480p/720p, has no image-to-video aspect parameter, and fixes the model to
   `grok-imagine-video-1.5`; the UI therefore does not advertise unsupported
   1080p, ratio, or model selectors.
-- A fresh full frontend regression after these changes passed 608 test files
-  and 7,222 tests. TypeScript and the final code-quality gates passed again.
+- An earlier full frontend regression at this point passed 608 test files
+  and 7,222 tests. The current post-merge run below supersedes this count.
 - A later visual follow-up changed the remaining video-source thumbnail from
-  `cover` to `contain`; its eight layout/control tests passed. The full-suite
-  count above predates this CSS-only follow-up. At 902 x 928, the main-window
+  `cover` to `contain`; its eight layout/control tests passed. The current
+  full suite includes this follow-up. At 902 x 928, the main-window
   library showed portrait and landscape cards without the old uniform crop.
   Opening the existing six-second mountain/lake MP4 displayed changing frames;
   clicking the video paused it at 0:03 / 0:06 with seek controls visible.
@@ -100,7 +102,7 @@ new failure gives a reason. No further background Saved polling is planned.
   The app's existing composer draft and user media were preserved.
 - A fresh `pnpm build:ui` passed after the thumbnail and menu fixes, including
   TypeScript compilation. Existing mixed-import and large-chunk warnings remain.
-  The 7,222-test full run predates these two focused follow-ups.
+  The current 7,236-test full run includes these two follow-ups.
 - Reopening Saved from the standalone editor subsequently displayed the official
   Cloudflare human-verification page again. Manual completion was requested;
   no authentication UI was automated. This latest observation does not negate
@@ -112,8 +114,9 @@ new failure gives a reason. No further background Saved polling is planned.
   1,400,713-byte MP4 under the isolated wallpaper output. The Host accepted the
   result and rendered the result card. A follow-up fix now waits for the media
   endpoint before resolving local result URLs and refreshes the gallery when
-  that endpoint becomes ready; its gallery and layout regressions pass. A
-  fresh generated-result lightbox observation after this fix remains pending.
+  that endpoint becomes ready; its gallery and layout regressions pass.
+  The first-open playback checks at the start of this section verify this
+  generated MP4 after the fix, including a check without temporary diagnostics.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
@@ -178,8 +181,32 @@ new failure gives a reason. No further background Saved polling is planned.
   is empty. No wallpaper modules were deleted.
 - Work remains local. No push or PR is part of this task.
 
+- The latest fetched upstream is `b7196790` (v0.2.32), merged as `1cbbd58f`.
+  The Windows drop-target conflict retains RAII `DropMedium` ownership and
+  `ReleaseStgMedium` from the Ole namespace, while incorporating upstream
+  parent-window coordinate conversion and deduplicated HWND registration.
+  The lockfile retains both local `bytes` and upstream `block2` dependencies.
+  The new upstream macOS bridge was formatted with the repository formatter.
+
 ## Verification
 
+- Current September 6 regression: 609 frontend files / 7,236 tests passed
+  without unhandled errors (189.74 seconds). The initial run exposed a late
+  search callback after teardown; `9f1aa261` invalidates dispatched search
+  requests on close/unmount. Three delayed-result regressions cover close,
+  cleared queries, and title search; the close case failed before the fix.
+  After correcting a test fixture timestamp, all six focused search tests,
+  TypeScript, targeted/full ESLint, and the production UI build passed again.
+  The final UI build completed in 25.75 seconds with existing bundle advisories.
+- The latest merged Windows harness passed 1,808 tests with 1 ignored and
+  0 failed (51.86 seconds). Strict Clippy and formatting checks passed.
+  Final quality gates, production dependency audit (no known vulnerabilities),
+  dependency hygiene, and all three website download self-tests passed.
+- The post-merge debug Host rebuilt against the existing isolated QA profile.
+  A fresh desktop observation showed the responsive workbench, preserved
+  composer draft, and the Theme submenu remaining open after a click.
+  Saved preview/source handoff and physical Explorer drag remain pending;
+  startup and menu observations do not close either acceptance item.
 - The later script-scoping follow-up passed 37 focused tests across the fixed
   scripts, album controller and status panel, plus TypeScript and targeted
   ESLint. The native debug Host rebuilt successfully with the updated bundled
