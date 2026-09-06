@@ -90,9 +90,10 @@ new failure gives a reason. No further background Saved polling is planned.
   other or future CLI versions.
 - A fresh post-fix six-second/480p run invoked `image_to_video` once and wrote a
   1,400,713-byte MP4 under the isolated wallpaper output. The Host accepted the
-  result and rendered the result card, but the card's media area remained a
-  blank poster during this observation; opening the generated result itself in
-  the lightbox still needs a follow-up media-URL check.
+  result and rendered the result card. A follow-up fix now waits for the media
+  endpoint before resolving local result URLs and refreshes the gallery when
+  that endpoint becomes ready; its gallery and layout regressions pass. A
+  fresh generated-result lightbox observation after this fix remains pending.
 
 - An AVIF original reached the CLI video tool unchanged and failed format detection.
   The browser now converts AVIF/WebP/GIF to bounded PNG pixels; Host independently
