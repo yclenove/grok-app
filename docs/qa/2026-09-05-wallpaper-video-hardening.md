@@ -8,6 +8,31 @@ Saved gallery/page growth and the fresh authenticated preview/source-handoff
 acceptance now pass. The user confirmed physical Explorer drag on September 6,
 closing the final device acceptance item. No push or PR.
 
+## September 6 capability correction
+
+The completed playback/generation checks do not establish feature parity with
+the current video API. A follow-up check of live xAI documentation confirms
+that `grok-imagine-video-1.5` supports native 1080p for text-to-video and
+image-to-video. The generation API accepts `aspect_ratio`, including `16:9`.
+For image-to-video, an explicit ratio overrides the source ratio by stretching
+the input; reference-to-video has different first-frame semantics and is
+capped at 720p. The older `grok-imagine-video` model page lists 480p and 720p.
+
+The app currently hides the ratio selector in video mode and rejects any
+resolution outside 480p/720p in its Host validation. The previously inspected
+Grok Build source is an August 27 snapshot (`9684fa3`); the installed CLI now
+reports `1.0.13 (5e9a58528b76)`. That source snapshot is not authoritative for
+the installed tool schema or the current official model's capabilities.
+Ratio/1080p/model selection remains an application integration gap, not a
+demonstrated limitation of `grok-imagine-video-1.5`. This research-only correction
+does not implement those controls or verify account-specific API access.
+
+Live sources checked September 6:
+- [Video generation and configuration](https://docs.x.ai/developers/model-capabilities/video/generation)
+- [Image-to-video](https://docs.x.ai/developers/model-capabilities/video/image-to-video)
+- [Grok Imagine Video 1.5](https://docs.x.ai/developers/models/grok-imagine-video-1.5)
+- [Grok Imagine Video](https://docs.x.ai/developers/models/grok-imagine-video)
+
 ## Acceptance ledger
 
 The implementation baseline is `ad53ae93`. The resumed session merged upstream
@@ -33,7 +58,8 @@ quality gates also pass.
 | Fresh authenticated Grok Saved gallery, paging and video handoff | Earlier September 6 page growth reached 80 displayed / 98 cached; the post-merge Host reopened authenticated Saved, synchronized 20 displayed / 43 cached, opened image 1 / 20, and handed it to video mode with a ready source and immediate prompt | Passed; no new generation submitted during handoff acceptance |
 | Review report and local commits without push/PR | Report updated after local merge `1cbbd58f` and fix `9f1aa261`; no push or PR | Passed |
 
-All acceptance items are complete. In response to the final request to drag
+The playback/hardening acceptance items above are complete; the capability
+gap in the correction above remains unresolved. In response to the request to drag
 the test folder into the sidebar and its file into the composer, the user
 confirmed that dragging works. This is user-reported physical acceptance,
 separate from the automated OLE tests and agent-observed media checks.
@@ -67,10 +93,11 @@ new failure gives a reason. No further background Saved polling is planned.
   across three files; targeted ESLint and TypeScript passed. Product source is
   unchanged from the previously built implementation after diagnostic removal.
 - Native video controls exposed 480p and 720p, and selecting 720p updated the
-  field. The checked local Grok Build `video_gen` contract has only image,
+  field. The checked August 27 Grok Build `video_gen` snapshot has only image,
   prompt, duration, and resolution fields for `image_to_video`; its model is
   fixed to `grok-imagine-video-1.5`. Independent ratio, 1080p, and model choices
-  remain unsupported by this integration. No new generation was submitted.
+  are absent from this integration; the live API correction above supersedes
+  any inference about official model capabilities. No new generation was submitted.
 
 - The standalone `ThemeEditorApp` did not mount `ImageViewerProvider`. Both
   wallpaper library and Imagine result cards consequently called the optional
@@ -84,10 +111,10 @@ new failure gives a reason. No further background Saved polling is planned.
 - Gallery cards previously forced paged media into a 16:10 crop. Cards now use
   each item's validated width/height metadata and `contain`, preserving the
   source ratio for library and remote results. The layout guard and gallery
-  tests pass. The current Grok Build image-to-video contract still exposes only
+  tests pass. The previously inspected Grok Build image-to-video snapshot exposes only
   480p/720p, has no image-to-video aspect parameter, and fixes the model to
-  `grok-imagine-video-1.5`; the UI therefore does not advertise unsupported
-  1080p, ratio, or model selectors.
+  `grok-imagine-video-1.5`. The resulting lack of 1080p, ratio, or model selectors
+  is an integration gap; see the live API correction above.
 - An earlier full frontend regression at this point passed 608 test files
   and 7,222 tests. The current post-merge run below supersedes this count.
 - A later visual follow-up changed the remaining video-source thumbnail from
