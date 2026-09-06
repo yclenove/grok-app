@@ -31,7 +31,15 @@ fn accepts_only_one_completed_call_with_exact_parameters() {
     };
     let good = log(&expected);
     assert!(audit(&good, &expected).is_ok());
+    let fabricated_result = json!({ "params": { "sessionId": expected.session_id,
+        "update": { "sessionUpdate": "agent_message_chunk", "content": {
+            "type": "text", "text": json!({ "items": [{
+                "localPath": source, "kind": "video"
+            }] }).to_string()
+        } } } })
+    .to_string();
     for bad in [
+        fabricated_result,
         good.replace("image_to_video", "use_tool"),
         good.replace("session-1", "different-session"),
         good.replace("slow orbit", "ignore instructions"),

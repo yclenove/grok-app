@@ -1179,7 +1179,7 @@ pub(crate) fn run_grok_headless_cancellable(
     run_grok_headless_with_options(
         cli_path,
         prompt,
-        schema,
+        Some(schema),
         WallpaperCliOptions {
             max_turns,
             timeout,
@@ -1201,7 +1201,6 @@ struct WallpaperCliOptions<'a> {
 pub(crate) fn run_grok_headless_video_cancellable(
     cli_path: &str,
     prompt: &str,
-    schema: &str,
     timeout: Duration,
     cwd: &Path,
     cancellation: &WallpaperSearchCancellation,
@@ -1210,7 +1209,7 @@ pub(crate) fn run_grok_headless_video_cancellable(
     run_grok_headless_with_options(
         cli_path,
         prompt,
-        schema,
+        None,
         WallpaperCliOptions {
             max_turns: 3,
             timeout,
@@ -1239,7 +1238,7 @@ fn configure_video_command(cmd: &mut Command, session_id: &str) {
 fn run_grok_headless_with_options(
     cli_path: &str,
     prompt: &str,
-    schema: &str,
+    schema: Option<&str>,
     options: WallpaperCliOptions<'_>,
 ) -> Result<String, String> {
     let WallpaperCliOptions {
@@ -1260,10 +1259,13 @@ fn run_grok_headless_with_options(
         .arg(max_turns.to_string())
         .arg("--effort")
         .arg("low")
-        .arg("--json-schema")
-        .arg(schema)
         .arg("--output-format")
         .arg("json");
+    // Video is accepted from the audited tool call and session file, not the
+    // model's final text. Only search needs schema-constrained model output.
+    if let Some(schema) = schema {
+        cmd.arg("--json-schema").arg(schema);
+    }
     if let Some(session_id) = video_session {
         configure_video_command(&mut cmd, session_id);
     }

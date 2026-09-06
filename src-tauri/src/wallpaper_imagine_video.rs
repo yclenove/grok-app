@@ -175,31 +175,9 @@ fn generate_inner(
         duration,
         resolution_name,
     );
-    let schema = r#"{
-  "type": "object",
-  "properties": {
-    "items": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 1,
-      "items": {
-        "type": "object",
-        "properties": {
-          "localPath": { "type": "string" },
-          "kind": { "type": "string", "enum": ["video"] },
-          "prompt": { "type": "string" }
-        },
-        "required": ["localPath", "kind"]
-      }
-    }
-  },
-  "required": ["items"]
-}"#;
-
     let run = wallpaper_source::run_grok_headless_video_cancellable(
         &cli,
         &prompt,
-        schema,
         VIDEO_TIMEOUT,
         &output_dir,
         cancellation,
