@@ -4,8 +4,8 @@ Status: local implementation and automated regression complete. Initial Windows
 video, search, and source-preparation acceptance passed. The resumed September 6
 session found and fixed a missing media viewer in the standalone theme editor;
 its focused regression and standalone desktop video playback now pass.
-Saved now visibly shows media and additional pages after the user's manual
-session, but its full preview/source-handoff acceptance remains open. No push or PR.
+Saved gallery/page growth and the fresh authenticated preview/source-handoff
+acceptance now pass. Physical Explorer drag remains open. No push or PR.
 
 ## Acceptance ledger
 
@@ -29,19 +29,26 @@ quality gates also pass.
 | Complete automated regression and build gates | Current run: 609 frontend files / 7,236 tests, production build/typecheck, lint and quality gates; 1,808 native tests with 1 ignored; four drop tests retained | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
 | Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the fresh generated apple MP4 plays on first open in the editor at 0:03 / 0:06 and Escape retains the library | Partial; Explorer drag remains pending |
-| Fresh authenticated Grok Saved gallery, paging and video handoff | September 6 desktop observations showed 40 displayed / 55 cached, then 80 displayed / 98 cached after user interaction | Gallery and page growth observed; preview and video handoff remain pending |
+| Fresh authenticated Grok Saved gallery, paging and video handoff | Earlier September 6 page growth reached 80 displayed / 98 cached; the post-merge Host reopened authenticated Saved, synchronized 20 displayed / 43 cached, opened image 1 / 20, and handed it to video mode with a ready source and immediate prompt | Passed; no new generation submitted during handoff acceptance |
 | Review report and local commits without push/PR | Report updated after local merge `1cbbd58f` and fix `9f1aa261`; no push or PR | Passed |
 
-The complete objective remains open for the two pending device rows. Continue
+The complete objective remains open for the pending Explorer device check. Continue
 the Explorer folder drop into the sidebar/file drop into the composer using
-nonpersonal fixtures. Saved login and page growth
-have been observed; finish preview and source handoff without exporting
-authentication state.
+nonpersonal fixtures. Saved login, page growth, preview, and source handoff
+have been observed without exporting authentication state.
 The completed automated suites do not need another run unless code changes or a
 new failure gives a reason. No further background Saved polling is planned.
 
 ## Review findings and changes
 
+- Final September 6 Saved follow-up on the post-merge debug Host: the isolated
+  WebView reopened directly into the authenticated gallery. The app synchronized
+  20 displayed / 43 cached images. Opening the first card rendered the complete
+  portrait in the lightbox at 1 / 20; Escape returned to the same selected card.
+  Its video action opened Imagine video mode with the matching source thumbnail,
+  a ready-source status, the localized generic motion prompt, 6 seconds / 480p,
+  and an enabled Generate button. No generation, upload, or background change
+  was submitted. This closes the previously pending Saved preview/handoff check.
 - September 6 follow-up: the fresh 1,400,713-byte apple MP4 played on first
   open after reloading the standalone editor. No Next/Previous workaround was
   used. Clicking the video exposed its pause/seek controls at 0:05 / 0:06;
@@ -106,8 +113,8 @@ new failure gives a reason. No further background Saved polling is planned.
 - Reopening Saved from the standalone editor subsequently displayed the official
   Cloudflare human-verification page again. Manual completion was requested;
   no authentication UI was automated. This latest observation does not negate
-  the earlier authenticated gallery/page growth, but fresh Saved preview and
-  source handoff remain unverified. The local Grok Build source examined for
+  the earlier authenticated gallery/page growth. The later final Saved check
+  above closes preview/source-handoff acceptance. The local Grok Build source examined for
   video capabilities is evidence for this integration, not a guarantee about
   other or future CLI versions.
 - A fresh post-fix six-second/480p run invoked `image_to_video` once and wrote a
@@ -205,8 +212,9 @@ new failure gives a reason. No further background Saved polling is planned.
 - The post-merge debug Host rebuilt against the existing isolated QA profile.
   A fresh desktop observation showed the responsive workbench, preserved
   composer draft, and the Theme submenu remaining open after a click.
-  Saved preview/source handoff and physical Explorer drag remain pending;
-  startup and menu observations do not close either acceptance item.
+  The later Saved preview/source-handoff observation is recorded above.
+  Physical Explorer drag remains pending; startup and menu observations do
+  not close that acceptance item.
 - The later script-scoping follow-up passed 37 focused tests across the fixed
   scripts, album controller and status panel, plus TypeScript and targeted
   ESLint. The native debug Host rebuilt successfully with the updated bundled
@@ -222,8 +230,8 @@ new failure gives a reason. No further background Saved polling is planned.
   executable path, distinct from the running installed app. No security prompt
   blocked it. Appearance rendered the existing video preview at 902 x 928;
   the wallpaper source workspace and the independent Saved window opened.
-  Saved is currently at the official human-verification boundary, not accepted
-  as an authenticated gallery pass.
+  Saved was at the official human-verification boundary during that earlier
+  observation, not accepted as an authenticated gallery pass at that point.
 - Focused frontend: 6 files, 57 tests passed.
 - The cancellation follow-up passed 31 tests across the browser converter, video
   API, controller, controls, and prompt helper. New regression checks cover
@@ -316,9 +324,10 @@ new failure gives a reason. No further background Saved polling is planned.
   cannot undo upstream calls that a nonconforming CLI may already have made.
 - The existing production build still reports large bundle size advisories.
 - The resumed September 6 session visibly reached the Saved gallery and showed
-  additional pages after user interaction. This does not prove the earlier
-  device-verification stall was fixed by script scoping. Saved preview and
-  video-source handoff still need a fresh acceptance pass.
+  additional pages after user interaction. The final post-merge observation
+  also passed preview and video-source handoff. Successful later login does
+  not establish that script scoping caused the earlier verification stall
+  to resolve.
 - Web discovery can still include weak topical matches and visually similar
   crops. This sample contained one unrelated image and two near-duplicate views;
   URL/media identity deduplication does not establish semantic relevance or
