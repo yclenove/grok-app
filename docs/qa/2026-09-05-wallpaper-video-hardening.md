@@ -26,19 +26,39 @@ focused coverage below; the earlier full-suite counts describe `37e15a6a`.
 | Merge latest fetched upstream and preserve local changes | `37e15a6a` merges `ecd1d998`; the OLE conflict keeps the validated `ReleaseStgMedium` implementation; no Rust changes relative to `2288f52f` | Passed for the recorded upstream snapshot |
 | Complete automated regression and build gates | Resumed run: 607 frontend files / 7,210 tests, production build/typecheck, lint and quality gates; unchanged Rust baseline: 1,808 native tests, Clippy and fmt; four drop tests rerun | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
-| Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the six-second fixture plays in both native lightboxes and Escape retains the library | Partial; Explorer drag and fresh generated-result preview remain pending |
+| Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the fresh generated apple MP4 plays on first open in the editor at 0:03 / 0:06 and Escape retains the library | Partial; Explorer drag remains pending |
 | Fresh authenticated Grok Saved gallery, paging and video handoff | September 6 desktop observations showed 40 displayed / 55 cached, then 80 displayed / 98 cached after user interaction | Gallery and page growth observed; preview and video handoff remain pending |
 | Review report and local commits without push/PR | This report and local merge `37e15a6a`; implementation worktree was clean after merge | Passed |
 
 The complete objective remains open for the two pending device rows. Continue
-the generated-result preview and Explorer folder drop into the sidebar/file
-drop into the composer using nonpersonal fixtures. Saved login and page growth
+the Explorer folder drop into the sidebar/file drop into the composer using
+nonpersonal fixtures. Saved login and page growth
 have been observed; finish preview and source handoff without exporting
 authentication state.
 The completed automated suites do not need another run unless code changes or a
 new failure gives a reason. No further background Saved polling is planned.
 
 ## Review findings and changes
+
+- September 6 follow-up: the fresh 1,400,713-byte apple MP4 played on first
+  open after reloading the standalone editor. No Next/Previous workaround was
+  used. Clicking the video exposed its pause/seek controls at 0:05 / 0:06;
+  after removing all temporary diagnostics, a second first-open check showed
+  changing frames and paused at 0:03 / 0:06. Escape preserved the selected
+  card and video filter. The native accessibility tree misleadingly retained
+  "unable to play media" while the video was playing; that stale string alone
+  is not evidence of a decoding failure. Temporary event diagnostics recorded
+  successful metadata/playing events and no media error and are not shipped.
+- Two delayed-endpoint regressions cover library and Imagine result cards:
+  when the media endpoint becomes ready after mount, the video source updates
+  to loopback HTTP. The gallery, lightbox, and viewer suites passed 20 tests
+  across three files; targeted ESLint and TypeScript passed. Product source is
+  unchanged from the previously built implementation after diagnostic removal.
+- Native video controls exposed 480p and 720p, and selecting 720p updated the
+  field. The checked local Grok Build `video_gen` contract has only image,
+  prompt, duration, and resolution fields for `image_to_video`; its model is
+  fixed to `grok-imagine-video-1.5`. Independent ratio, 1080p, and model choices
+  remain unsupported by this integration. No new generation was submitted.
 
 - The standalone `ThemeEditorApp` did not mount `ImageViewerProvider`. Both
   wallpaper library and Imagine result cards consequently called the optional

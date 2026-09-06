@@ -1,9 +1,10 @@
 /**
  * @vitest-environment jsdom
  */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageKey } from "@/i18n";
+import { ensureMediaEndpoint, resolveImageSrcSync } from "@/lib/imageSrc";
 import {
   WallpaperSourceGallery,
   type WallpaperSourceGalleryProps,
@@ -14,8 +15,8 @@ vi.mock("@/lib/imageSrc", async (importOriginal) => {
   return {
     ...actual,
     ensureMediaEndpoint: vi.fn(() => Promise.resolve()),
-    resolveImageSrcSync: (path: string) =>
-      `http://127.0.0.1/media/${encodeURIComponent(path)}`,
+    resolveImageSrcSync: vi.fn((path: string) =>
+      `http://127.0.0.1/media/${encodeURIComponent(path)}`),
   };
 });
 
@@ -57,6 +58,41 @@ function galleryProps(
 }
 
 describe("WallpaperSourceGallery", () => {
+  it.each(["library", "imagine"] as const)(
+    "refreshes a local video in %s after the media endpoint becomes ready",
+    async (tab) => {
+      let finishEndpoint!: () => void;
+      vi.mocked(ensureMediaEndpoint).mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishEndpoint = () => resolve(null);
+        }),
+      );
+      vi.mocked(resolveImageSrcSync).mockReturnValueOnce(null);
+      const path = "H:/wallpapers/imagine/result.mp4";
+      const { container } = render(
+        <WallpaperSourceGallery
+          {...galleryProps({
+            tab,
+            visibleItems: [{
+              id: "generated-video",
+              kind: "video",
+              source: "imagine",
+              localPath: path,
+              fullUrl: `file://${path}`,
+              thumbUrl: "",
+            }],
+          })}
+        />,
+      );
+      const video = container.querySelector("video");
+      expect(video?.getAttribute("src")).toBe(`file://${path}`);
+      await act(async () => finishEndpoint());
+      expect(video?.getAttribute("src")).toBe(
+        `http://127.0.0.1/media/${encodeURIComponent(path)}`,
+      );
+    },
+  );
+
   it("gives each preview control an item-specific accessible name", () => {
     render(
       <WallpaperSourceGallery
