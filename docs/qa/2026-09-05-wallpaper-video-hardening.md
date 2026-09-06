@@ -5,7 +5,8 @@ video, search, and source-preparation acceptance passed. The resumed September 6
 session found and fixed a missing media viewer in the standalone theme editor;
 its focused regression and standalone desktop video playback now pass.
 Saved gallery/page growth and the fresh authenticated preview/source-handoff
-acceptance now pass. Physical Explorer drag remains open. No push or PR.
+acceptance now pass. The user confirmed physical Explorer drag on September 6,
+closing the final device acceptance item. No push or PR.
 
 ## Acceptance ledger
 
@@ -28,14 +29,16 @@ quality gates also pass.
 | Merge latest fetched upstream and preserve local changes | `1cbbd58f` merges upstream `b7196790` (v0.2.32); the OLE conflict keeps the validated `ReleaseStgMedium` implementation; search lifecycle fix is `9f1aa261` | Passed; upstream is an ancestor of HEAD |
 | Complete automated regression and build gates | Current run: 609 frontend files / 7,236 tests, production build/typecheck, lint and quality gates; 1,808 native tests with 1 ignored; four drop tests retained | Passed; the single ignored native test regenerates a mock-stream fixture and is not an acceptance test |
 | Real Windows generation, playback, background, source selection and search | Two MP4s and device observations below; 6s/480p and edited 10s/720p requests | Passed at the initial device-validation build; follow-up distinctions remain explicit below |
-| Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the fresh generated apple MP4 plays on first open in the editor at 0:03 / 0:06 and Escape retains the library | Partial; Explorer drag remains pending |
+| Final Windows interaction after later code changes | Main and standalone editor libraries preserve portrait/landscape ratios; the fresh generated apple MP4 plays on first open in the editor at 0:03 / 0:06 and Escape retains the library; the user confirmed the requested Explorer folder/file drag checks on September 6 | Passed; physical drag evidence is user confirmation |
 | Fresh authenticated Grok Saved gallery, paging and video handoff | Earlier September 6 page growth reached 80 displayed / 98 cached; the post-merge Host reopened authenticated Saved, synchronized 20 displayed / 43 cached, opened image 1 / 20, and handed it to video mode with a ready source and immediate prompt | Passed; no new generation submitted during handoff acceptance |
 | Review report and local commits without push/PR | Report updated after local merge `1cbbd58f` and fix `9f1aa261`; no push or PR | Passed |
 
-The complete objective remains open for the pending Explorer device check. Continue
-the Explorer folder drop into the sidebar/file drop into the composer using
-nonpersonal fixtures. Saved login, page growth, preview, and source handoff
-have been observed without exporting authentication state.
+All acceptance items are complete. In response to the final request to drag
+the test folder into the sidebar and its file into the composer, the user
+confirmed that dragging works. This is user-reported physical acceptance,
+separate from the automated OLE tests and agent-observed media checks.
+Saved login, page growth, preview, and source handoff have been observed
+without exporting authentication state.
 The completed automated suites do not need another run unless code changes or a
 new failure gives a reason. No further background Saved polling is planned.
 
@@ -213,13 +216,13 @@ new failure gives a reason. No further background Saved polling is planned.
   A fresh desktop observation showed the responsive workbench, preserved
   composer draft, and the Theme submenu remaining open after a click.
   The later Saved preview/source-handoff observation is recorded above.
-  Physical Explorer drag remains pending; startup and menu observations do
-  not close that acceptance item.
+  Physical Explorer drag was pending at that observation and was subsequently
+  confirmed by the user. Startup and menu observations alone do not prove it.
 - The later script-scoping follow-up passed 37 focused tests across the fixed
   scripts, album controller and status panel, plus TypeScript and targeted
   ESLint. The native debug Host rebuilt successfully with the updated bundled
-  scripts and the same isolated app home. Fresh manual login remains required
-  to determine whether the xAI device-verification wait is resolved.
+  scripts and the same isolated app home. Login was unverified at that point;
+  the later authenticated Saved observation above confirms successful access.
 - Resumed September 5-6 run on `37e15a6a`: 607 frontend files and 7,210 tests
   passed, with 0 failures (158.97 seconds). TypeScript, ESLint, production UI
   build and final code-quality gates passed. Four existing Windows drop-target
@@ -264,10 +267,15 @@ new failure gives a reason. No further background Saved polling is planned.
   visibly rendered. A Windows Firewall permission prompt for the newly linked
   test harness obscured the window, so interactive follow-up was stopped without
   changing system permissions. The OLE checks above are native automated tests;
-  no fresh Explorer-to-workbench drag gesture is claimed.
+  no agent-observed Explorer-to-workbench drag gesture is claimed. The user's
+  later manual confirmation closes physical acceptance separately.
 
 ## Windows device acceptance
 
+- Final September 6 manual check: the user replied that dragging works after
+  being asked to drag `qa-drop-project` into the project sidebar and its
+  `drop-check.txt` into the composer without sending. This closes the final
+  outstanding acceptance item; the agent did not automate that gesture.
 - AVIF opened in video mode with an immediate localized prompt. Browser decoding
   and the Host PNG snapshot succeeded. A real 6-second/480p request produced one
   590,201-byte H.264 MP4 (6.041667 seconds, 688 x 432) and passed the exact-call
