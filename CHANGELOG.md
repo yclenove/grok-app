@@ -13,25 +13,43 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.32] - 2026-09-06
+
+> **Highlight:** Windows drag-drop and Mac Doubao voice work again, with leaner tool memory.
+>
+> **中文 · 亮点：** Windows 拖放与 Mac 豆包语音恢复可用，工具内存也更省。
+
 ### Changed
-- Selecting chat text no longer refreshes the quote toolbar on every drag move. The bar appears when you release the pointer; keyboard selection still works.
+- The quote toolbar appears after text selection settles, keeping chat selection smooth.
 - Slash and @ detection pause while the window is hidden or the input is not focused.
-- Long chats stay smoother when no session files changed. An empty change list no longer rebuilds every transcript row.
+- Long chats stay smoother when no session files changed.
+- The quote comment box uses the same Enter / Ctrl+Enter shortcut as the composer (#1015).
+- Running tool steps stay collapsed by default to reduce memory use (#1018).
+- Completed tool output uses less memory in long turns (#1029).
 
 **中文 · 变更**
-- 对话划词时，引用工具栏不再跟着拖选每一帧刷新。松开鼠标后再出现；键盘划选仍可用。
+- 对话划词结束后再显示引用工具栏，对话选取更顺畅。
 - 窗口隐藏或输入框未聚焦时，斜杠和 @ 探测会停。
-- 没有文件变更时长对话更顺。空的变更列表不再重渲每一行。
+- 没有文件变更时，长对话保持流畅。
+- 划词评论框与输入框共用 Enter / Ctrl+Enter 发送快捷键（#1015）。
+- 工具运行中默认折叠，减少内存占用（#1018）。
+- 工具结束后占用更少内存，长回合更顺畅（#1029）。
 
 ### Fixed
 - Mac Control+Return steers a live turn again (#1023).
-- Windows Explorer drag-drop works again (sidebar add project, chat attach). No more forbidden cursor after a hidden window create (#1017).
+- Windows Explorer drag-drop works again for projects and chat attachments (#1017).
 - Image prompts no longer paint two user bubbles (#1021).
+- Enter in the composer sends a quote card even when the input is empty (#1015).
+- Wide Markdown tables now scroll horizontally without fading on the right (#1020).
+- Mac Doubao IME Fn / Globe voice works in the chat composer again (#1030).
 
 **中文 · 修复**
 - Mac 上 Control+Return 又能引导当前回合（#1023）。
-- Windows 从资源管理器拖文件/文件夹恢复可用（侧栏加项目、聊天加附件），不再显示禁止光标（#1017）。
+- Windows 资源管理器拖放项目和附件恢复可用（#1017）。
 - 带图发送不再画出两条用户气泡（#1021）。
+- 输入框为空时按 Enter 也能只发送引用卡片（#1015）。
+- 过宽的 Markdown 表格支持横向滚动，右侧不再变淡（#1020）。
+- Mac 上豆包输入法按 Fn / Globe 可唤起语音（#1030）。
 
 ## [0.2.31] - 2026-09-04
 

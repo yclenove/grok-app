@@ -54,7 +54,7 @@ const DRAG_LEAVE: &str = "tauri://drag-leave";
 
 // Keep `IDropTarget` COM refs alive on the UI thread (STA).
 thread_local! {
-    static TARGETS: RefCell<Vec<IDropTarget>> = const { RefCell::new(Vec::new()) };
+    static TARGETS: RefCell<Vec<(HWND, IDropTarget)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Clone, Serialize)]
@@ -105,11 +105,11 @@ fn register_on_window(window: &WebviewWindow) {
 
     let mut registered = 0usize;
     // Parent first (frameless client ≈ webview), then every child HWND.
-    if inject_hwnd(hwnd, listener.clone()) {
+    if inject_hwnd(hwnd, hwnd, listener.clone()) {
         registered += 1;
     }
     for child in enum_child_hwnds(hwnd) {
-        if inject_hwnd(child, listener.clone()) {
+        if inject_hwnd(child, hwnd, listener.clone()) {
             registered += 1;
         }
     }
@@ -181,16 +181,20 @@ impl Drop for DropMedium {
     }
 }
 
-fn inject_hwnd(hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> bool {
+fn inject_hwnd(hwnd: HWND, coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> bool {
     if hwnd.0.is_null() {
         return false;
     }
-    let target: IDropTarget = FileDropTarget::new(hwnd, listener).into();
+    let target: IDropTarget = FileDropTarget::new(coordinate_hwnd, listener).into();
     // Best-effort revoke (hwnd may never have been a drop target — that is OK).
     let _ = unsafe { RevokeDragDrop(hwnd) };
     match unsafe { RegisterDragDrop(hwnd, &target) } {
         Ok(()) => {
-            TARGETS.with(|slot| slot.borrow_mut().push(target));
+            TARGETS.with(|slot| {
+                let mut targets = slot.borrow_mut();
+                targets.retain(|(registered, _)| registered.0 != hwnd.0);
+                targets.push((hwnd, target));
+            });
             true
         }
         Err(e) => {
@@ -235,16 +239,16 @@ fn enum_child_hwnds(parent: HWND) -> Vec<HWND> {
 
 #[implement(IDropTarget)]
 struct FileDropTarget {
-    hwnd: HWND,
+    coordinate_hwnd: HWND,
     listener: Rc<dyn Fn(DropKind)>,
     cursor_effect: UnsafeCell<DROPEFFECT>,
     enter_is_valid: UnsafeCell<bool>,
 }
 
 impl FileDropTarget {
-    fn new(hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> Self {
+    fn new(coordinate_hwnd: HWND, listener: Rc<dyn Fn(DropKind)>) -> Self {
         Self {
-            hwnd,
+            coordinate_hwnd,
             listener,
             cursor_effect: UnsafeCell::new(DROPEFFECT_NONE),
             enter_is_valid: UnsafeCell::new(false),
@@ -314,7 +318,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         pt: &POINTL,
         pdwEffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
-        let (x, y) = FileDropTarget::client_point(self.hwnd, pt);
+        let (x, y) = FileDropTarget::client_point(self.coordinate_hwnd, pt);
         let paths = unsafe { FileDropTarget::read_paths(pDataObj) }.unwrap_or_default();
         let enter_is_valid = !paths.is_empty();
         unsafe {
@@ -340,7 +344,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         pdwEffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         if unsafe { *self.enter_is_valid.get() } {
-            let (x, y) = FileDropTarget::client_point(self.hwnd, pt);
+            let (x, y) = FileDropTarget::client_point(self.coordinate_hwnd, pt);
             (self.listener)(DropKind::Over { x, y });
         }
         unsafe {
@@ -369,7 +373,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
     ) -> windows::core::Result<()> {
         let mut effect = DROPEFFECT_NONE;
         if unsafe { *self.enter_is_valid.get() } {
-            let (x, y) = FileDropTarget::client_point(self.hwnd, pt);
+            let (x, y) = FileDropTarget::client_point(self.coordinate_hwnd, pt);
             let paths = unsafe { FileDropTarget::read_paths(pDataObj) }.unwrap_or_default();
             if !paths.is_empty() {
                 (self.listener)(DropKind::Drop { paths, x, y });

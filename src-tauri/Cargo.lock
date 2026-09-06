@@ -1884,12 +1884,13 @@ dependencies = [
 
 [[package]]
 name = "grok-app"
-version = "0.2.31"
+version = "0.2.32"
 dependencies = [
  "arboard",
  "async-stream",
  "axum",
  "base64 0.22.1",
+ "block2",
  "bytes",
  "chrono",
  "clipboard-win",
