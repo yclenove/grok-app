@@ -5,6 +5,7 @@
 ## 执行台账（2026-09-08）
 
 ### 最新交付进度（继续执行）
+最新发布：远程缩略图读取与解码限制 [#1092](https://github.com/RongleCat/grok-app/pull/1092)，分支 `fix/remote-thumbnail-decode-limits`，提交 `4151c54b`，独立基于 `a248f395`，不依赖 #1088–#1091。2 文件 +161/-7；现有远程缩略图接入 12 MiB 流式读取限制、尺寸/像素/解码器分配限制，保留本地及缓存路径。前端 7,070 / Rust 1,655（另 1 ignored），typecheck/lint/build/质量门禁/网站自测/依赖检查与审计/fmt/clippy 全通过。Windows 当前 Rust 产物经 manifest harness 实际执行成功。未手动桌面实测，远端 CI 待完成。累计 18 个 PR，未执行上游合并。下一步公共媒体读取与 Openverse/Pexels 搜索完整链路，之后接既有 provider 预取；所有来源、目录、生成队列仍未全量完成。
 来源/预加载拆分核对：最终产品快照 19168986 的 X 路线只有显式追加，自动一页预取实际位于 useWallpaperRemoteSourceController（Openverse/Pexels/Web）。因此后续先交付公共远程媒体和 provider 链路再提预取，不虚构 X 自动预取已实现。已建干净工作区 grok-app-pr-licensed-search / feat/wallpaper-licensed-search，当前仍为 f7458ff9，无产品变更。先从 upstream/main a248f395 独立建立 grok-app-pr-thumbnail-limits / fix/remote-thumbnail-decode-limits，提取 image_thumb 的有界内存解码并接入现有 remote thumbnail，同时流式限制下载体；本地检查进行中，尚未提交 PR。此项可独立合入且是公共媒体读取的真实前置，不暴露不可用来源入口。
 
 清理进程已结束：成功删除本地 test/menu-animation-cleanup、fix/wallpaper-x-quality-pipeline、fix/wallpaper-cli-output-drain、fix/wallpaper-search-lifecycle 及相应工作区。其他旧 worktree 的 Git 登记可能已移除但磁盘残留因长路径/权限未完全删除；递归删除补救被审批拒绝，保持残留，不再绕过。#1091 前端和三平台 Rust CI 已全绿。
