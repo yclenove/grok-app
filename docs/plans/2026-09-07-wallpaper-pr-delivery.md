@@ -4,6 +4,29 @@
 
 ## 执行台账（2026-09-08）
 
+### 最新交付进度（继续执行）
+
+送审节奏调整：用户在确认尚未全部提 PR 后明确要求继续执行。将原“最多三个待审”改为通过验证的独立主题持续分批送审，不再等待上一批合并；仍保留小 PR、明确依赖、中文说明、逐项验证及不擅自合并的要求。以下旧台账中的三项上限不再作为暂停条件。
+
+| 主题 | 分支 / 提交 | 送审与验证状态 |
+| --- | --- | --- |
+| A0 设置测试隔离 | `test/isolate-settings-roundtrip` / `1e63b928` | PR #1074，四项远端 CI 全通过 |
+| A1 媒体安全端口 | `fix/media-browser-safe-ports` / `89c3b5cf` | PR #1076，四项远端 CI 全通过；正文显式声明 #1074 前置 |
+| A2 Windows 拖放 | `fix/windows-drop-medium-ownership` / `447f863e` | PR #1077，四项远端 CI 全通过；关联历史 #1017，不自动关闭 |
+| A3 搜索迟到结果 | `fix/search-palette-late-results` / `18ef7d84` | PR #1078，前端 7,058 / Rust 1,605，所有本地门禁通过 |
+| B3 旧代理迁移 | `fix/settings-legacy-proxy-mode` / `88da27ab` | PR #1079，前端 7,057 / Rust 1,609，通过所有本地门禁 |
+| B1 图片预览生命周期 | `fix/viewer-lifecycle` / `5ffc94ea` | PR #1081，生命周期及稳定 Context，最终前端 7,060 / Rust 1,605 和所有本地门禁通过 |
+| B2 壁纸组件拆分 | `refactor/wallpaper-source-components` / `729f860f` | Controls/Gallery/Footer 已推送；前端 7,055 / Rust 1,605 和所有本地门禁通过，待菜单测试前置独立送审后提 PR |
+| B4 共用 HTTPS | `fix/https-connect-dns-validation` / `afe87a38` | PR #1080，只接入既有皮肤下载；前端 7,055 / Rust 1,624 和所有本地门禁通过 |
+| C1a 媒体 URL 规范化 | `fix/wallpaper-x-media-quality` / `7bb0edfb` | PR #1082，前端 7,055 / Rust 1,608 和所有本地门禁通过；尚不包含完整质量排序、任务生命周期和 Responses |
+| A4 菜单测试清理 | `test/menu-animation-cleanup` / `8c01d61d` | 独立工作区，全量前端 7,055 通过，原生门禁进行中 |
+
+上述 Rust 数量均另有 1 项原有 ignored。未宣称这些新拆分分支完成手动桌面实机测试。B2 回归暴露的 `UserMenu.test.tsx` 退出动画清理缺失已另立提交 `8c01d61d`，全量重跑通过；公开前按独立测试修复处理该提交。
+
+执行调整：不再因 #1074 尚未合入而停止准备工作。其余 PR 明确列出前置测试提交和合入顺序，先供维护者独立审查；前置合入后再消除重复差异。通过验证的独立主题持续送审，不按三项上限暂停。没有执行上游合并。
+
+以下早期台账保留作追溯，状态以本表为准。
+
 - 已从上游 `30757366` 创建 A1、A2、A3 和 B3 独立工作区，原始集成分支及未提交修改保留。
 - A1 前端 7,055 项测试、类型检查、lint、UI 构建、质量门禁、网站自测、依赖检查/审计、Rust fmt/clippy 通过；原生测试发现上游设置读写测试隔离缺失，媒体测试通过。
 - 新增 A0 `test/isolate-settings-roundtrip`：仅修复设置读写测试的共享目录竞争，优先独立送审；本分支全量验证进行中。
