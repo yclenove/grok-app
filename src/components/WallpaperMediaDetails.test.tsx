@@ -127,4 +127,21 @@ describe("WallpaperMediaDetails", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(p.onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("cancels a parent preview still resolving when details close", async () => {
+    find.mockResolvedValue(parent);
+    const viewer: ImageViewerApi = {
+      open: vi.fn(), close: vi.fn(), isOpen: () => false,
+      copyImage: async () => false,
+    };
+    const p = props();
+    const view = render(<ImageViewerContext.Provider value={viewer}><WallpaperMediaDetails {...p} /></ImageViewerContext.Provider>);
+    fireEvent.click(screen.getByRole("button", { name: "View source image" }));
+    await screen.findByText("Original title");
+    fireEvent.click(screen.getByRole("button", { name: "Open full-size preview" }));
+    expect(viewer.open).toHaveBeenCalledOnce();
+    expect(viewer.isOpen()).toBe(false);
+    view.unmount();
+    expect(viewer.close).toHaveBeenCalledOnce();
+  });
 });

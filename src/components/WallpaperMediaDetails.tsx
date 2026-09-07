@@ -33,6 +33,7 @@ function MediaDetailsContent({ item: resultItem, t, locked, onClose, onOpenSourc
   const [error, setError] = useState<MessageKey | null>(null);
   const request = useRef(0);
   const pending = useRef(false);
+  const ownsPreview = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -46,7 +47,10 @@ function MediaDetailsContent({ item: resultItem, t, locked, onClose, onOpenSourc
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (viewer.isOpen()) viewer.close();
+        if (viewer.isOpen()) {
+          viewer.close();
+          ownsPreview.current = false;
+        }
         else closeRef.current();
       } else if (event.key === "Tab" && !viewer.isOpen()) {
         trapTabKey(event, contentRef.current?.closest('[role="dialog"]'));
@@ -56,6 +60,9 @@ function MediaDetailsContent({ item: resultItem, t, locked, onClose, onOpenSourc
     document.addEventListener("keydown", onKey, true);
     return () => {
       request.current += 1;
+      // Opening a local preview can still be resolving its media URL/size.
+      // Cancel that work too so it cannot appear after these details close.
+      if (ownsPreview.current) viewer.close();
       document.removeEventListener("keydown", onKey, true);
     };
   }, [viewer]);
@@ -117,7 +124,10 @@ function MediaDetailsContent({ item: resultItem, t, locked, onClose, onOpenSourc
       {item.metadata?.parentId ? <button className="btn btn--ghost" type="button" disabled={locked || loading}
         aria-busy={loading} onClick={() => void openParent()}>{t(loading ? "media.loading" : "settings.wallpaperSource.details.parent")}</button> : null}
       {parents.length > 0 && item.localPath ? <button className="btn btn--ghost" type="button" disabled={locked || loading}
-        onClick={() => viewer.open([{ src: item.localPath!, kind: item.kind === "video" ? "video" : "image", title: item.textPreview || undefined }])}>
+        onClick={() => {
+          ownsPreview.current = true;
+          viewer.open([{ src: item.localPath!, kind: item.kind === "video" ? "video" : "image", title: item.textPreview || undefined }]);
+        }}>
         {t("settings.wallpaperSource.openPreview")}</button> : null}
       {prompt?.trim() && onReusePrompt ? <button className="btn btn--primary" type="button" disabled={locked || loading}
         onClick={() => onReusePrompt(item)}>{t("settings.wallpaperSource.details.reuse")}</button> : null}
