@@ -6,6 +6,8 @@
 
 ### 最新交付进度（继续执行）
 
+最新发布：C1d 生命周期已提交 [#1087](https://github.com/RongleCat/grok-app/pull/1087)，提交 `b9160a0b`、分支 `fix/wallpaper-search-lifecycle`。本主题 26 文件 +927/-25，包含 15 语言、取消按钮/关闭/来源切换、请求 ID 与预取消、真实 CLI/图片探测取消及进度、连续重搜与迟到结果隔离。前端 7,060 / Rust 1,623（另 1 ignored）及所有本地门禁通过，最终定向 5 项通过；合成 CLI 等待执行阶段标记后再取消。尚未手动桌面实测。依赖 #1074/#1082/#1085/#1086；没有加入 Responses 或缓存。累计 13 个 PR，前 12 个四平台远端 CI 全通过，#1087 CI 待完成。下一批 C2 Responses 完整灰度；全量剩余队列仍未完成。
+
 最新发布：CLI 管道修复已提交 [#1086](https://github.com/RongleCat/grok-app/pull/1086)，提交 `e68edad0`、分支 `fix/wallpaper-cli-output-drain`。前端 7,055 / Rust 1,608（另 1 ignored）及所有本地门禁通过；大 stdout/stderr、超量输出、持有管道退出测试实际执行通过。累计 12 个 PR；#1085/#1086 远端 CI 待完成。下一步继续 CLI requestId/进度/取消的完整前后端接入，再推进 Responses。未完成项仍按下方全量队列交付。
 
 最新增量：C1b 已提交 [#1085](https://github.com/RongleCat/grok-app/pull/1085)，分支 `fix/wallpaper-x-quality-pipeline`，提交 `b995a18f`。图片内容校验、合并排序和不足时补搜已接入 CLI；前端 7,055 / Rust 1,615（另 1 ignored）及全部本地门禁通过。拆分复核同时修正 HEIC 被当作 AVIF、保留解析去重并合并丰富元数据。依赖 #1074/#1082；尚未手动桌面验证。
