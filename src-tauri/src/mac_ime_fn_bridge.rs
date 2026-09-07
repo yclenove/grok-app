@@ -148,8 +148,7 @@ unsafe fn post_right_option_tap(ns_app: *mut objc2::runtime::AnyObject) {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
 
-    let empty: *mut AnyObject =
-        msg_send![class!(NSString), stringWithUTF8String: b"\0".as_ptr() as *const i8];
+    let empty: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"".as_ptr()];
     let loc = CGPoint { x: 0.0, y: 0.0 };
     for ty in [NS_EVENT_TYPE_KEY_DOWN, NS_EVENT_TYPE_KEY_UP] {
         let ev: *mut AnyObject = msg_send![

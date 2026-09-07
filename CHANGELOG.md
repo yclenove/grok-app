@@ -13,6 +13,40 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+### Added
+- Ctrl+Tab jumps back to the last chat you used. Hold Ctrl and tap Tab to cycle further; Ctrl+Shift+Tab goes the other way.
+
+**中文 · 新增**
+- Ctrl+Tab 切回上一个用过的对话。按住 Ctrl 再点 Tab 继续循环；Ctrl+Shift+Tab 反向。
+
+### Changed
+- Expanded sidebar pins remaining SuperGrok quota without opening the account menu (#1048). Settings is a footer gear; the account menu keeps theme and sign-in.
+
+**中文 · 变更**
+- 展开左边栏即可看到 SuperGrok 剩余额度，不必再点开账户菜单（#1048）。设置改为脚注齿轮；账户菜单只留主题和登录。
+
+## [0.2.33] - 2026-09-06
+
+> **Highlight:** Windows installers are back, with composer shortcuts and worktree GC fixes.
+>
+> **中文 · 亮点：** Windows 安装包恢复上架，输入框快捷键与 worktree 清理也修好了。
+
+### Fixed
+- Windows setup and portable packages publish again after the 0.2.32 build break (#1039).
+- New chat and Settings shortcuts work while the message box is focused (#1035).
+- Worktree GC confirm actually runs prune instead of only closing the dialog (#1037).
+
+**中文 · 修复**
+- Windows 安装版与绿色版重新随 Release 发布（#1039）。
+- 光标在消息输入框时，新建对话和设置快捷键也能用（#1035）。
+- Worktree 清理点确认会真正执行 prune，而不只是关掉对话框（#1037）。
+
+### Changed
+- Release CI fails the gate unless every macOS, Windows, and Linux installer is on the tag.
+
+**中文 · 变更**
+- 发版门禁要求 macOS / Windows / Linux 安装包齐全，缺任一平台会失败。
+
 ## [0.2.32] - 2026-09-06
 
 > **Highlight:** Windows drag-drop and Mac Doubao voice work again, with leaner tool memory.

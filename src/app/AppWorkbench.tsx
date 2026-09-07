@@ -16,16 +16,13 @@ import { useFloatingMenu } from "@/lib/floatingMenu";
 import { restoreSessionGate } from "@/lib/sessionGateRestore";
 import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
 import { formatRelativeTime } from "@/lib/accountUi";
-import {
-  canFetchOfficialQuota,
-  mergeAccountStatusPreservingLocalUsage,
-} from "@/lib/accountQuotaRefresh";
 import { loadConfirmExternalLinksPref } from "@/lib/externalLinkPref";
 import {
   chatcutHandoffToResourceOpenTarget,
   resolveChatcutLinkClick,
 } from "@/lib/chatcutHandoff";
 import { loadStopAllSkipConfirmPref } from "@/lib/stopAllSkipConfirmPref";
+
 import {
   planStopAllBusySessions,
   stopAllDialogKeys,
@@ -47,7 +44,6 @@ import { writeOpenTargetStorage } from "@/lib/openEditorHonesty";
 import { buildContinueAgentPrompt } from "@/lib/continueInterruptedTurn";
 import {
   APP_CLOSE_REQUESTED_EVENT,
-  APP_CLOSE_TAB_OR_WINDOW_EVENT,
   loadAlwaysQuitWithoutAskingPref,
   shouldConfirmQuit,
 } from "@/lib/confirmQuit";
@@ -120,7 +116,6 @@ import {
   type ContextUsageState,
 } from "@/lib/contextUsage";
 import {
-  applyPlanPendingMembership,
   closedSessionPlan,
   emptySessionPlan,
   invalidatePlanGate,
@@ -134,7 +129,7 @@ import {
   countQuitBlockingSessions,
   stoppableActivitySessions,
 } from "@/lib/agentActivity";
-import { resolveTrayBusyBadgeCount } from "@/lib/trayNotifyPro";
+
 import {
   collectAgentDashboardRows,
   countBusyDashboardRows,
@@ -299,26 +294,10 @@ import {
   VOICE_HOTKEY_STORAGE_KEY,
 } from "@/lib/voiceHotkeyPref";
 import {
-  ensureNotifyPermission,
   listenForNativeNotifyClicks,
   setDesktopNotifySessionFocusHandler,
 } from "@/lib/desktopNotify";
-import {
-  clearAllMutes as clearAllSessionMutes,
-  loadMutedSessionIds,
-  SESSION_MUTE_CHANGE_EVENT,
-  shouldConfirmClearAllMutes,
-  toggle as toggleSessionMute,
-} from "@/lib/sessionMute";
-import {
-  clearAllUnread as clearAllSessionUnread,
-  clearUnread as clearSessionUnread,
-  isWorkbenchForeground,
-  loadUnreadSessionIds,
-  markUnread as markSessionUnread,
-  SESSION_UNREAD_CHANGE_EVENT,
-  shouldConfirmClearAllUnread,
-} from "@/lib/sessionUnread";
+
 import {
   clearNote as clearSessionNote,
   getNote as getSessionNote,
@@ -461,7 +440,6 @@ import type { MessageKey } from "@/i18n";
 import { ImageViewerProvider } from "@/components/ImageViewer";
 import {
   type SidebarSessionRowLabels,
-  type SidebarSessionWorktreeBadgeProp,
 } from "@/components/SidebarSessionRow";
 import { sidebarSessionRowMetrics } from "@/lib/sidebarDensity";
 import { sortSessionsForSidebar } from "@/lib/sidebarDateGroups";
@@ -482,36 +460,9 @@ import {
 } from "@/components/ComposerEditor";
 
 import {
-  applyGitStatusBranch,
-  buildWorktreePath,
-  canRemoveWorktree,
-  mainWorktreePath,
-  normalizeWorktreeLayout,
   pathsEqual,
-  resolveSessionWorktreeBadge,
-  sanitizeWorktreeName,
-  sanitizeWorktreeRef,
-  sessionWorktreeTooltip,
   worktreeEntryForPath,
-  worktreeRemoveErrorSuggestsForce,
-  type SessionWorktreeBadge,
-  type WorktreeLayout,
 } from "@/lib/gitWorktree";
-import { filterCliWorktreesForProject } from "@/lib/cliWorktrees";
-import {
-  canShipWorktree,
-  combineShipOutcome,
-  defaultPrTitleFromBranch,
-  redactShipOutput,
-  sanitizePrBody,
-  sanitizePrTitle,
-  shipOutcomeSummary,
-} from "@/lib/wtShipFlow";
-import {
-  PR_HUB_ANCHOR_ID,
-  buildPrHubDeepLink,
-  parseGithubPrNumber,
-} from "@/lib/prHubDeepLink";
 import {
   buildForkWorktreeName,
   canRestoreCodeOnFork,
@@ -581,18 +532,11 @@ import {
 } from "@/lib/providerBalanceFormat";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import {
-  applySideStripClose,
-  emptySideWorkbenchState,
-  openSideTab,
-  openSideTabFromPicker,
   type SidePickerKind,
-  type SideWorkbenchState,
 } from "@/lib/sideWorkbench";
 import {
-  isSideDockComposerActive,
   shouldHideChatForSideExpand,
 } from "@/lib/sideFloatComposer";
-import { applySideContextOpen } from "@/lib/sideContextOpen";
 import { resolveSidePathDeepLink } from "@/lib/sidePathDeepLink";
 
 import { WorkbenchAppDialogStage } from "@/app/WorkbenchAppDialogStage";
@@ -604,7 +548,7 @@ import {
   summarizeSessionChanges,
   type SessionFileChange,
 } from "@/lib/sessionChanges";
-import { pinReviewFocusPath } from "@/lib/reviewFocusPaths";
+
 import {
   gitDirtySummariesEqual,
   summarizeGitDirty,
@@ -634,16 +578,12 @@ import {
   preferPermissionFocus,
   trapTabKey,
 } from "@/lib/a11yFocus";
-import {
-  quotaFromHostItem,
-  type SwitcherQuota,
-} from "@/lib/accountSwitcherQuota";
+
 import {
   type SettingsSectionId,
 } from "@/components/SettingsPage";
 import { isSettingsSectionId } from "@/lib/settingsCatalog";
 import {
-  isAccountConnected,
   loadCachedSuperGrokBrand,
   resolveWelcomeBrandKind,
   saveCachedSuperGrokBrand,
@@ -681,7 +621,14 @@ import {
 import { useSidebarProjectReorder } from "@/hooks/useSidebarProjectReorder";
 import { useSessionMoveProject } from "@/hooks/useSessionMoveProject";
 import { useSidebarSessionMoveDrag } from "@/hooks/useSidebarSessionMoveDrag";
-import { useSideWorkbenchProjectIsolation } from "@/hooks/useSideWorkbenchProjectIsolation";
+import {
+  createSessionChromeBadgesHost,
+  useSessionChromeBadges,
+} from "@/hooks/useSessionChromeBadges";
+import {
+  createSideWorkbenchChromeHost,
+  useSideWorkbenchChrome,
+} from "@/hooks/useSideWorkbenchChrome";
 import { useBottomTerminal } from "@/hooks/useBottomTerminal";
 import { useProjectSpaces } from "@/hooks/useProjectSpaces";
 import {
@@ -695,13 +642,25 @@ import type { ContextMenuState } from "@/lib/app/appDialogTypes";
 import { useSessionRuntime } from "@/hooks/useSessionRuntime";
 import { sessionTranscriptStore } from "@/lib/sessionTranscriptStore";
 import { useSessionConnect, createSessionConnectHost } from "@/hooks/useSessionConnect";
+import {
+  createGitWorktreeChromeHost,
+  useGitWorktreeChrome,
+} from "@/hooks/useGitWorktreeChrome";
 import { useComposerController } from "@/hooks/useComposerController";
 import { useTypeToFocusComposer } from "@/hooks/useTypeToFocusComposer";
 import { useAppDialogs } from "@/hooks/useAppDialogs";
 import { useSessionHostEvents } from "@/hooks/useSessionHostEvents";
 import { useSessionSpend } from "@/hooks/useSessionSpend";
 import { useGhostStreamingHeal } from "@/hooks/useGhostStreamingHeal";
-import { useAccountQuotaAutoRefresh } from "@/hooks/useAccountQuotaAutoRefresh";
+import {
+  createAccountQuotaChromeHost,
+  useAccountQuotaChrome,
+} from "@/hooks/useAccountQuotaChrome";
+import {
+  createMcpDoctorChromeHost,
+  useMcpDoctorChrome,
+} from "@/hooks/useMcpDoctorChrome";
+import { useSetupBootGate } from "@/hooks/useSetupBootGate";
 import { useWorkbenchDisplayPrefs } from "@/hooks/useWorkbenchDisplayPrefs";
 import { useWorkbenchLayout } from "@/hooks/useWorkbenchLayout";
 import { useSettingsNavigation } from "@/hooks/useSettingsNavigation";
@@ -823,84 +782,6 @@ export function AppWorkbench() {
         /* non-Tauri / server down */
       });
   }, []);
-  /** Per-session desktop notification mute (localStorage Set). */
-  const [mutedSessionIds, setMutedSessionIds] = useState<Set<string>>(
-    () => loadMutedSessionIds(),
-  );
-  useEffect(() => {
-    const onChange = () => setMutedSessionIds(loadMutedSessionIds());
-    window.addEventListener(SESSION_MUTE_CHANGE_EVENT, onChange);
-    return () => window.removeEventListener(SESSION_MUTE_CHANGE_EVENT, onChange);
-  }, []);
-  /**
-   * Sessions that finished a turn while not viewed (localStorage Set).
-   * Independent of mute — muted chats still show the sidebar unread dot.
-   */
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(
-    () => loadUnreadSessionIds(),
-  );
-  useEffect(() => {
-    const onChange = () => setUnreadSessionIds(loadUnreadSessionIds());
-    window.addEventListener(SESSION_UNREAD_CHANGE_EVENT, onChange);
-    return () =>
-      window.removeEventListener(SESSION_UNREAD_CHANGE_EVENT, onChange);
-  }, []);
-  /**
-   * Clear one session's unread marker and sync React state immediately so
-   * sidebar dots + dock/tray badge count drop without waiting solely on the
-   * storage CustomEvent (open / focus / mark-as-read paths share this).
-   */
-  const applyClearSessionUnread = useCallback(
-    (sessionId: string | null | undefined) => {
-      const id = typeof sessionId === "string" ? sessionId.trim() : "";
-      if (!id) return;
-      clearSessionUnread(id);
-      setUnreadSessionIds((prev) => {
-        if (!prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    },
-    [],
-  );
-  /**
-   * Manual "mark as unread" while the chat is still open: hold the badge until
-   * the user leaves and re-opens the thread (auto clear-on-view still applies).
-   */
-  const manualUnreadHoldIdsRef = useRef<Set<string>>(new Set());
-  const applyMarkSessionUnread = useCallback(
-    (sessionId: string | null | undefined) => {
-      const id = typeof sessionId === "string" ? sessionId.trim() : "";
-      if (!id) return;
-      markSessionUnread(id);
-      setUnreadSessionIds((prev) => {
-        if (prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.add(id);
-        return next;
-      });
-      if (viewingSessionIdRef.current === id) {
-        manualUnreadHoldIdsRef.current.add(id);
-      }
-    },
-    [],
-  );
-  /**
-   * Sessions with an open plan review gate (or restored re-park wait).
-   * Sidebar badge only — does not change open/busy/select interactions.
-   */
-  const [planPendingSessionIds, setPlanPendingSessionIds] = useState<
-    Set<string>
-  >(() => new Set());
-  const markPlanPendingBadge = useCallback(
-    (sessionId: string | null | undefined, plan: SessionPlanState) => {
-      setPlanPendingSessionIds((prev) =>
-        applyPlanPendingMembership(prev, sessionId, plan),
-      );
-    },
-    [],
-  );
   const {
     appDialog,
     setAppDialog,
@@ -1008,29 +889,6 @@ export function AppWorkbench() {
   } = useWorkbenchLayout({
     onAsideClose: () => asideCloseExtrasRef.current(),
   });
-  /** Side Workbench multi-kind tabs (session-local; Phase 0+). */
-  const [sideWorkbench, setSideWorkbench] = useState<SideWorkbenchState>(
-    emptySideWorkbenchState,
-  );
-  const sideWorkbenchRef = useRef(sideWorkbench);
-  sideWorkbenchRef.current = sideWorkbench;
-  const [closeActiveSideRequest, setCloseActiveSideRequest] = useState<{
-    token: number;
-  } | null>(null);
-  const closeActiveSideTokenRef = useRef(0);
-  /**
-   * When side is expanded: optional bottom-docked compressed composer (icon toggle).
-   * Resets whenever expand ends.
-   */
-  const [sideDockComposer, setSideDockComposer] = useState(false);
-  /**
-   * Measured height of the docked composer strip.
-   * Drives --sw-dock-composer-h so the side pane ends above it.
-   */
-  const [sideDockComposerH, setSideDockComposerH] = useState(0);
-  /** Git work tree gate for Review picker entry. */
-  const [sideIsGitProject, setSideIsGitProject] = useState(false);
-
   /**
    * Secondary session window (`session-*` label / `#/session/<id>` deep link).
    * Live-capable (session-keyed Host pool): send / stop / warm-connect use the
@@ -1085,6 +943,25 @@ export function AppWorkbench() {
     effectiveCanStop,
     transcriptMeta,
   } = useSessionRuntime({ isSecondaryWindow });
+  const sessionChromeBadgesHostRef = useRef(createSessionChromeBadgesHost());
+  const {
+    mutedSessionIds,
+    unreadSessionIds,
+    planPendingSessionIds,
+    applyClearSessionUnread,
+    markPlanPendingBadge,
+    handleToggleSessionMute,
+    handleClearSessionUnread,
+    handleMarkSessionUnread,
+    handleClearAllSessionUnread,
+    handleClearAllSessionMutes,
+  } = useSessionChromeBadges({
+    hostRef: sessionChromeBadgesHostRef,
+    viewedSessionId: session.sessionId,
+    isSecondaryWindow,
+    trayBusyBadge,
+    winTaskbarOverlay,
+  });
 
   /** Context usage chip — known tokens from compact events + estimate fallback. */
   const [contextUsage, setContextUsage] = useState<ContextUsageState>(
@@ -1097,16 +974,6 @@ export function AppWorkbench() {
   const [sessionChangesById, setSessionChangesById] = useState<
     Record<string, SessionFileChange[]>
   >({});
-  /**
-   * Turn changed-files chip → Review focus (#998).
-   * Lifted out of SideWorkbench so open races cannot drop the path.
-   * `pinnedPaths` always appear in Review even when sessionChanges is empty.
-   */
-  const [reviewFocus, setReviewFocus] = useState<{
-    path: string;
-    token: number;
-    pinnedPaths: string[];
-  } | null>(null);
   /**
    * Workspace git dirty summary for the active project (composer chip).
    * Null when not a repo, unavailable, clean, or no active project.
@@ -1258,16 +1125,6 @@ export function AppWorkbench() {
   >(async () => false);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showUsageLimitModal, setShowUsageLimitModal] = useState(false);
-  const [showMcpModal, setShowMcpModal] = useState(false);
-  const [mcpServers, setMcpServers] = useState<api.McpDto[]>([]);
-  const [mcpError, setMcpError] = useState<string | null>(null);
-  const [mcpLoading, setMcpLoading] = useState(false);
-  /** MCP doctor report (coexists with inspect list; host `mcp_doctor`). */
-  const [mcpDoctorReport, setMcpDoctorReport] =
-    useState<api.McpDoctorReport | null>(null);
-  const [mcpDoctorError, setMcpDoctorError] = useState<string | null>(null);
-  const [mcpDoctorLoading, setMcpDoctorLoading] = useState(false);
-  const [mcpDoctorFocus, setMcpDoctorFocus] = useState<string | null>(null);
   /** Last user message open in inline edit (not main composer). */
   const [editingUserMessageId, setEditingUserMessageId] = useState<
     string | null
@@ -1304,11 +1161,24 @@ export function AppWorkbench() {
     sessions,
   });
   const [activeProject, setActiveProject] = useState<Project | null>(null);
-  useSideWorkbenchProjectIsolation(
-    activeProject?.id,
-    sideWorkbench,
-    setSideWorkbench,
-  );
+  const mcpDoctorHostRef = useRef(createMcpDoctorChromeHost());
+  const {
+    showMcpModal,
+    setShowMcpModal,
+    mcpServers,
+    mcpError,
+    mcpLoading,
+    mcpDoctorReport,
+    mcpDoctorError,
+    mcpDoctorLoading,
+    mcpDoctorFocus,
+    refreshMcpModal,
+    openMcpModal,
+    runMcpDoctor,
+  } = useMcpDoctorChrome({
+    hostRef: mcpDoctorHostRef,
+    projectPath: activeProject?.path ?? null,
+  });
   const bottomTerminal = useBottomTerminal(activeProject?.id);
   const [bottomTerminalMounted, setBottomTerminalMounted] = useState(false);
   useEffect(() => {
@@ -1326,26 +1196,6 @@ export function AppWorkbench() {
   /** Effective agent / resource root: bound project, else general workspace dir. */
   const effectiveProjectPath =
     activeProject?.path?.trim() || generalWorkspacePath || null;
-  /** Probe git so Side Workbench Review entry is gated. */
-  useEffect(() => {
-    const path = effectiveProjectPath?.trim();
-    if (!path) {
-      setSideIsGitProject(false);
-      return;
-    }
-    let cancelled = false;
-    void api
-      .gitStatus(path)
-      .then((r) => {
-        if (!cancelled) setSideIsGitProject(!!r?.available);
-      })
-      .catch(() => {
-        if (!cancelled) setSideIsGitProject(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [effectiveProjectPath]);
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   /** Avoid writing collapse prefs before settings hydrate on launch. */
   const expandedProjectsHydratedRef = useRef(false);
@@ -1414,6 +1264,8 @@ export function AppWorkbench() {
   const automationAppliedRef = useRef(new Set<string>());
   const sessionNavHostRef = useRef(createSessionNavHost());
   const sessionConnectHostRef = useRef(createSessionConnectHost());
+  const gitWorktreeHostRef = useRef(createGitWorktreeChromeHost());
+  const sideWorkbenchHostRef = useRef(createSideWorkbenchChromeHost());
   const {
     openSession,
     newChat,
@@ -1607,7 +1459,6 @@ export function AppWorkbench() {
         shortcutRemapsRef.current,
         {
           voiceHotkeyEnabled: voiceHotkeyEnabledRef.current,
-          settingsOpen: escapeStopLiveRef.current.settingsOpen,
         },
       );
       if (!matched) return;
@@ -1668,24 +1519,20 @@ export function AppWorkbench() {
     return () => document.removeEventListener("keydown", onKey, true);
   }, []);
 
-  /** First-run gate: loading → setup wizard → ready (home). Mirror forces ready. */
-  const [appGate, setAppGate] = useState<"loading" | "setup" | "ready">(() => {
-    if (typeof window === "undefined") return "loading";
-    if (isMirrorClient()) return "ready";
-    // Vite HMR / host heartbeats used to remount this splash forever in `tauri dev`.
-    if (import.meta.env.DEV) return "ready";
-    return "loading";
-  });
-  /** Boot probe hung / timed out — show retry on the loading gate. */
-  const [bootDetectTimedOut, setBootDetectTimedOut] = useState(false);
-  const [bootDetectSlow, setBootDetectSlow] = useState(false);
-  const [bootRetryNonce, setBootRetryNonce] = useState(0);
-  // Ask once for notification permission after first ready.
-  useEffect(() => {
-    if (appGate !== "ready") return;
-    void ensureNotifyPermission();
-  }, [appGate]);
-  const [setupCliSeed, setSetupCliSeed] = useState<SetupCliInfo | null>(null);
+  const {
+    appGate,
+    setAppGate,
+    bootDetectTimedOut,
+    setBootDetectTimedOut,
+    bootDetectSlow,
+    setBootDetectSlow,
+    bootRetryNonce,
+    setupCliSeed,
+    setSetupCliSeed,
+    setSetup,
+    retryBootDetect,
+    skipToSetup,
+  } = useSetupBootGate();
   const [showDoctor, setShowDoctor] = useState(false);
   const [showTraces, setShowTraces] = useState(false);
   /** Local plan review archive (approved / abandoned / completed). */
@@ -1749,11 +1596,6 @@ export function AppWorkbench() {
   }, [appGate]);
   /** In-conversation find (Cmd/Ctrl+F) — not the palette/session search. */
   const [showChatFind, setShowChatFind] = useState(false);
-  const [savedAccounts, setSavedAccounts] = useState<api.SavedAccount[]>([]);
-  const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
-  const [accountQuotas, setAccountQuotas] = useState<
-    Record<string, SwitcherQuota>
-  >({});
   const [perm, setPerm] = useState<PermissionPayload | null>(null);
   const permBarRef = useRef<HTMLDivElement | null>(null);
   const [askUser, setAskUser] = useState<AskUserPayload | null>(null);
@@ -1880,17 +1722,35 @@ export function AppWorkbench() {
     useState<ResourceOpenTarget | null>(null);
   /** Bump to force ResourceViewer into Plan review mode (详情 / auto-open). */
   const [planFocusKey, setPlanFocusKey] = useState(0);
-  /**
-   * True when we expanded the right resource pane for this plan cycle
-   * (auto-open on review or 详情). Hard-dismiss collapses it so the next
-   * open is a clean files pane, not a stuck Plan workbench.
-   */
-  const planOpenedAsideRef = useRef(false);
-  asideCloseExtrasRef.current = () => {
-    planOpenedAsideRef.current = false;
-    setSideWorkbench((s) => (s.expanded ? { ...s, expanded: false } : s));
-    setSideDockComposer(false);
-  };
+  const {
+    sideWorkbench,
+    setSideWorkbench,
+    closeActiveSideRequest,
+    sideDockComposer,
+    sideDockComposerH,
+    setSideDockComposerH,
+    sideIsGitProject,
+    reviewFocus,
+    planOpenedAsideRef,
+    sideDockActive,
+    openSkills,
+    openPlan,
+    openPicker,
+    openReview,
+    focusReviewPath,
+    onAsideCloseExtras,
+    onExpandedChange,
+    toggleDockComposer,
+    consumeCloseActive,
+  } = useSideWorkbenchChrome({
+    hostRef: sideWorkbenchHostRef,
+    projectId: activeProject?.id,
+    projectPath: effectiveProjectPath,
+    asideCollapsed: layout.asideCollapsed,
+    phoneLayout,
+    resourceOpenTarget,
+  });
+  asideCloseExtrasRef.current = onAsideCloseExtras;
   /** Live drag-drop target for zone overlays (null = not dragging). */
   const [dragZone, setDragZone] = useState<"sidebar" | "main" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1898,7 +1758,6 @@ export function AppWorkbench() {
   /** Tauri OS drop timestamp — HTML5 fallback must not double-attach. */
   const lastNativeDropAtRef = useRef(0);
   const html5DragDepthRef = useRef(0);
-  const [, setSetup] = useState({ cli: false, auth: false, project: false });
   const [localError, setLocalError] = useState<string | null>(null);
 
   const newRemoteChat = useCallback(
@@ -2092,62 +1951,31 @@ export function AppWorkbench() {
   const [batchAgentsOpen, setBatchAgentsOpen] = useState(false);
   /** Ops hub (palette open-ops) — routes to tasks / dashboard / board / batch. */
   const [opsEntryOpen, setOpsEntryOpen] = useState(false);
-  const [gitWorktrees, setGitWorktrees] = useState<api.GitWorktreeEntry[]>([]);
-  /** null = unknown/loading; true = git work tree; false = not a git repo. */
-  const [gitWorktreesAvailable, setGitWorktreesAvailable] = useState<
-    boolean | null
-  >(null);
-  const [gitWorktreesLoading, setGitWorktreesLoading] = useState(false);
-  const [gitWorktreesReason, setGitWorktreesReason] = useState<string | null>(
-    null,
-  );
-  /** New worktree dialog (name + optional start-point + layout). */
-  const [worktreeCreateOpen, setWorktreeCreateOpen] = useState(false);
-  const [worktreeCreateName, setWorktreeCreateName] = useState("");
-  const [worktreeCreateRef, setWorktreeCreateRef] = useState("");
-  /** Default CLI-aligned (`~/.grok/worktrees`); optional sibling. */
-  const [worktreeCreateLayout, setWorktreeCreateLayout] =
-    useState<WorktreeLayout>("cli");
-  const [worktreeCreateBusy, setWorktreeCreateBusy] = useState(false);
-  const [worktreeCreateError, setWorktreeCreateError] = useState<string | null>(
-    null,
-  );
-  /** When true, after create bind cwd and open a draft chat on that path. */
-  const [worktreeCreateStartChat, setWorktreeCreateStartChat] = useState(false);
-  /** Absolute `~/.grok` from host list (CLI path preview + badge detection). */
-  const [cliGrokHome, setCliGrokHome] = useState<string | null>(null);
-  /** CLI-tracked worktrees from `grok worktree list` (soft-fail). */
-  const [cliWorktrees, setCliWorktrees] = useState<api.CliWorktreeEntry[]>([]);
-  const [cliWorktreesAvailable, setCliWorktreesAvailable] = useState<
-    boolean | null
-  >(null);
-  const [cliWorktreesLoading, setCliWorktreesLoading] = useState(false);
-  const [cliWorktreesReason, setCliWorktreesReason] = useState<string | null>(
-    null,
-  );
-  /** Clean stale worktrees (git worktree prune) dialog. */
-  const [worktreeGcOpen, setWorktreeGcOpen] = useState(false);
-  const [worktreeGcForce, setWorktreeGcForce] = useState(false);
-  const [worktreeGcBusy, setWorktreeGcBusy] = useState(false);
-  const [worktreeGcPreviewBusy, setWorktreeGcPreviewBusy] = useState(false);
-  const [worktreeGcError, setWorktreeGcError] = useState<string | null>(null);
-  const [worktreeGcPreview, setWorktreeGcPreview] =
-    useState<api.GitWorktreeGcResult | null>(null);
-  /** Worktree ship flow (push + Open PR) dialog. */
-  const [shipOpen, setShipOpen] = useState(false);
-  const [shipTitle, setShipTitle] = useState("");
-  const [shipBody, setShipBody] = useState("");
-  const [shipDraft, setShipDraft] = useState(false);
-  const [shipCreatePr, setShipCreatePr] = useState(true);
-  const [shipBusy, setShipBusy] = useState(false);
-  const [shipError, setShipError] = useState<string | null>(null);
-  const [shipBranch, setShipBranch] = useState<string | null>(null);
-  const [shipStatus, setShipStatus] = useState<string | null>(null);
-  /** After successful `gh pr create` — success panel with URL + Open in PR hub. */
-  const [shipSuccess, setShipSuccess] = useState<{
-    prUrl: string;
-    prNumber: number | null;
-  } | null>(null);
+  const {
+    gitWorktrees,
+    gitWorktreesAvailable,
+    gitWorktreesLoading,
+    gitWorktreesReason,
+    cliWorktrees,
+    cliWorktreesAvailable,
+    cliWorktreesLoading,
+    cliWorktreesReason,
+    openWorktreeCreate,
+    openWorktreeGc,
+    openShipFlow,
+    confirmRemoveWorktree,
+    switchToWorktree,
+    markSessionWorktree,
+    sessionWorktreeBadgeFor,
+    buildSidebarWorktreeBadge,
+    refreshGitWorktrees,
+    refreshCliWorktrees,
+    applyStatusBranch,
+    worktreeChrome,
+  } = useGitWorktreeChrome({
+    hostRef: gitWorktreeHostRef,
+    projectPath: activeProject?.path ?? null,
+  });
   /** Host stream-stall prompt (I06); null when dismissed or not stalled. */
   const [streamStall, setStreamStall] = useState<{
     sessionId?: string;
@@ -2279,18 +2107,39 @@ export function AppWorkbench() {
     asideInFlow: !phoneLayout && !hideChatForSideExpand && !asideOverlay,
     sideExpanded: hideChatForSideExpand,
   });
-  const [account, setAccount] = useState<api.AccountStatus | null>(null);
+  const accountQuotaHostRef = useRef(createAccountQuotaChromeHost());
+  const {
+    account,
+    accountLoading,
+    accountBusy,
+    accountHeatmapError,
+    accountProbeError,
+    loginHint,
+    savedAccounts,
+    activeAccountId,
+    accountQuotas,
+    applyAccountSnapshot,
+    runWithAccountBusy,
+    refreshAccount,
+    refreshSavedAccounts,
+    refreshAccountQuotas,
+    runAccountLogin,
+    cancelAccountLogin,
+    submitAccountLoginCode,
+    runSaveAccount,
+    runAddAccount,
+    runSwitchAccount,
+    runRemoveAccount,
+    runAccountLogout,
+  } = useAccountQuotaChrome({
+    hostRef: accountQuotaHostRef,
+    manualCliPath,
+    accountSettingsOpen: settingsOpen && settingsSection === "account",
+  });
   voiceSignedInRef.current = !!account?.profile?.signedIn;
   useEffect(() => {
     void refreshVoiceGate();
   }, [account?.profile?.signedIn, refreshVoiceGate]);
-  const [accountLoading, setAccountLoading] = useState(false);
-  const [accountBusy, setAccountBusy] = useState(false);
-  /** Soft-fail heatmap / account_status error (never invents activity or quota). */
-  const [accountHeatmapError, setAccountHeatmapError] = useState<unknown>(null);
-  /** Soft-fail last account_status / billing probe error (never invents quota %). */
-  const [accountProbeError, setAccountProbeError] = useState<unknown>(null);
-  const [loginHint, setLoginHint] = useState<string | null>(null);
   const platform = useMemo(() => detectAppPlatform(), []);
   const settingsShortcutHint = useMemo(
     () =>
@@ -2309,35 +2158,6 @@ export function AppWorkbench() {
   });
   const dragRegion = tauriDragRegion(platform);
   const [windowMaximized, setWindowMaximized] = useState(false);
-
-  /**
-   * Route chat context opens into Side Workbench tabs.
-   * When the aside is collapsed, open it and keep `resourceOpenTarget` so
-   * SideWorkbench can consume path (e.g. Review focus for #998). Clearing
-   * here dropped path and left Review empty / unfocused.
-   */
-  useEffect(() => {
-    if (!resourceOpenTarget) return;
-    if (!layout.asideCollapsed) return;
-    const result = applySideContextOpen(sideWorkbench, resourceOpenTarget, {
-      isGitProject: sideIsGitProject,
-    });
-    // Turn-chip opens with a path still work without git — skip the scary toast (#998).
-    const skipNotGitToast =
-      resourceOpenTarget.type === "changes" &&
-      !!(resourceOpenTarget.path || "").trim();
-    if (result.noticeKey && !skipNotGitToast) {
-      showToast(tr(result.noticeKey), 2400);
-    }
-    if (result.needAsideOpen) {
-      setSideWorkbench(result.state);
-      openAsidePane();
-      // Keep target — SideWorkbench openRequest effect consumes path + clears.
-      return;
-    }
-    setResourceOpenTarget(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- consume once per target
-  }, [resourceOpenTarget, layout.asideCollapsed]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -2502,32 +2322,6 @@ export function AppWorkbench() {
     };
   }, []);
 
-  // Dock / tray badge: unread sessions that finished a turn in the background.
-  // Only updates after turn end (markUnread), never on send / while streaming.
-  // Secondary windows must not overwrite the dock badge (main owns chrome).
-  // Count is clamped for display (TRAY-NOTIFY-PRO); pref off clears to 0.
-  useEffect(() => {
-    const resolved = resolveTrayBusyBadgeCount({
-      enabled: trayBusyBadge,
-      busyCount: unreadSessionIds.size,
-      isSecondaryWindow,
-    });
-    if (!resolved.apply) return;
-    void api.traySetBusyCount(resolved.count);
-  }, [unreadSessionIds.size, trayBusyBadge, isSecondaryWindow]);
-
-  // Windows taskbar *button* overlay: independent of trayBusyBadge (default off).
-  // Secondary windows must not apply. Pref off sends 0 (clear).
-  useEffect(() => {
-    const resolved = resolveTrayBusyBadgeCount({
-      enabled: winTaskbarOverlay,
-      busyCount: unreadSessionIds.size,
-      isSecondaryWindow,
-    });
-    if (!resolved.apply) return;
-    void api.traySetWindowsOverlay(resolved.count);
-  }, [unreadSessionIds.size, winTaskbarOverlay, isSecondaryWindow]);
-
   const applyComposerPrefs = useCallback(
     (prefs: api.ComposerPrefs, catalog: ModelOption[]) => {
       const models = catalog.length > 0 ? catalog : GROK_BUILD_MODELS;
@@ -2611,7 +2405,7 @@ export function AppWorkbench() {
         const st = await api
           .accountStatus({ refreshBilling: false })
           .catch(() => null);
-        if (st) setAccount(st);
+        if (st) applyAccountSnapshot(st);
       } catch {
         /* never reset gate — soft-fail optional RPCs */
       }
@@ -3369,6 +3163,10 @@ export function AppWorkbench() {
       setLastSessionId(sessionId);
       void api.settingsRememberLastSession(sessionId, projectId).catch(() => {});
     };
+    host.catalog.listLiveIds = () =>
+      sessionsRef.current.filter((s) => !s.archived).map((s) => s.id);
+    host.catalog.findRow = (id) =>
+      sessionsRef.current.find((s) => s.id === id && !s.archived) ?? null;
     host.catalog.clearUnread = (sessionId) => {
       applyClearSessionUnread(sessionId);
     };
@@ -5544,116 +5342,6 @@ export function AppWorkbench() {
     [tr],
   );
 
-  const handleToggleSessionMute = useCallback((sessionId: string) => {
-    toggleSessionMute(sessionId);
-    setMutedSessionIds(loadMutedSessionIds());
-  }, []);
-
-  const applyClearAllSessionUnread = useCallback(() => {
-    clearAllSessionUnread();
-    manualUnreadHoldIdsRef.current.clear();
-    setUnreadSessionIds(loadUnreadSessionIds());
-  }, []);
-
-  const handleClearAllSessionUnread = useCallback(() => {
-    const n = unreadSessionIds.size;
-    if (n <= 0) {
-      return;
-    }
-    if (shouldConfirmClearAllUnread(n)) {
-      setAppDialog({
-        kind: "confirm",
-        title: tr("session.clearAllUnreadTitle"),
-        message: tr("session.clearAllUnreadBody", { n: String(n) }),
-        confirmLabel: tr("session.clearAllUnreadAction"),
-        onConfirm: () => {
-          applyClearAllSessionUnread();
-        },
-      });
-      return;
-    }
-    applyClearAllSessionUnread();
-  }, [unreadSessionIds.size, tr, applyClearAllSessionUnread]);
-
-  const applyClearAllSessionMutes = useCallback(() => {
-    clearAllSessionMutes();
-    setMutedSessionIds(loadMutedSessionIds());
-  }, []);
-
-  const handleClearAllSessionMutes = useCallback(() => {
-    const n = mutedSessionIds.size;
-    if (n <= 0) {
-      return;
-    }
-    if (shouldConfirmClearAllMutes(n)) {
-      setAppDialog({
-        kind: "confirm",
-        title: tr("session.clearAllMutesTitle"),
-        message: tr("session.clearAllMutesBody", { n: String(n) }),
-        confirmLabel: tr("session.clearAllMutesAction"),
-        onConfirm: () => {
-          applyClearAllSessionMutes();
-        },
-      });
-      return;
-    }
-    applyClearAllSessionMutes();
-  }, [mutedSessionIds.size, tr, applyClearAllSessionMutes]);
-
-  const handleClearSessionUnread = useCallback(
-    (sessionId: string) => {
-      // Explicit "mark as read" also drops any manual hold.
-      manualUnreadHoldIdsRef.current.delete(sessionId);
-      applyClearSessionUnread(sessionId);
-    },
-    [applyClearSessionUnread],
-  );
-
-  const handleMarkSessionUnread = useCallback(
-    (sessionId: string) => {
-      applyMarkSessionUnread(sessionId);
-    },
-    [applyMarkSessionUnread],
-  );
-
-  // Binding a session while the workbench is in front clears its unread
-  // (sidebar + dock/tray badge + pet done-bubble). Hidden / unfocused
-  // windows are not a read — the bubble stays until they click it or
-  // actually view this chat with the window focused.
-  useEffect(() => {
-    if (!session.sessionId) return;
-    manualUnreadHoldIdsRef.current.delete(session.sessionId);
-    if (!isWorkbenchForeground()) return;
-    applyClearSessionUnread(session.sessionId);
-  }, [session.sessionId, applyClearSessionUnread]);
-
-  // Dock/taskbar or OS focus while already on a finished chat: clear that
-  // session's unread so the badge and pet bubble drop without re-clicking.
-  useEffect(() => {
-    const clearViewingIfPresent = () => {
-      const id = viewingSessionIdRef.current;
-      if (!id) return;
-      // Keep manual "mark as unread" until the user leaves this thread.
-      if (manualUnreadHoldIdsRef.current.has(id)) return;
-      if (!isWorkbenchForeground()) return;
-      applyClearSessionUnread(id);
-    };
-    const onVis = () => {
-      if (
-        typeof document !== "undefined" &&
-        document.visibilityState === "visible"
-      ) {
-        clearViewingIfPresent();
-      }
-    };
-    window.addEventListener("focus", clearViewingIfPresent);
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      window.removeEventListener("focus", clearViewingIfPresent);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [applyClearSessionUnread]);
-
   const openProjectMenu = (e: ReactMouseEvent, proj: Project) => {
     e.preventDefault();
     e.stopPropagation();
@@ -6740,14 +6428,13 @@ export function AppWorkbench() {
     setSlashQuery(null);
     setLiveSlash({ present: false, query: "", start: 0, end: 0 });
     liveSlashRef.current = { present: false, query: "", start: 0, end: 0 };
-    setSideWorkbench((s) => openSideTab(s, "skills"));
-    openAsidePane();
+    openSkills();
   }, [
     setShowComposerPlus,
     setSlashQuery,
     setLiveSlash,
     liveSlashRef,
-    openAsidePane,
+    openSkills,
   ]);
 
   const atMenuOpen = liveAt.present && !composerMenuOpen;
@@ -7005,67 +6692,6 @@ export function AppWorkbench() {
         : i;
     });
   }, [composerMenuEntries.length]);
-
-  /** Re-run inspect list only — does not clear doctor findings. */
-  const refreshMcpModal = useCallback(async () => {
-    setMcpLoading(true);
-    setMcpError(null);
-    try {
-      const res = await api.inspectMcp(activeProject?.path ?? null);
-      // Host list only — never invent placeholder servers.
-      setMcpServers(res.servers ?? []);
-      if (res.error) setMcpError(res.error);
-    } catch (e) {
-      setMcpServers([]);
-      setMcpError(String(e));
-    } finally {
-      setMcpLoading(false);
-    }
-  }, [activeProject?.path]);
-
-  const openMcpModal = useCallback(async () => {
-    setShowMcpModal(true);
-    // Keep prior doctor results when re-opening; only refresh inspect list.
-    await refreshMcpModal();
-  }, [refreshMcpModal]);
-
-  /**
-   * Run `grok mcp doctor --json [name]`. Optional name focuses one server
-   * (must already exist in CLI config — host does not invent servers).
-   */
-  const runMcpDoctor = useCallback(
-    async (
-      name?: string | null,
-    ): Promise<{
-      report: api.McpDoctorReport | null;
-      error: string | null;
-    }> => {
-      if (!api.isTauri()) {
-        const error = tr("ext.needTauri");
-        setMcpDoctorError(error);
-        // Soft-fail: modal classifies host_only; no window.alert.
-        return { report: null, error };
-      }
-      const focus = name?.trim() || null;
-      setMcpDoctorFocus(focus);
-      setMcpDoctorLoading(true);
-      setMcpDoctorError(null);
-      try {
-        const report = await api.mcpDoctor(focus);
-        setMcpDoctorReport(report);
-        return { report, error: null };
-      } catch (e) {
-        const error = String(e);
-        // Soft-fail CLI missing / too old / timeout is classified in the modal.
-        setMcpDoctorReport(null);
-        setMcpDoctorError(error);
-        return { report: null, error };
-      } finally {
-        setMcpDoctorLoading(false);
-      }
-    },
-    [],
-  );
 
   const showToast = useCallback((msg: string, ms = 3200) => {
     setToast(msg);
@@ -7653,16 +7279,6 @@ export function AppWorkbench() {
       },
     });
   }, [archivePlanDecision, tr, writePlanForViewing]);
-
-  /** Open Side Workbench Plan tab (review / waiting empty / open-in-resources). */
-  const openPlanInResource = useCallback(() => {
-    planOpenedAsideRef.current = true;
-    setSideWorkbench((s) =>
-      openSideTab(s, "plan", { name: "side.tab.plan" }),
-    );
-    openAsidePane();
-    setPlanFocusKey((k) => k + 1);
-  }, [openAsidePane]);
 
   /**
    * Exit the bare “计划模式” chip (mode === "plan", no plan content yet).
@@ -9859,22 +9475,10 @@ export function AppWorkbench() {
       : layout.sidebarWidth || SIDEBAR_DEFAULT_WIDTH;
   const asidePaint =
     layout.asideCollapsed || asideOverlay ? 0 : layout.asideWidth;
-  const sideDockActive = isSideDockComposerActive({
-    expanded: sideWorkbench.expanded,
-    dockComposer: sideDockComposer,
-    phoneLayout,
-  });
   const dockSidebarOccupied =
     phoneLayout || layout.sidebarCollapsed || sidebarOverlay
       ? 0
       : layout.sidebarWidth;
-
-  // Expand ends → close dock toggle.
-  useEffect(() => {
-    if (sideWorkbench.expanded) return;
-    setSideDockComposer(false);
-    setSideDockComposerH(0);
-  }, [sideWorkbench.expanded]);
 
   // Dock on: measure composer height → shrink side pane bottom.
   // Webview host follows aside height (no native hole-punch).
@@ -9913,10 +9517,6 @@ export function AppWorkbench() {
     showComposerPlus,
     welcomeSession,
   ]);
-
-  const onToggleSideDockComposer = useCallback(() => {
-    setSideDockComposer((on) => !on);
-  }, []);
 
   const stop = async () => {
     const now = Date.now();
@@ -10130,125 +9730,6 @@ export function AppWorkbench() {
     [requestMove, session.sessionId, sessions],
   );
 
-  const gitWorktreesReqRef = useRef(0);
-  const gitWorktreesPathRef = useRef<string | null>(null);
-  const refreshGitWorktrees = useCallback(async () => {
-    const path = activeProject?.path?.trim() || null;
-    if (!path || !api.isTauri()) {
-      gitWorktreesReqRef.current += 1;
-      gitWorktreesPathRef.current = null;
-      setGitWorktrees([]);
-      setGitWorktreesAvailable(null);
-      setGitWorktreesReason(null);
-      setCliGrokHome(null);
-      setGitWorktreesLoading(false);
-      return;
-    }
-    const reqId = ++gitWorktreesReqRef.current;
-    // Drop stale rows when the active project path changes; soft-refresh keeps
-    // the previous list for the same path so the menu does not flash empty.
-    if (gitWorktreesPathRef.current !== path) {
-      gitWorktreesPathRef.current = path;
-      setGitWorktrees([]);
-      setGitWorktreesAvailable(null);
-      setGitWorktreesReason(null);
-    }
-    setGitWorktreesLoading(true);
-    try {
-      const res = await api.gitWorktreesList(path);
-      if (reqId !== gitWorktreesReqRef.current) return;
-      const home = (res.cliGrokHome || "").trim() || null;
-      if (home) setCliGrokHome(home);
-      if (!res.available) {
-        setGitWorktrees([]);
-        setGitWorktreesAvailable(false);
-        setGitWorktreesReason(res.reason?.trim() || "unavailable");
-      } else {
-        setGitWorktrees(res.worktrees ?? []);
-        setGitWorktreesAvailable(true);
-        setGitWorktreesReason(null);
-      }
-    } catch (e) {
-      if (reqId !== gitWorktreesReqRef.current) return;
-      setGitWorktrees([]);
-      setGitWorktreesAvailable(false);
-      setGitWorktreesReason(String(e));
-    } finally {
-      if (reqId === gitWorktreesReqRef.current) {
-        setGitWorktreesLoading(false);
-      }
-    }
-  }, [activeProject?.path]);
-
-  useEffect(() => {
-    void refreshGitWorktrees();
-  }, [refreshGitWorktrees]);
-
-  const cliWorktreesReqRef = useRef(0);
-  const refreshCliWorktrees = useCallback(async () => {
-    if (!api.isTauri()) {
-      cliWorktreesReqRef.current += 1;
-      setCliWorktrees([]);
-      setCliWorktreesAvailable(null);
-      setCliWorktreesReason(null);
-      setCliWorktreesLoading(false);
-      return;
-    }
-    const reqId = ++cliWorktreesReqRef.current;
-    setCliWorktreesLoading(true);
-    try {
-      const projectPath = activeProject?.path?.trim() || null;
-      const repoSlug = projectPath
-        ? projectPath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ||
-          null
-        : null;
-      const res = await api.cliWorktreesList({
-        all: false,
-        // CLI --repo matches repo_name (e.g. grok-app), not folder basename.
-        // Leave unfiltered; UI filters by source path / worktrees slug.
-        repo: null,
-      });
-      if (reqId !== cliWorktreesReqRef.current) return;
-      if (!res.available) {
-        setCliWorktrees([]);
-        setCliWorktreesAvailable(false);
-        setCliWorktreesReason(res.reason?.trim() || "unavailable");
-      } else {
-        // Prefer rows for the active project when we can match source/repo.
-        const filtered = filterCliWorktreesForProject(
-          res.worktrees ?? [],
-          projectPath,
-          repoSlug,
-        );
-        setCliWorktrees(filtered);
-        setCliWorktreesAvailable(true);
-        setCliWorktreesReason(null);
-      }
-    } catch (e) {
-      if (reqId !== cliWorktreesReqRef.current) return;
-      setCliWorktrees([]);
-      setCliWorktreesAvailable(false);
-      setCliWorktreesReason(String(e));
-    } finally {
-      if (reqId === cliWorktreesReqRef.current) {
-        setCliWorktreesLoading(false);
-      }
-    }
-  }, [activeProject?.path]);
-
-  useEffect(() => {
-    // Load CLI list when the branch menu can appear (git work tree confirmed).
-    if (gitWorktreesAvailable === true) {
-      void refreshCliWorktrees();
-    } else if (gitWorktreesAvailable === false) {
-      cliWorktreesReqRef.current += 1;
-      setCliWorktrees([]);
-      setCliWorktreesAvailable(null);
-      setCliWorktreesReason(null);
-      setCliWorktreesLoading(false);
-    }
-  }, [gitWorktreesAvailable, refreshCliWorktrees]);
-
   /**
    * Poll workspace git status for the active project so the composer dirty chip
    * stays current (hide when clean / not a repo). Soft-fail; no toast spam.
@@ -10271,12 +9752,12 @@ export function AppWorkbench() {
       );
       // Same poll already has HEAD. Patch the composer branch chip so an
       // in-place checkout does not stay stale until the menu is clicked.
-      setGitWorktrees((prev) => applyGitStatusBranch(prev, path, status));
+      applyStatusBranch(path, status);
     } catch {
       if (reqId !== gitDirtyReqRef.current) return;
       setGitDirtySummary((prev) => (prev == null ? prev : null));
     }
-  }, [activeProject?.path]);
+  }, [activeProject?.path, applyStatusBranch]);
 
   useEffect(() => {
     void refreshGitDirtyStatus();
@@ -10365,611 +9846,58 @@ export function AppWorkbench() {
     ],
   );
 
-  /** Open gc dialog and run dry-run preview. */
-  const openWorktreeGc = useCallback(() => {
-    setWorktreeGcForce(false);
-    setWorktreeGcError(null);
-    setWorktreeGcBusy(false);
-    setWorktreeGcPreview(null);
-    setWorktreeGcOpen(true);
-  }, []);
-
-  /** Open Ship… dialog for the active project / worktree cwd. */
-  const openShipFlow = useCallback(() => {
-    if (!api.isTauri() || !activeProject?.path) {
-      showToast(tr("composer.worktreeShipNeedProject"), 3500);
-      return;
-    }
-    const current =
-      gitWorktrees.find((w) => pathsEqual(w.path, activeProject.path)) ?? null;
-    const branch =
-      current?.branch?.trim() ||
-      (session.sessionId
-        ? sessions.find((s) => s.id === session.sessionId)?.worktreeBranch
-        : null) ||
-      null;
-    if (
-      !canShipWorktree({
-        branch,
-        detached: current?.detached ?? !branch,
-        available: gitWorktreesAvailable,
-      })
-    ) {
-      // Still allow open with empty title if branch unknown — host resolves HEAD.
-      // But refuse detached when we know it.
-      if (current?.detached) {
-        showToast(tr("composer.worktreeShipDetached"), 4000);
-        return;
-      }
-    }
-    setShipBranch(branch);
-    setShipTitle(defaultPrTitleFromBranch(branch));
-    setShipBody("");
-    setShipDraft(false);
-    setShipCreatePr(true);
-    setShipError(null);
-    setShipStatus(null);
-    setShipSuccess(null);
-    setShipBusy(false);
-    setShipOpen(true);
-  }, [
-    activeProject?.path,
-    gitWorktrees,
-    gitWorktreesAvailable,
-    session.sessionId,
-    sessions,
-    showToast,
-    tr,
-  ]);
-
-  /** Close ship dialog and clear transient success state. */
-  const closeShipFlow = useCallback(() => {
-    if (shipBusy) return;
-    setShipOpen(false);
-    setShipError(null);
-    setShipStatus(null);
-    setShipSuccess(null);
-  }, [shipBusy]);
-
-  /**
-   * Navigate to Settings → Runtime → Tools PR hub for the active project,
-   * optionally highlighting a PR number. Soft-fails with a toast (never throws).
-   */
-  const openPrHubFromShip = useCallback(
-    (prNumber: number | null) => {
-      try {
-        if (!activeProject?.path?.trim()) {
-          showToast(tr("composer.worktreeShipOpenHubFailed"), 4000);
-          return;
-        }
-        setPrHubHighlightPr(prNumber);
-        setSettingsFocusAnchor(PR_HUB_ANCHOR_ID);
-        navigateSettings("runtime", "tools");
-        if (typeof window !== "undefined") {
-          const hash = buildPrHubDeepLink({ prNumber });
-          if (window.location.hash !== hash) {
-            window.location.hash = hash;
-          }
-        }
-        setShipOpen(false);
-        setShipSuccess(null);
-        setShipError(null);
-        setShipStatus(null);
-      } catch {
-        showToast(tr("composer.worktreeShipOpenHubFailed"), 4000);
-      }
-    },
-    [activeProject?.path, navigateSettings, showToast, tr],
-  );
-
-  const submitShipFlow = useCallback(async () => {
-    if (!api.isTauri() || !activeProject?.path) return;
-    let title: string;
-    let body: string;
-    try {
-      title = sanitizePrTitle(shipTitle);
-      body = sanitizePrBody(shipBody);
-    } catch (e) {
-      setShipError(String(e));
-      return;
-    }
-    setShipBusy(true);
-    setShipError(null);
-    setShipSuccess(null);
-    setShipStatus(tr("composer.worktreeShipPushing"));
-    try {
-      const push = await api.gitPushBranch(activeProject.path);
-      let pr: api.GhPrCreateResult | null = null;
-      if (shipCreatePr) {
-        setShipStatus(tr("composer.worktreeShipCreatingPr"));
-        pr = await api.ghPrCreate({
-          projectPath: activeProject.path,
-          title,
-          body,
-          draft: shipDraft,
-          base: "main",
-        });
-      }
-      const outcome = combineShipOutcome(push, pr, {
-        createPr: shipCreatePr,
-      });
-      const summary = shipOutcomeSummary(outcome);
-      if (outcome.ok) {
-        setShipStatus(null);
-        if (outcome.prUrl) {
-          // Success panel: PR URL + Open in PR hub (do not force-close).
-          const prNumber = parseGithubPrNumber(outcome.prUrl);
-          setShipSuccess({ prUrl: outcome.prUrl, prNumber });
-        } else {
-          setShipOpen(false);
-          setShipSuccess(null);
-        }
-      } else {
-        const detail = redactShipOutput(
-          outcome.failReason ||
-            pr?.reason ||
-            push.reason ||
-            summary ||
-            "ship failed",
-          600,
-        );
-        setShipError(detail);
-        setShipStatus(null);
-        // Honest toast — never claim PR opened when gh failed.
-        showToast(
-          shipCreatePr
-            ? tr("composer.worktreeShipFailed", { reason: detail })
-            : tr("composer.worktreeShipPushFailed", { reason: detail }),
-          6000,
-        );
-      }
-    } catch (e) {
-      const msg = redactShipOutput(String(e), 600);
-      setShipError(msg);
-      setShipStatus(null);
-      showToast(tr("composer.worktreeShipFailed", { reason: msg }), 6000);
-    } finally {
-      setShipBusy(false);
-    }
-  }, [
-    activeProject?.path,
-    shipBody,
-    shipCreatePr,
-    shipDraft,
-    shipTitle,
-    showToast,
-    tr,
-  ]);
-
-  /** Dry-run `git worktree prune` for the modal preview. */
-  const refreshWorktreeGcPreview = useCallback(async () => {
-    if (!api.isTauri() || !activeProject?.path || !worktreeGcOpen) return;
-    setWorktreeGcPreviewBusy(true);
-    setWorktreeGcError(null);
-    try {
-      const res = await api.gitWorktreeGc(
-        activeProject.path,
-        true,
-        worktreeGcForce,
-      );
-      setWorktreeGcPreview(res);
-    } catch (e) {
-      setWorktreeGcPreview(null);
-      setWorktreeGcError(String(e));
-    } finally {
-      setWorktreeGcPreviewBusy(false);
-    }
-  }, [activeProject?.path, worktreeGcForce, worktreeGcOpen]);
-
-  useEffect(() => {
-    if (!worktreeGcOpen) return;
-    void refreshWorktreeGcPreview();
-  }, [worktreeGcOpen, refreshWorktreeGcPreview]);
-
-  /** Apply prune (non-dry-run), refresh list, toast. */
-  const submitWorktreeGc = useCallback(async () => {
-    if (!api.isTauri() || !activeProject?.path) return;
-    setWorktreeGcBusy(true);
-    setWorktreeGcError(null);
-    try {
-      setWorktreeGcOpen(false);
-      setWorktreeGcPreview(null);
-      setWorktreeGcForce(false);
-      await refreshGitWorktrees();
-    } catch (e) {
-      setWorktreeGcError(String(e));
-    } finally {
-      setWorktreeGcBusy(false);
-    }
-  }, [
-    activeProject?.path,
-    refreshGitWorktrees,
-    showToast,
-    tr,
-    worktreeGcForce,
-  ]);
-
-  /** Open a linked worktree as project cwd (reuse existing project if path matches). */
-  const switchToWorktree = useCallback(
-    async (wt: api.GitWorktreeEntry) => {
-      if (!api.isTauri()) return;
-      const path = wt.path?.trim();
-      if (!path) return;
-      try {
-        const existing = projects.find((p) => pathsEqual(p.path, path));
-        if (existing) {
-          await bindSessionProject(existing);
-          return;
-        }
-        const trust = !!activeProject?.trusted;
-        const added = (await api.projectAdd(path, trust)) as Project;
-        const list = mapProjectsList((await api.projectsList()) as Project[]);
-        setProjects(list);
-        projectSpaces.assignNewProjects([added.id]);
-        const proj = list.find((p) => p.id === added.id) ?? added;
-        if (!proj.trusted) {
-          await finalizeAddedProject(proj, { bindSession: true });
-        } else {
-          await bindSessionProject(proj);
-        }
-      } catch (e) {
-        showToast(String(e), 4500);
-      }
-    },
-    [
-      activeProject?.trusted,
-      bindSessionProject,
-      finalizeAddedProject,
-      projects,
-      showToast,
-      tr,
-    ],
-  );
-
-  /**
-   * Remove a live linked worktree via host `git_worktree_remove`.
-   * Never removes main. Dirty trees: first attempt without force, then
-   * in-app confirm for force. If the active cwd is removed, switch to main.
-   */
-  const executeWorktreeRemove = useCallback(
-    async (wt: api.GitWorktreeEntry, force: boolean) => {
-      if (!api.isTauri() || !canRemoveWorktree(wt)) return;
-      const mainPath =
-        mainWorktreePath(gitWorktrees) || activeProject?.path?.trim() || "";
-      if (!mainPath) {
-        showToast(tr("composer.worktreeRemoveFailed"), 4000);
-        return;
-      }
-      const wasCurrent = pathsEqual(wt.path, activeProject?.path);
-      try {
-        await api.gitWorktreeRemove({
-          projectPath: mainPath,
-          worktreePath: wt.path,
-          force,
-        });
-        // Drop WT meta on sessions that pointed at the removed tree.
-        try {
-          const linked = sessions.filter(
-            (s) =>
-              s.isWorktreeSession ||
-              pathsEqual(s.worktreePath, wt.path),
-          );
-          for (const s of linked) {
-            if (
-              pathsEqual(s.worktreePath, wt.path) ||
-              (!s.worktreePath &&
-                pathsEqual(
-                  projects.find((p) => p.id === s.projectId)?.path,
-                  wt.path,
-                ))
-            ) {
-              await api.sessionSetWorktree(s.id, {
-                worktreePath: null,
-                worktreeBranch: null,
-              });
-            }
-          }
-          if (linked.length) await refreshSessions();
-        } catch {
-          /* soft-fail */
-        }
-        if (wasCurrent) {
-          const main =
-            gitWorktrees.find((w) => w.isMain) ??
-            gitWorktrees.find((w) => pathsEqual(w.path, mainPath)) ??
-            null;
-          if (main) {
-            await switchToWorktree(main);
-          } else {
-            await refreshGitWorktrees();
-          }
-        } else {
-          await refreshGitWorktrees();
-        }
-      } catch (e) {
-        const err = String(e);
-        if (!force && worktreeRemoveErrorSuggestsForce(err)) {
-          setAppDialog({
-            kind: "confirm",
-            title: tr("composer.worktreeRemoveTitle"),
-            message: `${tr("composer.worktreeRemoveForce")}\n\n${err}`,
-            confirmLabel: tr("composer.worktreeRemove"),
-            danger: true,
-            onConfirm: () => {
-              void executeWorktreeRemove(wt, true);
-            },
-          });
-          return;
-        }
-        showToast(
-          `${tr("composer.worktreeRemoveFailed")}: ${err}`,
-          5000,
-        );
-      }
-    },
-    [
-      activeProject?.path,
-      gitWorktrees,
-      projects,
-      // refreshSessions via closure
-      sessions,
-      refreshGitWorktrees,
-      showToast,
-      switchToWorktree,
-      tr,
-    ],
-  );
-
-  const confirmRemoveWorktree = useCallback(
-    (wt: api.GitWorktreeEntry) => {
-      if (!canRemoveWorktree(wt)) return;
-      const branch =
-        wt.branch?.trim() || tr("composer.worktreeDetached");
-      const isCurrent = pathsEqual(wt.path, activeProject?.path);
-      const parts = [
-        tr("composer.worktreeRemoveHint"),
-        tr("composer.worktreeRemoveConfirm", {
-          branch,
-          path: wt.path,
-        }),
-      ];
-      if (isCurrent) {
-        parts.push(tr("composer.worktreeRemoveCurrentWarn"));
-      }
-      setAppDialog({
-        kind: "confirm",
-        title: tr("composer.worktreeRemoveTitle"),
-        message: parts.join("\n\n"),
-        confirmLabel: tr("composer.worktreeRemove"),
-        danger: true,
-        onConfirm: () => {
-          void executeWorktreeRemove(wt, false);
-        },
-      });
-    },
-    [activeProject?.path, executeWorktreeRemove, tr],
-  );
-
-  const openWorktreeCreate = useCallback((opts?: { startNewChat?: boolean }) => {
-    setWorktreeCreateName("");
-    setWorktreeCreateRef("");
-    setWorktreeCreateLayout("cli");
-    setWorktreeCreateError(null);
-    setWorktreeCreateBusy(false);
-    setWorktreeCreateStartChat(!!opts?.startNewChat);
-    setWorktreeCreateOpen(true);
-  }, []);
-
-  const worktreeCreatePreviewPath = (() => {
-    try {
-      const main = mainWorktreePath(gitWorktrees) || activeProject?.path || "";
-      if (!main || !worktreeCreateName.trim()) return null;
-      const layout = normalizeWorktreeLayout(worktreeCreateLayout);
-      if (layout === "cli" && !cliGrokHome) {
-        // Host has not reported home yet — show tilde form for CLI layout.
-        return buildWorktreePath(
-          "cli",
-          main,
-          worktreeCreateName.trim(),
-          "~/.grok",
-        );
-      }
-      return buildWorktreePath(
-        layout,
-        main,
-        worktreeCreateName.trim(),
-        cliGrokHome,
-      );
-    } catch {
-      return null;
-    }
-  })();
-
-  /**
-   * Persist worktree path/branch on a session (sidebar WT badge + manage menu).
-   * Soft-fails so create/switch UX is never blocked by meta write errors.
-   */
-  const markSessionWorktree = useCallback(
-    async (
-      sessionId: string | null | undefined,
-      path: string,
-      branch: string | null | undefined,
-    ) => {
-      if (!sessionId || !api.isTauri()) return;
-      const p = path.trim();
-      if (!p) return;
-      try {
-        await api.sessionSetWorktree(sessionId, {
-          worktreePath: p,
-          worktreeBranch: (branch || "").trim() || null,
-        });
-        await refreshSessions();
-      } catch {
-        /* soft-fail */
-      }
-    },
-    // refreshSessions is stable enough via closure
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
-
-  /** Resolve WT/CLI badge for a session row (meta first, git list fallback). */
-  const sessionWorktreeBadgeFor = useCallback(
-    (s: SessionRow): SessionWorktreeBadge | null => {
-      const proj = s.projectId
-        ? projects.find((p) => p.id === s.projectId) ?? null
-        : null;
-      return resolveSessionWorktreeBadge(
-        {
-          worktreePath: s.worktreePath,
-          worktreeBranch: s.worktreeBranch,
-          isWorktreeSession: s.isWorktreeSession,
-        },
-        proj?.path ?? s.worktreePath,
-        gitWorktrees,
-        { grokHome: cliGrokHome },
-      );
-    },
-    [cliGrokHome, gitWorktrees, projects],
-  );
-
-  /** Pre-translated worktree chip for memoized SidebarSessionRow. */
-  const buildSidebarWorktreeBadge = useCallback(
-    (s: SessionRow): SidebarSessionWorktreeBadgeProp | null => {
-      const wtBadge = sessionWorktreeBadgeFor(s);
-      if (!wtBadge) return null;
-      const title = sessionWorktreeTooltip(wtBadge, {
-        detachedLabel: tr("composer.worktreeDetached"),
-        cliLayoutLabel: tr("session.worktreeLayoutCli"),
-        siblingLayoutLabel: tr("session.worktreeLayoutSibling"),
-        otherLayoutLabel: tr("session.worktreeBadge"),
-      });
-      const ariaKey =
-        wtBadge.layoutKind === "cli"
-          ? "session.worktreeBadgeCliAria"
-          : "session.worktreeBadgeAria";
-      return {
-        label: wtBadge.label,
-        branch: wtBadge.branch,
-        layoutKind: wtBadge.layoutKind,
-        title,
-        ariaLabel: tr(ariaKey, {
-          branch: wtBadge.branch || tr("composer.worktreeDetached"),
-        }),
-      };
-    },
-    [sessionWorktreeBadgeFor, tr],
-  );
-
-  /**
-   * Create worktree → refresh list → add as project (trust inherited) →
-   * either bind current session or start a draft chat on that path.
-   * Worktree+chat creates a real session immediately so meta can be persisted.
-   */
-  const submitWorktreeCreate = useCallback(async () => {
-    if (!api.isTauri() || !activeProject?.path) return;
-    const rawName = worktreeCreateName.trim();
-    if (!rawName) {
-      setWorktreeCreateError(tr("composer.worktreeNameRequired"));
-      return;
-    }
-    let safeName: string;
-    try {
-      safeName = sanitizeWorktreeName(rawName);
-    } catch {
-      setWorktreeCreateError(tr("composer.worktreeNameInvalid"));
-      return;
-    }
-    let start: string | null;
-    try {
-      start = sanitizeWorktreeRef(worktreeCreateRef);
-    } catch {
-      setWorktreeCreateError(tr("composer.worktreeRefInvalid"));
-      return;
-    }
-    const layout = normalizeWorktreeLayout(worktreeCreateLayout);
-    setWorktreeCreateBusy(true);
-    setWorktreeCreateError(null);
-    try {
-      const created = await api.gitWorktreeAdd(
-        activeProject.path,
-        safeName,
-        start,
-        layout,
-      );
-      setWorktreeCreateOpen(false);
-      await refreshGitWorktrees();
-
-      const path = created.path;
-      const branch =
-        created.branch?.trim() ||
-        created.name ||
-        tr("composer.worktreeDetached");
-      const trust = !!activeProject.trusted;
-      const startChat = worktreeCreateStartChat;
-      const existing = projects.find((p) => pathsEqual(p.path, path));
-      let target: Project | null = existing ?? null;
-      if (!target) {
-        const added = (await api.projectAdd(path, trust)) as Project;
-        const list = mapProjectsList((await api.projectsList()) as Project[]);
-        setProjects(list);
-        projectSpaces.assignNewProjects([added.id]);
-        target = list.find((p) => p.id === added.id) ?? added;
-      }
-
-      if (!target.trusted) {
-        // Trust prompt first; bind only (chat requires trusted project).
-        await finalizeAddedProject(target, { bindSession: true });
-        return;
-      }
-
-      if (startChat) {
-        // Materialize session now so worktree meta survives before first send.
-        const meta = (await api.sessionCreate(
-          target.id,
-          tr("session.new"),
-        )) as SessionRow & { id: string; title?: string };
-        await markSessionWorktree(meta.id, path, branch);
-        const row = normalizeSessionRow({
-          ...meta,
-          projectId: target.id,
-          worktreePath: path,
-          worktreeBranch: branch,
-          isWorktreeSession: true,
-        });
-        setExpandedProjects((e) => ({ ...e, [target!.id]: true }));
-        await openSession(row, target);
-      } else {
-        await bindSessionProject(target);
-        // Tag the currently open chat when switching cwd into the new worktree.
-        const liveId =
-          viewingSessionIdRef.current || session.sessionId || null;
-        if (liveId) {
-          await markSessionWorktree(liveId, path, branch);
-        }
-      }
-    } catch (e) {
-      setWorktreeCreateError(String(e));
-    } finally {
-      setWorktreeCreateBusy(false);
-    }
-  }, [
-    activeProject?.path,
-    activeProject?.trusted,
-    bindSessionProject,
-    finalizeAddedProject,
-    markSessionWorktree,
-    openSession,
-    projects,
-    refreshGitWorktrees,
-    session.sessionId,
-    showToast,
-    tr,
-    worktreeCreateLayout,
-    worktreeCreateName,
-    worktreeCreateRef,
-    worktreeCreateStartChat,
-  ]);
+  {
+    const h = gitWorktreeHostRef.current;
+    h.tr = tr;
+    h.activeProject = activeProject;
+    h.projects = projects;
+    h.session = session;
+    h.sessions = sessions;
+    h.showToast = showToast;
+    h.setAppDialog = setAppDialog;
+    h.bindSessionProject = bindSessionProject;
+    h.finalizeAddedProject = finalizeAddedProject;
+    h.setProjects = setProjects;
+    h.setExpandedProjects = setExpandedProjects;
+    h.assignNewProjects = projectSpaces.assignNewProjects;
+    h.refreshSessions = refreshSessions;
+    h.openSession = openSession;
+    h.viewingSessionIdRef = viewingSessionIdRef;
+    h.navigateSettings = navigateSettings;
+    h.setPrHubHighlightPr = setPrHubHighlightPr;
+    h.setSettingsFocusAnchor = setSettingsFocusAnchor;
+  }
+  {
+    const h = sideWorkbenchHostRef.current;
+    h.tr = tr;
+    h.showToast = showToast;
+    h.openAsidePane = openAsidePane;
+    h.setResourceOpenTarget = setResourceOpenTarget;
+    h.setPlanFocusKey = setPlanFocusKey;
+    h.asideCollapsed = () => layoutRef.current.asideCollapsed;
+  }
+  {
+    const h = sessionChromeBadgesHostRef.current;
+    h.tr = tr;
+    h.setAppDialog = setAppDialog;
+    h.viewingSessionId = () => viewingSessionIdRef.current;
+  }
+  {
+    const h = accountQuotaHostRef.current;
+    h.tr = tr;
+    h.showToast = showToast;
+    h.setAppDialog = setAppDialog;
+    h.noteAccountConnected = ({ auth, cliFound }) => {
+      setSetup((s) => ({ ...s, auth, cli: cliFound || s.cli }));
+    };
+    h.resetFocusedSession = () => {
+      setSession({ ...IDLE_SNAPSHOT });
+    };
+  }
+  {
+    const h = mcpDoctorHostRef.current;
+    h.tr = tr;
+  }
 
   /**
    * Pick folder → add project (name = folder basename; no rename prompt).
@@ -11556,14 +10484,7 @@ export function AppWorkbench() {
       closeAsidePane();
     },
     openSidePicker: (kind: SidePickerKind) => {
-      setSideWorkbench((s) => {
-        const next = openSideTabFromPicker(s, kind, {
-          isGitProject: sideIsGitProject,
-        });
-        if (!("created" in next)) return s;
-        return next;
-      });
-      openAsidePane();
+      openPicker(kind);
     },
     toggleBottomTerminal: () => {
       bottomTerminal.toggle();
@@ -11786,52 +10707,6 @@ export function AppWorkbench() {
     onArm: () => showToast(tr("app.quitPressAgain"), QUIT_DOUBLE_PRESS_MS),
     onQuit: () => requestAppQuit("shortcut"),
   });
-
-  /**
-   * Host menu ⌘W / Ctrl+W (replaces native Close Window). Browser-like:
-   * active side tab first when the strip is non-empty and the aside is open;
-   * empty strip (or collapsed leftover tabs) falls through to window close.
-   * Decision is pure — see {@link applySideStripClose}.
-   */
-  const closeSideTabOrWindow = useCallback(() => {
-    const s = sideWorkbenchRef.current;
-    const result = applySideStripClose(s, {
-      asideCollapsed: layoutRef.current.asideCollapsed,
-    });
-    if (result.closeWindow) {
-      void (async () => {
-        try {
-          const { getCurrentWindow } = await import("@tauri-apps/api/window");
-          await getCurrentWindow().close();
-        } catch (e) {
-          console.warn("close window after empty side tabs failed", e);
-        }
-      })();
-      return;
-    }
-    closeActiveSideTokenRef.current += 1;
-    setCloseActiveSideRequest({ token: closeActiveSideTokenRef.current });
-  }, []);
-
-  useEffect(() => {
-    if (!api.isTauri()) return;
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        unlisten = await api.listen(APP_CLOSE_TAB_OR_WINDOW_EVENT, () => {
-          closeSideTabOrWindow();
-        });
-        if (cancelled) unlisten();
-      } catch (e) {
-        console.warn("close-tab-or-window listener failed", e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [closeSideTabOrWindow]);
 
   const error = session.lastError;
   const errorBanner = useMemo(
@@ -12204,106 +11079,13 @@ export function AppWorkbench() {
     ],
   );
 
-  const refreshAccount = useCallback(
-    async (opts?: {
-      refreshBilling?: boolean;
-      /** No spinner / error flash — background quota tick. */
-      quiet?: boolean;
-      /** Skip heatmap / call-log walk (billing-only). */
-      includeLocalUsage?: boolean;
-      /** Drop Host reply after unmount / superseded probe. */
-      isCurrent?: () => boolean;
-    }) => {
-      if (!api.isTauri()) {
-        // Browser preview: soft-fail host_only — never invent heatmap/quota.
-        setAccountHeatmapError({ code: "host_only", message: "need tauri" });
-        // Browser / non-host: soft-fail host_only so Account never invents %.
-        setAccountProbeError({
-          code: "host_only",
-          message: "Account requires Tauri desktop runtime",
-        });
-        return;
-      }
-      const quiet = opts?.quiet === true;
-      const includeLocalUsage = opts?.includeLocalUsage ?? true;
-      if (!quiet) setAccountLoading(true);
-      try {
-        const st = await api.accountStatus({
-          refreshBilling: opts?.refreshBilling ?? true,
-          includeLocalUsage,
-          manualCliPath: manualCliPath || null,
-        });
-        if (opts?.isCurrent && !opts.isCurrent()) return;
-        setAccount((prev) =>
-          includeLocalUsage
-            ? st
-            : mergeAccountStatusPreservingLocalUsage(prev, st),
-        );
-        if (!quiet) setAccountHeatmapError(null);
-        setAccountProbeError(null);
-        setSetup((s) => ({
-          ...s,
-          auth: isAccountConnected(st),
-          cli: st.cliFound || s.cli,
-        }));
-        if (!quiet) {
-          try {
-            const list = await api.accountsList();
-            setSavedAccounts(list.profiles ?? []);
-            setActiveAccountId(list.activeId ?? null);
-          } catch {
-            // multi-account list is best-effort
-          }
-        }
-        // Usage line on tray menu (Codex-style)
-        void api.trayRefresh();
-      } catch (e) {
-        if (opts?.isCurrent && !opts.isCurrent()) return;
-        console.warn("account status failed", e);
-        if (!quiet) {
-          setAccountHeatmapError(e);
-          setAccountProbeError(e);
-        }
-      } finally {
-        if (!quiet) setAccountLoading(false);
-      }
-    },
-    [manualCliPath],
-  );
-
-  const refreshSavedAccounts = useCallback(async () => {
-    if (!api.isTauri()) return;
-    try {
-      const list = await api.accountsList();
-      setSavedAccounts(list.profiles ?? []);
-      setActiveAccountId(list.activeId ?? null);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  const refreshAccountQuotas = useCallback(async () => {
-    if (!api.isTauri()) return;
-    try {
-      const r = await api.accountsQuota();
-      const map: Record<string, SwitcherQuota> = {};
-      for (const item of r.items ?? []) {
-        map[item.id] = quotaFromHostItem(item);
-      }
-      setAccountQuotas(map);
-    } catch {
-      /* ignore — rows stay on live seed / em dash */
-    }
-  }, []);
-
   /** Import markdown/JSON transcript as a new local session (from PR #24). */
   const importChatTranscript = useCallback(async () => {
     if (!api.isTauri()) {
       showToast(tr("error.needTauri"));
       return;
     }
-    setAccountBusy(true);
-    try {
+    await runWithAccountBusy(async () => {
       const created = await api.sessionImportTranscriptFile(
         null,
         activeProject?.id ?? null,
@@ -12317,15 +11099,13 @@ export function AppWorkbench() {
           projects.find((p) => p.id === (hit.projectId ?? undefined)) ?? null;
         void openSession(hit, proj ?? undefined);
       }
-    } catch (e) {
+    }).catch((e) => {
       showToast(
         `${tr("account.importChatFailed")}: ${String(e)}`,
         5000,
       );
-    } finally {
-      setAccountBusy(false);
-    }
-  }, [activeProject?.id, projects, showToast, tr]);
+    });
+  }, [activeProject?.id, projects, runWithAccountBusy, showToast, tr]);
 
   const unarchivedAppSessionCount = sessions.filter((s) => !s.archived).length;
   const linkedAgentIds = sessions
@@ -12850,28 +11630,20 @@ export function AppWorkbench() {
   const onThreadOpenSessionChanges = useCallback(() => {
     seedSessionChangesForReview(null);
     // Open Review synchronously — do not rely only on openRequest races (#998).
-    setSideWorkbench((s) => openSideTab(s, "review"));
-    openAsidePane();
+    openReview();
     setResourceOpenTarget({ type: "changes" });
-  }, [openAsidePane, seedSessionChangesForReview]);
+  }, [openReview, seedSessionChangesForReview]);
 
   const onThreadOpenModifiedPath = useCallback(
     (path: string) => {
       const p = (path || "").trim();
       seedSessionChangesForReview(p);
       // Synchronously ensure Review tab exists before aside paint (#998).
-      setSideWorkbench((s) => openSideTab(s, "review"));
-      openAsidePane();
-      if (p) {
-        setReviewFocus((prev) => ({
-          path: p,
-          token: (prev?.token ?? 0) + 1,
-          pinnedPaths: pinReviewFocusPath(prev?.pinnedPaths ?? [], p),
-        }));
-      }
+      openReview();
+      if (p) focusReviewPath(p);
       setResourceOpenTarget({ type: "changes", path: p || undefined });
     },
-    [openAsidePane, seedSessionChangesForReview],
+    [focusReviewPath, openReview, seedSessionChangesForReview],
   );
 
   const onThreadOpenResource = useCallback(
@@ -12926,237 +11698,6 @@ export function AppWorkbench() {
     [tr],
   );
 
-  const runAccountLogin = useCallback(
-    async (method: "oauth" | "device" = "oauth"): Promise<boolean> => {
-      if (!api.isTauri()) {
-        showToast(tr("error.needTauri"));
-        return false;
-      }
-      setAccountBusy(true);
-      setLoginHint(null);
-      try {
-        const res = await api.accountLogin(method);
-        if (res.ok) {
-          setLoginHint(null);
-        } else if (res.timedOut) {
-          const msg = `${tr("account.loginTimeout")} ${tr(
-            "account.loginUnreachableHint",
-          )}`;
-          setLoginHint(msg);
-          showToast(msg, 10000);
-        } else {
-          const msg = res.message || tr("account.loginFailed");
-          setLoginHint(msg);
-          showToast(msg, 6000);
-        }
-        if (res.deviceUrl) {
-          try {
-            await api.openExternalUrl(res.deviceUrl);
-          } catch {
-            /* host may already open it */
-          }
-        }
-        await refreshAccount({ refreshBilling: true });
-        await refreshSavedAccounts();
-        // Host account_login recycles live/bg/parked/prewarm on success
-        // (`account_auth`) so warm CLIs cannot keep stale/missing OIDC.
-        // Reset focused shell snapshot only — do not sessionDisconnect (that
-        // parks processes and used to leave prewarm alive for reuse).
-        if (res.ok) {
-          setSession({ ...IDLE_SNAPSHOT });
-        }
-        return !!res.ok;
-      } catch (e) {
-        const msg = String(e);
-        setLoginHint(msg);
-        showToast(msg, 4500);
-        return false;
-      } finally {
-        setAccountBusy(false);
-      }
-    },
-    [refreshAccount, refreshSavedAccounts, showToast, tr],
-  );
-
-  /** Abort a running login (OAuth/device) so the user can pick another method
-   *  without restarting the app. The backend kills the `grok login` child. */
-  const cancelAccountLogin = useCallback(async () => {
-    try {
-      await api.accountLoginCancel();
-    } catch {
-      /* ignore — still unlock UI */
-    }
-    setAccountBusy(false);
-  }, []);
-
-  /**
-   * Paste a browser-shown verification code into the running `grok login`.
-   * auth.x.ai sometimes asks to “copy this code into Grok Build” instead of
-   * completing via localhost callback.
-   */
-  const submitAccountLoginCode = useCallback(
-    async (code: string) => {
-      if (!api.isTauri()) {
-        showToast(tr("error.needTauri"));
-        return;
-      }
-      try {
-        await api.accountLoginSubmitCode(code);
-        showToast(tr("account.loginPasteOk"), 4000);
-      } catch (e) {
-        const msg = `${tr("account.loginPasteFailed")}: ${String(e)}`;
-        setLoginHint(msg);
-        showToast(msg, 5000);
-      }
-    },
-    [showToast, tr],
-  );
-
-  const runSaveAccount = useCallback(async () => {
-    if (!api.isTauri()) return;
-    setAccountBusy(true);
-    try {
-      await api.accountSaveCurrent();
-      await refreshSavedAccounts();
-    } catch (e) {
-      showToast(String(e), 4500);
-    } finally {
-      setAccountBusy(false);
-    }
-  }, [refreshSavedAccounts, showToast, tr]);
-
-  /**
-   * Save current login (if any), then start OAuth so the user can add another
-   * account without losing the previous snapshot.
-   */
-  const runAddAccount = useCallback(async () => {
-    if (!api.isTauri()) {
-      showToast(tr("error.needTauri"));
-      return;
-    }
-    // Snapshot current auth first so switcher keeps it.
-    if (account?.profile?.signedIn) {
-      setAccountBusy(true);
-      try {
-        await api.accountSaveCurrent();
-        await refreshSavedAccounts();
-      } catch (e) {
-        // Still try login — user may want a fresh account even if save fails.
-        showToast(String(e), 3500);
-      } finally {
-        setAccountBusy(false);
-      }
-    }
-    await runAccountLogin("oauth");
-  }, [
-    account?.profile?.signedIn,
-    refreshSavedAccounts,
-    runAccountLogin,
-    showToast,
-    tr,
-  ]);
-
-  const runSwitchAccount = useCallback(
-    async (id: string) => {
-      if (!api.isTauri()) return;
-      setAccountBusy(true);
-      try {
-        await api.accountSwitch(id);
-        await refreshAccount({ refreshBilling: true });
-        await refreshSavedAccounts();
-        // Host account_switch recycles all agents (account_auth).
-        setSession({ ...IDLE_SNAPSHOT });
-      } catch (e) {
-        showToast(String(e), 4500);
-      } finally {
-        setAccountBusy(false);
-      }
-    },
-    [refreshAccount, refreshSavedAccounts, showToast, tr],
-  );
-
-  const runRemoveAccount = useCallback(
-    (id: string) => {
-      if (!api.isTauri()) return;
-      const label =
-        savedAccounts.find((a) => a.id === id)?.label || id.slice(0, 8);
-      setAppDialog({
-        kind: "confirm",
-        title: tr("account.profileRemove"),
-        message: tr("account.profilesHint"),
-        confirmLabel: tr("account.profileRemove"),
-        danger: true,
-        onConfirm: async () => {
-          setAccountBusy(true);
-          try {
-            await api.accountRemove(id);
-            await refreshSavedAccounts();
-          } catch (e) {
-            showToast(String(e), 4500);
-          } finally {
-            setAccountBusy(false);
-          }
-        },
-      });
-      void label;
-    },
-    [refreshSavedAccounts, savedAccounts, showToast, tr],
-  );
-
-  const runAccountLogout = useCallback(async () => {
-    if (!api.isTauri()) return;
-    setAccountBusy(true);
-    try {
-      await api.accountLogout();
-      await refreshAccount({ refreshBilling: false });
-      await refreshSavedAccounts();
-      // Host account_logout recycles all agents (account_auth).
-      setSession({ ...IDLE_SNAPSHOT });
-    } catch (e) {
-      showToast(String(e), 4500);
-    } finally {
-      setAccountBusy(false);
-    }
-  }, [refreshAccount, refreshSavedAccounts, showToast]);
-
-  // Account boot: paint fast from disk cache first, then refresh quota on network.
-  // Welcome SuperGrok logo depends on billing tier — waiting only on the slow
-  // path made the mark look like a "slow image" even though it is inline SVG.
-  useEffect(() => {
-    if (!api.isTauri()) return;
-    let cancelled = false;
-    void (async () => {
-      const isCurrent = () => !cancelled;
-      await refreshAccount({ refreshBilling: false, isCurrent });
-      if (cancelled) return;
-      await refreshAccount({ refreshBilling: true, isCurrent });
-      if (cancelled) return;
-      await refreshSavedAccounts();
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshAccount, refreshSavedAccounts]);
-
-  useEffect(() => {
-    if (settingsOpen && settingsSection === "account") {
-      void refreshAccount({ refreshBilling: true });
-      void refreshSavedAccounts();
-    }
-  }, [settingsOpen, settingsSection, refreshAccount, refreshSavedAccounts]);
-
-  useAccountQuotaAutoRefresh({
-    enabled: api.isTauri(),
-    canFetch: canFetchOfficialQuota(account),
-    refresh: (isCurrent) =>
-      refreshAccount({
-        refreshBilling: true,
-        quiet: true,
-        includeLocalUsage: false,
-        isCurrent,
-      }),
-  });
-
   // Keep Esc→stop gate current for the capture-phase shortcut listener.
   escapeStopLiveRef.current = {
     streamingOrBusy: effectiveCanStop,
@@ -13180,9 +11721,9 @@ export function AppWorkbench() {
         rewindConfirm ||
         forkConfirm ||
         resumeRestoreConfirm ||
-        worktreeCreateOpen ||
-        worktreeGcOpen ||
-        shipOpen ||
+        worktreeChrome.create.open ||
+        worktreeChrome.gc.open ||
+        worktreeChrome.ship.open ||
         projectRulesTarget ||
         agentDashboardOpen ||
         taskBoardOpen ||
@@ -13580,10 +12121,8 @@ export function AppWorkbench() {
                     className="btn btn--primary"
                     data-testid="setup-boot-retry"
                     onClick={() => {
-                      setBootDetectTimedOut(false);
-                      setBootDetectSlow(false);
                       setLocalError(null);
-                      setBootRetryNonce((n) => n + 1);
+                      retryBootDetect();
                     }}
                   >
                     {tr("setup.detectRetry")}
@@ -13593,8 +12132,7 @@ export function AppWorkbench() {
                     className="btn btn--ghost"
                     style={{ marginLeft: 8 }}
                     onClick={() => {
-                      setBootDetectTimedOut(false);
-                      setAppGate("setup");
+                      skipToSetup();
                     }}
                   >
                     {tr("setup.cli.required")}
@@ -14250,7 +12788,7 @@ export function AppWorkbench() {
             onThreadOpenSessionChanges={onThreadOpenSessionChanges}
             onThreadRemoveEditAttachment={onThreadRemoveEditAttachment}
             openExternalLinkFromChat={openExternalLinkFromChat}
-            openPlanInResource={openPlanInResource}
+            openPlanInResource={openPlan}
             openReliability={openReliability}
             openRequestPlanChanges={openRequestPlanChanges}
             openSession={openSession}
@@ -14535,7 +13073,7 @@ export function AppWorkbench() {
           sideWorkbench={sideWorkbench}
           setSideWorkbench={setSideWorkbench}
           sideDockComposer={sideDockComposer}
-          onToggleSideDockComposer={onToggleSideDockComposer}
+          onToggleSideDockComposer={toggleDockComposer}
           sessionChanges={
             sessionChangesById[reviewSessionId] ??
             sessionChangesById[session.sessionId || ""] ??
@@ -14558,14 +13096,9 @@ export function AppWorkbench() {
           resourceOpenTarget={resourceOpenTarget}
           onOpenRequestConsumed={() => setResourceOpenTarget(null)}
           closeActiveSideRequest={closeActiveSideRequest}
-          onCloseActiveRequestConsumed={() =>
-            setCloseActiveSideRequest(null)
-          }
+          onCloseActiveRequestConsumed={consumeCloseActive}
           onToggleSide={layout.asideCollapsed ? openAsidePane : closeAsidePane}
-          onExpandedChange={(expanded) => {
-            if (phoneLayout) return;
-            if (!expanded) setSideDockComposer(false);
-          }}
+          onExpandedChange={onExpandedChange}
           skillInfos={skillInfos}
           skillsLoading={skillsLoading}
           skillsLoadError={skillsLoadError}
@@ -14749,71 +13282,7 @@ export function AppWorkbench() {
           if (!archiveAgeConfirm) return;
           void runArchiveAgePlan(archiveAgeConfirm);
         }}
-        worktreeCreateOpen={worktreeCreateOpen}
-        worktreeCreateBusy={worktreeCreateBusy}
-        worktreeCreateStartChat={worktreeCreateStartChat}
-        worktreeCreateName={worktreeCreateName}
-        worktreeCreateLayout={worktreeCreateLayout}
-        worktreeCreateRef={worktreeCreateRef}
-        worktreeCreatePreviewPath={worktreeCreatePreviewPath}
-        worktreeCreateError={worktreeCreateError}
-        closeWorktreeCreate={() => setWorktreeCreateOpen(false)}
-        submitWorktreeCreate={() => {
-          void submitWorktreeCreate();
-        }}
-        onWorktreeCreateNameChange={(value) => {
-          setWorktreeCreateName(value);
-          setWorktreeCreateError(null);
-        }}
-        onWorktreeCreateLayoutChange={(value) => {
-          setWorktreeCreateLayout(value);
-          setWorktreeCreateError(null);
-        }}
-        onWorktreeCreateRefChange={(value) => {
-          setWorktreeCreateRef(value);
-          setWorktreeCreateError(null);
-        }}
-        worktreeGcOpen={worktreeGcOpen}
-        worktreeGcBusy={worktreeGcBusy}
-        worktreeGcPreviewBusy={worktreeGcPreviewBusy}
-        worktreeGcForce={worktreeGcForce}
-        worktreeGcPreview={worktreeGcPreview}
-        worktreeGcError={worktreeGcError}
-        closeWorktreeGc={() => {
-          setWorktreeGcOpen(false);
-          setWorktreeGcError(null);
-          setWorktreeGcPreview(null);
-          setWorktreeGcForce(false);
-        }}
-        submitWorktreeGc={() => {
-          void submitWorktreeGc();
-        }}
-        setWorktreeGcForce={setWorktreeGcForce}
-        shipOpen={shipOpen}
-        shipBusy={shipBusy}
-        shipSuccess={shipSuccess}
-        shipTitle={shipTitle}
-        shipBody={shipBody}
-        shipCreatePr={shipCreatePr}
-        shipDraft={shipDraft}
-        shipBranch={shipBranch}
-        shipStatus={shipStatus}
-        shipError={shipError}
-        closeShip={closeShipFlow}
-        submitShip={() => {
-          void submitShipFlow();
-        }}
-        onShipTitleChange={(value) => {
-          setShipTitle(value);
-          setShipError(null);
-        }}
-        onShipBodyChange={(value) => {
-          setShipBody(value);
-          setShipError(null);
-        }}
-        setShipCreatePr={setShipCreatePr}
-        setShipDraft={setShipDraft}
-        onOpenPrHubFromShip={openPrHubFromShip}
+        worktreeChrome={worktreeChrome}
         showToast={showToast}
         showShortcuts={showShortcuts}
         composerSendKeyPref={composerSendKeyPref}
