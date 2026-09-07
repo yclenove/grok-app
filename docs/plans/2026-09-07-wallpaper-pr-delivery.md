@@ -16,10 +16,14 @@
 | A3 搜索迟到结果 | `fix/search-palette-late-results` / `18ef7d84` | PR #1078，前端 7,058 / Rust 1,605，所有本地门禁通过 |
 | B3 旧代理迁移 | `fix/settings-legacy-proxy-mode` / `88da27ab` | PR #1079，前端 7,057 / Rust 1,609，通过所有本地门禁 |
 | B1 图片预览生命周期 | `fix/viewer-lifecycle` / `5ffc94ea` | PR #1081，生命周期及稳定 Context，最终前端 7,060 / Rust 1,605 和所有本地门禁通过 |
-| B2 壁纸组件拆分 | `refactor/wallpaper-source-components` / `729f860f` | Controls/Gallery/Footer 已推送；前端 7,055 / Rust 1,605 和所有本地门禁通过，待菜单测试前置独立送审后提 PR |
+| B2 壁纸组件拆分 | `refactor/wallpaper-source-components` / `729f860f` | PR #1084，前端 7,055 / Rust 1,605 和所有本地门禁通过；依赖 #1074/#1083 |
 | B4 共用 HTTPS | `fix/https-connect-dns-validation` / `afe87a38` | PR #1080，只接入既有皮肤下载；前端 7,055 / Rust 1,624 和所有本地门禁通过 |
 | C1a 媒体 URL 规范化 | `fix/wallpaper-x-media-quality` / `7bb0edfb` | PR #1082，前端 7,055 / Rust 1,608 和所有本地门禁通过；尚不包含完整质量排序、任务生命周期和 Responses |
-| A4 菜单测试清理 | `test/menu-animation-cleanup` / `8c01d61d` | 独立工作区，全量前端 7,055 通过，原生门禁进行中 |
+| A4 菜单测试清理 | `test/menu-animation-cleanup` / `8c01d61d` | PR #1083，前端 7,055 / Rust 1,605 和所有本地门禁通过 |
+
+本轮累计正式创建 10 个 PR：#1074、#1076、#1077、#1078、#1079、#1080、#1081、#1082、#1083、#1084（均位于 `https://github.com/RongleCat/grok-app/pull/编号`）。已核对全部完成本地门禁；#1074/#1076/#1077/#1079/#1080 远端四项 CI 全通过，其余 CI 尚在运行，当前未见失败。全部仍为 OPEN，没有合并。
+
+继续交付时先处理远端 CI/审阅反馈和已合入前置的去重，再推进 C1b（媒体内容校验/质量排序）、C1c（CLI 任务生命周期）、C2（Responses 完整灰度接入）及后续渠道。B1 只完成图片生命周期和 Context 稳定性，视频预览/独立编辑器接入仍待后续；B2 只完成组件拆分，没有宣称领域状态 hook 已全部抽取。独立优化任务中的未提交功能不混入以上 PR。
 
 上述 Rust 数量均另有 1 项原有 ignored。未宣称这些新拆分分支完成手动桌面实机测试。B2 回归暴露的 `UserMenu.test.tsx` 退出动画清理缺失已另立提交 `8c01d61d`，全量重跑通过；公开前按独立测试修复处理该提交。
 
