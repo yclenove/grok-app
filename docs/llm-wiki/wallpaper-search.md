@@ -123,6 +123,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 - `wallpaper_image_to_video` 使用本机 Grok Build CLI、`--effort low`、最多 3 turns 和 420 秒硬超时。专用 runner 固定 `--tools image_to_video`、`--disallowed-tools search_tool,use_tool`、`--disable-web-search`、`--no-subagents`，使用 Host 生成的新会话 UUID 和规范官方 `GROK_HOME`。前端不能指定模型、工具、CLI 参数或输出目录。
 - AVIF/WebP/GIF 由主应用 WebView 解码为最长边 2048 px 的 PNG。原图通过有上限的 raw IPC 读取，最多 40 MiB；PNG 最多 20 MiB。Host 验证原始路径位于壁纸库，再独立解码图片，限制单边 16384、5000 万像素和 256 MiB 解码分配；缩放后应用 EXIF 旋转或镜像方向，再移除元数据并重新编码为本次任务的临时 PNG，避免手机照片方向丢失或重复旋转。禁止依赖 shell、ffmpeg 或用户安装的图像工具。临时源图不进入图库，成功或失败后清理。
 - Host 从已知 CLI session 的 `updates.jsonl` 审计恰好一个成功完成的 `image_to_video`；完整源图路径、提示词、时长和分辨率必须匹配。额外工具、参数变更、缺失或损坏日志一律拒收。此审计是结果验收边界，不保证 CLI 违约前没有产生上游调用；不自动重试。日志读取上限 4 MiB，不把原始日志写入 QA 报告。
+- 生成失败先完成整段 session 审计，再分类工具自己的 `tool_execution_failed` 错误。固定 HTTP 前缀映射鉴权、限流及服务端错误；固定请求失败前缀加 reqwest 的 `error sending request for url (` 映射 `imagine_network_failed`，覆盖生图、改图、视频提交及轮询。不读取 URL、响应正文或模型消息推断具体网络原因；前端保留输入，只允许手动重试。
 - Host 自行从本次会话 `videos/` 目录复制唯一成片，不接受模型指定的复制路径，也不授予 shell 文件操作能力。
 - Host 只接受当前 `{app_data}/wallpapers/imagine/<date>/video-*` 输出目录内的 MP4/WebM；落盘结果必须再通过路径 containment、文件签名、MIME、扩展名和 200 MiB 上限校验。Windows 内部可以使用 canonical extended path，但返回前端的本地路径必须移除 `\\?\` 前缀。
 - 生成使用 UUID `requestId`；取消信号 sticky，覆盖“取消先于注册”的竞态。取消、关闭弹窗或切换模式会终止进程树、忽略迟到结果并清理失败输出。成片只进入画廊和壁纸库，必须由用户明确选择后才能设为背景。

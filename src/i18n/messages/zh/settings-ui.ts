@@ -1,5 +1,6 @@
 /** Simplified Chinese messages — domain: settings-ui */
 export const zhSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "生成请求未能连接到服务。请检查网络或代理；输入已保留，连接恢复后可手动重试。",
   "settings.wallpaperSource.details.title": "媒体详情",
   "settings.wallpaperSource.details.unknown": "未记录",
   "settings.wallpaperSource.details.dimensions": "像素尺寸",

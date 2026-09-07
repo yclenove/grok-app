@@ -1,5 +1,6 @@
 /** ko messages — domain: settings-ui */
 export const koSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "생성 요청이 서비스에 연결되지 않았습니다. 네트워크나 프록시를 확인하세요. 입력 내용은 유지됩니다. 연결이 복구되면 직접 다시 시도하세요.",
   "settings.wallpaperSource.details.title": "미디어 상세 정보",
   "settings.wallpaperSource.details.unknown": "기록 없음",
   "settings.wallpaperSource.details.dimensions": "픽셀 크기",

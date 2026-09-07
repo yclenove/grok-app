@@ -1,5 +1,6 @@
 /** fil messages — domain: settings-ui */
 export const filSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "Hindi makakonekta sa serbisyo ang kahilingan sa pagbuo. Suriin ang network o proxy. Napanatili ang iyong mga input; manu-manong subukang muli kapag bumalik ang koneksyon.",
   "settings.wallpaperSource.details.title": "Detalye ng media",
   "settings.wallpaperSource.details.unknown": "Hindi naitala",
   "settings.wallpaperSource.details.dimensions": "Sukat sa pixel",

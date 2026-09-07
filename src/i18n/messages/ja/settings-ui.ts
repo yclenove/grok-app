@@ -1,5 +1,6 @@
 /** ja messages — domain: settings-ui */
 export const jaSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "生成リクエストがサービスに接続できませんでした。ネットワークまたはプロキシを確認してください。入力内容は保持されています。接続が復旧したら手動で再試行してください。",
   "settings.wallpaperSource.details.title": "メディアの詳細",
   "settings.wallpaperSource.details.unknown": "記録なし",
   "settings.wallpaperSource.details.dimensions": "ピクセル寸法",

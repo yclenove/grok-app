@@ -1,5 +1,6 @@
 /** Traditional Chinese messages — domain: settings-ui */
 export const zhTWSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "生成請求無法連線至服務。請檢查網路或代理；輸入已保留，連線恢復後可手動重試。",
   "settings.wallpaperSource.details.title": "媒體詳情",
   "settings.wallpaperSource.details.unknown": "未記錄",
   "settings.wallpaperSource.details.dimensions": "像素尺寸",

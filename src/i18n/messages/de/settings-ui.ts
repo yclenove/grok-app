@@ -1,5 +1,6 @@
 /** de messages — domain: settings-ui */
 export const deSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "Die Generierungsanfrage konnte den Dienst nicht erreichen. Prüfe Netzwerk oder Proxy. Deine Eingaben bleiben erhalten; versuche es manuell erneut, sobald die Verbindung wiederhergestellt ist.",
   "settings.wallpaperSource.details.title": "Mediendetails",
   "settings.wallpaperSource.details.unknown": "Nicht erfasst",
   "settings.wallpaperSource.details.dimensions": "Pixelmaße",

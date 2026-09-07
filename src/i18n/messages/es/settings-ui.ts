@@ -1,5 +1,6 @@
 /** es messages — domain: settings-ui */
 export const esSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "La solicitud de generación no pudo conectar con el servicio. Revisa la red o el proxy. Tus entradas se conservan; vuelve a intentarlo manualmente cuando se restablezca la conexión.",
   "settings.wallpaperSource.details.title": "Detalles del archivo",
   "settings.wallpaperSource.details.unknown": "Sin registrar",
   "settings.wallpaperSource.details.dimensions": "Dimensiones en píxeles",

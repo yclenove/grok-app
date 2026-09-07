@@ -1,5 +1,6 @@
 /** ta messages — domain: settings-ui */
 export const taSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "உருவாக்கக் கோரிக்கையால் சேவையுடன் இணைக்க முடியவில்லை. பிணையம் அல்லது ப்ராக்ஸியைச் சரிபார்க்கவும். உங்கள் உள்ளீடுகள் சேமிக்கப்பட்டுள்ளன; இணைப்பு மீண்டதும் கைமுறையாக மீண்டும் முயற்சிக்கவும்.",
   "settings.wallpaperSource.details.title": "ஊடக விவரங்கள்",
   "settings.wallpaperSource.details.unknown": "பதிவு செய்யப்படவில்லை",
   "settings.wallpaperSource.details.dimensions": "பிக்சல் அளவுகள்",

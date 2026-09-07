@@ -33,7 +33,7 @@ function item(
 describe("wallpaperSource", () => {
   it.each([
     "imagine_access_denied", "imagine_rate_limited", "imagine_request_rejected",
-    "imagine_upstream_failed", "imagine_result_invalid",
+    "imagine_upstream_failed", "imagine_network_failed", "imagine_result_invalid",
   ] as const)("preserves generation error %s without exposing diagnostics", (code) => {
     expect(parseWallpaperSourceError(new Error(code))).toBe(code);
     expect(errorCodeFromSearchResult({ items: [], errorCode: code, message: "private diagnostic" })).toBe(code);

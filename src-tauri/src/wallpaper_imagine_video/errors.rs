@@ -12,6 +12,24 @@ pub(super) fn tool_failure(update: &Value, tool: &str) -> &'static str {
     let Some(message) = output.get("message").and_then(Value::as_str) else {
         return "imagine_failed";
     };
+    // Match the tool's send() wrapper plus reqwest's transport-error prefix.
+    // Do not interpret URLs, nested causes, response bodies or model prose.
+    let transport_prefixes: &[&str] = match tool {
+        "image_gen" => &["Image generation API request failed: "],
+        "image_edit" => &["Image edit API request failed: "],
+        "image_to_video" => &[
+            "Video generation API request failed: ",
+            "Video poll request failed: ",
+        ],
+        _ => return "imagine_failed",
+    };
+    if transport_prefixes.iter().any(|prefix| {
+        message
+            .strip_prefix(prefix)
+            .is_some_and(|cause| cause.starts_with("error sending request for url ("))
+    }) {
+        return "imagine_network_failed";
+    }
     // Grok Build's ACP adapter drops ToolError.details and retains Display only.
     // Match the tool-owned prefix and status, ignoring the untrusted HTTP body.
     let prefixes: &[&str] = match tool {

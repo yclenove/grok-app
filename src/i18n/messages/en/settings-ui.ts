@@ -1,5 +1,6 @@
 /** English messages — domain: settings-ui */
 export const enSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "The generation request could not reach the service. Check your network or proxy. Your inputs are kept; retry manually when the connection recovers.",
   "settings.wallpaperSource.details.title": "Media details",
   "settings.wallpaperSource.details.unknown": "Not recorded",
   "settings.wallpaperSource.details.dimensions": "Pixel dimensions",

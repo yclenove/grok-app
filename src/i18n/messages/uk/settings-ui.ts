@@ -1,5 +1,6 @@
 /** uk messages — domain: settings-ui */
 export const ukSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "Запит на генерацію не зміг з’єднатися із сервісом. Перевірте мережу або проксі. Введені дані збережено; повторіть спробу вручну після відновлення з’єднання.",
   "settings.wallpaperSource.details.title": "Відомості про медіа",
   "settings.wallpaperSource.details.unknown": "Не записано",
   "settings.wallpaperSource.details.dimensions": "Розміри в пікселях",

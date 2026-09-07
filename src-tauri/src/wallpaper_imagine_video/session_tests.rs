@@ -57,6 +57,37 @@ fn classifies_only_tool_owned_http_statuses_for_all_generation_modes() {
 }
 
 #[test]
+fn classifies_audited_transport_failures_without_interpreting_the_url() {
+    for (tool, prefix) in [
+        ("image_gen", "Image generation API"),
+        ("image_edit", "Image edit API"),
+        ("image_to_video", "Video generation API"),
+        ("image_to_video", "Video poll"),
+    ] {
+        let raw = failed_log(
+            tool,
+            &format!("{prefix} request failed: error sending request for url (https://example.test/private?HTTP=401)"),
+        );
+        assert_eq!(audit_failure(&raw, tool), Err("imagine_network_failed"));
+        for invalid in [
+            raw.replace("session-1", "foreign-session"),
+            raw.replace("selected prompt", "substituted prompt"),
+            format!("{raw}\n{}", raw.lines().next().unwrap()),
+            format!("{raw}\nnot JSON"),
+        ] {
+            assert_eq!(audit_failure(&invalid, tool), Err("imagine_result_invalid"));
+        }
+    }
+    for message in [
+        "Video generation API request failed: error sending request for url (https://example.test)",
+        "Error: Image generation API request failed: error sending request for url (https://example.test)",
+        "Image generation failed with HTTP 500 Error: error sending request for url (https://example.test)",
+    ] {
+        assert_ne!(audit_failure(&failed_log("image_gen", message), "image_gen"), Err("imagine_network_failed"));
+    }
+}
+
+#[test]
 fn untrusted_text_and_invalid_audits_cannot_invent_a_generation_cause() {
     for message in [
         "selected prompt mentions HTTP 429",

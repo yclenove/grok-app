@@ -1,5 +1,6 @@
 /** id messages — domain: settings-ui */
 export const idSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "Permintaan pembuatan tidak dapat terhubung ke layanan. Periksa jaringan atau proksi. Masukan Anda disimpan; coba lagi secara manual setelah koneksi pulih.",
   "settings.wallpaperSource.details.title": "Detail media",
   "settings.wallpaperSource.details.unknown": "Belum dicatat",
   "settings.wallpaperSource.details.dimensions": "Dimensi piksel",

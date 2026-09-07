@@ -168,9 +168,11 @@ describe("useWallpaperImagineController", () => {
     await act(async () => { pending.resolve({ items: [] }); await job; });
   });
 
-  it.each(["image", "edit", "video"] as const)("keeps %s inputs and existing results after rate limiting without automatic retry", async (mode) => {
+  it.each((["image", "edit", "video"] as const).flatMap((mode) =>
+    (["imagine_rate_limited", "imagine_network_failed"] as const).map((code) => ({ mode, code })),
+  ))("keeps $mode inputs and existing results after $code without automatic retry", async ({ mode, code }) => {
     const generate = mode === "image" ? wallpaperImagine : mode === "edit" ? wallpaperImageEdit : wallpaperImageToVideo;
-    generate.mockResolvedValueOnce({ items: [], errorCode: "imagine_rate_limited", message: "private upstream diagnostic" });
+    generate.mockResolvedValueOnce({ items: [], errorCode: code, message: "private upstream diagnostic" });
     const t = createT("zh");
     const { result, setters } = renderController(t);
     const source = imageItem("selected", { localPath: "/selected.png" });
@@ -184,7 +186,7 @@ describe("useWallpaperImagineController", () => {
     });
     await act(async () => result.current.generate());
     expect(generate).toHaveBeenCalledTimes(1);
-    expect(setters.setError).toHaveBeenLastCalledWith(t("settings.wallpaperSource.err.imagine_rate_limited"));
+    expect(setters.setError).toHaveBeenLastCalledWith(t(`settings.wallpaperSource.err.${code}`));
     expect(setters.setItems).not.toHaveBeenCalled();
     expect(result.current.prompt).toBe("Selected instructions");
     expect(result.current.aspect).toBe("9:16");

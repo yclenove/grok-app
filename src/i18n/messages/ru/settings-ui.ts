@@ -1,5 +1,6 @@
 /** ru messages — domain: settings-ui */
 export const ruSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "Не удалось подключиться к сервису генерации. Проверьте сеть или прокси. Введённые данные сохранены; повторите попытку вручную после восстановления соединения.",
   "settings.wallpaperSource.details.title": "Сведения о медиа",
   "settings.wallpaperSource.details.unknown": "Не записано",
   "settings.wallpaperSource.details.dimensions": "Размеры в пикселях",

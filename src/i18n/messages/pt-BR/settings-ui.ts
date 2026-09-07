@@ -1,5 +1,6 @@
 /** pt-BR messages — domain: settings-ui */
 export const ptBRSettingsUi = {
+  "settings.wallpaperSource.err.imagine_network_failed": "A solicitação de geração não conseguiu acessar o serviço. Verifique a rede ou o proxy. Suas entradas foram mantidas; tente novamente manualmente quando a conexão voltar.",
   "settings.wallpaperSource.details.title": "Detalhes da mídia",
   "settings.wallpaperSource.details.unknown": "Não registrado",
   "settings.wallpaperSource.details.dimensions": "Dimensões em pixels",

@@ -100,6 +100,7 @@ export type WallpaperSourceErrorCode =
   | "imagine_rate_limited"
   | "imagine_request_rejected"
   | "imagine_upstream_failed"
+  | "imagine_network_failed"
   | "imagine_result_invalid"
   | "rate_limited"
   | "timeout"
@@ -107,7 +108,7 @@ export type WallpaperSourceErrorCode =
 
 const imagineErrorCodes = new Set<WallpaperSourceErrorCode>([
   "imagine_access_denied", "imagine_rate_limited", "imagine_request_rejected",
-  "imagine_upstream_failed", "imagine_result_invalid",
+  "imagine_upstream_failed", "imagine_network_failed", "imagine_result_invalid",
 ]);
 
 function imagineErrorCode(raw: string): WallpaperSourceErrorCode | null {
