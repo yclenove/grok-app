@@ -4,6 +4,14 @@
 
 ## 执行台账（2026-09-08）
 
+### 最新交付进度（Provider UI 已送审）
+
+公共许可来源已按依赖拆成四层并全部送审：[#1092](https://github.com/RongleCat/grok-app/pull/1092) 远程缩略图边界、[#1093](https://github.com/RongleCat/grok-app/pull/1093) Pexels 凭据、[#1094](https://github.com/RongleCat/grok-app/pull/1094) Provider 后端与安全媒体链路、[#1095](https://github.com/RongleCat/grok-app/pull/1095) 前端协议与缩略图缓存；四项远端 CI 均全绿。
+
+页面层 [#1096](https://github.com/RongleCat/grok-app/pull/1096) 已创建，分支 `feat/wallpaper-provider-ui`、独立提交 `e5d188ad`。本层 34 文件、`+2448/-305`，接入 Openverse/Pexels 页面、来源分组、显式分页、保留旧结果交互、失败重试、Pexels Key 完整设置交互、作者/许可元数据、15 语言和开发文档。最终本地验证为前端 598 文件/7,106 项、Rust 1,735 项（另 1 项原有 ignored），typecheck/lint/build/质量门禁/网站自测/依赖检查/生产审计/fmt/clippy 全通过。该 PR 属于 UI hold，依赖 #1092–#1095；不包含 Web、Grok Saved 或自动预取，也未宣称真实 Provider 网络和完整桌面实机 E2E。相关 Issue 检索没有精确匹配，未写 `Fixes`。
+
+下一批从已验证快照中独立提取 Provider 自动预取一页，并补齐“隐藏预取失败后显式加载更多必须真实重试”的契约；之后依次拆 Web 搜索、Grok Saved 相册、catalog/favorites/history、视频预览/编辑器、Imagine 与图生视频可靠性，最后对快照 `19168986` 做逐项 disposition 审计。主集成工作区 `WallpaperImagineControls.tsx`、`WallpaperSourceGallery.tsx`、`settings.part4.css` 三项未提交 WIP 保持原样，不混入台账提交。
+
 ### 最新交付进度（继续执行）
 最新发布：[PR #1093](https://github.com/RongleCat/grok-app/pull/1093)，feat/pexels-credential-storage / e1e7f748，5 文件 +135/-3。独立基于 a248f395；Pexels secrets/keychain/迁移/缓存/脱敏及 masked 状态，前端 API 类型，不含新入口。7070前端/1651Rust（另1 ignored），typecheck/lint/build/quality/website/deps/audit/fmt/clippy全通过；Rust当前产物manifest harness实际运行。未真实账号或各平台钥匙串实机验收。累计19 PR，远端CI待完成。完整licensed-search的最终前端7097项、596文件全绿（4workers），Rust1735/1ignored；所有产品变更仍完整暂存保留。
 
