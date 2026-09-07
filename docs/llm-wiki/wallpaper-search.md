@@ -117,7 +117,7 @@ CLI 与 Responses 的候选必须经过同一套处理：
 ## Imagine 静图与图片转视频
 
 - 改图通过 `wallpaper_image_edit` 调用受限 CLI 的 `image_edit`，复用来源规范化、取消与结果审计。`auto` 使用单个原图快照；显式 `16:9` / `9:16` / `1:1` / `4:3` 使用同一快照的两次引用，启用上游多参考图请求的原生 `aspect_ratio`。单参考图请求会忽略该参数。不得为改变比例给原图补白边、拉伸或裁切；提示模型按目标比例重新构图和延展场景。两次引用必须都指向本次同一个快照，审计不允许替换第二张图，也不允许额外工具调用或自动重试。
-- Imagine 图片模式的 `wallpaper_imagine` 使用独立 requestId、输出目录和受限 `image_gen` 会话，复用改图/视频的取消机制。Host 审计一次成功调用与准确提示词/比例，并从本次 session 复制唯一有效图片；不依据模型最终回复验收，也不扫描当天旧图充当新结果。不自动生成额外变体或重试。所有来源的静态图片卡提供“改图”和“生成视频”按钮，视频卡不显示这两项。
+- Imagine 图片模式的 `wallpaper_imagine` 使用独立 requestId、输出目录和受限 `image_gen` 会话，复用改图/视频的取消机制。Host 审计一次成功调用与准确提示词/比例，并从本次 session 复制唯一有效图片；不依据模型最终回复验收，也不扫描当天旧图充当新结果。输入审计兼容 Grok Build 进度事件添加的 `variant: "ImageGen"` 标记，除此之外字段集合和值必须与请求完全一致；未知标记、额外字段或参数变化仍拒收。不自动生成额外变体或重试。所有来源的静态图片卡提供“改图”和“生成视频”按钮，视频卡不显示这两项。
 - 点击按钮后先通过来源已有的安全下载路径准备本地图片。网络图库继续走 Host allowlist/签名校验，Grok 相册继续使用隔离 WebView 与 credential-free Host 竞速；不得把 Cookie、Token 或任意请求头导出到主应用。
 - 视频模式立即预填本地可编辑的运动/镜头模板，不额外请求模型或网络。只有 `imagine` 来源的原始 prompt 可作为至多 240 个 Unicode 字符的场景上下文；其他来源使用通用模板，不读取远程标题、描述或 Grok Saved 时间戳。净化明确的控制字符和 bidi 控制符，保留 ZWJ/ZWNJ。模板补充慢推镜头、自然运动、主体稳定、构图和风格保持约束；Host 把用户编辑的提示词作为场景数据，不能让它改写工具、路径、时长或分辨率。模式提供 `6` / `10` 秒和 `480p` / `720p`，默认 `6` 秒、`480p`。源图使用 `56 x 36` 紧凑缩略图，长文案截断。
 - `wallpaper_image_to_video` 使用本机 Grok Build CLI、`--effort low`、最多 3 turns 和 420 秒硬超时。专用 runner 固定 `--tools image_to_video`、`--disallowed-tools search_tool,use_tool`、`--disable-web-search`、`--no-subagents`，使用 Host 生成的新会话 UUID 和规范官方 `GROK_HOME`。前端不能指定模型、工具、CLI 参数或输出目录。

@@ -1,6 +1,8 @@
 # Wallpaper review and upstream integration
 
-Date: 2026-09-07. Status: in progress; no push or PR.
+Date: 2026-09-07. Status: review, upstream integration, full automated regression
+and representative Windows runtime checks completed; limitations below. No push
+or PR.
 
 ## Scope and baseline
 
@@ -143,12 +145,85 @@ existing Vite size advisory and MSVC import-library linker output remained.
 The final executable was built at 21:37:43 (77,771,264 bytes). It was restarted
 at 21:38:49 from the verified checkout path; the workbench rendered normally.
 
+## Image-generation progress compatibility
+
+An ordinary image-generation smoke test produced a valid JPEG in the current
+CLI session but the Host rejected it as `imagine_result_invalid`. The initial
+`image_gen` input contained prompt and aspect ratio; the progress update added
+`variant: "ImageGen"`. Whole-JSON equality incorrectly rejected that known CLI
+serialization marker. The fix accepts the exact original object or that one
+additional known tag, while requiring every requested field unchanged. Wrong
+tags, missing/changed fields and extra fields remain rejected.
+
+The regression exercises a complete initial/progress/completed audit, including
+the invalid variants above. All current Windows Rust harnesses passed:
+**1831 passed, 1 ignored, 0 failed**. Clippy with warnings denied and Rust
+formatting passed. The frontend is unchanged from the 7366-test result above.
+The desktop rebuild passed (22:00:18, 77,710,336 bytes), including TypeScript
+and production frontend assets. PID 16072 was launched at 22:00:50 from this
+checkout. The final code-quality gate passed (78 files at or above 1000 lines).
+
+The ordinary-image retest succeeded with the same previously rejected request.
+Its audit contains exactly one `image_gen` call, the known tagged progress input,
+and completion, with the exact prompt and 16:9 ratio. The Host saved a valid
+1280 x 720 JPEG (224,875 bytes), approximately 23 seconds after submission.
+The result appeared in Imagine and persisted near the top of the library.
+Selecting its video action immediately populated the original scene prompt
+plus the localized editable motion template, without submitting generation.
+
+A cancellation test using the shared generate/cancel button again raced a
+completed request and started another request. This produced one additional
+valid image (225,877 bytes); it was not an automatic retry. Closing the modal
+while the following request was busy removed its output directory, left no
+catalog entry and showed no late result on reopening. The CLI session retains
+its own completed image, so this proves Host cleanup/late-result rejection,
+not prevention of upstream generation or a measured two-second process stop.
+The generate/cancel action changing purpose at completion remains a UX edge
+case for delayed input; these earlier attempts do not measure cancellation.
+
+A separate final test submitted a new request at 22:30:00 and clicked Cancel
+immediately after observing the busy state. The next snapshot, 733 ms after
+the click, showed the editable prompt and Generate action restored, with no
+result. The subsequent process/filesystem check found the output directory
+removed and no matching generation process; the pre-existing unrelated CLI
+process remained running. This accepts immediate cancellation for this sample,
+without claiming that an upstream request can always be recalled after dispatch.
+
+The resulting library showed 115 entries (94 images, 21 videos). Pexels search
+for `mountain lake` returned 20 validated images in 15.2 seconds. Clicking
+Load more expanded the prefetched next page immediately to 32 images; opening
+an existing item resolved the original file and showed slide 20 of 32.
+Escape returned to the search results. This run does not prove clicking while
+a network pagination request is still pending; that path has automated coverage.
+
+The preceding image-edit smoke test also completed successfully: one audited
+`image_edit` call transformed the Pexels AVIF landscape into a 1280 x 720 sunset
+JPEG (292,555 bytes). The tool completed approximately 38 seconds after the UI
+submission; Host success was separately confirmed by the result card and media
+details. Details and the persisted catalog retain the exact editable prompt,
+`image_edit`, requested 16:9 and the source media ID. Only `result.jpg` remains
+in the output directory; the temporary PNG was removed.
+
+The new ordinary-image result opened at full size from the persistent library
+and was explicitly applied as the wallpaper. Both the Appearance preview and
+the main workbench displayed it correctly. Before this check, the current
+aurora video and appearance values were exported to a local temporary
+`.grokskin` recovery file. The archive contained the original 1102 x 768 MP4,
+default centered focus, mist skin and 36% scrim. Importing and applying that
+recovery file restored the aurora video without adding a preset. No network,
+account or authentication settings were modified. The usual before-last-apply
+snapshot now represents the generated-image test appearance.
+
 ## Remaining acceptance boundary
 
 This report does not claim the entire wallpaper optimization plan is complete.
-Final-build ordinary image generation, image editing, confirmed cancellation,
-remote-original failure/retry, the full seven-source/theme/size matrix and
-application of a newly generated background remain outside this runtime pass.
+Remote-original failure/retry and the exhaustive seven-source/theme/size matrix
+remain outside this runtime pass. Ordinary image generation, image editing,
+image-to-video, immediate cancellation, successful remote-original loading,
+late-result rejection and
+application/restoration of a newly generated background were exercised as
+described above. Automated full-regression coverage does not substitute for
+that remaining exhaustive manual matrix.
 Generated-video dimensions/duration are externally measured here but are not
 yet populated automatically in media details. Existing large single-result
 cards require scrolling to their bottom actions. Recoverable deletion, batch

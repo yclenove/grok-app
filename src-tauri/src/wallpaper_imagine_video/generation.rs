@@ -123,10 +123,21 @@ fn generate_inner(
 
 fn validate_input(actual: &Value, expected: &Value) -> Result<(), &'static str> {
     if actual == expected {
-        Ok(())
-    } else {
-        Err("imagine_failed")
+        return Ok(());
     }
+    // Grok Build progress updates serialize ImageGen's tagged input enum.
+    // Accept that one known tag while requiring every request field unchanged.
+    if let (Some(actual), Some(expected)) = (actual.as_object(), expected.as_object()) {
+        if actual.get("variant").and_then(Value::as_str) == Some("ImageGen")
+            && actual.len() == expected.len() + 1
+            && expected
+                .iter()
+                .all(|(key, value)| actual.get(key) == Some(value))
+        {
+            return Ok(());
+        }
+    }
+    Err("imagine_failed")
 }
 
 #[cfg(test)]
@@ -150,6 +161,46 @@ mod tests {
         assert_eq!(
             generate_inner("Sky", None, &cancellation).unwrap_err(),
             "cancelled"
+        );
+    }
+
+    #[test]
+    fn accepts_tagged_progress_input_but_rejects_changed_arguments_and_extra_fields() {
+        let input = generation_input("Sky", Some("16:9")).unwrap();
+        let mut tagged = input.clone();
+        tagged["variant"] = json!("ImageGen");
+        let with_progress = |actual: &Value| {
+            let initial = log(&input);
+            let lines: Vec<_> = initial.lines().collect();
+            let progress = json!({"params": {"sessionId": "session-1", "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "gen-1",
+                "rawInput": actual, "_meta": {"x.ai/tool": {"name": "image_gen"}}
+            }}});
+            format!("{}\n{progress}\n{}", lines[0], lines[1])
+        };
+        let audit = |raw: &str| {
+            session::audit_tool(raw, "session-1", "image_gen", |v| validate_input(v, &input))
+        };
+        assert!(audit(&with_progress(&tagged)).is_ok());
+        for (key, value) in [
+            ("prompt", json!("Other")),
+            ("aspect_ratio", json!("1:1")),
+            ("variant", json!("ImageEdit")),
+            ("variant", Value::Null),
+            ("extra", json!(true)),
+        ] {
+            let mut changed = tagged.clone();
+            changed[key] = value;
+            assert_eq!(
+                audit(&with_progress(&changed)),
+                Err("imagine_result_invalid")
+            );
+        }
+        let mut missing = tagged;
+        missing.as_object_mut().unwrap().remove("prompt");
+        assert_eq!(
+            audit(&with_progress(&missing)),
+            Err("imagine_result_invalid")
         );
     }
 
