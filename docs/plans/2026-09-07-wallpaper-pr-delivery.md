@@ -5,6 +5,9 @@
 ## 执行台账（2026-09-08）
 
 ### 最新交付进度（继续执行）
+来源/预加载拆分核对：最终产品快照 19168986 的 X 路线只有显式追加，自动一页预取实际位于 useWallpaperRemoteSourceController（Openverse/Pexels/Web）。因此后续先交付公共远程媒体和 provider 链路再提预取，不虚构 X 自动预取已实现。已建干净工作区 grok-app-pr-licensed-search / feat/wallpaper-licensed-search，当前仍为 f7458ff9，无产品变更。先从 upstream/main a248f395 独立建立 grok-app-pr-thumbnail-limits / fix/remote-thumbnail-decode-limits，提取 image_thumb 的有界内存解码并接入现有 remote thumbnail，同时流式限制下载体；本地检查进行中，尚未提交 PR。此项可独立合入且是公共媒体读取的真实前置，不暴露不可用来源入口。
+
+清理进程已结束：成功删除本地 test/menu-animation-cleanup、fix/wallpaper-x-quality-pipeline、fix/wallpaper-cli-output-drain、fix/wallpaper-search-lifecycle 及相应工作区。其他旧 worktree 的 Git 登记可能已移除但磁盘残留因长路径/权限未完全删除；递归删除补救被审批拒绝，保持残留，不再绕过。#1091 前端和三平台 Rust CI 已全绿。
 本地清理状态：使用 git worktree remove 清理已核实无 WIP 的旧 PR 工作区，部分依赖目录触发 Windows Filename too long / Permission denied，保留相应本地分支；已启用本仓库 core.longpaths。test/menu-animation-cleanup 已成功删除。PowerShell 递归删除残留目录被自动审批策略拒绝（仅返回 blocked by policy），没有执行该补救删除，也不得换工具绕过。原 Git 清理进程仍在处理剩余已合入工作区，继续执行时先检查其运行状态和现存目录；不要把剩余目录误认为新的产品 WIP，也不要宣称本地清理全部完成。待审 #1088–#1091、原集成分支和其他用户工作区保留。
 最新交付：C3c [#1091](https://github.com/RongleCat/grok-app/pull/1091)，`feat/wallpaper-search-more` / `f7458ff9`。Host 绑定凭据的 opaque continuationId、独占租约/在途 TTL 与淘汰保护、取消/失败归还、成功/空结果单次消费；一个额外 8 张目标请求、最多三次 X 调用、无 CLI 回退或自动重试；返回前复核凭据。前端追加时保留旧图并允许预览/选择，修复旧图下载后追加重复卡片，支持错误重试和无更多提示，15 语言。32 文件 +731/-61；7,079 前端、1,692 Rust（另 1 ignored）及所有本地门禁通过，22 项定向回归通过；未手动桌面/真实账号端到端。依赖 #1088/#1089/#1090，合入后去重。累计 17 个 PR，未擅自合并。#1090 四项远端 CI 全绿。
 
