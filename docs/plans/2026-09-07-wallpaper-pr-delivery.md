@@ -6,6 +6,10 @@
 
 ### 最新交付进度（继续执行）
 
+维护者合入更新：已 fetch 上游到 `8a211eb0`。#1074/#1076/#1077/#1078/#1079/#1080/#1081/#1082/#1083/#1086 共 10 项已由维护者合入；#1084/#1085/#1087 仍 OPEN。本任务未执行合并。#1084/#1085 维护者已自行 rebase，和本地处理后的树完全一致，采用远端 `92509cae` / `7b0e73f0`，未覆盖维护者提交。#1084 更新后前端 7,065 通过。#1087 rebase 并更新预览 Context 测试 mock，推送 `86491e5d`，typecheck、5 项定向前端、Rust fmt/clippy 与 1,651 原生测试（1 ignored）通过；已合入前置差异已去除，仍依赖 #1085。远端新 CI 待完成。
+
+C2 工作区 `grok-app-pr-responses-preview`、分支 `feat/wallpaper-responses-preview` 已跟随上述新基底。正在提取最终 OAuth 选择/过期/内容变化检测到 `account/build_oauth.rs`，保留原有测试。仅本地未完成模块，未提交也未宣称完整灰度交付；客户端、路由、设置与全量验证待完成。下一步先完成这一完整主题，之后继续 C3 及来源/目录/生成队列。
+
 最新发布：C1d 生命周期已提交 [#1087](https://github.com/RongleCat/grok-app/pull/1087)，提交 `b9160a0b`、分支 `fix/wallpaper-search-lifecycle`。本主题 26 文件 +927/-25，包含 15 语言、取消按钮/关闭/来源切换、请求 ID 与预取消、真实 CLI/图片探测取消及进度、连续重搜与迟到结果隔离。前端 7,060 / Rust 1,623（另 1 ignored）及所有本地门禁通过，最终定向 5 项通过；合成 CLI 等待执行阶段标记后再取消。尚未手动桌面实测。依赖 #1074/#1082/#1085/#1086；没有加入 Responses 或缓存。累计 13 个 PR，前 12 个四平台远端 CI 全通过，#1087 CI 待完成。下一批 C2 Responses 完整灰度；全量剩余队列仍未完成。
 
 最新发布：CLI 管道修复已提交 [#1086](https://github.com/RongleCat/grok-app/pull/1086)，提交 `e68edad0`、分支 `fix/wallpaper-cli-output-drain`。前端 7,055 / Rust 1,608（另 1 ignored）及所有本地门禁通过；大 stdout/stderr、超量输出、持有管道退出测试实际执行通过。累计 12 个 PR；#1085/#1086 远端 CI 待完成。下一步继续 CLI requestId/进度/取消的完整前后端接入，再推进 Responses。未完成项仍按下方全量队列交付。
