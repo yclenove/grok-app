@@ -15,6 +15,8 @@ export interface ImageSlideInput extends ImageSlideSource {
   onView?: () => void;
   /** Upgrade a viewable placeholder to a local original on first navigation. */
   loadOriginal?: () => Promise<ImageSlideSource | null>;
+  /** Return user-facing copy only; raw host errors are never rendered. */
+  originalErrorMessage?: (error: unknown) => string;
 }
 
 export interface ImageViewerApi {

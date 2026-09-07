@@ -81,13 +81,23 @@ export function loadImageNaturalSize(src: string): Promise<Size> {
       return;
     }
     const img = new Image();
+    const finish = (size: Size) => {
+      clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+      resolve(size);
+    };
+    const timer = setTimeout(() => {
+      finish({ width: 0, height: 0 });
+      img.src = "";
+    }, 20_000);
     img.onload = () => {
-      resolve({
+      finish({
         width: img.naturalWidth || 0,
         height: img.naturalHeight || 0,
       });
     };
-    img.onerror = () => resolve({ width: 0, height: 0 });
+    img.onerror = () => finish({ width: 0, height: 0 });
     img.src = src;
   });
 }

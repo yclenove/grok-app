@@ -17,6 +17,7 @@ fn gallery_item(id: usize) -> WallpaperGalleryItem {
         likes: None,
         local_path: None,
         prompt: None,
+        metadata: None,
         provenance: crate::wallpaper_source::WallpaperProvenance::empty(),
         status_id: None,
         media_index: None,

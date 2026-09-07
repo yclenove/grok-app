@@ -11,6 +11,8 @@ export type GrokAlbumThumbnailProps = {
   alt: string;
   width?: number | null;
   height?: number | null;
+  itemId?: string;
+  onUnavailable?: (id: string) => void;
 };
 
 export function GrokAlbumThumbnail({
@@ -18,6 +20,8 @@ export function GrokAlbumThumbnail({
   alt,
   width,
   height,
+  itemId,
+  onUnavailable,
 }: GrokAlbumThumbnailProps) {
   const [src, setSrc] = useState<string | null>(() =>
     peekGrokAlbumThumbnail(url),
@@ -50,11 +54,12 @@ export function GrokAlbumThumbnail({
       if (cancelled) return;
       setSrc(next);
       setFailed(!next);
+      if (!next && itemId) onUnavailable?.(itemId);
     });
     return () => {
       cancelled = true;
     };
-  }, [src, url]);
+  }, [src, url, itemId, onUnavailable]);
 
   if (!src) {
     return (
@@ -76,6 +81,7 @@ export function GrokAlbumThumbnail({
       onError={() => {
         forgetGrokAlbumThumbnail(url);
         setFailed(true);
+        if (itemId) onUnavailable?.(itemId);
       }}
     />
   );

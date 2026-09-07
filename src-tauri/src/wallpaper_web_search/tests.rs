@@ -29,6 +29,7 @@ fn item_with_fingerprint(
         likes: None,
         local_path: None,
         prompt: None,
+        metadata: None,
         provenance: WallpaperProvenance {
             source_url: Some(source_url.into()),
             source_name: Some("example.test".into()),

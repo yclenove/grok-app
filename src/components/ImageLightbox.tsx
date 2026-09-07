@@ -6,6 +6,7 @@ import Lightbox, { type Slide } from "yet-another-react-lightbox";
 import Zoom from "yet-another-react-lightbox/plugins/zoom";
 import Counter from "yet-another-react-lightbox/plugins/counter";
 import Video from "yet-another-react-lightbox/plugins/video";
+import { IconRefresh } from "./icons";
 import "yet-another-react-lightbox/styles.css";
 import "yet-another-react-lightbox/plugins/counter.css";
 
@@ -21,6 +22,8 @@ export type ImageLightboxSlide = {
   width?: number;
   height?: number;
   srcSet?: Array<{ src: string; width: number; height: number }>;
+  originalStatus?: "loading" | "error";
+  originalError?: string;
 };
 
 function videoMime(slide: ImageLightboxSlide): string {
@@ -56,6 +59,7 @@ export function ImageLightbox({
   index,
   slides,
   onView,
+  onRetryOriginal,
   labels,
 }: {
   open: boolean;
@@ -63,12 +67,16 @@ export function ImageLightbox({
   index: number;
   slides: ImageLightboxSlide[];
   onView: (index: number) => void;
+  onRetryOriginal?: () => void;
   labels: {
     next: string;
     prev: string;
     close: string;
     zoomIn: string;
     zoomOut: string;
+    loadingOriginal?: string;
+    originalFailed?: string;
+    retry?: string;
   };
 }) {
   return (
@@ -77,6 +85,23 @@ export function ImageLightbox({
       close={close}
       index={index}
       slides={toLightboxSlides(slides)}
+      toolbar={{
+        buttons: [
+          ...(slides[index]?.originalStatus ? [
+            <div key="original-status" className="image-original-status" role="status" aria-live="polite">
+              <span>{slides[index].originalStatus === "loading"
+                ? labels.loadingOriginal
+                : slides[index].originalError || labels.originalFailed}</span>
+              {slides[index].originalStatus === "error" && onRetryOriginal ? (
+                <button type="button" className="yarl__button" title={labels.retry} aria-label={labels.retry} onClick={onRetryOriginal}>
+                  <IconRefresh size={22} />
+                </button>
+              ) : null}
+            </div>,
+          ] : []),
+          "close",
+        ],
+      }}
       on={{
         view: ({ index: i }) => onView(i),
       }}

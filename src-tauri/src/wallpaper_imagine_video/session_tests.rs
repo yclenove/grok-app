@@ -2,6 +2,132 @@ use super::*;
 use crate::wallpaper_imagine_video::tests::{temp_dir, write_fake_mp4};
 use serde_json::json;
 
+fn failed_log(tool: &str, message: &str) -> String {
+    let start = json!({"sessionUpdate": "tool_call", "toolCallId": "call-1",
+        "toolName": tool, "rawInput": {"prompt": "selected prompt"}});
+    let end = json!({"sessionUpdate": "tool_call_update", "toolCallId": "call-1",
+        "status": "failed", "rawOutput": {"error": "tool_execution_failed", "message": message}});
+    [start, end]
+        .iter()
+        .map(|update| json!({"params": {"sessionId": "session-1", "update": update}}).to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn audit_failure(raw: &str, tool: &str) -> Result<(), &'static str> {
+    audit_tool(raw, "session-1", tool, |input| {
+        if input == &json!({"prompt": "selected prompt"}) {
+            Ok(())
+        } else {
+            Err("bad_input")
+        }
+    })
+}
+
+#[test]
+fn classifies_only_tool_owned_http_statuses_for_all_generation_modes() {
+    for (tool, prefix) in [
+        ("image_gen", "Image generation"),
+        ("image_edit", "Image edit"),
+        ("image_to_video", "Video generation"),
+        ("image_to_video", "Video poll"),
+    ] {
+        for (status, expected) in [
+            (401, "auth_required"),
+            (403, "imagine_access_denied"),
+            (408, "timeout"),
+            (504, "timeout"),
+            (429, "imagine_rate_limited"),
+            (400, "imagine_request_rejected"),
+            (402, "imagine_request_rejected"),
+            (415, "imagine_request_rejected"),
+            (422, "imagine_request_rejected"),
+            (500, "imagine_upstream_failed"),
+            (503, "imagine_upstream_failed"),
+            (200, "imagine_failed"),
+            (418, "imagine_failed"),
+        ] {
+            let raw = failed_log(
+                tool,
+                &format!("{prefix} failed with HTTP {status} Reason: private body HTTP 401"),
+            );
+            assert_eq!(audit_failure(&raw, tool), Err(expected), "{tool} {status}");
+        }
+    }
+}
+
+#[test]
+fn untrusted_text_and_invalid_audits_cannot_invent_a_generation_cause() {
+    for message in [
+        "selected prompt mentions HTTP 429",
+        "Error: Image generation failed with HTTP 429: body",
+        "Image edit failed with HTTP 429: wrong tool",
+        "Image generation failed with HTTP 4290: malformed status",
+        "Image generation failed with HTTP 429",
+        "Image generation failed with HTTP 4é: malformed status",
+        "Image generation API request failed: user input says HTTP 429",
+    ] {
+        assert_eq!(
+            audit_failure(&failed_log("image_gen", message), "image_gen"),
+            Err("imagine_failed")
+        );
+    }
+    let raw = failed_log("image_gen", "Image generation failed with HTTP 429: body");
+    for bad in [
+        raw.replace("session-1", "foreign-session"),
+        raw.replace("selected prompt", "substituted prompt"),
+        format!("{raw}\n{}", raw.lines().next().unwrap()),
+        format!("{raw}\nnot JSON"),
+        raw.lines().last().unwrap().to_string(),
+    ] {
+        assert_eq!(
+            audit_failure(&bad, "image_gen"),
+            Err("imagine_result_invalid")
+        );
+    }
+    assert_eq!(
+        audit_failure(
+            &raw.replace("tool_execution_failed", "other_error"),
+            "image_gen"
+        ),
+        Err("imagine_failed")
+    );
+    let message = json!({"params": {"sessionId": "session-1", "update": {
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": raw}
+    }}})
+    .to_string();
+    assert_eq!(
+        audit_failure(&message, "image_gen"),
+        Err("imagine_result_invalid")
+    );
+}
+
+#[test]
+fn failed_generation_without_an_images_directory_preserves_its_cause() {
+    let root = temp_dir("failed-tool-no-images");
+    let output = root.join("output");
+    fs::create_dir(&output).unwrap();
+    fs::write(
+        root.join("updates.jsonl"),
+        failed_log(
+            "image_gen",
+            "Image generation failed with HTTP 429: private body",
+        ),
+    )
+    .unwrap();
+    let result = crate::wallpaper_imagine_video::edit::copy_image_result(
+        &root,
+        &output,
+        "session-1",
+        "image_gen",
+        |_| Ok(()),
+        &WallpaperSearchCancellation::default(),
+    );
+    assert_eq!(result, Err("imagine_rate_limited"));
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn log(expected: &VideoInvocation<'_>) -> String {
     let update = json!({ "sessionUpdate": "tool_call", "toolCallId": "call-1",
         "_meta": { "x.ai/tool": { "name": "image_to_video" } },

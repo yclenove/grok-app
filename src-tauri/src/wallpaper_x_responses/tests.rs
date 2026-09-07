@@ -184,6 +184,7 @@ fn lane_item(id: &str) -> WallpaperGalleryItem {
         likes: None,
         local_path: None,
         prompt: None,
+        metadata: None,
         provenance: crate::wallpaper_source::WallpaperProvenance::empty(),
         status_id: Some(id.into()),
         media_index: Some(1),

@@ -72,6 +72,7 @@ function props(
       onVideoDurationChange: vi.fn(),
       onVideoResolutionChange: vi.fn(),
       onClearVideoSource: vi.fn(),
+      onUploadSource: vi.fn(),
       onGenerate: vi.fn(),
       onCancelGeneration: vi.fn(),
     },
@@ -93,7 +94,6 @@ function props(
     onOpenAlbum: vi.fn(),
     onSyncAlbum: vi.fn(),
     onRefreshAlbum: vi.fn(),
-    onRefreshLibrary: vi.fn(),
     ...overrides,
   };
 }

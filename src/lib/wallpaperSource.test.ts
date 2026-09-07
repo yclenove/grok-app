@@ -31,6 +31,15 @@ function item(
 }
 
 describe("wallpaperSource", () => {
+  it.each([
+    "imagine_access_denied", "imagine_rate_limited", "imagine_request_rejected",
+    "imagine_upstream_failed", "imagine_result_invalid",
+  ] as const)("preserves generation error %s without exposing diagnostics", (code) => {
+    expect(parseWallpaperSourceError(new Error(code))).toBe(code);
+    expect(errorCodeFromSearchResult({ items: [], errorCode: code, message: "private diagnostic" })).toBe(code);
+    expect(errorCodeFromSearchResult({ items: [item({ id: "saved", fullUrl: "https://a/saved.png" })], errorCode: code })).toBeNull();
+  });
+
   it("parses host error codes", () => {
     expect(parseWallpaperSourceError("auth_required")).toBe("auth_required");
     expect(parseWallpaperSourceError("pexels_key_missing")).toBe(

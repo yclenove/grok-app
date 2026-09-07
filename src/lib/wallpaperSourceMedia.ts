@@ -3,6 +3,7 @@ import {
   resolveApplySource,
   type WallpaperFetchResult,
   type WallpaperGalleryItem,
+  type WallpaperMediaRecord,
 } from "@/lib/wallpaperSource";
 import { createWallpaperRequestId } from "@/lib/wallpaperRequest";
 import {
@@ -57,7 +58,7 @@ export async function cancelRemoteWallpaperMediaRequests(): Promise<void> {
  */
 export async function ensureLocalWallpaperMedia(
   item: WallpaperGalleryItem,
-): Promise<{ path: string; name?: string; mime?: string }> {
+): Promise<{ path: string; name?: string; mime?: string; metadata?: WallpaperMediaRecord }> {
   const source = resolveApplySource(item);
   if (source.kind === "path") return { path: source.path };
 
@@ -101,5 +102,6 @@ export async function ensureLocalWallpaperMedia(
       item.source === "imagine" ? "imagine" : "x",
     );
   }
-  return { path: fetched.path, name: fetched.name, mime: fetched.mime };
+  const metadata = await api.wallpaperLibraryRemember(fetched.path, item);
+  return { path: fetched.path, name: fetched.name, mime: fetched.mime, ...(metadata ? { metadata } : {}) };
 }

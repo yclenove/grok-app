@@ -64,6 +64,7 @@ function model(
     onVideoDurationChange: vi.fn(),
     onVideoResolutionChange: vi.fn(),
     onClearVideoSource: vi.fn(),
+    onUploadSource: vi.fn(),
     onGenerate: vi.fn(),
     onCancelGeneration: vi.fn(),
     ...overrides,
@@ -78,6 +79,21 @@ const t = ((key: string, vars?: Record<string, unknown>) =>
       : key) as never;
 
 describe("WallpaperImagineControls", () => {
+  it("requires both an image and instructions for editing and offers upload", () => {
+    const onUploadSource = vi.fn();
+    const edit = model({ mode: "edit", videoSourcePath: "/source.png", videoSourceStatus: "ready", onUploadSource });
+    const view = render(<WallpaperImagineControls t={t} locked={false} model={edit} />);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "settings.wallpaperSource.editImage" }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.uploadImage" }));
+    expect(onUploadSource).toHaveBeenCalledOnce();
+    view.rerender(<WallpaperImagineControls t={t} locked={false} model={{ ...edit, prompt: "Make the sky blue" }} />);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "settings.wallpaperSource.editImage" }).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.aspect" }));
+    expect(edit.onAspectChange).toHaveBeenCalledWith("9:16");
+    view.rerender(<WallpaperImagineControls t={t} locked={true} model={{ ...edit, generating: true }} />);
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    expect(edit.onCancelGeneration).toHaveBeenCalledOnce();
+  });
   it("switches between image and video modes", () => {
     const onModeChange = vi.fn();
     render(
@@ -236,7 +252,7 @@ describe("WallpaperImagineControls", () => {
     expect(onCancelGeneration).toHaveBeenCalledTimes(1);
   });
 
-  it("does not advertise unsupported cancellation for image generation", () => {
+  it("allows cancelling image generation while other controls are locked", () => {
     const onCancelGeneration = vi.fn();
     render(
       <WallpaperImagineControls
@@ -251,10 +267,10 @@ describe("WallpaperImagineControls", () => {
     );
 
     const action = screen.getByRole<HTMLButtonElement>("button", {
-      name: "settings.wallpaperSource.generating",
+      name: "common.cancel",
     });
-    expect(action.disabled).toBe(true);
+    expect(action.disabled).toBe(false);
     fireEvent.click(action);
-    expect(onCancelGeneration).not.toHaveBeenCalled();
+    expect(onCancelGeneration).toHaveBeenCalledOnce();
   });
 });

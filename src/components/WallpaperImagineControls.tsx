@@ -1,5 +1,7 @@
 import {
   IconClose,
+  IconEdit,
+  IconUpload,
   IconImagine,
   IconPlay,
   IconVideo,
@@ -71,16 +73,18 @@ export function WallpaperImagineControls({
     onVideoDurationChange,
     onVideoResolutionChange,
     onClearVideoSource,
+    onUploadSource,
     onGenerate,
     onCancelGeneration,
   } = model;
   const preparingSource = videoSourceStatus === "preparing";
   const hardLocked = locked && !preparingSource && !generating;
   const sourceReady = videoSourceStatus === "ready" && !!videoSourcePath;
-  const cancellableGeneration = generating && mode === "video";
+  const cancellableGeneration = generating;
   const generateDisabled =
     hardLocked ||
     (mode === "image" ? !prompt.trim() : !sourceReady) ||
+    (mode === "edit" && !prompt.trim()) ||
     cancelling;
   const previewSrc = videoSource
     ? videoSourcePreview || localPreview(videoSource) || videoSource.thumbUrl
@@ -117,6 +121,15 @@ export function WallpaperImagineControls({
             ),
           },
           {
+            value: "edit",
+            label: (
+              <>
+                <IconEdit size={14} />
+                <span>{t("settings.wallpaperSource.editImage")}</span>
+              </>
+            ),
+          },
+          {
             value: "video",
             label: (
               <>
@@ -129,7 +142,7 @@ export function WallpaperImagineControls({
         onChange={(value) => onModeChange(value)}
       />
 
-      {mode === "video" ? (
+      {mode !== "image" ? (
         <div
           className="wallpaper-imagine-source"
           data-state={videoSourceStatus}
@@ -144,7 +157,7 @@ export function WallpaperImagineControls({
           </span>
           <span className="wallpaper-imagine-source__copy">
             <span className="wallpaper-imagine-source__label">
-              {t("settings.wallpaperSource.videoSource")}
+              {t("settings.wallpaperSource.sourceImage")}
             </span>
             <span className="wallpaper-imagine-source__value">
               {preparingSource
@@ -155,14 +168,24 @@ export function WallpaperImagineControls({
                   : t("settings.wallpaperSource.videoSourceMissing")}
             </span>
           </span>
+          <button
+            type="button"
+            className="wallpaper-imagine-source__clear"
+            disabled={generating || cancelling || hardLocked}
+            onClick={onUploadSource}
+            aria-label={t("settings.wallpaperSource.uploadImage")}
+            title={t("settings.wallpaperSource.uploadImage")}
+          >
+            <IconUpload size={16} />
+          </button>
           {videoSource ? (
             <button
               type="button"
               className="wallpaper-imagine-source__clear"
               disabled={generating || cancelling}
               onClick={onClearVideoSource}
-              aria-label={t("settings.wallpaperSource.removeVideoSource")}
-              title={t("settings.wallpaperSource.removeVideoSource")}
+              aria-label={t("settings.wallpaperSource.removeSourceImage")}
+              title={t("settings.wallpaperSource.removeSourceImage")}
             >
               <IconClose size={15} />
             </button>
@@ -176,11 +199,13 @@ export function WallpaperImagineControls({
         aria-label={t(
           mode === "video"
             ? "settings.wallpaperSource.videoPromptPlaceholder"
+            : mode === "edit" ? "settings.wallpaperSource.editPlaceholder"
             : "settings.wallpaperSource.imaginePlaceholder",
         )}
         placeholder={t(
           mode === "video"
             ? "settings.wallpaperSource.videoPromptPlaceholder"
+            : mode === "edit" ? "settings.wallpaperSource.editPlaceholder"
             : "settings.wallpaperSource.imaginePlaceholder",
         )}
         disabled={generating || cancelling || hardLocked}
@@ -188,7 +213,7 @@ export function WallpaperImagineControls({
         onChange={(event) => onPromptChange(event.target.value)}
       />
       <div className="wallpaper-source-form__row wallpaper-imagine-form__options">
-        {mode === "image" ? (
+        {mode !== "video" ? (
           <Select
             className="wallpaper-source-form__select"
             value={aspect}
@@ -198,7 +223,7 @@ export function WallpaperImagineControls({
             onChange={onAspectChange}
             placement="down"
           />
-        ) : (
+        ) : mode === "video" ? (
           <>
             <Select
               className="wallpaper-source-form__select"
@@ -223,18 +248,16 @@ export function WallpaperImagineControls({
               placement="down"
             />
           </>
-        )}
+        ) : null}
         <button
           type="button"
           className={cancellableGeneration ? "btn btn--ghost" : "btn btn--solid"}
-          disabled={generating ? mode === "image" || cancelling : generateDisabled}
+          disabled={generating ? cancelling : generateDisabled}
           aria-busy={generating}
           onClick={cancellableGeneration ? onCancelGeneration : onGenerate}
         >
           {generating ? (
-            mode === "image" ? (
-              t("settings.wallpaperSource.generating")
-            ) : cancelling ? (
+            cancelling ? (
               t("settings.wallpaperSource.cancellingVideo")
             ) : (
               t("common.cancel")
@@ -244,6 +267,8 @@ export function WallpaperImagineControls({
               <IconPlay size={15} />
               <span>{t("settings.wallpaperSource.generateVideo")}</span>
             </>
+          ) : mode === "edit" ? (
+            <><IconEdit size={15} /><span>{t("settings.wallpaperSource.editImage")}</span></>
           ) : (
             t("settings.wallpaperSource.generate")
           )}

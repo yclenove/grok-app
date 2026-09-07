@@ -5,11 +5,37 @@ const invoke = vi.hoisted(() => vi.fn());
 const prepare = vi.hoisted(() => vi.fn());
 vi.mock("./host", () => ({ invoke, listen: vi.fn() }));
 vi.mock("../wallpaperVideoImage", () => ({ prepareWallpaperVideoImage: prepare }));
-import { wallpaperImageToVideo, wallpaperImageToVideoCancel } from "./wallpaper";
+import { wallpaperImageEdit, wallpaperImportImage, wallpaperImageToVideo, wallpaperImageToVideoCancel } from "./wallpaper";
 
 afterEach(() => vi.resetAllMocks());
 
 describe("wallpaper video API", () => {
+  it("passes the actual source and edit prompt to the editing command", async () => {
+    prepare.mockResolvedValue("PNG");
+    invoke.mockResolvedValue({ items: [] });
+    await wallpaperImageEdit("/image.avif", "Replace the sky", "16:9", "edit-1");
+    expect(invoke).toHaveBeenCalledWith("wallpaper_image_edit", {
+      sourcePath: "/image.avif", sourcePngBase64: "PNG", prompt: "Replace the sky", aspectRatio: "16:9", requestId: "edit-1",
+    });
+  });
+
+  it("imports uploads through the Host with normalized pixels", async () => {
+    prepare.mockResolvedValue("PNG");
+    await wallpaperImportImage("/upload.avif");
+    expect(invoke).toHaveBeenCalledWith("wallpaper_import_image", { sourcePath: "/upload.avif", sourcePngBase64: "PNG" });
+  });
+
+  it("cancels edits during source conversion before starting the Host", async () => {
+    let resolve!: (value: string) => void;
+    prepare.mockReturnValue(new Promise<string>((r) => { resolve = r; }));
+    const edit = wallpaperImageEdit("/source.avif", "New sky", "auto", "edit-2");
+    const rejection = expect(edit).rejects.toThrow();
+    await wallpaperImageToVideoCancel("edit-2");
+    resolve("late pixels");
+    await rejection;
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("wallpaper_image_to_video_cancel", { requestId: "edit-2" });
+  });
   it("passes converted pixels with the original selected path and options", async () => {
     prepare.mockResolvedValue("encoded PNG");
     invoke.mockResolvedValue({ items: [] });

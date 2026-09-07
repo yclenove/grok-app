@@ -48,6 +48,7 @@ function galleryProps(
     onClearFilters: vi.fn(),
     onPreview: vi.fn(),
     onGenerateVideo: vi.fn(),
+    onEditImage: vi.fn(),
     onDropItem: vi.fn(),
     onOpenXStatus: vi.fn(),
     onOpenSource: vi.fn(),
@@ -58,6 +59,58 @@ function galleryProps(
 }
 
 describe("WallpaperSourceGallery", () => {
+  it("closes details when a filter removes its item and does not reopen it when rows return", () => {
+    const item = { id: "details", source: "library", kind: "image", fullUrl: "file:///test.png", thumbUrl: "", localPath: "/test.png", textPreview: "Lake" };
+    const props = galleryProps({ tab: "library", visibleItems: [item] });
+    const view = render(<WallpaperSourceGallery {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.details.title: Lake" }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(props.onPreview).not.toHaveBeenCalled();
+    view.rerender(<WallpaperSourceGallery {...props} visibleItems={[]} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    view.rerender(<WallpaperSourceGallery {...props} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("toggles a favorite without opening preview and shows its saved state", () => {
+    const item = { id: "favorite-image", source: "library", kind: "image", localPath: "/test.png", fullUrl: "file:///test.png", thumbUrl: "", textPreview: "Lake" };
+    const toggle = vi.fn();
+    const props = galleryProps({ tab: "library", visibleItems: [item], onToggleFavorite: toggle });
+    const view = render(<WallpaperSourceGallery {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.library.favorite: Lake" }));
+    expect(toggle).toHaveBeenCalledWith(item);
+    expect(props.onPreview).not.toHaveBeenCalled();
+    view.rerender(<WallpaperSourceGallery {...props} visibleItems={[{ ...item, metadata: { favorite: true } as never }]} />);
+    expect(screen.getByRole("button", { name: "settings.wallpaperSource.library.unfavorite: Lake" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("retains a failed local card and retries only its media", () => {
+    const item = { id: "failed-image", source: "library", kind: "image", fullUrl: "file:///test.png", thumbUrl: "", localPath: "/test.png", textPreview: "Lake", width: 600, height: 400 };
+    const props = galleryProps({ tab: "library", visibleItems: [item, { ...item, id: "good-image", localPath: "/good.png", textPreview: "Mountain" }] });
+    const { container } = render(<WallpaperSourceGallery {...props} />);
+    const original = container.querySelectorAll("img")[0];
+    const unchanged = container.querySelectorAll("img")[1];
+    fireEvent.error(original);
+    expect(props.onDropItem).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "ui.errorBoundary.retry: Lake" }));
+    expect(container.querySelectorAll("img")).toHaveLength(2);
+    expect(container.querySelectorAll("img")[0]).not.toBe(original);
+    expect(container.querySelectorAll("img")[1]).toBe(unchanged);
+    expect(props.onPreview).not.toHaveBeenCalled();
+  });
+
+  it.each(["library", "imagine", "x", "grok_album", "web", "openverse", "pexels"] as const)(
+    "hands the original image to edit from %s without triggering preview", (tab) => {
+      const image = { id: "image", kind: "image", source: tab, localPath: "/source.png", fullUrl: "file:///source.png", thumbUrl: "" };
+      const props = galleryProps({ tab, visibleItems: [image, { ...image, id: "video", kind: "video" }] });
+      render(<WallpaperSourceGallery {...props} />);
+      const buttons = screen.getAllByRole("button", { name: /settings.wallpaperSource.editImage/ });
+      expect(buttons).toHaveLength(1);
+      fireEvent.click(buttons[0]);
+      expect(props.onEditImage).toHaveBeenCalledWith(image);
+      expect(props.onPreview).not.toHaveBeenCalled();
+    },
+  );
   it.each(["library", "imagine"] as const)(
     "refreshes a local video in %s after the media endpoint becomes ready",
     async (tab) => {
@@ -177,6 +230,7 @@ describe("WallpaperSourceGallery", () => {
         onClearFilters={vi.fn()}
         onPreview={vi.fn()}
         onGenerateVideo={vi.fn()}
+        onEditImage={vi.fn()}
         onDropItem={onDropItem}
         onOpenXStatus={vi.fn()}
         onOpenSource={vi.fn()}

@@ -60,6 +60,12 @@ type PrefetchOutcome = {
   error: unknown | null;
 };
 
+export type WallpaperRemoteContinuationState = {
+  continuation: Continuation | null;
+  hasMore: boolean;
+  prefetched: PrefetchOutcome | null;
+};
+
 function sameContinuation(
   left: Continuation,
   right: Continuation,
@@ -95,6 +101,7 @@ export function useWallpaperRemoteSourceController({
   const appliedProgressiveKeysRef = useRef<Set<string>>(new Set());
   const prefetchingRef = useRef(false);
   const prefetchGenerationRef = useRef(0);
+  const foregroundGenerationRef = useRef(0);
   const prefetchRequestIdRef = useRef<string | null>(null);
   const prefetchOutcomeRef = useRef<PrefetchOutcome | null>(null);
   const prefetchPromiseRef = useRef<Promise<PrefetchOutcome | null> | null>(
@@ -120,9 +127,25 @@ export function useWallpaperRemoteSourceController({
   }, []);
 
   const cancel = useCallback(async (): Promise<boolean> => {
+    foregroundGenerationRef.current += 1;
     discardPrefetch();
     return remote.cancel();
   }, [discardPrefetch, remote.cancel]);
+
+  const capture = useCallback((): WallpaperRemoteContinuationState => ({
+    continuation: continuationRef.current,
+    hasMore,
+    prefetched: prefetchOutcomeRef.current,
+  }), [hasMore]);
+
+  const restore = useCallback((state: WallpaperRemoteContinuationState) => {
+    foregroundGenerationRef.current += 1;
+    discardPrefetch();
+    continuationRef.current = state.continuation;
+    prefetchOutcomeRef.current = state.prefetched;
+    setHasMore(state.hasMore);
+    setLoadingMore(false);
+  }, [discardPrefetch]);
 
   const startPrefetch = useCallback(
     (continuation: Continuation): Promise<PrefetchOutcome | null> => {
@@ -173,6 +196,7 @@ export function useWallpaperRemoteSourceController({
 
   useEffect(() => {
     if (enabled) return;
+    foregroundGenerationRef.current += 1;
     discardPrefetch();
     continuationRef.current = null;
     progressiveRequestRef.current = null;
@@ -193,6 +217,7 @@ export function useWallpaperRemoteSourceController({
       return;
     }
     const hiddenPrefetchWasActive = prefetchingRef.current;
+    foregroundGenerationRef.current += 1;
     discardPrefetch();
     continuationRef.current = null;
     setHasMore(false);
@@ -250,6 +275,7 @@ export function useWallpaperRemoteSourceController({
   }, [prefetching, remote.busy, remote.source, remote.stage, source, t]);
 
   const resetForSearch = useCallback(() => {
+    foregroundGenerationRef.current += 1;
     discardPrefetch();
     clearRemoteWallpaperThumbnailCache();
     setError(null);
@@ -291,9 +317,10 @@ export function useWallpaperRemoteSourceController({
       return;
     }
     resetForSearch();
+    const generation = foregroundGenerationRef.current;
     try {
       const result = await remote.search(activeSource, normalizedQuery);
-      if (!result) return;
+      if (!result || generation !== foregroundGenerationRef.current) return;
       const list = dedupeGalleryItems(result.items);
       const code = wallpaperRemoteUiError({ ...result, items: list });
       setHasSearched(true);
@@ -328,6 +355,7 @@ export function useWallpaperRemoteSourceController({
       );
       if (continuation) void startPrefetch(continuation);
     } catch (error) {
+      if (generation !== foregroundGenerationRef.current) return;
       setHasSearched(true);
       const code = parseWallpaperSourceError(error);
       setErrorCode(code);
@@ -353,6 +381,7 @@ export function useWallpaperRemoteSourceController({
     const continuation = continuationRef.current;
     if (!continuation || (remote.busy && !prefetchingRef.current)) return;
     const generation = prefetchGenerationRef.current;
+    const foregroundGeneration = foregroundGenerationRef.current;
     const initialItems = itemsRef.current;
     setError(null);
     setErrorCode(null);
@@ -446,11 +475,12 @@ export function useWallpaperRemoteSourceController({
       );
       if (nextContinuation) void startPrefetch(nextContinuation);
     } catch (error) {
+      if (foregroundGeneration !== foregroundGenerationRef.current) return;
       const code = parseWallpaperSourceError(error);
       setErrorCode(code);
       setError(wallpaperSourceErrorMessage(t, code));
     } finally {
-      setLoadingMore(false);
+      if (foregroundGeneration === foregroundGenerationRef.current) setLoadingMore(false);
     }
   }, [
     remote.busy,
@@ -471,6 +501,8 @@ export function useWallpaperRemoteSourceController({
     search,
     loadMore,
     cancel,
+    capture,
+    restore,
     clear: resetForSearch,
   };
 }

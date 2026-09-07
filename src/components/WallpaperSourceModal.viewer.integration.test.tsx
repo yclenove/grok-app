@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@/test/jsdomStubs";
 
@@ -120,6 +120,8 @@ vi.mock("@/lib/api", () => ({
   isDesktopHost: () => true,
   isTauri: () => false,
   wallpaperFetchMedia: vi.fn(),
+  wallpaperLibraryRemember: vi.fn(),
+  wallpaperLibraryLookup: vi.fn(async () => []),
   wallpaperRemoteFetchMedia: vi.fn(),
   wallpaperGrokAlbumFetchMedia: fetchAlbumMedia,
   wallpaperGrokAlbumThumbnail: vi.fn(async () => ({
@@ -133,6 +135,7 @@ vi.mock("@/lib/api", () => ({
   wallpaperRemoteCancelAllMediaRequests: vi.fn(async () => 0),
   wallpaperImagine: vi.fn(),
   wallpaperLibraryList: vi.fn(),
+  wallpaperLibraryPage: vi.fn(async () => ({ items: [], nextCursor: null, total: 0, kindCounts: { all: 0, image: 0, video: 0 } })),
   wallpaperLibraryDelete: vi.fn(),
   openExternalUrl: vi.fn(),
 }));
@@ -143,9 +146,12 @@ vi.mock("@/components/Select", () => ({
 
 import { ImageViewerProvider } from "./ImageViewer";
 import { WallpaperSourceModal } from "./WallpaperSourceModal";
+import { setMediaEndpoint } from "@/lib/imageSrc";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  setMediaEndpoint(null);
   fetchAlbumMedia.mockClear();
   remoteControllerState.busy = false;
   remoteControllerState.loadingMore = false;
@@ -154,6 +160,30 @@ afterEach(() => {
 });
 
 describe("WallpaperSourceModal image viewer integration", () => {
+  it("retries a failed original inside the real preview without dropping the card or leaving a gallery error", async () => {
+    setMediaEndpoint({ baseUrl: "http://127.0.0.1:19200", token: "test-only" });
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    fetchAlbumMedia.mockRejectedValueOnce(new Error("download_failed: private diagnostic"));
+    render(
+      <ImageViewerProvider locale="en">
+        <WallpaperSourceModal open initialTab="grok_album" t={(key) => key === "settings.wallpaperSource.err.download_failed" ? "Download failed" : key} onClose={vi.fn()} onPickFile={vi.fn()} />
+      </ImageViewerProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /^settings\.wallpaperSource\.openPreview/ }));
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    const portal = document.querySelector<HTMLElement>(".yarl__portal")!;
+    expect(within(portal).getByRole("status").textContent).toContain("Download failed");
+    expect(document.body.textContent).not.toContain("private diagnostic");
+    expect(screen.getAllByRole("listitem", { hidden: true })).toHaveLength(1);
+    fireEvent.click(retry);
+    await waitFor(() => expect(portal.querySelector("video")).not.toBeNull());
+    expect(fetchAlbumMedia).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(document.body.textContent).not.toContain("Download failed");
+    expect(screen.getAllByRole("listitem", { hidden: true })).toHaveLength(1);
+  });
+
   it("opens the real lightbox portal for a lazy Grok album card", async () => {
     const onClose = vi.fn();
     render(

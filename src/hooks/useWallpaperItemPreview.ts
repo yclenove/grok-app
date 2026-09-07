@@ -50,7 +50,6 @@ export function useWallpaperItemPreview({
   sourceGenerationRef,
   viewer,
   t,
-  dropItem,
   setItems,
   setSelectedId,
   setPreviewingId,
@@ -95,6 +94,7 @@ export function useWallpaperItemPreview({
                 ? {
                     ...candidate,
                     localPath: local.path,
+                    metadata: local.metadata ?? candidate.metadata,
                     fullUrl: candidate.fullUrl.startsWith("http")
                       ? candidate.fullUrl
                       : `file://${local.path}`,
@@ -124,8 +124,12 @@ export function useWallpaperItemPreview({
               kind: "image",
               title: slideTitle(candidate),
               alt: candidate.prompt || candidate.textPreview || undefined,
-              onView: () => setSelectedId(candidate.id),
+              onView: () => {
+                if (sourceGeneration === sourceGenerationRef.current) setSelectedId(candidate.id);
+              },
+              originalErrorMessage: (error) => wallpaperSourceErrorMessage(t, parseWallpaperSourceError(error)),
               loadOriginal: async () => {
+                if (sourceGeneration !== sourceGenerationRef.current) return null;
                 try {
                   const loaded = await ensureLocalWallpaperMedia(candidate);
                   if (sourceGeneration !== sourceGenerationRef.current) {
@@ -137,6 +141,7 @@ export function useWallpaperItemPreview({
                         ? {
                             ...current,
                             localPath: loaded.path,
+                            metadata: loaded.metadata ?? current.metadata,
                             fullUrl: current.fullUrl.startsWith("http")
                               ? current.fullUrl
                               : `file://${loaded.path}`,
@@ -154,9 +159,6 @@ export function useWallpaperItemPreview({
                   if (sourceGeneration !== sourceGenerationRef.current) {
                     return null;
                   }
-                  const code = parseWallpaperSourceError(error);
-                  setErrorCode(code);
-                  setError(wallpaperSourceErrorMessage(t, code));
                   throw error;
                 }
               },
@@ -179,8 +181,12 @@ export function useWallpaperItemPreview({
               kind: "image",
               title: slideTitle(candidate),
               alt: candidate.prompt || candidate.textPreview || undefined,
-              onView: () => setSelectedId(candidate.id),
+              onView: () => {
+                if (sourceGeneration === sourceGenerationRef.current) setSelectedId(candidate.id);
+              },
+              originalErrorMessage: (error) => wallpaperSourceErrorMessage(t, parseWallpaperSourceError(error)),
               loadOriginal: async () => {
+                if (sourceGeneration !== sourceGenerationRef.current) return null;
                 try {
                   const loaded = await ensureLocalWallpaperMedia(candidate);
                   if (sourceGeneration !== sourceGenerationRef.current) {
@@ -189,7 +195,7 @@ export function useWallpaperItemPreview({
                   setItems((previous) =>
                     previous.map((current) =>
                       current.id === candidate.id
-                        ? { ...current, localPath: loaded.path }
+                        ? { ...current, localPath: loaded.path, metadata: loaded.metadata ?? current.metadata }
                         : current,
                     ),
                   );
@@ -202,9 +208,6 @@ export function useWallpaperItemPreview({
                   if (sourceGeneration !== sourceGenerationRef.current) {
                     return null;
                   }
-                  const code = parseWallpaperSourceError(error);
-                  setErrorCode(code);
-                  setError(wallpaperSourceErrorMessage(t, code));
                   throw error;
                 }
               },
@@ -224,7 +227,9 @@ export function useWallpaperItemPreview({
             mime: candidate.id === item.id ? local?.mime : undefined,
             title: slideTitle(candidate),
             alt: candidate.prompt || candidate.textPreview || undefined,
-            onView: () => setSelectedId(candidate.id),
+            onView: () => {
+              if (sourceGeneration === sourceGenerationRef.current) setSelectedId(candidate.id);
+            },
           };
         });
         const index = Math.max(
@@ -234,9 +239,7 @@ export function useWallpaperItemPreview({
         viewer.open(slides, index);
       } catch (error) {
         if (sourceGeneration !== sourceGenerationRef.current) return;
-        // Eager X/Imagine failures represent broken cards. Album and remote
-        // previews do not perform an original download on this path.
-        if (eagerLocalPreview) dropItem(item.id);
+        // A failed original fetch must not discard a reusable search result.
         const code = parseWallpaperSourceError(error);
         setErrorCode(code);
         setError(wallpaperSourceErrorMessage(t, code));
@@ -248,7 +251,6 @@ export function useWallpaperItemPreview({
       }
     },
     [
-      dropItem,
       interactionLocked,
       setError,
       setErrorCode,

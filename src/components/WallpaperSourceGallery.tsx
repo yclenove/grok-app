@@ -1,5 +1,9 @@
 import { GrokAlbumThumbnail } from "@/components/GrokAlbumThumbnail";
-import { IconPlay } from "@/components/icons";
+import { IconEdit, IconHeart, IconInfo, IconPlay, IconRefresh } from "@/components/icons";
+import { WallpaperMediaDetails } from "@/components/WallpaperMediaDetails";
+import { Select } from "@/components/Select";
+import { forgetGrokAlbumThumbnail } from "@/lib/grokAlbumThumbnail";
+import { forgetRemoteWallpaperThumbnail } from "@/lib/remoteWallpaperThumbnail";
 import { RemoteWallpaperThumbnail } from "@/components/RemoteWallpaperThumbnail";
 import { WallpaperSourceAttribution } from "@/components/WallpaperSourceAttribution";
 import type { MessageKey } from "@/i18n";
@@ -7,10 +11,11 @@ import {
   ensureMediaEndpoint,
   resolveImageSrcSync,
 } from "@/lib/imageSrc";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type RefObject } from "react";
 import type {
   WallpaperGalleryItem,
   WallpaperSourceKind,
+  WallpaperLibraryPurpose,
 } from "@/lib/wallpaperSource";
 import {
   wallpaperGalleryKindFilterLabelKey,
@@ -29,6 +34,13 @@ type Translate = (
 ) => string;
 
 export type WallpaperSourceGalleryProps = {
+  favoriteBusyIds?: ReadonlySet<string>;
+  onToggleFavorite?: (item: WallpaperGalleryItem) => void;
+  onReusePrompt?: (item: WallpaperGalleryItem) => void;
+  libraryPurpose?: WallpaperLibraryPurpose;
+  onLibraryPurposeChange?: (purpose: WallpaperLibraryPurpose) => void;
+  onRefreshLibrary?: () => void;
+  scrollRef?: RefObject<HTMLDivElement | null>;
   t: Translate;
   tab: WallpaperSourceKind;
   visibleItems: WallpaperGalleryItem[];
@@ -51,6 +63,7 @@ export type WallpaperSourceGalleryProps = {
   onClearFilters: () => void;
   onPreview: (item: WallpaperGalleryItem) => void;
   onGenerateVideo: (item: WallpaperGalleryItem) => void;
+  onEditImage: (item: WallpaperGalleryItem) => void;
   onDropItem: (id: string) => void;
   onOpenXStatus: (url: string) => void;
   onOpenSource: (url: string) => void;
@@ -103,6 +116,13 @@ function itemActionAccessibleName(
 }
 
 export function WallpaperSourceGallery({
+  scrollRef,
+  favoriteBusyIds,
+  onToggleFavorite,
+  onReusePrompt,
+  libraryPurpose = "all",
+  onLibraryPurposeChange,
+  onRefreshLibrary,
   t,
   tab,
   visibleItems,
@@ -125,13 +145,38 @@ export function WallpaperSourceGallery({
   onClearFilters,
   onPreview,
   onGenerateVideo,
-  onDropItem,
+  onEditImage,
   onOpenXStatus,
   onOpenSource,
   onDeleteLibraryItem,
   onLoadMore,
 }: WallpaperSourceGalleryProps) {
   const [, refreshMediaSources] = useState(0);
+  const [details, setDetails] = useState<{ tab: string; id: string } | null>(null);
+  const detailsItem = details?.tab === tab
+    ? visibleItems.find((item) => item.id === details.id) ?? null : null;
+  useEffect(() => {
+    setDetails((current) => current?.tab === tab && visibleItems.some((item) => item.id === current.id) ? current : null);
+  }, [tab, visibleItems]);
+  const [failedMedia, setFailedMedia] = useState<Set<string>>(new Set());
+  const [mediaAttempts, setMediaAttempts] = useState<Record<string, number>>({});
+  const markUnavailable = useCallback((id: string) => {
+    setFailedMedia((previous) => previous.has(id) ? previous : new Set(previous).add(id));
+  }, []);
+  const retryMedia = (item: WallpaperGalleryItem) => {
+    if (item.source === "grok_album") forgetGrokAlbumThumbnail(item.thumbUrl || item.fullUrl);
+    if (isWallpaperRemoteSource(item.source)) forgetRemoteWallpaperThumbnail(item);
+    setMediaAttempts((previous) => ({ ...previous, [item.id]: (previous[item.id] ?? 0) + 1 }));
+    setFailedMedia((previous) => { const next = new Set(previous); next.delete(item.id); return next; });
+  };
+
+  useEffect(() => {
+    const ids = new Set(visibleItems.map((item) => item.id));
+    setFailedMedia((previous) => [...previous].every((id) => ids.has(id))
+      ? previous : new Set([...previous].filter((id) => ids.has(id))));
+    setMediaAttempts((previous) => Object.keys(previous).every((id) => ids.has(id))
+      ? previous : Object.fromEntries(Object.entries(previous).filter(([id]) => ids.has(id))));
+  }, [visibleItems]);
 
   useEffect(() => {
     let mounted = true;
@@ -146,6 +191,7 @@ export function WallpaperSourceGallery({
   const library = tab === "library";
   const imagineLayout = tab === "imagine";
   const stableAppendLayout =
+    tab === "library" ||
     tab === "grok_album" ||
     tab === "x" ||
     tab === "web" ||
@@ -156,13 +202,20 @@ export function WallpaperSourceGallery({
 
   return (
     <>
-      {showFilters ? (
+      {showFilters || library ? (
         <div
           className={
             "wallpaper-source-filters" +
+            (library ? " wallpaper-library-toolbar" : "") +
             (!showKindFilters ? " wallpaper-source-filters--query-only" : "")
           }
         >
+          {library && onLibraryPurposeChange ? (
+            <Select className="wallpaper-library-toolbar__collection" value={libraryPurpose}
+              options={(["all", "favorites", "generated", "cache"] as const).map((value) => ({ value, label: t(`settings.wallpaperSource.library.${value}`) }))}
+              onChange={(value) => onLibraryPurposeChange(value as WallpaperLibraryPurpose)}
+              aria-label={t("settings.wallpaperSource.library.collection")} disabled={locked} />
+          ) : null}
           {showKindFilters ? (
             <div
               className="wallpaper-source-chips"
@@ -214,10 +267,19 @@ export function WallpaperSourceGallery({
               {t("settings.wallpaperSource.clearFilters")}
             </button>
           ) : null}
+          {library && onRefreshLibrary ? (
+            <button type="button" className="btn btn--ghost wallpaper-library-toolbar__refresh"
+              onClick={onRefreshLibrary} disabled={locked || busy} aria-busy={busy}
+              title={t("settings.wallpaperSource.libraryRefresh")}
+              aria-label={t("settings.wallpaperSource.libraryRefresh")}>
+              <IconRefresh size={16} />
+            </button>
+          ) : null}
         </div>
       ) : null}
 
       <div
+        ref={scrollRef}
         className="wallpaper-masonry-scroll"
         role="list"
         aria-label={t("settings.wallpaperSource.gallery")}
@@ -319,13 +381,17 @@ export function WallpaperSourceGallery({
                         index,
                       )}
                     >
-                      <span className="wallpaper-masonry__media">
-                        {item.source === "grok_album" && !library ? (
+                      <span className="wallpaper-masonry__media" key={mediaAttempts[item.id] ?? 0}>
+                        {failedMedia.has(item.id) ? (
+                          <span className="wallpaper-masonry__thumb-placeholder" data-state="failed" style={{ aspectRatio: mediaAspectRatio ?? "16 / 9" }} />
+                        ) : item.source === "grok_album" && !library ? (
                           <GrokAlbumThumbnail
                             url={item.thumbUrl || item.fullUrl}
                             alt={item.textPreview || item.prompt || item.username || ""}
                             width={item.width}
                             height={item.height}
+                            itemId={item.id}
+                            onUnavailable={markUnavailable}
                           />
                         ) : !library &&
                           !item.localPath &&
@@ -338,7 +404,7 @@ export function WallpaperSourceGallery({
                               item.username ||
                               ""
                             }
-                            onUnavailable={onDropItem}
+                            onUnavailable={markUnavailable}
                           />
                         ) : localVideo ? (
                           <video
@@ -348,7 +414,7 @@ export function WallpaperSourceGallery({
                             playsInline
                             preload="metadata"
                             aria-hidden="true"
-                            onError={() => onDropItem(item.id)}
+                            onError={() => markUnavailable(item.id)}
                           />
                         ) : (
                           <img
@@ -357,12 +423,32 @@ export function WallpaperSourceGallery({
                             className="wallpaper-masonry__img"
                             loading="lazy"
                             referrerPolicy="no-referrer"
-                            onError={() => onDropItem(item.id)}
+                            onError={() => markUnavailable(item.id)}
                           />
                         )}
                       </span>
                     </button>
+                    {failedMedia.has(item.id) ? (
+                      <button type="button" className="wallpaper-masonry__video-action wallpaper-masonry__retry" disabled={locked} title={t("ui.errorBoundary.retry")} aria-label={itemActionAccessibleName(t, "ui.errorBoundary.retry", item, index)} onClick={(event) => { event.stopPropagation(); retryMedia(item); }}>
+                        <IconRefresh size={18} />
+                      </button>
+                    ) : null}
                     {canGenerateVideo ? (
+                      <>
+                      <button
+                        type="button"
+                        className="wallpaper-masonry__video-action wallpaper-masonry__edit-action"
+                        disabled={locked || loading}
+                        aria-label={itemActionAccessibleName(t, "settings.wallpaperSource.editImage", item, index)}
+                        title={t("settings.wallpaperSource.editImage")}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onEditImage(item);
+                        }}
+                      >
+                        <IconEdit size={16} />
+                      </button>
                       <button
                         type="button"
                         className="wallpaper-masonry__video-action"
@@ -384,11 +470,27 @@ export function WallpaperSourceGallery({
                       >
                         <IconPlay size={16} />
                       </button>
+                      </>
+                    ) : null}
+                    {onToggleFavorite ? (
+                      <button type="button" className="wallpaper-masonry__video-action wallpaper-masonry__favorite-action"
+                        disabled={locked || favoriteBusyIds?.has(item.id)} aria-busy={favoriteBusyIds?.has(item.id)} aria-pressed={!!item.metadata?.favorite}
+                        title={t(item.metadata?.favorite ? "settings.wallpaperSource.library.unfavorite" : "settings.wallpaperSource.library.favorite")}
+                        aria-label={itemActionAccessibleName(t, item.metadata?.favorite ? "settings.wallpaperSource.library.unfavorite" : "settings.wallpaperSource.library.favorite", item, index)}
+                        onClick={(event) => { event.stopPropagation(); onToggleFavorite(item); }}>
+                        <IconHeart size={16} />
+                      </button>
                     ) : null}
                   </div>
-                  {meta ? (
-                    <span className="wallpaper-masonry__meta">{meta}</span>
-                  ) : null}
+                  <div className="wallpaper-masonry__caption">
+                    {meta ? <span className="wallpaper-masonry__meta">{meta}</span> : null}
+                    <button type="button" className="btn btn--ghost btn--icon wallpaper-masonry__details"
+                      disabled={locked} title={t("settings.wallpaperSource.details.title")}
+                      aria-label={itemActionAccessibleName(t, "settings.wallpaperSource.details.title", item, index)}
+                      onClick={() => setDetails({ tab, id: item.id })}>
+                      <IconInfo size={15} />
+                    </button>
+                  </div>
                 </div>
 
                 {citation && !loading ? (
@@ -468,6 +570,9 @@ export function WallpaperSourceGallery({
           </div>
         ) : null}
       </div>
+      <WallpaperMediaDetails item={detailsItem} t={t} locked={locked}
+        onClose={() => setDetails(null)} onOpenSource={onOpenSource}
+        onReusePrompt={onReusePrompt ? (item) => { setDetails(null); onReusePrompt(item); } : undefined} />
     </>
   );
 }

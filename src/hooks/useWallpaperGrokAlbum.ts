@@ -46,7 +46,7 @@ function delay(ms: number): Promise<void> {
  * 20-item page warm when the official album window is not focused. Authentication
  * and request signing remain entirely inside that WebView.
  */
-export function useWallpaperGrokAlbum(enabled: boolean) {
+export function useWallpaperGrokAlbum(enabled: boolean, modalOpen = true) {
   const [snapshot, setSnapshot] =
     useState<GrokAlbumSnapshot>(EMPTY_SNAPSHOT);
   const [visibleCount, setVisibleCount] = useState(GROK_ALBUM_PAGE_SIZE);
@@ -54,6 +54,7 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
   const [hasSynced, setHasSynced] = useState(false);
   const [exhausted, setExhausted] = useState(false);
   const [errorCode, setErrorCode] = useState<GrokAlbumErrorCode | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const syncInFlightRef = useRef<number | null>(null);
   const prefetchInFlightRef = useRef<number | null>(null);
   const loadMoreInFlightRef = useRef<{
@@ -92,6 +93,9 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
       }
       initialSignInGenerationRef.current = null;
       observedGenerationRef.current = generation;
+      if (next.pageChanged || (next.status !== "ready" && next.status !== "loading")) {
+        setHistoryRevision((value) => value + 1);
+      }
       if (next.pageChanged) {
         clearGrokAlbumThumbnailCache();
         cancelGrokAlbumMediaRequests();
@@ -107,7 +111,7 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
         clearGrokAlbumThumbnailCache();
         cancelGrokAlbumMediaRequests();
         setHasSynced(false);
-        setVisibleCount(GROK_ALBUM_PAGE_SIZE);
+        if (next.status !== "loading") setVisibleCount(GROK_ALBUM_PAGE_SIZE);
         setExhausted(false);
         prefetchPausedRef.current = false;
       }
@@ -390,7 +394,7 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
       clearGrokAlbumThumbnailCache();
       cancelGrokAlbumMediaRequests();
       setSnapshot(EMPTY_SNAPSHOT);
-      setVisibleCount(GROK_ALBUM_PAGE_SIZE);
+      if (!modalOpen) setVisibleCount(GROK_ALBUM_PAGE_SIZE);
       setHasSynced(false);
       setExhausted(false);
       setOperation(null);
@@ -404,7 +408,7 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
       return;
     }
     void sync(true);
-  }, [enabled, sync]);
+  }, [enabled, modalOpen, sync]);
 
   useEffect(
     () => () => {
@@ -453,6 +457,7 @@ export function useWallpaperGrokAlbum(enabled: boolean) {
   const busy = operation !== null || initializing;
 
   return {
+    historyRevision,
     status: !enabled ? "closed" : initializing ? "loading" : snapshot.status,
     items,
     cachedCount: allItems.length,

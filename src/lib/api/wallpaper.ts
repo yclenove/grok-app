@@ -7,6 +7,7 @@ import {
 import { prepareWallpaperVideoImage } from "../wallpaperVideoImage";
 
 import type {
+  WallpaperGalleryItem,
   WallpaperFetchResult,
   WallpaperLibraryEntry,
   WallpaperSearchResult,
@@ -185,14 +186,40 @@ export async function wallpaperFetchMedia(
 export async function wallpaperImagine(
   prompt: string,
   aspectRatio?: string,
+  requestId?: string,
 ): Promise<WallpaperSearchResult> {
   return invoke<WallpaperSearchResult>("wallpaper_imagine", {
     prompt,
     aspectRatio: aspectRatio ?? null,
+    requestId: requestId ?? null,
   });
 }
 
 const videoPreparations = new Map<string, AbortController>();
+
+export async function wallpaperImportImage(sourcePath: string): Promise<WallpaperFetchResult> {
+  const sourcePngBase64 = await prepareWallpaperVideoImage(sourcePath, new AbortController().signal);
+  return invoke<WallpaperFetchResult>("wallpaper_import_image", { sourcePath, sourcePngBase64 });
+}
+
+export async function wallpaperImageEdit(
+  sourcePath: string,
+  prompt: string,
+  aspectRatio: string,
+  requestId: string,
+): Promise<WallpaperSearchResult> {
+  const preparation = new AbortController();
+  videoPreparations.set(requestId, preparation);
+  try {
+    const sourcePngBase64 = await prepareWallpaperVideoImage(sourcePath, preparation.signal);
+    preparation.signal.throwIfAborted();
+    return await invoke<WallpaperSearchResult>("wallpaper_image_edit", {
+      sourcePath, sourcePngBase64, prompt, aspectRatio, requestId,
+    });
+  } finally {
+    if (videoPreparations.get(requestId) === preparation) videoPreparations.delete(requestId);
+  }
+}
 
 export async function wallpaperImageToVideo(
   sourcePath: string,
@@ -232,6 +259,42 @@ export async function wallpaperLibraryList(
   return invoke<WallpaperLibraryEntry[]>("wallpaper_library_list", {
     limit: limit ?? null,
   });
+}
+
+export type WallpaperLibraryQuery = { query: string; kind: "all" | "image" | "video"; purpose?: import("@/lib/wallpaperSource").WallpaperLibraryPurpose };
+export type WallpaperLibraryPage = {
+  items: WallpaperLibraryEntry[];
+  nextCursor: string | null;
+  total: number;
+  kindCounts: { all: number; image: number; video: number };
+};
+
+export async function wallpaperLibraryPage(query: WallpaperLibraryQuery, cursor: string | null = null): Promise<WallpaperLibraryPage> {
+  return invoke<WallpaperLibraryPage>("wallpaper_library_page", { query, cursor, limit: 48 });
+}
+
+export async function wallpaperLibraryRemember(path: string, item: Pick<WallpaperGalleryItem, "source" | "fullUrl" | "sourceUrl" | "sourceName" | "authorName" | "authorUrl" | "username" | "postUrl" | "license" | "licenseUrl" | "textPreview">, favorite?: boolean): Promise<import("@/lib/wallpaperSource").WallpaperMediaRecord> {
+  return invoke("wallpaper_library_remember", { path, metadata: {
+    source: item.source,
+    mediaUrl: item.fullUrl,
+    sourceUrl: item.sourceUrl || item.postUrl || null,
+    sourceName: item.sourceName ?? null,
+    authorName: item.authorName || item.username || null,
+    authorUrl: item.authorUrl ?? null,
+    license: item.license ?? null,
+    licenseUrl: item.licenseUrl ?? null,
+    title: item.textPreview ?? null,
+  }, favorite: favorite ?? null });
+}
+
+export type WallpaperLibraryMatch = { index: number; path: string; metadata: import("@/lib/wallpaperSource").WallpaperMediaRecord };
+
+export async function wallpaperLibraryLookup(requests: Array<{ source: string; mediaUrl: string }>): Promise<WallpaperLibraryMatch[]> {
+  return invoke("wallpaper_library_lookup", { requests });
+}
+
+export async function wallpaperLibraryFindById(id: string): Promise<WallpaperLibraryEntry | null> {
+  return invoke("wallpaper_library_find_by_id", { id });
 }
 
 // ── Grok Imagine saved album (isolated consumer WebView) ───────────────────

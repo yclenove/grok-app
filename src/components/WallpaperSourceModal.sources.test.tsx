@@ -12,6 +12,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "@/test/jsdomStubs";
 import type { GrokAlbumStatus } from "@/lib/grokAlbum";
+import { wallpaperImagine } from "@/lib/api";
 import type {
   WallpaperGalleryItem,
   WallpaperLibraryEntry,
@@ -58,6 +59,7 @@ const xSearchState = vi.hoisted(() => ({
   progressiveDone: false,
 }));
 const grokAlbumState = vi.hoisted(() => ({
+  historyRevision: 0,
   status: "closed" as GrokAlbumStatus,
   cachedCount: 0,
   visibleCount: 0,
@@ -126,6 +128,8 @@ vi.mock("@/lib/api", () => ({
   isDesktopHost: () => true,
   isTauri: () => false,
   wallpaperFetchMedia: vi.fn(),
+  wallpaperLibraryRemember: vi.fn(),
+  wallpaperLibraryLookup: vi.fn(async () => []),
   wallpaperRemoteFetchMedia: fetchRemoteWallpaperMedia,
   wallpaperGrokAlbumFetchMedia: vi.fn(),
   wallpaperGrokAlbumThumbnail: vi.fn(),
@@ -137,6 +141,10 @@ vi.mock("@/lib/api", () => ({
   wallpaperImageToVideo,
   wallpaperImageToVideoCancel,
   wallpaperLibraryList,
+  wallpaperLibraryPage: vi.fn(async () => {
+    const items = await wallpaperLibraryList();
+    return { items, nextCursor: null, total: items.length, kindCounts: { all: items.length, image: items.filter((item) => item.kind === "image").length, video: items.filter((item) => item.kind === "video").length } };
+  }),
   wallpaperLibraryDelete: vi.fn(),
   openExternalUrl: vi.fn(),
   secretsGetMasked,
@@ -206,6 +214,7 @@ afterEach(() => {
   remoteControllerState.searchItems = [];
   remoteControllerState.searchErrorCode = null;
   grokAlbumState.status = "closed";
+  grokAlbumState.historyRevision = 0;
   grokAlbumState.cachedCount = 0;
   grokAlbumState.visibleCount = 0;
   grokAlbumState.busy = false;
@@ -234,6 +243,22 @@ function galleryItem(
 const t = (key: string) => key;
 
 describe("WallpaperSourceModal source workspace", () => {
+  it("reuses a library prompt in Imagine and preserves the library when returning", async () => {
+    wallpaperLibraryList.mockResolvedValueOnce([{
+      path: "/saved.png", name: "saved.png", source: "imagine", kind: "image", bytes: 2000, modifiedMs: 1,
+      metadata: { id: "saved", title: "Saved artwork", prompt: "A quiet mountain lake", generation: { aspectRatio: "9:16" } } as never,
+    }]);
+    render(<WallpaperSourceModal open initialTab="library" t={t as never} onClose={vi.fn()} onPickFile={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "settings.wallpaperSource.details.title: Saved artwork" }));
+    fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.details.reuse" }));
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe("wallpaper-source-tab-imagine");
+    expect(screen.getByDisplayValue("A quiet mountain lake")).toBeTruthy();
+    expect(screen.getByText("9:16")).toBeTruthy();
+    expect(wallpaperImagine).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "settings.wallpaperLibrary" }));
+    await screen.findByRole("button", { name: "settings.wallpaperSource.details.title: Saved artwork" });
+    expect(wallpaperLibraryList).toHaveBeenCalledTimes(1);
+  });
   it("associates the source navigation with one workspace", () => {
     const view = render(
       <WallpaperSourceModal
@@ -303,7 +328,8 @@ describe("WallpaperSourceModal source workspace", () => {
     expect(layout?.lastElementChild).toBe(panel);
   });
 
-  it("clears remote paging state when switching providers", () => {
+  it("cancels outgoing requests and restores the provider's query, rows and scroll", async () => {
+    remoteControllerState.searchItems = [galleryItem("saved", { source: "openverse" })];
     render(
       <WallpaperSourceModal
         open
@@ -314,12 +340,23 @@ describe("WallpaperSourceModal source workspace", () => {
       />,
     );
 
+    fireEvent.change(screen.getByPlaceholderText("settings.wallpaperSource.openverse.placeholder"), { target: { value: "misty coast" } });
+    fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.search" }));
+    await screen.findByRole("button", { name: /^settings\.wallpaperSource\.openPreview/ });
+    const scroller = document.querySelector<HTMLDivElement>(".wallpaper-masonry")!.parentElement!;
+    scroller.scrollTop = 420;
     fireEvent.click(
       screen.getByRole("tab", { name: "settings.wallpaperPexels" }),
     );
 
     expect(cancelRemote).toHaveBeenCalledTimes(1);
-    expect(clearRemote).toHaveBeenCalledTimes(1);
+    expect(clearRemote).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /^settings\.wallpaperSource\.openPreview/ })).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "settings.wallpaperOpenverse" }));
+    expect(screen.getByPlaceholderText<HTMLInputElement>("settings.wallpaperSource.openverse.placeholder").value).toBe("misty coast");
+    expect(screen.getByRole("button", { name: /^settings\.wallpaperSource\.openPreview/ })).toBeTruthy();
+    expect(searchRemote).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBe(420);
   });
 
   it("keeps paged search and album cards stable while results append", () => {
@@ -361,7 +398,7 @@ describe("WallpaperSourceModal source workspace", () => {
       />,
     );
 
-    await waitFor(() => expect(wallpaperLibraryList).toHaveBeenCalledWith(96));
+    await waitFor(() => expect(wallpaperLibraryList).toHaveBeenCalled());
     expect(
       screen.queryByRole("button", {
         name: "settings.wallpaperSource.kind.all",
@@ -398,7 +435,7 @@ describe("WallpaperSourceModal source workspace", () => {
       <WallpaperSourceModal open initialTab="library" {...props} />,
     );
 
-    await waitFor(() => expect(wallpaperLibraryList).toHaveBeenCalledWith(96));
+    await waitFor(() => expect(wallpaperLibraryList).toHaveBeenCalled());
     view.rerender(
       <WallpaperSourceModal open={false} initialTab="library" {...props} />,
     );
@@ -425,6 +462,29 @@ describe("WallpaperSourceModal source workspace", () => {
         name: /^settings\.wallpaperSource\.openPreview/,
       }),
     ).toBeNull();
+  });
+
+  it("restores album filters and scroll after revalidation, then clears them on a changed ready page", async () => {
+    const albumItems = [galleryItem("still", { source: "grok_album", kind: "image" }), galleryItem("clip", { source: "grok_album", kind: "video" })];
+    Object.assign(grokAlbumState, { status: "ready", hasSynced: true, items: albumItems, cachedCount: 2, visibleCount: 2 });
+    const props = { open: true, initialTab: "grok_album" as const, t: t as never, onClose: vi.fn(), onPickFile: vi.fn() };
+    const view = render(<WallpaperSourceModal {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /^settings\.wallpaperSource\.kind\.video/ }));
+    const scroller = view.container.querySelector<HTMLDivElement>(".wallpaper-masonry-scroll")!;
+    scroller.scrollTop = 320;
+    fireEvent.click(screen.getByRole("tab", { name: "settings.wallpaperFromX" }));
+    Object.assign(grokAlbumState, { status: "loading", busy: true, hasSynced: false, items: [], cachedCount: 0, visibleCount: 0 });
+    fireEvent.click(screen.getByRole("tab", { name: "settings.wallpaperGrokAlbum" }));
+    scroller.scrollTop = 0;
+    expect(screen.getByRole("button", { name: "settings.wallpaperSource.clearFilters" })).toBeTruthy();
+    Object.assign(grokAlbumState, { status: "ready", busy: false, hasSynced: true, items: albumItems, cachedCount: 2, visibleCount: 2 });
+    view.rerender(<WallpaperSourceModal {...props} />);
+    await waitFor(() => expect(scroller.scrollTop).toBe(320));
+    expect(screen.getAllByRole("button", { name: /^settings\.wallpaperSource\.openPreview/ })).toHaveLength(1);
+    grokAlbumState.historyRevision += 1;
+    view.rerender(<WallpaperSourceModal {...props} />);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "settings.wallpaperSource.clearFilters" })).toBeNull());
+    expect(screen.getAllByRole("button", { name: /^settings\.wallpaperSource\.openPreview/ })).toHaveLength(2);
   });
 
   it("clears stale album filters when the official page leaves ready state", async () => {

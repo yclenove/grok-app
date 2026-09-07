@@ -60,14 +60,12 @@ export type WallpaperSourceControlsProps = {
   onOpenAlbum: () => void;
   onSyncAlbum: () => void;
   onRefreshAlbum: () => void;
-  onRefreshLibrary: () => void;
 };
 
 export function WallpaperSourceControls({
   t,
   tab,
   locked,
-  busy,
   xSearchBusy,
   remoteSearchBusy,
   remoteSearchDisabled,
@@ -96,7 +94,6 @@ export function WallpaperSourceControls({
   onOpenAlbum,
   onSyncAlbum,
   onRefreshAlbum,
-  onRefreshLibrary,
 }: WallpaperSourceControlsProps) {
   const [xSearchModeSaving, setXSearchModeSaving] = useState(false);
 
@@ -253,20 +250,5 @@ export function WallpaperSourceControls({
     );
   }
 
-  return (
-    <div className="wallpaper-source-form">
-      <div className="wallpaper-source-form__row">
-        <button
-          type="button"
-          className="btn btn--solid"
-          disabled={locked}
-          onClick={onRefreshLibrary}
-        >
-          {busy
-            ? t("settings.wallpaperSource.libraryLoading")
-            : t("settings.wallpaperSource.libraryRefresh")}
-        </button>
-      </div>
-    </div>
-  );
+  return null;
 }

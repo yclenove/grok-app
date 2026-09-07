@@ -50,6 +50,9 @@ interface ResolvedSlide {
   title?: string;
   onView?: ImageSlideInput["onView"];
   loadOriginal?: ImageSlideInput["loadOriginal"];
+  originalErrorMessage?: ImageSlideInput["originalErrorMessage"];
+  originalStatus?: "loading" | "error";
+  originalError?: string;
   /** Original path/url for copy. */
   origin: string;
   /** Logical size for YARL fit + zoom (may exceed natural for small images). */
@@ -78,10 +81,14 @@ function currentStageRect() {
 async function withLogicalImageSize(
   slide: ResolvedSlide,
   stage: ReturnType<typeof currentStageRect>,
+  requireDecodedImage = false,
 ): Promise<ResolvedSlide> {
   if (slide.kind === "video") return slide;
   const natural = await loadImageNaturalSize(slide.src);
-  if (!(natural.width > 0 && natural.height > 0)) return slide;
+  if (!(natural.width > 0 && natural.height > 0)) {
+    if (requireDecodedImage) throw new Error("original_decode_failed");
+    return slide;
+  }
   const logical = lightboxSlideDimensions(natural, stage);
   const sizeFields = lightboxYarlSlideSize(slide.src, logical);
   return sizeFields ? { ...slide, ...sizeFields } : slide;
@@ -99,16 +106,26 @@ export function ImageViewerProvider({
   const slidesRef = useRef(slides);
   const generationRef = useRef(0);
   const originalLoadsRef = useRef(new Set<string>());
+  const activeOriginalLoadsRef = useRef(0);
+  const pendingOriginalLoadRef = useRef<(() => void) | null>(null);
   slidesRef.current = slides;
 
   const close = useCallback(() => {
     generationRef.current += 1;
     originalLoadsRef.current.clear();
+    pendingOriginalLoadRef.current = null;
     isOpenRef.current = false;
     setIsOpen(false);
   }, []);
 
   const viewerIsOpen = useCallback(() => isOpenRef.current, []);
+
+  useEffect(() => () => {
+    generationRef.current += 1;
+    originalLoadsRef.current.clear();
+    pendingOriginalLoadRef.current = null;
+    isOpenRef.current = false;
+  }, []);
 
   const openViewer = useCallback(
     (input: ImageSlideInput[] | string[], startIndex = 0) => {
@@ -121,6 +138,7 @@ export function ImageViewerProvider({
         const generation = generationRef.current + 1;
         generationRef.current = generation;
         originalLoadsRef.current.clear();
+        pendingOriginalLoadRef.current = null;
         const resolved = (
           await Promise.all(
             normalized.map(async (input, inputIndex) => {
@@ -147,6 +165,7 @@ export function ImageViewerProvider({
                 title: input.title,
                 onView: input.onView,
                 loadOriginal: input.loadOriginal,
+                originalErrorMessage: input.originalErrorMessage,
               };
             }
             return {
@@ -157,6 +176,7 @@ export function ImageViewerProvider({
               title: input.title,
               onView: input.onView,
               loadOriginal: input.loadOriginal,
+              originalErrorMessage: input.originalErrorMessage,
             };
           },
         );
@@ -203,7 +223,8 @@ export function ImageViewerProvider({
   }, []);
 
   const hydrateSlideAt = useCallback(
-    (targetIndex: number, force = false) => {
+    function hydrateSlideAt(targetIndex: number, force = false, retryOriginal = false) {
+      if (!isOpenRef.current) return;
       const slide = slidesRef.current[targetIndex];
       if (!slide) {
         return;
@@ -213,15 +234,39 @@ export function ImageViewerProvider({
       const expectedSrc = slide.src;
 
       if (slide.loadOriginal) {
+        if (slide.originalStatus === "error" && !retryOriginal) return;
         const loadKey = `${generation}:${targetIndex}:${expectedOrigin}`;
         if (originalLoadsRef.current.has(loadKey)) return;
+        const updateSlide = (updated: ResolvedSlide) => {
+          if (generationRef.current !== generation) return;
+          const previous = slidesRef.current[targetIndex];
+          if (previous?.origin !== expectedOrigin || previous.src !== expectedSrc) return;
+          const next = slidesRef.current.slice();
+          next[targetIndex] = updated;
+          slidesRef.current = next;
+          setSlides(next);
+        };
+        updateSlide({ ...slide, originalStatus: "loading", originalError: undefined });
+        // Keep only the latest queued slide. In-flight Host requests still
+        // occupy their slots after close/reopen until they actually settle.
+        if (activeOriginalLoadsRef.current >= 2) {
+          pendingOriginalLoadRef.current = () => {
+            if (generationRef.current === generation) {
+              hydrateSlideAt(targetIndex, force, retryOriginal);
+            }
+          };
+          return;
+        }
         originalLoadsRef.current.add(loadKey);
+        activeOriginalLoadsRef.current += 1;
         void (async () => {
           try {
             const loaded = await slide.loadOriginal?.();
-            if (!loaded || generationRef.current !== generation) return;
+            if (generationRef.current !== generation) return;
+            if (!loaded) throw new Error("original_unavailable");
             const loadedSrc = await resolveImageSrc(loaded.src);
-            if (!loadedSrc || generationRef.current !== generation) return;
+            if (generationRef.current !== generation) return;
+            if (!loadedSrc) throw new Error("original_unavailable");
             const upgraded: ResolvedSlide = {
               ...slide,
               src: loadedSrc,
@@ -230,6 +275,8 @@ export function ImageViewerProvider({
               mime: loaded.mime,
               poster: loaded.poster ?? slide.poster,
               loadOriginal: undefined,
+              originalStatus: undefined,
+              originalError: undefined,
               width: undefined,
               height: undefined,
               srcSet: undefined,
@@ -237,24 +284,22 @@ export function ImageViewerProvider({
             const updated = await withLogicalImageSize(
               upgraded,
               currentStageRect(),
+              true,
             );
-            if (generationRef.current !== generation) return;
-            setSlides((current) => {
-              const previous = current[targetIndex];
-              if (
-                previous?.origin !== expectedOrigin ||
-                previous.src !== expectedSrc
-              ) {
-                return current;
-              }
-              const next = current.slice();
-              next[targetIndex] = updated;
-              return next;
+            updateSlide(updated);
+          } catch (error) {
+            // Preserve the thumbnail and retry only on an explicit user action.
+            updateSlide({
+              ...slide,
+              originalStatus: "error",
+              originalError: slide.originalErrorMessage?.(error),
             });
-          } catch {
-            // Keep the already-viewable placeholder; revisiting may retry.
           } finally {
             originalLoadsRef.current.delete(loadKey);
+            activeOriginalLoadsRef.current -= 1;
+            const pending = pendingOriginalLoadRef.current;
+            pendingOriginalLoadRef.current = null;
+            pending?.();
           }
         })();
         return;
@@ -293,6 +338,7 @@ export function ImageViewerProvider({
 
   const handleView = useCallback(
     (nextIndex: number) => {
+      pendingOriginalLoadRef.current = null;
       setIndex(nextIndex);
       slidesRef.current[nextIndex]?.onView?.();
       hydrateSlideAt(nextIndex);
@@ -367,12 +413,16 @@ export function ImageViewerProvider({
             index={index}
             slides={slides}
             onView={handleView}
+            onRetryOriginal={() => hydrateSlideAt(index, false, true)}
             labels={{
               next: tr("image.next"),
               prev: tr("image.prev"),
               close: tr("image.close"),
               zoomIn: tr("image.zoomIn"),
               zoomOut: tr("image.zoomOut"),
+              loadingOriginal: tr("image.loadingOriginal"),
+              originalFailed: tr("image.originalFailed"),
+              retry: tr("ui.errorBoundary.retry"),
             }}
           />
         </Suspense>

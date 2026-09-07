@@ -16,6 +16,8 @@ use crate::wallpaper_source::{
 
 const VIDEO_TIMEOUT: Duration = Duration::from_secs(420);
 const MAX_MOTION_PROMPT_CHARS: usize = 4_000;
+pub(crate) mod edit;
+pub(crate) mod generation;
 mod session;
 mod source;
 const PRE_CANCEL_TTL: Duration = Duration::from_secs(30);
@@ -160,6 +162,7 @@ fn generate_inner(
     if fs::create_dir_all(&output_dir).is_err() {
         return failure("imagine_failed");
     }
+    let original_source = source.clone();
     let source = match source::materialize(source_png_base64, &source, &output_dir) {
         Ok(path) => path,
         Err(code) => {
@@ -186,14 +189,19 @@ fn generate_inner(
     match run {
         Ok(_) => {}
         Err(code) => {
+            let expected = session::VideoInvocation {
+                session_id: &session_id,
+                source: &source,
+                motion: motion_prompt.as_deref(),
+                duration,
+                resolution: resolution_name,
+            };
+            let code =
+                session::run_error(&code, &session_id, &output_dir, "image_to_video", |input| {
+                    session::validate_input(input, &expected)
+                });
             cleanup_failed_output(&output_dir);
-            return failure(match code.as_str() {
-                "cancelled" => "cancelled",
-                "timeout" => "timeout",
-                "auth_required" => "auth_required",
-                "cli_missing" => "cli_missing",
-                _ => "imagine_failed",
-            });
+            return failure(code);
         }
     };
 
@@ -215,7 +223,7 @@ fn generate_inner(
             return failure(code);
         }
     };
-    let item = match generated_video_item(&copied, &output_dir, motion_prompt.as_deref()) {
+    let mut item = match generated_video_item(&copied, &output_dir, motion_prompt.as_deref()) {
         Ok(item) => item,
         Err(code) => {
             cleanup_failed_output(&output_dir);
@@ -224,6 +232,26 @@ fn generate_inner(
     };
     // The input snapshot is transient; the library contains only the output.
     let _ = fs::remove_file(&source);
+    if cancellation.is_cancelled() {
+        cleanup_failed_output(&output_dir);
+        return failure("cancelled");
+    }
+    item.metadata = Some(
+        match crate::wallpaper_catalog::record_generation(
+            &copied,
+            motion_prompt.as_deref(),
+            crate::wallpaper_catalog::GenerationParameters {
+                operation: "image_to_video".into(),
+                duration: Some(duration),
+                resolution: Some(resolution_name.into()),
+                ..Default::default()
+            },
+            Some(&original_source),
+        ) {
+            Ok(record) => record,
+            Err(_) => return failure("catalog_write_failed"),
+        },
+    );
     if cancellation.is_cancelled() {
         cleanup_failed_output(&output_dir);
         return failure("cancelled");
@@ -332,15 +360,36 @@ fn generated_video_item(
     output_dir: &Path,
     motion_prompt: Option<&str>,
 ) -> Result<WallpaperGalleryItem, &'static str> {
+    generated_media_item(candidate, output_dir, motion_prompt, false)
+}
+
+fn generated_media_item(
+    candidate: &Path,
+    output_dir: &Path,
+    prompt: Option<&str>,
+    is_image: bool,
+) -> Result<WallpaperGalleryItem, &'static str> {
     let canonical = candidate.canonicalize().map_err(|_| "imagine_failed")?;
     if !wallpaper_source::is_path_under_dir(&canonical, output_dir) {
         return Err("imagine_failed");
     }
     let media = wallpaper_source::validate_local_wallpaper_media(
         &canonical,
-        LocalWallpaperMediaKind::Video,
+        if is_image {
+            LocalWallpaperMediaKind::Image
+        } else {
+            LocalWallpaperMediaKind::Video
+        },
     )
     .map_err(|_| "imagine_failed")?;
+    let dimensions = if is_image {
+        image::ImageReader::open(&canonical)
+            .ok()
+            .and_then(|reader| reader.with_guessed_format().ok())
+            .and_then(|reader| reader.into_dimensions().ok())
+    } else {
+        None
+    };
     if canonical
         .extension()
         .and_then(|s| s.to_str())
@@ -357,19 +406,24 @@ fn generated_video_item(
     digest.update(media.bytes.to_le_bytes());
     let id = hex::encode(digest.finalize());
     Ok(WallpaperGalleryItem {
-        id: format!("imagine-video-{}", &id[..24]),
+        id: format!(
+            "imagine-{}-{}",
+            if is_image { "edit" } else { "video" },
+            &id[..24]
+        ),
         thumb_url: format!("file://{path}"),
         full_url: format!("file://{path}"),
-        kind: "video".into(),
-        width: None,
-        height: None,
+        kind: if is_image { "image" } else { "video" }.into(),
+        width: dimensions.map(|value| value.0),
+        height: dimensions.map(|value| value.1),
         source: "imagine".into(),
         username: None,
         post_url: None,
         text_preview: None,
         likes: None,
         local_path: Some(path),
-        prompt: motion_prompt.map(str::to_string),
+        prompt: prompt.map(str::to_string),
+        metadata: None,
         provenance: WallpaperProvenance::empty(),
         status_id: None,
         media_index: None,

@@ -75,6 +75,41 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("useWallpaperGrokAlbum", () => {
+  it("restores expanded pages only after a fresh snapshot and resets them on modal close", async () => {
+    albumSnapshot.mockResolvedValue(readySnapshot(60));
+    const { result, rerender } = renderHook(({ enabled, open }) => useWallpaperGrokAlbum(enabled, open), {
+      initialProps: { enabled: true, open: true },
+    });
+    await waitFor(() => expect(result.current.items).toHaveLength(20));
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.items).toHaveLength(40);
+    rerender({ enabled: false, open: true });
+    expect(result.current.items).toHaveLength(0);
+    let finish!: (snapshot: GrokAlbumSnapshot) => void;
+    albumSnapshot.mockImplementationOnce(() => new Promise<GrokAlbumSnapshot>((resolve) => { finish = resolve; }));
+    rerender({ enabled: true, open: true });
+    expect(result.current.status).toBe("loading");
+    expect(result.current.items).toHaveLength(0);
+    await act(async () => { finish(readySnapshot(60)); });
+    expect(result.current.items).toHaveLength(40);
+    rerender({ enabled: false, open: false });
+    rerender({ enabled: true, open: true });
+    await waitFor(() => expect(result.current.items).toHaveLength(20));
+  });
+
+  it("invalidates restored navigation when the Host reports a changed ready page", async () => {
+    albumSnapshot.mockResolvedValue(readySnapshot(60));
+    const { result, rerender } = renderHook(({ enabled }) => useWallpaperGrokAlbum(enabled), { initialProps: { enabled: true } });
+    await waitFor(() => expect(result.current.items).toHaveLength(20));
+    await act(async () => { await result.current.loadMore(); });
+    const revision = result.current.historyRevision;
+    rerender({ enabled: false });
+    albumSnapshot.mockResolvedValue({ ...readySnapshot(60), pageChanged: true });
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.historyRevision).toBeGreaterThan(revision));
+    expect(result.current.items).toHaveLength(20);
+  });
+
   it("syncs after StrictMode replays effect cleanup and setup", async () => {
     albumSnapshot.mockResolvedValue(readySnapshot(20));
     const view = renderHook(() => useWallpaperGrokAlbum(true), {

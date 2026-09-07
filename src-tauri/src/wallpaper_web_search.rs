@@ -968,6 +968,7 @@ fn web_item(
         likes: None,
         local_path: None,
         prompt: None,
+        metadata: None,
         provenance: WallpaperProvenance {
             source_url: Some(metadata.source_url.clone()),
             source_name: Some(metadata.source_name.clone()),

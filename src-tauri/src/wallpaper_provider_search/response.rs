@@ -222,6 +222,7 @@ pub(super) fn provider_item(
         likes: None,
         local_path: None,
         prompt: None,
+        metadata: None,
         provenance: WallpaperProvenance {
             source_url: Some(candidate.source_url),
             source_name: Some(candidate.source_name.into()),

@@ -154,6 +154,34 @@ afterEach(() => {
 });
 
 describe("useWallpaperRemoteSourceController", () => {
+  it("restores completed prefetch without advancing the provider twice", async () => {
+    remote.search.mockResolvedValue(result([galleryItem("first")], { hasMore: true }));
+    remote.loadMore.mockResolvedValue(result([galleryItem("second")]));
+    const hook = renderHook(({ enabled }) => useHarness({ enabled }), { initialProps: { enabled: true } });
+    await act(async () => hook.result.current.controller.search());
+    const saved = hook.result.current.controller.capture();
+    expect(saved.prefetched?.result?.items[0].id).toBe("second");
+    hook.rerender({ enabled: false });
+    hook.rerender({ enabled: true });
+    act(() => hook.result.current.controller.restore(saved));
+    await act(async () => hook.result.current.controller.loadMore());
+    expect(hook.result.current.items.map((item) => item.id)).toEqual(["first", "second"]);
+    expect(remote.search).toHaveBeenCalledTimes(1);
+    expect(remote.loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a rejected outgoing search after cancellation", async () => {
+    let reject!: (reason: Error) => void;
+    remote.search.mockReturnValue(new Promise((_, fail) => { reject = fail; }));
+    const hook = renderHook(() => useHarness({}));
+    let pending!: Promise<void>;
+    act(() => { pending = hook.result.current.controller.search(); });
+    await act(async () => hook.result.current.controller.cancel());
+    await act(async () => { reject(new Error("timeout")); await pending; });
+    expect(hook.result.current.errorCode).toBeNull();
+    expect(hook.result.current.hasSearched).toBe(false);
+  });
+
   it("keeps paging available when an initial validated page is empty", async () => {
     remote.search.mockResolvedValue(
       result([], { errorCode: "empty", hasMore: true }),

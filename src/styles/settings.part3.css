@@ -1163,8 +1163,8 @@ html[data-theme-editor-shell] #root {
 .modal.glass-modal.wallpaper-source-modal {
   width: min(1440px, calc(100vw - 32px));
   max-height: min(94vh, 940px);
-  /* Prefer a tall shell so multi-result galleries can use the viewport */
-  min-height: min(78vh, 720px);
+  /* Keep the gallery shell stable across loading, filtering and empty states. */
+  height: min(88vh, 900px);
 }
 
 .wallpaper-source-modal__body {

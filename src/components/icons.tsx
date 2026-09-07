@@ -6,6 +6,7 @@
 import type { ComponentType } from "react";
 import {
   IconActivity as TbActivity,
+  IconHeart as TbHeart,
   IconAdjustmentsHorizontal as TbAdjustmentsHorizontal,
   IconAlertTriangle as TbAlertTriangle,
   IconArrowsMaximize as TbArrowsMaximize,
@@ -238,6 +239,7 @@ export const IconSearch = wrap(TbSearch);
 /** New chat / compose — Tabler Edit (pencil writing on paper). */
 export const IconNewChat = wrap(TbEdit);
 export const IconEdit = wrap(TbEdit);
+export const IconHeart = wrap(TbHeart);
 export const IconCamera = wrap(TbCamera);
 /** Markdown / TipTap format toolbar */
 export const IconBold = wrap(TbBold);

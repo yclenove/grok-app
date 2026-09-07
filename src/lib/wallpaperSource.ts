@@ -14,6 +14,7 @@ export type WallpaperSourceKind =
   | "library";
 
 export type WallpaperGalleryItem = {
+  metadata?: WallpaperMediaRecord | null;
   id: string;
   thumbUrl: string;
   fullUrl: string;
@@ -50,6 +51,7 @@ export type WallpaperFetchResult = {
 };
 
 export type WallpaperLibraryEntry = {
+  metadata?: WallpaperMediaRecord | null;
   path: string;
   name: string;
   source: string;
@@ -58,7 +60,31 @@ export type WallpaperLibraryEntry = {
   modifiedMs: number;
 };
 
+export type WallpaperMediaRecord = {
+  id: string;
+  source: string;
+  sourceUrl: string | null;
+  sourceName?: string | null;
+  authorName?: string | null;
+  authorUrl?: string | null;
+  license: string | null;
+  licenseUrl: string | null;
+  title: string | null;
+  width: number | null;
+  height: number | null;
+  prompt: string | null;
+  generation: { operation: string; aspectRatio: string | null; resolution: string | null; duration: number | null; requestedModel: string | null } | null;
+  parentId: string | null;
+  favorite: boolean;
+  purpose: "cache" | "generated";
+  bytes: number;
+  modifiedMs: number;
+};
+
+export type WallpaperLibraryPurpose = "all" | "favorites" | "generated" | "cache";
+
 export type WallpaperSourceErrorCode =
+  | "catalog_write_failed"
   | "auth_required"
   | "cli_missing"
   | "pexels_key_required"
@@ -70,9 +96,24 @@ export type WallpaperSourceErrorCode =
   | "url_blocked"
   | "imagine_source_invalid"
   | "imagine_failed"
+  | "imagine_access_denied"
+  | "imagine_rate_limited"
+  | "imagine_request_rejected"
+  | "imagine_upstream_failed"
+  | "imagine_result_invalid"
   | "rate_limited"
   | "timeout"
   | "generic";
+
+const imagineErrorCodes = new Set<WallpaperSourceErrorCode>([
+  "imagine_access_denied", "imagine_rate_limited", "imagine_request_rejected",
+  "imagine_upstream_failed", "imagine_result_invalid",
+]);
+
+function imagineErrorCode(raw: string): WallpaperSourceErrorCode | null {
+  const code = raw.trim() as WallpaperSourceErrorCode;
+  return imagineErrorCodes.has(code) ? code : null;
+}
 
 function hostSearchErrorCode(raw: string): WallpaperSourceErrorCode | null {
   const code = raw.toLowerCase();
@@ -132,6 +173,9 @@ export function parseWallpaperSourceError(err: unknown): WallpaperSourceErrorCod
           ? String((err as { message: unknown }).message)
           : "";
   const s = raw.toLowerCase();
+  const imagineError = imagineErrorCode(s);
+  if (imagineError) return imagineError;
+  if (s.includes("catalog_")) return "catalog_write_failed";
   if (s.includes("auth_required")) return "auth_required";
   if (s.includes("cli_missing")) return "cli_missing";
   if (s.includes("pexels_key_missing")) return "pexels_key_required";
@@ -177,6 +221,9 @@ export function errorCodeFromSearchResult(
   if (result.items.length > 0) return null;
   const code = (result.errorCode || "").toLowerCase();
   if (!code) return "empty";
+  const imagineError = imagineErrorCode(code);
+  if (imagineError) return imagineError;
+  if (code.startsWith("catalog_")) return "catalog_write_failed";
   if (code === "auth_required") return "auth_required";
   if (code === "cli_missing") return "cli_missing";
   if (code === "pexels_key_missing") return "pexels_key_required";
@@ -642,7 +689,7 @@ export function libraryEntryToGalleryItem(
     /\.(mp4|m4v|webm|mov)$/i.test(entry.name || abs)
       ? "video"
       : "image";
-  const source = (entry.source || "library").trim() || "library";
+  const source = (entry.metadata?.source || entry.source || "library").trim() || "library";
   return {
     id: libraryEntryId(entry),
     thumbUrl: fileUrl,
@@ -650,13 +697,20 @@ export function libraryEntryToGalleryItem(
     kind,
     source,
     localPath: abs || null,
-    textPreview: entry.name || null,
+    textPreview: entry.metadata?.title || entry.name || null,
     username: null,
     postUrl: null,
-    prompt: null,
+    prompt: entry.metadata?.prompt ?? null,
     likes: null,
-    width: null,
-    height: null,
+    width: entry.metadata?.width ?? null,
+    height: entry.metadata?.height ?? null,
+    metadata: entry.metadata,
+    sourceUrl: entry.metadata?.sourceUrl,
+    sourceName: entry.metadata?.sourceName,
+    authorName: entry.metadata?.authorName,
+    authorUrl: entry.metadata?.authorUrl,
+    license: entry.metadata?.license,
+    licenseUrl: entry.metadata?.licenseUrl,
   };
 }
 

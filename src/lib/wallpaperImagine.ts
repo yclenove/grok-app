@@ -1,7 +1,7 @@
 import type { MessageKey } from "@/i18n";
 import type { WallpaperGalleryItem } from "@/lib/wallpaperSource";
 
-export type WallpaperImagineMode = "image" | "video";
+export type WallpaperImagineMode = "image" | "edit" | "video";
 export type WallpaperVideoDuration = 6 | 10;
 export type WallpaperVideoResolution = "480p" | "720p";
 export type WallpaperVideoSourceStatus =
@@ -29,6 +29,7 @@ export type WallpaperImagineControlsModel = {
   onVideoDurationChange: (value: WallpaperVideoDuration) => void;
   onVideoResolutionChange: (value: WallpaperVideoResolution) => void;
   onClearVideoSource: () => void;
+  onUploadSource: () => void;
   onGenerate: () => void;
   onCancelGeneration: () => void;
 };

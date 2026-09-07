@@ -22,6 +22,7 @@ export function wallpaperSourceErrorMessage(
   t: Translate,
   code: WallpaperSourceErrorCode,
 ): string {
+  if (code === "catalog_write_failed") return t("settings.wallpaperSource.library.saveFailed");
   const key = `settings.wallpaperSource.err.${code}` as MessageKey;
   const message = t(key);
   return message === key ? t("settings.wallpaperSource.err.generic") : message;

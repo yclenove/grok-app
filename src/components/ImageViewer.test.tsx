@@ -2,6 +2,7 @@
  * @vitest-environment jsdom
  */
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -64,6 +65,7 @@ vi.mock("./ImageLightbox", () => ({
     index: number;
     slides: unknown[];
     onView: (index: number) => void;
+    onRetryOriginal: () => void;
   }) => {
     capturedSlides(props.slides);
     capturedOpen(props.open);
@@ -79,13 +81,38 @@ vi.mock("./ImageLightbox", () => ({
         <button type="button" data-testid="lightbox-close" onClick={props.close}>
           close
         </button>
+        <button type="button" data-testid="lightbox-retry" onClick={props.onRetryOriginal}>retry</button>
+        <button type="button" data-testid="lightbox-view-current" onClick={() => props.onView(props.index)}>view</button>
       </div>
     );
   },
 }));
 
 import { ImageViewerProvider } from "./ImageViewer";
-import { useImageViewer } from "./ImageViewerContext";
+import { useImageViewer, type ImageSlideInput } from "./ImageViewerContext";
+
+function ProvidedGalleryTrigger({ slides }: { slides: ImageSlideInput[] }) {
+  const viewer = useImageViewer();
+  return <button onClick={() => viewer.open(slides)}>open provided</button>;
+}
+
+function deferredOriginals(count: number) {
+  return Array.from({ length: count }, (_, index) => {
+    let resolve!: (value: { src: string }) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<{ src: string }>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    const load = vi.fn(() => promise);
+    return {
+      slide: { src: LAZY_PLACEHOLDER, loadOriginal: load },
+      load,
+      finish: () => resolve({ src: `H:/wallpapers/original-${index}.jpg` }),
+      fail: () => reject(new Error("download_failed")),
+    };
+  });
+}
 
 function GalleryTrigger() {
   const viewer = useImageViewer();
@@ -192,6 +219,118 @@ afterEach(() => {
 });
 
 describe("ImageViewerProvider", () => {
+  it("bounds rapid navigation and loads only the latest waiting original", async () => {
+    const originals = deferredOriginals(5);
+    render(<ImageViewerProvider locale="en"><ProvidedGalleryTrigger slides={originals.map((entry) => entry.slide)} /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open provided" }));
+    await waitFor(() => expect(originals[0].load).toHaveBeenCalledTimes(1));
+    for (let i = 1; i < originals.length; i += 1) {
+      fireEvent.click(screen.getByTestId("lightbox-next"));
+    }
+    expect(originals.map((entry) => entry.load.mock.calls.length)).toEqual([1, 1, 0, 0, 0]);
+    await act(async () => { originals[0].finish(); });
+    await waitFor(() => expect(originals[4].load).toHaveBeenCalledTimes(1));
+    expect(originals[2].load).not.toHaveBeenCalled();
+    expect(originals[3].load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("lightbox-retry"));
+    expect(originals[4].load).toHaveBeenCalledTimes(1);
+    await act(async () => { originals[1].finish(); originals[4].finish(); });
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][4].src).toBe("H:/wallpapers/original-4.jpg"));
+  });
+
+  it("releases a failed request's slot without automatically retrying it", async () => {
+    const originals = deferredOriginals(3);
+    render(<ImageViewerProvider locale="en"><ProvidedGalleryTrigger slides={originals.map((entry) => entry.slide)} /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open provided" }));
+    await waitFor(() => expect(originals[0].load).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("lightbox-next"));
+    fireEvent.click(screen.getByTestId("lightbox-next"));
+    await act(async () => { originals[0].fail(); });
+    await waitFor(() => expect(originals[2].load).toHaveBeenCalledTimes(1));
+    expect(capturedSlides.mock.calls.at(-1)?.[0][0].originalStatus).toBe("error");
+    expect(originals[0].load).toHaveBeenCalledTimes(1);
+    await act(async () => { originals[1].finish(); originals[2].finish(); });
+  });
+
+  it("discards queued downloads on close and retains the bound when reopened", async () => {
+    const originals = deferredOriginals(3);
+    render(<ImageViewerProvider locale="en"><ProvidedGalleryTrigger slides={originals.map((entry) => entry.slide)} /><InitiallyLazyGalleryTrigger /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open provided" }));
+    await waitFor(() => expect(originals[0].load).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("lightbox-next"));
+    fireEvent.click(screen.getByTestId("lightbox-next"));
+    fireEvent.click(screen.getByTestId("lightbox-close"));
+    fireEvent.click(screen.getByRole("button", { name: "open selected lazy" }));
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0]).toHaveLength(2));
+    expect(loadOriginal).not.toHaveBeenCalled();
+    await act(async () => { originals[0].finish(); });
+    await waitFor(() => expect(loadOriginal).toHaveBeenCalledTimes(1));
+    expect(originals[2].load).not.toHaveBeenCalled();
+    await act(async () => { originals[1].finish(); });
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe("H:\\wallpapers\\lazy-original.jpg"));
+  });
+
+  it("does not start a queued original after unmount", async () => {
+    const originals = deferredOriginals(3);
+    const view = render(<ImageViewerProvider locale="en"><ProvidedGalleryTrigger slides={originals.map((entry) => entry.slide)} /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open provided" }));
+    await waitFor(() => expect(originals[0].load).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("lightbox-next"));
+    fireEvent.click(screen.getByTestId("lightbox-next"));
+    view.unmount();
+    await act(async () => { originals[0].finish(); originals[1].finish(); });
+    expect(originals[2].load).not.toHaveBeenCalled();
+  });
+
+  it("retains a failed original's placeholder and retries only on request", async () => {
+    loadOriginal.mockRejectedValueOnce(new Error("download_failed: private upstream detail"));
+    render(<ImageViewerProvider locale="en"><InitiallyLazyGalleryTrigger /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open selected lazy" }));
+    await screen.findByTestId("lightbox");
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][1].originalStatus).toBe("error"));
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe(LAZY_PLACEHOLDER);
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].originalError).toBeUndefined();
+    fireEvent.click(screen.getByTestId("lightbox-view-current"));
+    fireEvent.resize(window);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+    expect(loadOriginal).toHaveBeenCalledTimes(1);
+
+    let complete: ((value: Awaited<ReturnType<typeof loadOriginal>>) => void) | undefined;
+    loadOriginal.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    fireEvent.click(screen.getByTestId("lightbox-retry"));
+    fireEvent.click(screen.getByTestId("lightbox-retry"));
+    expect(loadOriginal).toHaveBeenCalledTimes(2);
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].originalStatus).toBe("loading");
+    await act(async () => { complete?.({src: "H:\\wallpapers\\recovered.jpg", kind: "image", mime: "image/jpeg"}); });
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe("H:\\wallpapers\\recovered.jpg"));
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].originalStatus).toBeUndefined();
+    expect(capturedSlides.mock.calls.at(-1)?.[0][0].src).toBe("H:\\wallpapers\\first.jpg");
+  });
+
+  it("retains the thumbnail when the downloaded original cannot decode", async () => {
+    loadImageNaturalSize.mockResolvedValueOnce({ width: 0, height: 0 });
+    render(<ImageViewerProvider locale="en"><InitiallyLazyGalleryTrigger /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open selected lazy" }));
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][1].originalStatus).toBe("error"));
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe(LAZY_PLACEHOLDER);
+    fireEvent.click(screen.getByTestId("lightbox-retry"));
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe("H:\\wallpapers\\lazy-original.jpg"));
+  });
+
+  it("ignores a failed original after closing and opening another gallery", async () => {
+    let reject: ((error: Error) => void) | undefined;
+    loadOriginal.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    render(<ImageViewerProvider locale="en"><InitiallyLazyGalleryTrigger /><GalleryTrigger /></ImageViewerProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "open selected lazy" }));
+    await waitFor(() => expect(loadOriginal).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("lightbox-close"));
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    await waitFor(() => expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe("https://example.test/selected.jpg"));
+    await act(async () => { reject?.(new Error("download_failed")); });
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].originalStatus).toBeUndefined();
+    expect(capturedSlides.mock.calls.at(-1)?.[0][1].src).toBe("https://example.test/selected.jpg");
+  });
+
   it("opens after sizing only the selected image", async () => {
     render(
       <ImageViewerProvider locale="en">

@@ -1,11 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   containSize,
   lightboxCanPan,
   lightboxSlideDimensions,
   lightboxSlideRect,
   lightboxYarlSlideSize,
+  loadImageNaturalSize,
 } from "./imageLightboxFit";
+
+describe("loadImageNaturalSize", () => {
+  it("bounds a stalled image load and detaches its event handlers", async () => {
+    vi.useFakeTimers();
+    const image = { src: "", onload: null, onerror: null };
+    vi.stubGlobal("Image", class { constructor() { return image; } });
+    try {
+      const pending = loadImageNaturalSize("https://example.test/stalled.jpg");
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(await pending).toEqual({width: 0, height: 0});
+      expect(image.src).toBe("");
+      expect(image.onload).toBeNull();
+      expect(image.onerror).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("lightboxSlideRect", () => {
   it("subtracts padding on all sides", () => {

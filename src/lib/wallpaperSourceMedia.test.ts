@@ -4,6 +4,7 @@ const fetchAlbumMedia = vi.hoisted(() => vi.fn());
 const cancelAlbumRequests = vi.hoisted(() => vi.fn());
 const cancelAllAlbumRequests = vi.hoisted(() => vi.fn());
 const fetchMedia = vi.hoisted(() => vi.fn());
+const rememberMedia = vi.hoisted(() => vi.fn());
 const fetchRemoteMedia = vi.hoisted(() => vi.fn());
 const cancelRemoteRequests = vi.hoisted(() => vi.fn());
 const cancelAllRemoteRequests = vi.hoisted(() => vi.fn());
@@ -16,6 +17,7 @@ vi.mock("@/lib/api", () => ({
   wallpaperRemoteCancelMediaRequests: cancelRemoteRequests,
   wallpaperRemoteCancelAllMediaRequests: cancelAllRemoteRequests,
   wallpaperFetchMedia: fetchMedia,
+  wallpaperLibraryRemember: rememberMedia,
 }));
 
 import {
@@ -35,6 +37,7 @@ beforeEach(() => {
   cancelAllAlbumRequests.mockReset();
   cancelAllAlbumRequests.mockResolvedValue(0);
   fetchMedia.mockReset();
+  rememberMedia.mockReset();
   fetchRemoteMedia.mockReset();
   cancelRemoteRequests.mockReset();
   cancelRemoteRequests.mockResolvedValue(0);
@@ -43,6 +46,23 @@ beforeEach(() => {
 });
 
 describe("wallpaper source media lifecycle", () => {
+  it("persists source and license on original download without changing favorite state", async () => {
+    const item = { id: "licensed", source: "openverse", kind: "image", thumbUrl: "https://cdn.example.test/photo.jpg", fullUrl: "https://cdn.example.test/photo.jpg", sourceUrl: "https://example.test/photo", license: "CC BY 4.0", licenseUrl: "https://creativecommons.org/licenses/by/4.0/" };
+    fetchRemoteMedia.mockResolvedValue({ path: "H:\\wallpapers\\photo.jpg", name: "photo.jpg", mime: "image/jpeg" });
+    const metadata = { id: "media-1", favorite: true, width: 1920, height: 1080 };
+    rememberMedia.mockResolvedValue(metadata);
+    const result = await ensureLocalWallpaperMedia(item);
+    expect(rememberMedia).toHaveBeenCalledWith("H:\\wallpapers\\photo.jpg", item);
+    expect(result.metadata).toBe(metadata);
+  });
+
+  it("reports a catalog save failure without starting another original download", async () => {
+    fetchMedia.mockResolvedValue({ path: "H:\\wallpapers\\photo.jpg", name: "photo.jpg", mime: "image/jpeg" });
+    rememberMedia.mockRejectedValue(new Error("catalog_write_failed"));
+    await expect(ensureLocalWallpaperMedia({ id: "x", source: "x", kind: "image", thumbUrl: "https://pbs.twimg.com/media/photo.jpg", fullUrl: "https://pbs.twimg.com/media/photo.jpg" })).rejects.toThrow("catalog_write_failed");
+    expect(fetchMedia).toHaveBeenCalledTimes(1);
+  });
+
   it("uses a complete GIF for the immediate lazy-media placeholder", () => {
     const encoded = EMPTY_WALLPAPER_IMAGE_PLACEHOLDER.split(",", 2)[1] ?? "";
     const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));

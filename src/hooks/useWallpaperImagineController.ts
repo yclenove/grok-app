@@ -44,6 +44,7 @@ type Translate = (
 ) => string;
 
 type ControllerOptions = {
+  onGenerated?: () => void;
   open: boolean;
   enabled: boolean;
   t: Translate;
@@ -58,6 +59,7 @@ type ControllerOptions = {
 };
 
 export function useWallpaperImagineController({
+  onGenerated,
   open,
   enabled,
   t,
@@ -73,6 +75,9 @@ export function useWallpaperImagineController({
   const [mode, setModeState] = useState<WallpaperImagineMode>("image");
   const [imagePrompt, setImagePrompt] = useState("");
   const [videoPrompt, setVideoPrompt] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const uploadGenerationRef = useRef(0);
   const [aspect, setAspect] = useState("16:9");
   const [videoDuration, setVideoDuration] =
     useState<WallpaperVideoDuration>(6);
@@ -93,10 +98,11 @@ export function useWallpaperImagineController({
   const cancelledVideoRequestsRef = useRef(new Set<string>());
   const videoSourceRef = useRef<WallpaperGalleryItem | null>(videoSource);
   videoSourceRef.current = videoSource;
-  const prompt = mode === "video" ? videoPrompt : imagePrompt;
+  const prompt = mode === "video" ? videoPrompt : mode === "edit" ? editPrompt : imagePrompt;
   const setPrompt = useCallback(
     (value: string) => {
       if (mode === "video") setVideoPrompt(value);
+      else if (mode === "edit") setEditPrompt(value);
       else setImagePrompt(value);
     },
     [mode],
@@ -138,6 +144,7 @@ export function useWallpaperImagineController({
   }, [cancelling, setError, setErrorCode, t]);
 
   const cancelInFlight = useCallback(() => {
+    uploadGenerationRef.current += 1;
     operationGenerationRef.current += 1;
     cancelSourcePreparation(videoSourceRef.current);
     const requestId = activeVideoRequestRef.current;
@@ -152,6 +159,7 @@ export function useWallpaperImagineController({
     cancelInFlight();
     setGenerating(false);
     setCancelling(false);
+    setUploading(false);
     setVideoSourceStatus(videoSourcePath ? "ready" : "idle");
     setStatusHint(null);
   }, [cancelInFlight, setStatusHint, videoSourcePath]);
@@ -171,6 +179,7 @@ export function useWallpaperImagineController({
     setModeState("image");
     setImagePrompt("");
     setVideoPrompt("");
+    setEditPrompt("");
     setAspect("16:9");
     setVideoDuration(6);
     setVideoResolution("480p");
@@ -183,7 +192,7 @@ export function useWallpaperImagineController({
   useEffect(() => {
     if (
       !enabled ||
-      mode !== "video" ||
+      mode === "image" ||
       !videoSource ||
       videoSourcePath
     ) {
@@ -241,7 +250,9 @@ export function useWallpaperImagineController({
 
   const setMode = useCallback(
     (next: WallpaperImagineMode) => {
-      if (next === "image" && mode === "video") {
+      uploadGenerationRef.current += 1;
+      setUploading(false);
+      if (next === "image" && mode !== "image") {
         cancelSourcePreparation(videoSource);
         setVideoSourceStatus(videoSourcePath ? "ready" : "idle");
       }
@@ -262,10 +273,13 @@ export function useWallpaperImagineController({
   );
 
   const beginVideoFromItem = useCallback(
-    (item: WallpaperGalleryItem) => {
+    (item: WallpaperGalleryItem, targetMode: "video" | "edit" = "video") => {
+      uploadGenerationRef.current += 1;
+      setUploading(false);
       cancelSourcePreparation(videoSource);
-      setModeState("video");
-      setVideoPrompt(buildWallpaperVideoPrompt(t, item));
+      setModeState(targetMode);
+      if (targetMode === "video") setVideoPrompt(buildWallpaperVideoPrompt(t, item));
+      else setEditPrompt("");
       setVideoSource(item);
       setVideoSourcePath(item.localPath?.trim() || null);
       setVideoSourcePreview(
@@ -291,6 +305,8 @@ export function useWallpaperImagineController({
   );
 
   const clearVideoSource = useCallback(() => {
+    uploadGenerationRef.current += 1;
+    setUploading(false);
     cancelSourcePreparation(videoSource);
     setVideoSource(null);
     setVideoSourcePath(null);
@@ -302,16 +318,50 @@ export function useWallpaperImagineController({
     setStatusHint(null);
   }, [cancelSourcePreparation, setError, setErrorCode, setStatusHint, videoSource]);
 
+  const beginEditFromItem = useCallback(
+    (item: WallpaperGalleryItem) => beginVideoFromItem(item, "edit"),
+    [beginVideoFromItem],
+  );
+
+  const uploadSource = useCallback(async () => {
+    if (generating || uploading || mode === "image") return;
+    if (!api.isDesktopHost()) {
+      setError(t("settings.wallpaperSource.err.desktopOnly"));
+      return;
+    }
+    const generation = ++uploadGenerationRef.current;
+    setUploading(true);
+    try {
+      const paths = await api.pickAttachFiles();
+      if (generation !== uploadGenerationRef.current || !paths.length) return;
+      if (paths.length !== 1) throw new Error("imagine_source_invalid");
+      const local = await api.wallpaperImportImage(paths[0]);
+      if (generation !== uploadGenerationRef.current) return;
+      beginVideoFromItem({
+        id: `upload-${local.path}`, source: "library", kind: "image",
+        localPath: local.path, fullUrl: `file://${local.path}`, thumbUrl: "",
+        textPreview: paths[0].split(/[\\/]/).pop() || local.name,
+      }, mode);
+    } catch (error) {
+      if (generation !== uploadGenerationRef.current) return;
+      const code = parseWallpaperSourceError(error);
+      setErrorCode(code);
+      setError(wallpaperSourceErrorMessage(t, code));
+    } finally {
+      if (generation === uploadGenerationRef.current) setUploading(false);
+    }
+  }, [beginVideoFromItem, generating, mode, setError, setErrorCode, t, uploading]);
+
   const generate = useCallback(async () => {
-    if (generating || cancelling) return;
+    if (generating || cancelling || uploading) return;
     const trimmedPrompt = prompt.trim();
-    if (mode === "image" && !trimmedPrompt) {
+    if (mode !== "video" && !trimmedPrompt) {
       setErrorCode("empty");
       setError(wallpaperSourceErrorMessage(t, "empty"));
       return;
     }
     if (
-      mode === "video" &&
+      mode !== "image" &&
       (!videoSourcePath || videoSourceStatus !== "ready")
     ) {
       setErrorCode("imagine_source_invalid");
@@ -325,7 +375,7 @@ export function useWallpaperImagineController({
     }
 
     const generation = ++operationGenerationRef.current;
-    const requestId = mode === "video" ? createWallpaperRequestId() : null;
+    const requestId = createWallpaperRequestId();
     if (requestId) activeVideoRequestRef.current = requestId;
     setGenerating(true);
     setCancelling(false);
@@ -352,7 +402,9 @@ export function useWallpaperImagineController({
               videoResolution,
               requestId!,
             )
-          : await api.wallpaperImagine(trimmedPrompt, aspect);
+          : mode === "edit"
+            ? await api.wallpaperImageEdit(videoSourcePath!, trimmedPrompt, aspect, requestId!)
+            : await api.wallpaperImagine(trimmedPrompt, aspect, requestId);
       if (generation !== operationGenerationRef.current) return;
       if (
         requestId &&
@@ -373,6 +425,7 @@ export function useWallpaperImagineController({
         return;
       }
       setItems(list);
+      onGenerated?.();
       setError(null);
       setErrorCode(null);
       if (list[0]) setSelectedId(list[0].id);
@@ -402,6 +455,7 @@ export function useWallpaperImagineController({
     }
   }, [
     aspect,
+    onGenerated,
     cancelling,
     generating,
     mode,
@@ -419,6 +473,7 @@ export function useWallpaperImagineController({
     videoResolution,
     videoSourcePath,
     videoSourceStatus,
+    uploading,
   ]);
 
   const controls = useMemo<WallpaperImagineControlsModel>(
@@ -441,6 +496,7 @@ export function useWallpaperImagineController({
       onVideoDurationChange: setVideoDuration,
       onVideoResolutionChange: setVideoResolution,
       onClearVideoSource: clearVideoSource,
+      onUploadSource: uploadSource,
       onGenerate: generate,
       onCancelGeneration: cancelGeneration,
     }),
@@ -460,8 +516,20 @@ export function useWallpaperImagineController({
       videoSourcePath,
       videoSourcePreview,
       videoSourceStatus,
+      uploadSource,
     ],
   );
+
+  const reuseImagePrompt = useCallback((item: WallpaperGalleryItem) => {
+    const savedPrompt = item.metadata?.prompt || item.prompt;
+    if (!savedPrompt?.trim() || generating || uploading || cancelling) return;
+    setMode("image");
+    // Set the image draft directly: setPrompt still closes over the old mode
+    // during this event, which could otherwise overwrite the edit/video draft.
+    setImagePrompt(savedPrompt);
+    const ratio = item.metadata?.generation?.aspectRatio;
+    setAspect(WALLPAPER_ASPECT_OPTIONS.some((option) => option.value === ratio) ? ratio! : "auto");
+  }, [generating, uploading, cancelling, setMode]);
 
   return {
     mode,
@@ -477,13 +545,16 @@ export function useWallpaperImagineController({
     cancelling,
     busy:
       generating ||
-      (enabled && mode === "video" && videoSourceStatus === "preparing"),
+      uploading ||
+      (enabled && mode !== "image" && videoSourceStatus === "preparing"),
     setMode,
     setPrompt,
     setAspect,
     setVideoDuration,
     setVideoResolution,
     beginVideoFromItem,
+    beginEditFromItem,
+    reuseImagePrompt,
     clearVideoSource,
     generate,
     cancelGeneration,
