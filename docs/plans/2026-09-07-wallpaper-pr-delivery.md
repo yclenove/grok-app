@@ -5,6 +5,8 @@
 ## 执行台账（2026-09-08）
 
 ### 最新交付进度（继续执行）
+公共来源后端提取进行中：`grok-app-pr-licensed-search` / `feat/wallpaper-licensed-search` 已接入 #1092 前置（`69bb2238` 已 push）。产品代码仍未提交、未提 PR：从 `19168986` 提取 provider/runtime/media/commands；增加 provenance 和 Host-only fingerprint，未引入 catalog；Pexels 接入完整 secrets/keychain 存储，非明文临时槽。保留当前主干媒体签名检测（不回退旧 HEIC/AVIF 判断）。无 Referer 下载复用同模块安全读取，拒绝非完整响应，不额外复制 skin_net 文档抓取框架。当前 Web 搜索边界拒绝 unsupported source，Web 待单独交付，尚无前端渠道入口。Rust all-targets 编译适配进行中；修正 shared client 借用后当前 session 92803 / 日志 H:\aicoding\grok-pr-provider-check.log，继续时先轮询，不重复启动。后续须完成前端来源/署名/下载/缩略图/分页与 Pexels 设置、补齐测试和所有门禁，再发完整主题 PR；provider 预取仍后续。Issue 检索 wallpaper/Pexels/Openverse 找到的均为历史遮罩/布局问题，没有直接对应，勿自动关闭。#1092 macOS/Linux CI 通过，前端/Windows 尚在运行（本次最后核实）。
+
 最新发布：远程缩略图读取与解码限制 [#1092](https://github.com/RongleCat/grok-app/pull/1092)，分支 `fix/remote-thumbnail-decode-limits`，提交 `4151c54b`，独立基于 `a248f395`，不依赖 #1088–#1091。2 文件 +161/-7；现有远程缩略图接入 12 MiB 流式读取限制、尺寸/像素/解码器分配限制，保留本地及缓存路径。前端 7,070 / Rust 1,655（另 1 ignored），typecheck/lint/build/质量门禁/网站自测/依赖检查与审计/fmt/clippy 全通过。Windows 当前 Rust 产物经 manifest harness 实际执行成功。未手动桌面实测，远端 CI 待完成。累计 18 个 PR，未执行上游合并。下一步公共媒体读取与 Openverse/Pexels 搜索完整链路，之后接既有 provider 预取；所有来源、目录、生成队列仍未全量完成。
 来源/预加载拆分核对：最终产品快照 19168986 的 X 路线只有显式追加，自动一页预取实际位于 useWallpaperRemoteSourceController（Openverse/Pexels/Web）。因此后续先交付公共远程媒体和 provider 链路再提预取，不虚构 X 自动预取已实现。已建干净工作区 grok-app-pr-licensed-search / feat/wallpaper-licensed-search，当前仍为 f7458ff9，无产品变更。先从 upstream/main a248f395 独立建立 grok-app-pr-thumbnail-limits / fix/remote-thumbnail-decode-limits，提取 image_thumb 的有界内存解码并接入现有 remote thumbnail，同时流式限制下载体；本地检查进行中，尚未提交 PR。此项可独立合入且是公共媒体读取的真实前置，不暴露不可用来源入口。
 
