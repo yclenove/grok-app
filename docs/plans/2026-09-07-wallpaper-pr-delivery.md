@@ -11,7 +11,7 @@
 - B3 旧代理迁移已提取，尚未完成验证。后续主题继续按下面队列拆分。
 - 已创建 [#1074](https://github.com/RongleCat/grok-app/pull/1074)：`test(settings): 隔离设置读写测试的共享目录`，提交 `1e63b928`。本地 7,055 项前端、1,605 项 Rust 测试（1 ignored）以及所有门禁通过，远端 CI 进行中。
 - A1 已推送 `89c3b5cf`；包含内部验证前置 #1074，原生 1,607 项通过（1 ignored），fmt/clippy 通过。尚未提 PR，等前置合入后剔除重复差异。
-- A2 已推送 `447f863e`，1,608 项 Rust 测试及 fmt/clippy 通过（1 ignored）；A3 已推送 `18ef7d84`，原生验证进行中。各自包含内部验证前置 #1074，尚未提 PR。
+- A2 已推送 `447f863e`，1,608 项 Rust 测试及 fmt/clippy 通过（1 ignored）；A3 已推送 `18ef7d84`，1,605 项 Rust 测试及 fmt/clippy 通过（1 ignored）。各自包含内部验证前置 #1074，尚未提 PR。首批三个修复已完成本地门禁，公开送审等待 #1074 合入后移除重复差异。
 - B3 已推送 `88da27ab`；全量前端 7,057 项及其他前端门禁通过，原生验证待办。
 - #1074 远端 CI 已全部通过：frontend、Rust macOS、Rust Windows、Rust Linux；PR 仍待维护者审核，未合并。
 - 待审上限仍为三个；依赖修复合入前不混入其他独立 PR。仓库模板的中文说明草稿在工作区外 `H:\aicoding\grok-pr-a{0,1,2,3}-body.md`，不随产品 PR 提交。
