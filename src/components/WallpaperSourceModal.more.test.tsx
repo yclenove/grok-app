@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import "@/test/jsdomStubs";
 import type { WallpaperSearchResult } from "@/lib/wallpaperSource";
@@ -82,6 +82,7 @@ async function initial() {
   );
   fireEvent.click(screen.getByRole("button", { name: "settings.wallpaperSource.search" }));
   await screen.findByRole("button", { name: "settings.wallpaperSource.loadMore" });
+  await waitFor(() => expect(mocks.more).toHaveBeenCalledTimes(1));
   return view;
 }
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -91,8 +92,8 @@ it("preserves selectable images during enrichment and appends distinct final res
   mocks.more.mockReturnValue(pending.promise);
   await initial();
   fireEvent.click(moreButton());
-  await waitFor(() => expect(mocks.more).toHaveBeenCalledTimes(1));
   expect(mocks.more.mock.calls[0][0]).toBe("context-1");
+  expect(mocks.more).toHaveBeenCalledTimes(1);
   expect((cards()[0] as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(cards()[0]);
   await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(1));
@@ -105,12 +106,20 @@ it("keeps old gallery and allows retry after network failure, then consumes empt
   mocks.more.mockResolvedValueOnce({ items: [], errorCode: "responses_network" }).mockResolvedValueOnce({ items: [], errorCode: "empty" });
   await initial();
   fireEvent.click(moreButton());
-  await waitFor(() => expect(screen.queryByRole("button", { name: "settings.wallpaperSource.cancelSearch" })).toBeNull());
-  expect(cards()).toHaveLength(1);
-  fireEvent.click(moreButton());
   await screen.findByText("settings.wallpaperSource.noMore");
   expect(cards()).toHaveLength(1);
   expect(mocks.more).toHaveBeenCalledTimes(2);
+});
+
+it("keeps a prefetched empty page hidden until load more is clicked", async () => {
+  mocks.more.mockResolvedValue({ items: [], errorCode: "empty" });
+  await initial();
+  expect(
+    screen.queryByText("settings.wallpaperSource.noMore"),
+  ).toBeNull();
+  fireEvent.click(moreButton());
+  await screen.findByText("settings.wallpaperSource.noMore");
+  expect(mocks.more).toHaveBeenCalledTimes(1);
 });
 
 it("hides continuation for a changed query and discards a late result after close", async () => {
@@ -121,7 +130,7 @@ it("hides continuation for a changed query and discards a late result after clos
   fireEvent.change(input, { target: { value: "sea" } });
   expect(screen.queryByRole("button", { name: "settings.wallpaperSource.loadMore" })).toBeNull();
   fireEvent.change(input, { target: { value: "sky" } });
-  fireEvent.click(moreButton());
+  expect(screen.queryByRole("button", { name: "settings.wallpaperSource.loadMore" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "close-modal" }));
   await waitFor(() => expect(mocks.cancel).toHaveBeenCalled());
   pending.resolve({ items: [item("late")] });
@@ -164,17 +173,18 @@ it("keeps an X search running after switching tabs and restores its result", asy
   await waitFor(() => expect(cards()).toHaveLength(1));
 });
 
-it("keeps X load-more results with X after switching tabs", async () => {
+it("keeps a completed X prefetch ready after switching tabs", async () => {
   const pending = deferred<WallpaperSearchResult>();
   mocks.more.mockReturnValue(pending.promise);
   await initial();
-  fireEvent.click(moreButton());
-  await waitFor(() => expect(mocks.more).toHaveBeenCalledTimes(1));
 
   fireEvent.click(
     screen.getByRole("tab", { name: "settings.wallpaperImagine" }),
   );
-  pending.resolve({ items: [item("second")] });
+  await act(async () => {
+    pending.resolve({ items: [item("second")] });
+    await pending.promise;
+  });
   await waitFor(() =>
     expect(
       screen.queryAllByRole("button", {
@@ -186,5 +196,8 @@ it("keeps X load-more results with X after switching tabs", async () => {
   fireEvent.click(
     screen.getByRole("tab", { name: "settings.wallpaperFromX" }),
   );
+  expect(cards()).toHaveLength(1);
+  fireEvent.click(moreButton());
   await waitFor(() => expect(cards()).toHaveLength(2));
+  expect(mocks.more).toHaveBeenCalledTimes(1);
 });

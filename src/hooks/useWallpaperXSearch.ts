@@ -30,6 +30,11 @@ type ProgressiveAction =
   | { type: "reset" }
   | { type: "batch"; batch: WallpaperXSearchBatch };
 
+type PrefetchEntry = {
+  continuationId: string;
+  promise: Promise<WallpaperSearchResult | null>;
+};
+
 const EMPTY_PROGRESSIVE_STATE: ProgressiveState = {
   items: [],
   accumulatedCount: 0,
@@ -71,6 +76,8 @@ export function useWallpaperXSearch(
   const [stage, setStage] = useState<WallpaperXSearchStage | null>(null);
   const [progressive, dispatchProgressive] = useReducer(progressiveReducer, EMPTY_PROGRESSIVE_STATE);
   const active = useRef<string | null>(null);
+  const activeKind = useRef<"foreground" | "prefetch" | null>(null);
+  const prefetched = useRef<PrefetchEntry | null>(null);
   const generation = useRef(0);
   const mounted = useRef(true);
 
@@ -80,13 +87,25 @@ export function useWallpaperXSearch(
     let unlisten: (() => void) | undefined;
     let unlistenBatch: (() => void) | undefined;
     void client.listenBatch((event) => {
-      if (!disposed && mounted.current && isWallpaperXSearchBatch(event) && event.requestId === active.current) {
+      if (
+        !disposed &&
+        mounted.current &&
+        activeKind.current === "foreground" &&
+        isWallpaperXSearchBatch(event) &&
+        event.requestId === active.current
+      ) {
         dispatchProgressive({ type: "batch", batch: event });
       }
     }).then((cleanup) => { if (disposed) cleanup(); else unlistenBatch = cleanup; })
       .catch(() => { /* Invoke result remains authoritative if event registration fails. */ });
     void client.listenProgress((event) => {
-      if (!disposed && isWallpaperXSearchProgress(event) && event.requestId === active.current) {
+      if (
+        !disposed &&
+        mounted.current &&
+        activeKind.current === "foreground" &&
+        isWallpaperXSearchProgress(event) &&
+        event.requestId === active.current
+      ) {
         setStage(event.stage);
       }
     }).then((cleanup) => {
@@ -99,6 +118,8 @@ export function useWallpaperXSearch(
       generation.current += 1;
       const id = active.current;
       active.current = null;
+      activeKind.current = null;
+      prefetched.current = null;
       unlisten?.();
       unlistenBatch?.();
       if (id) void client.cancel(id).catch(() => false);
@@ -109,6 +130,8 @@ export function useWallpaperXSearch(
     const id = active.current;
     generation.current += 1;
     active.current = null;
+    activeKind.current = null;
+    prefetched.current = null;
     if (mounted.current) {
       dispatchProgressive({ type: "reset" });
       setLoadingMore(false);
@@ -126,6 +149,7 @@ export function useWallpaperXSearch(
     const id = requestIdFactory();
     const revision = ++generation.current;
     active.current = id;
+    activeKind.current = "foreground";
     setLoadingMore(continuationId !== undefined);
     setBusy(true);
     setStage("preparing");
@@ -139,14 +163,105 @@ export function useWallpaperXSearch(
     } finally {
       if (current()) {
         active.current = null;
+        activeKind.current = null;
         setLoadingMore(false);
-      setBusy(false);
+        setBusy(false);
         setStage(null);
       }
     }
   }, [cancel, client, requestIdFactory]);
 
   const search = useCallback((query: string, sort: "top" | "latest") => run(query, sort), [run]);
-  const loadMore = useCallback((id: string) => run("", "top", id), [run]);
-  return { busy, loadingMore, stage, search, loadMore, cancel, progressiveItems: progressive.items };
+  const prefetchMore = useCallback(
+    (continuationId: string): Promise<WallpaperSearchResult | null> => {
+      if (!mounted.current) return Promise.resolve(null);
+      const existing = prefetched.current;
+      if (existing?.continuationId === continuationId) return existing.promise;
+      if (activeKind.current === "foreground") return Promise.resolve(null);
+
+      // A continuation is an exclusive Host lease. A different prefetch must
+      // cancel the old request before it can claim a new request ID.
+      const previousId = active.current;
+      prefetched.current = null;
+      const id = requestIdFactory();
+      const revision = ++generation.current;
+      active.current = id;
+      activeKind.current = "prefetch";
+      if (previousId) void client.cancel(previousId).catch(() => false);
+      const current = () =>
+        mounted.current &&
+        generation.current === revision &&
+        active.current === id &&
+        activeKind.current === "prefetch";
+
+      let entry!: PrefetchEntry;
+      const promise = (async (): Promise<WallpaperSearchResult | null> => {
+        let reusable = false;
+        try {
+          const result = await client.loadMore(continuationId, id);
+          if (!current() || result.errorCode === "cancelled") return null;
+          // Only a successful or confirmed-empty response consumes the Host
+          // continuation. Background failures stay invisible and are retried
+          // once as a foreground request when the user asks for more.
+          reusable = !result.errorCode || result.errorCode === "empty";
+          return reusable ? result : null;
+        } catch {
+          return null;
+        } finally {
+          if (current()) {
+            active.current = null;
+            activeKind.current = null;
+          }
+          if (!reusable && prefetched.current === entry) {
+            prefetched.current = null;
+          }
+        }
+      })();
+      entry = { continuationId, promise };
+      prefetched.current = entry;
+      return promise;
+    },
+    [client, requestIdFactory],
+  );
+
+  const loadMore = useCallback(
+    async (continuationId: string): Promise<WallpaperSearchResult | null> => {
+      const entry = prefetched.current;
+      if (!entry || entry.continuationId !== continuationId) {
+        return run("", "top", continuationId);
+      }
+
+      // Consume the prepared page exactly once. If it is still running, the
+      // foreground action waits for this same promise instead of opening a
+      // second Responses request.
+      prefetched.current = null;
+      const revision = generation.current;
+      setLoadingMore(true);
+      setBusy(true);
+      let result: WallpaperSearchResult | null = null;
+      try {
+        result = await entry.promise;
+      } finally {
+        if (mounted.current && generation.current === revision) {
+          setLoadingMore(false);
+          setBusy(false);
+          setStage(null);
+        }
+      }
+      if (!mounted.current || generation.current !== revision) return null;
+      if (result) return result;
+      return run("", "top", continuationId);
+    },
+    [run],
+  );
+  return {
+    busy,
+    loadingMore,
+    stage,
+    search,
+    loadMore,
+    prefetchMore,
+    cancel,
+    progressiveItems: progressive.items,
+  };
 }

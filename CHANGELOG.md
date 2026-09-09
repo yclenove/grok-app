@@ -13,6 +13,12 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+### Added
+- Wallpaper X preloads the next Responses page for faster “Load more”.
+
+**中文 · 新增**
+- 壁纸 X 搜索会在后台预取下一批 Responses 结果，让「加载更多」更快。
+
 ## [0.2.34] - 2026-09-09
 
 > **Highlight:** Bigger wallpaper sources, stronger Windows freeze fixes, safer chat thumbs.

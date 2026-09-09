@@ -197,6 +197,7 @@ export function WallpaperSourceModal({
     busy: xBusy,
     loadingMore,
     loadMore: searchMore,
+    prefetchMore: prefetchXMore,
     stage: xStage,
     progressiveItems,
     search: searchX,
@@ -216,6 +217,30 @@ export function WallpaperSourceModal({
     query: string;
     sort: "top" | "latest";
   } | null>(null);
+
+  const updateXQuery = useCallback(
+    (nextQuery: string) => {
+      if (nextQuery !== query) {
+        setContinuation(null);
+        xSearchContextRef.current = null;
+        void cancelX();
+      }
+      setQuery(nextQuery);
+    },
+    [cancelX, query],
+  );
+
+  const updateXSort = useCallback(
+    (nextSort: "top" | "latest") => {
+      if (nextSort !== sort) {
+        setContinuation(null);
+        xSearchContextRef.current = null;
+        void cancelX();
+      }
+      setSort(nextSort);
+    },
+    [cancelX, sort],
+  );
 
   const onProviderBackgroundProgress = useCallback(
     (event: WallpaperProviderBackgroundProgress) => {
@@ -845,6 +870,10 @@ export function WallpaperSourceModal({
       }
       const list = dedupeGalleryItems(res.items || []);
       const code = errorCodeFromSearchResult({ ...res, items: list });
+      const nextContinuation =
+        !code && res.meta?.continuationId
+          ? { id: res.meta.continuationId, query: q, sort }
+          : null;
       if (hidden) {
         sourceHistory.update("x", (snapshot) => {
           if (code) {
@@ -888,11 +917,10 @@ export function WallpaperSourceModal({
                   unverified: counts.unverified,
                 })
               : null,
-            xContinuation: res.meta?.continuationId
-              ? { id: res.meta.continuationId, query: q, sort }
-              : null,
+            xContinuation: nextContinuation,
           };
         });
+        if (nextContinuation) void prefetchXMore(nextContinuation.id);
         return;
       }
       setHasSearched(true);
@@ -914,7 +942,7 @@ export function WallpaperSourceModal({
         );
       } else {
         setItems(list);
-        if (res.meta?.continuationId) setContinuation({ id: res.meta.continuationId, query: q, sort });
+        setContinuation(nextContinuation);
         setError(null);
         setErrorCode(null);
         const counts = countWallpaperXCitations(list);
@@ -931,6 +959,7 @@ export function WallpaperSourceModal({
               })
             : null,
         );
+        if (nextContinuation) void prefetchXMore(nextContinuation.id);
       }
     } catch (e) {
       if (!openRef.current || tabRef.current !== "x") {
@@ -963,6 +992,7 @@ export function WallpaperSourceModal({
     viewer,
     xBusy,
     routeSaving,
+    prefetchXMore,
     sourceHistory.update,
   ]);
 
@@ -1144,9 +1174,12 @@ export function WallpaperSourceModal({
     try {
       const result = await searchMore(active.id);
       if (!result) return;
+      const emptyResult =
+        result.errorCode === "empty" ||
+        (!result.errorCode && result.items.length === 0);
       if (!openRef.current || tabRef.current !== "x") {
         sourceHistory.update("x", (snapshot) => {
-          if (!result.errorCode) {
+          if (!result.errorCode && !emptyResult) {
             return {
               ...snapshot,
               items: appendWallpaperGalleryItems(snapshot.items, result.items),
@@ -1157,7 +1190,7 @@ export function WallpaperSourceModal({
               errorCode: null,
             };
           }
-          if (result.errorCode === "empty") {
+          if (emptyResult) {
             return {
               ...snapshot,
               xContinuation: null,
@@ -1171,7 +1204,7 @@ export function WallpaperSourceModal({
             ...snapshot,
             xContinuation:
               result.errorCode === "load_more_unavailable" ||
-              result.errorCode.startsWith("oauth_")
+              result.errorCode?.startsWith("oauth_")
                 ? null
                 : snapshot.xContinuation,
             errorCode: code,
@@ -1180,16 +1213,21 @@ export function WallpaperSourceModal({
         });
         return;
       }
-      if (!result.errorCode) {
+      if (!result.errorCode && !emptyResult) {
         setItems(previous => appendWallpaperGalleryItems(previous, result.items));
         setContinuation(null);
         setCiteSummary(null);
         setStatusHint(null);
-      } else if (result.errorCode === "empty") {
+      } else if (emptyResult) {
         setContinuation(null);
         setStatusHint(t("settings.wallpaperSource.noMore"));
       } else {
-        if (result.errorCode === "load_more_unavailable" || result.errorCode.startsWith("oauth_")) setContinuation(null);
+        if (
+          result.errorCode === "load_more_unavailable" ||
+          result.errorCode?.startsWith("oauth_")
+        ) {
+          setContinuation(null);
+        }
         const code = parseWallpaperSourceError(result.errorCode);
         setErrorCode(code);
         setError(errorMessage(t, code));
@@ -1375,8 +1413,8 @@ export function WallpaperSourceModal({
               busy={busy}
               xBusy={xBusy}
               locked={locked}
-              setQuery={setQuery}
-              setSort={setSort}
+              setQuery={updateXQuery}
+              setSort={updateXSort}
               runXSearch={runXSearch}
               cancelXSearch={cancelX}
               loadLibrary={loadLibrary}

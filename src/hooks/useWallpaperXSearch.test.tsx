@@ -133,3 +133,84 @@ it("uses a separate more command and cancels it without losing the next request"
   expect(h.hook.result.current.loadingMore).toBe(false);
   await act(async () => { pending.resolve({ items: [] }); expect(await result).toBeNull(); });
 });
+
+it("keeps prefetch hidden and lets load more consume the same in-flight request", async () => {
+  const h = harness();
+  const initialPending = deferred<WallpaperSearchResult>();
+  const pending = deferred<WallpaperSearchResult>();
+  vi.mocked(h.client.search).mockReturnValue(initialPending.promise);
+  vi.mocked(h.client.loadMore).mockReturnValue(pending.promise);
+  let initial!: Promise<WallpaperSearchResult | null>;
+  act(() => {
+    initial = h.hook.result.current.search("sky", "top");
+    h.emitBatch(batch("1", 1, ["visible"]));
+  });
+  await act(async () => {
+    initialPending.resolve({ items: batch("1", 1, ["visible"]).items });
+    await initial;
+  });
+  expect(h.hook.result.current.progressiveItems.map((item) => item.id)).toEqual([
+    "visible",
+  ]);
+
+  let prepared!: Promise<WallpaperSearchResult | null>;
+  act(() => {
+    prepared = h.hook.result.current.prefetchMore("context");
+  });
+  expect(h.client.loadMore).toHaveBeenCalledWith("context", "2");
+  expect(h.hook.result.current.busy).toBe(false);
+  expect(h.hook.result.current.loadingMore).toBe(false);
+  expect(h.hook.result.current.progressiveItems.map((item) => item.id)).toEqual([
+    "visible",
+  ]);
+
+  act(() => {
+    h.emit({ requestId: "2", stage: "validating" });
+    h.emitBatch(batch("2", 1, ["hidden"]));
+  });
+  expect(h.hook.result.current.stage).toBeNull();
+  expect(h.hook.result.current.progressiveItems.map((item) => item.id)).toEqual([
+    "visible",
+  ]);
+
+  let consumed!: Promise<WallpaperSearchResult | null>;
+  act(() => {
+    consumed = h.hook.result.current.loadMore("context");
+  });
+  expect(h.client.loadMore).toHaveBeenCalledTimes(1);
+  expect(h.hook.result.current.busy).toBe(true);
+  expect(h.hook.result.current.loadingMore).toBe(true);
+
+  const final = { items: batch("2", 1, ["ready"]).items };
+  await act(async () => {
+    pending.resolve(final);
+    expect(await prepared).toEqual(final);
+    expect(await consumed).toEqual(final);
+  });
+  expect(h.hook.result.current.busy).toBe(false);
+  expect(h.hook.result.current.loadingMore).toBe(false);
+});
+
+it("hides a failed prefetch and retries once when load more is explicit", async () => {
+  const h = harness();
+  const final = { items: batch("2", 1, ["retry"]).items };
+  vi.mocked(h.client.loadMore)
+    .mockResolvedValueOnce({ items: [], errorCode: "responses_network" })
+    .mockResolvedValueOnce(final);
+
+  await act(async () => {
+    expect(await h.hook.result.current.prefetchMore("context")).toBeNull();
+  });
+  expect(h.hook.result.current.busy).toBe(false);
+  expect(h.hook.result.current.loadingMore).toBe(false);
+
+  let result!: Promise<WallpaperSearchResult | null>;
+  act(() => {
+    result = h.hook.result.current.loadMore("context");
+  });
+  await act(async () => {
+    expect(await result).toEqual(final);
+  });
+  expect(h.client.loadMore).toHaveBeenNthCalledWith(1, "context", "1");
+  expect(h.client.loadMore).toHaveBeenNthCalledWith(2, "context", "2");
+});

@@ -49,7 +49,8 @@ to prevent an additional CLI request. Cancellation drops all pending lanes.
 The picker displays batches as they arrive; the final invoke result is authoritative.
 The hook rejects malformed, duplicate and foreign-request batches and clears them
 on replacement/cancel. Batch event failure cannot prevent the final result from
-showing. Automatic prefetch is a separate follow-up slice.
+showing. A successful initial Responses result starts the hidden one-page enrichment
+described below.
 
 Eligible failures fall back once to CLI. Rate limits, cancellation and tool-budget
 violations never trigger a second route. Three counted failures open a ten-minute
@@ -124,8 +125,17 @@ the existing media/post identities as exclusions. It validates and deduplicates
 against the original gallery, never falls back to CLI and never auto-retries.
 The final result is appended only after the Host validates its identity. Existing
 images remain visible/selectable while enrichment runs; errors keep them intact,
-and an empty batch displays the localized no-more hint. Closing/cancelling rejects
-late results. This slice does not automatically prefetch or repeat enrichment.
+and an empty batch displays the localized no-more hint. The renderer starts this
+single enrichment request in the background as soon as the initial continuation is
+available, without changing foreground busy/progress state or revealing its rows.
+“Load more” consumes a completed result or waits for the same in-flight promise; it
+never opens a duplicate request. A failed prefetch stays silent and leaves the
+continuation retryable, so an explicit click makes one fresh foreground attempt.
+Changing the X query/sort and closing/cancelling invalidate the result and cancel an
+active Host request. Switching source tabs keeps the prepared page associated with
+the X browsing snapshot. Confirmed-empty responses are retained until the click so
+the localized no-more hint is still user initiated. The Host exposes only one
+enrichment continuation, so this does not repeat after the second page.
 
 
 ## Public image provider Host contract
