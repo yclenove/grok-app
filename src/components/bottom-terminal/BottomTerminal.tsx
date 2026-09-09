@@ -5,6 +5,7 @@
 
 import {
   useCallback,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -23,6 +24,10 @@ import { TerminalTab } from "@/components/side-workbench/TerminalTab";
 import { isSideTabMiddleClick } from "@/lib/sideWorkbench";
 import { paneSplitSizeStyle } from "@/lib/paneSplitMotion";
 import type { BottomTerminalState } from "@/lib/bottomTerminal";
+import {
+  restoreFocusFromHiddenPanel,
+  visibleBottomTerminalToggle,
+} from "@/lib/hiddenPanelFocus";
 
 export type BottomTerminalProps = {
   locale: Locale | string;
@@ -56,6 +61,26 @@ export function BottomTerminal({
   );
   const [resizing, setResizing] = useState(false);
   const paintH = state.open ? state.height : 0;
+
+  const restoreToggleFocus = useCallback(() => {
+    restoreFocusFromHiddenPanel(
+      panelRef.current,
+      visibleBottomTerminalToggle(),
+    );
+  }, []);
+
+  const closeTabAndRestoreIfLast = useCallback(
+    (id: string) => {
+      if (state.tabs.length <= 1) restoreToggleFocus();
+      onCloseTab(id);
+    },
+    [onCloseTab, restoreToggleFocus, state.tabs.length],
+  );
+
+  useLayoutEffect(() => {
+    if (state.open) return;
+    restoreToggleFocus();
+  }, [state.open, restoreToggleFocus]);
 
   const onResizePointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -91,6 +116,7 @@ export function BottomTerminal({
   }, []);
 
   const many = state.tabs.length > 1;
+  const chromeTabIndex = state.open ? undefined : -1;
 
   return (
     <div
@@ -99,6 +125,7 @@ export function BottomTerminal({
       data-open={state.open ? "true" : "false"}
       data-testid="bottom-terminal"
       aria-hidden={!state.open}
+      inert={!state.open || undefined}
       aria-label={tr("terminal.panelAria")}
       style={paneSplitSizeStyle(paintH, "y", resizing)}
     >
@@ -132,12 +159,13 @@ export function BottomTerminal({
                       (active ? " is-active" : " is-inactive")
                     }
                     data-testid="bottom-terminal-tab"
+                    tabIndex={chromeTabIndex}
                     onClick={() => onActivateTab(tab.id)}
                     onAuxClick={(e) => {
                       if (!isSideTabMiddleClick(e)) return;
                       e.preventDefault();
                       e.stopPropagation();
-                      onCloseTab(tab.id);
+                      closeTabAndRestoreIfLast(tab.id);
                     }}
                     onMouseDown={(e) => {
                       if (isSideTabMiddleClick(e)) e.preventDefault();
@@ -148,16 +176,16 @@ export function BottomTerminal({
                     <span
                       className="rp-tab__x"
                       role="button"
-                      tabIndex={active ? 0 : -1}
+                      tabIndex={state.open && active ? 0 : -1}
                       title={tr("side.tabClose")}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onCloseTab(tab.id);
+                        closeTabAndRestoreIfLast(tab.id);
                       }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.stopPropagation();
-                          onCloseTab(tab.id);
+                          closeTabAndRestoreIfLast(tab.id);
                         }
                       }}
                     >
@@ -174,6 +202,7 @@ export function BottomTerminal({
                   className="chrome-btn"
                   aria-label={tr("terminal.new")}
                   data-testid="bottom-terminal-new"
+                  tabIndex={chromeTabIndex}
                   onClick={onAddTab}
                 >
                   <IconPlus size={16} />
@@ -185,7 +214,11 @@ export function BottomTerminal({
                   className="chrome-btn"
                   aria-label={tr("terminal.closeAll")}
                   data-testid="bottom-terminal-close-all"
-                  onClick={onCloseAllTabs}
+                  tabIndex={chromeTabIndex}
+                  onClick={() => {
+                    restoreToggleFocus();
+                    onCloseAllTabs();
+                  }}
                 >
                   <IconClearAll size={16} />
                 </button>
@@ -196,7 +229,11 @@ export function BottomTerminal({
                   className="chrome-btn"
                   aria-label={tr("terminal.closePanel")}
                   data-testid="bottom-terminal-close"
-                  onClick={onClosePanel}
+                  tabIndex={chromeTabIndex}
+                  onClick={() => {
+                    restoreToggleFocus();
+                    onClosePanel();
+                  }}
                 >
                   <IconChevronDown size={16} />
                 </button>

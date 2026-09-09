@@ -225,7 +225,13 @@ textarea:focus-visible,
   background: transparent;
   color: var(--text-primary);
   border-radius: var(--radius-window);
-  overflow: hidden;
+  /*
+   * clip, not hidden: wallpaper frost uses a negative inset that creates
+   * scrollable overflow. overflow:hidden still scrolls on focus-into-view
+   * (closed terminal chrome), which clips the top chrome and shows a
+   * bright un-scrimmed strip at the bottom.
+   */
+  overflow: clip;
   position: relative;
   /* UI chrome is not selectable; opt back in for chat + resource preview */
   -webkit-user-select: none;

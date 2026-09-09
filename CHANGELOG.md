@@ -13,6 +13,12 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+### Fixed
+- Closing the bottom terminal no longer scrolls and clips the window frame.
+
+**中文 · 修复**
+- 关闭底部终端时不再滚动并裁掉窗口导航区域。
+
 ## [0.2.34] - 2026-09-09
 
 > **Highlight:** Bigger wallpaper sources, stronger Windows freeze fixes, safer chat thumbs.
