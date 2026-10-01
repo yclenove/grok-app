@@ -66,14 +66,38 @@ pnpm setup:cross   # rust targets + (macOS) cargo-xwin / nsis / llvm 检查
 # Debian/Ubuntu
 # Prefer Ayatana only (libappindicator3-dev conflicts with libayatana-appindicator3-dev).
 sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev \
-  patchelf libgtk-3-dev libayatana-appindicator3-dev libssl-dev
+  patchelf libgtk-3-dev libayatana-appindicator3-dev libssl-dev \
+  libpipewire-0.3-dev libspa-0.2-dev libclang-dev \
+  build-essential pkg-config curl meson ninja-build python3-jinja2
 
 # Arch
 sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module \
-  libappindicator-gtk3 librsvg
+  libappindicator-gtk3 librsvg libpipewire clang meson ninja python-jinja pkgconf
 ```
 
-然后：
+Linux App 直接依赖 Wayland crate（即使入口仍默认关闭），因此构建需要
+**PipeWire/SPA ≥ 0.3.65、GTK ≥ 3.24，以及静态 libei ≥ 1.5**。
+libei 旧版本的连接退出缺陷不能通过动态链接系统同 SONAME 库规避。
+先在**全新私有目录**构建校验过 SHA-256 的 libei SDK，不覆盖系统库：
+
+```bash
+bash scripts/build-computer-use-libei.sh "$HOME/.cache/grok-cu-libei-1.5-sdk"
+export PKG_CONFIG_PATH="$HOME/.cache/grok-cu-libei-1.5-sdk/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="$HOME/.cache/grok-cu-libei-1.5-sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+bash scripts/check-computer-use-linux-sdk.sh
+```
+
+已有完整 SDK 可直接复用环境变量；builder 拒绝覆盖已有目录。发行时须保留
+SDK 的 `share/licenses/libei/COPYING`。`LD_LIBRARY_PATH` 供原生夹具的 libeis 使用；
+产品的 libei 必须静态链接，不能用这个变量假装修复发行物。
+
+**Ubuntu 22.04 发布门槛尚未解决：** Jammy 官方包为 PipeWire 0.3.48，低于上述要求。
+当前 `release.yml` 仍保留 Ubuntu 22.04/glibc 底线；需要在该底线上构建并验证私有
+PipeWire SDK、运行时模块和 AppImage/deb/rpm 依赖/许可装载后才能宣称可发布。
+不能改为 24.04、伪造 pkg-config 版本、只复制新头文件，或禁用 Wayland 依赖来制造绿灯。
+私有较新 SDK 的 `cargo check` 通过，不等于这一发布门槛已通过。
+
+通过 SDK 检查后：
 
 ```bash
 pnpm build:linux
@@ -185,7 +209,7 @@ src-tauri/target/<triple>/release/bundle/
   deb/       # Debian/Ubuntu .deb
   rpm/       # Fedora/RHEL .rpm
   appimage/  # 通用 Linux AppImage
-src-tauri/target/<triple>/release/Grok.exe   # Windows 裸二进制 → CI 打成绿色版 zip
+src-tauri/target/release/grok-app.exe       # Windows 本机主 EXE；绿色版还必须包含 resources
 ```
 
 拷贝测试建议：
@@ -195,11 +219,18 @@ mkdir -p dist-installers
 cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg dist-installers/
 cp src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg dist-installers/
 cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe dist-installers/
-# 绿色版：zip release/Grok.exe
+# Windows 本机绿色版：完整资源校验、打包并解包回读（本地默认不上传）
+# bash scripts/package-windows-portable.sh vX.Y.Z
 cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/* dist-installers/ 2>/dev/null || true
 cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/* dist-installers/ 2>/dev/null || true
 cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/* dist-installers/ 2>/dev/null || true
 ```
+
+Windows 绿色版不能仅压缩主 EXE。先以当前源码执行 `node scripts/prepare-computer-use-runtime.mjs --prepare --target x86_64-pc-windows-msvc`，再在 Windows 构建机运行 `bash scripts/package-windows-portable.sh vX.Y.Z`。脚本要求构建机具备 Node、Rust、7-Zip；用户解压后的 Computer Use 运行时不依赖系统 Node/Rust。它按 `tauri.windows.conf.json` 原样携带 Windows seed，保留入口名 `Grok.exe`，校验源和已复制 seed，并对 ZIP 解包后逐文件验证 `portable-files.json`。该文件仅是包内完整性清单，**不是发布者签名**。
+
+CI 的 Windows build 不传 `--target`，默认主文件为 `src-tauri/target/release/grok-app.exe`。若使用 `pnpm build:win` 的显式 target 输出，在 Windows 上打本地包时指定 `GROK_PORTABLE_EXE=src-tauri/target/x86_64-pc-windows-msvc/release/grok-app.exe`；不会扫描目录并猜测其他 EXE。运行时校验在独立的构建暂存目录执行，再按资源映射复制进交付目录，校验产生的 mutation lock / owner sidecar 不入包。
+
+默认产物是根目录 `Grok_X.Y.Z_x64-portable.zip` 和 `dist-portable/Grok_X.Y.Z_x64-portable/`；已有目标拒绝覆盖，不清空整个 dist-portable。`GROK_PORTABLE_EXE` / `GROK_PORTABLE_OUTPUT` 可用于明确的本机构建或隔离探针，设置这些覆盖项时拒绝 `--upload`。只有发布 CI 显式传入 `--upload` 才会上传。用户须保留整个目录和 resources；便携版本的人工替换/回退以完整版本目录为单位。安装器更新仍使用其安装布局，不能把 ZIP 往返验证当作便携版自动更新或安装完成的验收。
 
 ## 3. GitHub Actions 发布（推荐）
 

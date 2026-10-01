@@ -13,3 +13,5 @@
 *.zip binary
 # A unified diff's blank context lines contain a required space prefix.
 *.patch whitespace=-blank-at-eol
+# Markdown hard breaks and archived report spacing are intentional.
+*.md whitespace=-blank-at-eol,-blank-at-eof

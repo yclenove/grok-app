@@ -28,6 +28,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [plugins-marketplace.md](./plugins-marketplace.md) | **插件市场**：插件目录、安装流与兼容性约束 |
 | [remote-im.md](./remote-im.md) | **Remote IM**：GUI 配置全渠道 · Bridge · Grok Build；goal 见 `docs/plans/GOAL-remote-im.md` |
 | [appearance-skins.md](./appearance-skins.md) | **外观皮肤包**：`.grokskin` 布局、K19 allowlist、`grok://` + `grok-app:`、从不自动 apply、网站只用 `url=` |
+| [computer-use.md](./computer-use.md) | **Computer Use**：默认关闭、Broker/MCP、Windows 原生、macOS/Linux stub、禁止桌面回退 |
 
 ## 原则
 
