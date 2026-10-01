@@ -125,7 +125,7 @@ When reviewing a batch of open PRs:
 - **#1** locale-aware session titles — **merge** (correct i18n for LLM rename)  
 - **#2** Grok Build underscore permission optionIds — **merge** (fixes shell tool allow failures)
 
-After merge: thank author on PR; close linked Issues; mention in CHANGELOG under next version (one short sentence per bullet for the What's New popup; see [release.md](./release.md)); **then clean branches** (next section).
+After merge: thank author on PR; close linked Issues; mention in CHANGELOG under next version (one short sentence per bullet for the What's New popup; see [release.md](./release.md)); **fast-forward local `main`** (next section); **then clean branches**.
 
 ---
 
@@ -136,6 +136,28 @@ Product rules stay in `AGENTS.md` items 1–8. Git process lives here so a bugfi
 ### Commit then push
 
 After a fix or feature lands as a local `git commit` on a branch that tracks `origin`, **`git push` in the same turn**. Do not leave commits only on this machine. Opening a PR from GitHub without push ships a stale tip. Skip push only when the user explicitly says not to, or the branch has no remote yet (then `git push -u origin HEAD`). Never push secrets, `auth.json`, personal config, or `.hypergrep/`.
+
+### Merge, then match local to remote
+
+`gh pr merge` writes the squash only on GitHub. Local `main` does not move. Ending the turn there leaves **`origin/main` ahead of local `main`**. That is a failed merge, same class of mistake as a commit that was never pushed.
+
+**Forbidden end state:** for `main`, and for any branch this turn pushed or merged, the upstream is ahead of the local ref.
+
+```bash
+git fetch origin
+git rev-list --count main..origin/main          # must be 0
+git rev-list --count HEAD..@{upstream}          # must be 0 when an upstream exists
+```
+
+Steps:
+
+1. `git fetch origin`.
+2. If local `main` is behind, fast-forward **before** the next merge. On `main`: `git merge --ff-only origin/main`. From another branch: `git fetch origin main:main` (this refuses a non-fast-forward).
+3. `gh pr merge --squash --delete-branch` is allowed. It is not finished until step 4.
+4. Same turn, fast-forward local `main` again with the command from step 2.
+5. Re-run the counts above. If `--ff-only` fails, stop and resolve. Do not start the next PR, and do not end the turn, while remote is ahead.
+
+Do not merge a second PR until local `main` already contains the previous squash.
 
 ### Local CI before opening a PR
 
@@ -260,6 +282,43 @@ Prefer **delete remote soon after land**, then local. Do not force-push `main`. 
 4. Bump CHANGELOG unreleased notes if fixing on main  
 5. When enough P0/P1 landed → [release.md](./release.md)  
 6. **Branch hygiene:** `git fetch --prune`; drop merged remotes/locals and idle worktrees (see above)  
+
+---
+
+## Windows session freeze — ops notes
+
+Plan: `docs/plans/2026-09-09-windows-freeze-remediation.md`.
+
+### What was fixed (symptoms → lever)
+
+| Symptom | Lever |
+|---------|-------|
+| UI freezes mid-stream / on switch | Stream IPC + bg tool journal no longer run under session-map locks |
+| Session switch hangs on history load | 15s journal-load deadline; cached transcript kept; recoverable error |
+| Retry / reconnect stuck on 连接中 | Claim wait aligned to connect budget; `session_stop` client timeout then force-connect |
+| Orphan tool/shell after agent kill | Windows ACP spawn in process group + `taskkill /T /F` tree kill (local only; not SSH/WSL) |
+| One terminal tab blocks others | PTY map lock only clones handles; per-session write lock + backpressure timeout |
+
+### Structured diagnostics
+
+Look for these when correlating freezes:
+
+- Frontend console: `[session] journal_load_timeout` / `journal_load_failed` / `connect_claim_timeout`
+- Host tracing: `kill_process_tree:*`, `acp kill timeout: fallback process-tree kill`
+- Host: stream emit / tool journal persist must not hold `inner` / `background` (regression tests in `session_manager`)
+
+### Windows smoke matrix (before shipping freeze fixes)
+
+Run on a real Windows build (or CI Windows job) after lock/IPC+timeout stage, then again after process-tree+PTY stage:
+
+1. **Long stream** — multi-minute assistant + thought coalesce; UI stays responsive; switch chats mid-stream  
+2. **Rapid session switch** — open 5+ chats quickly; no stuck opening / journal spinner; timeout shows recoverable error with cache  
+3. **Retry while connecting** — force retry during 连接中; stop timeout still force-connects  
+4. **Tool subprocess cancel** — bash/long tool, Stop; no orphan console windows (Task Manager)  
+5. **Abnormal agent exit** — kill grok CLI mid-turn; App recovers to disconnected + cancel chip; reconnect works  
+6. **Two PTY tabs** — flood one terminal with output; second tab still accepts type/resize  
+
+Ship gate: stage A (locks + timeouts) can land first; stage B (tree-kill + PTY) after matrix passes.
 
 ---
 

@@ -161,6 +161,49 @@ export function rewindKeepPromptIndex(
   return clickedUserPromptIndex - 1;
 }
 
+/** Same keep-index rule from a disk rewind-point count (not the UI cache). */
+export function rewindKeepPromptIndexFromCount(
+  clickedUserPromptIndex: number,
+  userCount: number,
+): number | null {
+  if (clickedUserPromptIndex < 0 || clickedUserPromptIndex >= userCount) {
+    return null;
+  }
+  if (clickedUserPromptIndex < userCount - 1) return clickedUserPromptIndex;
+  if (clickedUserPromptIndex === 0) return null;
+  return clickedUserPromptIndex - 1;
+}
+
+export type RewindPointLike = {
+  promptIndex: number;
+  messageId?: string | null;
+};
+
+/** Prefer Host journal points so UI cache bubbles after an agent restart
+ * cannot send a Host index the live agent session does not have (#1216). */
+export async function resolveRewindKeepForUserMessage(input: {
+  messageId: string;
+  messages: ChatMessage[];
+  loadPoints?: () => Promise<RewindPointLike[]>;
+}): Promise<{ keep: number | null; reason: "ok" | "unavailable" | "missing" }> {
+  if (input.loadPoints) {
+    try {
+      const points = await input.loadPoints();
+      const hit = points.find((p) => p.messageId === input.messageId);
+      if (!hit) return { keep: null, reason: "unavailable" };
+      return {
+        keep: rewindKeepPromptIndexFromCount(hit.promptIndex, points.length),
+        reason: "ok",
+      };
+    } catch {
+      /* local journal index */
+    }
+  }
+  const idx = userPromptIndexOf(input.messages, input.messageId);
+  if (idx < 0) return { keep: null, reason: "missing" };
+  return { keep: rewindKeepPromptIndex(input.messages, idx), reason: "ok" };
+}
+
 /**
  * First discarded user prompt after a rewind — restore into the composer
  * so the user can edit and send again instead of losing the text.
@@ -284,6 +327,8 @@ export function forkSessionTitle(sourceTitle: string | undefined | null): string
 export function isClientOptimisticId(id: string): boolean {
   return (
     /^u-\d+$/.test(id) ||
+    id.startsWith("u-auto-") ||
+    id.startsWith("u-batch-") ||
     id.startsWith("a-pending-") ||
     /^a-\d+$/.test(id) ||
     /^t-\d+$/.test(id)
@@ -323,9 +368,10 @@ export function stripUserAttachmentRefs(message: ChatMessage): ChatMessage {
  * Match optimistic `u-${ts}` rows to the host UUID even when journal
  * dual-wrote `@/path` lines the composer never showed.
  */
-function userBubbleDedupeKey(message: ChatMessage): string {
+export function userBubbleDedupeKey(message: ChatMessage): string {
   const parsed = parseAttachmentsFromContent(message.content ?? "");
-  const text = parsed.text.trim();
+  // Windows composers may keep CRLF; Host journal normalizes to LF.
+  const text = parsed.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   const paths = new Set<string>();
   for (const a of message.attachments ?? []) {
     if (a.path) paths.add(a.path);
@@ -336,7 +382,7 @@ function userBubbleDedupeKey(message: ChatMessage): string {
   return `${text}\n---\n${[...paths].sort().join("\n")}`;
 }
 
-const EMPTY_USER_KEY = "\n---\n";
+export const EMPTY_USER_KEY = "\n---\n";
 
 /**
  * Remove optimistic user/pending-assistant rows that host journal already

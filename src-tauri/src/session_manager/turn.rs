@@ -49,6 +49,7 @@ impl SessionManager {
         // those lines via parseAttachmentsFromContent for the bubble body).
         let journal_attachments = attachments.filter(|items| !items.is_empty());
         if let Some(ref atts) = journal_attachments {
+            grant_journal_attachment_paths(atts);
             journal_content = append_journal_attachment_refs(journal_content, atts);
         }
         // Note: image @path stripping + Host vision runs on the *final*
@@ -89,6 +90,15 @@ impl SessionManager {
         let Some(app_sid) = target_sid else {
             return Err("no active session".into());
         };
+        if self
+            .pending_spawn_flag_invalidations
+            .lock()
+            .contains_key(&app_sid)
+        {
+            return Err(
+                "Computer Use cleanup is pending; reconnect this chat before sending".into(),
+            );
+        }
 
         // A delayed reconcile from the preceding turn performs a journal
         // read-modify-write. Keep this user append mutually exclusive with
@@ -96,6 +106,15 @@ impl SessionManager {
         let journal_lock = self.post_turn_journal_lock(&app_sid);
         let journal_guard = journal_lock.lock().await;
         let open = self.with_session_mut(&app_sid, |s| {
+            if self
+                .pending_spawn_flag_invalidations
+                .lock()
+                .contains_key(&app_sid)
+            {
+                return Err(
+                    "Computer Use cleanup is pending; reconnect this chat before sending".into(),
+                );
+            }
             if let Some(target) = session_id.as_deref() {
                 if s.app_session_id != target {
                     return Err(format!(
@@ -210,6 +229,14 @@ impl SessionManager {
                 s.saw_model_output = false;
                 return Err(format!("JOURNAL_WRITE_FAILED: {e}"));
             }
+            // Sidebar recency: last activity, not last click. Pin stays organizational.
+            s.meta.updated_at = user_row.created_at;
+            if let Err(e) = store::update_session_meta(&s.meta) {
+                tracing::warn!(
+                    session = %s.app_session_id,
+                    "turn-start session metadata update failed after user journal: {e}"
+                );
+            }
             Ok((
                 s.backend.clone(),
                 s.app_session_id.clone(),
@@ -262,6 +289,7 @@ impl SessionManager {
                 "streamMessageId": message_id,
             }),
         );
+        crate::mirror::notify_sessions_changed(Some(&app), "turn", &app_sid);
 
         // ── Host vision (custom text-only main + @image only) ──────────────
         // Official Grok route: never Host-describe (native multimodal).
@@ -507,6 +535,8 @@ impl SessionManager {
                     // someone else's turn — recording the error there would blame
                     // the wrong chat.
                     let mut record_error = false;
+                    let mut pending_emits = Vec::new();
+                    let mut pending_persists = Vec::new();
                     mgr.with_session_mut(&turn_sid, |s| {
                         // The RPC failed, so no authoritative PromptComplete will
                         // arrive. Release the turn or the chat stays un-parkable
@@ -523,11 +553,15 @@ impl SessionManager {
                         }
                         // Skip if host already recorded a retry-exhausted error this turn.
                         if !s.provider_retry_aborted {
-                            SessionManager::record_turn_error(s, &app2, &e);
+                            pending_persists.push(PendingSessionPersist::TurnBoundary(Box::new(
+                                SessionManager::prepare_turn_error(s, &e, &mut pending_emits),
+                            )));
                             let _ = s.fsm.fail_with(e);
                             record_error = true;
                         }
                     });
+                    SessionManager::emit_stream_payloads(&app2, pending_emits);
+                    SessionManager::commit_session_persists(Some(&app2), pending_persists);
                     if record_error {
                         mgr.emit_for_session(&app2, &turn_sid);
                     }
@@ -544,6 +578,8 @@ impl SessionManager {
                     // but FSM never left Streaming — UI shows "thinking" forever
                     // while the agent turn already ended (journal may hold body).
                     let mut need_emit = false;
+                    let mut pending_emits = Vec::new();
+                    let mut pending_persists = Vec::new();
                     mgr.with_session_mut(&turn_sid, |s| {
                         // Only heal sticky *Streaming* here — leave
                         // AwaitingPermission alone (user gate still live).
@@ -559,9 +595,10 @@ impl SessionManager {
                                 s.deferred_prompt_complete = Some("end_turn".into());
                             }
                             need_emit = SessionManager::try_finish_deferred_prompt_complete(
-                                s,
-                                Some(&app2),
-                            )
+                            s,
+                            Some(&mut pending_emits),
+                            Some(&mut pending_persists),
+                        )
                             .is_some();
                         } else if sticky_streaming {
                             tracing::warn!(
@@ -573,9 +610,10 @@ impl SessionManager {
                                 s.deferred_prompt_complete = Some("end_turn".into());
                             }
                             need_emit = SessionManager::try_finish_deferred_prompt_complete(
-                                s,
-                                Some(&app2),
-                            )
+                            s,
+                            Some(&mut pending_emits),
+                            Some(&mut pending_persists),
+                        )
                             .is_some();
                             // If gates still block finish, at least drop busy so
                             // reconnect/send are not wedged forever.
@@ -584,12 +622,13 @@ impl SessionManager {
                                 && s.pending_plan_rpc_id.is_none()
                                 && s.pending_ask_user_rpc_id.is_none()
                             {
-                                // Best-effort flush so partial stream_buf is not lost
+                                // Best-effort take so partial stream_buf is not lost
                                 // when we force-end without try_finish.
-                                SessionManager::flush_pending_stream_emit_done(
-                                    s,
-                                    Some(&app2),
-                                );
+                                if let Some(p) =
+                                    SessionManager::take_pending_stream_emit_done(s)
+                                {
+                                    pending_emits.push(p);
+                                }
                                 SessionManager::maybe_flush_stream_journal(s, true, false);
                                 s.stream_buf.clear();
                                 s.stream_thought.clear();
@@ -603,6 +642,8 @@ impl SessionManager {
                             }
                         }
                     });
+                    SessionManager::emit_stream_payloads(&app2, pending_emits);
+                    SessionManager::commit_session_persists(Some(&app2), pending_persists);
                     if need_emit {
                         mgr.emit_for_session(&app2, &turn_sid);
                     }
@@ -678,6 +719,7 @@ impl SessionManager {
             .unwrap_or_else(|| text.clone());
         let attachments = attachments.filter(|items| !items.is_empty());
         if let Some(ref atts) = attachments {
+            grant_journal_attachment_paths(atts);
             journal_content = append_journal_attachment_refs(journal_content, atts);
         }
         let target = session_id.as_deref();
@@ -867,13 +909,12 @@ impl SessionManager {
             self.spawn_fenced_computer_use_stop(target.clone(), computer_use_stop, termination);
             return Ok(self.snapshot());
         }
-        let app_for_marker = app.clone();
         // Also release ask_user / plan reverse-RPCs. Leaving them set kept
         // `live_session_is_busy` true after stop, so Send/park paths stayed
         // wedged until process kill (user diag 5bda6b52).
+        let mut pending_persists = Vec::new();
         let (acp, agent_sid, pending_ask, pending_plan, pending_perm) = self
-            .with_session_mut(&target, move |s| {
-                let app = app_for_marker;
+            .with_session_mut(&target, |s| {
                 if let Some(h) = s.mock_stream.take() {
                     h.request_stop();
                 }
@@ -894,7 +935,10 @@ impl SessionManager {
                 // Journal a cancel marker so UI history is not left as user-only silence.
                 if was_busy {
                     // Shared helper: durable chip + live emit (history matches live).
-                    Self::journal_turn_cancelled(s, Some(&app), "user_stop");
+                    if let Some(boundary) = Self::prepare_journal_turn_cancelled(s, "user_stop") {
+                        pending_persists
+                            .push(PendingSessionPersist::TurnBoundary(Box::new(boundary)));
+                    }
                     if s.fsm.state() == SessionState::Streaming
                         || s.fsm.state() == SessionState::AwaitingPermission
                     {
@@ -926,6 +970,7 @@ impl SessionManager {
                 )
             })
             .ok_or("no active session")?;
+        Self::commit_session_persists(Some(&app), pending_persists);
         let had_pending_ask = pending_ask.is_some();
         if had_pending_ask {
             let _ = app.emit(

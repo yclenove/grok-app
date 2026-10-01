@@ -3,6 +3,8 @@
  * Open/new-chat and settings navigation stay with the host.
  */
 import {
+  lazy,
+  Suspense,
   useEffect,
   useState,
   type CSSProperties,
@@ -13,7 +15,6 @@ import {
 import { Tip } from "@/components/ui/tooltip";
 import { SidebarBrand } from "@/components/SidebarBrand";
 import { SidebarUpdateButton } from "@/components/SidebarUpdateButton";
-import { ThemeEditorModal } from "@/components/ThemeEditorModal";
 import { UserMenu } from "@/components/UserMenu";
 import { GrokLogo } from "@/components/GrokLogo";
 import {
@@ -63,6 +64,13 @@ import type { Theme, ThemePreference } from "@/lib/theme";
 import { requestWhatsNewOpen } from "@/lib/whatsNew";
 
 type TFn = ReturnType<typeof createT>;
+
+// Theme editor (appearance settings model, ~300KB) only loads when opened
+// from the sidebar rail, keeping it off the boot-critical App chunk.
+const ThemeEditorModal = lazy(async () => {
+  const m = await import("@/components/ThemeEditorModal");
+  return { default: m.ThemeEditorModal };
+});
 
 function quotaBarFillClass(usedPercent: number | null): string {
   if (usedPercent != null && usedPercent >= 90) return " is-danger";
@@ -177,12 +185,19 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
     account,
     accountBusy,
     providerBalanceCache,
+    providerBalanceBusy,
+    providerBalanceError,
+    loadProviderBalance,
     applyThemeChoice,
     onSettings,
     onAccountSettings,
     onTutorial,
     onLogin,
     onLogout,
+    savedAccounts,
+    activeAccountId,
+    accountQuotas,
+    onSwitchAccount,
     onUserMenuOpened,
   } = props;
 
@@ -220,9 +235,7 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
       ? tierLabel(account.billing, account.channel ?? "none")
       : "Grok Build";
   const pinResetText =
-    signedInOfficial && resetTime
-      ? `${tr("account.resetsAt")} ${resetTime}`
-      : null;
+    signedInOfficial && resetTime ? resetTime : null;
   const providerBalance =
     providerBalanceCache != null &&
     providerBalanceCache.providerId === activeCustomProvider?.id
@@ -407,60 +420,6 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
         {children}
 
         <div className="sidebar__account">
-          {pinQuota ? (
-            <button
-              type="button"
-              className="sidebar__quota-pin"
-              aria-label={
-                [pinPlan, pinRemain, pinResetText]
-                  .filter(Boolean)
-                  .join(", ")
-              }
-              onClick={onAccountSettings}
-            >
-              <span className="sidebar__quota-pin__row">
-                <span className="sidebar__quota-pin__plan">{pinPlan}</span>
-                {pinResetText ? (
-                  <span className="sidebar__quota-pin__reset">
-                    {pinResetText}
-                  </span>
-                ) : null}
-              </span>
-              {pinRemain ||
-              (!customRouteActive &&
-                livePercents.remainingPercent != null) ? (
-                <span className="sidebar__quota-pin__meter">
-                  {!customRouteActive &&
-                  livePercents.remainingPercent != null ? (
-                    <div
-                      className="account-quota-bar account-quota-bar--sm"
-                      aria-hidden
-                    >
-                      <div
-                        className={
-                          "account-quota-bar__fill" +
-                          quotaBarFillClass(livePercents.usedPercent)
-                        }
-                        style={{
-                          width: `${Math.min(100, livePercents.usedPercent ?? 0)}%`,
-                        }}
-                      />
-                    </div>
-                  ) : null}
-                  {pinRemain ? (
-                    <span
-                      className={
-                        "sidebar__quota-pin__remain" +
-                        (remainLow ? " is-low" : "")
-                      }
-                    >
-                      {pinRemain}
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-            </button>
-          ) : null}
           <div className="sidebar__footer-row">
             <UserMenu
               open={showUserMenu}
@@ -468,9 +427,41 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
               closeImmediately={closeImmediately}
               theme={theme}
               themePreference={themePreference}
+              locale={locale}
               account={account}
               activeProvider={activeCustomProvider}
               accountBusy={accountBusy}
+              officialQuota={
+                signedInOfficial
+                  ? {
+                      plan: pinPlan,
+                      resetText: pinResetText,
+                      remainLabel: remainLabel,
+                      usedPercent: livePercents.usedPercent,
+                      remainLow,
+                      barFillClass: quotaBarFillClass(
+                        livePercents.usedPercent,
+                      ),
+                    }
+                  : null
+              }
+              providerBalance={
+                customRouteActive && providerSupportsBalance
+                  ? {
+                      line: pinRemain,
+                      busy: providerBalanceBusy,
+                      error: providerBalanceError,
+                      refreshLabel: tr("prov.balance.refresh"),
+                      refreshingLabel: tr("prov.balance.checking"),
+                      onRefresh: () => loadProviderBalance({ force: true }),
+                    }
+                  : null
+              }
+              savedAccounts={savedAccounts}
+              activeAccountId={activeAccountId}
+              accountQuotas={accountQuotas}
+              onSwitchAccount={onSwitchAccount}
+              onAccountSettings={onAccountSettings}
               labels={{
                 whatsNew: tr("whatsNew.menu"),
                 tutorial: tr("tutorial.menu"),
@@ -481,6 +472,10 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
                 themeEditor: tr("user.themeEditor"),
                 login: tr("account.login"),
                 logout: tr("account.logout"),
+                remaining: tr("account.quotaRemaining"),
+                profileActive: tr("account.profileActive"),
+                switchTo: tr("account.switchTo"),
+                resetsAt: tr("account.resetsAt"),
               }}
               onWhatsNew={() => requestWhatsNewOpen()}
               onTutorial={onTutorial}
@@ -503,6 +498,7 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
                   className={
                     "sidebar__footer" + (showUserMenu ? " is-open" : "")
                   }
+                  aria-label={tr("user.menu")}
                   aria-haspopup="menu"
                   aria-expanded={showUserMenu}
                   onClick={() => {
@@ -553,6 +549,19 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
                     <span className="user-meta__name">
                       {customRouteActive ? customName : officialName}
                     </span>
+                    {pinQuota &&
+                    (pinRemain ||
+                      (providerSupportsBalance && providerBalanceBusy)) ? (
+                      <span
+                        className={
+                          "sidebar__footer-remain" +
+                          (remainLow ? " is-low" : "")
+                        }
+                      >
+                        {pinRemain ??
+                          (providerBalanceBusy ? "…" : null)}
+                      </span>
+                    ) : null}
                   </div>
                 </button>
               </Tip>
@@ -571,11 +580,13 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
         </div>
       </div>
       {themeEditorOpen ? (
-        <ThemeEditorModal
-          open
-          onClose={() => setThemeEditorOpen(false)}
-          locale={locale}
-        />
+        <Suspense fallback={null}>
+          <ThemeEditorModal
+            open
+            onClose={() => setThemeEditorOpen(false)}
+            locale={locale}
+          />
+        </Suspense>
       ) : null}
     </aside>
   );

@@ -25,6 +25,8 @@ import {
   endIndexThroughUserPrompt,
   canRewindToUserPrompt,
   rewindKeepPromptIndex,
+  rewindKeepPromptIndexFromCount,
+  resolveRewindKeepForUserMessage,
   rewindComposerRestore,
   userPromptIndexOf,
   userPromptIndexContaining,
@@ -213,6 +215,36 @@ describe("session projection", () => {
     expect(rewindKeepPromptIndex(msgs, 0)).toBe(0);
     expect(rewindKeepPromptIndex(msgs, 1)).toBe(0);
     expect(rewindKeepPromptIndex(msgs.slice(0, 3), 0)).toBe(null);
+    expect(rewindKeepPromptIndexFromCount(0, 5)).toBe(0);
+    expect(rewindKeepPromptIndexFromCount(4, 5)).toBe(3);
+    expect(rewindKeepPromptIndexFromCount(0, 1)).toBe(null);
+    expect(rewindKeepPromptIndexFromCount(3, 2)).toBe(null);
+  });
+
+  it("resolveRewindKeepForUserMessage prefers disk points after restart", async () => {
+    const msgs: ChatMessage[] = [
+      { id: "old-1", role: "user", content: "old" },
+      { id: "old-2", role: "user", content: "older" },
+      { id: "u-new", role: "user", content: "continue" },
+    ];
+    const missing = await resolveRewindKeepForUserMessage({
+      messageId: "old-1",
+      messages: msgs,
+      loadPoints: async () => [
+        { promptIndex: 0, messageId: "blob" },
+        { promptIndex: 1, messageId: "u-new" },
+      ],
+    });
+    expect(missing.reason).toBe("unavailable");
+    const hit = await resolveRewindKeepForUserMessage({
+      messageId: "u-new",
+      messages: msgs,
+      loadPoints: async () => [
+        { promptIndex: 0, messageId: "blob" },
+        { promptIndex: 1, messageId: "u-new" },
+      ],
+    });
+    expect(hit).toEqual({ keep: 0, reason: "ok" });
   });
 
   it("rewindComposerRestore puts the discarded user prompt back for edit", () => {
@@ -911,6 +943,105 @@ describe("session projection", () => {
     );
     expect(out.map((m) => m.id)).toEqual(["host-user", "a-pending-1"]);
     expect(out.filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
+  it("applyRemoteUserMessage reconciles text + image when host dual-wrote @path", () => {
+    const shot = "/tmp/paste.png";
+    const body = "帮我看一下怎么操作，才能接入telegram";
+    const att = { path: shot, name: "paste.png", isDir: false };
+    const out = applyRemoteUserMessage(
+      [
+        {
+          id: "u-1710000000002",
+          role: "user",
+          content: body,
+          attachments: [att],
+        },
+        { id: "a-pending-2", role: "assistant", content: "", streaming: true },
+      ],
+      {
+        id: "host-user-2",
+        role: "user",
+        content: `${body}\n\n@${shot}`,
+        attachments: [att],
+      },
+      "host-stream-2",
+    );
+    expect(out.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(out[0]!.id).toBe("host-user-2");
+    expect(out[0]!.content).toBe(body);
+    expect(out[0]!.attachments).toEqual([att]);
+    expect(out[1]!.id).toBe("a-pending-2");
+  });
+
+  it("applyRemoteUserMessage reconciles pure-image send when host dual-wrote @path", () => {
+    const shot = "/tmp/paste.png";
+    const att = { path: shot, name: "paste.png", isDir: false };
+    const out = applyRemoteUserMessage(
+      [
+        {
+          id: "u-1710000000003",
+          role: "user",
+          content: "",
+          attachments: [att],
+        },
+        { id: "a-pending-3", role: "assistant", content: "", streaming: true },
+      ],
+      {
+        id: "host-user-3",
+        role: "user",
+        content: `@${shot}`,
+        attachments: [att],
+      },
+      "host-stream-3",
+    );
+    expect(out.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(out[0]!.id).toBe("host-user-3");
+    expect(out[0]!.content).toBe("");
+    expect(out[0]!.attachments).toEqual([att]);
+  });
+
+  it("applyRemoteUserMessage does not append when host row already matches (#1124 reconnect)", () => {
+    const out = applyRemoteUserMessage(
+      [
+        { id: "host-already", role: "user", content: "hello again" },
+        { id: "a-pending-r", role: "assistant", content: "", streaming: true },
+      ],
+      { id: "host-new", role: "user", content: "hello again" },
+      "host-stream-r",
+    );
+    expect(out.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(out[0]!.id).toBe("host-already");
+    expect(out.map((m) => m.id)).toEqual(["host-already", "a-pending-r"]);
+  });
+
+  it("applyRemoteUserMessage finds optimistic above a pre-hydrated host twin (#1124)", () => {
+    const out = applyRemoteUserMessage(
+      [
+        { id: "u-1710000000099", role: "user", content: "ping" },
+        { id: "host-pre", role: "user", content: "other" },
+        { id: "a-pending-p", role: "assistant", content: "", streaming: true },
+      ],
+      { id: "host-ping", role: "user", content: "ping" },
+      "host-stream-p",
+    );
+    const users = out.filter((m) => m.role === "user");
+    expect(users).toHaveLength(2);
+    expect(users[0]!.id).toBe("host-ping");
+    expect(users[1]!.id).toBe("host-pre");
+  });
+
+  it("applyRemoteUserMessage matches CRLF optimistic body to LF host body", () => {
+    const out = applyRemoteUserMessage(
+      [
+        { id: "u-1710000000100", role: "user", content: "line1\r\nline2" },
+        { id: "a-pending-cr", role: "assistant", content: "", streaming: true },
+      ],
+      { id: "host-cr", role: "user", content: "line1\nline2" },
+      "host-stream-cr",
+    );
+    expect(out.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(out[0]!.id).toBe("host-cr");
   });
 
   it("applyStreamChunk grows assistant text once per chunk", () => {

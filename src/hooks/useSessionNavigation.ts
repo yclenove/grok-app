@@ -245,6 +245,19 @@ export function useSessionNavigation(opts: {
   const { noteOpened } = useSessionMruNav({
     getCurrentId: () => viewingSessionIdRef.current,
     getLiveIds: () => hostRef.current.catalog.listLiveIds(),
+    getRow: (id) => {
+      try {
+        const row = hostRef.current.catalog.findRow(id);
+        if (!row) return null;
+        const proj = hostRef.current.catalog.resolveProject(row);
+        return {
+          title: (row.title || "").trim(),
+          projectName: (proj?.name || "").trim(),
+        };
+      } catch {
+        return null;
+      }
+    },
     openById: (id) => {
       const row = hostRef.current.catalog.findRow(id);
       if (row) void mruOpenRef.current(row);
@@ -348,20 +361,26 @@ export function useSessionNavigation(opts: {
       host.plan.restoreChrome(s.id, stillThisOpen);
       host.gates.clearEditingAndSchema(s.jsonSchema);
 
-      const hydrated = await hydrateSessionJournal({
-        sessionId: s.id,
-        sessionScheduled: !!s.scheduled,
-        stillThisOpen,
-        liveState: resumeStateForSession(
-          s.id,
-          sessionShellStore.getLiveHost(),
-          sessionLiveMapStore.getMap(),
-        ).state,
-      });
-      if (hydrated.status === "aborted") {
+      let hydrated;
+      try {
+        hydrated = await hydrateSessionJournal({
+          sessionId: s.id,
+          sessionScheduled: !!s.scheduled,
+          stillThisOpen,
+          liveState: resumeStateForSession(
+            s.id,
+            sessionShellStore.getLiveHost(),
+            sessionLiveMapStore.getMap(),
+          ).state,
+        });
+      } finally {
+        // Always clear matching open claim — timeout/failure must not leave
+        // openingSessionIdRef stuck and block viewingSessionId sync.
         if (openingSessionIdRef.current === s.id) {
           openingSessionIdRef.current = null;
         }
+      }
+      if (hydrated.status === "aborted") {
         return;
       }
       hostRef.current.hydrate.applyOpenResult(s.id, hydrated);
@@ -390,19 +409,13 @@ export function useSessionNavigation(opts: {
         }, DEFERRED_RECONCILE_MS);
       }
       if (!stillThisOpen()) {
-        if (openingSessionIdRef.current === s.id) {
-          openingSessionIdRef.current = null;
-        }
         return;
       }
 
       const hostAfter = hostRef.current;
       hostAfter.catalog.setActiveProject(proj);
       bindShellSession(s);
-      if (openingSessionIdRef.current === s.id) {
-        openingSessionIdRef.current = null;
-      }
-      hostAfter.gates.setLocalError(null);
+      // timed_out / failed: applyOpenResult keeps cache and sets recoverable error.
       const live = sessionShellStore.getLiveHost();
       hostAfter.gates.restoreForSession(s.id, {
         stillThisOpen,

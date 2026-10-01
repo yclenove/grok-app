@@ -34,8 +34,13 @@ mod types;
 mod watchdog;
 
 // Multi-session event routing (P0 shared-process load-replay safety).
+pub(crate) use stream::StreamEmitPayload;
 pub(crate) use stream::{
     has_turn_end_marker_after_last_user, resolve_turn_event_route, SessionRouteHint, TurnEventRoute,
+};
+#[allow(unused_imports)]
+pub(crate) use stream::{
+    PendingSessionPersist, PendingStreamJournalFlush, PendingTurnBoundaryPersist,
 };
 
 #[cfg(test)]
@@ -106,6 +111,10 @@ pub struct SessionManager {
     /// effort change, proxy, …). Flushed when the turn becomes idle so
     /// the next process picks up spawn flags (P0-5 / #598).
     pub(super) pending_soft_respawn: Mutex<HashMap<String, String>>,
+    /// Spawn flags require a fresh CLI session, but its old resume id must
+    /// remain indexed until CU catalog cleanup succeeds. Keep this intent
+    /// separate so another deferred respawn cannot erase the required reset.
+    pub(super) pending_spawn_flag_invalidations: Mutex<HashMap<String, String>>,
     /// Serialize every MCP catalog replacement for one App session. Generic
     /// extension changes and Computer Use attach/detach must share this lock;
     /// otherwise a late response can resurrect a stale CU entry.
@@ -144,6 +153,7 @@ impl SessionManager {
             connect_lock_busy_ticks: AtomicU32::new(0),
             post_turn_journal_locks: Mutex::new(HashMap::new()),
             pending_soft_respawn: Mutex::new(HashMap::new()),
+            pending_spawn_flag_invalidations: Mutex::new(HashMap::new()),
             mcp_catalog_locks: Mutex::new(HashMap::new()),
             computer_use_cleanup_locks: Mutex::new(HashMap::new()),
             mcp_catalog_revision: AtomicU64::new(0),
@@ -155,6 +165,9 @@ impl SessionManager {
     pub fn forget_deleted_session(&self, session_id: &str) {
         crate::computer_use::sessions::forget_session(session_id);
         self.pending_soft_respawn.lock().remove(session_id);
+        self.pending_spawn_flag_invalidations
+            .lock()
+            .remove(session_id);
         self.post_turn_journal_locks.lock().remove(session_id);
         self.mcp_catalog_locks.lock().remove(session_id);
         self.computer_use_cleanup_locks.lock().remove(session_id);

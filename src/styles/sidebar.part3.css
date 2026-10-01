@@ -13,6 +13,7 @@
 .prompt-history,
 .modal,
 .search-panel,
+.session-mru-panel,
 .cmm__pop,
 .auto-panel,
 .drop-overlay__card {
@@ -836,6 +837,12 @@ html[data-sidebar-density="compact"] .tree-l3__rename {
 }
 
 html[data-sidebar-density="compact"] .tree-l3--hint {
+  height: 22px;
+  min-height: 22px;
+  font-size: 11px;
+}
+
+html[data-sidebar-density="compact"] .tree-l3--more {
   height: 22px;
   min-height: 22px;
   font-size: 11px;

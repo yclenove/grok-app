@@ -6,7 +6,13 @@ import type {
   StreamPayload,
 } from "./types";
 import { isTurnPromptMessage } from "./types";
-import { stripUserAttachmentRefs } from "./rewind";
+import {
+  EMPTY_USER_KEY,
+  isClientOptimisticId,
+  reconcileOptimisticDuplicates,
+  stripUserAttachmentRefs,
+  userBubbleDedupeKey,
+} from "./rewind";
 import {
   appendContentToSegments,
   appendThoughtToSegments,
@@ -190,42 +196,72 @@ export function applyRemoteUserMessage(
 ): ChatMessage[] {
   if (!user?.id || user.role !== "user") return messages;
   if (messages.some((m) => m.id === user.id)) {
-    return ensureLiveAssistantAfterUser(messages, user.id, streamMessageId);
-  }
-
-  const userText = (user.content || "").trim();
-  let optimisticIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m || m.role !== "user" || m.marker === "interjection") continue;
-    const id = m.id || "";
-    // Optimistic composer ids: `u-<ts>` / `u-auto-…` (see isClientOptimisticId).
-    if (
-      userText &&
-      (m.content || "").trim() === userText &&
-      (/^u-\d+$/.test(id) || id.startsWith("u-auto-"))
-    ) {
-      optimisticIdx = i;
-    }
-    break;
-  }
-
-  let next: ChatMessage[];
-  if (optimisticIdx >= 0) {
-    next = messages.map((m, i) =>
-      i === optimisticIdx
-        ? {
-            ...user,
-            attachments: user.attachments?.length
-              ? user.attachments
-              : m.attachments,
-          }
-        : m,
+    return ensureLiveAssistantAfterUser(
+      reconcileOptimisticDuplicates(messages),
+      user.id,
+      streamMessageId,
     );
-  } else {
-    next = [...messages, { ...user, role: "user" }];
   }
-  return ensureLiveAssistantAfterUser(next, user.id, streamMessageId);
+
+  const cleanedUser = stripUserAttachmentRefs(user);
+  const userKey = userBubbleDedupeKey(cleanedUser);
+
+  // Scan every user row (not only the tail). After idle reconnect / journal
+  // rehydrate the last user may already be a Host UUID; the optimistic `u-…`
+  // can sit above it — matching only the tail would append a duplicate.
+  if (userKey !== EMPTY_USER_KEY) {
+    let optimisticIdx = -1;
+    let existingRealIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m || m.role !== "user" || m.marker === "interjection") continue;
+      if (userBubbleDedupeKey(m) !== userKey) continue;
+      const id = m.id || "";
+      if (
+        isClientOptimisticId(id) ||
+        /^u-\d/.test(id) ||
+        id.startsWith("u-auto-") ||
+        id.startsWith("u-batch-")
+      ) {
+        if (optimisticIdx < 0) optimisticIdx = i;
+      } else if (existingRealIdx < 0) {
+        existingRealIdx = i;
+      }
+    }
+
+    if (optimisticIdx >= 0) {
+      const next = messages.map((m, i) =>
+        i === optimisticIdx
+          ? {
+              ...cleanedUser,
+              attachments: cleanedUser.attachments?.length
+                ? cleanedUser.attachments
+                : m.attachments,
+            }
+          : m,
+      );
+      return ensureLiveAssistantAfterUser(
+        reconcileOptimisticDuplicates(next),
+        user.id,
+        streamMessageId,
+      );
+    }
+
+    if (existingRealIdx >= 0) {
+      return ensureLiveAssistantAfterUser(
+        reconcileOptimisticDuplicates(messages),
+        user.id,
+        streamMessageId,
+      );
+    }
+  }
+
+  const next = [...messages, cleanedUser];
+  return ensureLiveAssistantAfterUser(
+    reconcileOptimisticDuplicates(next),
+    user.id,
+    streamMessageId,
+  );
 }
 
 function ensureLiveAssistantAfterUser(
@@ -349,7 +385,7 @@ export function applyInterjection(
 }
 
 /** Visible body on an assistant row (text / thought / segments / media). */
-function assistantHasVisibleBody(m: ChatMessage): boolean {
+export function assistantHasVisibleBody(m: ChatMessage): boolean {
   if (m.content?.trim()) return true;
   if (m.thought?.trim()) return true;
   if (m.attachments?.length) return true;

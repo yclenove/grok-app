@@ -87,16 +87,29 @@ const CARET_PAD_RE = /[\u200B-\u200D\uFEFF\u2060]/g;
  * Strip pads before composition / after landing the caret on a new line.
  */
 export function stripCaretPadsInEditor(el: HTMLElement) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const texts: Text[] = [];
+  let n: Node | null;
+  while ((n = walker.nextNode())) texts.push(n as Text);
+
+  let hasPad = false;
+  for (const t of texts) {
+    if (CARET_PAD_RE.test(t.data)) {
+      hasPad = true;
+      CARET_PAD_RE.lastIndex = 0;
+      break;
+    }
+    CARET_PAD_RE.lastIndex = 0;
+  }
+  // No pads → leave selection alone (Win11 IME / TSF hates needless
+  // removeAllRanges during compositionstart).
+  if (!hasPad) return;
+
   const sel = window.getSelection();
   const caretNode = sel?.anchorNode ?? null;
   const caretOff = sel?.anchorOffset ?? 0;
   let nextNode: Node | null = caretNode;
   let nextOff = caretOff;
-
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  const texts: Text[] = [];
-  let n: Node | null;
-  while ((n = walker.nextNode())) texts.push(n as Text);
 
   for (const t of texts) {
     if (!CARET_PAD_RE.test(t.data)) continue;
@@ -1183,6 +1196,18 @@ export const ComposerEditor = memo(function ComposerEditor({
   const lastValue = useRef(value);
   const composing = useRef(false);
   const focused = useRef(false);
+  // Windows IME keeps the candidate bar at (0, 0) if composition is still
+  // open when the webview loses the window. Blur ends that composition so
+  // the next focus starts at the caret.
+  useEffect(() => {
+    const endStuckComposition = () => {
+      const node = elRef.current;
+      if (!node || !composing.current) return;
+      node.blur();
+    };
+    window.addEventListener("blur", endStuckComposition);
+    return () => window.removeEventListener("blur", endStuckComposition);
+  }, []);
   /** Guard against double paste events (some WebViews fire paste twice). */
   const pasteInFlight = useRef(false);
   /** Coalesced rAF for post-newline caret pin (key-repeat must not stack). */
@@ -1331,8 +1356,9 @@ export const ComposerEditor = memo(function ComposerEditor({
     syncDomEmpty(e.currentTarget);
     if (composing.current) {
       // Live pinyin in DOM — update slash filter without committing draft yet.
+      // Do not resize/scroll during composition: height/scrollTop churn makes
+      // WebView2 IME candidate windows jump to the top of the screen (#1170).
       emitSlash();
-      resize();
       return;
     }
     commitFromDom(e.currentTarget);
@@ -1415,12 +1441,12 @@ export const ComposerEditor = memo(function ComposerEditor({
       composing.current = false;
       stripCaretPadsInEditor(el);
       commitFromDom(el);
+      // One follow-up frame covers late WebView2 composition commits without
+      // hammering selection (extra rAF/timeouts broke Shift IME toggle #1170).
       requestAnimationFrame(() => {
+        if (composing.current) return;
         commitFromDom(el);
-        requestAnimationFrame(() => commitFromDom(el));
       });
-      window.setTimeout(() => commitFromDom(el), 0);
-      window.setTimeout(() => commitFromDom(el), 50);
     },
     [commitFromDom],
   );

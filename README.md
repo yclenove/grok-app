@@ -60,12 +60,12 @@
 
 ## ✨ Key Highlights
 
-- ⚡ **Native Build Sessions** — Deep integration with `grok agent stdio` via the ACP protocol. Granular permission tiers (Ask, Allow Once, Allow for Session, and YOLO mode) with Grok 4.6 Extra High (`xhigh`) enabled by default.
+- ⚡ **Native Build Sessions** — Deep integration with `grok agent stdio` via the ACP protocol. Granular permission tiers (Ask, Allow Once, Allow for Session, and YOLO mode) with Grok 4.7 Extra High (`xhigh`) enabled by default. Grok 4.7 Fast is also selectable.
 - 🗂️ **Multi-Project Workbench** — Isolated project workspaces, agent status Kanban, one-click Git Worktree switching, session forking from any assistant reply, and cross-session context attachment.
 - 📝 **Files & Creation Loop** — Embedded CodeMirror 6 editor with instant disk synchronization, visual Git Diff review, comprehensive media preview (images, video, audio, PDF, Office documents), and AI image/video generation via Imagine.
 - 📲 **Omnichannel Remote IM** — Unified bridge connecting your local agent to Feishu/Lark, Telegram, Discord, Slack, DingTalk, WeCom, WeChat personal, QQ, Matrix, LINE, and Weibo; token-gated mobile web mirror and loopback REST session API.
 - 🐾 **Desktop Companion & Status Feedback** — Interactive always-on-top desktop pet companion with live agent status awareness, responsive reactions, and notification bubbles.
-- 🔐 **Privacy & Custom Relays** — API keys securely stored in your OS keychain. SuperGrok quota bar and heatmap tracking, custom provider relays (OpenRouter, DeepSeek, AI98PRO, etc.), and 15 built-in UI languages.
+- 🔐 **Privacy & Custom Relays** — API keys securely stored in your OS keychain. SuperGrok quota bar and heatmap tracking, custom provider relays (OpenRouter, Requesty, DeepSeek, AI98PRO, etc.), and 15 built-in UI languages.
 
 ---
 
@@ -102,7 +102,7 @@
 
 ### 6. Accounts, Relays & Personalization
 - **Multi-Account & Quota Tracking**: Instant account switcher, official login, SuperGrok quota progress bar, cost heatmaps, and local tracking for custom providers.
-- **Flexible Relay Modes**: Independent configuration mode or non-destructive shared mode (protects existing `~/.grok` configurations); one-click presets for OpenRouter, DeepSeek, AI98PRO, etc.
+- **Flexible Relay Modes**: Independent configuration mode or non-destructive shared mode (protects existing `~/.grok` configurations); one-click presets for OpenRouter, Requesty, DeepSeek, AI98PRO, etc.
 - **Visual Customization**: Light, dark, and system-adaptive themes; custom skins, wallpapers, UI fonts, terminal fonts, and share card styling.
 - **Internationalization**: 15 built-in languages (EN, ZH, JA, KO, DE, FR, RU, ES, PT-BR, IT, ID, TA, UK, FIL, ZH-TW) with automatic OS locale detection.
 
@@ -182,6 +182,8 @@ open /Applications/Grok.app
 
 ### Windows SmartScreen Notice
 For unsigned community packages, Windows SmartScreen may display a warning on initial launch. Click **More info → Run anyway**. You can verify the file hash against `SHA256SUMS` for integrity.
+
+Third-party antivirus (Kaspersky and similar) may also flag the unsigned Tauri app and bundled CLI as a heuristic threat. That is a false positive on community builds. Verify the installer hash, then exclude the install folder and the app data directory (often under `%LOCALAPPDATA%`). Signing with Authenticode is the long-term fix; the app cannot whitelist itself inside the antivirus.
 
 ---
 
@@ -314,14 +316,15 @@ Contributions, bug reports, and suggestions are warmly welcomed!
 ## 👥 Contributors
 
 <!-- CONTRIBUTORS:START -->
-Thanks to everyone who has contributed to Grok App. All human GitHub contributors (by commit count, updated 2026-09-06).
+Thanks to everyone who has contributed to Grok App. All human GitHub contributors (by commit count, updated 2026-09-30).
 
 <p align="center">
   <a href="https://github.com/RongleCat" title="RongleCat"><img src="https://github.com/RongleCat.png?size=96" width="72" height="72" alt="RongleCat" style="border-radius:50%" /></a>
   <a href="https://github.com/sonnemusk" title="sonnemusk"><img src="https://github.com/sonnemusk.png?size=96" width="72" height="72" alt="sonnemusk" style="border-radius:50%" /></a>
   <a href="https://github.com/zhangxaochen" title="zhangxaochen"><img src="https://github.com/zhangxaochen.png?size=96" width="72" height="72" alt="zhangxaochen" style="border-radius:50%" /></a>
-  <a href="https://github.com/AlexZander85" title="AlexZander85"><img src="https://github.com/AlexZander85.png?size=96" width="72" height="72" alt="AlexZander85" style="border-radius:50%" /></a>
   <a href="https://github.com/shiaho777" title="shiaho777"><img src="https://github.com/shiaho777.png?size=96" width="72" height="72" alt="shiaho777" style="border-radius:50%" /></a>
+  <a href="https://github.com/yclenove" title="yclenove"><img src="https://github.com/yclenove.png?size=96" width="72" height="72" alt="yclenove" style="border-radius:50%" /></a>
+  <a href="https://github.com/AlexZander85" title="AlexZander85"><img src="https://github.com/AlexZander85.png?size=96" width="72" height="72" alt="AlexZander85" style="border-radius:50%" /></a>
   <a href="https://github.com/Dmao233" title="Dmao233"><img src="https://github.com/Dmao233.png?size=96" width="72" height="72" alt="Dmao233" style="border-radius:50%" /></a>
   <a href="https://github.com/pengqian-lu" title="pengqian-lu"><img src="https://github.com/pengqian-lu.png?size=96" width="72" height="72" alt="pengqian-lu" style="border-radius:50%" /></a>
   <a href="https://github.com/ynjmxn" title="ynjmxn"><img src="https://github.com/ynjmxn.png?size=96" width="72" height="72" alt="ynjmxn" style="border-radius:50%" /></a>
@@ -334,13 +337,14 @@ Thanks to everyone who has contributed to Grok App. All human GitHub contributor
   <a href="https://github.com/a70win-wq" title="a70win-wq"><img src="https://github.com/a70win-wq.png?size=96" width="72" height="72" alt="a70win-wq" style="border-radius:50%" /></a>
   <a href="https://github.com/1parado" title="1parado"><img src="https://github.com/1parado.png?size=96" width="72" height="72" alt="1parado" style="border-radius:50%" /></a>
   <a href="https://github.com/sutongwuyanzu" title="sutongwuyanzu"><img src="https://github.com/sutongwuyanzu.png?size=96" width="72" height="72" alt="sutongwuyanzu" style="border-radius:50%" /></a>
+  <a href="https://github.com/KarnaughK" title="KarnaughK"><img src="https://github.com/KarnaughK.png?size=96" width="72" height="72" alt="KarnaughK" style="border-radius:50%" /></a>
+  <a href="https://github.com/Ksndj" title="Ksndj"><img src="https://github.com/Ksndj.png?size=96" width="72" height="72" alt="Ksndj" style="border-radius:50%" /></a>
   <a href="https://github.com/lunar-me" title="lunar-me"><img src="https://github.com/lunar-me.png?size=96" width="72" height="72" alt="lunar-me" style="border-radius:50%" /></a>
-  <a href="https://github.com/yclenove" title="yclenove"><img src="https://github.com/yclenove.png?size=96" width="72" height="72" alt="yclenove" style="border-radius:50%" /></a>
   <a href="https://github.com/ericyiu9819" title="ericyiu9819"><img src="https://github.com/ericyiu9819.png?size=96" width="72" height="72" alt="ericyiu9819" style="border-radius:50%" /></a>
   <a href="https://github.com/falser101" title="falser101"><img src="https://github.com/falser101.png?size=96" width="72" height="72" alt="falser101" style="border-radius:50%" /></a>
-  <a href="https://github.com/Ksndj" title="Ksndj"><img src="https://github.com/Ksndj.png?size=96" width="72" height="72" alt="Ksndj" style="border-radius:50%" /></a>
   <a href="https://github.com/salasebas" title="salasebas"><img src="https://github.com/salasebas.png?size=96" width="72" height="72" alt="salasebas" style="border-radius:50%" /></a>
   <a href="https://github.com/Sdefendre" title="Sdefendre"><img src="https://github.com/Sdefendre.png?size=96" width="72" height="72" alt="Sdefendre" style="border-radius:50%" /></a>
+  <a href="https://github.com/Thibaultjaigu" title="Thibaultjaigu"><img src="https://github.com/Thibaultjaigu.png?size=96" width="72" height="72" alt="Thibaultjaigu" style="border-radius:50%" /></a>
   <a href="https://github.com/yuhaouno" title="yuhaouno"><img src="https://github.com/yuhaouno.png?size=96" width="72" height="72" alt="yuhaouno" style="border-radius:50%" /></a>
   <a href="https://github.com/2530185073" title="2530185073"><img src="https://github.com/2530185073.png?size=96" width="72" height="72" alt="2530185073" style="border-radius:50%" /></a>
   <a href="https://github.com/86208620" title="86208620"><img src="https://github.com/86208620.png?size=96" width="72" height="72" alt="86208620" style="border-radius:50%" /></a>
@@ -358,6 +362,7 @@ Thanks to everyone who has contributed to Grok App. All human GitHub contributor
   <a href="https://github.com/sk1935" title="sk1935"><img src="https://github.com/sk1935.png?size=96" width="72" height="72" alt="sk1935" style="border-radius:50%" /></a>
   <a href="https://github.com/tisrop" title="tisrop"><img src="https://github.com/tisrop.png?size=96" width="72" height="72" alt="tisrop" style="border-radius:50%" /></a>
   <a href="https://github.com/XancelZC" title="XancelZC"><img src="https://github.com/XancelZC.png?size=96" width="72" height="72" alt="XancelZC" style="border-radius:50%" /></a>
+  <a href="https://github.com/Yux-c" title="Yux-c"><img src="https://github.com/Yux-c.png?size=96" width="72" height="72" alt="Yux-c" style="border-radius:50%" /></a>
 </p>
 
 [Full contributors graph →](https://github.com/RongleCat/grok-app/graphs/contributors)

@@ -128,6 +128,99 @@ export function sortSessionsForSidebar<T extends DateGroupableSession>(
   return sessions.slice().sort(compareSessionsPinThenUpdated);
 }
 
+/** Session shape for lifting pins out of their project folder. */
+export type GlobalPinnableSession = DateGroupableSession & {
+  archived?: boolean;
+};
+
+/**
+ * Pinned chats sit at the top of the whole sidebar (above folders).
+ * Archived rows are omitted. Does not mutate the input array.
+ */
+export function partitionGlobalPinned<T extends GlobalPinnableSession>(
+  sessions: readonly T[],
+): { pinned: T[]; rest: T[] } {
+  const pinned: T[] = [];
+  const rest: T[] = [];
+  for (const s of sessions) {
+    if (s.archived) continue;
+    if (s.pinned) pinned.push(s);
+    else rest.push(s);
+  }
+  // Pin order is the list order (oldest pin first). Activity must not reorder it.
+  return { pinned, rest: sortSessionsForSidebar(rest) };
+}
+
+/** One run of pinned chats that share a workspace, in pin order. */
+export type PinnedWorkspaceRun<T> = {
+  key: string;
+  projectId: string | null;
+  sessions: T[];
+};
+
+/**
+ * Workspace names are dividers only. A new group starts when the project
+ * changes. Pins are not regrouped into folder order.
+ */
+export function groupPinnedByWorkspaceRun<
+  T extends { projectId?: string | null },
+>(
+  pinnedInOrder: readonly T[],
+  knownProjectIds: ReadonlySet<string>,
+): PinnedWorkspaceRun<T>[] {
+  const groups: PinnedWorkspaceRun<T>[] = [];
+  for (const session of pinnedInOrder) {
+    const projectId =
+      session.projectId && knownProjectIds.has(session.projectId)
+        ? session.projectId
+        : null;
+    const key = projectId ?? "__orphan__";
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.sessions.push(session);
+    else groups.push({ key, projectId, sessions: [session] });
+  }
+  return groups;
+}
+
+/** j/k order: global pins, then expanded project chats, then default-workspace orphans. */
+export function sidebarNavSessionIds<
+  T extends GlobalPinnableSession & {
+    id: string;
+    projectId?: string | null;
+  },
+>(input: {
+  sessions: readonly T[];
+  /** All projects — decides which sessions count as orphans. */
+  projects: readonly { id: string }[];
+  /**
+   * Projects actually rendered in the tree (space-filtered, SSH-hidden
+   * projects excluded). Chats of projects the sidebar does not show are
+   * unreachable by pointer and must not be j/k targets either.
+   */
+  visibleProjects: readonly { id: string }[];
+  projectsOpen: boolean;
+  historyOpen: boolean;
+  expandedProjects: Record<string, boolean>;
+}): string[] {
+  const { pinned, rest } = partitionGlobalPinned(input.sessions);
+  const ids = pinned.map((s) => s.id);
+  const projectIdSet = new Set(input.projects.map((p) => p.id));
+  if (input.projectsOpen) {
+    for (const proj of input.visibleProjects) {
+      if (input.expandedProjects[proj.id] === false) continue;
+      const projSessions = rest.filter((s) => s.projectId === proj.id);
+      for (const s of sortSessionsForSidebar(projSessions)) ids.push(s.id);
+    }
+  }
+  if (input.historyOpen) {
+    const orphans = rest.filter(
+      (s) => !s.projectId || !projectIdSet.has(s.projectId),
+    );
+    for (const s of sortSessionsForSidebar(orphans)) ids.push(s.id);
+  }
+  return ids;
+}
+
 /**
  * Group sessions into relative-date sections.
  * @deprecated Sidebar UI no longer groups by date; prefer {@link sortSessionsForSidebar}.

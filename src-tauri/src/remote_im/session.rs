@@ -1,6 +1,5 @@
 //! Per-scope IM session binding (project + agent session id), disk-persisted.
 
-#![allow(dead_code)] // residual-clippy: ephemeral/reset session API
 use super::control_plane::{binding_after_app_session_move, ScopeBinding};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -56,6 +55,7 @@ impl SessionStore {
     }
 
     /// In-memory only (tests).
+    #[allow(dead_code)]
     pub fn ephemeral() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
@@ -126,6 +126,7 @@ impl SessionStore {
         self.save_disk();
     }
 
+    #[allow(dead_code)]
     pub fn reset(&self, key: &str, work_dir: &str) -> ScopeBinding {
         let rec = ScopeBinding::fresh(work_dir);
         self.inner.lock().insert(key.to_string(), rec.clone());
@@ -187,6 +188,7 @@ pub fn binds_app_session(session_id: &str) -> bool {
     SessionStore::open(SessionStore::default_path()).binds_session(id)
 }
 
+#[cfg(any(test, feature = "computer-use-probe"))]
 pub(crate) fn with_live_cleared<T>(f: impl FnOnce() -> T) -> T {
     let prev = LIVE.lock().take();
     let out = f();

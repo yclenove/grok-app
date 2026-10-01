@@ -60,12 +60,12 @@
 
 ## ✨ 核心亮点
 
-- ⚡ **原生 Build 会话** — 通过 ACP 协议直接托管 `grok agent stdio`，支持 Ask（默认确认）、单次允许、本会话允许与 YOLO（完全自主）权限分级，默认启用 Grok 4.6 极高推理（`xhigh`）。
+- ⚡ **原生 Build 会话** — 通过 ACP 协议直接托管 `grok agent stdio`，支持 Ask（默认确认）、单次允许、本会话允许与 YOLO（完全自主）权限分级，默认启用 Grok 4.7 极高推理（`xhigh`），也可选 Grok 4.7 Fast。
 - 🗂️ **多项目工作台** — 独立项目空间、智能体看板、Git 工作树（Worktree）一键无缝切换、从任意助手回复分叉（Fork）会话、将历史对话作为上下文一键引用。
 - 📝 **文件与创作闭环** — 内置 CodeMirror 代码与文本编辑器（支持实时保存与磁盘双向同步）、Git Diff 变更对比、图片/音视频/PDF/Office 丰富媒体预览，以及 Imagine 图像与视频生成。
 - 📲 **全渠道远程 IM 连接** — 内置远程控制桥接，支持飞书 (Lark)、Telegram、Discord、Slack、钉钉、企业微信、微信个人、QQ、Matrix、LINE 与微博；支持手机 Web 镜像及本地 REST API。
 - 🐾 **桌面伴侣与互动反馈** — 趣味置顶桌面宠物，实时感知智能体运行状态，提供灵动的交互反馈与气泡通知。
-- 🔐 **本地隐私与自定中转** — API Key 安全托管至系统钥匙串；支持官方 SuperGrok 额度与热力图监控，支持自定义中转提供商（OpenRouter、DeepSeek、AI98PRO 等）并支持十五种界面语言。
+- 🔐 **本地隐私与自定中转** — API Key 安全托管至系统钥匙串；支持官方 SuperGrok 额度与热力图监控，支持自定义中转提供商（OpenRouter、Requesty、DeepSeek、AI98PRO 等）并支持十五种界面语言。
 
 ---
 
@@ -102,7 +102,7 @@
 
 ### 6. 账户、中转与个性化
 - **多账号与用量追踪**：支持多账号快速切换，内置 SuperGrok 额度进度条与消耗热力图统计，自定义提供商用量本地记录。
-- **中转提供商配置**：提供独立配置模式与共享模式（共享模式安全保护现有 `~/.grok` 配置）；内置 OpenRouter、DeepSeek、AI98PRO 等一键预设。
+- **中转提供商配置**：提供独立配置模式与共享模式（共享模式安全保护现有 `~/.grok` 配置）；内置 OpenRouter、Requesty、DeepSeek、AI98PRO 等一键预设。
 - **个性化视觉定制**：支持浅色/深色/跟随系统主题，支持自定义皮肤、壁纸（本地图片/Unsplash/Imagine）、界面与终端字体。
 - **多语言支持**：原生内置 15 种语言（中、英、日、韩、德、法、俄、西、葡等），首次启动自动跟随操作系统语言。
 
@@ -182,6 +182,8 @@ open /Applications/Grok.app
 
 ### Windows SmartScreen 提示未知发布者
 在运行未签名的社区版本时，Windows SmartScreen 可能会弹出提示。点击 **更多信息 → 仍要运行** 即可。建议通过 `SHA256SUMS` 校验下载包的哈希值。
+
+卡巴斯基等第三方杀毒也可能把未签名的 Tauri 应用和随包 CLI 标成启发式威胁，这是社区构建的误报。请先核对安装包哈希，再把安装目录和应用数据目录（常见在 `%LOCALAPPDATA%`）加入排除项。根治需要 Windows 代码签名；应用无法在杀毒软件里给自己开白名单。
 
 ---
 
@@ -314,14 +316,15 @@ Windows（可选）：双击 [`install-latest.cmd`](./install-latest.cmd) 会把
 ## 👥 贡献者
 
 <!-- CONTRIBUTORS:START -->
-感谢所有为 Grok App 做出贡献的人！以下为 GitHub 仓库全部人类贡献者（按 commits 降序，2026-09-06 更新）。
+感谢所有为 Grok App 做出贡献的人！以下为 GitHub 仓库全部人类贡献者（按 commits 降序，2026-09-30 更新）。
 
 <p align="center">
   <a href="https://github.com/RongleCat" title="RongleCat"><img src="https://github.com/RongleCat.png?size=96" width="72" height="72" alt="RongleCat" style="border-radius:50%" /></a>
   <a href="https://github.com/sonnemusk" title="sonnemusk"><img src="https://github.com/sonnemusk.png?size=96" width="72" height="72" alt="sonnemusk" style="border-radius:50%" /></a>
   <a href="https://github.com/zhangxaochen" title="zhangxaochen"><img src="https://github.com/zhangxaochen.png?size=96" width="72" height="72" alt="zhangxaochen" style="border-radius:50%" /></a>
-  <a href="https://github.com/AlexZander85" title="AlexZander85"><img src="https://github.com/AlexZander85.png?size=96" width="72" height="72" alt="AlexZander85" style="border-radius:50%" /></a>
   <a href="https://github.com/shiaho777" title="shiaho777"><img src="https://github.com/shiaho777.png?size=96" width="72" height="72" alt="shiaho777" style="border-radius:50%" /></a>
+  <a href="https://github.com/yclenove" title="yclenove"><img src="https://github.com/yclenove.png?size=96" width="72" height="72" alt="yclenove" style="border-radius:50%" /></a>
+  <a href="https://github.com/AlexZander85" title="AlexZander85"><img src="https://github.com/AlexZander85.png?size=96" width="72" height="72" alt="AlexZander85" style="border-radius:50%" /></a>
   <a href="https://github.com/Dmao233" title="Dmao233"><img src="https://github.com/Dmao233.png?size=96" width="72" height="72" alt="Dmao233" style="border-radius:50%" /></a>
   <a href="https://github.com/pengqian-lu" title="pengqian-lu"><img src="https://github.com/pengqian-lu.png?size=96" width="72" height="72" alt="pengqian-lu" style="border-radius:50%" /></a>
   <a href="https://github.com/ynjmxn" title="ynjmxn"><img src="https://github.com/ynjmxn.png?size=96" width="72" height="72" alt="ynjmxn" style="border-radius:50%" /></a>
@@ -334,13 +337,14 @@ Windows（可选）：双击 [`install-latest.cmd`](./install-latest.cmd) 会把
   <a href="https://github.com/a70win-wq" title="a70win-wq"><img src="https://github.com/a70win-wq.png?size=96" width="72" height="72" alt="a70win-wq" style="border-radius:50%" /></a>
   <a href="https://github.com/1parado" title="1parado"><img src="https://github.com/1parado.png?size=96" width="72" height="72" alt="1parado" style="border-radius:50%" /></a>
   <a href="https://github.com/sutongwuyanzu" title="sutongwuyanzu"><img src="https://github.com/sutongwuyanzu.png?size=96" width="72" height="72" alt="sutongwuyanzu" style="border-radius:50%" /></a>
+  <a href="https://github.com/KarnaughK" title="KarnaughK"><img src="https://github.com/KarnaughK.png?size=96" width="72" height="72" alt="KarnaughK" style="border-radius:50%" /></a>
+  <a href="https://github.com/Ksndj" title="Ksndj"><img src="https://github.com/Ksndj.png?size=96" width="72" height="72" alt="Ksndj" style="border-radius:50%" /></a>
   <a href="https://github.com/lunar-me" title="lunar-me"><img src="https://github.com/lunar-me.png?size=96" width="72" height="72" alt="lunar-me" style="border-radius:50%" /></a>
-  <a href="https://github.com/yclenove" title="yclenove"><img src="https://github.com/yclenove.png?size=96" width="72" height="72" alt="yclenove" style="border-radius:50%" /></a>
   <a href="https://github.com/ericyiu9819" title="ericyiu9819"><img src="https://github.com/ericyiu9819.png?size=96" width="72" height="72" alt="ericyiu9819" style="border-radius:50%" /></a>
   <a href="https://github.com/falser101" title="falser101"><img src="https://github.com/falser101.png?size=96" width="72" height="72" alt="falser101" style="border-radius:50%" /></a>
-  <a href="https://github.com/Ksndj" title="Ksndj"><img src="https://github.com/Ksndj.png?size=96" width="72" height="72" alt="Ksndj" style="border-radius:50%" /></a>
   <a href="https://github.com/salasebas" title="salasebas"><img src="https://github.com/salasebas.png?size=96" width="72" height="72" alt="salasebas" style="border-radius:50%" /></a>
   <a href="https://github.com/Sdefendre" title="Sdefendre"><img src="https://github.com/Sdefendre.png?size=96" width="72" height="72" alt="Sdefendre" style="border-radius:50%" /></a>
+  <a href="https://github.com/Thibaultjaigu" title="Thibaultjaigu"><img src="https://github.com/Thibaultjaigu.png?size=96" width="72" height="72" alt="Thibaultjaigu" style="border-radius:50%" /></a>
   <a href="https://github.com/yuhaouno" title="yuhaouno"><img src="https://github.com/yuhaouno.png?size=96" width="72" height="72" alt="yuhaouno" style="border-radius:50%" /></a>
   <a href="https://github.com/2530185073" title="2530185073"><img src="https://github.com/2530185073.png?size=96" width="72" height="72" alt="2530185073" style="border-radius:50%" /></a>
   <a href="https://github.com/86208620" title="86208620"><img src="https://github.com/86208620.png?size=96" width="72" height="72" alt="86208620" style="border-radius:50%" /></a>
@@ -358,6 +362,7 @@ Windows（可选）：双击 [`install-latest.cmd`](./install-latest.cmd) 会把
   <a href="https://github.com/sk1935" title="sk1935"><img src="https://github.com/sk1935.png?size=96" width="72" height="72" alt="sk1935" style="border-radius:50%" /></a>
   <a href="https://github.com/tisrop" title="tisrop"><img src="https://github.com/tisrop.png?size=96" width="72" height="72" alt="tisrop" style="border-radius:50%" /></a>
   <a href="https://github.com/XancelZC" title="XancelZC"><img src="https://github.com/XancelZC.png?size=96" width="72" height="72" alt="XancelZC" style="border-radius:50%" /></a>
+  <a href="https://github.com/Yux-c" title="Yux-c"><img src="https://github.com/Yux-c.png?size=96" width="72" height="72" alt="Yux-c" style="border-radius:50%" /></a>
 </p>
 
 [完整贡献图 →](https://github.com/RongleCat/grok-app/graphs/contributors)

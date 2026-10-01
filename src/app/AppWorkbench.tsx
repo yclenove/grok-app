@@ -10,13 +10,21 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { useThemeShell } from "@/providers/ThemeProvider";
+import { useThemeShell } from "@/providers/ThemeShellContext";
+import { useSshWatch } from "@/providers/SshWatchProvider";
 import { usePetCompanion } from "@/hooks/usePetCompanion";
 import { useFloatingMenu } from "@/lib/floatingMenu";
 import { restoreSessionGate } from "@/lib/sessionGateRestore";
 import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
+import {
+  setStreamPerfActive,
+  shouldSyncStreamPerfDataset,
+} from "@/lib/streamRenderPolicy";
 import { formatRelativeTime } from "@/lib/accountUi";
-import { loadConfirmExternalLinksPref } from "@/lib/externalLinkPref";
+import {
+  loadConfirmExternalLinksPref,
+  openExternalHttpUrl,
+} from "@/lib/externalLinkPref";
 import {
   chatcutHandoffToResourceOpenTarget,
   resolveChatcutLinkClick,
@@ -47,6 +55,7 @@ import {
   shouldConfirmQuit,
 } from "@/lib/confirmQuit";
 import { QUIT_DOUBLE_PRESS_MS } from "@/lib/doublePressQuit";
+import { setProviderRetryStatus } from "@/lib/providerRetryStatusStore";
 import { useDoublePressQuit } from "@/hooks/useDoublePressQuit";
 import {
   canLiveParticipate,
@@ -92,16 +101,15 @@ import {
   applyTurnError,
   applyTurnMarker,
   canSend,
+  canStop,
   canType,
   isSessionLiveStreaming,
   presentErrorBanner,
   type ErrorBannerView,
   weaveToolsIntoAssistantSegments,
-  truncateBeforeLastUser,
   truncateThroughUserPrompt,
-  rewindKeepPromptIndex,
+  resolveRewindKeepForUserMessage,
   canRegenerateAssistant,
-  userPromptIndexOf,
   userPromptIndexContaining,
   localRewindPoints,
   IDLE_SNAPSHOT,
@@ -162,8 +170,12 @@ import {
   resolveGoalOrchSessionIndicator,
   shouldConfirmClearGoalOrch,
 } from "@/lib/goalOrch";
+import { sessionGoalClear } from "@/lib/goalClear";
 import * as api from "@/lib/api";
-import { queueComposerPreferenceApply } from "@/lib/composerPrefsBarrier";
+import {
+  liveHostAfterProviderSwitch,
+  queueComposerPreferenceApply,
+} from "@/lib/composerPrefsBarrier";
 import {
   isDangerousSandboxProfile,
   normalizeSandboxProfile,
@@ -178,7 +190,7 @@ import {
 } from "@/lib/sessionArchiveAge";
 import {
   collapsedIdsFromExpandMap,
-  expandMapFromCollapsedIds,
+  hydrateSidebarExpandMap,
   sameCollapsedIdSet,
 } from "@/lib/sidebarExpand";
 import {
@@ -188,6 +200,10 @@ import {
   tickStopLatch,
   STOP_LATCH_MS,
 } from "@/lib/stopLatch";
+import {
+  closeImageViewerLayer,
+  isImageViewerLayerOpen,
+} from "@/components/ImageViewerContext";
 import {
   isSettingsEscapeOwnedByNestedLayer,
   shouldEscapeCloseSettings,
@@ -219,6 +235,14 @@ import {
   type Locale,
   type LocalePreference,
 } from "@/i18n";
+import { resolveComposerPrefsSelection } from "@/lib/composerPrefsApply";
+import {
+  messagesAfterEditResend,
+  optimisticLiveHostForEditResend,
+  restoreOptimisticLiveHost,
+  shellAfterEditResendStart,
+  shellReadyAfterRewindFailure,
+} from "@/lib/editResendState";
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL_ID,
@@ -247,7 +271,7 @@ import {
 import {
   mapPermissionButtons,
 } from "@/lib/permissionOptions";
-import { dropAskUserClocks } from "@/lib/askUserClocks";
+import { dropAskUserClocks } from "@/lib/askUser/askUserClocks";
 import { type PaletteActionDef } from "@/lib/paletteActions";
 import {
   canOfferContinueCwd,
@@ -364,10 +388,6 @@ import {
 import {
   collectUserPromptHistory,
   filterPromptHistory,
-  promptHistoryListNavFromKey,
-  shouldHandlePromptHistoryKey,
-  stepPromptHistory,
-  stepPromptHistoryListIndex,
   type PromptHistoryEntry,
 } from "@/lib/composerPromptHistory";
 import {
@@ -379,13 +399,11 @@ import {
   RECENT_PROMPT_HISTORY_STORAGE_KEY,
 } from "@/lib/recentPromptHistory";
 import {
-  composerSteerLive,
-  resolveComposerSubmitAction,
-} from "@/lib/composerSendKey";
-import {
   composerDraftStore,
   getDraft as getComposerDraft,
+  setDraft as setComposerDraft,
 } from "@/lib/composerDraftStore";
+import { buildHandoffBrief, handoffSessionTitle } from "@/lib/sessionHandoff";
 import {
   clearComposerProjectDraft,
   loadComposerProjectDraft,
@@ -396,11 +414,11 @@ import {
 } from "@/lib/composerProjectDraft";
 import {
   loadComposerSessionDraft,
+  restoredComposerGoalMode,
   saveComposerSessionDraft,
 } from "@/lib/composerSessionDraft";
 import {
   appendQuotesToContent,
-  composerHasSendPayload,
   makeComposerQuoteId,
   serializeQuotesForAgent,
   type ComposerQuote,
@@ -441,7 +459,7 @@ import {
   type SidebarSessionRowLabels,
 } from "@/components/SidebarSessionRow";
 import { sidebarSessionRowMetrics } from "@/lib/sidebarDensity";
-import { sortSessionsForSidebar } from "@/lib/sidebarDateGroups";
+import { sidebarNavSessionIds as navSessionIds } from "@/lib/sidebarDateGroups";
 import { nextSessionTitle } from "@/lib/sidebarSessionRename";
 import { GrokLogo } from "@/components/GrokLogo";
 import type { SetupCliInfo } from "@/components/SetupWizard";
@@ -479,6 +497,7 @@ import {
   canRestoreCodeOnResume,
 } from "@/lib/sessionResumeRestore";
 import {
+  hideSshProjectInLocalTree,
   isProjectFolderMissing,
   isProjectWarmable,
 } from "@/lib/projectPath";
@@ -541,19 +560,11 @@ import { resolveSidePathDeepLink } from "@/lib/sidePathDeepLink";
 import { WorkbenchAppDialogStage } from "@/app/WorkbenchAppDialogStage";
 import { WorkbenchComposerModals } from "@/app/WorkbenchComposerModals";
 import {
-  EMPTY_SESSION_FILE_CHANGES,
   mergeSessionChange,
   sessionChangesFromMessages,
   summarizeSessionChanges,
-  type SessionFileChange,
 } from "@/lib/sessionChanges";
 
-import {
-  gitDirtySummariesEqual,
-  summarizeGitDirty,
-  type GitDirtySummary,
-} from "@/lib/workspaceGit";
-import { startVisibilityPoll } from "@/lib/visibilityPoll";
 
 const AutomationsPage = lazy(async () => {
   const m = await import("@/components/AutomationsPage");
@@ -646,6 +657,7 @@ import type { ContextMenuState } from "@/lib/app/appDialogTypes";
 import { useSessionRuntime } from "@/hooks/useSessionRuntime";
 import { sessionTranscriptStore } from "@/lib/sessionTranscriptStore";
 import { useSessionConnect, createSessionConnectHost } from "@/hooks/useSessionConnect";
+import { useSessionProviderChip } from "@/hooks/useSessionProviderChip";
 import {
   createGitWorktreeChromeHost,
   useGitWorktreeChrome,
@@ -673,6 +685,7 @@ import { useSearchPalette } from "@/hooks/useSearchPalette";
 import { useCompactDialog } from "@/hooks/useCompactDialog";
 import { useQueueEditDialog } from "@/hooks/useQueueEditDialog";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
+import { useComposerKeyDown } from "@/hooks/useComposerKeyDown";
 import { useComposerSend } from "@/hooks/useComposerSend";
 import { useComposerEndPad } from "@/hooks/useComposerEndPad";
 import { useRewindComposerRestore } from "@/hooks/useRewindComposerRestore";
@@ -681,6 +694,9 @@ import {
   createSessionNavHost,
   useSessionNavigation,
 } from "@/hooks/useSessionNavigation";
+import { useGitDirtyStatus } from "@/hooks/useGitDirtyStatus";
+import { useSessionFileChanges } from "@/hooks/useSessionFileChanges";
+import { ERROR_BANNER_SETTINGS_ROUTE, isErrorBannerDismissOnly } from "@/lib/errorBannerActions";
 import { WorkbenchSessionTree } from "@/app/WorkbenchSessionTree";
 import { WorkbenchSidebar } from "@/app/WorkbenchSidebar";
 import { WorkbenchMain } from "@/app/WorkbenchMain";
@@ -974,15 +990,8 @@ export function AppWorkbench() {
    * Files written/edited by agent tools per session (Changes / diff panel).
    * Live tool events may enrich entries with before/after snippets.
    */
-  const [sessionChangesById, setSessionChangesById] = useState<
-    Record<string, SessionFileChange[]>
-  >({});
-  /**
-   * Workspace git dirty summary for the active project (composer chip).
-   * Null when not a repo, unavailable, clean, or no active project.
-   */
-  const [gitDirtySummary, setGitDirtySummary] =
-    useState<GitDirtySummary | null>(null);
+  const { sessionChangesById, setSessionChangesById, changesFor } =
+    useSessionFileChanges();
   const {
     getDraft,
     setDraft,
@@ -1142,6 +1151,7 @@ export function AppWorkbench() {
   projectsRef.current = projects;
   const projectSpaces = useProjectSpaces();
   const visibleProjects = projectSpaces.visibleProjects(projects);
+  const { watchAliases } = useSshWatch();
   const {
     sessions,
     setSessions,
@@ -1374,6 +1384,14 @@ export function AppWorkbench() {
       if (e.key === "Escape") {
         const gate = escapeStopLiveRef.current;
         const voiceSteals = voiceStealsEscapeRef.current;
+        // Lightbox is a child of this listener; capture would otherwise stop the turn.
+        if (isImageViewerLayerOpen()) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          closeImageViewerLayer();
+          return;
+        }
         const nestedLayerOpen =
           gate.settingsOpen &&
           isSettingsEscapeOwnedByNestedLayer(
@@ -1938,6 +1956,10 @@ export function AppWorkbench() {
     voiceDictationAutoSendRef,
     setDraft,
     sessionState: session.state,
+    dictationTarget: {
+      sessionId: viewingSessionIdRef.current ?? session.sessionId,
+      projectKey: projectDraftKey(activeProject?.id ?? null),
+    },
     refreshSessions,
     sttEngine,
     sttCustomBaseUrl,
@@ -1959,6 +1981,11 @@ export function AppWorkbench() {
     gitWorktreesAvailable,
     gitWorktreesLoading,
     gitWorktreesReason,
+    gitBranches,
+    gitBranchesAvailable,
+    gitBranchesLoading,
+    gitBranchesReason,
+    gitBranchesBusy,
     cliWorktrees,
     cliWorktreesAvailable,
     cliWorktreesLoading,
@@ -1968,16 +1995,26 @@ export function AppWorkbench() {
     openShipFlow,
     confirmRemoveWorktree,
     switchToWorktree,
+    switchToBranch,
     markSessionWorktree,
     sessionWorktreeBadgeFor,
     buildSidebarWorktreeBadge,
     refreshGitWorktrees,
     refreshCliWorktrees,
+    refreshGitBranches,
     applyStatusBranch,
     worktreeChrome,
   } = useGitWorktreeChrome({
     hostRef: gitWorktreeHostRef,
     projectPath: activeProject?.path ?? null,
+  });
+
+  const { gitDirtySummary } = useGitDirtyStatus({
+    projectPath: activeProject?.path,
+    busy:
+      session.state === "streaming" || session.state === "awaiting_permission",
+    busyKey: session.sessionId,
+    onStatus: applyStatusBranch,
   });
   /** Host stream-stall prompt (I06); null when dismissed or not stalled. */
   const [streamStall, setStreamStall] = useState<{
@@ -2015,14 +2052,8 @@ export function AppWorkbench() {
   /** Queue item open in the edit dialog (`null` when closed). */
   /** Effort changes respawn the CLI; sends must wait for that write to settle. */
   const effortApplyRef = useRef<Promise<void>>(Promise.resolve());
-  /** Live provider retry progress (session://retry); cleared on success/stop/error. */
-  // Value intentionally unbound (retry chip hidden): only the setter is kept
-  // for cleanup calls. See the hidden-retry comment at the status-pill site.
-  const [, setRetryStatus] = useState<{
-    attempt: number;
-    maxRetries: number;
-    reason: string;
-  } | null>(null);
+  /** Live provider retry progress — store lives outside the shell (Thinking reads it). */
+  const setRetryStatus = setProviderRetryStatus;
   /** Epoch ms when the current agent turn became busy (for elapsed UI). */
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   /**
@@ -2325,22 +2356,17 @@ export function AppWorkbench() {
     };
   }, []);
 
+  const sessionProviderChip = useSessionProviderChip();
+
   const applyComposerPrefs = useCallback(
     (prefs: api.ComposerPrefs, catalog: ModelOption[]) => {
-      const models = catalog.length > 0 ? catalog : GROK_BUILD_MODELS;
-      let nextModelId: string;
-      if (prefs.modelId && isValidModelId(prefs.modelId, models)) {
-        nextModelId = prefs.modelId;
-      } else {
-        nextModelId = pickDefaultModelId(models);
-      }
-      setModelId(nextModelId);
-      const model = findModel(nextModelId, models);
-      setEffort(
-        isValidEffort(prefs.effort, model)
-          ? prefs.effort
-          : pickDefaultEffort(model),
-      );
+      const next = resolveComposerPrefsSelection({
+        prefs,
+        catalog,
+        providers: sessionProviderChip.providersSnapshot(),
+      });
+      setModelId(next.modelId);
+      setEffort(next.effort);
       setMode(prefs.mode || "agent");
       setPolicy(
         isValidPolicy(prefs.permissionPolicy) ? prefs.permissionPolicy : "ask",
@@ -2349,7 +2375,7 @@ export function AppWorkbench() {
         setPrefsScope(prefs.scope);
       }
     },
-    [],
+    [sessionProviderChip],
   );
 
   const refreshLists = useCallback(async () => {
@@ -2673,14 +2699,28 @@ export function AppWorkbench() {
         }
         return null;
       });
-      // Restore sidebar project collapse (missing id ⇒ expanded).
-      setExpandedProjects(
-        expandMapFromCollapsedIds(
-          (p as Project[]).map((proj) => proj.id),
-          settings.sidebarCollapsedProjectIds,
-        ),
-      );
-      expandedProjectsHydratedRef.current = true;
+      // Restore sidebar project collapse once (missing id ⇒ expanded).
+      if (!expandedProjectsHydratedRef.current) {
+        const hyd = hydrateSidebarExpandMap({
+          projectIds: (p as Project[]).map((proj) => proj.id),
+          collapsedIds: settings.sidebarCollapsedProjectIds,
+          migrated: settings.sidebarCollapseDefaultMigrated === true,
+        });
+        setExpandedProjects(hyd.map);
+        expandedProjectsHydratedRef.current = true;
+        if (hyd.shouldPersistMigration) {
+          void api
+            .settingsGet()
+            .then((s) =>
+              api.settingsSet({
+                ...s,
+                sidebarCollapseDefaultMigrated: true,
+                sidebarCollapsedProjectIds: collapsedIdsFromExpandMap(hyd.map),
+              }),
+            )
+            .catch(() => {});
+        }
+      }
       // Restore Default workspace section (missing / undefined ⇒ open).
       // Only hydrate once so later refreshLists does not clobber in-session toggles.
       if (!historyOpenHydratedRef.current) {
@@ -2732,17 +2772,35 @@ export function AppWorkbench() {
   useEffect(() => {
     if (!api.isTauri()) return;
     let cancelled = false;
-    void api
-      .composerPrefsResolve({
-        projectId: activeProject?.id ?? null,
-        sessionId: session.sessionId ?? null,
-      })
-      .then((prefs) => {
-        if (!cancelled) applyComposerPrefs(prefs, availableModels);
-      })
-      .catch(() => {});
+    const run = () => {
+      void api
+        .composerPrefsResolve({
+          projectId: activeProject?.id ?? null,
+          sessionId: session.sessionId ?? null,
+        })
+        .then((prefs) => {
+          if (cancelled) return;
+          applyComposerPrefs(prefs, availableModels);
+          if (session.sessionId) {
+            sessionProviderChip.draftComposerRouteRef.current = null;
+          }
+          const stored = prefs.providerId?.trim() ?? "";
+          const draft = sessionProviderChip.draftComposerRouteRef.current;
+          if (stored) {
+            sessionProviderChip.paint(stored);
+          } else if (session.sessionId || !draft) {
+            sessionProviderChip.paint(null);
+          } else {
+            sessionProviderChip.paint(draft.providerId);
+          }
+        })
+        .catch(() => {});
+    };
+    sessionProviderChip.setAfterProviderList(run);
+    run();
     return () => {
       cancelled = true;
+      sessionProviderChip.setAfterProviderList(null);
     };
   }, [
     activeProject?.id,
@@ -2750,6 +2808,7 @@ export function AppWorkbench() {
     prefsScope,
     applyComposerPrefs,
     availableModels,
+    sessionProviderChip,
   ]);
 
   // Prompt history browse is per viewed session — leave browse mode on switch / new chat.
@@ -3036,7 +3095,6 @@ export function AppWorkbench() {
     setContextUsage,
     setRetryStatus,
     setStreamStall,
-    setTurnStartedAt,
     startTurnClock,
     restartTurnClock,
     clearTurnClock,
@@ -3067,7 +3125,6 @@ export function AppWorkbench() {
     trRef,
     tr,
     modeRef,
-    maxConcurrentAgents,
     streamStallSeconds,
   });
 
@@ -3124,6 +3181,8 @@ export function AppWorkbench() {
     connectHost.sendInFlightBySessionRef = sendInFlightBySessionRef;
     connectHost.sendEpochBySessionRef = sendEpochBySessionRef;
     connectHost.sessionJsonSchemaRef = sessionJsonSchemaRef;
+    connectHost.draftComposerRouteRef =
+      sessionProviderChip.draftComposerRouteRef;
     connectHost.currentViewFocus = currentViewFocus;
     connectHost.syncViewedTurnClock = syncViewedTurnClock;
     connectHost.setLocalError = setLocalError;
@@ -3217,15 +3276,13 @@ export function AppWorkbench() {
         setAttachments(saved.attachments ?? []);
         setChatAttachments(saved.chatAttachments ?? []);
         setQuotes(saved.quotes ?? []);
-        if (typeof saved.goalMode === "boolean") {
-          setGoalMode(saved.goalMode);
-        }
       } else {
         setDraft("");
         setAttachments([]);
         setChatAttachments([]);
         setQuotes([]);
       }
+      setGoalMode(restoredComposerGoalMode(saved));
       requestAnimationFrame(() => {
         suppressProjectDraftPersistRef.current = false;
       });
@@ -3289,8 +3346,21 @@ export function AppWorkbench() {
         if (result.scheduledFromJournal) {
           sessionNavHostRef.current.catalog.markScheduled(sessionId);
         }
+        if (viewingSessionIdRef.current === sessionId) {
+          setLocalError(null);
+        }
       } else {
         setContextUsage(result.usage);
+        if (
+          viewingSessionIdRef.current === sessionId &&
+          (result.status === "timed_out" || result.status === "failed")
+        ) {
+          setLocalError(
+            result.status === "timed_out"
+              ? tr("session.journalLoadTimedOut")
+              : tr("session.journalLoadFailed"),
+          );
+        }
       }
     };
     host.hydrate.applyReconcileResult = (sessionId, result) => {
@@ -3446,15 +3516,13 @@ export function AppWorkbench() {
         setAttachments(saved.attachments ?? []);
         setChatAttachments(saved.chatAttachments ?? []);
         setQuotes(saved.quotes ?? []);
-        if (typeof saved.goalMode === "boolean") {
-          setGoalMode(saved.goalMode);
-        }
       } else {
         setDraft("");
         setAttachments([]);
         setChatAttachments([]);
         setQuotes([]);
       }
+      setGoalMode(restoredComposerGoalMode(saved));
       // Allow debounced persist again after React commits the load.
       requestAnimationFrame(() => {
         suppressProjectDraftPersistRef.current = false;
@@ -3735,27 +3803,30 @@ export function AppWorkbench() {
    * Visual order of sessions in the open sidebar (expanded projects + orphans).
    * Used by j/k navigation via {@link nextSessionId}.
    */
-  const sidebarNavSessionIds = useMemo(() => {
-    const ids: string[] = [];
-    const projectIdSet = new Set(projects.map((p) => p.id));
-    if (projectsOpen) {
-      for (const proj of projects) {
-        if (expandedProjects[proj.id] === false) continue;
-        const projSessions = sessions.filter(
-          (s) => s.projectId === proj.id && !s.archived,
-        );
-        for (const s of sortSessionsForSidebar(projSessions)) ids.push(s.id);
-      }
-    }
-    if (historyOpen) {
-      const orphans = sessions.filter(
-        (s) =>
-          (!s.projectId || !projectIdSet.has(s.projectId)) && !s.archived,
-      );
-      for (const s of sortSessionsForSidebar(orphans)) ids.push(s.id);
-    }
-    return ids;
-  }, [projectsOpen, projects, expandedProjects, sessions, historyOpen]);
+  const sidebarNavSessionIds = useMemo(
+    () =>
+      navSessionIds({
+        sessions,
+        projects,
+        // Mirror the tree's project set — sessions of space-filtered or
+        // SSH-watched projects are not rendered, so j/k must skip them too.
+        visibleProjects: visibleProjects.filter(
+          (p) => !hideSshProjectInLocalTree(p, watchAliases),
+        ),
+        projectsOpen,
+        historyOpen,
+        expandedProjects,
+      }),
+    [
+      projectsOpen,
+      projects,
+      visibleProjects,
+      watchAliases,
+      expandedProjects,
+      sessions,
+      historyOpen,
+    ],
+  );
   sidebarNavIdsRef.current = sidebarNavSessionIds;
   sidebarNavCurrentIdRef.current =
     session.sessionId ?? viewingSessionIdRef.current ?? null;
@@ -4236,7 +4307,7 @@ export function AppWorkbench() {
     [],
   );
 
-  /** Open chat markdown http(s) links via desktop shell; optional confirm pref. */
+  /** Open chat markdown http(s) links in the configured browser; optional confirm pref. */
   const openExternalLinkFromChat = useCallback(
     (url: string) => {
       // ChatCut editor/billing → system default browser (EmbeddedBrowser cannot
@@ -4255,19 +4326,7 @@ export function AppWorkbench() {
       const openUrl =
         action.kind === "open_external" ? action.url : url;
       const doOpen = () => {
-        if (api.isTauri()) {
-          void api.openExternalUrl(openUrl).catch((e) => {
-            console.error("[chat] openExternalUrl failed", e);
-            // Fallback for hosts that reject shell open.
-            try {
-              window.open(openUrl, "_blank", "noopener,noreferrer");
-            } catch {
-              /* ignore */
-            }
-          });
-        } else {
-          window.open(openUrl, "_blank", "noopener,noreferrer");
-        }
+        openExternalHttpUrl(openUrl);
       };
       if (loadConfirmExternalLinksPref()) {
         setAppDialog({
@@ -5059,7 +5118,7 @@ export function AppWorkbench() {
         ? tr("sidebar.archiveSelectedTitle")
         : tr("sidebar.restoreSelectedTitle"),
       message: archived
-        ? tr("sidebar.archiveSelectedConfirm", { n: String(n) })
+        ? `${tr("sidebar.archiveSelectedConfirm", { n: String(n) })}\n\n${tr("sidebar.archiveCliHint")}`
         : tr("sidebar.restoreSelectedConfirm", { n: String(n) }),
       confirmLabel: archived
         ? tr("sidebar.archiveSelected", { n: String(n) })
@@ -5499,13 +5558,21 @@ export function AppWorkbench() {
   const lastUserMessageId = transcriptMeta.lastUserId;
 
   // Streaming perf mode — shrink browse overscan on integrated GPU Retina.
-  // Do not zero the flag in the update cleanup (that flashes 1→0→1).
-  // Turn it off after paint so it does not restyle in the same frame as settle.
+  // Module flag drives JS readers; html data-stream-perf is only for CSS that
+  // is already gated off wallpaper. Flipping html attrs while wallpaper frost
+  // is active invalidates the macOS blur compositor (#1158).
   useEffect(() => {
     const on =
       session.state === "streaming" ||
       session.state === "awaiting_permission" ||
       transcriptMeta.hasStreamingAssistant;
+    setStreamPerfActive(on);
+    const wallpaperActive =
+      document.documentElement.getAttribute("data-wallpaper") === "1";
+    if (!shouldSyncStreamPerfDataset({ wallpaperActive })) {
+      delete document.documentElement.dataset.streamPerf;
+      return;
+    }
     if (on) {
       document.documentElement.dataset.streamPerf = "1";
       return;
@@ -5517,7 +5584,8 @@ export function AppWorkbench() {
   }, [session.state, transcriptMeta.hasStreamingAssistant]);
   useEffect(() => {
     return () => {
-      document.documentElement.dataset.streamPerf = "0";
+      setStreamPerfActive(false);
+      delete document.documentElement.dataset.streamPerf;
     };
   }, []);
 
@@ -5528,12 +5596,19 @@ export function AppWorkbench() {
     session.state !== "streaming" &&
     session.state !== "awaiting_permission";
 
-  /** Idle-ish: allow fork / rewind from transcript (not mid-turn). */
+  /** Idle gate for fork / duplicate. Rewind itself is also allowed mid-turn. */
   const canRewindSession =
     canSend(session.state) &&
     !connecting &&
     !editSubmitting &&
     !rewindBusy;
+  const canRewindNow =
+    canRewindSession ||
+    (canStop(session.state) && !connecting && !editSubmitting && !rewindBusy);
+
+  useEffect(() => {
+    sessionGoalClear.flush(session.sessionId, session.state);
+  }, [session.sessionId, session.state]);
 
   const {
     executeSend,
@@ -8232,6 +8307,64 @@ export function AppWorkbench() {
     ],
   );
 
+  const runHandoffSession = useCallback(
+    async (source: SessionRow) => {
+      if (!api.isTauri()) {
+        showToast(tr("error.needTauri"));
+        return;
+      }
+      setCtxMenu(null);
+      setForkBusy(true);
+      try {
+        const isOpenSource =
+          session.sessionId === source.id ||
+          viewingSessionIdRef.current === source.id;
+        const msgs = isOpenSource
+          ? messagesRef.current
+          : mapStoredMessagesToChat(await api.sessionMessages(source.id));
+        const title = handoffSessionTitle(source.title || tr("session.untitled"));
+        const brief = buildHandoffBrief({
+          title: source.title,
+          parentSessionId: source.id,
+          messages: msgs,
+        });
+        const meta = (await api.sessionCreate(
+          source.projectId ?? undefined,
+          title,
+        )) as SessionRow;
+        await refreshSessions();
+        const projectId = meta.projectId ?? source.projectId;
+        const row = normalizeSessionRow({
+          ...source,
+          ...meta,
+          id: meta.id,
+          title: meta.title || title,
+          projectId,
+          updatedAt: meta.updatedAt || new Date().toISOString(),
+          archived: meta.archived,
+          pinned: false,
+        });
+        const openProj = projectId
+          ? projects.find((p) => p.id === projectId) ?? null
+          : null;
+        if (row.projectId) {
+          setExpandedProjects((e) => ({ ...e, [row.projectId!]: true }));
+        } else {
+          setHistoryOpen(true);
+        }
+        await openSession(row, openProj);
+        setComposerDraft(brief);
+        showToast(tr("session.handoffOk"), 3200);
+      } catch (e) {
+        showToast(tr("session.handoffFailed") + ": " + String(e), 4500);
+      } finally {
+        setForkBusy(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projects, session.sessionId, showToast, tr],
+  );
+
   const { captureRewindComposerRestore, applyRewindComposerRestore } =
     useRewindComposerRestore({
       viewingSessionIdRef, composerInputRef, messagesRef, messagesBySessionRef,
@@ -8255,7 +8388,7 @@ export function AppWorkbench() {
         showToast(msg);
         return;
       }
-      if (!canRewindSession) {
+      if (!canRewindNow) {
         const msg = tr("session.rewindBusy");
         setRewindError(msg);
         showToast(msg);
@@ -8322,7 +8455,7 @@ export function AppWorkbench() {
     },
     // ensureConnected / refreshSessions via closure
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [applyRewindComposerRestore, captureRewindComposerRestore, canRewindSession, session.sessionId, session.state, showToast, tr],
+    [applyRewindComposerRestore, captureRewindComposerRestore, canRewindNow, session.sessionId, session.state, showToast, tr],
   );
 
   const runRewindDropLastUser = useCallback(
@@ -8333,7 +8466,7 @@ export function AppWorkbench() {
         showToast(msg);
         return;
       }
-      if (!canRewindSession) {
+      if (!canRewindNow) {
         const msg = tr("session.rewindBusy");
         setRewindError(msg);
         showToast(msg);
@@ -8380,7 +8513,7 @@ export function AppWorkbench() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [applyRewindComposerRestore, captureRewindComposerRestore, canRewindSession, session.sessionId, session.state, showToast, tr],
+    [applyRewindComposerRestore, captureRewindComposerRestore, canRewindNow, session.sessionId, session.state, showToast, tr],
   );
 
   const confirmRewindToPrompt = useCallback(
@@ -8407,7 +8540,7 @@ export function AppWorkbench() {
         showToast(tr("error.needTauri"));
         return;
       }
-      if (!canRewindSession) {
+      if (!canRewindNow) {
         showToast(tr("session.rewindBusy"));
         return;
       }
@@ -8445,7 +8578,7 @@ export function AppWorkbench() {
         showToast(tr("session.rewindFailed") + ": " + String(e), 4500);
       }
     },
-    [canRewindSession, showToast, tr],
+    [canRewindNow, showToast, tr],
   );
 
   const onRewindToUserMessage = useCallback(
@@ -8455,24 +8588,34 @@ export function AppWorkbench() {
         showToast(tr("session.rewindFailed"));
         return;
       }
-      if (!canRewindSession) {
+      if (!canRewindNow) {
         showToast(tr("session.rewindBusy"));
         return;
       }
-      const idx = userPromptIndexOf(messages, msg.id);
-      if (idx < 0) {
-        showToast(tr("session.rewindFailed"));
-        return;
-      }
-      const keep = rewindKeepPromptIndex(messages, idx);
       const preview = (msg.content || "")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 80);
-      confirmRewindToPrompt(sid, keep, preview);
+      void resolveRewindKeepForUserMessage({
+        messageId: msg.id,
+        messages,
+        loadPoints: api.isTauri()
+          ? () => api.sessionRewindPoints(sid)
+          : undefined,
+      }).then((got) => {
+        if (got.reason === "unavailable") {
+          showToast(tr("session.rewindUnavailableAfterRestart"), 4500);
+          return;
+        }
+        if (got.reason === "missing") {
+          showToast(tr("session.rewindFailed"));
+          return;
+        }
+        confirmRewindToPrompt(sid, got.keep, preview);
+      });
     },
     [
-      canRewindSession,
+      canRewindNow,
       confirmRewindToPrompt,
       messages,
       session.sessionId,
@@ -8818,6 +8961,10 @@ export function AppWorkbench() {
           }
           case "goal-clear":
             setGoalMode(false);
+            sessionGoalClear.arm(
+              viewingSessionIdRef.current ?? session.sessionId,
+              session.state,
+            );
             return;
           default:
             return void applyComputerUseSlash(item.action);
@@ -8861,10 +9008,7 @@ export function AppWorkbench() {
   /** Session file-changes chip (+/− or N files); hidden when empty. */
   const sessionChangesSummary = useMemo(() => {
     const sid = session.sessionId || "";
-    const list = sid
-      ? (sessionChangesById[sid] ?? EMPTY_SESSION_FILE_CHANGES)
-      : EMPTY_SESSION_FILE_CHANGES;
-    return summarizeSessionChanges(list);
+    return summarizeSessionChanges(changesFor(sid));
   }, [session.sessionId, sessionChangesById]);
 
   // Reset find when switching conversation (keep open across same session).
@@ -8884,8 +9028,8 @@ export function AppWorkbench() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (e.isComposing) return;
-      // Permission bar / dialogs own Escape when open.
-      if (perm || appDialog) return;
+      // Permission bar / dialogs / image lightbox own Escape when open.
+      if (perm || appDialog || isImageViewerLayerOpen()) return;
       e.preventDefault();
       e.stopPropagation();
       setShowChatFind(false);
@@ -9042,6 +9186,7 @@ export function AppWorkbench() {
     useState<string>("official");
   const [providerActiveId, setProviderActiveId] = useState<string | null>(null);
   const [modelPickBusy, setModelPickBusy] = useState(false);
+  const modelPickBusyRef = useRef(false);
   const customRouteActive = activeCustomProvider != null;
   const composerProviderInputs = useMemo(
     () =>
@@ -9058,28 +9203,25 @@ export function AppWorkbench() {
       })),
     [customProviders],
   );
+  sessionProviderChip.bind({
+    setProviderActiveSource,
+    setProviderActiveId,
+    setActiveCustomProvider,
+  });
   const refreshProviderRoute = useCallback(async () => {
     if (!api.isTauri()) {
-      setActiveCustomProvider(null);
+      sessionProviderChip.noteProviderList(null);
       setCustomProviders([]);
-      setProviderActiveSource("official");
-      setProviderActiveId(null);
       return;
     }
     try {
       const list = await api.providersList();
       setCustomProviders(list.providers);
-      setProviderActiveSource(list.activeSource);
-      setProviderActiveId(list.activeProviderId);
-      const active =
-        list.activeSource === "custom"
-          ? list.providers.find((provider) => provider.id === list.activeProviderId) ?? null
-          : null;
-      setActiveCustomProvider(active);
+      sessionProviderChip.noteProviderList(list);
     } catch {
       /* keep previous */
     }
-  }, []);
+  }, [sessionProviderChip]);
   useEffect(() => {
     void refreshProviderRoute();
   }, [refreshProviderRoute]);
@@ -9206,7 +9348,7 @@ export function AppWorkbench() {
 
   /**
    * Active effort catalog for the composer: custom channel efforts, else the
-   * selected official model (grok-4.6 is 4-tier with xhigh).
+   * selected official model (Grok 4.7 / Fast / 4.6 are 4-tier with xhigh).
    */
   const officialEffortCatalog = useMemo(
     () =>
@@ -9258,115 +9400,95 @@ export function AppWorkbench() {
 
   const handleModelPick = useCallback(
     async (pick: ComposerModelPick) => {
-      if (modelPickBusy) return;
+      if (modelPickBusyRef.current) return;
+      modelPickBusyRef.current = true;
       setModelPickBusy(true);
       try {
+        const providerId =
+          pick.kind === "official" ? "official" : pick.providerId;
+        let nextEfforts = officialEffortCatalog;
         if (pick.kind === "official") {
-          if (providerActiveSource === "custom" && api.isTauri()) {
-            await api.providersActivate("official");
-            await refreshProviderRoute();
-          }
           if (!isValidModelId(pick.modelId, availableModels)) return;
-          setModelId(pick.modelId);
-          const targetOfficial = effortCatalogForRoute({
+          nextEfforts = effortCatalogForRoute({
             model: findModel(pick.modelId, availableModels),
           });
-          const clampedOfficial = mapEffortToTargetCatalog(
-            effort,
-            targetOfficial,
-            channelEffortOptions ?? officialEffortCatalog,
-          );
-          setEffort(clampedOfficial);
-          void api
-            .composerPrefsSet({
-              projectId: activeProject?.id ?? null,
-              sessionId: session.sessionId ?? null,
-              modelId: pick.modelId,
-              effort: clampedOfficial,
-            })
-            .catch((e) => showToast(String(e), 4000));
         } else {
           if (!api.isTauri()) return;
-          const provider = customProviders.find(
-            (p) => p.id === pick.providerId,
-          );
+          const provider = customProviders.find((p) => p.id === pick.providerId);
           if (!provider) {
             showToast(tr("prov.err.unknownProvider"), 4000);
             return;
           }
-          // Switch request model on the channel when needed (keeps multi-model catalog).
-          const models =
-            provider.models?.length
-              ? provider.models
-              : [{ id: provider.model, name: provider.model }];
+          const models = provider.models?.length
+            ? provider.models
+            : [{ id: provider.model, name: provider.model }];
           const catalog = models.some((m) => m.id === pick.modelId)
             ? models
             : [...models, { id: pick.modelId, name: pick.modelId }];
-          const appliedLive = materializeActiveModelChannel({
-            provider,
-            modelId: pick.modelId,
-            models: catalog,
-          });
-          if (provider.model.trim() !== pick.modelId.trim()) {
-            await api.providersUpsert({
-              id: provider.id,
-              model: pick.modelId,
-              baseUrl: provider.baseUrl,
-              name: provider.name,
-              apiBackend: provider.apiBackend,
-              models: catalog,
-              efforts: appliedLive.efforts ?? provider.efforts,
-              contextWindow:
-                appliedLive.contextWindow ??
-                provider.contextWindow ??
-                undefined,
-              supportsVision: appliedLive.supportsVision,
-              setAsDefault: false,
-            });
-          }
-          if (
-            providerActiveSource !== "custom" ||
-            providerActiveId !== pick.providerId
-          ) {
-            const activated = await api.providersActivate(
-              "custom",
-              pick.providerId,
-            );
-            // #557: custom routes require independent agent-home GROK_HOME.
-            if (activated.switchedToIndependent) {
-              setSessionDataMode("independent");
-              showToast(tr("prov.switchedToIndependent"), 5200);
-            }
-          }
-          await refreshProviderRoute();
-          // Map effort into the picked model's catalog (Grok ↔ DeepSeek tiers).
-          const nextEfforts =
-            effortOptionsFromProvider(appliedLive.efforts) ?? GROK_BUILD_EFFORTS;
-          const clampedCustom = mapEffortToTargetCatalog(
-            effort,
-            nextEfforts,
-            channelEffortOptions ?? officialEffortCatalog,
-          );
-          setEffort(clampedCustom);
-          void api
-            .composerPrefsSet({
-              projectId: activeProject?.id ?? null,
-              sessionId: session.sessionId ?? null,
-              modelId: pick.modelId,
-              effort: clampedCustom,
-            })
-            .catch((e) => showToast(String(e), 4000));
+          nextEfforts =
+            effortOptionsFromProvider(
+              materializeActiveModelChannel({
+                provider,
+                modelId: pick.modelId,
+                models: catalog,
+              }).efforts,
+            ) ?? GROK_BUILD_EFFORTS;
         }
+        const clamped = mapEffortToTargetCatalog(
+          effort,
+          nextEfforts,
+          channelEffortOptions ?? officialEffortCatalog,
+        );
+        setModelId(pick.modelId);
+        setEffort(clamped);
+        sessionProviderChip.paint(providerId);
+        if (session.sessionId) {
+          sessionProviderChip.draftComposerRouteRef.current = null;
+        } else {
+          sessionProviderChip.draftComposerRouteRef.current = {
+            providerId,
+            modelId: pick.modelId,
+            effort: clamped,
+          };
+        }
+        const providerChanged =
+          (providerId === "official") !== (providerActiveSource === "official") ||
+          (providerId !== "official" && providerActiveId !== providerId);
+        const sid = session.sessionId;
+        const apply = queueComposerPreferenceApply(
+          effortApplyRef.current,
+          async () => {
+            await api.composerPrefsSet({
+              projectId: activeProject?.id ?? null,
+              sessionId: sid,
+              modelId: pick.modelId,
+              effort: clamped,
+              providerId,
+            });
+            const next = liveHostAfterProviderSwitch(
+              liveHostRef.current,
+              sid,
+              providerChanged,
+            );
+            if (!next) return;
+            liveHostRef.current = next;
+            setLiveHost(next);
+            setSession((prev) =>
+              prev.sessionId === sid ? { ...prev, state: next.state } : prev,
+            );
+          },
+          (error) => showToast(String(error), 4000),
+        );
+        effortApplyRef.current = apply;
+        await apply;
       } catch (e) {
         showToast(String(e), 4000);
       } finally {
+        modelPickBusyRef.current = false;
         setModelPickBusy(false);
       }
     },
     [
-      modelPickBusy,
-      providerActiveSource,
-      providerActiveId,
       availableModels,
       customProviders,
       activeProject?.id,
@@ -9374,11 +9496,11 @@ export function AppWorkbench() {
       effort,
       channelEffortOptions,
       officialEffortCatalog,
-      refreshProviderRoute,
+      providerActiveSource,
+      providerActiveId,
+      sessionProviderChip,
       showToast,
       tr,
-      channelEffortOptions,
-      officialEffortCatalog,
     ],
   );
   const handleContextWindow = useCallback(
@@ -9737,60 +9859,6 @@ export function AppWorkbench() {
    * Poll workspace git status for the active project so the composer dirty chip
    * stays current (hide when clean / not a repo). Soft-fail; no toast spam.
    */
-  const gitDirtyReqRef = useRef(0);
-  const refreshGitDirtyStatus = useCallback(async () => {
-    const path = activeProject?.path?.trim() || null;
-    if (!path || !api.isTauri()) {
-      gitDirtyReqRef.current += 1;
-      setGitDirtySummary((prev) => (prev == null ? prev : null));
-      return;
-    }
-    const reqId = ++gitDirtyReqRef.current;
-    try {
-      const status = await api.gitStatus(path);
-      if (reqId !== gitDirtyReqRef.current) return;
-      const next = summarizeGitDirty(status);
-      setGitDirtySummary((prev) =>
-        gitDirtySummariesEqual(prev, next) ? prev : next,
-      );
-      // Same poll already has HEAD. Patch the composer branch chip so an
-      // in-place checkout does not stay stale until the menu is clicked.
-      applyStatusBranch(path, status);
-    } catch {
-      if (reqId !== gitDirtyReqRef.current) return;
-      setGitDirtySummary((prev) => (prev == null ? prev : null));
-    }
-  }, [activeProject?.path, applyStatusBranch]);
-
-  useEffect(() => {
-    void refreshGitDirtyStatus();
-    // Soft poll while a project is bound; refresh sooner on focus.
-    // Faster while a turn is live — agent may `git switch` mid-session.
-    // Ticks pause while the window is hidden — a minimized app has nothing
-    // to paint, and `git status` is a process spawn per poll.
-    const path = activeProject?.path?.trim() || null;
-    if (!path || !api.isTauri()) return;
-    const busy =
-      session.state === "streaming" || session.state === "awaiting_permission";
-    const intervalMs = busy ? 2000 : 8000;
-    const poll = startVisibilityPoll({
-      tick: () => void refreshGitDirtyStatus(),
-      setIntervalFn: (handler) => window.setInterval(handler, intervalMs),
-    });
-    const onFocus = () => {
-      void refreshGitDirtyStatus();
-    };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      poll.dispose();
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [
-    activeProject?.path,
-    refreshGitDirtyStatus,
-    session.sessionId,
-    session.state,
-  ]);
 
   /**
    * After a project is created/updated: refresh list, expand, optionally trust
@@ -11002,43 +11070,21 @@ export function AppWorkbench() {
   const runErrorBannerAction = useCallback(
     (action: NonNullable<ErrorBannerView["primary"]>) => {
       setErrorDetailOpen(false);
-      switch (action.id) {
+      const { id } = action;
+      // Settings navigation: data-driven from the routing table.
+      const route = ERROR_BANNER_SETTINGS_ROUTE[id];
+      if (route) {
+        setLocalError(null);
+        navigateSettings(route.section, route.tab);
+        return;
+      }
+      switch (id) {
         case "reconnect":
           retryAgentConnect();
           break;
         case "open_doctor":
           setLocalError(null);
           openDoctor();
-          break;
-        case "open_runtime":
-          setLocalError(null);
-          navigateSettings("runtime");
-          break;
-        case "upgrade_cli":
-          setLocalError(null);
-          navigateSettings("runtime");
-          break;
-        case "open_network":
-          setLocalError(null);
-          navigateSettings("runtime", "network");
-          break;
-        case "open_account":
-          setLocalError(null);
-          navigateSettings("account");
-          break;
-        case "open_providers":
-          setLocalError(null);
-          // Providers live under account / extensions path — account is the
-          // login+key surface; extensions holds MCP. Prefer account for keys.
-          navigateSettings("account");
-          break;
-        case "open_permissions":
-          setLocalError(null);
-          navigateSettings("general", "permissions");
-          break;
-        case "open_extensions":
-          setLocalError(null);
-          navigateSettings("extensions");
           break;
         case "open_mcp":
           setLocalError(null);
@@ -11056,27 +11102,25 @@ export function AppWorkbench() {
           setLocalError(null);
           void addProject(false);
           break;
-        case "dismiss":
-        case "keep_waiting":
-          // keep_waiting is for the stream-stall banner (clears prompt only).
-          setLocalError(null);
-          break;
         case "cancel_turn":
           setLocalError(null);
           void stop();
           break;
         default:
+          // dismiss / keep_waiting: clear the banner (keep_waiting is the
+          // stream-stall prompt — clears the prompt, keeps the turn).
+          if (isErrorBannerDismissOnly(id)) setLocalError(null);
           break;
       }
     },
     [
       activeProject,
       addProject,
-      ensureConnected,
       navigateSettings,
       openDoctor,
       openMcpModal,
       relocateProject,
+      retryAgentConnect,
       stop,
       trustProject,
     ],
@@ -11294,6 +11338,8 @@ export function AppWorkbench() {
       // May still be a draft id; ensureConnected materializes it later.
       let sendTargetId = session.sessionId;
       let cacheKey = sendTargetId ?? "__draft__";
+      const priorKey = cacheKey;
+      const priorMessages = messagesRef.current.slice();
       const nowIso = new Date().toISOString();
       const nextModelId = opts?.modelId?.trim() || "";
       const switchModel =
@@ -11310,49 +11356,43 @@ export function AppWorkbench() {
 
       // 1) Instant UI commit — same as normal send: user bubble + thinking.
       //    Connect/rewind wait happens under this thinking row, not the edit form.
+      let liveBeforeEdit = liveHostRef.current;
+      let tookOptimisticLive = false;
       setMessages((m) => {
-        const kept = truncateBeforeLastUser(m);
-        const next: ChatMessage[] = [
-          ...kept,
-          {
-            id: `u-${Date.now()}`,
-            role: "user",
-            content: storedDisplay,
-            attachments: att.length ? att : undefined,
-            createdAt: nowIso,
-          },
-          {
-            id: pendingAssistantId,
-            role: "assistant",
-            content: "",
-            streaming: true,
-            createdAt: nowIso,
-          },
-        ];
+        const next = messagesAfterEditResend(m, {
+          userId: `u-${Date.now()}`,
+          pendingAssistantId,
+          content: storedDisplay,
+          attachments: att,
+          createdAt: nowIso,
+        });
         messagesBySessionRef.current.set(cacheKey, next);
         return next;
       });
       setEditingUserMessageId(null);
       setEditAttachments([]);
       setRetryStatus(null);
-      setSession((prev) =>
-        prev.state === "streaming" || prev.state === "awaiting_permission"
-          ? prev
-          : { ...prev, state: "streaming", lastError: null },
-      );
+      setSession((prev) => shellAfterEditResendStart(prev));
       setLiveHost((prev) => {
-        if (sendTargetId && prev.sessionId && prev.sessionId !== sendTargetId) {
-          return prev;
-        }
-        const next = {
-          ...prev,
-          sessionId: sendTargetId ?? prev.sessionId,
-          state: "streaming" as const,
-          lastError: null,
-        };
-        liveHostRef.current = next;
+        liveBeforeEdit = prev;
+        const next = optimisticLiveHostForEditResend(prev, sendTargetId);
+        tookOptimisticLive = next !== prev;
+        if (tookOptimisticLive) liveHostRef.current = next;
         return next;
       });
+      const restoreEditFailure = (targetId: string | null) => {
+        setSession((prev) => shellReadyAfterRewindFailure(prev, targetId));
+        setLiveHost((prev) => {
+          const next = restoreOptimisticLiveHost(
+            prev,
+            liveBeforeEdit,
+            targetId,
+            tookOptimisticLive,
+          );
+          liveHostRef.current = next;
+          return next;
+        });
+      };
 
       const failPending = (errText?: string) => {
         const errTarget = sendTargetId ?? viewingSessionIdRef.current;
@@ -11366,17 +11406,7 @@ export function AppWorkbench() {
             localeRef.current,
           ),
         );
-        if (
-          viewingSessionIdRef.current === sendTargetId ||
-          viewingSessionIdRef.current === errTarget ||
-          (!sendTargetId && viewingSessionIdRef.current === null)
-        ) {
-          setSession((prev) =>
-            prev.state === "streaming"
-              ? { ...prev, state: prev.sessionId ? "ready" : prev.state }
-              : prev,
-          );
-        }
+        restoreEditFailure(sendTargetId);
       };
 
       // 2) Background: connect → rewind journal → send (thinking already shown).
@@ -11401,8 +11431,23 @@ export function AppWorkbench() {
           try {
             await api.sessionRewindDropLastUser(sessionId);
           } catch (e) {
-            console.warn("session rewind before edit failed", e);
-            // Continue: UI already replaced the turn; resend still proceeds.
+            // The bubble was already replaced. A failed rewind must not send,
+            // or the agent answers the prompt that is no longer on screen.
+            messagesBySessionRef.current.set(priorKey, priorMessages);
+            messagesBySessionRef.current.set(sessionId, priorMessages);
+            if (
+              viewingSessionIdRef.current === sessionId ||
+              viewingSessionIdRef.current === priorKey ||
+              viewingSessionIdRef.current == null
+            ) {
+              setMessages(priorMessages);
+            }
+            restoreEditFailure(sessionId);
+            showToast(
+              tr("session.rewindFailed") + ": " + String(e),
+              4500,
+            );
+            return;
           }
         }
 
@@ -11755,7 +11800,8 @@ export function AppWorkbench() {
         liveVoiceOpen ||
         showJsonSchemaModal ||
         phoneAccountOpen ||
-        sessionSelectMode,
+        sessionSelectMode ||
+        isImageViewerLayerOpen(),
     ),
   };
 
@@ -11806,237 +11852,49 @@ export function AppWorkbench() {
     [pasteMediaFromNativeClipboard],
   );
 
-  const composerKeyDownRef = useRef<
-    (e: ReactKeyboardEvent<HTMLDivElement>) => void
-  >(() => {});
-  composerKeyDownRef.current = (e) => {
-    if (
-      e.nativeEvent.isComposing ||
-      (e.nativeEvent as KeyboardEvent).keyCode === 229
-    ) {
-      return;
-    }
-    if (atMenuOpen) {
-      const n = atEntries.length;
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (!n) return;
-        setAtActiveIndex((i) => (i + 1) % n);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (!n) return;
-        setAtActiveIndex((i) => (i - 1 + n) % n);
-        return;
-      }
-      if (
-        (e.key === "Enter" || e.key === "Tab") &&
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.metaKey
-      ) {
-        e.preventDefault();
-        if (!n) return;
-        const entry =
-          atEntries[
-            Math.min(Math.max(0, atActiveIndex), Math.max(0, n - 1))
-          ];
-        if (entry) applyAtFile(entry);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeAtMenu();
-        return;
-      }
-    }
-    if (composerMenuOpen) {
-      // Ref = same array the panel renders (never desync).
-      const flat = composerMenuEntriesRef.current;
-      const n = flat.length;
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (!n) return;
-        setSlashActiveIndex((i) => (i + 1) % n);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (!n) return;
-        setSlashActiveIndex((i) => (i - 1 + n) % n);
-        return;
-      }
-      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        e.preventDefault();
-        const entry =
-          flat[
-            Math.min(Math.max(0, slashActiveIndex), Math.max(0, n - 1))
-          ];
-        if (!entry) return;
-        if (entry.kind === "upload") void pickComposerFiles();
-        else if (entry.kind === "create-video") applyCreateVideo();
-        else if (entry.kind === "json-schema") {
-          closeComposerMenu();
-          setJsonSchemaDraft(sessionJsonSchema ?? "");
-          setShowJsonSchemaModal(true);
-        } else applySlashItem(entry.item);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeComposerMenu();
-        return;
-      }
-      if (e.key === "Tab" && n > 0) {
-        e.preventDefault();
-        const entry =
-          flat[Math.min(Math.max(0, slashActiveIndex), n - 1)]!;
-        if (entry.kind === "upload") void pickComposerFiles();
-        else if (entry.kind === "create-video") applyCreateVideo();
-        else if (entry.kind === "json-schema") {
-          closeComposerMenu();
-          setJsonSchemaDraft(sessionJsonSchema ?? "");
-          setShowJsonSchemaModal(true);
-        } else applySlashItem(entry.item);
-        return;
-      }
-    }
-    // Prompt history picker open: ↑/↓/Home/End/Page move selection;
-    // Enter/Tab apply; Esc closes (Build `/history` + empty-↑).
-    if (promptHistoryOpenRef.current && !composerMenuOpen) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closePromptHistory();
-        return;
-      }
-      if (
-        (e.key === "Enter" && !e.ctrlKey && !e.metaKey) ||
-        e.key === "Tab"
-      ) {
-        const entry = promptHistoryEntries[promptHistoryActive];
-        if (entry) {
-          e.preventDefault();
-          applyPromptHistoryEntry(entry, {
-            listIndex: promptHistoryActive,
-          });
-          return;
-        }
-      }
-      const listNav = promptHistoryListNavFromKey(e.key);
-      if (listNav) {
-        e.preventDefault();
-        if (promptHistoryEntries.length === 0) return;
-        const liveSeed =
-          !promptHistoryFocusFilter && promptHistoryScope === "session";
-        // ArrowDown past newest on live session browse: clear + close.
-        if (listNav === "down" && promptHistoryActive <= 0 && liveSeed) {
-          promptHistoryIndexRef.current = null;
-          setPromptHistoryIndex(null);
-          setDraft("");
-          closePromptHistory();
-          return;
-        }
-        const next = stepPromptHistoryListIndex(
-          promptHistoryActive,
-          promptHistoryEntries.length,
-          listNav,
-        );
-        setPromptHistoryActive(next);
-        const entry = promptHistoryEntries[next];
-        if (entry && liveSeed) {
-          applyPromptHistoryEntry(entry, {
-            close: false,
-            listIndex: next,
-            scope: "session",
-          });
-        }
-        return;
-      }
-    }
-    // CLI-like prompt history: ↑ on empty draft opens picker + seeds newest.
-    // Only when slash palette is closed so palette ↑/↓ is untouched.
-    if (
-      (e.key === "ArrowUp" || e.key === "ArrowDown") &&
-      !composerMenuOpen &&
-      !promptHistoryOpenRef.current
-    ) {
-      const history = collectUserPromptHistory(messagesRef.current);
-      const draftEmpty = isDraftEmpty(parseStoredContent(getDraft()));
-      const browsing = promptHistoryIndexRef.current !== null;
-      if (
-        shouldHandlePromptHistoryKey({
-          key: e.key,
-          draftEmpty,
-          browsing,
-          historyLength: history.length,
-        })
-      ) {
-        e.preventDefault();
-        if (e.key === "ArrowUp" && !browsing) {
-          openPromptHistory({
-            focusFilter: false,
-            seedDraft: true,
-          });
-          return;
-        }
-        const step = stepPromptHistory(
-          history,
-          promptHistoryIndexRef.current,
-          e.key === "ArrowUp" ? "up" : "down",
-        );
-        promptHistoryIndexRef.current = step.index;
-        setPromptHistoryIndex(step.index);
-        setDraft(step.text);
-        if (step.index == null) {
-          closePromptHistory();
-        } else if (!promptHistoryOpenRef.current) {
-          openPromptHistory({
-            focusFilter: false,
-            seedDraft: false,
-          });
-          setPromptHistoryActive(step.index);
-        } else {
-          setPromptHistoryActive(step.index);
-        }
-        return;
-      }
-    }
-    const submit = resolveComposerSubmitAction({
-      event: e,
-      sendPref: composerSendKeyPref,
-      canSteer: composerSteerLive({
-        canGuideQueuedMessage,
-        sessionState: session.state,
-      }),
-    });
-    if (submit === "steer") {
-      e.preventDefault();
-      void steerFromComposer();
-      return;
-    }
-    if (submit === "send") {
-      e.preventDefault();
-      const hasBody = composerHasSendPayload({
-        draftEmpty: isDraftEmpty(parseStoredContent(getDraft())),
-        attachmentCount: attachments.length,
-        chatAttachmentCount: chatAttachments.length,
-        quoteCount: quotesRef.current.length,
-      });
-      if (hasBody && session.state !== "awaiting_permission") void send();
-    }
-    if (e.key === "Escape") {
-      if (promptHistoryOpenRef.current) {
-        closePromptHistory();
-        return;
-      }
-      if (attachChatOpenRef.current) {
-        closeAttachChat();
-        return;
-      }
-      closeComposerMenu();
-    }
-  };
+  const composerKeyDownRef = useComposerKeyDown({
+    applyAtFile,
+    applyCreateVideo,
+    applyPromptHistoryEntry,
+    applySlashItem,
+    atActiveIndex,
+    atEntries,
+    atMenuOpen,
+    attachChatOpenRef,
+    attachments,
+    canGuideQueuedMessage,
+    chatAttachments,
+    closeAtMenu,
+    closeAttachChat,
+    closeComposerMenu,
+    closePromptHistory,
+    composerMenuEntriesRef,
+    composerMenuOpen,
+    composerSendKeyPref,
+    getDraft,
+    messagesRef,
+    openPromptHistory,
+    pickComposerFiles,
+    promptHistoryActive,
+    promptHistoryEntries,
+    promptHistoryFocusFilter,
+    promptHistoryIndexRef,
+    promptHistoryOpenRef,
+    promptHistoryScope,
+    quotesRef,
+    send,
+    sessionJsonSchema,
+    sessionState: session.state,
+    setAtActiveIndex,
+    setDraft,
+    setJsonSchemaDraft,
+    setPromptHistoryActive,
+    setPromptHistoryIndex,
+    setShowJsonSchemaModal,
+    setSlashActiveIndex,
+    slashActiveIndex,
+    steerFromComposer,
+  });
 
   const onComposerKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -12480,7 +12338,7 @@ export function AppWorkbench() {
           activeCustomProvider={activeCustomProvider}
           mainPane={mainPane}
           onOpenSearch={() => searchPalette.openBlank()}
-          onNewChat={() => void newChat(null)}
+          onNewChat={() => void newChat()}
           onNavigateAutomations={navigateAutomations}
           onNavigateKanban={navigateKanban}
           onNavigateRemoteIm={() => navigateSettings("remote_im", "im")}
@@ -12753,7 +12611,7 @@ export function AppWorkbench() {
             availableModels={availableModels}
             beginEditLastUser={beginEditLastUser}
             canEditLastUser={canEditLastUser}
-            canRewindSession={canRewindSession}
+            canRewindSession={canRewindNow}
             cancelEditUser={cancelEditUser}
             chatFindFocusKey={chatFindFocusKey}
             composerFloatPad={composerFloatPad}
@@ -12804,10 +12662,7 @@ export function AppWorkbench() {
             retryAgentConnect={retryAgentConnect}
             runErrorBannerAction={runErrorBannerAction}
             session={session}
-            sessionChanges={
-              sessionChangesById[session.sessionId || ""] ??
-              EMPTY_SESSION_FILE_CHANGES
-            }
+            sessionChanges={changesFor(session.sessionId || "")}
             sessionJsonSchema={sessionJsonSchema}
             sessionTranscriptStore={sessionTranscriptStore}
             sessions={sessions}
@@ -12898,7 +12753,7 @@ export function AppWorkbench() {
             currentModelWindow={currentModelWindow}
             customRouteActive={customRouteActive}
             cycleAttachedChatScope={cycleAttachedChatScope}
-            effectiveCanSend={effectiveCanSend}
+            effectiveCanSend={effectiveCanSend && !modelPickBusy}
             effectiveCanStop={effectiveCanStop}
             effort={effort}
             formatPermCountdown={formatPermCountdown}
@@ -12907,6 +12762,11 @@ export function AppWorkbench() {
             gitWorktreesAvailable={gitWorktreesAvailable}
             gitWorktreesLoading={gitWorktreesLoading}
             gitWorktreesReason={gitWorktreesReason}
+            gitBranches={gitBranches}
+            gitBranchesAvailable={gitBranchesAvailable}
+            gitBranchesLoading={gitBranchesLoading}
+            gitBranchesReason={gitBranchesReason}
+            gitBranchesBusy={gitBranchesBusy}
             goalMode={goalMode}
             guideQueuedMessage={guideQueuedMessage}
             guidingQueueItemId={guidingQueueItemId}
@@ -12963,6 +12823,7 @@ export function AppWorkbench() {
             quotes={quotes}
             refreshCliWorktrees={refreshCliWorktrees}
             refreshGitWorktrees={refreshGitWorktrees}
+            refreshGitBranches={refreshGitBranches}
             removeAttachedChat={removeAttachedChat}
             requestClearComposerDraft={requestClearComposerDraft}
             requestClearSendQueue={queueEdit.requestClear}
@@ -13013,6 +12874,7 @@ export function AppWorkbench() {
             slashKindFilter={slashKindFilter}
             stop={stop}
             switchToWorktree={switchToWorktree}
+            switchToBranch={switchToBranch}
             toggleVoice={toggleVoice}
             voice={voice}
             voiceDictationAutoSend={voiceDictationAutoSend}
@@ -13079,11 +12941,9 @@ export function AppWorkbench() {
           setSideWorkbench={setSideWorkbench}
           sideDockComposer={sideDockComposer}
           onToggleSideDockComposer={toggleDockComposer}
-          sessionChanges={
-            sessionChangesById[reviewSessionId] ??
-            sessionChangesById[session.sessionId || ""] ??
-            EMPTY_SESSION_FILE_CHANGES
-          }
+          sessionChanges={changesFor(
+            reviewSessionId ?? (session.sessionId || ""),
+          )}
           reviewFocusPath={reviewFocus?.path ?? null}
           reviewFocusToken={reviewFocus?.token ?? 0}
           reviewPinnedPaths={reviewFocus?.pinnedPaths ?? []}
@@ -13604,6 +13464,7 @@ export function AppWorkbench() {
             archiveSession={archiveSession}
             bulkMoveMenuItems={bulkMoveMenuItems}
             busyIds={busyIds}
+            canRewindNow={canRewindNow}
             canRewindSession={canRewindSession}
             clearSessionPluginDirs={clearSessionPluginDirs}
             composerCtxItems={composerCtxItems}
@@ -13659,6 +13520,7 @@ export function AppWorkbench() {
             renameSession={renameSession}
             resumeRestoreBusy={resumeRestoreBusy}
             runDuplicateSession={runDuplicateSession}
+            runHandoffSession={runHandoffSession}
             sandboxProfileLabel={sandboxProfileLabel}
             session={session}
             sessionSelectMode={sessionSelectMode}

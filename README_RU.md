@@ -60,12 +60,12 @@
 
 ## ✨ Главные особенности
 
-- ⚡ **Нативные Build-сессии** — Глубокая интеграция с `grok agent stdio` через протокол ACP. Гибкие уровни разрешений (Ask по умолчанию, однократно, на всю сессию и полностью автономный режим YOLO); по умолчанию включена модель Grok 4.6 Extra High (`xhigh`).
+- ⚡ **Нативные Build-сессии** — Глубокая интеграция с `grok agent stdio` через протокол ACP. Гибкие уровни разрешений (Ask по умолчанию, однократно, на всю сессию и полностью автономный режим YOLO); по умолчанию включена модель Grok 4.7 Extra High (`xhigh`); Grok 4.7 Fast тоже можно выбрать.
 - 🗂️ **Рабочая среда для нескольких проектов** — Изолированные пространства проектов, канбан-доска статусов агентов, быстрое переключение Git Worktree, ветвление (Fork) сессий из любого ответа ассистента и прикрепление других диалогов в качестве контекста.
 - 📝 **Файлы, код и генерация контента** — Встроенный редактор CodeMirror 6 с мгновенной синхронизацией с диском, визуальный просмотр изменений Git Diff, поддержка мультимедиа (изображения, видео, аудио, PDF, документы Office) и генерация изображений/видео через Imagine.
 - 📲 **Мультиканальный Remote IM** — Единый мост для подключения агента к Telegram, Discord, Slack, Feishu/Lark, DingTalk, WeCom, личному WeChat, QQ, Matrix, LINE и Weibo; мобильное веб-зеркало с защитой по токену и локальный REST API.
 - 🐾 **Настольный компаньон и интерактивность** — Интерактивный плавающий питомец поверх окон с реакцией на статус работы агента, поддержкой кастомизации и всплывающими подсказками.
-- 🔐 **Локальная приватность и кастомные relay** — Ключи API надёжно хранятся в системном хранилище ключей ОС. Мониторинг квоты SuperGrok и тепловая карта расхода, поддержка сторонних шлюзов (OpenRouter, DeepSeek, AI98PRO и др.) и 15 встроенных языков интерфейса.
+- 🔐 **Локальная приватность и кастомные relay** — Ключи API надёжно хранятся в системном хранилище ключей ОС. Мониторинг квоты SuperGrok и тепловая карта расхода, поддержка сторонних шлюзов (OpenRouter, Requesty, DeepSeek, AI98PRO и др.) и 15 встроенных языков интерфейса.
 
 ---
 
@@ -102,7 +102,7 @@
 
 ### 6. Учётные записи, шлюзы и персонализация
 - **Мультиаккаунт и контроль квот**: Быстрое переключение между профилями, официальный вход, прогресс-бар квоты SuperGrok, тепловая карта расходов и локальный учёт сторонних провайдеров.
-- **Настройка провайдеров и relay**: Независимый режим конфигурации или безопасный совместный режим (сохраняет оригинальный `~/.grok`); готовые пресеты для OpenRouter, DeepSeek, AI98PRO и др.
+- **Настройка провайдеров и relay**: Независимый режим конфигурации или безопасный совместный режим (сохраняет оригинальный `~/.grok`); готовые пресеты для OpenRouter, Requesty, DeepSeek, AI98PRO и др.
 - **Визуальная кастомизация**: Светлая, тёмная и системная темы; поддержка скинов, обоев, шрифтов интерфейса и терминала.
 - **Интернационализация**: 15 встроенных языков с автоматическим определением языка операционной системы при первом запуске.
 
@@ -182,6 +182,8 @@ open /Applications/Grok.app
 
 ### Предупреждение Windows SmartScreen
 При запуске неподписанных сборок сообщества Windows SmartScreen может вывести предупреждение. Нажмите **Подробнее → Выполнить в любом случае**. Вы также можете сверить контрольную сумму файла с `SHA256SUMS`.
+
+Сторонние антивирусы (Kaspersky и аналоги) могут эвристически пометить неподписанное Tauri-приложение и входящий CLI как угрозу — это ложное срабатывание на community-сборках. Сверьте хеш установщика и добавьте в исключения папку установки и каталог данных приложения (часто `%LOCALAPPDATA%`). Настоящее решение — Authenticode; само приложение не может внести себя в белый список антивируса.
 
 ---
 
@@ -314,14 +316,15 @@ Windows (необязательно): дважды щёлкните [`install-la
 ## 👥 Участники
 
 <!-- CONTRIBUTORS:START -->
-Спасибо всем, кто внёс вклад в Grok App. Все участники GitHub — люди (по числу коммитов, обновлено 2026-09-06).
+Спасибо всем, кто внёс вклад в Grok App. Все участники GitHub — люди (по числу коммитов, обновлено 2026-09-30).
 
 <p align="center">
   <a href="https://github.com/RongleCat" title="RongleCat"><img src="https://github.com/RongleCat.png?size=96" width="72" height="72" alt="RongleCat" style="border-radius:50%" /></a>
   <a href="https://github.com/sonnemusk" title="sonnemusk"><img src="https://github.com/sonnemusk.png?size=96" width="72" height="72" alt="sonnemusk" style="border-radius:50%" /></a>
   <a href="https://github.com/zhangxaochen" title="zhangxaochen"><img src="https://github.com/zhangxaochen.png?size=96" width="72" height="72" alt="zhangxaochen" style="border-radius:50%" /></a>
-  <a href="https://github.com/AlexZander85" title="AlexZander85"><img src="https://github.com/AlexZander85.png?size=96" width="72" height="72" alt="AlexZander85" style="border-radius:50%" /></a>
   <a href="https://github.com/shiaho777" title="shiaho777"><img src="https://github.com/shiaho777.png?size=96" width="72" height="72" alt="shiaho777" style="border-radius:50%" /></a>
+  <a href="https://github.com/yclenove" title="yclenove"><img src="https://github.com/yclenove.png?size=96" width="72" height="72" alt="yclenove" style="border-radius:50%" /></a>
+  <a href="https://github.com/AlexZander85" title="AlexZander85"><img src="https://github.com/AlexZander85.png?size=96" width="72" height="72" alt="AlexZander85" style="border-radius:50%" /></a>
   <a href="https://github.com/Dmao233" title="Dmao233"><img src="https://github.com/Dmao233.png?size=96" width="72" height="72" alt="Dmao233" style="border-radius:50%" /></a>
   <a href="https://github.com/pengqian-lu" title="pengqian-lu"><img src="https://github.com/pengqian-lu.png?size=96" width="72" height="72" alt="pengqian-lu" style="border-radius:50%" /></a>
   <a href="https://github.com/ynjmxn" title="ynjmxn"><img src="https://github.com/ynjmxn.png?size=96" width="72" height="72" alt="ynjmxn" style="border-radius:50%" /></a>
@@ -334,13 +337,14 @@ Windows (необязательно): дважды щёлкните [`install-la
   <a href="https://github.com/a70win-wq" title="a70win-wq"><img src="https://github.com/a70win-wq.png?size=96" width="72" height="72" alt="a70win-wq" style="border-radius:50%" /></a>
   <a href="https://github.com/1parado" title="1parado"><img src="https://github.com/1parado.png?size=96" width="72" height="72" alt="1parado" style="border-radius:50%" /></a>
   <a href="https://github.com/sutongwuyanzu" title="sutongwuyanzu"><img src="https://github.com/sutongwuyanzu.png?size=96" width="72" height="72" alt="sutongwuyanzu" style="border-radius:50%" /></a>
+  <a href="https://github.com/KarnaughK" title="KarnaughK"><img src="https://github.com/KarnaughK.png?size=96" width="72" height="72" alt="KarnaughK" style="border-radius:50%" /></a>
+  <a href="https://github.com/Ksndj" title="Ksndj"><img src="https://github.com/Ksndj.png?size=96" width="72" height="72" alt="Ksndj" style="border-radius:50%" /></a>
   <a href="https://github.com/lunar-me" title="lunar-me"><img src="https://github.com/lunar-me.png?size=96" width="72" height="72" alt="lunar-me" style="border-radius:50%" /></a>
-  <a href="https://github.com/yclenove" title="yclenove"><img src="https://github.com/yclenove.png?size=96" width="72" height="72" alt="yclenove" style="border-radius:50%" /></a>
   <a href="https://github.com/ericyiu9819" title="ericyiu9819"><img src="https://github.com/ericyiu9819.png?size=96" width="72" height="72" alt="ericyiu9819" style="border-radius:50%" /></a>
   <a href="https://github.com/falser101" title="falser101"><img src="https://github.com/falser101.png?size=96" width="72" height="72" alt="falser101" style="border-radius:50%" /></a>
-  <a href="https://github.com/Ksndj" title="Ksndj"><img src="https://github.com/Ksndj.png?size=96" width="72" height="72" alt="Ksndj" style="border-radius:50%" /></a>
   <a href="https://github.com/salasebas" title="salasebas"><img src="https://github.com/salasebas.png?size=96" width="72" height="72" alt="salasebas" style="border-radius:50%" /></a>
   <a href="https://github.com/Sdefendre" title="Sdefendre"><img src="https://github.com/Sdefendre.png?size=96" width="72" height="72" alt="Sdefendre" style="border-radius:50%" /></a>
+  <a href="https://github.com/Thibaultjaigu" title="Thibaultjaigu"><img src="https://github.com/Thibaultjaigu.png?size=96" width="72" height="72" alt="Thibaultjaigu" style="border-radius:50%" /></a>
   <a href="https://github.com/yuhaouno" title="yuhaouno"><img src="https://github.com/yuhaouno.png?size=96" width="72" height="72" alt="yuhaouno" style="border-radius:50%" /></a>
   <a href="https://github.com/2530185073" title="2530185073"><img src="https://github.com/2530185073.png?size=96" width="72" height="72" alt="2530185073" style="border-radius:50%" /></a>
   <a href="https://github.com/86208620" title="86208620"><img src="https://github.com/86208620.png?size=96" width="72" height="72" alt="86208620" style="border-radius:50%" /></a>
@@ -358,6 +362,7 @@ Windows (необязательно): дважды щёлкните [`install-la
   <a href="https://github.com/sk1935" title="sk1935"><img src="https://github.com/sk1935.png?size=96" width="72" height="72" alt="sk1935" style="border-radius:50%" /></a>
   <a href="https://github.com/tisrop" title="tisrop"><img src="https://github.com/tisrop.png?size=96" width="72" height="72" alt="tisrop" style="border-radius:50%" /></a>
   <a href="https://github.com/XancelZC" title="XancelZC"><img src="https://github.com/XancelZC.png?size=96" width="72" height="72" alt="XancelZC" style="border-radius:50%" /></a>
+  <a href="https://github.com/Yux-c" title="Yux-c"><img src="https://github.com/Yux-c.png?size=96" width="72" height="72" alt="Yux-c" style="border-radius:50%" /></a>
 </p>
 
 [Полный граф участников →](https://github.com/RongleCat/grok-app/graphs/contributors)

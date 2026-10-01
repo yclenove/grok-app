@@ -121,6 +121,10 @@ fn sample_live_for_empty_run(body: &str, thought: &str, tools: u32, mode: &str) 
             fork_agent_session: false,
             fork_rewind_prompt_index: None,
             no_ask_user: None,
+            workspace_id: None,
+            workspace_root_snapshot: None,
+            workspace_capability: None,
+            provider_id: None,
         },
         fsm,
         backend: "mock_acp".into(),
@@ -433,15 +437,25 @@ fn provider_retry_abort_skips_idle_and_connecting_reconnect() {
 fn plan_event_gate_accepts_resume_repark_without_prompt() {
     // Grok Build re-issues exit_plan_mode after session/load with no prompt.
     assert!(!SessionManager::should_drop_plan_event(
-        /* prompt_in_flight */ false, /* pending_plan */ false,
-        /* has_rpc_id */ true,
+        /* prompt_in_flight */ false, /* deferred_prompt_complete */ false,
+        /* pending_plan */ false, /* has_rpc_id */ true,
     ));
     // Progress while a gate is already open (prompt may have completed early).
-    assert!(!SessionManager::should_drop_plan_event(false, true, false));
+    assert!(!SessionManager::should_drop_plan_event(
+        false, false, true, false
+    ));
     // Mid-turn drafting updates.
-    assert!(!SessionManager::should_drop_plan_event(true, false, false));
+    assert!(!SessionManager::should_drop_plan_event(
+        true, false, false, false
+    ));
+    // Execution progress after an early prompt_complete — turn is still open.
+    assert!(!SessionManager::should_drop_plan_event(
+        false, true, false, false
+    ));
     // Idle load-replay plan notification only.
-    assert!(SessionManager::should_drop_plan_event(false, false, false));
+    assert!(SessionManager::should_drop_plan_event(
+        false, false, false, false
+    ));
 }
 
 #[test]

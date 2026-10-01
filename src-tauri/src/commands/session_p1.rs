@@ -10,7 +10,11 @@ fn windows_grok_go_config_candidates() -> Option<Vec<String>> {
             out.push(format!(r"{local}\com.grokgo.desktop\config.json"));
             out.push(format!(r"{local}\GrokGo\config.json"));
         }
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -397,13 +401,19 @@ pub async fn cli_install_latest(
     app: tauri::AppHandle,
     allow_unverified: Option<bool>,
 ) -> Result<crate::cli_install::CliInstallResult, String> {
-    let allow =
-        allow_unverified.unwrap_or_else(|| store::load_settings().allow_unverified_cli_install);
+    let allow = match allow_unverified {
+        Some(v) => v,
+        None => {
+            store::load_settings_async()
+                .await
+                .allow_unverified_cli_install
+        }
+    };
     let result = crate::cli_install::install_cli_latest(app, allow).await?;
     // Remember last install verification for Doctor.
-    let mut s = store::load_settings();
+    let mut s = store::load_settings_async().await;
     s.last_cli_checksum_verified = result.checksum_verified;
-    let _ = store::save_settings(&s);
+    let _ = store::save_settings_async(&s).await;
     Ok(result)
 }
 
@@ -528,11 +538,7 @@ pub async fn project_add(path: String, trust: bool) -> Result<Project, String> {
 }
 
 #[tauri::command]
-pub async fn project_add_ssh(
-    alias: String,
-    path: String,
-    trust: bool,
-) -> Result<Project, String> {
+pub async fn project_add_ssh(alias: String, path: String, trust: bool) -> Result<Project, String> {
     store::add_ssh_project(&alias, path, trust)
 }
 
@@ -665,7 +671,7 @@ pub async fn sessions_search(
 /// List Grok Build CLI sessions under GROK_HOME (shared-mode discovery, E03).
 #[tauri::command]
 pub async fn cli_sessions_list() -> Result<Vec<crate::cli_sessions::CliSessionSummary>, String> {
-    let mode = store::load_settings().session_data_mode;
+    let mode = store::load_settings_async().await.session_data_mode;
     crate::cli_sessions::list_cli_sessions(&mode)
 }
 
@@ -676,7 +682,7 @@ pub async fn cli_sessions_search(
     query: String,
     limit: Option<u32>,
 ) -> Result<Vec<crate::cli_sessions::CliSessionSearchHit>, String> {
-    let settings = store::load_settings();
+    let settings = store::load_settings_async().await;
     let mode = settings.session_data_mode.clone();
     let probe = cli_probe::probe_cli(settings.manual_cli_path.as_deref());
     let cli_path = probe
@@ -697,7 +703,7 @@ pub async fn cli_session_import(
     dir: Option<String>,
     project_id: Option<String>,
 ) -> Result<SessionMeta, String> {
-    let mode = store::load_settings().session_data_mode;
+    let mode = store::load_settings_async().await.session_data_mode;
     crate::cli_sessions::import_cli_session(&agent_session_id, dir.as_deref(), project_id, &mode)
 }
 
@@ -707,7 +713,7 @@ pub async fn cli_session_import(
 pub async fn cli_session_find_latest_for_cwd(
     project_path: String,
 ) -> Result<Option<crate::cli_sessions::CliSessionSummary>, String> {
-    let mode = store::load_settings().session_data_mode;
+    let mode = store::load_settings_async().await.session_data_mode;
     let path = project_path;
     tauri::async_runtime::spawn_blocking(move || {
         crate::cli_sessions::find_latest_cli_session_for_cwd(&path, &mode)
@@ -723,7 +729,7 @@ pub async fn cli_session_continue_cwd(
     project_path: String,
     project_id: Option<String>,
 ) -> Result<Option<SessionMeta>, String> {
-    let mode = store::load_settings().session_data_mode;
+    let mode = store::load_settings_async().await.session_data_mode;
     tauri::async_runtime::spawn_blocking(move || {
         crate::cli_sessions::continue_cli_session_for_cwd(&project_path, project_id, &mode)
     })
@@ -734,7 +740,7 @@ pub async fn cli_session_continue_cwd(
 /// Import up to `limit` not-yet-linked CLI sessions (default 50).
 #[tauri::command]
 pub async fn cli_sessions_import_all(limit: Option<u32>) -> Result<Vec<SessionMeta>, String> {
-    let mode = store::load_settings().session_data_mode;
+    let mode = store::load_settings_async().await.session_data_mode;
     let lim = limit.unwrap_or(50).min(100) as usize;
     crate::cli_sessions::import_all_cli_sessions(&mode, lim)
 }
@@ -746,7 +752,7 @@ pub async fn cli_sessions_delete(
     agent_session_id: String,
     dir: Option<String>,
 ) -> Result<(), String> {
-    let mode = store::load_settings().session_data_mode;
+    let mode = store::load_settings_async().await.session_data_mode;
     // Blocking disk IO off the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
         crate::cli_sessions::delete_cli_session(&agent_session_id, dir.as_deref(), &mode)
@@ -761,7 +767,9 @@ pub async fn session_create(
     title: Option<String>,
     scheduled: Option<bool>,
 ) -> Result<SessionMeta, String> {
-    store::create_session(project_id, title, scheduled.unwrap_or(false))
+    let meta = store::create_session(project_id, title, scheduled.unwrap_or(false))?;
+    let id = meta.id.clone();
+    Ok(crate::workspace_store::bind_default_workspace_if_unbound(&id).unwrap_or(meta))
 }
 
 #[tauri::command]
@@ -904,12 +912,29 @@ pub async fn session_delete(
     mgr: State<'_, Arc<SessionManager>>,
     id: String,
 ) -> Result<(), String> {
-    // Detach while the live/background/parked ACP endpoint is still indexed.
-    // Deleting the journal first made a shared ACP retain the old
-    // grok-computer-use MCP entry with no session left to retry cleanup.
+    let agent_id = store::load_sessions_index()
+        .into_iter()
+        .find(|s| s.id == id)
+        .and_then(|m| m.agent_session_id)
+        .filter(|s| !s.trim().is_empty());
+    let mode = store::load_settings_async().await.session_data_mode;
+
+    // Drop live / background / parked ACP first so Windows can remove the
+    // CLI session tree (locks on `.lock` / `turn_lease.json`).
+    // Keep the original endpoint and journal available if CU cleanup fails;
+    // otherwise a shared ACP would retain an unowned MCP catalog entry.
     mgr.drop_session_agent(&app, &id).await?;
-    store::delete_session(&id)?;
     mgr.forget_deleted_session(&id);
+
+    if let Some(aid) = agent_id {
+        let mode_clone = mode.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            crate::cli_sessions::forget_app_linked_cli_session(&aid, &mode_clone)
+        })
+        .await;
+    }
+
+    store::delete_session(&id)?;
     Ok(())
 }
 
@@ -1041,8 +1066,60 @@ pub async fn session_set_plugin_dirs(
     Ok(meta)
 }
 
+/// After AGENTS.md / project rules change: clear agent session ids for chats
+/// bound to this project so the next turn does `session/new` and reloads
+/// project instructions. Soft-respawns / drops idle ACP processes.
+#[tauri::command]
+pub async fn project_rules_invalidate_sessions(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    project_path: String,
+) -> Result<usize, String> {
+    let path = project_path.trim();
+    if path.is_empty() {
+        return Err("project path empty".into());
+    }
+    let norm = |s: &str| {
+        s.trim()
+            .trim_end_matches(['/', '\\'])
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    };
+    let target = norm(path);
+    let projects = store::load_projects();
+    let project_ids: Vec<String> = projects
+        .iter()
+        .filter(|p| norm(&p.path) == target)
+        .map(|p| p.id.clone())
+        .collect();
+    let sessions = store::load_sessions_index();
+    let mut ids: Vec<String> = Vec::new();
+    for s in sessions {
+        let by_project = s
+            .project_id
+            .as_deref()
+            .is_some_and(|pid| project_ids.iter().any(|id| id == pid));
+        let by_worktree = s.worktree_path.as_deref().is_some_and(|wp| {
+            let n = norm(wp);
+            n == target || n.starts_with(&(target.clone() + "/"))
+        });
+        if by_project || by_worktree {
+            ids.push(s.id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    let n = ids.len();
+    for id in ids {
+        mgr.invalidate_spawn_flags_for_session(&app, &id, "project_rules")
+            .await;
+    }
+    Ok(n)
+}
+
 /// Set or clear per-session extra rules (`grok --rules` at next spawn).
-/// Empty / whitespace clears. Soft-respawns the live agent for this chat.
+/// Empty / whitespace clears. Forces a fresh agent session so `--rules` apply
+/// (session/load would keep the old prompt).
 #[tauri::command]
 pub async fn session_set_extra_rules(
     app: tauri::AppHandle,
@@ -1051,11 +1128,8 @@ pub async fn session_set_extra_rules(
     extra_rules: Option<String>,
 ) -> Result<SessionMeta, String> {
     let meta = store::set_session_extra_rules(&id, extra_rules)?;
-    let snap = mgr.snapshot();
-    if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_extra_rules")
-            .await;
-    }
+    mgr.invalidate_spawn_flags_for_session(&app, &meta.id, "session_extra_rules")
+        .await;
     Ok(meta)
 }
 
@@ -1079,7 +1153,8 @@ pub async fn session_set_max_agent_turns(
 
 /// Set or clear per-session system prompt override
 /// (`grok --system-prompt-override` at next spawn).
-/// Empty / whitespace clears. Soft-respawns the live agent for this chat.
+/// Empty / whitespace clears. Forces a fresh agent session so the override
+/// applies (session/load would keep the old prompt).
 /// Never logs the prompt body (may contain secrets / PII).
 #[tauri::command]
 pub async fn session_set_system_prompt_override(
@@ -1089,11 +1164,8 @@ pub async fn session_set_system_prompt_override(
     system_prompt_override: Option<String>,
 ) -> Result<SessionMeta, String> {
     let meta = store::set_session_system_prompt_override(&id, system_prompt_override)?;
-    let snap = mgr.snapshot();
-    if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_system_prompt_override")
-            .await;
-    }
+    mgr.invalidate_spawn_flags_for_session(&app, &meta.id, "session_system_prompt_override")
+        .await;
     Ok(meta)
 }
 

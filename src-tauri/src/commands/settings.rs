@@ -1,6 +1,6 @@
 #[tauri::command]
 pub async fn settings_get() -> Result<AppSettings, String> {
-    Ok(store::load_settings())
+    Ok(store::load_settings_async().await)
 }
 
 /// One-shot notice after corrupt store files were quarantined on load.
@@ -15,49 +15,48 @@ pub async fn settings_set(
     mgr: State<'_, Arc<SessionManager>>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    let prev = store::load_settings();
+    let prev = store::load_settings_async().await;
     let mut settings = settings;
+    settings.wallpaper_x_search_mode =
+        store::normalize_wallpaper_x_search_mode(&settings.wallpaper_x_search_mode).into();
     // Normalize denylist / allowlist so spawn / equality see stable lists.
     settings.disallowed_tools =
         crate::acp_client::normalize_disallowed_tools(&settings.disallowed_tools);
-    settings.allowed_tools =
-        crate::acp_client::normalize_allowed_tools(&settings.allowed_tools);
+    settings.allowed_tools = crate::acp_client::normalize_allowed_tools(&settings.allowed_tools);
     // Normalize optional agent profile path (trim / drop control chars).
     settings.agent_profile_path =
         crate::agents_catalog::normalize_agent_profile_path(&settings.agent_profile_path)
             .unwrap_or_default();
     // Normalize / validate optional agents JSON (reject invalid non-empty).
-    settings.agents_json =
-        crate::agents_catalog::normalize_agents_json(&settings.agents_json)?;
+    settings.agents_json = crate::agents_catalog::normalize_agents_json(&settings.agents_json)?;
     // Headless background-wait policy (CLI 0.2.117+); clamp timeout 1–3600.
     settings.background_wait_policy =
         crate::acp_client::normalize_background_wait_policy(&settings.background_wait_policy)
             .as_str()
             .to_string();
-    settings.background_wait_timeout_sec =
-        crate::acp_client::normalize_background_wait_timeout_sec(
-            settings.background_wait_timeout_sec,
-        );
+    settings.background_wait_timeout_sec = crate::acp_client::normalize_background_wait_timeout_sec(
+        settings.background_wait_timeout_sec,
+    );
     // Normalize compaction mode/detail enums (CLI 0.2.117+).
     settings.compaction_mode =
         crate::acp_client::normalize_compaction_mode(&settings.compaction_mode).to_string();
     settings.compaction_detail =
         crate::acp_client::normalize_compaction_detail(&settings.compaction_detail).to_string();
+    // Keep Host routing, returned IPC settings, and persisted JSON on the same
+    // canonical proxy mode. Legacy `use` needs proxyUrl context to migrate.
+    store::normalize_proxy_settings(&mut settings);
     // Audit ledger retention presets: 7 / 30 / 90 / 0 (unlimited).
     settings.audit_ledger_retention_days =
         crate::audit_ledger::normalize_retention_days(settings.audit_ledger_retention_days);
-    let audit_retention_flip = crate::audit_ledger::normalize_retention_days(
-        prev.audit_ledger_retention_days,
-    ) != settings.audit_ledger_retention_days;
-    let keychain_flip =
-        prev.store_api_keys_in_keychain != settings.store_api_keys_in_keychain;
-    let session_data_mode_changed =
-        prev.session_data_mode != settings.session_data_mode;
+    let audit_retention_flip =
+        crate::audit_ledger::normalize_retention_days(prev.audit_ledger_retention_days)
+            != settings.audit_ledger_retention_days;
+    let keychain_flip = prev.store_api_keys_in_keychain != settings.store_api_keys_in_keychain;
+    let session_data_mode_changed = prev.session_data_mode != settings.session_data_mode;
     let memory_flip = prev.experimental_memory != settings.experimental_memory;
     let web_search_flip = prev.disable_web_search != settings.disable_web_search;
-    let official_aux_inject_flip =
-        prev.official_aux_inject != settings.official_aux_inject
-            || prev.official_aux_with_user_mcp != settings.official_aux_with_user_mcp;
+    let official_aux_inject_flip = prev.official_aux_inject != settings.official_aux_inject
+        || prev.official_aux_with_user_mcp != settings.official_aux_with_user_mcp;
     // Keep native-Imagine PreToolUse hook in sync with inject / route (independent home only).
     if official_aux_inject_flip || session_data_mode_changed {
         let mode = settings.session_data_mode.clone();
@@ -69,15 +68,12 @@ pub async fn settings_set(
         &prev.disallowed_tools,
         &settings.disallowed_tools,
     );
-    let allowed_tools_flip = !crate::acp_client::allowed_tools_equal(
-        &prev.allowed_tools,
-        &settings.allowed_tools,
-    );
+    let allowed_tools_flip =
+        !crate::acp_client::allowed_tools_equal(&prev.allowed_tools, &settings.allowed_tools);
     // Normalize TodoGate max fires (1–20; 0 → default 3).
-    settings.todo_gate_max_fires_per_prompt =
-        crate::agent_todo_gate::normalize_todo_gate_max_fires(Some(
-            settings.todo_gate_max_fires_per_prompt,
-        ));
+    settings.todo_gate_max_fires_per_prompt = crate::agent_todo_gate::normalize_todo_gate_max_fires(
+        Some(settings.todo_gate_max_fires_per_prompt),
+    );
     let todo_gate_flip = prev.todo_gate_enabled != settings.todo_gate_enabled
         || crate::agent_todo_gate::normalize_todo_gate_max_fires(Some(
             prev.todo_gate_max_fires_per_prompt,
@@ -85,14 +81,13 @@ pub async fn settings_set(
     let plan_enabled_flip = prev.plan_enabled != settings.plan_enabled;
     let use_leader_changed = prev.use_leader != settings.use_leader;
     let subagents_flip = prev.subagents_enabled != settings.subagents_enabled;
-    let subagent_wt_snap_flip = prev.subagent_worktree_snapshot_enabled
-        != settings.subagent_worktree_snapshot_enabled;
+    let subagent_wt_snap_flip =
+        prev.subagent_worktree_snapshot_enabled != settings.subagent_worktree_snapshot_enabled;
     let auto_wake_flip = prev.auto_wake_enabled != settings.auto_wake_enabled;
     let workflows_flip = prev.workflows_enabled != settings.workflows_enabled;
     let two_pass_compaction_flip =
         prev.two_pass_compaction_enabled != settings.two_pass_compaction_enabled;
-    let preferred_agent_flip =
-        prev.preferred_agent.trim() != settings.preferred_agent.trim();
+    let preferred_agent_flip = prev.preferred_agent.trim() != settings.preferred_agent.trim();
     let agent_profile_flip = prev.agent_profile_path.trim() != settings.agent_profile_path.trim();
     let agents_json_flip = prev.agents_json.trim() != settings.agents_json.trim();
     let max_turns_flip = prev.max_agent_turns != settings.max_agent_turns;
@@ -143,7 +138,11 @@ pub async fn settings_set(
         )
         .await?;
     } else {
-        store::save_settings(&settings)?;
+        store::save_settings_async(&settings).await?;
+    }
+
+    if proxy_flip {
+        crate::wallpaper_grok_album::close_for_proxy_change(&app);
     }
 
     if schedules_launch_agent_flip {
@@ -155,7 +154,7 @@ pub async fn settings_set(
         if let Err(e) = res {
             let mut rolled = settings.clone();
             rolled.schedules_launch_agent = prev.schedules_launch_agent;
-            let _ = store::save_settings(&rolled);
+            let _ = store::save_settings_async(&rolled).await;
             return Err(format!("schedules LaunchAgent: {e}"));
         }
         // Non-macOS enable is unsupported — keep flag false.
@@ -163,7 +162,7 @@ pub async fn settings_set(
         if settings.schedules_launch_agent {
             let mut rolled = settings.clone();
             rolled.schedules_launch_agent = false;
-            let _ = store::save_settings(&rolled);
+            let _ = store::save_settings_async(&rolled).await;
             settings.schedules_launch_agent = false;
         }
     }
@@ -174,7 +173,7 @@ pub async fn settings_set(
         {
             let mut rolled = settings.clone();
             rolled.store_api_keys_in_keychain = prev.store_api_keys_in_keychain;
-            let _ = store::save_settings(&rolled);
+            let _ = store::save_settings_async(&rolled).await;
             return Err(e);
         }
     }
@@ -190,7 +189,7 @@ pub async fn settings_set(
         if let Err(e) = res {
             let mut rolled = settings.clone();
             rolled.launch_at_login = prev.launch_at_login;
-            let _ = store::save_settings(&rolled);
+            let _ = store::save_settings_async(&rolled).await;
             return Err(format!("launch at login: {e}"));
         }
     }
@@ -201,7 +200,7 @@ pub async fn settings_set(
         if settings.session_data_mode == "shared"
             && crate::providers::ensure_independent_for_custom_route()
         {
-            settings = store::load_settings();
+            settings = store::load_settings_async().await;
             tracing::info!(
                 "settings_set: custom route self-healed session_data_mode shared → independent"
             );
@@ -326,7 +325,8 @@ pub async fn settings_set(
 }
 
 #[tauri::command]
-pub async fn models_list_available() -> Result<crate::models_catalog::AvailableModelsResult, String> {
+pub async fn models_list_available() -> Result<crate::models_catalog::AvailableModelsResult, String>
+{
     Ok(crate::models_catalog::list_available_models())
 }
 
@@ -353,6 +353,7 @@ pub async fn composer_prefs_set(
     effort: Option<String>,
     mode: Option<String>,
     permission_policy: Option<String>,
+    provider_id: Option<String>,
 ) -> Result<store::ComposerPrefs, String> {
     // Prefer explicit ids; fall back to live session context.
     let (live_proj, live_sess) = mgr.current_context_ids();
@@ -369,6 +370,13 @@ pub async fn composer_prefs_set(
     let previous_effort = effort.as_ref().map(|_| {
         store::resolve_composer_prefs(project_id.as_deref(), session_id.as_deref()).effort
     });
+    let (previous_provider, ssh) = session_provider_and_ssh(session_id.as_deref());
+    let pick = crate::providers::composer_provider_pick(
+        ssh,
+        previous_provider.as_deref(),
+        provider_id.as_deref(),
+        model_id.as_deref(),
+    );
 
     let prefs = store::save_composer_prefs(
         project_id.as_deref(),
@@ -377,27 +385,38 @@ pub async fn composer_prefs_set(
         effort.clone(),
         mode.clone(),
         permission_policy.clone(),
+        pick.provider_to_persist.clone(),
     )?;
+    if let (Some(sid), Some(pid)) = (session_id.as_deref(), pick.provider_to_persist.as_deref()) {
+        mgr.remember_session_provider(sid, pid);
+    }
 
     if let Some(ref pol) = permission_policy {
         if let Err(e) = mgr.apply_permission_policy(&app, pol).await {
             tracing::warn!("composer_prefs_set apply_permission: {e}");
         }
     }
-    if let Some(mid) = model_id {
-        if let Err(e) = mgr.set_model(mid).await {
+    // Empty stored id follows the global route. Comparing the raw column to
+    // the pick treats the first save of that same route as a switch, which
+    // clears the CLI resume id and skips session/set_model. SSH pins both
+    // sides to official, so an official model never respawns that chat.
+    if pick.route_changed {
+        // This chat's process was spawned for the previous provider. Clear
+        // only this session's CLI resume id, then cold-spawn this chat.
+        // `session/load` would restore the old route. Never `recycle_all`.
+        if let Some(sid) = session_id.as_deref() {
+            mgr.invalidate_spawn_flags_for_session(&app, sid, "session_provider")
+                .await;
+        }
+    } else if let Some(mid) = pick.set_model_id {
+        if let Err(e) = mgr.set_model(mid, session_id.as_deref()).await {
             tracing::warn!("composer_prefs_set set_model soft-fail: {e}");
         }
     }
     if let Some(eff) = effort {
         let effort_changed = previous_effort.as_deref() != Some(eff.trim());
         if let Err(e) = mgr
-            .set_effort_and_respawn_needed(
-                &app,
-                eff,
-                session_id.as_deref(),
-                effort_changed,
-            )
+            .set_effort_and_respawn_needed(&app, eff, session_id.as_deref(), effort_changed)
             .await
         {
             tracing::warn!("composer_prefs_set set_effort soft-fail: {e}");
@@ -409,6 +428,24 @@ pub async fn composer_prefs_set(
         }
     }
     Ok(prefs)
+}
+
+fn session_provider_and_ssh(session_id: Option<&str>) -> (Option<String>, bool) {
+    let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (None, false);
+    };
+    let row = store::load_sessions_index()
+        .into_iter()
+        .find(|s| s.id == sid);
+    let Some(row) = row else {
+        return (None, false);
+    };
+    let ssh = row.project_id.as_deref().is_some_and(|pid| {
+        store::load_projects()
+            .into_iter()
+            .any(|p| p.id == pid && p.is_ssh_remote())
+    });
+    (row.provider_id, ssh)
 }
 
 #[tauri::command]
@@ -428,6 +465,7 @@ pub async fn session_set_policy(
         None,
         None,
         Some(p.as_str().into()),
+        None,
     )?;
     mgr.apply_permission_policy(&app, p.as_str()).await?;
     Ok(prefs)
@@ -441,15 +479,17 @@ pub async fn session_set_model(
     session_id: Option<String>,
 ) -> Result<store::ComposerPrefs, String> {
     let (live_proj, live_sess) = mgr.current_context_ids();
+    let session_id = session_id.or(live_sess);
     let prefs = store::save_composer_prefs(
         project_id.or(live_proj).as_deref(),
-        session_id.or(live_sess).as_deref(),
+        session_id.as_deref(),
         Some(model_id.clone()),
         None,
         None,
         None,
+        None,
     )?;
-    if let Err(e) = mgr.set_model(model_id).await {
+    if let Err(e) = mgr.set_model(model_id, session_id.as_deref()).await {
         tracing::warn!("session_set_model soft-fail: {e}");
     }
     Ok(prefs)
@@ -505,12 +545,7 @@ pub async fn fs_write_file(
     content: String,
     expected_mtime_ms: Option<u64>,
 ) -> Result<crate::fs_browser::FsWriteResult, String> {
-    crate::fs_browser::write_text_file(
-        &project_path,
-        &relative,
-        &content,
-        expected_mtime_ms,
-    )
+    crate::fs_browser::write_text_file(&project_path, &relative, &content, expected_mtime_ms)
 }
 
 /// Write UTF-8 text to an absolute path already open in the resource pane.
@@ -525,9 +560,7 @@ pub async fn fs_write_absolute(
 
 /// Read an absolute path for resource-pane preview (chat file cards, agent outputs).
 #[tauri::command]
-pub async fn fs_read_absolute(
-    path: String,
-) -> Result<crate::fs_browser::FsReadResult, String> {
+pub async fn fs_read_absolute(path: String) -> Result<crate::fs_browser::FsReadResult, String> {
     crate::fs_browser::read_absolute_file(&path)
 }
 
@@ -594,6 +627,7 @@ pub async fn secrets_get_masked() -> Result<serde_json::Value, String> {
         "hasOfficialKey": crate::secrets::has_official_key_configured(&s),
         "hasRelayKey": has_provider_key
             || crate::secrets::has_relay_key_configured(&s),
+        "hasPexelsKey": crate::secrets::has_pexels_key_configured(&s),
         "hasSttCustomKey": crate::secrets::has_stt_custom_key_configured(&s),
         "sttCustomKeys": crate::secrets::stt_custom_key_presence(&s),
         "relayBaseUrl": relay_base,
@@ -605,7 +639,7 @@ pub async fn secrets_get_masked() -> Result<serde_json::Value, String> {
             crate::secrets::SecretsBackendKind::Keychain => "keychain",
             crate::secrets::SecretsBackendKind::File => "file",
         },
-        "storeApiKeysInKeychain": store::load_settings().store_api_keys_in_keychain,
+        "storeApiKeysInKeychain": store::load_settings_async().await.store_api_keys_in_keychain,
     }))
 }
 
@@ -617,6 +651,7 @@ pub async fn secrets_set(
     official_api_key: Option<String>,
     relay_base_url: Option<String>,
     relay_api_key: Option<String>,
+    pexels_api_key: Option<String>,
     default_model: Option<String>,
     stt_custom_api_key: Option<String>,
     stt_custom_api_key_provider: Option<String>,
@@ -624,20 +659,19 @@ pub async fn secrets_set(
     let mut s = store::load_secrets();
     // Empty string clears the secret (needed when revoking speech/API credentials).
     if let Some(k) = official_api_key {
-        s.official_api_key = if k.trim().is_empty() {
-            None
-        } else {
-            Some(k)
-        };
+        s.official_api_key = if k.trim().is_empty() { None } else { Some(k) };
     }
     if let Some(u) = relay_base_url {
         s.relay_base_url = if u.is_empty() { None } else { Some(u) };
     }
     if let Some(k) = relay_api_key {
-        s.relay_api_key = if k.trim().is_empty() {
+        s.relay_api_key = if k.trim().is_empty() { None } else { Some(k) };
+    }
+    if let Some(k) = pexels_api_key {
+        s.pexels_api_key = if k.trim().is_empty() {
             None
         } else {
-            Some(k)
+            Some(k.trim().to_string())
         };
     }
     if let Some(m) = default_model {
@@ -721,14 +755,21 @@ pub async fn provider_ping() -> Result<serde_json::Value, String> {
     }
 
     // CLI auth present?
-    let auth = crate::process_util::user_home().join(".grok").join("auth.json");
+    let auth = crate::process_util::user_home()
+        .join(".grok")
+        .join("auth.json");
     if auth.is_file() {
         Ok(serde_json::json!({
             "ok": true,
             "class": "OK",
             "message": "CLI auth.json present (cached_token). Use Doctor + real chat to verify."
         }))
-    } else if secrets.official_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false) {
+    } else if secrets
+        .official_api_key
+        .as_ref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+    {
         Ok(serde_json::json!({
             "ok": true,
             "class": "OK",

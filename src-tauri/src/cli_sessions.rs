@@ -5,13 +5,12 @@
 //!   - summary.json — title, timestamps, cwd
 //!   - chat_history.jsonl — line-delimited messages
 
-#![allow(dead_code)] // residual-clippy: pick_latest helper
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -90,6 +89,7 @@ struct SummaryFile {
 #[derive(Debug, Deserialize)]
 struct SummaryInfo {
     #[serde(default)]
+    #[allow(dead_code)]
     id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
@@ -240,6 +240,7 @@ fn ensure_untrusted_project_for_cwd(cwd: &str) {
 /// Pick the newest session among rows whose `cwd` matches `project_path` (pure).
 ///
 /// Compares `updated_at` lexicographically (RFC3339-friendly).
+#[allow(dead_code)]
 pub fn pick_latest_session_for_cwd<'a, T>(
     rows: &'a [T],
     project_path: &str,
@@ -1317,10 +1318,11 @@ pub fn parse_at_path_attachments(content: &str) -> (String, Vec<MessageAttachmen
     let mut seen = std::collections::HashSet::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        // @/path or @C:\path — absolute only (same as FE).
+        // @/path or @C:\path — absolute only, and multi-segment for POSIX so
+        // `@/goal …` prose is not backfilled as a missing-file chip (#1197).
         let path = trimmed.strip_prefix('@').and_then(|rest| {
             let rest = rest.trim();
-            if rest.starts_with('/') || looks_like_windows_abs(rest) {
+            if is_sole_line_at_attachment_path(rest) {
                 Some(rest.to_string())
             } else {
                 None
@@ -1355,6 +1357,23 @@ pub fn parse_at_path_attachments(content: &str) -> (String, Vec<MessageAttachmen
 fn looks_like_windows_abs(path: &str) -> bool {
     let b = path.as_bytes();
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Mirrors FE `isSoleLineAtAttachmentPath`: POSIX needs ≥2 segments so
+/// `/goal` / `/goal 你再检查…` stay as text; Windows drive needs ≥1 segment.
+fn is_sole_line_at_attachment_path(path: &str) -> bool {
+    let p = path.trim();
+    if p.is_empty() {
+        return false;
+    }
+    if looks_like_windows_abs(p) {
+        let rest = p[2..].trim_start_matches(['/', '\\']).replace('\\', "/");
+        return rest.split('/').filter(|s| !s.is_empty()).count() >= 1;
+    }
+    if !p.starts_with('/') || p.starts_with("//") {
+        return false;
+    }
+    p.split('/').filter(|s| !s.is_empty()).count() >= 2
 }
 
 fn user_body_key(content: &str) -> String {
@@ -1518,6 +1537,7 @@ fn load_tool_names_from_events(events_path: &std::path::Path) -> HashMap<String,
 struct ToolCallRecord {
     name: String,
     label: String,
+    #[allow(dead_code)]
     kind: String,
     input: Option<String>,
 }
@@ -1682,6 +1702,8 @@ pub fn reconcile_journal_from_chat_history(
         .map(|(role, content, _)| (role.clone(), content.clone()))
         .collect();
     let mut journal = store::load_messages(app_session_id);
+    let journal_users = store::user_prompt_count(&journal);
+    let mut seen_users = 0u32;
     let mut changed = 0u32;
     let now = Utc::now();
     // Insert anchor: journal index after which the next rebuilt tool row goes,
@@ -1690,6 +1712,15 @@ pub fn reconcile_journal_from_chat_history(
     let mut anchor: Option<usize> = journal.len().checked_sub(1);
 
     for (role, content, tool_call_id) in &rows {
+        if role == "user" {
+            seen_users = seen_users.saturating_add(1);
+            continue;
+        }
+        // A rewind leaves the journal shorter than chat_history.jsonl. Do not
+        // paste assistant or tool rows from turns that were cut.
+        if seen_users > journal_users {
+            continue;
+        }
         if role == "assistant" {
             match journal_covers_assistant(&journal, content) {
                 CoverKind::Covered(idx) => {
@@ -1879,6 +1910,8 @@ pub fn import_cli_session(
     {
         return Ok(existing);
     }
+    // Explicit one-id import may revive a previously deleted App link.
+    let _ = forget_deleted_cli_id(agent_session_id);
 
     let dir = if let Some(d) = dir.filter(|s| !s.is_empty()) {
         PathBuf::from(d)
@@ -1951,6 +1984,103 @@ pub fn import_cli_session(
     Ok(meta)
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct DeletedCliSessionsFile {
+    #[serde(default)]
+    ids: Vec<String>,
+}
+
+fn deleted_cli_sessions_path() -> PathBuf {
+    crate::paths::app_data_root().join("deleted_cli_sessions.json")
+}
+
+fn load_deleted_cli_ids() -> Vec<String> {
+    let path = deleted_cli_sessions_path();
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let file: DeletedCliSessionsFile = crate::store::read_json_recover(&path);
+    file.ids
+}
+
+/// Record an agent session id so bulk import will not recreate an App row
+/// after the user deleted the chat (#1236).
+pub fn remember_deleted_cli_id(agent_session_id: &str) -> Result<(), String> {
+    let id = validate_agent_session_id(agent_session_id)?.to_string();
+    let mut ids = load_deleted_cli_ids();
+    if ids.iter().any(|x| x == &id) {
+        return Ok(());
+    }
+    ids.push(id);
+    if ids.len() > 500 {
+        let drop_n = ids.len() - 500;
+        ids.drain(0..drop_n);
+    }
+    crate::store::write_json(
+        &deleted_cli_sessions_path(),
+        &DeletedCliSessionsFile { ids },
+    )
+}
+
+pub fn forget_deleted_cli_id(agent_session_id: &str) -> Result<(), String> {
+    let id = agent_session_id.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+    let mut ids = load_deleted_cli_ids();
+    let before = ids.len();
+    ids.retain(|x| x != id);
+    if ids.len() == before {
+        return Ok(());
+    }
+    crate::store::write_json(
+        &deleted_cli_sessions_path(),
+        &DeletedCliSessionsFile { ids },
+    )
+}
+
+pub fn is_deleted_cli_id(agent_session_id: &str) -> bool {
+    let id = agent_session_id.trim();
+    !id.is_empty() && load_deleted_cli_ids().iter().any(|x| x == id)
+}
+
+/// True for CLI stubs / non-project cwd that bulk import should not resurrect.
+pub fn should_skip_bulk_cli_import(title: &str, cwd: Option<&str>, num_messages: u32) -> bool {
+    if is_noise_cli_cwd(cwd) {
+        return true;
+    }
+    let t = title.trim();
+    let stub_title = t.is_empty() || t.starts_with("CLI ");
+    stub_title && num_messages <= 2
+}
+
+fn is_noise_cli_cwd(cwd: Option<&str>) -> bool {
+    let Some(cwd) = cwd.map(normalize_cwd_path).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    cwd.ends_with("/windows/system32")
+        || cwd.ends_with("/system32")
+        || cwd.contains("/workspaces/general")
+}
+
+/// App deleted this chat: tombstone the agent id and remove the CLI directory.
+/// Tombstone remains if the directory is locked (Windows) so import_all cannot
+/// recreate a sidebar row (#1236).
+pub fn forget_app_linked_cli_session(
+    agent_session_id: &str,
+    session_data_mode: &str,
+) -> Result<(), String> {
+    let _ = remember_deleted_cli_id(agent_session_id);
+    if let Err(e) = delete_cli_session(agent_session_id, None, session_data_mode) {
+        tracing::warn!(
+            target: "session",
+            agent = %agent_session_id,
+            "cli session dir not removed after app delete: {e}"
+        );
+    }
+    Ok(())
+}
+
 /// Import all not-yet-linked CLI sessions (capped).
 pub fn import_all_cli_sessions(
     session_data_mode: &str,
@@ -1958,7 +2088,13 @@ pub fn import_all_cli_sessions(
 ) -> Result<Vec<SessionMeta>, String> {
     let list = list_cli_sessions(session_data_mode)?;
     let mut imported = Vec::new();
-    for s in list.into_iter().filter(|s| !s.already_linked).take(limit) {
+    for s in list
+        .into_iter()
+        .filter(|s| !s.already_linked)
+        .filter(|s| !is_deleted_cli_id(&s.agent_session_id))
+        .filter(|s| !should_skip_bulk_cli_import(&s.title, s.cwd.as_deref(), s.num_messages))
+        .take(limit)
+    {
         match import_cli_session(&s.agent_session_id, Some(&s.dir), None, session_data_mode) {
             Ok(m) => imported.push(m),
             Err(e) => tracing::warn!("cli import skip {}: {e}", s.agent_session_id),
@@ -2201,6 +2337,15 @@ mod tests {
         assert_eq!(atts.len(), 1);
         assert_eq!(atts[0].path, "/Users/me/Downloads/Codex 安装教程文档.md");
         assert_eq!(atts[0].name, "Codex 安装教程文档.md");
+    }
+
+    #[test]
+    fn parse_at_path_attachments_keeps_at_goal_prose() {
+        let raw = "两句说明\n\n@/goal 你再检查优化一下吧\n\n@/tmp/notes.md";
+        let (text, atts) = parse_at_path_attachments(raw);
+        assert_eq!(text, "两句说明\n\n@/goal 你再检查优化一下吧");
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].path, "/tmp/notes.md");
     }
 
     #[test]
@@ -2554,7 +2699,11 @@ mod tests {
         let dir = home.join("sessions").join(cwd_enc).join(agent_id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("summary.json"), r#"{"generated_title":"t"}"#).unwrap();
-        fs::write(dir.join("chat_history.jsonl"), "").unwrap();
+        fs::write(
+            dir.join("chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":\"hi\"}\n{\"type\":\"assistant\",\"content\":\"ok\"}\n",
+        )
+        .unwrap();
         dir
     }
 
@@ -2655,6 +2804,140 @@ mod tests {
         assert!(cwd_paths_match(r"C:\Work\App", "c:/work/app"));
         assert!(!cwd_paths_match("/a/b", "/a/c"));
         assert!(!cwd_paths_match("", "/a"));
+    }
+
+    #[test]
+    fn skip_bulk_import_drops_stubs_and_noise_cwds() {
+        assert!(should_skip_bulk_cli_import("CLI ab12cd34", None, 1));
+        assert!(should_skip_bulk_cli_import("", None, 2));
+        assert!(should_skip_bulk_cli_import(
+            "real title",
+            Some(r"C:\Windows\System32"),
+            20
+        ));
+        assert!(should_skip_bulk_cli_import(
+            "real title",
+            Some("/Users/me/Library/Application Support/com.grokapp.grok-app/workspaces/general"),
+            4
+        ));
+        assert!(!should_skip_bulk_cli_import(
+            "Fix login",
+            Some("/Users/me/proj"),
+            2
+        ));
+        assert!(!should_skip_bulk_cli_import(
+            "CLI leftover",
+            Some("/Users/me/proj"),
+            12
+        ));
+    }
+
+    #[test]
+    fn import_all_does_not_resurrect_deleted_app_session() {
+        use crate::paths::APP_HOME_ENV_LOCK;
+
+        let _guard = APP_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let app_home = std::env::temp_dir().join(format!("cli-resurrect-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&app_home);
+        fs::create_dir_all(&app_home).unwrap();
+        std::env::set_var("GROK_APP_HOME", &app_home);
+        let _ = crate::paths::ensure_app_dirs();
+
+        let agent_home = crate::paths::agent_home_dir();
+        let agent_id = "agent-resurrect-aaaa";
+        let dir = make_fake_cli_session(&agent_home, agent_id);
+
+        let imported =
+            import_cli_session(agent_id, Some(dir.to_str().unwrap()), None, "independent")
+                .expect("import");
+        assert_eq!(imported.agent_session_id.as_deref(), Some(agent_id));
+
+        forget_app_linked_cli_session(agent_id, "independent").expect("forget cli");
+        crate::store::delete_session(&imported.id).expect("delete app");
+
+        assert!(!dir.exists(), "CLI dir should be gone");
+        let again = import_all_cli_sessions("independent", 50).expect("import all");
+        assert!(
+            again.is_empty(),
+            "bulk import resurrected {:?}",
+            again.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            crate::store::load_sessions_index()
+                .iter()
+                .all(|s| s.agent_session_id.as_deref() != Some(agent_id)),
+            "index grew a new row for the deleted agent id"
+        );
+
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&app_home);
+    }
+
+    #[test]
+    fn import_all_skips_tombstoned_id_even_if_cli_dir_remains() {
+        use crate::paths::APP_HOME_ENV_LOCK;
+
+        let _guard = APP_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let app_home = std::env::temp_dir().join(format!("cli-tombstone-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&app_home);
+        fs::create_dir_all(&app_home).unwrap();
+        std::env::set_var("GROK_APP_HOME", &app_home);
+        let _ = crate::paths::ensure_app_dirs();
+
+        let agent_home = crate::paths::agent_home_dir();
+        let agent_id = "agent-tombstone-cccc";
+        let dir = make_fake_cli_session(&agent_home, agent_id);
+        let imported =
+            import_cli_session(agent_id, Some(dir.to_str().unwrap()), None, "independent")
+                .expect("import");
+        remember_deleted_cli_id(agent_id).expect("tombstone");
+        crate::store::delete_session(&imported.id).expect("delete app");
+        assert!(dir.is_dir(), "CLI dir still on disk");
+
+        let again = import_all_cli_sessions("independent", 50).expect("import all");
+        assert!(
+            again.is_empty(),
+            "tombstone should block resurrection, got {}",
+            again.len()
+        );
+
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&app_home);
+    }
+
+    #[test]
+    fn archived_row_is_already_linked_so_import_all_skips() {
+        use crate::paths::APP_HOME_ENV_LOCK;
+
+        let _guard = APP_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let app_home = std::env::temp_dir().join(format!("cli-arch-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&app_home);
+        fs::create_dir_all(&app_home).unwrap();
+        std::env::set_var("GROK_APP_HOME", &app_home);
+        let _ = crate::paths::ensure_app_dirs();
+
+        let agent_home = crate::paths::agent_home_dir();
+        let agent_id = "agent-archived-bbbb";
+        let dir = make_fake_cli_session(&agent_home, agent_id);
+        let imported =
+            import_cli_session(agent_id, Some(dir.to_str().unwrap()), None, "independent")
+                .expect("import");
+        crate::store::set_session_archived(&imported.id, true).expect("archive");
+
+        let list = list_cli_sessions("independent").expect("list");
+        let row = list
+            .iter()
+            .find(|s| s.agent_session_id == agent_id)
+            .unwrap();
+        assert!(row.already_linked);
+        assert_eq!(row.app_session_id.as_deref(), Some(imported.id.as_str()));
+
+        let again = import_all_cli_sessions("independent", 50).expect("import all");
+        assert!(again.is_empty());
+
+        let _ = crate::store::delete_session(&imported.id);
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&app_home);
     }
 
     #[test]

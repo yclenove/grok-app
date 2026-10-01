@@ -18,6 +18,15 @@ App data root (macOS typical): `~/Library/Application Support/com.grokapp.grok-a
 
 External apps on this machine that need to **list chats and continue one by id** use the local session API — see [session-api.md](./session-api.md). That surface takes a **Grok App session id**, not an agent session id.
 
+**Archive vs delete (shared `GROK_HOME`):**
+
+| Action | App sidebar | CLI `{GROK_HOME}/sessions/.../<agentSessionId>/` | Bulk import |
+|--------|-------------|--------------------------------------------------|-------------|
+| Archive | Hidden (`archived: true`); `agentSessionId` stays linked | Unchanged (terminal `grok sessions list` still shows it). Confirm copy says App-only. | Skipped (`already_linked`) |
+| Delete | Journal + index row removed | Removed after ACP stop; tombstone if the tree is locked | Skipped (tombstone + missing dir) |
+
+New chats in a project inherit that project's multi-root workspace so extra-root write is not bound only to the session that opened the modal (#1233).
+
 ## Problem
 
 Grok App keeps a **UI journal** (`~/.…/sessions/<appSessionId>/messages.json`) separate from the **Agent session** under `GROK_HOME` (`agent-home/sessions/<encoded-cwd>/<agentSessionId>/`).
@@ -168,6 +177,8 @@ This covers load failure, wiped agent dirs, or agent version mismatches.
 ### 3. Soft-respawn
 
 Permission / mode soft-respawn **keeps** `agentSessionId` so the next connect prefers `session/load`. Bootstrap runs only if load fails.
+
+Changing **one chat's provider** (official ↔ custom, or another custom section) clears that chat's `agentSessionId` before the soft-respawn, so `session/load` cannot restore the previous route. Other chats are not recycled. SSH cold start is always the official route.
 
 ### 3a. Move chat to another project
 

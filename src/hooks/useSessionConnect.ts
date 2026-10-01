@@ -33,6 +33,7 @@ import { reconcileSessionState } from "@/lib/sessionPhase";
 import { migrateDraftTurnClock } from "@/lib/turnClock";
 import { isSameView, shouldAdoptView, type ViewFocus } from "@/lib/viewFocus";
 import { useLiveMapWhen } from "@/hooks/useSessionLiveMap";
+import { SESSION_CONNECT_CLAIM_WAIT_MS } from "@/lib/sessionConnectTimeout";
 
 type TFn = ReturnType<typeof createT>;
 
@@ -53,6 +54,12 @@ export type SessionConnectHost = {
   sendInFlightBySessionRef: MutableRefObject<Set<string>>;
   sendEpochBySessionRef: MutableRefObject<Map<string, number>>;
   sessionJsonSchemaRef: MutableRefObject<string | null>;
+  /** Provider picked on a chat that has no row yet. Stamped before connect. */
+  draftComposerRouteRef: MutableRefObject<{
+    providerId: string;
+    modelId: string;
+    effort: string;
+  } | null>;
   currentViewFocus: () => ViewFocus;
   syncViewedTurnClock: (sessionId: string) => void;
   setLocalError: (msg: string | null) => void;
@@ -86,6 +93,7 @@ function emptyHost(): SessionConnectHost {
     sendInFlightBySessionRef: { current: new Set() },
     sendEpochBySessionRef: { current: new Map() },
     sessionJsonSchemaRef: { current: null },
+    draftComposerRouteRef: { current: null },
     currentViewFocus: () => ({ sessionId: null, epoch: 0 }),
     syncViewedTurnClock: noop,
     setLocalError: noop,
@@ -206,7 +214,7 @@ export function useSessionConnect(opts: {
         const waitStart = Date.now();
         while (
           connectingBySessionRef.current.has(connectKey) &&
-          Date.now() - waitStart < 120_000
+          Date.now() - waitStart < SESSION_CONNECT_CLAIM_WAIT_MS
         ) {
           await new Promise((r) => setTimeout(r, 50));
           const live = h.liveHostRef.current;
@@ -219,7 +227,16 @@ export function useSessionConnect(opts: {
             return preferredId;
           }
         }
-        if (connectingBySessionRef.current.has(connectKey)) return null;
+        if (connectingBySessionRef.current.has(connectKey)) {
+          console.warn("[session] connect_claim_timeout", {
+            sessionId: preferredId,
+            budgetMs: SESSION_CONNECT_CLAIM_WAIT_MS,
+          });
+          if (h.viewingSessionIdRef.current === preferredId) {
+            h.setLocalError(h.tr("session.connectClaimTimedOut"));
+          }
+          return null;
+        }
       }
       if (!claimSessionConnection(preferredId)) return null;
       ensureConnectCountRef.current += 1;
@@ -233,6 +250,21 @@ export function useSessionConnect(opts: {
             h.tr("session.new"),
           )) as { id: string; title?: string };
           sessionId = meta.id;
+          const pendingRoute = h.draftComposerRouteRef.current;
+          if (pendingRoute && api.isTauri()) {
+            h.draftComposerRouteRef.current = null;
+            try {
+              await api.composerPrefsSet({
+                sessionId: meta.id,
+                projectId: connectProject?.id ?? null,
+                providerId: pendingRoute.providerId,
+                modelId: pendingRoute.modelId,
+                effort: pendingRoute.effort,
+              });
+            } catch {
+              /* connect still follows the global route if the stamp fails */
+            }
+          }
           const materializedKey = queueSessionKey(sessionId);
           if (!heldConnectKeys.has(materializedKey)) {
             const claims = connectingBySessionRef.current;
@@ -408,7 +440,7 @@ export function useSessionConnect(opts: {
         try {
           await api.sessionStop(sid);
         } catch {
-          /* Host may not have bound ACP yet */
+          /* Stop timed out or Host not bound — still force-connect below. */
         }
       }
       const next = await ensureConnected({ force: true, sessionId: sid });

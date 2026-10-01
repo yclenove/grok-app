@@ -247,6 +247,32 @@ impl SessionManager {
         snap
     }
 
+    /// Whole-row connect write that keeps `provider_id` and `model_id` from
+    /// the index. The in-memory shell is updated to those disk values so a
+    /// later snapshot write cannot put the spawn-time pair back.
+    fn persist_connect_meta(&self, meta: &mut store::SessionMeta) {
+        match store::update_session_meta_preserving_composer(meta) {
+            Ok(written) => {
+                {
+                    let mut guard = self.inner.lock();
+                    if let Some(s) = guard.as_mut() {
+                        if s.app_session_id == written.id {
+                            s.meta.provider_id = written.provider_id.clone();
+                            s.meta.model_id = written.model_id.clone();
+                        }
+                    }
+                }
+                *meta = written;
+            }
+            Err(e) => tracing::warn!(
+                target: "session",
+                session = %meta.id,
+                error = %e,
+                "connect meta write failed"
+            ),
+        }
+    }
+
     pub(super) async fn connect_inner(
         self: &Arc<Self>,
         app: AppHandle,
@@ -277,6 +303,9 @@ impl SessionManager {
             store::create_session(None, Some("New chat".into()), false)
                 .map_err(|e| format!("create session: {e}"))?
         };
+        if let Ok(bound) = crate::workspace_store::bind_default_workspace_if_unbound(&meta.id) {
+            meta = bound;
+        }
 
         // Orphan / missing project_id → keep null (shows under Default workspace).
         // Clear retired system:general bindings if any slip through.
@@ -288,7 +317,7 @@ impl SessionManager {
                 .unwrap_or(false)
         {
             meta.project_id = None;
-            let _ = store::update_session_meta(&meta);
+            self.persist_connect_meta(&mut meta);
         }
 
         let projects = store::load_projects();
@@ -343,7 +372,7 @@ impl SessionManager {
                     p.ssh_alias.as_deref() == Some(alias) && p.path == cwd.to_string_lossy()
                 }) {
                     meta.project_id = Some(p.id.clone());
-                    let _ = store::update_session_meta(&meta);
+                    self.persist_connect_meta(&mut meta);
                 }
             }
         }
@@ -359,14 +388,38 @@ impl SessionManager {
         // Mid-turn policy / effort / proxy changes queue a respawn. If this
         // chat is now idle, drop the old process before the no-op / unpark
         // paths reuse spawn flags (P0-5 / #598).
-        if self.pending_soft_respawn.lock().contains_key(&meta.id) {
+        if self.pending_soft_respawn.lock().contains_key(&meta.id)
+            || self
+                .pending_spawn_flag_invalidations
+                .lock()
+                .contains_key(&meta.id)
+        {
             self.flush_pending_soft_respawn(&app, &meta.id).await;
+            let reset_pending = self
+                .pending_spawn_flag_invalidations
+                .lock()
+                .contains_key(&meta.id);
+            if reset_pending && !self.session_is_busy(&meta.id) {
+                return Err(
+                    "Computer Use cleanup is pending; retry before reconnecting this chat".into(),
+                );
+            }
+            // A deferred spawn-flag reset can clear the resume id during the
+            // flush. Do not reopen it from the pre-flush metadata snapshot.
+            if let Some(refreshed) = store::load_sessions_index()
+                .into_iter()
+                .find(|s| s.id == meta.id)
+            {
+                meta = refreshed;
+            }
         }
 
         // Resolve model / effort / permission / mode for this project+session scope.
         let prefs =
             store::resolve_composer_prefs(meta.project_id.as_deref(), Some(meta.id.as_str()));
         let policy = PermissionPolicy::parse(&prefs.permission_policy);
+        let route =
+            crate::providers::connect_route_id(ssh_alias.is_some(), meta.provider_id.as_deref());
         let agent_model = if ssh_alias.is_some() {
             let m = prefs.model_id.trim();
             if m.is_empty() || crate::providers::is_custom_provider_id(m) {
@@ -375,7 +428,14 @@ impl SessionManager {
                 m.to_string()
             }
         } else {
-            crate::providers::agent_spawn_model_id(&prefs.model_id)
+            crate::providers::spawn_model_for_provider(&route, &prefs.model_id)
+        };
+        // set_model carries this chat's catalog id. Spawn `--model` is the
+        // provider section id (or an official catalog id).
+        let session_model = if ssh_alias.is_some() {
+            agent_model.clone()
+        } else {
+            crate::providers::session_set_model_id_for(&route, &prefs.model_id)
         };
 
         // Pending CLI --fork-session: must cold-spawn so open can call session/fork.
@@ -519,7 +579,11 @@ impl SessionManager {
                 // cannot be hot-patched — kill and fall through to cold spawn.
                 let effort_ok = live.effort.as_deref() == Some(prefs.effort.as_str());
                 let policy_ok = live.policy == policy;
-                if !effort_ok || !policy_ok {
+                let route_ok = live
+                    .acp
+                    .as_ref()
+                    .is_none_or(|acp| acp.route_provider_id() == route);
+                if !effort_ok || !policy_ok || !route_ok {
                     tracing::info!(
                         session = %meta.id,
                         parked_effort = ?live.effort,
@@ -558,7 +622,7 @@ impl SessionManager {
                     if let Some(acp) = live.acp.clone() {
                         if let Some(sid) = live.meta.agent_session_id.clone() {
                             if let Err(e) =
-                                Self::with_soft_rpc_budget(acp.set_model_for(&sid, &agent_model))
+                                Self::with_soft_rpc_budget(acp.set_model_for(&sid, &session_model))
                                     .await
                             {
                                 tracing::warn!("acp set_model on unpark soft-fail: {e}");
@@ -730,17 +794,30 @@ impl SessionManager {
         // Seatbelt/Landlock write root for the process lifetime. Prewarm
         // always starts in `workspaces/general` — never reuse it for a
         // project-bound session (open_session_at cannot widen the sandbox).
+        //
+        // Prewarm also omits folder `--trust`, per-session `--rules`,
+        // `--system-prompt-override`, and `--plugin-dir`. Reusing it for those
+        // connects would silently drop AGENTS.md / session rules.
         if !pending_fork && ssh_alias.is_none() {
+            let project_row_early = meta
+                .project_id
+                .as_deref()
+                .and_then(|pid| store::load_projects().into_iter().find(|p| p.id == pid));
+            let folder_trust_needed = project_row_early.as_ref().is_some_and(|p| p.trusted);
+            let session_spawn_flags_need_cold = Self::session_needs_cold_spawn_for_flags(
+                folder_trust_needed,
+                meta.extra_rules.as_deref(),
+                meta.system_prompt_override.as_deref(),
+                &meta.plugin_dirs,
+            );
             let eff_sandbox = {
-                let project_sandbox = meta.project_id.as_deref().and_then(|pid| {
-                    store::load_projects()
-                        .into_iter()
-                        .find(|p| p.id == pid)
-                        .and_then(|p| p.sandbox_profile)
-                });
-                store::resolve_sandbox_profile(
+                let project_sandbox = project_row_early
+                    .as_ref()
+                    .and_then(|p| p.sandbox_profile.clone());
+                crate::workspace_store::resolve_spawn_sandbox(
                     &settings.sandbox_profile,
                     project_sandbox.as_deref(),
+                    meta.workspace_id.as_deref(),
                 )
             };
             let mut stale_prewarm: Vec<Arc<AcpClient>> = Vec::new();
@@ -755,10 +832,7 @@ impl SessionManager {
                 // auth.json was stripped (#528 intermittent re-login).
                 // Only the ownerless prewarm process is eligible for reuse.
                 // Session-bound ACP processes stay with their App session.
-                let target_custom = matches!(
-                    crate::providers::active_route(),
-                    crate::providers::ActiveRoute::Custom { .. }
-                );
+                let target_custom = !crate::providers::is_session_provider_official(&route);
                 let gate = |alive: bool,
                             p_policy: PermissionPolicy,
                             p_effort: Option<&str>,
@@ -819,89 +893,102 @@ impl SessionManager {
                 // awaited briefly — its CLI has no accumulated actors, so the
                 // session/load that follows is fast instead of the CLI's 5s
                 // old-thread drain.
+                // Skip entirely when this connect needs process-level flags the
+                // ownerless prewarm never received (trust / rules / override /
+                // plugin dirs). Leave the Ready prewarm for a later unbound chat.
+                if session_spawn_flags_need_cold {
+                    rejected.push(
+                        "prewarm: session needs trust/rules/system-prompt/plugin-dirs (cold spawn)"
+                            .into(),
+                    );
+                }
                 let prewarm_wait_deadline =
                     std::time::Instant::now() + std::time::Duration::from_millis(2500);
-                loop {
-                    let taken = {
-                        let mut pw = self.prewarm.lock();
-                        match std::mem::replace(&mut *pw, PrewarmState::None) {
-                            PrewarmState::Ready(p) => {
-                                let process_cwd = p.acp.cwd().to_string_lossy();
-                                let target_cwd = cwd.to_string_lossy();
-                                if !Self::reuse_sandbox_cwd_ok(
-                                    p.sandbox_profile.as_deref(),
-                                    process_cwd.as_ref(),
-                                    target_cwd.as_ref(),
-                                ) {
-                                    // Keep the general-workspace prewarm for a
-                                    // later unbound chat; only cold-spawn this
-                                    // project session (#986).
-                                    rejected.push(format!(
-                                        "prewarm: sandbox cwd {process_cwd}≠{target_cwd}"
-                                    ));
-                                    *pw = PrewarmState::Ready(p);
-                                    None
-                                } else if gate(
-                                    p.acp.is_alive(),
-                                    p.policy,
-                                    p.effort.as_deref(),
-                                    p.sandbox_profile.as_deref(),
-                                    p.acp.is_custom_route(),
-                                ) {
-                                    Some((p.acp, p.process_id, p.created_at))
-                                } else {
-                                    // `PrewarmState::Ready` is ownerless, so
-                                    // a gate mismatch cannot be handed back to
-                                    // another session. Drop and explicitly
-                                    // kill it after leaving the map lock; an
-                                    // Arc/Child drop alone does not terminate
-                                    // the CLI process.
-                                    stale_prewarm.push(p.acp.clone());
-                                    rejected.push(format!(
-                                        "prewarm: {}",
-                                        reject_reason(
+                if !session_spawn_flags_need_cold {
+                    loop {
+                        let taken = {
+                            let mut pw = self.prewarm.lock();
+                            match std::mem::replace(&mut *pw, PrewarmState::None) {
+                                PrewarmState::Ready(p) => {
+                                    let process_cwd = p.acp.cwd().to_string_lossy();
+                                    let target_cwd = cwd.to_string_lossy();
+                                    if !Self::reuse_sandbox_cwd_ok(
+                                        p.sandbox_profile.as_deref(),
+                                        process_cwd.as_ref(),
+                                        target_cwd.as_ref(),
+                                    ) {
+                                        // Keep the general-workspace prewarm for a
+                                        // later unbound chat; only cold-spawn this
+                                        // project session (#986).
+                                        rejected.push(format!(
+                                            "prewarm: sandbox cwd {process_cwd}≠{target_cwd}"
+                                        ));
+                                        *pw = PrewarmState::Ready(p);
+                                        None
+                                    } else if p.acp.route_provider_id() == route
+                                        && gate(
                                             p.acp.is_alive(),
                                             p.policy,
                                             p.effort.as_deref(),
                                             p.sandbox_profile.as_deref(),
                                             p.acp.is_custom_route(),
                                         )
-                                    ));
+                                    {
+                                        Some((p.acp, p.process_id, p.created_at))
+                                    } else {
+                                        // `PrewarmState::Ready` is ownerless, so
+                                        // a gate mismatch cannot be handed back to
+                                        // another session. Drop and explicitly
+                                        // kill it after leaving the map lock; an
+                                        // Arc/Child drop alone does not terminate
+                                        // the CLI process.
+                                        stale_prewarm.push(p.acp.clone());
+                                        rejected.push(format!(
+                                            "prewarm: {}",
+                                            reject_reason(
+                                                p.acp.is_alive(),
+                                                p.policy,
+                                                p.effort.as_deref(),
+                                                p.sandbox_profile.as_deref(),
+                                                p.acp.is_custom_route(),
+                                            )
+                                        ));
+                                        None
+                                    }
+                                }
+                                PrewarmState::Spawning { since }
+                                    if since.elapsed() < std::time::Duration::from_millis(2500) =>
+                                {
+                                    *pw = PrewarmState::Spawning { since };
+                                    None
+                                }
+                                other => {
+                                    *pw = other;
                                     None
                                 }
                             }
-                            PrewarmState::Spawning { since }
-                                if since.elapsed() < std::time::Duration::from_millis(2500) =>
-                            {
-                                *pw = PrewarmState::Spawning { since };
-                                None
-                            }
-                            other => {
-                                *pw = other;
-                                None
-                            }
+                        };
+                        if let Some((acp, pid, at)) = taken {
+                            best = Some((acp, pid, at));
+                            break;
                         }
-                    };
-                    if let Some((acp, pid, at)) = taken {
-                        best = Some((acp, pid, at));
-                        break;
+                        let still_spawning =
+                            matches!(*self.prewarm.lock(), PrewarmState::Spawning { .. });
+                        if !still_spawning || std::time::Instant::now() >= prewarm_wait_deadline {
+                            break;
+                        }
+                        // Brief yield so the prewarm task can progress (it spawns
+                        // outside connect_lock, so this cannot deadlock).
+                        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                     }
-                    let still_spawning =
-                        matches!(*self.prewarm.lock(), PrewarmState::Spawning { .. });
-                    if !still_spawning || std::time::Instant::now() >= prewarm_wait_deadline {
-                        break;
-                    }
-                    // Brief yield so the prewarm task can progress (it spawns
-                    // outside connect_lock, so this cannot deadlock).
-                    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-                }
-                // A session-bound ACP process is never transferred to another
-                // App session. The old parked/background reuse path shared an
-                // `Arc<AcpClient>` while leaving the original owner registered;
-                // capacity and event routing could then kill or apply events to
-                // the wrong tenant. Only the ownerless prewarm process above is
-                // eligible for reuse. The target session is opened on a fresh
-                // process once its own parked entry is no longer focused.
+                } // if !session_spawn_flags_need_cold
+                  // A session-bound ACP process is never transferred to another
+                  // App session. The old parked/background reuse path shared an
+                  // `Arc<AcpClient>` while leaving the original owner registered;
+                  // capacity and event routing could then kill or apply events to
+                  // the wrong tenant. Only the ownerless prewarm process above is
+                  // eligible for reuse. The target session is opened on a fresh
+                  // process once its own parked entry is no longer focused.
                 if best.is_none() && !rejected.is_empty() {
                     tracing::warn!(
                         target: "session",
@@ -927,9 +1014,22 @@ impl SessionManager {
                     "connect prewarm reuse (ownerless process, no cross-session sharing)"
                 );
                 // #528: warm reuse skips cold spawn (no prepare_route_auth).
-                // Re-apply route auth so official OIDC is on disk after any
-                // intervening custom-route clear, and nested tools see keys.
-                crate::providers::prepare_route_auth_for_agent();
+                // Shared-mode official uses ~/.grok and must not copy OIDC into
+                // agent-home. Independent mode still prepares like a cold spawn
+                // (no conflict skip — skipping can leave the official chat
+                // signed out at session/load).
+                let process_custom = acp.is_custom_route();
+                let mode = store::load_settings().session_data_mode;
+                if crate::providers::warm_reuse_should_prepare_auth(&mode, process_custom) {
+                    let _route_auth = crate::providers::route_auth_lock().lock().await;
+                    crate::providers::prepare_route_auth_for_agent();
+                } else {
+                    tracing::info!(
+                        target: "session",
+                        session = %meta.id,
+                        "connect warm-reuse skipped agent-home auth rewrite (shared official uses ~/.grok)"
+                    );
+                }
                 // P0: bind the live shell to the reused process *before*
                 // session/load. Load replays stream/tool notifications while
                 // open awaits; if live still held a temporary process_id,
@@ -966,6 +1066,7 @@ impl SessionManager {
                 match open_result {
                     Ok((agent_sid, resumed)) => {
                         let need_bootstrap = !resumed && journal_has_history;
+                        let acp_align = acp.clone();
                         {
                             let mut guard = self.inner.lock();
                             if let Some(s) = guard.as_mut() {
@@ -984,7 +1085,7 @@ impl SessionManager {
                                 meta = s.meta.clone();
                             }
                         }
-                        let _ = store::update_session_meta(&meta);
+                        self.persist_connect_meta(&mut meta);
                         let snap = self.snapshot();
                         Self::emit_state(&app, &snap);
                         tracing::info!(
@@ -994,6 +1095,33 @@ impl SessionManager {
                             resumed,
                             "connect warm-reuse ok"
                         );
+                        // #1000: mirror the cold-spawn and unpark paths.
+                        // session/load restores the chat's own persisted
+                        // model/mode, and the prewarm process was spawned with
+                        // whatever prefs were current at prewarm time. Without
+                        // this a resumed chat silently kept running on its old
+                        // model while the composer and live shell showed the
+                        // resolved one.
+                        let session_model = connect_set_model_argument(
+                            ssh_alias.is_some(),
+                            &route,
+                            &session_model,
+                            disk_session_model_id(&meta.id).as_deref(),
+                        );
+                        if let Err(e) = Self::with_soft_rpc_budget(
+                            acp_align.set_model_for(&agent_sid, &session_model),
+                        )
+                        .await
+                        {
+                            tracing::warn!("acp set_model after warm reuse soft-fail: {e}");
+                        }
+                        if let Err(e) = Self::with_soft_rpc_budget(
+                            acp_align.set_mode_for(&agent_sid, &prefs.mode),
+                        )
+                        .await
+                        {
+                            tracing::warn!("acp set_mode after warm reuse soft-fail: {e}");
+                        }
                         emit_host_exit_heal(&app, &meta.id);
                         // Refresh the prewarm slot with a FRESH process: the
                         // one we just consumed now hosts this session's actor,
@@ -1113,14 +1241,24 @@ impl SessionManager {
             std::path::PathBuf::from(probe.path.unwrap())
         };
         // Effective sandbox: project override > app Settings (affects --sandbox / GROK_SANDBOX).
-        let project_sandbox = meta.project_id.as_deref().and_then(|pid| {
-            store::load_projects()
-                .into_iter()
-                .find(|p| p.id == pid)
-                .and_then(|p| p.sandbox_profile)
-        });
-        let effective_sandbox =
-            store::resolve_sandbox_profile(&settings.sandbox_profile, project_sandbox.as_deref());
+        let project_row = meta
+            .project_id
+            .as_deref()
+            .and_then(|pid| store::load_projects().into_iter().find(|p| p.id == pid));
+        let project_sandbox = project_row.as_ref().and_then(|p| p.sandbox_profile.clone());
+        let folder_trust = project_row.as_ref().is_some_and(|p| p.trusted) && ssh_alias.is_none();
+        let sandbox_for_spawn = crate::workspace_store::resolve_spawn_sandbox(
+            &settings.sandbox_profile,
+            project_sandbox.as_deref(),
+            meta.workspace_id.as_deref(),
+        );
+        if let Some(wid) = meta.workspace_id.as_deref() {
+            if let Some(ws) = crate::workspace_store::get_workspace(wid) {
+                for root in &ws.roots {
+                    crate::path_scope::grant_path(std::path::Path::new(&root.path));
+                }
+            }
+        }
         // One-shot CLI --fork-session: only when meta asks and we have a source id.
         let fork_agent = meta.fork_agent_session
             && resume_agent_sid
@@ -1128,11 +1266,19 @@ impl SessionManager {
                 .map(str::trim)
                 .is_some_and(|s| !s.is_empty());
         let spawn_opts = crate::acp_client::SpawnOptions {
-            model_id: Some(agent_model.clone()),
+            // Custom spawn `--model` is the section id. Pass the catalog id here
+            // so a Grok Build proxy section can bind that model; generic custom
+            // still spawns with the section id inside `AcpClient::spawn`.
+            model_id: Some(if crate::providers::is_session_provider_official(&route) {
+                agent_model.clone()
+            } else {
+                prefs.model_id.clone()
+            }),
+            route_provider_id: Some(cold_start_route_provider_id(ssh_alias.as_deref(), &route)),
             effort: Some(prefs.effort.clone()),
             permission_policy: Some(prefs.permission_policy.clone()),
             product_mode: Some(prefs.mode.clone()),
-            sandbox_profile: Some(effective_sandbox),
+            sandbox_profile: Some(sandbox_for_spawn),
             json_schema: meta
                 .json_schema
                 .as_ref()
@@ -1167,6 +1313,7 @@ impl SessionManager {
             grok_home_override: None,
             empty_mcp_servers: false,
             ssh_alias: ssh_alias.clone(),
+            folder_trust,
         };
 
         let cwd_str = cwd.to_string_lossy().to_string();
@@ -1439,7 +1586,7 @@ impl SessionManager {
                         meta = s.meta.clone();
                     }
                 }
-                let _ = store::update_session_meta(&meta);
+                self.persist_connect_meta(&mut meta);
                 let snap = self.snapshot();
                 Self::emit_state(&app, &snap);
                 // Child is live/Ready — drop it from the abort-reap list before
@@ -1462,7 +1609,13 @@ impl SessionManager {
                 // session/set_model after session/new. Spawn `--model` alone is not
                 // enough when the composer id is an App `app_models` catalog id that
                 // CLI spawn resolves differently from ACP set_model.
-                if let Err(e) = Self::with_soft_rpc_budget(client.set_model(&agent_model)).await {
+                let session_model = connect_set_model_argument(
+                    ssh_alias.is_some(),
+                    &route,
+                    &session_model,
+                    disk_session_model_id(&meta.id).as_deref(),
+                );
+                if let Err(e) = Self::with_soft_rpc_budget(client.set_model(&session_model)).await {
                     tracing::warn!("acp set_model after session open soft-fail: {e}");
                 }
                 // A process may have been restarted by an external crash or
@@ -1889,6 +2042,21 @@ impl SessionManager {
             && p_custom_route == target_custom_route
     }
 
+    /// Ownerless prewarm never receives these process-level flags — force cold spawn.
+    pub(super) fn session_needs_cold_spawn_for_flags(
+        folder_trust: bool,
+        extra_rules: Option<&str>,
+        system_prompt_override: Option<&str>,
+        plugin_dirs: &[String],
+    ) -> bool {
+        folder_trust
+            || extra_rules.map(str::trim).is_some_and(|s| !s.is_empty())
+            || system_prompt_override
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+            || !plugin_dirs.is_empty()
+    }
+
     /// Whether warm-reuse is safe for OS sandbox vs spawn cwd (#986).
     ///
     /// `off` does not lock filesystem roots to spawn cwd, so a different
@@ -1992,10 +2160,130 @@ pub(crate) fn should_kill_parked_after_flag_mismatch(
     !process_blocked_for_warm_reuse(process_id, busy_process_ids)
 }
 
+/// Route id stored on a cold-started ACP process.
+///
+/// SSH sessions are official-only. `None` follows `active_route()` and would
+/// prepare a custom global relay's auth for a remote official chat.
+/// `session/set_model` id for a connect that already spawned.
+///
+/// A model saved on the row after spawn wins. Empty disk keeps the id this
+/// handshake already resolved.
+pub(crate) fn connect_set_model_argument(
+    ssh: bool,
+    route: &str,
+    spawned: &str,
+    disk_model: Option<&str>,
+) -> String {
+    let Some(raw) = disk_model.map(str::trim).filter(|s| !s.is_empty()) else {
+        return spawned.to_string();
+    };
+    if ssh {
+        if crate::providers::is_custom_provider_id(raw) {
+            return crate::providers::OFFICIAL_CATALOG_MODEL.to_string();
+        }
+        return raw.to_string();
+    }
+    crate::providers::session_set_model_id_for(route, raw)
+}
+
+fn disk_session_model_id(session_id: &str) -> Option<String> {
+    store::load_sessions_index()
+        .into_iter()
+        .find(|s| s.id == session_id)
+        .and_then(|s| s.model_id)
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+}
+
+pub(super) fn cold_start_route_provider_id(ssh_alias: Option<&str>, session_route: &str) -> String {
+    if ssh_alias.is_some() {
+        crate::providers::SESSION_PROVIDER_OFFICIAL.to_string()
+    } else {
+        session_route.to_string()
+    }
+}
+
 #[cfg(test)]
 mod connect_preserve_tests {
     use super::*;
     use crate::store::SessionMeta;
+
+    #[test]
+    fn ssh_cold_start_route_is_official() {
+        assert_eq!(
+            cold_start_route_provider_id(Some("devbox"), "relay-b"),
+            crate::providers::SESSION_PROVIDER_OFFICIAL
+        );
+        assert_eq!(
+            cold_start_route_provider_id(Some("devbox"), "official"),
+            crate::providers::SESSION_PROVIDER_OFFICIAL
+        );
+        assert_eq!(cold_start_route_provider_id(None, "relay-b"), "relay-b");
+        assert_eq!(
+            cold_start_route_provider_id(None, crate::providers::SESSION_PROVIDER_OFFICIAL),
+            crate::providers::SESSION_PROVIDER_OFFICIAL
+        );
+    }
+
+    #[test]
+    fn set_model_after_ready_uses_the_model_saved_on_disk() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-set-model-disk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("temp home");
+        let previous = std::env::var_os("GROK_APP_HOME");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let _ = crate::paths::ensure_app_dirs();
+
+        assert_eq!(
+            connect_set_model_argument(false, "official", "grok-4.7", None),
+            "grok-4.7",
+            "no disk model keeps the spawn-time id"
+        );
+        assert_eq!(
+            connect_set_model_argument(false, "official", "grok-4.7", Some("  ")),
+            "grok-4.7"
+        );
+        assert_eq!(
+            connect_set_model_argument(false, "official", "grok-4.7", Some("grok-4.5")),
+            "grok-4.5",
+            "a model saved after Ready replaces the spawn-time id"
+        );
+
+        let session =
+            crate::store::create_session(None, Some("chat".into()), false).expect("session");
+        crate::store::save_composer_prefs(
+            None,
+            Some(&session.id),
+            Some("grok-4.5".into()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("save model");
+        let disk = disk_session_model_id(&session.id);
+        assert_eq!(disk.as_deref(), Some("grok-4.5"));
+        assert_eq!(
+            connect_set_model_argument(false, "official", "grok-4.7", disk.as_deref()),
+            "grok-4.5"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("GROK_APP_HOME", value),
+            None => std::env::remove_var("GROK_APP_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn disconnected_never_preserves_even_when_busy_flags_stuck() {
@@ -2129,6 +2417,10 @@ mod connect_preserve_tests {
                 fork_agent_session: false,
                 fork_rewind_prompt_index: None,
                 no_ask_user: None,
+                workspace_id: None,
+                workspace_root_snapshot: None,
+                workspace_capability: None,
+                provider_id: None,
             },
             fsm,
             backend: "grok_agent_stdio".into(),
@@ -2225,6 +2517,10 @@ mod connect_preserve_tests {
                 fork_agent_session: false,
                 fork_rewind_prompt_index: None,
                 no_ask_user: None,
+                workspace_id: None,
+                workspace_root_snapshot: None,
+                workspace_capability: None,
+                provider_id: None,
             },
             fsm,
             backend: "grok_agent_stdio".into(),
@@ -2420,6 +2716,46 @@ mod reuse_gate_tests {
             Some("read-only"),
             general,
             project
+        ));
+    }
+
+    #[test]
+    fn session_needs_cold_spawn_when_trust_or_rules_present() {
+        assert!(!SessionManager::session_needs_cold_spawn_for_flags(
+            false,
+            None,
+            None,
+            &[]
+        ));
+        assert!(SessionManager::session_needs_cold_spawn_for_flags(
+            true,
+            None,
+            None,
+            &[]
+        ));
+        assert!(SessionManager::session_needs_cold_spawn_for_flags(
+            false,
+            Some(" always write tests "),
+            None,
+            &[]
+        ));
+        assert!(SessionManager::session_needs_cold_spawn_for_flags(
+            false,
+            None,
+            Some("you are terse"),
+            &[]
+        ));
+        assert!(SessionManager::session_needs_cold_spawn_for_flags(
+            false,
+            None,
+            None,
+            &[String::from("/tmp/plugin")]
+        ));
+        assert!(!SessionManager::session_needs_cold_spawn_for_flags(
+            false,
+            Some("   \n"),
+            Some(""),
+            &[]
         ));
     }
 

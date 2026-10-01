@@ -23,15 +23,19 @@ import { isImagePath, mergeAttachments } from "@/lib/attachments";
 import { chatHasUpdate, loadRecentAttachIds, lookupChatStatus, lookupChatTitle } from "@/lib/chatAttach";
 import { type PermissionPolicyId } from "@/lib/grokCatalog";
 import { removeRecentPrompt } from "@/lib/recentPromptHistory";
-import { queuePreviewText, shouldEnqueueSend, type QueuedSend } from "@/lib/sendQueue";
+import { queuePreviewText, shouldEnqueueSend } from "@/lib/sendQueue";
 import type { SlashItem } from "@/lib/slashCatalog";
+import { sessionGoalClear } from "@/lib/goalClear";
 import { canType } from "@/lib/session";
 import { resolveVoiceMicChrome, voiceMicLabelMessageKey } from "@/lib/voiceDictation";
 import { createPortal } from "react-dom";
+import type { WorkbenchComposerColumnProps } from "@/app/WorkbenchComposerColumn";
 
-export type WorkbenchComposerShellProps = {
-  [key: string]: any;
-};
+/**
+ * The shell receives the composer column's full prop bag via `{...p}`
+ * spread; reusing its type keeps the seam compiler-checked end to end.
+ */
+export type WorkbenchComposerShellProps = WorkbenchComposerColumnProps;
 
 export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
   const {
@@ -218,7 +222,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                     </div>
                   ) : null}
                   <ul className="composer__queue-list">
-                    {sendQueue.activeQueue.map((item: QueuedSend, idx: number) => {
+                    {sendQueue.activeQueue.map((item, idx) => {
                       const queueLen = sendQueue.activeQueue.length;
                       const rowBusy =
                         guidingQueueItemId === item.id ||
@@ -336,12 +340,12 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                 <ComposerQuoteCards
                   quotes={quotes}
                   onCommentChange={(id, comment) =>
-                    setQuotes((prev: any) =>
-                      prev.map((q: any) => (q.id === id ? { ...q, comment } : q)),
+                    setQuotes((prev) =>
+                      prev.map((q) => (q.id === id ? { ...q, comment } : q)),
                     )
                   }
                   onRemove={(id) =>
-                    setQuotes((prev: any) => prev.filter((q: any) => q.id !== id))
+                    setQuotes((prev) => prev.filter((q) => q.id !== id))
                   }
                   labels={{
                     list: tr("composer.quotes"),
@@ -360,7 +364,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                     n: String(attachments.length + chatAttachments.length),
                   })}
                 >
-                  {chatAttachments.map((c: any) => (
+                  {chatAttachments.map((c) => (
                     <ChatRefChip
                       key={c.sessionId}
                       title={
@@ -376,7 +380,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       metaTitle={tr("attachChat.scopeHint")}
                       stale={chatHasUpdate(c, sessions)}
                       onOpen={() => {
-                        const row = sessions.find((s: any) => s.id === c.sessionId);
+                        const row = sessions.find((s) => s.id === c.sessionId);
                         if (!row) {
                           showToast(tr("attachChat.missing"), 2400);
                           return;
@@ -390,22 +394,22 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       archivedLabel={tr("attachChat.archived")}
                     />
                   ))}
-                  {attachments.map((a: any) => (
+                  {attachments.map((a) => (
                     <AttachmentCard
                       key={a.path}
                       attachment={a}
                       variant="chip"
                       labels={attachLabels}
                       galleryPaths={attachments
-                        .filter((x: any) => !x.isDir && isImagePath(x.path))
-                        .map((x: any) => x.path)}
-                      onRemove={(att: any) =>
-                        setAttachments((prev: any) =>
-                          prev.filter((x: any) => x.path !== att.path),
+                        .filter((x) => !x.isDir && isImagePath(x.path))
+                        .map((x) => x.path)}
+                      onRemove={(att) =>
+                        setAttachments((prev) =>
+                          prev.filter((x) => x.path !== att.path),
                         )
                       }
-                      onAddToComposer={(att: any) =>
-                        setAttachments((prev: any) => mergeAttachments(prev, [att]))
+                      onAddToComposer={(att) =>
+                        setAttachments((prev) => mergeAttachments(prev, [att]))
                       }
                     />
                   ))}
@@ -424,7 +428,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       liveSlash.present ? slashFilterQuery : undefined
                     }
                     kindFilter={slashKindFilter}
-                    onKindFilterChange={(k: any) => {
+                    onKindFilterChange={(k) => {
                       setSlashKindFilter(k);
                       setSlashActiveIndex(0);
                     }}
@@ -567,15 +571,15 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                         });
                       }
                     }}
-                    onSelect={(entry: any) =>
+                    onSelect={(entry) =>
                       applyPromptHistoryEntry(entry, {
                         scope: promptHistoryScope,
                       })
                     }
                     onRequestClearRecent={() => setPromptHistoryClearOpen(true)}
-                    onRemoveRecent={(historyIndex: any) => {
+                    onRemoveRecent={(historyIndex) => {
                       setRecentPromptHistory(removeRecentPrompt(historyIndex));
-                      setPromptHistoryActive((i: any) => Math.max(0, i));
+                      setPromptHistoryActive((i) => Math.max(0, i));
                     }}
                     onClose={closePromptHistory}
                     style={{
@@ -619,7 +623,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                     aria-label={tr("composer.add")}
                     onClick={() => {
                       if (phoneLayout) {
-                        setPhoneToolsOpen((v: any) => !v);
+                        setPhoneToolsOpen((v) => !v);
                         closeComposerMenu();
                         return;
                       }
@@ -639,14 +643,14 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       type="button"
                       className={
                         "icon-btn" +
-                        (sideWorkbench.tabs.some((t: any) => t.kind === "skills") &&
+                        (sideWorkbench.tabs.some((t) => t.kind === "skills") &&
                         !layout.asideCollapsed
                           ? " is-open"
                           : "")
                       }
                       aria-label={tr("composer.skillsPicker")}
                       aria-pressed={
-                        sideWorkbench.tabs.some((t: any) => t.kind === "skills") &&
+                        sideWorkbench.tabs.some((t) => t.kind === "skills") &&
                         !layout.asideCollapsed
                       }
                       onClick={() => openSideSkillsPanel()}
@@ -696,7 +700,10 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       }}
                       onMode={(v) => {
                         setMode(v);
-                        if (v === "plan") setGoalMode(false);
+                        if (v === "plan") {
+                          setGoalMode(false);
+                          sessionGoalClear.arm(session.sessionId, session.state);
+                        }
                         void api
                           .composerPrefsSet({
                             projectId: activeProject?.id ?? null,
@@ -714,7 +721,13 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                         <button
                           type="button"
                           className="chip chip--goal"
-                          onClick={() => setGoalMode(false)}
+                          onClick={() => {
+                            setGoalMode(false);
+                            sessionGoalClear.arm(
+                              session.sessionId,
+                              session.state,
+                            );
+                          }}
                           aria-label={tr("composer.goalClear")}
                         >
                           <IconImagine size={14} />

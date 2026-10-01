@@ -95,10 +95,14 @@ export const zhChat = {
   "chat.thinkingLabel": "思考中",
   /** 进行中裸思考折叠头：思考中 + 计时（与工作中对称）。 */
   "chat.thinkingFor": "思考中 {duration}",
+  "chat.waitingFirstToken": "仍在等待模型首个输出…",
+  "chat.providerRetrying": "中转重试 {attempt}/{max}",
+  "chat.providerRetryingWithReason": "中转重试 {attempt}/{max}：{reason}",
   /** 已完成工作阶段 + 时长（与思考了对称）。 */
   "chat.workedFor": "工作了 {duration}",
   /** 无时长时的已完成折叠头（统一「工作了」，不用「已工作/工作」）。 */
   "chat.worked": "工作了",
+  "chat.phaseErrorsMore": "还有 {n} 个失败",
   /** 进行中工作阶段 + 计时。 */
   "chat.workingFor": "工作中 {duration}",
   "chat.working": "工作中",
@@ -155,6 +159,10 @@ export const zhChat = {
   "chat.codeWrap": "启用自动换行",
   "chat.codeUnwrap": "取消自动换行",
   "chat.lineNumbers": "行号",
+  "chat.mermaidSource": "查看源码",
+  "chat.mermaidDiagram": "查看图表",
+  "chat.mermaidLoading": "正在渲染图表…",
+  "chat.mermaidError": "无法渲染图表",
   "chat.externalLinkConfirmTitle": "打开外部链接？",
   "chat.externalLinkConfirmMessage": "即将在浏览器中打开：\n{url}",
   "chat.externalLinkOpen": "打开链接",
@@ -177,5 +185,8 @@ export const zhChat = {
   "chat.changedFiles.collapse": "收起 {name} 的差异",
   "chat.changedFiles.openInReview": "在 Review 中打开",
   "chat.changedFiles.noDiffYet": "暂无差异预览 — 可在 Review 中查看完整文件。",
-  "chat.changedFiles.truncated": "显示 {shown} / {total} 行"
+  "chat.changedFiles.truncated": "显示 {shown} / {total} 行",
+  "chat.tool.copyCommand": "复制命令",
+  "chat.tool.copyOutput": "复制输出",
+  "chat.changedFiles.copyDiff": "复制 diff",
 };

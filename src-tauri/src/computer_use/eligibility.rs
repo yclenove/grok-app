@@ -79,6 +79,10 @@ pub fn run_classify_session_gates() -> Result<(), String> {
         fork_agent_session: false,
         fork_rewind_prompt_index: None,
         no_ask_user: None,
+        workspace_id: None,
+        workspace_root_snapshot: None,
+        workspace_capability: None,
+        provider_id: None,
     };
 
     store::save_sessions_index(&[meta("cu-sched", None, true)]).map_err(|e| e.to_string())?;

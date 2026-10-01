@@ -26,6 +26,7 @@ import {
 } from "@/lib/sessionMessageNodes";
 import type { ChatMessage } from "@/lib/session";
 import { cn } from "@/lib/utils";
+import { scrollChildIntoContainer } from "@/lib/grokActivityVirtualize";
 import { scrollPerfDebug } from "@/lib/scrollPerfDebug";
 import {
   MSG_RAIL_SIDE_CHANGE_EVENT,
@@ -129,13 +130,13 @@ export function MessageNodeRail({
       `[data-node-id="${CSS.escape(nodes[activeIndex]!.id)}"]`,
     ) as HTMLElement | null;
     if (!tick) return;
-    const tickTop = tick.offsetTop;
-    const tickBottom = tickTop + tick.offsetHeight;
-    const viewTop = list.scrollTop;
-    const viewBottom = viewTop + list.clientHeight;
-    // Only scroll if outside visible range to avoid redundant scroll operations.
-    if (tickTop < viewTop || tickBottom > viewBottom) {
-      tick.scrollIntoView({ block: "nearest", behavior: "auto" });
+    // Rail list only. scrollIntoView walks the chat scroller and jumps the
+    // transcript when a tick's transformed box sits outside the viewport
+    // during thinking / tool updates.
+    const listBox = list.getBoundingClientRect();
+    const tickBox = tick.getBoundingClientRect();
+    if (tickBox.top < listBox.top || tickBox.bottom > listBox.bottom) {
+      scrollChildIntoContainer(list, tick);
     }
   }, [activeIndex, nodes]);
 
@@ -156,20 +157,26 @@ export function MessageNodeRail({
 
       const viewportRect = viewport.getBoundingClientRect();
       const focusY = viewportRect.top + viewport.clientHeight * 0.28;
+      const scrolling = viewport.dataset.scrolling === "1";
 
-      // Mounted rows beat height estimates — one tall imported assistant
-      // answer otherwise keeps the active tick in the middle of the rail.
-      const mounted = viewport.querySelectorAll<HTMLElement>("[data-message-id]");
-      const rects: { id: string; top: number; bottom: number }[] = [];
-      for (const row of mounted) {
-        const id = row.getAttribute("data-message-id");
-        if (!id || !nodeIdSet.has(id)) continue;
-        const r = row.getBoundingClientRect();
-        if (r.height <= 0) continue;
-        rects.push({ id, top: r.top, bottom: r.bottom });
+      let bestId: string | null = null;
+      let mountedCount = 0;
+      if (!scrolling) {
+        // Mounted rows beat height estimates — one tall imported assistant
+        // answer otherwise keeps the active tick in the middle of the rail.
+        const mounted =
+          viewport.querySelectorAll<HTMLElement>("[data-message-id]");
+        mountedCount = mounted.length;
+        const rects: { id: string; top: number; bottom: number }[] = [];
+        for (const row of mounted) {
+          const id = row.getAttribute("data-message-id");
+          if (!id || !nodeIdSet.has(id)) continue;
+          const r = row.getBoundingClientRect();
+          if (r.height <= 0) continue;
+          rects.push({ id, top: r.top, bottom: r.bottom });
+        }
+        bestId = pickActiveNodeIdFromRects(rects, focusY);
       }
-
-      let bestId = pickActiveNodeIdFromRects(rects, focusY);
 
       if (!bestId && messages && messages.length > 0) {
         const y = viewport.scrollTop + viewport.clientHeight * 0.28;
@@ -179,7 +186,7 @@ export function MessageNodeRail({
       }
 
       const syncDuration = performance.now() - t0;
-      scrollPerfDebug.recordNodeRailSyncTime(syncDuration, mounted.length);
+      scrollPerfDebug.recordNodeRailSyncTime(syncDuration, mountedCount);
 
       if (bestId) {
         setScrollActiveId((prev) => {

@@ -20,10 +20,17 @@ const rehypeKatexCssLoader = () => {
   return () => undefined;
 };
 
+export const MARKDOWN_REMARK_PLUGINS_GFM: NonNullable<Options["remarkPlugins"]> =
+  [remarkGfm];
+
 export const MARKDOWN_REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [
   remarkGfm,
   remarkMath,
 ];
+
+export const MARKDOWN_REHYPE_PLUGINS_NO_MATH: NonNullable<
+  Options["rehypePlugins"]
+> = [];
 
 export const MARKDOWN_REHYPE_PLUGINS: NonNullable<Options["rehypePlugins"]> = [
   rehypeKatexCssLoader,
@@ -38,3 +45,29 @@ export const MARKDOWN_REHYPE_PLUGINS: NonNullable<Options["rehypePlugins"]> = [
     },
   ],
 ];
+
+/**
+ * CommonMark treats `\[` as an escaped `[`, so remark-math never sees
+ * display TeX. Grok (and other Chinese models) also emit one-line
+ * `[ \int ... ]`. Rewrite those to `$` / `$$` before parse (#1238).
+ */
+const LATEX_HINT =
+  /\\(?:int|sum|prod|frac|sqrt|mathrm|mathbf|operatorname|begin|end|left|right|bigl|bigr|Bigl|Bigr|cdot|times|alpha|beta|gamma|pi|theta|infty|partial|nabla|leq|geq|neq|to|rightarrow)|[_^]\s*\{/;
+
+export function normalizeMarkdownMath(src: string): string {
+  if (!src) return src;
+  let out = src.replace(/\\\[([\s\S]+?)\\\]/g, (_m, body: string) => `$$${body}$$`);
+  out = out.replace(/\\\(([\s\S]+?)\\\)/g, (_m, body: string) => `$${body}$`);
+  out = out.replace(
+    /^[ \t]*\[(?!\s*$)(?![^\]]+\]\()([^\n]+)\][ \t]*$/gm,
+    (full, body: string) => (LATEX_HINT.test(body) ? `$$${body}$$` : full),
+  );
+  return out;
+}
+
+/** Skip remark-math + KaTeX when the source has no math delimiters. */
+export function sourceHasMath(src: string): boolean {
+  if (!src) return false;
+  if (/\$\$|\$[^$\n]|\\\[|\\\(/.test(src)) return true;
+  return LATEX_HINT.test(src) && /^[ \t]*\[[^\n]+\][ \t]*$/m.test(src);
+}

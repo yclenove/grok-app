@@ -9,7 +9,11 @@ const windowFit = vi.hoisted(() => ({ ensure: vi.fn(async () => {}) }));
 vi.mock("@/lib/api", () => ({ isDesktopHost: () => false }));
 vi.mock("@/lib/mirrorTransport", () => ({ isMirrorClient: () => false }));
 vi.mock("@/lib/appPlatform", () => ({ detectAppPlatform: () => "windows", usesCustomWindowChrome: () => true }));
-vi.mock("@/lib/windowFit", () => ({ ensureWindowFitsLayout: windowFit.ensure, isWindowFitSuppressed: () => false }));
+vi.mock("@/lib/windowFit", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/windowFit")>(),
+  ensureWindowFitsLayout: windowFit.ensure,
+  isWindowFitSuppressed: () => false,
+}));
 beforeEach(() => {
   windowFit.ensure.mockReset();
   windowFit.ensure.mockResolvedValue(undefined);

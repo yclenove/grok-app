@@ -6,7 +6,6 @@ use tauri::AppHandle;
 
 use crate::acp_client::AcpClient;
 use crate::error::AgentErrorCode;
-use crate::session_fsm::SessionState;
 use crate::store::{self};
 
 use super::*;
@@ -33,11 +32,47 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
+    /// Stop only this chat, then rewind. Other chats stay up.
+    /// If the turn is still busy afterwards, the caller must not touch the journal.
+    async fn stop_turn_before_rewind(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        app_sid: &str,
+    ) -> Result<(), String> {
+        if !self.rewind_blocked_by_running_turn(app_sid) {
+            return Ok(());
+        }
+        self.stop(app.clone(), Some(app_sid.to_string())).await?;
+        if self.rewind_blocked_by_running_turn(app_sid) {
+            return Err("cannot rewind while a turn is running".into());
+        }
+        Ok(())
+    }
+
+    fn drop_agent_link_when_no_user_prompt(
+        &self,
+        app_sid: &str,
+        kept: &[store::ChatMessageStored],
+    ) {
+        if store::user_prompt_count(kept) > 0 {
+            return;
+        }
+        if let Ok(meta) = store::clear_session_agent_link(app_sid) {
+            let _ = self.with_session_mut(app_sid, |s| {
+                s.meta.agent_session_id = meta.agent_session_id.clone();
+                s.meta.fork_agent_session = meta.fork_agent_session;
+            });
+        }
+    }
+
     pub async fn rewind_drop_last_user_turn(
         self: &Arc<Self>,
         app: AppHandle,
         session_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
+        if let Some(target) = session_id.as_deref().filter(|s| !s.trim().is_empty()) {
+            self.stop_turn_before_rewind(&app, target).await?;
+        }
         let (backend, app_sid, acp, agent_sid, user_prompt_count) = {
             let guard = self.inner.lock();
             let s = guard.as_ref().ok_or("no active session")?;
@@ -48,11 +83,6 @@ impl SessionManager {
                         AgentErrorCode::ConnectFailed.as_str()
                     ));
                 }
-            }
-            if s.fsm.state() == SessionState::Streaming
-                || s.fsm.state() == SessionState::AwaitingPermission
-            {
-                return Err("cannot edit while a turn is running".into());
             }
             let msgs = store::load_messages(&s.app_session_id);
             let user_prompt_count = store::user_prompt_count(&msgs);
@@ -102,13 +132,52 @@ impl SessionManager {
                     }
                     Ok(Err(e)) => {
                         agent_rewind_ok = Some(false);
-                        if crate::acp_client::rpc_looks_like_method_not_found(&e) {
+                        if let Some(have) = store::parse_agent_prompt_count_from_rewind_error(&e) {
+                            if let Some(mapped) = store::drop_last_user_prompt_exec_index(have) {
+                                if mapped != exec_index {
+                                    tracing::warn!(
+                                        target: "session",
+                                        error = %e,
+                                        "rewind_execute({exec_index}) out of range (have {have}); retrying mapped {mapped}"
+                                    );
+                                    match tokio::time::timeout(
+                                        REWIND_AGENT_RPC_BUDGET,
+                                        client.rewind_execute_for(sid, mapped, false),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(_)) => {
+                                            agent_rewind_ok = Some(true);
+                                        }
+                                        Ok(Err(e2)) => {
+                                            tracing::warn!(
+                                                target: "session",
+                                                error = %e2,
+                                                "mapped agent rewind failed; leaving local journal intact"
+                                            );
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                target: "session",
+                                                "mapped agent rewind timed out; leaving local journal intact"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if agent_rewind_ok == Some(true) {
+                            tracing::info!(
+                                target: "session",
+                                "rewind_drop_last_user_turn: mapped agent rewind ok"
+                            );
+                        } else if crate::acp_client::rpc_looks_like_method_not_found(&e) {
                             tracing::warn!(
                                 target: "session",
                                 error = %e,
                                 "rewind_execute({exec_index}) failed; leaving local journal intact"
                             );
-                        } else {
+                        } else if agent_rewind_ok != Some(true) {
                             // Fallback: try targeting the last turn itself (some builds discard at/after index).
                             tracing::warn!(
                                 target: "session",
@@ -153,6 +222,7 @@ impl SessionManager {
         let cut = store::cut_index_before_last_user_prompt(&msgs);
         let kept: Vec<_> = msgs.into_iter().take(cut).collect();
         store::replace_messages(&app_sid, &kept)?;
+        self.drop_agent_link_when_no_user_prompt(&app_sid, &kept);
 
         {
             let mut guard = self.inner.lock();
@@ -234,9 +304,7 @@ impl SessionManager {
             }
         };
 
-        if self.rewind_blocked_by_running_turn(&app_sid) {
-            return Err("cannot rewind while a turn is running".into());
-        }
+        self.stop_turn_before_rewind(&app, &app_sid).await?;
 
         let (live_match, backend, acp, agent_sid) = {
             let guard = self.inner.lock();
@@ -283,13 +351,62 @@ impl SessionManager {
                         );
                     }
                     Ok(Err(e)) => {
-                        agent_ok = false;
-                        agent_error = Some(e.clone());
-                        tracing::warn!(
-                            target: "session",
-                            error = %e,
-                            "agent rewind failed; applying local journal truncate only"
-                        );
+                        let mut mapped_ok = false;
+                        if let Some(have) = store::parse_agent_prompt_count_from_rewind_error(&e) {
+                            match store::map_host_rewind_index_to_agent(
+                                target_prompt_index,
+                                user_count,
+                                have,
+                            ) {
+                                Some(mapped) if mapped != target_prompt_index => {
+                                    tracing::warn!(
+                                        target: "session",
+                                        error = %e,
+                                        "agent rewind index {target_prompt_index} out of range (have {have}); retrying mapped {mapped}"
+                                    );
+                                    match tokio::time::timeout(
+                                        REWIND_AGENT_RPC_BUDGET,
+                                        client.rewind_execute_for(&sid, mapped, restore_files),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(_)) => {
+                                            mapped_ok = true;
+                                            tracing::info!(
+                                                target: "session",
+                                                "rewind_to_prompt_index: agent rewound mapped target={mapped}"
+                                            );
+                                        }
+                                        Ok(Err(e2)) => {
+                                            agent_ok = false;
+                                            agent_error = Some(e2);
+                                        }
+                                        Err(_) => {
+                                            agent_ok = false;
+                                            agent_error = Some("agent rewind timed out".into());
+                                        }
+                                    }
+                                }
+                                None => {
+                                    agent_ok = false;
+                                    agent_error = Some(
+                                        "turn exists only in reconstructed history after agent restart"
+                                            .into(),
+                                    );
+                                    mapped_ok = true; // skip generic failure log
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                        if !mapped_ok {
+                            agent_ok = false;
+                            agent_error = Some(e.clone());
+                            tracing::warn!(
+                                target: "session",
+                                error = %e,
+                                "agent rewind failed; applying local journal truncate only"
+                            );
+                        }
                     }
                     Err(_) => {
                         agent_ok = false;
@@ -307,6 +424,14 @@ impl SessionManager {
         } else if !live_match {
             agent_ok = false;
             agent_error = Some("session not live; local journal only".into());
+        }
+
+        // A live agent that rejected rewind must keep the journal and the
+        // bubbles. Truncating anyway is how the next send answers the prompt
+        // the user just removed.
+        if live_match && !agent_ok {
+            return Err(agent_error
+                .unwrap_or_else(|| "agent rewind failed; local journal left intact".into()));
         }
 
         let kept = store::truncate_through_user_prompt(&msgs, target_prompt_index)?;

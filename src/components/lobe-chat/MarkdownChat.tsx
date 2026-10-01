@@ -14,7 +14,11 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import type { Locale } from "@/i18n";
 import {
   MARKDOWN_REHYPE_PLUGINS,
+  MARKDOWN_REHYPE_PLUGINS_NO_MATH,
   MARKDOWN_REMARK_PLUGINS,
+  MARKDOWN_REMARK_PLUGINS_GFM,
+  normalizeMarkdownMath,
+  sourceHasMath,
 } from "@/lib/markdownMath";
 import { createT } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
@@ -41,6 +45,7 @@ import {
   resolveFileToken,
 } from "@/lib/pathRefs";
 import { parsePathLineCitation } from "@/lib/pathLineCitation";
+import { filePathCardTokens } from "@/lib/filePathCardPref";
 import { isExternalHttpUrl } from "@/lib/externalLinkPref";
 import {
   createSoftBufferState,
@@ -56,6 +61,8 @@ import { splitStableMarkdownTail } from "@/lib/markdownTail";
 import { revealInOsLabel } from "@/lib/appPlatform";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
+import { MermaidBlock } from "./MermaidBlock";
+import { isMermaidLanguage } from "@/lib/mermaidRender";
 
 /** Highlight string leaves for in-chat find (markdown-safe). */
 function highlightChildren(
@@ -120,6 +127,38 @@ function textFromChildren(children: ReactNode): string {
 /** Stable identity so ReactMarkdown does not remount the tree every stream tick. */
 export const MARKDOWN_CHAT_REMARK_PLUGINS = MARKDOWN_REMARK_PLUGINS;
 export const MARKDOWN_CHAT_REHYPE_PLUGINS = MARKDOWN_REHYPE_PLUGINS;
+export const MARKDOWN_CHAT_REMARK_PLUGINS_GFM = MARKDOWN_REMARK_PLUGINS_GFM;
+export const MARKDOWN_CHAT_REHYPE_PLUGINS_NO_MATH =
+  MARKDOWN_REHYPE_PLUGINS_NO_MATH;
+
+/**
+ * Streaming prefix view — memoized on the source string so the already-
+ * painted markdown prefix is not re-parsed (and rehype-katex not re-run) on
+ * every ~110ms tail flush. ReactMarkdown itself is synchronous and unmemoized,
+ * so the memo boundary must live one level up.
+ */
+const MarkdownStablePrefix = memo(function MarkdownStablePrefix({
+  source,
+  components,
+}: {
+  source: string;
+  components: Components;
+}) {
+  const math = sourceHasMath(source);
+  return (
+    <ReactMarkdown
+      remarkPlugins={
+        math ? MARKDOWN_CHAT_REMARK_PLUGINS : MARKDOWN_CHAT_REMARK_PLUGINS_GFM
+      }
+      rehypePlugins={
+        math ? MARKDOWN_CHAT_REHYPE_PLUGINS : MARKDOWN_CHAT_REHYPE_PLUGINS_NO_MATH
+      }
+      components={components}
+    >
+      {source}
+    </ReactMarkdown>
+  );
+});
 
 type MdKids = { children?: ReactNode };
 
@@ -348,7 +387,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   // Store-level content notify throttle + markdown parse throttle pace paints.
   const buffered = streaming ? softDisplayed : children || "";
   const liveText = buffered || (streaming ? " " : "");
-  const source = softCloseMarkdown(liveText, streaming);
+  const source = normalizeMarkdownMath(softCloseMarkdown(liveText, streaming));
   const parseMs = resolveStreamMarkdownParseMs(source.length, streaming);
 
   /**
@@ -516,9 +555,12 @@ export const MarkdownChat = memo(function MarkdownChat({
       return null;
     }
 
-    // Prefer multi-segment relative after ellipsis strip for smart open.
-    // Display token: keep short relative when we only have that; abs is for open.
-    const pathToken = resolved || raw || pathForLooks || rawIn;
+    // Display: model-written token. Open/hover: pathMap or host-resolved abs.
+    // Using `resolved` as the chip path made "as written" show `/Users/…`
+    // whenever the session had already touched the file.
+    const { path: writtenPath, absolutePath: resolvedAbsHint } =
+      filePathCardTokens({ written: rawIn, resolved });
+    const pathToken = writtenPath || raw || pathForLooks || rawIn;
     // Video/image only when we have a real multi-segment local absolute.
     // Never promote site-root, single-segment tails, or unresolved relative media.
     const asLocalMedia = (p: string | null | undefined, kind: "image" | "video") => {
@@ -586,9 +628,7 @@ export const MarkdownChat = memo(function MarkdownChat({
     return (
       <FilePathCard
         path={tokenForCard}
-        absolutePath={
-          resolved && isRealLocalAbsolutePath(resolved) ? resolved : undefined
-        }
+        absolutePath={resolvedAbsHint}
         projectPath={projectPath}
         sshAlias={sshAlias}
         kind="file"
@@ -663,9 +703,24 @@ export const MarkdownChat = memo(function MarkdownChat({
           if (card) return card;
           return <code className="chat-md__inline-code">{paint(c)}</code>;
         }
+        const language = match?.[1] || "text";
+        if (isMermaidLanguage(language)) {
+          return (
+            <MermaidBlock
+              streaming={streaming}
+              copyLabel={tr("message.copy")}
+              sourceLabel={tr("chat.mermaidSource")}
+              diagramLabel={tr("chat.mermaidDiagram")}
+              loadingLabel={tr("chat.mermaidLoading")}
+              errorLabel={tr("chat.mermaidError")}
+            >
+              {c as ReactNode}
+            </MermaidBlock>
+          );
+        }
         return (
           <CodeBlock
-            language={match?.[1] || "text"}
+            language={language}
             wrapLabel={tr("chat.codeWrap")}
             unwrapLabel={tr("chat.codeUnwrap")}
             copyLabel={tr("message.copy")}
@@ -716,9 +771,18 @@ export const MarkdownChat = memo(function MarkdownChat({
     videoLabels,
     locale,
     tr,
+    streaming,
+    sshAlias,
   ]);
 
   const isPlain = !streaming && !qFind && isSimplePlainText(painted);
+  const math = sourceHasMath(painted);
+  const remarkPlugins = math
+    ? MARKDOWN_CHAT_REMARK_PLUGINS
+    : MARKDOWN_CHAT_REMARK_PLUGINS_GFM;
+  const rehypePlugins = math
+    ? MARKDOWN_CHAT_REHYPE_PLUGINS
+    : MARKDOWN_CHAT_REHYPE_PLUGINS_NO_MATH;
   // Streaming incremental paint (DSH MarkdownText): freeze the stable prefix
   // so long answers only re-parse the tail each tick. Settled turns always
   // single-render, so a mid-stream block boundary never persists.
@@ -743,16 +807,13 @@ export const MarkdownChat = memo(function MarkdownChat({
         <p>{painted}</p>
       ) : tailSplit.prefix ? (
         <>
-          <ReactMarkdown
-            remarkPlugins={MARKDOWN_CHAT_REMARK_PLUGINS}
-            rehypePlugins={MARKDOWN_CHAT_REHYPE_PLUGINS}
+          <MarkdownStablePrefix
+            source={tailSplit.prefix}
             components={components}
-          >
-            {tailSplit.prefix}
-          </ReactMarkdown>
+          />
           <ReactMarkdown
-            remarkPlugins={MARKDOWN_CHAT_REMARK_PLUGINS}
-            rehypePlugins={MARKDOWN_CHAT_REHYPE_PLUGINS}
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={rehypePlugins}
             components={components}
           >
             {tailSplit.tail}
@@ -760,8 +821,8 @@ export const MarkdownChat = memo(function MarkdownChat({
         </>
       ) : (
         <ReactMarkdown
-          remarkPlugins={MARKDOWN_CHAT_REMARK_PLUGINS}
-          rehypePlugins={MARKDOWN_CHAT_REHYPE_PLUGINS}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
           components={components}
         >
           {painted}

@@ -31,8 +31,9 @@ import {
 import {
   filterProjectRulesList,
   presentProjectRulesSoftFail,
+  projectRuleDisplayPath,
   projectRuleKindChipLetter,
-  projectRuleKindLabelKey,
+  projectRuleRowTitleSpec,
   summarizeProjectRules,
   validateProjectRuleDraft,
 } from "@/lib/rulesPromptPro";
@@ -50,6 +51,8 @@ export type ProjectRulesModalProps = {
   projectPath: string | null;
   projectName?: string | null;
   locale: Locale;
+  /** Render the editor inline (Settings) instead of a modal overlay. */
+  embedded?: boolean;
 };
 
 type RuleRow = {
@@ -57,6 +60,8 @@ type RuleRow = {
   relativePath: string;
   absolutePath: string;
   kind: string;
+  scope: string;
+  exists: boolean;
 };
 
 type DraftState = {
@@ -89,11 +94,15 @@ function normalizeRules(
         relativePath.split(/[/\\]/).pop() ||
         relativePath;
       const kind = String(r.kind || "").trim();
-      return { name, relativePath, absolutePath, kind };
+      const scope = String(r.scope || "project").trim() || "project";
+      const exists = r.exists !== false;
+      return { name, relativePath, absolutePath, kind, scope, exists };
     })
     .filter((r) => r.relativePath || r.absolutePath);
   const hasAgentsMd = Array.isArray(res)
-    ? rules.some((r) => r.kind === "agents_md")
+    ? rules.some(
+        (r) => r.kind === "agents_md" && r.scope === "project" && r.exists,
+      )
     : Boolean(res?.hasAgentsMd);
   return { rules, hasAgentsMd };
 }
@@ -104,6 +113,7 @@ export function ProjectRulesModal({
   projectPath,
   projectName = null,
   locale,
+  embedded = false,
 }: ProjectRulesModalProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [rules, setRules] = useState<RuleRow[]>([]);
@@ -131,11 +141,6 @@ export function ProjectRulesModal({
         saving: draft?.saving,
       }),
     [draft],
-  );
-
-  const ruleKindLabel = useCallback(
-    (kind: string) => tr(projectRuleKindLabelKey(kind)),
-    [tr],
   );
 
   const refreshRules = useCallback(async () => {
@@ -394,6 +399,13 @@ export function ProjectRulesModal({
               }
             : d,
         );
+        try {
+          if (projectPath) {
+            await api.projectRulesInvalidateSessions(projectPath);
+          }
+        } catch {
+          /* soft — disk write already succeeded */
+        }
         setHint(tr("rules.saved"));
       } catch (e) {
         if (isFsWriteConflict(e)) {
@@ -430,7 +442,7 @@ export function ProjectRulesModal({
     );
   }, []);
 
-  const ensureAgentsTemplate = useCallback(async () => {
+  const ensureAgentsTemplate = useCallback(async (scope?: string) => {
     if (!projectPath || !api.isTauri()) {
       const soft = presentProjectRulesSoftFail(null, {
         needProject: !projectPath,
@@ -441,8 +453,13 @@ export function ProjectRulesModal({
     }
     setHint(null);
     try {
-      const res = await api.projectRulesEnsureTemplate(projectPath);
+      const res = await api.projectRulesEnsureTemplate(projectPath, scope);
       await refreshRules();
+      try {
+        await api.projectRulesInvalidateSessions(projectPath);
+      } catch {
+        /* soft */
+      }
       if (res.created) {
         setHint(tr("rules.created"));
       } else {
@@ -452,12 +469,15 @@ export function ProjectRulesModal({
       const abs = String(res.absolutePath || "").trim();
       const name = String(res.name || "AGENTS.md").trim();
       const kind = String(res.kind || "agents_md").trim();
+      const nextScope = String(scope || "project").trim() || "project";
       runOrConfirmDiscard(() => {
         void loadRuleContent({
           name,
           relativePath: rel,
           absolutePath: abs,
           kind,
+          scope: nextScope,
+          exists: true,
         });
       });
     } catch (e) {
@@ -521,25 +541,13 @@ export function ProjectRulesModal({
     [draft?.name, tr],
   );
 
-  return (
-    <>
-      <GlassModal
-        open={open}
-        onClose={requestClose}
-        title={title}
-        size="lg"
-        className="project-rules-modal"
-        bodyClassName="project-rules-modal__body"
-        wrapBody
-        closeLabel={tr("common.close")}
-        closeOnOverlay={!dirty && !draft?.saving}
-      >
+  const editor = (
         <div className="prm">
           <div className="prm__toolbar">
             <button
               type="button"
               className="btn btn--ghost prm__tool-btn"
-              onClick={() => void ensureAgentsTemplate()}
+              onClick={() => void ensureAgentsTemplate("project")}
               disabled={!projectPath || loading}
             >
               <IconPlus size={14} />
@@ -570,11 +578,18 @@ export function ProjectRulesModal({
             />
           </div>
 
-          {rulesSummary.total > 0 ? (
+          {rulesSummary.total > 0 || rulesSummary.missingCount > 0 ? (
             <div className="prm__summary" aria-live="polite">
               <span className="prm__summary-count">
                 {tr("rules.count", { n: String(rulesSummary.total) })}
               </span>
+              {rulesSummary.missingCount > 0 ? (
+                <span className="prm__summary-chip" data-kind="missing">
+                  {tr("rules.missingCount", {
+                    n: String(rulesSummary.missingCount),
+                  })}
+                </span>
+              ) : null}
               {rulesSummary.hasAgentsMd ? (
                 <span className="prm__summary-chip" data-kind="agents_md">
                   A · {tr("rules.kind.agents_md")}
@@ -622,24 +637,42 @@ export function ProjectRulesModal({
                 {filteredRules.map((rule) => {
                   const key = rule.relativePath || rule.absolutePath;
                   const isOpen = expandedPath === key;
+                  const titleSpec = projectRuleRowTitleSpec(rule);
+                  const displayPath = projectRuleDisplayPath(rule);
                   return (
                     <li
                       key={key}
-                      className={"prm__item" + (isOpen ? " is-open" : "")}
+                      className={
+                        "prm__item" +
+                        (isOpen ? " is-open" : "") +
+                        (rule.exists ? "" : " is-missing")
+                      }
                     >
                       <div className="prm__row">
                         <button
                           type="button"
                           className="prm__row-main"
-                          onClick={() => selectRule(rule)}
-                          title={rule.absolutePath || rule.relativePath}
+                          onClick={() => {
+                            if (!rule.exists) {
+                              runOrConfirmDiscard(() => {
+                                void ensureAgentsTemplate(rule.scope);
+                              });
+                              return;
+                            }
+                            selectRule(rule);
+                          }}
+                          title={displayPath}
                           aria-expanded={isOpen}
                         >
                           <span className="prm__chevron" aria-hidden>
-                            {isOpen ? (
-                              <IconChevronDown size={14} />
+                            {rule.exists ? (
+                              isOpen ? (
+                                <IconChevronDown size={14} />
+                              ) : (
+                                <IconChevronRight size={14} />
+                              )
                             ) : (
-                              <IconChevronRight size={14} />
+                              <IconPlus size={14} />
                             )}
                           </span>
                           <span
@@ -653,29 +686,33 @@ export function ProjectRulesModal({
                             {projectRuleKindChipLetter(rule.kind)}
                           </span>
                           <span className="prm__row-meta">
-                            <span className="prm__row-name">{rule.name}</span>
-                            <span className="prm__row-path">
-                              {rule.relativePath || rule.absolutePath}
+                            <span className="prm__row-name">
+                              {tr(titleSpec.key, titleSpec.params)}
                             </span>
-                            <span className="prm__row-kind">
-                              {ruleKindLabel(rule.kind)}
-                            </span>
+                            <span className="prm__row-path">{displayPath}</span>
+                            {rule.exists ? null : (
+                              <span className="prm__row-missing">
+                                {tr("rules.missing")}
+                              </span>
+                            )}
                           </span>
                         </button>
                         <div className="prm__row-actions">
-                          <Tip label={tr("rules.reveal")}>
-                            <button
-                              type="button"
-                              className="chrome-btn"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void revealRule(rule);
-                              }}
-                              aria-label={tr("rules.reveal")}
-                            >
-                              <IconFolder size={13} />
-                            </button>
-                          </Tip>
+                          {rule.exists ? (
+                            <Tip label={tr("rules.reveal")}>
+                              <button
+                                type="button"
+                                className="chrome-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void revealRule(rule);
+                                }}
+                                aria-label={tr("rules.reveal")}
+                              >
+                                <IconFolder size={13} />
+                              </button>
+                            </Tip>
+                          ) : null}
                         </div>
                       </div>
 
@@ -795,7 +832,32 @@ export function ProjectRulesModal({
             ) : null}
           </OverlayScroll>
         </div>
-      </GlassModal>
+  );
+
+  return (
+    <>
+      {embedded ? (
+        <div
+          className="project-rules-modal project-rules-modal--page"
+          id="settings-anchor-ext-rules"
+        >
+          {editor}
+        </div>
+      ) : (
+        <GlassModal
+          open={open}
+          onClose={requestClose}
+          title={title}
+          size="lg"
+          className="project-rules-modal"
+          bodyClassName="project-rules-modal__body"
+          wrapBody
+          closeLabel={tr("common.close")}
+          closeOnOverlay={!dirty && !draft?.saving}
+        >
+          {editor}
+        </GlassModal>
+      )}
 
       <GlassModal
         open={discardOpen}
@@ -857,6 +919,8 @@ export function ProjectRulesModal({
                     relativePath: draft.relativePath,
                     absolutePath: draft.absolutePath,
                     kind: "",
+                    scope: "project",
+                    exists: true,
                   };
                   void loadRuleContent(rule);
                 }

@@ -4,7 +4,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { AccountStatus } from "@/lib/api";
+import type { AccountStatus, CustomProvider } from "@/lib/api";
 import { createT } from "@/i18n";
 import { WorkbenchSidebar, type WorkbenchSidebarProps } from "./WorkbenchSidebar";
 
@@ -77,6 +77,19 @@ function signedInAccount(): AccountStatus {
   };
 }
 
+function deepseekProvider(): CustomProvider {
+  return {
+    id: "deepseek",
+    model: "deepseek-chat",
+    baseUrl: "https://api.deepseek.com",
+    name: "DeepSeek",
+    hasApiKey: true,
+    apiBackend: "openai",
+    providerMode: "generic",
+    isDefault: false,
+  };
+}
+
 function props(
   override: Partial<WorkbenchSidebarProps> = {},
 ): WorkbenchSidebarProps {
@@ -131,38 +144,138 @@ function props(
   };
 }
 
-it("pins plan + reset, with remaining % on the bar row", () => {
-  const onSettings = vi.fn();
+it("shows compact remain beside the name and opens the user menu from the identity row", () => {
+  const setShowUserMenu = vi.fn();
   const onAccountSettings = vi.fn();
+  const onSettings = vi.fn();
   render(
     <WorkbenchSidebar
-      {...props({ onSettings, onAccountSettings })}
+      {...props({
+        setShowUserMenu,
+        onAccountSettings,
+        onSettings,
+        showUserMenu: false,
+      })}
     />,
   );
 
-  const pin = document.querySelector(".sidebar__quota-pin");
-  expect(pin).toBeTruthy();
-  expect(pin?.textContent).toContain("SuperGrok");
-  expect(pin?.textContent).toContain("Resets");
-  expect(pin?.textContent).not.toContain("Ada");
-  expect(pin?.textContent).not.toContain("89% remaining");
+  expect(document.querySelector(".sidebar__quota-pin")).toBeNull();
   expect(
-    document.querySelector(".sidebar__quota-pin__remain")?.textContent,
+    document.querySelector(".sidebar__footer-remain")?.textContent,
   ).toBe("89%");
-  expect(document.querySelector(".sidebar__footer-remain")).toBeNull();
+  expect(screen.getByText("Ada")).toBeTruthy();
 
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   expect(onSettings).toHaveBeenCalledTimes(1);
   expect(onAccountSettings).not.toHaveBeenCalled();
 
-  fireEvent.click(pin as HTMLElement);
-  expect(onAccountSettings).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
+  expect(setShowUserMenu).toHaveBeenCalled();
+  expect(onAccountSettings).not.toHaveBeenCalled();
 });
 
-it("does not pin a quota card when signed out, but still shows settings", () => {
+it("does not show remain when signed out, but still shows settings", () => {
   const account = signedInAccount();
   account.profile.signedIn = false;
   render(<WorkbenchSidebar {...props({ account })} />);
   expect(document.querySelector(".sidebar__quota-pin")).toBeNull();
+  expect(document.querySelector(".sidebar__footer-remain")).toBeNull();
   expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+});
+
+it("shows DeepSeek balance beside the name when the custom route is active", () => {
+  render(
+    <WorkbenchSidebar
+      {...props({
+        customRouteActive: true,
+        activeCustomProvider: deepseekProvider(),
+        providerBalanceCache: {
+          providerId: "deepseek",
+          fetchedAt: Date.now(),
+          result: {
+            kind: "balance",
+            provider: "deepseek",
+            endpoint: "https://api.deepseek.com/user/balance",
+            ok: true,
+            latencyMs: 12,
+            isAvailable: true,
+            balances: [
+              {
+                currency: "CNY",
+                totalBalance: "9.55",
+                grantedBalance: "0",
+                toppedUpBalance: "9.55",
+              },
+            ],
+          },
+        },
+      })}
+    />,
+  );
+
+  expect(document.querySelector(".sidebar__quota-pin")).toBeNull();
+  expect(
+    document.querySelector(".sidebar__footer-remain")?.textContent,
+  ).toBe("9.55 CNY");
+  expect(screen.getByText("DeepSeek")).toBeTruthy();
+});
+
+it("puts the full SuperGrok quota card at the top of the open user menu", () => {
+  render(
+    <WorkbenchSidebar
+      {...props({
+        showUserMenu: true,
+      })}
+    />,
+  );
+
+  expect(document.querySelector(".sidebar__quota-pin")).toBeNull();
+  const quota = document.querySelector(".user-menu__quota");
+  expect(quota).toBeTruthy();
+  expect(quota?.textContent).toContain("SuperGrok");
+  expect(quota?.textContent).not.toContain("Resets");
+  expect(quota?.textContent).toMatch(/\d{2}\/\d{2}/);
+  expect(quota?.textContent).toContain("89%");
+  expect(document.querySelector(".user-menu__quota .account-quota-bar")).toBeTruthy();
+});
+
+it("puts DeepSeek balance + refresh at the top of the open user menu", () => {
+  const loadProviderBalance = vi.fn();
+  render(
+    <WorkbenchSidebar
+      {...props({
+        showUserMenu: true,
+        customRouteActive: true,
+        activeCustomProvider: deepseekProvider(),
+        loadProviderBalance,
+        providerBalanceCache: {
+          providerId: "deepseek",
+          fetchedAt: Date.now(),
+          result: {
+            kind: "balance",
+            provider: "deepseek",
+            endpoint: "https://api.deepseek.com/user/balance",
+            ok: true,
+            latencyMs: 12,
+            isAvailable: true,
+            balances: [
+              {
+                currency: "CNY",
+                totalBalance: "9.55",
+                grantedBalance: "0",
+                toppedUpBalance: "9.55",
+              },
+            ],
+          },
+        },
+      })}
+    />,
+  );
+
+  const balance = document.querySelector(".user-menu__balance");
+  expect(balance).toBeTruthy();
+  expect(balance?.textContent).toContain("9.55 CNY");
+  const refresh = screen.getByRole("button", { name: "Refresh balance" });
+  fireEvent.click(refresh);
+  expect(loadProviderBalance).toHaveBeenCalled();
 });

@@ -6,7 +6,6 @@
 //! **Safety:** only touches those four keys under `[models]`. Never mutates
 //! `[models].default`, never activates provider routes, never rewrites auth.json.
 
-#![allow(dead_code)] // residual-clippy: prompt-rewrite / spawn-env helpers retained for routing experiments
 use serde::{Deserialize, Serialize};
 
 use crate::agent_home_config::{
@@ -220,6 +219,7 @@ pub fn apply_all_slots(text: &str, model_id: &str) -> String {
 }
 
 /// Ensure `[model.<id>]` has `api_key` when non-empty (does not touch other fields).
+#[allow(dead_code)]
 pub fn ensure_model_api_key(text: &str, model_id: &str, api_key: &str) -> String {
     let id = model_id.trim();
     let key = api_key.trim();
@@ -262,7 +262,7 @@ pub fn input_references_official(input: &ModelsAuxSetInput) -> bool {
     })
 }
 
-/// Write a **complete** `[model.grok-4.6]` so aux calls do not inherit the
+/// Write a **complete** `[model.grok-4.7]` so aux calls do not inherit the
 /// active custom relay's `base_url` (the bug that sent official Grok to DeepSeek).
 ///
 /// Fields always upserted: `model`, `name`, `base_url`, `api_backend`.
@@ -271,7 +271,7 @@ pub fn ensure_official_aux_model_section(text: &str, api_key: Option<&str>) -> S
     let table = format!("model.{OFFICIAL_CATALOG_MODEL}");
     let mut out = text.to_string();
     out = set_table_string(&out, &table, "model", OFFICIAL_CATALOG_MODEL);
-    out = set_table_string(&out, &table, "name", "Grok 4.6");
+    out = set_table_string(&out, &table, "name", "Grok 4.7");
     out = set_table_string(&out, &table, "base_url", OFFICIAL_GROK_BASE_URL);
     out = set_table_string(&out, &table, "api_backend", OFFICIAL_GROK_API_BACKEND);
     if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
@@ -540,7 +540,7 @@ pub fn apply_save_grok() -> Result<ModelsAuxState, String> {
     let path = resolve_writable_config_path(&settings.session_data_mode)?;
     let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
 
-    // Official catalog id as aux requires a full [model.grok-4.6] section with
+    // Official catalog id as aux requires a full [model.grok-4.7] section with
     // the Grok base_url — never inherit DeepSeek/Amux/etc. base_url.
     if is_official_catalog_model(&target) {
         existing = ensure_official_reachable(&existing, &list.active_source)?;
@@ -798,6 +798,7 @@ fn strip_inline_image_at_refs(line: &str) -> (String, Vec<String>) {
 /// across custom relays; Host describes images instead).
 ///
 /// `vision_aux_ok` only changes the fallback note text (legacy param kept for tests).
+#[allow(dead_code)]
 pub fn rewrite_prompt_guard_text_only(
     prompt: &str,
     text_only_main: bool,
@@ -827,6 +828,7 @@ pub fn rewrite_prompt_guard_text_only(
 
 /// Live config: rewrite agent prompt when needed. Never touches journal UI text.
 /// Prefer [`prepare_agent_prompt_for_main`] which also Host-describes images.
+#[allow(dead_code)]
 pub fn maybe_rewrite_agent_prompt(prompt: &str) -> String {
     let text = read_config_text();
     let list = match list_custom_providers() {
@@ -842,6 +844,7 @@ pub fn maybe_rewrite_agent_prompt(prompt: &str) -> String {
 ///
 /// Keys match Grok Build: `GROK_WEB_SEARCH_MODEL`, `GROK_IMAGE_DESCRIPTION_MODEL`,
 /// `GROK_SESSION_SUMMARY_MODEL`, `GROK_PROMPT_SUGGESTIONS_MODEL`.
+#[allow(dead_code)]
 pub fn aux_model_spawn_env() -> Vec<(String, String)> {
     let text = read_config_text();
     let pairs = [
@@ -1200,10 +1203,12 @@ pub fn host_vision_will_run(prompt: &str) -> bool {
 pub struct HostVisionPrep {
     pub prompt: String,
     /// Whether we attempted host vision (images present on text-only main).
+    #[allow(dead_code)]
     pub ran: bool,
     /// True if at least one description succeeded (official or HTTP).
     pub ok: bool,
     /// Short status for logs / legacy chips.
+    #[allow(dead_code)]
     pub detail: String,
     /// Full description text for journal / expandable tool body (may be long).
     pub description: String,
@@ -1214,6 +1219,7 @@ pub struct HostVisionPrep {
 /// - Host describes images: **prefer official ACP**, else `grok -p`, else Amux HTTP
 ///
 /// Safe to call for every send; no-op when main is multimodal.
+#[allow(dead_code)]
 pub async fn prepare_agent_prompt_for_main(prompt: &str) -> String {
     prepare_agent_prompt_for_main_detailed(prompt, None)
         .await

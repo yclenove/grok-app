@@ -68,6 +68,32 @@ button:disabled {
   user-select: none;
 }
 
+.image-original-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(400px, calc(100vw - 224px));
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.image-original-status > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.image-original-status > button {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+}
+
+.image-original-status > button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: -4px;
+}
+
 /* Zoomed past fit: drag to pan (YARL adds this class when zoom > 1). */
 .yarl__slide_wrapper_interactive {
   cursor: grab;
@@ -132,6 +158,20 @@ button:disabled {
 /* Tips opened from a .overlay modal (z-index 12000) */
 .ui-tip--modal {
   z-index: 13050;
+}
+
+/* File-path card hover: full path, wrap, show immediately (delayMs=0). */
+.ui-tip--path {
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: min(240px, 40vh);
+  overflow: hidden;
+  padding: 6px 8px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* JSON Schema full text on active chip tip */
@@ -207,9 +247,9 @@ textarea:focus-visible,
 }
 
 /* Tauri window drag regions.
- * `false` only skips JS `start_dragging` (Tauri drag.js). Keep compositor
- * caption drag: WebView2 covers the client, so parent WM_NCHITTEST never
- * sees titlebar clicks. */
+ * Hosts use `data-tauri-drag-region="deep"` so drag.js can start_dragging
+ * (#1075). Keep compositor caption drag too: WebView2 covers the client,
+ * so parent WM_NCHITTEST never sees titlebar clicks. */
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
   app-region: drag;
@@ -480,6 +520,20 @@ html.platform-win .window-edge-n {
 .sidebar.is-resizing {
   transition: none;
   user-select: none;
+}
+
+/*
+ * Win/Linux WebView: interpolating used width reflows chat every frame.
+ * Snap the flex box; clip opacity still fades. Mac keeps the base
+ * `.sidebar` size tween (WKWebView hard-cut / seam contract).
+ * Overlay / phone keep their transform rule (excluded here).
+ */
+.platform-win .sidebar:not(.is-resizing):not(.sidebar--overlay):not(.sidebar--phone-drawer),
+.platform-linux .sidebar:not(.is-resizing):not(.sidebar--overlay):not(.sidebar--phone-drawer) {
+  transition:
+    border-color var(--motion-pane) ease,
+    opacity 180ms ease,
+    filter 180ms ease;
 }
 
 /* Right-edge drag handle (mirrors .aside-resizer) */
