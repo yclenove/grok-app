@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Collega questo browser a Grok App."
+  },
+  "pairingHint": {
+    "message": "Conferma in Grok, poi inserisci questo codice nell’estensione. Scade dopo cinque minuti."
+  },
+  "appAddress": {
+    "message": "Indirizzo dell’app"
+  },
+  "pairingCode": {
+    "message": "Codice di abbinamento"
+  },
+  "pair": {
+    "message": "Abbina"
+  },
+  "paired": {
+    "message": "Abbinato a Grok App."
+  },
+  "unpaired": {
+    "message": "Non abbinato."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Condividi scheda corrente"
+  },
+  "unshareCurrentTab": {
+    "message": "Interrompi condivisione scheda corrente"
+  },
+  "sharedCurrentTab": {
+    "message": "Scheda corrente condivisa con Grok App."
+  },
+  "unsharedCurrentTab": {
+    "message": "La scheda corrente non è più condivisa."
+  },
+  "shareUnavailable": {
+    "message": "Impossibile condividere questa scheda."
+  },
+  "invalidAddress": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  },
+  "invalidCode": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  },
+  "challengeChanged": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  },
+  "pairingRejected": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  },
+  "busy": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  },
+  "cancelled": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  },
+  "connectionFailed": {
+    "message": "Controlla l’indirizzo dell’app e il codice, poi riprova."
+  }
+}

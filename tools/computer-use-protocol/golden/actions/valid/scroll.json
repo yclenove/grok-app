@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "actionId": "a5",
+  "runId": "r1",
+  "targetId": "t1",
+  "targetGeneration": 1,
+  "snapshotId": "s1",
+  "geometryRevision": 1,
+  "action": "scroll",
+  "target": { "x": 8, "y": 8 },
+  "parameters": { "delta": -120 }
+}

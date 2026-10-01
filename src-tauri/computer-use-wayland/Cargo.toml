@@ -29,4 +29,3 @@ pkg-config = "0.3"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 grok-computer-use-gtk-parent = { path = "../computer-use-gtk-parent" }
 gtk = { version = "0.18", features = ["v3_24"] }
-

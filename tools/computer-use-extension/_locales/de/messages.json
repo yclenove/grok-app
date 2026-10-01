@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Diesen Browser mit Grok App verbinden."
+  },
+  "pairingHint": {
+    "message": "Bestätige in Grok und gib diesen Code in der Browser-Erweiterung ein. Er gilt fünf Minuten."
+  },
+  "appAddress": {
+    "message": "App-Adresse"
+  },
+  "pairingCode": {
+    "message": "Kopplungscode"
+  },
+  "pair": {
+    "message": "Koppeln"
+  },
+  "paired": {
+    "message": "Mit Grok App gekoppelt."
+  },
+  "unpaired": {
+    "message": "Nicht gekoppelt."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Aktuellen Tab teilen"
+  },
+  "unshareCurrentTab": {
+    "message": "Teilen des aktuellen Tabs beenden"
+  },
+  "sharedCurrentTab": {
+    "message": "Aktueller Tab mit Grok App geteilt."
+  },
+  "unsharedCurrentTab": {
+    "message": "Aktueller Tab wird nicht mehr geteilt."
+  },
+  "shareUnavailable": {
+    "message": "Dieser Tab kann nicht geteilt werden."
+  },
+  "invalidAddress": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  },
+  "invalidCode": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  },
+  "challengeChanged": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  },
+  "pairingRejected": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  },
+  "busy": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  },
+  "cancelled": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  },
+  "connectionFailed": {
+    "message": "Prüfe App-Adresse und Code und versuche es erneut."
+  }
+}

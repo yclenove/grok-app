@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Conecta este navegador a Grok App."
+  },
+  "pairingHint": {
+    "message": "Confirma en Grok e introduce este código en la extensión. Caduca en cinco minutos."
+  },
+  "appAddress": {
+    "message": "Dirección de la app"
+  },
+  "pairingCode": {
+    "message": "Código de vinculación"
+  },
+  "pair": {
+    "message": "Vincular"
+  },
+  "paired": {
+    "message": "Vinculado con Grok App."
+  },
+  "unpaired": {
+    "message": "Sin vincular."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Compartir pestaña actual"
+  },
+  "unshareCurrentTab": {
+    "message": "Dejar de compartir pestaña actual"
+  },
+  "sharedCurrentTab": {
+    "message": "Pestaña actual compartida con Grok App."
+  },
+  "unsharedCurrentTab": {
+    "message": "La pestaña actual ya no se comparte."
+  },
+  "shareUnavailable": {
+    "message": "No se puede compartir esta pestaña."
+  },
+  "invalidAddress": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  },
+  "invalidCode": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  },
+  "challengeChanged": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  },
+  "pairingRejected": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  },
+  "busy": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  },
+  "cancelled": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  },
+  "connectionFailed": {
+    "message": "Comprueba la dirección de la app y el código e inténtalo de nuevo."
+  }
+}

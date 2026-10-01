@@ -1,0 +1,8 @@
+{
+  "uuid": "computer-use-counter-probe@grok-app.local",
+  "name": "Owned VM compositor counter acceptance probe",
+  "description": "Explicit owned-VM experiment only. Read-only, never grants input. Not installed by Grok App.",
+  "shell-version": ["46"],
+  "version": 1,
+  "session-modes": ["user", "unlock-dialog"]
+}

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "actionId": "a6",
+  "runId": "r1",
+  "targetId": "t1",
+  "targetGeneration": 1,
+  "snapshotId": "s1",
+  "geometryRevision": 1,
+  "action": "drag",
+  "target": { "x": 4, "y": 4 },
+  "parameters": { "toX": 40, "toY": 60 }
+}

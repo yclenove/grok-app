@@ -30,10 +30,50 @@ jobs:
         run: pnpm run audit:prod
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Windows portable resource mapping (inert fixture EXEs)
+        run: node --test scripts/stage-windows-portable.test.mjs
+      - name: Computer Use DOM, extension and MCP regressions
+        run: >-
+          node --test tools/computer-use-extension/*.test.mjs
+          tools/computer-use-mcp/*.test.mjs
+          tools/computer-use-probe/existing-mcp-live.test.mjs
+          tools/computer-use-probe/webview-dom.test.mjs
       - name: ESLint (minimal quality rules)
         run: pnpm lint
+      # No GUI/native claim: deterministic mutation, retirement and recovery
+      # contracts complement the explicitly opted-in owned Chromium fixture.
+      - name: Computer Use browser observation transactions
+        run: >-
+          node --test tools/computer-use-browser/page-state.test.mjs
+          tools/computer-use-browser/observation-extract.test.mjs
+          tools/computer-use-browser/observation-lifetime.test.mjs
+          tools/computer-use-browser/worker-ledger.test.mjs
+          tools/computer-use-browser/typed-drag.test.mjs
       - name: Code quality gates
         run: python3 scripts/check-code-quality-gates.py --mode final
+      # Deterministic oracles only. The native GTK/QMP probe remains an explicit
+      # owned-VM acceptance gate; these unit tests cannot certify physical input.
+      - name: Computer Use GNOME policy and input acceptance oracles
+        run: |
+          node --test tools/computer-use-gnome-shell/policy.test.js
+          node --test tools/computer-use-gnome-shell/compositor/physical-input-watch.test.js
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p input_acceptance_test.py -v
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p ime_acceptance_test.py -v
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p ei_ime_acceptance_test.py -v
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p test_overlap_acceptance.py -v
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p lock_acceptance_test.py -v
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p pointer_acceptance_test.py -v
+          python3 -m unittest discover -s tools/computer-use-gnome-shell -p portal_pointer_acceptance_test.py -v
+            python3 -m unittest discover -s tools/computer-use-gnome-shell -p portal_recovery_acceptance_test.py -v
+      - name: Computer Use experimental compositor counter contracts
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libglib2.0-dev
+          out=$(mktemp -d)
+          trap 'rm -rf "$out"' EXIT
+          cc -std=c11 -Wall -Wextra -Werror -O2 -pthread tools/computer-use-gnome-shell/compositor/physical-input-counter.test.c $(pkg-config --cflags --libs gobject-2.0) -o "$out/counter-tests"
+          timeout 30 "$out/counter-tests"
       - name: Website download contract self-test
         run: python3 scripts/publish-website-downloads.py --self-test
       - run: pnpm build:ui
@@ -54,6 +94,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        if: matrix.name == 'Windows'
+        with:
+          node-version: 22
+      - name: Windows portable ZIP roundtrip (no App or installer execution)
+        if: matrix.name == 'Windows'
+        run: node --test scripts/stage-windows-portable.test.mjs
+      - name: Windows NSIS callback in private hives (no Grok installation)
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        env:
+          GROK_NSIS_REQUIRED: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install nsis --version=3.11 -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $env:GROK_MAKENSIS = $compiler
+          $evidence = Join-Path $env:RUNNER_TEMP ('grok-private-nsis-' + [guid]::NewGuid())
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          $env:GROK_NSIS_TEST_ARTIFACT_DIR = $evidence
+          node --test scripts/windows-nsis-completion.test.mjs scripts/windows-nsis-private-hive.test.mjs scripts/windows-nsis-failure.test.mjs scripts/windows-install-inventory.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $receipt = @(Get-ChildItem -LiteralPath $evidence -Filter native-callback.json -Recurse -File)
+          if ($receipt.Count -ne 1) { throw 'Expected exactly one successful native callback fixture' }
+          'GROK_NSIS_NATIVE_CALLBACK_FIXTURE=' + $receipt[0].FullName | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          foreach ($entry in @(@('native-failed-callback.json','GROK_NSIS_NATIVE_FAILURE_FIXTURE'),@('native-cancelled-callback.json','GROK_NSIS_NATIVE_CANCEL_FIXTURE'))) {
+            $receipt = @(Get-ChildItem -LiteralPath $evidence -Filter $entry[0] -Recurse -File)
+            if ($receipt.Count -ne 1) { throw ('Expected exactly one native callback: ' + $entry[0]) }
+            $entry[1] + '=' + $receipt[0].FullName | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
       - name: Install Linux WebKit deps
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -64,11 +137,33 @@ jobs:
             librsvg2-dev \
             patchelf \
             libgtk-3-dev \
-            libayatana-appindicator3-dev
+            libayatana-appindicator3-dev \
+            xvfb xauth dbus-x11 at-spi2-core python3-gi gir1.2-gtk-3.0 \
+            libpipewire-0.3-dev libspa-0.2-dev libclang-dev pipewire-bin meson ninja-build python3-jinja2 \
+            labwc xwayland iproute2
+      - name: Prepare private native Wayland SDK before App compilation
+        if: matrix.name == 'Linux'
+        run: |
+          bash scripts/build-computer-use-libei.sh "$RUNNER_TEMP/cu-libei"
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/cu-libei/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/cu-libei/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          bash scripts/check-computer-use-linux-sdk.sh
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          python3 scripts/test-computer-use-wayland-runner.py
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
           shared-key: ci-${{ matrix.name }}-v5
+      - name: Computer Use runtime prepare/check
+        shell: bash
+        run: |
+          # cargo test below is a native build (no --target); pin its actual
+          # Rust host explicitly, rather than assuming macos-latest's CPU.
+          CU_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$CU_TARGET"
+          node scripts/prepare-computer-use-runtime.mjs --prepare --target "$CU_TARGET"
+          node scripts/prepare-computer-use-runtime.mjs --check --target "$CU_TARGET"
       - name: cargo fmt --check
         working-directory: src-tauri
         run: cargo fmt --all -- --check
@@ -85,6 +180,78 @@ jobs:
         if: matrix.name != 'Windows'
         working-directory: src-tauri
         run: cargo test
+      - name: macOS capture and AX contracts (FFI doubles, not native acceptance)
+        if: matrix.name != 'macOS'
+        working-directory: src-tauri
+        run: cargo test --locked -p grok-computer-use-core --test macos_capture_contract --test macos_ax_contract --test macos_value_contract --test macos_pointer_contract --test macos_pointer_ownership_contract --test macos_keyboard_contract --test macos_text_contract --test macos_coordinate_input_contract --test macos_wait_contract
+      - name: Owned Cocoa verifier contracts (not native acceptance)
+        working-directory: src-tauri
+        run: cargo test --locked -p grok-computer-use-core --test macos_native_fixture_contract
+      - name: Host-owned private worker contracts (process fixture, not native acceptance)
+        working-directory: src-tauri
+        run: cargo test --locked -p grok-computer-use-core --features test-support --test driver
+      - name: Compile owned Cocoa gate (no interactive permission grant or native claim)
+        if: matrix.name == 'macOS'
+        shell: bash
+        run: |
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          for TARGET in arm64-apple-macos11.0 x86_64-apple-macos11.0; do
+            xcrun swiftc -swift-version 5 -warnings-as-errors -typecheck -sdk "$SDK" -target "$TARGET" \
+              tools/computer-use-fixtures/macos/InputFixture.swift
+          done
+          cargo check --manifest-path src-tauri/Cargo.toml --locked -p grok-computer-use-core \
+            --features test-support --bin cu-macos-native
+      - name: Wayland portal, PipeWire and EI (private peers, not GNOME acceptance)
+        if: matrix.name == 'Linux'
+        working-directory: src-tauri
+        run: |
+          cargo clippy --locked -p grok-computer-use-wayland --all-targets -- -D warnings
+          cargo test --locked -p grok-computer-use-wayland --lib --no-run --message-format=json > "$RUNNER_TEMP/cu-native-build.jsonl"
+          TEST_BINARY=$(python3 -c 'import json,sys; items=[json.loads(s) for s in open(sys.argv[1])]; paths=[j["executable"] for j in items if j.get("reason")=="compiler-artifact" and j.get("executable") and j.get("target",{}).get("name")=="grok_computer_use_wayland"]; assert len(paths)==1,paths; print(paths[0])' "$RUNNER_TEMP/cu-native-build.jsonl")
+          cc -std=gnu11 -Wall -Wextra -Werror computer-use-wayland/tests/pw-source.c \
+            $(pkg-config --cflags --libs libpipewire-0.3) -o "$RUNNER_TEMP/cu-owned-pw-source"
+          cc -std=gnu11 -Wall -Wextra -Werror computer-use-wayland/tests/eis-server.c \
+            $(pkg-config --cflags --libs libeis-1.0) -o "$RUNNER_TEMP/cu-owned-eis"
+          # Some Ubuntu runners restrict unprivileged user namespaces. Elevate
+          # only this namespace launcher, never change global AppArmor/sysctl.
+          sudo env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+            GROK_CU_PW_SOURCE="$RUNNER_TEMP/cu-owned-pw-source" \
+            GROK_CU_EIS_SERVER="$RUNNER_TEMP/cu-owned-eis" \
+            bash ../scripts/run-computer-use-wayland-tests.sh \
+              --test-binary "$TEST_BINARY" --test-threads 4 \
+              --evidence "$RUNNER_TEMP/cu-native-evidence"
+      - name: Make owned native evidence readable for artifact upload
+        if: always() && matrix.name == 'Linux'
+        run: |
+          if [ -d "$RUNNER_TEMP/cu-native-evidence" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/cu-native-evidence"
+          fi
+      - name: Retain native Wayland evidence, including failed runs
+        if: always() && matrix.name == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: computer-use-wayland-private-peers
+          path: ${{ runner.temp }}/cu-native-evidence
+          if-no-files-found: warn
+      - name: Native X11 adapter acceptance (owned Xvfb, not Wayland)
+        if: matrix.name == 'Linux'
+        working-directory: src-tauri
+        run: |
+          cargo clippy --locked -p grok-computer-use-core -p grok-computer-use-x11 --all-targets --features grok-computer-use-x11/native-probe -- -D warnings
+          cargo test --locked -p grok-computer-use-core --lib -- --test-threads=1
+          cargo test --locked -p grok-computer-use-x11 --lib
+          cargo build --locked -p grok-computer-use-x11 --features native-probe --bin cu-x11-native
+            env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 GROK_CU_X11_FIXTURE=owned-xvfb \
+              timeout --kill-after=2s 30s xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+              target/debug/cu-x11-native
+            env -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS -u AT_SPI_BUS_ADDRESS \
+              XDG_SESSION_TYPE=x11 GROK_CU_X11_FIXTURE=owned-xvfb GDK_BACKEND=x11 GTK_A11Y=always NO_AT_BRIDGE=0 \
+              timeout --kill-after=3s 45s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+              target/debug/cu-x11-native --accessibility
+            env -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS -u AT_SPI_BUS_ADDRESS \
+              XDG_SESSION_TYPE=x11 GROK_CU_X11_FIXTURE=owned-xvfb GDK_BACKEND=x11 \
+              timeout --kill-after=3s 45s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+              target/debug/cu-x11-native --clipboard
       # Windows MSVC lib tests link Tauri/WebView2/comctl32 and abort at process
       # start with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) unless Common
       # Controls v6 is activated. We cannot pass a second /MANIFESTINPUT through
@@ -131,8 +298,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           Write-Host "=== cargo test --no-run ==="
-          cargo test --no-run
+          $appBuild = @(cargo test --no-run --message-format=json)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $appArtifacts = @($appBuild | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable
+          })
+          if (-not @($appArtifacts | Where-Object { $_.target.name -eq 'grok_app_lib' }).Count) {
+            throw 'Cargo did not return the App library test artifact'
+          }
 
           # Locate mt.exe (Windows SDK or MSVC host tools). Prefer Windows Kits —
           # VS 2026 images sometimes omit mt next to dumpbin under VC\Tools\MSVC.
@@ -169,13 +342,9 @@ jobs:
           $manifest = Join-Path (Get-Location) "windows-test-manifest.xml"
           if (-not (Test-Path -LiteralPath $manifest)) { throw "missing $manifest" }
 
-          $exes = @(Get-ChildItem -Path "target\debug\deps" -Filter "grok_app_lib-*.exe" -ErrorAction SilentlyContinue)
-          if (-not $exes.Count) {
-            # Fallback: any freshly built test harness under deps
-            $exes = @(Get-ChildItem -Path "target\debug\deps" -Filter "*-*.exe" -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -notmatch 'build_script|deps_dir' })
-          }
-          if (-not $exes.Count) { throw "no test harness exe found under target\debug\deps" }
+          # Run only test executables returned by this Cargo invocation. Never
+          # discover stale cache artifacts by glob or fall back to arbitrary EXEs.
+          $exes = @($appArtifacts | ForEach-Object { Get-Item -LiteralPath $_.executable })
 
           foreach ($exe in $exes) {
             Write-Host "Embedding Common Controls v6 manifest into $($exe.Name)"
@@ -195,3 +364,35 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+
+          # Build the patched updater's own harness explicitly; App tests alone
+          # do not run its native recovery tests. Use Cargo's actual artifact,
+          # not a glob that may select stale cached binaries.
+          if (-not $env:GROK_NSIS_NATIVE_CALLBACK_FIXTURE -or -not (Test-Path -LiteralPath $env:GROK_NSIS_NATIVE_CALLBACK_FIXTURE)) {
+            throw 'Missing successful private-hive NSIS callback evidence'
+          }
+          $updaterBuild = @(cargo test --locked -p tauri-plugin-updater --lib --no-run --message-format=json)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $updater = @($updaterBuild | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'tauri_plugin_updater' -and $_.executable
+          })
+          if ($updater.Count -ne 1) { throw 'Expected exactly one updater test artifact' }
+          $updaterExe = $updater[0].executable
+          & $mt -nologo -manifest $manifest "-outputresource:$updaterExe;#1"
+          if ($LASTEXITCODE -ne 0) { throw 'Updater manifest embedding failed' }
+          & $updaterExe --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nativeTest = 'updater::windows_install::inventory::tests::completion_tests::native_nsis_callback_from_private_hive_matches_production_verifier'
+          $listed = @(& $updaterExe --ignored --exact $nativeTest --list --format terse)
+          if ($LASTEXITCODE -ne 0 -or $listed -notcontains ($nativeTest + ': test')) { throw 'Native NSIS parser test missing' }
+          & $updaterExe --ignored --exact $nativeTest --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($name in @('GROK_NSIS_NATIVE_FAILURE_FIXTURE','GROK_NSIS_NATIVE_CANCEL_FIXTURE')) {
+            $inputPath = [Environment]::GetEnvironmentVariable($name)
+            if (-not $inputPath -or -not (Test-Path -LiteralPath $inputPath)) { throw ('Missing native callback: ' + $name) }
+          }
+          $nativeTest = 'updater::windows_install::inventory::tests::failure_tests::native_nsis_failure_callbacks_match_production_verifier'
+          $listed = @(& $updaterExe --ignored --exact $nativeTest --list --format terse)
+          if ($LASTEXITCODE -ne 0 -or $listed -notcontains ($nativeTest + ': test')) { throw 'Native NSIS failure parser test missing' }
+          & $updaterExe --ignored --exact $nativeTest --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

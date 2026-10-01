@@ -1,0 +1,15 @@
+{
+  "upstreamTag": "46.2",
+  "mesonSha256": "5046038df19fded8c441b2aff6158a20ac3bd7d42b14836b452f5f5b0c05bd40",
+  "patchSha256": "47596474bffe91bdc620fa512d1afb65aeb8ab31e959966db0d9a407ddc1e6ce",
+  "files": [
+    {
+      "path": "src/backends/meta-eis-client.c",
+      "beforeSha256": "75386e3ff6b1aaa54e4b4b5ffb6c8f71b892947c2729e5172aec48911a411864",
+      "afterSha256": "4c7b85df473aee74de878178131375f0236a0a875d4af21bd88ea0f0616e10c6"
+    }
+  ],
+  "experimental": true,
+  "installed": false,
+  "scope": "Absolute pointer seat capability lifecycle only; no client-side ambiguity bypass"
+}

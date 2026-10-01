@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "將此瀏覽器連線至 Grok App。"
+  },
+  "pairingHint": {
+    "message": "先在 Grok 確認，再到瀏覽器擴充功能輸入此驗證碼。驗證碼五分鐘後失效。"
+  },
+  "appAddress": {
+    "message": "應用程式位址"
+  },
+  "pairingCode": {
+    "message": "配對碼"
+  },
+  "pair": {
+    "message": "配對"
+  },
+  "paired": {
+    "message": "已與 Grok App 配對。"
+  },
+  "unpaired": {
+    "message": "尚未配對。"
+  },
+  "forget": {
+    "message": "撤銷配對"
+  },
+  "shareCurrentTab": {
+    "message": "分享目前分頁"
+  },
+  "unshareCurrentTab": {
+    "message": "停止分享目前分頁"
+  },
+  "sharedCurrentTab": {
+    "message": "目前分頁已分享給 Grok App。"
+  },
+  "unsharedCurrentTab": {
+    "message": "目前分頁已停止分享。"
+  },
+  "shareUnavailable": {
+    "message": "此分頁無法分享。"
+  },
+  "invalidAddress": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  },
+  "invalidCode": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  },
+  "challengeChanged": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  },
+  "pairingRejected": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  },
+  "busy": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  },
+  "cancelled": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  },
+  "connectionFailed": {
+    "message": "請檢查應用程式位址和驗證碼，然後重試。"
+  }
+}

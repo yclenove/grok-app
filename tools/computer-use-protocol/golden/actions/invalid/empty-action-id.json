@@ -1,0 +1,15 @@
+{
+  "errorContains": "actionId",
+  "body": {
+    "version": 1,
+    "actionId": " ",
+    "runId": "r1",
+    "targetId": "t1",
+    "targetGeneration": 1,
+    "snapshotId": "s1",
+    "geometryRevision": 1,
+    "action": "click",
+    "target": { "elementRef": "n1" },
+    "parameters": {}
+  }
+}

@@ -1,0 +1,50 @@
+--- a/src/backends/meta-eis-client.c
++++ b/src/backends/meta-eis-client.c
+@@ -53,6 +53,7 @@
+ 
+   GHashTable *eis_devices; /* eis_device => MetaEisDevice*/
+ 
++  gboolean absolute_pointer_bound;
+   gulong viewports_changed_handler_id;
+ };
+ 
+@@ -635,6 +636,11 @@
+   MetaEisDevice *shared_device = NULL;
+   GList *viewports;
+   GList *l;
++
++  /* Viewports may exist before the client binds its seat. Do not announce
++   * devices before that bind, or announce a second set on the first bind. */
++  if (!client->absolute_pointer_bound)
++    return;
+ 
+   viewports = meta_eis_peek_viewports (client->eis);
+   if (!viewports)
+@@ -678,6 +684,8 @@
+     propagate_device (shared_device);
+ }
+ 
++static void update_viewports (MetaEisClient *client);
++
+ gboolean
+ meta_eis_client_process_event (MetaEisClient    *client,
+                                struct eis_event *event)
+@@ -711,7 +719,17 @@
+                             client);
+         }
+ 
+-      add_abs_pointer_devices (client);
++      {
++        gboolean absolute_pointer_bound;
++
++        absolute_pointer_bound =
++          eis_event_seat_has_capability (event, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
++        if (client->absolute_pointer_bound != absolute_pointer_bound)
++          {
++            client->absolute_pointer_bound = absolute_pointer_bound;
++            update_viewports (client);
++          }
++      }
+       break;
+ 
+     /* We only have one seat, so if the client unbinds from that

@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Подключите этот браузер к Grok App."
+  },
+  "pairingHint": {
+    "message": "Подтвердите в Grok, затем введите код в расширении браузера. Код действует пять минут."
+  },
+  "appAddress": {
+    "message": "Адрес приложения"
+  },
+  "pairingCode": {
+    "message": "Код сопряжения"
+  },
+  "pair": {
+    "message": "Сопряжение"
+  },
+  "paired": {
+    "message": "Сопряжено с Grok App."
+  },
+  "unpaired": {
+    "message": "Не сопряжено."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Поделиться текущей вкладкой"
+  },
+  "unshareCurrentTab": {
+    "message": "Прекратить общий доступ к вкладке"
+  },
+  "sharedCurrentTab": {
+    "message": "Текущая вкладка доступна Grok App."
+  },
+  "unsharedCurrentTab": {
+    "message": "Текущая вкладка больше не доступна."
+  },
+  "shareUnavailable": {
+    "message": "Этой вкладкой нельзя поделиться."
+  },
+  "invalidAddress": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  },
+  "invalidCode": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  },
+  "challengeChanged": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  },
+  "pairingRejected": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  },
+  "busy": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  },
+  "cancelled": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  },
+  "connectionFailed": {
+    "message": "Проверьте адрес приложения и код, затем повторите попытку."
+  }
+}

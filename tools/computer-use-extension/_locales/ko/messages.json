@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "이 브라우저를 Grok App에 연결합니다."
+  },
+  "pairingHint": {
+    "message": "Grok에서 확인한 후 브라우저 확장 프로그램에 이 코드를 입력하세요. 코드는 5분 후 만료됩니다."
+  },
+  "appAddress": {
+    "message": "앱 주소"
+  },
+  "pairingCode": {
+    "message": "페어링 코드"
+  },
+  "pair": {
+    "message": "페어링"
+  },
+  "paired": {
+    "message": "Grok App과 페어링되었습니다."
+  },
+  "unpaired": {
+    "message": "페어링되지 않았습니다."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "현재 탭 공유"
+  },
+  "unshareCurrentTab": {
+    "message": "현재 탭 공유 중지"
+  },
+  "sharedCurrentTab": {
+    "message": "현재 탭을 Grok App과 공유했습니다."
+  },
+  "unsharedCurrentTab": {
+    "message": "현재 탭 공유를 중지했습니다."
+  },
+  "shareUnavailable": {
+    "message": "이 탭은 공유할 수 없습니다."
+  },
+  "invalidAddress": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  },
+  "invalidCode": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  },
+  "challengeChanged": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  },
+  "pairingRejected": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  },
+  "busy": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  },
+  "cancelled": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  },
+  "connectionFailed": {
+    "message": "앱 주소와 코드를 확인한 후 다시 시도하세요."
+  }
+}

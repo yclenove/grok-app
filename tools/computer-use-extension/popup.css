@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; font: 13px/1.5 system-ui, sans-serif; }
+body { margin: 0; min-width: 320px; background: light-dark(#f7f7f8, #202124); color: light-dark(#202124, #e8eaed); }
+main { padding: 16px; max-width: 400px; }
+h1 { margin: 0 0 12px; font-size: 17px; }
+.muted { color: light-dark(#5f6368, #bdc1c6); overflow-wrap: anywhere; }
+label { display: grid; gap: 5px; margin: 12px 0; }
+input { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid light-dark(#dadce0, #5f6368); border-radius: 8px; background: light-dark(#fff, #292a2d); color: inherit; font: inherit; }
+button { border: 1px solid light-dark(#dadce0, #5f6368); border-radius: 8px; padding: 7px 12px; margin: 4px 4px 4px 0; background: light-dark(#fff, #303134); color: inherit; font: inherit; cursor: pointer; }
+button:disabled { opacity: .5; cursor: wait; }
+button:focus-visible, input:focus-visible { outline: 2px solid #7298d5; outline-offset: 2px; }
+#status { min-height: 2em; }
+.share-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }

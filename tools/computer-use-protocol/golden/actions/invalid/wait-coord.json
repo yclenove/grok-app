@@ -1,0 +1,15 @@
+{
+  "errorContains": "elementRef",
+  "body": {
+    "version": 1,
+    "actionId": "a1",
+    "runId": "r1",
+    "targetId": "t1",
+    "targetGeneration": 1,
+    "snapshotId": "s1",
+    "geometryRevision": 1,
+    "action": "wait",
+    "target": { "x": 4, "y": 4 },
+    "parameters": { "nameEquals": "Count", "timeoutMs": 200 }
+  }
+}

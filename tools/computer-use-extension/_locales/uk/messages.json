@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Підключіть цей браузер до Grok App."
+  },
+  "pairingHint": {
+    "message": "Підтвердьте в Grok, а потім введіть код у розширенні браузера. Код діє п’ять хвилин."
+  },
+  "appAddress": {
+    "message": "Адреса застосунку"
+  },
+  "pairingCode": {
+    "message": "Код сполучення"
+  },
+  "pair": {
+    "message": "Сполучити"
+  },
+  "paired": {
+    "message": "Сполучено з Grok App."
+  },
+  "unpaired": {
+    "message": "Не сполучено."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Поділитися поточною вкладкою"
+  },
+  "unshareCurrentTab": {
+    "message": "Припинити спільний доступ до вкладки"
+  },
+  "sharedCurrentTab": {
+    "message": "Поточна вкладка доступна Grok App."
+  },
+  "unsharedCurrentTab": {
+    "message": "Поточна вкладка більше недоступна."
+  },
+  "shareUnavailable": {
+    "message": "Цією вкладкою не можна поділитися."
+  },
+  "invalidAddress": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  },
+  "invalidCode": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  },
+  "challengeChanged": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  },
+  "pairingRejected": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  },
+  "busy": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  },
+  "cancelled": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  },
+  "connectionFailed": {
+    "message": "Перевірте адресу застосунку та код, а потім спробуйте ще раз."
+  }
+}

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>GrokCuBrowserFixture</title>
+  </head>
+  <body>
+    <h1>Computer Use browser fixture</h1>
+    <form id="f">
+      <label>Name <input id="name" name="name" /></label>
+      <button id="inc" type="button">+1</button>
+      <output id="count">0</output>
+      <button id="go" type="submit">Submit</button>
+    </form>
+    <pre id="result"></pre>
+    <a id="dl" href="/file.bin" download="report.bin">download</a>
+    <input id="file" type="file" aria-label="Upload fixture" />
+    <output id="uploaded">none</output>
+    <label>Secret <input id="secret" type="password" name="secret" /></label>
+    <label>Color
+      <select id="color" aria-label="color">
+        <option value="red">red</option>
+        <option value="blue">blue</option>
+      </select>
+    </label>
+    <output id="colorval">red</output>
+    <div id="scroller" tabindex="0" aria-label="scroller" style="height:72px;overflow:auto;border:1px solid #888">
+      <div style="height:420px">scroll-body</div>
+    </div>
+    <output id="scrollpos">0</output>
+    <div id="drag" tabindex="0" aria-label="Drag" style="width:88px;height:32px;background:#ccc">Drag</div>
+    <div id="drop" tabindex="0" aria-label="Drop" style="width:88px;height:32px;background:#eee">Drop</div>
+    <output id="dropped">0</output>
+    <button id="ping" type="button">ping</button>
+    <output id="pings">0</output>
+    <button id="pop" type="button">popup</button>
+    <iframe id="inner" title="inner" src="/frame.html"></iframe>
+    <script>
+      let n = 0;
+      let submits = 0;
+      let pings = 0;
+      let uploadEvents = 0;
+      const runId = new URLSearchParams(location.search).get("run") || "default";
+      function reportOracle(extra) {
+        fetch("/oracle", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ runId, count: n, submits, ...extra }),
+        }).catch(() => {});
+      }
+      document.getElementById("inc").onclick = () => {
+        n += 1;
+        document.getElementById("count").textContent = String(n);
+        reportOracle({});
+      };
+      document.getElementById("ping").onclick = () => {
+        pings += 1;
+        document.getElementById("pings").textContent = String(pings);
+        fetch("/ping-hit", { method: "POST" }).catch(() => {});
+      };
+      document.getElementById("f").onsubmit = (e) => {
+        e.preventDefault();
+        if (submits > 0) return;
+        submits = 1;
+        const name = document.getElementById("name").value;
+        document.getElementById("result").textContent = JSON.stringify({
+          name,
+          count: n,
+          submits,
+        });
+        reportOracle({ name, result: { name, count: n, submits } });
+      };
+      document.getElementById("pop").onclick = () => {
+        window.open("/popup.html", "grokCuPopup", "width=240,height=160");
+      };
+      document.getElementById("file").onchange = () => {
+        const f = document.getElementById("file").files[0];
+        uploadEvents += 1;
+        document.getElementById("uploaded").textContent = f
+          ? f.name + ":" + f.size
+          : "none";
+        reportOracle({ uploadEvents, uploaded: f ? { name: f.name, size: f.size } : null });
+      };
+      document.getElementById("color").onchange = () => {
+        document.getElementById("colorval").textContent =
+          document.getElementById("color").value;
+      };
+      document.getElementById("scroller").onscroll = () => {
+        const top = Math.round(document.getElementById("scroller").scrollTop);
+        document.getElementById("scrollpos").textContent = String(top);
+        reportOracle({ scrollTop: top });
+      };
+      let dragging = false;
+      document.getElementById("drag").onmousedown = () => {
+        dragging = true;
+      };
+      document.getElementById("drop").onmouseup = () => {
+        if (dragging) {
+          document.getElementById("dropped").textContent = "1";
+          reportOracle({ dropped: 1 });
+        }
+        dragging = false;
+      };
+    </script>
+  </body>
+</html>

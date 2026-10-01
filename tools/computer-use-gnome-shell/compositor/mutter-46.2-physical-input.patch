@@ -1,0 +1,348 @@
+diff --git a/src/backends/native/meta-seat-impl.c b/src/backends/native/meta-seat-impl.c
+--- a/src/backends/native/meta-seat-impl.c
++++ b/src/backends/native/meta-seat-impl.c
+@@ -27,6 +27,8 @@
+ 
+ #include "config.h"
+ 
++#include "backends/native/physical-input-counter.h"
++
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <libinput.h>
+@@ -95,6 +97,7 @@
+   BELL,
+   MODS_STATE_CHANGED,
+   POINTER_POSITION_CHANGED_IN_IMPL,
++  PHYSICAL_INPUT,
+   N_SIGNALS
+ };
+ 
+@@ -103,6 +106,7 @@
+ typedef struct _MetaSeatImplPrivate
+ {
+   GHashTable *device_files;
++  MetaPhysicalInputCounter physical_input;
+ } MetaSeatImplPrivate;
+ 
+ static void meta_seat_impl_initable_iface_init (GInitableIface *iface);
+@@ -2668,6 +2672,23 @@
+ process_event (MetaSeatImpl          *seat_impl,
+                struct libinput_event *event)
+ {
++  MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
++
++  /* Observe native libinput ingress BEFORE seat-wide duplicate suppression,
++   * accessibility, capture, IME, grabs or client routing. Virtual EIS requests
++   * do not traverse this function. Never inspect or change event contents.
++   */
++  switch (libinput_event_get_type (event))
++    {
++    case LIBINPUT_EVENT_NONE:
++    case LIBINPUT_EVENT_DEVICE_ADDED:
++    case LIBINPUT_EVENT_DEVICE_REMOVED:
++      break;
++    default:
++      meta_physical_input_counter_record (&priv->physical_input);
++      break;
++    }
++
+   if (process_base_event (seat_impl, event))
+     return;
+   if (process_device_event (seat_impl, event))
+@@ -3096,6 +3117,7 @@
+ void
+ meta_seat_impl_destroy (MetaSeatImpl *seat_impl)
+ {
++  MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
+   if (seat_impl->input_thread)
+     {
+       GTask *task;
+@@ -3110,6 +3132,8 @@
+       g_assert (!seat_impl->libinput);
+     }
+ 
++  /* The original writer has joined; retire our original queued notification. */
++  meta_physical_input_counter_close (&priv->physical_input);
+   g_object_unref (seat_impl);
+ }
+ 
+@@ -3117,6 +3141,7 @@
+ meta_seat_impl_finalize (GObject *object)
+ {
+   MetaSeatImpl *seat_impl = META_SEAT_IMPL (object);
++  MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
+ 
+   g_assert (!seat_impl->libinput);
+   g_assert (!seat_impl->tools);
+@@ -3124,9 +3149,18 @@
+ 
+   g_free (seat_impl->seat_id);
+ 
++  meta_physical_input_counter_clear (&priv->physical_input);
+   g_rw_lock_clear (&seat_impl->state_lock);
+ 
+   G_OBJECT_CLASS (meta_seat_impl_parent_class)->finalize (object);
++}
++
++guint64
++meta_seat_impl_get_physical_input_generation (MetaSeatImpl *seat_impl)
++{
++  MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
++
++  return meta_physical_input_counter_read (&priv->physical_input);
+ }
+ 
+ ClutterInputDevice *
+@@ -3331,6 +3365,12 @@
+                         META_SEAT_NATIVE_FLAG_NONE,
+                         G_PARAM_READWRITE |
+                         G_PARAM_CONSTRUCT_ONLY);
++
++  signals[PHYSICAL_INPUT] =
++    g_signal_new ("grok-physical-input",
++                  G_TYPE_FROM_CLASS (object_class),
++                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
++                  G_TYPE_NONE, 0);
+ 
+   signals[KBD_A11Y_FLAGS_CHANGED] =
+     g_signal_new ("kbd-a11y-flags-changed",
+@@ -3379,6 +3419,12 @@
+ static void
+ meta_seat_impl_init (MetaSeatImpl *seat_impl)
+ {
++  MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
++
++  meta_physical_input_counter_init (&priv->physical_input,
++                                    G_OBJECT (seat_impl),
++                                    g_main_context_default (),
++                                    signals[PHYSICAL_INPUT]);
+   g_rw_lock_init (&seat_impl->state_lock);
+ 
+   seat_impl->repeat = TRUE;
+diff --git a/src/backends/native/meta-seat-impl.h b/src/backends/native/meta-seat-impl.h
+--- a/src/backends/native/meta-seat-impl.h
++++ b/src/backends/native/meta-seat-impl.h
+@@ -133,6 +133,8 @@
+ void meta_seat_impl_start (MetaSeatImpl *seat_impl);
+ 
+ void meta_seat_impl_destroy (MetaSeatImpl *seat_impl);
++
++guint64 meta_seat_impl_get_physical_input_generation (MetaSeatImpl *seat_impl);
+ 
+ META_EXPORT_TEST
+ void meta_seat_impl_run_input_task (MetaSeatImpl *seat_impl,
+diff --git a/src/backends/native/meta-seat-native.c b/src/backends/native/meta-seat-native.c
+--- a/src/backends/native/meta-seat-native.c
++++ b/src/backends/native/meta-seat-native.c
+@@ -45,6 +45,8 @@
+   PROP_SEAT_ID,
+   PROP_FLAGS,
+   PROP_BACKEND,
++  PROP_PHYSICAL_INPUT_VERSION,
++  PROP_PHYSICAL_INPUT_GENERATION,
+   N_PROPS,
+ 
+   /* This property is overridden */
+@@ -138,11 +140,22 @@
+ }
+ 
+ static void
++proxy_physical_input (MetaSeatImpl   *seat_impl,
++                      MetaSeatNative *seat_native)
++{
++  (void) seat_impl;
++  g_object_notify_by_pspec (G_OBJECT (seat_native),
++                           props[PROP_PHYSICAL_INPUT_GENERATION]);
++}
++
++static void
+ meta_seat_native_constructed (GObject *object)
+ {
+   MetaSeatNative *seat = META_SEAT_NATIVE (object);
+ 
+   seat->impl = meta_seat_impl_new (seat, seat->seat_id, seat->flags);
++  g_signal_connect_object (seat->impl, "grok-physical-input",
++                           G_CALLBACK (proxy_physical_input), seat, 0);
+   g_signal_connect (seat->impl, "kbd-a11y-flags-changed",
+                     G_CALLBACK (proxy_kbd_a11y_flags_changed), seat);
+   g_signal_connect (seat->impl, "kbd-a11y-mods-state-changed",
+@@ -209,6 +222,14 @@
+       break;
+     case PROP_BACKEND:
+       g_value_set_object (value, seat_native->backend);
++      break;
++    case PROP_PHYSICAL_INPUT_VERSION:
++      g_value_set_uint (value, 1);
++      break;
++    case PROP_PHYSICAL_INPUT_GENERATION:
++      g_value_set_uint64 (value, seat_native->impl
++        ? meta_seat_impl_get_physical_input_generation (seat_native->impl)
++        : G_MAXUINT64);
+       break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+@@ -407,6 +428,20 @@
+                          G_PARAM_READWRITE |
+                          G_PARAM_CONSTRUCT_ONLY);
+ 
++  /* Experimental read-only ABI, not provided by stock Mutter 46.2. Only a
++   * generation escapes; no key, text, coordinate, device or timestamp does.
++   * Notify is coalesced on the main thread; readback sees the input-thread
++   * generation even before the queued notify dispatches. UINT64_MAX is fault.
++   */
++  props[PROP_PHYSICAL_INPUT_VERSION] =
++    g_param_spec_uint ("grok-physical-input-version", NULL, NULL,
++                       1, 1, 1, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++  props[PROP_PHYSICAL_INPUT_GENERATION] =
++    g_param_spec_uint64 ("grok-physical-input-generation", NULL, NULL,
++                         0, G_MAXUINT64, 0,
++                         G_PARAM_READABLE | G_PARAM_EXPLICIT_NOTIFY |
++                         G_PARAM_STATIC_STRINGS);
++
+   g_object_class_install_properties (object_class, N_PROPS, props);
+ 
+   g_object_class_override_property (object_class, PROP_TOUCH_MODE,
+diff --git a/src/backends/native/physical-input-counter.h b/src/backends/native/physical-input-counter.h
+new file mode 100644
+--- /dev/null
++++ b/src/backends/native/physical-input-counter.h
+@@ -0,0 +1,138 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/* Experimental Mutter-side read-only counter, NOT installed by the App.
++ * Call record only at native libinput ingress, before ANY event filtering.
++ * No event content, device access, input interception or reinjection.
++ * init/close/clear and dispatch belong to the compositor main thread;
++ * record/read are thread safe. Join the input thread before close/clear.
++ */
++#pragma once
++
++#include <glib-object.h>
++
++typedef struct
++{
++  GMutex mutex;
++  GMainContext *context;
++  GObject *owner; /* Borrowed; each pending source takes its own strong ref. */
++  guint signal_id;
++  guint64 generation;
++  GSource *source; /* Exactly one owned ref, or NULL. */
++  gboolean closed;
++} MetaPhysicalInputCounter;
++
++typedef struct
++{
++  MetaPhysicalInputCounter *counter;
++  GObject *owner;
++  GSource *source; /* Borrowed from the live dispatch source. */
++} MetaPhysicalInputDelivery;
++
++static inline void
++meta_physical_input_delivery_free (gpointer data)
++{
++  MetaPhysicalInputDelivery *delivery = data;
++
++  g_object_unref (delivery->owner);
++  g_free (delivery);
++}
++
++static inline gboolean
++meta_physical_input_counter_dispatch (gpointer data)
++{
++  MetaPhysicalInputDelivery *delivery = data;
++  MetaPhysicalInputCounter *counter = delivery->counter;
++  GSource *source = NULL;
++  gboolean emit = FALSE;
++
++  g_mutex_lock (&counter->mutex);
++  if (counter->source == delivery->source)
++    {
++      source = g_steal_pointer (&counter->source);
++      emit = !counter->closed;
++    }
++  g_mutex_unlock (&counter->mutex);
++
++  g_clear_pointer (&source, g_source_unref);
++  if (emit)
++    g_signal_emit (delivery->owner, counter->signal_id, 0);
++  return G_SOURCE_REMOVE;
++}
++
++static inline void
++meta_physical_input_counter_init (MetaPhysicalInputCounter *counter,
++                                 GObject                  *owner,
++                                 GMainContext             *context,
++                                 guint                     signal_id)
++{
++  g_mutex_init (&counter->mutex);
++  counter->context = g_main_context_ref (context);
++  counter->owner = owner;
++  counter->signal_id = signal_id;
++  counter->generation = 0;
++  counter->source = NULL;
++  counter->closed = FALSE;
++}
++
++static inline guint64
++meta_physical_input_counter_read (MetaPhysicalInputCounter *counter)
++{
++  guint64 generation;
++
++  g_mutex_lock (&counter->mutex);
++  generation = counter->closed ? G_MAXUINT64 : counter->generation;
++  g_mutex_unlock (&counter->mutex);
++  return generation;
++}
++
++static inline void
++meta_physical_input_counter_record (MetaPhysicalInputCounter *counter)
++{
++  g_mutex_lock (&counter->mutex);
++  if (!counter->closed)
++    {
++      /* Saturation is a permanent fault sentinel, never a wrapped grant. */
++      if (counter->generation < G_MAXUINT64)
++        counter->generation++;
++      if (!counter->source)
++        {
++          MetaPhysicalInputDelivery *delivery;
++
++          counter->source = g_idle_source_new ();
++          g_source_set_priority (counter->source, G_PRIORITY_HIGH);
++          g_source_set_name (counter->source, "physical-input-generation");
++          delivery = g_new0 (MetaPhysicalInputDelivery, 1);
++          delivery->counter = counter;
++          delivery->owner = g_object_ref (counter->owner);
++          delivery->source = counter->source;
++          g_source_set_callback (counter->source,
++                                 meta_physical_input_counter_dispatch,
++                                 delivery, meta_physical_input_delivery_free);
++          g_source_attach (counter->source, counter->context);
++        }
++    }
++  g_mutex_unlock (&counter->mutex);
++}
++
++static inline void
++meta_physical_input_counter_close (MetaPhysicalInputCounter *counter)
++{
++  GSource *source;
++
++  g_mutex_lock (&counter->mutex);
++  counter->closed = TRUE;
++  source = g_steal_pointer (&counter->source);
++  g_mutex_unlock (&counter->mutex);
++  if (source)
++    {
++      g_source_destroy (source);
++      g_source_unref (source);
++    }
++}
++
++static inline void
++meta_physical_input_counter_clear (MetaPhysicalInputCounter *counter)
++{
++  meta_physical_input_counter_close (counter);
++  g_clear_pointer (&counter->context, g_main_context_unref);
++  g_mutex_clear (&counter->mutex);
++}

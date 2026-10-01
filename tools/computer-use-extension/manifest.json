@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_extensionName__",
+  "version": "1.1.0",
+  "description": "__MSG_extensionDescription__",
+  "default_locale": "en",
+  "minimum_chrome_version": "112",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApR6oHR0qktDEKP3Scn57HRQFKpxOXVkvFlCYn0SA0d88AREqxNk7C4SlJYbrRPmZAOq+NAPN+9hDUu30zvsLUrpELQjrAWqDzXoZZuOMG3aJO4XwUQn/u7Wmqhi8A2FrE3Q9BZrb6kAar18o863wVceSRbnSf+aILJ0nhnSrvj0O5JE875eGTxyLgujmsr6QIIpazP43duNxYYRPNs6jlHjOzVA2iAssCm2759KP4naAPe+4gmMTBstoSuQP6JSZ3PXP189pRWkXcLAl27kNrNDotoER8HaOnRFUsKD8nALChFudcM/bw+0L7Ack9Yq2kVpC4zh++tLosFCQ4Fz13QIDAQAB",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "webNavigation",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "__MSG_extensionName__"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
+  }
+}

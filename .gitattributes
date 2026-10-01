@@ -11,3 +11,5 @@
 *.icns binary
 *.woff2 binary
 *.zip binary
+# A unified diff's blank context lines contain a required space prefix.
+*.patch whitespace=-blank-at-eol

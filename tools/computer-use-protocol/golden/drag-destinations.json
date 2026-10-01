@@ -1,0 +1,18 @@
+[
+  {"name":"canonical pair","parameters":{"toX":40,"toY":60},"valid":true},
+  {"name":"legacy pair","parameters":{"x1":40,"y1":60},"valid":true},
+  {"name":"zero destination","parameters":{"toX":0,"toY":0},"valid":true},
+  {"name":"fractional destination","parameters":{"x1":0.5,"y1":1.25},"valid":true},
+  {"name":"missing destination","parameters":{},"valid":false},
+  {"name":"missing canonical y","parameters":{"toX":40},"valid":false},
+  {"name":"missing canonical x","parameters":{"toY":60},"valid":false},
+  {"name":"missing legacy y","parameters":{"x1":40},"valid":false},
+  {"name":"mixed partial pair","parameters":{"toX":40,"y1":60},"valid":false},
+  {"name":"conflicting aliases","parameters":{"toX":40,"toY":60,"x1":999999,"y1":999999},"valid":false},
+  {"name":"identical aliases still ambiguous","parameters":{"toX":40,"toY":60,"x1":40,"y1":60},"valid":false},
+  {"name":"extra partial alias","parameters":{"toX":40,"toY":60,"x1":40},"valid":false},
+  {"name":"numeric string","parameters":{"toX":"40","toY":60},"valid":false},
+  {"name":"null coordinate","parameters":{"x1":40,"y1":null},"valid":false},
+  {"name":"boolean coordinate","parameters":{"toX":false,"toY":60},"valid":false},
+  {"name":"negative coordinate","parameters":{"toX":-1,"toY":60},"valid":false}
+]

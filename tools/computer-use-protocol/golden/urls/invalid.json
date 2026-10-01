@@ -1,0 +1,8 @@
+[
+  { "url": "javascript:alert(1)", "errorContains": "javascript" },
+  { "url": "file:///etc/passwd", "errorContains": "file" },
+  { "url": "data:text/html,hi", "errorContains": "data" },
+  { "url": "https://user:pass@example.com/", "errorContains": "credentials" },
+  { "url": "http://169.254.169.254/latest/meta-data", "errorContains": "metadata" },
+  { "url": "http://metadata.google.internal/", "errorContains": "metadata" }
+]

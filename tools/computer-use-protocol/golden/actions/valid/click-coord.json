@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "actionId": "a2",
+  "runId": "r1",
+  "targetId": "t1",
+  "targetGeneration": 1,
+  "snapshotId": "s1",
+  "geometryRevision": 1,
+  "action": "click",
+  "target": { "x": 12, "y": 40 },
+  "parameters": { "button": "right", "count": 2 }
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "computer-use@grok-app.local",
+  "name": "Grok App Computer Use Policy",
+  "description": "Read-only lock and physical-input loss signals for explicitly authorized Computer Use. Installing this helper does not grant capture or input permission.",
+  "shell-version": ["46"],
+  "version": 1,
+  "session-modes": ["user", "unlock-dialog"]
+}

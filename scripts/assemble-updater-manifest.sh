@@ -185,6 +185,8 @@ for t in "${TRIPLES[@]}"; do
 done
 
 bash "$SCRIPT_DIR/generate-latest-json.sh" "$VERSION" "${TRIPLES[@]}" > latest.json
+node "$SCRIPT_DIR/attach-windows-install-inventory.mjs" latest.json "$PWD" > latest.inventory.json
+mv latest.inventory.json latest.json
 echo "==> latest.json"
 cat latest.json
 

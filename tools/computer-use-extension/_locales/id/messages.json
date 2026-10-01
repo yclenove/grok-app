@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Hubungkan browser ini ke Grok App."
+  },
+  "pairingHint": {
+    "message": "Konfirmasi di Grok, lalu masukkan kode ini di ekstensi browser. Kode berlaku lima menit."
+  },
+  "appAddress": {
+    "message": "Alamat aplikasi"
+  },
+  "pairingCode": {
+    "message": "Kode pemasangan"
+  },
+  "pair": {
+    "message": "Pasangkan"
+  },
+  "paired": {
+    "message": "Terhubung ke Grok App."
+  },
+  "unpaired": {
+    "message": "Belum terhubung."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Bagikan tab saat ini"
+  },
+  "unshareCurrentTab": {
+    "message": "Hentikan berbagi tab saat ini"
+  },
+  "sharedCurrentTab": {
+    "message": "Tab saat ini dibagikan dengan Grok App."
+  },
+  "unsharedCurrentTab": {
+    "message": "Tab saat ini tidak lagi dibagikan."
+  },
+  "shareUnavailable": {
+    "message": "Tab ini tidak dapat dibagikan."
+  },
+  "invalidAddress": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  },
+  "invalidCode": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  },
+  "challengeChanged": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  },
+  "pairingRejected": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  },
+  "busy": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  },
+  "cancelled": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  },
+  "connectionFailed": {
+    "message": "Periksa alamat aplikasi dan kode, lalu coba lagi."
+  }
+}

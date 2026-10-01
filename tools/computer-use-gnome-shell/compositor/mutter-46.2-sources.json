@@ -1,0 +1,28 @@
+{
+  "upstreamTag": "GNOME/mutter/46.2",
+  "experimental": true,
+  "files": [
+    {
+      "path": "src/backends/native/meta-seat-impl.c",
+      "beforeSha256": "07a3017def08f10172969ea21d040d0d1a2965abfa84b998450f1285fd84f908",
+      "afterSha256": "d3f2bcb73b13afa56019bb071f94a898d90db5ea822a98a870890081356f2438"
+    },
+    {
+      "path": "src/backends/native/meta-seat-impl.h",
+      "beforeSha256": "e3490acd93925216df026e310074c00ab0edbbffa104ebe16d0823de3558d997",
+      "afterSha256": "aa4dab6b592d8f3092fd78eedebc72512fe9dccbb078cf8d504875c951d8204b"
+    },
+    {
+      "path": "src/backends/native/meta-seat-native.c",
+      "beforeSha256": "ce66aace666a509a98934bba4d3df047bf4c55a55bc83206b271303a61b96eef",
+      "afterSha256": "7b66737db077da04fc2f60a5b825afde8e3f3fe3aeb1227953377f14e8fd376c"
+    },
+    {
+      "path": "src/backends/native/physical-input-counter.h",
+      "beforeSha256": null,
+      "afterSha256": "4689730b00143c1b6901484dcba3ca57d098233f58cbfa2767b578a7cfa43c16"
+    }
+  ],
+  "mesonSha256": "5046038df19fded8c441b2aff6158a20ac3bd7d42b14836b452f5f5b0c05bd40",
+  "patchSha256": "487534780cfb6e97825c0f8d49e5fbe0afe7c33f7784b1ef425902f6e3f92b17"
+}

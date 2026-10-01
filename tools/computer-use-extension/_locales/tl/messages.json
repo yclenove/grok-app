@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "Ikonekta ang browser na ito sa Grok App."
+  },
+  "pairingHint": {
+    "message": "Kumpirmahin sa Grok, saka ilagay ang code sa browser extension. Mag-e-expire ito pagkalipas ng limang minuto."
+  },
+  "appAddress": {
+    "message": "Address ng app"
+  },
+  "pairingCode": {
+    "message": "Pairing code"
+  },
+  "pair": {
+    "message": "Ipares"
+  },
+  "paired": {
+    "message": "Naka-pares sa Grok App."
+  },
+  "unpaired": {
+    "message": "Hindi naka-pares."
+  },
+  "forget": {
+    "message": "Revoke pairing"
+  },
+  "shareCurrentTab": {
+    "message": "Ibahagi ang kasalukuyang tab"
+  },
+  "unshareCurrentTab": {
+    "message": "Itigil ang pagbabahagi ng kasalukuyang tab"
+  },
+  "sharedCurrentTab": {
+    "message": "Ibinahagi ang kasalukuyang tab sa Grok App."
+  },
+  "unsharedCurrentTab": {
+    "message": "Hindi na ibinabahagi ang kasalukuyang tab."
+  },
+  "shareUnavailable": {
+    "message": "Hindi maibahagi ang tab na ito."
+  },
+  "invalidAddress": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  },
+  "invalidCode": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  },
+  "challengeChanged": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  },
+  "pairingRejected": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  },
+  "busy": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  },
+  "cancelled": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  },
+  "connectionFailed": {
+    "message": "Tingnan ang address ng app at code, saka subukan muli."
+  }
+}

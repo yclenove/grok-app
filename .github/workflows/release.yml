@@ -57,15 +57,19 @@ jobs:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             name: macOS-ARM64
+            cu-target: aarch64-apple-darwin
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
             name: macOS-x64
+            cu-target: x86_64-apple-darwin
           - platform: windows-latest
             args: ""
             name: Windows-x64
+            cu-target: x86_64-pc-windows-msvc
           - platform: ubuntu-22.04
             args: ""
             name: Linux-x64
+            cu-target: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.platform }}
     name: Build ${{ matrix.name }}
@@ -282,10 +286,16 @@ jobs:
             echo "Apple certificate present but no APPLE_API_KEY_P8 — will sign without notarizing"
           fi
 
+      - name: Computer Use runtime prepare/check (target-pinned)
+        run: |
+          node scripts/prepare-computer-use-runtime.mjs --prepare --target ${{ matrix.cu-target }}
+          node scripts/prepare-computer-use-runtime.mjs --check --target ${{ matrix.cu-target }}
+
       - name: Build Tauri app & attach to GitHub Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROK_CU_BUNDLE_TARGET: ${{ matrix.cu-target }}
           GROK_UPDATER_PUBLIC_KEY: ${{ secrets.GROK_UPDATER_PUBLIC_KEY }}
           GROK_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/grok-desktop-latest/latest.json
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -307,6 +317,37 @@ jobs:
             ${{ matrix.platform == 'windows-latest' && steps.win_sign.outputs.enabled == 'true' && ' --config src-tauri/tauri.windows.sign.conf.json' || '' }}
           # We assemble a multi-platform latest.json in assemble-updater-manifest.
           includeUpdaterJson: false
+
+      # Produce a signed, exact-byte file inventory from the actual NSIS archive.
+      # Extraction only: this must never execute an installer on the CI runner.
+      - name: Sign and attach Windows installed-file inventory
+        if: matrix.platform == 'windows-latest' && steps.updater.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $bundles = @(Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($bundles.Count -ne 1) { throw 'Expected exactly one Windows x64 NSIS updater artifact' }
+          $payload = $bundles[0].FullName
+          if (-not (Test-Path "$payload.sig")) { throw 'Signed NSIS updater artifact missing' }
+          $image = Join-Path $env:RUNNER_TEMP ("grok-install-inventory-" + [guid]::NewGuid())
+          $sevenZip = (Get-Command 7z -ErrorAction Stop).Source
+          & $sevenZip x -y "-o$image" $payload
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS read-only extraction failed' }
+          $inventory = "$payload.install-inventory.json"
+          if ($config.bundle.windows.nsis.installMode -ne 'currentUser' -or $config.bundle.windows.nsis.installerHooks -ne 'nsis/update-completion.nsh' -or $config.bundle.windows.nsis.template -ne 'nsis/installer.nsi') { throw 'Review the signed NSIS completion contract before changing installer scope/template' }
+          node scripts/windows-install-inventory.mjs --root $image --payload $payload --app-name $config.productName --version $config.version --target windows --arch x86_64 --kind Nsis --executable grok-app.exe --nsis-image --nsis-completion-bundle-id $config.identifier --nsis-failure-receipt --output $inventory
+          if ($LASTEXITCODE -ne 0) { throw 'Installed-file inventory failed' }
+          pnpm exec tauri signer sign $inventory
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$inventory.sig")) { throw 'Inventory signing failed' }
+          $tag = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' } else { "v$($config.version)" }
+          gh release upload $tag $inventory "$inventory.sig" --repo '${{ github.repository }}' --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Inventory upload failed' }
+          Remove-Item -Recurse -LiteralPath $image
 
       # macOS: tauri-action often uploads only the .dmg. Silent update needs the
       # signed .app.tar.gz (+ .sig) with arch in the filename for assemble-updater.
@@ -354,7 +395,8 @@ jobs:
           echo "Uploading $OUT_TAR (+ .sig) to $TAG"
           gh release upload "$TAG" "$OUT_TAR" "$OUT_SIG" --clobber
 
-      # 绿色版：免安装 zip（单文件 exe + 说明）。WebView2 仍由系统提供。
+      # 绿色版：主 EXE + 完整 Computer Use runtime + 说明；ZIP 解包回读后才上传。
+      # WebView2 仍由系统提供；不是仅压缩单个 EXE。
       - name: Windows portable zip (绿色版)
         if: matrix.platform == 'windows-latest'
         shell: bash
@@ -368,7 +410,7 @@ jobs:
           else
             TAG="v$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
           fi
-          bash scripts/package-windows-portable.sh "$TAG"
+          bash scripts/package-windows-portable.sh "$TAG" --upload
 
   # Hard gate: every matrix leg must succeed AND the Release must list every
   # required installer. Without this, fail-fast:false lets mac/linux publish a
@@ -413,6 +455,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js for signed inventory assembly
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Assemble rolling grok-desktop-latest
         shell: bash

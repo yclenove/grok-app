@@ -1,0 +1,65 @@
+{
+  "extensionName": {
+    "message": "Grok Computer Use"
+  },
+  "extensionDescription": {
+    "message": "将此浏览器连接到 Grok App。"
+  },
+  "pairingHint": {
+    "message": "先在 Grok 确认，再到浏览器扩展输入此验证码。验证码五分钟后失效。"
+  },
+  "appAddress": {
+    "message": "应用地址"
+  },
+  "pairingCode": {
+    "message": "配对码"
+  },
+  "pair": {
+    "message": "配对"
+  },
+  "paired": {
+    "message": "已与 Grok App 配对。"
+  },
+  "unpaired": {
+    "message": "尚未配对。"
+  },
+  "forget": {
+    "message": "撤销配对"
+  },
+  "shareCurrentTab": {
+    "message": "分享当前标签页"
+  },
+  "unshareCurrentTab": {
+    "message": "停止分享当前标签页"
+  },
+  "sharedCurrentTab": {
+    "message": "当前标签页已分享给 Grok App。"
+  },
+  "unsharedCurrentTab": {
+    "message": "当前标签页已停止分享。"
+  },
+  "shareUnavailable": {
+    "message": "此标签页无法分享。"
+  },
+  "invalidAddress": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  },
+  "invalidCode": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  },
+  "challengeChanged": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  },
+  "pairingRejected": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  },
+  "busy": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  },
+  "cancelled": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  },
+  "connectionFailed": {
+    "message": "请检查应用地址和验证码，然后重试。"
+  }
+}

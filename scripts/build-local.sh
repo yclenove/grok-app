@@ -114,11 +114,19 @@ build_target() {
 
 # Windows: on Darwin/Linux use Tauri + cargo-xwin runner (NSIS installer).
 # On Windows host, native MSVC toolchain (no runner).
+prepare_windows_computer_use_runtime() {
+  echo "======== Computer Use runtime prepare/check (x86_64-windows) ========"
+  export GROK_CU_BUNDLE_TARGET="x86_64-pc-windows-msvc"
+  node scripts/prepare-computer-use-runtime.mjs --prepare --target x86_64-windows
+  node scripts/prepare-computer-use-runtime.mjs --check --target x86_64-windows
+}
+
 build_windows() {
   local triple="x86_64-pc-windows-msvc"
   echo ""
   echo "======== Building target: $triple ========"
   rustup target add "$triple" >/dev/null 2>&1 || true
+  prepare_windows_computer_use_runtime
 
   if [[ "$OS" == "Darwin" ]] || [[ "$OS" == "Linux" ]]; then
     prepend_homebrew_llvm
@@ -156,6 +164,9 @@ case "$TARGET_ALIAS" in
       build_target "$triple"
     else
       echo "======== Building host default ========"
+      if [[ "$OS" == "Linux" ]]; then
+        bash "$ROOT/scripts/check-computer-use-linux-sdk.sh"
+      fi
       pnpm exec tauri build
       # Host default without --target often lands under target/release/bundle
       if [[ -d src-tauri/target/release/bundle ]]; then
@@ -196,6 +207,7 @@ case "$TARGET_ALIAS" in
       echo "       deps: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf" >&2
       exit 1
     fi
+    bash "$ROOT/scripts/check-computer-use-linux-sdk.sh"
     build_target "x86_64-unknown-linux-gnu"
     ;;
   all-mac)

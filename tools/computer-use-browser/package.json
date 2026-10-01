@@ -1,0 +1,10 @@
+{
+  "name": "grok-computer-use-browser",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "description": "Isolated Playwright worker for Grok App Computer Use. Not a root runtime dependency.",
+  "dependencies": {
+    "playwright-core": "1.48.0"
+  }
+}

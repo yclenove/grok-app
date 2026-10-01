@@ -1,86 +1,72 @@
 #!/usr/bin/env bash
-# Build a Windows portable (绿色版) zip from a release Windows binary and upload to GitHub Release.
-# Usage (CI): bash scripts/package-windows-portable.sh v0.1.2
-# Or: TAG=v0.1.2 bash scripts/package-windows-portable.sh
+# Package on Windows after Tauri's release build. Never runs the app/installer.
+# Local: bash scripts/package-windows-portable.sh v0.2.33
+# CI publishing is explicit: add --upload (never inferred from a token).
+# GROK_PORTABLE_EXE / GROK_PORTABLE_OUTPUT are explicit build/probe inputs only.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-TAG="${1:-${TAG:-}}"
+UPLOAD=0
+TAG="${TAG:-}"
+TAG_ARG=0
+for arg in "$@"; do
+  case "$arg" in
+    --upload) [[ "$UPLOAD" == 0 ]] || { echo 'duplicate --upload' >&2; exit 2; }; UPLOAD=1 ;;
+    --*) echo "unknown option: $arg" >&2; exit 2 ;;
+    *) [[ "$TAG_ARG" == 0 ]] || { echo 'only one version is allowed' >&2; exit 2; }; TAG="$arg"; TAG_ARG=1 ;;
+  esac
+done
 if [[ -z "$TAG" ]]; then
-  TAG="v$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+  TAG="v$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json","utf8")).version')"
 fi
 VER="${TAG#v}"
+node --input-type=module - "$VER" <<'JS'
+if(process.platform!=='win32')throw new Error('portable packaging requires the Windows build host');
+if(!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(process.argv[2]))throw new Error('invalid portable version');
+JS
+if [[ "$UPLOAD" == 1 ]]; then
+  command -v gh >/dev/null || { echo 'gh is required for explicit upload' >&2; exit 1; }
+  [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]] || { echo 'upload token is required' >&2; exit 1; }
+  [[ -z "${GROK_PORTABLE_EXE:-}" && -z "${GROK_PORTABLE_OUTPUT:-}" ]] || { echo 'custom build/probe paths cannot be published' >&2; exit 1; }
+fi
+EXE="${GROK_PORTABLE_EXE:-src-tauri/target/release/grok-app.exe}"
+OUTPUT="${GROK_PORTABLE_OUTPUT:-.}"
+STAGE="$OUTPUT/dist-portable/Grok_${VER}_x64-portable"
+OUT="$OUTPUT/Grok_${VER}_x64-portable.zip"
+[[ -f "$EXE" ]] || { echo 'explicit Windows product EXE not found; build it first' >&2; exit 1; }
+[[ ! -e "$STAGE" && ! -L "$STAGE" && ! -e "$OUT" && ! -L "$OUT" ]] || { echo 'portable destination already exists; choose a new owned output directory' >&2; exit 1; }
 
-# Tauri productName is "Grok" but Cargo package name may produce grok-app.exe.
-find_release_exe() {
-  local name
-  for name in Grok.exe grok-app.exe; do
-    # Prefer top-level release binary (not under bundle/)
-    if [[ -f "src-tauri/target/release/${name}" ]]; then
-      echo "src-tauri/target/release/${name}"
-      return 0
-    fi
-  done
-  # Fallback: any release/*.exe that is not under bundle/
-  local found
-  found="$(find src-tauri/target -type f -name '*.exe' 2>/dev/null \
-    | grep -E '/release/[^/]+\.exe$' \
-    | grep -v '/bundle/' \
-    | head -n 1 || true)"
-  if [[ -n "$found" && -f "$found" ]]; then
-    echo "$found"
-    return 0
+# Use native paths at process boundaries; Git Bash must not rewrite native argv.
+native_path() { node -e 'console.log(require("node:path").resolve(process.argv[1]))' "$1"; }
+RESOURCES="$(native_path src-tauri/resources)"
+SEED="$(native_path src-tauri/resources/computer-use/seed)"
+STAGE_NATIVE="$(native_path "$STAGE")"
+OUT_NATIVE="$(native_path "$OUT")"
+VALIDATION_NATIVE="$(native_path "$OUTPUT/.portable-validation-$(node -p 'require("node:crypto").randomUUID()')")"
+OWNED_VALIDATION=0
+cleanup_validation() {
+  if [[ "$OWNED_VALIDATION" == 1 ]]; then
+    node -e 'require("node:fs").rmSync(process.argv[1],{recursive:true,force:true})' "$VALIDATION_NATIVE"
   fi
-  return 1
 }
-
-EXE="$(find_release_exe || true)"
-if [[ -z "${EXE:-}" || ! -f "$EXE" ]]; then
-  echo "error: Windows release .exe not found under src-tauri/target/release/" >&2
-  find src-tauri/target -name '*.exe' 2>/dev/null | head -40 || true
-  exit 1
-fi
-echo "using EXE=$EXE"
-
-STAGE="dist-portable/Grok_${VER}_x64-portable"
-rm -rf dist-portable
-mkdir -p "$STAGE"
-# Always ship as Grok.exe for end users (product name).
-cp "$EXE" "$STAGE/Grok.exe"
-python3 - "$VER" "$STAGE" <<'PY'
-import sys
-from pathlib import Path
-
-ver, stage = sys.argv[1], Path(sys.argv[2])
-(stage / "README-portable.txt").write_text(
-    f"""Grok App portable (绿色版) v{ver}
-================================
-1. 解压本目录到任意位置（无需安装）。
-2. 双击 Grok.exe 运行。
-3. 需要系统已安装 Microsoft Edge WebView2 Runtime（Win10/11 通常已自带）。
-4. 真 Agent 能力仍需本机 Grok Build CLI（grok.exe）并完成登录。
-5. SmartScreen 可能提示未知发布者 → 更多信息 → 仍要运行。
-
-Extract anywhere and run Grok.exe. WebView2 required. Grok Build CLI still needed for agent sessions.
-""",
-    encoding="utf-8",
-)
-print("wrote", stage / "README-portable.txt")
-PY
-
-OUT="Grok_${VER}_x64-portable.zip"
-# Prefer zip; on Windows Git Bash it is usually present. Fallback to PowerShell Compress-Archive.
-if command -v zip >/dev/null 2>&1; then
-  (cd dist-portable && zip -r "../${OUT}" "Grok_${VER}_x64-portable")
-else
-  powershell.exe -NoProfile -Command \
-    "Compress-Archive -Path 'dist-portable/Grok_${VER}_x64-portable' -DestinationPath '${OUT}' -Force"
-fi
-ls -lah "$OUT"
-if command -v gh >/dev/null 2>&1 && [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]]; then
+trap cleanup_validation EXIT
+GROK_CU_SEED="$SEED" node scripts/prepare-computer-use-runtime.mjs --check --target x86_64-pc-windows-msvc
+# The Rust verifier correctly persists a lock/owner sidecar beside its seed.
+# Verify in our private build image, then copy only the declared resources into
+# the deliverable. Never delete lock files from a shared seed or ship owner data.
+node scripts/stage-windows-portable.mjs --exe "$EXE" --resources "$RESOURCES" \
+  --config src-tauri/tauri.windows.conf.json --stage "$VALIDATION_NATIVE" --version "$VER"
+OWNED_VALIDATION=1
+GROK_CU_SEED="$VALIDATION_NATIVE/resources/computer-use/seed" node scripts/prepare-computer-use-runtime.mjs --check --target x86_64-pc-windows-msvc
+node scripts/stage-windows-portable.mjs --exe "$VALIDATION_NATIVE/Grok.exe" --resources "$VALIDATION_NATIVE/resources" \
+  --config src-tauri/tauri.windows.conf.json --stage "$STAGE_NATIVE" --version "$VER"
+node scripts/audit-computer-use-bundle.mjs "$STAGE_NATIVE" --target x86_64-pc-windows-msvc
+MSYS2_ARG_CONV_EXCL='*' powershell.exe -NoProfile -NonInteractive -File "$(native_path scripts/package-windows-portable.ps1)" -Stage "$STAGE_NATIVE" -Archive "$OUT_NATIVE"
+echo "Portable archive verified: $OUT_NATIVE"
+if [[ "$UPLOAD" == 1 ]]; then
   gh release upload "$TAG" "$OUT" --clobber
   echo "uploaded $OUT to $TAG"
 else
-  echo "skip upload (gh/token missing); artifact at $OUT"
+  echo 'Local artifact only; nothing uploaded.'
 fi
