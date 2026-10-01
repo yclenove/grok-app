@@ -37,7 +37,7 @@ export const itWorkspace = {
   "resources.collapseTree": "Nascondi albero file",
   "resources.expandTree": "Mostra albero file",
   "resources.resizeTree": "Ridimensiona albero file",
-  "resources.resizeFilesPane": "Ridimensiona pannello file",
+  "resources.resizeFilesPane": "Ridimensiona pannello laterale",
   "resources.save": "Salva",
   "resources.saving": "Salvataggio…",
   "resources.revert": "Ripristina",

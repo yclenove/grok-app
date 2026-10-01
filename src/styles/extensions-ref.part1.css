@@ -15,6 +15,11 @@
   min-width: 0;
 }
 
+/* ComputerUseSettings owns its card and spacing; do not wrap it in a second card. */
+.ext-panel__computer-surface {
+  min-width: 0;
+}
+
 .ext-ref-stack {
   display: flex;
   flex-direction: column;

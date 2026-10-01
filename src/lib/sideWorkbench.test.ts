@@ -43,6 +43,7 @@ describe("sidePickerOptions", () => {
       "terminal",
       "skills",
       "review",
+      "computer",
     ]);
     expect(kinds).not.toContain("plan");
     expect(SIDE_PICKER_EXCLUDED).toContain("plan");
@@ -55,6 +56,7 @@ describe("sidePickerOptions", () => {
       "browser",
       "terminal",
       "skills",
+      "computer",
     ]);
     expect(isPickerCreatableKind("review", { isGitProject: false })).toBe(
       false,
@@ -67,6 +69,9 @@ describe("sidePickerOptions", () => {
       true,
     );
     expect(isPickerCreatableKind("plan", { isGitProject: true })).toBe(false);
+    expect(isPickerCreatableKind("computer", { isGitProject: false })).toBe(
+      true,
+    );
   });
 });
 

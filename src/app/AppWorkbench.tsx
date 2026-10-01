@@ -22,7 +22,6 @@ import {
   resolveChatcutLinkClick,
 } from "@/lib/chatcutHandoff";
 import { loadStopAllSkipConfirmPref } from "@/lib/stopAllSkipConfirmPref";
-
 import {
   planStopAllBusySessions,
   stopAllDialogKeys,
@@ -426,7 +425,7 @@ import {
   type ExecuteSendFromQueue,
 } from "@/hooks/useSendQueue";
 import {
-  buildSlashCatalog,
+  applyComputerUseSlash, buildSlashCatalog,
   countSlashByKind,
   flattenFilteredCatalog,
   type SlashItem,
@@ -889,7 +888,7 @@ export function AppWorkbench() {
     closePhoneDrawer,
     openPhoneDrawer,
     beginSidebarResize,
-    beginAsideResize,
+    asideResize,
   } = useWorkbenchLayout({
     onAsideClose: () => asideCloseExtrasRef.current(),
   });
@@ -8821,7 +8820,7 @@ export function AppWorkbench() {
             setGoalMode(false);
             return;
           default:
-            return;
+            return void applyComputerUseSlash(item.action);
         }
       }
     },
@@ -13067,7 +13066,7 @@ export function AppWorkbench() {
           resizingAside={resizingAside}
           asideOpenW={asideOpenW}
           asidePaint={asidePaint}
-          beginAsideResize={beginAsideResize}
+          asideResize={asideResize}
           effectiveProjectPath={effectiveProjectPath}
           sshAlias={activeProject?.sshAlias ?? null}
           projectName={

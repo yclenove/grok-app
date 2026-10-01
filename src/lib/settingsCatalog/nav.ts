@@ -71,6 +71,7 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
       { id: "skills", labelKey: "ext.skills.title" },
       { id: "agents", labelKey: "ext.agents.title" },
       { id: "hooks", labelKey: "ext.hooks.title" },
+      { id: "computer", labelKey: "ext.computer.title" },
     ],
   },
   {

@@ -11,8 +11,9 @@
  *   (e.g. Linux .deb/.rpm; Linux AppImage is supported)
  * - **host_only** — not running in the desktop app host
  *
- * P0: agents / voice / IM / mirror stop only after successful `install()`
- * prepare — never claim they stop earlier.
+ * For installers that return, services stop after staging and before relaunch.
+ * Windows plugin install exits internally; post-install UI state is not proof
+ * of a pre-exit cleanup barrier or completed signed installation.
  */
 
 /** Mirrors `UpdateStatus` from `useUpdater` without importing the hook. */
@@ -23,6 +24,7 @@ export type AppUpdateStatusState =
   | "available"
   | "downloading"
   | "installing"
+  | "preparing-restart"
   | "ready"
   | "restarting"
   | "error"
@@ -33,6 +35,12 @@ export type AppUpdateStatusLike = {
   /** Only when known from check/download — never invent. */
   version?: string;
   message?: string;
+  /** Install succeeded, but mandatory cleanup/relaunch did not. */
+  restartPending?: true;
+  /** Windows package retained, installation not confirmed; retry original handle. */
+  installPending?: true;
+  /** Unknown native outcome or unavailable ownership: no mutating retry. */
+  installBlocked?: true;
   releaseUrl?: string;
   downloadUrl?: string | null;
   assetNames?: string[];
@@ -70,6 +78,7 @@ export type UpdateStatusTitleKey =
   | "settings.autoUpdateDownloading"
   | "settings.autoUpdateReady"
   | "settings.autoUpdateInstalling"
+  | "settings.autoUpdatePreparingRestart"
   | "settings.autoUpdateRestarting"
   | "settings.autoUpdateManualRequired"
   | "settings.autoUpdateError"
@@ -187,6 +196,15 @@ export function mapUpdateStatusCopy(
       : null;
 
   switch (status.state) {
+    case "preparing-restart":
+      return {
+        titleKey: "settings.autoUpdatePreparingRestart",
+        bodyKey: null,
+        severity: "info",
+        version,
+        errorKind: null,
+        errorMessage: null,
+      };
     case "idle":
       return {
         titleKey: "settings.autoUpdateIdle",
@@ -335,6 +353,7 @@ export function shouldShowInstallProgress(
   return (
     state === "downloading" ||
     state === "installing" ||
+    state === "preparing-restart" ||
     state === "restarting"
   );
 }
@@ -348,15 +367,29 @@ export function isUpdateActionBusy(
     state === "checking" ||
     state === "downloading" ||
     state === "installing" ||
+    state === "preparing-restart" ||
     state === "restarting"
   );
 }
 
-/** Whether the Install-and-restart CTA should show (download finished). */
+/** Installed bytes are retained; this action must not run the installer again. */
+export function isUpdateRestartPending(
+  status: AppUpdateStatusLike | { state: string } | null | undefined,
+): boolean {
+  return status?.state === "error" && "restartPending" in status && status.restartPending === true;
+}
+
+export function isUpdateInstallPending(
+  status: AppUpdateStatusLike | { state: string } | null | undefined,
+): boolean {
+  return status?.state === "error" && "installPending" in status && status.installPending === true;
+}
+
+/** Show install for downloaded bytes, or retry for an already-installed update. */
 export function shouldShowInstallButton(
   status: AppUpdateStatusLike | { state: string } | null | undefined,
 ): boolean {
-  return status?.state === "ready";
+  return status?.state === "ready" || isUpdateRestartPending(status) || isUpdateInstallPending(status);
 }
 
 /** Manual GitHub path CTAs (open release / download asset). */
@@ -379,8 +412,10 @@ export function isUpdateAffordanceVisible(
     state === "downloading" ||
     state === "ready" ||
     state === "installing" ||
+    state === "preparing-restart" ||
     state === "restarting" ||
-    state === "manual-required"
+    state === "manual-required" ||
+    isUpdateRestartPending(status) || isUpdateInstallPending(status)
   );
 }
 
@@ -648,6 +683,7 @@ export function planUserCheckUpdate(status: {
 }): UserCheckUpdatePlan {
   switch (status.state) {
     case "installing":
+    case "preparing-restart":
     case "restarting":
     case "ready":
     case "downloading":

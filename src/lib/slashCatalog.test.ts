@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyComputerUseSlash,
   buildSlashCatalog,
   builtinSlashItems,
   countSlashByKind,
@@ -16,9 +17,30 @@ import {
 } from "./slashCatalog";
 
 describe("builtinSlashItems", () => {
+  it("T23 Composer still has the computer-use slash", () => {
+    const names = builtinSlashItems().map((i) => i.name);
+    expect(names).toContain("computer-use");
+    expect(names).toContain("computer-use-browser");
+    const item = builtinSlashItems().find((i) => i.name === "computer-use")!;
+    expect(item.action).toBe("computer-use");
+    expect(item.kind).toBe("action");
+    expect(item.kind).not.toBe("prompt");
+    const browser = builtinSlashItems().find((i) => i.name === "computer-use-browser")!;
+    expect(browser.kind).toBe("action");
+    expect(browser.action).toBe("computer-use-browser");
+  });
+
+  it("computer-use slash only opens the panel helper", () => {
+    expect(applyComputerUseSlash("status")).toBe(false);
+    expect(applyComputerUseSlash("computer-use")).toBe(true);
+    expect(applyComputerUseSlash("computer-use-browser")).toBe(true);
+  });
+
   it("includes expected commands with i18n keys", () => {
     const items = builtinSlashItems();
     const names = items.map((i) => i.name);
+    expect(names).toContain("computer-use");
+    expect(names).toContain("computer-use-browser");
     expect(names).toEqual([
       "goal",
       "goal-clear",
@@ -44,6 +66,8 @@ describe("builtinSlashItems", () => {
       "attach-chat",
       "extensions",
       "yolo",
+      "computer-use",
+      "computer-use-browser",
     ]);
 
     const goal = items.find((i) => i.name === "goal")!;

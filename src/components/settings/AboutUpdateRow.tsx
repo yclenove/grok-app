@@ -13,6 +13,8 @@ import {
   classifyUpdateError,
   isAutoUpdatePath,
   isUpdateActionBusy,
+  isUpdateRestartPending,
+  isUpdateInstallPending,
   mapUpdateStatusCopy,
   needsInstallAndRestartConfirm,
   resolveManualUpdateUrls,
@@ -53,6 +55,8 @@ export function AboutUpdateRow({
   };
 
   const statusLike = status as AppUpdateStatusLike;
+  const installPending = isUpdateInstallPending(statusLike);
+  const installBlocked = statusLike.state === "error" && statusLike.installBlocked === true;
   const copy = mapUpdateStatusCopy(statusLike);
   const channel = resolveUpdateChannelHonestyPreferHost({
     hostChannel: channelInfo.channel,
@@ -91,6 +95,7 @@ export function AboutUpdateRow({
   })();
 
   const busy = isUpdateActionBusy(statusLike);
+  const restartPending = isUpdateRestartPending(statusLike);
   const showInstallProgress = shouldShowInstallProgress(statusLike);
   // Only show install when download finished (ready), never on available.
   // Click opens in-app confirm; confirm runs install + relaunch.
@@ -139,7 +144,7 @@ export function AboutUpdateRow({
           <button
             type="button"
             className="btn btn--solid"
-            disabled={busy}
+            disabled={busy || restartPending || installPending}
             onClick={() => void checkForUpdate()}
           >
             {busy
@@ -147,9 +152,11 @@ export function AboutUpdateRow({
               : t("settings.checkUpdate")}
           </button>
           {showInstallProgress &&
-          (status.state === "installing" || status.state === "restarting") ? (
+          (status.state === "installing" || status.state === "preparing-restart" || status.state === "restarting") ? (
             <button type="button" className="btn btn--solid" disabled>
-              {status.state === "restarting"
+              {status.state === "preparing-restart"
+                ? t("settings.autoUpdatePreparingRestart")
+                : status.state === "restarting"
                 ? t("settings.autoUpdateRestarting")
                 : t("settings.autoUpdateInstalling")}
             </button>
@@ -157,7 +164,7 @@ export function AboutUpdateRow({
             <button
               type="button"
               className="btn btn--solid"
-              disabled={busy}
+              disabled={busy || installBlocked}
               onClick={() => {
                 if (needsInstallAndRestartConfirm(statusLike)) {
                   setConfirmInstall(true);
@@ -166,7 +173,7 @@ export function AboutUpdateRow({
                 void installAndRelaunch();
               }}
             >
-              {t("settings.autoUpdateInstall")}
+              {t(installPending ? "settings.autoUpdateRetryInstall" : restartPending ? "settings.autoUpdateRetryRestart" : "settings.autoUpdateInstall")}
             </button>
           ) : null}
           {showOpenRelease && downloadUrl ? (
@@ -218,7 +225,15 @@ export function AboutUpdateRow({
             {t("settings.autoUpdateError", {
               error: copy.errorMessage ?? status.message,
             })}
-            {copy.bodyKey ? (
+            {installPending && status.version ? (
+              <div className="settings-about-update__err-hint" data-update-install-pending>
+                {t(installBlocked ? "settings.autoUpdateInstallBlocked" : "settings.autoUpdateInstallPending", { version: status.version })}
+              </div>
+            ) : restartPending && status.version ? (
+              <div className="settings-about-update__err-hint" data-update-restart-pending>
+                {t("settings.autoUpdateRestartPending", { version: status.version })}
+              </div>
+            ) : copy.bodyKey ? (
               <div className="settings-about-update__err-hint">
                 {t(copy.bodyKey)}
               </div>

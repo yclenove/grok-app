@@ -37,7 +37,7 @@ export const ptBRWorkspace = {
   "resources.collapseTree": "Ocultar árvore de arquivos",
   "resources.expandTree": "Mostrar árvore de arquivos",
   "resources.resizeTree": "Redimensionar árvore de arquivos",
-  "resources.resizeFilesPane": "Redimensionar painel de arquivos",
+  "resources.resizeFilesPane": "Redimensionar painel lateral",
   "resources.save": "Salvar",
   "resources.saving": "Salvando…",
   "resources.revert": "Reverter",

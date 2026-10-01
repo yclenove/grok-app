@@ -86,6 +86,8 @@ import {
   loadWindowAlwaysOnTopPref,
 } from "./lib/windowAlwaysOnTop";
 import { installZoomHotkeys } from "./lib/zoomHotkeys";
+// Slash → Computer Use must be on window before the lazy App chunk loads.
+import "@/lib/computer-use/panelStore";
 
 // Apply persisted theme preference (default: system) before first React paint.
 // Optional clock schedule (under System) wins over OS scheme when enabled.

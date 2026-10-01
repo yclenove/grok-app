@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, intlLocale, type Locale, type MessageKey } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
+import { ComputerUseSettings } from "@/components/computer-use/ComputerUseSettings";
 import {
   IconDoctor,
   IconEdit,
@@ -171,6 +172,7 @@ export type ExtensionsTabId =
   | "mcp"
   | "agents"
   | "hooks"
+  | "computer"
   /** @deprecated Deep-link only; resolves to plugins. */
   | "market";
 
@@ -199,6 +201,10 @@ export function ExtensionsPanel({
   onSkillsPrefsChanged,
 }: ExtensionsPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
+  // Legacy market deep-link / search resolves to plugins. Computer Use owns
+  // its Host reads and does not depend on CLI extension inspection.
+  const tab = resolveExtensionsTabId(activeTab);
+  const inspectExtensions = tab !== "computer";
 
   const pluginValidateKindLabels = useMemo(
     (): Partial<Record<PluginValidateKind, string>> => ({
@@ -716,8 +722,9 @@ export function ExtensionsPanel({
   }, [enrichPluginCards, projectPath, tr]);
 
   useEffect(() => {
+    if (!inspectExtensions) return;
     void refresh();
-  }, [refresh]);
+  }, [inspectExtensions, refresh]);
 
   // Load discover catalog when plugins tab is shown (cached when possible).
   useEffect(() => {
@@ -1556,8 +1563,6 @@ export function ExtensionsPanel({
     }
   }, [doctorLastAt, locale]);
 
-  // Legacy market deep-link / search → plugins (no top-level market tab).
-  const tab = resolveExtensionsTabId(activeTab);
   const chatcutInstalled = useMemo(
     () => isChatCutInstalled(plugins),
     [plugins],
@@ -1797,6 +1802,7 @@ export function ExtensionsPanel({
                 ["skills", "ext.skills.title", skills.length] as const,
                 ["agents", "ext.agents.title", null] as const,
                 ["hooks", "ext.hooks.title", null] as const,
+                ["computer", "ext.computer.title", null] as const,
               ] as const
             ).map(([id, key, count]) => (
               <button
@@ -1883,13 +1889,13 @@ export function ExtensionsPanel({
         </div>
       ) : null}
 
-      {pathHint && (
+      {inspectExtensions && pathHint && (
         <p className="ext-alert ext-alert--warn" role="status">
           {pathHint}
         </p>
       )}
 
-      {actionError && (
+      {inspectExtensions && actionError && (
         <div className="ext-alert ext-alert--error" role="alert">
           <div className="ext-alert__title">
             {actionErrorSource === "mcp"
@@ -1910,7 +1916,7 @@ export function ExtensionsPanel({
         </div>
       )}
 
-      {bannerError && (
+      {inspectExtensions && bannerError && (
         <div
           className={
             "ext-alert" + (cliMissing ? " ext-alert--error" : " ext-alert--warn")
@@ -1941,7 +1947,7 @@ export function ExtensionsPanel({
         </div>
       )}
 
-      <div className="settings-card ext-panel__surface">
+      <div className={tab === "computer" ? "ext-panel__computer-surface" : "settings-card ext-panel__surface"}>
       {/* Plugins — reference layout: installed strip + 2-col featured catalog */}
       {tab === "plugins" && (
       <div className="ext-ref-stack ext-ref-plugins-scroll">
@@ -2420,6 +2426,10 @@ export function ExtensionsPanel({
         </section>
       </div>
       )}
+
+      {tab === "computer" ? (
+        <ComputerUseSettings locale={locale} />
+      ) : null}
 
       {/* Skills */}
       {tab === "skills" && (

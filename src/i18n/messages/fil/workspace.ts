@@ -37,7 +37,7 @@ export const filWorkspace = {
   "resources.collapseTree": "Itago ang file tree",
   "resources.expandTree": "Ipakita ang file tree",
   "resources.resizeTree": "Baguhin ang laki ng file tree",
-  "resources.resizeFilesPane": "Baguhin ang laki ng files pane",
+  "resources.resizeFilesPane": "Baguhin ang laki ng panel sa gilid",
   "resources.save": "I-save",
   "resources.saving": "Sine-save…",
   "resources.revert": "Ibalik",

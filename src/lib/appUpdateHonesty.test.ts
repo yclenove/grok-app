@@ -6,6 +6,8 @@ import {
   formatUpdateProgressLine,
   isAutoUpdatePath,
   isUpdateActionBusy,
+  isUpdateRestartPending,
+  isUpdateInstallPending,
   mapUpdateStatusCopy,
   needsInstallAndRestartConfirm,
   planUserCheckUpdate,
@@ -23,6 +25,51 @@ import {
   updateStatusToneClass,
   type AppUpdateStatusLike,
 } from "./appUpdateHonesty";
+
+describe("Windows installation pending honesty", () => {
+  const pending: AppUpdateStatusLike = { state: "error", version: "9.9.9", installPending: true, message: "cleanup pending" };
+  it("offers an installation retry, not an already-installed restart", () => {
+    expect(isUpdateInstallPending(pending)).toBe(true);
+    expect(isUpdateRestartPending(pending)).toBe(false);
+    expect(shouldShowInstallButton(pending)).toBe(true);
+    expect(isUpdateAffordanceVisible(pending)).toBe(true);
+    expect(needsInstallAndRestartConfirm(pending)).toBe(false);
+    expect(mapUpdateStatusCopy(pending).severity).toBe("error");
+  });
+  it("requires explicit native ownership rather than any install error", () => {
+    expect(isUpdateInstallPending({ state: "error", message: "launch failed" })).toBe(false);
+    expect(isUpdateInstallPending({ state: "installing", installPending: true })).toBe(false);
+    expect(isUpdateInstallPending(null)).toBe(false);
+  });
+});
+
+describe("installed update recovery affordances", () => {
+  const installed: AppUpdateStatusLike = {
+    state: "error", message: "cleanup pending", version: "9.9.9", restartPending: true,
+  };
+  it("keeps About and sidebar recovery actions visible without suggesting a reinstall", () => {
+    expect(isUpdateRestartPending(installed)).toBe(true);
+    expect(shouldShowInstallButton(installed)).toBe(true);
+    expect(isUpdateAffordanceVisible(installed)).toBe(true);
+    expect(isUpdateActionBusy(installed)).toBe(false);
+    expect(needsInstallAndRestartConfirm(installed)).toBe(false);
+    expect(shouldShowManualDownloadCtas(installed)).toBe(false);
+  });
+  it("does not turn an ordinary install/check failure into an installed update", () => {
+    const error: AppUpdateStatusLike = { state: "error", message: "install failed" };
+    expect(isUpdateRestartPending(error)).toBe(false);
+    expect(shouldShowInstallButton(error)).toBe(false);
+    expect(isUpdateAffordanceVisible(error)).toBe(false);
+  });
+  it("shows mandatory cleanup as preparing restart, not a second installation", () => {
+    const preparing: AppUpdateStatusLike = { state: "preparing-restart", version: "9.9.9" };
+    expect(mapUpdateStatusCopy(preparing).titleKey).toBe("settings.autoUpdatePreparingRestart");
+    expect(isUpdateActionBusy(preparing)).toBe(true);
+    expect(isUpdateAffordanceVisible(preparing)).toBe(true);
+    expect(shouldShowInstallProgress(preparing)).toBe(true);
+    expect(planUserCheckUpdate(preparing)).toEqual({ action: "noop" });
+  });
+});
 
 describe("resolveUpdateChannelHonesty", () => {
   it("returns host_only when not desktop", () => {

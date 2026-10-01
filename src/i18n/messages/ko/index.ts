@@ -23,6 +23,7 @@ import { koSettingsMemory } from "./settings-memory";
 import { koSettingsCode } from "./settings-code";
 import { koSettingsRemoteIm } from "./settings-remoteIm";
 import { koSettingsPet } from "./settings-pet";
+import { koComputerUse } from "./computer-use";
 
 import type { MessageKey } from "../en";
 
@@ -51,4 +52,5 @@ export const ko: Record<MessageKey, string> = {
   ...koSettingsCode,
   ...koSettingsRemoteIm,
   ...koSettingsPet,
+  ...koComputerUse,
 };

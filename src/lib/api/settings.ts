@@ -125,6 +125,8 @@ export interface AppSettings {
    */
   /** Inject official-aux MCP on **custom** main route only (never official Grok). */
   officialAuxInject?: boolean;
+  /** Computer Use product flag. Default false. Independent of YOLO. */
+  computerUseEnabled?: boolean;
   /** With inject on: also load user extension MCPs (default false — keeps official-aux fast). */
   officialAuxWithUserMcp?: boolean;
   /**

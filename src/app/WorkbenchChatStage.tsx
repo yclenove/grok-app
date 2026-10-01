@@ -26,6 +26,8 @@ import { GoalOrchSessionChip } from "@/components/GoalOrchSessionChip";
 import { PlanStatusBar } from "@/components/PlanStatusBar";
 import { ChatFindLive } from "@/components/ChatFindLive";
 import { AgentTasksPanelLive } from "@/components/AgentTasksPanelLive";
+import { ComputerTaskCardLive } from "@/components/computer-use/ComputerTaskCardLive";
+import { resolveLocale } from "@/i18n";
 
 export type WorkbenchChatStageProps = {
   [key: string]: any;
@@ -270,6 +272,13 @@ export function WorkbenchChatStage(p: WorkbenchChatStageProps) {
               onClose={() => setShowChatFind(false)}
             />
           )}
+          {mainPane === "chat" ? (
+            <ComputerTaskCardLive
+              key={session.sessionId ?? "no-session"}
+              locale={resolveLocale(locale)}
+              sessionId={session.sessionId ?? null}
+            />
+          ) : null}
           {mainPane === "chat" && tasksPanelOpen && session.sessionId ? (
             <AgentTasksPanelLive
               t={(k, vars) => tr(k, vars)}

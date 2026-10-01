@@ -37,7 +37,7 @@ export const idWorkspace = {
   "resources.collapseTree": "Sembunyikan pohon berkas",
   "resources.expandTree": "Tampilkan pohon berkas",
   "resources.resizeTree": "Ubah ukuran pohon berkas",
-  "resources.resizeFilesPane": "Ubah ukuran panel file",
+  "resources.resizeFilesPane": "Ubah ukuran panel samping",
   "resources.save": "Simpan",
   "resources.saving": "Menyimpan…",
   "resources.revert": "Kembalikan",

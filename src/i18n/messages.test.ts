@@ -116,6 +116,23 @@ describe("i18n catalog", () => {
     }
   });
 
+  it("translates Computer Use controls, pairing and consent in every locale", () => {
+    const keys: MessageKey[] = [
+      "cu.panel.resume", "cu.panel.takeover", "cu.panel.stopping", "cu.panel.busy",
+      "cu.panel.previewHidden", "cu.panel.previewLabel", "cu.settings.lead",
+      "cu.settings.enable", "cu.settings.enableDesc", "cu.panel.pairExtension",
+      "cu.panel.confirmPairing", "cu.panel.revokePairing", "cu.panel.selectWebview",
+      "cu.panel.unbindWebview", "cu.flag.off", "cu.task.windowClosed", "cu.task.unavailable",
+      "cu.panel.targetsUnavailable",
+    ];
+    for (const locale of LOCALES) {
+      if (locale === "en") continue;
+      for (const key of keys) {
+        expect(messages[locale][key], `${locale}.${key}`).not.toBe(messages.en[key]);
+      }
+    }
+  });
+
   it("every value is a non-empty string", () => {
     for (const loc of LOCALES) {
       for (const [k, v] of Object.entries(messages[loc])) {

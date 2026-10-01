@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createT, type Locale, type MessageKey } from "@/i18n";
+import { createT, resolveLocale, type Locale, type MessageKey } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
 import type { PlanReviewState } from "@/lib/planBody";
 import { shouldOpenPlanSideTab } from "@/lib/planModePro";
@@ -35,6 +35,7 @@ import { FilesWorkspace } from "./FilesWorkspace";
 import { PlanTab, type PlanTabChrome } from "./PlanTab";
 import { ReviewTab } from "./ReviewTab";
 import { SkillsTab } from "./SkillsTab";
+import { ComputerPanel } from "@/components/computer-use/ComputerPanel";
 import { SidePicker } from "./SidePicker";
 import { SideTabBar } from "./SideTabBar";
 import { SideTabBody } from "./SideTabBody";
@@ -78,6 +79,7 @@ export type SideWorkbenchProps = {
   skillsLoading?: boolean;
   skillsLoadError?: string | null;
   onSelectSkill?: (skill: SkillsPickerSkill) => void;
+  sessionId?: string | null;
 };
 
 export function SideWorkbench({
@@ -114,6 +116,7 @@ export function SideWorkbench({
   skillsLoading = false,
   skillsLoadError = null,
   onSelectSkill,
+  sessionId = null,
 }: SideWorkbenchProps) {
   const [internal, setInternal] = useState(emptySideWorkbenchState);
   const state = controlled ?? internal;
@@ -462,6 +465,16 @@ export function SideWorkbench({
                 hostError={skillsLoadError}
                 sshAlias={sshAlias}
                 onSelectSkill={(skill) => onSelectSkill?.(skill)}
+              />
+            ) : null}
+
+            {active.kind === "computer" ? (
+              <ComputerPanel
+                key={`${sessionId ?? "no-session"}:${active.surface}`}
+                locale={resolveLocale(locale)}
+                sessionId={sessionId ?? null}
+                runId={null}
+                surface={active.surface}
               />
             ) : null}
 

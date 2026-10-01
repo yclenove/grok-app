@@ -23,6 +23,7 @@ import { frSettingsMemory } from "./settings-memory";
 import { frSettingsCode } from "./settings-code";
 import { frSettingsRemoteIm } from "./settings-remoteIm";
 import { frSettingsPet } from "./settings-pet";
+import { frComputerUse } from "./computer-use";
 
 import type { MessageKey } from "../en";
 
@@ -51,4 +52,5 @@ export const fr: Record<MessageKey, string> = {
   ...frSettingsCode,
   ...frSettingsRemoteIm,
   ...frSettingsPet,
+  ...frComputerUse,
 };

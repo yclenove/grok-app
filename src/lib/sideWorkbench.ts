@@ -6,7 +6,7 @@
 export const SIDE_TABS_MAX = 24;
 
 /** User-creatable kinds via empty state / `+` picker. */
-export type SidePickerKind = "file" | "browser" | "terminal" | "review" | "skills";
+export type SidePickerKind = "file" | "browser" | "terminal" | "review" | "skills" | "computer";
 
 /** All tab kinds including process-only plan. */
 export type SideTabKind = SidePickerKind | "plan";
@@ -25,7 +25,13 @@ export type SideTab =
   | { id: string; kind: "terminal"; sessionKey: string; name: string }
   | { id: string; kind: "review"; name: string }
   | { id: string; kind: "skills"; name: string }
-  | { id: string; kind: "plan"; planRef?: string; name: string };
+  | { id: string; kind: "plan"; planRef?: string; name: string }
+  | {
+      id: string;
+      kind: "computer";
+      name: string;
+      surface: "desktop" | "managed-browser" | "existing-tabs" | "app-webview";
+    };
 
 export type SideWorkbenchState = {
   tabs: SideTab[];
@@ -55,6 +61,7 @@ export type CreateSideTabMeta = {
   /** 1-based line for file path:line open. */
   line?: number | null;
   column?: number | null;
+  surface?: "desktop" | "managed-browser" | "existing-tabs" | "app-webview";
 };
 
 export type OpenSideTabResult = SideWorkbenchState & {
@@ -96,6 +103,10 @@ const PICKER_BASE: SidePickerOption[] = [
     kind: "review",
     labelKey: "side.picker.review",
   },
+  {
+    kind: "computer",
+    labelKey: "side.picker.computer",
+  },
 ];
 
 /** Kinds never offered in empty state / `+` menus. */
@@ -135,7 +146,8 @@ export function isPickerCreatableKind(
     kind === "file" ||
     kind === "browser" ||
     kind === "terminal" ||
-    kind === "skills"
+    kind === "skills" ||
+    kind === "computer"
   );
 }
 
@@ -164,6 +176,7 @@ export const SIDE_TAB_DEFAULT_NAME_KEYS: Record<SideTabKind, string> = {
   review: "side.tab.review",
   skills: "side.tab.skills",
   plan: "side.tab.plan",
+  computer: "side.tab.computer",
 };
 
 /** True when `name` is a Side Workbench i18n label key (not a path/title). */
@@ -231,6 +244,13 @@ function buildTab(kind: SideTabKind, meta?: CreateSideTabMeta): SideTab {
       return { id, kind, name };
     case "plan":
       return { id, kind, planRef: meta?.planRef, name };
+    case "computer":
+      return {
+        id,
+        kind,
+        name,
+        surface: meta?.surface ?? "desktop",
+      };
   }
 }
 
@@ -276,7 +296,10 @@ export function openSideTab(
         (t.url || "").trim().replace(/\/+$/, "") === u,
     );
   }
-  if (existingIdx < 0 && (kind === "review" || kind === "plan" || kind === "skills")) {
+  if (
+    existingIdx < 0 &&
+    (kind === "review" || kind === "plan" || kind === "skills" || kind === "computer")
+  ) {
     existingIdx = tabs.findIndex((t) => t.kind === kind);
   }
   // Picker「文件」: reuse a placeholder, or focus an already-open file tab.
@@ -300,7 +323,12 @@ export function openSideTab(
             name: meta?.name?.trim() || hit.name,
             path: meta?.path?.trim() || hit.path,
           }
-        : hit;
+        : hit.kind === "computer" && kind === "computer"
+          ? {
+              ...hit,
+              surface: meta?.surface ?? hit.surface,
+            }
+          : hit;
     const rest = tabs.filter((_, i) => i !== existingIdx);
     const keepPlaceholder = isPlaceholderFileTab(refreshed);
     const nextTabs = dropPlaceholderFileTabs(

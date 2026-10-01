@@ -5,11 +5,14 @@
 import {
   lazy,
   Suspense,
+  useEffect,
   type CSSProperties,
   type Dispatch,
   type SetStateAction,
 } from "react";
 import { PaneToggleButton } from "@/components/PaneToggleButton";
+import { AsideResizeHandle } from "@/components/AsideResizeHandle";
+import type { AsideResizeControl } from "@/lib/asideResize";
 import { UiErrorBoundary } from "@/components/UiErrorBoundary";
 import { createT, type Locale } from "@/i18n";
 import { usePaneUnreadDot } from "@/hooks/usePaneUnreadDot";
@@ -19,7 +22,9 @@ import type { SessionPlanState } from "@/lib/planSession";
 import type { SessionFileChange } from "@/lib/sessionChanges";
 import type { SkillInfo } from "@/lib/slashCatalog";
 import type { SkillsPickerSkill } from "@/lib/skillsTaskPicker";
-import type { SideWorkbenchState } from "@/lib/sideWorkbench";
+import { type SideWorkbenchState } from "@/lib/sideWorkbench";
+import { applyComputerPanelOpen } from "@/lib/computer-use/surface";
+import { subscribeComputerPanel } from "@/lib/computer-use/panelStore";
 import type { ResourceOpenTarget } from "@/components/resource-viewer/types";
 
 const SideWorkbench = lazy(async () => {
@@ -39,7 +44,7 @@ export type WorkbenchResourcesAsideProps = {
   resizingAside: boolean;
   asideOpenW: number;
   asidePaint: number;
-  beginAsideResize: (width: number) => void;
+  asideResize: AsideResizeControl;
   effectiveProjectPath: string | null;
   sshAlias?: string | null;
   projectName: string;
@@ -88,7 +93,7 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
     resizingAside,
     asideOpenW,
     asidePaint,
-    beginAsideResize,
+    asideResize,
     effectiveProjectPath,
     sshAlias = null,
     projectName,
@@ -123,6 +128,12 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
     skillsLoadError,
     onSelectSkill,
   } = props;
+
+  useEffect(() => {
+    return subscribeComputerPanel((mode) => {
+      setSideWorkbench((s) => applyComputerPanelOpen(s, mode));
+    });
+  }, [setSideWorkbench]);
 
   const asideMin = layout.asideWidth || DEFAULT_LAYOUT.asideWidth;
   const toggleUnread = usePaneUnreadDot({
@@ -197,16 +208,11 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
                 } as CSSProperties)
       }
     >
-      {!layout.asideCollapsed && !sidePaneCoversMain && !asideOverlay && (
-        <div
-          className="aside-resizer"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={t("resources.resizeFilesPane")}
-          onPointerDown={(e) => {
-            e.preventDefault();
-            beginAsideResize(asideMin);
-          }}
+      {!layout.asideCollapsed && !phoneLayout && !sidePaneCoversMain && !asideOverlay && (
+        <AsideResizeHandle
+          control={asideResize}
+          label={t("resources.resizeFilesPane")}
+          busy={resizingAside}
         />
       )}
       <div className="aside__inner">
@@ -265,6 +271,7 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
             skillsLoading={skillsLoading}
             skillsLoadError={skillsLoadError}
             onSelectSkill={onSelectSkill}
+            sessionId={sessionId}
           />
           </UiErrorBoundary>
         </Suspense>

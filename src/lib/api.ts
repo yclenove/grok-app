@@ -27,3 +27,4 @@ export * from "./api/ssh";
 export * from "./api/wallpaper";
 export * from "./api/pet";
 export * from "./api/skin";
+export * from "./api/computerUse";

@@ -18,4 +18,8 @@ describe("boot CSS", () => {
     expect(src).toContain('import("./components/pet/PetApp")');
     expect(src).toContain('import("./App")');
   });
+
+  it("registers Computer Use slash on the boot chunk, not only the lazy App chunk", () => {
+    expect(src).toContain("@/lib/computer-use/panelStore");
+  });
 });

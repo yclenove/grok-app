@@ -14,6 +14,8 @@ import type { UpdateStatus } from "@/hooks/useUpdater";
 import {
   isUpdateAffordanceVisible,
   needsInstallAndRestartConfirm,
+  isUpdateRestartPending,
+  isUpdateInstallPending,
 } from "@/lib/appUpdateHonesty";
 import { isUpdateSimActive } from "@/lib/updateSim";
 import * as api from "@/lib/api";
@@ -25,9 +27,11 @@ function statusVersion(status: UpdateStatus): string | undefined {
     status.state === "downloading" ||
     status.state === "ready" ||
     status.state === "installing" ||
+    status.state === "preparing-restart" ||
     status.state === "restarting" ||
     status.state === "manual-required" ||
     status.state === "up-to-date"
+    || status.state === "error"
   ) {
     return status.version;
   }
@@ -35,11 +39,16 @@ function statusVersion(status: UpdateStatus): string | undefined {
 }
 
 function tipKey(status: UpdateStatus): MessageKey {
+  if (status.state === "error" && status.installBlocked) return "settings.autoUpdateInstallBlocked";
+  if (isUpdateInstallPending(status)) return "settings.autoUpdateRetryInstall";
+  if (isUpdateRestartPending(status)) return "settings.autoUpdateRetryRestart";
   switch (status.state) {
     case "downloading":
       return "sidebar.update.downloading";
     case "installing":
       return "sidebar.update.installing";
+    case "preparing-restart":
+      return "settings.autoUpdatePreparingRestart";
     case "restarting":
       return "sidebar.update.restarting";
     case "ready":
@@ -57,6 +66,7 @@ export function SidebarUpdateButton({
   t: (key: MessageKey, vars?: Record<string, string | number>) => string;
 }) {
   const { status, applyAvailableUpdate } = useUpdaterContext();
+  const installBlocked = status.state === "error" && status.installBlocked === true;
   const [busyClick, setBusyClick] = useState(false);
   const [confirmInstall, setConfirmInstall] = useState(false);
 
@@ -64,12 +74,12 @@ export function SidebarUpdateButton({
   const version = statusVersion(status);
   // Message templates end with optional `{version}` (e.g. " (1.2.3)" or "").
   const tipLabel = t(tipKey(status), {
-    version: version ? ` (${version})` : "",
+    version: installBlocked ? (version ?? "") : version ? ` (${version})` : "",
   });
 
   const runApply = useCallback(async () => {
-    if (busyClick) return;
-    if (status.state === "installing" || status.state === "restarting") return;
+    if (busyClick || installBlocked) return;
+    if (status.state === "installing" || status.state === "preparing-restart" || status.state === "restarting") return;
     setBusyClick(true);
     try {
       const result = await applyAvailableUpdate();
@@ -86,17 +96,17 @@ export function SidebarUpdateButton({
     } finally {
       setBusyClick(false);
     }
-  }, [applyAvailableUpdate, busyClick, status.state]);
+  }, [applyAvailableUpdate, busyClick, installBlocked, status.state]);
 
   const onClick = useCallback(() => {
-    if (busyClick) return;
-    if (status.state === "installing" || status.state === "restarting") return;
+    if (busyClick || installBlocked) return;
+    if (status.state === "installing" || status.state === "preparing-restart" || status.state === "restarting") return;
     if (needsInstallAndRestartConfirm(status)) {
       setConfirmInstall(true);
       return;
     }
     void runApply();
-  }, [busyClick, runApply, status]);
+  }, [busyClick, installBlocked, runApply, status]);
 
   // Desktop host, or update sim (browser can still exercise the UI).
   if (!visible || (!api.isDesktopHost() && !isUpdateSimActive())) {
@@ -107,6 +117,7 @@ export function SidebarUpdateButton({
     busyClick ||
     status.state === "downloading" ||
     status.state === "installing" ||
+    status.state === "preparing-restart" ||
     status.state === "restarting";
 
   return (
@@ -118,6 +129,7 @@ export function SidebarUpdateButton({
             "sidebar-update-btn" +
             (status.state === "downloading" ||
             status.state === "installing" ||
+            status.state === "preparing-restart" ||
             status.state === "restarting"
               ? " sidebar-update-btn--busy"
               : "")
@@ -125,7 +137,7 @@ export function SidebarUpdateButton({
           aria-label={tipLabel}
           title={tipLabel}
           disabled={
-            status.state === "installing" || status.state === "restarting"
+            installBlocked || status.state === "installing" || status.state === "preparing-restart" || status.state === "restarting"
           }
           onClick={() => onClick()}
         >

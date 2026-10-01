@@ -23,7 +23,8 @@ import { isImagePath, mergeAttachments } from "@/lib/attachments";
 import { chatHasUpdate, loadRecentAttachIds, lookupChatStatus, lookupChatTitle } from "@/lib/chatAttach";
 import { type PermissionPolicyId } from "@/lib/grokCatalog";
 import { removeRecentPrompt } from "@/lib/recentPromptHistory";
-import { queuePreviewText, shouldEnqueueSend } from "@/lib/sendQueue";
+import { queuePreviewText, shouldEnqueueSend, type QueuedSend } from "@/lib/sendQueue";
+import type { SlashItem } from "@/lib/slashCatalog";
 import { canType } from "@/lib/session";
 import { resolveVoiceMicChrome, voiceMicLabelMessageKey } from "@/lib/voiceDictation";
 import { createPortal } from "react-dom";
@@ -217,7 +218,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                     </div>
                   ) : null}
                   <ul className="composer__queue-list">
-                    {sendQueue.activeQueue.map((item: any, idx: any) => {
+                    {sendQueue.activeQueue.map((item: QueuedSend, idx: number) => {
                       const queueLen = sendQueue.activeQueue.length;
                       const rowBusy =
                         guidingQueueItemId === item.id ||
@@ -443,7 +444,9 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       setShowJsonSchemaModal(true);
                     }}
                     onSelectCreateVideo={applyCreateVideo}
-                    onSelectSlash={applySlashItem}
+                    onSelectSlash={(item: SlashItem) => {
+                      applySlashItem(item);
+                    }}
                     onClearFilters={clearSlashFilters}
                     resolveTitle={resolveSlashTitle}
                     resolveDescription={resolveSlashDescription}

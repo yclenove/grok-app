@@ -5,8 +5,11 @@
  *   install → relaunch. About “Check for updates” stops at `ready`.
  * - Local / unsigned / plugin off: GitHub Releases via `app_check_update` → open page.
  *
- * P0: `prepare_for_app_update` runs only AFTER successful `install()`, so a failed
- * install never kills agents / voice / IM / mirror.
+ * On platforms where install() returns, prepare_for_app_update is mandatory
+ * before relaunch. Windows uses the pinned native updater patch: verified
+ * staging → fallible App cleanup → checked installer launch → exit. Native
+ * pending errors retain the original Update without claiming installation.
+ * Library tests do not prove signed, installed-product update acceptance.
  */
 
 import { useState, useRef, useCallback, useEffect } from "react";
@@ -19,6 +22,7 @@ import {
   shouldInstallWhenReady,
 } from "@/lib/appUpdateHonesty";
 import { DEVELOPER_MODE_CHANGE_EVENT } from "@/lib/developerModePref";
+import { decodePendingInstall, type NativePendingInstall } from "@/lib/updateRecovery";
 import {
   UPDATE_SIM_CHANGE_EVENT,
   UPDATE_SIM_VERSION,
@@ -36,10 +40,11 @@ export type UpdateStatus =
   | { state: "available"; version: string }
   | { state: "downloading"; version: string }
   | { state: "installing"; version: string }
+  | { state: "preparing-restart"; version: string }
   | { state: "ready"; version: string }
   /** Install staged; process is about to relaunch (or sim page reload). */
   | { state: "restarting"; version: string }
-  | { state: "error"; message: string }
+  | { state: "error"; message: string; version?: string; restartPending?: true; installPending?: true; installBlocked?: true }
   | {
       state: "manual-required";
       version: string;
@@ -56,6 +61,7 @@ const BACKGROUND_BLOCKED_STATES = new Set<UpdateStatus["state"]>([
   "available",
   "downloading",
   "installing",
+  "preparing-restart",
   "ready",
   "restarting",
   "manual-required",
@@ -67,7 +73,12 @@ const GITHUB_RELEASES_URL =
   "https://github.com/RongleCat/grok-app/releases/latest";
 
 function toErrorMessage(err: unknown): string {
+  if (typeof err === "object" && err !== null && "message" in err && typeof err.message === "string") return err.message;
   return err instanceof Error ? err.message : String(err);
+}
+
+function isNativeInstallPending(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "code" in err && err.code === "update_install_pending";
 }
 
 /** Last-resort string match only — prefer `is_updater_plugin_enabled` first. */
@@ -102,11 +113,11 @@ async function isAutoUpdateSupported(): Promise<boolean> {
 
 async function isUpdaterPluginEnabled(): Promise<boolean> {
   if (!isDesktopHost()) return false;
-  try {
-    return await invoke<boolean>("is_updater_plugin_enabled");
-  } catch {
-    return false;
-  }
+  // A transport failure is not proof the updater is disabled. In particular,
+  // never route around an unknown process-owned install through GitHub.
+  const enabled = await invoke<unknown>("is_updater_plugin_enabled");
+  if (typeof enabled !== "boolean") throw new Error("Invalid native updater availability");
+  return enabled;
 }
 
 /** Tear down ACP / mirror / voice / IM — only after successful install. */
@@ -151,6 +162,15 @@ export function useUpdater() {
   });
   const statusRef = useRef<UpdateStatus>(initialUpdateStatus());
   const updateRef = useRef<Update | null>(null);
+  // Once installation succeeds, retries must only prepare/relaunch that exact
+  // version. Never check/download/install again over a partially stopped App.
+  const installedVersionRef = useRef<string | null>(null);
+  // Windows retains downloaded bytes, but has NOT confirmed installation.
+  // Keep the same Update/native transaction for cleanup/launch recovery.
+  const pendingInstallVersionRef = useRef<string | null>(null);
+  const recoveredInstallRef = useRef<NativePendingInstall | null>(null);
+  const recoveryVerifiedRef = useRef(true);
+  const recoveryEpochRef = useRef(0);
   const checkInFlightRef = useRef(false);
   const downloadInFlightRef = useRef(false);
   const installInFlightRef = useRef(false);
@@ -170,8 +190,39 @@ export function useUpdater() {
     setStatusState(nextStatus);
   }, []);
 
-  /** Always close the previous Update handle (no in-flight short-circuit). */
+  const adoptRecovery = useCallback((pending: NativePendingInstall) => {
+    if (pending.state === "failed" || pending.state === "completed") {
+      recoveredInstallRef.current = null;
+      pendingInstallVersionRef.current = null;
+      recoveryVerifiedRef.current = true;
+      installWhenReadyRef.current = false;
+      // Completed is emitted only by the already-running candidate after
+      // durable native verification; do not reinstall or relaunch it here.
+      setStatus(pending.state === "completed" ? { state: "idle" }
+        : { state: "error", message: pending.message ?? pending.phase });
+      return;
+    }
+    recoveredInstallRef.current = pending;
+    pendingInstallVersionRef.current = pending.version;
+    recoveryVerifiedRef.current = true;
+    installWhenReadyRef.current = false;
+    setStatus(pending.state === "running"
+      ? { state: "installing", version: pending.version }
+      : { state: "error", version: pending.version, installPending: true,
+        ...(pending.state === "blocked" ? { installBlocked: true as const } : {}),
+        message: pending.message ?? pending.phase });
+  }, [setStatus]);
+
+  const queryRecovery = useCallback(async () => decodePendingInstall(
+    await invoke<unknown>("plugin:updater|pending_install", recoveredInstallRef.current
+      ? { candidateId: recoveredInstallRef.current.candidateId } : undefined),
+  ), []);
+
+  /** Close unused handles; the install owner retains its in-flight resource. */
   const closeUpdate = useCallback(async () => {
+    // The install owner releases its handle after the operation settles.
+    // An unmount must not invalidate resources underneath native installation.
+    if (installInFlightRef.current) return;
     const current = updateRef.current;
     if (!current) return;
     updateRef.current = null;
@@ -201,9 +252,40 @@ export function useUpdater() {
         return;
       }
 
+      if (!recoveryVerifiedRef.current) return;
+      const recovered = recoveredInstallRef.current;
+      if (recovered) {
+        if (recovered.state !== "retryable") return;
+        installInFlightRef.current = true;
+        const epoch = ++recoveryEpochRef.current;
+        const gen = generationRef.current;
+        installWhenReadyRef.current = false;
+        setStatus({ state: "installing", version: recovered.version });
+        try {
+          // This owns native cleanup/launch/exit. Never call JS install/relaunch
+          // or claim installed merely because the resume IPC settles.
+          try {
+            await invoke("plugin:updater|resume_install", { candidateId: recovered.candidateId });
+          } catch {
+            // Authoritative snapshot distinguishes refusal, running, unknown.
+          }
+          const pending = await queryRecovery();
+          if (!aliveRef.current || generationRef.current !== gen || recoveryEpochRef.current !== epoch) return;
+          if (!pending || pending.candidateId !== recovered.candidateId || pending.version !== recovered.version) throw new Error("Original native update recovery owner is missing");
+          adoptRecovery(pending);
+        } catch (error) {
+          if (!aliveRef.current || generationRef.current !== gen) return;
+          recoveryVerifiedRef.current = false;
+          setStatus({ state: "error", version: recovered.version, installPending: true, installBlocked: true, message: toErrorMessage(error) });
+        } finally {
+          installInFlightRef.current = false;
+        }
+        return;
+      }
+
       // Sim silent path: full chain install → restarting → page reload
       // (stand-in for process relaunch). Developer mode + sim prefs persist.
-      if (readUpdateSimMode() === "silent") {
+      if (installedVersionRef.current === null && pendingInstallVersionRef.current === null && readUpdateSimMode() === "silent") {
         installInFlightRef.current = true;
         installWhenReadyRef.current = false;
         try {
@@ -228,7 +310,7 @@ export function useUpdater() {
       }
 
       const update = updateRef.current;
-      if (!update) {
+      if (!update && installedVersionRef.current !== version) {
         setStatus({
           state: "error",
           message: "Update is not ready to install yet",
@@ -240,30 +322,71 @@ export function useUpdater() {
       installWhenReadyRef.current = false;
       try {
         setStatus({ state: "installing", version });
-        // P0: stage the update first. Only tear down children after install succeeds
-        // so a failed install leaves agents / IM / mirror intact.
-        await update.install();
-        try {
-          await prepareForAppUpdate();
-        } catch (prepErr) {
-          // Install already staged — still relaunch so the new binary can start.
-          console.warn(
-            "prepare_for_app_update failed; continuing relaunch",
-            prepErr,
-          );
+        // Returning platforms stop children only after install succeeds. Windows
+        // verifies and stages first, then owns its native cleanup/launch barrier.
+        if (installedVersionRef.current === null) {
+          await update!.install();
+          pendingInstallVersionRef.current = null;
+          installedVersionRef.current = version;
+          if (updateRef.current === update) updateRef.current = null;
+          try {
+            await update!.close();
+          } catch {
+            // The installer may already have released its download resource.
+          }
         }
-        updateRef.current = null;
+        if (!aliveRef.current) return;
+        // This barrier is mandatory: Tauri relaunch bypasses cooperative exit.
+        // Retain installed state on either cleanup or relaunch failure.
+        setStatus({ state: "preparing-restart", version });
+        await prepareForAppUpdate();
         if (!aliveRef.current) return;
         setStatus({ state: "restarting", version });
         await relaunch();
       } catch (err) {
         if (!aliveRef.current) return;
-        setStatus({ state: "error", message: toErrorMessage(err) });
+        if (installedVersionRef.current === null) {
+          // Also discovers another window's original owner after a Busy error.
+          try {
+            const pending = await queryRecovery();
+            if (!aliveRef.current) return;
+            if (pending) { adoptRecovery(pending); return; }
+          } catch (queryError) {
+            if (!aliveRef.current) return;
+            recoveryVerifiedRef.current = false;
+            pendingInstallVersionRef.current = version;
+            setStatus({ state: "error", version, installPending: true, installBlocked: true, message: toErrorMessage(queryError) });
+            return;
+          }
+        }
+        if (isNativeInstallPending(err)) pendingInstallVersionRef.current = version;
+        const unknownOutcome = isNativeInstallPending(err)
+          && typeof err === "object" && err !== null && "phase" in err
+          && !["cleanup", "launch", "exit"].includes(String(err.phase));
+        if (unknownOutcome) recoveryVerifiedRef.current = false;
+        setStatus({
+          state: "error",
+          message: toErrorMessage(err),
+          ...(unknownOutcome ? { installBlocked: true as const } : {}),
+          ...(installedVersionRef.current !== null
+            ? { version: installedVersionRef.current, restartPending: true as const }
+            : pendingInstallVersionRef.current !== null
+              ? { version: pendingInstallVersionRef.current, installPending: true as const }
+              : {}),
+        });
       } finally {
         installInFlightRef.current = false;
+        if (!aliveRef.current && updateRef.current === update && update) {
+          updateRef.current = null;
+          try {
+            await update.close();
+          } catch {
+            // Teardown must not turn a completed installation into a retry.
+          }
+        }
       }
     },
-    [setStatus],
+    [adoptRecovery, queryRecovery, setStatus],
   );
 
   const downloadUpdate = useCallback(
@@ -316,6 +439,14 @@ export function useUpdater() {
   );
 
   const installAndRelaunch = useCallback(async () => {
+    if (pendingInstallVersionRef.current !== null) {
+      await performInstall(pendingInstallVersionRef.current);
+      return;
+    }
+    if (installedVersionRef.current !== null) {
+      await performInstall(installedVersionRef.current);
+      return;
+    }
     // Only install when download has finished (status ready).
     const current = statusRef.current;
     if (current.state !== "ready") {
@@ -373,9 +504,10 @@ export function useUpdater() {
 
   const runUpdateCheck = useCallback(
     async ({ background }: { background: boolean }) => {
+      if (installedVersionRef.current !== null || pendingInstallVersionRef.current !== null) return;
       const simMode = readUpdateSimMode();
 
-      // DEV simulation: skip host/plugin I/O entirely.
+      // Simulation cannot hide a real process-owned Windows transaction.
       if (simMode !== "off") {
         if (checkInFlightRef.current) {
           if (!background) {
@@ -392,10 +524,17 @@ export function useUpdater() {
         }
 
         checkInFlightRef.current = true;
+        const gen = generationRef.current;
         try {
           if (!background) {
             setStatus({ state: "checking" });
           }
+          if (isDesktopHost() && await isUpdaterPluginEnabled()) {
+            const pending = await queryRecovery();
+            if (generationRef.current !== gen || !aliveRef.current) return;
+            if (pending && pending.state !== "failed" && pending.state !== "completed") { adoptRecovery(pending); return; }
+          }
+          if (generationRef.current !== gen || !aliveRef.current) return;
           await sleepMs(background ? 350 : 500);
           if (!aliveRef.current) return;
 
@@ -414,6 +553,10 @@ export function useUpdater() {
           // silent
           setStatus({ state: "available", version: UPDATE_SIM_VERSION });
           void downloadUpdate(UPDATE_SIM_VERSION);
+        } catch (error) {
+          if (generationRef.current !== gen || !aliveRef.current) return;
+          installWhenReadyRef.current = false;
+          setStatus({ state: "error", message: toErrorMessage(error) });
         } finally {
           checkInFlightRef.current = false;
         }
@@ -455,12 +598,32 @@ export function useUpdater() {
           setStatus({ state: "checking" });
         }
 
-        const pluginOn = await isUpdaterPluginEnabled();
+        let pluginOn: boolean;
+        try { pluginOn = await isUpdaterPluginEnabled(); }
+        catch (error) {
+          if (generationRef.current !== gen || !aliveRef.current) return;
+          installWhenReadyRef.current = false;
+          setStatus({ state: "error", message: toErrorMessage(error) });
+          return;
+        }
         if (generationRef.current !== gen || !aliveRef.current) return;
 
         if (!pluginOn) {
           // Single path: plugin off → GitHub check (no separate Settings branch).
           await runGithubFallback({ background });
+          return;
+        }
+
+        // A reload must recover the process owner BEFORE network discovery or
+        // releasing handles. Query failure never falls back to a new package.
+        try {
+          const pending = await queryRecovery();
+          if (generationRef.current !== gen || !aliveRef.current) return;
+          if (pending && pending.state !== "failed" && pending.state !== "completed") { adoptRecovery(pending); return; }
+        } catch (error) {
+          if (generationRef.current !== gen || !aliveRef.current) return;
+          installWhenReadyRef.current = false;
+          setStatus({ state: "error", message: toErrorMessage(error) });
           return;
         }
 
@@ -544,7 +707,7 @@ export function useUpdater() {
         }
       }
     },
-    [adoptUpdate, closeUpdate, downloadUpdate, runGithubFallback, setStatus],
+    [adoptRecovery, adoptUpdate, closeUpdate, downloadUpdate, queryRecovery, runGithubFallback, setStatus],
   );
 
   const checkForUpdate = useCallback(async () => {
@@ -575,6 +738,7 @@ export function useUpdater() {
    */
   const applyAvailableUpdate = useCallback(async (): Promise<ApplyUpdateResult> => {
     const current = statusRef.current;
+    if (!recoveryVerifiedRef.current || recoveredInstallRef.current?.state === "blocked") return { kind: "busy" };
 
     if (current.state === "manual-required") {
       return {
@@ -586,9 +750,15 @@ export function useUpdater() {
 
     if (
       current.state === "installing" ||
+      current.state === "preparing-restart" ||
       current.state === "restarting"
     ) {
       return { kind: "busy" };
+    }
+
+    if (installedVersionRef.current !== null || pendingInstallVersionRef.current !== null) {
+      await installAndRelaunch();
+      return { kind: "installing" };
     }
 
     installWhenReadyRef.current = shouldInstallWhenReady("apply");
@@ -670,6 +840,9 @@ export function useUpdater() {
    * background discovery is not stuck on a previous sim `ready`.
    */
   const reseedFromPrefs = useCallback(async () => {
+    // A developer-mode toggle cannot cancel/reset an owned install or make a
+    // completed install eligible for download/reinstall or simulated reload.
+    if (installInFlightRef.current || installedVersionRef.current !== null || pendingInstallVersionRef.current !== null) return;
     clearUpdateSimIfDeveloperModeOff();
     installUpdateSimConsoleApi();
     installWhenReadyRef.current = false;
@@ -681,6 +854,34 @@ export function useUpdater() {
     await refreshChannelInfo();
     await runUpdateCheck({ background: true });
   }, [closeUpdate, refreshChannelInfo, runUpdateCheck, setStatus]);
+
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    const interval = window.setInterval(async () => {
+      if (!active || polling || installInFlightRef.current
+        || (!recoveredInstallRef.current && recoveryVerifiedRef.current)) return;
+      polling = true;
+      const epoch = recoveryEpochRef.current;
+      const gen = generationRef.current;
+      const previous = recoveredInstallRef.current;
+      try {
+        const pending = await queryRecovery();
+        if (!active || !aliveRef.current || gen !== generationRef.current || epoch !== recoveryEpochRef.current) return;
+        if (!pending || (previous && (pending.candidateId !== previous.candidateId || pending.version !== previous.version))) {
+          throw new Error("Original native update recovery owner is missing");
+        }
+        adoptRecovery(pending);
+      } catch (error) {
+        if (!active || !aliveRef.current || gen !== generationRef.current || epoch !== recoveryEpochRef.current) return;
+        recoveryVerifiedRef.current = false;
+        const version = pendingInstallVersionRef.current;
+        setStatus({ state: "error", message: toErrorMessage(error),
+          ...(version ? { version, installPending: true as const, installBlocked: true as const } : {}) });
+      } finally { polling = false; }
+    }, 1000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [adoptRecovery, queryRecovery, setStatus]);
 
   useEffect(() => {
     aliveRef.current = true;

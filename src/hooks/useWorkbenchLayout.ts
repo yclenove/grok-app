@@ -20,6 +20,11 @@ import {
   type LayoutPrefs,
 } from "@/lib/layout";
 import { isMirrorClient } from "@/lib/mirrorTransport";
+import {
+  resolveAsideResize,
+  type AsideResizeControl,
+  type AsideResizeRequest,
+} from "@/lib/asideResize";
 import { detectAppPlatform, usesCustomWindowChrome } from "@/lib/appPlatform";
 import {
   TRANSCRIPT_FILTER_CHANGE_EVENT,
@@ -123,6 +128,12 @@ export function useWorkbenchLayout(opts?: { onAsideClose?: () => void }) {
 
   const asideFitGenRef = useRef(0);
   const sidebarFitGenRef = useRef(0);
+  const retirePendingPaneFits = useCallback(() => {
+    // Native window fitting may settle after the user starts resizing either
+    // pane. Its old projected geometry must not replace newer explicit input.
+    asideFitGenRef.current += 1;
+    sidebarFitGenRef.current += 1;
+  }, []);
   const sidebarResizeStartRef = useRef<{ x: number; width: number } | null>(
     null,
   );
@@ -418,15 +429,47 @@ export function useWorkbenchLayout(opts?: { onAsideClose?: () => void }) {
   }, []);
 
   const beginSidebarResize = useCallback((clientX: number, width: number) => {
+    retirePendingPaneFits();
     sidebarResizeStartRef.current = { x: clientX, width };
     liveSidebarWidthRef.current = width;
     setResizingSidebar(true);
-  }, []);
+  }, [retirePendingPaneFits]);
 
-  const beginAsideResize = useCallback((width: number) => {
-    liveAsideWidthRef.current = width;
+  const beginAsideResize = useCallback(() => {
+    retirePendingPaneFits();
+    liveAsideWidthRef.current = layoutRef.current.asideWidth;
     setResizingAside(true);
-  }, []);
+  }, [retirePendingPaneFits]);
+
+  const changeAsideSize = useCallback(
+    (request: AsideResizeRequest) => {
+      if (
+        phoneLayout || resizingAside || isWindowFitSuppressed()
+        || layoutRef.current.asideCollapsed
+      ) return;
+      retirePendingPaneFits();
+      setLayout((current) => {
+        if (current.asideCollapsed) return current;
+        const width = resolveAsideResize(current.asideWidth, request, {
+          ...asideClampOpts(),
+          sidebarOccupiedWidth: current.sidebarCollapsed || sidebarOverlay
+            ? 0 : current.sidebarWidth || SIDEBAR_DEFAULT_WIDTH,
+        });
+        if (width === current.asideWidth) return current;
+        return persist({ ...current, asideWidth: width });
+      });
+    },
+    [asideClampOpts, phoneLayout, resizingAside, retirePendingPaneFits, sidebarOverlay],
+  );
+
+  const resizeBounds = asideClampOpts();
+  const asideResize: AsideResizeControl = {
+    value: clampAsideWidth(layout.asideWidth, resizeBounds),
+    min: clampAsideWidth(0, resizeBounds),
+    max: clampAsideWidth(Number.MAX_SAFE_INTEGER, resizeBounds),
+    begin: beginAsideResize,
+    change: changeAsideSize,
+  };
 
   const openAsidePaneRef = useRef(openAsidePane);
   openAsidePaneRef.current = openAsidePane;
@@ -543,32 +586,40 @@ export function useWorkbenchLayout(opts?: { onAsideClose?: () => void }) {
 
   useEffect(() => {
     if (!resizingAside) return;
+    if (layout.asideCollapsed || phoneLayout) {
+      setResizingAside(false);
+      return;
+    }
+    let ended = false;
     const clampOpts = () => ({
       ...asideClampOpts(),
       viewportWidth: window.innerWidth,
     });
     const pane = queryWorkbenchSplitPane("aside");
+    const handle = pane?.querySelector(".aside-resizer");
     liveAsideWidthRef.current = clampAsideWidth(
       layoutRef.current.asideWidth,
       clampOpts(),
     );
     applyLiveSplitWidth(pane, liveAsideWidthRef.current);
+    handle?.setAttribute("aria-valuenow", String(liveAsideWidthRef.current));
     const onMove = (e: PointerEvent) => {
-      if (isWindowFitSuppressed()) return;
+      if (ended || isWindowFitSuppressed()) return;
       const desired = Math.round(window.innerWidth - e.clientX);
       const next = clampAsideWidth(desired, clampOpts());
       if (next === liveAsideWidthRef.current) return;
       liveAsideWidthRef.current = next;
       applyLiveSplitWidth(pane, next);
+      handle?.setAttribute("aria-valuenow", String(next));
     };
     const onUp = () => {
+      if (ended) return;
+      ended = true;
       setResizingAside(false);
       const width = clampAsideWidth(liveAsideWidthRef.current, clampOpts());
       setLayout((l) =>
-        persist({
-          ...l,
-          asideCollapsed: false,
-          asideWidth: width,
+        l.asideCollapsed ? l : persist({
+          ...l, asideCollapsed: false, asideWidth: width,
         }),
       );
       document.body.style.cursor = "";
@@ -578,11 +629,17 @@ export function useWorkbenchLayout(opts?: { onAsideClose?: () => void }) {
     document.body.style.userSelect = "none";
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onUp);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("blur", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
     };
-  }, [asideClampOpts, resizingAside]);
+  }, [asideClampOpts, resizingAside, layout.asideCollapsed, phoneLayout]);
 
   useEffect(() => {
     if (!resizingSidebar) return;
@@ -714,6 +771,6 @@ export function useWorkbenchLayout(opts?: { onAsideClose?: () => void }) {
     closePhoneDrawer,
     openPhoneDrawer,
     beginSidebarResize,
-    beginAsideResize,
+    asideResize,
   };
 }

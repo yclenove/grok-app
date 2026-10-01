@@ -26,6 +26,17 @@ describe("settingsCatalog", () => {
     expect(catalogInvariants()).toEqual([]);
   });
 
+  it("T23 exposes Computer Use in the settings catalog", () => {
+    expect(SETTINGS_ENTRIES.some((e) => e.id === "ext.computer")).toBe(true);
+    const computer = SETTINGS_ENTRIES.find((e) => e.id === "ext.computer")!;
+    expect(computer.labelKey).toBe("ext.computer.title");
+    expect(computer.anchorId).toBe("settings-anchor-ext-computer");
+    expect(computer.descKeys).toEqual(
+      expect.arrayContaining(["cu.settings.privacy", "cu.settings.platforms"]),
+    );
+    expect(computer.tab).toBe("computer");
+  });
+
   it("mounts every searchable anchor in production", { timeout: 30_000 }, () => {
     const srcRoot = resolve(__dirname, "..");
     const mountedAnchors = new Set<string>();
@@ -175,6 +186,7 @@ describe("settingsCatalog", () => {
       "skills",
       "agents",
       "hooks",
+      "computer",
     ]);
     expect(extNav?.tabs.some((t) => t.id === "market")).toBe(false);
     expect(resolveTab("extensions", "market")).toBe("plugins");

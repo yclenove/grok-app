@@ -4,6 +4,8 @@
  * or display strings for dynamic skills.
  */
 
+export { openComputerUseFromSlash as applyComputerUseSlash } from "@/lib/computer-use/panelStore";
+
 export type SlashKind = "mode" | "skill" | "action" | "prompt" | "plugin";
 
 export type SlashItem = {
@@ -346,6 +348,24 @@ export function builtinSlashItems(): SlashItem[] {
       titleKey: "slash.yolo",
       descriptionKey: "slash.yoloDesc",
       action: "yolo",
+    },
+    {
+      id: "computer-use",
+      kind: "action",
+      name: "computer-use",
+      titleKey: "slash.computerUse",
+      descriptionKey: "slash.computerUseDesc",
+      action: "computer-use",
+      aliases: ["使用电脑", "使用電腦", "computer"],
+    },
+    {
+      id: "computer-use-browser",
+      kind: "action",
+      name: "computer-use-browser",
+      titleKey: "slash.computerUseBrowser",
+      descriptionKey: "slash.computerUseBrowserDesc",
+      action: "computer-use-browser",
+      aliases: ["浏览器", "瀏覽器", "browser"],
     },
   ];
 }

@@ -54,6 +54,7 @@ export type SettingsTabId =
   | "mcp"
   | "agents"
   | "hooks"
+  | "computer"
   | "market"
   // runtime
   | "cli"
