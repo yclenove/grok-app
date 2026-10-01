@@ -1,0 +1,60 @@
+{
+  "target": "x86_64-linux",
+  "allowedRedirectHosts": [
+    "nodejs.org",
+    "static.nodejs.org",
+    "registry.npmjs.org",
+    "playwright.azureedge.net",
+    "playwright-akamai.azureedge.net",
+    "playwright-verizon.azureedge.net",
+    "playwright.download.prss.microsoft.com"
+  ],
+  "jsRuntime": {
+    "name": "node",
+    "version": "20.18.0",
+    "url": "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.gz",
+    "archiveSha256": "24a5d58a1d4c2903478f4b7c3cfd2eeb5cea2cae3baee11a4dc6a1fed25fec6c",
+    "archiveBytes": 46879641,
+    "archiveRoot": "node-v20.18.0-linux-x64",
+    "executableRelpath": "bin/node",
+    "executableSha256": "869bfab097a116f4f7b185365a75076ca27513267bf643de2957123681889e1d",
+    "executableBytes": 98422312,
+    "license": "Node.js license (see extracted LICENSE)"
+  },
+  "playwright": {
+    "name": "playwright-core",
+    "version": "1.48.0",
+    "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.48.0.tgz",
+    "archiveSha256": "60cbf41da4e72847064ad7c720088dd133cf8601f7af9d5b1b73751d6e649562",
+    "archiveBytes": 1957232,
+    "treeRelpath": "playwright/node_modules/playwright-core",
+    "treeSha256": "f5e938f6c30f0ca5f74be2ac14b45a23840f047a82032d1aa4195e7f24d8edce",
+    "treeFiles": 335,
+    "treeBytes": 7700524,
+    "license": "Apache-2.0 (playwright-core LICENSE/NOTICE/ThirdPartyNotices)"
+  },
+  "chromium": {
+    "name": "chromium",
+    "source": "playwright-core@1.48.0 browsers.json",
+    "revision": "1140",
+    "browserVersion": "130.0.6723.31",
+    "platform": "linux",
+    "url": "https://playwright.azureedge.net/builds/chromium/1140/chromium-linux.zip",
+    "mirrors": [
+      "https://playwright.azureedge.net",
+      "https://playwright-akamai.azureedge.net",
+      "https://playwright-verizon.azureedge.net"
+    ],
+    "archiveRelpath": "builds/chromium/1140/chromium-linux.zip",
+    "archiveSha256": "e78cda52fa7e847abcd36a48ffabda43e71e2220a3e9a398f7c9a179529570a5",
+    "archiveBytes": 173675209,
+    "archiveRoot": "chrome-linux",
+    "treeRelpath": "chromium/chrome-linux",
+    "treeSha256": "b203864ac3ee28fde712f33d13b90e7c67682f22207e36ff253b8b34ee2827bc",
+    "treeFiles": 141,
+    "treeBytes": 576103777,
+    "executableRelpath": "chrome",
+    "executableSha256": "fe6fc54237c979a717989e8d22aa6f82f725a80ab5014497b97cc569788a1cfa",
+    "license": "BSD-3-Clause (Chromium) plus third-party notices in chrome-linux/CREDITS.html"
+  }
+}

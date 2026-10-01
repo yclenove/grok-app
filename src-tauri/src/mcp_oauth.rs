@@ -744,15 +744,20 @@ fn persist_oauth_tokens(
     );
 
     // Write agent-home (independent) + user ~/.grok so doctor/CLI both see it.
+    // Isolated test identity must never mutate the shipping `~/.grok`.
     let paths: Vec<PathBuf> = {
         let agent = mcp_agent_config_path(&settings.session_data_mode);
-        let user = crate::process_util::user_home()
-            .join(".grok")
-            .join("config.toml");
-        if agent == user {
+        if crate::paths::isolated_app_instance_id().is_some() {
             vec![agent]
         } else {
-            vec![agent, user]
+            let user = crate::process_util::user_home()
+                .join(".grok")
+                .join("config.toml");
+            if agent == user {
+                vec![agent]
+            } else {
+                vec![agent, user]
+            }
         }
     };
 

@@ -1,0 +1,27 @@
+[package]
+name = "grok-computer-use-x11"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+native-probe = []
+
+[[bin]]
+name = "cu-x11-native"
+path = "src/main.rs"
+required-features = ["native-probe"]
+test = false
+bench = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+grok-computer-use-core = { path = "../computer-use-core" }
+x11rb = { version = "0.13.2", features = ["xtest", "res", "xfixes"] }
+zbus = "5.18.0"
+futures-lite = "2.6.1"
+parking_lot = "0.12"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["clock"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }

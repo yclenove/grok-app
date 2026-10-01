@@ -132,8 +132,19 @@ pub async fn settings_set(
     let launch_at_login_flip = prev.launch_at_login != settings.launch_at_login;
     let schedules_launch_agent_flip =
         prev.schedules_launch_agent != settings.schedules_launch_agent;
+    let computer_use_flip = prev.computer_use_enabled != settings.computer_use_enabled;
 
-    store::save_settings(&settings)?;
+    if computer_use_flip {
+        let persisted = settings.clone();
+        crate::computer_use::persist_feature_transition(
+            mgr.inner().clone(),
+            settings.computer_use_enabled,
+            move || store::save_settings(&persisted),
+        )
+        .await?;
+    } else {
+        store::save_settings(&settings)?;
+    }
 
     if schedules_launch_agent_flip {
         let res = if settings.schedules_launch_agent {

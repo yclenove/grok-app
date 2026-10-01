@@ -843,6 +843,10 @@ impl SessionManager {
                 .map(|s| s.app_session_id.clone())
                 .ok_or("no active session")?,
         };
+        // Fence Computer Use before touching the turn state.  The returned
+        // plan contains only local authority changes; its adapter/browser
+        // cleanup is scheduled after the Stop snapshot is emitted.
+        let computer_use_stop = self.fence_computer_use_stop(&target);
         // Handshake is not a turn. Stop / Retry must tear it down so the
         // user is not stuck on 连接中 until restart.
         let abort_handshake = self.with_session_mut(&target, |s| {
@@ -853,13 +857,14 @@ impl SessionManager {
                 crate::error::AgentErrorCode::ConnectFailed,
                 "connect cancelled",
             ));
-            (true, s.acp.take())
+            let termination = super::computer_use::FencedAcpTermination::capture(s);
+            (true, termination)
         });
-        if let Some((true, acp)) = abort_handshake {
-            if let Some(acp) = acp {
-                Self::kill_acp_bounded(&acp).await;
-            }
+        if let Some((true, termination)) = abort_handshake {
             self.emit_for_session(&app, &target);
+            // The local handshake acknowledgement is observable immediately;
+            // ACP/catalog/resource cleanup continues behind the coordinator.
+            self.spawn_fenced_computer_use_stop(target.clone(), computer_use_stop, termination);
             return Ok(self.snapshot());
         }
         let app_for_marker = app.clone();
@@ -952,6 +957,7 @@ impl SessionManager {
             // Parked after promote, or already idle — return live focus snap.
             self.snapshot()
         };
+        self.spawn_fenced_computer_use_stop(target.clone(), computer_use_stop, None);
 
         // Best-effort agent cancel after UI is already unblocked.
         if let Some(acp) = acp {

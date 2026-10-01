@@ -122,6 +122,15 @@ fn validate_side_label(label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// App-owned side browser labels only (`resource-browser-*`).
+pub fn is_app_owned_side_browser(label: &str) -> bool {
+    validate_side_label(label).is_ok()
+}
+
+pub fn exists(app: &AppHandle, label: &str) -> bool {
+    validate_side_label(label).is_ok() && app.get_webview(label).is_some()
+}
+
 fn validate_url(url: &str) -> Result<Url, String> {
     let u = url.trim();
     if u.is_empty() {
@@ -323,6 +332,7 @@ pub fn create(
             .map(|current| current != parsed)
             .unwrap_or(true);
         if should_navigate {
+            crate::computer_use::webview::lifecycle::navigation_started(&label);
             emit_page_load(app, "started", &label, &url);
             existing
                 .navigate(parsed)
@@ -343,6 +353,11 @@ pub fn create(
     let polyfill_reload = polyfill.clone();
     let title_label = label.clone();
     let page_load_label = label.clone();
+    // These CU identities belong to this native instance, not its reusable
+    // Tauri label. Old navigation callbacks cannot fence a replacement.
+    let cu_native = crate::computer_use::webview::lifecycle::creating()?;
+    let cu_navigation = cu_native.clone();
+    let cu_page_load = cu_native.clone();
     // Do not steal keyboard focus from the main chat/composer on create —
     // users click the page when they want to type there.
     // First document load starts immediately after create.
@@ -351,6 +366,12 @@ pub fn create(
         .accept_first_mouse(true)
         .focused(false)
         .initialization_script(polyfill)
+        .on_navigation(move |_| {
+            // Retire document-scoped CU authority before allowing navigation.
+            // Keep the browser's existing navigation policy unchanged.
+            cu_navigation.navigation_started();
+            true
+        })
         // Drive UI loading bar + re-assert download polyfill after navigations.
         // Polyfill early-returns if already installed — cheap.
         .on_page_load(move |webview, payload| {
@@ -365,6 +386,7 @@ pub fn create(
             };
             match payload.event() {
                 PageLoadEvent::Started => {
+                    cu_page_load.navigation_started();
                     emit_page_load(webview.app_handle(), "started", &label, &url);
                 }
                 PageLoadEvent::Finished => {
@@ -609,13 +631,22 @@ pub fn create(
         "creating side browser child webview"
     );
 
-    window
-        .add_child(
-            builder,
-            LogicalPosition::new(x, y),
-            LogicalSize::new(width, height),
-        )
-        .map_err(|e| format!("side browser create: {e}"))?;
+    let created = match window.add_child(
+        builder,
+        LogicalPosition::new(x, y),
+        LogicalSize::new(width, height),
+    ) {
+        Ok(created) => created,
+        Err(error) => {
+            crate::computer_use::webview::lifecycle::closed(&webview_label, &cu_native);
+            return Err(format!("side browser create: {error}"));
+        }
+    };
+    if let Err(error) = crate::computer_use::webview::lifecycle::created(&webview_label, &cu_native)
+    {
+        let _ = created.close();
+        return Err(error);
+    }
 
     tracing::info!(
         target: "side_browser",
@@ -630,7 +661,15 @@ pub fn create(
 /// Close a side-browser webview if present (no error when already gone).
 pub fn close(app: &AppHandle, label: String) -> Result<(), String> {
     validate_side_label(&label)?;
-    if let Some(wv) = app.get_webview(&label) {
+    // Capture the native handle before retiring its routing identity, so a
+    // replacement created after that fence is never looked up and closed.
+    let webview = app.get_webview(&label);
+    if let Some(native) = crate::computer_use::webview::lifecycle::current(&label) {
+        // Fence first, even if native close later fails. Failure is not proof
+        // that a previously queued CU operation can safely regain authority.
+        crate::computer_use::webview::lifecycle::closed(&label, &native);
+    }
+    if let Some(wv) = webview {
         wv.close().map_err(|e| format!("side browser close: {e}"))?;
     }
     Ok(())
@@ -654,6 +693,7 @@ pub fn list(app: &AppHandle) -> Result<Vec<SideBrowserInfo>, String> {
 pub fn navigate(app: &AppHandle, label: String, url: String) -> Result<(), String> {
     let parsed = validate_url(&url)?;
     let wv = get_side_webview(app, &label)?;
+    crate::computer_use::webview::lifecycle::navigation_started(&label);
     // Optimistic start so the UI can paint a progress bar before WK/WebView2
     // fires PageLoadEvent::Started (can lag on slow DNS / first byte).
     emit_page_load(app, "started", &label, &url);
@@ -662,6 +702,7 @@ pub fn navigate(app: &AppHandle, label: String, url: String) -> Result<(), Strin
 
 pub fn reload(app: &AppHandle, label: String) -> Result<(), String> {
     let wv = get_side_webview(app, &label)?;
+    crate::computer_use::webview::lifecycle::navigation_started(&label);
     let url = wv.url().ok().map(|u| u.to_string()).unwrap_or_default();
     emit_page_load(app, "started", &label, &url);
     wv.reload().map_err(|e| format!("reload: {e}"))
@@ -727,6 +768,8 @@ mod tests {
         assert!(validate_label("resource-browser-tab1").is_ok());
         assert!(validate_label("../x").is_err());
         assert!(validate_side_label("resource-browser-x").is_ok());
+        assert!(is_app_owned_side_browser("resource-browser-x"));
+        assert!(!is_app_owned_side_browser("main"));
         assert!(validate_side_label("other").is_err());
     }
 

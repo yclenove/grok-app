@@ -1,0 +1,27 @@
+{
+  "answers": {
+    "operation": {
+      "choice": "set_value",
+      "confidence": 0.84,
+      "probabilities": {
+        "blocked": 0.09,
+        "done": 0.02,
+        "set_value": 0.89
+      },
+      "type": "choice"
+    },
+    "set_value_target": {
+      "choice": "e-name",
+      "confidence": 1.0,
+      "probabilities": {
+        "e-name": 1.0
+      },
+      "type": "choice"
+    }
+  },
+  "model": "jev-1.13.0",
+  "usage": {
+    "input_tokens": 432,
+    "output_tokens": 65
+  }
+}

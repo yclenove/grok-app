@@ -1,6 +1,5 @@
 //! Policy, model, disconnect, recycle, permission resolution.
 
-#![allow(dead_code)] // residual-clippy: set_permission_policy / tracked counts
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,12 +15,6 @@ use crate::store::{self};
 use super::*;
 
 impl SessionManager {
-    pub fn set_permission_policy(&self, policy: PermissionPolicy) {
-        if let Some(s) = self.inner.lock().as_mut() {
-            s.policy = policy;
-        }
-    }
-
     /// Soft-drop live agent so next send re-spawns with new spawn flags / config.
     /// Keeps `agent_session_id` so reconnect can `session/load`; if load fails,
     /// journal bootstrap still fills the gap.
@@ -35,6 +28,27 @@ impl SessionManager {
 
     /// Soft-respawn and tell the UI why the agent process was reloaded.
     pub async fn soft_respawn_with_reason(&self, app: &AppHandle, reason: &str) {
+        // Revoke while the old session is still registered so a shared ACP can
+        // receive the catalog replacement before this owner is detached.
+        let cleanup_sid = {
+            let guard = self.inner.lock();
+            guard
+                .as_ref()
+                .and_then(|s| (!Self::live_session_is_busy(s)).then(|| s.app_session_id.clone()))
+        };
+        if let Some(sid) = cleanup_sid.as_deref() {
+            if let Err(error) = self.revoke_and_detach_computer_use(sid).await {
+                tracing::warn!(
+                    session = %sid,
+                    reason = %reason,
+                    "Computer Use cleanup before soft-respawn is pending: {error}"
+                );
+                self.pending_soft_respawn
+                    .lock()
+                    .insert(sid.to_string(), reason.to_string());
+                return;
+            }
+        }
         let (acp, sid, process_id, deferred) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
@@ -123,6 +137,17 @@ impl SessionManager {
         // respawn flags still belong to that session; leaving its old ACP in
         // `background` lets connect promote it and silently ignore the new
         // process-level settings.
+        if let Err(error) = self.revoke_and_detach_computer_use(session_id).await {
+            tracing::warn!(
+                session = %session_id,
+                reason = %reason,
+                "Computer Use cleanup before background soft-respawn is pending: {error}"
+            );
+            self.pending_soft_respawn
+                .lock()
+                .insert(session_id.to_string(), reason);
+            return;
+        }
         let background = self.background.lock().remove(session_id);
         if let Some(mut s) = background {
             let process_id = s.process_id.clone();
@@ -169,7 +194,8 @@ impl SessionManager {
     }
 
     /// Counts of tracked live shell / background / parked entries (alive or not).
-    /// Used by diagnostics and unit tests — not the same as `active_process_count`.
+    /// Test-only: not the same as `active_process_count`.
+    #[cfg(test)]
     pub fn tracked_agent_map_counts(&self) -> (usize, usize, usize) {
         let live = self.inner.lock().is_some() as usize;
         let background = self.background.lock().len();
@@ -258,6 +284,18 @@ impl SessionManager {
     /// `agent_session_id` is cleared when the data root changes (reconnect should
     /// `session/new` + bootstrap). Emits `session://agents_recycled` for UI toasts.
     pub async fn recycle_all_agents(&self, app: &AppHandle, reason: &str) {
+        // Revoke Host authority and replace each live ACP catalog before the
+        // ownership maps are drained. This matters for shared ACP processes:
+        // killing one tenant must not leave its Computer Use MCP entry
+        // available to the remaining tenant.
+        let mcp_cleanup_errors = self.revoke_and_detach_all_computer_use().await;
+        if !mcp_cleanup_errors.is_empty() {
+            tracing::warn!(
+                reason = %reason,
+                errors = ?mcp_cleanup_errors,
+                "Computer Use MCP cleanup before agent recycle is pending"
+            );
+        }
         // Collect pending permission/plan/ask gates *before* draining so the
         // UI can drop stale bars that would write to a dead stdin (#524).
         let invalidated = self.collect_pending_gate_invalidations();
@@ -378,6 +416,9 @@ impl SessionManager {
     /// still left a Ready prewarm (spawned with stale/missing auth) for the next
     /// connect to consume → intermittent 401 after re-login (CharlieLam 2026-08-05).
     pub(super) fn drain_all_agent_slots(&self) -> DrainedAgents {
+        if let Err(error) = crate::computer_use::sessions::fence_all_checked() {
+            tracing::warn!(%error, "Computer Use authority fence before agent drain failed");
+        }
         let mut acps: Vec<Arc<AcpClient>> = Vec::new();
         let mut had_live_shell = false;
 
@@ -583,29 +624,41 @@ impl SessionManager {
     }
 
     /// Apply model id on the live ACP session (best-effort session/set_model).
-    pub async fn set_model(&self, model_id: String) -> Result<(), String> {
+    pub async fn set_model(self: &Arc<Self>, model_id: String) -> Result<(), String> {
         let model_id = model_id.trim().to_string();
         if model_id.is_empty() {
             return Err("model id empty".into());
         }
         // Store composer preference; agent receives channel-resolved id.
         let agent_model = crate::providers::agent_spawn_model_id(&model_id);
-        let (acp, sid) = {
+        let (acp, sid, app_sid) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 s.model_id = Some(model_id.clone());
                 s.meta.model_id = Some(model_id.clone());
                 let _ = store::update_session_meta(&s.meta);
-                (s.acp.clone(), s.meta.agent_session_id.clone())
+                (
+                    s.acp.clone(),
+                    s.meta.agent_session_id.clone(),
+                    s.app_session_id.clone(),
+                )
             } else {
-                (None, None)
+                (None, None, String::new())
             }
         };
-        // Target the live session explicitly (shared process safety).
-        if let (Some(acp), Some(sid)) = (acp, sid) {
-            acp.set_model_for(&sid, &agent_model).await?;
+        // A model/context boundary revokes local authority before the ACP call.
+        // Catalog and surface cleanup continue independently so a successful
+        // model switch is not reported as failed merely because cleanup needs
+        // the panel's explicit Retry path.
+        let cleanup = (!app_sid.is_empty()).then(|| self.fence_computer_use_stop(&app_sid));
+        if let Some(plan) = cleanup {
+            self.spawn_fenced_computer_use_stop(app_sid.clone(), plan, None);
         }
-        Ok(())
+        let model_result = match (acp, sid) {
+            (Some(acp), Some(sid)) => acp.set_model_for(&sid, &agent_model).await,
+            _ => Ok(()),
+        };
+        model_result
     }
 
     /// Apply product mode via session/set_mode; soft-respawn if agent rejects.
@@ -647,55 +700,49 @@ impl SessionManager {
     /// session — kills the process only when the hot path fails or the turn is
     /// busy (mid-turn swaps are deferred to the next connect injection).
     pub async fn apply_extensions_mcp_change(&self, app: &AppHandle) {
-        let (hot_sid, hot_busy, cwd) = {
-            let guard = self.inner.lock();
-            match guard.as_ref() {
-                Some(s) if s.acp.as_ref().is_some_and(|c| c.is_alive()) => (
-                    s.meta.agent_session_id.clone(),
-                    Self::live_session_is_busy(s),
-                    s.project_path.clone(),
-                ),
-                _ => (None, false, None),
+        // Bump the shared base clock before waiting for the per-session
+        // reconciler. A concurrent Computer Use attach will re-read this
+        // revision after its ACP response and converge on one final catalog.
+        self.note_mcp_base_changed();
+        // Reconcile every live/background/parked App session. The ACP agent id
+        // is not an App session id and must never be used as the grant key.
+        let session_ids = self.mcp_session_ids();
+        let mut live_failed = false;
+        for sid in session_ids {
+            if self.session_is_busy(&sid) {
+                // Keep the current catalog and retry once the turn becomes
+                // idle. The desired Computer Use state is deliberately left
+                // untouched until the shared reconciler gets the lock.
+                self.pending_soft_respawn
+                    .lock()
+                    .insert(sid, "extensions_mcp".into());
+                continue;
             }
-        };
-        if let (Some(sid), false, Some(cwd)) = (hot_sid, hot_busy, cwd) {
-            let app_sid = self.inner.lock().as_ref().map(|s| s.app_session_id.clone());
-            let servers = tauri::async_runtime::spawn_blocking(move || {
-                crate::extensions::build_session_mcp_servers(Some(cwd.as_str()))
-            })
-            .await
-            .unwrap_or_else(|_| serde_json::json!([]));
-            let acp = self.inner.lock().as_ref().and_then(|s| s.acp.clone());
-            if let Some(acp) = acp {
-                match acp.update_mcp_servers(&sid, servers).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            "extensions: MCP prefs changed — hot-swapped mcpServers on live agent sid={sid}"
-                        );
-                        if let Some(asid) = app_sid {
-                            let _ = app.emit(
-                                "session://mcp_hot_updated",
-                                serde_json::json!({ "sessionId": asid }),
-                            );
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "extensions: MCP hot update failed ({e}); falling back to soft-respawn"
-                        );
+            match self.reconcile_session_mcp(&sid).await {
+                Ok(()) => {
+                    tracing::info!(session = %sid, "extensions: MCP catalog reconciled");
+                    let _ = app.emit(
+                        "session://mcp_hot_updated",
+                        serde_json::json!({ "sessionId": sid }),
+                    );
+                }
+                Err(error) => {
+                    let is_live = self.is_live_session(&sid);
+                    tracing::warn!(
+                        session = %sid,
+                        "extensions: MCP catalog reconciliation failed: {error}"
+                    );
+                    live_failed |= is_live;
+                    if !is_live {
+                        self.pending_soft_respawn
+                            .lock()
+                            .insert(sid, "extensions_mcp".into());
                     }
                 }
             }
         }
-        let live = self
-            .inner
-            .lock()
-            .as_ref()
-            .map(|s| s.acp.is_some())
-            .unwrap_or(false);
-        if live {
-            tracing::info!("extensions: MCP prefs changed — soft-respawn live agent");
+        if live_failed {
+            tracing::info!("extensions: MCP live update failed — soft-respawn live agent");
             self.soft_respawn(app).await;
         }
     }
@@ -1107,6 +1154,18 @@ impl SessionManager {
     /// - Idle Ready → warm `parked`.
     /// - Only kills when there is a leftover dead/orphan acp that could not be parked.
     pub(super) async fn disconnect_inner(&self, app: &AppHandle) {
+        let disconnect_sid = {
+            let guard = self.inner.lock();
+            guard.as_ref().map(|session| session.app_session_id.clone())
+        };
+        if let Some(sid) = disconnect_sid {
+            if let Err(error) = self.revoke_and_detach_computer_use(&sid).await {
+                tracing::warn!(
+                    session = %sid,
+                    "Computer Use cleanup while disconnecting is pending: {error}"
+                );
+            }
+        }
         // Prefer demote/park over kill so "new chat" / UI clear never aborts turns.
         if let Err(e) = self.try_park_live_emit(app) {
             tracing::warn!(
@@ -1193,7 +1252,12 @@ impl SessionManager {
 
     /// Kill live + background + parked ACP for this App session so the next
     /// connect is `session/new` under the new cwd.
-    pub async fn drop_session_agent(&self, app: &AppHandle, session_id: &str) {
+    pub async fn drop_session_agent(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+    ) -> Result<(), String> {
+        self.revoke_and_detach_computer_use(session_id).await?;
         let (live_acp, live_process_id) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
@@ -1237,6 +1301,7 @@ impl SessionManager {
         }
         self.pending_soft_respawn.lock().remove(session_id);
         Self::emit_state(app, &self.snapshot());
+        Ok(())
     }
 
     pub async fn reattach(self: &Arc<Self>, app: AppHandle) -> Result<SessionSnapshot, String> {
@@ -1254,6 +1319,7 @@ impl SessionManager {
 #[cfg(test)]
 mod recycle_tests {
     use super::*;
+    use crate::session_manager::computer_use::McpCatalogStatus;
     use std::time::Instant;
 
     #[test]
@@ -1300,7 +1366,7 @@ mod recycle_tests {
     }
 
     #[test]
-    fn forget_deleted_session_drops_pending_soft_respawn() {
+    fn forget_deleted_session_drops_only_deleted_session_bookkeeping() {
         let mgr = SessionManager::new();
         mgr.pending_soft_respawn
             .lock()
@@ -1308,12 +1374,48 @@ mod recycle_tests {
         mgr.pending_soft_respawn
             .lock()
             .insert("keep".into(), "permission_policy".into());
+        mgr.post_turn_journal_locks
+            .lock()
+            .insert("gone".into(), Arc::new(tokio::sync::Mutex::new(())));
+        mgr.post_turn_journal_locks
+            .lock()
+            .insert("keep".into(), Arc::new(tokio::sync::Mutex::new(())));
+        mgr.mcp_catalog_locks
+            .lock()
+            .insert("gone".into(), Arc::new(tokio::sync::Mutex::new(())));
+        mgr.mcp_catalog_locks
+            .lock()
+            .insert("keep".into(), Arc::new(tokio::sync::Mutex::new(())));
+        mgr.mcp_catalog_status
+            .lock()
+            .insert("gone".into(), McpCatalogStatus::default());
+        mgr.mcp_catalog_status
+            .lock()
+            .insert("keep".into(), McpCatalogStatus::default());
+        mgr.tool_identities
+            .lock()
+            .unwrap()
+            .insert("gone".into(), HashMap::new());
+        mgr.tool_identities
+            .lock()
+            .unwrap()
+            .insert("keep".into(), HashMap::new());
+
         mgr.forget_deleted_session("gone");
-        let map = mgr.pending_soft_respawn.lock();
-        assert!(!map.contains_key("gone"));
+
+        let respawns = mgr.pending_soft_respawn.lock();
+        assert!(!respawns.contains_key("gone"));
         assert_eq!(
-            map.get("keep").map(String::as_str),
+            respawns.get("keep").map(String::as_str),
             Some("permission_policy")
         );
+        assert!(!mgr.post_turn_journal_locks.lock().contains_key("gone"));
+        assert!(mgr.post_turn_journal_locks.lock().contains_key("keep"));
+        assert!(!mgr.mcp_catalog_locks.lock().contains_key("gone"));
+        assert!(mgr.mcp_catalog_locks.lock().contains_key("keep"));
+        assert!(!mgr.mcp_catalog_status.lock().contains_key("gone"));
+        assert!(mgr.mcp_catalog_status.lock().contains_key("keep"));
+        assert!(!mgr.tool_identities.lock().unwrap().contains_key("gone"));
+        assert!(mgr.tool_identities.lock().unwrap().contains_key("keep"));
     }
 }

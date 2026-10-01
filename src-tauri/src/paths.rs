@@ -6,8 +6,30 @@ use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "computer-use-probe"))]
 pub(crate) static APP_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Isolated test App identity. Never the shipping `com.grokapp.desktop`.
+///
+/// `GROK_APP_INSTANCE_ID` must be `com.grokapp.desktop.<suffix>` with a non-empty
+/// suffix so single-instance / AUMID cannot attach to the installed App.
+pub fn isolated_app_instance_id() -> Option<String> {
+    let raw = std::env::var("GROK_APP_INSTANCE_ID").ok()?;
+    let id = raw.trim();
+    const PREFIX: &str = "com.grokapp.desktop.";
+    if id.len() <= PREFIX.len() || !id.starts_with(PREFIX) {
+        return None;
+    }
+    let suffix = &id[PREFIX.len()..];
+    if suffix.is_empty()
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
 
 pub fn app_data_root() -> PathBuf {
     if let Ok(custom) = std::env::var("GROK_APP_HOME") {
@@ -345,5 +367,28 @@ mod tests {
         assert!(needs_agent_home_spawn_prep("independent", true));
         assert!(!needs_agent_home_spawn_prep("Shared", false));
         assert!(needs_agent_home_spawn_prep("SHARED", true));
+    }
+
+    #[test]
+    fn isolated_instance_id_rejects_shipping_identifier() {
+        let _g = super::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("GROK_APP_INSTANCE_ID").ok();
+        std::env::remove_var("GROK_APP_INSTANCE_ID");
+        assert!(super::isolated_app_instance_id().is_none());
+        std::env::set_var("GROK_APP_INSTANCE_ID", "com.grokapp.desktop");
+        assert!(super::isolated_app_instance_id().is_none());
+        std::env::set_var("GROK_APP_INSTANCE_ID", "com.evil.desktop.cu-d6-test");
+        assert!(super::isolated_app_instance_id().is_none());
+        std::env::set_var("GROK_APP_INSTANCE_ID", "com.grokapp.desktop.cu-d6-test");
+        assert_eq!(
+            super::isolated_app_instance_id().as_deref(),
+            Some("com.grokapp.desktop.cu-d6-test")
+        );
+        match prev {
+            Some(v) => std::env::set_var("GROK_APP_INSTANCE_ID", v),
+            None => std::env::remove_var("GROK_APP_INSTANCE_ID"),
+        }
     }
 }

@@ -1,0 +1,6 @@
+{
+  "description": "Valid test signature and MZ prefix, inert bytes. Never allow fixture cleanup/launch.",
+  "payload": "MZ inert owned staging fixture: deliberately not a PE executable; cleanup must always refuse launch.",
+  "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IGVwaGVtZXJhbCBmaXh0dXJlIHB1YmxpYyBrZXkKUldRLzZkd3pLSk1mc2VoTk5tWU5Xa0hsdkNGL3pJdkNYeW9rdGM1SG01K2pvWVhqQUVzb25oSDg=",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGVwaGVtZXJhbCBmaXh0dXJlIHNpZ25hdHVyZQpSVVEvNmR3ektKTWZzYlp1UlA3ZkZjWm9FWWNWQmZHWjFyWnZiTDE4QWFzVHJFRkF0YzV3ajduTEhnb2gxZzRzTDJzWTNmNSsxOGNWZGQwZlNKMDJOYmVTZ1pxa080OXZnd1U9CnRydXN0ZWQgY29tbWVudDogb3duZWQgaW5lcnQgc3RhZ2luZyB0ZXN0IG9ubHkKS1EwOStFaWVqd0RwNjNEdjQybGNLcHZpY0F4b1Y5K1NKQ3RHOWhrbXdnMUVJbGRhaWNRZEpoVzlBRE1tSkJUSm9sUHA3THFNS2F5aHNaYVVxRkF4Qnc9PQ=="
+}

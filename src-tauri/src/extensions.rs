@@ -1373,6 +1373,11 @@ pub fn build_session_mcp_servers_with_opts(
             );
         }
     }
+    // Computer Use requires a concrete Host session and user target grant.
+    // This generic builder is also used by remote/auxiliary/automated sessions.
+    arr.retain(|v| {
+        v.get("name").and_then(Value::as_str) != Some(crate::computer_use::MCP_SERVER_NAME)
+    });
     Value::Array(arr)
 }
 
@@ -1605,6 +1610,9 @@ pub fn upsert_mcp_http_in_toml(
 /// Returns how many servers were mirrored.
 pub fn mirror_user_http_mcp_into_agent_home(session_data_mode: &str) -> usize {
     if session_data_mode == "shared" {
+        return 0;
+    }
+    if crate::paths::isolated_app_instance_id().is_some() {
         return 0;
     }
     let user_cfg = crate::process_util::user_home()

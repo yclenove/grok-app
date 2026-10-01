@@ -34,3 +34,5 @@ include!("misc_p1.rs");
 include!("misc_p2.rs");
 include!("terminal.rs");
 include!("skin.rs");
+include!("computer_use.rs");
+include!("computer_use_helper.rs");

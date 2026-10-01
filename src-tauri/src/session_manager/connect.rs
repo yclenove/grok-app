@@ -1465,6 +1465,18 @@ impl SessionManager {
                 if let Err(e) = Self::with_soft_rpc_budget(client.set_model(&agent_model)).await {
                     tracing::warn!("acp set_model after session open soft-fail: {e}");
                 }
+                // A process may have been restarted by an external crash or
+                // reconnect while the Host grant remained current. Rebuild the
+                // latest desired catalog against this exact agent identity;
+                // explicit context/model changes revoke the grant first.
+                if self.computer_use_reconcile_needed_after_connect(&meta.id) {
+                    if let Err(error) = self.reconcile_session_mcp(&meta.id).await {
+                        tracing::warn!(
+                            session = %meta.id,
+                            "Computer Use catalog reconcile after connect is pending: {error}"
+                        );
+                    }
+                }
                 emit_host_exit_heal(&app, &meta.id);
                 Ok(self.snapshot())
             }

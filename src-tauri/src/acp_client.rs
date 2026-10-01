@@ -3002,6 +3002,11 @@ impl AcpClient {
             .await
     }
 
+    /// A remote ACP server or auxiliary process cannot receive local desktop credentials.
+    pub async fn supports_local_computer_use(&self) -> bool {
+        !self.empty_mcp_servers && self.ssh_alias.is_none() && self.child.lock().await.is_some()
+    }
+
     /// [`Self::open_session`] with a caller-supplied cwd.
     ///
     /// The CLI session cwd is per-session. OS sandbox write roots are **not** —

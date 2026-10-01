@@ -70,6 +70,11 @@ mod side_browser_host;
 
 mod commands;
 
+mod computer_use;
+
+#[cfg(feature = "computer-use-probe")]
+pub use computer_use::computer_use_probe_main;
+
 mod pet_window;
 mod theme_editor_window;
 
@@ -268,7 +273,10 @@ pub fn run() {
     crate::host_runtime::on_process_start();
     crate::win_crash::install();
 
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    if let Some(id) = crate::paths::isolated_app_instance_id() {
+        context.config_mut().identifier = id;
+    }
 
     // Windows: AppUserModelID before window/taskbar so Show Desktop / jump lists
     // treat us as a normal app (matches NSIS shortcut AUMID / `pnpm dev` overlay).
@@ -277,6 +285,7 @@ pub fn run() {
     win_shell::set_process_app_user_model_id(&context.config().identifier);
 
     let session_mgr = Arc::new(SessionManager::new());
+    crate::computer_use::ipc::register_session_manager(&session_mgr);
 
     let mirror_host = Arc::new(MirrorHost::from_env());
 
@@ -518,6 +527,9 @@ pub fn run() {
         })
 
         .setup(|app| {
+
+            #[cfg(windows)]
+            updater::register_windows_install_guard(app.handle())?;
 
             crate::path_scope::refresh_from_store();
 
@@ -895,7 +907,8 @@ pub fn run() {
 
                 // Prewarm competes with frontend probeCli (`grok --version`) if
                 // both spawn at t=0. Delay so first paint + gate probe win.
-                {
+                // Isolated test identity must not spawn the shipping grok CLI.
+                if crate::paths::isolated_app_instance_id().is_none() {
                     let mgr = Arc::clone(&mgr);
                     let app_handle = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
@@ -1014,6 +1027,9 @@ pub fn run() {
                     tracing::warn!("pet restore: {e}");
                 }
             }
+
+            #[cfg(debug_assertions)]
+            crate::computer_use::app_shell::maybe_spawn(app.handle());
 
             Ok(())
 
@@ -1800,6 +1816,33 @@ pub fn run() {
             pet_window::pet_get_tasks,
             pet_window::pet_set_hit_chrome,
 
+            commands::computer_use_status,
+            commands::computer_use_helper_status,
+            commands::computer_use_helper_action,
+            commands::computer_use_set_feature,
+            commands::computer_use_list_targets,
+            commands::computer_use_authorize_surface,
+            commands::computer_use_cancel_authorization,
+            commands::computer_use_observe,
+            commands::computer_use_pause,
+            commands::computer_use_resume,
+            commands::computer_use_takeover,
+            commands::computer_use_stop,
+            commands::computer_use_retry_cleanup,
+            commands::computer_use_set_preview,
+            commands::computer_use_runtime_status,
+            commands::computer_use_runtime_repair,
+            commands::computer_use_runtime_rollback,
+            commands::computer_use_begin_pairing,
+            commands::computer_use_confirm_pairing_app,
+            commands::computer_use_revoke_pairing,
+            commands::computer_use_list_shared_tabs,
+            commands::computer_use_unbind_webview,
+            commands::computer_use_export_bundle,
+            commands::computer_use_clear_traces,
+            commands::computer_use_clear_staging,
+            commands::computer_use_clear_managed_profiles,
+
         ])
 
         .build(context)
@@ -1807,6 +1850,16 @@ pub fn run() {
         .expect("error while building Grok App")
 
         .run(|app, event| {
+
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+                // Relaunch cannot be prevented by Tauri; the updater command
+                // runs the same catalog barrier before invoking relaunch.
+                if *code != Some(tauri::RESTART_EXIT_CODE)
+                    && crate::computer_use::shutdown::intercept_exit_requested(app, *code)
+                {
+                    api.prevent_exit();
+                }
+            }
 
             // macOS: Dock click. The pet overlay is a visible skip-taskbar
             // window, so `has_visible_windows` stays true and must not block
@@ -1834,6 +1887,8 @@ pub fn run() {
                 use tauri::Manager;
 
                 pet_window::persist_pet_window_pos(app);
+
+                crate::computer_use::shutdown_product();
 
                 crate::host_runtime::on_process_shutdown();
 

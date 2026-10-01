@@ -1,5 +1,16 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": [
+      "resources/computer-use/linux-x64.lock.json",
+      "resources/computer-use/pack-targets.json",
+      "resources/computer-use/README.md",
+      "resources/computer-use/seed/manifest.json",
+      "resources/computer-use/seed/bin/*",
+      "resources/computer-use/seed/playwright/**/*",
+      "resources/computer-use/seed/chromium/chrome-linux/**/*"
+    ]
+  },
   "app": {
     "windows": [
       {

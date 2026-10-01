@@ -1,0 +1,32 @@
+[package]
+name = "grok-computer-use-wayland"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# Explicit, read-only native acceptance instrumentation. Off in product builds.
+owned-acceptance-diagnostics = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+grok-computer-use-core = { path = "../computer-use-core" }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+futures-util = "0.3"
+libc = "0.2"
+pipewire = { version = "=0.10.1", features = ["v0_3_65"] }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+# Preserve the X11/AT-SPI executor in feature-unified workspace builds.
+zbus = "5.18.0"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+grok-computer-use-gtk-parent = { path = "../computer-use-gtk-parent" }
+gtk = { version = "0.18", features = ["v3_24"] }
+

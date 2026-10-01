@@ -899,7 +899,15 @@ mod multi_window_tests {
 }
 
 #[tauri::command]
-pub async fn session_delete(mgr: State<'_, Arc<SessionManager>>, id: String) -> Result<(), String> {
+pub async fn session_delete(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    id: String,
+) -> Result<(), String> {
+    // Detach while the live/background/parked ACP endpoint is still indexed.
+    // Deleting the journal first made a shared ACP retain the old
+    // grok-computer-use MCP entry with no session left to retry cleanup.
+    mgr.drop_session_agent(&app, &id).await?;
     store::delete_session(&id)?;
     mgr.forget_deleted_session(&id);
     Ok(())
@@ -993,7 +1001,7 @@ pub async fn session_move_to_project(
     if mgr.session_is_busy(&id) {
         return Err("session_move_busy".into());
     }
-    mgr.drop_session_agent(&app, &id).await;
+    mgr.drop_session_agent(&app, &id).await?;
     let meta = store::move_session_to_project(&id, project_id)?;
     let work_dir = meta
         .project_id

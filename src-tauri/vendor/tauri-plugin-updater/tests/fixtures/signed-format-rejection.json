@@ -1,0 +1,6 @@
+{
+  "description": "Public-only ephemeral-key fixture. Valid signature, deliberately invalid installer format.",
+  "payload": "signed updater format-rejection fixture; not an executable",
+  "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IGVwaGVtZXJhbCB1cGRhdGVyIGZpeHR1cmUgcHVibGljIGtleQpSV1NtWUh5cWtJbG5QaERkWU1UVlQ5T2x1dWlpeVAwandrUmcwY1dONS9Yd0picmtQRWdtNC9UUw==",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGVwaGVtZXJhbCB1cGRhdGVyIGZpeHR1cmUgc2lnbmF0dXJlClJVU21ZSHlxa0lsblBxdkFLMHBYSlYzSmtCL0QwZWxMeHNDVmhlckQySml3ekxxR1B3WWtnazZETEwvelZNNmVlQWFMeHdRYk4xR1hrdkVxNW1PMHVjalF2bm1SVkpranh3VT0KdHJ1c3RlZCBjb21tZW50OiBvd25lZCB0ZXN0IGZpeHR1cmUgb25seQpmTlppQVhFS2dxUlJ2ZktmTk9ibkd4eXRsWTZoMzZkUVE2UXZrdnppUkxZMERUWG9YaXA5RHkxYWJ3WHJqWUdUY2dBYTJRVDJnRy9SbnN2MEVjZ05BQT09"
+}

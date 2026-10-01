@@ -650,6 +650,9 @@ pub struct AppSettings {
     /// Applied on write/rotate and via explicit prune. Default **0** (unlimited).
     #[serde(default)]
     pub audit_ledger_retention_days: u32,
+    /// Computer Use product flag. Default **false** until the three-OS bar passes.
+    #[serde(default)]
+    pub computer_use_enabled: bool,
 }
 
 fn default_composer_prefs_scope() -> String {
@@ -830,6 +833,7 @@ impl Default for AppSettings {
             allow_unverified_cli_install: false,
             last_cli_checksum_verified: None,
             audit_ledger_retention_days: 0,
+            computer_use_enabled: false,
         }
     }
 }
@@ -3754,6 +3758,13 @@ mod tests {
         let s: AppSettings = serde_json::from_str(legacy_settings_json()).expect("deserialize");
         assert!(!s.auto_wake_enabled);
         assert!(!AppSettings::default().auto_wake_enabled);
+    }
+
+    #[test]
+    fn computer_use_enabled_defaults_false_when_missing_from_json() {
+        let s: AppSettings = serde_json::from_str(legacy_settings_json()).expect("deserialize");
+        assert!(!s.computer_use_enabled);
+        assert!(!AppSettings::default().computer_use_enabled);
     }
 
     #[test]

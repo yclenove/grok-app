@@ -1,0 +1,23 @@
+{
+  "name": "chromium",
+  "source": "playwright-core@1.48.0 browsers.json",
+  "revision": "1140",
+  "browserVersion": "130.0.6723.31",
+  "platform": "win64",
+  "url": "https://playwright.azureedge.net/builds/chromium/1140/chromium-win64.zip",
+  "mirrors": [
+    "https://playwright.azureedge.net",
+    "https://playwright-akamai.azureedge.net",
+    "https://playwright-verizon.azureedge.net"
+  ],
+  "archiveRelpath": "builds/chromium/1140/chromium-win64.zip",
+  "archiveSha256": "da752c83305f84d2e4ce2c93842532402289f2ebf5ca96178ed2e59c58a4aedb",
+  "archiveBytes": 147201336,
+  "treeRelpath": "chromium/chrome-win",
+  "treeSha256": "63c6075faf6d986bc8e9f11996f5d2e784e7f4d9471366b7a2ad6eebaca245e3",
+  "treeFiles": 84,
+  "treeBytes": 361230888,
+  "executableRelpath": "chromium/chrome-win/chrome.exe",
+  "executableSha256": "de88b8d38bf8807685bf0293e79f7a49a449309b05d36ecc0b22eed92cf445e8",
+  "license": "BSD-3-Clause (Chromium) plus third-party notices inside chrome-win"
+}

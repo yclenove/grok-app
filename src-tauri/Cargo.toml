@@ -4,6 +4,31 @@ version = "0.2.33"
 description = "Grok — desktop workbench for Grok Build CLI"
 authors = ["RongleCat"]
 edition = "2021"
+default-run = "grok-app"
+autobins = false
+
+[workspace]
+members = ["computer-use-core", "computer-use-x11", "computer-use-wayland", "computer-use-gtk-parent", "cu-probe"]
+default-members = ["."]
+resolver = "2"
+
+# Pinned upstream with a fallible Windows pre-launch cleanup barrier.
+# Provenance and exact changes: vendor/tauri-plugin-updater/GROK-PATCH.md.
+[patch.crates-io]
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
+# Linux SCM_RIGHTS must be close-on-exec at reception, before any FD clone.
+# Provenance and regression evidence: vendor/zbus/GROK-PATCH.md.
+zbus = { path = "vendor/zbus" }
+
+[features]
+computer-use-probe = ["grok-computer-use-core/test-support", "grok-computer-use-x11/native-probe"]
+# Explicit development opt-in until installed GNOME / release acceptance passes.
+# Does not enable the product feature or install/enable a Shell helper.
+computer-use-wayland-preview = []
+
+[[bin]]
+name = "grok-app"
+path = "src/main.rs"
 
 [lib]
 name = "grok_app_lib"
@@ -13,6 +38,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+grok-computer-use-core = { path = "computer-use-core" }
 # `unstable` — multi-webview (resource pane embedded browser)
 # `macos-private-api` — required by tauri.macos.conf.json `macOSPrivateApi: true`
 #   (transparent titlebar + window-vibrancy). Keep the feature on all targets so
@@ -97,16 +123,30 @@ clipboard-win = "5"
 winreg = "0.55"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_SystemServices",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Variant",
 ] }
 # COM `#[implement(IDropTarget)]` for late Windows file-drop (#1017).
 windows-core = "0.61"
@@ -115,6 +155,9 @@ tauri-winrt-notification = "0.7"
 webview2-com = "0.38"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+grok-computer-use-x11 = { path = "computer-use-x11" }
+grok-computer-use-gtk-parent = { path = "computer-use-gtk-parent" }
+grok-computer-use-wayland = { path = "computer-use-wayland" }
 notify-rust = "4"
 # Same gtk as Tauri — hide the app menubar on the pet overlay (KDE/GTK
 # reapplies Edit/Window/Help to every ApplicationWindow).

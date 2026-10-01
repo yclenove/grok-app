@@ -1,0 +1,60 @@
+{
+  "target": "x86_64-macos",
+  "allowedRedirectHosts": [
+    "nodejs.org",
+    "static.nodejs.org",
+    "registry.npmjs.org",
+    "playwright.azureedge.net",
+    "playwright-akamai.azureedge.net",
+    "playwright-verizon.azureedge.net",
+    "playwright.download.prss.microsoft.com"
+  ],
+  "jsRuntime": {
+    "name": "node",
+    "version": "20.18.0",
+    "url": "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz",
+    "archiveSha256": "c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc",
+    "archiveBytes": 43660520,
+    "archiveRoot": "node-v20.18.0-darwin-x64",
+    "executableRelpath": "bin/node",
+    "executableSha256": "b56011a73347b0fff7e853796cba7cb851fda3119a9826cdd66ea2e1daa32a88",
+    "executableBytes": 98901152,
+    "license": "Node.js license (see extracted LICENSE)"
+  },
+  "playwright": {
+    "name": "playwright-core",
+    "version": "1.48.0",
+    "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.48.0.tgz",
+    "archiveSha256": "60cbf41da4e72847064ad7c720088dd133cf8601f7af9d5b1b73751d6e649562",
+    "archiveBytes": 1957232,
+    "treeRelpath": "playwright/node_modules/playwright-core",
+    "treeSha256": "f5e938f6c30f0ca5f74be2ac14b45a23840f047a82032d1aa4195e7f24d8edce",
+    "treeFiles": 335,
+    "treeBytes": 7700524,
+    "license": "Apache-2.0 (playwright-core LICENSE/NOTICE/ThirdPartyNotices)"
+  },
+  "chromium": {
+    "name": "chromium",
+    "source": "playwright-core@1.48.0 browsers.json",
+    "revision": "1140",
+    "browserVersion": "130.0.6723.31",
+    "platform": "mac",
+    "url": "https://playwright.azureedge.net/builds/chromium/1140/chromium-mac.zip",
+    "mirrors": [
+      "https://playwright.azureedge.net",
+      "https://playwright-akamai.azureedge.net",
+      "https://playwright-verizon.azureedge.net"
+    ],
+    "archiveRelpath": "builds/chromium/1140/chromium-mac.zip",
+    "archiveSha256": "755a564c20effd9cc1938153a70c1e2501063d2aa2c5ffb81275f2045b4cdb1f",
+    "archiveBytes": 157382582,
+    "archiveRoot": "chrome-mac",
+    "treeRelpath": "chromium/chrome-mac",
+    "treeSha256": "0b530d1faaeec48a57d60ab7a41d3404b085b911916a50a6fa526d92efa26d39",
+    "treeFiles": 163,
+    "treeBytes": 467079304,
+    "executableRelpath": "Chromium.app/Contents/MacOS/Chromium",
+    "executableSha256": "e1ccc6d8e1b292b4a878d15a296ed18e5ec7f4c0ee17949e16ed09b1e378e5c0",
+    "license": "BSD-3-Clause (Chromium) plus third-party notices in chrome-mac/CREDITS.html"
+  }
+}

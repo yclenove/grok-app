@@ -31,6 +31,11 @@ impl SessionManager {
         // deliver to live if this process is the focused shell.
         if let AcpEvent::ProcessExited { code } = &ev {
             let exit_code = *code;
+            // Fence every matching Computer Use tenant before any ownership
+            // map is removed. Catalog transport is already dead; only the
+            // generation-bound surface cleanup continues asynchronously.
+            let computer_use_cleanups = self.fence_computer_use_for_process_exit(process_id);
+            self.spawn_process_exit_computer_use_cleanup(computer_use_cleanups);
             {
                 let mut parked = self.parked.lock();
                 parked.retain(|_, p| p.process_id != process_id);
@@ -1171,6 +1176,7 @@ impl SessionManager {
                     }
                     (s.app_session_id.clone(), content)
                 };
+                let computer_use_stop = self.fence_computer_use_stop(&app_sid);
                 let mid = Uuid::new_v4().to_string();
                 if let Err(e) = store::append_message(
                     &app_sid,
@@ -1187,6 +1193,7 @@ impl SessionManager {
                 ) {
                     tracing::error!(session = %app_sid, "context compact journal append failed: {e}");
                 }
+                self.spawn_fenced_computer_use_stop(app_sid.clone(), computer_use_stop, None);
                 let _ = app.emit(
                     "session://context_compact",
                     serde_json::json!({

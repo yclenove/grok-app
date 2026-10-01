@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "update-recovery",
+  "description": "Recover the process-owned Windows update only from local App/session UI",
+  "windows": ["main", "session-*"],
+  "permissions": ["updater:allow-pending-install", "updater:allow-resume-install"]
+}

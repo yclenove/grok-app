@@ -1,0 +1,12 @@
+[package]
+name = "grok-computer-use-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cu_probe"
+path = "src/main.rs"
+
+[dependencies]
+grok-app = { path = "..", features = ["computer-use-probe"] }

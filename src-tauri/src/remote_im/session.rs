@@ -114,6 +114,13 @@ impl SessionStore {
         self.inner.lock().get(key).cloned()
     }
 
+    pub fn binds_session(&self, session_id: &str) -> bool {
+        self.inner
+            .lock()
+            .values()
+            .any(|b| b.local_session_id == session_id)
+    }
+
     pub fn set(&self, key: &str, rec: ScopeBinding) {
         self.inner.lock().insert(key.to_string(), rec);
         self.save_disk();
@@ -167,6 +174,24 @@ impl SessionStore {
         }
         Self::open(Self::default_path()).retarget_app_session(session_id, project_id, work_dir)
     }
+}
+
+pub fn binds_app_session(session_id: &str) -> bool {
+    let id = session_id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    if let Some(store) = LIVE.lock().clone() {
+        return store.binds_session(id);
+    }
+    SessionStore::open(SessionStore::default_path()).binds_session(id)
+}
+
+pub(crate) fn with_live_cleared<T>(f: impl FnOnce() -> T) -> T {
+    let prev = LIVE.lock().take();
+    let out = f();
+    *LIVE.lock() = prev;
+    out
 }
 
 #[cfg(test)]
@@ -223,5 +248,28 @@ mod tests {
             SessionStore::scope_key_for(&msg(None), true),
             "telegram:bot:42:7"
         );
+    }
+
+    #[test]
+    fn binds_app_session_reads_disk_when_live_engine_is_down() {
+        let _g = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "cu-im-bind-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        with_live_cleared(|| {
+            let mut rec = ScopeBinding::fresh("/im");
+            rec.local_session_id = "im-disk".into();
+            SessionStore::open_default().set("telegram:bot:1:1", rec);
+            assert!(binds_app_session("im-disk"));
+            assert!(!binds_app_session("not-bound"));
+        });
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

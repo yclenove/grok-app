@@ -223,6 +223,9 @@ pub struct LoginResult {
 }
 
 fn grok_home() -> PathBuf {
+    if crate::paths::isolated_app_instance_id().is_some() {
+        return crate::paths::agent_home_dir();
+    }
     if let Ok(h) = std::env::var("GROK_HOME") {
         return PathBuf::from(h);
     }
@@ -230,6 +233,10 @@ fn grok_home() -> PathBuf {
 }
 
 fn auth_json_path() -> PathBuf {
+    // Isolated test identity never reads the shipping `~/.grok/auth.json`.
+    if crate::paths::isolated_app_instance_id().is_some() {
+        return agent_home_auth_json_path();
+    }
     // GROK_HOME may point at a profile that holds no credentials (e.g. the App
     // agent-home after a custom-route switch clears auth.json). Prefer it only
     // when the file actually exists; otherwise fall back to the canonical CLI
@@ -247,7 +254,11 @@ fn auth_json_path() -> PathBuf {
 
 /// Canonical CLI auth path (`~/.grok/auth.json`), ignoring process `GROK_HOME`.
 /// Login writes here; independent-mode agents use a different GROK_HOME and need a copy.
+/// Isolated App identity stays inside `GROK_APP_HOME/agent-home`.
 fn cli_default_auth_json_path() -> PathBuf {
+    if crate::paths::isolated_app_instance_id().is_some() {
+        return agent_home_auth_json_path();
+    }
     crate::process_util::user_home()
         .join(".grok")
         .join("auth.json")
@@ -268,6 +279,9 @@ fn agent_home_auth_json_path() -> PathBuf {
 /// a custom route left a newer empty/stale agent-home file (#525 project switch
 /// re-login).
 pub fn sync_cli_auth_to_agent_home() -> Result<(), String> {
+    if crate::paths::isolated_app_instance_id().is_some() {
+        return Ok(());
+    }
     let src = cli_default_auth_json_path();
     if !src.is_file() {
         // Fall back to GROK_HOME path only when canonical is absent (tests /
@@ -1942,6 +1956,40 @@ fn open_url(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_identity_does_not_read_canonical_grok_auth() {
+        let _g = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev_id = std::env::var("GROK_APP_INSTANCE_ID").ok();
+        let prev_home = std::env::var("GROK_APP_HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "cu-iso-auth-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::create_dir_all(tmp.join("agent-home"));
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        std::env::set_var("GROK_APP_INSTANCE_ID", "com.grokapp.desktop.cu-d6-test");
+        let auth = auth_json_path();
+        let canonical = crate::process_util::user_home()
+            .join(".grok")
+            .join("auth.json");
+        assert_eq!(auth, tmp.join("agent-home").join("auth.json"));
+        assert_ne!(auth, canonical);
+        assert!(sync_cli_auth_to_agent_home().is_ok());
+        assert!(!tmp.join("agent-home").join("auth.json").is_file());
+        match prev_id {
+            Some(v) => std::env::set_var("GROK_APP_INSTANCE_ID", v),
+            None => std::env::remove_var("GROK_APP_INSTANCE_ID"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("GROK_APP_HOME", v),
+            None => std::env::remove_var("GROK_APP_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn parse_billing_accepts_cli_shape() {

@@ -1,0 +1,60 @@
+{
+  "target": "x86_64-windows",
+  "allowedRedirectHosts": [
+    "nodejs.org",
+    "static.nodejs.org",
+    "registry.npmjs.org",
+    "playwright.azureedge.net",
+    "playwright-akamai.azureedge.net",
+    "playwright-verizon.azureedge.net",
+    "playwright.download.prss.microsoft.com"
+  ],
+  "jsRuntime": {
+    "name": "node",
+    "version": "20.18.0",
+    "url": "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
+    "archiveSha256": "f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297",
+    "archiveBytes": 29602979,
+    "archiveRoot": "node-v20.18.0-win-x64",
+    "executableRelpath": "node.exe",
+    "executableSha256": "35b7c95a379beb606f5798ed83081690df13190077630b234163c6607aa4cc94",
+    "executableBytes": 69804184,
+    "license": "Node.js license (see extracted LICENSE)"
+  },
+  "playwright": {
+    "name": "playwright-core",
+    "version": "1.48.0",
+    "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.48.0.tgz",
+    "archiveSha256": "60cbf41da4e72847064ad7c720088dd133cf8601f7af9d5b1b73751d6e649562",
+    "archiveBytes": 1957232,
+    "treeRelpath": "playwright/node_modules/playwright-core",
+    "treeSha256": "f5e938f6c30f0ca5f74be2ac14b45a23840f047a82032d1aa4195e7f24d8edce",
+    "treeFiles": 335,
+    "treeBytes": 7700524,
+    "license": "Apache-2.0 (playwright-core LICENSE/NOTICE/ThirdPartyNotices)"
+  },
+  "chromium": {
+    "name": "chromium",
+    "source": "playwright-core@1.48.0 browsers.json",
+    "revision": "1140",
+    "browserVersion": "130.0.6723.31",
+    "platform": "win64",
+    "url": "https://playwright.azureedge.net/builds/chromium/1140/chromium-win64.zip",
+    "mirrors": [
+      "https://playwright.azureedge.net",
+      "https://playwright-akamai.azureedge.net",
+      "https://playwright-verizon.azureedge.net"
+    ],
+    "archiveRelpath": "builds/chromium/1140/chromium-win64.zip",
+    "archiveSha256": "da752c83305f84d2e4ce2c93842532402289f2ebf5ca96178ed2e59c58a4aedb",
+    "archiveBytes": 147201336,
+    "archiveRoot": "chrome-win",
+    "treeRelpath": "chromium/chrome-win",
+    "treeSha256": "63c6075faf6d986bc8e9f11996f5d2e784e7f4d9471366b7a2ad6eebaca245e3",
+    "treeFiles": 84,
+    "treeBytes": 361230888,
+    "executableRelpath": "chrome.exe",
+    "executableSha256": "de88b8d38bf8807685bf0293e79f7a49a449309b05d36ecc0b22eed92cf445e8",
+    "license": "BSD-3-Clause (Chromium) plus third-party notices inside chrome-win"
+  }
+}

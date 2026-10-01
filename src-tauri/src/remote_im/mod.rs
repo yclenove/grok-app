@@ -39,6 +39,22 @@ pub fn set_app_handle(app: AppHandle) {
     app_sessions::set_app_handle(app);
 }
 
+pub fn binds_app_session(session_id: &str) -> bool {
+    session::binds_app_session(session_id)
+}
+
+#[cfg(any(test, feature = "computer-use-probe"))]
+pub(crate) fn with_live_bindings_cleared<T>(f: impl FnOnce() -> T) -> T {
+    session::with_live_cleared(f)
+}
+
+#[cfg(any(test, feature = "computer-use-probe"))]
+pub(crate) fn seed_disk_im_binding(session_id: &str) {
+    let mut rec = control_plane::ScopeBinding::fresh("/im");
+    rec.local_session_id = session_id.to_string();
+    session::SessionStore::open_default().set("telegram:bot:cu:1", rec);
+}
+
 /// Keep Remote IM scope bindings on the same App chat after a sidebar move.
 pub fn retarget_bindings_for_app_session(
     session_id: &str,

@@ -19,6 +19,7 @@
 //!   (Keep waiting / End turn). **Never auto-cancel a user-initiated turn** —
 //!   long silence re-prompts only; only the user may End turn.
 
+mod computer_use;
 mod connect;
 mod control;
 mod events;
@@ -58,6 +59,7 @@ use crate::session_fsm::SessionState;
 
 use types::*;
 
+pub(crate) use computer_use::McpShutdownReport;
 pub(crate) use types::{
     extract_tool_input, tool_journal_richer, RewindExecuteResult, RewindPointDto, SessionSnapshot,
     UiAskUserRequest, UiPermissionRequest, TOOL_OUTPUT_MAX_PUB, TOOL_OUTPUT_SENTINEL,
@@ -104,6 +106,20 @@ pub struct SessionManager {
     /// effort change, proxy, …). Flushed when the turn becomes idle so
     /// the next process picks up spawn flags (P0-5 / #598).
     pub(super) pending_soft_respawn: Mutex<HashMap<String, String>>,
+    /// Serialize every MCP catalog replacement for one App session. Generic
+    /// extension changes and Computer Use attach/detach must share this lock;
+    /// otherwise a late response can resurrect a stale CU entry.
+    pub(super) mcp_catalog_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Serialize generation-bound native/browser cleanup per App session.
+    /// Duplicate Stop/Retry callers re-check the ledger after taking this lock.
+    pub(super) computer_use_cleanup_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Monotonic revision for the base (non-Computer-Use) MCP preferences.
+    /// A reconciler compares it again after ACP returns to catch changes made
+    /// while an update was in flight.
+    pub(super) mcp_catalog_revision: AtomicU64,
+    /// Redacted per-session reconciliation state used by diagnostics/UI.
+    pub(super) mcp_catalog_status:
+        Mutex<HashMap<String, crate::session_manager::computer_use::McpCatalogStatus>>,
 }
 
 impl Default for SessionManager {
@@ -128,12 +144,25 @@ impl SessionManager {
             connect_lock_busy_ticks: AtomicU32::new(0),
             post_turn_journal_locks: Mutex::new(HashMap::new()),
             pending_soft_respawn: Mutex::new(HashMap::new()),
+            mcp_catalog_locks: Mutex::new(HashMap::new()),
+            computer_use_cleanup_locks: Mutex::new(HashMap::new()),
+            mcp_catalog_revision: AtomicU64::new(0),
+            mcp_catalog_status: Mutex::new(HashMap::new()),
         }
     }
 
     /// Drop bookkeeping for a chat that no longer exists in the store.
     pub fn forget_deleted_session(&self, session_id: &str) {
+        crate::computer_use::sessions::forget_session(session_id);
         self.pending_soft_respawn.lock().remove(session_id);
+        self.post_turn_journal_locks.lock().remove(session_id);
+        self.mcp_catalog_locks.lock().remove(session_id);
+        self.computer_use_cleanup_locks.lock().remove(session_id);
+        self.mcp_catalog_status.lock().remove(session_id);
+        self.tool_identities
+            .lock()
+            .expect("tool identity map poisoned")
+            .remove(session_id);
         let kids: Vec<PendingAcpChild> = {
             let mut list = self.pending_children.lock();
             let mut taken = Vec::new();

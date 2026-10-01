@@ -10,12 +10,16 @@
 //!
 //! ## Teardown ordering (P0)
 //!
-//! Call [`prepare_for_app_update`] **only after** `update.install()` succeeds and
-//! **before** `relaunch()`. If install fails, children must stay alive — there is
-//! no in-process recovery for recycled agents / stopped IM / mirror.
+//! For installers that return, call [`prepare_for_app_update`] only after
+//! `update.install()` succeeds and before `relaunch()`. Failed staging must not
+//! tear down services. The pinned Windows updater patch invokes the App-managed
+//! fallible guard after verified staging and before checked installer launch.
+//! A rejected guard/launch retains the original candidate and cannot exit.
+//! Source/library verification is not signed installed-product acceptance.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+mod shutdown_gate;
 
 use tauri::{AppHandle, State};
 use tracing::info;
@@ -27,9 +31,50 @@ use crate::voice_host::VoiceHost;
 
 /// Process-wide guard so prepare-for-update does not race with itself.
 ///
-/// Only set after a successful install path begins teardown. Not reset on
-/// failure because prepare is no longer called before install (see module docs).
-static UPDATE_SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
+/// Concurrent callers await the same result. A later attempt rechecks cleanup;
+/// neither a prior failure nor a prior success grants an unconditional restart.
+static UPDATE_SHUTDOWN: shutdown_gate::ShutdownGate = shutdown_gate::ShutdownGate::new();
+
+/// Installed before any webview loads. The patched updater invokes this on its
+/// owned blocking installer task, after verified staging and before OS launch.
+#[cfg(windows)]
+pub(crate) fn register_windows_install_guard(app: &AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let app_handle = app.clone();
+    let installed = app.manage(tauri_plugin_updater::WindowsInstallGuard::new(move || {
+        let app = app_handle.clone();
+        let mgr = app
+            .try_state::<Arc<SessionManager>>()
+            .ok_or("App update SessionManager unavailable")?
+            .inner()
+            .clone();
+        let mirror = app
+            .try_state::<Arc<MirrorHost>>()
+            .ok_or("App update MirrorHost unavailable")?
+            .inner()
+            .clone();
+        let voice = app
+            .try_state::<Arc<VoiceHost>>()
+            .ok_or("App update VoiceHost unavailable")?
+            .inner()
+            .clone();
+        let remote_im = app
+            .try_state::<Arc<RemoteImState>>()
+            .ok_or("App update Remote IM unavailable")?
+            .inner()
+            .clone();
+        // The plugin owns this blocking task even when its IPC caller vanishes.
+        tauri::async_runtime::block_on(
+            UPDATE_SHUTDOWN
+                .run(async move { prepare_owned(app, mgr, mirror, voice, remote_im).await }),
+        )
+    }));
+    if installed {
+        Ok(())
+    } else {
+        Err("App update install guard already registered".into())
+    }
+}
 
 /// Returns `true` when the running install supports Tauri's auto-updater.
 ///
@@ -104,8 +149,8 @@ pub fn updater_status() -> UpdaterStatusDto {
 
 /// Stop managed agent children / hosts before process relaunch after a staged install.
 ///
-/// Must run **after** a successful `update.install()` and **before** `relaunch()`
-/// so a failed install never leaves the app without agents / IM / mirror.
+/// Runs after a returning `update.install()` succeeds and before `relaunch()`.
+/// It cannot guard a platform installer that exits before returning to the UI.
 ///
 /// `remote_im.inner` is held only for the duration of `stop_async`. That method
 /// uses a separate global `runtime_slot` mutex (not `remote_im.inner`) and
@@ -118,16 +163,33 @@ pub async fn prepare_for_app_update(
     voice: State<'_, Arc<VoiceHost>>,
     remote_im: State<'_, Arc<RemoteImState>>,
 ) -> Result<(), String> {
-    if UPDATE_SHUTDOWN_DONE.swap(true, Ordering::SeqCst) {
-        info!(target: "grok_app::updater", "prepare_for_app_update already completed");
-        return Ok(());
-    }
+    let mgr = Arc::clone(mgr.inner());
+    let mirror = Arc::clone(mirror.inner());
+    let voice = Arc::clone(voice.inner());
+    let remote_im = Arc::clone(remote_im.inner());
+    UPDATE_SHUTDOWN
+        .run(async move { prepare_owned(app, mgr, mirror, voice, remote_im).await })
+        .await
+}
 
+async fn prepare_owned(
+    app: AppHandle,
+    mgr: Arc<SessionManager>,
+    mirror: Arc<MirrorHost>,
+    voice: Arc<VoiceHost>,
+    remote_im: Arc<RemoteImState>,
+) -> Result<(), String> {
     info!(target: "grok_app::updater", "stopping managed processes before app relaunch");
+
+    // Relaunch requests cannot be prevented by Tauri's ExitRequested API.
+    // Fence dispatch now; the bounded catalog barrier runs after interactive
+    // network surfaces have stopped and while ACP endpoints are still indexed.
+    crate::computer_use::shutdown::fence_all();
 
     // Voice realtime session first (network + tool delegation).
     // Pass SessionManager so keep_agents_on_end=false can cancel delegated turns.
-    let _ = voice.stop(&app, mgr.inner()).await;
+    let mut errors = Vec::new();
+    let _ = voice.stop(&app, &mgr).await;
 
     // Remote IM connectors (Feishu / Weixin / …).
     // Hold `inner` only while stop_async runs; stop_async does not re-enter `inner`.
@@ -135,8 +197,15 @@ pub async fn prepare_for_app_update(
         let mut rt = remote_im.inner.lock().await;
         if let Err(e) = rt.stop_async().await {
             tracing::warn!(target: "grok_app::updater", error = %e, "remote_im stop during prepare_for_app_update");
+            errors.push(format!("Remote IM cleanup: {e}"));
         }
     }
+
+    let computer_use_shutdown = crate::computer_use::shutdown::shutdown_with_catalog_barrier(
+        &mgr,
+        std::time::Duration::from_millis(2_500),
+    )
+    .await;
 
     // Kill live + background ACP agent processes; session metadata stays on disk.
     mgr.recycle_all_agents(&app, "app_update").await;
@@ -144,14 +213,20 @@ pub async fn prepare_for_app_update(
     // Mirror HTTP host + cloudflared tunnel.
     mirror.stop_sync();
 
-    info!(target: "grok_app::updater", "managed processes stopped; safe to relaunch");
-    Ok(())
-}
-
-/// Reset guard — only for tests.
-#[cfg(test)]
-pub fn reset_update_shutdown_guard_for_tests() {
-    UPDATE_SHUTDOWN_DONE.store(false, Ordering::SeqCst);
+    if !computer_use_shutdown.is_clean() {
+        errors.push(format!(
+            "Computer Use cleanup incomplete ({}/{}): {}",
+            computer_use_shutdown.settled,
+            computer_use_shutdown.attempted,
+            computer_use_shutdown.errors.join("; ")
+        ));
+    }
+    if errors.is_empty() {
+        info!(target: "grok_app::updater", "managed cleanup reports settled; ready for relaunch");
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[cfg(test)]
@@ -184,14 +259,5 @@ mod tests {
         if cfg!(debug_assertions) {
             assert!(!is_updater_plugin_enabled());
         }
-    }
-
-    #[test]
-    fn shutdown_guard_is_idempotent_flag() {
-        reset_update_shutdown_guard_for_tests();
-        assert!(!UPDATE_SHUTDOWN_DONE.load(Ordering::SeqCst));
-        UPDATE_SHUTDOWN_DONE.store(true, Ordering::SeqCst);
-        assert!(UPDATE_SHUTDOWN_DONE.load(Ordering::SeqCst));
-        reset_update_shutdown_guard_for_tests();
     }
 }
