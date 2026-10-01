@@ -13,6 +13,9 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+### Fixed
+- Fixed Markdown editor freezes caused by large link-heavy documents.
+
 ## [0.2.38] - 2026-09-30
 
 > **Highlight:** Each chat keeps its own model and provider.
