@@ -67,7 +67,8 @@ pnpm setup:cross   # rust targets + (macOS) cargo-xwin / nsis / llvm 检查
 # Debian/Ubuntu
 # Prefer Ayatana only (libappindicator3-dev conflicts with libayatana-appindicator3-dev).
 sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev \
-  patchelf libgtk-3-dev libayatana-appindicator3-dev libssl-dev
+  patchelf libgtk-3-dev libayatana-appindicator3-dev libssl-dev \
+  xdg-utils
 
 # Arch
 sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module \

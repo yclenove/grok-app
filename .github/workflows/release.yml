@@ -79,6 +79,10 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: Build ${{ matrix.name }}
+    env:
+      # macos-latest is 14 GB RAM; Node's default heap (~2–4 GB) OOM'd `pnpm build:ui`
+      # on the Apple Silicon job (v0.2.39). Same flag on every leg is harmless.
+      NODE_OPTIONS: --max-old-space-size=8192
 
     steps:
       - name: Checkout
@@ -109,7 +113,11 @@ jobs:
             libayatana-appindicator3-dev \
             libssl-dev \
             rpm \
-            file
+            file \
+            xdg-utils
+          # xdg-utils: Tauri AppImage copies /usr/bin/xdg-mime when deep-link
+          # schemes are set (grok://). ubuntu-22.04 x64 images often already
+          # have it; ubuntu-24.04-arm does not (v0.2.39 Linux-arm64 failed).
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

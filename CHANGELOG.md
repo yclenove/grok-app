@@ -13,6 +13,20 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.40] - 2026-10-04
+
+> **Highlight:** Linux ARM64 and Apple Silicon installers are on this GitHub Release.
+>
+> **中文 · 亮点：** 本版 GitHub Release 含 Linux ARM64 与 Apple Silicon 安装包。
+
+### Fixed
+- Linux ARM64 AppImage, .deb, and .rpm are published. v0.2.39 lacked them (`xdg-mime` missing on the ARM runner).
+- The Apple Silicon .dmg is published. v0.2.39's macOS ARM job ran out of Node heap.
+
+**中文 · 修复**
+- Linux ARM64 的 AppImage、.deb 和 .rpm 已发布。v0.2.39 缺这三项（ARM 构建机没有 `xdg-mime`）。
+- Apple Silicon 的 .dmg 已发布。v0.2.39 的 macOS ARM 任务 Node 内存不足。
+
 ## [0.2.39] - 2026-10-04
 
 > **Highlight:** Linux ARM64 installers are on GitHub Releases.
