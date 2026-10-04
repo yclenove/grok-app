@@ -49,13 +49,17 @@ jobs:
             name: Windows
           - os: ubuntu-latest
             name: Linux
+          # Same fmt / clippy / test bar as Linux x64, on the native ARM runner.
+          # Parallel with the other legs (does not build release bundles).
+          - os: ubuntu-24.04-arm
+            name: Linux-arm64
     runs-on: ${{ matrix.os }}
     name: Rust ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux WebKit deps
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           # Ayatana only — libappindicator3-dev conflicts with libayatana-appindicator3-dev on Ubuntu.
           sudo apt-get update

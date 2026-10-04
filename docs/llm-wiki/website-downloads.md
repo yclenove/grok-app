@@ -44,7 +44,7 @@ GitHub Releases CDN（objects.githubusercontent.com 等）
 tag vX.Y.Z
   ├─ macOS ARM / Intel  → Grok_<ver>_aarch64.dmg / Grok_<ver>_x64.dmg
   ├─ Windows            → Grok_<ver>_x64-setup.exe / Grok_<ver>_x64-portable.zip
-  ├─ Linux              → AppImage / .deb / .rpm
+  ├─ Linux x64 / ARM64  → AppImage / .deb / .rpm
   ├─ grok-desktop-latest → 仅自动更新（官网不要用）
   └─ checksums job
         scripts/publish-website-downloads.py
@@ -66,12 +66,15 @@ tag vX.Y.Z
 | macOS Intel | `mac-x64` | `Grok_mac_x64.dmg` | `…/latest/download/Grok_mac_x64.dmg` |
 | Windows 安装版 | `windows-x64` | `Grok_windows_x64-setup.exe` | `…/latest/download/Grok_windows_x64-setup.exe` |
 | Windows 绿色版 | `windows-x64-portable` | `Grok_windows_x64-portable.zip` | `…/latest/download/Grok_windows_x64-portable.zip` |
-| Linux 通用 | `linux-x64-appimage` | `Grok_linux_x64.AppImage` | `…/latest/download/Grok_linux_x64.AppImage` |
-| Debian 系 | `linux-x64-deb` | `Grok_linux_x64.deb` | `…/latest/download/Grok_linux_x64.deb` |
-| Fedora / RHEL 系 | `linux-x64-rpm` | `Grok_linux_x64.rpm` | `…/latest/download/Grok_linux_x64.rpm` |
+| Linux x64 通用 | `linux-x64-appimage` | `Grok_linux_x64.AppImage` | `…/latest/download/Grok_linux_x64.AppImage` |
+| Debian 系 x64 | `linux-x64-deb` | `Grok_linux_x64.deb` | `…/latest/download/Grok_linux_x64.deb` |
+| Fedora / RHEL 系 x64 | `linux-x64-rpm` | `Grok_linux_x64.rpm` | `…/latest/download/Grok_linux_x64.rpm` |
+| Linux ARM64 通用 | `linux-arm64-appimage` | `Grok_linux_arm64.AppImage` | `…/latest/download/Grok_linux_arm64.AppImage` |
+| Debian 系 ARM64 | `linux-arm64-deb` | `Grok_linux_arm64.deb` | `…/latest/download/Grok_linux_arm64.deb` |
+| Fedora / RHEL 系 ARM64 | `linux-arm64-rpm` | `Grok_linux_arm64.rpm` | `…/latest/download/Grok_linux_arm64.rpm` |
 | 机器清单 | — | `downloads.json` | `…/latest/download/downloads.json` |
 
-发版硬性要求：`mac-x64` 与 `windows-x64` 缺失则 checksums job 失败。其余键在对应平台构建成功时一并写入。四端 CI 全绿时上表 7 个安装包都会在。
+发版硬性要求：上表 10 个安装包（含 Linux ARM64 三种）任一缺失则 checksums job 失败。五条构建腿全绿时这些键都会在。
 
 ### 3.1 各包给谁用
 
@@ -81,11 +84,14 @@ tag vX.Y.Z
 | `mac-x64` | Intel Mac | 默认主按钮（现在大多数人是 ARM） |
 | `windows-x64` | Windows 10/11 x64 安装 | 「Windows ARM」 |
 | `windows-x64-portable` | 免安装 zip | 主下载（主按钮用 setup.exe） |
-| `linux-x64-appimage` | 任意桌面发行版；Arch / Manjaro 走这条 | 某个具体发行版专包 |
-| `linux-x64-deb` | Ubuntu / Debian / Mint / Pop!_OS | Fedora |
-| `linux-x64-rpm` | Fedora / RHEL / openSUSE | Ubuntu |
+| `linux-x64-appimage` | x64 桌面发行版；Arch / Manjaro 走这条 | ARM64 机器、某个具体发行版专包 |
+| `linux-x64-deb` | Ubuntu / Debian / Mint / Pop!_OS x64 | Fedora、ARM64 |
+| `linux-x64-rpm` | Fedora / RHEL / openSUSE x64 | Ubuntu、ARM64 |
+| `linux-arm64-appimage` | Ubuntu 24.04+ aarch64 以及其它 glibc 2.39+ 的 ARM64 桌面 | x64 机器 |
+| `linux-arm64-deb` | Ubuntu 24.04+ / Debian ARM64 | Fedora、Ubuntu 22.04 ARM（glibc 太旧） |
+| `linux-arm64-rpm` | Fedora / RHEL aarch64（glibc 2.39+） | Ubuntu |
 
-没有：macOS universal、Windows ARM、Linux aarch64、AUR、Flatpak、Snap。
+没有：macOS universal、Windows ARM、AUR、Flatpak、Snap。
 
 ### 3.2 版本化文件名（只作对照，不要写死在按钮上）
 
@@ -100,8 +106,11 @@ tag vX.Y.Z
 | `Grok_linux_x64.AppImage` | `Grok_0.2.19_amd64.AppImage` |
 | `Grok_linux_x64.deb` | `Grok_0.2.19_amd64.deb` |
 | `Grok_linux_x64.rpm` | `Grok-0.2.19-1.x86_64.rpm` |
+| `Grok_linux_arm64.AppImage` | `Grok_0.2.19_aarch64.AppImage` |
+| `Grok_linux_arm64.deb` | `Grok_0.2.19_arm64.deb` |
+| `Grok_linux_arm64.rpm` | `Grok-0.2.19-1.aarch64.rpm` |
 
-按钮必须用左列。右列会随版本变，写死会在下一版 404。
+按钮必须用左列。右列会随版本变，写死会在下一版 404。ARM64 三行是文件名形状（0.2.19 还没有这些资产）；从带 Linux ARM64 构建的正式版起才会出现。
 
 ## 4. `downloads.json`
 
@@ -253,7 +262,8 @@ https://github.com/RongleCat/grok-app/releases
 | macOS + ARM | `mac-aarch64` |
 | macOS + Intel / 无法判断 | `mac-x64`（若同时有 ARM，文案写清「Intel」；主 CTA 在无法判断时宁可指向 ARM 并提供 Intel 次按钮） |
 | Windows | `windows-x64` |
-| Linux | `linux-x64-appimage`，旁边给 deb / rpm |
+| Linux x64 / 无法判断 | `linux-x64-appimage`，旁边给 deb / rpm |
+| Linux ARM64 | `linux-arm64-appimage`，旁边给 deb / rpm |
 
 无法判断时不要只给一个按钮，列出 Mac ARM / Mac Intel / Windows / Linux。
 
@@ -271,6 +281,9 @@ https://github.com/RongleCat/grok-app/releases
 | `/download/linux` | `linux-x64-appimage` 的 `url` |
 | `/download/linux-deb` | `linux-x64-deb` 的 `url` |
 | `/download/linux-rpm` | `linux-x64-rpm` 的 `url` |
+| `/download/linux-arm` | `linux-arm64-appimage` 的 `url` |
+| `/download/linux-arm-deb` | `linux-arm64-deb` 的 `url` |
+| `/download/linux-arm-rpm` | `linux-arm64-rpm` 的 `url` |
 
 必须是 **HTTP 302/307**，响应里不要出现安装包字节。Cloudflare 橙色云不要反代这几个路径去拉 GitHub 大文件。
 
@@ -313,16 +326,16 @@ https://github.com/RongleCat/grok-app/releases/latest/download/SHA256SUMS
 4. 按钮指向 `*.app.tar.gz`、`*.sig`、`latest.json`。  
 5. 在浏览器里依赖 GitHub API / `downloads.json` 的 CORS。  
 6. 把 `v0.2.19` 写进官网按钮路径。  
-7. 把 Linux 三种格式说成「三个发行版官方源」；它们是同一套 x64 构建的三种打包。
+7. 把 Linux 三种格式说成「三个发行版官方源」；同一架构下它们是同一套构建的三种打包。x64 与 ARM64 是两套包，不要混用。
 
 ## 9. 验收
 
 官网发布前：
 
-- [ ] 七个安装按钮（或短链）都 302/直达 GitHub，响应不是官网域名吐出的文件流  
+- [ ] 十个安装按钮（或短链）都 302/直达 GitHub，响应不是官网域名吐出的文件流  
 - [ ] Mac 两个架构都在，默认不明显导向 Intel  
 - [ ] Windows 主按钮是 setup.exe，绿色版是次入口  
-- [ ] Linux 能看到 AppImage + deb + rpm  
+- [ ] Linux x64 与 ARM64 都能看到 AppImage + deb + rpm  
 - [ ] 页面版本号与 `downloads.json` 的 `tag` 一致（若构建时有拉清单）  
 - [ ] 国内访问失败时仍有「GitHub Releases」兜底链接  
 - [ ] 没有链到 `grok-desktop-latest`

@@ -7,7 +7,8 @@
 | macOS Apple Silicon | `aarch64-apple-darwin` | ✅ | `.dmg` |
 | macOS Intel | `x86_64-apple-darwin` | ✅（在 Apple Silicon 上交叉） | `.dmg` |
 | Windows x64 | `x86_64-pc-windows-msvc` | ✅ 本机 Windows，或 **macOS/Linux 经 cargo-xwin** | NSIS `*-setup.exe` + **绿色版** `*-portable.zip` |
-| Linux x64 | `x86_64-unknown-linux-gnu` | ✅ 本机 Linux | **AppImage** + **.deb** + **.rpm** |
+| Linux x64 | `x86_64-unknown-linux-gnu` | ✅ 本机 Linux | **AppImage** + **.deb** + **.rpm**（Release 仍用 `ubuntu-22.04`，glibc 2.35） |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | ✅ 本机 aarch64 Linux | **AppImage** + **.deb** + **.rpm**（Release 用原生 `ubuntu-24.04-arm`，glibc 2.39，面向 Ubuntu 24.04+） |
 
 > macOS / Linux 交叉打 Windows 安装包使用 Tauri 官方 runner：`cargo-xwin` + `makensis`（NSIS）。  
 > 见 [Build Windows apps on Linux and macOS](https://v2.tauri.app/distribute/windows-installer/#build-windows-apps-on-linux-and-macos)。
