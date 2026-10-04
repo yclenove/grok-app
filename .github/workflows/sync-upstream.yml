@@ -1,0 +1,50 @@
+# Keep this fork's main aligned with RongleCat/grok-app.
+#
+# Triggers: daily schedule + workflow_dispatch.
+# Clean merge → merge commit on main (never reset / never force-push).
+# Conflicts → PR (or Issue) instead of forcing.
+# Never creates tags, so it cannot start .github/workflows/release.yml.
+#
+# Token:
+#   Default GITHUB_TOKEN can merge ordinary commits, but GitHub refuses
+#   GITHUB_TOKEN pushes that add/change files under .github/workflows/.
+#   Upstream often touches workflows, so set repo secret SYNC_UPSTREAM_TOKEN
+#   to a PAT (see scripts/sync-fork-from-upstream.sh header).
+name: sync-upstream
+
+on:
+  schedule:
+    # 06:00 UTC daily
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+# Least privilege for the fallback GITHUB_TOKEN. A PAT in SYNC_UPSTREAM_TOKEN
+# uses the PAT's own scopes instead of this block.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    # No-op on the upstream repo if this file is ever merged there.
+    if: github.event.repository.fork == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.SYNC_UPSTREAM_TOKEN || github.token }}
+
+      - name: Merge upstream/main
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN || github.token }}
+          USING_PAT: ${{ secrets.SYNC_UPSTREAM_TOKEN != '' }}
+        run: bash scripts/sync-fork-from-upstream.sh
