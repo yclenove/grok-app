@@ -132,6 +132,7 @@
 | **macOS (Intel)** | `Grok_*_x64.dmg` | Для компьютеров Mac на базе процессоров Intel |
 | **Windows (x64)** | `*-setup.exe` / `*-portable.zip` | Установщик и портативная версия |
 | **Linux (x64)** | `AppImage` / `.deb` / `.rpm` | Универсальный AppImage, пакеты для Debian/Ubuntu и Fedora/RHEL |
+| **Linux (ARM64)** | `AppImage` / `.deb` / `.rpm` | Ubuntu 24.04+ aarch64. AppImage `Grok_*_aarch64.AppImage`, Debian `*_arm64.deb`, Fedora `*.aarch64.rpm` |
 
 > 💡 **Примечание**: Имя приложения в системе — **Grok**. Для запуска готовых пакетов не требуется установка Node.js, pnpm или Rust.
 

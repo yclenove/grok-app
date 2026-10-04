@@ -10,7 +10,7 @@
 #     linux-x86_64:./Grok.AppImage.sig:https://github.com/org/grok-app/releases/download/grok-desktop-latest/Grok.AppImage
 #
 # Platform keys (Tauri 2):
-#   darwin-aarch64 | darwin-x86_64 | linux-x86_64 | windows-x86_64
+#   darwin-aarch64 | darwin-x86_64 | linux-x86_64 | linux-aarch64 | windows-x86_64
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then

@@ -1,7 +1,9 @@
 # Build & publish desktop installers:
 #   macOS ARM / Intel (.dmg)
 #   Windows x64 NSIS setup + portable zip (绿色版)
-#   Linux x64 AppImage / .deb / .rpm (Ubuntu/Debian + Fedora/RHEL family)
+#   Linux x64 AppImage / .deb / .rpm (ubuntu-22.04, glibc 2.35)
+#   Linux ARM64 AppImage / .deb / .rpm (native ubuntu-24.04-arm, glibc 2.39;
+#     Ubuntu 24.04+ aarch64. Not cross-compiled. ubuntu-22.04-arm is deprecated.)
 # Trigger: push tag v*  (e.g. v0.1.1)  or manual workflow_dispatch.
 #
 # Prerequisites (repo Settings → Actions → General → Workflow permissions):
@@ -66,6 +68,14 @@ jobs:
           - platform: ubuntu-22.04
             args: ""
             name: Linux-x64
+          # Native ARM64. Empty args = host triple (aarch64-unknown-linux-gnu),
+          # same pattern as Linux-x64. Tauri names:
+          #   Grok_<ver>_aarch64.AppImage
+          #   Grok_<ver>_arm64.deb
+          #   Grok-<ver>-1.aarch64.rpm
+          - platform: ubuntu-24.04-arm
+            args: ""
+            name: Linux-arm64
 
     runs-on: ${{ matrix.platform }}
     name: Build ${{ matrix.name }}
@@ -396,7 +406,7 @@ jobs:
             TAG="v$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
           fi
           if [[ "$PUBLISH_RESULT" != "success" ]]; then
-            echo "::error::Platform matrix result=$PUBLISH_RESULT (need success). One of macOS-ARM64 / macOS-x64 / Windows-x64 / Linux-x64 failed — do not treat this Release as complete."
+            echo "::error::Platform matrix result=$PUBLISH_RESULT (need success). One of macOS-ARM64 / macOS-x64 / Windows-x64 / Linux-x64 / Linux-arm64 failed — do not treat this Release as complete."
             # Still list what landed so the missing platform is obvious.
             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
               --jq '.assets[].name' 2>/dev/null | sort || true
@@ -433,7 +443,12 @@ jobs:
           fi
           # Hard-fail when secrets are present but rolling manifest cannot be built —
           # otherwise clients stay stuck on the GitHub manual-download path.
-          TAG="$TAG" REPO="$GITHUB_REPOSITORY" bash scripts/assemble-updater-manifest.sh
+          # Hint locks the ARM64 AppImage to Tauri's linux-aarch64 key. Filename
+          # heuristic in assemble-updater-manifest.sh is the fallback.
+          VER="${TAG#v}"
+          TAG="$TAG" REPO="$GITHUB_REPOSITORY" \
+            PLATFORM_HINTS="linux-aarch64:Grok_${VER}_aarch64.AppImage" \
+            bash scripts/assemble-updater-manifest.sh
 
   # Supply-chain floor (NEW-06): one SHA256SUMS over every published asset so
   # users can verify downloads. Runs after all platform builds have uploaded.

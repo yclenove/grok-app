@@ -132,6 +132,7 @@ Download installers directly from the official website [grok-app.com](https://gr
 | **macOS (Intel)** | `Grok_*_x64.dmg` | Intel-based Macs |
 | **Windows (x64)** | `*-setup.exe` / `*-portable.zip` | Setup installer and portable archive |
 | **Linux (x64)** | `AppImage` / `.deb` / `.rpm` | Universal AppImage, Debian/Ubuntu, Fedora/RHEL |
+| **Linux (ARM64)** | `AppImage` / `.deb` / `.rpm` | Ubuntu 24.04+ aarch64. AppImage `Grok_*_aarch64.AppImage`, Debian `*_arm64.deb`, Fedora `*.aarch64.rpm` |
 
 > 💡 **Note**: The application bundle name is **Grok**. Prebuilt packages do not require Node.js, pnpm, or Rust installed on your system.
 

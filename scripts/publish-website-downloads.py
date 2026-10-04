@@ -40,6 +40,9 @@ REQUIRED_IDS = (
     "linux-x64-appimage",
     "linux-x64-deb",
     "linux-x64-rpm",
+    "linux-arm64-appimage",
+    "linux-arm64-deb",
+    "linux-arm64-rpm",
 )
 
 # source_names: first existing file wins. `{ver}` is the tag without leading v.
@@ -110,6 +113,38 @@ INSTALLER_SPEC: tuple[dict[str, Any], ...] = (
             "Grok-{ver}.x86_64.rpm",
             "Grok_{ver}_x86_64.rpm",
             "Grok_{ver}_amd64.rpm",
+        ),
+    },
+    {
+        "id": "linux-arm64-appimage",
+        "os": "linux",
+        "arch": "aarch64",
+        "kind": "appimage",
+        "label": "Linux ARM64 AppImage",
+        "stable": "Grok_linux_arm64.AppImage",
+        "sources": ("Grok_{ver}_aarch64.AppImage", "Grok_{ver}_arm64.AppImage"),
+    },
+    {
+        "id": "linux-arm64-deb",
+        "os": "linux",
+        "arch": "aarch64",
+        "kind": "deb",
+        "label": "Linux ARM64 .deb",
+        "stable": "Grok_linux_arm64.deb",
+        "sources": ("Grok_{ver}_arm64.deb", "Grok_{ver}_aarch64.deb"),
+    },
+    {
+        "id": "linux-arm64-rpm",
+        "os": "linux",
+        "arch": "aarch64",
+        "kind": "rpm",
+        "label": "Linux ARM64 .rpm",
+        "stable": "Grok_linux_arm64.rpm",
+        "sources": (
+            "Grok-{ver}-1.aarch64.rpm",
+            "Grok-{ver}.aarch64.rpm",
+            "Grok_{ver}_aarch64.rpm",
+            "Grok_{ver}_arm64.rpm",
         ),
     },
 )
@@ -295,6 +330,9 @@ class WebsiteDownloadsTests(unittest.TestCase):
                 "Grok_0.2.20_amd64.AppImage": b"appimage",
                 "Grok_0.2.20_amd64.deb": b"deb",
                 "Grok-0.2.20-1.x86_64.rpm": b"rpm",
+                "Grok_0.2.20_aarch64.AppImage": b"arm-appimage",
+                "Grok_0.2.20_arm64.deb": b"arm-deb",
+                "Grok-0.2.20-1.aarch64.rpm": b"arm-rpm",
                 "Grok_0.2.20_x64.dmg.sig": b"ignore-me",
             }
             for name, body in samples.items():
@@ -324,6 +362,24 @@ class WebsiteDownloadsTests(unittest.TestCase):
             self.assertEqual((root / "Grok_windows_x64-setup.exe").read_bytes(), b"win-setup")
             self.assertIn("linux-x64-rpm", installers)
             self.assertEqual(installers["linux-x64-rpm"]["versionedFilename"], "Grok-0.2.20-1.x86_64.rpm")
+            self.assertEqual(
+                installers["linux-arm64-appimage"]["filename"],
+                "Grok_linux_arm64.AppImage",
+            )
+            self.assertEqual(
+                installers["linux-arm64-appimage"]["versionedFilename"],
+                "Grok_0.2.20_aarch64.AppImage",
+            )
+            self.assertEqual(
+                installers["linux-arm64-appimage"]["url"],
+                "https://github.com/RongleCat/grok-app/releases/latest/download/Grok_linux_arm64.AppImage",
+            )
+            self.assertEqual(installers["linux-arm64-deb"]["versionedFilename"], "Grok_0.2.20_arm64.deb")
+            self.assertEqual(
+                installers["linux-arm64-rpm"]["versionedFilename"],
+                "Grok-0.2.20-1.aarch64.rpm",
+            )
+            self.assertEqual(installers["linux-arm64-appimage"]["arch"], "aarch64")
             self.assertNotIn("sig", json.dumps(installers))
             self.assertEqual(payload["manifest"]["officialSite"], OFFICIAL_SITE)
             self.assertEqual(payload["manifest"]["schemaVersion"], SCHEMA_VERSION)
