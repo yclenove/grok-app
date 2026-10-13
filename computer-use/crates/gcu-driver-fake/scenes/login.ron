@@ -1,0 +1,28 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.login", name: "Fixture login", executable: "/fixtures/login", pid: 1001,
+windows: [(id: "login-window", title: "Fixture login", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Login"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "username",
+role: text_field,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Username"),
+frame: Some((x: 20.0, y: 30.0, w: 220.0, h: 30.0)),
+value: Some(text(""))),
+(id: "password",
+role: text_field,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | PASSWORD",
+name: Some("Password"),
+frame: Some((x: 20.0, y: 90.0, w: 220.0, h: 30.0)),
+value: Some(text(""))),
+(id: "login",
+role: button,
+states: "ENABLED",
+name: Some("Log in"),
+frame: Some((x: 20.0, y: 150.0, w: 120.0, h: 30.0)),
+actions: [press])
+])))])])

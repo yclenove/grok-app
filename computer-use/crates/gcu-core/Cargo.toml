@@ -9,5 +9,18 @@ publish.workspace = true
 gcu-protocol.workspace = true
 gcu-host-api.workspace = true
 
+async-trait.workspace = true
+bitflags.workspace = true
+smol_str.workspace = true
+smallvec.workspace = true
+tokio.workspace = true
+futures-core.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
+
+[features]
+testing = []

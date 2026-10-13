@@ -1,0 +1,29 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.modal", name: "Fixture modal", executable: "/fixtures/modal", pid: 1001,
+windows: [(id: "modal-window", title: "Fixture modal", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Modal"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "background",
+role: button,
+states: "ENABLED",
+name: Some("Background"),
+frame: Some((x: 20.0, y: 100.0, w: 120.0, h: 30.0)),
+actions: [press]),
+(id: "modal",
+role: dialog,
+states: "ENABLED | MODAL",
+name: Some("Confirm"),
+frame: Some((x: 200.0, y: 100.0, w: 300.0, h: 200.0)),
+children: [
+(id: "confirm",
+role: button,
+states: "ENABLED",
+name: Some("OK"),
+frame: Some((x: 220.0, y: 180.0, w: 100.0, h: 30.0)),
+actions: [press])
+])
+])))])])

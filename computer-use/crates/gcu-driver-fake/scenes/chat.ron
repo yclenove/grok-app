@@ -1,0 +1,27 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.chat", name: "Fixture chat", executable: "/fixtures/chat", pid: 1001,
+windows: [(id: "chat-window", title: "Fixture chat", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Chat"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "text",
+role: text_field,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Message"),
+frame: Some((x: 20.0, y: 350.0, w: 550.0, h: 60.0)),
+value: Some(text(""))),
+(id: "send",
+role: button,
+states: "ENABLED",
+name: Some("发送"),
+frame: Some((x: 590.0, y: 350.0, w: 90.0, h: 60.0)),
+actions: [press]),
+(id: "history",
+role: static_text,
+states: "ENABLED",
+name: Some("Offline chat"),
+frame: Some((x: 20.0, y: 30.0, w: 650.0, h: 300.0)))
+])))])])
