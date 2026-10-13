@@ -841,6 +841,13 @@
             "description": "Opaque string returned by list_windows.",
             "type": "string"
           },
+          "on_current_desktop": {
+            "description": "Whether the window is on the user's current virtual desktop/Space; `None` when the\nplatform cannot tell. Foreground actions on a window that is not current are refused.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "scale": {
             "description": "Display scale factor.",
             "format": "double",

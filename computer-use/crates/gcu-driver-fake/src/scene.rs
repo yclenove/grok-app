@@ -224,6 +224,7 @@ pub(crate) fn window_info(win: &SceneWindow) -> WindowInfo {
         title: win.title.clone(),
         frame: win.frame,
         scale: win.scale,
+        on_current_desktop: None,
     }
 }
 pub(crate) fn raw_node(node: &SceneNode, world: u64, window: &str, i: usize) -> RawNode {
