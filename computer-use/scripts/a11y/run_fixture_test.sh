@@ -85,7 +85,7 @@ if ! cargo test --locked -p gcu-driver-linux --test capture -- --ignored; then
 fi
 
 echo "Running live driver X11 actions test..."
-if ! cargo test --locked -p gcu-driver-linux --test actions -- --ignored; then
+if ! cargo test --locked -p gcu-driver-linux --test actions -- --ignored --test-threads=1; then
   echo "=== FIXTURE LOG ON LIVE DRIVER ACTIONS TEST FAILURE ==="
   cat /tmp/fixture.log 2>/dev/null || true
   exit 1

@@ -21,11 +21,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(target_os = "linux")]
+use gcu_core::model::RawNode;
 use gcu_core::{
     driver::{
         Cancel, Delivery, Driver, DriverAction, DriverError, KeyRoute, PointerRoute, WindowRef,
     },
-    model::{NativeHandle, NodeAction, NodeValue, RawNode, WindowPoint},
+    model::{NativeHandle, NodeAction, NodeValue, Role, WindowPoint},
 };
 use gcu_driver_linux::{
     atspi::{
@@ -643,7 +645,30 @@ async fn live_fixture_setup(driver: &LinuxDriver) -> (WindowRef, RawNode) {
         .snapshot_tree(&win_ref, &opts, &cancel)
         .await
         .expect("tree snapshot");
-    (win_ref, tree.root.expect("root node must exist"))
+    let mut root = tree.root.expect("root node must exist");
+
+    // If modal dialog was left open (e.g. by dump_atspi.py), close it
+    if let Some(confirm_btn) = find_raw_node(&root, &|n| {
+        n.name.as_deref() == Some("modal_confirm_button")
+            || n.identifier.as_deref() == Some("modal_confirm_button")
+    }) {
+        let _ = driver
+            .perform(
+                &DriverAction::Press {
+                    el: confirm_btn.handle.clone(),
+                },
+                &cancel,
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let new_tree = driver
+            .snapshot_tree(&win_ref, &opts, &cancel)
+            .await
+            .expect("tree snapshot after closing modal");
+        root = new_tree.root.expect("root node after closing modal");
+    }
+
+    (win_ref, root)
 }
 
 #[cfg(target_os = "linux")]
@@ -670,10 +695,10 @@ async fn live_actions_fixture_counter_button_press_increments_counter_once() {
     let (_win_ref, root) = live_fixture_setup(&driver).await;
 
     let btn = find_raw_node(&root, &|n| {
-        n.name
-            .as_deref()
-            .is_some_and(|s| s.contains("Increment") || s.contains("计数"))
-            || n.identifier.as_deref() == Some("counter_button")
+        n.role == Role::Button
+            && (n.name.as_deref().is_some_and(|s| {
+                s == "counter_button" || s.contains("Increment") || s.contains("计数")
+            }) || n.identifier.as_deref() == Some("counter_button"))
     })
     .expect("counter button found");
 
@@ -716,10 +741,12 @@ async fn live_actions_fixture_set_value_on_name_field() {
     let (_win_ref, root) = live_fixture_setup(&driver).await;
 
     let name_field = find_raw_node(&root, &|n| {
-        n.name
-            .as_deref()
-            .is_some_and(|s| s.contains("Name") || s.contains("姓名"))
-            || n.identifier.as_deref() == Some("name_field")
+        n.role == Role::TextField
+            && (n
+                .name
+                .as_deref()
+                .is_some_and(|s| s == "name_field" || s.contains("Name") || s.contains("姓名"))
+                || n.identifier.as_deref() == Some("name_field"))
     })
     .expect("name_field found");
 
@@ -820,9 +847,38 @@ async fn live_actions_fixture_xtest_click_canvas_grid_hits_cell() {
 #[ignore]
 async fn live_actions_fixture_type_text_chinese_and_emoji() {
     let driver = LinuxDriver::connect().await.expect("connect to AT-SPI");
-    let (win_ref, _) = live_fixture_setup(&driver).await;
+    let (win_ref, root) = live_fixture_setup(&driver).await;
+
+    let name_field = find_raw_node(&root, &|n| {
+        n.role == Role::TextField
+            && (n
+                .name
+                .as_deref()
+                .is_some_and(|s| s == "name_field" || s.contains("Name") || s.contains("姓名"))
+                || n.identifier.as_deref() == Some("name_field"))
+    })
+    .expect("name_field found");
+    let name_frame = name_field.frame.expect("name_field frame");
 
     let cancel = Cancel::default();
+    // Focus the text field via mouse click first
+    driver
+        .perform(
+            &DriverAction::PointerClick {
+                win: win_ref.clone(),
+                at: WindowPoint {
+                    x: name_frame.x + 10.0,
+                    y: name_frame.y + 10.0,
+                },
+                button: Button::Left,
+                count: 1,
+                route: PointerRoute::AllowForeground,
+            },
+            &cancel,
+        )
+        .await
+        .expect("click name_field to focus");
+
     let text = "你好，世界！🚀🎉";
     driver
         .perform(
@@ -857,9 +913,38 @@ async fn live_actions_fixture_type_text_chinese_and_emoji() {
 #[ignore]
 async fn live_actions_fixture_ctrl_a_backspace_clears_field() {
     let driver = LinuxDriver::connect().await.expect("connect to AT-SPI");
-    let (win_ref, _) = live_fixture_setup(&driver).await;
+    let (win_ref, root) = live_fixture_setup(&driver).await;
+
+    let name_field = find_raw_node(&root, &|n| {
+        n.role == Role::TextField
+            && (n
+                .name
+                .as_deref()
+                .is_some_and(|s| s == "name_field" || s.contains("Name") || s.contains("姓名"))
+                || n.identifier.as_deref() == Some("name_field"))
+    })
+    .expect("name_field found");
+    let name_frame = name_field.frame.expect("name_field frame");
 
     let cancel = Cancel::default();
+    // Focus the text field via mouse click first
+    driver
+        .perform(
+            &DriverAction::PointerClick {
+                win: win_ref.clone(),
+                at: WindowPoint {
+                    x: name_frame.x + 10.0,
+                    y: name_frame.y + 10.0,
+                },
+                button: Button::Left,
+                count: 1,
+                route: PointerRoute::AllowForeground,
+            },
+            &cancel,
+        )
+        .await
+        .expect("click name_field to focus");
+
     driver
         .perform(
             &DriverAction::PressKeys {
