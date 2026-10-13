@@ -246,3 +246,60 @@ setup源码及hash清单先留存于证据目录；逻辑删除 **195970 bytes**
 系统可用空间观测增加 **372736 bytes**。精确物理回收未知，未缩小VHDX。
 05/06 native upper树包含fixture链接/残留socket，暂缓递归清理；当前SDK/cache、
 源码/依赖、两次199项证据、用户包/home与前批故障证据保留。
+
+## 第六批：Windows 夹具临时目录一致性
+
+第五批已提交/push `22e6dfb7`，没有创建PR/tag/Release。再次fetch两边main
+无新增，当前分支已包含它们。Windows继续使用上一批准确Cargo产物的相同
+SHA256/manifested owned副本，没有更换Rust测试内容来取得不同结果。
+
+本机控制实验把 `TMP` 与 `TEMP` 指向两个独立目录：Rust临时路径按Windows
+GetTempPath优先使用TMP，Node `os.tmpdir()`优先使用TEMP。原fixture要求Rust
+创建的UUID目录直接位于Node临时目录，入口因此拒绝，同样的八项失败完整
+复现：**2 passed / 8 failed / 1 ignored**。没有修改本机全局TEMP/TMP或用户home。
+这证明了一个能造成原CI八项症状的具体机制；尚未捕获远端runner的实际变量，
+不能宣称远端故障的唯一根因已经证明或整个Windows job已经恢复。
+
+新fixture helper按Windows TMP/TEMP/USERPROFILE/Windows目录优先顺序校验
+原Rust目录，并用native realpath与Rust canonicalize保持物理路径一致。原UUID
+命名、直接临时父目录、ownership marker与拒绝linked root全部保留。Playwright
+artifact观察继续检查Node实际临时目录，支持别名parent，缺失parent只跳过
+诊断，保留原rm(force)行为。helper只由源码测试fixture使用，不进入产品pack；
+未修改产品worker、env allowlist、启动/审批/cleanup时钟或用户浏览器配置。
+
+实际验证：
+
+- 同一manifested App test artifact：TMP/TEMP不同与相同两组各 **10 passed /
+  0 failed / 1 ignored**，原八项全部通过。最后artifact observer修正后的最终
+  不同目录候选再次 **10 passed / 0 failed / 1 ignored**，原contexts/Job owners
+  join，三次fixture根目录均无残留。人工十分钟deadline仍ignored，不算通过。
+- 新路径合同：固定产品Node20在Windows **7 passed / 0 failed / 0 skipped**；
+  Linux Node也 **7 passed / 0 failed / 0 skipped**。覆盖变量优先级/fallback、
+  丢marker/错误名字/linked root、Node artifact别名与missing-path行为。
+- 首次扩大Node source-worker测试因未传显式测试Chromium参数，**212 passed /
+  7 failed / 0 skipped**，首败说明保留。为五个准确失败文件提供固定Node20/
+  Chromium seed与原source worker后，完整native重跑 **15 passed / 0 failed /
+  0 skipped**（含嵌套合同），原workers/browser退出且profiles删除。不是原始
+  invocation全套一次通过，也不是installed或真人模型验收。
+- Node语法、diff与final质量门禁通过；没有Rust或前端产品修改，既有workspace
+  fmt/依赖检查保持，App+Workbench13552行与产品≥1000行80文件未增长。
+
+证据、准确artifact/hash与再生命令：
+`tools/computer-use-probe/.run/ci-windows-startup-20261013-01/`。
+首个PowerShell5验证入口因缺ProcessStartInfo.ArgumentList未启动测试，后续
+PowerShell7运行才计验证；不把这个夹具环境错误列为产品故障。
+
+已确认四次原test owners退出，并核验准确targets/reparse points与CIM进程身份，
+保留原八个失败store/marker/hash后，删除两份manifested EXE副本和五个原测试
+temp根。逻辑 **148095811 bytes**，H盘可用空间观测增加 **148172800 bytes**；
+精确物理回收未知。主Cargo产物、不可变seed、依赖、原失败/全部正例证据及
+用户包/home保持；第五批05/06 native upper树仍暂缓。
+
+最后观察 `22e6dfb7` 的 [run 38392655799](https://github.com/yclenove/grok-app/actions/runs/38392655799)：
+frontend、两个SDK与维护ARM64 browser诊断成功；ARM64产品Rust失败，其余
+Rust与production Jammy仍运行。9eb run随后由workflow转为cancelled，本批
+没有主动取消/重跑。后续先回读最终CI，若启动仍失败则补有界安全诊断，
+不能仅放宽gate时间。另保留production supervisor的已识别债务：stderr当前
+在端口成功后才drain，端口前错误缺诊断，需另批修复/验证；不是本批已完成项。
+继续CPU/header验证、维护来源/完整NOTICE、安全策略、五target产品集成及
+所有原R1–R4安装/模型/四surface/UI UX/同最终候选12h门禁，整体active/partial。

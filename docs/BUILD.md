@@ -1,6 +1,6 @@
 # Grok App 桌面端构建与发布
 
-CU当前状态见[CI修复检查点](plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：fork和源main已合入，再次fetch无新增。Mac资源复制权限已修；Linux隔离入口改为映射原sudo用户，真实0700目录与Jammy完整Wayland199项通过。Windows八项原生启动gate及ARM64产品target仍开放，远端workflow尚未全部通过。五target维护运行时、完整NOTICE和产品/安装验收继续；App macOS 11+ / CU受管浏览器14+不变，R1–R4保持。
+CU当前状态见[CI修复检查点](plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：fork和源main已合入，再次fetch无新增。Mac资源复制权限已修；Linux原sudo用户/0700目录与Jammy完整Wayland199项通过。Windows已复现TMP/TEMP差异导致相同八项启动失败，修正测试夹具后相同/不同目录两种环境各10项通过；远端故障仍待复验。ARM64产品target、维护运行时、完整NOTICE和产品/安装验收继续，整个workflow尚未通过；App macOS 11+ / CU受管浏览器14+与R1–R4不变。
 
 支持平台：
 

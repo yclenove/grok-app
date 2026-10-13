@@ -1,4 +1,4 @@
-当前批次见[CI修复检查点](../plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：两边main已合入，再次fetch无新增。Mac只读资源复制已修；Linux私有namespace映射原sudo用户，真实0700目录读取、runner27项与Jammy完整Wayland199项通过。远端Windows八项启动gate及ARM64产品target仍开放，整个workflow尚未通过。SDK/维护browser诊断成功不等于产品验收；产品pins/seed/App144与App11+/CU受管Mac14+保持，完整R1–R4继续，以下为历史批次记录。
+当前批次见[CI修复检查点](../plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：两边main已合入，再次fetch无新增。Mac复制权限已修；Linux原sudo用户/0700目录、runner27项与Jammy完整Wayland199项通过。Windows相同八项失败已在TMP/TEMP差异环境复现并修正测试夹具，两种环境各10项通过、路径合同两平台各7项；远端故障待复验。ARM64产品target与整个workflow仍开放，SDK/维护browser诊断不等于产品验收；产品pins/seed/App144、App11+/CU受管Mac14+与完整R1–R4保持，以下为历史批次记录。
 
 2026-10-13 最新[SwiftShader MD5/libbacktrace特殊通知](../plans/2026-10-13-computer-use-swiftshader-copied-checkpoint.md)：13准确源/88774 bytes/四manifest/raw batches已验，五MD5与两backtrace完整原inline permission保持；Boost下载pins、libbacktrace Gitlink及CMake debug源码分支明确，不据此推导binary排除。独立01/02整个报告及10197-byte片段一致，437工具tests/0skip通过，原所有目录/字段/来源缺口保持；完整NOTICE/维护pack/产品验收及原R1–R4全部范围active/partial，App11+/CU受管Mac14+与旧产品保持。
 

@@ -1,19 +1,14 @@
 // Test-only source worker entry. Never bundled into a product runtime.
 // Hold the ORIGINAL native launch/close; gates do not replay input or close.
-import fs, { appendFileSync, existsSync, lstatSync, realpathSync } from "node:fs";
-import { basename, dirname, join, toNamespacedPath } from "node:path";
-import { tmpdir } from "node:os";
+import fs, { appendFileSync, existsSync } from "node:fs";
+import { basename, join, toNamespacedPath } from "node:path";
 import childProcess from "node:child_process";
 import http from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
+import { taskFixtureArtifactDirectory, taskFixtureRoot } from "./task-fixture-root.mjs";
 
 const supplied = process.env.GROK_CU_BROWSER_PROFILE_ROOT || "";
-const root = realpathSync(supplied);
-if (toNamespacedPath(dirname(root)) !== toNamespacedPath(realpathSync(tmpdir())) ||
-    !/^grok-cu-managed-task-[0-9a-f-]{36}$/.test(basename(root)) ||
-    lstatSync(supplied).isSymbolicLink() || !existsSync(join(root, "owned-task-fixture"))) {
-  throw new Error("explicit isolated task fixture root required");
-}
+const root = taskFixtureRoot(supplied);
 const evidence = join(root, "fixture-events.ndjson");
 const start = performance.now();
 const record = (phase, details = {}) => appendFileSync(evidence,
@@ -65,9 +60,7 @@ childProcess.spawn = function (command, ...args) {
 const originalRemove = fs.promises.rm;
 let cleanupSequence = 0;
 fs.promises.rm = async function (directory, ...args) {
-  if (typeof directory !== "string" ||
-      toNamespacedPath(dirname(directory)) !== toNamespacedPath(realpathSync(tmpdir())) ||
-      !basename(directory).startsWith("playwright-artifacts-")) {
+  if (!taskFixtureArtifactDirectory(directory)) {
     return originalRemove.call(this, directory, ...args);
   }
   const cleanup = ++cleanupSequence;
