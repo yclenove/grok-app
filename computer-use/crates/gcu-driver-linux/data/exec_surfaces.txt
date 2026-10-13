@@ -1,0 +1,41 @@
+# List of execution surface keywords used by Linux AT-SPI sensitive detection.
+# Matches against accessible roles and names (case-insensitive substring/word match).
+# Heuristic only: best-effort, non-exhaustive.
+terminal
+console
+shell
+ssh
+bash
+zsh
+sh
+csh
+tcsh
+fish
+ksh
+xterm
+konsole
+alacritty
+kitty
+wezterm
+warp
+ghostty
+hyper
+pty
+tty
+repl
+powershell
+cmd.exe
+command prompt
+debug console
+terminal window
+web terminal
+cloud shell
+cloud terminal
+remote terminal
+tmux
+screen
+ipython
+jupyter terminal
+integrated terminal
+task runner
+debug target

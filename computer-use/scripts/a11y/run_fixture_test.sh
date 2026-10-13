@@ -69,3 +69,11 @@ if ! /usr/bin/python3 scripts/a11y/check_fixture_tree.py --input /tmp/fixture_tr
   cat /tmp/fixture.log 2>/dev/null || true
   exit 1
 fi
+
+echo "Running live driver AT-SPI test..."
+if ! cargo test --locked -p gcu-driver-linux --test atspi_tree -- --ignored; then
+  echo "=== FIXTURE LOG ON LIVE DRIVER TEST FAILURE ==="
+  cat /tmp/fixture.log 2>/dev/null || true
+  exit 1
+fi
+
