@@ -26,3 +26,6 @@ pub mod tree;
 pub mod redact;
 /// Session-local snapshots, stable element indices, and fingerprint-aligned diffs.
 pub mod snapshot;
+
+/// Single-attempt action routing, snapshot gates, and bounded session ledger.
+pub mod action;

@@ -55,6 +55,7 @@ pub struct Session {
     grants: Mutex<GrantTable>,
     queue: tokio::sync::Mutex<()>,
     cancel: Cancel,
+    pub(crate) actions: Mutex<crate::action::SessionActions>,
 }
 
 impl Session {
@@ -80,6 +81,7 @@ impl Session {
             grants: Mutex::new(GrantTable::default()),
             queue: tokio::sync::Mutex::new(()),
             cancel: Cancel::new(),
+            actions: Mutex::new(crate::action::SessionActions::default()),
         }
     }
 
@@ -90,6 +92,26 @@ impl Session {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Live activity source used by policy and routing. Nonblocking; no timeout
+    /// or cancellation. Engine callers must never clear Stop on this Host source.
+    pub fn activity(&self) -> &dyn UserActivity {
+        self.activity.as_ref()
+    }
+
+    /// Copy the bounded metadata ledger. Memory only; may wait on its mutex,
+    /// with no timeout or cancellation. No input payloads are retained.
+    pub fn action_ledger(&self) -> crate::action::ActionLedger {
+        lock(&self.actions).ledger.clone()
+    }
+
+    pub(crate) fn turn_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cancellation(&self) -> &Cancel {
+        &self.cancel
     }
 
     /// Whether the latch was set when this session was created.
@@ -143,6 +165,7 @@ impl Session {
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
         lock(&self.grants).turn_ended();
+        lock(&self.actions).snapshots.begin_turn();
         let _ = drive_native(self.release.release_all_input()).await;
     }
 
@@ -159,6 +182,7 @@ impl Session {
         self.turn_open.store(false, Ordering::Release);
         lock(&self.grants).session_closed();
         self.cancel.cancel();
+        *lock(&self.actions) = crate::action::SessionActions::default();
         let _ = drive_native(self.release.release_all_input()).await;
     }
 

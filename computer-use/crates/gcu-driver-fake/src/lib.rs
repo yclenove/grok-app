@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod control;
 /// One-shot fault descriptions.
 pub mod faults;
 /// Fixture rasterizer constants for pixel assertions.
@@ -44,6 +45,9 @@ pub struct FakeDriver {
     world: Arc<Mutex<World>>,
     capabilities: Capabilities,
     held_input: Arc<AtomicUsize>,
+    perform_calls: Arc<AtomicUsize>,
+    release_calls: Arc<AtomicUsize>,
+    action_faults: Arc<Mutex<std::collections::VecDeque<Fault>>>,
 }
 impl FakeDriver {
     /// Construct from validated RON data, synchronously, without filesystem access.
@@ -56,6 +60,9 @@ impl FakeDriver {
             ))),
             capabilities: capabilities(),
             held_input: Arc::new(AtomicUsize::new(0)),
+            perform_calls: Arc::new(AtomicUsize::new(0)),
+            release_calls: Arc::new(AtomicUsize::new(0)),
+            action_faults: Arc::new(Mutex::new(Default::default())),
         })
     }
     /// Construct a built-in fixture, synchronously, without OS resources.
@@ -191,6 +198,7 @@ fn read_fault(fault: &Option<Fault>) -> Result<()> {
         Some(Fault::Crash { .. }) => Err(DriverError::Crashed {
             maybe_executed: false,
         }),
+        Some(Fault::Error(e)) => Err(e.clone()),
         Some(Fault::SlowSettle(_)) => Err(DriverError::InvalidRequest),
         _ => Ok(()),
     }
@@ -369,6 +377,10 @@ impl Driver for FakeDriver {
             .map(|node| node.handle.clone()))
     }
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        self.perform_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(fault) = self.action_faults.lock().await.pop_front() {
+            self.lock().await?.faults.push_front(fault);
+        }
         bounded(cancel, NATIVE_TIMEOUT, async {
             let delivery = self.delivery(req)?;
             let fault = self.prepare(cancel, NATIVE_TIMEOUT).await?;
@@ -379,6 +391,7 @@ impl Driver for FakeDriver {
                 });
             }
             match fault {
+                Some(Fault::Error(e)) => Err(e),
                 Some(Fault::Timeout { maybe_executed } | Fault::Crash { maybe_executed }) => {
                     if maybe_executed {
                         world.apply(req, delivery)?;
@@ -432,6 +445,9 @@ impl Driver for FakeDriver {
     }
 
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
+        if !self.capabilities.observe.events {
+            return None;
+        }
         let mut world = self.world.try_lock().ok()?;
         world.window(win).ok()?;
         let (tx, rx) = mpsc::unbounded_channel();
@@ -441,6 +457,7 @@ impl Driver for FakeDriver {
     }
     async fn release_all_input(&self) {
         // No physical keys exist. This path remains available even after injected crash.
+        self.release_calls.fetch_add(1, Ordering::SeqCst);
         self.held_input.store(0, Ordering::SeqCst);
     }
 }
@@ -475,6 +492,9 @@ impl FakeDriver {
             ))),
             capabilities: capabilities(),
             held_input: Arc::new(AtomicUsize::new(0)),
+            perform_calls: Arc::new(AtomicUsize::new(0)),
+            release_calls: Arc::new(AtomicUsize::new(0)),
+            action_faults: Arc::new(Mutex::new(Default::default())),
         })
     }
 }
