@@ -4,6 +4,7 @@
 mod handshake;
 mod process;
 mod process_tree;
+mod startup;
 
 #[cfg(all(windows, any(test, feature = "computer-use-probe")))]
 pub(crate) use process_tree::assign_job as assign_probe_job;

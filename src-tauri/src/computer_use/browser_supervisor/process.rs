@@ -1,5 +1,6 @@
 //! Spawn, attach, and stop the Host-owned Playwright worker.
 
+#[cfg(all(test, windows))]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 use grok_computer_use_core::browser::{csprng_bearer_token, keep_worker_env_key};
 use grok_computer_use_core::runtime::JS_RUNTIME;
 
+use super::startup::StartupOutput;
 use crate::computer_use::playwright_worker;
 use crate::computer_use::ComputerUseBroker;
 
@@ -34,6 +36,7 @@ fn apply_worker_env(command: &mut Command) {
 
 pub struct BrowserSupervisor {
     child: Mutex<Child>,
+    output: Mutex<Option<StartupOutput>>,
     // Hold through physical teardown; simultaneous callers must not report
     // success merely because another caller has started shutting down.
     closed: Mutex<bool>,
@@ -83,6 +86,7 @@ impl BrowserSupervisor {
     }
 
     pub fn spawn(req: SpawnRequest) -> Result<Self, String> {
+        retire_failed_startups(Some(&req.profile_root))?;
         if !req.node.is_file() {
             return Err(format!("js-runtime missing: {}", req.node.display()));
         }
@@ -148,42 +152,58 @@ impl BrowserSupervisor {
             let _ = child.kill();
             let _ = child.wait();
         })?;
-        let stdout = child.stdout.take().ok_or("worker stdout missing")?;
-        let port = read_port(stdout, Duration::from_secs(8)).inspect_err(|_| {
-            let _ = child.kill();
-            let _ = child.wait();
-            #[cfg(windows)]
-            unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(job);
-            }
-        })?;
-        // The worker must never be able to block on a full stderr pipe. The
-        // supervisor currently exposes only structured health errors, so
-        // drain diagnostic text without retaining unbounded process output.
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut buf = [0_u8; 4096];
-                loop {
-                    match std::io::Read::read(&mut reader, &mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                }
-            });
-        }
-        Ok(Self {
+        let output = StartupOutput::start(
+            child
+                .stdout
+                .take()
+                .expect("worker stdout was configured as piped"),
+            child
+                .stderr
+                .take()
+                .expect("worker stderr was configured as piped"),
+        );
+        let startup = output.wait_port(Duration::from_secs(8));
+        let mut supervisor = Self {
             child: Mutex::new(child),
+            output: Mutex::new(Some(output)),
             closed: Mutex::new(false),
             shutdown_requested: AtomicBool::new(false),
             #[cfg(any(all(test, windows), feature = "computer-use-probe"))]
             pid,
-            base: format!("http://127.0.0.1:{port}"),
+            base: String::new(),
             token,
             profile_root: req.profile_root,
             #[cfg(windows)]
             job,
-        })
+        };
+        match startup {
+            Ok(port) => {
+                supervisor.base = format!("http://127.0.0.1:{port}");
+                Ok(supervisor)
+            }
+            Err(error) => {
+                // Keep the exact Child/Job/readers if physical cleanup cannot
+                // be confirmed. A startup error must not orphan their owners.
+                let cleanup = supervisor.shutdown();
+                let diagnostic = supervisor
+                    .output
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .map(StartupOutput::summary)
+                    .unwrap_or_default();
+                let message = format!("{error}; {diagnostic}");
+                if let Err(cleanup) = cleanup {
+                    failed_startups()
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(supervisor);
+                    Err(format!("{message}; startup cleanup pending: {cleanup}"))
+                } else {
+                    Err(message)
+                }
+            }
+        }
     }
 
     pub fn attach(&self, broker: &ComputerUseBroker) -> Result<(), String> {
@@ -248,12 +268,18 @@ impl BrowserSupervisor {
         if *closed {
             return Ok(());
         }
-        let graceful = reqwest::blocking::Client::new()
-            .post(format!("{}/shutdown", self.base))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(&serde_json::json!({}))
-            .timeout(Duration::from_secs(2))
-            .send();
+        let graceful = if self.base.is_empty() {
+            None
+        } else {
+            Some(
+                reqwest::blocking::Client::new()
+                    .post(format!("{}/shutdown", self.base))
+                    .header("Authorization", format!("Bearer {}", self.token))
+                    .json(&serde_json::json!({}))
+                    .timeout(Duration::from_secs(2))
+                    .send(),
+            )
+        };
         #[cfg(windows)]
         {
             // The kernel Job remains the ownership authority even after its
@@ -292,7 +318,10 @@ impl BrowserSupervisor {
             std::thread::sleep(Duration::from_millis(20));
         }
         #[cfg(not(windows))]
-        if !graceful.is_ok_and(|response| response.status().is_success()) {
+        if !self.base.is_empty()
+            && !graceful
+                .is_some_and(|result| result.is_ok_and(|response| response.status().is_success()))
+        {
             // Killing a Unix worker alone does not prove its browsers exited.
             // A native process-lifetime authority is still required here.
             return Err("worker exited without confirmed browser cleanup".into());
@@ -315,6 +344,14 @@ impl BrowserSupervisor {
                 "physicalTeardownBudgetMs": 5_000,
                 })
             );
+        }
+        if let Some(output) = self
+            .output
+            .lock()
+            .map_err(|_| "worker output lock poisoned")?
+            .as_mut()
+        {
+            output.join(Duration::from_secs(2))?;
         }
         *closed = true;
         Ok(())
@@ -339,28 +376,6 @@ impl Drop for BrowserSupervisor {
 
 fn looks_like_path_lookup(node: &Path) -> bool {
     node.components().count() == 1
-}
-
-fn read_port<R: std::io::Read + Send + 'static>(
-    stdout: R,
-    timeout: Duration,
-) -> Result<u16, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut lines = BufReader::new(stdout).lines();
-        let line = lines.next().and_then(Result::ok);
-        let _ = tx.send(line);
-    });
-    let line = rx
-        .recv_timeout(timeout)
-        .map_err(|_| "worker did not publish port".to_string())?
-        .ok_or_else(|| "worker stdout closed before port".to_string())?;
-    let v: serde_json::Value =
-        serde_json::from_str(&line).map_err(|e| format!("worker port json: {e}"))?;
-    v.get("port")
-        .and_then(|p| p.as_u64())
-        .and_then(|p| u16::try_from(p).ok())
-        .ok_or_else(|| format!("worker port missing in {line}"))
 }
 
 pub fn product_spawn_request() -> Result<SpawnRequest, String> {
@@ -428,7 +443,51 @@ fn product_supervisor_slot() -> &'static Mutex<Option<BrowserSupervisor>> {
 /// Release the static slot only after physical teardown succeeds. Failed cleanup
 /// retains the original lifetime authority for an explicit later retry.
 pub fn shutdown_product() -> Result<(), String> {
-    shutdown_slot(product_supervisor_slot())
+    let current = shutdown_slot(product_supervisor_slot());
+    let startup = retire_failed_startups(None);
+    current.and(startup)
+}
+
+static FAILED_STARTUPS: OnceLock<Mutex<Vec<BrowserSupervisor>>> = OnceLock::new();
+
+fn failed_startups() -> &'static Mutex<Vec<BrowserSupervisor>> {
+    FAILED_STARTUPS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn retire_failed_startups(profile_root: Option<&Path>) -> Result<(), String> {
+    let mut owners = failed_startups()
+        .lock()
+        .map_err(|_| "startup cleanup lock poisoned")?;
+    retire_startup_owners(&mut owners, profile_root)
+}
+
+fn retire_startup_owners(
+    owners: &mut Vec<BrowserSupervisor>,
+    profile_root: Option<&Path>,
+) -> Result<(), String> {
+    let mut first_error = None;
+    owners.retain(|owner| {
+        if profile_root.is_some_and(|root| {
+            root != owner.profile_root
+                && !root.canonicalize().ok().is_some_and(|requested| {
+                    owner.profile_root.canonicalize().ok().as_ref() == Some(&requested)
+                })
+        }) {
+            return true;
+        }
+        match owner.shutdown() {
+            Ok(()) => false,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                true
+            }
+        }
+    });
+    first_error.map_or(Ok(()), |error| {
+        Err(format!(
+            "previous worker startup cleanup is pending: {error}"
+        ))
+    })
 }
 
 fn shutdown_slot(slot: &Mutex<Option<BrowserSupervisor>>) -> Result<(), String> {

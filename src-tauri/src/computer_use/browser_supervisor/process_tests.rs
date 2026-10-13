@@ -96,6 +96,7 @@ fn supervisor() -> (BrowserSupervisor, u32) {
     (
         BrowserSupervisor {
             child: Mutex::new(child),
+            output: Mutex::new(None),
             closed: Mutex::new(false),
             shutdown_requested: AtomicBool::new(false),
             pid,
@@ -363,4 +364,133 @@ fn failed_binding_with_confirmed_cleanup_allows_a_fresh_worker() {
     assert!(slot.lock().unwrap().is_none());
     ensure_slot(&slot, || Ok(supervisor().0), |_| Ok(())).unwrap();
     shutdown_slot(&slot).unwrap();
+}
+
+fn startup_fixture(script: &str) -> (SpawnRequest, PathBuf) {
+    let root =
+        std::env::temp_dir().join(format!("grok-cu-worker-startup-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("owned-startup-fixture"),
+        b"synthetic output-only fixture",
+    )
+    .unwrap();
+    let entry = root.join("startup.cjs");
+    std::fs::write(&entry, script).unwrap();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    (
+        SpawnRequest {
+            node: manifest.join("resources/computer-use/seed/bin/node.exe"),
+            script: entry,
+            profile_root: root.join("profiles"),
+            browser: Some(
+                manifest.join("resources/computer-use/seed/chromium/chrome-win/chrome.exe"),
+            ),
+        },
+        root,
+    )
+}
+
+#[test]
+fn pre_and_post_port_output_cannot_deadlock_startup_and_original_readers_join() {
+    let (request, root) = startup_fixture(
+        r#"
+      require('node:fs').writeSync(2, Buffer.alloc(2 * 1024 * 1024, 120));
+      const server = require('node:http').createServer((req, res) => {
+        res.end('{}'); server.close(() => process.exit(0));
+      });
+      server.listen(0, '127.0.0.1', () => {
+        require('node:fs').writeSync(1, JSON.stringify({port:server.address().port})+'\n');
+        require('node:fs').writeSync(1, Buffer.alloc(2 * 1024 * 1024, 120));
+        require('node:fs').writeFileSync(require('node:path').join(process.env.GROK_CU_BROWSER_PROFILE_ROOT, 'stdout-complete'), 'complete');
+      });
+    "#,
+    );
+    let supervisor = BrowserSupervisor::spawn(request).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let completed = root.join("profiles/stdout-complete");
+    while !completed.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(completed).unwrap(), "complete");
+    supervisor.shutdown().unwrap();
+    assert_eq!(active_job_processes(supervisor.job).unwrap(), 0);
+    let output = supervisor.output.lock().unwrap();
+    assert!(output
+        .as_ref()
+        .unwrap()
+        .summary()
+        .contains("stderr_bytes=2097152"));
+    assert!(output
+        .as_ref()
+        .unwrap()
+        .summary()
+        .contains("stderr_code=unclassified"));
+    drop(output);
+    drop(supervisor);
+    assert!(failed_startups()
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|owner| !owner.profile_root.starts_with(&root)));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn startup_failure_reports_only_safe_codes_and_does_not_drop_cleanup_owners() {
+    let (request, root) = startup_fixture(
+        r#"
+      require('node:fs').writeSync(2, 'private-sentinel ERR_MODULE_NOT_FOUND private-path-and-token\n');
+      console.log(JSON.stringify({token:process.env.GROK_CU_BROWSER_TOKEN, private:'private-sentinel'}));
+      setInterval(() => {}, 1000);
+    "#,
+    );
+    let error = BrowserSupervisor::spawn(request).err().unwrap();
+    assert!(error.contains("worker port is missing or invalid"));
+    assert!(error.contains("stderr_code=ERR_MODULE_NOT_FOUND"));
+    assert!(!error.contains("private-sentinel") && !error.contains("private-path-and-token"));
+    assert!(failed_startups()
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|owner| !owner.profile_root.starts_with(&root)));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_worker_with_no_port_preserves_the_real_startup_deadline_and_joins_after_timeout() {
+    let (request, root) = startup_fixture("setInterval(() => {}, 1000);\n");
+    let started = Instant::now();
+    let error = BrowserSupervisor::spawn(request).err().unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(8));
+    assert!(error.contains("worker did not publish port"));
+    assert!(failed_startups()
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|owner| !owner.profile_root.starts_with(&root)));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_startup_registry_retains_the_original_job_and_cannot_block_an_unrelated_profile() {
+    let (mut worker, descendant) = supervisor();
+    let original_pid = worker.pid;
+    worker.base.clear();
+    worker.profile_root = PathBuf::from("synthetic-startup-profile");
+    let original_job = worker.job;
+    let mut job_owner = OwnedTestJob(Some(original_job));
+    worker.job = windows::Win32::Foundation::HANDLE::default();
+    let mut owners = vec![worker];
+    assert!(
+        retire_startup_owners(&mut owners, Some(Path::new("synthetic-startup-profile"))).is_err()
+    );
+    assert_eq!(owners.len(), 1);
+    assert_eq!(owners[0].pid, original_pid);
+    assert!(retire_startup_owners(&mut owners, Some(Path::new("unrelated-profile"))).is_ok());
+    assert_eq!(owners.len(), 1);
+    owners[0].job = job_owner.0.take().unwrap();
+    assert!(job_members(&owners[0]).contains(&(descendant as usize)));
+    retire_startup_owners(&mut owners, None).unwrap();
+    assert!(owners.is_empty());
 }

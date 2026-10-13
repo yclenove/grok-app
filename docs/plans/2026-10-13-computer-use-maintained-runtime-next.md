@@ -1,6 +1,6 @@
 # CU 维护版运行时：下一批落地顺序
 
-最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)第五/六批已修Linux原sudo用户/0700入口及Windows夹具的TMP/TEMP优先级：Wayland199项、runner27项通过；Windows相同八项首败已复现，修复后两种环境各10项通过，远端故障仍待复验。Mac复制权限已修；下一步回读远端CI、补worker端口前有界诊断/及时stderr drain，并接运行时CPU校验、五target维护合同/ARM64产品集成及原R1–R4完整验收。维护ARM64 browser仅诊断成功，整个workflow未通过。用户App144与home、App11+/CU受管Mac14+保持。
+最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)第七批已接worker端口前及时drain、有界诊断和原owners保留，Windows完整App2407项与Linux独立startup模块4项通过。`c8217d08`远端Mac、production Jammy、frontend与双架构SDK成功，原八项Windows managed启动已通过；继续定位Windows plugin auth超时、X11可访问性D-Bus崩溃，并接运行时CPU/header校验、五target维护合同/ARM64产品集成及原R1–R4完整验收。ARM64产品prepare仍失败，维护browser诊断成功不替代产品验收。用户App144与home、App11+/CU受管Mac14+保持；新启动修复待远端复验。
 
 最新同步已完成：[fork / 源仓库同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)，
 提交 `8107bb07` 已推送。当前处理 [Linux SDK 双架构检查点](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：

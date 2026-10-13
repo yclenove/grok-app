@@ -1,8 +1,9 @@
 # Computer Use：远端 CI 修复与同步
 
-当前继续处理第四批：macOS只读资源修复已通过下述本机回归，尚待新远端验证。
-`040c92d8` 的CI已暴露Windows八项原生启动时序失败与Linux私有namespace
-读取runner工作区失败；二者仍开放，不能将之前局部通过当作整体CI成功。
+当前为第七批：浏览器worker从启动起drain输出并保留原清理owners，Windows
+完整App本机2407项通过，Linux独立startup模块4项通过。`c8217d08` 的远端
+CI已结束：macOS、production Jammy、frontend与双架构SDK通过；Windows
+plugin auth超时、X11可访问性D-Bus崩溃、ARM64产品target仍开放。整体未交付。
 
 2026-10-13，`feat/computer-use-implementation`。
 
@@ -303,3 +304,56 @@ Rust与production Jammy仍运行。9eb run随后由workflow转为cancelled，本
 在端口成功后才drain，端口前错误缺诊断，需另批修复/验证；不是本批已完成项。
 继续CPU/header验证、维护来源/完整NOTICE、安全策略、五target产品集成及
 所有原R1–R4安装/模型/四surface/UI UX/同最终候选12h门禁，整体active/partial。
+
+## 第七批：启动输出 drain、有界诊断与原 owners 收束
+
+提交前再次成功fetch两个remote，main仍分别为 `b58b97cd` / `9c5eb3b5`，
+均为当前分支祖先。第六批 `c8217d08` 的
+[run 38394968937](https://github.com/yclenove/grok-app/actions/runs/38394968937)
+已结束，整体failure；原八项Windows managed启动测试已在远端通过。
+Mac Rust、production Jammy完整release App/strict/navigation、frontend、
+双架构SDK和维护ARM64 browser诊断成功。仍有三个实际缺项：
+
+- Windows：`private_pipe_reaches_legacy_node_parser_on_this_host` 报
+  `Plugin auth timed out`，2398 passed / 1 failed / 87 ignored。本机单独5项
+  与全量均通过，尚未证明远端超时根因，不通过放宽deadline掩盖。
+- Linux X11：Core1001项、X11库49项及第一段原生X11夹具通过；随后GTK
+  可访问性进程报D-Bus `a(sss)`结构序列化fatal，观察报geometry changed。
+  需要核查实际AT-SPI生产协议与夹具，不弱化身份/geometry检查。
+- Linux ARM64：prepare/check仍拒绝 `aarch64-unknown-linux-gnu`；SDK及
+  browser内部诊断绿不等于产品target、来源/通知与打包已完成。
+
+### 修复与真实验证
+
+旧supervisor在收到端口后才读取stderr，启动期大量错误输出可塞满pipe，
+使Node无法继续发布端口。机制控制实验中，同一child写2MiB stderr，8秒
+未drain没有port，随后drain便发布port；没有restart，也不称旧完整App复现。
+
+新 `StartupOutput` 从spawn开始drain stderr，只保留饱和字节计数和七种
+安全错误分类；固定匹配窗口，不保留/回显原日志、token或路径。首stdout
+端口消息上限1024 bytes，端口必须为非0 u16；发布后stdout继续drain到sink。
+原Child、Windows Job和两个reader JoinHandle保留到物理退出/join。清理
+超时的原supervisor进入failed-startup registry；相同profile下次启动先重试
+清理，产品shutdown也收束它。真正8秒启动deadline不变，2秒reader观察
+期限不替代物理退出。Unix pre-port只验证root/readers，任意后代树合同仍开放。
+
+- 最终Windows真实manifested App harness：**2407 passed / 0 failed /
+  87 ignored**，200.44秒；ignored未算通过。supervisor15项、源码worker/
+  Chromium任务10项（1 ignored）、plugin auth单独5项均通过。
+- 最终Rust1.99 App all-targets strict Clippy、workspace fmt与final质量门禁
+  通过。未修改前端；App+Workbench13552行与产品≥1000行文件80均未增长。
+- Jammy独立小crate使用未改动的最终 `startup.rs`：**4 passed / 0 failed**；
+  不是完整Linux App或一般Unix后代树验收。首轮私有root的环境失败保留，
+  最终在私有mount namespace修正，没有改全局root/mount。
+
+证据与再生命令：`tools/computer-use-probe/.run/ci-worker-startup-20261013-01/`，
+包含完整App/strict/supervisor日志、原pipe控制实验、Linux source SHA与清理
+receipt。两份manifested临时EXE的原owners退出后精确删除，逻辑
+**148354048 bytes**，H空闲观测增加 **148357120 bytes**；Linux临时测试
+binary逻辑 **10509280 bytes**，WSL空闲观测增 **10506240 bytes**。
+精确物理回收未知，WSL差值不代表VHDX缩小；所有失败证据、原Cargo产物/
+依赖/seed与用户App144/home保留。05/06含links/socket的upper树继续暂缓。
+
+本批仅commit/push到fork，无PR/tag/Release；两份第三方研究另行文档提交。
+继续上述三个CI缺项、CPU/header、维护运行时完整来源/NOTICE/安全策略与
+五target产品集成，以及原R1–R4全部安装/模型/四surface/UI UX/12h门禁。

@@ -1,6 +1,6 @@
 # Computer Use 当前可用性与交付顺序
 
-最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)：两边main已合入，再次fetch无新增；production Jammy、双架构SDK与维护ARM64 browser远端成功。补齐video adapter后完整Wayland199项通过，Mac FFI合同180项通过，Windows定向13项通过；新CI待结果，Linux ARM64产品target仍开放。产品pins/seed/App144保持，完整R1–R4仍active/partial，App11+/CU受管Mac14+不变。
+最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)第七批：两边main已合入，最新fetch无新增。`c8217d08`远端Mac、production Jammy、frontend与双架构SDK通过；Windows plugin auth超时、X11可访问性D-Bus崩溃、ARM64产品target仍开放。worker启动输出/有界诊断/原owners修复已在Windows完整App2407项与Linux独立startup模块4项通过，待新远端验证。产品pins/seed/App144保持，完整R1–R4仍active/partial，App11+/CU受管Mac14+不变。
 
 当前进度：fork/源仓库已合入并推送 `8107bb07`，完整本地回归通过，见[同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)。当前推进 [Linux SDK 双架构](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)，保留 x64/Jammy 并接 ARM64/Noble 的 SDK/ABI/loader 与原生 CI；ARM64 浏览器资源仍开放。完整 NOTICE/媒体/源提供、维护运行时晋升及原 R1–R4 全范围仍 active/partial。App144 真人任务仍未发送，App11+/CU受管Mac14+及原用户home保持；以下为历史批次。
 
