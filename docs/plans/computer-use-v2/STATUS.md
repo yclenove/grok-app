@@ -29,7 +29,7 @@
 | P1-07 | macOS 文本输入与剪贴板 | P1-06 | 1.5d | todo |  |  |  |  |
 | P1-08 | macOS 守卫 / 热键 / 前台 | P1-06、P0-08 | 1.5d | todo |  |  |  |  |
 | P1-09 | macOS 契约测试与冒烟 | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08 | 1.5d | todo |  |  |  | 需自托管 Mac runner |
-| P2-01 | Windows 发现 / 身份 / 虚拟桌面 | P0-05 | 2d | todo |  |  |  |  |
+| P2-01 | Windows 发现 / 身份 / 虚拟桌面 | P0-05 | 2d | done | cu2/P2-01-windows-discovery |  | 2026-10-13 | 34测试；WinGate 统一门禁(引擎提升/高完整性目标/安全桌面)；真实 Windows 冒烟 ignored(not_run) |
 | P2-02 | Windows UIA 树 | P2-01 | 3d | todo |  |  |  |  |
 | P2-03 | Windows WGC 截图 | P2-01、P2-02、P0-07 | 2d | todo |  |  |  |  |
 | P2-04 | Windows worker 隔离 | P2-02、P2-03 | 2d | todo |  |  |  |  |
