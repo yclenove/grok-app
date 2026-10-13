@@ -23,6 +23,7 @@ fn main() {
     ];
 
     let symlink_path = std::path::Path::new(&out_dir).join("libxkbcommon.so");
+    #[cfg(unix)]
     if !symlink_path.exists() {
         for &candidate in &candidates {
             if std::path::Path::new(candidate).exists() {
