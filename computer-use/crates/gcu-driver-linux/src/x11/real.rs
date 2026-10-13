@@ -3,9 +3,13 @@
 use crate::x11::server::{
     zpixmap_to_rgba, RawImage, XError, XRootGeometry, XServer, XWindowGeometry,
 };
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::composite::{self, ConnectionExt as _};
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, ImageFormat, MapState};
+use x11rb::protocol::xproto::{
+    AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, ImageFormat,
+    MapState,
+};
+use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 /// Real X11 server connection backed by `x11rb`.
@@ -301,5 +305,112 @@ impl XServer for RealX {
             height: height as u32,
             data: rgba,
         })
+    }
+
+    fn is_xtest_available(&self) -> Result<bool, XError> {
+        let ext = self
+            .conn
+            .extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        if ext.is_none() {
+            return Ok(false);
+        }
+        match self.conn.xtest_get_version(2, 2) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => Ok(reply.major_version >= 2),
+                Err(_) => Ok(false),
+            },
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn xtest_fake_motion(&self, root_x: i16, root_y: i16) -> Result<(), XError> {
+        // MotionNotify = 6
+        self.conn
+            .xtest_fake_input(6, 0, 0, self.screen().root, root_x, root_y, 0)
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        self.conn
+            .flush()
+            .map_err(|e| XError::Protocol(e.to_string()))
+    }
+
+    fn xtest_fake_button(&self, button: u8, is_press: bool) -> Result<(), XError> {
+        // ButtonPress = 4, ButtonRelease = 5
+        let event_type = if is_press { 4 } else { 5 };
+        self.conn
+            .xtest_fake_input(event_type, button, 0, x11rb::NONE, 0, 0, 0)
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        self.conn
+            .flush()
+            .map_err(|e| XError::Protocol(e.to_string()))
+    }
+
+    fn xtest_fake_key(&self, keycode: u8, is_press: bool) -> Result<(), XError> {
+        // KeyPress = 2, KeyRelease = 3
+        let event_type = if is_press { 2 } else { 3 };
+        self.conn
+            .xtest_fake_input(event_type, keycode, 0, x11rb::NONE, 0, 0, 0)
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        self.conn
+            .flush()
+            .map_err(|e| XError::Protocol(e.to_string()))
+    }
+
+    fn activate_window(&self, window: u32) -> Result<(), XError> {
+        let event = ClientMessageEvent {
+            response_type: x11rb::protocol::xproto::CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window,
+            type_: self.net_active_window,
+            data: ClientMessageData::from([1, x11rb::CURRENT_TIME, 0, 0, 0]),
+        };
+        self.conn
+            .send_event(
+                false,
+                self.screen().root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            )
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        self.conn
+            .flush()
+            .map_err(|e| XError::Protocol(e.to_string()))
+    }
+
+    fn keyboard_bounds(&self) -> Result<(u8, u8), XError> {
+        let setup = self.conn.setup();
+        Ok((setup.min_keycode, setup.max_keycode))
+    }
+
+    fn get_keyboard_mapping(&self, first_keycode: u8, count: u8) -> Result<(Vec<u32>, u8), XError> {
+        let reply = self
+            .conn
+            .get_keyboard_mapping(first_keycode, count)
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .reply()
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        Ok((reply.keysyms, reply.keysyms_per_keycode))
+    }
+
+    fn change_keyboard_mapping(
+        &self,
+        first_keycode: u8,
+        keysyms_per_keycode: u8,
+        keysyms: &[u32],
+    ) -> Result<(), XError> {
+        let keycode_count = (keysyms.len() / (keysyms_per_keycode as usize).max(1)) as u8;
+        self.conn
+            .change_keyboard_mapping(keycode_count, first_keycode, keysyms_per_keycode, keysyms)
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        self.conn
+            .flush()
+            .map_err(|e| XError::Protocol(e.to_string()))
+    }
+
+    fn flush(&self) -> Result<(), XError> {
+        self.conn
+            .flush()
+            .map_err(|e| XError::Protocol(e.to_string()))
     }
 }

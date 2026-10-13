@@ -19,7 +19,16 @@ smallvec = { workspace = true }
 sha2.workspace = true
 futures-core = { workspace = true }
 png = { workspace = true }
-x11rb = { version = "0.13", features = ["composite"] }
+unicode-segmentation = "1"
+x11rb = { version = "0.13", features = ["composite", "xtest"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xkbcommon = "0.9"
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+
