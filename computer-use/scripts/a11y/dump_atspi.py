@@ -132,14 +132,41 @@ def dump_node(acc, depth=0, max_depth=60):
     }
 
 
+def trigger_screen_reader_signal():
+    """Toggle ScreenReaderEnabled to ensure accesskit_unix receives a PropertiesChanged signal."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["busctl", "--user", "set-property", "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", "ScreenReaderEnabled", "b", "false"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.05)
+        subprocess.run(
+            ["busctl", "--user", "set-property", "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", "ScreenReaderEnabled", "b", "true"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def find_fixture_app(timeout=30.0, retry_interval=0.5):
     """Find the gcu-fixture application node in AT-SPI desktop."""
     start = time.time()
     last_err = None
     found_names = []
+    poked_after_start = False
 
     print(f"Connecting to AT-SPI desktop (timeout={timeout}s)...")
     while time.time() - start < timeout:
+        # Trigger signal after 1.0s to ensure accesskit_unix gets the activation event
+        if not poked_after_start and (time.time() - start) > 1.0:
+            trigger_screen_reader_signal()
+            poked_after_start = True
+
         try:
             desktop = Atspi.get_desktop(0)
             if desktop is None:
@@ -176,7 +203,7 @@ def find_fixture_app(timeout=30.0, retry_interval=0.5):
                         w = child.get_child_at_index(w_idx)
                         if w:
                             w_name = (w.get_name() or "").lower()
-                            if "fixture" in w_name:
+                            if "fixture" in w_name or "gcu" in w_name:
                                 print(
                                     f"Found fixture via window title '{w.get_name()}' under app '{name}'"
                                 )

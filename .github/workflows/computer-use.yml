@@ -139,7 +139,7 @@ jobs:
               exit 1
             fi
             echo "Using at-spi-bus-launcher: $ATSPI_LAUNCHER"
-            "$ATSPI_LAUNCHER" &
+            "$ATSPI_LAUNCHER" --launch-immediately --a11y=1 --screen-reader=1 &
             ATSPI_PID=$!
 
             echo "Waiting for org.a11y.Bus..."
@@ -150,6 +150,18 @@ jobs:
               fi
               sleep 0.2
             done
+
+            gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled true 2>/dev/null || true
+            gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true
+            busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status IsEnabled b true 2>/dev/null || true
+            busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status ScreenReaderEnabled b true 2>/dev/null || true
+
+            BUS_RAW=$(busctl --user call org.a11y.Bus /org/a11y/bus org.a11y.Bus GetAddress 2>/dev/null || true)
+            ADDR=$(echo "$BUS_RAW" | awk '{print $2}' | tr -d '"')
+            if [ -n "$ADDR" ]; then
+              export AT_SPI_BUS_ADDRESS="$ADDR"
+              echo "Exported AT_SPI_BUS_ADDRESS=$AT_SPI_BUS_ADDRESS"
+            fi
 
             export LIBGL_ALWAYS_SOFTWARE=1
             export GALLIUM_DRIVER=llvmpipe
