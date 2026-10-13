@@ -24,6 +24,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+sha2 = "0.11"
 gcu-protocol = { path = "crates/gcu-protocol" }
 gcu-host-api = { path = "crates/gcu-host-api" }
 gcu-host-protocol = { path = "crates/gcu-host-protocol" }

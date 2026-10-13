@@ -46,8 +46,9 @@ pub fn compute_sha256(path: &Path) -> Result<String, io::Error> {
         }
         hasher.update(&buffer[..count]);
     }
+    // sha2 0.11 digests no longer implement `LowerHex`; format the bytes explicitly.
     let digest = hasher.finalize();
-    Ok(format!("{digest:x}"))
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Read process start time from `/proc/<pid>/stat`.
