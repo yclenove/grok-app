@@ -17,3 +17,8 @@ pub mod render;
 pub mod testing;
 /// Pure accessibility tree transforms and stable snapshot-local indices.
 pub mod tree;
+
+/// Mandatory screenshot redaction and safe image derivatives.
+pub mod redact;
+/// Session-local snapshots, stable element indices, and fingerprint-aligned diffs.
+pub mod snapshot;

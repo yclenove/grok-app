@@ -42,7 +42,7 @@ struct Rule {
     allowed: Allowed,
 }
 
-const CORE_DEV: &[&str] = &["insta", "criterion", "gcu-driver-fake"];
+const CORE_DEV: &[&str] = &["insta", "criterion", "gcu-driver-fake", "proptest"];
 
 // Keep this table aligned with docs/plans/computer-use-v2/03-architecture.md §2.
 // Inspect every declared edge: optional, target-specific, dev, and build. Using

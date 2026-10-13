@@ -355,3 +355,17 @@ fn check_deps_core_snapshot_and_bench_libraries_dev_only() {
         }
     }
 }
+
+#[test]
+fn check_deps_proptest_dev_only_and_image_runtime_allowed() {
+    for kind in ["dev", "build", "normal"] {
+        let input = json!({
+            "workspace_members": ["core"],
+            "packages": [{"id": "core", "name": "gcu-core", "dependencies": [
+                {"name": "proptest", "kind": kind}, {"name": "image", "kind": null}
+            ]}]
+        });
+        let violations = check_metadata(&input.to_string()).unwrap();
+        assert_eq!(violations.len(), usize::from(kind != "dev"));
+    }
+}

@@ -13,7 +13,7 @@
 | P0-04 | gcu-host-api | P0-03 | 1d | done | cu2/P0-04-host-api |  | 2026-10-13 | 24 测试；Stop 锁存无引擎清除；PolicyStore 只读 |
 | P0-05 | core 模型 / Driver trait / fake 驱动 | P0-03、P0-04 | 2.5d | done | cu2/P0-05-core-model |  | 2026-10-13 | 8 场景+故障注入；契约框架 C01-C09 等；RULES 已同步 |
 | P0-06 | 树管线与渲染 | P0-05 | 3d | done | cu2/P0-06-tree-pipeline |  | 2026-10-13 | 13步管线+渲染；55快照；敏感区域先于裁剪收集；文本20KB上限 |
-| P0-07 | SnapshotStore / Index / Diff | P0-06 | 2d | todo |  |  |  |  |
+| P0-07 | SnapshotStore / Index / Diff | P0-06 | 2d | done | cu2/P0-07-snapshots |  | 2026-10-13 | 3快照/脱敏类型封装(compile-fail测试)/32x32区域哈希；105测试 |
 | P0-08 | Session / Policy / Router / Ledger | P0-04、P0-07、P0-08a | 2d | todo |  |  |  | 余下集成2d；含P0-08a在内≤3个闭环子PR |
 | P0-08a | 策略数据（P0-08 新增子卡） | P0-01 | 1d | done | cu2/P0-08a-policy-data | #4 | 2026-10-13 | 拒绝名单138条+15语言敏感词 |
 | P0-09 | gcu-mcp stdio | P0-08 | 2d | todo |  |  |  |  |
