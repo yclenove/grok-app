@@ -1,6 +1,6 @@
 # CU 维护版运行时：下一批落地顺序
 
-最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)已回读040c92d8的远端结果：Mac只读资源复制失败已修，本机Core1000/ZIP13/strict通过；Windows八项原启动gate与Linux隔离runner入口权限仍开放，先定位修复。随后接运行时CPU校验、五target维护合同/ARM64产品集成及原R1–R4完整验收；维护ARM64 browser仅诊断成功，尚未晋升产品资源。用户App144与home、App11+/CU受管Mac14+保持。
+最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)第五批已修Linux隔离runner入口：原sudo用户映射、真实0700目录与Jammy完整Wayland199项通过，27项runner合同通过。Mac只读资源复制已修；Windows八项原启动gate和ARM64产品target仍开放，优先定位修复。随后接运行时CPU校验、五target维护合同/ARM64产品集成及原R1–R4完整验收；维护ARM64 browser仅诊断成功，远端workflow尚未全部通过。用户App144与home、App11+/CU受管Mac14+保持。
 
 最新同步已完成：[fork / 源仓库同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)，
 提交 `8107bb07` 已推送。当前处理 [Linux SDK 双架构检查点](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：

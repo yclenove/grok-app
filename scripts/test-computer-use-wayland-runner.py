@@ -178,6 +178,68 @@ class OwnershipContract(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "linux", "shell SDK guards run on Linux")
+class LauncherContract(unittest.TestCase):
+    def launch(self, sudo=None, uid="0"):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            # Intercept only the namespace boundary. The real namespace and
+            # private-ancestor regression are separately exercised natively.
+            for name, body in {
+                "id": "printf '%s\\n' \"$TEST_UID\"",
+                "getent": "exit 0",
+                "unshare": "printf '%s\\n' \"$@\"",
+                "setpriv": "printf '%s\\n' \"setpriv\" \"$@\"",
+            }.items():
+                tool = root / name
+                tool.write_text("#!/bin/sh\n" + body + "\n")
+                tool.chmod(0o700)
+            env = dict(os.environ, PATH=temp + ":" + os.environ["PATH"], TEST_UID=uid)
+            env.pop("SUDO_UID", None)
+            env.pop("SUDO_GID", None)
+            if sudo is not None:
+                env.update(sudo)
+            return subprocess.run(["bash", str(ROOT / "run-computer-use-wayland-tests.sh"),
+                                   "--evidence", "/owned/path with spaces"],
+                                  env=env, text=True, capture_output=True)
+
+    def test_sudo_maps_original_runner_and_preserves_private_namespace(self):
+        result = self.launch({"SUDO_UID": "1001", "SUDO_GID": "1002"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = result.stdout.splitlines()
+        self.assertEqual(args[:6], ["setpriv", "--reuid=1001", "--regid=1002",
+                                   "--clear-groups", "--inh-caps=-all,+sys_admin",
+                                   "--ambient-caps=-all,+sys_admin"])
+        for flag in ("unshare", "--user", "--map-user=1", "--map-group=1", "--keep-caps",
+                     "--mount", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=KILL"):
+            self.assertIn(flag, args)
+        self.assertEqual(args[-2:], ["--evidence", "/owned/path with spaces"])
+
+    def test_direct_caller_needs_no_elevation(self):
+        for uid in ("0", "1001"):
+            with self.subTest(uid=uid):
+                result = self.launch(uid=uid)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines()[0], "--user")
+                self.assertNotIn("setpriv", result.stdout)
+
+    def test_missing_or_invalid_sudo_identity_is_rejected_before_unshare(self):
+        for identity in ({"SUDO_UID": "1001"}, {"SUDO_GID": "1001"},
+                         {"SUDO_UID": "-1", "SUDO_GID": "1001"},
+                         {"SUDO_UID": "1001", "SUDO_GID": "1;id"},
+                         {"SUDO_UID": "01001", "SUDO_GID": "1001"}):
+            with self.subTest(identity=identity):
+                result = self.launch(identity)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Invalid original sudo UID/GID", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_unprivileged_caller_does_not_apply_ambient_sudo_variables(self):
+        result = self.launch({"SUDO_UID": "1002", "SUDO_GID": "1002"}, uid="1001")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("setpriv", result.stdout)
+
+
+@unittest.skipUnless(sys.platform == "linux", "shell SDK guards run on Linux")
 class SdkContract(unittest.TestCase):
     def check(self, pipewire_old=False, ei_old=False, archive=True):
         with tempfile.TemporaryDirectory() as temp:

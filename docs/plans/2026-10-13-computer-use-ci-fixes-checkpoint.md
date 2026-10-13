@@ -197,3 +197,52 @@ Mac失败发生在Tauri资源复制：两份固定Chromium1140的
 逻辑删除 **22 bytes**，WSL可用空间观测增加 **12288 bytes**；实际物理回收
 未知，不代表VHDX缩小。当前编译产物/依赖、原包/日志/失败证据及用户包/home
 保留；前批symlink/FIFO故障目录不在本批清理范围内。
+
+## 第五批：sudo 原用户与私有目录权限
+
+再次fetch `origin` / `upstream`，两边main均已在当前分支中，新增提交数均为0。
+main仍分别为 `b58b97cd` / `9c5eb3b5`；没有为了同步重写或覆盖用户工作区。
+
+原Linux CI不是Wayland断言失败：sudo将host root映射为namespace 1，原runner
+用户没有映射。原用户的0700工作目录及SDK目录因此无法遍历，Python入口报
+permission denied。私有namespace的capabilities不能代替未映射owner的访问权。
+
+launcher现在仅在sudo提升路径中，用 `setpriv` 恢复原 `SUDO_UID` / `SUDO_GID`、
+清空附加组与原继承/ambient capabilities，只将SYS_ADMIN传给紧接着的unshare，
+以保留受限制runner的namespace创建能力。unshare在执行任何fixture代码前创建
+新的user/mount/net/PID namespace，并只把原caller映射为1:1；namespace UID0
+仍未映射。直接普通用户/直接root入口保持原单ID映射，缺失或非法sudo身份
+在namespace创建前拒绝。没有chmod真实runner/home、改AppArmor/sysctl、开放
+用户会话网络，或减少完整套件要求。Jammy unshare 2.37.2不支持多ID映射参数，
+本实现不依赖新版 `--map-users` / `--map-groups` 或newuidmap/newgidmap。
+
+实际验证：
+
+- 原launcher在原用户1000:1000拥有的0700目录中失败；修复后能读取同类目录，
+  不改变目录模式。使用真实Jammy util-linux 2.37.2的unshare/setpriv。
+- 实际PID1、UID/GID1、唯一 `1 -> 1000` uid/gid map、只有lo的网络与私有tmp
+  均已断言，原脚本/SDK文件可读。新runner合同合计 **27 passed**，无跳过。
+- 同一原Jammy/glibc2.35 Wayland binary/compositor/SDK在私有overlay中两次运行
+  全量套件，最终清空ambient继承后的候选 **199 passed / 0 failed / 0 ignored /
+  0 filtered out**，GTK原UI-owner集成通过。原children均joined，live/errors为空；
+  二进制与真实SDK/cache字节及权限未改，仅私有overlay复制上层目录metadata。
+- Bash语法、四Rust profile实例化workflow语法、workspace fmt、依赖卫生与final
+  质量门禁通过；App+Workbench13552行、产品≥1000行文件80，均未增长。
+
+证据/再生命令：`tools/computer-use-probe/.run/ci-namespace-owner-20261013-01/`。
+保留原拒绝日志及验证夹具的PID/sysfs/旧cache祖先权限错误；它们不是产品通过。
+本批不等于安装态GNOME portal、真人输入或完整CU交付。
+
+最新 `9eb01b84` 的 [run 38389828107](https://github.com/yclenove/grok-app/actions/runs/38389828107)
+已通过frontend、两个SDK与维护ARM64 browser诊断；ARM64产品Rust job仍失败，
+Windows/Mac/Linux Rust与production Jammy在本批最后观察时仍运行，未标绿。
+上一run的production job已由workflow转为cancelled，本批没有主动取消/重跑。
+继续Windows八项原启动故障（包括worker端口前退出）、ARM64产品运行时、CPU
+校验、完整NOTICE/维护安全选择、五target与原R1–R4全部门禁。
+
+原验证owners退出并确认native cleanup后，检查准确路径、mount与每个进程的
+cwd/exe/open-fd，四个退休setup目录均无links/特殊文件，才删除它们。原失败
+setup源码及hash清单先留存于证据目录；逻辑删除 **195970 bytes**，WSL文件
+系统可用空间观测增加 **372736 bytes**。精确物理回收未知，未缩小VHDX。
+05/06 native upper树包含fixture链接/残留socket，暂缓递归清理；当前SDK/cache、
+源码/依赖、两次199项证据、用户包/home与前批故障证据保留。
