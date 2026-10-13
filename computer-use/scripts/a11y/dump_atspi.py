@@ -293,6 +293,40 @@ def print_tree_summary(node, indent=0, max_depth=4):
         print_tree_summary(child, indent + 2, max_depth)
 
 
+# Widgets that exist only once the fixture has drawn its first full frame. The application
+# registers with AT-SPI before that, so dumping on registration races the first render.
+READY_ANCHORS = ("name_field", "send_button")
+
+
+def wait_for_widgets(app_acc, anchors, timeout, interval=0.5):
+    """Re-dump until every anchor name is present in the tree; fail loudly on timeout."""
+    deadline = time.time() + timeout
+    tree = dump_node(app_acc)
+    while True:
+        text = json.dumps(tree, ensure_ascii=False)
+        missing = [name for name in anchors if name not in text]
+        if not missing:
+            return tree
+        if time.time() >= deadline:
+            raise SystemExit(
+                f"ERROR: fixture widgets never appeared within {timeout}s; missing {missing}"
+            )
+        time.sleep(interval)
+        tree = dump_node(app_acc)
+
+
+def wait_for_change(app_acc, previous, timeout, interval=0.5):
+    """Re-dump until the tree differs from `previous` or the timeout passes (returns last dump)."""
+    deadline = time.time() + timeout
+    tree = dump_node(app_acc)
+    while json.dumps(tree, sort_keys=True) == json.dumps(previous, sort_keys=True):
+        if time.time() >= deadline:
+            return tree
+        time.sleep(interval)
+        tree = dump_node(app_acc)
+    return tree
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dump AT-SPI tree of gcu-fixture to JSON.")
     parser.add_argument(
@@ -325,6 +359,12 @@ def main():
         help="Output raw tree node at root instead of {tree, modal_tree}",
     )
     parser.add_argument(
+        "--ready-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds to wait for the fixture's widgets to be drawn (default: 60)",
+    )
+    parser.add_argument(
         "positional_output",
         nargs="?",
         default=None,
@@ -340,8 +380,8 @@ def main():
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print("Dumping initial AT-SPI accessibility tree...")
-    initial_tree = dump_node(app_acc)
+    print("Waiting for the fixture's widgets to appear in the tree...")
+    initial_tree = wait_for_widgets(app_acc, READY_ANCHORS, args.ready_timeout)
 
     print("\nInitial accessibility tree overview:")
     print_tree_summary(initial_tree, indent=0, max_depth=3)
@@ -350,10 +390,9 @@ def main():
     if not args.no_modal:
         print("\nTriggering modal dialog...")
         modal_triggered = trigger_modal(app_acc)
-        # Allow egui frame loop to render modal dialog
-        time.sleep(1.0)
+        # Poll until the egui frame loop has rendered something different from the initial tree.
         print("Dumping AT-SPI tree after modal trigger...")
-        modal_tree = dump_node(app_acc)
+        modal_tree = wait_for_change(app_acc, initial_tree, 10.0)
 
         print("\nPost-modal accessibility tree overview:")
         print_tree_summary(modal_tree, indent=0, max_depth=3)
