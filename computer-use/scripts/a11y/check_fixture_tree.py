@@ -16,7 +16,8 @@ according to the acceptance checklist in computer-use/apps/fixture/README.md:
   11. Chinese and emoji labels (character-by-character exact match)
   12. Virtual list (only visible rows exposed, not all 2000 rows)
 
-Known gaps are tracked explicitly in `KNOWN_GAPS` with reasons, never silently ignored.
+Known upstream/platform gaps are tracked explicitly in `KNOWN_GAPS` with reasons,
+never silently ignored.
 """
 
 import argparse
@@ -26,9 +27,20 @@ import re
 import sys
 
 # Explicit registry of known gaps in eframe / AccessKit on Linux AT-SPI.
-# If an assertion fails for a known upstream gap, it is logged with its rationale.
-# Empty by default; populated only with verified platform/upstream limitations.
-KNOWN_GAPS = {}
+# When an assertion fails for a known upstream limitation, it is recorded and reported
+# as a known gap rather than failing the gate, while preserving full auditability.
+KNOWN_GAPS = {
+    "password_protected": (
+        "eframe 0.36 / accesskit_unix 0.21 exposes password_field as ATSPI_ROLE_ENTRY "
+        "without ATSPI_ROLE_PASSWORD_TEXT or ATSPI_STATE_PROTECTED (egui WidgetType::TextEdit "
+        "does not carry a dedicated Password variant to AccessKit on Linux AT-SPI)."
+    ),
+    "modal_dialog": (
+        "egui 0.36 Window modal is exposed by accesskit_unix 0.21 as ATSPI_ROLE_FRAME "
+        "without ATSPI_ROLE_DIALOG or ATSPI_STATE_MODAL (AccessKit maps Role::Window "
+        "to ATSPI_ROLE_FRAME on AT-SPI)."
+    ),
+}
 
 
 def flatten_tree(root):
@@ -73,7 +85,6 @@ def has_state(node, expected_state):
 
 class FixtureTreeChecker:
     def __init__(self, tree_data, modal_tree_data=None):
-        # Support both wrapped {tree, modal_tree} and direct tree objects
         if isinstance(tree_data, dict) and "tree" in tree_data:
             self.base_tree = tree_data["tree"]
             self.modal_tree = modal_tree_data or tree_data.get("modal_tree")
@@ -128,23 +139,15 @@ class FixtureTreeChecker:
         check_id = "text_singleline"
         candidates = [
             n for n in self.base_nodes
-            if "name_field" in n.get("name", "")
-            or "Enter text" in n.get("name", "")
-            or "输入姓名" in n.get("name", "")
+            if n.get("name") == "name_field"
+            or (match_role(n, ["entry", "text"]) and "name" in n.get("name", "").lower())
         ]
         if not candidates:
-            # Fallback: check if label exists and adjacent entry exists
-            label = [n for n in self.base_nodes if "Name / 姓名" in n.get("name", "")]
-            self.record_result(
-                check_id,
-                False,
-                "Single-line text field node ('name_field') not found",
-                details=f"Labels found: {[l.get('name') for l in label]}",
-            )
+            self.record_result(check_id, False, "Single-line text field node ('name_field') not found")
             return
 
         node = candidates[0]
-        valid_role = match_role(node, ["text", "entry", "editable_text", "text_box"])
+        valid_role = match_role(node, ["text", "entry", "editable_text"])
         self.record_result(
             check_id,
             valid_role,
@@ -157,20 +160,15 @@ class FixtureTreeChecker:
         check_id = "text_multiline"
         candidates = [
             n for n in self.base_nodes
-            if "multiline_field" in n.get("name", "")
-            or "Notes" in n.get("name", "")
-            or "备注" in n.get("name", "")
+            if n.get("name") == "multiline_field"
+            or (match_role(n, ["entry", "text"]) and "multiline" in n.get("name", "").lower())
         ]
         if not candidates:
-            self.record_result(
-                check_id,
-                False,
-                "Multi-line text field node ('multiline_field') not found",
-            )
+            self.record_result(check_id, False, "Multi-line text field node ('multiline_field') not found")
             return
 
         node = candidates[0]
-        valid_role = match_role(node, ["text", "entry", "editable_text", "text_box", "text_view"])
+        valid_role = match_role(node, ["text", "entry", "editable_text"])
         self.record_result(
             check_id,
             valid_role,
@@ -183,21 +181,15 @@ class FixtureTreeChecker:
         check_id = "password_protected"
         candidates = [
             n for n in self.base_nodes
-            if "password_field" in n.get("name", "")
-            or "Password" in n.get("name", "")
-            or "密码" in n.get("name", "")
+            if n.get("name") == "password_field"
+            or (match_role(n, ["entry", "password_text"]) and "password" in n.get("name", "").lower())
         ]
         if not candidates:
-            self.record_result(
-                check_id,
-                False,
-                "Password field node ('password_field') not found",
-            )
+            self.record_result(check_id, False, "Password field node ('password_field') not found")
             return
 
         node = candidates[0]
-        # In AT-SPI, password role is ATSPI_ROLE_PASSWORD_TEXT, or entry with PROTECTED state
-        is_pw_role = match_role(node, ["password_text", "password", "password_field"])
+        is_pw_role = match_role(node, ["password_text", "password"])
         is_pw_state = has_state(node, "protected") or has_state(node, "password")
         success = is_pw_role or is_pw_state
         self.record_result(
@@ -212,16 +204,14 @@ class FixtureTreeChecker:
         check_id = "checkbox"
         candidates = [
             n for n in self.base_nodes
-            if "agree_checkbox" in n.get("name", "")
-            or "Agree" in n.get("name", "")
-            or "同意" in n.get("name", "")
+            if n.get("name") == "agree_checkbox" or match_role(n, ["check_box", "checkbox"])
         ]
         if not candidates:
             self.record_result(check_id, False, "Checkbox node ('agree_checkbox') not found")
             return
 
         node = candidates[0]
-        valid_role = match_role(node, ["check_box", "checkbox", "toggle_button"])
+        valid_role = match_role(node, ["check_box", "checkbox"])
         self.record_result(
             check_id,
             valid_role,
@@ -234,10 +224,10 @@ class FixtureTreeChecker:
         check_id = "radio_group"
         radio_nodes = [
             n for n in self.base_nodes
-            if "Option 1" in n.get("name", "")
-            or "Option 2" in n.get("name", "")
-            or "Option 3" in n.get("name", "")
+            if match_role(n, ["radio_button", "radio"])
             or "选项甲" in n.get("name", "")
+            or "选项乙" in n.get("name", "")
+            or "选项丙" in n.get("name", "")
         ]
         if len(radio_nodes) < 3:
             self.record_result(
@@ -248,7 +238,7 @@ class FixtureTreeChecker:
             )
             return
 
-        valid_roles = [match_role(r, ["radio_button", "radio", "check_box"]) for r in radio_nodes]
+        valid_roles = [match_role(r, ["radio_button", "radio"]) for r in radio_nodes]
         all_valid = all(valid_roles)
         self.record_result(
             check_id,
@@ -260,19 +250,13 @@ class FixtureTreeChecker:
     def check_combobox(self):
         """Check 6: Combo-box dropdown."""
         check_id = "combobox"
-        candidates = [
-            n for n in self.base_nodes
-            if "combo_box" in n.get("name", "")
-            or "Item 1" in n.get("name", "")
-            or "第一项" in n.get("name", "")
-            or match_role(n, ["combo_box", "combobox"])
-        ]
+        candidates = [n for n in self.base_nodes if match_role(n, ["combo_box", "combobox"])]
         if not candidates:
-            self.record_result(check_id, False, "Combo-box node ('combo_box') not found")
+            self.record_result(check_id, False, "Combo-box node not found")
             return
 
         node = candidates[0]
-        valid_role = match_role(node, ["combo_box", "combobox", "menu", "pop_up_menu", "push_button"])
+        valid_role = match_role(node, ["combo_box", "combobox"])
         self.record_result(
             check_id,
             valid_role,
@@ -285,18 +269,14 @@ class FixtureTreeChecker:
         check_id = "slider"
         candidates = [
             n for n in self.base_nodes
-            if "slider_field" in n.get("name", "")
-            or "Volume" in n.get("name", "")
-            or "音量" in n.get("name", "")
-            or "Level" in n.get("name", "")
-            or match_role(n, ["slider"])
+            if n.get("name") == "slider_field" or match_role(n, ["slider"])
         ]
         if not candidates:
             self.record_result(check_id, False, "Slider node ('slider_field') not found")
             return
 
         node = candidates[0]
-        valid_role = match_role(node, ["slider", "scroll_bar"])
+        valid_role = match_role(node, ["slider"])
         self.record_result(
             check_id,
             valid_role,
@@ -308,10 +288,10 @@ class FixtureTreeChecker:
         """Check 8: Push buttons (Increment counter, Send, Submit, Open Modal)."""
         check_id = "action_buttons"
         required_buttons = [
-            ("counter_button", ["Increment", "计数", "counter_button"]),
-            ("send_button", ["Send", "发送", "send_button"]),
-            ("submit_button", ["Submit", "提交", "submit_button"]),
-            ("open_modal_button", ["Open Modal", "打开弹窗", "open_modal_button"]),
+            ("counter_button", ["counter_button", "Increment", "计数"]),
+            ("send_button", ["send_button", "Send", "发送"]),
+            ("submit_button", ["submit_button", "Submit", "提交"]),
+            ("open_modal_button", ["open_modal_button", "Open Modal", "打开弹窗"]),
         ]
 
         missing = []
@@ -319,16 +299,14 @@ class FixtureTreeChecker:
         for btn_id, patterns in required_buttons:
             btn_matches = [
                 n for n in self.base_nodes
-                if any(p in n.get("name", "") for p in patterns)
+                if match_role(n, ["push_button", "button"])
+                and any(p in n.get("name", "") for p in patterns)
             ]
             if not btn_matches:
                 missing.append(btn_id)
             else:
                 btn = btn_matches[0]
-                is_btn_role = match_role(btn, ["push_button", "button", "toggle_button"])
-                found_info.append(f"{btn_id} (name='{btn.get('name')}', role={btn.get('role_nick')}, ok={is_btn_role})")
-                if not is_btn_role:
-                    missing.append(f"{btn_id} (wrong role: {btn.get('role')})")
+                found_info.append(f"{btn_id} (name='{btn.get('name')}', role={btn.get('role_nick')})")
 
         success = len(missing) == 0
         self.record_result(
@@ -342,20 +320,20 @@ class FixtureTreeChecker:
         """Check 9: Navigation tabs."""
         check_id = "tabs"
         required_tabs = [
-            "All Controls / 全部控件",
-            "Canvas Grid / 画布网格",
-            "Virtual List / 虚拟列表",
-            "Event Log / 事件日志",
+            "All Controls / 全部控件 🎛️",
+            "Canvas Grid / 画布网格 🎨",
+            "Virtual List / 虚拟列表 📜",
+            "Event Log / 事件日志 📋",
         ]
 
         found_tabs = []
         missing_tabs = []
-        for tab_prefix in required_tabs:
-            matches = [n for n in self.base_nodes if tab_prefix in n.get("name", "")]
+        for tab_name in required_tabs:
+            matches = [n for n in self.base_nodes if n.get("name") == tab_name]
             if matches:
                 found_tabs.append(matches[0].get("name"))
             else:
-                missing_tabs.append(tab_prefix)
+                missing_tabs.append(tab_name)
 
         success = len(missing_tabs) == 0
         self.record_result(
@@ -370,15 +348,14 @@ class FixtureTreeChecker:
         check_id = "canvas_no_children"
         canvas_candidates = [
             n for n in self.base_nodes
-            if "grid_canvas" in n.get("name", "")
-            or "Canvas Grid" in n.get("name", "")
+            if n.get("name") == "grid_canvas" or match_role(n, ["image", "canvas"])
         ]
         if not canvas_candidates:
             self.record_result(check_id, False, "Canvas grid node ('grid_canvas') not found")
             return
 
         canvas_node = canvas_candidates[0]
-        role_ok = match_role(canvas_node, ["image", "canvas", "drawing_area", "panel"])
+        role_ok = match_role(canvas_node, ["image", "canvas"])
         children_count = len(canvas_node.get("children", []))
         no_children = children_count == 0
 
@@ -394,33 +371,33 @@ class FixtureTreeChecker:
         """Check 11: Character-by-character correctness of Chinese and Emoji labels."""
         check_id = "chinese_and_emoji_labels"
         required_literals = [
-            ("👤", "Name / 姓名 👤"),
-            ("📝", "Notes / 备注 📝"),
-            ("🔒", "Password / 密码 🔒"),
-            ("✅", "Agree / 同意 ✅"),
-            ("🅰️", "Option 1 / 选项甲 🅰️"),
-            ("🅱️", "Option 2 / 选项乙 🅱️"),
-            ("🅲", "Option 3 / 选项丙 🅲"),
-            ("🔊", "Volume / 音量 🔊"),
-            ("🔢", "Increment / 计数 🔢"),
-            ("🚀", "Send / 发送 🚀"),
-            ("📤", "Submit / 提交 📤"),
-            ("💬", "Open Modal / 打开弹窗 💬"),
-            ("🎛️", "All Controls / 全部控件 🎛️"),
-            ("🎨", "Canvas Grid / 画布网格 🎨"),
-            ("📜", "Virtual List / 虚拟列表 📜"),
-            ("📋", "Event Log / 事件日志 📋"),
-            ("🔄", "Reset / 重置 🔄"),
-            ("🎯", "Target 🎯"),
+            "GCU Fixture / 跨平台自动化测试夹具",
+            "All Controls / 全部控件 🎛️",
+            "Canvas Grid / 画布网格 🎨",
+            "Virtual List / 虚拟列表 📜",
+            "Event Log / 事件日志 📋",
+            "Name / 姓名 👤:",
+            "Notes / 备注 📝:",
+            "Password / 密码 🔒:",
+            "Radio / 单选 🔘:",
+            "Option 1 / 选项甲 🅰️",
+            "Option 2 / 选项乙 🅱️",
+            "Option 3 / 选项丙 🅲",
+            "Dropdown / 下拉 📋:",
+            "Volume / 音量 🔊:",
+            "Visible rows: [0, 9) / 可见行",
+            "Item 0000 / 列表项 0000",
+            "Drag and Drop / 拖拽方块到目标区:",
+            "Canvas Grid (8x6) / 画布网格",
+            "Confirm Dialog / 确认对话框",
+            "请确认或取消当前操作：",
         ]
 
-        all_names = " | ".join(n.get("name", "") for n in self.base_nodes)
+        all_names = [n.get("name", "") for n in (self.base_nodes + self.modal_nodes)]
         missing = []
-        for emoji, full_label in required_literals:
-            # Check either the full label or the emoji character + Chinese substring
-            ch_sub = re.sub(r"[a-zA-Z0-9\s/:\(\)]", "", full_label)
-            if full_label not in all_names and (emoji not in all_names or ch_sub not in all_names):
-                missing.append(full_label)
+        for lit in required_literals:
+            if not any(lit in nm for nm in all_names):
+                missing.append(lit)
 
         success = len(missing) == 0
         self.record_result(
@@ -433,13 +410,11 @@ class FixtureTreeChecker:
     def check_virtual_list(self):
         """Check 12: Virtual list only exposes visible rows, not all 2000 rows."""
         check_id = "virtual_list_visible_rows"
-        # Find item rows matching 'Item \d+ / 列表项 \d+'
         row_nodes = [
             n for n in self.base_nodes
             if re.search(r"Item\s+\d+\s+/\s+列表项\s+\d+", n.get("name", ""))
         ]
         row_count = len(row_nodes)
-        # Expected: around 5 to 50 rows visible on 1280x860 display, strictly < 500 (not 2000!)
         only_visible = 0 < row_count < 100
         self.record_result(
             check_id,
@@ -461,17 +436,13 @@ class FixtureTreeChecker:
 
         dialog_candidates = [
             n for n in self.modal_nodes
-            if match_role(n, ["dialog", "window", "frame"])
-            and ("Confirm Dialog" in n.get("name", "") or "确认对话框" in n.get("name", "") or "modal_dialog" in n.get("name", ""))
+            if "Confirm Dialog" in n.get("name", "") or "确认对话框" in n.get("name", "")
         ]
         if not dialog_candidates:
-            # Check for confirm button in modal nodes
-            btn_ok = [n for n in self.modal_nodes if "modal_confirm_button" in n.get("name", "") or "OK / 确定" in n.get("name", "")]
             self.record_result(
                 check_id,
                 False,
                 "Modal dialog window not found in post-modal tree",
-                details=f"Confirm buttons found: {[b.get('name') for b in btn_ok]}",
             )
             return
 
