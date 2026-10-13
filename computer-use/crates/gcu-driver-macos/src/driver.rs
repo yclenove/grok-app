@@ -1,12 +1,18 @@
 //! Serial discovery worker and the portable [`Driver`] implementation.
 //!
 //! Spotlight indexing uses a separate thread. The first `list_apps` does not
-//! wait for it. Tree, capture, and input return [`DriverError::CapabilityUnavailable`]
-//! after the same gate as a real observation. Queued calls that time out or
-//! cancel before the worker starts them never run.
+//! wait for it. Capture and input return [`DriverError::CapabilityUnavailable`]
+//! after the same gate as a real observation. Tree reads use [`crate::ax`] and,
+//! on a live macOS driver, a separate `gcu-macos-ax` thread. Queued calls that
+//! time out or cancel before the worker starts them never run.
 
 use crate::{
-    api::MacApi, discovery::State, gate::MacGate, identity::TRUST_NOTE, spotlight::SpotlightIndex,
+    api::MacApi,
+    ax::{self, EventHub, FakeAxNode, FakeAxSource},
+    discovery::State,
+    gate::MacGate,
+    identity::TRUST_NOTE,
+    spotlight::SpotlightIndex,
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -16,10 +22,21 @@ use gcu_core::{
 use gcu_protocol::{capabilities::*, AppInfo, WindowInfo};
 use std::{
     collections::BTreeMap,
-    sync::{atomic::AtomicBool, mpsc, Arc},
-    time::Duration,
+    sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
+
+#[cfg(target_os = "macos")]
+use crate::discovery::TreeTarget;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
+
+#[derive(Clone)]
+struct InjectedTree {
+    source: Arc<FakeAxSource>,
+    root: FakeAxNode,
+}
 
 type Task = Box<dyn FnOnce(&mut State) + Send>;
 
@@ -32,6 +49,19 @@ pub struct MacosDriver {
     indexing: Arc<AtomicBool>,
     caps: Capabilities,
     listed: AtomicBool,
+    injected: Mutex<Option<InjectedTree>>,
+    /// Declared before the AX thread so Drop restores toggles while the thread
+    /// still exists.
+    toggles: Mutex<Vec<Box<dyn ax::ErasedToggle>>>,
+    events: EventHub,
+    snapshot: tokio::sync::Mutex<()>,
+    /// True only after the macOS constructor. Portable drivers never set it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    live_ax: AtomicBool,
+    #[cfg(target_os = "macos")]
+    ax: Option<Arc<crate::real::AxThread>>,
+    #[cfg(target_os = "macos")]
+    observers: crate::ax::ObserverPool,
 }
 
 impl MacosDriver {
@@ -79,13 +109,60 @@ impl MacosDriver {
             indexing,
             caps: discovery_capabilities(),
             listed: AtomicBool::new(false),
+            injected: Mutex::new(None),
+            toggles: Mutex::new(Vec::new()),
+            events: EventHub::new(),
+            snapshot: tokio::sync::Mutex::new(()),
+            live_ax: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            ax: None,
+            #[cfg(target_os = "macos")]
+            observers: crate::ax::ObserverPool::new(),
         })
     }
 
     /// Start the production adapter. Available only on macOS.
+    ///
+    /// This is the only constructor that starts the AX thread. [`Self::with_api`]
+    /// stays portable and never calls Accessibility.
     #[cfg(target_os = "macos")]
     pub async fn new() -> Result<Self> {
-        Self::with_api(Arc::new(crate::RealMacApi::new())).await
+        let mut driver = Self::with_api(Arc::new(crate::RealMacApi::new())).await?;
+        driver.live_ax.store(true, Ordering::Release);
+        driver.ax = Some(Arc::new(crate::real::AxThread::spawn()?));
+        Ok(driver)
+    }
+
+    /// Use an in-memory tree after the accessibility gate and window check.
+    ///
+    /// Tests on every platform call this. A missing accessibility permission
+    /// still returns `PermissionMissing` and does not read the fake tree.
+    pub fn inject_tree(&self, source: Arc<FakeAxSource>, root: FakeAxNode) {
+        if let Ok(mut slot) = self.injected.lock() {
+            *slot = Some(InjectedTree { source, root });
+        }
+    }
+
+    /// Remember toggles so [`Driver::release_all_input`] and Drop restore them.
+    pub fn track_toggles(&self, toggles: impl ax::ErasedToggle + 'static) {
+        if let Ok(mut slot) = self.toggles.lock() {
+            slot.push(Box::new(toggles));
+        }
+    }
+
+    /// Deliver one event to subscribers. Tests use this; the live observer does too.
+    pub fn emit_ui_event(&self, event: UiEvent) {
+        self.events.emit(event);
+    }
+
+    fn restore_toggles(&self) {
+        let Ok(mut slot) = self.toggles.lock() else {
+            return;
+        };
+        for toggles in slot.iter() {
+            toggles.restore();
+        }
+        slot.clear();
     }
 
     async fn call<T: Send + 'static>(
@@ -135,11 +212,11 @@ impl MacosDriver {
 fn discovery_capabilities() -> Capabilities {
     Capabilities {
         platform: Platform::Macos,
-        version: "macOS 14+; discovery only (P1-02)".into(),
+        version: "macOS 14+; AX tree (P1-03)".into(),
         observe: ObserveCapabilities {
-            tree: false,
+            tree: true,
             screenshot: false,
-            events: false,
+            events: true,
         },
         delivery: DeliveryCapabilities {
             accessibility: false,
@@ -152,14 +229,15 @@ fn discovery_capabilities() -> Capabilities {
         overlay_excluded_from_capture: false,
         private_apis: BTreeMap::new(),
         limits: CapabilityLimits {
-            max_tree_nodes: 0,
+            max_tree_nodes: ax::MAX_NODES_CEILING as u32,
             max_image_edge: 0,
             type_text_max: 0,
         },
     }
 }
 
-/// Private element binding. P1-03 will attach an Accessibility node.
+/// Private element binding. Action targets still use the window; tree handles
+/// carry [`crate::ax::AxHandle`] separately.
 #[derive(Clone, Debug)]
 pub struct MacElement {
     /// Window that owned the element when it was observed.
@@ -187,7 +265,7 @@ impl Driver for MacosDriver {
             Err(error) => (false, vec![error.to_string()]),
         };
         issues.push(
-            "P1-03+: tree, capture, focus, geometry, subscriptions and input unavailable".into(),
+            "P1-04+: capture, focus, geometry, and input are unavailable. Tree reads need Accessibility.".into(),
         );
         issues.push(TRUST_NOTE.into());
         DoctorReport {
@@ -248,12 +326,47 @@ impl Driver for MacosDriver {
         opts: &TreeOpts,
         cancel: &Cancel,
     ) -> Result<RawTree> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        let started = Instant::now();
         let win = win.clone();
-        self.call(opts.timeout, Some(cancel), false, move |state| {
-            state.validate_window(&win)?;
-            Err(DriverError::CapabilityUnavailable)
+        let target = self
+            .call(opts.timeout, Some(cancel), false, move |state| {
+                state.prepare_tree(&win)
+            })
+            .await?;
+        let remaining = opts.timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(DriverError::Timeout {
+                maybe_executed: false,
+            });
+        }
+        let _guard = self.snapshot.lock().await;
+        let injected = self.injected.lock().ok().and_then(|slot| slot.clone());
+        if let Some(injected) = injected {
+            let mut walk = opts.clone();
+            walk.timeout = remaining.min(ax::TREE_BUILD_TIMEOUT);
+            return ax::build_raw_tree(
+                &*injected.source,
+                &injected.root,
+                &walk,
+                cancel,
+                target.scale,
+            )
+            .await;
+        }
+        #[cfg(target_os = "macos")]
+        if self.live_ax.load(Ordering::Acquire) {
+            return self.snapshot_live(&target, opts, cancel, remaining).await;
+        }
+        let _ = (target, remaining);
+        Err(DriverError::Native {
+            message: "accessibility tree source is not connected".into(),
+            maybe_executed: false,
         })
-        .await
     }
 
     async fn capture(
@@ -298,11 +411,83 @@ impl Driver for MacosDriver {
         .await
     }
 
-    fn subscribe(&self, _win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
-        None
+    fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
+        #[cfg(target_os = "macos")]
+        if self.live_ax.load(Ordering::Acquire) {
+            if let Some(pid) = ax::parse_window_pid(&win.id) {
+                self.observers.start(pid, self.events.clone());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = win;
+        Some(self.events.subscribe())
     }
 
-    async fn release_all_input(&self) {}
+    async fn release_all_input(&self) {
+        self.restore_toggles();
+    }
+}
+
+impl Drop for MacosDriver {
+    fn drop(&mut self) {
+        self.restore_toggles();
+        #[cfg(target_os = "macos")]
+        self.observers.stop();
+    }
+}
+
+impl MacosDriver {
+    #[cfg(target_os = "macos")]
+    async fn snapshot_live(
+        &self,
+        target: &TreeTarget,
+        opts: &TreeOpts,
+        cancel: &Cancel,
+        remaining: Duration,
+    ) -> Result<RawTree> {
+        let Some(thread) = self.ax.clone() else {
+            return Err(DriverError::Native {
+                message: "accessibility tree source is not connected".into(),
+                maybe_executed: false,
+            });
+        };
+        if ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name) {
+            let toggles = Arc::new(ax::AccessibilityToggles::new(
+                crate::real::AxToggleStore::new(Arc::clone(&thread)),
+            ));
+            let enabling = Arc::clone(&toggles);
+            let pid = target.pid;
+            let enabled = tokio::task::spawn_blocking(move || enabling.enable(pid))
+                .await
+                .map_err(|_| DriverError::Crashed {
+                    maybe_executed: false,
+                })?;
+            enabled?;
+            self.track_toggles(ArcToggle(toggles));
+        }
+        let Some(index) = target.ax_index else {
+            return Ok(RawTree { root: None });
+        };
+        let source = crate::real::RealAxSource::open(thread, target.pid, index).await?;
+        source.set_text_limit(opts.text_limit);
+        let mut walk = opts.clone();
+        walk.timeout = remaining.min(ax::TREE_BUILD_TIMEOUT);
+        let root = source.root();
+        let tree = ax::build_raw_tree(&source, &root, &walk, cancel, target.scale).await;
+        source.reset().await;
+        tree
+    }
+}
+
+/// `Arc` wrapper so tracked toggles restore when the driver drops them.
+#[cfg(target_os = "macos")]
+struct ArcToggle<S: ax::ToggleStore>(Arc<ax::AccessibilityToggles<S>>);
+
+#[cfg(target_os = "macos")]
+impl<S: ax::ToggleStore + 'static> ax::ErasedToggle for ArcToggle<S> {
+    fn restore(&self) {
+        self.0.restore();
+    }
 }
 
 fn action_window(action: &DriverAction) -> Result<(&WindowRef, bool)> {

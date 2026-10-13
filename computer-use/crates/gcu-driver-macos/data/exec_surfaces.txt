@@ -1,0 +1,41 @@
+# IDE, terminal, REPL, task, and debug names for the macOS driver.
+# Best-effort and incomplete. Core web/SSH tokens are loaded beside this file.
+# Short tokens (<=3) match a whole word. Longer tokens match a substring.
+terminal
+console
+shell
+ssh
+bash
+zsh
+sh
+csh
+tcsh
+fish
+ksh
+xterm
+konsole
+alacritty
+kitty
+wezterm
+warp
+ghostty
+hyper
+pty
+tty
+repl
+powershell
+cmd.exe
+command prompt
+debug console
+terminal window
+web terminal
+cloud shell
+cloud terminal
+remote terminal
+tmux
+screen
+ipython
+jupyter terminal
+integrated terminal
+task runner
+debug target

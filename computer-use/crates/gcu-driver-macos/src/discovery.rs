@@ -191,24 +191,22 @@ impl State {
 
     pub(super) fn validate_window(&mut self, win: &WindowRef) -> Result<()> {
         self.observation_gate()?;
-        let resolved = self.validate_app(&win.app)?;
-        let old = self
-            .windows
-            .get(&win.id)
-            .cloned()
-            .ok_or(DriverError::WindowGone)?;
-        if resolved.pid.is_some_and(|pid| pid != old.pid) {
-            return Err(DriverError::AppNotFound);
-        }
-        let current = self
-            .collect_windows()?
-            .into_iter()
-            .find(|window| window.id == win.id)
-            .ok_or(DriverError::WindowGone)?;
-        if current.pid != old.pid || current.cg_id != old.cg_id {
-            return Err(DriverError::WindowGone);
-        }
+        self.confirm_window(win, true)?;
         Ok(())
+    }
+
+    /// Accessibility-only gate plus the window identity. Screen Recording is
+    /// not required to read the tree.
+    pub(super) fn prepare_tree(&mut self, win: &WindowRef) -> Result<TreeTarget> {
+        self.tree_gate()?;
+        let window = self.confirm_window(win, false)?;
+        Ok(TreeTarget {
+            pid: window.pid,
+            ax_index: window.ax_index,
+            scale: window.scale,
+            bundle_id: win.app.info.id.clone(),
+            app_name: win.app.info.name.clone(),
+        })
     }
 
     pub(super) fn validate_focus(&mut self, app: &AppRef) -> Result<()> {
@@ -256,12 +254,52 @@ impl State {
         Ok(resolved)
     }
 
+    fn confirm_window(
+        &mut self,
+        win: &WindowRef,
+        require_prior: bool,
+    ) -> Result<crate::windows::AlignedWindow> {
+        let resolved = self.validate_app(&win.app)?;
+        let prior = self.windows.get(&win.id).cloned();
+        if require_prior && prior.is_none() {
+            return Err(DriverError::WindowGone);
+        }
+        let current = self
+            .collect_windows()?
+            .into_iter()
+            .find(|window| window.id == win.id)
+            .ok_or(DriverError::WindowGone)?;
+        if resolved.pid.is_some_and(|pid| pid != current.pid) {
+            return Err(DriverError::AppNotFound);
+        }
+        if let Some(old) = prior {
+            if current.pid != old.pid || current.cg_id != old.cg_id {
+                return Err(DriverError::WindowGone);
+            }
+        }
+        Ok(current)
+    }
+
     fn observation_gate(&self) -> Result<()> {
         MacGate::engine(self.api.engine_euid()?)?;
         MacGate::permissions(
             self.api.accessibility_trusted()?,
             self.api.screen_recording_ok()?,
         )?;
+        self.prompt_gate()
+    }
+
+    fn tree_gate(&self) -> Result<()> {
+        MacGate::engine(self.api.engine_euid()?)?;
+        if !self.api.accessibility_trusted()? {
+            return Err(DriverError::PermissionMissing {
+                permission: "accessibility".into(),
+            });
+        }
+        self.prompt_gate()
+    }
+
+    fn prompt_gate(&self) -> Result<()> {
         if gate::security_prompt(&self.api.running_apps()?, &self.api.windows()?) {
             return Err(DriverError::SecureDesktop);
         }
@@ -332,6 +370,19 @@ fn direct_facts(
         Err(DriverError::AppNotFound) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Window selected for an accessibility walk.
+///
+/// Pid, AX index, and app identity are read by the macOS walk. Portable tests
+/// only need `scale`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) struct TreeTarget {
+    pub(super) pid: u32,
+    pub(super) ax_index: Option<u32>,
+    pub(super) scale: f64,
+    pub(super) bundle_id: String,
+    pub(super) app_name: String,
 }
 
 fn fact_path<'a>(bundle: &'a str, executable: &'a str) -> Option<&'a str> {
