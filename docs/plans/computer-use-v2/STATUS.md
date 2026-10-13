@@ -5,17 +5,17 @@
 
 | 卡 | 标题 | 依赖 | 估算 | 状态 | 分支 | PR | 日期 | 备注 |
 |---|---|---|---|---|---|---|---|---|
-| S-01 | Grok Build CLI MCP 能力探测 | — | 1.5d | todo |  |  |  |  |
+| S-01 | Grok Build CLI MCP 能力探测 | — | 1.5d | done | cu2/S-01-grok-mcp-probe | #6 | 2026-10-13 | ADR 0001 已接受；影响已写入 03/04/05 |
 | S-02 | macOS TCC 与 helper 可行性 | — | 1.5d | todo |  |  |  | 需 macOS 14/15/26 机器 |
-| P0-01 | computer-use workspace | — | 1d | done |  | #2 | 2026-10-13 | 已合入；RULES扩展由P0-05承接 |
-| P0-02 | CI 骨架 | P0-01 | 1d | in_progress |  | #3 | 2026-10-13 | 评审中 |
-| P0-03 | gcu-protocol | P0-01 | 2d | in_progress |  |  | 2026-10-13 | 总控确认进行中 |
-| P0-04 | gcu-host-api | P0-03 | 1d | todo |  |  |  |  |
-| P0-05 | core 模型 / Driver trait / fake 驱动 | P0-03、P0-04 | 2.5d | todo |  |  |  |  |
+| P0-01 | computer-use workspace | — | 1d | done | cu2/P0-01-workspace | #2 | 2026-10-13 | 已合入；RULES扩展由P0-05承接 |
+| P0-02 | CI 骨架 | P0-01 | 1d | done | cu2/P0-02-ci | #3 | 2026-10-13 | 三平台 CI 绿；pin SHA 已核 |
+| P0-03 | gcu-protocol | P0-01 | 2d | done | cu2/P0-03-protocol | #5 | 2026-10-13 | 预算 13,821/14,000 字节；后续需同步 window_minimized 错误码 |
+| P0-04 | gcu-host-api | P0-03 | 1d | in_progress |  |  |  |  |
+| P0-05 | core 模型 / Driver trait / fake 驱动 | P0-03、P0-04 | 2.5d | in_progress |  |  |  |  |
 | P0-06 | 树管线与渲染 | P0-05 | 3d | todo |  |  |  |  |
 | P0-07 | SnapshotStore / Index / Diff | P0-06 | 2d | todo |  |  |  |  |
 | P0-08 | Session / Policy / Router / Ledger | P0-04、P0-07、P0-08a | 2d | todo |  |  |  | 余下集成2d；含P0-08a在内≤3个闭环子PR |
-| P0-08a | 策略数据（P0-08 新增子卡） | P0-01 | 1d | in_progress | cu2/P0-08a-policy-data |  | 2026-10-13 | 策略数据已完成待合入；工时从P0-08原3d分出1d |
+| P0-08a | 策略数据（P0-08 新增子卡） | P0-01 | 1d | done | cu2/P0-08a-policy-data | #4 | 2026-10-13 | 拒绝名单138条+15语言敏感词 |
 | P0-09 | gcu-mcp stdio | P0-08 | 2d | todo |  |  |  |  |
 | P0-10 | gcu-cli（fake） | P0-09 | 1d | todo |  |  |  |  |
 | P0-12 | gcu-host-protocol 与 engine 模式 | P0-09 | 2.5d | todo |  |  |  | 路线 B 松耦合基础 |
@@ -91,6 +91,8 @@
 ## 发现（卡外问题，一行一条）
 
 - 计划 v1.1 逐项决定见 [评审处置表](reviews/2026-10-13-disposition.md)；工时 P0–P9 177d + spike 3d，与 06 一致。
+- P0-03 已合入的 `ErrorCode` 缺 v1.1 新增的 `window_minimized`，且 golden/errors.json 需同步（小补丁，P0-05 合入后单独 PR）。
+- 外部 CI：仓库原有 `ci.yml` 会对 `computer-use/**` 改动也整套运行（Rust/frontend），浪费时间；待 CU 稳定后给它加 `paths-ignore: computer-use/**`。
 
 ## 阶段记录
 

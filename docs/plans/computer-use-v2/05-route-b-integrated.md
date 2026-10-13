@@ -50,7 +50,7 @@ Grok App (Tauri 主进程, Rust)
  │    └─ 每个会话的 MCP token 由 App 通过 engine.session.open 申请
  │
  ├─ 会话注入（session_manager）：对启用 CU 的本地会话，在 ACP newSession 的 mcpServers 中加入：
- │    方案 1（首选，若 Grok Build 支持 http MCP）：{ name:"computer-use", transport:"http", url:<mcp_url>, headers:{Authorization:"Bearer <token>"} }
+ │    方案 1（首选，若 Grok Build 支持 http MCP）：{ type:"http", name:"computer-use", url:<mcp_url>, headers:[{name:"Authorization", value:"Bearer <token>"}] }（ACP 实测只接受 `type` 键与 headers 数组，见 ADR 0001）
  │    方案 2（回退）：{ name:"computer-use", command:"<App 资源目录>/gcu", args:["mcp","--connect",<mcp_url>,"--token-fd",<fd>] }
  │    —— 回退 token 经 App 创建并继承的匿名管道/FD 传入；两种方案都不需要 Node；token 不进 argv/环境/ACP 载荷日志/崩溃报告/子进程环境；不写入 ~/.grok。
  │
