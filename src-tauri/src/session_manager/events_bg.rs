@@ -574,6 +574,19 @@ impl SessionManager {
                     );
                 }
             }
+            AcpEvent::Subagent(sub) => {
+                // Emit only while the demoted session still exists — a frame in
+                // flight when it was reclaimed must not create a row for a chat
+                // the user no longer has (and session ids can be reused).
+                let owned = self
+                    .background
+                    .lock()
+                    .get(app_session_id)
+                    .is_some_and(|s| !Self::is_session_load_replay(s));
+                if owned {
+                    let _ = app.emit("session://subagent", sub.to_payload(app_session_id));
+                }
+            }
             AcpEvent::ToolOpenReleased { tool_call_id } => {
                 let mut pending_emits = Vec::new();
                 let mut pending_persists = Vec::new();
@@ -898,7 +911,7 @@ impl SessionManager {
                 let abort = {
                     let mut bg = self.background.lock();
                     if let Some(s) = bg.get_mut(app_session_id) {
-                        s.provider_retry_attempt = attempt;
+                        Self::note_provider_retry(s, attempt, &reason);
                         if !Self::should_apply_provider_retry_abort(s) || s.provider_retry_aborted {
                             false
                         } else {

@@ -1,5 +1,7 @@
 # Code Quality Remediation — Progress Ledger
 
+2026-10-13 [fork / 源仓库同步](2026-10-13-computer-use-upstream-sync-checkpoint.md)：保留两边改动并完成合入，收尾fetch两边main未移动；新增上下文切换CU fence与领域hook / 会话响应隔离回归。App+Workbench13552，比原13573减少21，≥1000源码80，未抬门禁。743文件/8578前端、68定向、Windows manifested harness 2399 passed / 0 failed / 87 ignored、fmt/strict clippy/类型/lint/生产UI构建/质量门禁通过，首败及复现保留。原owners均终态后清两份旧incremental，逻辑5849500038 bytes、H可用即时观察增2394234880 bytes；当前包/home/source/seed/证据保留。提交/push身份见分支Git记录及同批回执，完整交付及Linux ARM64发行兼容仍partial；以下fetch-only及旧哈希为历史，不套用为合并后基线。
+
 2026-10-13 [SDK / FFmpeg与同步预检](2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：两个原采集owner均exit0；准确3GB Linux SDK整包SHA、四许可/manifest和FFmpeg完整选定源及四记录参数复验。最终独立03/04整个报告/源文本/15327-byte片段一致；未接统一候选、未证明binary/完整NOTICE/源码提供。两边main已fetch、未合入；committed HEAD预检冲突fork2/源6，tracked WIP重叠7/36，HEAD/index/235文件前后身份保持。
 原来源工具源码及565-tests既有证据保持，本批未改产品或重跑该suite。最终格式/hash/质量与清理见checkpoint；App+Workbench13573/≥1000源码80冻结，App11+/CU受管Mac14+、旧用户包/home及原R1–R4全部active/partial。无新构建/包，删除0/实际回收0；下一批先按同步计划保存CU源码快照、解决生命周期冲突和回归，无提交发布。
 

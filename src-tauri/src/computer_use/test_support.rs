@@ -28,6 +28,12 @@ pub(crate) use super::playwright_worker::managed_task_tests::remove_owned_root;
 
 pub(crate) const COUNTING_TARGET: &str = "test:window:computer-use";
 
+/// Serialize tests that publish grants with process-wide feature-off / recycle
+/// tests. Unique session IDs do not isolate a deliberate revoke-all operation.
+pub(crate) fn process_grants_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    super::feature::TEST_LOCK.blocking_lock()
+}
+
 #[derive(Default)]
 pub(crate) struct CountingAdapter {
     aborts: AtomicU64,

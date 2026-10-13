@@ -1,5 +1,10 @@
 # Computer Use：本批后同步 fork 与源仓库
 
+执行进度见[同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)。
+收尾再次fetch两边引用未移动；原CU源码已分批保存，fork与源仓库已合入，
+本批完整本地回归通过。提交/push身份以分支Git记录及同批回执为准。
+下方是同步前预检与实施计划，引用计数和“已fetch、未合入”属于当时状态。
+
 2026-10-13。用户要求在合适时机拉取最新代码；本批已完成两边 fetch，
 实际合并安排在来源回读收尾后、下一轮产品修改和新包验收前。
 保持 `feat/computer-use-implementation` 的全部开发内容，当前用户预览继续使用原隔离home。

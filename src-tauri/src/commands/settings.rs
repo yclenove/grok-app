@@ -17,6 +17,8 @@ pub async fn settings_set(
 ) -> Result<AppSettings, String> {
     let prev = store::load_settings_async().await;
     let mut settings = settings;
+    settings.composer_editor =
+        store::normalize_composer_editor(&settings.composer_editor).to_string();
     settings.wallpaper_x_search_mode =
         store::normalize_wallpaper_x_search_mode(&settings.wallpaper_x_search_mode).into();
     // Normalize denylist / allowlist so spawn / equality see stable lists.
@@ -495,6 +497,30 @@ pub async fn session_set_model(
     Ok(prefs)
 }
 
+/// Set the live session context window. Does not rewrite composer model prefs.
+#[tauri::command]
+pub async fn session_set_context_window(
+    mgr: State<'_, Arc<SessionManager>>,
+    tokens: u64,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let (_live_proj, live_sess) = mgr.current_context_ids();
+    let session_id = session_id.or(live_sess);
+    mgr.set_context_window(tokens, session_id.as_deref())
+        .await
+}
+
+/// Live session info for `/context` (`x.ai/session/info`).
+#[tauri::command]
+pub async fn session_context_info(
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let (_live_proj, live_sess) = mgr.current_context_ids();
+    let session_id = session_id.or(live_sess);
+    mgr.session_context_info(session_id.as_deref()).await
+}
+
 #[tauri::command]
 pub async fn fs_list_dir(
     project_path: String,
@@ -512,16 +538,19 @@ pub async fn project_codebase_search(
     query: String,
     mode: Option<String>,
     limit: Option<usize>,
+    include_dirs: Option<bool>,
 ) -> Result<crate::project_codebase_search::CodebaseSearchResult, String> {
     let path = project_path;
     let q = query;
     let m = mode;
+    let dirs = include_dirs.unwrap_or(false);
     tokio::task::spawn_blocking(move || {
         Ok(crate::project_codebase_search::search_project_codebase(
             &path,
             &q,
             m.as_deref(),
             limit,
+            dirs,
         ))
     })
     .await

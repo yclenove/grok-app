@@ -1,4 +1,4 @@
-当前维护来源见[SDK / FFmpeg与同步预检](../plans/2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选、媒体/源提供及完整NOTICE仍开放，原候选07/08和18原错误保持。fork/源仓库已fetch、未合入，下一批先按同步计划处理会话生命周期冲突与回归，再继续原R1–R4完整范围。App11+/CU受管Mac14+、旧产品和用户home保持。以下为历史批次记录。
+当前同步见[fork / 源仓库同步检查点](../plans/2026-10-13-computer-use-upstream-sync-checkpoint.md)：fork与源仓库已合入，收尾fetch两边main引用未移动；上下文 retune 补 CU fence，领域 hook 保留上游功能且 App+Workbench 降至13552。完整前端8578、Windows Rust manifested harness 2399 passed / 0 failed / 87 ignored、fmt/strict clippy/类型/lint/生产UI构建/质量门禁通过；原owners均终态后清两份旧incremental，逻辑5849500038 bytes、H可用即时观察增2394234880 bytes。Linux ARM64 release资源/SDK兼容仍开放；维护候选未晋升，完整NOTICE及原R1–R4全部范围active/partial，App11+/CU受管Mac14+、旧产品和用户home保持。提交/push身份见分支Git记录及同批回执；以下为历史批次记录。
 
 2026-10-13 最新[SwiftShader MD5/libbacktrace特殊通知](../plans/2026-10-13-computer-use-swiftshader-copied-checkpoint.md)：13准确源/88774 bytes/四manifest/raw batches已验，五MD5与两backtrace完整原inline permission保持；Boost下载pins、libbacktrace Gitlink及CMake debug源码分支明确，不据此推导binary排除。独立01/02整个报告及10197-byte片段一致，437工具tests/0skip通过，原所有目录/字段/来源缺口保持；完整NOTICE/维护pack/产品验收及原R1–R4全部范围active/partial，App11+/CU受管Mac14+与旧产品保持。
 

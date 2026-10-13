@@ -16,6 +16,9 @@
   gap: 8px;
   width: 100%;
   min-width: 0;
+  /* Chip compaction only. Must not wrap .composer__input — see .composer. */
+  container-type: inline-size;
+  container-name: composer;
 }
 
 .composer__chrome > * {
@@ -198,6 +201,69 @@ button.composer__context-item {
 
 .composer__context-item--branch.is-loading {
   opacity: 0.72;
+}
+
+/* Branch-bound PR: number + truncated title, banded with the branch label. */
+.composer__context-item--branch.has-pr {
+  max-width: min(320px, 52vw);
+}
+
+.composer__context-pr {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding-left: 7px;
+  margin-left: 1px;
+  border-left: 1px solid var(--border-subtle);
+  color: var(--text-secondary, inherit);
+  font-variant-numeric: tabular-nums;
+}
+
+.composer__context-pr-num {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.composer__context-pr-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  opacity: 0.82;
+}
+
+.cwm__pr {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 4px;
+}
+
+.cwm__pr-row .cwm__item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cwm__pr-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cwm__pr-tag {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-secondary, inherit);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .cwm__pop {
@@ -518,9 +584,8 @@ button.composer__context-item {
   transition:
     border-color 160ms ease,
     box-shadow 160ms ease;
-  /* Size container for compact chips (Codex-style) */
-  container-type: inline-size;
-  container-name: composer;
+  /* Do not set container-type on .composer. It wraps the field, and a size
+   * container makes Windows IME candidate windows jump to (0, 0). */
 }
 
 .composer::before {

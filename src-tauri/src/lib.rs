@@ -25,6 +25,8 @@ mod agent_memory_embed;
 
 mod agent_prefs;
 
+mod agent_proc_home;
+
 mod agent_privacy;
 
 mod agent_subagent_wt_snap;
@@ -158,6 +160,8 @@ mod providers;
 mod proxy;
 
 mod relay_stream_proxy;
+
+mod pr_monitor;
 
 mod pty_host;
 
@@ -586,6 +590,9 @@ fn run_inner(return_after_exit: bool) {
         })
 
         .setup(|app| {
+            // Plugin setup already exited any second process. Sweep only here,
+            // so a relaunch cannot delete the running chats' agent-proc homes.
+            agent_proc_home::sweep_orphans();
 
             computer_use::runtime::register_installation(app.handle());
             computer_use::product_webview().attach_scope_host(app.handle().clone());
@@ -989,6 +996,11 @@ fn run_inner(return_after_exit: bool) {
                 } else {
                     automation_runner::start(app.handle().clone(), mgr);
                 }
+
+                // PR monitors: poll mounted PRs while the process lives (tray
+                // included) and emit `pr-monitor://update` on real changes.
+                // Mounts are UI-driven and not persisted.
+                pr_monitor::start(app.handle().clone());
             }
 
             // LaunchAgent / helper / oneshot: open into tray so schedules fire without focus steal.

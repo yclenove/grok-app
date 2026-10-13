@@ -68,7 +68,7 @@ pub(crate) use computer_use::McpShutdownReport;
 pub(crate) use computer_use::TaskResumeOutcome;
 pub(crate) use types::{
     extract_tool_input, tool_journal_richer, RewindExecuteResult, RewindPointDto, SessionSnapshot,
-    UiAskUserRequest, UiPermissionRequest, TOOL_OUTPUT_MAX_PUB, TOOL_OUTPUT_SENTINEL,
+    StopReport, UiAskUserRequest, UiPermissionRequest, TOOL_OUTPUT_MAX_PUB, TOOL_OUTPUT_SENTINEL,
 };
 
 pub struct SessionManager {
@@ -131,6 +131,9 @@ pub struct SessionManager {
     /// Redacted per-session reconciliation state used by diagnostics/UI.
     pub(super) mcp_catalog_status:
         Mutex<HashMap<String, crate::session_manager::computer_use::McpCatalogStatus>>,
+    /// Context window chosen on the new-chat composer, before `session/new`.
+    /// Applied on the first empty session, then cleared.
+    pub(super) pending_context_window: Mutex<Option<u64>>,
 }
 
 impl Default for SessionManager {
@@ -161,6 +164,7 @@ impl SessionManager {
             computer_use_cleanup_locks: Mutex::new(HashMap::new()),
             mcp_catalog_revision: AtomicU64::new(0),
             mcp_catalog_status: Mutex::new(HashMap::new()),
+            pending_context_window: Mutex::new(None),
         }
     }
 

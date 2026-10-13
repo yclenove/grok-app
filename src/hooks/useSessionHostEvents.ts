@@ -8,15 +8,9 @@ import type { ContextUsageState } from "@/lib/contextUsage";
 import type { MessagesReducer } from "@/lib/sessionTranscriptStore";
 import type { CompactPendingBefore } from "@/hooks/useCompactDialog";
 import type { GoalOrchEvent } from "@/lib/goalOrch";
+import type { StreamStallView } from "@/lib/streamStallView";
 
 type TFn = ReturnType<typeof createT>;
-type StreamStallView = {
-  sessionId?: string;
-  stallSeconds: number;
-  tier?: string;
-  sawModelOutput?: boolean;
-  sawToolActivity?: boolean;
-} | null;
 import type { Project, SessionRow } from "@/lib/app/sidebarModels";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
 import type { SessionPlanState } from "@/lib/planSession";
@@ -27,6 +21,10 @@ import type { ReliabilityStallSignal } from "@/lib/reliabilityCenter";
 import type { ProviderRetryStatus } from "@/lib/providerRetryStatusStore";
 import type { ProcessLimitEvent } from "@/lib/processBudget";
 import type { GoalOrchHostPayload } from "@/lib/goalOrch";
+import {
+  subagentStore,
+  type SubagentEventPayload,
+} from "@/lib/subagentStore";
 import * as api from "@/lib/api";
 import { noteTaskEndpointReady } from "@/lib/computer-use/taskSource";
 import { registerGateAndMetaSubscriptions } from "./sessionHostGateSubscriptions";
@@ -1440,6 +1438,16 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
           }),
         );
        track(
+          listenWithRetry<SubagentEventPayload>("session://subagent", (p) => {
+            if (cancelled || !p) return;
+            // CLI 1.0.x subagent_spawned / _progress / _finished. Subscribed
+            // here (app-level) rather than in the Tasks panel: that panel is
+            // mounted on demand, and telemetry arriving before the user opened
+            // it would otherwise be dropped with no way to backfill.
+            subagentStore.apply(p);
+          }),
+        );
+       track(
           listenWithRetry<GoalOrchHostPayload>("session://goal", (p) => {
             if (cancelled || !p) return;
             // CLI 0.2.117+ goal_updated — soft-fail when CLI never emits.
@@ -1727,6 +1735,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             tier?: string;
             sawModelOutput?: boolean;
             sawToolActivity?: boolean;
+            streamInterrupted?: boolean;
           }>("session://stream_stall", (p) => {
             if (cancelled || !p) return;
             // Only prompt for the viewed session (or unknown id).
@@ -1761,6 +1770,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
               tier: p.tier,
               sawModelOutput: p.sawModelOutput,
               sawToolActivity: p.sawToolActivity,
+              streamInterrupted: p.streamInterrupted === true,
             });
             // Reliability center ring — title resolved at view assembly time.
             const activeStall = reliabilityStallFromEvent({

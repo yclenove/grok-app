@@ -235,6 +235,11 @@ mod tests {
 
     #[test]
     fn try_run_real_script_with_stdin_and_refuse_outside() {
+        // CU runtime tests replace PATH with a decoy under this shared env
+        // lock. Keep the real shell fixture out of that temporary environment.
+        let _env_guard = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-hooks-tryrun-{}",
             std::process::id()

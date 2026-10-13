@@ -174,6 +174,58 @@ pub enum AcpEvent {
     ProcessExited {
         code: Option<i32>,
     },
+    /// Subagent lifecycle from `_x.ai/session_notification`.
+    ///
+    /// CLI 1.0.x emits `subagent_spawned` / `subagent_progress` /
+    /// `subagent_finished` on the xAI extension notification channel; before
+    /// this the client dropped them and the Tasks panel could only *guess*
+    /// parent-child links from spawn-tool stream order.
+    Subagent(SubagentUpdate),
+}
+
+/// Lifecycle phase of a CLI subagent run (`spawn_subagent` / Task tool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentPhase {
+    Spawned,
+    Progress,
+    Finished,
+}
+
+impl SubagentPhase {
+    /// Wire-stable token used in the `session://subagent` payload.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubagentPhase::Spawned => "spawned",
+            SubagentPhase::Progress => "progress",
+            SubagentPhase::Finished => "finished",
+        }
+    }
+}
+
+/// One subagent run as reported by the CLI. Every field beyond `subagent_id`
+/// is optional: the CLI omits what it does not know, and the UI must show an
+/// honest empty state rather than a fabricated value.
+///
+/// Only what the Tasks panel renders is carried. The CLI also sends
+/// `parent_session_id`, `model`, `tools_used`, `error_count`, `will_wake` and
+/// friends; the golden fixture keeps pinning that wire shape, but decoding a
+/// field nothing reads just widens the payload and the type for no one.
+#[derive(Debug, Clone)]
+pub struct SubagentUpdate {
+    pub phase: SubagentPhase,
+    pub subagent_id: String,
+    pub subagent_type: Option<String>,
+    pub description: Option<String>,
+    /// Terminal status on `subagent_finished` (`completed` / `failed` / …).
+    pub status: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub turn_count: Option<u64>,
+    pub tool_call_count: Option<u64>,
+    pub tokens_used: Option<u64>,
+    /// Denominator for the row's occupancy percentage.
+    pub context_window_tokens: Option<u64>,
+    /// Final subagent answer (only on `subagent_finished`).
+    pub output: Option<String>,
 }
 
 /// Host circuit-breaker: after this many provider retries, cancel the turn.
@@ -390,6 +442,9 @@ pub struct AcpClient {
     rewind_supported: ParkingMutex<Option<bool>>,
     /// OpenSSH alias this process was spawned with. Remote cwd is not local.
     ssh_alias: Option<String>,
+    /// Private `GROK_HOME` sealed for this process (#1293). `None` for
+    /// `~/.grok`, official-aux, SSH, and TCP. Discarded in `kill`.
+    proc_home: std::sync::Mutex<Option<PathBuf>>,
 }
 
 /// Options applied at agent process start (CLI flags).
@@ -636,8 +691,9 @@ impl AcpClient {
         } else {
             session_data_mode
         };
-        // Hold across the auth-file write and process spawn so two chats on
-        // different providers cannot strip and restore auth.json at once.
+        // Hold across canonical auth/config writes and the private GROK_HOME
+        // snapshot. The child and its nested tools read the snapshot, so the
+        // lock does not have to outlive spawn (#1293).
         let route_auth_guard = crate::providers::route_auth_lock().lock().await;
         if agent_home_prep {
             crate::providers::prepare_route_auth(custom_route);
@@ -994,6 +1050,29 @@ impl AcpClient {
                 cmd.env("PATH", path);
             }
         }
+        // agent-home is shared by every independent official chat and every
+        // custom chat. Seal a private directory so one spawn cannot replace
+        // the other's auth.json while nested tools are still reading it.
+        let proc_home = if agent_home_prep {
+            match crate::agent_proc_home::create(&grok_home, custom_route) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    drop(route_auth_guard);
+                    return Err(AgentError::new(
+                        AgentErrorCode::ConnectFailed,
+                        format!("failed to prepare a private agent home: {e}"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let grok_home = proc_home.clone().unwrap_or(grok_home);
+        let discard_proc_home = || {
+            if let Some(ref dir) = proc_home {
+                crate::agent_proc_home::discard(dir);
+            }
+        };
         if ssh_alias.is_none() {
             cmd.env("GROK_HOME", &grok_home);
         }
@@ -1055,6 +1134,7 @@ impl AcpClient {
 
         let mut child = cmd.spawn().map_err(|e| {
             drop(route_auth_guard);
+            discard_proc_home();
             let code = if ssh_alias.is_some() {
                 AgentErrorCode::ConnectFailed
             } else {
@@ -1071,18 +1151,18 @@ impl AcpClient {
             "acp: spawned child"
         );
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stdin on child"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stdout on child"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child"))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            discard_proc_home();
+            AgentError::new(AgentErrorCode::AgentCrashed, "no stdin on child")
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            discard_proc_home();
+            AgentError::new(AgentErrorCode::AgentCrashed, "no stdout on child")
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            discard_proc_home();
+            AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child")
+        })?;
 
         let client = Arc::new(Self {
             computer_use_connections: ParkingMutex::new(HashMap::new()),
@@ -1109,6 +1189,7 @@ impl AcpClient {
             route_provider_id,
             rewind_supported: ParkingMutex::new(None),
             ssh_alias: ssh_alias.clone(),
+            proc_home: std::sync::Mutex::new(proc_home),
         });
 
         client.start_read_loop(Box::new(stdout));
@@ -1211,6 +1292,7 @@ impl AcpClient {
             route_provider_id: crate::providers::SESSION_PROVIDER_OFFICIAL.to_string(),
             rewind_supported: ParkingMutex::new(None),
             ssh_alias: None,
+            proc_home: std::sync::Mutex::new(None),
         });
         client.start_read_loop(Box::new(read_half));
         Ok((client, event_rx))
@@ -2684,16 +2766,18 @@ impl AcpClient {
         .await
     }
 
-    /// Switch model on the live agent session (`session/set_model`).
-    /// Switch model on the live agent session (`session/set_model`).
-    /// Uses the process's most recently bound agent session id.
-    pub async fn set_model(&self, model_id: &str) -> Result<(), String> {
-        let sid = self
-            .agent_session_id
-            .lock()
-            .clone()
-            .ok_or_else(|| "no agent session".to_string())?;
-        self.set_model_for(&sid, model_id).await
+    /// `x.ai/session/info` — the payload behind the pager `/context` view.
+    /// Live stdio registers the underscore form; older agents use the bare name.
+    pub async fn session_info(&self, session_id: &str) -> Result<Value, String> {
+        let params = json!({ "sessionId": session_id });
+        let raw = match self.request("_x.ai/session/info", params.clone()).await {
+            Ok(v) => v,
+            Err(e) if rpc_looks_like_method_not_found(&e) => {
+                self.request("x.ai/session/info", params).await?
+            }
+            Err(e) => return Err(e),
+        };
+        unwrap_session_info(raw)
     }
 
     /// Switch model on an explicit session (`session/set_model`).
@@ -2701,20 +2785,50 @@ impl AcpClient {
     /// mean — the process-level "recently bound" id may belong to another
     /// App session on the same process.
     pub async fn set_model_for(&self, session_id: &str, model_id: &str) -> Result<(), String> {
+        self.set_model_for_inner(session_id, model_id, None).await
+    }
+
+    /// Same as [`Self::set_model_for`], plus `_meta.contextWindow`.
+    /// Reasoning effort is omitted so the CLI keeps the current effort.
+    pub async fn set_context_window_for(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        context_window: u64,
+    ) -> Result<(), String> {
+        if context_window == 0 {
+            return Err("context window must be positive".into());
+        }
+        self.set_model_for_inner(session_id, model_id, Some(context_window))
+            .await
+    }
+
+    async fn set_model_for_inner(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        context_window: Option<u64>,
+    ) -> Result<(), String> {
         let model_id = model_id.trim();
         if model_id.is_empty() {
             return Err("model id empty".into());
         }
         let sid = session_id.to_string();
         // ACP SetSessionModelRequest: sessionId + modelId (+ optional meta).
+        // Absent `_meta` preserves effort and the selected window.
+        let params = match context_window {
+            Some(window) => json!({
+                "sessionId": sid,
+                "modelId": model_id,
+                "_meta": { "contextWindow": window },
+            }),
+            None => json!({
+                "sessionId": sid,
+                "modelId": model_id,
+            }),
+        };
         let result = self
-            .request(
-                "session/set_model",
-                json!({
-                    "sessionId": sid,
-                    "modelId": model_id,
-                }),
-            )
+            .request("session/set_model", params)
             .await
             .map_err(|e| format!("session/set_model: {e}"))?;
         // Best-effort: some agents echo currentModelId.
@@ -3192,6 +3306,14 @@ impl AcpClient {
         *self.stdin.lock().await = None;
         self.last_update_by_session.lock().clear();
         *self.last_update_unstamped.lock() = None;
+        let proc_home = self
+            .proc_home
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(dir) = proc_home {
+            crate::agent_proc_home::discard(&dir);
+        }
     }
 }
 
@@ -3275,6 +3397,57 @@ pub fn wire_session_interject_params(session_id: &str, text: &str) -> Value {
         "sessionId": session_id,
         "text": text,
     })
+}
+
+/// Pull the session-info object out of an ext-method result.
+///
+/// Grok Build wraps it as `{ "result": SessionInfoResponse, "error"?: ... }`.
+/// Some agents return the object itself, or either form as a JSON string.
+pub(crate) fn unwrap_session_info(raw: Value) -> Result<Value, String> {
+    let value = coerce_session_info_json(raw);
+    if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
+        let has_body = value.get("result").is_some_and(|r| r.is_object());
+        if !has_body {
+            return Err(session_info_error_text(err));
+        }
+    }
+    let body = value
+        .get("result")
+        .filter(|r| r.is_object())
+        .cloned()
+        .unwrap_or(value);
+    if body.get("context").is_some()
+        || body.get("sessionId").is_some()
+        || body.get("session_id").is_some()
+    {
+        return Ok(body);
+    }
+    Err("invalid session info response".into())
+}
+
+fn coerce_session_info_json(raw: Value) -> Value {
+    match raw {
+        Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
+        Value::Object(map) => {
+            if let Some(Value::String(s)) = map.get("result") {
+                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                    return parsed;
+                }
+            }
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+fn session_info_error_text(err: &Value) -> String {
+    if let Some(s) = err.as_str() {
+        return s.to_string();
+    }
+    err.get("message")
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| err.to_string())
 }
 
 /// Whether an ACP RPC error indicates the method name is unknown on this agent.
@@ -3768,6 +3941,14 @@ pub fn decode_session_update(params: &Value) -> Vec<AcpEvent> {
                 out.push(AcpEvent::ToolOpenReleased { tool_call_id });
             }
         }
+        // Subagent lifecycle. CLI 1.0.x reports these on the xAI
+        // extension notification channel with a *stable* subagent id, so the
+        // Tasks panel no longer has to infer parent links from stream order.
+        "subagent_spawned" | "subagent_progress" | "subagent_finished" => {
+            if let Some(ev) = parse_subagent_update(kind, update) {
+                out.push(ev);
+            }
+        }
         "retry_state" => {
             let attempt = update.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let max_retries = update
@@ -3928,6 +4109,78 @@ pub fn decode_session_update(params: &Value) -> Vec<AcpEvent> {
     }
 
     out
+}
+
+/// Decode one `subagent_spawned` / `subagent_progress` / `subagent_finished`
+/// notification. Returns `None` when the update carries no subagent id — an
+/// id-less row cannot be tracked or de-duplicated, so it is not surfaced.
+pub fn parse_subagent_update(kind: &str, update: &Value) -> Option<AcpEvent> {
+    let subagent_id = update
+        .get("subagent_id")
+        .or_else(|| update.get("subagentId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if subagent_id.is_empty() {
+        return None;
+    }
+    let phase = match kind {
+        "subagent_spawned" => SubagentPhase::Spawned,
+        "subagent_progress" => SubagentPhase::Progress,
+        "subagent_finished" => SubagentPhase::Finished,
+        _ => return None,
+    };
+    let str_field = |keys: &[&str]| -> Option<String> {
+        keys.iter()
+            .find_map(|k| update.get(*k))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let num_field = |keys: &[&str]| -> Option<u64> {
+        keys.iter()
+            .find_map(|k| update.get(*k))
+            .and_then(|v| v.as_u64())
+    };
+    Some(AcpEvent::Subagent(SubagentUpdate {
+        phase,
+        subagent_id,
+        subagent_type: str_field(&["subagent_type", "subagentType"]),
+        description: str_field(&["description", "summary"]),
+        status: str_field(&["status"]),
+        duration_ms: num_field(&["duration_ms", "durationMs"]),
+        // `subagent_finished` reports the counters as `turns` / `tool_calls`;
+        // `subagent_progress` uses the longer names. Accept both so a run whose
+        // progress frames were throttled away still shows its totals.
+        turn_count: num_field(&["turn_count", "turnCount", "turns"]),
+        tool_call_count: num_field(&["tool_call_count", "toolCallCount", "tool_calls"]),
+        tokens_used: num_field(&["tokens_used", "tokensUsed"]),
+        context_window_tokens: num_field(&["context_window_tokens", "contextWindowTokens"]),
+        output: str_field(&["output", "result"]),
+    }))
+}
+
+impl SubagentUpdate {
+    /// `session://subagent` payload (snake_case keys are flattened to camelCase
+    /// for the frontend). Absent values stay `null` — the UI must not invent them.
+    pub fn to_payload(&self, app_session_id: &str) -> Value {
+        json!({
+            "sessionId": app_session_id,
+            "phase": self.phase.as_str(),
+            "subagentId": self.subagent_id,
+            "subagentType": self.subagent_type,
+            "description": self.description,
+            "status": self.status,
+            "durationMs": self.duration_ms,
+            "turnCount": self.turn_count,
+            "toolCallCount": self.tool_call_count,
+            "tokensUsed": self.tokens_used,
+            "contextWindowTokens": self.context_window_tokens,
+            "output": self.output,
+        })
+    }
 }
 
 /// One choice inside an ask-user question.
@@ -5198,6 +5451,17 @@ pub fn provider_retry_abort_rpc_message(reason: &str) -> String {
     }
 }
 
+/// Mid-stream body decode failure reported by the CLI reqwest client.
+///
+/// This is a flaky SSE break, not a dead socket. The same reason often
+/// recovers and keeps editing, so it must **not** join
+/// [`is_hard_transport_retry_reason`] or fail the turn on attempt 1.
+pub fn is_stream_decode_retry_reason(reason: &str) -> bool {
+    reason
+        .to_ascii_lowercase()
+        .contains("error decoding response body")
+}
+
 /// True when the retry reason looks like a hard transport failure (not a flaky 5xx).
 pub fn is_hard_transport_retry_reason(reason: &str) -> bool {
     let r = reason.to_ascii_lowercase();
@@ -5594,6 +5858,21 @@ mod retry_tests {
         assert!(!is_hard_transport_retry_reason(
             "HTTP 503 Service Unavailable"
         ));
+    }
+
+    #[test]
+    fn stream_decode_error_is_not_a_hard_abort() {
+        let reason = "reqwest error stream: Transport error: error decoding response body";
+        assert!(is_stream_decode_retry_reason(reason));
+        assert!(is_stream_decode_retry_reason(
+            "Transport error: Error decoding response body"
+        ));
+        assert!(!is_stream_decode_retry_reason(
+            "error sending request for url"
+        ));
+        assert!(!is_hard_transport_retry_reason(reason));
+        assert!(!should_abort_provider_retry_ex(1, 15, "retrying", reason));
+        assert!(!should_abort_provider_retry_ex(3, 15, "retrying", reason));
     }
 
     #[test]
@@ -6555,6 +6834,29 @@ fn json_id_u64(v: Option<&Value>) -> Option<u64> {
 #[cfg(test)]
 mod cached_token_route_tests {
     use super::*;
+
+    #[test]
+    fn unwrap_session_info_reads_the_pager_envelope() {
+        let raw = serde_json::json!({
+            "result": {
+                "sessionId": "s1",
+                "model": "grok-4.7",
+                "context": { "used": 3300, "total": 500000 }
+            }
+        });
+        let body = unwrap_session_info(raw).unwrap();
+        assert_eq!(body["model"], "grok-4.7");
+        assert_eq!(body["context"]["total"], 500000);
+    }
+
+    #[test]
+    fn unwrap_session_info_reads_a_string_envelope_and_surfaces_errors() {
+        let raw =
+            serde_json::json!(r#"{"result":{"sessionId":"s","context":{"used":1,"total":2}}}"#);
+        assert!(unwrap_session_info(raw).is_ok());
+        let err = unwrap_session_info(serde_json::json!({ "error": "no session" })).unwrap_err();
+        assert_eq!(err, "no session");
+    }
 
     #[test]
     fn rewind_unsupported_error_matches_method_not_found() {

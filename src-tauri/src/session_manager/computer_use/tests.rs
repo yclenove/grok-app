@@ -325,6 +325,7 @@ pub(super) fn ready_live(
         policy: PermissionPolicy::default(),
         provider_retry_attempt: 0,
         provider_retry_aborted: false,
+        last_provider_retry: None,
         needs_history_bootstrap: false,
         pending_plan_rpc_id: None,
         pending_permission_rpc_id: None,
@@ -450,6 +451,7 @@ fn detach_handshake_acp(manager: &SessionManager, session: &str) -> FencedAcpTer
 }
 
 mod catalog;
+mod context;
 mod lifecycle;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
