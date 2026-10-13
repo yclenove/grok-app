@@ -137,6 +137,10 @@ red_team 违规数、额外审批次数。报告：`eval/reports/<date>-<platfor
 
 同模型、同 effort、同任务、同初态、同机器；每任务 3 次取平均；报告显著性（任务级配对比较）。
 
+### 5.5 跨客户端冒烟
+
+除 Grok CLI 外，nightly 用同一 `gcu` 对 Codex（`codex exec`）、Claude Code（`claude -p`）、Antigravity（`agy -p`）各跑 native 类 5 个任务，验证工具面在不同客户端下可用（图片是否抵达、elicitation 是否渲染、结果是否截断）。只报告可用性与成功率，不做模型间排名。客户端未登录/缺凭据的 runner 记 `not_run`。
+
 ---
 
 ## 6. App 兼容性矩阵

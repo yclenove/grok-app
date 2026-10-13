@@ -334,7 +334,7 @@
 ### P4-05 `gcu install/uninstall`（全客户端）
 - **依赖：** P0-10　**估算：** 2d
 - **内容：** [04 §2.1](04-route-a-standalone-mcp.md#21-gcu-install-client-写入的配置)；TOML/JSON 无损编辑（`toml_edit`、保留注释）；备份；`--dry-run`；`~/.grok` 写入需确认。
-- **测试：** 每个客户端：空文件、已有其他条目、已有 gcu 条目（幂等）、uninstall 精确移除——快照测试。
+- **测试：** 每个客户端：空文件、已有其他条目、已有 gcu 条目（幂等）、uninstall 精确移除——快照测试；Antigravity 走 `agy mcp add/remove`，测试中用假的 `agy` 可执行文件记录 argv。
 
 ### P4-06 turn-ended 接入
 - **依赖：** P0-09、S-01　**估算：** 1d

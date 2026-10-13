@@ -1,6 +1,6 @@
 # 04 · 路线 A：独立 MCP（`grok-computer-use` / `gcu`）
 
-> 目标：一个可以 `npm i -g`/`brew install`/`winget install` 后，接入 Grok CLI、Codex、Claude Code、Gemini CLI、opencode 等任意 MCP 客户端的
+> 目标：一个可以 `npm i -g`/`brew install`/`winget install` 后，接入 Grok CLI、Codex、Claude Code、Antigravity（`agy`）、Gemini CLI、opencode 等任意 MCP 客户端的
 > 跨平台 Computer Use 服务，体验对齐 Codex，能力在三平台一致。
 
 ---
@@ -29,7 +29,7 @@ gcu call <tool> [--args JSON] [--json]          # 单次调用，调试与脚本
 gcu batch --file steps.json                     # 同 computer_batch
 gcu script --file a.js | -                      # 同 computer_script（feature）
 gcu approvals list|revoke <app>|revoke-all       # 管理"始终允许"
-gcu install <client> [--scope user|project]     # grok | codex | claude | gemini | opencode | cursor | vscode
+gcu install <client> [--scope user|project]     # grok | codex | claude | antigravity | gemini | opencode | cursor | vscode
 gcu uninstall <client>
 gcu turn-ended [payload]                        # 客户端 notify 钩子入口
 gcu worker                                      # 内部：Windows 隔离执行子进程（隐藏）
@@ -46,6 +46,7 @@ gcu version
 | Grok Build CLI | `~/.grok/config.toml`（共享模式）的 `[mcp_servers.computer-use]`；若用户使用独立 GROK_HOME，用 `--grok-home` 指定 | `command = "<abs path>/gcu"`, `args = ["mcp"]`；同时安装 Grok skill（若 Grok Build 支持插件/skill 目录）与 notify 钩子（若支持） |
 | Codex | `~/.codex/config.toml` `[mcp_servers.computer-use]` | 同上；`notify` 若已存在则链式包装（保存原值，`gcu turn-ended --previous-notify`） |
 | Claude Code | `~/.claude.json` `mcpServers.computer-use` | stdio |
+| Antigravity CLI（`agy`） | 不直接改文件：调用 `agy mcp add computer-use <abs path>/gcu mcp`（官方子命令，幂等"add or update"）；卸载用 `agy mcp remove computer-use` | stdio；`agy` 未登录时仍可写配置，`doctor` 提示需登录后才能实测 |
 | Gemini CLI | `./.gemini/settings.json` 或 `~/.gemini/settings.json` | stdio |
 | opencode | `~/.config/opencode/opencode.json` | stdio |
 | Cursor / VS Code | 各自 `mcp.json` | stdio |
