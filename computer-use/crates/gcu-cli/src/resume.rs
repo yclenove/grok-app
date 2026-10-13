@@ -380,9 +380,10 @@ mod tests {
                 .unwrap();
         let control = Control::start(connection.session(), host.activity.clone())
             .await
-            .ok()
-            .unwrap();
-        send(control.directory(), "stop").await.ok().unwrap();
+            .unwrap_or_else(|e| panic!("control start failed: {}", e.message));
+        send(control.directory(), "stop")
+            .await
+            .unwrap_or_else(|e| panic!("send failed: {}", e.message));
         assert!(host.activity.latched_stop());
         assert!(crate::host::LocalHost::fixture(fixture.path())
             .activity
@@ -395,7 +396,9 @@ mod tests {
         // The queue is intentionally occupied; Stop must still issue release.
         tokio::task::yield_now().await;
         let start = tokio::time::Instant::now();
-        send(control.directory(), "stop").await.ok().unwrap();
+        send(control.directory(), "stop")
+            .await
+            .unwrap_or_else(|e| panic!("send failed: {}", e.message));
         assert!(start.elapsed() < Duration::from_millis(500));
         queued.abort();
         assert!(send(control.directory(), "resume invalid invalid")
@@ -406,20 +409,23 @@ mod tests {
         let challenge = std::fs::read_to_string(control.directory().join("challenge")).unwrap();
         let request = format!("resume {token} {challenge}");
         assert!(tty_gate(&Tty(true, true)).is_ok());
-        send(control.directory(), &request).await.ok().unwrap();
+        send(control.directory(), &request)
+            .await
+            .unwrap_or_else(|e| panic!("send failed: {}", e.message));
         assert!(!host.activity.latched_stop());
         assert!(!crate::host::LocalHost::fixture(fixture.path())
             .activity
             .latched_stop());
-        send(control.directory(), "stop").await.ok().unwrap();
+        send(control.directory(), "stop")
+            .await
+            .unwrap_or_else(|e| panic!("send failed: {}", e.message));
         assert!(send(control.directory(), &request).await.is_err());
         assert!(host.activity.latched_stop());
         let token = std::fs::read_to_string(control.directory().join("token")).unwrap();
         let challenge = std::fs::read_to_string(control.directory().join("challenge")).unwrap();
         send(control.directory(), &format!("resume {token} {challenge}"))
             .await
-            .ok()
-            .unwrap();
+            .unwrap_or_else(|e| panic!("send failed: {}", e.message));
         connection.close().await.unwrap();
     }
 }
