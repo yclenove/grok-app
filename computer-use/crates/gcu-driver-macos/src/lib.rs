@@ -1,8 +1,10 @@
-//! macOS discovery driver. Native bindings compile only on macOS.
+//! macOS discovery and accessibility-tree driver. Native bindings compile only
+//! on macOS.
 //!
-//! Tree, capture, and input stay unavailable until P1-03+. Portable identity,
-//! resolution, window alignment, Spotlight cache policy, and [`gate::MacGate`]
-//! run on every platform through [`testing::FakeMacApi`].
+//! [`ax::build_raw_tree`] reads a window tree. Capture, geometry, focus, and
+//! input stay unavailable. Portable identity, resolution, window alignment,
+//! Spotlight cache policy, and [`gate::MacGate`] run on every platform through
+//! [`testing::FakeMacApi`].
 //!
 //! A code signature does not prove that every byte running inside the process
 //! is trusted. Plugins and writable load paths can still change that code.
@@ -15,6 +17,7 @@
 
 pub mod api;
 pub mod apps;
+pub mod ax;
 mod discovery;
 mod driver;
 #[cfg(target_os = "macos")]

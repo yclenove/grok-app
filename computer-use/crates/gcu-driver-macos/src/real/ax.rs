@@ -1,5 +1,8 @@
 //! Accessibility windows and non-activating raise.
 //!
+//! Tree walks, batch attribute copies, and `RealAxSource` live in [`super::reader`]
+//! so this file stays the window-list FFI.
+//!
 //! Trust is checked with `kAXTrustedCheckOptionPrompt = false`. This module
 //! never calls the prompting variant and never clicks a system dialog.
 //! `kAXErrorAPIDisabled` is reported as a missing accessibility permission.

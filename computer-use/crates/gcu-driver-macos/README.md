@@ -1,4 +1,4 @@
-# macOS discovery (P1-02)
+# macOS discovery and AX tree (P1-02, P1-03)
 
 This crate lists running and recently used apps, resolves an exact name, localized
 name, bundle id, or path, and builds the signing identity used for later grants.
@@ -38,10 +38,20 @@ trusted. Plugins and writable load paths can still change that code. `trust_note
 says so on every identity. Real macOS reports `on_current_desktop: None` (no
 SkyLight) and window scale `1.0` until P1-04.
 
-Tree, capture, geometry, focus, subscriptions, and input return
-`CapabilityUnavailable` until **P1-03+**. `capabilities()` stays false for those
-features. Calls have a five-second deadline. A launch that has already started
-at timeout reports `maybe_executed=true`.
+`snapshot_tree` reads the accessibility tree. It needs Accessibility and does
+not need Screen Recording. A missing permission is
+`DriverError::PermissionMissing { permission: "accessibility" }`. Capture,
+geometry, focus, and input still return `CapabilityUnavailable`.
+`capabilities().observe.tree` is true and `screenshot` is false. Event
+subscription is a settle skeleton (`observe.events` is true). Calls have a
+five-second deadline. A tree walk also stops at 2 seconds and 5000 nodes. A
+launch that has already started at timeout reports `maybe_executed=true`. Tree
+reads report `maybe_executed=false`.
+
+Chromium and Electron apps get `AXEnhancedUserInterface` and
+`AXManualAccessibility` at the start of a live snapshot. The previous values
+are written back from `release_all_input` (turn end and session close) and from
+Drop. The driver only marks terminal-like names; refusal stays in the router.
 
 Portable verification:
 
@@ -69,3 +79,16 @@ cargo test -p gcu-driver-macos -- --ignored --test-threads=1
 The fixture bundle is produced by the app's bundle step when that target is
 macOS. Point `GCU_FIXTURE_APP` at the `.app` you actually built. Close the
 fixture afterward. Linux results are not evidence of native desktop behavior.
+
+Ignored AX render smokes (`tests/ax_tree.rs`, macOS only) need Accessibility
+and Screen Recording. Leave TextEdit, Finder, and System Settings open. The
+fixture smoke also needs `GCU_FIXTURE_APP`. They are compiled on the macOS
+runner and are not executed in CI:
+
+```sh
+cargo test -p gcu-driver-macos --test ax_tree -- --ignored --test-threads=1
+```
+
+`CROSS=1` clippy checks the macOS library and bins for `aarch64-apple-darwin`.
+It does not compile integration tests. The macOS GitHub runner compiles the
+live AX code and the ignored tests. Those ignored tests are `not_run`.

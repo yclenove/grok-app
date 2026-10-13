@@ -1614,6 +1614,7 @@ dependencies = [
  "async-trait",
  "block2 0.6.2",
  "core-foundation 0.10.1",
+ "futures-core",
  "gcu-core",
  "gcu-protocol",
  "libc",
@@ -1628,7 +1629,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smallvec",
+ "smol_str 0.3.6",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

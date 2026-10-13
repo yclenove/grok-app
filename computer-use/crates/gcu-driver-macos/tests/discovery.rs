@@ -422,23 +422,27 @@ async fn tree_capture_and_input_are_unavailable() {
     let driver = start(api).await;
     let caps = driver.capabilities();
     assert_eq!(caps.platform, Platform::Macos);
-    assert!(caps.version.contains("P1-02"));
-    assert!(!caps.observe.tree && !caps.observe.screenshot && !caps.observe.events);
+    assert!(caps.version.contains("P1-03"));
+    assert!(caps.observe.tree && !caps.observe.screenshot && caps.observe.events);
     assert_eq!(caps.delivery.foreground, ForegroundCapability::Unavailable);
     assert_eq!(caps.background_operation, BackgroundOperation::None);
-    assert_eq!(caps.limits.max_tree_nodes, 0);
+    assert_eq!(caps.limits.max_tree_nodes, 5000);
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     let windows = driver.list_windows(Some(&app)).await.unwrap();
     let win = WindowRef {
         app: app.clone(),
         id: windows[0].id.clone(),
     };
+    let tree_error = driver
+        .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+        .await
+        .unwrap_err();
     assert_eq!(
-        driver
-            .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
-            .await
-            .unwrap_err(),
-        DriverError::CapabilityUnavailable
+        tree_error,
+        DriverError::Native {
+            message: "accessibility tree source is not connected".into(),
+            maybe_executed: false,
+        }
     );
     assert_eq!(
         driver
