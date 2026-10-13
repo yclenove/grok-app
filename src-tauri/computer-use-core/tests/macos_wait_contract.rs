@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 use adapter::{ActionScope, ComputerUseAdapter, DispatchRequest};
@@ -54,7 +56,7 @@ fn finish(adapter: Arc<MacosAdapter>) {
 #[test]
 fn wait_verifies_the_original_control_without_recapture_or_native_input() {
     let (adapter, obs) = setup();
-    macos_adapter::run_native_selftest().unwrap();
+    macos_selftest::run_native_selftest().unwrap();
     let captures = inspect(|s| s.captures.len());
     let result = adapter.act(&request(&obs, &obs.nodes[1].name)).unwrap();
     assert!(result.verifiable && result.postcondition_ok);

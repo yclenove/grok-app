@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 
@@ -69,7 +71,7 @@ fn finish(adapter: MacosAdapter, expected: Vec<String>) {
 fn editable_text_roles_advertise_exact_set_value_without_pretending_to_be_ime() {
     for role in ["AXTextField", "AXTextArea", "AXComboBox"] {
         let (adapter, id) = setup(role);
-        macos_adapter::run_native_selftest().unwrap(); // FFI doubles, not native proof.
+        macos_selftest::run_native_selftest().unwrap(); // FFI doubles, not native proof.
         let observation = adapter.observe_for_run("run", &id).unwrap();
         assert_eq!(observation.nodes[1].actions, vec!["wait", "set_value"]);
         assert!(adapter.capabilities().set_value.semantic);

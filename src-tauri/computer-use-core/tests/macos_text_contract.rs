@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 
@@ -56,7 +58,7 @@ fn finish(adapter: MacosAdapter) {
 #[test]
 fn focused_text_advertises_append_without_claiming_ime() {
     let (adapter, obs) = setup();
-    macos_adapter::run_native_selftest().unwrap(); // Doubles, not native proof.
+    macos_selftest::run_native_selftest().unwrap(); // Doubles, not native proof.
     assert!(obs.nodes[1].actions.iter().any(|a| a == "type_text"));
     assert!(adapter.capabilities().type_text.semantic);
     assert!(adapter.capabilities().type_text.coordinate);

@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 
@@ -85,7 +87,7 @@ fn observation_contains_real_window_children_and_retina_geometry_without_secure_
         .iter()
         .all(|n| n.node_ref.starts_with("mac-ax-")));
     assert_ne!(observation.nodes[0].node_ref, button.node_ref);
-    macos_adapter::run_native_selftest().unwrap(); // Doubles only, not native proof.
+    macos_selftest::run_native_selftest().unwrap(); // Doubles only, not native proof.
     finish(adapter, 0);
 }
 

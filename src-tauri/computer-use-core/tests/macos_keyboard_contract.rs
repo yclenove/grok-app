@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 use adapter::{ActionScope, ComputerUseAdapter, DispatchRequest};
@@ -55,7 +57,7 @@ fn finish(adapter: Arc<MacosAdapter>) {
 #[test]
 fn focused_node_advertises_named_keys_without_ime_claims() {
     let (adapter, obs) = setup();
-    macos_adapter::run_native_selftest().unwrap();
+    macos_selftest::run_native_selftest().unwrap();
     assert!(adapter.capabilities().key.semantic);
     assert!(adapter.capabilities().key.coordinate && !adapter.capabilities().chinese_ime);
     assert!(obs.nodes[1].actions.iter().any(|a| a == "key"));

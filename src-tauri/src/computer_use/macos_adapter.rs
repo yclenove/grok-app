@@ -109,7 +109,7 @@ extern "C" {
         buffer: *mut i8,
         buffer_size: isize,
         encoding: u32,
-    ) -> bool;
+    ) -> u8;
     fn CFNumberGetValue(number: CfTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn CFDataGetLength(data: CfTypeRef) -> isize;
     fn CFDataGetBytePtr(data: CfTypeRef) -> *const u8;
@@ -172,7 +172,8 @@ fn cf_string_value(item: CfTypeRef) -> String {
             buf.as_mut_ptr(),
             buf.len() as isize,
             K_CF_STRING_ENCODING_UTF8,
-        ) {
+        ) != 0
+        {
             CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
         } else {
             String::new()
@@ -699,20 +700,6 @@ fn send_click(
         // a replacement/occluded window. An uncertain release retains occupancy.
         pointer::release(adapter, req, observation, (x, y), &up, button, owner)?;
         req.cancellation.check()?;
-    }
-    Ok(())
-}
-
-/// Compile-time runner entry. Returns Err with not_run/permission text; never claims a host it is not.
-pub fn run_native_selftest() -> Result<(), String> {
-    let adapter = MacosAdapter::new();
-    let cap = adapter.capabilities();
-    if !cap.observe_screenshot {
-        return Err("not_run: Screen Recording or Accessibility permission missing".into());
-    }
-    let listed = adapter.list_targets()?;
-    if listed.is_empty() {
-        return Err("not_run: no on-screen windows (unsigned or empty session)".into());
     }
     Ok(())
 }

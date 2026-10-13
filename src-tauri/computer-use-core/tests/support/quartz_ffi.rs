@@ -509,16 +509,16 @@ unsafe extern "C" fn CFStringGetCString(
     buffer: *mut i8,
     capacity: isize,
     _: u32,
-) -> bool {
+) -> u8 {
     let Object::String(s) = object(ptr) else {
-        return false;
+        return 0;
     };
     let bytes = s.as_bytes_with_nul();
     if capacity < bytes.len() as isize {
-        return false;
+        return 0;
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), bytes.len());
-    true
+    1
 }
 #[no_mangle]
 unsafe extern "C" fn CFNumberGetValue(ptr: *const c_void, kind: i32, out: *mut c_void) -> bool {

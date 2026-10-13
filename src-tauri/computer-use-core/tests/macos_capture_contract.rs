@@ -5,6 +5,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 
@@ -60,7 +62,7 @@ fn production_capture_selects_only_one_window_and_encodes_through_imageio() {
     assert!(adapter.capabilities().observe_ax);
     assert!(adapter.capabilities().set_value.semantic);
     assert!(!adapter.capabilities().set_value.coordinate);
-    macos_adapter::run_native_selftest().unwrap(); // FFI doubles only.
+    macos_selftest::run_native_selftest().unwrap(); // FFI doubles only.
 }
 
 #[test]

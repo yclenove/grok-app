@@ -186,14 +186,15 @@ impl<'a> Budget<'a> {
             return Err("AX string exceeds read budget".into());
         }
         let mut buffer = vec![0i8; (units as usize) * 4 + 1];
-        if !unsafe {
+        if unsafe {
             CFStringGetCString(
                 value,
                 buffer.as_mut_ptr(),
                 buffer.len() as isize,
                 K_CF_STRING_ENCODING_UTF8,
             )
-        } {
+        } == 0
+        {
             return Err("AX string decoding failed".into());
         }
         let value = unsafe { CStr::from_ptr(buffer.as_ptr()) }

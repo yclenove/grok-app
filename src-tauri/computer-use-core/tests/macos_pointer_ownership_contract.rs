@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 
@@ -16,7 +18,7 @@ use std::sync::Arc;
 fn setup(action: ActionKind) -> (Arc<MacosAdapter>, DispatchRequest) {
     reset();
     let adapter = Arc::new(MacosAdapter::new());
-    macos_adapter::run_native_selftest().unwrap(); // FFI double, not native proof.
+    macos_selftest::run_native_selftest().unwrap(); // FFI double, not native proof.
     let target_id = adapter.list_targets().unwrap().remove(0).target_id;
     let obs = adapter.observe_for_run("run", &target_id).unwrap();
     let req = DispatchRequest {

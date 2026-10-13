@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 use adapter::{ActionScope, CaptureOptions, ComputerUseAdapter, DispatchRequest};
@@ -63,7 +65,7 @@ fn finish(adapter: MacosAdapter) {
 #[test]
 fn screenshot_point_binds_exact_focused_text_for_unicode_append() {
     let (adapter, obs) = setup();
-    macos_adapter::run_native_selftest().unwrap();
+    macos_selftest::run_native_selftest().unwrap();
     let result = adapter.act(&request(&obs, ActionKind::TypeText)).unwrap();
     assert!(result.applied && !result.verifiable && !result.postcondition_ok);
     inspect(|s| {

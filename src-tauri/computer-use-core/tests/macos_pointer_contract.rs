@@ -3,6 +3,8 @@
 pub use grok_computer_use_core::{adapter, protocol};
 #[path = "../../src/computer_use/macos_adapter.rs"]
 mod macos_adapter;
+#[path = "../../src/computer_use/macos_selftest.rs"]
+mod macos_selftest;
 #[path = "support/quartz_ffi.rs"]
 mod quartz_ffi;
 
@@ -55,7 +57,7 @@ fn finish(adapter: Arc<MacosAdapter>) {
 #[test]
 fn capabilities_advertise_only_coordinate_scroll_and_drag_with_both_permissions() {
     let (adapter, _) = setup();
-    macos_adapter::run_native_selftest().unwrap(); // doubles, not host proof
+    macos_selftest::run_native_selftest().unwrap(); // doubles, not host proof
     for permission in 0..3 {
         update(|s| {
             s.screen_allowed = permission != 1;

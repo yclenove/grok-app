@@ -84,6 +84,8 @@ mod windows_webview2_fixture;
 
 #[cfg(target_os = "macos")]
 mod macos_adapter;
+#[cfg(all(target_os = "macos", feature = "computer-use-probe"))]
+mod macos_selftest;
 
 #[cfg(target_os = "linux")]
 mod linux_adapter;
@@ -750,7 +752,7 @@ pub fn computer_use_probe_main() -> i32 {
     println!("computer_use managed browser s75: PASS");
     #[cfg(target_os = "macos")]
     {
-        match macos_adapter::run_native_selftest() {
+        match macos_selftest::run_native_selftest() {
             Ok(()) => {
                 println!("macos native selftest: listed windows (fixture proof still separate)")
             }
