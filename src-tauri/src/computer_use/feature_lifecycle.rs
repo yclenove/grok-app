@@ -106,7 +106,7 @@ where
         return Err("Computer Use is shutting down".into());
     }
     let revision = FEATURE_CHOICE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
             revision.checked_add(1)
         })
         .map_err(|_| "Computer Use preference revision exhausted")?

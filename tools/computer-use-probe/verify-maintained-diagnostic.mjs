@@ -12,7 +12,9 @@ assert.equal(inputs.scope, "INTERNAL native compatibility diagnostic only, not a
 assert.equal(inputs.stagingComplete, true);
 assert.equal(inputs.runtimePrepared, false);
 assert.equal(inputs.promoted, false);
-assert.equal(inputs.target, process.platform === "win32" ? "windows" : "linux");
+assert.equal(inputs.target, process.platform === "win32" ? "windows" :
+  process.arch === "arm64" ? "linux-arm64" : "linux");
+assert.equal(process.arch, inputs.target === "linux-arm64" ? "arm64" : "x64");
 assert.equal(process.version, "v22.23.3");
 const require = createRequire(join(directory, "worker", "package.json"));
 const packagePath = require.resolve("playwright-core/package.json");
@@ -30,7 +32,7 @@ try {
   browser = await chromium.launch({ executablePath: browserPath, headless: true,
     args: ["--disable-gpu", "--disable-dev-shm-usage", "--disable-crash-reporter"] });
   report.browser = browser.version();
-  assert.equal(report.browser, "157.0.8101.0");
+  assert.equal(report.browser, inputs.target === "linux-arm64" ? "156.0.8078.4" : "157.0.8101.0");
   const page = await browser.newPage();
   await page.setContent("<!doctype html><title>CU internal version fixture</title><p>owned fixture</p>");
   assert.equal(await page.title(), "CU internal version fixture");

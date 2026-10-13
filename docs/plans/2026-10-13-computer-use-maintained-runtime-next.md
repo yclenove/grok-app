@@ -1,5 +1,7 @@
 # CU 维护版运行时：下一批落地顺序
 
+最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)已完成本机Rust1.99 App2399/strict；[维护ARM64 browser](2026-10-13-computer-use-arm64-browser-checkpoint.md)的官方固定Node22/PW1.64/CfT156已实核验，原生诊断job已接，尚未晋升产品资源。下一步回读真实CI，再推进最终维护合同/ARM64产品接入与原R1–R4完整验收；用户App144及App11+/CU受管Mac14+保持。
+
 最新同步已完成：[fork / 源仓库同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)，
 提交 `8107bb07` 已推送。当前处理 [Linux SDK 双架构检查点](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：
 明确 x64/Jammy 与 ARM64/Noble 的独立 SDK/ABI/loader 合同，两架构原生 CI

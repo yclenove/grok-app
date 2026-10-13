@@ -42,7 +42,9 @@ pub(super) fn directories(path: &Path) -> Result<Vec<File>, String> {
             use std::os::unix::fs::MetadataExt;
             let uid = unsafe { libc::geteuid() };
             if (metadata.uid() != uid && metadata.uid() != 0)
-                || (metadata.mode() & 0o022 != 0 && metadata.mode() & libc::S_ISVTX == 0)
+                // POSIX sticky bit is 01000. MetadataExt::mode is u32 on all
+                // Unix targets; libc::S_ISVTX is u16 on macOS and u32 on Linux.
+                || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
             {
                 return Err(error("untrusted writable ancestor"));
             }

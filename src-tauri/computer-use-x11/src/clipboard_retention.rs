@@ -183,7 +183,7 @@ struct Permit;
 impl Permit {
     fn acquire() -> Result<Self, String> {
         LIVE_SERVICES
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < MAX_SERVICES).then_some(n + 1)
             })
             .map_err(|_| "clipboard retention capacity occupied; retain caller's service")?;

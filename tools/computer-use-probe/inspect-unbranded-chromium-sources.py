@@ -23,7 +23,7 @@ SNAPSHOTS = {
     "Mac": ("chrome-mac", "Chromium.app/Contents/MacOS/Chromium", "macho-x86_64"),
 }
 HERE = Path(__file__).parent
-ZIP_INSPECT = runpy.run_path(str(HERE / "inspect-maintained-chromium-sources.py"))["inspect"]
+ZIP_INSPECT = runpy.run_path(str(HERE / "inspect-maintained-chromium-sources.py"))["inspect_tree"]
 NATIVE = runpy.run_path(str(HERE / "inspect-maintained-node-sources.py"))
 
 

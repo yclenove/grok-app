@@ -30,7 +30,7 @@ def inspect_directory(directory):
     credits, payloads = CREDITS["inspect_pinned_archive"](path, "Win_x64", ROOT, SHA256)
     if path.stat().st_size != ARCHIVE_BYTES:
         raise ValueError("fixed publisher archive size mismatch")
-    tree = SOURCE["inspect"](path, ROOT, "chrome.exe")
+    tree = SOURCE["inspect_tree"](path, ROOT, "chrome.exe")
     if tree["archiveSha256"] != SHA256:
         raise ValueError("source changed during proposal inventory")
     headers = {}

@@ -445,7 +445,7 @@ impl LiveWebView for HostOwnedWebView {
 }
 
 fn fence_generation(gen: &AtomicU64, alive: &AtomicBool) -> Result<u64, String> {
-    gen.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+    gen.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
         .map(|previous| previous + 1)
         .map_err(|_| {
             alive.store(false, Ordering::SeqCst);

@@ -87,6 +87,65 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  linux-arm64-maintained-browser:
+    # Real native worker compatibility. Candidate only; never publishes CfT
+    # binaries or promotes the product's runtime locks/redistribution contract.
+    name: Maintained ARM64 browser (internal diagnostic)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native browser dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libnspr4 libasound2t64 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+            libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libatspi2.0-0
+      - name: Fixed source and architecture oracles
+        run: |
+          python3 tools/computer-use-probe/test-maintained-node-sources.py
+          python3 tools/computer-use-probe/test-maintained-browser-diagnostic.py
+      - name: Download fixed candidate sources (not system or latest browser)
+        run: |
+          set -euo pipefail
+          node_source="$GITHUB_WORKSPACE/.cache/computer-use/platform-source-20261012-node22"
+          source="$GITHUB_WORKSPACE/.cache/computer-use/platform-source-20261012-maintenance"
+          mkdir -p "$node_source" "$source" "$GITHUB_WORKSPACE/tools/computer-use-probe/.run"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --max-time 240 \
+            https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-arm64.tar.gz \
+            --output "$node_source/node-v22.23.3-linux-arm64.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --max-time 120 \
+            https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.0.tgz \
+            --output "$source/playwright-core-1.64.0.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --max-time 60 \
+            https://registry.npmjs.org/playwright-core/1.64.0 \
+            --output "$source/playwright-core-1.64.0.metadata.json"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --max-time 300 \
+            'https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip?generation=1790729770695645' \
+            --output "$source/chrome-linux-arm64.zip"
+          # The stager audits the complete archives, fixed SHA256/SRI, bounds,
+          # notices and actual ELF architecture before writing an executable.
+          python3 tools/computer-use-probe/stage-maintained-browser-diagnostic.py \
+            --target linux-arm64 --output "$GITHUB_WORKSPACE/tools/computer-use-probe/.run/ci-arm64-browser"
+      - name: Native ARM64 versions, actions, observations and lifecycle
+        run: |
+          set -euo pipefail
+          bash tools/computer-use-probe/run-maintained-arm64-diagnostic.sh \
+            "$GITHUB_WORKSPACE/tools/computer-use-probe/.run/ci-arm64-browser" \
+            2>&1 | tee "$RUNNER_TEMP/cu-arm64-browser.log"
+      - name: Preserve diagnostic evidence without redistributing binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maintained-arm64-browser-diagnostic
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/cu-arm64-browser.log
+            tools/computer-use-probe/.run/ci-arm64-browser/diagnostic-inputs.json
+            tools/computer-use-probe/.run/ci-arm64-browser/native-identity.json
+            tools/computer-use-probe/.run/ci-arm64-browser/worker-tests.tap
+
   linux-native-sdk-jammy:
     # Actual SDK + product loader module; not full App/desktop/portal acceptance.
     name: Private Linux SDK (${{ matrix.name }})
@@ -264,7 +323,7 @@ jobs:
             name: macOS
           - os: windows-latest
             name: Windows
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             name: Linux
           # Same fmt / clippy / test bar as Linux x64, on the native ARM runner.
           # Parallel with the other legs (does not build release bundles).
@@ -323,12 +382,19 @@ jobs:
             libpipewire-0.3-dev libspa-0.2-dev libclang-dev pipewire-bin meson ninja-build python3-jinja2 \
             labwc xwayland iproute2
       - name: Prepare private native Wayland SDK before App compilation
-        if: matrix.name == 'Linux'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
+          CU_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$CU_TARGET"
+          bash scripts/build-computer-use-pipewire.sh "$RUNNER_TEMP/cu-pw"
           bash scripts/build-computer-use-libei.sh "$RUNNER_TEMP/cu-libei"
-          export PKG_CONFIG_PATH="$RUNNER_TEMP/cu-libei/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-          export LD_LIBRARY_PATH="$RUNNER_TEMP/cu-libei/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/cu-pw/lib/pkgconfig:$RUNNER_TEMP/cu-libei/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/cu-pw/lib:$RUNNER_TEMP/cu-libei/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           bash scripts/check-computer-use-linux-sdk.sh
+          bash scripts/check-computer-use-pipewire-runtime.sh "$RUNNER_TEMP/cu-pw" \
+            "$RUNNER_TEMP/cu-libei" "$RUNNER_TEMP/cu-native" "$CU_TARGET"
+          python3 scripts/stage-computer-use-native-sdk.py "$RUNNER_TEMP/cu-native/runtime" \
+            "$GITHUB_WORKSPACE/src-tauri/resources/computer-use/native-pipewire" --target "$CU_TARGET"
           echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           python3 scripts/test-computer-use-wayland-runner.py

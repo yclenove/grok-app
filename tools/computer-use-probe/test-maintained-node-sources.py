@@ -92,10 +92,10 @@ def pe():
     return bytes(data)
 
 
-def elf():
+def elf(machine=62):
     data = bytearray(64)
     data[:6] = b"\x7fELF\x02\x01"
-    struct.pack_into("<H", data, 18, 62)
+    struct.pack_into("<H", data, 18, machine)
     return bytes(data)
 
 
@@ -122,15 +122,17 @@ def inspect_bytes(contents, suffix=".zip", executable="node.exe", architecture="
 
 
 class NodeInventoryTests(unittest.TestCase):
-    def test_four_native_headers_and_macos_minimum(self):
+    def test_native_headers_include_arm64_and_macos_minimum(self):
         samples = [(pe(), "pe-x86_64"), (elf(), "elf-x86_64"),
                    (macho(0x0100000C), "macho-arm64"), (macho(0x01000007), "macho-x86_64")]
         for binary, architecture in samples:
             self.assertEqual(HEADER(binary)["formatArchitecture"], architecture)
+        self.assertEqual(HEADER(elf(183))["formatArchitecture"], "elf-arm64")
         self.assertEqual(HEADER(samples[2][0])["headerMinimumMacOS"], "13.5.0")
 
     def test_truncated_and_wrong_native_headers_reject(self):
-        for binary in (b"not native", pe()[:63], macho(0x0100000C)[:-1], macho(9)):
+        for binary in (b"not native", pe()[:63], elf(40), elf(243),
+                       macho(0x0100000C)[:-1], macho(9)):
             with self.assertRaises(ValueError):
                 HEADER(binary)
 
@@ -162,6 +164,13 @@ class NodeInventoryTests(unittest.TestCase):
             inspect_bytes(complete, architecture="macho-arm64")
         with self.assertRaisesRegex(ValueError, "complete LICENSE"):
             inspect_bytes(zip_bytes([("root/node.exe", pe())]))
+
+    def test_arm64_node_is_bound_to_its_declared_source_target(self):
+        contents = zip_bytes([("root/bin/node", elf(183)), ("root/LICENSE", LICENSE)])
+        result = inspect_bytes(contents, executable="bin/node", architecture="elf-arm64")
+        self.assertEqual(result["executable"]["formatArchitecture"], "elf-arm64")
+        with self.assertRaisesRegex(ValueError, "does not match target"):
+            inspect_bytes(contents, executable="bin/node", architecture="elf-x86_64")
 
     def test_duplicate_and_unexpected_paths_reject(self):
         for extra in ["root/NODE.exe", "root/../outside", "other/", "root/sub//file"]:
@@ -200,7 +209,7 @@ class BrowserInventoryTests(unittest.TestCase):
 
     def test_directories_participate_in_inventory_and_duplicates(self):
         result = self.inspect_browser([("chrome-linux64/", b""), ("chrome-linux64/sub/", b""),
-                                       ("chrome-linux64/chrome", b"browser")])
+                                       ("chrome-linux64/chrome", elf())])
         self.assertEqual(result["archiveEntries"], 3)
         self.assertEqual(result["entryTypes"], {"directory": 2, "regular": 1})
         self.assertEqual(result["treeFiles"], 1)
@@ -212,6 +221,19 @@ class BrowserInventoryTests(unittest.TestCase):
                                ("chrome-linux64//file", b""), ("other/", b"")]:
             with self.assertRaises(ValueError):
                 self.inspect_browser([(name, contents)])
+
+    def test_linux_browser_rejects_cross_architecture_and_wrong_native_format(self):
+        for root, machine in (("chrome-linux64", 62), ("chrome-linux-arm64", 183)):
+            result = self.inspect_browser([(f"{root}/chrome", elf(machine))], root)
+            expected = "elf-arm64" if machine == 183 else "elf-x86_64"
+            self.assertEqual(result["nativeHeaderRequirements"]["chrome"]["formatArchitecture"], expected)
+            for wrong in (elf(183 if machine == 62 else 62), pe()):
+                with self.subTest(root=root), self.assertRaisesRegex(ValueError, "architecture does not match"):
+                    self.inspect_browser([(f"{root}/chrome", wrong)], root)
+
+    def test_unknown_browser_source_cannot_select_an_arbitrary_architecture(self):
+        with self.assertRaisesRegex(ValueError, "fixed target"):
+            self.inspect_browser([("unknown/chrome", elf())], "unknown")
 
     def test_macos_binary_headers_and_original_archive_identity(self):
         root = "chrome-mac-arm64"

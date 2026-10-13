@@ -217,7 +217,7 @@ impl Registry {
     pub fn reserve(&self) -> Result<NativeView, String> {
         let instance = self
             .sequence
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
             .map_err(|_| "WebView native identity exhausted")?
             + 1;
         Ok(NativeView(

@@ -548,7 +548,7 @@ impl ComputerUseAdapter for WebViewAdapter {
             bound.observation.lock().snapshot = None;
             if bound
                 .execution_epoch
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
                 .is_err()
             {
                 // Never wrap an old dispatch epoch back into authority.

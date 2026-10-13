@@ -56,9 +56,10 @@ def native_header(data):
             raise ValueError("unexpected Node PE architecture")
         return {"formatArchitecture": "pe-x86_64"}
     if data.startswith(b"\x7fELF") and len(data) >= 64:
-        if data[4:6] != b"\x02\x01" or struct.unpack_from("<H", data, 18)[0] != 62:
+        architecture = {62: "x86_64", 183: "arm64"}.get(struct.unpack_from("<H", data, 18)[0])
+        if data[4:6] != b"\x02\x01" or architecture is None:
             raise ValueError("unexpected Node ELF architecture")
-        return {"formatArchitecture": "elf-x86_64"}
+        return {"formatArchitecture": f"elf-{architecture}"}
     if data.startswith(b"\xcf\xfa\xed\xfe") and len(data) >= 32:
         cpu, _, _, commands, command_bytes = struct.unpack_from("<IIIII", data, 4)
         architecture = {0x01000007: "x86_64", 0x0100000C: "arm64"}.get(cpu)

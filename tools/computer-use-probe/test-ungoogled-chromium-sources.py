@@ -26,7 +26,7 @@ class ProposalTests(unittest.TestCase):
     def inspect(self, kind="full_candidate", tree_sha=None, architecture="pe-x86_64", size=None):
         credits = {"creditsCandidates": [{"documentKind": kind}], "packs": []}
         with patch.dict(SUBJECT.CREDITS, {"inspect_pinned_archive": Mock(return_value=(credits, [b"oracle"]))}), \
-                patch.dict(SUBJECT.SOURCE, {"inspect": Mock(return_value={
+                patch.dict(SUBJECT.SOURCE, {"inspect_tree": Mock(return_value={
                     "archiveSha256": tree_sha or SUBJECT.SHA256})}), \
                 patch.dict(SUBJECT.NATIVE, {"native_header": Mock(return_value={
                     "formatArchitecture": architecture})}), \
@@ -66,7 +66,7 @@ class ProposalTests(unittest.TestCase):
 
     def test_original_pin_failure_stops_before_tree_inventory(self):
         inventory = Mock()
-        with patch.dict(SUBJECT.SOURCE, {"inspect": inventory}), self.assertRaisesRegex(ValueError, "SHA256"):
+        with patch.dict(SUBJECT.SOURCE, {"inspect_tree": inventory}), self.assertRaisesRegex(ValueError, "SHA256"):
             SUBJECT.inspect_directory(self.directory)
         inventory.assert_not_called()
 

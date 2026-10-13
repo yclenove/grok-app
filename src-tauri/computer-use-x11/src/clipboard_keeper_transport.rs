@@ -32,7 +32,7 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 struct Permit;
 impl Permit {
     fn acquire() -> Result<Self, String> {
-        LIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        LIVE.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < 8).then_some(n + 1)
         })
         .map_err(|_| "clipboard keeper process capacity is occupied")?;

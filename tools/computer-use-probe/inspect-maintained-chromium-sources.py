@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 SOURCES = {
     "chrome-win64": "chrome.exe",
     "chrome-linux64": "chrome",
+    "chrome-linux-arm64": "chrome",
     "chrome-mac-arm64": "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
     "chrome-mac-x64": "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
 }
@@ -31,7 +32,7 @@ def digest_stream(stream):
     return digest.hexdigest(), size
 
 
-def inspect(path, root, executable):
+def inspect_tree(path, root, executable):
     if path.is_symlink() or not path.is_file():
         raise ValueError("regular source archive required")
     with path.open("rb") as stream:
@@ -79,16 +80,18 @@ def inspect(path, root, executable):
             if size != item.file_size:
                 raise ValueError(f"source size mismatch: {name}")
             rows[relative] = (size, digest)
+        native_header = runpy.run_path(str(Path(__file__).with_name(
+            "inspect-maintained-node-sources.py")))["native_header"]
+        headers = {}
+        if executable in links or executable not in rows:
+            raise ValueError("browser executable must be a regular source file")
         if root.startswith("chrome-mac-"):
             base = f"{root}/Google Chrome for Testing.app/Contents/"
             info = plistlib.loads(archive.read(base + "Info.plist"))
-            native_header = runpy.run_path(str(Path(__file__).with_name(
-                "inspect-maintained-node-sources.py")))["native_header"]
             paths = [executable,
                      "Google Chrome for Testing.app/Contents/Frameworks/"
                      "Google Chrome for Testing Framework.framework/Versions/156.0.8078.4/"
                      "Google Chrome for Testing Framework"]
-            headers = {}
             expected_arch = "macho-arm64" if root.endswith("-arm64") else "macho-x86_64"
             for binary_path in paths:
                 with archive.open(f"{root}/{binary_path}") as stream:
@@ -98,6 +101,13 @@ def inspect(path, root, executable):
             macos_headers = {"plistMinimumSystemVersion": info.get("LSMinimumSystemVersion"),
                              "nativeHeaderRequirements": headers,
                              "scope": "binary metadata only, not OS runtime acceptance"}
+        elif root in SOURCES:
+            expected_arch = {"chrome-win64": "pe-x86_64", "chrome-linux64": "elf-x86_64",
+                             "chrome-linux-arm64": "elf-arm64"}[root]
+            with archive.open(f"{root}/{executable}") as stream:
+                headers[executable] = native_header(stream.read(65536))
+            if headers[executable]["formatArchitecture"] != expected_arch:
+                raise ValueError("browser native architecture does not match source target")
     listing = "".join(f"{name}\t{size}\t{digest}\n" for name, (size, digest) in sorted(rows.items()))
     tree_size = sum(row[0] for row in rows.values())
     return {
@@ -109,6 +119,7 @@ def inspect(path, root, executable):
         "maxPathChars": longest, "largestEntryBytes": largest,
         "compressionRatio": round(tree_size / max(1, archive_size), 6),
         "macosMinimumSystemMetadata": macos_headers,
+        "nativeHeaderRequirements": headers,
         "withinCurrent768MiBQuota": tree_size <= 768 * 1024**2,
         "executableRelpath": executable,
         "executableSha256": rows[executable][1], "executableBytes": rows[executable][0],
@@ -116,6 +127,12 @@ def inspect(path, root, executable):
         "licenseCandidates": [name for name in sorted(rows) if any(
             marker in name.lower() for marker in ("credits.html", "license", "copying", "notice"))],
     }
+
+
+def inspect(path, root, executable):
+    if SOURCES.get(root) != executable:
+        raise ValueError("browser source root/executable does not match a fixed target")
+    return inspect_tree(path, root, executable)
 
 
 if __name__ == "__main__":

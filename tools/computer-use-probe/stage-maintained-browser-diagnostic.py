@@ -1,6 +1,6 @@
 """Stage an exclusive INTERNAL native compatibility diagnostic, not a CU pack.
 
-Fixed Node22/PW1.64 and official unbranded development Chromium157 only.
+Fixed Node22/PW1.64 and explicit Chromium157/CfT156 candidates only.
 No system browser, product locks, seed, manifest, auth, model or user App data.
 Full source checks precede writes; failure evidence is retained, never replaced.
 """
@@ -20,6 +20,7 @@ REPO = HERE.parents[1]
 NODE = runpy.run_path(str(HERE / "inspect-maintained-node-sources.py"))
 PW = runpy.run_path(str(HERE / "inspect-maintained-playwright-sources.py"))
 BROWSER = runpy.run_path(str(HERE / "inspect-unbranded-chromium-sources.py"))
+CFT = runpy.run_path(str(HERE / "inspect-maintained-chromium-sources.py"))
 TARGETS = {
     "windows": ("win-x64", "zip", "node.exe", "pe-x86_64", "Win_x64",
                 "2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71",
@@ -27,6 +28,9 @@ TARGETS = {
     "linux": ("linux-x64", "tar.gz", "bin/node", "elf-x86_64", "Linux_x64",
               "1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af",
               "e3d9fbfb1866494e3515f7885d67ccddebd88d1970f110a6809204fd190609dd"),
+    "linux-arm64": ("linux-arm64", "tar.gz", "bin/node", "elf-arm64", "chrome-linux-arm64",
+                    "5ced2d48d1d7198739b7f86804de0171aefb6823b684b12341d3321afc3cb0b2",
+                    "910a12fff6170202195f72ef3d353801c7063d301ab80b1f51b77d791fda60ce"),
 }
 
 
@@ -160,19 +164,26 @@ def stage(target, output):
     browser_root = REPO / ".cache/computer-use/platform-source-20261012-chromium-snapshot"
     node_report = NODE["inspect"](node_path, node_root, node_exe, native_arch, node_sha)
     pw_report = PW["inspect"](pw_root)
-    metadata_path = browser_root / "source-metadata.json"
-    NODE["regular_source"](metadata_path)
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    source = next(row for row in metadata["archives"] if row["platform"] == platform)
-    browser_path = browser_root / (platform + ".zip")
-    browser_report = BROWSER["inspect_archive"](browser_path, platform, source)
+    if target == "linux-arm64":
+        browser_path = pw_root / "chrome-linux-arm64.zip"
+        browser_report = CFT["inspect"](browser_path, platform, "chrome")
+        if browser_report["archiveBytes"] != 199750508:
+            raise ValueError("fixed ARM64 browser source size mismatch")
+    else:
+        metadata_path = browser_root / "source-metadata.json"
+        NODE["regular_source"](metadata_path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        source = next(row for row in metadata["archives"] if row["platform"] == platform)
+        browser_path = browser_root / (platform + ".zip")
+        browser_report = BROWSER["inspect_archive"](browser_path, platform, source)
     if browser_report["archiveSha256"] != browser_sha:
         raise ValueError("fixed diagnostic browser source SHA mismatch")
     output = exclusive_output(output)
     report = {"scope": "INTERNAL native compatibility diagnostic only, not a runtime pack",
               "target": target, "sources": [node_report, pw_report, browser_report],
               "runtimePrepared": False, "promoted": False, "nativeAcceptance": "not_run",
-              "redistributionGate": "failed_missing_full_notices", "stagingComplete": False}
+              "redistributionGate": ("not_proven_chrome_terms_and_notices" if target == "linux-arm64"
+                                     else "failed_missing_full_notices"), "stagingComplete": False}
     try:
         reader = copy_zip if suffix == "zip" else copy_tar
         node_rows = reader(node_path, node_root, output / "node", {node_exe, "LICENSE"})
