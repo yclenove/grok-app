@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit a relocated, private Linux x64 client SDK (not App/portal acceptance)."""
+"""Audit a relocated private Linux SDK for an explicit target and ABI baseline."""
 from __future__ import annotations
 
 import argparse
@@ -40,11 +40,28 @@ SOURCE_LINES = (
 REQUIRED = frozenset((*LIBRARIES, *NOTICE_HASHES,
                       "share/licenses/pipewire/SOURCE.txt", "share/pipewire/client.conf"))
 SYSTEM_LIBRARIES = frozenset(("libc.so.6", "libm.so.6", "libdl.so.2",
-                             "libpthread.so.0", "librt.so.1", "ld-linux-x86-64.so.2"))
+                             "libpthread.so.0", "librt.so.1"))
+TARGETS = {
+    "x86_64-unknown-linux-gnu": {
+        "arch": "x64", "machine": "Advanced Micro Devices X86-64",
+        "loader": "ld-linux-x86-64.so.2", "glibc": "2.35",
+    },
+    "aarch64-unknown-linux-gnu": {
+        "arch": "arm64", "machine": "AArch64",
+        "loader": "ld-linux-aarch64.so.1", "glibc": "2.39",
+    },
+}
+DEFAULT_TARGET = "x86_64-unknown-linux-gnu"
 
 
 class AuditError(RuntimeError):
     """An incomplete or unsafe SDK must not produce a passing inventory."""
+
+
+def target_policy(target: str) -> dict:
+    if target not in TARGETS:
+        raise AuditError(f"Unsupported private Linux SDK target: {target}")
+    return TARGETS[target]
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -108,19 +125,20 @@ def readelf(path: Path, option: str) -> str:
     return result.stdout
 
 
-def inspect_elf(path: Path, glibc_max: str) -> dict:
+def inspect_elf(path: Path, glibc_max: str, target: str = DEFAULT_TARGET) -> dict:
+    policy = target_policy(target)
     with path.open("rb") as stream:
         if stream.read(4) != b"\x7fELF":
             raise AuditError(f"Not an ELF library: {path.name}")
     header = readelf(path, "--file-header")
     for field in (r"Class:\s+ELF64\b", r"Data:.*little endian",
-                  r"Machine:\s+Advanced Micro Devices X86-64\b", r"Type:\s+DYN\b"):
+                  rf"Machine:\s+{re.escape(policy['machine'])}\b", r"Type:\s+DYN\b"):
         if not re.search(field, header):
-            raise AuditError(f"Expected Linux x64 shared ELF: {path.name}")
+            raise AuditError(f"Expected Linux {policy['arch']} shared ELF: {path.name}")
     dynamic = readelf(path, "--dynamic")
     needed = re.findall(r"\(NEEDED\).*\[([^\]]+)\]", dynamic)
     for library in needed:
-        if library not in SYSTEM_LIBRARIES | {"libpipewire-0.3.so.0"}:
+        if library not in SYSTEM_LIBRARIES | {policy["loader"], "libpipewire-0.3.so.0"}:
             raise AuditError(f"Unapproved dynamic dependency {library} in {path.name}")
     if re.search(r"\((?:RPATH|RUNPATH)\)", dynamic):
         raise AuditError(f"Build/ambient search path retained in {path.name}")
@@ -137,8 +155,12 @@ def inspect_elf(path: Path, glibc_max: str) -> dict:
             "glibcMaxRequired": max(required, key=version_tuple) if required else None}
 
 
-def audit(root: Path, glibc_max: str = "2.35") -> dict:
+def audit(root: Path, glibc_max: str = None, target: str = DEFAULT_TARGET) -> dict:
+    policy = target_policy(target)
+    glibc_max = policy["glibc"] if glibc_max is None else glibc_max
     version_tuple(glibc_max)
+    if version_tuple(glibc_max) > version_tuple(policy["glibc"]):
+        raise AuditError(f"Requested ABI baseline exceeds {target} policy {policy['glibc']}")
     files = runtime_files(root)
     hashes = {relative: digest(path) for relative, path in files.items()}
     for relative, expected in NOTICE_HASHES.items():
@@ -151,9 +173,10 @@ def audit(root: Path, glibc_max: str = "2.35") -> dict:
     for relative, path in sorted(files.items()):
         entry = {"path": relative, "bytes": path.stat().st_size, "sha256": hashes[relative]}
         if relative in LIBRARIES:
-            entry["elf"] = inspect_elf(path, glibc_max)
+            entry["elf"] = inspect_elf(path, glibc_max, target)
         inventory.append(entry)
-    return {"schemaVersion": 1, "scope": "private-linux-x64-client-sdk",
+    return {"schemaVersion": 1, "scope": f"private-linux-{policy['arch']}-client-sdk",
+            "target": target,
             "pipewireSource": "1.6.9+Debian-1.6.9-2-security-patch", "libeiStaticVersion": "1.5.0",
             "glibcBaseline": glibc_max, "runtimeRoot": str(root), "files": inventory,
             "installedAppAcceptance": False, "portalAcceptance": False,
@@ -163,14 +186,15 @@ def audit(root: Path, glibc_max: str = "2.35") -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runtime", type=Path)
-    parser.add_argument("--glibc-max", default="2.35")
+    parser.add_argument("--target", choices=TARGETS, default=DEFAULT_TARGET)
+    parser.add_argument("--glibc-max")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         canonical_directory(args.output.parent)
         if args.output.exists() or args.output.is_symlink():
             raise AuditError("Inventory output must be new; refusing overwrite")
-        report = audit(args.runtime, args.glibc_max)
+        report = audit(args.runtime, args.glibc_max, args.target)
         with args.output.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
             stream.write("\n")

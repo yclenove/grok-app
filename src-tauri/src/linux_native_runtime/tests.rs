@@ -54,7 +54,27 @@ fn fixture_manifest(root: &Path) -> serde_json::Value {
             json!({"path":path,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
         })
         .collect::<Vec<_>>();
-    json!({"schemaVersion":1,"target":"x86_64-unknown-linux-gnu","pipewireVersion":"1.6.9","glibcBaseline":"2.35","files":files})
+    let (target, glibc) = native_policy(std::env::consts::ARCH).unwrap();
+    json!({"schemaVersion":1,"target":target,"pipewireVersion":"1.6.9","glibcBaseline":glibc,"files":files})
+}
+
+#[test]
+fn architecture_and_abi_policy_must_match_the_compiled_target() {
+    let fixture = Fixture::new();
+    let mut manifest = fixture_manifest(&fixture.0);
+    for (arch, target, baseline, foreign_arch) in [
+        ("x86_64", "x86_64-unknown-linux-gnu", "2.35", "aarch64"),
+        ("aarch64", "aarch64-unknown-linux-gnu", "2.39", "x86_64"),
+    ] {
+        manifest["target"] = json!(target);
+        manifest["glibcBaseline"] = json!(baseline);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        assert!(parse_manifest_for_arch(&bytes, arch).is_ok());
+        assert!(parse_manifest_for_arch(&bytes, foreign_arch).is_err());
+        assert!(parse_manifest_for_arch(&bytes, "riscv64").is_err());
+        manifest["glibcBaseline"] = json!("2.99");
+        assert!(parse_manifest_for_arch(&serde_json::to_vec(&manifest).unwrap(), arch).is_err());
+    }
 }
 
 #[test]

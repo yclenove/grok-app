@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Native loader + module proof; no desktop, compositor, portal or remote socket.
 set -euo pipefail
-if [[ $# != 3 || $1 != /* || $2 != /* || $3 != /* || -e $3 || -L $3 ]]; then
-  echo 'Usage: check-computer-use-pipewire-runtime.sh /private/PW-SDK /private/EI-SDK /new/output' >&2
+if [[ ( $# != 3 && $# != 4 ) || $1 != /* || $2 != /* || $3 != /* || -e $3 || -L $3 ]]; then
+  echo 'Usage: check-computer-use-pipewire-runtime.sh /private/PW-SDK /private/EI-SDK /new/output [target]' >&2
   exit 2
 fi
 sdk=$1
 ei_sdk=$2
 out=$3
+target=${4:-x86_64-unknown-linux-gnu}
+case "$target:$(uname -m)" in
+  x86_64-unknown-linux-gnu:x86_64|aarch64-unknown-linux-gnu:aarch64) ;;
+  *) echo 'Private SDK smoke requires a matching native Linux target' >&2; exit 2 ;;
+esac
 for directory in "$sdk" "$ei_sdk"; do
   [[ -d $directory && ! -L $directory && $(realpath -e "$directory") == "$directory" ]] || exit 2
 done
@@ -87,7 +92,7 @@ for library in "$runtime/lib/libpipewire-0.3.so.0" "$runtime/lib/pipewire-0.3/"*
   "$runtime/lib/spa-0.2/support/libspa-support.so" "$runtime/lib/spa-0.2/audioconvert/libspa-audioconvert.so"; do
   patchelf --remove-rpath "$library"
 done
-python3 "$repo/scripts/audit-computer-use-native-sdk.py" "$runtime" --glibc-max 2.35 \
+python3 "$repo/scripts/audit-computer-use-native-sdk.py" "$runtime" --target "$target" \
   --output "$out/runtime-inventory.json"
 for prefix in "$sdk" "$runtime"; do
   env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME="$out/empty-config" \

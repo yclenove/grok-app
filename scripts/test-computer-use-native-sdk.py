@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic audit failures; only the explicit native smoke proves loading."""
 import importlib.util
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -98,6 +99,45 @@ class NativeSdkAudit(unittest.TestCase):
         with self.assertRaisesRegex(sdk.AuditError, "Linux x64"):
             sdk.audit(self.root)
 
+    def test_arm64_inventory_requires_arm64_elf_and_its_own_loader(self):
+        target = "aarch64-unknown-linux-gnu"
+        def arm_reader(path, option):
+            if option == "--file-header":
+                return HEADER.replace("Advanced Micro Devices X86-64", "AArch64")
+            if option == "--dynamic":
+                return DYNAMIC + "(NEEDED) Shared library: [ld-linux-aarch64.so.1]\n"
+            return "Name: GLIBC_2.39\n"
+        self.reader.side_effect = arm_reader
+        report = sdk.audit(self.root, target=target)
+        self.assertEqual(report["target"], target)
+        self.assertEqual(report["glibcBaseline"], "2.39")
+        self.assertEqual(report["scope"], "private-linux-arm64-client-sdk")
+        with self.assertRaisesRegex(sdk.AuditError, "Linux x64"):
+            sdk.audit(self.root)
+        for bad_header, bad_dynamic, bad_versions, error in (
+            (HEADER, arm_reader(None, "--dynamic"), "Name: GLIBC_2.39\n", "Linux arm64"),
+            (arm_reader(None, "--file-header"), DYNAMIC + "(NEEDED) Shared library: [ld-linux-x86-64.so.2]\n", "Name: GLIBC_2.39\n", "Unapproved dynamic"),
+            (arm_reader(None, "--file-header"), DYNAMIC, "Name: GLIBC_2.40\n", "exceeds baseline"),
+        ):
+            with self.subTest(error=error):
+                self.reader.side_effect = lambda path, option: {
+                    "--file-header": bad_header, "--dynamic": bad_dynamic,
+                    "--version-info": bad_versions,
+                }[option]
+                with self.assertRaisesRegex(sdk.AuditError, error):
+                    sdk.audit(self.root, target=target)
+
+    def test_target_or_baseline_cannot_be_changed_to_accept_incompatible_libraries(self):
+        for target, maximum, error in (
+            (sdk.DEFAULT_TARGET, "2.39", "exceeds.*policy"),
+            ("aarch64-unknown-linux-gnu", "2.40", "exceeds.*policy"),
+            ("riscv64-unknown-linux-gnu", None, "Unsupported"),
+        ):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(sdk.AuditError, error):
+                    sdk.audit(self.root, maximum, target)
+        self.reader.assert_not_called()
+
     def test_modified_license_patch_or_provenance_is_rejected(self):
         for relative in (*sdk.NOTICE_HASHES, "share/licenses/pipewire/SOURCE.txt"):
             with self.subTest(relative=relative):
@@ -152,12 +192,13 @@ class NativeSdkAudit(unittest.TestCase):
             library = directory / "fixture.so"
             source.write_text("#include <stdio.h>\nvoid fixture(void) { puts(\"inert\"); }\n")
             subprocess.run(["cc", "-shared", "-fPIC", str(source), "-o", str(library)], check=True)
-            self.assertIn("libc.so.6", sdk.inspect_elf(library, "2.99")["needed"])
+            target = {"x86_64": sdk.DEFAULT_TARGET, "aarch64": "aarch64-unknown-linux-gnu"}[platform.machine()]
+            self.assertIn("libc.so.6", sdk.inspect_elf(library, "2.99", target)["needed"])
             with self.assertRaisesRegex(sdk.AuditError, "exceeds baseline"):
-                sdk.inspect_elf(library, "0.1")
+                sdk.inspect_elf(library, "0.1", target)
             library.write_bytes(b"\x7fELFtruncated")
             with self.assertRaisesRegex(sdk.AuditError, "Malformed ELF"):
-                sdk.inspect_elf(library, "2.35")
+                sdk.inspect_elf(library, "2.35", target)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

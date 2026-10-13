@@ -17,8 +17,8 @@ SPEC.loader.exec_module(audit)
 
 def manifest(report):
     # Do not ship build-machine paths or claim installed/capture acceptance.
-    return {"schemaVersion": 1, "target": "x86_64-unknown-linux-gnu",
-            "pipewireVersion": "1.6.9", "glibcBaseline": "2.35",
+    return {"schemaVersion": 1, "target": report["target"],
+            "pipewireVersion": "1.6.9", "glibcBaseline": report["glibcBaseline"],
             "files": [{key: item[key] for key in ("path", "bytes", "sha256")}
                       for item in report["files"]]}
 
@@ -39,10 +39,10 @@ def resource_modes(destination: Path, normalize=False):
             raise audit.AuditError("Existing native resource permissions differ; refusing repair")
 
 
-def stage(runtime: Path, destination: Path):
+def stage(runtime: Path, destination: Path, target: str = audit.DEFAULT_TARGET):
     if not destination.is_absolute():
         raise audit.AuditError("Absolute native resource destination required")
-    report = audit.audit(runtime, "2.35")
+    report = audit.audit(runtime, target=target)
     expected = manifest(report)
     if destination.exists() or destination.is_symlink():
         audit.canonical_directory(destination)
@@ -51,7 +51,7 @@ def stage(runtime: Path, destination: Path):
         index = destination / "manifest.json"
         if index.is_symlink() or not index.is_file():
             raise audit.AuditError("Native manifest must be a regular file")
-        actual = manifest(audit.audit(destination / "runtime", "2.35"))
+        actual = manifest(audit.audit(destination / "runtime", target=target))
         if actual != expected or json.loads(index.read_text(encoding="utf-8")) != expected:
             raise audit.AuditError("Existing native resource differs; refusing overwrite")
         resource_modes(destination)
@@ -62,7 +62,7 @@ def stage(runtime: Path, destination: Path):
     # silently dereferenced into apparently approved regular files.
     shutil.copytree(runtime, destination / "runtime", symlinks=True)
     # Re-audit copies before publishing their compile-time manifest.
-    if manifest(audit.audit(destination / "runtime", "2.35")) != expected:
+    if manifest(audit.audit(destination / "runtime", target=target)) != expected:
         raise audit.AuditError("Native resource changed during copy")
     with (destination / "manifest.json").open("x", encoding="utf-8") as stream:
         json.dump(expected, stream, indent=2)
@@ -76,9 +76,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runtime", type=Path)
     parser.add_argument("destination", type=Path)
+    parser.add_argument("--target", choices=audit.TARGETS, default=audit.DEFAULT_TARGET)
     args = parser.parse_args()
     try:
-        print(stage(args.runtime, args.destination))
+        print(stage(args.runtime, args.destination, args.target))
         return 0
     except (audit.AuditError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"Native SDK staging failed: {error}", file=sys.stderr)

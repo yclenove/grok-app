@@ -1,6 +1,6 @@
 # Computer Use 当前可用性与交付顺序
 
-当前进度见[SDK / FFmpeg与同步预检](2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选、完整NOTICE/媒体/源提供仍开放；原候选07/08、18原错误与原R1–R4完整范围保持active/partial。fork/源仓库已fetch、未合入，下一批先保存源码快照、处理冲突和回归。App144真人任务仍未发送；App11+/CU受管Mac14+、旧用户包/home保持，以下为历史批次。
+当前进度：fork/源仓库已合入并推送 `8107bb07`，完整本地回归通过，见[同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)。当前推进 [Linux SDK 双架构](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)，保留 x64/Jammy 并接 ARM64/Noble 的 SDK/ABI/loader 与原生 CI；ARM64 浏览器资源仍开放。完整 NOTICE/媒体/源提供、维护运行时晋升及原 R1–R4 全范围仍 active/partial。App144 真人任务仍未发送，App11+/CU受管Mac14+及原用户home保持；以下为历史批次。
 
 2026-10-13 最新[复制API通知与省略记录](2026-10-13-computer-use-notice-supplements-checkpoint.md)：38完整头文件/四manifest/原版权块已验，39880-byte partial补充绑定全部实际声明与完整许可；17省略记录分为10配置真实许可、3复制API/registry provenance未证、4 source/shipping义务未解决。411工具tests/0skip通过不作完整通知或产品验收；196目录问题/copied-generated/源提供/安全策略与原R1–R4全部门禁仍开放。App11+/CU受管Mac14+和产品旧runtime/pins/四锁/seed/App144/home保持。
 

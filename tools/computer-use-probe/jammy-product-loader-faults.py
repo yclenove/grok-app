@@ -44,7 +44,7 @@ def run(binary, resources, output, fallback):
         native.parent.mkdir(parents=True)
         shutil.copy2(binary, exe)
         shutil.copytree(resources, native)
-        env = dict(os.environ, LD_LIBRARY_PATH=str(fallback.parent) + ":/usr/lib/x86_64-linux-gnu",
+        env = dict(os.environ, LD_LIBRARY_PATH=str(fallback.parent),
                    GROK_CU_LOADER_EXPECTED_RESOURCE=str(native))
         library = native / "runtime/lib/libpipewire-0.3.so.0"
         if name == "ambient-overrides":
@@ -90,8 +90,10 @@ def run(binary, resources, output, fallback):
                 "stdout": completed.stdout, "stderr": completed.stderr}
         results.append(item)
         print(json.dumps(item, ensure_ascii=True))
-    report = {"schemaVersion": 1, "scope": "actual-product-loader-module-on-jammy",
-              "glibc": "2.35", "appAcceptance": False, "portalAcceptance": False,
+    manifest = json.loads((resources / "manifest.json").read_text())
+    report = {"schemaVersion": 1, "scope": "actual-product-loader-module-on-linux",
+              "target": manifest["target"], "glibc": manifest["glibcBaseline"],
+              "appAcceptance": False, "portalAcceptance": False,
               "desktopAcceptance": False, "binarySha256": digest(binary), "cases": results,
               "passed": all(item["passed"] for item in results)}
     with (output / "results.json").open("x") as stream:

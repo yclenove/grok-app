@@ -3,7 +3,7 @@ name: ci
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, feat/computer-use-implementation]
   pull_request:
 
 concurrency:
@@ -89,7 +89,26 @@ jobs:
 
   linux-native-sdk-jammy:
     # Actual SDK + product loader module; not full App/desktop/portal acceptance.
-    runs-on: ubuntu-22.04
+    name: Private Linux SDK (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Jammy-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu:22.04
+            glibc: glibc 2.35
+            arch: x86_64
+            multiarch: x86_64-linux-gnu
+          - name: Noble-ARM64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu:24.04
+            glibc: glibc 2.39
+            arch: aarch64
+            multiarch: aarch64-linux-gnu
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -98,8 +117,9 @@ jobs:
         run: |
           set -euo pipefail
           source /etc/os-release
-          test "$ID:$VERSION_ID" = ubuntu:22.04
-          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.35'
+          test "$ID:$VERSION_ID" = '${{ matrix.os }}'
+          test "$(getconf GNU_LIBC_VERSION)" = '${{ matrix.glibc }}'
+          test "$(uname -m)" = '${{ matrix.arch }}'
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config curl meson ninja-build python3-jinja2 \
@@ -112,7 +132,7 @@ jobs:
           python3 scripts/test-stage-computer-use-native-sdk.py
           python3 scripts/test-computer-use-wayland-runner.py
           bash -n scripts/build-computer-use-pipewire.sh scripts/check-computer-use-pipewire-runtime.sh
-      - name: Native build, private loading and relocation on glibc 2.35
+      - name: Native build, private loading and relocation on the target baseline
         run: |
           set -euo pipefail
           bash scripts/build-computer-use-pipewire.sh "$RUNNER_TEMP/cu-pw-jammy" 2>&1 | tee "$RUNNER_TEMP/cu-pw-jammy.log"
@@ -121,6 +141,7 @@ jobs:
             bash scripts/check-computer-use-linux-sdk.sh
           bash scripts/check-computer-use-pipewire-runtime.sh \
             "$RUNNER_TEMP/cu-pw-jammy" "$RUNNER_TEMP/cu-ei-jammy" "$RUNNER_TEMP/cu-sdk-jammy-proof" \
+            '${{ matrix.target }}' \
             2>&1 | tee "$RUNNER_TEMP/cu-sdk-jammy-proof.log"
           python3 tools/computer-use-probe/jammy-sdk-runtime-faults.py \
             "$RUNNER_TEMP/cu-sdk-jammy-proof" "$RUNNER_TEMP/cu-sdk-jammy-faults"
@@ -130,7 +151,7 @@ jobs:
           fixture=tools/computer-use-probe/native-loader
           mkdir -p "$fixture/resources/computer-use"
           python3 scripts/stage-computer-use-native-sdk.py "$RUNNER_TEMP/cu-sdk-jammy-proof/runtime" \
-            "$GITHUB_WORKSPACE/$fixture/resources/computer-use/native-pipewire"
+            "$GITHUB_WORKSPACE/$fixture/resources/computer-use/native-pipewire" --target '${{ matrix.target }}'
           export GROK_CU_LOADER_LINK_SDK="$RUNNER_TEMP/cu-pw-jammy"
           cargo build --manifest-path "$fixture/Cargo.toml" --locked --release
           LD_LIBRARY_PATH="$GITHUB_WORKSPACE/$fixture/resources/computer-use/native-pipewire/runtime/lib" \
@@ -139,12 +160,12 @@ jobs:
           python3 tools/computer-use-probe/jammy-product-loader-faults.py \
             "$fixture/target/release/grok-native-loader-probe" \
             "$fixture/resources/computer-use/native-pipewire" "$RUNNER_TEMP/cu-loader-jammy" \
-            --fallback-library /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0
+            --fallback-library '/usr/lib/${{ matrix.multiarch }}/libpipewire-0.3.so.0'
       - name: Preserve SDK evidence (not runtime release artifacts)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-native-sdk-jammy-evidence
+          name: linux-native-sdk-${{ matrix.name }}-evidence
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/cu-*-jammy*.log

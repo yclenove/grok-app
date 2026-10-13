@@ -10,10 +10,12 @@ pub fn configure(manifest_dir: &std::path::Path) {
     let manifest = manifest_dir.join("resources/computer-use/native-pipewire/manifest.json");
     println!("cargo:rerun-if-changed={}", manifest.display());
     if manifest.is_file() {
-        assert_eq!(
-            std::env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
-            Ok("x86_64"),
-            "Private PipeWire resources support only Linux x64"
+        assert!(
+            matches!(
+                std::env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+                Ok("x86_64" | "aarch64")
+            ),
+            "Private PipeWire resources require Linux x64 or ARM64"
         );
         println!("cargo:rustc-cfg=grok_private_pipewire");
         // DT_RPATH, not RUNPATH: private PW must precede a host-WebKit
@@ -22,6 +24,8 @@ pub fn configure(manifest_dir: &std::path::Path) {
     } else if std::env::var("PROFILE").as_deref() == Ok("release")
         || std::env::var("GROK_CU_BUNDLE_TARGET").as_deref() == Ok("x86_64-unknown-linux-gnu")
         || std::env::var("TAURI_ENV_TARGET_TRIPLE").as_deref() == Ok("x86_64-unknown-linux-gnu")
+        || std::env::var("GROK_CU_BUNDLE_TARGET").as_deref() == Ok("aarch64-unknown-linux-gnu")
+        || std::env::var("TAURI_ENV_TARGET_TRIPLE").as_deref() == Ok("aarch64-unknown-linux-gnu")
     {
         panic!("Linux bundle requires staged private PipeWire; see docs/BUILD.md");
     }

@@ -72,6 +72,9 @@ jobs:
             args: ""
             name: Linux-x64
             cu-target: x86_64-unknown-linux-gnu
+            native-os: ubuntu:22.04
+            native-glibc: glibc 2.35
+            native-arch: x86_64
           # Native ARM64. Empty args = host triple (aarch64-unknown-linux-gnu),
           # same pattern as Linux-x64. Tauri names:
           #   Grok_<ver>_aarch64.AppImage
@@ -83,6 +86,9 @@ jobs:
             # Keep the native target explicit. CU must fail its unsupported
             # runtime gate rather than bundle the Linux x64 seed on ARM64.
             cu-target: aarch64-unknown-linux-gnu
+            native-os: ubuntu:24.04
+            native-glibc: glibc 2.39
+            native-arch: aarch64
 
     runs-on: ${{ matrix.platform }}
     name: Build ${{ matrix.name }}
@@ -147,14 +153,16 @@ jobs:
         run: |
           set -euo pipefail
           source /etc/os-release
-          test "$ID:$VERSION_ID" = ubuntu:22.04
-          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.35'
+          test "$ID:$VERSION_ID" = '${{ matrix.native-os }}'
+          test "$(getconf GNU_LIBC_VERSION)" = '${{ matrix.native-glibc }}'
+          test "$(uname -m)" = '${{ matrix.native-arch }}'
           bash scripts/build-computer-use-pipewire.sh "$RUNNER_TEMP/cu-pw-release"
           bash scripts/build-computer-use-libei.sh "$RUNNER_TEMP/cu-ei-release"
           PKG_CONFIG_PATH="$RUNNER_TEMP/cu-pw-release/lib/pkgconfig:$RUNNER_TEMP/cu-ei-release/lib/pkgconfig" \
             bash scripts/check-computer-use-linux-sdk.sh
           bash scripts/check-computer-use-pipewire-runtime.sh \
-            "$RUNNER_TEMP/cu-pw-release" "$RUNNER_TEMP/cu-ei-release" "$RUNNER_TEMP/cu-native-release-proof"
+            "$RUNNER_TEMP/cu-pw-release" "$RUNNER_TEMP/cu-ei-release" "$RUNNER_TEMP/cu-native-release-proof" \
+            '${{ matrix.cu-target }}'
           {
             echo "PKG_CONFIG_PATH=$RUNNER_TEMP/cu-pw-release/lib/pkgconfig:$RUNNER_TEMP/cu-ei-release/lib/pkgconfig"
             echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cu-pw-release/lib"

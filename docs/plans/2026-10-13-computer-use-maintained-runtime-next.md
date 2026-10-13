@@ -1,5 +1,11 @@
 # CU 维护版运行时：下一批落地顺序
 
+最新同步已完成：[fork / 源仓库同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)，
+提交 `8107bb07` 已推送。当前处理 [Linux SDK 双架构检查点](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：
+明确 x64/Jammy 与 ARM64/Noble 的独立 SDK/ABI/loader 合同及原生 CI，
+ARM64 浏览器资源仍开放。原 R1–R4、全部平台/surface/安装/真人/12h 范围保持；
+下方 fetch-only、未提交和旧哈希属于历史批次，不作为当前下一步状态。
+
 当前R1：[SDK / FFmpeg与同步预检](2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)。准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选，四平台记录参数默认走FFmpeg静态库分支，源码提供与完整NOTICE仍开放；原候选07/08和18原错误保持。fork/源仓库已fetch、未合入，下一批先保存CU源码快照、处理冲突和回归，再继续原R1–R4全部范围。App11+/CU受管Mac14+、旧产品保持，以下为原各批证据。
 
 R1最新[SwiftShader MD5/libbacktrace特殊通知](2026-10-13-computer-use-swiftshader-copied-checkpoint.md)：13准确源/88774 bytes/四manifest与raw batches已验；五MD5完整原许可和两backtrace inline permission绑定，独立01/02的10197-byte片段与整个报告一致，437工具tests/0skip通过。Boost按需下载pins、libbacktrace Gitlink及CMake debug分支已查清源码来源，未证明binary排除或完整NOTICE；原八目录错误/其它缺口保持。继续其余copied/generated来源/ANGLE义务、完整四平台NOTICE/SBOM/源码提供/LGPL-media/稳定安全策略，再最终维护pack及原R2–R4全部门禁；App11+/CU受管Mac14+与旧产品保持，整体active/partial。

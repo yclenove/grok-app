@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import process from "node:process";
 import { computerUseTarget } from "./computer-use-targets.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -59,15 +60,16 @@ function run(cmd, args) {
 }
 
 {
-  if (target.arch === "x86_64-linux") {
+  if (target.triple.endsWith("-unknown-linux-gnu")) {
     if (!process.env.GROK_CU_PIPEWIRE_RUNTIME) {
-      process.stderr.write("GROK_CU_PIPEWIRE_RUNTIME must point at an audited Jammy-compatible private runtime before Linux bundling.\n");
+      process.stderr.write(`GROK_CU_PIPEWIRE_RUNTIME must point at an audited private runtime for ${target.triple} before Linux bundling.\n`);
       process.exit(1);
     }
     run("python3", [
       join(ROOT, "scripts", "stage-computer-use-native-sdk.py"),
       process.env.GROK_CU_PIPEWIRE_RUNTIME,
       join(ROOT, "src-tauri", "resources", "computer-use", "native-pipewire"),
+      "--target", target.triple,
     ]);
   }
   run(process.execPath, [join(ROOT, "scripts", "prepare-computer-use-extension.mjs"), "--check"]);

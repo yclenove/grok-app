@@ -123,7 +123,14 @@ export GROK_CU_PIPEWIRE_RUNTIME=/absolute/NEW-OUTPUT/runtime
 ```
 
 该入口只输出客户端runtime的许可/SHA/ELF/ABI清单，并验证实际私有装载。
-它不是完整App的安装或桌面验收。CI新增ubuntu-22.04独立SDK job；当前尚未远端运行。
+它不是完整App的安装或桌面验收。SDK支持显式目标：x64 使用 Ubuntu22.04 /
+glibc2.35，ARM64 使用 fork 已声明的 Ubuntu24.04 / glibc2.39；两者的 ELF、
+动态 loader、manifest 和产品加载策略分别核验，不能互相替换。
+ARM64 checker 在第四个参数传 `aarch64-unknown-linux-gnu`，stager 传
+`--target aarch64-unknown-linux-gnu`；checker 要求匹配的原生机器。
+CI 同时保留 Jammy-x64 并加入 Noble-ARM64 原生 SDK / 产品 loader 矩阵；
+CU 开发分支 push 也执行该门禁，远端结果按实际 run 记录。
+**ARM64 受管浏览器资源仍未补齐，因此整套 ARM64 Release 尚不可交付。**
 
 最新[产品私有loader检查点](plans/2026-10-12-computer-use-product-loader-checkpoint.md)：
 DT_RPATH、安装/迁移/Cargo布局、实际库身份、16件资源和18个ELF正/负场景已验。

@@ -45,6 +45,22 @@ class NativeSdkStage(unittest.TestCase):
         self.assertIn("reused", stage.stage(self.runtime, self.destination))
         self.assertEqual(index.read_bytes(), before)
 
+    def test_arm64_manifest_and_copy_are_bound_to_the_explicit_architecture(self):
+        target = "aarch64-unknown-linux-gnu"
+        stage.stage(self.runtime, self.destination, target)
+        value = json.loads((self.destination / "manifest.json").read_text())
+        self.assertEqual(value["target"], target)
+        self.assertEqual(value["glibcBaseline"], "2.39")
+        original = (self.destination / "manifest.json").read_bytes()
+        with self.assertRaisesRegex(stage.audit.AuditError, "refusing overwrite"):
+            stage.stage(self.runtime, self.destination)
+        self.assertEqual((self.destination / "manifest.json").read_bytes(), original)
+
+    def test_unknown_target_does_not_create_destination(self):
+        with self.assertRaisesRegex(stage.audit.AuditError, "Unsupported"):
+            stage.stage(self.runtime, self.destination, "riscv64-unknown-linux-gnu")
+        self.assertFalse(self.destination.exists())
+
     @unittest.skipUnless(sys.platform == "linux", "POSIX package permission contract")
     def test_root_owned_package_copy_readable_by_ordinary_user_without_source_changes(self):
         source_modes = {path: stat.S_IMODE(path.stat().st_mode) for path in (self.runtime, *self.runtime.rglob("*"))}

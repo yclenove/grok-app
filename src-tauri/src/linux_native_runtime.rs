@@ -14,6 +14,14 @@ use std::path::{Component, Path, PathBuf};
 
 const RESOURCE: &str = "resources/computer-use/native-pipewire";
 
+fn native_policy(arch: &str) -> Result<(&'static str, &'static str), String> {
+    match arch {
+        "x86_64" => Ok(("x86_64-unknown-linux-gnu", "2.35")),
+        "aarch64" => Ok(("aarch64-unknown-linux-gnu", "2.39")),
+        _ => Err("Unsupported private PipeWire target architecture".into()),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Manifest {
@@ -33,11 +41,16 @@ struct FileRecord {
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
+    parse_manifest_for_arch(bytes, std::env::consts::ARCH)
+}
+
+fn parse_manifest_for_arch(bytes: &[u8], arch: &str) -> Result<Manifest, String> {
+    let (target, glibc_baseline) = native_policy(arch)?;
     let manifest: Manifest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if manifest.schema_version != 1
-        || manifest.target != "x86_64-unknown-linux-gnu"
+        || manifest.target != target
         || manifest.pipewire_version != "1.6.9"
-        || manifest.glibc_baseline != "2.35"
+        || manifest.glibc_baseline != glibc_baseline
         || manifest.files.len() != 16
     {
         return Err("Private PipeWire manifest policy mismatch".into());

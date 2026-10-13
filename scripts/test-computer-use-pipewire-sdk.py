@@ -2,6 +2,7 @@
 """Private SDK builder contracts, not native or installed acceptance."""
 from pathlib import Path
 import os
+import platform
 import subprocess
 import shutil
 import sys
@@ -122,8 +123,19 @@ class PipeWireSdkContract(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "linux", "requires Linux shell tooling")
 class RuntimeCheckerContract(unittest.TestCase):
     def invoke(self, arguments, env=None):
+        if len(arguments) == 3 and platform.machine() == "aarch64":
+            arguments = [*arguments, "aarch64-unknown-linux-gnu"]
         return subprocess.run([BASH, str(CHECKER), *arguments], env=env,
                               capture_output=True, text=True, timeout=15)
+
+    def test_foreign_native_target_rejected_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "not-created"
+            foreign = "x86_64-unknown-linux-gnu" if platform.machine() == "aarch64" else "aarch64-unknown-linux-gnu"
+            result = self.invoke([temp, temp, str(output), foreign])
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("matching native Linux target", result.stderr)
+            self.assertFalse(output.exists())
 
     def test_existing_output_never_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:

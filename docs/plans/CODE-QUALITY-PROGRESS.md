@@ -1,5 +1,7 @@
 # Code Quality Remediation — Progress Ledger
 
+2026-10-13 [Linux SDK 双架构](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：SDK auditor/stager、编译架构 manifest、link policy 与 CI/release baseline 分别绑定 Jammy-x64/2.35、Noble-ARM64/2.39。隔离 Jammy 当前源码40 Python/0skip、10产品loader Rust/0ignore、strict及同ELF18故障场景通过；Node15/0skip、fmt/targeted lint/AST/YAML实例通过。ARM64本地not_run/交原生CI，受管浏览器ARM64资源仍缺，完整发行和原R1–R4保持partial。App+Workbench13552/≥1000源码80未增长；首败保留，owners终态后清14规则case副本，逻辑65796778 bytes/ext4观测增67620864 bytes，Windows物理回收未知，4链接/FIFO案例暂缓。
+
 2026-10-13 [fork / 源仓库同步](2026-10-13-computer-use-upstream-sync-checkpoint.md)：保留两边改动并完成合入，收尾fetch两边main未移动；新增上下文切换CU fence与领域hook / 会话响应隔离回归。App+Workbench13552，比原13573减少21，≥1000源码80，未抬门禁。743文件/8578前端、68定向、Windows manifested harness 2399 passed / 0 failed / 87 ignored、fmt/strict clippy/类型/lint/生产UI构建/质量门禁通过，首败及复现保留。原owners均终态后清两份旧incremental，逻辑5849500038 bytes、H可用即时观察增2394234880 bytes；当前包/home/source/seed/证据保留。提交/push身份见分支Git记录及同批回执，完整交付及Linux ARM64发行兼容仍partial；以下fetch-only及旧哈希为历史，不套用为合并后基线。
 
 2026-10-13 [SDK / FFmpeg与同步预检](2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：两个原采集owner均exit0；准确3GB Linux SDK整包SHA、四许可/manifest和FFmpeg完整选定源及四记录参数复验。最终独立03/04整个报告/源文本/15327-byte片段一致；未接统一候选、未证明binary/完整NOTICE/源码提供。两边main已fetch、未合入；committed HEAD预检冲突fork2/源6，tracked WIP重叠7/36，HEAD/index/235文件前后身份保持。
