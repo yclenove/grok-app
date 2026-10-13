@@ -400,10 +400,15 @@ pub async fn execute_type_text_x11(
         .map(|r| r.keycode)
         .unwrap_or(50); // standard X11 keycode for Shift_L
 
+    let mut all_remapped = Vec::new();
+
     for chunk in graphemes.chunks(TYPE_TEXT_CHUNK_SIZE) {
         for &g in chunk {
             if cancel.is_cancelled() {
                 ledger.release_all(x);
+                for rkc in all_remapped {
+                    restore_remapped_keycode(x, rkc);
+                }
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -413,28 +418,41 @@ pub async fn execute_type_text_x11(
                 let sym = char_to_keysym(ch);
                 let resolved = resolve_or_remap_keysym(x, sym)?;
 
+                if let Some(rkc) = resolved.remapped_keycode {
+                    all_remapped.push(rkc);
+                    // Give X server & client event loop a moment to receive MappingNotify
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                }
+
                 if resolved.needs_shift {
                     ledger.record_key_down(shift_kc);
                     let _ = x.xtest_fake_key(shift_kc, true);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
 
                 ledger.record_key_down(resolved.keycode);
                 let _ = x.xtest_fake_key(resolved.keycode, true);
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 let _ = x.xtest_fake_key(resolved.keycode, false);
                 ledger.record_key_up(resolved.keycode);
 
                 if resolved.needs_shift {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                     let _ = x.xtest_fake_key(shift_kc, false);
                     ledger.record_key_up(shift_kc);
-                }
-
-                if let Some(rkc) = resolved.remapped_keycode {
-                    restore_remapped_keycode(x, rkc);
                 }
             }
         }
         // Yield briefly between large chunks to let X server / application process input
         tokio::task::yield_now().await;
+    }
+
+    // Allow application to process the last keystroke before unmapping
+    if !all_remapped.is_empty() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for rkc in all_remapped {
+            restore_remapped_keycode(x, rkc);
+        }
     }
 
     Ok(Delivery::Foreground)

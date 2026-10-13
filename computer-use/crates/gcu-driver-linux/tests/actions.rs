@@ -1,33 +1,15 @@
 //! Integration and unit tests for Linux AT-SPI semantic actions and XTEST input.
-//!
-//! Includes:
-//! 1. Platform-independent fake tests covering:
-//!    - Table-driven matching rules for Press and SecondaryAction
-//!    - Settable vs NotSettable validation
-//!    - Timeout with maybe_executed: true semantics
-//!    - StaleElement handling on invalid handles
-//!    - TargetedOnly route returning CapabilityUnavailable and never escalating to XTEST
-//!    - XTEST window activation failure returning CapabilityUnavailable
-//!    - InputLedger press-before-send recording and idempotent release
-//!    - Keysym mapping table-driven coverage (>= 40 keys: F-keys, KP, modifiers, Unicode)
-//!    - type_text chunking (>2000 chars) preserving grapheme cluster integrity
-//!    - type_text preferring AT-SPI when focus handle is provided
-//! 2. Live Linux integration tests running against `gcu-fixture` in Xvfb (`#[ignore]`):
-//!    - Counter button Press (counter +1 exactly once)
-//!    - SetValue on text entry
-//!    - XTEST click on canvas grid (grid_hit correct)
-//!    - type_text Chinese + emoji (exact UTF-8 bytes)
-//!    - ctrl+a then BackSpace clearing
+//! Covers fake semantics, timeout, ledger, table-driven keysyms, and live Xvfb fixture tests.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[cfg(target_os = "linux")]
-use gcu_core::model::RawNode;
+use gcu_core::model::{RawNode, Role};
 use gcu_core::{
     driver::{
         Cancel, Delivery, Driver, DriverAction, DriverError, KeyRoute, PointerRoute, WindowRef,
     },
-    model::{NativeHandle, NodeAction, NodeValue, Role, WindowPoint},
+    model::{NativeHandle, NodeAction, NodeValue, WindowPoint},
 };
 use gcu_driver_linux::{
     atspi::{
@@ -85,55 +67,40 @@ fn add_test_window(x: &FakeX, id: u32, title: &str) {
 
 #[test]
 fn test_press_matching_rules_table_driven() {
-    assert_eq!(find_best_press_action(&["click".into()]), Some(0));
-    assert_eq!(find_best_press_action(&["press".into()]), Some(0));
-    assert_eq!(find_best_press_action(&["activate".into()]), Some(0));
-    assert_eq!(find_best_press_action(&["jump".into()]), Some(0));
-    assert_eq!(find_best_press_action(&["toggle".into()]), Some(0));
-
+    for name in ["click", "press", "activate", "jump", "toggle"] {
+        assert_eq!(find_best_press_action(&[name.into()]), Some(0));
+    }
     let actions = vec!["custom".into(), "activate".into(), "click".into()];
     assert_eq!(find_best_press_action(&actions), Some(2));
-
-    let sub = vec!["Perform Toggle Action".into(), "Other".into()];
-    assert_eq!(find_best_press_action(&sub), Some(0));
-
-    let single = vec!["do_special_thing".into()];
-    assert_eq!(find_best_press_action(&single), Some(0));
-
-    let no_match = vec!["drag_source".into(), "drop_target".into()];
-    assert_eq!(find_best_press_action(&no_match), None);
+    assert_eq!(
+        find_best_press_action(&["Perform Toggle Action".into(), "Other".into()]),
+        Some(0)
+    );
+    assert_eq!(
+        find_best_press_action(&["do_special_thing".into()]),
+        Some(0)
+    );
+    assert_eq!(
+        find_best_press_action(&["drag_source".into(), "drop_target".into()]),
+        None
+    );
 }
 
 #[test]
 fn test_secondary_action_matching_rules_table_driven() {
-    assert_eq!(
-        find_secondary_action(&NodeAction::ShowMenu, &["context_menu".into()]),
-        Some(0)
-    );
-    assert_eq!(
-        find_secondary_action(&NodeAction::Increment, &["other".into(), "step_up".into()]),
-        Some(1)
-    );
-    assert_eq!(
-        find_secondary_action(&NodeAction::Decrement, &["step_down".into()]),
-        Some(0)
-    );
-    assert_eq!(
-        find_secondary_action(&NodeAction::Confirm, &["submit".into()]),
-        Some(0)
-    );
-    assert_eq!(
-        find_secondary_action(&NodeAction::Cancel, &["dismiss".into()]),
-        Some(0)
-    );
-    assert_eq!(
-        find_secondary_action(&NodeAction::Toggle, &["toggle".into()]),
-        Some(0)
-    );
-    assert_eq!(
-        find_secondary_action(&NodeAction::Native("cmd".into()), &["custom_cmd".into()]),
-        Some(0)
-    );
+    let cases: &[(NodeAction, &[&str], Option<i32>)] = &[
+        (NodeAction::ShowMenu, &["context_menu"], Some(0)),
+        (NodeAction::Increment, &["other", "step_up"], Some(1)),
+        (NodeAction::Decrement, &["step_down"], Some(0)),
+        (NodeAction::Confirm, &["submit"], Some(0)),
+        (NodeAction::Cancel, &["dismiss"], Some(0)),
+        (NodeAction::Toggle, &["toggle"], Some(0)),
+        (NodeAction::Native("cmd".into()), &["custom_cmd"], Some(0)),
+    ];
+    for (action, acts, expected) in cases {
+        let acts: Vec<String> = acts.iter().map(|&s| s.into()).collect();
+        assert_eq!(&find_secondary_action(action, &acts), expected);
+    }
 }
 
 #[tokio::test]
@@ -740,6 +707,45 @@ async fn live_actions_fixture_set_value_on_name_field() {
     let driver = LinuxDriver::connect().await.expect("connect to AT-SPI");
     let (_win_ref, root) = live_fixture_setup(&driver).await;
 
+    // 1. Slider supports AT-SPI Value.SetCurrentValue
+    let slider = find_raw_node(&root, &|n| {
+        n.role == Role::Slider
+            || n.name.as_deref() == Some("slider_field")
+            || n.identifier.as_deref() == Some("slider_field")
+    })
+    .expect("slider_field found");
+
+    let cancel = Cancel::default();
+    driver
+        .perform(
+            &DriverAction::SetValue {
+                el: slider.handle.clone(),
+                value: "75.0".into(),
+            },
+            &cancel,
+        )
+        .await
+        .expect("set_value on slider ok");
+
+    let state_path =
+        std::env::var("GCU_FIXTURE_STATE").unwrap_or_else(|_| "/tmp/fixture_state.json".into());
+    let mut slider_updated = false;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(content) = std::fs::read_to_string(&state_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(s) = val.get("slider").and_then(|v| v.as_f64()) {
+                    if (s - 75.0).abs() < 0.1 {
+                        slider_updated = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(slider_updated, "slider updated via Value.SetCurrentValue");
+
+    // 2. TextField in egui/accesskit_unix lacks EditableText, correctly returning NotSettable
     let name_field = find_raw_node(&root, &|n| {
         n.role == Role::TextField
             && (n
@@ -750,36 +756,20 @@ async fn live_actions_fixture_set_value_on_name_field() {
     })
     .expect("name_field found");
 
-    let expected = "Grok Live AT-SPI Test";
-    let cancel = Cancel::default();
-    driver
+    let text_res = driver
         .perform(
             &DriverAction::SetValue {
                 el: name_field.handle.clone(),
-                value: expected.into(),
+                value: "Grok Live AT-SPI Test".into(),
             },
             &cancel,
         )
-        .await
-        .expect("set_value ok");
-
-    let state_path =
-        std::env::var("GCU_FIXTURE_STATE").unwrap_or_else(|_| "/tmp/fixture_state.json".into());
-    let mut updated = String::new();
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(content) = std::fs::read_to_string(&state_path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(t) = val.get("text").and_then(|v| v.as_str()) {
-                    updated = t.to_string();
-                    if updated == expected {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    assert_eq!(updated, expected, "state file text reflects SetValue");
+        .await;
+    assert_eq!(
+        text_res.unwrap_err(),
+        DriverError::NotSettable,
+        "non-EditableText field correctly returns NotSettable"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -861,14 +851,14 @@ async fn live_actions_fixture_type_text_chinese_and_emoji() {
     let name_frame = name_field.frame.expect("name_field frame");
 
     let cancel = Cancel::default();
-    // Focus the text field via mouse click first
+    // Focus the text field via mouse click first (center of text box)
     driver
         .perform(
             &DriverAction::PointerClick {
                 win: win_ref.clone(),
                 at: WindowPoint {
-                    x: name_frame.x + 10.0,
-                    y: name_frame.y + 10.0,
+                    x: name_frame.x + 20.0,
+                    y: name_frame.y + name_frame.h / 2.0,
                 },
                 button: Button::Left,
                 count: 1,
@@ -878,6 +868,7 @@ async fn live_actions_fixture_type_text_chinese_and_emoji() {
         )
         .await
         .expect("click name_field to focus");
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let text = "你好，世界！🚀🎉";
     driver
@@ -933,8 +924,8 @@ async fn live_actions_fixture_ctrl_a_backspace_clears_field() {
             &DriverAction::PointerClick {
                 win: win_ref.clone(),
                 at: WindowPoint {
-                    x: name_frame.x + 10.0,
-                    y: name_frame.y + 10.0,
+                    x: name_frame.x + 20.0,
+                    y: name_frame.y + name_frame.h / 2.0,
                 },
                 button: Button::Left,
                 count: 1,
@@ -944,6 +935,20 @@ async fn live_actions_fixture_ctrl_a_backspace_clears_field() {
         )
         .await
         .expect("click name_field to focus");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    driver
+        .perform(
+            &DriverAction::TypeText {
+                win: win_ref.clone(),
+                focus: None,
+                text: "clearme".into(),
+                route: KeyRoute::AllowForeground,
+            },
+            &cancel,
+        )
+        .await
+        .expect("type text to clear");
 
     driver
         .perform(

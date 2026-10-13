@@ -247,8 +247,9 @@ pub fn resolve_or_remap_keysym(
     }
 
     // Keysym not currently bound: dynamically remap an unused keycode
+    let keysym_slice = vec![keysym; per];
     if let Some(unused_kc) = unused_candidate {
-        x.change_keyboard_mapping(unused_kc, 1, &[keysym])
+        x.change_keyboard_mapping(unused_kc, per as u8, &keysym_slice)
             .map_err(|e| DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: false,
@@ -262,7 +263,7 @@ pub fn resolve_or_remap_keysym(
     } else {
         // Fallback: If no keycode was unbound, attempt to remap the highest keycode (e.g. 255)
         let fallback_kc = max_kc;
-        x.change_keyboard_mapping(fallback_kc, 1, &[keysym])
+        x.change_keyboard_mapping(fallback_kc, per as u8, &keysym_slice)
             .map_err(|e| DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: false,
@@ -278,7 +279,13 @@ pub fn resolve_or_remap_keysym(
 
 /// Restore a previously dynamically remapped keycode back to NoSymbol.
 pub fn restore_remapped_keycode(x: &dyn XServer, keycode: u8) {
-    if let Err(e) = x.change_keyboard_mapping(keycode, 1, &[0]) {
+    let per = if let Ok((_, per_kc)) = x.get_keyboard_mapping(keycode, 1) {
+        per_kc.max(1) as usize
+    } else {
+        2
+    };
+    let zero_slice = vec![0u32; per];
+    if let Err(e) = x.change_keyboard_mapping(keycode, per as u8, &zero_slice) {
         tracing::warn!(keycode, "failed to restore remapped keycode: {e}");
     }
     let _ = x.flush();
