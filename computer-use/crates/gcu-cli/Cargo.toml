@@ -9,5 +9,14 @@ publish.workspace = true
 name = "gcu"
 path = "src/main.rs"
 
+[dependencies]
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror = { workspace = true }
+toml_edit = "0.25"
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["preserve_order"] }
+toml = { workspace = true }
+
 [lints]
 workspace = true
