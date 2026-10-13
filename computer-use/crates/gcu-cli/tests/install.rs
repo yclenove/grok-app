@@ -179,7 +179,7 @@ fn json_cases() -> Vec<Case> {
             ClientId::VsCode,
             "servers",
             Kind::Stdio,
-            ".config/Code/User/mcp.json",
+            vscode_user_rel(),
             ".vscode/mcp.json",
         ),
         (
@@ -719,3 +719,14 @@ fn grok_install_gcu_path_with_space_is_shell_quoted() {
 
 #[path = "install_support/cli_clients.rs"]
 mod cli_clients;
+
+/// VS Code keeps its user `mcp.json` in a per-OS directory under the home directory.
+fn vscode_user_rel() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "AppData/Roaming/Code/User/mcp.json"
+    } else if cfg!(target_os = "macos") {
+        "Library/Application Support/Code/User/mcp.json"
+    } else {
+        ".config/Code/User/mcp.json"
+    }
+}
