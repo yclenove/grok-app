@@ -36,13 +36,13 @@
 
 ```
 Grok App (Tauri 主进程, Rust)
- ├─ ComputerUseHost（新，src-tauri/src/computer_use_v2/）—— 只依赖 gcu-protocol + gcu-host-protocol
- │    ├─ EngineSupervisor：启动/停止/重启 `gcu engine --host-socket <path>`（Tauri externalBin），健康检查、熔断
+ ├─ ComputerUseHost（新，src-tauri/src/computer_use/）—— 只依赖 gcu-protocol + gcu-host-protocol
+ │    ├─ EngineSupervisor：启动/停止/重启 `gcu engine --host-fd <fd> --stop-fd <fd>`（回退 --host-socket）（Tauri externalBin），健康检查、熔断
  │    ├─ HostServer：Host 协议服务端（UDS / 命名管道，仅当前用户可访问）
- │    │     ├─ approval.requestApp / confirmAction / handoff → 前端事件 → 等待用户决定 → 应答
- │    │     ├─ policy.load / grantAlways → App 设置存储
- │    │     ├─ overlay.* → App 覆盖窗
- │    │     └─ event → 前端面板时间线
+ │    │     ├─ host.approval.requestApp / host.approval.confirmAction / host.approval.handoff → 前端事件 → 等待用户决定 → 应答
+ │    │     ├─ host.policy.load → App 设置存储；真实审批事件持久化 Always 后发 engine.policy.changed
+ │    │     ├─ host.overlay.* → App 覆盖窗
+ │    │     └─ host.event.emit → 前端面板时间线
  │    └─ 生命周期转发：ACP 轮次结束 → engine.session.turnEnded；会话关闭/fork/切模型 → engine.session.close
  │
  ├─ gcu 引擎（子进程，与路线 A 同一二进制）
@@ -51,14 +51,19 @@ Grok App (Tauri 主进程, Rust)
  │
  ├─ 会话注入（session_manager）：对启用 CU 的本地会话，在 ACP newSession 的 mcpServers 中加入：
  │    方案 1（首选，若 Grok Build 支持 http MCP）：{ name:"computer-use", transport:"http", url:<mcp_url>, headers:{Authorization:"Bearer <token>"} }
- │    方案 2（回退）：{ name:"computer-use", command:"<App 资源目录>/gcu", args:["mcp","--connect",<mcp_url>], env:{GCU_TOKEN:"<token>"} }
- │    —— 两种方案都不需要 Node；token 不进 argv；不写入 ~/.grok。
+ │    方案 2（回退）：{ name:"computer-use", command:"<App 资源目录>/gcu", args:["mcp","--connect",<mcp_url>,"--token-fd",<fd>] }
+ │    —— 回退 token 经 App 创建并继承的匿名管道/FD 传入；两种方案都不需要 Node；token 不进 argv/环境/ACP 载荷日志/崩溃报告/子进程环境；不写入 ~/.grok。
  │
  └─ 前端（React）
       ├─ 聊天流内联卡片：App 授权卡、敏感动作确认卡、交接卡（handoff）
       ├─ Computer 侧栏面板：当前 App/窗口、步骤时间线（含缩略图）、停止
       └─ 设置 › 扩展 › Computer Use：开关、系统权限状态、始终允许的 App、敏感确认级别、前台策略、热键
 ```
+
+单引擎多会话隔离：一个 gcu engine 服务全部本地会话；每次 engine.session.open 使用 App 提供的独立 session_id 并产生 32 字节 token、审批状态机、快照/图片命名空间和串行队列，可共用监听端口但 token 只能访问其所属会话；同窗口写动作互斥，剪贴板跨会话全局互斥。会话结束撤销旧 token，重开不得复用。
+Host 首选 App 继承专用连接；回退必须双向挑战响应核验预期进程实例，拒绝未知/抢占端点；UID/权限不能证明调用者可信。
+HTTP 只监听 127.0.0.1，Host 必须恰好一个且值精确为 `127.0.0.1:<实际端口>`；Origin 缺省仅对带 token 的非浏览器 MCP 客户端允许；若出现必须精确为 `http://127.0.0.1:<实际端口>`（禁止 null、通配符、域名/子域匹配）。拒绝重复 Host、恶意 Origin、DNS rebinding、无 token initialize。
+若 ACP 不能保密传 headers 或不能继承 FD，S-01/P5-02 返回 needs-decision，不回退到环境变量。
 
 **turn 边界：** App 已在解析 ACP 流（`session/update`、`stopReason`），在每个 prompt 结束时发送 `engine.session.turnEnded`。
 **会话结束/删除/切换模型/fork：** 发送 `engine.session.close`，引擎清除 session 级授权与快照。
@@ -68,25 +73,25 @@ Grok App (Tauri 主进程, Rust)
 **Windows 前台：** 前台动作期间 App 主窗口不得抢焦点（覆盖窗 `WS_EX_NOACTIVATE`）；若 App 自身是前台窗口且用户正在输入 → 守卫拒绝。
 
 **耦合边界（`xtask check-deps` 强制）：** `src-tauri` 只能依赖 `gcu-protocol`、`gcu-host-protocol`。前端只通过 Tauri 命令/事件与 `ComputerUseHost` 交互，
-不直接接触引擎。引擎替换为外部路径（开发者设置）时，App 代码零改动。
+不直接接触引擎。正式模式必须验证引擎签名/构建身份；外部路径仅独立 Dev 身份与独立 TCC 授权下允许，S-02 测试替换引擎不可继承正式权限。Stop 锁存由 Host 保存并传给新引擎，独立控制通道不与普通动作/审批排队；生产 Windows 引擎提升或 UIAccess 时拒绝工作。
 
 ---
 
 ## 2. Rust 侧模块（新）
 
-`src-tauri/src/computer_use_v2/`（v1 目录 `computer_use/` 不迁入 main；v2 名称在 P5 末尾改回 `computer_use/`）
+`src-tauri/src/computer_use/`（永久模块路径；v1 实现不迁入 main，无后期重命名）
 
 | 文件 | 职责 | 行数上限 |
 |---|---|---|
 | `mod.rs` | `ComputerUseHost` 生命周期（feature 开关变化时启停）、Tauri state 注册 | 250 |
 | `supervisor.rs` | 引擎进程：定位 externalBin（或开发者设置的外部路径）、启动、握手版本检查、心跳、空闲 60s 退出、崩溃重启、10 分钟 3 次熔断 | 300 |
-| `host_server.rs` | Host 协议服务端：监听 UDS/命名管道（权限仅当前用户）、一次性连接 token、分发请求到下列模块 | 300 |
+| `host_server.rs` | Host 协议服务端：优先继承匿名管道/socketpair；回退 UDS/本机命名管道双向认证与防抢占、分发请求到下列模块 | 300 |
 | `inject.rs` | `engine.session.open` 取 MCP 端点 → 构造 ACP mcpServers 条目；`should_inject(session)`：功能开启 + 本地会话 | 200 |
 | `approval.rs` | 处理 `host.approval.*`：emit `cu://approval` → 等待 `cu_approval_decide` 命令 → 应答；超时；会话关闭自动拒绝挂起请求 | 300 |
 | `overlay.rs` | 处理 `host.overlay.*`：覆盖窗创建/定位/隐藏；排除截图；光标动画参数下发给覆盖窗前端 | 300 |
-| `events.rs` | 处理 `host.event`：节流（每会话 ≤10 事件/秒），缩略图转发；大图按需 `engine.screenshot.get` | 200 |
-| `policy_store.rs` | 处理 `host.policy.*`：读写"始终允许"列表、敏感确认级别、前台策略 → App 设置存储（`app_settings`）；变更时发 `engine.policy.changed` | 200 |
-| `commands.rs` | Tauri 命令：`cu_status`、`cu_doctor`（转发 `engine.doctor`）、`cu_approval_decide`、`cu_stop`、`cu_approvals_list`、`cu_approvals_revoke`、`cu_open_system_settings(kind)` | 300 |
+| `events.rs` | 处理 `host.event.emit`：节流（每会话 ≤10 事件/秒），缩略图转发；大图按需 `engine.screenshot.get` | 200 |
+| `policy_store.rs` | 处理 `host.policy.*`：读取策略及处理真实审批事件/设置 UI 写入“始终允许”列表、敏感确认级别、前台策略 → App 设置存储（`app_settings`）；变更时发 `engine.policy.changed` | 200 |
+| `commands.rs` | Tauri 命令：`cu_status`、`cu_doctor`（转发 `engine.system.doctor`）、`cu_approval_decide`、`cu_stop`、`cu_resume`（可信用户 UI）、`cu_approvals_list`、`cu_approvals_revoke`、`cu_open_system_settings(kind)` | 300 |
 
 依赖：**仅** `gcu-protocol`、`gcu-host-protocol`。`gcu` 可执行文件作为 Tauri `externalBin` 打包（各平台各架构）。
 
@@ -98,10 +103,10 @@ Grok App (Tauri 主进程, Rust)
 
 | 组件 | 说明 |
 |---|---|
-| `ComputerUseApprovalCard.tsx` | 聊天流内联卡：App 图标+名称+理由；按钮 `仅本次` / `本会话` / `始终允许` / `拒绝`；倒计时（复用 `PermissionCountdown`）；与现有 ACP 权限卡同一视觉（复用其样式类） |
+| `ComputerUseApprovalCard.tsx` | 聊天流内联卡：OS 核验签名状态/发布者/路径（名称与图标辅助）；理由标“模型提供”，纯文本处理双向控制字符；默认焦点拒绝，不劫持聊天 Enter；按钮 `本轮` / `本会话` / `始终允许` / `拒绝`；倒计时（复用 `PermissionCountdown`）；与现有 ACP 权限卡同一视觉（复用其样式类） |
 | `ComputerUseActionConfirmCard.tsx` | 敏感动作确认卡：动作摘要（"在「微信」中点击「发送」"）+ 目标区域裁剪图 + `允许` / `拒绝` |
-| `ComputerUseHandoffCard.tsx` | 遇到登录/验证码/系统安全提示时：说明 + `我已处理，继续`（触发一条用户消息） |
-| `ComputerUsePanel.tsx` | 侧栏面板（SideWorkbench 的 Computer tab，替换 v1 面板）：当前状态、时间线（工具、目标、结果、耗时、缩略图）、`停止` |
+| `ComputerUseHandoffCard.tsx` | 遇到登录/验证码/系统安全提示时：说明 + `我已处理，继续`（触发一条用户消息并重新观察，不直接重放动作，也不解除 Stop） |
+| `ComputerUsePanel.tsx` | 侧栏面板（SideWorkbench 的 Computer tab，替换 v1 面板）：当前状态、时间线（工具、目标、结果、耗时、缩略图）、`停止/恢复`（只有用户显式恢复） |
 | `ComputerUseOverlay.tsx` | 覆盖窗前端（独立 Tauri 窗口 `cu-overlay` 的入口）：光标、状态胶囊、停止按钮 |
 | `settings/ComputerUseSection.tsx` | 设置页：总开关、系统权限状态与"去授权"按钮、始终允许列表（可撤销）、敏感确认 `Select`（关/标准/严格）、前台策略 `Select`（从不/询问/总是）、停止热键展示 |
 | `useComputerUseEvents.ts` | 订阅 `cu://*` 事件，维护每会话的时间线 store（`src/lib/computer-use/store.ts`，zustand 或项目现有 store 模式） |
@@ -132,7 +137,7 @@ Grok App (Tauri 主进程, Rust)
 ```
 用户：帮我把微信里张三发的会议时间记到日历
 模型：get_app_state{app:"微信", reason:"读取张三的消息"}
-  → 聊天流出现授权卡「允许 Grok 使用 微信？」[仅本次][本会话][始终允许][拒绝]
+  → 聊天流出现授权卡「允许 Grok 使用 微信？」[本轮][本会话][始终允许][拒绝]
   → 用户点「本会话」→ 工具返回状态+截图（面板时间线出现第一步，缩略图）
 模型：click{app:"微信", element_index:4} → 返回 diff
 模型：get_app_state{app:"日历"} → 授权卡（日历）→ 用户点「始终允许」
@@ -141,7 +146,8 @@ Grok App (Tauri 主进程, Rust)
 ```
 
 - 覆盖窗光标在目标窗口上移动；胶囊显示"Grok 正在使用 日历"；用户按停止 → 当前步骤 `stopped_by_user`，模型收到后应停止。
-- 若某步触发敏感词（"发送"）→ 动作确认卡；拒绝则工具返回 `refused: user_declined`。
+- 审批与敏感确认绑定进程实例/窗口/参数/snapshot_id+fingerprint/状态和策略版本；批准后投递前重验，变化作废并重审。挂起/提交中/超时/拒绝/过期/会话关闭均有状态，重复决定只能消费一次。模型提供理由不是可信身份凭据。
+- 若某步触发敏感词（"发送"）→ 动作确认卡；拒绝则工具返回 `refused: approval_denied`。
 
 ### 4.3 状态与错误呈现
 
@@ -160,9 +166,11 @@ Grok App (Tauri 主进程, Rust)
 
 - 新 Tauri 窗口 `cu-browser`（系统 WebView），带地址栏/后退/前进/刷新（复用现有 WebView 组件或新建，遵循既有视觉）。
 - 它就是一个普通窗口：驱动通过 OS 无障碍树操作它（WKWebView/WebView2/WebKitGTK 均暴露网页无障碍树）。
-- 额外工具 `browser_navigate{url}`（仅当该窗口打开时注册），拦截 javascript/file/data/元数据地址。
+- 额外工具 `browser_navigate{url}`（仅当该窗口打开时注册），拦截 javascript:/file:/data:/vbscript:/blob:/已知外部协议/元数据地址；自己发出的地址栏输入同策略返回 key_blocked，不声称控制 L0 的页面重定向。
 - 不与用户浏览器共享 cookie；数据目录在 App 数据目录下 `cu-browser-profile/`，设置页可"清除浏览数据"。
-- Grok App 主窗口仍在拒绝名单中；`cu-browser` 窗口单独放行（以窗口 label 识别，不以进程识别）。
+- Grok App 主窗口仍在拒绝名单中；`cu-browser` 窗口单独放行（Rust 持有的实际窗口身份映射核验，不接受页面自报 label）。
+- cu-browser 远程内容无 Tauri 命令、事件、媒体 token、Host/审批访问权；导航/iframe/弹窗均不得获得可信 UI capability，可信地址栏控制与网页权限隔离。P5-10 必须测试调用审批/Stop恢复/媒体与 Host 失败。
+- 截图 get 请求带 session_id 并核验归属；原图/缩略图/裁剪图均已脱敏，会话删除清衍生物，见 03 §7.6。
 
 ---
 
@@ -187,7 +195,7 @@ Grok App (Tauri 主进程, Rust)
 | Grok Build 不支持 http MCP | 方案 2（`gcu mcp --connect` sidecar）；S-01 spike 先确认 |
 | ACP 会话 MCP 列表变更需要重建会话 | 复用 v1 已验证的"会话 MCP 重建"路径；只在下一轮生效并在 UI 提示 |
 | 引擎崩溃/卡死 | 引擎是独立进程，App 不受影响；supervisor 重启，进行中调用返回 `unknown`；10 分钟 3 次崩溃熔断并提示 |
-| App 与引擎版本不匹配 | 握手检查 Host 协议 major；App 只随包携带经测试的引擎版本；开发者外部引擎有显式标记 |
+| App 与引擎版本不匹配 | 握手检查 Host 协议 major；App 只随包携带经测试的引擎版本；正式签名/构建身份验证，外部引擎独立 Dev 身份和授权 |
 | 引擎子进程的 TCC 归属不是 App | S-02 实测；备选为 bundle 内 helper |
 | 覆盖窗与主窗焦点争抢 | 覆盖窗不可激活、不可点击穿透以外区域（仅胶囊可点） |
 | 审批卡阻塞期间用户切换会话 | 审批与会话绑定；切走不取消，回来仍在；会话关闭则拒绝 |

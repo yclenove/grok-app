@@ -23,7 +23,7 @@
 ```
 gcu                          # 无参数：macOS 打开 onboarding（缺权限时）；其他平台打印 doctor 摘要
 gcu mcp [--transport stdio|http] [--port N] [--profile default|minimal|full]
-gcu mcp --connect <url> --token-file <path>     # 代理模式（路线 B 用，见 05）
+gcu mcp --connect <url> --token-fd <fd>     # 代理模式（路线 B 用，见 05）
 gcu doctor [--json]          # 权限、能力、私有 API、版本、日志路径
 gcu call <tool> [--args JSON] [--json]          # 单次调用，调试与脚本
 gcu batch --file steps.json                     # 同 computer_batch
@@ -32,11 +32,20 @@ gcu approvals list|revoke <app>|revoke-all       # 管理"始终允许"
 gcu install <client> [--scope user|project]     # grok | codex | claude | antigravity | gemini | opencode | cursor | vscode
 gcu uninstall <client>
 gcu turn-ended [payload]                        # 客户端 notify 钩子入口
+gcu resume                                      # 仅用户显式解除 Stop 锁存，不向模型暴露
 gcu worker                                      # 内部：Windows 隔离执行子进程（隐藏）
 gcu version
 ```
 
 **退出码：** 0 成功；2 参数错误；3 权限缺失；4 工具返回 isError；10 内部错误。
+| 协议/进程结果 | CLI 退出码 |
+|---|---|
+| 成功（无 isError） | 0 |
+| 参数解析错误；ambiguous_app、invalid_key、out_of_bounds | 2 |
+| permission_missing | 3 |
+| 其余业务 isError（含 approval_denied、key_blocked、stale_*） | 4 |
+| internal / panic / 未知异常 | 10 |
+
 **`gcu call` 输出：** 默认人类可读（文本 + 截图保存到临时文件路径）；`--json` 输出 MCP `CallToolResult` 原样 JSON。
 
 ### 2.1 `gcu install <client>` 写入的配置
@@ -50,6 +59,8 @@ gcu version
 | Gemini CLI | `./.gemini/settings.json` 或 `~/.gemini/settings.json` | stdio |
 | opencode | `~/.config/opencode/opencode.json` | stdio |
 | Cursor / VS Code | 各自 `mcp.json` | stdio |
+
+TOML（Grok、Codex）用 toml_edit 0.25，只改自己的表项并保注释。JSON 用 serde_json + preserve_order 按键增删，测试断言键值不断言空白；若 JSONC 注释必须保留，P4-05 另选库并写 ADR、更新 deny.toml。
 
 规则：先备份原文件为 `*.gcu-backup-<ts>`；只增删自己的条目；`--dry-run` 打印 diff；`uninstall` 精确移除。
 **改写 `~/.grok/config.toml` 前必须征得用户确认**（交互式 y/N；非 TTY 需 `--yes`）——与 Grok App "共享模式拒绝改写 ~/.grok"的规则一致，独立 CLI 的写入是用户显式命令触发的。
@@ -75,7 +86,8 @@ gcu version
               - 空闲 10 分钟且无连接时退出
 ```
 
-- socket 目录权限 0700；连接时校验对端 uid（`getpeereid`），并要求 CLI 携带启动时从 helper 读取的随机 token（存于 0600 文件）。
+- UID/文件权限只隔离其他用户，不证明调用者可信。socket 目录 0700、端点限当前用户之外，helper 必须通过连接的 audit token 取对端代码签名：可执行文件与 helper 同一 cdhash/同一签名身份（两项均核验），其他客户端不得连接；getpeereid/token 文件不能替代代码身份认证。新连接独立 MCP 会话，不继承其他连接的 turn/session 授权。
+- 对端认证在握手前执行，端点抢占/替换拒绝；允许同二进制 CLI 调用的边界不包含同 UID 对受信进程内存的读写或修改受信二进制。路线 B 优先 App 创建并继承的专用匿名管道/socketpair，见 03 §15。
 - helper 与 CLI 是**同一个二进制**（`gcu agent` 子命令），`.app` 只是包装；版本必须完全一致，不一致时 CLI 让旧 helper 退出并重启新版本。
 - 开发构建命名 `Grok Computer Use (Dev).app`、bundle id `ai.grok.computer-use.helper.dev`，避免与正式版在系统设置里重名。
 - **Onboarding：** 缺权限时 helper 显示一个小窗口（wry WebView + 共享 HTML/CSS，15 语言），两张卡片（辅助功能、屏幕录制），
@@ -91,17 +103,21 @@ Windows / Linux 无 TCC 问题，`gcu mcp` 进程内直接执行（Windows 可�
 优先级：
 
 1. **MCP elicitation**（客户端在 initialize 中声明 `elicitation` 能力时）：
-   `elicitation/create`，message `允许 Grok Computer Use 使用「微信」吗？`，requestedSchema 为单选 `{"decision": ["once","session","always","deny"]}`，
+   在 `tools/call` 处理函数内调用 `peer.create_elicitation`（FormElicitationParams、OriginatingRequestId），message `允许 Grok Computer Use 使用「微信」吗？`；requestedSchema 为正规 JSON Schema：
+   `{"type":"object","properties":{"decision":{"type":"string","enum":["turn","session","always","deny"]}},"required":["decision"]}`，
    附 `_meta`：`{"gcu/app": {...}, "gcu/risk": "low|high", "gcu/reason": "..."}`。客户端渲染能力差异大，单选是最保守的通用形态。
 2. **helper 审批窗**（客户端不支持 elicitation 或返回错误时）：
-   - macOS：helper 弹出小窗（同 onboarding 的 WebView 栈），置顶、带 App 图标与理由、四个按钮、键盘可达；
-   - Windows / Linux：`gcu mcp` 进程用 `tao + wry` 弹同样的 HTML 窗口（Windows 用系统 WebView2，Linux 用 WebKitGTK——Linux 若缺 WebKitGTK 则回退到 `zenity/kdialog` 并在 doctor 提示）。
-3. **非交互环境**（无显示/CI）：仅当 `GCU_APPROVAL=auto-deny|auto-allow-session`（评测 runner 使用）时自动决定；默认拒绝。
+   - macOS：helper 弹出小窗（同 onboarding 的 WebView 栈），置顶、显示 OS 核验签名状态/发布者/路径（图标与名称辅助）、模型理由纯文本且处理双向控制字符、四个按钮（本轮/本会话/始终允许/拒绝）、默认焦点拒绝且不捕获聊天 Enter、键盘可达；
+   - Windows / Linux：`gcu mcp` 进程用 `tao + wry` 弹同样的 HTML 窗口（Windows 用系统 WebView2，Linux 用 GTK3 的 webkit2gtk-4.1——Linux 若缺 WebKitGTK 则回退到 `zenity/kdialog` 并在 doctor 提示）。
+3. **非交互环境**（无显示/CI）：默认拒绝。`GCU_APPROVAL=auto-*` 仅存在于 cargo feature `eval-autoapprove` 构建（一次性评测环境），发布构建遇到该变量必须报错退出，不能通过环境开自动审批。
+
+rmcp 3.5：`default-features=false, features=["server","macros","transport-io","transport-streamable-http-server","elicitation"]`。stdio 仅 NDJSON；若 S-01 证明需 Content-Length，自写 codec 并独立测试，不宣称 rmcp 自动识别。审批决定为 ApprovalDecision { Turn, Session, Always, Deny }，超时返回 approval_timeout；批准后重新验证绑定状态，变化重审。
 
 **持久化：** `approvals.json`（0600），键为 §7.2 的 App 身份，值 `{decision:"always", granted_at, identity:{team_id|publisher|path_hash}}`。
 `gcu approvals` 子命令管理；不提供"全部始终允许"。
 
-敏感动作确认走同一 provider 的 `confirm_action`，UI 显示动作摘要与目标区域裁剪图。
+敏感动作确认走同一 provider 的 `confirm_action`，UI 显示动作摘要与已脱敏目标区域裁剪图；拒绝为 approval_denied。网页区默认 strict，未知语义点击/Enter/Space/含换行输入/自定义快捷键按高风险，IDE 与嵌入执行环境限制见 03 §7.4。
+系统动态库 WebKitGTK、GTK、libpipewire 的许可不在 cargo-deny 图中，deny.toml 注释边界、发行说明单列依赖。
 
 ---
 
@@ -115,7 +131,8 @@ Windows / Linux 无 TCC 问题，`gcu mcp` 进程内直接执行（Windows 可�
 | 不进截图 | macOS `sharingType=.none`；Windows `WDA_EXCLUDEFROMCAPTURE`；X11 采集前隐藏、采集后恢复 |
 
 实现：macOS 在 helper 中用 AppKit 透明 `NSPanel`（objc2）；Windows 用分层窗口 + Direct2D；Linux X11 用 override-redirect ARGB 窗口；Wayland 无全局覆盖能力 → 仅胶囊用 layer-shell（wlroots/KDE）或不显示（GNOME，声明于 capabilities）。
-`GCU_OVERLAY=0` 可关闭。
+Wayland layer-shell 的 crate 在 P4-04 选型后补 03 §2 与 deny.toml，GNOME 不显示并声明能力。
+Stop/恢复走独立控制通道与 watchdog，停止锁存不因下一轮/重连/重启恢复；热键注册失败则禁用依赖该能力的路线。`GCU_OVERLAY=0` 可关闭视觉覆盖层，不能取消停止保障。
 
 ---
 
@@ -136,7 +153,7 @@ Windows / Linux 无 TCC 问题，`gcu mcp` 进程内直接执行（Windows 可�
 
 ## 7. 与 Grok Build CLI 的配合
 
-需要在 P0 用 spike 卡（[06 S-01](06-roadmap.md#s-01-grok-build-cli-mcp-能力探测)）确认下列事实，结论写入 ADR：
+需要在 P0 用 spike 卡（[06 S-01](06-roadmap.md#s-01-grok-build-cli-mcp-能力探测spike)）确认下列事实，结论写入 ADR：
 
 | 问题 | 若支持 | 若不支持 |
 |---|---|---|
@@ -153,7 +170,7 @@ Windows / Linux 无 TCC 问题，`gcu mcp` 进程内直接执行（Windows 可�
 
 | 里程碑 | 内容 | 对应阶段 |
 |---|---|---|
-| A-α | macOS 单平台：`gcu mcp` 9 工具 + list_windows/capabilities，helper/onboarding，elicitation + helper 审批，覆盖层 | P0–P1、P4 部分 |
+| A-α | macOS 单平台：`gcu mcp` minimal 9 工具（含 list_apps/list_windows）；default 另含 capabilities，helper/onboarding，elicitation + helper 审批，覆盖层 | P0–P1、P4 部分 |
 | A-β | + Windows、Linux X11；`gcu install` 全客户端；npm/brew/winget 分发 | P2–P4 |
 | A-1.0 | + batch/wait_for/script、性能预算达标、评测基线通过、签名公证 | P6、P9 |
 | A-1.x | + Wayland、DOM 增强扩展、OCR（可选） | P7、P8、P10 |
