@@ -132,6 +132,7 @@
 | **macOS (Intel)** | `Grok_*_x64.dmg` | Для компьютеров Mac на базе процессоров Intel |
 | **Windows (x64)** | `*-setup.exe` / `*-portable.zip` | Установщик и портативная версия |
 | **Linux (x64)** | `AppImage` / `.deb` / `.rpm` | Универсальный AppImage, пакеты для Debian/Ubuntu и Fedora/RHEL |
+| **Linux (ARM64)** | `AppImage` / `.deb` / `.rpm` | Ubuntu 24.04+ aarch64. AppImage `Grok_*_aarch64.AppImage`, Debian `*_arm64.deb`, Fedora `*.aarch64.rpm` |
 
 > 💡 **Примечание**: Имя приложения в системе — **Grok**. Для запуска готовых пакетов не требуется установка Node.js, pnpm или Rust.
 
@@ -316,7 +317,7 @@ Windows (необязательно): дважды щёлкните [`install-la
 ## 👥 Участники
 
 <!-- CONTRIBUTORS:START -->
-Спасибо всем, кто внёс вклад в Grok App. Все участники GitHub — люди (по числу коммитов, обновлено 2026-09-30).
+Спасибо всем, кто внёс вклад в Grok App. Все участники GitHub — люди (по числу коммитов, обновлено 2026-10-04).
 
 <p align="center">
   <a href="https://github.com/RongleCat" title="RongleCat"><img src="https://github.com/RongleCat.png?size=96" width="72" height="72" alt="RongleCat" style="border-radius:50%" /></a>

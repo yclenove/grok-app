@@ -474,7 +474,8 @@ import {
   requestComposerStoredCaret,
   resizeComposerInput,
   serializeDom,
-} from "@/components/ComposerEditor";
+} from "@/components/composer";
+import { useApplyAtFile } from "@/hooks/useApplyAtFile";
 
 import {
   pathsEqual,
@@ -1048,6 +1049,8 @@ export function AppWorkbench() {
     slashKindFilter,
     setSlashKindFilter,
     liveAt,
+    reportAtQuery,
+    onSlashQueryChange,
     setLiveAt,
     liveAtRef,
     atDismissedSigRef,
@@ -1890,7 +1893,9 @@ export function AppWorkbench() {
     workflowsEnabled,
     setWorkflowsEnabled,
     planEnabled,
+    composerEditor,
     setPlanEnabled,
+    setComposerEditor,
     todoGateEnabled,
     setTodoGateEnabled,
     todoGateMaxFiresPerPrompt,
@@ -5916,25 +5921,6 @@ export function AppWorkbench() {
     setSlashActiveIndex(0);
   }, []);
 
-  /** Stable slash-query setter: skip no-op updates so filter effects don't thrash. */
-  const onSlashQueryChange = useCallback(
-    (q: { start: number; query: string; end: number } | null) => {
-      setSlashQuery((prev) => {
-        if (q == null) return prev == null ? prev : null;
-        if (
-          prev &&
-          prev.start === q.start &&
-          prev.query === q.query &&
-          prev.end === q.end
-        ) {
-          return prev;
-        }
-        return q;
-      });
-    },
-    [],
-  );
-
   /**
    * Composer right-click menu (Paste + Command panel). Same ContextMenu
    * baseline as attachment cards; native menu is already suppressed.
@@ -6529,30 +6515,15 @@ export function AppWorkbench() {
     setAtLoading(false);
   }, []);
 
-  const applyAtFile = useCallback(
-    (entry: ComposerAtFileEntry) => {
-      const live = liveAtRef.current;
-      if (live.present) {
-        setDraft((d) => removeAtTokenFromDraft(d, live.start, live.end));
-      }
-      const cleared = { present: false, query: "", start: 0, end: 0 };
-      liveAtRef.current = cleared;
-      setLiveAt(cleared);
-      setAtEntries([]);
-      setAtSoftFail(null);
-      setAttachments((prev) =>
-        mergeAttachments(prev, [
-          {
-            path: entry.path,
-            name: entry.name || entry.path.split(/[/\\]/).pop() || entry.path,
-            isDir: !!entry.isDir,
-          },
-        ]),
-      );
-      requestComposerFocus();
-    },
-    [requestComposerFocus],
-  );
+  const applyAtFile = useApplyAtFile({
+    liveAtRef,
+    clearAtState: closeAtMenu,
+    removeAtTokenFromDraft,
+    editorRef: composerInputRef,
+    setDraft,
+    setAttachments,
+    focus: requestComposerFocus,
+  });
 
   // Debounced project file search for @ panel.
   useEffect(() => {
@@ -12080,6 +12051,7 @@ export function AppWorkbench() {
         closeToTray={closeToTray}
         compactionDetail={compact.compactionDetail}
         compactionMode={compact.compactionMode}
+        composerEditor={composerEditor}
         confirmArchiveOlderThan={confirmArchiveOlderThan}
         defaultOpenTarget={defaultOpenTarget}
         deleteSessionsConfirm={deleteSessionsConfirm}
@@ -12163,6 +12135,7 @@ export function AppWorkbench() {
         setCloseToTray={setCloseToTray}
         setCompactionDetail={compact.setCompactionDetail}
         setCompactionMode={compact.setCompactionMode}
+        setComposerEditor={setComposerEditor}
         setDefaultOpenTarget={setDefaultOpenTarget}
         setDisableWebSearch={setDisableWebSearch}
         setDisallowedTools={setDisallowedTools}
@@ -12786,6 +12759,7 @@ export function AppWorkbench() {
             onComposerPasteFiles={onComposerPasteFiles}
             onComposerPasteMediaFallback={onComposerPasteMediaFallback}
             onSlashQueryChange={onSlashQueryChange}
+            onAtQueryChange={reportAtQuery}
             openAsidePane={openAsidePane}
             openQueueEdit={queueEdit.openEdit}
             openSession={openSession}

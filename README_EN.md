@@ -132,6 +132,7 @@ Download installers directly from the official website [grok-app.com](https://gr
 | **macOS (Intel)** | `Grok_*_x64.dmg` | Intel-based Macs |
 | **Windows (x64)** | `*-setup.exe` / `*-portable.zip` | Setup installer and portable archive |
 | **Linux (x64)** | `AppImage` / `.deb` / `.rpm` | Universal AppImage, Debian/Ubuntu, Fedora/RHEL |
+| **Linux (ARM64)** | `AppImage` / `.deb` / `.rpm` | Ubuntu 24.04+ aarch64. AppImage `Grok_*_aarch64.AppImage`, Debian `*_arm64.deb`, Fedora `*.aarch64.rpm` |
 
 > 💡 **Note**: The application bundle name is **Grok**. Prebuilt packages do not require Node.js, pnpm, or Rust installed on your system.
 
@@ -316,7 +317,7 @@ Contributions, bug reports, and suggestions are warmly welcomed!
 ## 👥 Contributors
 
 <!-- CONTRIBUTORS:START -->
-Thanks to everyone who has contributed to Grok App. All human GitHub contributors (by commit count, updated 2026-09-30).
+Thanks to everyone who has contributed to Grok App. All human GitHub contributors (by commit count, updated 2026-10-04).
 
 <p align="center">
   <a href="https://github.com/RongleCat" title="RongleCat"><img src="https://github.com/RongleCat.png?size=96" width="72" height="72" alt="RongleCat" style="border-radius:50%" /></a>

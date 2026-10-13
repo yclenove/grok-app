@@ -19,7 +19,7 @@ import { ContextUsageChip } from "@/components/ContextUsageChip";
 import { PromptHistoryPanel } from "@/components/PromptHistoryPanel";
 import { IconChevronDown, IconChevronUp, IconClock, IconClose, IconCode, IconImagine, IconMic, IconPlus, IconSkills } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
-import { isImagePath, mergeAttachments } from "@/lib/attachments";
+import { isImagePath, mergeAttachments, type Attachment } from "@/lib/attachments";
 import { chatHasUpdate, loadRecentAttachIds, lookupChatStatus, lookupChatTitle } from "@/lib/chatAttach";
 import { type PermissionPolicyId } from "@/lib/grokCatalog";
 import { removeRecentPrompt } from "@/lib/recentPromptHistory";
@@ -28,6 +28,7 @@ import type { SlashItem } from "@/lib/slashCatalog";
 import { sessionGoalClear } from "@/lib/goalClear";
 import { canType } from "@/lib/session";
 import { resolveVoiceMicChrome, voiceMicLabelMessageKey } from "@/lib/voiceDictation";
+import { useCallback } from "react";
 import { createPortal } from "react-dom";
 import type { WorkbenchComposerColumnProps } from "@/app/WorkbenchComposerColumn";
 
@@ -104,6 +105,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
     onComposerPasteFiles,
     onComposerPasteMediaFallback,
     onSlashQueryChange,
+    onAtQueryChange,
     openQueueEdit,
     openSession,
     openSideSkillsPanel,
@@ -174,6 +176,18 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
     voiceDictationAutoSend,
     voiceGate,
   } = p;
+  /**
+   * 跨档降级补进来的附件（切到内置档时引用 → 附件条）。
+   *
+   * 必须 memo：它是薄岛里那个降级 effect 的依赖，行内函数会让 effect 在父组件每次
+   * 渲染后重跑，直到 `setDraft` 落盘才停。
+   */
+  const onDemoteRefs = useCallback(
+    (converted: Attachment[]) => {
+      setAttachments((prev) => mergeAttachments(prev, converted));
+    },
+    [setAttachments],
+  );
   return (
             <div
               ref={composerShellRef}
@@ -604,6 +618,8 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                 onPasteFiles={onComposerPasteFiles}
                 onPasteMediaFallback={onComposerPasteMediaFallback}
                 onSlashQueryChange={onSlashQueryChange}
+                onAtQueryChange={onAtQueryChange}
+                onDemoteRefs={onDemoteRefs}
                 onKeyDown={onComposerKeyDown}
                 onContextMenu={onComposerContextMenu}
               />

@@ -9,7 +9,8 @@ CU维护来源最新见[SDK / FFmpeg与同步预检](plans/2026-10-13-computer-u
 | macOS Apple Silicon | `aarch64-apple-darwin` | ✅ | `.dmg` |
 | macOS Intel | `x86_64-apple-darwin` | ✅（在 Apple Silicon 上交叉） | `.dmg` |
 | Windows x64 | `x86_64-pc-windows-msvc` | ✅ 本机 Windows，或 **macOS/Linux 经 cargo-xwin** | NSIS `*-setup.exe` + **绿色版** `*-portable.zip` |
-| Linux x64 | `x86_64-unknown-linux-gnu` | ✅ 本机 Linux | **AppImage** + **.deb** + **.rpm** |
+| Linux x64 | `x86_64-unknown-linux-gnu` | ✅ 本机 Linux | **AppImage** + **.deb** + **.rpm**（Release 仍用 `ubuntu-22.04`，glibc 2.35） |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | ✅ 本机 aarch64 Linux | **AppImage** + **.deb** + **.rpm**（Release 用原生 `ubuntu-24.04-arm`，glibc 2.39，面向 Ubuntu 24.04+） |
 
 > macOS / Linux 交叉打 Windows 安装包使用 Tauri 官方 runner：`cargo-xwin` + `makensis`（NSIS）。  
 > 见 [Build Windows apps on Linux and macOS](https://v2.tauri.app/distribute/windows-installer/#build-windows-apps-on-linux-and-macos)。
@@ -73,7 +74,7 @@ App 的发行最低版本仍为 **macOS 11.0**。Computer Use 的**受管浏览�
 sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev \
   patchelf libgtk-3-dev libayatana-appindicator3-dev libssl-dev \
   libpipewire-0.3-dev libspa-0.2-dev libclang-dev \
-  build-essential pkg-config curl meson ninja-build python3-jinja2
+  build-essential pkg-config curl meson ninja-build python3-jinja2 xdg-utils
 
 # Arch
 sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module \

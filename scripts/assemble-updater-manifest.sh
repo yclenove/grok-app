@@ -59,6 +59,9 @@ map_platform() {
       fi
       ;;
     *.AppImage)
+      # ARM64 release asset is Grok_<ver>_aarch64.AppImage (Tauri AppImage arch).
+      # Debian packages use arm64 in the filename; accept that token too.
+      # x64 assets are *_amd64.AppImage and must stay linux-x86_64.
       if [[ "$name" == *aarch64* || "$name" == *arm64* ]]; then
         echo "linux-aarch64"
       else
@@ -177,6 +180,20 @@ if [[ ${#TRIPLES[@]} -eq 0 ]]; then
   echo "hint: archives need arch in the name (e.g. aarch64 / x64) or PLATFORM_HINTS" >&2
   ls -la
   exit 1
+fi
+
+# The Linux ARM64 job uploads this signature next to the AppImage. If it is
+# present but did not become linux-aarch64, the rolling manifest is wrong.
+arm_sig="Grok_${VERSION}_aarch64.AppImage.sig"
+if [[ -f "$arm_sig" ]]; then
+  arm_ok=0
+  for t in "${TRIPLES[@]}"; do
+    [[ "$t" == linux-aarch64:* ]] && arm_ok=1
+  done
+  if [[ $arm_ok -eq 0 ]]; then
+    echo "error: $arm_sig is on the release but linux-aarch64 is missing from latest.json" >&2
+    exit 1
+  fi
 fi
 
 echo "==> Platforms: ${#TRIPLES[@]}"

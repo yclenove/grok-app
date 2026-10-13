@@ -43,6 +43,7 @@
 | macOS Intel | `Grok_*_x64.dmg` |
 | Windows x64 | `*-setup.exe` 安装版，或 `*-portable.zip` 绿色版 |
 | Linux x64 | AppImage / `.deb` / `.rpm` |
+| Linux ARM64 | AppImage `Grok_*_aarch64.AppImage` / `.deb` `*_arm64.deb` / `.rpm` `*.aarch64.rpm`（Ubuntu 24.04+） |
 
 校验：Release 附带 `SHA256SUMS`。
 

@@ -99,6 +99,24 @@ fn is_stable_installer_name(lower_name: &str) -> bool {
         || lower_name.starts_with("grok_linux_")
 }
 
+/// Arch token on a Linux installer filename.
+///
+/// Tauri 2 emits `aarch64` on the AppImage and RPM, and `arm64` on the `.deb`.
+/// x64 packages use `amd64` / `x86_64` / `x64`. `aarch64` is checked first so it
+/// is not mistaken for a shorter token.
+fn linux_installer_arch(lower_name: &str) -> Option<&'static str> {
+    if lower_name.contains("aarch64") || lower_name.contains("arm64") {
+        Some("aarch64")
+    } else if lower_name.contains("amd64")
+        || lower_name.contains("x86_64")
+        || lower_name.contains("x64")
+    {
+        Some("x86_64")
+    } else {
+        None
+    }
+}
+
 fn prefer_tokens(os: &str, arch: &str) -> &'static [&'static str] {
     match (os, arch) {
         ("macos", "aarch64") => &["aarch64", "arm64", "apple-silicon", ".dmg", "macos"],
@@ -148,6 +166,26 @@ fn pick_platform_asset_for(
         }
         if score == 0 {
             continue;
+        }
+        // Linux installs are AppImage / deb / rpm only. A macOS `*_aarch64.dmg`
+        // can pick up the stable-name bonus and must not win on Linux.
+        // When both arches are on the Release, skip the other one so an
+        // aarch64 machine is not offered the x64 AppImage (or the reverse).
+        // Packages with no arch token stay eligible.
+        if os == "linux" {
+            let linux_pkg =
+                lower.ends_with(".appimage") || lower.ends_with(".deb") || lower.ends_with(".rpm");
+            if !linux_pkg {
+                continue;
+            }
+            if let Some(asset_arch) = linux_installer_arch(&lower) {
+                let want_arm = arch == "aarch64";
+                let asset_arm = asset_arch == "aarch64";
+                if want_arm != asset_arm {
+                    continue;
+                }
+                score = score.saturating_add(40);
+            }
         }
         match &best {
             None => best = Some((score, name, url)),
@@ -560,6 +598,53 @@ mod tests {
         let (url, name) = pick_platform_asset_for("windows", "x86_64", Some(&assets));
         assert_eq!(name.as_deref(), Some("Grok_windows_x64-setup.exe"));
         assert!(url.unwrap().ends_with("/Grok_windows_x64-setup.exe"));
+    }
+
+    #[test]
+    fn pick_linux_x64_prefers_stable_appimage_over_arm_and_deb() {
+        let assets = vec![
+            gh_asset("Grok_0.2.20_aarch64.AppImage"),
+            gh_asset("Grok_linux_arm64.AppImage"),
+            gh_asset("Grok_0.2.20_arm64.deb"),
+            gh_asset("Grok_0.2.20_amd64.deb"),
+            gh_asset("Grok_linux_x64.deb"),
+            gh_asset("Grok_0.2.20_amd64.AppImage"),
+            gh_asset("Grok_linux_x64.AppImage"),
+            gh_asset("Grok-0.2.20-1.x86_64.rpm"),
+            gh_asset("Grok-0.2.20-1.aarch64.rpm"),
+        ];
+        let (url, name) = pick_platform_asset_for("linux", "x86_64", Some(&assets));
+        assert_eq!(name.as_deref(), Some("Grok_linux_x64.AppImage"));
+        assert!(url.unwrap().ends_with("/Grok_linux_x64.AppImage"));
+    }
+
+    #[test]
+    fn pick_linux_arm64_prefers_stable_appimage() {
+        let assets = vec![
+            gh_asset("Grok_linux_x64.AppImage"),
+            gh_asset("Grok_0.2.20_amd64.AppImage"),
+            gh_asset("Grok_0.2.20_amd64.deb"),
+            gh_asset("Grok_0.2.20_aarch64.AppImage"),
+            gh_asset("Grok_linux_arm64.AppImage"),
+            gh_asset("Grok_0.2.20_arm64.deb"),
+            gh_asset("Grok-0.2.20-1.aarch64.rpm"),
+            gh_asset("Grok_mac_aarch64.dmg"),
+        ];
+        let (url, name) = pick_platform_asset_for("linux", "aarch64", Some(&assets));
+        assert_eq!(name.as_deref(), Some("Grok_linux_arm64.AppImage"));
+        assert!(url.unwrap().ends_with("/Grok_linux_arm64.AppImage"));
+    }
+
+    #[test]
+    fn pick_linux_arm64_skips_x64_and_macos_when_no_arm_installer() {
+        let assets = vec![
+            gh_asset("Grok_linux_x64.AppImage"),
+            gh_asset("Grok_0.2.20_amd64.deb"),
+            gh_asset("Grok_mac_aarch64.dmg"),
+        ];
+        let (url, name) = pick_platform_asset_for("linux", "aarch64", Some(&assets));
+        assert!(url.is_none());
+        assert!(name.is_none());
     }
 
     #[test]

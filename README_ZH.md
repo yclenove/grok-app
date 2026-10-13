@@ -132,6 +132,7 @@
 | **macOS (Intel)** | `Grok_*_x64.dmg` | 适用于 Intel 处理器 Mac |
 | **Windows (x64)** | `*-setup.exe` / `*-portable.zip` | 包含安装版与免安装绿色版 |
 | **Linux (x64)** | `AppImage` / `.deb` / `.rpm` | 通用 AppImage，以及 Debian/Ubuntu/Fedora 格式 |
+| **Linux (ARM64)** | `AppImage` / `.deb` / `.rpm` | Ubuntu 24.04 及以上 aarch64。AppImage：`Grok_*_aarch64.AppImage`；Debian：`*_arm64.deb`；Fedora：`*.aarch64.rpm` |
 
 > 💡 **提示**：安装包名称为 **Grok**。预编译版本无需安装 Node.js、pnpm 或 Rust 等开发环境，开箱即用。
 
@@ -316,7 +317,7 @@ Windows（可选）：双击 [`install-latest.cmd`](./install-latest.cmd) 会把
 ## 👥 贡献者
 
 <!-- CONTRIBUTORS:START -->
-感谢所有为 Grok App 做出贡献的人！以下为 GitHub 仓库全部人类贡献者（按 commits 降序，2026-09-30 更新）。
+感谢所有为 Grok App 做出贡献的人！以下为 GitHub 仓库全部人类贡献者（按 commits 降序，2026-10-04 更新）。
 
 <p align="center">
   <a href="https://github.com/RongleCat" title="RongleCat"><img src="https://github.com/RongleCat.png?size=96" width="72" height="72" alt="RongleCat" style="border-radius:50%" /></a>
