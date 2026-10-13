@@ -123,7 +123,7 @@ jobs:
           sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1
 
       - name: cargo build -p gcu-fixture
-        run: cargo build -p gcu-fixture
+        run: cargo build --locked -p gcu-fixture
 
       - name: Run fixture and verify AT-SPI tree
         run: |
