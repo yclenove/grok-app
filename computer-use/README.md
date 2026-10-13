@@ -29,8 +29,9 @@ computer-use/
 └── xtask/                      Development gates and dependency-rule tests
 ```
 
-Crate entry points are documented skeletons; product APIs and behavior belong
-to their subsequent roadmap cards. Platform driver libraries are empty on other
+Most crate entry points are documented skeletons; gcu-protocol defines the complete
+default tool schema, results, errors, capabilities, and chord parser. Product
+behavior belongs to subsequent roadmap cards. Platform driver libraries are empty on other
 operating systems, so all workspace members can build together on each platform.
 
 `src-tauri` has no pinned toolchain and its CI uses stable. This workspace pins
@@ -73,9 +74,16 @@ Among computer-use crates, App may depend only on `gcu-protocol` and
 inherited aliases are resolved from an in-manifest workspace dependency table,
 and unresolved inheritance is an error. Read or metadata failures return nonzero.
 
-`golden` and `budget` currently print `SKIP: not implemented yet: P0-03` and
-return 0. Schema generation and byte-budget validation belong to P0-03; a skip
-does not certify either gate. These subcommands will be replaced there.
+`cargo xtask golden --check` compares generated protocol JSON byte for byte with
+`crates/gcu-protocol/golden/{tools,errors}.json`. After reviewing a protocol change,
+run `cargo xtask golden --update` to regenerate sorted JSON with two-space indentation
+and a final newline. `cargo xtask budget` checks the compact tools array's UTF-8
+size against 14,000 bytes and reports each tool's size; overflow returns nonzero.
+The catalog includes all sixteen tools, including schemas for later roadmap stages;
+schema presence does not enable a pending implementation. App/window context is
+shared by batch steps, which reuse standalone action payloads. Call `validate()`
+on action payloads and batches before execution to enforce mutually exclusive
+targets, key syntax, and resource limits.
 
 The license allowlist rejects GPL/AGPL/LGPL; architecture §2 additionally requires
 MPL-2.0 dependencies to be dynamically linked. The source policy permits only

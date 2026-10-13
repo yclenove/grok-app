@@ -1,0 +1,7 @@
+# Generated golden files and policy data must be byte-identical on every platform.
+* text=auto
+crates/gcu-protocol/golden/*.json text eol=lf
+crates/gcu-core/data/** text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
