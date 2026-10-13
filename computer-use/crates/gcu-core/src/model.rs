@@ -331,3 +331,24 @@ pub struct WindowPoint {
     /// Vertical coordinate.
     pub y: f64,
 }
+
+bitflags::bitflags! {
+    /// Core observation annotations, separate from platform accessibility states.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct NodeFlags: u16 {
+        /// Best-effort terminal/console recognition from native role or name.
+        /// Role has no Terminal/Console variants; this also propagates to descendants
+        /// so flattening cannot erase an embedded execution surface. Not a safety proof.
+        const TERMINAL_LIKE = 1 << 0;
+        /// Node is on the focused element's ancestor chain (including the element).
+        const FOCUS_PATH = 1 << 1;
+        /// Node is on a modal popup's ancestor chain (including the popup).
+        const MODAL_PATH = 1 << 2;
+        /// Node is inside a modal dialog, sheet, or native alert.
+        const MODAL_CONTENT = 1 << 3;
+        /// Native title bar or its descendants.
+        const TITLE_BAR = 1 << 4;
+        /// Background node kept as a one-level summary while a modal is present.
+        const SUMMARY = 1 << 5;
+    }
+}

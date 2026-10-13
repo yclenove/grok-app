@@ -1,0 +1,9 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.terminal (pid 1001) — Fixture terminal
+Window: "Fixture terminal", id terminal-window, 800×480 @1x, App: Fixture terminal.
+0 standard window Terminal ID: root [terminal]
+    1 unknown (settable, focused) Console Value: fixture only ID: console [terminal]
+The focused UI element is 1 unknown.

@@ -54,12 +54,18 @@ pub struct TreeOpts {
     pub timeout: Duration,
     /// Maximum extended-text Unicode scalars; None requests native maximum.
     pub text_limit: Option<usize>,
+    /// Core node budget, including the root. Zero yields an empty observation.
+    pub max_tree_nodes: usize,
+    /// Core depth budget in levels, counting the window as level one.
+    pub max_tree_depth: usize,
 }
 impl Default for TreeOpts {
     fn default() -> Self {
         Self {
             timeout: NATIVE_TIMEOUT,
             text_limit: Some(500),
+            max_tree_nodes: 1200,
+            max_tree_depth: 64,
         }
     }
 }

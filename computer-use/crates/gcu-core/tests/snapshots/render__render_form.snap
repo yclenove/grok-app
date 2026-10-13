@@ -1,0 +1,13 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.form (pid 1001) — Fixture form
+Window: "Fixture form", id form-window, 800×480 @1x, App: Fixture form.
+0 standard window Form ID: root
+    1 text field (settable, focused) Name ID: text
+    2 check box Agree ID: agree Secondary Actions: Toggle
+    3 button Submit ID: submit
+    4 slider (settable) Volume Value: 0 (0–100) ID: slider Secondary Actions: Increment, Decrement
+    5 static text Ready ID: status
+The focused UI element is 1 text field.

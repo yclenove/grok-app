@@ -1,0 +1,77 @@
+---
+source: crates/gcu-core/src/tree/test_support.rs
+expression: "serde_json::to_string_pretty(&io).unwrap()"
+---
+{
+  "input": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "flags": "NodeFlags(TERMINAL_LIKE | MODAL_CONTENT)",
+            "index": null,
+            "name": "Console",
+            "omitted": 0,
+            "role": "unknown",
+            "states": "ENABLED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(MODAL_PATH | MODAL_CONTENT)",
+        "index": null,
+        "name": "Modal",
+        "omitted": 0,
+        "role": "dialog",
+        "states": "ENABLED | MODAL",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(MODAL_PATH)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  },
+  "omitted": 0,
+  "output": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "flags": "NodeFlags(TERMINAL_LIKE | MODAL_CONTENT)",
+            "index": 2,
+            "name": "Console",
+            "omitted": 0,
+            "role": "unknown",
+            "states": "ENABLED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(MODAL_PATH | MODAL_CONTENT)",
+        "index": 1,
+        "name": "Modal",
+        "omitted": 0,
+        "role": "dialog",
+        "states": "ENABLED | MODAL",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(MODAL_PATH)",
+    "index": 0,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  }
+}

@@ -24,3 +24,12 @@ workspace = true
 
 [features]
 testing = []
+
+[dev-dependencies]
+insta = { version = "1.49", default-features = false }
+criterion = { version = "0.8", default-features = false }
+gcu-driver-fake.workspace = true
+
+[[bench]]
+name = "render"
+harness = false

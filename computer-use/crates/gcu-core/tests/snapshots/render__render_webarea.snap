@@ -1,0 +1,10 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.webarea (pid 1001) — Fixture webarea
+Window: "Fixture webarea", id webarea-window, 800×480 @1x, App: Fixture webarea.
+0 standard window Webarea ID: root
+    1 web area Offline page ID: web URL: https://example.invalid/
+        2 link [Documentation](https://example.invalid/docs) ID: link URL: https://example.invalid/docs
+        3 static text Fixture content ID: paragraph

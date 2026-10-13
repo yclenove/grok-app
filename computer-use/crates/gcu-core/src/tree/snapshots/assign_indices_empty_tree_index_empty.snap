@@ -1,0 +1,9 @@
+---
+source: crates/gcu-core/src/tree/test_support.rs
+expression: "serde_json::to_string_pretty(&io).unwrap()"
+---
+{
+  "input": null,
+  "omitted": 0,
+  "output": null
+}

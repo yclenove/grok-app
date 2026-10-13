@@ -1,0 +1,141 @@
+---
+source: crates/gcu-core/src/tree/test_support.rs
+expression: "serde_json::to_string_pretty(&io).unwrap()"
+---
+{
+  "input": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 0",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 1",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 2",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 3",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 4",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(0x0)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  },
+  "omitted": 0,
+  "output": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 0",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 1",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 2",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 3",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Row 4",
+        "omitted": 0,
+        "role": "static_text",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(0x0)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  }
+}
