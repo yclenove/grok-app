@@ -381,9 +381,9 @@ impl Driver for FakeDriver {
         if let Some(fault) = self.action_faults.lock().await.pop_front() {
             self.lock().await?.faults.push_front(fault);
         }
-        bounded(cancel, NATIVE_TIMEOUT, async {
+        bounded(cancel, DRIVER_DEADLINE, async {
             let delivery = self.delivery(req)?;
-            let fault = self.prepare(cancel, NATIVE_TIMEOUT).await?;
+            let fault = self.prepare(cancel, DRIVER_DEADLINE).await?;
             let mut world = self.lock().await?;
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled {

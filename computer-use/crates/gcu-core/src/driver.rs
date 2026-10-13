@@ -19,6 +19,13 @@ use tokio::sync::Notify;
 
 /// Default hard native-call deadline; mutation timeouts must report uncertainty.
 pub const NATIVE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Inner deadline a driver enforces on its own native calls.
+///
+/// It is deliberately shorter than [`NATIVE_TIMEOUT`], the router's outer deadline. A
+/// driver that stops first can prove the call had no effect (`maybe_executed == false`);
+/// if both limits were equal the outer one could win and report an uncertain outcome for
+/// a call that never started. Real drivers must use this value for their own timeouts.
+pub const DRIVER_DEADLINE: Duration = Duration::from_millis(4_750);
 /// Driver operation result, including whether input might have been delivered.
 pub type Result<T, E = DriverError> = std::result::Result<T, E>;
 /// Optional event stream, terminated when the native subscription is dropped.
