@@ -5,9 +5,66 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[dependencies]
 gcu-protocol.workspace = true
 gcu-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility-sys = { version = "0.2.0", default-features = false }
+block2 = "0.6.2"
+core-foundation = "0.10"
+libc = "0.2"
+objc2 = { version = "0.6.5", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSWorkspace",
+    "NSRunningApplication",
+    "block2",
+    "libc",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFCGTypes",
+    "CFDate",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "objc2",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGGeometry",
+    "CGWindow",
+    "bitflags",
+    "objc2",
+    "libc",
+] }
+objc2-core-services = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "MDItem",
+    "MDQuery",
+    "Metadata",
+    "objc2",
+    "libc",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+] }
+security-framework = "3.7.0"
+security-framework-sys = "2.17"
+sha2.workspace = true
 
 [lints]
 workspace = true
