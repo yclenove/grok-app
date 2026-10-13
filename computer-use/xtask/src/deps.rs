@@ -110,6 +110,10 @@ const RULES: &[Rule] = &[
         allowed: Allowed::Any,
     },
     Rule {
+        owner: CrateName::Exact("gcu-fixture"),
+        allowed: Allowed::Any,
+    },
+    Rule {
         owner: CrateName::Exact("xtask"),
         allowed: Allowed::Any,
     },

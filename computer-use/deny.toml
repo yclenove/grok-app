@@ -8,7 +8,10 @@ db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0192: ttf-parser is unmaintained upstream; transitive dependency of eframe 0.36
+    "RUSTSEC-2026-0192",
+]
 
 [licenses]
 # Everything outside this allowlist is rejected, including GPL/AGPL/LGPL.
@@ -26,11 +29,24 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.95
+exceptions = [
+    # Transitive dependencies of eframe 0.36 for gcu-fixture:
+    # clipboard-win: transitive dependency via arboard on Windows
+    { allow = ["BSL-1.0"], crate = "clipboard-win" },
+    # error-code: transitive dependency via clipboard-win on Windows
+    { allow = ["BSL-1.0"], crate = "error-code" },
+    # epaint_default_fonts: embedded fonts in epaint for eframe UI rendering
+    { allow = ["OFL-1.1", "Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
+]
 
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = true
+skip-tree = [
+    # eframe 0.36 brings in winit, wgpu, arboard which have transitive multiple versions across OS targets
+    { crate = "eframe", reason = "fixture app eframe transitive dependencies" },
+]
 
 [sources]
 unknown-registry = "deny"
