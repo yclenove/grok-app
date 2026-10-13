@@ -31,7 +31,7 @@ gcu script --file a.js | -                      # 同 computer_script（feature�
 gcu approvals list|revoke <app>|revoke-all       # 管理"始终允许"
 gcu install <client> [--scope user|project]     # grok | codex | claude | antigravity | gemini | opencode | cursor | vscode
 gcu uninstall <client>
-gcu turn-ended [payload]                        # 客户端 notify 钩子入口
+gcu turn-ended [payload]                        # 客户端钩子入口（Grok: Stop/end_turn；Codex: notify）
 gcu resume                                      # 仅用户显式解除 Stop 锁存，不向模型暴露
 gcu worker                                      # 内部：Windows 隔离执行子进程（隐藏）
 gcu version
@@ -165,6 +165,19 @@ Stop/恢复走独立控制通道与 watchdog，停止锁存不因下一轮/重�
 | 工具结果大小上限 | 按上限调 `max_image_edge` 与 `text_limit` | — |
 
 ---
+
+### S-01 结论（[ADR 0001](../../../computer-use/docs/adr/0001-grok-build-mcp-capabilities.md)，grok 1.0.52）
+
+| 问题 | 结论 | v2 处置 |
+|---|---|---|
+| image 是否抵达模型 | 有条件：像素量约 ≥6 万才作为视觉输入，小图变文本 | 短边下限 256 + 放大小裁剪 + 文件路径后备（03 §4.4） |
+| elicitation | 能力位有；headless 直接 `cancel` | 先试，失败/取消一律走 helper 审批窗；无界面会话不依赖它 |
+| http MCP / ACP | 支持；`session/new` 的条目必须写 `type:"http"` 与 `headers:[{name,value}]`，写 `transport` 会被拒 | 05 §1 已按此；`server/discover` 失败可忽略 |
+| instructions | 注入为 synthetic user 消息，模型可见 | 照常使用（≤1,200 字符） |
+| turn 结束 | Hook `Stop`（`reason == end_turn`），没有 Codex 式 `notify` | `gcu install grok` 安装 `Stop` 钩子，仅处理 `end_turn`；钩子缺失时空闲 45s 推定 |
+| 结果大小 | 文本约 20,000 字节前缀，超出写溢出文件；structuredContent 拼进文本末尾 | 渲染总量控制在 20 KB 内；长内容放文件 |
+| 并发 | 同一条助手消息内的多个 `tools/call` 并发发出 | `gcu-mcp` 每会话内部串行执行，但必须能同时接收并排队 |
+| annotations | headless 下不影响权限 | 策略完全自管，不依赖 `readOnlyHint` |
 
 ## 8. 路线 A 里程碑（与 06 路线图对齐）
 

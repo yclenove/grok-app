@@ -219,6 +219,7 @@ The focused UI element is 21 text area.
 ```
 
 `elements` 默认不随文本重复下发（避免双倍 token）；`gcu call --json`、脚本、评测器可请求 `detail: "full"`。
+在 Grok 1.0.52 上 `structuredContent` 会被拼进文本末尾，且工具文本只保留约 20,000 字节前缀（超出部分写入会话溢出文件，尾部 JSON 丢失）。因此：文本渲染与 `text_limit` 的总输出必须落在 20 KB 前缀内，结构化 JSON 只放精简事实（动作结果、ID），长内容放文件路径。
 
 ### 4.4 截图
 
@@ -226,6 +227,7 @@ The focused UI element is 21 text area.
 - 窗口级截图（不是全屏），物理像素；长边超过 `max_image_edge`（默认 1568）时等比缩放，记录 `scale_to_window`。
 - 坐标动作的 `x,y` 永远是**该截图的像素坐标**；服务端换算为窗口点坐标再到屏幕坐标。
 - 默认 PNG；`image_format: "jpeg"`（质量 82）可选；单图上限 1.5 MB，超出自动降质/缩放并在结果中注明。
+- **Grok 1.0.52 的图片到达条件（[ADR 0001](../../../computer-use/docs/adr/0001-grok-build-mcp-capabilities.md)）：** MCP image 只有在像素量约 6 万以上（实测 344×160 失败、344×190 成功）时才作为视觉输入，更小的图被摊成文本 data URL，模型读不出。因此 `image_min_short_edge = 256`：窗口截图自然满足；审批裁剪图等小图先放大到短边 ≥256 再下发，仍不满足则不附图并改用文件路径。工具文本同时给出临时图片路径作后备（模型可用 `read_file`；路径只对本会话有效、会话结束删除，且图片经同一脱敏管线）。1.6 MB 级 PNG 会被客户端重编码为 JPEG，故图片目标上限按 ≤300 KB 的 PNG 设计。
 - `get_app_state` 默认附图（`include_screenshot` 默认 true）；动作结果默认**仅当视觉可能变化且树无法表达时**附图：
   规则 `attach_image = action_used_coordinates || window_is_canvas_like || diff_is_empty_but_pixels_changed || explicit`。
 - 截图与覆盖层：覆盖层窗口设置为不参与截图（macOS `NSWindow.sharingType = .none`；Windows `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`；
