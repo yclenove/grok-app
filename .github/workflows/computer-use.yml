@@ -3,14 +3,16 @@ name: computer-use
 
 on:
   push:
-    branches: [main, feat/cu-v2]
+    branches: [main, feat/cu-v2, 'cu2/**']
     paths:
       - 'computer-use/**'
+      - 'docs/plans/computer-use-v2/**'
       - '.github/workflows/computer-use.yml'
   pull_request:
     branches: [main, feat/cu-v2]
     paths:
       - 'computer-use/**'
+      - 'docs/plans/computer-use-v2/**'
       - '.github/workflows/computer-use.yml'
 
 concurrency:
@@ -96,6 +98,54 @@ jobs:
         run: |
           python3 -I computer-use/scripts/check_policy_data.py
           python3 -I computer-use/scripts/test_check_policy_data.py
+
+      - name: Verify plan documents
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: python3 -I docs/plans/computer-use-v2/reviews/check_plan.py
+
+  fixture-a11y-linux:
+    name: Linux AT-SPI Accessibility Tree
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: computer-use
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain (computer-use/rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "computer-use -> target"
+          key: ${{ hashFiles('computer-use/Cargo.lock') }}
+
+      - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject, Mesa)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1
+
+      - name: cargo build -p gcu-fixture
+        run: cargo build --locked -p gcu-fixture
+
+      - name: Run fixture and verify AT-SPI tree
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render" bash scripts/a11y/run_fixture_test.sh
+
+      - name: Upload AT-SPI artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: fixture-a11y-linux-artifacts
+          if-no-files-found: warn
+          path: |
+            /tmp/fixture_tree.json
+            /tmp/fixture.log
+            /tmp/fixture_state.json
 
   e2e-self-hosted:
     name: Self-hosted E2E (Placeholder)

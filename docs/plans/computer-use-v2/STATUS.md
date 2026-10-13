@@ -20,7 +20,7 @@
 | P0-10 | gcu-cli（fake） | P0-09 | 1d | todo |  |  |  |  |
 | P0-12 | gcu-host-protocol 与 engine 模式 | P0-09 | 2.5d | todo |  |  |  | 路线 B 松耦合基础 |
 | P0-11 | 文档与 STATUS 初始化 | P0-10、P0-12 | 0.5d | todo |  |  |  | P0-12后文档收尾；保留既有进展 |
-| P1-01 | 跨平台夹具 App | P0-01 | 2.5d | done | cu2/P1-01-fixture |  | 2026-10-13 | 状态机+原子状态文件12测试；三平台无障碍实测 not_run（清单见 apps/fixture/README.md）；deny 例外限 eframe 子树 |
+| P1-01 | 跨平台夹具 App | P0-01 | 2.5d | done | cu2/P1-01-fixture |  | 2026-10-13 | 状态机+原子状态文件12测试；Linux 无障碍已由 CI 验证(11项通过+2已知缺口)，macOS/Windows not_run（清单见 apps/fixture/README.md）；deny 例外限 eframe 子树 |
 | P1-02 | macOS 发现与身份 | P0-05 | 2d | todo |  |  |  |  |
 | P1-03 | macOS AX 树 | P1-02 | 3d | todo |  |  |  |  |
 | P1-04 | macOS SCK 截图 | P1-02、P1-03、P0-07 | 2d | todo |  |  |  |  |
@@ -47,7 +47,8 @@
 | P4-02 | Onboarding 窗口 | P4-01 | 2d | todo |  |  |  |  |
 | P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | todo |  |  |  |  |
 | P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | todo |  |  |  |  |
-| P4-05 | gcu install/uninstall | P0-10 | 2d | in_progress | cu2/P4-05a-install-lib |  | 2026-10-13 | 库部分(05a)已完成：服务端名改为 grok-computer-use（Claude 保留 computer-use）；clap 子命令接线待 P0-10 |
+| P4-05a | gcu install 客户端安装库（P4-05 前半） | P0-01 | 1d | done | cu2/P4-05a-install-lib | #14 | 2026-10-13 | 服务端名 grok-computer-use；Claude 保留 computer-use |
+| P4-05 | gcu install/uninstall（clap 接线 + Windows 钩子） | P0-10、P4-05a | 1d | todo |  |  |  | 库部分已由 P4-05a 完成 |
 | P4-06 | turn-ended 接入 | P0-09、S-01 | 1d | todo |  |  |  |  |
 | P4-07 | 打包与分发 | P4-01、P4-02、P4-03、P4-04、P4-05、P4-06 | 3d | todo |  |  |  | 需签名证书（可先无签名） |
 | P4-08 | 用户文档 | P4-07 | 1d | todo |  |  |  |  |
@@ -93,6 +94,8 @@
 - 计划 v1.1 逐项决定见 [评审处置表](reviews/2026-10-13-disposition.md)；工时 P0–P9 177d + spike 3d，与 06 一致。
 - ~~P0-03 的 ErrorCode 缺 window_minimized~~ 已补（cu2/protocol-window-minimized）。
 - 外部 CI：仓库原有 `ci.yml` 会对 `computer-use/**` 改动也整套运行（Rust/frontend），浪费时间；待 CU 稳定后给它加 `paths-ignore: computer-use/**`。
+- eframe 0.36 在 Linux AT-SPI 上不暴露密码保护(ROLE_PASSWORD_TEXT/STATE_PROTECTED)与模态(ROLE_DIALOG/STATE_MODAL)：契约用例 C14/C20 不能靠 gcu-fixture 验证，需 fixtures-native（GTK4 等）补；脚本以 KNOWN_GAPS 显式登记，非静默跳过。
+- Windows 上 Grok `Stop` 钩子（.cmd）未实现；安装库当前钩子脚本为 Unix `.sh`，Windows 只装 MCP 条目。
 
 ## 阶段记录
 
