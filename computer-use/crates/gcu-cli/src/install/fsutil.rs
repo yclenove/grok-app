@@ -226,6 +226,9 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError
 }
 
 fn write_temp(tmp: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
+    // Permission bits only apply on Unix; Windows ignores them.
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)

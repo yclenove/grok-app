@@ -165,31 +165,16 @@ fn cursor_project(project: &Path) -> PathBuf {
 }
 
 fn vscode_user(home: &Path) -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        return home
-            .join("AppData")
-            .join("Roaming")
-            .join("Code")
-            .join("User")
-            .join("mcp.json");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return home
-            .join("Library")
-            .join("Application Support")
-            .join("Code")
-            .join("User")
-            .join("mcp.json");
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
+    // `cfg!` keeps every branch type-checked on every platform and avoids
+    // cfg-dependent early returns that trip `clippy::needless_return`.
+    let user_dir = if cfg!(target_os = "windows") {
+        home.join("AppData").join("Roaming")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
         home.join(".config")
-            .join("Code")
-            .join("User")
-            .join("mcp.json")
-    }
+    };
+    user_dir.join("Code").join("User").join("mcp.json")
 }
 
 fn vscode_project(project: &Path) -> PathBuf {
