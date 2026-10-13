@@ -92,21 +92,37 @@
 
 ### 3.3 Linux 验收清单
 
+> **状态**：已由 CI 自动验证（Job: `fixture-a11y-linux`，见 `.github/workflows/computer-use.yml`；测试脚本：`computer-use/scripts/a11y/dump_atspi.py` 与 `check_fixture_tree.py`）。
+
 - **工具**：
-  - Accerciser（GNOME AT-SPI 检查器：`sudo apt-get install accerciser`）
-  - D-Bus 检查：`at-spi-bus-launcher` 与 `busctl --user tree org.a11y.Bus`
-- **启动命令**（Xvfb / AT-SPI 会话）：
+  - AT-SPI 2.0 / D-Bus（`at-spi-bus-launcher`、`gir1.2-atspi-2.0`、`python3-gi`）
+  - Xvfb 虚拟显示与 Openbox 窗口管理器
+- **CI 执行命令**（Xvfb / AT-SPI 会话）：
   ```bash
-  dbus-run-session -- env GCU_FIXTURE_STATE=/tmp/fixture_state.json cargo run -p gcu-fixture
+  dbus-run-session -- xvfb-run -a bash -c '
+    openbox &
+    /usr/libexec/at-spi-bus-launcher &
+    export GTK_MODULES="gail:atk-bridge" QT_ACCESSIBILITY=1 ACCESSIBILITY_ENABLED=1
+    cargo build -p gcu-fixture
+    ./target/debug/gcu-fixture &
+    python3 scripts/a11y/dump_atspi.py --output /tmp/fixture_tree.json
+    python3 scripts/a11y/check_fixture_tree.py --input /tmp/fixture_tree.json
+  '
   ```
 - **检查项目**：
-  1. **AT-SPI 角色**：
-     - `name_field`：Role 为 `ATSPI_ROLE_TEXT` 或 `ATSPI_ROLE_ENTRY`。
-     - `password_field`：Role 为 `ATSPI_ROLE_PASSWORD_TEXT`。
+  1. **AT-SPI 角色与断言**：
+     - `name_field`、`multiline_field`：Role 为 `ATSPI_ROLE_TEXT` 或 `ATSPI_ROLE_ENTRY`。
+     - `password_field`：Role 为 `ATSPI_ROLE_PASSWORD_TEXT`（或具有受保护属性）。
      - `agree_checkbox`：Role 为 `ATSPI_ROLE_CHECK_BOX`。
-     - 按钮类：Role 为 `ATSPI_ROLE_PUSH_BUTTON`。
-     - 列表：Role 为 `ATSPI_ROLE_LIST` / `ATSPI_ROLE_SCROLL_PANE`。
-     - 画布区：Role 为 `ATSPI_ROLE_IMAGE` / `ATSPI_ROLE_CANVAS`，无子无障碍对象。
-     - 模态：Role 为 `ATSPI_ROLE_DIALOG`，拥有 `MODAL` 状态标记。
-  2. **截图凭证**：
-     - `import -window root /tmp/linux_fixture.png` 或 Accerciser 界面截图。
+     - `radio_group`：3 个单选按钮，Role 为 `ATSPI_ROLE_RADIO_BUTTON`。
+     - `combo_box`：Role 为 `ATSPI_ROLE_COMBO_BOX`。
+     - `slider_field`：Role 为 `ATSPI_ROLE_SLIDER`。
+     - 按钮类（计数器、发送、提交、打开弹窗）：Role 为 `ATSPI_ROLE_PUSH_BUTTON`。
+     - 标签页（全部控件、画布网格、虚拟列表、事件日志）：树中存在且逐字匹配。
+     - 虚拟列表：Role 为 `ATSPI_ROLE_LIST` / `ATSPI_ROLE_SCROLL_PANE`，仅视口可见行（约 10–30 行）进树，禁止 2000 行全量加载。
+     - 画布区（`grid_canvas`）：Role 为 `ATSPI_ROLE_IMAGE` / `ATSPI_ROLE_CANVAS`，子节点数量严格为 0。
+     - 模态弹窗：打开后出现 Role 为 `ATSPI_ROLE_DIALOG`，拥有 `MODAL` 状态标记。
+     - 中文与 Emoji：18 组双语与 Emoji 标签逐字符完全匹配。
+  2. **CI 凭证与 Artifacts**：
+     - CI 生成 `/tmp/fixture_tree.json` 完整 AT-SPI 结构树。
+     - 失败时自动上传 `/tmp/fixture_tree.json` 与 `/tmp/fixture.log` 为 Workflow Artifacts。

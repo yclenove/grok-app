@@ -3,7 +3,7 @@ name: computer-use
 
 on:
   push:
-    branches: [main, feat/cu-v2]
+    branches: [main, feat/cu-v2, 'cu2/**']
     paths:
       - 'computer-use/**'
       - '.github/workflows/computer-use.yml'
@@ -96,6 +96,99 @@ jobs:
         run: |
           python3 -I computer-use/scripts/check_policy_data.py
           python3 -I computer-use/scripts/test_check_policy_data.py
+
+  fixture-a11y-linux:
+    name: Linux AT-SPI Accessibility Tree
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: computer-use
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain (computer-use/rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "computer-use -> target"
+          key: ${{ hashFiles('computer-use/Cargo.lock') }}
+
+      - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev
+
+      - name: cargo build -p gcu-fixture
+        run: cargo build -p gcu-fixture
+
+      - name: Run fixture and verify AT-SPI tree
+        run: |
+          dbus-run-session -- xvfb-run -a bash -c '
+            set -euo pipefail
+
+            openbox &
+            OPENBOX_PID=$!
+
+            ATSPI_LAUNCHER=$(which at-spi-bus-launcher 2>/dev/null || find /usr/lib* /usr/libexec -name at-spi-bus-launcher 2>/dev/null | head -n 1)
+            if [ -z "$ATSPI_LAUNCHER" ]; then
+              echo "ERROR: at-spi-bus-launcher not found" >&2
+              exit 1
+            fi
+            echo "Using at-spi-bus-launcher: $ATSPI_LAUNCHER"
+            "$ATSPI_LAUNCHER" &
+            ATSPI_PID=$!
+
+            echo "Waiting for org.a11y.Bus..."
+            for i in $(seq 1 40); do
+              if busctl --user status org.a11y.Bus >/dev/null 2>&1; then
+                echo "AT-SPI bus ready"
+                break
+              fi
+              sleep 0.2
+            done
+
+            export GTK_MODULES="gail:atk-bridge"
+            export QT_ACCESSIBILITY=1
+            export ACCESSIBILITY_ENABLED=1
+            export GCU_FIXTURE_STATE=/tmp/fixture_state.json
+
+            echo "Launching gcu-fixture in background..."
+            ./target/debug/gcu-fixture > /tmp/fixture.log 2>&1 &
+            FIXTURE_PID=$!
+
+            cleanup() {
+              echo "Cleaning up background processes..."
+              kill $FIXTURE_PID 2>/dev/null || true
+              kill $ATSPI_PID 2>/dev/null || true
+              kill $OPENBOX_PID 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
+            echo "Dumping AT-SPI tree via python3 scripts/a11y/dump_atspi.py..."
+            /usr/bin/python3 scripts/a11y/dump_atspi.py --output /tmp/fixture_tree.json --timeout 30
+
+            echo "Checking fixture tree conformance via python3 scripts/a11y/check_fixture_tree.py..."
+            if ! /usr/bin/python3 scripts/a11y/check_fixture_tree.py --input /tmp/fixture_tree.json; then
+              echo "=== FIXTURE LOG ==="
+              cat /tmp/fixture.log 2>/dev/null || true
+              exit 1
+            fi
+          '
+
+      - name: Upload AT-SPI artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: fixture-a11y-linux-artifacts
+          if-no-files-found: warn
+          path: |
+            /tmp/fixture_tree.json
+            /tmp/fixture.log
+            /tmp/fixture_state.json
 
   e2e-self-hosted:
     name: Self-hosted E2E (Placeholder)
