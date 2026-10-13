@@ -63,6 +63,14 @@ const RULES: &[Rule] = &[
             "unicode-segmentation",
             "image",
             "tracing",
+            "smol_str",
+            "smallvec",
+            "bitflags",
+            "thiserror",
+            "async-trait",
+            "serde",
+            "serde_json",
+            "futures-core",
         ]),
     },
     Rule {
@@ -92,10 +100,10 @@ const RULES: &[Rule] = &[
         owner: CrateName::Exact("src-tauri"),
         allowed: Allowed::AppProtocols,
     },
-    // Architecture §2 names these crates but sets no dependency restrictions.
+    // Script dependencies are explicitly constrained by architecture §2.
     Rule {
         owner: CrateName::Exact("gcu-script"),
-        allowed: Allowed::Any,
+        allowed: Allowed::Only(&["gcu-core", "gcu-protocol", "rquickjs"]),
     },
     Rule {
         owner: CrateName::Exact("gcu-overlay"),

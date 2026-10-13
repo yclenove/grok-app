@@ -9,5 +9,20 @@ publish.workspace = true
 gcu-protocol.workspace = true
 gcu-core.workspace = true
 
+async-trait.workspace = true
+tokio.workspace = true
+futures-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+ron.workspace = true
+png.workspace = true
+
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+gcu-core = { workspace = true, features = ["testing"] }
+
+[features]
+testing = ["gcu-core/testing"]

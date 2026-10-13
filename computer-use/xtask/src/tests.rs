@@ -281,3 +281,56 @@ fn check_deps_invalid_tauri_manifest_returns_error() {
         assert!(check_tauri_manifest(input).is_err(), "{input}");
     }
 }
+
+#[test]
+fn check_deps_model_and_fake_support_libraries_pass() {
+    let input = metadata(&[
+        (
+            "gcu-core",
+            &[
+                "smol_str",
+                "smallvec",
+                "bitflags",
+                "thiserror",
+                "async-trait",
+                "serde",
+                "serde_json",
+                "futures-core",
+            ],
+        ),
+        (
+            "gcu-driver-fake",
+            &[
+                "gcu-core",
+                "gcu-protocol",
+                "async-trait",
+                "tokio",
+                "futures-core",
+                "serde",
+                "thiserror",
+                "ron",
+                "png",
+            ],
+        ),
+        ("gcu-script", &["gcu-core", "gcu-protocol", "rquickjs"]),
+    ]);
+    assert!(check_metadata(&input).unwrap().is_empty());
+}
+
+#[test]
+fn check_deps_script_io_and_model_os_edges_fail() {
+    for (owner, dependency) in [
+        ("gcu-core", "ron"),
+        ("gcu-core", "png"),
+        ("gcu-script", "tokio"),
+        ("gcu-script", "reqwest"),
+        ("gcu-script", "windows"),
+    ] {
+        assert_eq!(
+            check_metadata(&metadata(&[(owner, &[dependency])]))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}

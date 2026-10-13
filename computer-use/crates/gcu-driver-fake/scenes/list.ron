@@ -1,0 +1,24 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.list", name: "Fixture list", executable: "/fixtures/list", pid: 1001,
+windows: [(id: "list-window", title: "Fixture list", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("List"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "list",
+role: list,
+states: "ENABLED",
+name: Some("Rows"),
+frame: Some((x: 20.0, y: 20.0, w: 500.0, h: 360.0)),
+actions: [scroll_up, scroll_down],
+children: [
+(id: "row-{i}",
+role: row,
+states: "ENABLED | SELECTABLE",
+name: Some("Row {i}"),
+frame: Some((x: 20.0, y: 20.0, w: 500.0, h: 24.0)),
+repeat: 2000)
+])
+])))])])

@@ -1,0 +1,4 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.canvas", name: "Fixture canvas", executable: "/fixtures/canvas", pid: 1001,
+windows: [(id: "canvas-window", title: "Fixture canvas", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: None)])])

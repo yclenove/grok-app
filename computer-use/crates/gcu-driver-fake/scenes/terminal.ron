@@ -1,0 +1,17 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.terminal", name: "Fixture terminal", executable: "/fixtures/terminal", pid: 1001,
+windows: [(id: "terminal-window", title: "Fixture terminal", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Terminal"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "console",
+role: unknown,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Console"),
+frame: Some((x: 20.0, y: 20.0, w: 650.0, h: 350.0)),
+value: Some(text("fixture only")),
+native_role: "terminal")
+])))])])

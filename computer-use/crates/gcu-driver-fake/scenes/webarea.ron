@@ -1,0 +1,30 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+(apps: [(id: "fake.webarea", name: "Fixture webarea", executable: "/fixtures/webarea", pid: 1001,
+windows: [(id: "webarea-window", title: "Fixture webarea", frame: (x: 100.0, y: 100.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Webarea"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "web",
+role: web_area,
+states: "ENABLED",
+name: Some("Offline page"),
+frame: Some((x: 20.0, y: 20.0, w: 600.0, h: 350.0)),
+url: Some("https://example.invalid/"),
+children: [
+(id: "link",
+role: link,
+states: "ENABLED",
+name: Some("Documentation"),
+frame: Some((x: 40.0, y: 40.0, w: 160.0, h: 30.0)),
+actions: [press],
+url: Some("https://example.invalid/docs")),
+(id: "paragraph",
+role: static_text,
+states: "ENABLED",
+name: Some("Fixture content"),
+frame: Some((x: 40.0, y: 100.0, w: 300.0, h: 40.0)))
+])
+])))])])
