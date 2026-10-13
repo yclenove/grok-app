@@ -1,3 +1,536 @@
+当前维护来源见[SDK / FFmpeg与同步预检](../plans/2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选、媒体/源提供及完整NOTICE仍开放，原候选07/08和18原错误保持。fork/源仓库已fetch、未合入，下一批先按同步计划处理会话生命周期冲突与回归，再继续原R1–R4完整范围。App11+/CU受管Mac14+、旧产品和用户home保持。以下为历史批次记录。
+
+2026-10-13 最新[SwiftShader MD5/libbacktrace特殊通知](../plans/2026-10-13-computer-use-swiftshader-copied-checkpoint.md)：13准确源/88774 bytes/四manifest/raw batches已验，五MD5与两backtrace完整原inline permission保持；Boost下载pins、libbacktrace Gitlink及CMake debug源码分支明确，不据此推导binary排除。独立01/02整个报告及10197-byte片段一致，437工具tests/0skip通过，原所有目录/字段/来源缺口保持；完整NOTICE/维护pack/产品验收及原R1–R4全部范围active/partial，App11+/CU受管Mac14+与旧产品保持。
+
+2026-10-13 前批[SwiftShader复制源码通知](../plans/2026-10-13-computer-use-swiftshader-notice-checkpoint.md)：28完整GN/五C++样本与原tree/四manifest/raw batches已验，11原通知和完整NCSA/LLVM exception已绑定；保留原版权、八目录错误与所有原缺口，Boost/libbacktrace和其它copied-source义务未齐。独立01/02整个inventory及91194-byte partial supplement一致，427工具tests/0skip通过；不是完整NOTICE/发行或产品实机验收。App11+/CU受管Mac14+、旧产品/pins/四锁/seed/App144/home及原R1–R4全部范围active/partial保持。
+
+2026-10-13 前批[复制API通知与省略记录](../plans/2026-10-13-computer-use-notice-supplements-checkpoint.md)：38完整API头文件/1430862 bytes与原固定树/四manifest匹配；11 SPDX、20 Apache短声明、5完整内嵌permission、2 ANGLE BSD引用均保留原版权并绑定完整正文。17省略记录中10真实配置许可路径已绑定、3对应复制API通知已补但registry provenance未证、4 source/shipping义务未解决；原17错/196目录错/5异常值/421 raw gaps保持。411工具tests/0skip通过；完整四平台NOTICE/SBOM及原R1–R4仍active/partial，App11+/CU受管Mac14+、产品旧runtime/pins/四锁/seed/App144/home保持。
+
+2026-10-13 前批[默认通知候选与完整 ANGLE GN 来源](../plans/2026-10-13-computer-use-notice-candidates-checkpoint.md)：按准确上游大小写/错误省略规则得到495候选，实际WebGL正文已补，候选全文缺口1→0；独立02/03预览为5453606 bytes。17省略记录/196目录问题/5异常值保持，不将partial preview用于发行。全部162 ANGLE GN源1018314 bytes已封存，CPU七引用仅在自身BUILD，未证明binary排除；399工具tests/0skip通过。下一步处理省略记录、真实消费来源及copied/generated文件，完成四平台NOTICE/SBOM/源提供/安全策略，再维护pins/四锁/production pack与原R2–R4全部门禁；App11+/CU受管Mac14+和当前旧产品保持，整体active/partial。
+
+2026-10-13 前批[Khronos 完整许可正文](../plans/2026-10-13-computer-use-khronos-notice-checkpoint.md)：固定SPDX v3.28.0的两完整正文11358 bytes已采，七SPDX头文件绑定和一内嵌permission、八原版权声明保持；实际offline复验及380工具tests/0skip通过。片段不是完整Chromium NOTICE，原7554paths/422 raw gaps/17 yes错/196目录错/5异常值保持。下一步其它copied/generated源、ANGLE CPU真实消费路径、完整四平台NOTICE/SBOM/源提供/安全策略及原R2–R4；App11+/受管Mac14+、产品旧运行时/pins/四锁/seed/App144/home保持，整体active/partial。
+
+补充[ANGLE CPU候选消费源](../plans/2026-10-13-computer-use-cpu-consumer-source-checkpoint.md)：两固定源25913 bytes/四manifest/独立offline复验通过，累计381工具tests/0skip。独立Android条件和候选两处无CPU引用已记录，尚未证明全部消费图/二进制不使用，不据此排除许可或重写原错误；前批SPDX全文/fragment再次复验，产品与完整R1–R4保持。
+
+2026-10-13 前批[ANGLE / OpenScreen 集成](../plans/2026-10-13-computer-use-integration-checkpoint.md)：generated flag导出/helper AST、16准确规则/四原GN参数与四条实际许可路径映射、Perfetto四actual manifest pin已验，357工具tests/0skip及独立04/05同SHA通过。7541paths/422 raw gaps/17 yes错、196目录错/5异常值保留，不创建嵌套alias或隐藏新六目录缺项。下一步其它准确消费路径/生成输入、四平台NOTICE/SBOM/源提供/LGPL-media/稳定安全策略；R1与原R2–R4全部active/partial，App11+/受管Mac14+与产品/pins/四锁/seed/App144/home未晋升。格式/hash/清理收尾见checkpoint。
+
+2026-10-13 前批[Crashpad 配置与 lss 来源](../plans/2026-10-13-computer-use-crashpad-checkpoint.md)：根default/四actual GN参数、external lss/zlib分支与真实路径许可已验，7518paths/422 raw gaps/17 yes错、190目录错/5异常值保留。319审查工具tests/0skip和独立重算通过；原standalone缺项不排除，不是完整NOTICE/产品验收。R1仍红、原R2–R4全部active/partial，App11+/受管Mac14+与产品/pins/四锁/seed/App144/home不晋升。
+
+2026-10-13 前批[固定生成依赖闭包](../plans/2026-10-13-computer-use-node-generated-checkpoint.md)：准确GCS对象/generation/SHA、6544entries/234paths、原recipe AST布局和四actual checkout同-object段已验，7507paths/422 raw gaps/17 yes错；190目录错/5异常值保留。296工具tests/0skip与独立重算通过，原目录/lockv3假设首败保留、复用唯一包修正；Lit3.3.0/README3.2.1差异不抹平。不是远端文件测量/完整NOTICE或产品验收，R1红与原R2–R4全部active/partial；App11+/受管Mac14+和产品/pins/四锁/seed/App144/home不晋升，删除0/实际回收0，无提交发布。
+
+2026-10-13 前批[四平台来源/生成输入](../plans/2026-10-13-computer-use-platform-coverage-checkpoint.md)：主树+63源/实际manifest准确匹配59/62/56/56、身份冲突0；原439 raw gaps/19 yes错/190目录错/5异常值全保留，不从缺项推导不随包。八准确Crashpad/node源271849 bytes已采，固定GCS输入与Lit锁3.3.0/README3.2.1差异实读；258工具tests/0skip通过不替代完整NOTICE或实际GN/产品验收。R1仍红、原R2–R4全部active/partial，App11+/受管Mac14+、产品/pins/四锁/seed/App144/home保持；删除0/实际回收0，无提交发布。
+
+2026-10-13 前批[实际recipe/helper/config](../plans/2026-10-13-computer-use-recipe-provenance-checkpoint.md)：原immutable recipe实际ZIP/SHA、包内21ae helper与独立Git bytes、四原log布局及DEPS fallback AST已核验；四固定config8465 bytes/Git blobs与32 bootstrap keys一致。236工具tests/0skip通过，不作远端文件测量/条件求值或完整NOTICE验收。63源439 raw gaps/19 yes错/190目录错/5异常值保留，R1红与原R2–R4完整active/partial不变；产品/pins/四锁/seed/App144/home及App11+/受管Mac14+保持，删除0/实际回收0，source ZIP/bare/SDK/证据/live preview保留。
+
+2026-10-13 前批[六个实际递归仓库](../plans/2026-10-13-computer-use-checked-recursive-checkpoint.md)：四manifest均准确匹配的六源/36文件已采，63源7273路径/439 raw gaps；rapidjson一项关闭，19 yes错/5异常值保留、OpenScreen自身buildtools三LLVM目录使目录错增至190，不排除原缺项或借主树同名版本。206工具tests/0skip与独立重算通过，不是完整NOTICE/产品验收；执行CIPD helper/DEPS fallback与完整R1–R4仍开放。产品/pins/四锁/seed/App144/home及App11+/受管Mac14+保持，active/partial；删除0/实际回收0，source/bare/SDK/全部证据保留，live/不确定owner不动。
+
+2026-10-13 前批[实际checkout/固定GCS对象](../plans/2026-10-13-computer-use-checkout-object-checkpoint.md)：12原日志/5116718 bytes，四manifest/bootstrap完整、Windows stdout有界4MiB前缀；四manifest157/169/152/152仓库、57来源准确匹配52/55/49/49且身份差异0，递归ANGLE/OpenScreen各3匹配但缺项不当NOT_SHIPPED。原四ZIP共988113804 bytes的SHA256/MD5/CRC32C与原GCS generation一致，Windows24.062ms时间差保留、publisher build认证仍false；原recipe/config身份实录，执行CIPD helper/fallback未证。192工具tests/0skip通过，原19 yes错/187目录错/5异常值与完整NOTICE/R1红保持；不晋升产品/pins/四锁/seed/App144/home，App11+/受管Mac14+及原R2–R4全部范围active/partial。删除0/实际回收0，SDK/source/bare/全部证据保留，live preview不动。
+
+2026-10-13 前批[四平台实际archive/GN参数](../plans/2026-10-13-computer-use-archive-build-checkpoint.md)：4完整GetBuild/1260152 bytes和16原白名单日志/22343 bytes封存，同commit/position/四核心pins/ZIP上传step与path SUCCESS均实核；四实际GN写入args无official/credits override，准确同源默认Git对象/hash确认sample机制。custom vars已读但checkout/有效递归变量、GCS generation/下载ZIP bytes关联/完整NOTICE仍未证，不排除原19 yes错/187目录错/5异常值。169工具tests/质量通过仅本批，不晋升产品/pins/四锁/seed/App144/home，App11+/CU受管Mac14+与原R2–R4完整范围active/partial保持；删除0/实际回收0，source/CI/bare/依赖/全部证据保留。
+
+2026-10-13 前批[gclient机制/公开build入口](../plans/2026-10-13-computer-use-gclient-build-evidence-checkpoint.md)：4固定helper原文/AST/boolean示例只证明源码机制，实际builder仍未证；OpenScreen25 Git/7 non-Git对齐，ANGLE02原核心数据不变。固定commit 4页361条read-only CI已封存，定位四archive IDs；Linux同position ZIP上传URL已诊断，大输出截断不作完整raw/四平台/generation证明。140工具tests通过，原19 yes错/187目录错/5异常值不降，完整NOTICE/R1仍红，原R2–R4全部范围active/partial；App11+/CU受管Mac14+及产品/pins/四锁/seed/App144/home保持，删除0/实际回收0。
+
+2026-10-13 前批[公共浏览器源/ANGLE递归目录](../plans/2026-10-13-computer-use-browser-recursion-checkpoint.md)：再10准确源/876 paths，57源7237 paths/440 raw gaps；19 yes带错/187目录错/5异常值保留，原12错误关闭/新6递归错误暴露。ANGLE80 Git/441 non-Git准确对齐，实际继承/builder/binary未证明；113显式tests/0skip通过。条件只作data、Not Included不免义务，不晋升产品/pins/四锁/seed/App144，完整NOTICE及原R2–R4仍active/partial；App11+/受管Mac14+保持，本批删除0/实际回收0，source/evidence/home保留。
+
+2026-10-13 前批[LLVM/Windows支持源](../plans/2026-10-13-computer-use-support-license-checkpoint.md)：再11准确源/16 paths，47源6361 paths/439 raw gaps，25 yes带错/165目录错/4异常字段保持；14许可缺口关闭，99显式tests/0skip通过。Not Included只分类不免义务，条件不执行，来源/工具通过不是binary或完整NOTICE通过；产品/pins/四锁/seed/App144不晋升。App11+/受管Mac14+与原R2–R4全部范围active/partial保持，本批删除0/实际回收0，source/evidence/home保留。
+
+2026-10-13 最新[公共运行源/许可分类](../plans/2026-10-13-computer-use-runtime-license-classification-checkpoint.md)：17额外固定公共源/28 paths已采，36源6345 paths/459 raw gaps，39 yes带错/154目录错/4异常字段保留；17许可缺口关闭，94显式tests/0skip通过。0tests discovery不算验收，准确Linux条件不执行、seals/ownership分类不证明binary使用或完整通知。产品/pins/seed/App144不晋升，App11+/受管Mac14+与原R1–R4全部范围active/partial。本批无新可退休构建/执行副本，删除0/实际回收0，source/evidence/home保持。
+
+2026-10-13 最新[有界运行时合同](../plans/2026-10-13-computer-use-runtime-contract-checkpoint.md)：ZIP/TAR/实际树/复制/prepare/manifest/repair/rollback/audit共享额度，坏包保留旧目录/journal。Windows/Jammy06最终各Core1000/CLI3/strict、Node35及Linux冻结SHA/质量通过，原owners终态。四现有源容量适配，seed445不变；清两旧incremental逻辑575.3MiB/H可用观察增455.0MiB，current候选/依赖/source/全部证据/home保留。不晋升来源/pins/四锁/App144，R1完整通知、最终候选与R3–R4全部原范围保持active/partial；App11+/CU受管Mac14+不变。
+
+2026-10-13 前批[默认policy/媒体来源](../plans/2026-10-13-computer-use-license-policy-media-checkpoint.md)：新增静态规则与媒体7额外pins，19源6317路径/1201 raw引用/477未解析，policy56 yes带错/153目录错/4非标准字段保留。四个媒体许可缺口关闭，75测试/质量通过，component seals与不可变输入补强；不是generator/binary/native验收，不晋升产品/pins/seed/App144。正确来源分类与通用R2合同可并行，App11+/受管Mac14+和R3–R4完整范围保持active/partial。
+
+2026-10-13 前批[核心外部许可输入/闭包](../plans/2026-10-13-computer-use-external-license-inputs-checkpoint.md)：12个固定公共来源456路径/440仓库内blob已采，49测试通过；合并重验6289路径/1199 raw引用/714解析/485未解析，raw不是shipping计数。FreeType FTL/FFmpeg CREDITS已补；261个parent Git声明、157 non-Git/递归/平台/完整通知/源义务仍开放，不晋升产品/pins/seed/App144。继续R1–R4全部原范围，受管Mac14+/App11+保持，整体active/partial。
+
+2026-10-13 前批[固定源码/许可输入](../plans/2026-10-13-computer-use-pinned-license-source-checkpoint.md)：主仓库509552条固定树、5196选定原文blob与273 Git pins全对齐，22测试通过；外部源/完整通知仍未齐。455原始缺失/远程引用不是shipping计数。正常Credits默认扫描checkout，GN为可选模式；exit0不能证明coverage，不晋升产品/pins/seed/App144。继续R1–R4全部原范围，受管Mac14+/App11+保持，完整active/partial。
+
+2026-10-13 前批[维护版内部原生诊断](../plans/2026-10-13-computer-use-maintained-native-checkpoint.md)：官方157/Node22/PW1.64 Windows/Jammy各28项通过，Linux首败缺库/未进入断言保留，新02补库后通过；deb/rpm NSS/NSPR/ALSA声明已补，Node9/Python9/guard14/质量通过。只证明内部worker/headless兼容，不是用户sandbox/installed/最终pack/通知/Mac/model通过，产品pins/seed/App144未晋升。两退休browser逻辑1.46GiB已清，当前Linux02/source/依赖/失败证据/home保持；继续R1–R4与完整原范围，Mac14+/App11+不变。
+
+2026-10-13 前批[Linux155来源/静态ABI与固定补丁](../plans/2026-10-13-computer-use-linux155-source-checkpoint.md)：完整673文件/797546240-byte树、8.28MiB Credits候选及9 ELF静态符号已查；GLIBC最高2.25不是Jammy原生验收。后续三个固定仓库281 blob已归档，确有Safe Browsing/quarantine/MOTW/FedCM默认关闭等差异；最终显式来源54测试/质量通过，不是分发或完整SBOM。Mac同版本、格式/配额/codec/源覆盖/安全/native未通过，不晋升产品/seed/App144。临时ELF逻辑550MiB已清，源包/全部证据/home保持；Mac14+/App11+、四目标/所有surface/安装/model/最终12h门禁保持。
+
+2026-10-13 前批[维护浏览器替代来源](../plans/2026-10-13-computer-use-maintained-browser-notices-checkpoint.md)：实际Windows155固定提案有8.55MiB完整Credits候选/75文件，来源工具25测试/质量通过，但codec/源覆盖/安全/其它目标/native均未完成，不晋升。原官方157四快照仍sample/exit2；产品pins/seed/App144没改。原Mac14+/App11+、完整四目标/所有surface/安装/model/最终12h门禁保持。
+
+2026-10-13 前批[受管浏览器系统边界与维护来源](../plans/2026-10-13-computer-use-managed-browser-boundary-checkpoint.md)：受管Mac14+/App11+经用户确认并接线；Win/Jammy Core各980、前端477/strict通过，Mac native not_run。Node22/PW1.64实际Win/Linux source import已收尾，source audit绝不代替seed prepare/check。四同commit官方未品牌化快照实查仅401-byte sample Credits，完整NOTICE门禁失败，不晋升。当前app144/PID59356/home/草稿保持，fixtures停止；其它平台/surface/安装/UI UX/model/同最终候选12h/D00–D31仍partial。按[R1–R4](../plans/2026-10-13-computer-use-maintained-runtime-next.md)继续，以下963/975与旧PID均为历史。
+
+最新[runtime来源/归档边界](../plans/2026-10-12-computer-use-runtime-source-bounds-checkpoint.md)：坏包保留原destination、总条目/目录/type/大小/路径门禁已修；最终WindowsCore963与Jammy ZIP10/两边strict通过，Node22四源包与Mac最低11.0已实清点。runtime未晋升，CfT分发/系统底线/布局、三格式安装与三平台/两Mac架构/四surface/UI UX/model/同候选12h/D00–D31仍partial。清本批两旧incremental逻辑573MiB/H可用观察增417MiB，current App/依赖/源包/原失败/seed/app144/home/未发送草稿保留。下方为历史。
+
+前批[完整Jammy App续行](../plans/2026-10-12-computer-use-jammy-app-build-checkpoint.md)：03正式构建/strict/导航9项通过，原23735生成owner指纹exit1保留、内容/seed独立复验通过。同一正式ELF正常首次设置页、实际私有PW身份、224ms正常close和三原owner全退出已验；不是installed/portal/模型CU/12h通过。[runtime编译合同](../plans/2026-10-12-computer-use-runtime-pins-checkpoint.md)已接且Core956/strict、Node8/输入6/质量通过，当前版本/seed未晋升、远端CI未跑。CfT许可/系统底线/新布局/文件配额、三格式安装与所有三平台/两Mac架构/四surface/UI UX/model/最终12h/D00–D31仍partial。清精确compiled helper17040 bytes，Windows物理回收未知；current App/SDK/依赖/维护源包/全部证据和app144/home/未发送草稿保留。下方为历史。
+
+前批[维护版Jammy SDK/装载门禁](../plans/2026-10-12-computer-use-maintained-sdk-checkpoint.md)：PW1.6.9+Debian1.6.9-2补丁在glibc2.35实编、16件runtime许可/ABI/实际私有模块、静态EI、8负例和48回归0skip通过；Ubuntu22独立CI已写但远端未跑、release未接。产品loader/完整App/三格式安装/portal与三平台四surface/UI UX/model/同候选12h/D00–D31仍partial。清152退休fault文件逻辑33455536 bytes，主机实际回收未知；app144/home/未发送草稿与工具链保留。
+
+前批[Ubuntu22私有SDK真实构建/迁移smoke](../plans/2026-10-12-computer-use-jammy-sdk-checkpoint.md)：独立Jammy/glibc2.35实际编译PW1.0.5/静态EI1.5，两个目录native contexts和所见DSO最高GLIBC2.34已验；仅SDK兼容性候选，最终版本审计/App loader/完整Rust构建/release/三格式安装/portal采集仍缺，不等于产品交付。新guard5/既有runner22/语法/质量通过，app144/未发送草稿保持，所有原范围partial。
+
+前批[普通app144新真人任务就绪](../plans/2026-10-12-computer-use-ordinary-app144-next.md)：三内嵌页实际打开、独立receiver初值0、session health正常；新任务草稿未发送，待用户方便时再申请，不自动授权/选择文件。source145仅辅助服务EOF收尾/原child回归，Node9/lint/质量/3432 Verify通过，用户产品包仍144，完整范围partial。
+
+前批[source144真实journal异常组合](../plans/2026-10-12-computer-use-native-journal-faults-checkpoint.md)：同候选真实App crash/new run并存/破损与替换/readonly/receipt替换/恢复与重复维护九项通过，39原held owners最终退出；首败runner分类预期错误保留。未改产品源码，真人CU/picker/D22其余与完整交付仍partial。当前唯一预览app144/PID19768保持，清两重复EXE/helper逻辑190362639 bytes，原空闲delta缺失不虚报。
+
+前批[source144正常退出取证](../plans/2026-10-12-computer-use-normal-exit-checkpoint.md)：
+probe-only阶段记录/0下载baseline已接；idle/held/before-start各原App业务与30秒gate通过，14/17/20 owners退休。
+首次外部ExitTime null失败保留，改按原kernel handle读准确FILETIME；底层null及138/139产品退出延迟根因未证。
+fresh144定向153/三strict/质量通过，app144普通fresh包/450件ZIP回读完成；唯一预览已更新PID19768并实看首页/关于app144/历史消息及连接“就绪”，原133及14 observed owners正常exit0，原home/login保留。真人CU全链/完整范围保持partial。
+清3份退休测试EXE/H空闲观察增约254.6MiB；原logs/home/失败证据/current候选与包保留，不确定cache/PDB暂缓。
+
+前批[持久下载journal/真实App崩溃恢复](../plans/2026-10-12-computer-use-download-journal-checkpoint.md)：
+139起派发前持久归属/原kernel+FileID/64事务/显式维护已接生产；Lease Drop不清理，不扫描Temp或启动时自动回收。
+140修复维护专属错误分类，143 fresh153/三strict与140前端86通过；142真实App force-kill/原browser live拒绝/hash保留、退休维护/重复维护通过。
+138/139正常退出30秒gate失败，后来owner缺失/事务0不改原失败；根因开放，真人picker/fresh包/其余故障组合及完整交付仍partial。
+清四重复EXE/H空闲观察增约327.6MiB；唯一用户preview仍app133，实看正常但不冒充最新143源码包。以下136及以前为历史。
+
+前批[真实held/private-file/source136](../plans/2026-10-12-computer-use-native-buffer-retirement-checkpoint.md)：
+两实际1MiB/322–324字符下载，callback-first及原8.013秒caller-unknown后原buffer仍保留，准确callback后才清理；同label新owner正常。
+五项before-start复查和原30秒owners gate通过，fresh136回归/三strict/质量通过；首败退出慢根因未确认、证据保留。
+三成功副本已清/H空闲观察增约254MiB；用户仍app133，持久journal/真实新意图/picker/完整范围仍partial。
+
+前批[下载buffer联合收尾](../plans/2026-10-12-computer-use-native-buffer-retirement-checkpoint.md)：
+134真实red后135修复；原caller与callbacks联合退休、重复旧callback/Drop不能二次删除，136回归及三strict通过。
+native五业务场景完成但30秒owner gate失败，附加自行退出回查不改原失败；独立error-unwind expected2与owners退出通过。
+持久crash journal、退出慢根因及更强held-private-file验收仍开放；当前预览app133，完整范围仍partial。
+三副本已清，后两份统计报告失败透明恢复，原H净增量不可重建；无新model任务/自动批准/发布。
+
+前批[授权等待期间状态查询修复](../plans/2026-10-12-computer-use-pending-status-checkpoint.md)：
+原132实际请求已过期/零业务效果；未授权status被CLI自动拒绝而取消的断点已修。
+冻结133 Core950/App173+84 ignored-not-run/Node47与strict通过；空参数只读原申请metadata，执行gate未放宽。
+修复133普通包/450件ZIP及实机主界面/关于页已验，唯一App10928；旧App/CLI/MCP/fixtures已退出，原home/历史保留。
+真人执行重验仍待办，完整范围与正式probe门禁保留；以下pending请求为历史。
+
+前批[普通入口灰度包/真人请求](../plans/2026-10-12-computer-use-gray-product-acceptance-checkpoint.md)：
+source132完整包/450件ZIP与随包Node8项通过；唯一App51460为普通产品入口，mock/harness unset。
+实际Grok4.7/极高已申请app-webview；真人选择/批准待办，独立业务/上传效果0，执行尚未验收。
+正式descriptor gate不解除，全部跨平台/四surface/installed/model/12h/D00–D31保持partial。
+
+前批[上传授权正向回归/灰度门禁](../plans/2026-10-12-computer-use-upload-permission-checkpoint.md)：
+默认 fresh manifested App172 passed/84 ignored-not-run；有效授权只 allow-once，预检不建文件选择，Pause/Stop拒绝。
+Windows app-webview descriptor 仍受 probe 灰度门禁，真人原产品链验收后才能公开；app129 正常首页不证明该入口可用。
+原 ACP/model/真实 picker/其它平台/installed/12h/D00–D31 仍开放，整体 partial。
+
+前批[上传 MCP/native 接线](../plans/2026-10-12-computer-use-upload-mcp-checkpoint.md)：
+computer_upload 已进入严格 Core/Node/App catalog；专属 /cu/upload 原请求等待，普通 idle 仍 15 秒。
+实际 App MCP/native 四场景/2 POST/原 owners 退出通过；Host approval/file choice synthetic。
+fresh app129 独立包/ZIP回读、无开发服务的首页/历史就绪/设置已验；未发新模型任务、未代批权限。
+原 ACP/model/真实 picker/真人/installed 与完整交付仍开放；整体 partial。
+下方“computer_upload 未公开/MCP 未接/用户 app115”仅为历史描述，不覆盖此增量。
+
+前批[上传原 TaskGrant / Host 文件入口](../plans/2026-10-12-computer-use-upload-task-checkpoint.md)：
+单次意图/账本/原 handle 不可变读取、main choose/cancel IPC/ACP pin、十五语言共享任务 UI 已接。
+Core932/fresh manifested App201/前端450/实际渲染198通过；原生候选与最终收尾见检查点。
+真实 picker/模型工具与原 MCP 等待/真人/fresh 用户包仍开放；computer_upload 未公开，整体 partial。
+cancel 只退休原请求，不能提前释放 picker/assignment owner；字段 verified 不等于网站提交成功。
+下方旧检查点的“TaskGrant/UI 未接”是历史描述，不覆盖此增量。
+
+最新[原App下载错误收尾](../plans/2026-10-12-computer-use-download-error-unwind-checkpoint.md)：
+held处真实fixture错误正确exit2，24ms收尾、原callbacks/资源/staging退休；10 owners退出，同label新owner正常。
+同候选下载2/上传8/隔离负例与fresh Rust154/Node27/三strict/质量80通过，清三重复EXE/H观察增约270MiB。
+原error unwind缺口关闭，开始[上传U1–U4全链](../plans/2026-10-12-computer-use-upload-integration-next.md)。
+文件同意/TaskGrant/UI/ACP/MCP/model和fresh用户包仍未完成，当前预览app115；完整范围保持，整体partial。
+以下2026-10-11及以前为历史检查点，不覆盖最新状态。
+
+最新上传基础：[App WebView 与退出码](../plans/2026-10-11-computer-use-webview-upload-checkpoint.md)。
+追加原下载关闭fresh01失败保留；fresh02 fixture修复后下载2/上传8/exit2负例与去重Rust154/三strict通过；error unwind负例仍待验。
+原生固定内核/不可变 Host 内容/原ref与最终发布 guard 已接，真实8场景和同构建拒绝exit2通过；Rust154/Node27/三strict通过。
+Host批准仍synthetic，文件同意/Broker TaskGrant/UI/ACP/MCP/model未接；computer_upload仍拒绝，不能宣称端到端可用。
+D22 native buffer异常维护、fresh包/真人与完整交付开放；本批未观察到用户预览，清理拒绝/实际0，首败保留。
+
+最新下载批次：[最终发布与开始前导航/关闭](../plans/2026-10-08-computer-use-download-publication-checkpoint.md)。
+同一实际App构建14场景、fresh定向Rust144与三strict通过；原完成文件在暂停/停止/导航/解绑/重绑/关闭后最终提交拒绝，无漏文件/二次派发。
+响应头前导航/关闭、原五秒Close失败/显式重试、8001ms grace及264字符路径通过；Host批准/pin仍synthetic，ACP/MCP/model=false。
+页面就绪首败/探针exit0而report失败保留调查；upload、D22异常维护、fresh用户包/真人/所有跨平台与完整交付仍开放。
+当前用户窗口后端未更新；两份EXE删除自动审批拒绝，实际回收0、暂缓188,401,664 bytes，未绕过。
+
+前批下载：[开始前取消与长路径转存](../plans/2026-10-08-computer-use-download-before-start-checkpoint.md)。
+Windows private native buffer 保留原 Broker destination，实际264字符最终路径/37-byte/hash通过；不依赖固定盘符/8.3。
+Pause/Stop/原八秒grace三场景及原Close两场景通过，fresh Rust144、三strict通过；Host批准/pin仍synthetic。
+当前用户窗口后端未更新；最终publication、开始前navigation/close、upload、D22 buffer异常维护、fresh包/真人及完整范围保持。
+
+上一批关闭失败/显式恢复UX：[检查点](../plans/2026-10-08-computer-use-browser-close-recovery-checkpoint.md)。
+前端租约保留原create/close回执，失败不自动重试、不提前重建；正式提示可重试或暂缓，技术详情折叠，十五语言已补。
+75前端/82实际渲染/140定向Rust和三strict通过；真实原App等待close时 view已hidden，原owner保留/显式重试已局部验。
+渲染IPC及Host批准仍synthetic，用户后端未更新；余下download边界/upload/fresh包/原ACP/MCP/真人与完整交付范围保持。
+
+上一批原 App 下载关闭：[检查点](../plans/2026-10-08-computer-use-app-download-close-checkpoint.md)。
+原 main IPC/真实 Wry 两场景通过，修复手动 polyfill 吞 CU 下载、普通保存框和隔离世界桥接问题。
+五秒失败保留原 view、同 label 重建拒绝、显式重试、keeper/UI 响应与 exact native 资源清理已实机验。
+Host approval/pin 仍 synthetic，ACP/MCP/model=false；用户预览正常但未更新，超时恢复UX和完整交付仍开放。
+
+上一批共享下载关闭：[检查点](../plans/2026-10-08-computer-use-shared-download-close-checkpoint.md)。
+Windows 真实共享 controller Close 44ms、keeper/new owner 保持可用；修复取消后立即 Close 丢回调。
+App close 已改为异步收尾；下载 Closed admission、精确 observer/COM 释放已接，136回归/三strict/质量80通过。
+主证据仍 Host WebView2，原 App IPC/Wry 慢下载、超时恢复 UX、upload、fresh 用户包和真人链仍开放。
+清三个旧副本逻辑185,889,280 bytes，H即时空闲增量185,892,864 bytes；原home/当前App与证据保留。
+
+上一批 App WebView 慢下载：[生命周期检查点](../plans/2026-10-07-computer-use-download-lifecycle-checkpoint.md)。
+Windows Pause/Stop/navigation/disposable Close 四场景实际通过；修复原浏览器退出后丢回调仍占用，
+退出仅返回 unknown，不伪造下载成功。133项回归、三组strict及质量80/80通过。
+shared/live环境的单view关闭、timeout、原ACP/UI/真人、fresh包与完整跨平台/长稳仍开放。
+
+上一批 App WebView 下载诊断：[下载检查点](../plans/2026-10-07-computer-use-webview-download-checkpoint.md)。
+Windows fixture socket非阻塞继承与下载联合退休修正后，固定候选40/40、独立profile6/6、
+定向回归131及三组strict通过，旧失败证据保留。慢下载生命周期、长稳与真人全链仍开放。
+用户预览已实际截图正常主页，但本批未重建用户App包；最终大型文件预算仍83>80，清理被策略拒绝/0回收。
+
+最新 App WebView navigation：[导航检查点](../plans/2026-10-07-computer-use-app-webview-navigation-checkpoint.md)。
+URL/reload/back/forward 已接原 Broker + TaskGrant；success/unknown 均零二次派发，
+无 history 零派发，旧 native document 与旧 ref 同步退休。107 项定向回归、MCP 8 项和
+真实 Windows WebView2 全门禁通过；macOS/Linux 与文件 staging 仍未实机完成，完整范围保持。
+
+最新 App WebView semantic `type_text`：[type_text 检查点](../plans/2026-10-07-computer-use-app-webview-type-text-checkpoint.md)。
+exact DOM ref/selection、中文 emoji 插入、原生 setter、beforeinput/input 与最终字段
+后置条件已接；Broker 为 Verified，真实 WebView2 与 95 项定向回归通过，不使用剪贴板。
+完整范围保持。
+
+最新 App WebView semantic Wait：[Wait 检查点](../plans/2026-10-07-computer-use-app-webview-wait-checkpoint.md)。
+原 DOM ref、保留 snapshot 与 native document 原子最终提交已接；92 项单元回归和真实 WebView2 全门禁通过。完整范围保持。
+
+最新开发入口修复：[Windows IPv4 dev origin 检查点](../plans/2026-10-07-computer-use-dev-origin-checkpoint.md)。
+真实 Vite + Tauri 页面已验，CI 同款 manifest 后链的两项 CORS 测试通过；真人 App WebView 请求已过期、零副作用，完整范围保持。
+
+最新D12 source124：[任务转换检查点](../plans/2026-10-06-computer-use-app-webview-task-checkpoint.md)。
+候选/新run/proof/TaskGrant、整组Stop/切回/后端恢复已接，真实Windows内嵌两页各保存1/计数3通过。
+Core1121/1137、WebView86/runtime4/命令15/ACP42/approval8、四strict与质量通过，App exit0、exact-home无残留。
+fixture的Host approval/publication pin synthetic，ACP/MCP/model均false；原ACP pin/统一UI/真人仍待下一批。
+入口隐藏，用户包app115，无新待批准卡片；三平台/四surface等完整范围与未提交发布状态保持。
+原owners退出后清18旧cache，逻辑9.58GiB/H空闲观察增4.90GiB；current/source/seed/原home/失败证据保留。
+下方source122及以前为历史。
+
+最新D12开发source122：[多绑定与原生最终提交检查点](../plans/2026-10-06-computer-use-app-webview-authority-checkpoint.md)。
+exact多binding/共享native占用、Core WebView执行proof与原native document guard已接。
+84项WebView/15命令/42ACP、Core1110/1126、四strict/质量以及Windows真实双内嵌页效果通过。
+实机为synthetic Host bind；候选到原新run/proof转换、picker/publication/前端/真人Grok仍缺，descriptor未开。
+原App/观察到的owners已退出，exact-home无残留；当前用户包app115，无新待授权卡片。
+本批精确清17旧cache，逻辑9.41GiB/H空闲观察增7.17GiB；当前包/源/seed/证据保留。
+完整范围保持；下方source118是历史上一批。
+
+source118：[内嵌页面选择与真实原生效果检查点](../plans/2026-10-06-computer-use-app-webview-selection-checkpoint.md)。
+Host保留原native/document选择，旧授权在等待前冻结；同URL刷新/同label重建拒绝旧选择。
+76项WebView/15项命令回归、default/probe strict及格式质量通过；默认真实Windows内嵌页中文保存1/计数1通过。
+该实机是synthetic Host bind，未接新TaskGrant/真人Grok；多owner/最后提交边界/picker/15locale仍待下一批。
+原App已正常退出，当前用户包仍app115；清6旧cache逻辑6.91GiB/H空闲观察增4.67GiB。
+三平台/四surface/installed/升级回滚/模型矩阵/12h及完整交付范围保持。
+
+source115实时恢复与第二Stop记录：[实机与修复检查点](../plans/2026-10-06-computer-use-live-recovery-checkpoint.md)。
+app114真人批准、Pause保持5、Continue新计数6–9、active Stop保持9已验；一次保存/申请、无重发/重复批准。
+原App/CLI/MCP/runtime/browser/fixture均退出。source115补实时stream/重读边界、空恢复shell和终态去重；
+223项前端/29项App定向回归、default/probe strict及格式质量门禁通过。
+app115新真实任务实际expired/authority=none，零电脑操作/网页效果；source115实时恢复验收仍未通过。
+唯一测试App及原CLI/MCP/fixture已正常退出，home保留；6组旧cache逻辑6.85GiB/H空闲观察增4.53GiB。
+下一独立工作是[D12内嵌浏览器新TaskGrant接入](../plans/2026-10-06-computer-use-app-webview-task-next.md)，已推进上方source118原生选择基础。
+完整三平台/四surface/installed/升级回滚/模型矩阵/12h仍开放，未提交发布。
+
+source114聊天恢复分组修复：[真实恢复与聊天检查点](../plans/2026-10-05-computer-use-transcript-recovery-checkpoint.md)。
+app113真实Grok/真人批准/中文备注/恰好3次计数、一次Pause/Continue后的fresh观察与明确完成通过。
+新source114按终态分开恢复前后答复/工具，保留历史取消记录；201项回归、真实journal只读投影通过。
+fresh app114已构建/450文件ZIP逐件校验，实机重开原会话确认两答复与取消标记顺序正确。
+恢复后的新操作/active Stop随后在app114通过，完整交付仍开放；原home/证据保留，旧app109/app113包及1组cache已清，H空闲观察另增2.22GiB。
+原app113与全部子owner已退出、home保留；source112清17组旧cache，逻辑9.41GiB/H空闲观察增5.60GiB。
+
+source112生产状态修复：[原任务准确收尾检查点](../plans/2026-10-05-computer-use-cleanup-readback-checkpoint.md)。
+Host同步读原ExistingTab本地占用；暂停收尾/一次继续/停止与完成终态显示已接，15locale齐全。
+Core1104/1120、前端401、四native定点4/0、四strict与质量门禁通过；Host/ACP仍synthetic。
+app113已以source112实际构建，450文件ZIP逐件校验及上述范围内真实恢复通过；installed/其它平台仍开放，下方111为历史。
+
+source111新增测试验收：[原截图等待时的一次Continue/Stop检查点](../plans/2026-10-05-computer-use-early-continue-capture-checkpoint.md)。
+两项原native PNG/HTTP/MCP联测2/0，default/probe strict通过；等待前零新工作，释放后一次恢复，等待中Stop零复活。
+仅测试/probe改动；实际应用仍source108/app109，真人installed恢复与准确等待回执等仍待完成。完整范围保留。
+
+最新source108/app109：[实际应用完成工具检查点](../plans/2026-10-05-computer-use-completion-app109-checkpoint.md)。
+原 taskId 绑定的完成工具、App 权限入口和卡片终态已打入实际Windows新包；构建/包装及真人批准后的真实Grok业务/完成收尾通过。
+中文备注、恰好3次计数、18工具/0错误、卡片完成/原browser退出已验；本批App/CLI/worker/fixture均退出，完整恢复和其它平台验收仍开放。
+完整交付范围保留，未提交发布。下方source96为历史。
+
+source96/artifact96：[观察 v2 整链与迟到截图修复](../plans/2026-10-05-computer-use-task-consent-u04-existing-observation-v2-checkpoint.md)。
+扩展v2 scope/watch/独立持久journal/recovery已接；原Pause/Chat Stop迟到PNG两定点、正常模型截图/preview与权限拒绝通过。
+生产源码与95相同：Core1097/1113、四strict、Node210/MCP38/扩展7通过；96导出12、宽CU295/82ignored、ACP178/routing38与质量通过。
+原session47034已exit0，完整native81/0（1643.75s）及最终Verify3316通过；清6旧cache，逻辑4.75GiB/H空闲观察增3.23GiB。
+最后检查533个最新cache文件/6保留产物hash一致，无新增完整旧代、追加删除0；旧working与失败现场保留。
+单writer、descriptor关闭、完整范围保留，active / partial — not releasable；未提交发布。
+
+以下source89为历史。
+
+source89：[观察生命周期 Host / IPC 基础](../plans/2026-10-05-computer-use-task-consent-u04-existing-observation-host-checkpoint.md)。
+
+以下source86为历史。
+
+source86：[扩展观察 Promise 所属占用](../plans/2026-10-05-computer-use-task-consent-u04-existing-observation-ownership-checkpoint.md)。
+原读取/capture/decoder不再通过race提前释放；连接signal贯穿，原owner退出前阻止同tab新观察/输入/Share。
+Node193、扩展7、原App导出12、截图权限拒绝1、派发后click/Pause1、两strict与质量/source Verify通过。
+Host每request取消/claim/watch/settle尚未接线，source82迟到PNG反例仍OPEN；整体partial、未发布，完整范围不减。
+
+source82原反例记录：[原App迟到截图真实反例](../plans/2026-10-05-computer-use-task-consent-u04-existing-late-capture-checkpoint.md)。
+原Pause/Chat Stop两独立CFT154/App/MCP/native PNG fixture实际0/2失败、exit101，34.45s；held时Host提前idle，释放后旧图仍decode1并尝试提交，模型最终无image/旧正文成功。
+source81测试查询拆分的E0596已保留并以fresh82修正；82的3303源/artifact真实重编译，两strict、Node184/MCP38/诊断8及质量/Verify通过，独立权限拒绝1通过；完整native/宽CU/Core/前端未重跑，不借80数字。
+原82两个profile/PNG/10hash/log/source/artifact均保留；owners终态后fresh82-1清3旧cache，逻辑3.63GiB、H空闲观察增2.46GiB，累计42.89GiB，current/source/全部证据复验不变。
+下一步按[观察取消与物理完成合同](../plans/2026-10-05-computer-use-task-consent-u04-existing-observation-lifecycle-next.md)修原Host pending和扩展每request scope；不放松原反例断言，不能仅凭Host拒绝代替扩展收尾。
+完整E5/U04–U09/D00–D31、四surface、三平台/两Mac架构、安装/真人Grok/12h/UI UX均开放。descriptor关闭，raw parser仍Desktop-only；单writer、active / partial — not releasable、未提交发布。
+
+以下source80为历史。
+
+2026-10-05 最新候选source80：[截图权限拒绝与真实授权条件检查点](../plans/2026-10-05-computer-use-task-consent-u04-existing-capture-checkpoint.md)。
+独立原App/MCP/native截图拒绝1 passed/exit0、16.63s；真实capture=1/denial=1/settled=1/decoder=0，显式正文继续沿原authority，不自动降级。
+source80已实际收束：3301源/artifact80、两strict、Node184/MCP38/诊断8及质量门禁通过；宽CU295/79ignored、ACP178/routing38通过，原session22543已exit0，完整native78/0（1552.15s）与最终Verify3301通过。
+独立CFT154已证明action前拒绝、原Extensions.triggerAction(CDP)后同tab/window真实PNG；这是API前置条件，不是App/TaskGrant迟到截图或真人installed验收。metadata80-1未知首败保留。
+重复zip/成功profile清理约202MiB；原owners终态后fresh80-2清3组旧cache，逻辑3.65GiB、H空闲观察增2.44GiB，累计40.43GiB；current/source/全部旧证据不变，working/unknown继续保留。
+现按[真实成功截图迟到合同](../plans/2026-10-05-computer-use-task-consent-u04-existing-late-capture-next.md)接入source81新候选，须实际新artifact与新测试，不能借80标绿。descriptor关闭、完整范围保留、active / partial — not releasable、未提交发布。
+
+以下source79为历史。
+
+2026-10-05 source79：[五动作迟到结果检查点](../plans/2026-10-05-computer-use-task-consent-u04-existing-late-actions-checkpoint.md)。
+五动作20独立fixture各1通过、exit0，原定点session65137已终态；默认artifact79已重新编译，App/probe两strict及Node184/MCP38/诊断8、syntax/fmt/quality/diff/Verify实际通过。
+原session56119已exit0；source79宽CU295/78ignored、ACP178/routing38、完整native77/0（1549.34s）及最终Verify3299均实际通过。原执行器/被动DOM见证证明post不可称NotStarted，wait native invoke与DOM输入分列。
+原79定点/strict/build/browser owners已终态；fresh79精确清3组旧cache，逻辑3.67GiB、H实际空闲观察增3.31GiB，累计37.79GiB。source/current/全部原证据hash不变；unknown/working/其它owner仍deferred。
+回归owners退出后检查22组cache，无新增完整旧代，额外零删除；current/原四log及全部旧首败证据复验不变。74配对、71/72 B切换及初始化首败仍OPEN。继续[R5五动作/截图合同](../plans/2026-10-05-computer-use-task-consent-u04-existing-late-actions-next.md)，下一批独立实测截图权限拒绝，再核实新版CDP action的真实授权条件；未验成功仍not_run。
+单writer、descriptor关闭、完整范围保留，active / partial — not releasable，未提交发布。
+
+以下source64为历史。
+
+2026-10-05 最新完整候选source64见[原publication三终态检查点](../plans/2026-10-05-computer-use-task-consent-u04-existing-publication-terminals-checkpoint.md)。
+focused3通过；完整native48/1未绿，Cancel后执行poll403触发误断Pair的原HTTP链已取得，先修此真实反例。
+宽CU295/50ignored、ACP178/routing38及门禁通过；清3旧cache，H实际空闲观察增3.41GiB，累计17.16GiB，证据保留。
+单writer、descriptor关闭、完整范围保留，active / partial — not releasable，未提交发布；source65修复仍在开发。
+
+以下source63为历史：[原worker被动诊断检查点](../plans/2026-10-05-computer-use-task-consent-u04-existing-connection-evidence-checkpoint.md)。
+只改probe；unit5/两个定点/Node177/MCP38通过，未跑本批完整native或Rust strict，不借source62数字。
+历史首败仍OPEN；清理规划无完整旧cache可删，本批零删除，累计实际空闲观察增仍13.75GiB。
+下一批按publication三终态合同；单writer、descriptor关闭、完整范围保留，active / partial — not releasable。
+
+以下source62为历史：[原reservation三终态检查点](../plans/2026-10-05-computer-use-task-consent-u04-existing-reservation-terminals-checkpoint.md)。
+三种新切点均有定点通过证据；完整native40通过/6失败，整套未绿，首败仍OPEN。
+宽CU295/47ignored、ACP178/routing38、两strict/Node177/MCP38/质量及源码复验通过；Core/前端未全量重跑。
+原owners已退出；清5组旧cache，H实际空闲观察增4.16GiB，累计13.75GiB；源码/current/37证据哈希不变。
+先补配对与控制失败的精确见证，再[publication三终态](../plans/2026-10-05-computer-use-task-consent-u04-existing-publication-terminals-next.md)。
+单writer、descriptor关闭、完整范围保留；active / partial — not releasable，未提交发布。
+
+以下source60为历史：[真实终态与配对状态检查点](../plans/2026-10-05-computer-use-task-consent-u04-existing-terminal-pair-checkpoint.md)。
+已修取消准备后status403使扩展误断Pair：原租约内仅被动认证，不续租、不开放Share/执行。
+真实choose/discovery五项终态通过；其余同候选门禁与清理以检查点实际终态为准。
+descriptor关闭、完整范围不缩减；active / partial — not releasable，单writer、未提交发布。
+
+以下source54为历史：native20通过/18失败、宽CU290通过/3失败/39ignored；详情见
+[source54结果及清理](../plans/2026-10-05-computer-use-task-consent-u04-existing-control-results.md)。
+ACP178/routing38、两strict、Node177/MCP38及格式质量通过；3276源冻结，Core/前端未全量重跑。
+全部18组原profile/stage/hash已记录；清三组旧cache，H实际观察增1.64GiB，source/current不变。
+下一批choose/discovery五项终态；初始化失败不能称为授权失败。整体active / partial — not releasable。
+
+2026-10-05 历史source52/build52：[原生worker启动检查点](../plans/2026-10-04-computer-use-task-consent-u04-existing-bootstrap-checkpoint.md)。
+dormant1/browser focused3通过；完整native33通过/5失败、exit101，整套未绿。
+宽CU293/39ignored、ACP178/routing38、两strict、Node177/MCP38及格式质量通过；3274源冻结，Core/前端未全量重跑。
+原owners已退出；精确清三组旧cache，H空闲观察增2.34GiB，当前产物/源/hash与全部首败保留。
+下一批按[原control诊断与choose/discovery终态](../plans/2026-10-05-computer-use-task-consent-u04-existing-control-terminals-next.md)。
+旧观察/startup及五项新首败保持OPEN；不增加预算或重试刷绿。每批按AGENTS第9条收尾，已执行身份不复用，working/未知owner文件仍deferred。
+descriptor关闭、单writer、全部dirty/fix.patch和首败证据保留；完整范围active / partial — not releasable，未提交发布。
+
+2026-10-04 历史 source45/build45：[批准前自然租约竞争](../plans/2026-10-04-computer-use-task-consent-u04-existing-preapproval-lease-checkpoint.md)。
+default-off choose/reservation/publication三项真实30秒lease、原生产维护退休各7checks，focused3通过；
+完整native实际24通过/1项旧startup首败（0checks），exit101，整套不绿。新三项在矩阵中仍通过。
+Core1081/1097、四strict、Node177/MCP38与格式质量门禁通过；宽App回归/精准清理实际结果见检查点。
+生产行为未改，前端未改未全量重跑，不借旧数字。source45新startup及source42/43、所有历史首败保留。
+下一步按[原App/ACP owner替换](../plans/2026-10-04-computer-use-task-consent-u04-existing-owner-next.md)，
+补startup脱敏精确见证，再Stop/Drop/恢复竞争；不无限复跑堵其它ready工作。descriptor关闭、单writer、未提交发布，完整范围保留。
+本批新清单清15组旧cache，H空闲实际观察增4.62GiB，source/current/失败根不变；每批常规清理，已执行身份不复用。
+状态 active / partial — not releasable，原dirty/untracked/fix.patch和失败证据保留。
+
+source44的已启用重新Pair三项与source34/source30均为历史，不是当前候选；原合同保留。
+
+2026-10-04 历史：[原Host暂停/正文恢复及一次续行](../plans/2026-10-04-computer-use-task-consent-u04-existing-host-recovery-checkpoint.md)。
+实测发现已分享但无截图权限的正文任务Continue失败：原恢复强制截图，实际capture权限拒绝。
+现ExistingTab恢复主动采新正文/refs，Desktop仍截图；不自动降级、不扩大坐标能力，原owner/scope/publication保留。
+source34/build34，原Host恢复12checks实际通过（17.81s），完整真实矩阵16通过（331.90s）；Core1080/1096、宽CU293/17manual ignored、ACP178/routing38、四strict/Node177/MCP38/格式质量及Verify3262通过。
+Host/session/ACP仍synthetic，descriptor关闭；旧B/IO/rename/startup首败保留，全交付仍active / partial — not releasable。
+原owners退出后新清单清15组旧缓存，H空闲实际观察增3.55GiB；source/current/artifacts不变，失败根保留，未提交发布。
+
+以下为source30历史，不是当前最新候选。
+
+2026-10-04 历史：[已发布任务连接替换/真实租约及启动首败](../plans/2026-10-04-computer-use-task-consent-u04-existing-active-connection-checkpoint.md)。
+真实source重配对和原30秒lease自然过期后，旧grant的读/input/切换均拒绝；重新Share同document不复活旧权限，Stop保留新连接/3Share/tab。
+source29/build30新增两项2通过；完整15场景14通过/1项初始化首败（0checks），宽CU293/16manual ignored、ACP178/routing38及App两strict/Node/MCP/质量门禁通过。整套不绿。
+当前source30/build31补逐步startup phase/error family/原control-result诊断；定位复测1通过，两项active2通过（lease29650ms）；App两strict、Node177/MCP38/fmt/quality及source Verify3260通过，未全量重跑矩阵/Core/前端。
+旧B、IO error32/未知owner、rename及新startup首败全部保持开放，未复现不销项；失败根与脱敏诊断保留。
+下一项真实browser/profile退出替换、批准前连接/lease竞争、App/agent/ACP replacement、Stop/Drop/Pause恢复；Host手势/session/ACP peer仍synthetic，descriptor关闭。
+完整E5/安装态/真人Grok/三平台/全交付仍开放。新清单清3组旧缓存，H空闲实际观察增2.29GiB，source/current/artifacts不变；按AGENTS第9条每批收尾。
+active / partial — not releasable，单writer、未提交发布。
+
+以下为reservation历史，不是当前最新候选。
+
+2026-10-04 历史：[原owned reservation实际Share撤销联测](../plans/2026-10-04-computer-use-task-consent-u04-existing-reservation-checkpoint.md)。
+原reservation进入点锁外test-only门闩钉住原worker，source MV3/认证HTTP撤销A/B后原逻辑具体拒绝，零grant/continuation且原worker实际退出；上一批最终提交锁内proof复验保留。
+source21/build22，真实native八场景两轮各8通过（169.68s/156.82s）；Core1078/1094、ACP178/routing38、四strict、Node177+audit7/MCP38/fmt/quality通过。
+本批宽CU实际290 passed / 3 failed / 9 manual ignored：原native目录清理AccessDenied，首败日志与三个精确fixture根保留，不能写全绿或移用上批数字；seed rename首败根因也仍开放。
+Host/Share手势与ACP peer仍synthetic，ExistingTab descriptor仍关闭，完整E5/安装态/真人Grok/三平台/全交付仍开放。
+原owners退出后新清单已清15组旧App/Core缓存，H空闲实际观察增加5.97GiB；3255源/current/artifacts复验不变，失败现场保留。每批按AGENTS第9条收尾清理；active / partial — not releasable，未提交发布。
+
+以下为MCP多成员历史，不是当前最新候选。
+
+2026-10-04 历史：[首次真实MCP request与A/B/C联合链](../plans/2026-10-04-computer-use-task-consent-u04-existing-mcp-members-checkpoint.md)。
+首次request现走原session MCP/认证HTTP；原Host固定key、一次批准/ACP续行，选A/B未选C、A→B→A fresh五操作/旧refs拒绝/Stop保留Share，13checks两轮实际通过。
+source15/build18冻结；本批CU293（2 manual ignored，joint另跑）/ACP178/routing38、Node177+audit7/MCP38、两种strict/fmt/quality通过。
+Host/Share手势与ACP peer仍synthetic，不是真人installed/Grok/三平台验收；撤销/replacement/Pause恢复、完整E5与全交付仍开放，descriptor仍关闭。
+清理按AGENTS第9条，其他活跃Rust owner不杀；其退出后新清单清5旧cache，H空闲实际观察增2.98GiB，source/current/artifacts复验不变。active / partial — not releasable，未提交发布。
+
+以下为首链历史，不是当前最新结论。
+
+2026-10-04 历史：[新 TaskGrant 实际联合路径首链](../plans/2026-10-04-computer-use-task-consent-u04-existing-joint-checkpoint.md)。
+production source MV3/认证HTTP/原App ACP publication/新TaskGrant/MCP/独立DOM效果9检查两次通过；request/Host决定/ACP peer仍synthetic。
+实测确认Chromium130缺storage.local.setAccessLevel；不降级安全，扩展最低Chrome/Edge140，隔离官方CFT140运行，不修改managed seed。
+source13/build15冻结；本批CU292（2 manual ignored，新joint另跑）/ACP177/routing38、Node184/MCP38、两种strict/fmt/quality通过。
+原首次MCP request、多成员/撤销/replacement/恢复、真人安装/Grok及完整联合矩阵未完成；descriptor仍关闭、raw parser不放宽。
+Core/前端未改，未冒用上一批全量数字；精确清理与首败现场见checkpoint，active / partial — not releasable，未提交发布。
+
+以下为E4b.2历史，不是当前最新结论。
+
+2026-10-04 历史：[内置扩展导出与慢准备交互（E4b.2）](../plans/2026-10-04-computer-use-task-consent-u04-existing-extension-checkpoint.md)。
+固定44个生产文件/15locale内置，Host-owned显式导出与跨平台no-replace发布；慢metadata/queued confirm、复制焦点及原owner生命周期已补。
+最终前端707文件/8107项、浏览器153场景、Node183项、fresh默认App native12/CU292（1手动ignored）/ACP177/routing38及两种strict通过；source/artifact/首败/精准清理见checkpoint。
+浏览器Share/Host/visibility仍synthetic；production ExistingTab descriptor关闭，按[新TaskGrant联合路径](../plans/2026-10-04-computer-use-task-consent-u04-existing-joint-next.md)继续真实MV3/认证HTTP/原App ACP联测，不借legacy mcp-open。
+原自然21530ms关闭长尾、本轮Node unknown及App首败根因未证明；全U D/四surface/三平台/签名/真人Grok/12h/UX仍开放。
+active / partial — not releasable，单writer、未提交发布。Core本批未改/未全量重跑，不移用旧数字。
+
+以下为E4a.1历史，不是当前最新结论。
+
+2026-10-04 历史：[ExistingTab空结果原任务重试（E4a.1）](../plans/2026-10-04-computer-use-task-consent-u04-existing-empty-retry-checkpoint.md)。
+readiness→discover撤销/借用Share导致空receipt固定，实际先红；现只将空ExistingTab沿原permit/key/guard/TTL安全重试，不刷新非空ID或生成权限。
+新增3项Core/3项App测试；3171源/默认App冻结，Core1068/1084、默认App CU280/0 failed/1手动ignored、ACP177/routing38、Node28和四strict/fmt/quality通过。
+原进程退出→临时目录清理→close-settle→原consumer重试200→同run Stopped已补trace；诊断回复重复计数的4项首败只修日志字段，不放宽断言。
+原自然21530ms关闭长尾未复现，根因仍开放，不因本次绿销项。UI/descriptor/15locale仍待E4b，再E5联合链；全U D/三平台/签名/12h/UX仍开。
+原owners退出后新15代缓存及4份重复Chromium副本已清，H/C空闲分别观察增5.64/1.35GiB；current/source/seed/失败证据不变，已执行清单不复用。
+active / partial — not releasable，单writer、未提交发布。
+
+以下为E4a历史，不是当前最新结论。
+
+2026-10-04 历史：[ExistingTab原App任务准备入口（E4a）](../plans/2026-10-04-computer-use-task-consent-u04-existing-app-checkpoint.md)。
+原App picker现接严格existing-tabs、所选metadata executor、task-bound准备查询/显式confirm及原App process pin。
+未Pair/Share/只有不兼容或已借用页面时保留原call；raw parser仍Desktop-only，descriptor/UI/15locale未开放。
+3169源/默认App冻结；Core1065/1081、ACP174/routing38、Node177/协议38、四strict/fmt/quality通过。
+完整App CU为276 passed/1 failed/1手动ignored：原managed native close21530ms超过20秒等待，根因尚未证明，不写全绿。
+先受控核对原物理收束→consumer→Stopped，再继续E4b共享UI/竞争/15locale与E5联合链；全U D/三平台/签名/12h/UX仍开。
+清理15组新cache首次被活跃Rust编译安全挡下，owners退出并重验精确pairs/source/current hashes后已完成，H空闲观察增5.77GiB；当前产物/源码/失败现场不变，已执行清单不复用；active / partial — not releasable，未提交发布。
+
+以下为E3历史，不是当前最新结论。
+
+2026-10-04 历史：[ExistingTab默认关闭首次Pair/Share（E3）](../plans/2026-10-04-computer-use-task-consent-u04-existing-first-use-checkpoint.md)。
+原picker full key/guard下off metadata、显式Pair/Share及原reservation保活桥接；扩展等readiness再启动执行loop。
+10项新Core/4项新Node，最终Core1064/1080、默认App CU267/1手动ignored、ACP167/routing38、Node177/协议38及四strict/fmt/quality通过。
+3166源/最终App冻结；原owners退出后清15组旧缓存，H空闲观察增5.96GiB，current/source/App/Core/seed/fix.patch不变。
+App parser/picker仍Desktop-only；下一步E4原App命令/共享UI/15locale→E5同候选联合链，不重做E1–E3。
+仅backend/synthetic用户与peer，不是真人MV3/App/Grok/installed整链；全U D/四surface/三平台/签名/12h/UX仍开，active / partial — not releasable，未提交发布。
+
+以下为E2历史，不是当前最新结论。
+
+2026-10-04 历史：[ExistingTab多成员切换与原Host恢复（E2）](../plans/2026-10-04-computer-use-task-consent-u04-existing-switch-checkpoint.md)。
+原Bound proof精确借用/切换/回滚，Pause保留active、fresh capture后原Host恢复；Stop提前终态与失败切换后Pause/Continue不可用已修。
+23项新Core回归；最终Core1054/1070、默认App CU267/1手动ignored、ACP167/routing38、Node173/协议38及四种strict/fmt/quality通过。
+3162源含extension/最终App冻结；原owners退出后清15组旧缓存逻辑6.28GiB，H空闲观察增加4.51GiB，source/current/App/Core/seed/fix.patch不变。
+App parser/picker仍Desktop-only；下一步E3 off首次Pair+Share事务→E4共享UI/15locale→E5同候选联合链。
+仅backend/synthetic peer，不是真人MV3/App/Grok/installed整链；全U D/四surface/三平台/签名/12h/UX仍开，active / partial — not releasable，单writer、未提交发布。
+
+以下为E1 picker历史，不是当前最新结论。
+
+2026-10-04 历史增量：[ExistingTab 原分享 Host picker（E1）](../plans/2026-10-04-computer-use-task-consent-u04-existing-picker-checkpoint.md)。
+Core picker已接真实分享列表，网页不再用Desktop标题过滤；原receipt/preparation/Stop规则不变，10项新回归。
+最终Core default1031/test-support1047、默认App CU267/1手动ignored、ACP167/routing38、Node173/协议38与四种strict/fmt/quality通过。
+3152源含extension与最终App冻结；清15组旧缓存逻辑6.32GiB，H空闲首before→最终after观察增加约3.66GiB。
+首清理被其它工作区新编译安全中断，原记录保留；新清单完成剩余13组，源码/current/seed哈希不变，未杀无关进程。
+App parser/picker仍Desktop-only；下一步E2多成员切换/恢复→E3 off首次Pair+Share→E4共享UI/15locale→E5联合验收。
+不冒称真人MV3/App/Grok/installed整链；全U D/四surface/三平台/签名/12h/UX仍开，active / partial — not releasable，单writer、未提交发布。
+
+## 先前 ExistingTab 身份基础（以下不是当前最新结论）
+
+2026-10-04 历史增量：[ExistingTab原分享身份与任务预留基础](../plans/2026-10-04-computer-use-task-consent-u04-existing-scope-checkpoint.md)。
+实际documentId经source Share/认证HTTP到Host-only proof，原reservation借用/回滚/Stop归还；旧Share兼容，错文档观察零交付。
+17项新Core回归，canonical候选及large enum首败已修；最终Core default1021/test-support1037、默认App CU267/1手动ignored、ACP167/routing38、Node173及strict/fmt/quality通过。
+3151源含extension及最终App冻结；原owners退出后精准清13组旧缓存，逻辑6.22GiB、H空闲观察增加5.97GiB，最新程序/seed/依赖/源码/失败证据不变。
+仅backend基础，不是source MV3新TaskGrant/真人App/Grok整链；Core/App picker仍Desktop-only，首次off Pair+Share及inactive member switch未接。
+下一步按[ExistingTab执行顺序](../plans/2026-10-04-computer-use-task-consent-u04-existing-next.md)，其它surface/全U D/三平台/签名/12h/UX仍开。
+active / partial — not releasable，单Codex writer、原dirty/fix.patch保留、未提交发布。
+
+## 先前 dispatcher 批次（以下不是当前最新结论）
+
+2026-10-04 历史增量：[dispatcher退出所有权与managed生命周期](../plans/2026-10-04-computer-use-dispatch-owned-lifecycle-checkpoint.md)。
+原dispatcher取消join丢句柄/后次join吞原失败两反例先红后绿，registry保留原handle至实际退出。
+同生产owned approval补真实feature-off/原ACP stdin queued-stop，实际10分钟request deadline另跑1通过（601.93s）。
+native普通7通过/1手动ignored；默认App宽CU267通过/1手动ignored、ACP167/routing38、strict/Node28/fmt/quality通过。
+3084源和默认App冻结；原owners全部退出后清五组旧缓存逻辑4.25GiB，H观察空闲增加4.17GiB，最新程序/seed/依赖/源码/失败证据保留。
+Host/session/peer/gate仍synthetic，不是真人主窗/自动dispatcher/Grok/安装态整链；其它surface/全U D/三平台/签名/12h/UX仍开。
+active / partial — not releasable，单Codex writer、原dirty/fix.patch保留、未提交发布。
+
+## 先前 owned approval 批次（以下不是当前最新结论）
+
+2026-10-04 历史增量：[原owned approval联合native验收](../plans/2026-10-04-computer-use-owned-approval-checkpoint.md)。
+生产constructor/原App ACP pin、真实隔离preference writer、原owned worker与source Chromium联合五场景通过。
+正常一次原agent ACP续行，Stop/Drop/两类replacement零迟到grant；原launch/close一次且最终Stopped。
+Host/session/peer/gate仍synthetic；不是主窗真人、自动turn dispatcher、真实Grok或安装态E2E。
+默认App宽filter CU263（可比子集239=原234+5）、ACP167/routing38、strict/Node28/fmt/quality通过。
+3083源及默认App冻结，原owners退出后清旧缓存逻辑4.25GiB、H观察空闲再增3.97GiB，源码/当前程序/seed/依赖/证据保留。
+其它owned生命周期阶段/自然关闭长尾/其它surface/全U D/三平台/真实App Grok/签名/12h/UX仍开。
+active / partial — not releasable，单Codex writer、原dirty/fix.patch保留、未提交发布。
+
+## 先前 cleanup ownership 批次（以下不是当前最新结论）
+
+2026-10-04 历史增量：[原清理消费者的退出所有权](../plans/2026-10-04-computer-use-owned-cleanup-checkpoint.md)。
+生产watcher取消join仍留原句柄，原join failure不会被下一调用改成成功；两反例先红后绿。
+测试收尾只认原ticket的Stopped，不把StopRequested或5秒unknown回包当物理退出。
+真实source Chromium延迟gate跨pending回复后仍占用、原关闭一次且最终Stopped；不是安装态/真人/Grok整链。
+默认App CU234、ACP167/routing38、strict/fmt/Node28/quality通过；3080源与默认App冻结。
+原owners退出后清5组旧缓存逻辑4.18GiB、H空闲观察增加3.96GiB，最新程序/seed/缓存及失败证据保留。
+原自然关闭长尾首败未关闭根因，下一步仍owned approval整链/其它surface/全U/D/三平台/签名/12h/UX。
+active / partial — not releasable，单Codex writer、原dirty/fix.patch保留、未提交发布。
+
+## 先前 managed UI 批次（以下不是当前最新结论）
+
+2026-10-04 历史增量：[独立任务浏览器共享批准 UI](../plans/2026-10-04-computer-use-task-consent-u04-managed-ui-checkpoint.md)。
+原 card/panel 共享一次明确 gesture → managed 主 WebView 命令；挂载/换范围不创建资源，无假窗口 picker。
+固定当前 tab 范围说明、local Cancel、优先 Stop、短错误/显式 retry及15locale已接；三平台 compiled descriptor不是runtime ready。
+Core1004/1020、默认App CU229复测、ACP165/routing38、最终前端703文件8031测试与隔离Chromium最终两轮各79通过。
+3075源manifest4冻结；原owners退出后清旧缓存逻辑6.06GiB，H空闲观察增加3.97GiB，四轮UI临时site/runtime也已清理，证据保留。
+原一次 native cleanup_pending 首败保留，复测不等于根因修复；UI synthetic IPC与默认App native fixture不冒称真人整链。
+全四surface/三平台/真实App/Grok/签名/12h/UX仍开，active / partial — not releasable，单writer、未提交发布。
+
+## 先前入口批次（以下不是当前最新结论）
+
+2026-10-04 历史增量：[完整 Host 地址与 App managed 批准入口](../plans/2026-10-04-computer-use-task-consent-u04-managed-entry-checkpoint.md)。
+原 Broker 锁内 full key 验证、原 ACP/SessionManager/主 WebView 命令及 owned approval/publication 接通；未造 managed picker/native target。
+取消/Drop 的 selecting/bound 残留已补；重复gesture、原地址/replacement/Stop/retry合同通过。
+Core默认1004/test-support1020、默认App managed6/publication6/task8/recovery4/native managed1/native scope2/
+CU228/ACP164/routing38（重叠）、全前端701文件7999及strict/type/lint/fmt/quality/build通过。
+3071源和默认App候选冻结；原owners退出后清13组旧缓存，逻辑6.08GiB、H空闲观察增加3.44GiB，最新缓存/程序/seed及源码清理后不变，未动其它编译任务。
+**生产task card/picker descriptor仍Desktop-only**；下一步共享controller、明确managed一次确认/Stop/retry、15locale及production UI联合验收。
+全四surface/三平台/真实App/签名/Grok/12h/UX仍待完成，active / partial — not releasable，单Codex writer、未提交发布。
+
+## 先前阶段原文（以下不是当前最新结论）
+
+2026-10-04 最新增量：[原reservation ManagedBrowser资源准备](../plans/2026-10-04-computer-use-task-consent-u04-managed-producer-checkpoint.md)。
+Resources/Bound分相，唯一原Pending run/profile/真实worker/context/page proof，原App/ACP publication复用。
+Bound任务旧browser工具不能扩大scope或读取未批准tab；legacy正向合同仍保留。
+Core默认1002/test-support1018，默认App publication6/task8/recovery4/native managed1/native scope2/
+CU222/ACP158/routing38（重叠），全前端701文件7999及strict/type/lint/fmt/quality/build通过。
+Node37文件296通过，3069源冻结/清理后逐项不变；原owners退出后清13代旧缓存和一次性runtime，
+逻辑6.39GiB、H空闲观察增加5.11GiB，最新缓存/App/Core/seed不变，失败证据保留，详见checkpoint。
+**生产task scope/批准/UI仍Desktop-only**；下一步接App owned runtime/命令/共享UI/15locale。
+全四surface/三平台/真实App/签名/Grok/12h/UX仍待完成，active / partial — not releasable。
+单Codex writer，未提交发布；每批精准清理临时构建，不删最新程序、seed、依赖、源码和证据。
+旧publication批次test-support1021重复计driver16，原日志实际1005；本批计数已重新核算。
+
+## 先前阶段原文（以下不是当前最新结论）
+
+2026-10-04 最新增量：[原 App/ACP 批准发布边界](../plans/2026-10-04-computer-use-task-consent-u04-approval-publication-checkpoint.md)。
+锁外native scope准备与borrowed authority-only commit，精确pin原slot/process/agent/ACP/RequestTransport；
+直接selection/picker和U05恢复共用边界，replacement胜出时无grant/continuation。
+Core默认989/test-support1021、默认App publication5/task8/recovery4/native2/CU220/ACP158/routing38（重叠），
+全前端701文件7999及strict/type/lint/fmt/quality/build通过。3063 source冻结/清理后逐项不变。
+原owners退出后清五代旧缓存，逻辑4.08GiB、H空闲增加3.01GiB，最新程序/seed不变；原失败证据保留。
+**生产task scope/批准/UI仍Desktop-only；managed资源producer待实现**，复用本边界而非借legacy run。
+完整四surface/三平台/真实App/签名/Grok/12h/UX仍待完成，目标 **active / partial — not releasable**。
+单Codex writer、未提交发布；每批收尾清精确临时产物的规则在AGENTS第9条。
+
+## 先前阶段原文（以下不是当前最新结论）
+
+2026-10-04 最新增量：[ManagedBrowser原实例身份基础](../plans/2026-10-04-computer-use-task-consent-u04-managed-identity-checkpoint.md)。
+Host-only六字段真实worker/context/page证明、原Arc/revision pin和打包hash已接线；无正文读取或执行。
+Core默认983/test-support1015、默认App真实native2/CU214/ACP158/routing38（重叠）、前端333及严格检查通过。
+**生产task scope/批准/UI仍Desktop-only**；下一批解决原reservation下owned资源→Bound依赖及最终原ACP/session原子publication，不能借legacy run。
+3059 source hashes清理后不变；原owners退出后清五代旧缓存，逻辑4.03GiB、H空闲增加2.60GiB，最新产物/seed不变。
+旧seed清单hardlink夹具事故已恢复原bytes/hash，失败和修复证据保留。完整四surface/三平台/真实App/签名/Grok/12h/UX仍待完成。
+目标 **active / partial — not releasable**，单Codex writer、未提交发布。
+
+## 先前阶段原文（以下不是当前最新结论）
+
 2026-10-01 最新增量：[同进程显式重新授权与拒绝恢复](../plans/2026-10-01-computer-use-grant-recovery-checkpoint.md)。
 同一 owned GTK/Registry/broker/SessionGrants 进程完成两次真实 consent、点击计数0→1→2、Enter及两次物理接管；旧 ticket/target/snapshot/request 在 fresh input 前后均被拒绝。
 第二次 picker 的真实拒绝也正确 fenced/关闭/join，实际退出1，无自动重试。先前格式整理后的默认/诊断探针已按原hash实际重跑，旧证据不改写。
@@ -779,7 +1312,9 @@ Grok Build ACP 注入会话 MCP `grok-computer-use` → loopback HTTP IPC（`127
 
 Cua Driver 不是根依赖。私有 clone 仅探针；产品桌面路径是 Host 适配器。
 
-扩展配对使用 30 秒单调租约，worker 每 10 秒合并 status/续租；popup 不必常开。
+扩展配对使用 30 秒单调租约；有效任务准备/已启用功能下，worker 每 10 秒合并 status/续租，popup 不必常开。
+任务准备结束后，status 只在原租约内确认已完成的 Pair，返回 executionReady=false，不续租或开放 Share/执行。
+明确关闭功能仍撤销 Pair；过期/伪造/旧连接继续拒绝。仅局部真实终态已验，不代表完整交付。
 过期派发先拒绝，Host 每秒清除 key/候选/借用权限；浏览器崩溃不是即时检测。
 Share/Unshare 已绑定连接、document 和顺序并原子撤销。扩展仅在显式 Share 时
 读取当前 tab 的 main-frame 元数据；权限为 storage/activeTab/scripting/webNavigation + loopback。

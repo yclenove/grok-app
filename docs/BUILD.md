@@ -1,5 +1,7 @@
 # Grok App 桌面端构建与发布
 
+CU维护来源最新见[SDK / FFmpeg与同步预检](plans/2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选、源码提供与完整NOTICE仍开放；原候选07/08和18原错误保持。fork/源仓库已fetch、未合入，下一批先按同步计划处理冲突和回归。App macOS 11+ / CU受管浏览器14+、原R1–R4完整验收继续。
+
 支持平台：
 
 | 平台 | Triple | 本地构建 | CI Release 产物 |
@@ -34,12 +36,15 @@ pnpm setup:cross   # rust targets + (macOS) cargo-xwin / nsis / llvm 检查
 `pnpm dev` 会 merge [`src-tauri/tauri.dev.conf.json`](../src-tauri/tauri.dev.conf.json)：
 
 - `identifier=com.grokapp.desktop.dev`（single-instance mutex 与正式版 / **grok-app-latest** 隔离）
+- 开发页固定使用 `http://127.0.0.1:1421`；Vite、Tauri `devUrl` 与本地媒体 CORS 必须保持同一来源，避免 Windows 将 `localhost` 解析到未监听的 IPv6 后出现 `ERR_CONNECTION_REFUSED`
 - `productName=Grok Dev`，Dock / 窗口图标用 `src-tauri/icons/dev`（白色 AppIcon.appiconset，不是从黑标反相）
 - Windows AUMID / WinRT toast 跟 bundled identifier，不和正式版抢任务栏分组
 - 会话/设置仍默认同一套 App data（`%APPDATA%\grokapp\grok-app`）；可用 `GROK_APP_HOME` 覆盖（`scripts/dev-white-icon.sh` 会指到临时目录）
 - **不要**裸跑 `tauri dev` / `pnpm tauri dev`（没有 `--config` 会撞正式版单实例锁）
 
 ### macOS
+
+App 的发行最低版本仍为 **macOS 11.0**。Computer Use 的**受管浏览器**单独要求 **macOS 14+**；较旧或无法核验版本时，不启动该浏览器并给出对应说明，不将此限制应用到普通聊天或其它 CU surface。两个架构的原生系统边界与维护 browser pack 验收尚未完成，见[最新检查点](plans/2026-10-13-computer-use-managed-browser-boundary-checkpoint.md)。不要为了新版 Playwright 全局抬高 App 的 `minimumSystemVersion`。
 
 - Xcode Command Line Tools：`xcode-select --install`
 - Apple Silicon 上构建 Intel：`rustup target add x86_64-apple-darwin`（脚本已处理）
@@ -78,6 +83,13 @@ sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-modu
 Linux App 直接依赖 Wayland crate（即使入口仍默认关闭），因此构建需要
 **PipeWire/SPA ≥ 0.3.65、GTK ≥ 3.24，以及静态 libei ≥ 1.5**。
 libei 旧版本的连接退出缺陷不能通过动态链接系统同 SONAME 库规避。
+
+CU 受管浏览器还需要系统 NSS/NSPR 和 ALSA。deb 配置声明 `libnspr4`、`libnss3`、
+`libasound2 | libasound2t64`，RPM 用相应五个64-bit SONAME capabilities；
+构建机已有这些库不等于最终用户安装会有，不能依赖 browser resource 自动推导。
+[维护版内部原生检查点](plans/2026-10-13-computer-use-maintained-native-checkpoint.md)
+记录了 Jammy 缺库首败、私有环境补库及新02的28项通过；真实包安装/完整依赖审核仍待完成。
+
 先在**全新私有目录**构建校验过 SHA-256 的 libei SDK，不覆盖系统库：
 
 ```bash
@@ -91,10 +103,96 @@ bash scripts/check-computer-use-linux-sdk.sh
 SDK 的 `share/licenses/libei/COPYING`。`LD_LIBRARY_PATH` 供原生夹具的 libeis 使用；
 产品的 libei 必须静态链接，不能用这个变量假装修复发行物。
 
-**Ubuntu 22.04 发布门槛尚未解决：** Jammy 官方包为 PipeWire 0.3.48，低于上述要求。
-当前 `release.yml` 仍保留 Ubuntu 22.04/glibc 底线；需要在该底线上构建并验证私有
-PipeWire SDK、运行时模块和 AppImage/deb/rpm 依赖/许可装载后才能宣称可发布。
+**Ubuntu 22.04 发布门槛仍未全部解决：** Jammy 官方包为 PipeWire 0.3.48，低于上述要求。
+新增 `scripts/build-computer-use-pipewire.sh /absolute/new/sdk-directory` 可构建固定来源
+及 SHA-256 的私有 PipeWire 1.6.9 + Debian1.6.9-2 安全补丁，不安装系统服务、不替换系统库。将该SDK和
+libei SDK的 `lib/pkgconfig` 都加入 `PKG_CONFIG_PATH` 后再运行SDK检查。
+
+维护版本已经在隔离Jammy/glibc2.35实际编译，并验证原/迁移目录实际私有模块装载、
+contexts创建/退休，runtime清单的最高需求GLIBC2.34。新增48项guard/audit/runner回归
+和8个实际装载负例通过；范围、来源补丁及失败记录见
+[维护版SDK检查点](plans/2026-10-12-computer-use-maintained-sdk-checkpoint.md)。
+旧1.0.5兼容性试验保留为历史证据，不再作为产品接线候选。
+
+```bash
+# 需patchelf；仅处理SDK副本，不替换系统库。
+bash scripts/check-computer-use-pipewire-runtime.sh /absolute/PW-SDK /absolute/EI-SDK /absolute/NEW-OUTPUT
+export GROK_CU_PIPEWIRE_RUNTIME=/absolute/NEW-OUTPUT/runtime
+# Tauri before-build audits/copies this pack into generated native-pipewire resources.
+```
+
+该入口只输出客户端runtime的许可/SHA/ELF/ABI清单，并验证实际私有装载。
+它不是完整App的安装或桌面验收。CI新增ubuntu-22.04独立SDK job；当前尚未远端运行。
+
+最新[产品私有loader检查点](plans/2026-10-12-computer-use-product-loader-checkpoint.md)：
+DT_RPATH、安装/迁移/Cargo布局、实际库身份、16件资源和18个ELF正/负场景已验。
+`release.yml` 已接入SDK准备及资源门禁，本地YAML解析通过，远端CI/release尚未运行。
+[完整Jammy App续行](plans/2026-10-12-computer-use-jammy-app-build-checkpoint.md)记录原失败、平台修正及同一03正式候选：
+完整构建/strict/导航9项与Cargo布局下的实际窗口、私有库身份、224ms正常关闭已验；
+仍须正常聊天/所有CU lifecycle、AppImage/deb/rpm资源与依赖、真实安装和portal验证才可宣称可发布。
+当前browser/Node seed仍旧，维护版晋升还须完成[编译合同检查点](plans/2026-10-12-computer-use-runtime-pins-checkpoint.md)
+中的新布局/文件配额/系统底线/许可及完整四目标回归，不能借兼容性候选作为最终维护候选。
+通用[归档/树额度合同](plans/2026-10-13-computer-use-runtime-contract-checkpoint.md)已统一为编译/审计同一JSON，
+Chromium默认1024文件/2048条目/600MiB单件/1GiB总树；prepare不另覆盖。锁/manifest不能扩大额度，
+失败须保留旧seed/恢复证据。容量适配及当前旧seed回归不等于最终来源/通知/维护版prepare通过。
+独立loader/SDK的通过不替代这些门禁。
+[公共运行源/许可分类检查点](plans/2026-10-13-computer-use-runtime-license-classification-checkpoint.md)记录36固定来源与剩余缺口；
+94项审查工具测试不代替完整NOTICE/实际binary覆盖。当前四官方157快照仍只有sample Credits，不晋升维护runtime。
+后续[LLVM/Windows支持源](plans/2026-10-13-computer-use-support-license-checkpoint.md)已补到47固定来源/99工具测试；
+25个yes错误、165目录错误与4异常Shipped仍保留，仍不替代完整NOTICE/最终四目标prepare与原生安装验收。
+最新[公共浏览器源/ANGLE递归目录](plans/2026-10-13-computer-use-browser-recursion-checkpoint.md)已补到57固定来源/113工具测试；
+19个yes错误、187目录错误与5异常Shipped仍保留，准确递归pins不能替代实际builder继承/binary覆盖。
+完整NOTICE与维护runtime晋升仍未通过，macOS仍App11+/CU受管14+，原四目标prepare/原生安装门禁不变。
+后续[gclient机制/公开build入口](plans/2026-10-13-computer-use-gclient-build-evidence-checkpoint.md)已核验固定helper源码优先级、
+OpenScreen25 Git/7 non-Git并封存361条CI，140工具tests通过；四archive IDs已定位，
+真实builder参数/发布对象generation/hash/完整通知仍需验证，不从sample分支或SUCCESS推导晋升。
+最新[实际checkout/固定GCS对象](plans/2026-10-13-computer-use-checkout-object-checkpoint.md)已采四完整manifest/bootstrap，
+原四ZIP的SHA256/MD5/CRC32C与固定generation一致；Windows24.062ms时间差保留，非publisher认证。
+192工具tests/0skip通过不替代完整NOTICE/实际CIPD helper或生产pack；产品pins/四锁/seed仍未晋升。
+后续[六个实际递归仓库](plans/2026-10-13-computer-use-checked-recursive-checkpoint.md)按四manifest补齐六固定源，
+63源7273路径/439 raw gaps、19 yes错/190目录错/5异常值；206工具tests/0skip与独立重算通过。
+这是来源输入增量，不排除原缺项或晋升维护pack；完整NOTICE、执行CIPD helper及原R1–R4仍需完成。
+最新[实际recipe/helper/config](plans/2026-10-13-computer-use-recipe-provenance-checkpoint.md)核验原recipe ZIP/SHA、
+包内helper/Git bytes、四log布局/DEPS fallback AST及四config/Git blobs/32 bootstrap keys；236工具tests通过。
+这不替代平台license coverage/完整NOTICE、远端运行时测量或最终production pack；原维护版晋升门禁保持。
+后续[四平台来源/生成输入](plans/2026-10-13-computer-use-platform-coverage-checkpoint.md)联合重验主树+63源与原manifest，
+准确匹配59/62/56/56、冲突0；439 raw gaps/19 yes错/190目录错/5异常值未排除。
+八准确Crashpad/node源已采，固定GCS生成输入与Lit锁/README版本差异实读；258工具tests/0skip通过不等于完整NOTICE。
+下一批校验固定生成对象/实际分支与完整通知后，再晋升最终维护pack；App11+/受管Mac14+及原R1–R4全部门禁不变。
+最新[Khronos 完整许可正文](plans/2026-10-13-computer-use-khronos-notice-checkpoint.md)已绑定七SPDX声明/一原内嵌permission，
+两固定标准全文11358 bytes与八原版权声明实核，380工具tests/0skip及offline复验通过。
+这只是八文件通知片段；完整四平台NOTICE/最终维护pack与原R1–R4尚未完成，App11+/受管Mac14+保持。
+最新[复制API通知与省略记录](plans/2026-10-13-computer-use-notice-supplements-checkpoint.md)收齐38API头文件，
+原版权/完整短声明/permission与完整许可绑定；17省略记录复核为10配置许可、3复制API/registry来源未证、4义务未解决。
+411工具tests/0skip通过；39880-byte补充仍partial，不用于发行，不替代完整NOTICE/SBOM与原R1–R4。
+App11+/CU受管Mac14+与产品旧runtime/pins/四锁/seed保持，下一批真实copied-generated输入及四义务仍需完成。
+前批[默认通知候选与完整 ANGLE GN 来源](plans/2026-10-13-computer-use-notice-candidates-checkpoint.md)补齐实际WebGL全文，
+495有效候选全文缺口归零，独立partial preview为5453606 bytes；17省略记录/196目录问题/5异常值仍开放。
+全部162 ANGLE GN原文与399工具tests通过，未证明完整通知/binary排除；预览不得用于发行。
+最终维护pins/四锁/production pack及原R2–R4全部门禁保持，App11+/CU受管Mac14+与当前旧产品不变。
+后续[ANGLE CPU候选源](plans/2026-10-13-computer-use-cpu-consumer-source-checkpoint.md)新增两准确GN/C++输入，累计381工具tests通过；
+候选引用/独立Android条件只作来源证据，全部CPU消费图/二进制排除未证明，完整维护pack门禁保持。
+前批[真实 C++ 来源与 Khronos 通知](plans/2026-10-13-computer-use-consumer-checkpoint.md)已验三主C++库/四manifest/原license字节、
+11源码规则和8copied headers逐文件Apache/MIT/完整permission及platform引用；369工具tests/独立01/02同SHA通过。
+7554paths/422 raw gaps/17 yes错、196目录错/5异常值保留；七SPDX声明完整文本/其它生成源/完整NOTICE与原R1–R4仍需完成。
+App11+/受管Mac14+与产品/pins/四锁/seed未晋升，source审查通过不替代最终pack/native验收。
+前批[ANGLE / OpenScreen 集成](plans/2026-10-13-computer-use-integration-checkpoint.md)已验generated flag导出/helper AST、
+16准确source rules/四原GN参数、四条实际路径许可映射与Perfetto四manifest pin；357工具tests/独立04/05同SHA通过。
+7541paths/422 raw gaps/17 yes错、196目录错/5异常值保留；完整NOTICE/R1仍红，继续其它消费路径/生成输入与原R2–R4全部门禁。
+App11+/受管Mac14+与产品/pins/四锁/seed未晋升；审查工具通过不替代production pack/native验收。
+前批[Crashpad 配置与 lss 来源](plans/2026-10-13-computer-use-crashpad-checkpoint.md)已验根default/四原GN参数、
+external lss/zlib分支和真实路径许可，319审查工具tests/独立重算通过；7518paths/422 raw gaps/17 yes错、
+190目录错/5异常值保持，不排除standalone缺项。完整NOTICE/R1仍红，不晋升产品/四锁/seed；
+App11+/受管Mac14+与原R2–R4所有门禁保持active/partial。
+前批[固定生成依赖闭包](plans/2026-10-13-computer-use-node-generated-checkpoint.md)已验原GCS对象/generation/hash、
+完整6544 entries/234source paths与原recipe布局/四actual checkout同-object段；7507paths/422 raw gaps/17 yes错，
+190目录错/5异常值保留。296工具tests/0skip通过不等于完整NOTICE/实际二进制验收；继续准确lss/Crashpad分支、
+ANGLE/OpenScreen/其它生成输入与完整R1，再晋升维护pack，原R2–R4与App11+/受管Mac14+全部保持。
 不能改为 24.04、伪造 pkg-config 版本、只复制新头文件，或禁用 Wayland 依赖来制造绿灯。
+后续[四平台实际archive/GN参数](plans/2026-10-13-computer-use-archive-build-checkpoint.md)已封存4条完整GetBuild和16原日志，
+同source/pins/上传路径实核，actual GN args与同源默认确认sample机制；169审查工具tests通过不替代完整NOTICE。
+GCS generation/下载ZIP bytes关联、实际checkout/递归与完整通知仍需补证，不从publisher路径或custom vars推导晋升。
+产品/pins/四锁/seed/App144保持，App11+/CU受管Mac14+与原R2–R4全部门禁不变。
 私有较新 SDK 的 `cargo check` 通过，不等于这一发布门槛已通过。
 
 通过 SDK 检查后：
@@ -120,7 +218,7 @@ Issue [#539](https://github.com/RongleCat/grok-app/issues/539) 对照实验：�
 用户侧缓解：各 README 的「Linux blank/black window」段，或仓库脚本  
 `scripts/run-linux-appimage-system-webkit.sh`。
 
-AppImage 宿主进程在启动时若检测到系统 WebKitGTK 4.1，会带 `WEBKIT_EXEC_PATH` / `LD_LIBRARY_PATH` 再 exec 自身（`src-tauri/src/linux_webkit.rs`）。这覆盖 #539 黑屏，也避免退出时 FUSE 卸载仍映射在 squashfs 上的 `WebKitNetworkProcess`（SIGBUS / `BUS_ADRERR`）。`GROK_SKIP_SYSTEM_WEBKIT=1` 可退回内置 WebKit。不要为了此问题单独把 Linux CI 升到 Ubuntu 24.04——会抬高 glibc 底线。
+仓库保留 `src-tauri/src/linux_webkit.rs` 的 host-WebKit/退出辅助实现，但当前未在产品入口注册，不能依赖它自动解决黑屏或FUSE/helper退出问题。外部wrapper也须独立核对私有PipeWire优先级、实际helper归属和挂载生命周期；SDK/loader探针通过不证明此项已完成。不要为了此问题单独把 Linux CI 升到 Ubuntu 24.04——会抬高 glibc 底线。
 
 ## 2. 本地构建命令
 

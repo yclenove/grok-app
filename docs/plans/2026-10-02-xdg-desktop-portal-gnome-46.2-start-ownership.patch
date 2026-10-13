@@ -1,0 +1,215 @@
+# xdg-desktop-portal-gnome 46.2 RemoteDesktop Start ownership.
+# Baseline: https://download.gnome.org/sources/xdg-desktop-portal-gnome/46/xdg-desktop-portal-gnome-46.2.tar.xz
+# Baseline SHA256: b5c65ea25e8483502d033a613be6dc6b71883ac07f1a3e474ad18049c47d16d6
+# Patched file license: GNU Lesser General Public License, version 2.1 or later.
+# The file header in src/remotedesktop.c names Red Hat as the copyright holder.
+# Apply inside a clean official 46.2 tree with: patch -p1 < this file
+# This is a private owned-VM experiment. It does not replace /usr/libexec and
+# it is not stock production support. Upstream commit a4f6ed64474ff6fe6c4eb9dbe092d97cafd6ea81
+# and xdg-desktop-portal-gnome MR !231 do not clear a consumed RemoteDesktop Start invocation.
+# Ubuntu bug 2125128 tracks a screencast use-after-free and is not this RemoteDesktop fix.
+
+--- a/src/remotedesktop.c
++++ b/src/remotedesktop.c
+@@ -145,6 +145,14 @@
+ cancel_start_session (RemoteDesktopSession *session,
+                       int response);
+ 
++static gboolean
++complete_start_invocation (RemoteDesktopSession *session,
++                           int response,
++                           GVariant *results);
++
++static void
++retire_remote_desktop_dialog (RemoteDesktopSession *session);
++
+ gboolean
+ is_remote_desktop_session (Session *session)
+ {
+@@ -217,9 +225,10 @@
+               GDBusMethodInvocation *invocation,
+               RemoteDesktopDialogHandle *dialog_handle)
+ {
+-  cancel_start_session (dialog_handle->session, 2);
++  RemoteDesktopSession *session = dialog_handle->session;
+ 
+-  remote_desktop_dialog_handle_close (dialog_handle);
++  cancel_start_session (session, 2);
++  retire_remote_desktop_dialog (session);
+ 
+   return FALSE;
+ }
+@@ -272,6 +281,11 @@
+ 
+   if (response != 0)
+     cancel_start_session (dialog_handle->session, response);
++
++  /* A screen-cast ready callback may still be the Start owner. Every other
++     outcome has consumed that invocation, so retire the dialog exactly once. */
++  if (response != 0 || dialog_handle->session->start_invocation == NULL)
++    retire_remote_desktop_dialog (dialog_handle->session);
+ }
+ 
+ static RemoteDesktopDialogHandle *
+@@ -561,6 +575,9 @@
+   gboolean clipboard_enabled;
+   RemoteDesktopPersistMode persist_mode;
+ 
++  if (remote_desktop_session->start_invocation == NULL)
++    return;
++
+   g_variant_builder_init (&results_builder, G_VARIANT_TYPE_VARDICT);
+ 
+   shared_device_types = remote_desktop_session->shared.device_types;
+@@ -631,11 +648,16 @@
+         }
+     }
+ 
+-  xdp_impl_remote_desktop_complete_start (XDP_IMPL_REMOTE_DESKTOP (impl),
+-                                          remote_desktop_session->start_invocation,
+-                                          0,
+-                                          g_variant_builder_end (&results_builder));
+-  remote_desktop_session->start_invocation = NULL;
++  if (remote_desktop_session->start_invocation == NULL)
++    {
++      g_variant_builder_clear (&results_builder);
++      return;
++    }
++
++  complete_start_invocation (remote_desktop_session,
++                             0,
++                             g_variant_builder_end (&results_builder));
++  retire_remote_desktop_dialog (remote_desktop_session);
+ }
+ 
+ static void
+@@ -721,17 +743,75 @@
+   return TRUE;
+ }
+ 
++static gboolean
++retire_remote_desktop_dialog_idle (gpointer user_data)
++{
++  remote_desktop_dialog_handle_close (user_data);
++  return G_SOURCE_REMOVE;
++}
++
++static void
++disconnect_ready_handler (RemoteDesktopSession *session)
++{
++  if (session->session_ready_handler_id == 0 ||
++      session->gnome_screen_cast_session == NULL)
++    return;
++
++  g_signal_handler_disconnect (session->gnome_screen_cast_session,
++                               session->session_ready_handler_id);
++  session->session_ready_handler_id = 0;
++}
++
++static gboolean
++complete_start_invocation (RemoteDesktopSession *session,
++                           int response,
++                           GVariant *results)
++{
++  GDBusMethodInvocation *invocation;
++
++  invocation = g_steal_pointer (&session->start_invocation);
++  if (invocation == NULL)
++    {
++      if (results != NULL)
++        g_variant_unref (g_variant_ref_sink (results));
++      return FALSE;
++    }
++
++  xdp_impl_remote_desktop_complete_start (XDP_IMPL_REMOTE_DESKTOP (impl),
++                                          invocation,
++                                          response,
++                                          results);
++  return TRUE;
++}
++
++static void
++retire_remote_desktop_dialog (RemoteDesktopSession *session)
++{
++  RemoteDesktopDialogHandle *dialog_handle;
++
++  dialog_handle = g_steal_pointer (&session->dialog_handle);
++  if (dialog_handle == NULL)
++    return;
++
++  if (dialog_handle->request != NULL)
++    g_signal_handlers_disconnect_by_data (dialog_handle->request, dialog_handle);
++  if (dialog_handle->dialog != NULL)
++    g_signal_handlers_disconnect_by_data (dialog_handle->dialog, dialog_handle);
++
++  g_idle_add (retire_remote_desktop_dialog_idle, dialog_handle);
++}
++
+ static void
+ cancel_start_session (RemoteDesktopSession *remote_desktop_session,
+                       int response)
+ {
+   GVariantBuilder results_builder;
+ 
++  disconnect_ready_handler (remote_desktop_session);
+   g_variant_builder_init (&results_builder, G_VARIANT_TYPE_VARDICT);
+-  xdp_impl_remote_desktop_complete_start (XDP_IMPL_REMOTE_DESKTOP (impl),
+-                                          remote_desktop_session->start_invocation,
+-                                          response,
+-                                          g_variant_builder_end (&results_builder));
++  complete_start_invocation (remote_desktop_session,
++                             response,
++                             g_variant_builder_end (&results_builder));
+ }
+ 
+ static gboolean
+@@ -1277,26 +1357,39 @@
+   GnomeScreenCastSession *gnome_screen_cast_session;
+   g_autoptr(GError) error = NULL;
+ 
++  cancel_start_session (remote_desktop_session, 2);
++  retire_remote_desktop_dialog (remote_desktop_session);
++
+   gnome_screen_cast_session = remote_desktop_session->gnome_screen_cast_session;
+   if (gnome_screen_cast_session)
+     {
+-      g_signal_handler_disconnect (gnome_screen_cast_session,
+-                                   remote_desktop_session->session_ready_handler_id);
++      if (remote_desktop_session->session_ready_handler_id != 0)
++        {
++          g_signal_handler_disconnect (gnome_screen_cast_session,
++                                       remote_desktop_session->session_ready_handler_id);
++          remote_desktop_session->session_ready_handler_id = 0;
++        }
+       g_clear_object (&remote_desktop_session->gnome_screen_cast_session);
+     }
+ 
+   session_proxy = remote_desktop_session->mutter_session_proxy;
+-  g_signal_handler_disconnect (session_proxy,
+-                               remote_desktop_session->closed_handler_id);
++  if (remote_desktop_session->closed_handler_id != 0)
++    {
++      g_signal_handler_disconnect (session_proxy,
++                                   remote_desktop_session->closed_handler_id);
++      remote_desktop_session->closed_handler_id = 0;
++    }
+ 
+   if (remote_desktop_session->clipboard.clipboard_enabled)
+     {
+-      g_signal_handler_disconnect (
+-          session_proxy, remote_desktop_session->clipboard
+-                             .selection_owner_changed_handler_id);
+-      g_signal_handler_disconnect (
+-          session_proxy, remote_desktop_session->clipboard
+-                             .selection_transfer_handler_id);
++      if (remote_desktop_session->clipboard.selection_owner_changed_handler_id != 0)
++        g_signal_handler_disconnect (
++            session_proxy, remote_desktop_session->clipboard
++                               .selection_owner_changed_handler_id);
++      if (remote_desktop_session->clipboard.selection_transfer_handler_id != 0)
++        g_signal_handler_disconnect (
++            session_proxy, remote_desktop_session->clipboard
++                               .selection_transfer_handler_id);
+     }
+ 
+   if (!org_gnome_mutter_remote_desktop_session_call_stop_sync (session_proxy,
