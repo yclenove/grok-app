@@ -1,0 +1,21 @@
+# Best-effort title and URL tokens for remote execution surfaces.
+# This list is not a complete detector. Unrecognized consoles must hand off.
+# Matching folds case and Unicode compatibility forms, then looks for a whole
+# token or a whole phrase. See data/README.md.
+web ssh
+webssh
+cloud shell
+cloud terminal
+cloudshell
+container console
+remote desktop
+remotedesktop
+vnc
+kubectl
+bastion
+ttyd
+wetty
+gotty
+code-server
+serial console
+debug console

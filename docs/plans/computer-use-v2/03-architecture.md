@@ -77,7 +77,7 @@ computer-use/
 |---|---|---|
 | gcu-protocol | serde, serde_json, schemars, thiserror | 任何 OS crate、tokio |
 | gcu-host-api | gcu-protocol, async-trait | OS crate |
-| gcu-core | protocol, host-api, tokio(sync,time,rt,macros), parking_lot, smol_str, smallvec, bitflags, thiserror, async-trait, serde, serde_json, futures-core(事件 Stream), similar(仅渲染行 diff), unicode-segmentation, image(仅缩放/编码), tracing；仅 dev：insta(快照)、criterion(基准)、proptest(属性测试)、gcu-driver-fake(离线场景) | OS crate、网络、文件系统直写（经 Host） |
+| gcu-core | protocol, host-api, tokio(sync,time,rt,macros), parking_lot, smol_str, smallvec, bitflags, thiserror, async-trait, serde, serde_json, toml(只读解析编入的 denylist), unicode-normalization(敏感词 NFKC), futures-core(事件 Stream), similar(仅渲染行 diff), unicode-segmentation, image(仅缩放/编码), tracing；仅 dev：insta(快照)、criterion(基准)、proptest(属性测试)、gcu-driver-fake(离线场景) | OS crate、网络、文件系统直写（经 Host） |
 | gcu-driver-* | protocol, core 中的 `Driver` trait 所在模块（core 以 `pub mod driver` 暴露），平台 crate 与支持库（fake: async-trait, tokio, futures-core, serde, thiserror, ron, png；tokio/test-util 仅测试） | 互相依赖；依赖 gcu-mcp |
 | gcu-mcp | protocol, core, host-api, host-protocol（RemoteHost 适配）, rmcp, tokio, axum(仅 loopback) | 平台 crate |
 | gcu-script | gcu-protocol, gcu-core, rquickjs | OS crate、网络、文件系统、进程权限 |
@@ -96,7 +96,7 @@ computer-use/
 | MCP/schema | rmcp 3.5、schemars 1.2 | rmcp `default-features=false, features=["server","macros","transport-io","transport-streamable-http-server","elicitation"]`；stdio 只承诺 NDJSON |
 | 测试 | insta 1.49、proptest 1.12、criterion 0.8 | 三平台 |
 | 检查工具 | cargo-deny 0.20、cargo-llvm-cov 0.9、cargo-fuzz 0.13 | cov 需 llvm-tools-preview；fuzz 仅 Ubuntu/macOS nightly，不在 Windows 运行 |
-| 数据/文本 | similar 3.2、smol_str 0.3、smallvec 1.16、unicode-segmentation 1.13 | similar 仅渲染行序列 diff；树对齐始终按 fingerprint |
+| 数据/文本 | similar 3.2、smol_str 0.3、smallvec 1.16、unicode-segmentation 1.13、unicode-normalization 0.1.24、toml 1 | similar 仅渲染行序列 diff；树对齐始终按 fingerprint；toml 只读解析编入的 denylist，不写配置；NFKC 仅用于敏感词与执行界面关键词 |
 | 通信/CLI | interprocess 2.4、axum 0.8、tokio 1.53、tracing 0.1、clap 4.6 | axum 仅 loopback；interprocess 许可 OR 可选 Apache-2.0 |
 | 配置编辑 | toml_edit 0.25、serde_json（preserve_order） | TOML 保注释；JSON 保键顺序，不保证空白/JSONC 注释；JSONC 另选库需 ADR |
 | 审批 UI | wry 0.57、tao 0.37 | Linux 为 GTK3 的 webkit2gtk-4.1；缺库走 zenity/kdialog |

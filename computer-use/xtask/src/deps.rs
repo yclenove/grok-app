@@ -74,6 +74,8 @@ const RULES: &[Rule] = &[
             "async-trait",
             "serde",
             "serde_json",
+            "toml",
+            "unicode-normalization",
             "futures-core",
         ]),
     },

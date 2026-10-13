@@ -275,6 +275,9 @@ pub fn builtin(name: &str) -> Option<&'static str> {
         "canvas" => Some(include_str!("../scenes/canvas.ron")),
         "terminal" => Some(include_str!("../scenes/terminal.ron")),
         "login" => Some(include_str!("../scenes/login.ron")),
+        "ide" => Some(include_str!("../scenes/ide.ron")),
+        "web_terminal" => Some(include_str!("../scenes/web_terminal.ron")),
+        "submit_unknown" => Some(include_str!("../scenes/submit_unknown.ron")),
         _ => None,
     }
 }

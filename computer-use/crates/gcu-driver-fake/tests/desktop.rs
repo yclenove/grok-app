@@ -48,7 +48,17 @@ fn pixel(bytes: &[u8], width: u32, x: usize, y: usize) -> [u8; 4] {
 #[tokio::test]
 async fn scene_loading_all_builtins_preserves_native_roles_and_shapes() {
     for name in [
-        "form", "list", "modal", "chat", "webarea", "canvas", "terminal", "login",
+        "form",
+        "list",
+        "modal",
+        "chat",
+        "webarea",
+        "canvas",
+        "terminal",
+        "login",
+        "ide",
+        "web_terminal",
+        "submit_unknown",
     ] {
         let (driver, win) = setup(name).await;
         assert!(driver.doctor().await.ready);
