@@ -89,3 +89,7 @@ The license allowlist rejects GPL/AGPL/LGPL; architecture §2 additionally requi
 MPL-2.0 dependencies to be dynamically linked. The source policy permits only
 crates.io and the advisory policy has no exceptions. Network/database failures
 must be reported and must not be addressed by relaxing `deny.toml`.
+
+## 一键门禁
+
+`bash scripts/verify.sh` 依序运行 fmt、clippy、test、check-deps、golden、budget、deny，遇到第一个失败即停；`CROSS=1` 另外对 Windows/macOS 目标做 clippy。在编译机上：`rcargo --sh "bash scripts/verify.sh"`。
