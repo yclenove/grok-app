@@ -18,6 +18,8 @@ smol_str = { workspace = true }
 smallvec = { workspace = true }
 sha2.workspace = true
 futures-core = { workspace = true }
+png = { workspace = true }
+x11rb = { version = "0.13", features = ["composite"] }
 
 [lints]
 workspace = true

@@ -404,8 +404,8 @@ async fn linux_driver_fake_test_suite() {
         "observe.tree must be true"
     );
     assert!(
-        !driver.capabilities().observe.screenshot,
-        "observe.screenshot must be false"
+        driver.capabilities().observe.screenshot,
+        "observe.screenshot must be true"
     );
 
     let doc = driver.doctor().await;

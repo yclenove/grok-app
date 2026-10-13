@@ -10,6 +10,9 @@ pub mod atspi;
 pub mod driver;
 /// Linux application identity, filesystem provenance, and re-authorization checks.
 pub mod identity;
+/// X11 window management, EWMH alignment, and window capture.
+pub mod x11;
 
 pub use driver::LinuxDriver;
 pub use identity::{needs_reauth, same_process_instance, AppIdentity};
+pub use x11::{FakeX, RealX, XServer};

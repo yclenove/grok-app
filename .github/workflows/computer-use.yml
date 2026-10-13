@@ -133,10 +133,11 @@ jobs:
         run: |
           cargo build --locked -p gcu-fixture
           cargo test --no-run --locked -p gcu-driver-linux --test atspi_tree
+          cargo test --no-run --locked -p gcu-driver-linux --test capture
 
-      - name: Run fixture and verify AT-SPI tree
+      - name: Run fixture and verify AT-SPI tree and X11 capture
         run: |
-          dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render" bash scripts/a11y/run_fixture_test.sh
+          dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render +extension Composite" bash scripts/a11y/run_fixture_test.sh
 
       - name: Upload AT-SPI artifacts on failure
         if: failure()

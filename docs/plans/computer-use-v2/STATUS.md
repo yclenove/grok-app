@@ -39,7 +39,7 @@
 | P2-08 | Windows 剪贴板与文本 | P2-06 | 1d | todo |  |  |  |  |
 | P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | todo |  |  |  |  |
 | P3-01 | AT-SPI 树 | P0-05 | 3d | done | cu2/P3-01-atspi-tree |  | 2026-10-13 | AT-SPI 树+Linux 身份(路径+dev/inode+sha256；持久授权绑定映像，pid 复用另判)；CI 实时测试读到夹具 send_button |
-| P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | todo |  |  |  |  |
+| P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | done | cu2/P3-02-x11 |  | 2026-10-13 | X11 窗口+XComposite 截图；无 composite 且被遮挡则拒绝(不交付他人内容)；CI Xvfb 实测 live_x11_fixture_window_capture_and_canvas_grid 通过 |
 | P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | todo |  |  |  |  |
 | P3-04 | X11 守卫与热键 | P3-03 | 1d | todo |  |  |  |  |
 | P3-05 | Linux 契约测试与 CI | P3-01、P3-02、P3-03、P3-04 | 1.5d | todo |  |  |  |  |
