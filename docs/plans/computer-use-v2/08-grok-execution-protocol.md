@@ -9,12 +9,12 @@
 ```
 1. 打开 STATUS.md，选第一张 status=todo 且所有依赖为 done 的卡（同阶段内按卡号顺序；P1/P2/P3 可按你所在平台选择）。
 2. 在 STATUS.md 把该卡改为 in_progress（同一 PR 内改，不单独提交）。
-3. 从最新 main 拉分支：cu2/<卡号>-<短名>，例如 cu2/P0-06-tree-pipeline。
+3. 从维护者指定集成基线（当前 origin/feat/cu-v2，集成主线后用 main）拉分支；已派工的独立 worktree 不切换分支：cu2/<卡号>-<短名>，例如 cu2/P0-06-tree-pipeline。
 4. 读卡 + 03 架构中被引用的小节 + 卡里提到的移植来源（git show archive/cu-v1-2026-10-13:<path>）。
 5. 先写测试（至少写出用例名与断言骨架），再写实现。
-6. 本地跑：cargo fmt / clippy -D warnings / test / deny / xtask check-deps golden budget（computer-use workspace）；涉及前端再跑 npm 的 lint/test。
+6. cargo fmt 可本机跑；编译/测试/检查走下文“编译环境”的 rcargo（限定 -p，串行构建）。涉及前端跑项目既有 lint/test。纯文档卡只跑文档自查，不编译 Rust。
 7. 自审：对照卡的 DoD 与 07 的相关条目逐条打勾，写进 PR 描述。
-8. 开 PR → CI 绿 → 请求 review → 合入后 STATUS.md 该卡改为 done（填 PR 链接）。
+8. 开 PR → CI 绿 → 请求 review；该卡 PR 最后一次提交把 STATUS 状态置 done 并填分支名，表示待合入的交付已验收；未合入 PR 的 done 不算依赖完成，领卡以集成基线为准。正式 PR 编号在后续功能 PR 回填，禁止为 STATUS 单独提 PR。拆卡仅最后子 PR 置 done，其余保持 in_progress。
 9. 回到 1。
 ```
 
@@ -34,7 +34,7 @@
 8. **不碰用户真实数据。** 测试只用夹具与系统自带 App；不登录任何账号；不操作 IM/邮件/支付。
 9. **不改宪法。** 03 架构的接口变化需要 ADR + 维护者批准；不能在实现卡里悄悄改。
 10. **遵守 AGENTS.md**：i18n（15 语言同 PR）、无 `window.confirm`、无原生 `<select>`、不增长 App.tsx/AppWorkbench.tsx、设置登记、功能三件套、提交后推送、分支卫生。
-11. **一次只做一张卡。** 例外：同一平台的两张无依赖小卡（各 ≤1d）可在一个 PR，标题写两个卡号。
+11. **一次只做一张卡。** 例外：同一平台两张无依赖小卡（各 ≤1d）可共用 PR；明确标“可拆”的卡允许 ≤3 个 PR，分支 `cu2/<卡号>-<序号>-<短名>`。每个子 PR 自身闭环（编译、测试、局部 DoD），禁止半成品；STATUS 记录各子 PR 分支/编号，全部子 PR 合入后才视为 done。已有 P0-08a 作为策略数据子卡单列，父卡和子卡都需验收，合计仍受 ≤3 PR 限制。
 12. **失败首因保留。** CI 首次失败的原因写进 PR 评论（一句话 + 修复方式），不靠重跑刷绿。
 
 ---
@@ -52,6 +52,13 @@
 - 快照测试用 `insta`，快照文件随 PR 提交且在描述中说明审阅过。
 
 前端（路线 B）遵循仓库既有规范（TypeScript strict、Vitest、组件位置、i18n）。
+
+---
+
+### 3.1 编译环境
+
+本机 Linux aarch64 资源不足，**执行工程师的所有编译一律用 build8 的 `rcargo <cargo 参数>`**；本机仅可跑只读 `cargo fmt --all -- --check`。示例：`rcargo test -p gcu-protocol`、`rcargo clippy -p gcu-core --all-targets -- -D warnings`、`rcargo run -q -p xtask -- check-deps`、`rcargo --sh 'cargo deny check'`。rcargo 同步当前 worktree 的 computer-use/ 并回传输出，Rust 1.99.0/cargo-deny 已安装。
+一次只开一个 cargo 构建，只用必要 `-p <crate>`；三平台原生行为由对应 CI/runner 验证，runner 使用原生 cargo 命令；build8 不代替 TCC/交互桌面，执行工程师不得用本机 cargo 代替远程编译。需要工具在 build8 用 `rcargo --sh 'cargo install --locked <tool>'`。build8 是共享服务器，不启动常驻进程、不改系统配置、不碰 `/home/build/cu2` 以外目录。纯文档修订不用 rcargo。
 
 ---
 
@@ -125,7 +132,7 @@ archive/cu-v1-2026-10-13:src-tauri/src/computer_use/windows_uia.rs（取了 … 
 
 ## 7. 汇报格式
 
-每合入一个 PR，在 STATUS.md 更新一行即可。每完成一个阶段（P0、P1…），在 STATUS.md 的"阶段记录"区写 ≤5 行：
+每张卡 PR 最后提交按 §1 更新 STATUS 的状态与分支名；PR 编号在后续功能 PR 回填，不为状态单独开 PR。拆卡全部子 PR 合入才完成，既有进展由总控统一核验。每完成一个阶段（P0、P1…），在 STATUS.md 的"阶段记录"区写 ≤5 行：
 退出条件是否满足（逐条 是/否）、关键指标（如契约测试通过数、bench p50）、遗留 issue 链接。不写其他总结文档。
 
 ---
@@ -139,6 +146,9 @@ archive/cu-v1-2026-10-13:src-tauri/src/computer_use/windows_uia.rs（取了 … 
 | `unknown` 自动重试 | 永不；返回新状态 |
 | 后台投递失败静默改前台 | 返回错误，前台需策略允许，结果写明 `delivery: foreground` |
 | macOS 权限挂在终端上 | 路线 A 用 helper .app；路线 B 引擎由 App 启动，归属 App |
+| Stop 后靠模型续轮恢复 | 锁存由用户控制，仅可信 UI/CLI 显式恢复，重启也保留 |
+| 同 UID/token 文件当作可信身份 | helper 验 audit token 代码签名，Host 双向绑定预期进程实例 |
+| 用 GCU_TOKEN 环境传会话密钥 | 继承匿名管道/FD；日志/崩溃报告脱敏，关闭会话撤销旧 token |
 | 路线 B 里直接 `use gcu_core` 图省事 | src-tauri 只能用 gcu-protocol / gcu-host-protocol；需要新能力就加 Host 协议消息 |
 | 每次调用冷启动 UIA/COM/AT-SPI | 常驻连接 + 专用线程（Windows worker 也是常驻） |
 | 截图全屏 | 窗口截图 + 缩放 + 坐标映射 |

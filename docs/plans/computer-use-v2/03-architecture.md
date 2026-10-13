@@ -1,6 +1,6 @@
 # 03 · v2 目标架构
 
-> 本文是 v2 的技术宪法。任务卡（[06](06-roadmap.md)）中的"接口"一栏均以本文为准。修改本文需要 ADR（[08 §6](08-grok-execution-protocol.md#6-adr-何时写怎么写)）。
+> 本文是 v2 的技术宪法。任务卡（[06](06-roadmap.md)）中的"接口"一栏均以本文为准。本次 v1.1 按总控已批准的[评审处置](reviews/2026-10-13-disposition.md)修订计划；实现卡不得自行扩大这些决定。后续修改本文需要 ADR（[08 §6](08-grok-execution-protocol.md#6-adr-何时写怎么写)）。
 
 ---
 
@@ -29,7 +29,7 @@
  postToPid/SkyLight PostMessage/SendInput   Portal/PipeWire/EI  （单元/契约测试）
                     · worker 隔离
                     └──────────────────── 路线 B ────────────────────┘
- Grok App(Tauri) ── 启动并托管 `gcu engine --host-socket <path>` 进程；
+ Grok App(Tauri) ── 启动并托管 `gcu engine --host-fd <fd> --stop-fd <fd>`（回退 --host-socket） 进程；
    App 侧只实现 Host 协议的服务端（审批卡/覆盖层/事件/策略/生命周期），不链接 core 与驱动；
    会话注入：MCP 条目指向 gcu 引擎暴露的 loopback MCP 端点（见 §15）
 ```
@@ -58,13 +58,14 @@ computer-use/
 │   ├── gcu-driver-windows/    # cfg(windows)
 │   ├── gcu-driver-linux/      # cfg(target_os="linux")：atspi / x11 / wayland 子模块
 │   ├── gcu-driver-fake/       # 内存假桌面 + 场景脚本（测试与评测离线模式）
+│   ├── gcu-eval/              # 评测 runner（P9-01 创建），任务与报告数据在 eval/
 │   ├── gcu-script/            # feature "script"：rquickjs 沙箱，绑定到 core 的 ActionRouter
 │   ├── gcu-mcp/               # MCP 服务器（rmcp），stdio 与 loopback streamable-http；代理模式
 │   ├── gcu-overlay/           # 路线 A 用：软件光标 + 状态胶囊（各平台原生透明窗，不进截图）
 │   └── gcu-cli/               # 二进制 `gcu`：mcp / doctor / call / batch / script / install-* / turn-ended / version
 ├── apps/
 │   ├── gcu-helper-macos/      # 打包脚本 + Info.plist：把 gcu 包成 "Grok Computer Use.app"（LSUIElement，承载 TCC）
-│   └── fixture/               # 跨平台夹具 App：egui + AccessKit（AX/UIA/AT-SPI 三平台无障碍）
+│   └── fixture/               # 跨平台夹具 App：eframe 0.36 默认 AccessKit（不另加 accesskit）
 ├── fixtures-native/           # 平台原生夹具：AppKit（objc2）、Win32/WinForms 等价（windows-rs）、GTK4（gtk4-rs）
 ├── eval/                      # 任务集 YAML、判定器、runner（见 07 §5）
 └── xtask/                     # cargo xtask：打包、签名、生成 schema/golden、预算检查
@@ -76,12 +77,39 @@ computer-use/
 |---|---|---|
 | gcu-protocol | serde, serde_json, schemars, thiserror | 任何 OS crate、tokio |
 | gcu-host-api | gcu-protocol, async-trait | OS crate |
-| gcu-core | protocol, host-api, tokio(sync,time,rt), parking_lot, similar(diff), unicode-segmentation, image(仅缩放/编码), tracing | OS crate、网络、文件系统直写（经 Host） |
+| gcu-core | protocol, host-api, tokio(sync,time,rt), parking_lot, smol_str, smallvec, bitflags, thiserror, async-trait, serde, serde_json(确需时), similar(仅渲染行 diff), unicode-segmentation, image(仅缩放/编码), tracing | OS crate、网络、文件系统直写（经 Host） |
 | gcu-driver-* | protocol, core 中的 `Driver` trait 所在模块（core 以 `pub mod driver` 暴露），平台 crate | 互相依赖；依赖 gcu-mcp |
-| gcu-mcp | protocol, core, host-api, rmcp, tokio, axum(仅 loopback) | 平台 crate |
+| gcu-mcp | protocol, core, host-api, host-protocol（RemoteHost 适配）, rmcp, tokio, axum(仅 loopback) | 平台 crate |
+| gcu-script | gcu-protocol, gcu-core, rquickjs | OS crate、网络、文件系统、进程权限 |
+| gcu-eval | gcu-protocol, gcu-core, gcu-driver-fake, serde, serde_json, tokio；任务 YAML/CLI/报告依赖在 P9-01 固定并核实许可 | 生产凭据、非隔离运行 |
 | gcu-cli | 全部 | — |
-| gcu-host-protocol | gcu-protocol, serde, tokio(io), interprocess（UDS/命名管道） | core、驱动 |
+| gcu-host-protocol | gcu-protocol, serde, serde_json, tokio(io), interprocess（UDS/命名管道） | core、驱动 |
 | src-tauri（路线 B） | **仅** gcu-protocol、gcu-host-protocol | gcu-core、任何 gcu-driver-*、gcu-mcp、gcu-cli、gcu-overlay（`xtask check-deps` 同时检查 src-tauri） |
+
+---
+
+依赖核实基线（2026-10-13）：上述为运行依赖白名单，测试/构建工具按用途单独校验；不是要求一次性加入全部库。纯数据编解码留在 host-protocol，依赖 core/host-api 的 RemoteHost 适配器放 gcu-mcp。
+
+| 用途 | 核实版本与选择 | 平台/约束 |
+|---|---|---|
+| MCP/schema | rmcp 3.5、schemars 1.2 | rmcp `default-features=false, features=["server","macros","transport-io","transport-streamable-http-server","elicitation"]`；stdio 只承诺 NDJSON |
+| 测试 | insta 1.49、proptest 1.12、criterion 0.8 | 三平台 |
+| 检查工具 | cargo-deny 0.20、cargo-llvm-cov 0.9、cargo-fuzz 0.13 | cov 需 llvm-tools-preview；fuzz 仅 Ubuntu/macOS nightly，不在 Windows 运行 |
+| 数据/文本 | similar 3.2、smol_str 0.3、smallvec 1.16、unicode-segmentation 1.13 | similar 仅渲染行序列 diff；树对齐始终按 fingerprint |
+| 通信/CLI | interprocess 2.4、axum 0.8、tokio 1.53、tracing 0.1、clap 4.6 | axum 仅 loopback；interprocess 许可 OR 可选 Apache-2.0 |
+| 配置编辑 | toml_edit 0.25、serde_json（preserve_order） | TOML 保注释；JSON 保键顺序，不保证空白/JSONC 注释；JSONC 另选库需 ADR |
+| 审批 UI | wry 0.57、tao 0.37 | Linux 为 GTK3 的 webkit2gtk-4.1；缺库走 zenity/kdialog |
+| macOS | objc2 0.6、objc2-app-kit/objc2-foundation/objc2-screen-capture-kit/objc2-core-graphics/objc2-core-services 0.3、accessibility-sys 0.2、security-framework 3.7 | 不用 accessibility 及 servo core-graphics；SecCodeCopySigningInformation 自有 extern C |
+| Windows | windows 0.62 | features 至少 Win32_System_WinRT_Graphics_Capture、Graphics_Capture、Win32_Foundation、Win32_UI_Accessibility |
+| Linux 树/X11 | atspi 0.30（features=["tokio"]）、上游 zbus 5、x11rb 0.14（composite/xtest/xinput）、xkbcommon 0.9 | 不 fork zbus；xkbcommon 仅 Linux，CI 安装 libxkbcommon-dev |
+| Wayland | ashpd 0.13（default-features=false, features=["tokio","screencast","remote_desktop","pipewire"]）、reis 0.7（tokio） | 不单独依赖 pipewire 0.10；沿 ashpd 的 pipewire 0.9；CI 安装 libpipewire-0.3-dev；仅 Linux |
+| 脚本 | rquickjs 0.14（default-features=false, features=["std"]） | 禁 rust-alloc/allocator/loader/dyn-load/full；见 §11.5 |
+| 打包 | cargo-deb 3.8、cargo-generate-rpm 0.21、cargo-cyclonedx 0.5、cargo-auditable 0.7 | deb/rpm 在 Linux；SBOM/auditable 为发行工具 |
+| 夹具 | eframe 0.36（默认 accesskit）、egui 0.36（传递依赖 accesskit 0.24）；gtk4 0.11 仅 fixtures-native | 不另加 accesskit 0.25；无障碍缺口使用原生夹具 |
+| Wayland 胶囊 | 待 P4-04 选型后补依赖表与 deny.toml | GNOME 不显示并声明能力，不预设可用 crate |
+
+许可选择遵循 MIT/Apache-2.0/BSD/ISC/Zlib/Unicode 白名单及允许的 OR 分支。系统动态库 WebKitGTK、GTK、libpipewire、libxkbcommon 不由 cargo-deny 判定，需在 deny.toml 注释并单列发行依赖说明。
+此规则表与 `computer-use/xtask/src/deps.rs` 的 RULES 必须一致；**代码同步由 P0-05 卡完成**，本次修订仅改计划。
 
 ---
 
@@ -194,6 +222,7 @@ The focused UI element is 21 text area.
 
 ### 4.4 截图
 
+- 必经交付管线：原始树先收集密码/敏感区域 → 树裁剪与截图采集 → 按同一状态版本打码 → 缩放/编码 → 模型图片、缩略图、审批裁剪图、临时文件。登录/安全场景无法可靠定位敏感区域或状态不同步时，不输出截图并 `handoff_required`；首次截图交付（P0-07/P1-04/P2-03/P3-02）即验收，不能等 P9。
 - 窗口级截图（不是全屏），物理像素；长边超过 `max_image_edge`（默认 1568）时等比缩放，记录 `scale_to_window`。
 - 坐标动作的 `x,y` 永远是**该截图的像素坐标**；服务端换算为窗口点坐标再到屏幕坐标。
 - 默认 PNG；`image_format: "jpeg"`（质量 82）可选；单图上限 1.5 MB，超出自动降质/缩放并在结果中注明。
@@ -281,12 +310,12 @@ pub enum PointerRoute { Auto, TargetedOnly, AllowForeground }   // ActionRouter 
 
 | 能力 | 实现 | crate |
 |---|---|---|
-| App 发现 | `NSWorkspace.runningApplications` + Spotlight `kMDItemLastUsedDate`/`kMDItemUseCount`（`list_apps` 最近 14 天） | objc2-app-kit, objc2-foundation |
-| 签名身份 | `SecStaticCodeCreateWithPath` + `SecCodeCopySigningInformation` → team id + bundle id | security-framework |
-| 树 | `AXUIElementCopyMultipleAttributeValues` 批量取属性；`AXEnhancedUserInterface`/`AXManualAccessibility` 对 Chromium/Electron 开启完整树（记录并在会话结束恢复原值） | accessibility-sys / objc2 绑定 |
-| 截图 | ScreenCaptureKit `SCScreenshotManager.captureImage(contentFilter: window)`（macOS 14+）；窗口被遮挡仍可采 | objc2-screen-capture-kit |
+| App 发现 | `NSWorkspace.runningApplications` + Spotlight `kMDItemLastUsedDate`/`kMDItemUseCount`（`list_apps` 最近 14 天） | objc2-app-kit, objc2-foundation, objc2-core-services（MDQuery） |
+| 签名身份 | `SecStaticCode::from_path`；自有 `extern "C" SecCodeCopySigningInformation` 读取 `kSecCodeInfoTeamIdentifier`/`kSecCodeInfoIdentifier` | security-framework 3.7 + 驱动 ffi.rs |
+| 树 | `AXUIElementCopyMultipleAttributeValues` 批量取属性；`AXEnhancedUserInterface`/`AXManualAccessibility` 对 Chromium/Electron 开启完整树（记录并在会话结束恢复原值） | 仅 accessibility-sys 0.2（不引入 accessibility） |
+| 截图 | ScreenCaptureKit 异步 `SCScreenshotManager.captureImageWithFilter_configuration_completionHandler`（SCContentFilter、SCStreamConfiguration、completion 回调取 CGImage，失败返回驱动错误）（macOS 14+）；窗口被遮挡仍可采 | objc2-screen-capture-kit |
 | 语义动作 | `AXUIElementPerformAction`（AXPress/AXShowMenu/AXIncrement/AXRaise/AXScroll*ByPage）、`AXUIElementSetAttributeValue(kAXValue)`、`AXSelectedTextRange` | — |
-| 定向事件 | `CGEvent` + `postToPid`；鼠标事件设置 window number、window-local 位置（`CGEventSetWindowLocation` **私有**，`dlsym` 运行时解析） | core-graphics |
+| 定向事件 | `CGEvent` + `postToPid`；鼠标事件设置 window number、window-local 位置（`CGEventSetWindowLocation` **私有**，`dlsym` 运行时解析） | objc2-core-graphics（CGEvent feature） |
 | SkyLight 后台键/点击 | `SLPSPostEventRecordTo` / `SLEventPostToPid`（**私有**，feature `macos-private-spi`，默认开启但运行时探测 + 远程 kill switch 配置项） | dlsym |
 | 前台兜底 | `CGEvent.post(.cghidEventTap)`；仅策略 `allow_foreground` 时 | — |
 | 文本输入 | 优先 `AXValue` 追加（可设置且非富文本）；否则按 grapheme cluster 分块 `keyboardSetUnicodeString` 定向投递；中文/emoji 不拆分 | unicode-segmentation |
@@ -300,9 +329,9 @@ pub enum PointerRoute { Auto, TargetedOnly, AllowForeground }   // ActionRouter 
 
 | 能力 | 实现 | crate |
 |---|---|---|
-| App 发现 | `EnumWindows` + 进程映像路径 + Authenticode 发布者（`WinVerifyTrust` + `CryptQueryObject`）；开始菜单 `.lnk` 后台异步索引并缓存（避免 opensymph 的 3.5s） | windows |
-| 树 | UIA `IUIAutomation` + **CacheRequest** 批量属性（Name、ControlType、AutomationId、BoundingRectangle、IsEnabled、HasKeyboardFocus、IsPassword、各 Pattern 可用性）；专用 MTA 线程 | windows |
-| 截图 | Windows.Graphics.Capture（`CreateForWindow`，Win10 1903+，Win11 关边框）；失败回退 `PrintWindow(PW_RENDERFULLCONTENT)` | windows |
+| App 发现 | `EnumWindows` + 进程映像路径 + Authenticode 发布者（`WinVerifyTrust` + `CryptQueryObject`）；开始菜单 `.lnk` 后台异步索引并缓存（避免 opensymph 的 3.5s） | windows 0.62 |
+| 树 | UIA IUIAutomation + CacheRequest 批量属性（Name、ControlType、AutomationId、BoundingRectangle、IsEnabled、HasKeyboardFocus、IsPassword、各 Pattern 可用性属性，不缓存 pattern 对象）；专用 MTA 线程；IUIAutomationStructureChangedEventHandler / IUIAutomationPropertyChangedEventHandler / IUIAutomationFocusChangedEventHandler 三类订阅 | windows |
+| 截图 | Windows.Graphics.Capture（`IGraphicsCaptureItemInterop::CreateForWindow(hwnd)`，Win10 1903+；不用 TryCreateFromWindowId；Win11 在 GraphicsCaptureSession 探测并关闭 IsBorderRequired/IsCursorCaptureEnabled）；失败回退 `PrintWindow(PW_RENDERFULLCONTENT)` | windows |
 | 语义动作 | Invoke / Toggle / SelectionItem / ExpandCollapse / Value.SetValue / RangeValue / Scroll / Text(选区) / LegacyIAccessible.DoDefaultAction | — |
 | 定向消息 | `PostMessage` WM_LBUTTONDOWN/UP、WM_CHAR、WM_KEYDOWN/UP 到命中的子 HWND（对 Win32/WinForms/部分 WPF 有效，对 Chromium/UWP 通常无效——必须检测 effect） | — |
 | 前台 | `AttachThreadInput → AllowSetForegroundWindow → SetForegroundWindow → detach` 激活后 `SendInput`；仅策略允许；遵守用户活动守卫 | — |
@@ -313,18 +342,22 @@ pub enum PointerRoute { Auto, TargetedOnly, AllowForeground }   // ActionRouter 
 | 虚拟桌面 | `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`；不在当前桌面的窗口标注且前台动作拒绝 | — |
 | 完整性级别 | 目标进程完整性高于自身（管理员窗口）时 UIPI 会拒绝输入 → 返回 `elevation_required`，不尝试提权 | — |
 
+生产引擎启动即检查自身完整性与 UIAccess：High/System 或 UIAccess → 拒绝工作，不自行提升或降权绕过。管理员目标、非交互/安全桌面在观察及所有动作路线前统一拒绝（`elevation_required` / `handoff_required`），不只依赖 SendInput 的 UIPI 失败。
+
 最低版本：Windows 10 1903（WGC）；Win7/8 不支持。
 
 ### 5.3 Linux
 
 | 能力 | X11 | Wayland |
 |---|---|---|
-| 树 | AT-SPI2（`atspi` crate，zbus 上游版本，不 fork） | 同左 |
+| 树 | AT-SPI2（`atspi = { version = "0.30", features = ["tokio"] }`，zbus 上游版本，不 fork；子接口操作外层 tokio 超时） | 同左 |
 | 窗口枚举/身份 | `_NET_CLIENT_LIST` + `_NET_WM_PID`（x11rb） | 无标准 API：GNOME 用可选 Shell 扩展（移植 v1）、KDE 用 KWin 脚本 D-Bus、其他合成器用 AT-SPI frame 近似；能力表如实声明 |
-| 截图 | `XComposite` + `GetImage`（x11rb） | xdg-desktop-portal ScreenCast（window source）+ PipeWire 取一帧；restore token 持久化，避免每次弹窗（ashpd + pipewire） |
+| 截图 | `XComposite` + `GetImage`（x11rb） | xdg-desktop-portal ScreenCast（window source）+ PipeWire 取一帧；restore token 持久化，避免每次弹窗（ashpd 的 pipewire feature，不单独依赖 pipewire） |
 | 语义动作 | AT-SPI Action / EditableText / Value / Selection / Text | 同左（最可靠路径） |
 | 指针/键盘 | XTEST（全局，等同前台） | portal RemoteDesktop + libei（`reis`），需用户首次同意；坐标需映射到流 |
 | 用户活动 | XInput2 原始事件监听 | 无通用方案 → 守卫降级（doctor 说明） |
+
+restore token 仅当前用户可读（目录 0700、文件 0600），绑定授权身份、进程实例、compositor、source/窗口及授权版本；有效期不超过 24h 且不得超过授权期限。关闭功能、撤销、会话结束时关闭实际 portal/输入会话并清除对应 token；恢复时重新验证来源与范围，无法证明仅覆盖授权目标则拒绝输出/输入。
 
 ### 5.4 能力声明（`capabilities` 工具 / doctor / initialize instructions 共用）
 
@@ -380,7 +413,9 @@ pub enum PointerRoute { Auto, TargetedOnly, AllowForeground }   // ActionRouter 
 |---|---|---|
 | macOS | bundle id | 代码签名 team id（`always` 授权绑定 team id；未签名 App 绑定可执行文件路径 + cdhash） |
 | Windows | 可执行文件规范路径（小写） | Authenticode 发布者主体；未签名绑定路径 + 文件哈希（更新后需重新授权） |
-| Linux | desktop file id（若有）否则 `/proc/<pid>/exe` 规范路径 | 无签名；绑定路径 |
+| Linux | 实际进程映像规范路径 + 文件身份(dev/inode) + sha256 内容摘要 | desktop id 仅用于发现；每次使用校验进程实例与映像；替换/更新重新授权 |
+
+签名绑定不证明进程内全部代码可信（插件/DLL/可写加载路径仍可能改变代码）。每次使用验证进程实例、规范映像及签名有效性；更新（构建摘要改变）、证书身份/指纹变化、产品身份变化或路径替换均使旧授权失效；同名发布者字符串不是同一证书。插件/DLL 的注入边界在审批中说明，不能仅凭入口签名声称宿主安全。
 
 ### 7.3 授权档位与流程
 
@@ -390,7 +425,7 @@ pub enum PointerRoute { Auto, TargetedOnly, AllowForeground }   // ActionRouter 
    ├─ App 在拒绝名单？ ──是──▶ refused: app_denied（说明原因），不弹窗
    ├─ 已有有效授权（always / 本会话 session / 本轮 turn）？ ──是──▶ 继续
    └─ 否 ──▶ ApprovalProvider.request_app(app, purpose, risk) —— **阻塞当前工具调用**（超时默认 120s）
-              ├─ 允许一次（本轮）  → turn 授权，turn-ended 时失效
+              ├─ 本轮  → turn 授权，turn-ended 时失效
               ├─ 本会话允许        → session 授权，MCP 会话结束时失效
               ├─ 始终允许          → 持久化（PolicyStore），设置页可撤销；企业策略可禁用此档
               └─ 拒绝 / 超时       → refused: approval_denied / approval_timeout
@@ -398,17 +433,23 @@ pub enum PointerRoute { Auto, TargetedOnly, AllowForeground }   // ActionRouter 
 
 - 只读工具 `list_apps`、`list_windows` 不需要 App 授权（只返回名称/标题，标题可按策略脱敏）。
 - `get_app_state` 需要授权（读内容即敏感）。
+
+底层枚举固定为 `ApprovalDecision { Turn, Session, Always, Deny }`，wire 为 `turn/session/always/deny`；UI 为“本轮/本会话/始终允许/拒绝”。超时是审批错误 `approval_timeout`，不是第五种授权档位。
+审批绑定 App 身份/进程实例/窗口/动作参数（含收件人和提交内容）/snapshot_id+fingerprint/状态版本/策略版本；批准后、投递前重验，变化使决定作废并重新观察、重审。
+审批显示 OS 核验的签名状态、发布者、规范路径；名称/图标仅辅助；理由标“模型提供”，纯文本并处理双向控制字符；默认焦点为拒绝，卡片出现不得劫持聊天输入框的 Enter。
+
 - `purpose` 由 MCP 工具参数可选字段 `reason` 提供（模型写一句为什么），显示在审批卡上。
 
 ### 7.4 拒绝名单（内置，不可通过"始终允许"覆盖；企业/用户只能追加）
 
 - **Grok 自身：** Grok App、Grok CLI 所在终端窗口（路线 B 记录会话的 TTY/宿主 PID）、`gcu` helper。
 - **终端与 shell 宿主：** Terminal、iTerm2、WezTerm、Alacritty、kitty、Ghostty、Warp、Hyper、Windows Terminal、conhost、PowerShell ISE、
-  GNOME Terminal、Konsole、xterm 等（以 bundle id / exe 名单维护在 `gcu-core/src/policy/denylist.rs`，表驱动测试）。理由同 Codex：防止绕过 shell 沙箱与审批。
+  GNOME Terminal、Konsole、xterm 等（规则维护在 `gcu-core/src/policy/denylist.rs`，名称仅提示信号；核验映像路径、签名产品身份、已知二进制哈希，解析符号链接/junction/启动包装器，表驱动测试；未知执行宿主 handoff，名单不是全部终端的完备识别器）。理由同 Codex：防止绕过 shell 沙箱与审批。
 - **凭据与安全：** 1Password、Bitwarden、KeePassXC、Dashlane、LastPass、钥匙串访问、Windows 凭据管理器、主流杀毒/EDR 控制台。
 - **系统安全提示：** macOS `SecurityAgent`、`coreautha`、`UserNotificationCenter` 授权对话框；Windows `consent.exe`（UAC）、`CredentialUIBroker.exe`、LogonUI；
   Linux polkit 代理窗口。遇到这些窗口出现在目标 App 之上时返回 `handoff_required`（请用户处理）。
-- IDE 内置终端不整体拒绝（VS Code 本身允许），但 VS Code 的终端面板元素在渲染中标注 `[terminal]`，对其 `type_text`/`press_key` 拒绝（P9）。
+- IDE 可允许普通编辑区，但终端/REPL/任务执行/调试执行入口的**所有动作路径**（坐标、菜单、secondary action、拖拽、batch/script）均拒绝，无法确认性质时 handoff；P0-08 通用规则与 fake 场景、P1-03/P2-02/P3-01 角色/名称启发式从首次交付即覆盖。
+- 执行环境限制同样适用于 App 内部功能：Web SSH、云终端、容器控制台、远程桌面、调试控制台。窗口标题/URL 关键词表 + 原生角色 terminal/console 的识别是**尽力而为，非完备**；不能可靠隔离的混合界面仅允许观察或 handoff。
 
 ### 7.5 敏感动作确认
 
@@ -419,32 +460,34 @@ ActionRouter 在执行变更动作前计算风险：
 | 目标元素名/描述匹配多语言敏感词表 | 发送/Send/送信、支付/Pay/购买/Buy/下单、删除/Delete/移到废纸篓、提交/Submit、转账、确认付款、Sign/签署、Post/发布 |
 | 目标是密码字段 | `set_value`/`type_text` 到 PASSWORD 节点 |
 | 组合键 | `cmd+delete`、`shift+delete`、`ctrl+enter`（多数 IM 的发送）、`cmd+q`/`alt+f4` |
+| 未知语义 | 浏览器/网页区/未知语义目标中，无可靠动作语义的坐标点击、Enter/Space、含换行 type_text、自定义快捷键，默认高风险 |
 | App 类别 | 银行/证券/支付类（策略可配置 bundle 列表） |
 
 `risk = high` 时调用 `ApprovalProvider.confirm_action(app, summary, screenshot_crop)`：卡片显示"Grok 将在「微信」中点击「发送」"及目标区域截图。
 设置项 `sensitive_action_confirmation: off | standard(默认) | strict(所有变更动作)`。
-企业策略可强制 `strict`。词表放 `gcu-core/src/policy/sensitive_terms/*.txt`（15 语言），有测试。
+web area 默认 `strict`；standard 对上述未知语义信号弹确认，不能因名称伪装/无文字图标降为低风险。企业策略可强制 `strict`。词表放 `gcu-core/src/policy/sensitive_terms/*.txt`（15 语言），有测试。
 
 ### 7.6 隐私与脱敏
 
 - 密码节点值恒为 `•••`，且不进入日志/structured。
-- 截图中密码字段区域打码（由节点 frame 计算，P9）。
-- 日志默认只记工具名、App id、结果、耗时；不记文本参数与截图（`GCU_LOG_PAYLOADS=1` 才记录，且仅本地）。
-- 剪贴板：不读入观察；`type_text` 走剪贴板路径时保存 → 写入 → 粘贴 → 若仍为我们写入的内容则恢复（序号比较，Windows `GetClipboardSequenceNumber`、macOS `changeCount`）。
+- 截图打码为 §4.4 的必经阶段：先收集敏感区域再裁树；所有衍生物只能来自脱敏结果；无法可靠定位则不交付并 handoff（A-α 前）。
+- 日志默认只记工具名、App id、结果、耗时；不记文本参数与截图（`GCU_LOG_PAYLOADS=1` 才记录脱敏载荷，且仅本地；该开关绝不取消秘密脱敏，错误信息同样脱敏）。
+- 剪贴板：不读入观察；跨会话全局互斥，保存 → 写入 → 粘贴前校验序号/内容/目标焦点 → 粘贴 → 若仍为我们写入的内容则恢复（Windows GetClipboardSequenceNumber、macOS changeCount）。变化即取消；敏感文本及高风险目标禁止剪贴板回退。无法消除恶意进程最后一刻替换，剪贴板历史/同步可能保存文本，能力说明必须如实告知。
+- 数据清单覆盖原图、缩略图、审批裁剪图、CLI 临时图片、调试载荷、错误日志：内存按会话隔离，临时文件仅当前用户可读；会话删除即清理图片及载荷，元数据日志最多保留 7 天并遵守 5×5MB 上限。截图查询必须核验会话归属；P9-04 审计所有衍生物。
 
 ### 7.7 用户活动守卫与接管
 
 - 用户在 `user_idle_ms`（默认 3000）内有物理输入时：需要前台的动作返回 `user_active`（附"等待用户空闲后重试"提示）；
   后台路径（AX/定向事件）不受影响（macOS 主路径因此几乎不打扰用户）。
-- **Stop 热键：** macOS `⌃⌥⌘.`、Windows/Linux `Ctrl+Alt+Shift+Backspace`（可配置）。按下 → 立即 `release_all_input` → 当前与后续调用返回 `stopped_by_user`，直到模型下一轮且用户未再按停止。
-- 覆盖层胶囊上有"停止"按钮，效果同热键。
+- **Stop 热键：** macOS `⌃⌥⌘.`、Windows/Linux `Ctrl+Alt+Shift+Backspace`（可配置）。按下 → 立即 `release_all_input` → 当前与后续调用返回 `stopped_by_user`，锁存 Stop。模型下一轮、会话重连、引擎重启均不得自动解除；Host 持久保存停止状态且新引擎默认禁止投递，握手后恢复锁存。只有用户在可信 UI（胶囊“恢复”/App 面板）或 `gcu resume` CLI 显式恢复；模型工具不能调用恢复。
+- 覆盖层胶囊上有“停止/恢复”按钮。独立停止控制通道 + watchdog，不排在动作/审批队列后；Stop ≤100ms 锁存、≤500ms 发输入释放，原生阻塞 ≤5s 超时或杀 worker。注册失败/权限撤销/监听失效则禁止启动依赖该停止能力的投递路线；Wayland 无可靠热键时禁用相应输入路线并声明能力。
 
 ### 7.8 其他门禁
 
-- 坐标动作：必须引用本会话中该窗口最近一次带截图的观察（`screenshot_id` 省略即用最新）；观察后窗口几何变化（移动/缩放/DPI）→ `stale_geometry` + 新状态；坐标越界 → `out_of_bounds`。
+- 坐标动作：必须引用本会话中该窗口最近一次带截图的观察（`screenshot_id` 省略即用最新）；观察后窗口几何变化（移动/缩放/DPI）→ `stale_geometry` + 新状态；坐标越界 → `out_of_bounds`。观察时记录点击点周围 32×32 物理像素小块的目标区域内容哈希（边缘裁剪，使用同一脱敏/覆盖层处理）；批准后投递前重采核验，内容不一致 → `stale_screenshot` 并附新状态，不能仅验几何。
 - 元素动作：`element_index` 映射到 fingerprint；执行前用句柄重新读取 role/name/frame 校验；不一致 → `stale_element` + 新状态。**绝不按名字去找"另一个相似元素"代替。**
 - 窗口关闭/App 退出 → `window_gone` + `list_windows` 结果，不自动切换。
-- URL 输入（浏览器地址栏 `type_text` 后回车）不拦截（用户已授权浏览器）；但 P8 的 DOM 增强导航沿用 v1 的 scheme/元数据地址拦截。
+- 对自己发出的输入拦截：焦点元素是浏览器地址栏（角色/名称启发式）时，gcu 发出的文本输入/提交返回 `key_blocked`。任意目标输入文本以 javascript:/file:/data:/vbscript:/blob:、已知外部协议开头，或命中元数据主机（例如 169.254.169.254、169.254.170.2、100.100.100.200、metadata.google.internal；含大小写/等价IP/主机写法）均 `key_blocked`，包括 set_value/type_text/粘贴/快捷键提交/batch/script。L1 browser_navigate、L2 自身导航请求用同一规则。此规则只拦截 gcu 自己的输入，不声称 L0 能拦截浏览器内部页面重定向。
 
 ---
 
@@ -458,7 +501,7 @@ ActionRouter 在执行变更动作前计算风险：
 | Snapshot | 一次观察的结果（渲染行、fingerprint 表、截图 id、几何） | SnapshotStore（每窗口保留最近 3 个，内存上限 32MB/会话） |
 
 **turn_ended 时：** 清 turn 级授权、隐藏光标（30s 内无新动作也隐藏）、`release_all_input`、恢复本轮修改过的 `AXEnhancedUserInterface`、下一次观察强制全量。
-**session 结束时：** 清 session 授权、停所有订阅、释放所有资源、停 worker。
+**session 结束时：** 清 session 授权、停所有订阅、释放所有资源、停 worker、关闭 portal 并清对应 restore token；不清用户 Stop 锁存。
 
 **并发：** 同一会话内工具调用串行执行（MCP 客户端可能并发发送，gcu-mcp 用每会话队列）；不同会话对**同一窗口**的变更动作互斥（窗口级锁，等待上限 5s → `busy`）。
 
@@ -492,7 +535,7 @@ ActionRouter 在执行变更动作前计算风险：
 > schema 以 `gcu-protocol` 的 Rust 类型 + `schemars` 生成；`computer-use/crates/gcu-protocol/golden/tools.json` 是黄金文件，CI 比对；
 > **工具目录字节预算：默认面 ≤ 14,000 bytes**（`xtask budget` 测试）。
 
-### 11.1 默认面（16 个，P0–P6 逐步上线）
+### 11.1 工具目录（16 个默认面 + 1 个条件注册，P0–P6 逐步上线）
 
 | # | 工具 | 参数（`?` 可选） | 只读 | 阶段 |
 |---|---|---|---|---|
@@ -512,17 +555,24 @@ ActionRouter 在执行变更动作前计算风险：
 | 14 | `computer_batch` | `app`, `window?`, `steps[]`（上列动作 + `wait_for` + `expect`）, `stop_on_error?=true`, `final_state?=true` | ❌ | P6 |
 | 15 | `computer_script` | `code`(≤20KB), `timeout_ms?=30000` | ❌ | P6（feature） |
 | 16 | `capabilities` | — | ✅ | P0 |
+| 17 | `browser_navigate` | `url` | ❌ | P5（仅路线 B 内置浏览窗打开时条件注册） |
 
 \* `get_app_state` 只读但需 App 授权。
+
+`minimal` profile 明确为 9 工具：`get_app_state, click, perform_secondary_action, set_value, type_text, press_key, scroll, list_apps, list_windows`；default 使用已上线的默认面，full 增加已启用 feature/条件工具，browser_navigate 始终受窗口打开条件限制。所有 profile 单独生成黄金文件并检查目录预算。
 
 `app` 接受：显示名、bundle id / exe 名 / desktop id、绝对路径。歧义时返回 `ambiguous_app` + 候选列表。
 `window` 接受：`list_windows` 返回的 `id`；省略即 key window。
 
-### 11.2 错误码（`isError: true`，文本首行为 `error: <code>: <说明>`，结构化 `{error:{code,message,hint,retryable,state?}}`）
+### 11.2 错误码
 
-`app_not_found ambiguous_app app_denied approval_denied approval_timeout window_not_found window_gone stale_element stale_geometry
+`isError: true`，文本首行为 `error: <code>: <说明>`，结构化 `{error:{code,message,hint,retryable,state?}}`。
+
+`app_not_found ambiguous_app app_denied approval_denied approval_timeout window_minimized window_not_found window_gone stale_element stale_geometry
 stale_screenshot out_of_bounds element_not_actionable not_settable invalid_key key_blocked user_active stopped_by_user busy
 handoff_required elevation_required permission_missing capability_unavailable timeout driver_error internal`
+
+`key_blocked` 包含 §7.8 的地址栏/危险协议/元数据输入拦截；敏感动作被用户拒绝统一 `approval_denied`。协议 golden/errors.json 与 tools.json 需覆盖这些语义与条件工具（P0-03）。
 
 带 `state?` 的错误（stale_*、window_gone、element_not_actionable）**附上新状态**，让模型零额外往返继续。
 
@@ -551,7 +601,9 @@ handoff_required elevation_required permission_missing capability_unavailable ti
 
 ### 11.5 `computer_script` 语义（feature `script`，P6）
 
-QuickJS（rquickjs）沙箱；无文件/网络/进程/环境/定时器之外的全局；限制：墙钟 30s、驱动调用 ≤200、内存 32MB、代码 ≤20KB；可取消。
+QuickJS（rquickjs）沙箱运行在无文件/网络/进程权限的受限 worker，经窄 RPC 调 ActionRouter，不传原生句柄，不暴露 IO/环境/模块加载/计时器。`rquickjs = { version = "0.14", default-features = false, features = ["std"] }`；禁 rust-alloc/allocator/loader/dyn-load/full。
+worker 启动及 OS 权限/资源限额由 gcu-cli 的可信 launcher 实施，gcu-script 仅承担运行时/绑定/窄 RPC，不为此引入平台 crate。
+`runtime.set_memory_limit(32 * 1024 * 1024)`；30s 墙钟在 interrupt handler 用 Instant 判断并返回 true 中断；cu.* 绑定计数 ≤200 次并检查取消。宿主回调分配不计入 JS 堆：另限宿主缓冲 32MB、并发 native 调用 1、排队请求 32、总输出 2MB、worker 总内存 128MB、代码 ≤20KB；独立 watchdog 在超时/失控时 ≤500ms 终止 worker，Stop 不依赖 JS interrupt handler。
 
 ```js
 const app = await cu.app("TextEdit");          // 触发授权（如需）
@@ -608,7 +660,9 @@ extra_denied_apps = []
 
 ---
 
-## 14. 性能预算（P9 发布门禁，见 [07 §4](07-quality-gates.md#4-性能预算)）
+## 14. 性能预算（P9 发布门禁）
+
+具体发布门禁指标见 [07 §4](07-quality-gates.md#4-性能预算)。
 
 | 操作 | macOS p50/p95 | Windows p50/p95 | Linux X11 p50/p95 |
 |---|---|---|---|
@@ -632,14 +686,16 @@ extra_denied_apps = []
 
 ```
 Grok App（Tauri 主进程）
-  ├─ HostServer（gcu-host-protocol 服务端，UDS / Windows 命名管道，路径在 App 数据目录，0600 / 仅当前用户 ACL）
-  └─ 托管子进程：gcu engine --host-socket <path> --host-token-fd <fd>
+  ├─ HostServer（首选 App 创建并继承的匿名管道/socketpair；UDS / 本机命名管道为回退）
+  └─ 托管子进程：gcu engine --host-fd <fd> --stop-fd <fd>（首选继承连接；回退 --host-socket <path> --host-token-fd <fd>）
          ├─ 连接 HostServer（握手：协议版本、引擎版本、能力）
          ├─ 驱动、core、MCP 全部在此进程内
          └─ 暴露 loopback MCP 端点（streamable HTTP 127.0.0.1:随机端口）；每个聊天会话一个 token（由 App 经 Host 协议申请）
 
 Grok CLI（某聊天会话）──MCP──▶ 引擎的 loopback 端点（或 `gcu mcp --connect`，同一二进制的 stdio→HTTP 代理）
 ```
+
+UID/文件权限只隔离其他用户，不证明调用者可信。路线 A macOS helper 通过连接 audit token 取对端代码签名，要求对端可执行文件与 helper 同一 cdhash/同一签名身份，其他客户端不得连接（P4-01）；签名校验不由 getpeereid 或 token 文件替代。同 UID 读写进程内存、修改受信二进制/可信 UI 的攻击不在此认证可保证的边界内。继承连接绑定预期子进程实例；否则用一次性秘密 FD + 双向挑战响应并核验预期进程实例。UDS 防路径替换，命名管道限本机并检测抢先创建；已有未知端点直接拒绝。Stop 使用独立控制通道，不与普通 RPC 排队。
 
 - 一个 App 只有一个引擎进程，服务所有会话；空闲（无启用会话）60s 后 App 让它退出，下次需要时再拉起。
 - 引擎异常退出：App 记录、在面板显示"Computer Use 引擎已重启"，进行中的调用返回 `unknown`；10 分钟内连续崩溃 3 次 → 自动关闭功能并提示。
@@ -654,33 +710,37 @@ Grok CLI（某聊天会话）──MCP──▶ 引擎的 loopback 端点（或 
 | `host.approval.confirmAction` | `confirm_action` | 敏感动作确认，含目标区域裁剪图 |
 | `host.approval.handoff` | `handoff` | 需要用户处理（登录/验证码/系统提示） |
 | `host.policy.load` | `PolicyStore::load` | 返回策略配置（始终允许列表、确认级别、前台策略、热键） |
-| `host.policy.grantAlways` | `PolicyStore::grant_always` | 由用户选择"始终允许"后引擎回写；App 持久化到 App 设置 |
+
+路线 A 的内置 Host 可在可信用户决定后调用 PolicyStore::grant_always；路线 B 的 RemoteHost 不发送该方法，App 在处理真实审批事件时自行持久化 Always（绑定请求/会话/App 身份/引擎实例/策略版本，单次消费），随后发送 `engine.policy.changed`（含单调策略版本），引擎重新 load 后更新缓存；不提供持久授权回写 RPC。
 
 **引擎 → App（通知）**
 
 | 方法 | 说明 |
 |---|---|
 | `host.overlay.show` / `host.overlay.status` / `host.overlay.hide` | App 的覆盖窗绘制光标/胶囊（屏幕坐标、DPI、目标窗口 frame） |
-| `host.event` | 动作事件（工具、目标、结果、耗时、缩略图引用）→ 面板时间线 |
+| `host.event.emit` | 动作事件（工具、目标、结果、耗时、缩略图引用）→ 面板时间线 |
 | `host.engine.health` | 心跳与资源占用 |
 
 **App → 引擎（请求/通知）**
 
 | 方法 | 说明 |
 |---|---|
-| `engine.session.open {session_id, kind}` → `{mcp_url, token}` | App 为本地会话申请 MCP 端点；`kind` 非 local 时引擎拒绝 |
+| `engine.session.open {session_id, kind}` → `{mcp_url, token}` | App 提供其本地 session_id，为该会话申请独立 token/审批/快照命名空间；kind 非 local 时引擎拒绝 |
 | `engine.session.turnEnded {session_id}` | ACP 一轮结束 |
 | `engine.session.close {session_id}` | 会话关闭/fork/切模型 |
-| `engine.stop {session_id?}` | 用户点停止（覆盖层/面板/热键由引擎自身也会检测） |
+| `engine.session.stop {session_id?}` | 独立控制通道，用户点停止（覆盖层/面板/热键由引擎自身也会检测） |
+| `engine.session.resume {session_id?}` | 仅可信用户控制通道的显式恢复，核验用户事件，不能来自模型工具或重放 |
 | `engine.policy.changed` | 用户在设置页撤销授权或改级别 |
-| `engine.doctor` → DoctorReport | 设置页显示权限/能力 |
-| `engine.screenshot.get {id}` → bytes | 面板按需取大图（事件里只带缩略图） |
-| `engine.shutdown` | 正常退出 |
+| `engine.system.doctor` → DoctorReport | 设置页显示权限/能力 |
+| `engine.screenshot.get {session_id, id}` → bytes | 面板按需取脱敏大图，必须核验会话归属（事件里只带脱敏缩略图） |
+| `engine.system.shutdown` | 正常退出 |
+
+方法统一 `domain.subdomain.method`（末段 camelCase）。`engine.session.resume` 仅可信用户控制通道调用，不注册为 MCP 工具；重放/模型请求不得解除 Stop。
 
 ### 15.4 版本与兼容
 
 - 握手交换 `host_protocol: {major, minor}`；major 不同 → 引擎拒绝连接，App 显示"引擎版本不匹配"；minor 向后兼容（新增方法/可选字段）。
-- App 随包携带经过测试的 `gcu` 版本（Tauri `externalBin`）；开发者设置可指向外部 `gcu` 路径（便于引擎单独迭代与调试），此时显示"使用外部引擎"标记。
+- App 随包携带经过测试的 `gcu` 版本（Tauri `externalBin`）；正式模式验证引擎签名/构建身份及预期产品，不接受任意外部路径。开发者外部引擎使用独立 Dev App/helper 身份并单独授权，同时显示“使用外部引擎”；S-02 验证替换引擎不能继承正式 App 的 TCC。
 - 协议黄金文件：`gcu-host-protocol/golden/*.json`，CI 比对；App 侧 TypeScript/Rust 类型由同一 schema 生成。
 
 ### 15.5 为什么不用"进程内链接"
