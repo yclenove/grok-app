@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use zbus::blocking::{connection::Builder, Connection, Proxy};
 use zbus::zvariant::OwnedObjectPath;
 
+#[path = "accessibility_actions.rs"]
+mod actions;
 #[path = "accessibility_call.rs"]
 mod call;
 #[path = "accessibility_text.rs"]
@@ -211,35 +213,6 @@ fn window_root(
     Ok(matches.remove(0))
 }
 
-fn click_index(connection: &Connection, object: &Object) -> Result<Option<i32>, String> {
-    let actions: Vec<(String, String, String)> = proxy(connection, object, ACTION)?
-        .call("GetActions", &())
-        .map_err(err)?;
-    Ok(primary_action_index(&actions))
-}
-
-fn primary_action_index(actions: &[(String, String, String)]) -> Option<i32> {
-    if actions.len() > 64 {
-        return None;
-    }
-    // GTK exposes click, press and release together. Only a complete primary
-    // action is eligible; never treat a bare press as a completed click.
-    for name in ["click", "activate"] {
-        let indices: Vec<_> = actions
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.0.eq_ignore_ascii_case(name))
-            .map(|(i, _)| i as i32)
-            .collect();
-        match indices.as_slice() {
-            [index] => return Some(*index),
-            [] => {}
-            _ => return None,
-        }
-    }
-    None
-}
-
 fn read_text(connection: &Connection, object: &Object) -> Result<String, String> {
     let text = proxy(connection, object, TEXT)?;
     let count: i32 = text.get_property("CharacterCount").map_err(err)?;
@@ -377,7 +350,7 @@ impl Accessibility {
             let mut actions = Vec::new();
             if actionable(&bits) {
                 if interfaces.iter().any(|s| s == ACTION)
-                    && click_index(connection, &object)?.is_some()
+                    && actions::click_index(connection, &object, deadline)?.is_some()
                 {
                     actions.push("click".into());
                 }
@@ -526,8 +499,12 @@ impl Accessibility {
                 {
                     return Err("AT-SPI semantic click is a single primary action".into());
                 }
-                let index = click_index(connection, &node.object)?
-                    .ok_or("AT-SPI primary action changed")?;
+                let index = actions::click_index(
+                    connection,
+                    &node.object,
+                    Instant::now() + Duration::from_secs(1),
+                )?
+                .ok_or("AT-SPI primary action changed")?;
                 input_message(connection, &node.object, ACTION, "DoAction")?
                     .build(&(index,))
                     .map_err(err)?
@@ -622,25 +599,5 @@ mod tests {
     #[test]
     fn insertion_limits_result_not_only_input() {
         assert!(inserted(&"x".repeat(MAX_TEXT), 0, "中").is_err());
-    }
-    #[test]
-    fn gtk_press_release_are_not_ambiguous_complete_clicks() {
-        let actions = |names: &[&str]| {
-            names
-                .iter()
-                .map(|s| (s.to_string(), String::new(), String::new()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            primary_action_index(&actions(&["click", "press", "release"])),
-            Some(0)
-        );
-        assert_eq!(primary_action_index(&actions(&["Click"])), Some(0));
-        assert_eq!(
-            primary_action_index(&actions(&["press", "activate", "release"])),
-            Some(1)
-        );
-        assert_eq!(primary_action_index(&actions(&["press", "release"])), None);
-        assert_eq!(primary_action_index(&actions(&["click", "click"])), None);
     }
 }

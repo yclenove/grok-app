@@ -7,7 +7,8 @@
 - Fork：`https://github.com/yclenove/grok-app.git`
 - 分支：`feat/computer-use-implementation`
 - 已推完整review提交：`5455eff94b744eff91dcc8280f59039d395205c8`
-- 此后的第三方研究/本交接仅为文档，不改变该提交的产品源码。
+- 截至`9309a6bb`，该基线之后只有第三方研究/本交接文档。
+- 后续独立X11产品修复见[CI第八批](../plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：旧ATK GetActions崩溃已复现并改用有界机器名协议，Jammy原生矩阵通过，待远端复验。请在固定基线的全量review之后，一并审查这批增量，不把它当作基线已有行为。
 - Fork main：`b58b97cd`；upstream main：`9c5eb3b5`。本轮已fetch，两者均为review提交祖先；不以旧main引用代替将来合并前fetch。
 - 相对fork main为完整累积开发：约2341文件、40.3万新增行，含测试/工具/历史文档及已合入源仓库工作；不是只有最后两个commit。
 
@@ -71,6 +72,8 @@ cargo test
 ## 5. 给Claude的review提示词
 
 请审阅 yclenove/grok-app 的 feat/computer-use-implementation 完整分支，产品源码固定到5455eff94b744eff91dcc8280f59039d395205c8。先读本交接与项目规则，再看相对fork main的全量变化，区分合入上游的代码与CU新增代码。当前是review任务，请先出问题报告，不自动修改、push、合并或发布。
+
+固定基线的全量review之后，再独立审查该分支后续第八批X11协议修复及其证据，记录实际checkout SHA；不能因为它通过本机矩阵而把Windows auth、ARM64 runtime或完整交付标绿。
 
 优先查真实用户流程、授权/身份、原生生命周期、unknown重放、模型图像/坐标、文件操作、运行时维护与跨平台安装、UI UX和未接线/临时实现。每项给优先级、文件/行、具体触发条件、用户影响、证据与修复建议；未经验证的假设单列，已知CI失败不要重复描述成新发现。测试绿、schema完整或大段计划不能替代生产路径和实机结果。
 

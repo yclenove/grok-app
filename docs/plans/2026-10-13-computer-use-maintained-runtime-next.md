@@ -1,6 +1,6 @@
 # CU 维护版运行时：下一批落地顺序
 
-最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)第七批已接worker端口前及时drain、有界诊断和原owners保留，Windows完整App2407项与Linux独立startup模块4项通过。`c8217d08`远端Mac、production Jammy、frontend与双架构SDK成功，原八项Windows managed启动已通过；继续定位Windows plugin auth超时、X11可访问性D-Bus崩溃，并接运行时CPU/header校验、五target维护合同/ARM64产品集成及原R1–R4完整验收。ARM64产品prepare仍失败，维护browser诊断成功不替代产品验收。用户App144与home、App11+/CU受管Mac14+保持；新启动修复待远端复验。
+最新[原生CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)第八批已独立/原产品复现旧ATK GetActions崩溃，生产改用有界NActions/GetName，Jammy X11库52项及原生输入19/可访问性41/剪贴板66项通过，待新远端复验。`9309a6bb`远端Windows仍只有plugin auth超时（2406通过/1失败），ARM64产品target仍失败。下一步Windows私有stdin/EOF及并发进程诊断、ARM64产品运行时、CPU/header与完整R1–R4；第七批worker原owners/本机2407项证据保留。维护browser诊断不替代产品验收，用户App144/home与App11+/CU受管Mac14+保持。
 
 最新同步已完成：[fork / 源仓库同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)，
 提交 `8107bb07` 已推送。当前处理 [Linux SDK 双架构检查点](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：

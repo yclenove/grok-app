@@ -525,14 +525,16 @@ jobs:
             env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 GROK_CU_X11_FIXTURE=owned-xvfb \
               timeout --kill-after=2s 30s xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
               target/debug/cu-x11-native
+            # Activated AT-SPI services must inherit this fixture's DISPLAY and
+            # XAUTHORITY; start the private session bus inside the owned Xvfb.
             env -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS -u AT_SPI_BUS_ADDRESS \
               XDG_SESSION_TYPE=x11 GROK_CU_X11_FIXTURE=owned-xvfb GDK_BACKEND=x11 GTK_A11Y=always NO_AT_BRIDGE=0 \
-              timeout --kill-after=3s 45s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
-              target/debug/cu-x11-native --accessibility
+              timeout --kill-after=3s 45s xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+              dbus-run-session -- target/debug/cu-x11-native --accessibility
             env -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS -u AT_SPI_BUS_ADDRESS \
               XDG_SESSION_TYPE=x11 GROK_CU_X11_FIXTURE=owned-xvfb GDK_BACKEND=x11 \
-              timeout --kill-after=3s 45s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
-              target/debug/cu-x11-native --clipboard
+              timeout --kill-after=3s 45s xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+              dbus-run-session -- target/debug/cu-x11-native --clipboard
       # Windows MSVC lib tests link Tauri/WebView2/comctl32 and abort at process
       # start with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) unless Common
       # Controls v6 is activated. We cannot pass a second /MANIFESTINPUT through

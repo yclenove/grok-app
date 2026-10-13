@@ -1,9 +1,10 @@
 # Computer Use：远端 CI 修复与同步
 
-当前为第七批：浏览器worker从启动起drain输出并保留原清理owners，Windows
-完整App本机2407项通过，Linux独立startup模块4项通过。`c8217d08` 的远端
-CI已结束：macOS、production Jammy、frontend与双架构SDK通过；Windows
-plugin auth超时、X11可访问性D-Bus崩溃、ARM64产品target仍开放。整体未交付。
+当前为第八批：Ubuntu22旧ATK的GetActions崩溃已在独立探针与原产品夹具复现，
+产品改读有界NActions/GetName；Jammy X11测试52项、原生输入19/可访问性41/
+剪贴板66项通过。`9309a6bb`远端Windows仍为plugin auth超时（2406通过/1失败/
+87 ignored），ARM64产品target仍失败；X11新修复待远端复验。第七批Windows
+完整App本机2407项等证据保留；完整维护运行时与R1–R4仍未交付。
 
 2026-10-13，`feat/computer-use-implementation`。
 
@@ -357,3 +358,62 @@ binary逻辑 **10509280 bytes**，WSL空闲观测增 **10506240 bytes**。
 本批仅commit/push到fork，无PR/tag/Release；两份第三方研究另行文档提交。
 继续上述三个CI缺项、CPU/header、维护运行时完整来源/NOTICE/安全策略与
 五target产品集成，以及原R1–R4全部安装/模型/四surface/UI UX/12h门禁。
+
+## 第八批：X11 AT-SPI 动作发现协议
+
+Claude完整审阅基线为`5455eff9`，交接/六仓库研究已推`9309a6bb`。本批为其后
+独立的产品修复。再次fetch两边remote后main无新增，远端feature与本地HEAD
+一致；不修改用户App144、home、登录或未发送任务。
+
+### 根因与对照
+
+Jammy/glibc2.35私有overlay使用原libatk-bridge2.0-0 `2.38.0-3`、GTK
+`3.24.33-1ubuntu2.2`及libdbus `1.12.20-2ubuntu4.1`。独立Gio探针对同一GTK
+按钮读取NActions/GetName正常；调用GetActions则得到与远端相同的`a(sss)`
+序列化错误、GTK原进程SIGABRT（exit -6）。另一次独立进程仅用机器名称读取
+与DoAction，GTK自身回读clicks=1且进程仍活着。
+
+实际[GNOME 2.38源码包](https://download.gnome.org/sources/at-spi2-atk/2.38/at-spi2-atk-2.38.0.tar.xz)
+SHA256为`cfa008a5af822b36ae6287f18182c40c91dd699c55faa38605881ed175ca464f`。
+`impl_GetActions`声明`(sss)`却写入name/localized_name/description/keybinding四个
+字符串。新桥的[协议](https://github.com/GNOME/at-spi2-core/blob/AT_SPI2_CORE_2_52_0/xml/Action.xml)
+则明确GetActions返回本地化名称，机器ID应从GetName读取。不是Rust三字段
+反序列化导致应用中止，也不应删除geometry检查来掩盖后续失效。
+
+原产品源码的真实cu-x11-native在同一私有Jammy/Xvfb下：输入与剪贴板通过，
+可访问性复现同样的provider abort与geometry changed失败。没有改原GTK夹具
+或native验收断言来取得之后的成功。首次私有bus缺DISPLAY和独立探针对GTK
+动作数量的错误假设均保留在日志；它们不是产品故障或已通过的原始调用。
+
+### 产品修改与验证
+
+- 生产observe与click重新发现都改用NActions/GetName，最多64项，每个机器名
+  最多128 bytes；共享观察deadline，点击发现有一秒预算，过期不继续发下一
+  查询。每个D-Bus调用原一秒timeout保持，单个正在执行的读取仍可能跨过
+  总预算。最终重新检查动作数量，拒绝变化、部分结果与歧义；只接受完整
+  click/activate，不把press/release当完整点击，也不使用本地化显示名。
+- CI先启动独立Xvfb再启动独立session bus，让激活的AT-SPI服务继承准确
+  DISPLAY/XAUTHORITY；原timeout、身份、geometry、焦点、取消与unknown门禁保留。
+- 最终Jammy X11库 **52 passed/0 failed/0 ignored**、Rust1.98 all-targets
+  strict Clippy通过；真实Xvfb原生输入 **19**、GTK可访问性 **41**、剪贴板
+  **66** 个独立检查全部通过。含中文/emoji、一次点击、替换控件、Stop、
+  迟到原生回执与Broker不重放；不是完整App/安装态GNOME Wayland验收。
+- Debian GTK3.24.49/bridge2.56.2的独立机器名探针也完成一次点击与GTK回读；
+  不把它当另一个完整产品native矩阵。workspace fmt、diff、final质量门禁、
+  YAML解析及实际X11 step的Bash语法通过。初次Node YAML入口缺少模块，后续
+  使用现有PyYAML验证；无前端改动，App+Workbench13552行/≥1000行文件80未增。
+
+证据/再生命令：`tools/computer-use-probe/.run/ci-x11-actions-20261013-01/`。
+同原owners均退出、无残留task mount或进程root/exe/cwd/fd引用后，验证确切
+路径与全部子项无links/特殊文件，清理一个已退休test binary和两个旧incremental
+generation：逻辑文件 **255222800 bytes**；WSL可用空间观察增加
+**226217984 bytes**。精确物理回收未知，不代表VHDX缩小。保留当前native候选、
+当前generation/依赖层、原base、全部源码/失败与正例日志和用户数据；05/06旧
+namespace upper含links/socket仍暂缓。按记录的cargo test/build可重建。
+
+`9309a6bb` [run38410195410](https://github.com/yclenove/grok-app/actions/runs/38410195410)
+的Windows job已终态failure：2406 passed/1 failed/87 ignored，仍只有plugin auth
+10秒超时；启动输出相关测试通过。ARM64产品target仍失败，其他未终态job不
+标绿。本批修复尚待新远端run，不把本机X11通过标为全CI或完整交付通过。
+继续Windows私有stdin/EOF及并发进程诊断、ARM64产品运行时、CPU/header、完整
+维护来源/NOTICE/安全策略、五target及原R1–R4全部安装/模型/四surface/UI UX/12h。
