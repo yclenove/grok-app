@@ -117,17 +117,17 @@ jobs:
           workspaces: "computer-use -> target"
           key: ${{ hashFiles('computer-use/Cargo.lock') }}
 
-      - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject)
+      - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject, Mesa)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev
+          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1
 
       - name: cargo build -p gcu-fixture
         run: cargo build -p gcu-fixture
 
       - name: Run fixture and verify AT-SPI tree
         run: |
-          dbus-run-session -- xvfb-run -a bash -c '
+          dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render" bash -c '
             set -euo pipefail
 
             openbox &
@@ -151,6 +151,8 @@ jobs:
               sleep 0.2
             done
 
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export GALLIUM_DRIVER=llvmpipe
             export GTK_MODULES="gail:atk-bridge"
             export QT_ACCESSIBILITY=1
             export ACCESSIBILITY_ENABLED=1
