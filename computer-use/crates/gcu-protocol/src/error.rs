@@ -14,7 +14,7 @@ macro_rules! error_codes {
         pub enum ErrorCode { $(#[doc = $doc] $variant),+ }
         impl ErrorCode {
             /// Complete protocol error catalog in architecture order.
-            pub const ALL: [Self; 25] = [$(Self::$variant),+];
+            pub const ALL: [Self; 26] = [$(Self::$variant),+];
             /// Stable wire name, without allocation or IO.
             pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $wire),+ } }
         }
@@ -27,6 +27,7 @@ error_codes! {
     AppDenied => "app_denied": "The app is on the denylist.",
     ApprovalDenied => "approval_denied": "The user refused authorization.",
     ApprovalTimeout => "approval_timeout": "Authorization timed out.",
+    WindowMinimized => "window_minimized": "The target window is minimized; restore it or ask the user.",
     WindowNotFound => "window_not_found": "No matching window exists.",
     WindowGone => "window_gone": "The target window closed; attach fresh state when available.",
     StaleElement => "stale_element": "The element fingerprint changed; attach fresh state.",
@@ -36,7 +37,7 @@ error_codes! {
     ElementNotActionable => "element_not_actionable": "The element cannot perform that action; attach fresh state.",
     NotSettable => "not_settable": "The element value cannot be set.",
     InvalidKey => "invalid_key": "The chord cannot be parsed.",
-    KeyBlocked => "key_blocked": "Policy blocked the chord.",
+    KeyBlocked => "key_blocked": "Policy blocked the chord or text input.",
     UserActive => "user_active": "Foreground input must wait for the user to become idle.",
     StoppedByUser => "stopped_by_user": "The user stopped execution.",
     Busy => "busy": "The window lock could not be acquired in time.",
