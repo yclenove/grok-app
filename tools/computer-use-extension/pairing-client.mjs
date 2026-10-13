@@ -1,6 +1,7 @@
 import { parseEndpoint } from "./loopback-endpoint.mjs";
 import { CompletionScope, copyCompletionProof, exactKeys, uuid } from "./completion-scope.mjs";
 import { copyBoundAction } from "./action-completions.mjs";
+import { copyObservationProof } from "./observation-completions.mjs";
 import { copyHostLifetime } from "./host-lifetime.mjs";
 import { recordConnectionFailure } from "./connection-diagnostics.mjs";
 export { parseEndpoint } from "./loopback-endpoint.mjs";
@@ -8,6 +9,34 @@ export { parseEndpoint } from "./loopback-endpoint.mjs";
 export const EXTENSION_ID = "bgegbabkegkanjbmjbeaockdijnbkjgi";
 const encoder = new TextEncoder();
 const keyName = "cuPairing";
+
+class HttpRejection extends Error {
+  constructor(status) { super("pairingRejected"); this.status = status; }
+}
+
+export class ExecutionSuspended extends Error {
+  constructor() { super("executionSuspended"); }
+}
+
+const executionWaits = new WeakMap();
+export function waitExecutionReady(client, epoch, signal, wait) {
+  const prior = executionWaits.get(client);
+  if (prior?.epoch === epoch && prior.signal === signal) return prior.task;
+  const owner = { epoch, signal, task: null };
+  owner.task = (async () => {
+    while (!signal.aborted && client.connectionEpoch === epoch) {
+      const ready = await client.executionReady(epoch);
+      if (signal.aborted || client.connectionEpoch !== epoch) return false;
+      if (ready === true) return true;
+      await wait(signal);
+    }
+    return false;
+  })().finally(() => {
+    if (executionWaits.get(client) === owner) executionWaits.delete(client);
+  });
+  executionWaits.set(client, owner);
+  return owner.task;
+}
 
 export function normalizeCode(value) {
   if (typeof value !== "string" || !/^[0-9a-f -]+$/i.test(value)) throw new Error("invalidCode");
@@ -45,6 +74,8 @@ export class PairingClient {
   #storageQueue = Promise.resolve();
   #shareSequence = 0;
   #actionsEpoch = null;
+  #observationsEpoch = null;
+  #executionReady = false;
 
   constructor({ storage, fetch = (...args) => globalThis.fetch(...args), crypto = globalThis.crypto,
     now = Date.now, schedule = (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -77,7 +108,7 @@ export class PairingClient {
         body: JSON.stringify(body), signal,
       });
       status = response.status;
-      if (!response.ok) { failure = "http"; throw new Error("pairingRejected"); }
+      if (!response.ok) { failure = "http"; throw new HttpRejection(status); }
       failure = "body_read";
       // Read a bounded response even if the loopback process was replaced.
       const reader = response.body.getReader();
@@ -144,6 +175,8 @@ export class PairingClient {
 
   #setSession(session) {
     this.#actionsEpoch = null;
+    this.#observationsEpoch = null;
+    this.#executionReady = false;
     this.#session = session;
     this.onSessionChanged();
   }
@@ -221,6 +254,14 @@ export class PairingClient {
     return request.promise;
   }
 
+  // Status renews only connection metadata. Readiness never substitutes for the
+  // Host's run/grant/ref checks and cannot start either loop for a stale epoch.
+  async executionReady(epoch) {
+    if (this.connectionEpoch !== epoch) return false;
+    await this.status();
+    return this.connectionEpoch === epoch && this.#executionReady;
+  }
+
   async shareCurrentTab(tab, expectedEpoch = this.connectionEpoch) {
     const session = this.#session;
     await this.ready;
@@ -229,7 +270,8 @@ export class PairingClient {
     if (!tab || !/^\d{1,16}$/.test(String(tab.tabId)) || typeof tab.url !== "string"
       || (!tab.url.startsWith("http://") && !tab.url.startsWith("https://"))
       || tab.url.length > 8192 || String(tab.title ?? "").length > 1024
-      || !Number.isSafeInteger(tab.documentGeneration) || tab.documentGeneration < 1) {
+      || !Number.isSafeInteger(tab.documentGeneration) || tab.documentGeneration < 1
+      || (tab.documentId !== undefined && (typeof tab.documentId !== "string" || !/^[0-9a-f]{32}$/i.test(tab.documentId)))) {
       throw new Error("shareUnavailable");
     }
     const url = new URL(tab.url);
@@ -238,6 +280,7 @@ export class PairingClient {
       ...identity(session), tabId: String(tab.tabId), title: String(tab.title ?? ""),
       url: tab.url, browserId: "chromium", profileId: session.connectionNonce,
       documentGeneration: tab.documentGeneration, focused: tab.focused === true,
+      ...(tab.documentId !== undefined ? { documentId: tab.documentId } : {}),
     });
     return { shared: true, tabId: String(tab.tabId) };
   }
@@ -294,10 +337,23 @@ export class PairingClient {
       }
       if (response?.ok !== true) { recordConnectionFailure(path, "response_protocol"); throw new Error("invalid extension response"); }
       return response;
+    } catch (error) {
+      // A disabled first-use transaction leaves a valid, non-renewed Pair.
+      // Only an actual forbidden execution poll and exact authenticated status
+      // can suspend execution. Other HTTP/network/protocol failures still fail.
+      if (error instanceof HttpRejection && error.status === 403
+        && ["/cu/extension-poll", "/cu/extension-actions/poll", "/cu/extension-actions/negotiate", "/cu/extension-observation/negotiate"].includes(path)
+        && !signal.aborted && !controller.signal.aborted && this.#session === session && this.connectionEpoch === epoch
+        && await this.executionReady(epoch) === false
+        && !signal.aborted && !controller.signal.aborted && this.#session === session && this.connectionEpoch === epoch) {
+        throw new ExecutionSuspended();
+      }
+      throw error;
     } finally { clearTimeout(timer); signal.removeEventListener("abort", abort); }
   }
 
   async pollExtension(epoch, signal) {
+    if (this.#observationsEpoch !== epoch) throw new Error("invalidObservationScope");
     const result = await this.#extensionRequest(epoch, "/cu/extension-poll", identity, signal);
     if (result.request === null) return null;
     const connection = result.request?.connection;
@@ -307,6 +363,37 @@ export class PairingClient {
       throw new Error("invalid extension connection");
     }
     return result.request;
+  }
+
+  async negotiateObservations(epoch, signal) {
+    this.#observationsEpoch = null;
+    const reply = await this.#extensionRequest(epoch, "/cu/extension-observation/negotiate", session => ({
+      protocol: 2, completionProtocol: 2, purpose: "observation", connection: identity(session),
+    }), signal);
+    if (!exactKeys(reply, ["ok", "protocol", "completionProtocol", "purpose"]) || reply.protocol !== 2
+      || reply.completionProtocol !== 2 || reply.purpose !== "observation"
+      || this.connectionEpoch !== epoch || signal.aborted) throw new Error("invalidObservationScope");
+    this.#observationsEpoch = epoch;
+  }
+
+  observationScope(epoch, input, journal) {
+    const completion = copyObservationProof(input); const session = this.#session;
+    const connection = completion.proof.binding.connection;
+    if (!session || this.connectionEpoch !== epoch || this.#observationsEpoch !== epoch || connection.instanceId !== session.instanceId
+      || connection.connectionNonce !== session.connectionNonce || connection.generation !== session.generation) throw new Error("cancelled");
+    return new CompletionScope({ endpoint: session.endpoint, proof: completion.proof, fetch: this.fetch, journal, purpose: "observation" });
+  }
+
+  async claimObservation(epoch, input, signal) {
+    if (this.#observationsEpoch !== epoch) throw new Error("invalidObservationScope");
+    const completion = copyObservationProof(input);
+    const reply = await this.#extensionRequest(epoch, "/cu/extension-observation/claim", session => {
+      const connection = completion.proof.binding.connection;
+      if (connection.instanceId !== session.instanceId || connection.connectionNonce !== session.connectionNonce
+        || connection.generation !== session.generation) throw new Error("cancelled");
+      return completion;
+    }, signal);
+    if (!exactKeys(reply, ["ok"])) throw new Error("invalidObservationScope");
   }
 
   async retiredHost(input) {
@@ -355,7 +442,10 @@ export class PairingClient {
     try {
       if (!negotiation && this.#actionsEpoch !== epoch) throw new Error("unnegotiated");
       return await this.#extensionRequest(epoch, "/cu/extension-actions/" + route, makeBody, signal);
-    } catch { throw new Error("actionUnavailable"); }
+    } catch (error) {
+      if (error instanceof ExecutionSuspended) throw error;
+      throw new Error("actionUnavailable");
+    }
   }
 
   async negotiateActions(epoch, signal) {
@@ -444,7 +534,13 @@ export class PairingClient {
     const timer = setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), 5000);
     try {
       const result = await this.#request(session.endpoint, "/cu/extension-status", identity(session), session.sessionKey, controller.signal);
-      if (result?.ok !== true) throw new Error("pairingRejected");
+      if (result?.ok !== true || (Object.hasOwn(result, "executionReady") && typeof result.executionReady !== "boolean")) {
+        throw new Error("pairingRejected");
+      }
+      if (this.#session === session && !controller.signal.aborted) {
+        // Older enabled Hosts have no preparation phase and omit this field.
+        this.#executionReady = result.executionReady !== false;
+      }
       return this.#publicState();
     } catch {
       if (this.#session === session) {

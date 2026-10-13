@@ -5,7 +5,7 @@ mod handshake;
 mod process;
 mod process_tree;
 
-#[cfg(all(windows, feature = "computer-use-probe"))]
+#[cfg(all(windows, any(test, feature = "computer-use-probe")))]
 pub(crate) use process_tree::assign_job as assign_probe_job;
 
 #[cfg(feature = "computer-use-probe")]

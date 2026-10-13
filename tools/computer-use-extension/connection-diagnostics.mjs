@@ -4,6 +4,7 @@ const routes = new Set([
   "/cu/browser-restart", "/cu/tab-offer", "/cu/tab-unoffer", "/cu/extension-poll", "/cu/extension-result",
   "/cu/extension-actions/negotiate", "/cu/extension-actions/poll", "/cu/extension-actions/claim", "/cu/extension-actions/result",
   "/cu/extension-completion/claim", "/cu/extension-completion/host-retirement",
+  "/cu/extension-observation/negotiate", "/cu/extension-observation/claim",
 ]);
 const reasons = new Set(["http", "network", "timeout", "cancelled", "body_read", "body_limit", "decode", "json", "response_identity", "response_protocol",
   "retire_status", "retire_share", "retire_observation", "retire_action", "retire_transport"]);

@@ -1,7 +1,8 @@
 //! Locked Chromium trees. Only the five links shipped in the pinned macOS
 //! framework are allowed; other components continue to reject all symlinks.
 
-use crate::playwright_materialize::{self, sha256_hex, MaterializeError};
+use crate::playwright_materialize::{self, MaterializeError};
+use crate::runtime_pins::REQUIRED_CHROMIUM_VERSION;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -17,7 +18,7 @@ pub fn macos_links() -> BTreeMap<String, String> {
     let base = "Chromium.app/Contents/Frameworks/Chromium Framework.framework";
     [
         ("Resources", "Versions/Current/Resources"),
-        ("Versions/Current", "130.0.6723.31"),
+        ("Versions/Current", REQUIRED_CHROMIUM_VERSION),
         ("Libraries", "Versions/Current/Libraries"),
         ("Chromium Framework", "Versions/Current/Chromium Framework"),
         ("Helpers", "Versions/Current/Helpers"),
@@ -52,77 +53,27 @@ pub fn allowed_link(root: &Path, path: &Path) -> bool {
 }
 
 pub fn tree_manifest(root: &Path, arch: &str) -> Result<(String, u64, u32), MaterializeError> {
-    if !is_macos(arch) {
-        return playwright_materialize::tree_manifest(root);
-    }
-    let mut rows = BTreeMap::new();
-    collect(root, root, &mut rows)?;
-    for path in macos_links().keys() {
-        if !allowed_link(root, &root.join(path)) {
-            return Err(error(
-                "symlink",
-                format!("missing or invalid pinned Chromium framework link {path}"),
-            ));
-        }
-    }
-    let mut listing = String::new();
-    let mut size = 0;
-    for (path, (bytes, digest)) in &rows {
-        listing.push_str(&format!("{path}\t{bytes}\t{digest}\n"));
-        size += bytes;
-    }
-    Ok((sha256_hex(listing.as_bytes()), size, rows.len() as u32))
-}
-
-fn collect(
-    root: &Path,
-    path: &Path,
-    rows: &mut BTreeMap<String, (u64, String)>,
-) -> Result<(), MaterializeError> {
-    let meta = fs::symlink_metadata(path).map_err(|e| error("io", e.to_string()))?;
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|e| error("path", e.to_string()))?
-        .to_string_lossy()
-        .replace('\\', "/");
-    if meta.file_type().is_symlink() {
-        if !allowed_link(root, path) {
-            return Err(error(
-                "symlink",
-                format!("untrusted Chromium link {relative}"),
-            ));
-        }
-        let target = fs::read_link(path)
-            .map_err(|e| error("io", e.to_string()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        rows.insert(
-            relative,
-            (target.len() as u64, sha256_hex(target.as_bytes())),
-        );
-    } else if meta.is_dir() {
-        for entry in fs::read_dir(path).map_err(|e| error("io", e.to_string()))? {
-            collect(
-                root,
-                &entry.map_err(|e| error("io", e.to_string()))?.path(),
-                rows,
-            )?;
-        }
-    } else if meta.is_file() {
-        let bytes = fs::read(path).map_err(|e| error("io", e.to_string()))?;
-        rows.insert(relative, (bytes.len() as u64, sha256_hex(&bytes)));
+    let links = if is_macos(arch) {
+        macos_links()
     } else {
-        return Err(error("path", "Chromium tree contains a special file"));
-    }
-    Ok(())
+        BTreeMap::new()
+    };
+    let listing = crate::runtime_tree::listing(root, crate::runtime_limits::chromium(), &links)?;
+    Ok(crate::runtime_tree::manifest(&listing))
 }
 
 pub fn copy_tree(src: &Path, dest: &Path, arch: &str) -> Result<(), MaterializeError> {
-    if !is_macos(arch) {
-        return playwright_materialize::copy_tree_secure(src, dest);
-    }
     tree_manifest(src, arch)?;
-    copy_regular(src, dest)?;
+    if !is_macos(arch) {
+        playwright_materialize::copy_tree_with_limits(
+            src,
+            dest,
+            crate::runtime_limits::chromium(),
+        )?;
+        tree_manifest(dest, arch)?;
+        return Ok(());
+    }
+    copy_regular(src, dest, &mut Default::default())?;
     // Current must exist before aliases resolving through it can be validated.
     let mut links: Vec<_> = macos_links().into_iter().collect();
     links.sort_by_key(|(path, _)| !path.ends_with("/Versions/Current"));
@@ -137,19 +88,31 @@ pub fn copy_tree(src: &Path, dest: &Path, arch: &str) -> Result<(), MaterializeE
     Ok(())
 }
 
-fn copy_regular(src: &Path, dest: &Path) -> Result<(), MaterializeError> {
+fn copy_regular(
+    src: &Path,
+    dest: &Path,
+    budget: &mut crate::runtime_limits::TreeBudget,
+) -> Result<(), MaterializeError> {
     let meta = fs::symlink_metadata(src).map_err(|e| error("io", e.to_string()))?;
     if meta.file_type().is_symlink() {
         return Ok(());
     }
+    budget.add(
+        crate::runtime_limits::chromium(),
+        if meta.is_dir() {
+            None
+        } else {
+            Some(meta.len())
+        },
+    )?;
     if meta.is_dir() {
         fs::create_dir_all(dest).map_err(|e| error("io", e.to_string()))?;
         for entry in fs::read_dir(src).map_err(|e| error("io", e.to_string()))? {
             let entry = entry.map_err(|e| error("io", e.to_string()))?;
-            copy_regular(&entry.path(), &dest.join(entry.file_name()))?;
+            copy_regular(&entry.path(), &dest.join(entry.file_name()), budget)?;
         }
     } else if meta.is_file() {
-        fs::copy(src, dest).map_err(|e| error("io", e.to_string()))?;
+        crate::runtime_tree::copy_file(src, dest, meta.len())?;
     } else {
         return Err(error("path", "Chromium tree contains a special file"));
     }

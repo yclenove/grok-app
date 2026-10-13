@@ -57,8 +57,46 @@ fn cross_session_cannot_reuse_run_id() {
 #[test]
 fn resume_drops_authorization_snapshot_and_lease() {
     let (broker, fake, tid, gen, snap, geo) = setup();
+    let issued = broker.issue_transport_credential("sess").unwrap();
+    broker
+        .bind_agent_session("sess", "synthetic-agent")
+        .unwrap();
+    let pending = broker
+        .submit_access(
+            issued.token(),
+            serde_json::json!({
+                "action": "request",
+                "purpose": "remember the fixture",
+                "surfaces": ["desktop"],
+                "capabilities": ["observe"],
+                "scopeIntent": "GrokCuFixture"
+            }),
+        )
+        .unwrap();
+    assert_eq!(pending["state"], "pending");
+    assert_eq!(pending["authority"], "none");
+    assert!(broker.scope_memories("sess").is_empty());
+    assert_eq!(broker.executable_grant_count("sess"), 0);
+    let request_id = pending["requestId"].as_str().unwrap();
+    broker
+        .bind_synthetic_scope(request_id, &fake.fixture_id())
+        .unwrap();
+    let outcome = broker
+        .commit_access(
+            issued.token(),
+            request_id,
+            pending["revision"].as_u64().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(broker.scope_memories("sess").len(), 1);
+    broker.pause(&outcome.run_id).unwrap();
     broker.pause("run-1").unwrap();
     broker.resume("run-1").unwrap();
+    assert_eq!(broker.scope_memories("sess").len(), 1);
+    assert!(broker
+        .execution_run(issued.token(), "computer_observe")
+        .is_err());
+    assert!(!broker.consent_debug().contains(issued.token()));
     assert_eq!(
         broker.observe("run-1").unwrap_err(),
         BrokerError::TargetUnauthorized

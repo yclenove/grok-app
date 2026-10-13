@@ -7,6 +7,7 @@ use crate::runtime_lock::{host_allowed, load_lock, RuntimeLock, RuntimeTarget};
 use crate::runtime_mutation::{
     new_owner, remove_staging, try_acquire_exclusive, write_staging_owner, MutationError,
 };
+use crate::runtime_pins::playwright_archive_relpath;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,7 +21,10 @@ mod node_archive;
 pub(crate) mod runtime_import;
 #[path = "runtime_publish.rs"]
 mod runtime_publish;
+#[path = "runtime_sources.rs"]
+mod runtime_sources;
 use runtime_publish::{publish_seed, recover_seed};
+pub use runtime_sources::{verify_sources, SourceReport};
 
 #[cfg(test)]
 #[path = "runtime_prepare_fixture.rs"]
@@ -36,6 +40,7 @@ pub const WORKER_FILES: &[&str] = &[
     "observation-extract.mjs",
     "observation-state.mjs",
     "page-state.mjs",
+    "scope-identity.mjs",
     "run-operations.mjs",
     "typed-act.mjs",
     "typed-drag.mjs",
@@ -386,9 +391,9 @@ pub fn prepare(ctx: &PrepareContext) -> Result<PrepareReport, PrepareError> {
         format!("prepare-{}", uuid::Uuid::new_v4()),
     );
     let _guard = try_acquire_exclusive(&ctx.seed_dir, owner.clone()).map_err(mutation_err)?;
-    recover_seed(&ctx.seed_dir).map_err(|error| error.at("recover seed"))?;
     let lock = load_lock(&ctx.lock_path).map_err(|e| PrepareError::new(&e.code, e.message))?;
     require_lock_target(ctx, &lock)?;
+    recover_seed(&ctx.seed_dir).map_err(|error| error.at("recover seed"))?;
     fs::create_dir_all(&ctx.cache_dir)
         .map_err(|e| PrepareError::new("io", e.to_string()).at("create archive cache"))?;
     let parent = ctx
@@ -492,101 +497,23 @@ fn materialize_into(
     ctx: &PrepareContext,
     lock: &RuntimeLock,
 ) -> Result<(), PrepareError> {
-    let node_zip = ensure_archive(
-        ctx,
-        lock,
-        &lock.js_runtime.url,
-        &lock.js_runtime.archive_sha256,
-        lock.js_runtime.archive_bytes,
-        &[ctx
-            .seed_dir
-            .join("..")
-            .join("cache")
-            .join(&lock.js_runtime.archive_sha256)],
-    )?;
-    let pw_tgz = ensure_archive(
-        ctx,
-        lock,
-        &lock.playwright.url,
-        &lock.playwright.archive_sha256,
-        lock.playwright.archive_bytes,
-        &[ctx
-            .seed_dir
-            .join("playwright")
-            .join("playwright-core-1.48.0.tgz")],
-    )?;
+    runtime_sources::materialize(staging, ctx, lock)?;
     let chrome_zip = ensure_archive(
         ctx,
         lock,
         &lock.chromium.url,
         &lock.chromium.archive_sha256,
         lock.chromium.archive_bytes,
-        &[ctx.seed_dir.join("chromium").join("chromium-win64.zip")],
+        &[ctx.seed_dir.join("chromium").join(
+            Path::new(&lock.chromium.archive_relpath)
+                .file_name()
+                .ok_or_else(|| PrepareError::new("schema", "missing browser archive filename"))?,
+        )],
     )?;
-
-    let node_bytes = fs::read(&node_zip).map_err(|e| PrepareError::new("io", e.to_string()))?;
-    let node_extract = staging.join("bin");
-    let target =
-        RuntimeTarget::parse(&lock.target).map_err(|e| PrepareError::new(&e.code, e.message))?;
-    if target == RuntimeTarget::WindowsX64 {
-        let mut node_policy = ZipPolicy::node_win_x64();
-        node_policy.expected_root = lock.js_runtime.archive_root.clone();
-        extract_zip(
-            &node_bytes,
-            &node_extract,
-            &node_policy,
-            Some(&lock.js_runtime.archive_sha256),
-        )
-        .map_err(|e| PrepareError::new(&e.code, e.message))?;
-    } else {
-        node_archive::extract(
-            &node_bytes,
-            &node_extract,
-            &lock.js_runtime.archive_root,
-            &lock.js_runtime.archive_sha256,
-        )?;
-    }
-
-    let tgz = fs::read(&pw_tgz).map_err(|e| PrepareError::new("io", e.to_string()))?;
-    let pw_dest = staging
-        .join("playwright")
-        .join("node_modules")
-        .join("playwright-core");
-    let tree = playwright_materialize::materialize_playwright_tgz(
-        &tgz,
-        &pw_dest,
-        Some(&lock.playwright.archive_sha256),
-    )
-    .map_err(|e| PrepareError::new(&e.code, e.message))?;
-    fs::create_dir_all(staging.join("playwright"))
-        .map_err(|e| PrepareError::new("io", e.to_string()))?;
-    fs::copy(
-        &pw_tgz,
-        staging
-            .join("playwright")
-            .join("playwright-core-1.48.0.tgz"),
-    )
-    .map_err(|e| PrepareError::new("io", e.to_string()))?;
-    let pw_listing = tree_listing(&pw_dest).map_err(|e| PrepareError::new(&e.code, e.message))?;
-    fs::write(
-        staging
-            .join("playwright")
-            .join("playwright-runtime.sha256list"),
-        pw_listing,
-    )
-    .map_err(|e| PrepareError::new("io", e.to_string()))?;
-    if tree.listing_sha256 != lock.playwright.tree_sha256 {
-        return Err(PrepareError::new(
-            "hash_mismatch",
-            "playwright-runtime tree digest does not match lock",
-        ));
-    }
 
     let chrome_bytes = fs::read(&chrome_zip).map_err(|e| PrepareError::new("io", e.to_string()))?;
     let mut chrome_policy = ZipPolicy::chromium();
     chrome_policy.expected_root = lock.chromium.archive_root.clone();
-    chrome_policy.max_total_bytes = 768 * 1024 * 1024;
-    chrome_policy.max_file_bytes = 600 * 1024 * 1024;
     if crate::runtime_chromium::is_macos(&lock.target) {
         chrome_policy.allowed_symlinks = crate::runtime_chromium::macos_links();
     }
@@ -633,11 +560,37 @@ fn pack_worker(seed: &Path, src_dir: &Path) -> Result<(), PrepareError> {
     Ok(())
 }
 
+/// Refresh only an isolated test clone. Detach each old hardlink before
+/// copying current worker sources; never write through to the immutable seed.
+#[cfg(test)]
+pub(crate) fn refresh_fixture_worker(
+    seed: &Path,
+    src_dir: &Path,
+    lock: &RuntimeLock,
+) -> Result<(), PrepareError> {
+    // Manifest rewriting must detach its hardlink as well as worker siblings.
+    fs::remove_file(seed.join("manifest.json"))
+        .map_err(|error| PrepareError::new("io", error.to_string()))?;
+    for name in ["worker.mjs", "modules.sha256list"]
+        .iter()
+        .chain(WORKER_FILES)
+    {
+        match fs::remove_file(seed.join("playwright").join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PrepareError::new("io", error.to_string())),
+        }
+    }
+    pack_worker(seed, src_dir)?;
+    write_seed_manifest(seed, lock)
+}
+
 fn write_seed_manifest(seed: &Path, lock: &RuntimeLock) -> Result<(), PrepareError> {
     let target =
         RuntimeTarget::parse(&lock.target).map_err(|e| PrepareError::new(&e.code, e.message))?;
     let node = seed.join(target.node_relpath());
-    let tgz = seed.join("playwright").join("playwright-core-1.48.0.tgz");
+    let archive_relpath = playwright_archive_relpath();
+    let tgz = seed.join(&archive_relpath);
     let worker = seed.join("playwright").join("worker.mjs");
     let modules = seed.join("playwright").join("modules.sha256list");
     let pw = seed
@@ -662,7 +615,7 @@ fn write_seed_manifest(seed: &Path, lock: &RuntimeLock) -> Result<(), PrepareErr
         },
         "components": {
             "js-runtime": component("js-runtime", &lock.js_runtime.version, target.arch(), target.node_relpath(), &sha256_file(&node)?, file_len(&node)?, "file"),
-            "playwright-archive": component("playwright-archive", &lock.playwright.version, "any", "playwright/playwright-core-1.48.0.tgz", &sha256_file(&tgz)?, file_len(&tgz)?, "file"),
+            "playwright-archive": component("playwright-archive", &lock.playwright.version, "any", &archive_relpath, &sha256_file(&tgz)?, file_len(&tgz)?, "file"),
             "playwright-runtime": component("playwright-runtime", &lock.playwright.version, "any", "playwright/node_modules/playwright-core", &pw_digest, pw_bytes, "tree"),
             "browser-worker": component("browser-worker", "app-embed", "any", "playwright/worker.mjs", &worker_hash, file_len(&worker)?, "file"),
             "chromium": component("chromium", &lock.chromium.browser_version, target.arch(), &lock.chromium.tree_relpath, &chrome_digest, chrome_bytes, "tree"),
@@ -724,67 +677,7 @@ fn check_seed(seed: &Path, ctx: &PrepareContext, lock: &RuntimeLock) -> Result<(
             format!("seed contains deny-list paths: {denials:?}"),
         ));
     }
-    let target =
-        RuntimeTarget::parse(&lock.target).map_err(|e| PrepareError::new(&e.code, e.message))?;
-    let node = seed.join(target.node_relpath());
-    let node_bytes =
-        fs::read(&node).map_err(|_| PrepareError::new("missing", "seed node.exe missing"))?;
-    if !looks_like_native_binary(&node_bytes) {
-        return Err(PrepareError::new(
-            "not_executable",
-            "seed node.exe is not a native binary",
-        ));
-    }
-    if sha256_hex(&node_bytes) != lock.js_runtime.executable_sha256 {
-        return Err(PrepareError::new(
-            "hash_mismatch",
-            "node.exe hash does not match lock",
-        ));
-    }
-    if node_bytes.len() as u64 != lock.js_runtime.executable_bytes {
-        return Err(PrepareError::new(
-            "hash_mismatch",
-            "node.exe size does not match lock",
-        ));
-    }
-
-    let tgz = seed.join("playwright").join("playwright-core-1.48.0.tgz");
-    let tgz_bytes =
-        fs::read(&tgz).map_err(|_| PrepareError::new("missing", "playwright tgz missing"))?;
-    if sha256_hex(&tgz_bytes) != lock.playwright.archive_sha256 {
-        return Err(PrepareError::new(
-            "hash_mismatch",
-            "playwright tgz hash does not match lock",
-        ));
-    }
-
-    let pw = seed
-        .join("playwright")
-        .join("node_modules")
-        .join("playwright-core");
-    if !pw.is_dir() {
-        return Err(PrepareError::new(
-            "missing",
-            "materialized playwright-core tree is missing; run --prepare",
-        ));
-    }
-    let (pw_digest, pw_bytes, pw_files) =
-        tree_manifest(&pw).map_err(|e| PrepareError::new(&e.code, e.message))?;
-    if pw_digest != lock.playwright.tree_sha256 {
-        return Err(PrepareError::new(
-            "hash_mismatch",
-            format!(
-                "playwright-runtime digest mismatch expected={} actual={}",
-                lock.playwright.tree_sha256, pw_digest
-            ),
-        ));
-    }
-    if pw_bytes != lock.playwright.tree_bytes || pw_files != lock.playwright.tree_files {
-        return Err(PrepareError::new(
-            "hash_mismatch",
-            "playwright-runtime file count/bytes do not match lock",
-        ));
-    }
+    let (node, pw) = runtime_sources::check_files(seed, lock)?;
 
     let chrome = seed.join(&lock.chromium.tree_relpath);
     if !chrome.is_dir() {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{ExistingTabHost, ManagedLocator, ManagedObservation, ManagedTabAction, TabInfo};
 use crate::adapter::{
     ActionSupport, AdapterActResult, Capabilities, CaptureOptions, ComputerUseAdapter,
-    DispatchRequest, SurfaceKind, TargetInfo,
+    DispatchRequest, NativeScopeIdentity, SurfaceKind, TargetInfo,
 };
 use crate::protocol::{
     ActionKind, ActionTarget, Observation, ObservationImage, ObservationNode, PROTOCOL_VERSION,
@@ -156,6 +156,18 @@ impl ComputerUseAdapter for ManagedBrowserAdapter {
 
     fn target_alive(&self, target_id: &str) -> bool {
         self.host.managed_target_info(target_id).is_some()
+    }
+
+    fn scope_identity(&self, target_id: &str) -> Result<NativeScopeIdentity, String> {
+        self.host
+            .managed_scope_identity(target_id)
+            .map(|identity| NativeScopeIdentity::ManagedPage { identity })
+            .map_err(|error| error.to_string())
+    }
+
+    fn scope_target_info(&self, run_id: &str, target_id: &str) -> Result<TargetInfo, String> {
+        self.require_owned_target(run_id, target_id)
+            .map(Self::target_info)
     }
 
     fn observe(&self, _target_id: &str) -> Result<Observation, String> {

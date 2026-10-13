@@ -13,9 +13,12 @@ export class CompletionRecovery {
   #notify;
   #cancel;
   #started = false;
+  #purpose;
 
   constructor({ journal, scripting, fetch = (...args) => globalThis.fetch(...args),
-    schedule = (fn, ms) => globalThis.setTimeout(fn, ms), cancel = id => globalThis.clearTimeout(id), notify = () => {} }) {
+    schedule = (fn, ms) => globalThis.setTimeout(fn, ms), cancel = id => globalThis.clearTimeout(id), notify = () => {}, purpose = "action" }) {
+    if (!["action", "observation"].includes(purpose)) throw new Error("completionRecoveryUnavailable");
+    this.#purpose = purpose;
     this.#journal = journal; this.#scripting = scripting; this.#fetch = fetch;
     this.#schedule = schedule; this.#notify = notify; this.#cancel = cancel;
   }
@@ -28,7 +31,8 @@ export class CompletionRecovery {
       this.#pending.set(completionIdentity(record.proof), { record,
         physical: record.phase === "physicallySettled",
         task: null,
-        scope: new CompletionScope({ endpoint: record.endpoint, proof: record.proof, fetch: this.#fetch, journal: this.#journal }) });
+        scope: new CompletionScope({ endpoint: record.endpoint, proof: record.proof, fetch: this.#fetch,
+          journal: this.#journal, purpose: this.#purpose }) });
     }
     await this.retry();
   }

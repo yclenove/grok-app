@@ -138,6 +138,15 @@ function removeOwnedTempRoot(root) {
   const target = `${resolve(root)}${sep}`.toLowerCase();
   assert.equal(target.startsWith(base), true, `refusing to remove non-temp root: ${root}`);
   assert.equal(relative(realpathSync(tmpdir()), resolve(root)).startsWith(".."), false);
+  assert.equal(dirname(resolve(root)), realpathSync(tmpdir()));
+  assert.match(resolve(root).slice(dirname(resolve(root)).length + 1), /^grok-cu-observe-contract-/);
+  const pending = [root];
+  while (pending.length) {
+    const current = pending.pop(), info = lstatSync(current);
+    assert.equal(info.isSymbolicLink(), false, "refuse a linked profile/runtime entry");
+    if (info.isDirectory()) for (const name of readdirSync(current)) pending.push(join(current, name));
+    else assert.equal(info.isFile(), true, "refuse a non-file artifact");
+  }
   rmSync(root, { recursive: true, force: true });
 }
 
@@ -181,6 +190,7 @@ async function startHarness(t) {
   let workerOutput = "";
   const child = spawn(process.execPath, [join(ROOT, "server.mjs")], {
     cwd: ROOT,
+    windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
     env: childEnv({
       GROK_CU_BROWSER_TOKEN: token,
@@ -291,6 +301,64 @@ function assertTypedError(response, status, completion = "not_started") {
   assert.equal(response.body.error.completion, completion);
   assert.equal(typeof response.body.error.message, "string");
 }
+
+test("Host managed scope identity pins context and page without reading content", async (t) => {
+  const harness = await startHarness(t);
+  const profile = "scope-contract", owner = "scope-owner";
+  const opened = await post(harness.port, "/open", { profile, owner }, harness.token);
+  assert.equal(opened.status, 200);
+  const body = { profile, owner, pageId: opened.body.pageId, runRevision: 1 };
+  const identity = () => post(harness.port, "/scope-identity", body, harness.token, { host: true });
+  const first = await identity();
+  assert.equal(first.status, 200, "the real owned worker must supply a scope witness");
+  assert.deepEqual(Object.keys(first.body).sort(),
+    ["ok", "owner", "profile", "workerInstanceId", "contextInstanceId", "pageId"].sort());
+  assert.equal(first.body.owner, owner);
+  assert.equal(first.body.profile, profile);
+  assert.equal(first.body.pageId, body.pageId);
+  for (const field of ["workerInstanceId", "contextInstanceId"]) {
+    assert.match(first.body[field], /^[0-9a-f-]{36}$/);
+  }
+  assert.deepEqual((await identity()).body, first.body);
+  assertTypedError(await post(harness.port, "/scope-identity", body, harness.token), 403);
+  assertTypedError(await post(harness.port, "/scope-identity", { ...body, owner: "another-owner" }, harness.token, { host: true }), 409);
+  assertTypedError(await post(harness.port, "/scope-identity", { ...body, pageId: "page-unknown" }, harness.token, { host: true }), 404);
+  assertTypedError(await post(harness.port, "/scope-identity", { ...body, runRevision: 2 }, harness.token, { host: true }), 409);
+  assertTypedError(await post(harness.port, "/scope-identity", { ...body, runRevision: undefined }, harness.token, { host: true }), 400);
+
+  const navigated = await post(harness.port, "/goto", { ...body,
+    pageGeneration: opened.body.pageGeneration, actionId: "scope-goto", url: harness.pageUrl }, harness.token);
+  assert.equal(navigated.status, 200);
+  assert.ok(navigated.body.pageGeneration > opened.body.pageGeneration);
+  assert.deepEqual((await identity()).body, first.body, "navigation retires document refs, not the tab scope");
+  assert.equal(harness.clickCount(), 0, "metadata checks must never dispatch input");
+
+  const newTab = await post(harness.port, "/new-tab", { profile, owner, runRevision: 1, actionId: "scope-tab" }, harness.token);
+  assert.equal(newTab.status, 200);
+  const other = await post(harness.port, "/scope-identity", { ...body, pageId: newTab.body.pageId }, harness.token, { host: true });
+  assert.equal(other.status, 200);
+  assert.equal(other.body.contextInstanceId, first.body.contextInstanceId);
+  assert.notEqual(other.body.pageId, first.body.pageId);
+  const paused = await post(harness.port, "/pause-run", { owner, runRevision: 1 }, harness.token, { host: true });
+  assert.equal(paused.status, 200);
+  assertTypedError(await post(harness.port, "/scope-identity", { ...body, pageId: newTab.body.pageId }, harness.token, { host: true }), 409);
+  const resumed = await post(harness.port, "/resume-run", { owner, runRevision: 1, nextRunRevision: 2 }, harness.token, { host: true });
+  assert.equal(resumed.status, 200);
+  assertTypedError(await identity(), 409, "not_started");
+  body.runRevision = 2;
+  assert.deepEqual((await identity()).body, first.body);
+  const cleared = await post(harness.port, "/clear", { profile }, harness.token, { host: true });
+  assert.equal(cleared.status, 200, "wait for the original context's confirmed cleanup");
+  assertTypedError(await identity(), 404);
+  const replacement = await post(harness.port, "/open", { profile, owner, runRevision: 2 }, harness.token);
+  assert.equal(replacement.status, 200);
+  const replaced = await post(harness.port, "/scope-identity", { ...body, pageId: replacement.body.pageId }, harness.token, { host: true });
+  assert.equal(replaced.status, 200);
+  assert.equal(replaced.body.workerInstanceId, first.body.workerInstanceId);
+  assert.notEqual(replaced.body.contextInstanceId, first.body.contextInstanceId);
+  assert.notEqual(replaced.body.pageId, first.body.pageId);
+  assertTypedError(await identity(), 404, "not_started");
+});
 
 test("production observe publishes fresh bounded opaque snapshots over authenticated loopback", async (t) => {
   const harness = await startHarness(t);

@@ -209,6 +209,12 @@ impl ExistingTabHost {
         }
     }
 
+    /// Retained state only: reading a task card never contacts the worker.
+    pub(crate) fn managed_resume_available(&self, owner: &str) -> bool {
+        self.prepare_managed_resume(owner)
+            .is_ok_and(|ticket| ticket.is_some())
+    }
+
     /// Capture the exact Pause being resumed under the Broker admission lock.
     pub(crate) fn prepare_managed_resume(
         &self,

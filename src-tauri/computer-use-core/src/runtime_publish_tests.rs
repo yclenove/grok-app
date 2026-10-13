@@ -51,6 +51,28 @@ fn recovery_preserves_unowned_prefix_directories_beside_a_seed() {
 }
 
 #[test]
+fn prepare_oversize_lock_preserves_previous_seed_and_publication_journal() {
+    let root = Workspace::new();
+    let seed = root.tree("seed", "current");
+    let staging = root.staging();
+    let record = Publication::new(&staging, &seed).unwrap();
+    write_journal(&seed, &record).unwrap();
+    let journal = journal_path(&seed).unwrap();
+    let before = fs::read(&journal).unwrap();
+    let mut ctx = PrepareContext::shipped(root.0.clone(), "x86_64-windows".into());
+    ctx.seed_dir = seed.clone();
+    ctx.lock_path = root.0.join("lock.json");
+    let mut lock = fixture::source_lock(RuntimeTarget::WindowsX64);
+    lock.chromium.tree_bytes = crate::runtime_limits::chromium().max_total_bytes + 1;
+    fs::write(&ctx.lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    assert_eq!(prepare(&ctx).unwrap_err().code, "oversize");
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    assert_eq!(fs::read(seed.join("identity")).unwrap(), b"current");
+    assert_eq!(fs::read(staging.join("identity")).unwrap(), b"prepared");
+    assert!(!ctx.cache_dir.exists());
+}
+
+#[test]
 fn recovery_never_promotes_an_unowned_prefix_backup() {
     let root = Workspace::new();
     let seed = root.0.join("seed");

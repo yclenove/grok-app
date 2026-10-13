@@ -28,6 +28,7 @@ import type { ProviderRetryStatus } from "@/lib/providerRetryStatusStore";
 import type { ProcessLimitEvent } from "@/lib/processBudget";
 import type { GoalOrchHostPayload } from "@/lib/goalOrch";
 import * as api from "@/lib/api";
+import { noteTaskEndpointReady } from "@/lib/computer-use/taskSource";
 import { registerGateAndMetaSubscriptions } from "./sessionHostGateSubscriptions";
 import { isMirrorClient } from "@/lib/mirrorTransport";
 import { planForkTrimmedFollowUp } from "@/lib/sessionFork";
@@ -46,6 +47,7 @@ import {
   upgradeMessagesFromJournal,
   weaveToolsIntoAssistantSegments,
   ensureBusyTurnStreaming,
+  ensureContinuationForHostSnapshot,
   settleStreamingOnHostReady,
   type AskUserPayload,
   type ChatMessage,
@@ -635,6 +637,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
        track(
           listenWithRetry<SessionSnapshot>("session://state", (s) => {
             if (cancelled) return;
+            if (s.sessionId && ["ready", "streaming", "awaiting_permission"].includes(s.state)) noteTaskEndpointReady(s.sessionId);
             // Host focus slot (the process under the live cursor). Multi-session
             // busy demotions also emit session://runtime so liveMap stays honest.
             const prevLiveState = s.sessionId
@@ -674,6 +677,11 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                   };
             c.setLiveHost(heldSnapshot);
             c.liveHostRef.current = heldSnapshot;
+            if (s.sessionId) {
+              c.patchSessionMessages(s.sessionId, (prev) =>
+                ensureContinuationForHostSnapshot(prev, heldSnapshot),
+              );
+            }
             c.setLiveMap((prev) =>
               projectHostIntoLiveMap(prev, {
                 sessionId: s.sessionId,
@@ -799,6 +807,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
        track(
           listenWithRetry<SessionSnapshot>("session://runtime", (s) => {
             if (cancelled || !s.sessionId) return;
+            if (["ready", "streaming", "awaiting_permission"].includes(s.state)) noteTaskEndpointReady(s.sessionId);
             const prevLiveState = c.liveMapRef.current[s.sessionId]?.state;
             let background = false;
             if (
@@ -823,6 +832,13 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
               c.setLiveMap((prev) =>
                 projectHostIntoLiveMap(prev, {
                   sessionId: s.sessionId,
+                  state: heldState,
+                  streamingMessageId:
+                    heldState !== s.state ? null : s.streamingMessageId,
+                }),
+              );
+              c.patchSessionMessages(s.sessionId, (prev) =>
+                ensureContinuationForHostSnapshot(prev, {
                   state: heldState,
                   streamingMessageId:
                     heldState !== s.state ? null : s.streamingMessageId,

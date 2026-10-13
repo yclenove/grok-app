@@ -1084,7 +1084,7 @@ pub fn load_settings() -> AppSettings {
             "settings migration: normalized proxyMode to {}",
             s.proxy_mode
         );
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: installs that already stored keys in keychain before the opt-in
     // keep keychain mode so keys remain reachable without a silent loss.
@@ -1092,7 +1092,7 @@ pub fn load_settings() -> AppSettings {
         let disk = crate::secrets::load_secrets_disk_only();
         if disk.keychain_has_official || disk.keychain_has_relay {
             s.store_api_keys_in_keychain = true;
-            let _ = write_json(&settings_file(), &s);
+            let _ = save_settings(&s);
         }
     }
     // One-time: installs predating the multi-session rework persisted the old
@@ -1108,10 +1108,10 @@ pub fn load_settings() -> AppSettings {
         );
         s.max_concurrent_agents = next;
         s.pool_size_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     } else if !s.pool_size_migrated {
         s.pool_size_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: stream stall soft window 120/180 → 600 (10 min). Installs that
     // only ever stored the product default must not keep false-stalling; a
@@ -1127,10 +1127,10 @@ pub fn load_settings() -> AppSettings {
         );
         s.stream_stall_seconds = next;
         s.stream_stall_default_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     } else if !s.stream_stall_default_migrated {
         s.stream_stall_default_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: product default is draft new-chat on launch (not restore last).
     // Prior builds defaulted reopen_last_session=true, so existing settings
@@ -1139,7 +1139,7 @@ pub fn load_settings() -> AppSettings {
         s.reopen_last_session = false;
         s.startup_new_chat_default_migrated = true;
         tracing::info!("settings migration: reopenLastSession → false (start on new chat)");
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: Grok Build 1.0 effort default medium → high. Unset / empty /
     // legacy product default medium lift to high; deliberate low/high/max kept.
@@ -1153,7 +1153,7 @@ pub fn load_settings() -> AppSettings {
             s.effort = Some(next);
         }
         s.effort_default_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: official catalog default grok-4.5 → grok-4.6. Unset / empty /
     // legacy product default grok-4.5 lift; deliberate other ids kept.
@@ -1167,7 +1167,7 @@ pub fn load_settings() -> AppSettings {
             s.model_id = Some(next);
         }
         s.official_model_default_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: official catalog default grok-4.6 → grok-4.7. Unset / empty /
     // the previous product default grok-4.6 lift. Explicit grok-4.5, Fast,
@@ -1187,7 +1187,7 @@ pub fn load_settings() -> AppSettings {
             s.model_id = Some(next);
         }
         s.official_model_47_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: official 4.6 product effort high → xhigh. Unset / empty / the
     // previous product default high lift; deliberate low/medium/max stay.
@@ -1204,12 +1204,12 @@ pub fn load_settings() -> AppSettings {
             }
         }
         s.official_effort_xhigh_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     if !s.official_effort_xhigh_rows_migrated {
         migrate_official_effort_xhigh_rows(s.model_id.as_deref());
         s.official_effort_xhigh_rows_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: factory UI locale `en` → `system` so Chinese (and other)
     // OS languages apply on first launch / existing installs that never
@@ -1224,7 +1224,7 @@ pub fn load_settings() -> AppSettings {
             s.locale = next;
         }
         s.locale_follow_system_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     // One-time: product workflows default off → on (CLI ≥0.2.111 / 1.0).
     // Only lifts false → true once; users who turn it off again stay off.
@@ -1236,7 +1236,7 @@ pub fn load_settings() -> AppSettings {
                 crate::agent_workflows::sync_workflows_to_agent_profile(&s.session_data_mode, true);
         }
         s.workflows_default_migrated = true;
-        let _ = write_json(&settings_file(), &s);
+        let _ = save_settings(&s);
     }
     s
 }
@@ -1389,9 +1389,17 @@ pub fn clamp_effort_for_model(model_id: &str, effort: &str) -> String {
 
 pub fn save_settings(s: &AppSettings) -> Result<(), String> {
     let _ = ensure_app_dirs();
+    save_settings_at(&settings_file(), s)
+}
+
+pub(crate) fn save_settings_at(path: &Path, s: &AppSettings) -> Result<(), String> {
     let mut normalized = s.clone();
     normalize_proxy_settings(&mut normalized);
-    write_json(&settings_file(), &normalized)
+    let mut value = serde_json::to_value(normalized).map_err(|e| e.to_string())?;
+    let _lock = crate::store_lock::lock_exclusive(path)?;
+    crate::computer_use::feature_preferences::preserve_owner(path, &mut value);
+    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+    crate::store_lock::write_bytes_replace(path, &bytes)
 }
 
 /// Async-context variant of [`load_settings`]. The settings file sits behind

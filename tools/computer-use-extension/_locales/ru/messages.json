@@ -24,7 +24,7 @@
     "message": "Не сопряжено."
   },
   "forget": {
-    "message": "Revoke pairing"
+    "message": "Отменить сопряжение"
   },
   "shareCurrentTab": {
     "message": "Поделиться текущей вкладкой"

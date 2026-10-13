@@ -263,7 +263,7 @@ fn deps(base_version: Arc<AtomicU64>, timeout: Duration) -> McpReconcileDeps {
     }
 }
 
-fn ready_live(
+pub(super) fn ready_live(
     app_session_id: &str,
     agent_session_id: &str,
     process_id: &str,

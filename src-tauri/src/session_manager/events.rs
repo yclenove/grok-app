@@ -271,12 +271,19 @@ impl SessionManager {
             AcpEvent::PromptComplete {
                 stop_reason,
                 authoritative,
+                host_turn_id,
             } => {
                 let mut pending_emits = Vec::new();
                 let mut pending_persists = Vec::new();
                 let empty_run = {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
+                        if host_turn_id
+                            .as_deref()
+                            .is_some_and(|turn| s.active_turn_id.as_deref() != Some(turn))
+                        {
+                            return;
+                        }
                         // Take any buffered stream before turn-end signals.
                         if let Some(p) = Self::take_pending_stream_emit(s) {
                             pending_emits.push(p);
@@ -328,6 +335,26 @@ impl SessionManager {
                 options,
                 raw,
             } => {
+                let app_session = self
+                    .inner
+                    .lock()
+                    .as_ref()
+                    .filter(|session| session.process_id == process_id)
+                    .map(|session| session.app_session_id.clone());
+                if let Some(app_session) = app_session {
+                    if self
+                        .respond_computer_use_permission(
+                            &app_session,
+                            process_id,
+                            rpc_id,
+                            &raw,
+                            &options,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                }
                 // During session/load replay, never surface a permission UI or
                 // leave the agent blocked on a historical tool approval.
                 let replay_acp = {

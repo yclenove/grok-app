@@ -11,12 +11,17 @@ pub(super) fn run() -> Result<(), String> {
     let page = root.join("page.html");
     std::fs::write(&page, r#"<!doctype html><meta charset="utf-8"><title>CU generic DOM fixture</title>
 <button>Without id</button><button id="duplicate">Duplicate first</button><button id="duplicate">Duplicate second</button>
+<label>输入框 <input value="值尾"></label>
 <div aria-label="First region" style="height:60px;overflow-y:auto"><div style="height:900px">First content</div></div>
 <div aria-label="Second region" style="height:60px;overflow-y:auto"><div style="height:900px">Second content</div></div>
 <button aria-label="Replaced control">Original</button>
+<button aria-label="等待中">等待中</button><button aria-label="替换等待">替换等待</button>
 <script>
-globalThis.effects = [0,0,0,0];
+globalThis.effects = [0,0,0,0,0,0];
+globalThis.inputEvents = [];
 document.querySelectorAll('button').forEach((button,index) => button.onclick = () => effects[index]++);
+const typed = document.querySelector('input');
+for (const type of ['beforeinput','input','change']) typed.addEventListener(type, event => inputEvents.push([event.type,event.inputType||null,event.data||null]));
 </script>"#).map_err(|_| "DOM fixture page unavailable")?;
     let url = tauri::Url::from_file_path(&page).map_err(|_| "DOM fixture URL unavailable")?;
     let live = HostOwnedWebView::spawn("resource-browser-dom", "dom", url.as_str())?;
@@ -55,6 +60,16 @@ fn request(
         },
         scope: ActionScope::Directed,
     })
+}
+
+fn wait_request(
+    observation: &Observation,
+    name: &str,
+    expected: &str,
+) -> Result<DispatchRequest, String> {
+    let mut request = request(observation, name, ActionKind::Wait)?;
+    request.parameters = serde_json::json!({"nameEquals": expected, "timeoutMs": 1000});
+    Ok(request)
 }
 
 fn check(live: &Arc<HostOwnedWebView>) -> Result<(), String> {
@@ -127,11 +142,48 @@ fn check(live: &Arc<HostOwnedWebView>) -> Result<(), String> {
     {
         return Err("generic DOM scroll not applied".into());
     }
-    let actual = parse_script_json(&live.host_script("({effects, first:document.querySelector('[aria-label=\"First region\"]').scrollTop, second:document.querySelector('[aria-label=\"Second region\"]').scrollTop})")?)?;
-    if actual != serde_json::json!({"effects":[1,0,1,1],"first":0,"second":120}) {
+    live.host_script("(() => { const input=document.querySelector('input'); input.focus(); input.setSelectionRange(1,1); return {ok:true}; })()")?;
+    let typed = adapter.observe(&target.target_id)?;
+    if typed.text.contains("值尾") {
+        return Err("generic DOM observation exposed the input value".into());
+    }
+    let mut type_request = request(&typed, "输入框", ActionKind::TypeText)?;
+    type_request.parameters = serde_json::json!({"text":"中文🙂"});
+    let type_result = adapter.act(&type_request)?;
+    if !type_result.applied || !type_result.verifiable || !type_result.postcondition_ok {
+        return Err("generic DOM type_text was not verified".into());
+    }
+    let wait = adapter.observe(&target.target_id)?;
+    live.host_script(
+        "(() => { const target = document.querySelector('[aria-label=\"等待中\"]'); setTimeout(() => target.setAttribute('aria-label', '等待完成'), 120); return {ok:true}; })()",
+    )?;
+    let wait_action = wait_request(&wait, "等待中", "等待完成")?;
+    let waited = adapter.act(&wait_action)?;
+    if !waited.verifiable || !waited.postcondition_ok {
+        return Err("same-object WebView wait did not verify the delayed name".into());
+    }
+    if !adapter.act(&wait_action)?.postcondition_ok {
+        return Err("WebView wait consumed its retained snapshot".into());
+    }
+
+    let replacement_wait = adapter.observe(&target.target_id)?;
+    live.host_script(
+        "(() => { const old = document.querySelector('[aria-label=\"替换等待\"]'); setTimeout(() => { const next = old.cloneNode(true); next.setAttribute('aria-label', '替换完成'); old.replaceWith(next); }, 120); return {ok:true}; })()",
+    )?;
+    if adapter
+        .act(&wait_request(&replacement_wait, "替换等待", "替换完成")?)
+        .is_ok()
+    {
+        return Err("replacement DOM object inherited the old WebView wait ref".into());
+    }
+    let actual = parse_script_json(&live.host_script("({effects, first:document.querySelector('[aria-label=\"First region\"]').scrollTop, second:document.querySelector('[aria-label=\"Second region\"]').scrollTop, typed:document.querySelector('input').value, selection:document.querySelector('input').selectionStart, inputEvents})")?)?;
+    if actual
+        != serde_json::json!({"effects":[1,0,1,1,0,0],"first":0,"second":120,
+        "typed":"值中文🙂尾","selection":5,"inputEvents":[["beforeinput","insertText","中文🙂"],["input","insertText","中文🙂"]]})
+    {
         return Err("generic DOM independent effect or scroller postcondition failed".into());
     }
     adapter.unbind();
-    println!("gate: webview_native_dom no_id=true duplicate_id_exact=true preview_preserves_model=true replacement_stale=true effects=1,0,1,1 scroll=0,120");
+    println!("gate: webview_native_dom no_id=true duplicate_id_exact=true preview_preserves_model=true replacement_stale=true type_text_verified=true type_text_private=true wait_same_object=true wait_snapshot_retained=true wait_replacement_stale=true effects=1,0,1,1,0,0 scroll=0,120");
     Ok(())
 }

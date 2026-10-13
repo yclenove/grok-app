@@ -109,3 +109,70 @@ describe("explicit pairing copy", () => {
     expect(expired).not.toHaveBeenCalled();
   });
 });
+
+it("preserves the focused copy control during a slow writeText and rejects repeated gestures", async () => {
+  let resolve!: () => void;
+  writeText.mockReturnValueOnce(new Promise<void>(done => { resolve = done; }));
+  const original = challenge();
+  render(<ComputerPairingFields locale="en" challenge={original} disabled={false} onExpired={vi.fn()} />);
+  const address = screen.getByRole("button", { name: "Copy App address" });
+  const code = screen.getByRole("button", { name: "Copy pairing code" });
+  address.focus();
+  fireEvent.click(address);
+  expect(address).toHaveFocus();
+  // A native disabled button loses focus in Chromium. Keep it keyboard reachable
+  // while the synchronous copying guard prevents duplicate clipboard requests.
+  expect(address).toBeEnabled();
+  expect(address).toHaveAttribute("aria-disabled", "true");
+  expect(code).toBeEnabled();
+  expect(code).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(address);
+  fireEvent.click(code);
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(original.endpoint);
+  await act(async () => resolve());
+  expect(address).toHaveFocus();
+  expect(address).toHaveAttribute("aria-disabled", "false");
+  expect(screen.getByRole("status")).toHaveTextContent("Copied");
+  writeText.mockResolvedValueOnce();
+  fireEvent.click(code);
+  await act(async () => {});
+  expect(writeText).toHaveBeenLastCalledWith(original.verificationCode);
+  expect(writeText).toHaveBeenCalledTimes(2);
+  expect(writeText.mock.calls.flat()).not.toContain(original.nonce);
+});
+
+it("keeps focus on a failed copy and allows an explicit retry without exposing clipboard errors", async () => {
+  let reject!: (reason: Error) => void;
+  writeText.mockReturnValueOnce(new Promise<void>((_resolve, fail) => { reject = fail; }));
+  render(<ComputerPairingFields locale="en" challenge={challenge()} disabled={false} onExpired={vi.fn()} />);
+  const copy = screen.getByRole("button", { name: "Copy pairing code" });
+  copy.focus();
+  fireEvent.click(copy);
+  await act(async () => reject(new Error("private clipboard detail")));
+  expect(copy).toHaveFocus();
+  expect(copy).toHaveAttribute("aria-disabled", "false");
+  expect(screen.getByRole("status")).not.toHaveTextContent("private clipboard detail");
+  expect(screen.getByRole("status")).not.toHaveTextContent("Copied");
+  writeText.mockResolvedValueOnce();
+  fireEvent.click(copy);
+  await act(async () => {});
+  expect(writeText).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("status")).toHaveTextContent("Copied");
+});
+
+it("does not report a slow copy successful after the original challenge expires", async () => {
+  vi.useFakeTimers();
+  let resolve!: () => void;
+  writeText.mockReturnValueOnce(new Promise<void>(done => { resolve = done; }));
+  const original = challenge();
+  const expired = vi.fn();
+  render(<ComputerPairingFields locale="en" challenge={original} disabled={false} onExpired={expired} />);
+  const copy = screen.getByRole("button", { name: "Copy App address" });
+  fireEvent.click(copy);
+  vi.setSystemTime(original.expiresAtMs + 1);
+  await act(async () => resolve());
+  expect(expired).toHaveBeenCalledOnce();
+  expect(screen.getByRole("status")).not.toHaveTextContent("Copied");
+  fireEvent.click(copy);
+  expect(writeText).toHaveBeenCalledTimes(1);
+});

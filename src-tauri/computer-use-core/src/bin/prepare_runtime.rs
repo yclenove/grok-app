@@ -1,4 +1,19 @@
-//! CLI: prepare or check an explicitly selected Computer Use runtime target.
+//! CLI: prepare, check, or audit sources for an explicit runtime target.
+const USAGE: &str = "usage: cu-prepare-runtime --prepare|--check|--verify-sources --target <target> [--repo <path>] [--seed <path>] [--cache <path>] [--lock <path>]";
+
+fn argument_value(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
+    match args
+        .next()
+        .filter(|value| !value.starts_with("--") && !value.is_empty())
+    {
+        Some(value) => value,
+        None => {
+            eprintln!("{flag} requires a value\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let mut mode = None;
     let mut target = None;
@@ -9,13 +24,26 @@ fn main() {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--prepare" => mode = Some("prepare"),
-            "--check" => mode = Some("check"),
-            "--target" => target = args.next(),
-            "--repo" => repo = args.next().map(std::path::PathBuf::from),
-            "--seed" => seed = args.next().map(std::path::PathBuf::from),
-            "--cache" => cache = args.next().map(std::path::PathBuf::from),
-            "--lock" => lock = args.next().map(std::path::PathBuf::from),
+            "--prepare" | "--check" | "--verify-sources" => {
+                if mode.is_some() {
+                    eprintln!("exactly one mode is required\n{USAGE}");
+                    std::process::exit(2);
+                }
+                mode = Some(match arg.as_str() {
+                    "--prepare" => "prepare",
+                    "--check" => "check",
+                    _ => "sources",
+                });
+            }
+            "--target" => target = Some(argument_value(&mut args, &arg)),
+            "--repo" => repo = Some(std::path::PathBuf::from(argument_value(&mut args, &arg))),
+            "--seed" => seed = Some(std::path::PathBuf::from(argument_value(&mut args, &arg))),
+            "--cache" => cache = Some(std::path::PathBuf::from(argument_value(&mut args, &arg))),
+            "--lock" => lock = Some(std::path::PathBuf::from(argument_value(&mut args, &arg))),
+            "--help" => {
+                println!("{USAGE}");
+                return;
+            }
             other => {
                 eprintln!("unknown arg {other}");
                 std::process::exit(2);
@@ -25,9 +53,7 @@ fn main() {
     let mode = match mode {
         Some(m) => m,
         None => {
-            eprintln!(
-                "usage: cu-prepare-runtime --prepare|--check --target <target> [--repo <path>]"
-            );
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
     };
@@ -61,6 +87,19 @@ fn main() {
     }
     if let Some(lock) = lock {
         ctx.lock_path = lock;
+    }
+    if mode == "sources" {
+        match grok_computer_use_core::runtime_prepare::verify_sources(&ctx) {
+            Ok(report) => println!(
+                "{}",
+                serde_json::to_string(&report).expect("source report serialization")
+            ),
+            Err(error) => {
+                eprintln!("{}: {}", error.code, error.message);
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     let result = match mode {
         "prepare" => grok_computer_use_core::runtime_prepare::prepare(&ctx),

@@ -10,6 +10,11 @@ static FEATURE: Mutex<bool> = Mutex::new(FEATURE_DEFAULT);
 static SESSIONS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static SURFACES: Mutex<Option<HashMap<String, ComputerUseSurface>>> = Mutex::new(None);
 
+// Independent fixtures share the process-wide preference and choice revision.
+// Keep those fixtures isolated without serializing workers within a scenario.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn sessions() -> std::sync::MutexGuard<'static, Option<HashSet<String>>> {
     SESSIONS.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -135,6 +140,7 @@ mod tests {
 
     #[test]
     fn default_off_and_independent_of_missing_session() {
+        let _feature_guard = TEST_LOCK.blocking_lock();
         set_feature_enabled(false);
         const { assert!(!FEATURE_DEFAULT) };
         assert!(!should_inject_session_mcp(Some("s1")));

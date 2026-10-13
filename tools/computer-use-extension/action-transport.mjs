@@ -1,4 +1,5 @@
 import { ActionCompletions, copyBoundAction } from "./action-completions.mjs";
+import { ExecutionSuspended, waitExecutionReady } from "./pairing-client.mjs";
 
 // One owner survives transport resets. Cleanup scopes never depend on current pairing.
 export class ExtensionActionTransport {
@@ -21,12 +22,23 @@ export class ExtensionActionTransport {
 
   async run(epoch, signal) {
     // Failed or legacy negotiation leaves the existing observation channel intact.
-    try { await this.#client.negotiateActions(epoch, signal); }
-    catch { return; }
+    for (;;) {
+      try { await this.#client.negotiateActions(epoch, signal); break; }
+      catch (error) {
+        if (!(error instanceof ExecutionSuspended)
+          || !await waitExecutionReady(this.#client, epoch, signal, this.#wait)) return;
+      }
+    }
     if (signal.aborted || this.#client.connectionEpoch !== epoch) return;
     if (this.#epoch !== epoch) { this.#epoch = epoch; this.#sequence = 0; }
     while (!signal.aborted && this.#client.connectionEpoch === epoch) {
-      const dispatch = await this.#client.pollAction(epoch, signal);
+      let dispatch;
+      try { dispatch = await this.#client.pollAction(epoch, signal); }
+      catch (error) {
+        if (!(error instanceof ExecutionSuspended)) throw error;
+        if (!await waitExecutionReady(this.#client, epoch, signal, this.#wait)) return;
+        continue;
+      }
       if (signal.aborted || this.#client.connectionEpoch !== epoch) return;
       if (dispatch !== null) {
         const { request, proof } = copyBoundAction(dispatch.request, dispatch.proof);

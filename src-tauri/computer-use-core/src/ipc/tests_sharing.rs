@@ -31,7 +31,7 @@ pub(super) fn offer(session: &PairingSession) -> Value {
     json!({ "instanceId": session.instance_id, "connectionNonce": session.connection_nonce,
         "generation": session.generation, "sequence": 1, "tabId": "101", "title": "fixture",
         "url": "https://fixture.invalid/", "browserId": "chromium", "profileId": "connection",
-        "documentGeneration": 7, "focused": true })
+        "documentGeneration": 7, "documentId":"0123456789abcdef0123456789abcdef", "focused": true })
 }
 
 fn unoffer(session: &PairingSession, sequence: u64, document: u64) -> Value {
@@ -388,4 +388,111 @@ fn stale_picker_selection_cannot_authorize_a_replacement_document() {
         .grant_picker_tab("owner", "run", &fresh_selection)
         .unwrap();
     assert_eq!(granted.document_generation, 8);
+}
+
+#[test]
+fn existing_task_http_document_share_flows_into_original_reservation() {
+    use crate::adapter::SurfaceKind;
+    use crate::broker::AccessApprovalReady;
+    let (broker, server, session) = fixture();
+    broker.register_existing_browser_adapter().unwrap();
+    let mut body = offer(&session);
+    body["documentId"] = json!("0123456789abcdef0123456789abcdef");
+    assert_eq!(post(&server, &session, "/cu/tab-offer", &body), 200);
+    let issued = broker.reserve_transport_connection("http-task").unwrap();
+    broker
+        .bind_transport_agent(issued.token(), "synthetic-http-agent")
+        .unwrap();
+    broker
+        .submit_access(
+            issued.token(),
+            json!({
+                "action":"request", "purpose":"shared fixture task", "surfaces":["existing-tabs"],
+                "scopeIntent":"original shared document", "capabilities":["observe", "input"]
+            }),
+        )
+        .unwrap();
+    let key = broker
+        .host_task_view(issued.token())
+        .unwrap()
+        .request
+        .unwrap()
+        .key;
+    let picker = broker
+        .begin_task_scope_picker(issued.token(), &key, SurfaceKind::ExistingTab)
+        .unwrap()
+        .discover()
+        .unwrap();
+    let views = picker.views().unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].surface, "existing-tabs");
+    let selection = picker.select(&[views[0].candidate_id.clone()]).unwrap();
+    assert!(broker.tabs().existing_target_info("101").is_none());
+    let AccessApprovalReady::Prepare(mut approval) = broker
+        .reserve_selected_access_approval(issued.token(), selection)
+        .unwrap()
+    else {
+        panic!("prepare")
+    };
+    approval.publish_feature().unwrap();
+    approval.prepare_execution().unwrap();
+    let granted = approval.commit().unwrap();
+    assert_eq!(
+        broker.tabs().existing_target_info("101").unwrap().run_id,
+        granted.run_id
+    );
+    broker.fence_task_consent("http-task");
+    for ticket in broker.take_cleanup_tickets() {
+        broker.finish_stop_cleanup(&ticket).unwrap();
+    }
+    assert_eq!(broker.executable_grant_count("http-task"), 0);
+    assert!(broker.tabs().existing_target_info("101").is_none());
+    assert_eq!(broker.tabs().list_shared_candidates().len(), 1);
+    assert!(!broker.tabs().is_closed("101"));
+}
+
+#[test]
+fn existing_task_http_invalid_document_preserves_proof_and_sequence() {
+    let (broker, server, session) = fixture();
+    let mut original = offer(&session);
+    original["documentId"] = json!("0123456789abcdef0123456789abcdef");
+    assert_eq!(post(&server, &session, "/cu/tab-offer", &original), 200);
+    let proof = broker.tabs().existing_scope_identity("tab:101").unwrap();
+    for invalid in [json!(""), json!("bad"), json!("z".repeat(32)), json!(12)] {
+        let mut body = original.clone();
+        body["sequence"] = json!(2);
+        body["documentId"] = invalid;
+        assert_ne!(post(&server, &session, "/cu/tab-offer", &body), 200);
+        assert_eq!(
+            broker.tabs().existing_scope_identity("tab:101").unwrap(),
+            proof
+        );
+    }
+    original["sequence"] = json!(2);
+    assert_eq!(post(&server, &session, "/cu/tab-offer", &original), 200);
+    assert_ne!(
+        broker.tabs().existing_scope_identity("tab:101").unwrap(),
+        proof
+    );
+    assert!(broker.tabs().existing_target_info("101").is_none());
+}
+
+#[test]
+fn existing_task_http_legacy_share_still_borrows_without_task_proof() {
+    let (broker, server, session) = fixture();
+    let mut legacy = offer(&session);
+    legacy.as_object_mut().unwrap().remove("documentId");
+    assert_eq!(post(&server, &session, "/cu/tab-offer", &legacy), 200);
+    assert!(broker.tabs().existing_scope_identity("tab:101").is_err());
+    let selector = broker.tabs().list_shared_candidates()[0].0.clone();
+    assert!(
+        broker
+            .tabs()
+            .grant_picker_tab("legacy", "legacy-run", &selector)
+            .unwrap()
+            .borrowed
+    );
+    broker.tabs().return_borrowed("legacy-run", "101").unwrap();
+    assert_eq!(broker.tabs().list_shared_candidates().len(), 1);
+    assert!(!broker.tabs().is_closed("101"));
 }

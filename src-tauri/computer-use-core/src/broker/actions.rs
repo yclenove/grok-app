@@ -1,5 +1,10 @@
 use super::*;
 
+struct WorkTiming {
+    elapsed_ms: u64,
+    completed: bool,
+}
+
 pub(super) fn semantic_hit(
     nodes: &[crate::protocol::ObservationNode],
     action: crate::protocol::ActionKind,
@@ -36,7 +41,36 @@ pub(super) fn semantic_hit(
 
 impl ComputerUseBroker {
     pub fn act(&self, req: ActionRequest) -> ActionOutcome {
-        match self.act_inner(&req) {
+        self.act_with(req, None)
+    }
+
+    pub fn act_for_permit(
+        &self,
+        permit: &crate::task_consent::ExecutionPermit,
+        req: ActionRequest,
+    ) -> ActionOutcome {
+        if permit.capability != "input"
+            || permit.run_id != req.run_id
+            || permit.target_id != req.target_id
+        {
+            return ActionOutcome {
+                action_id: req.action_id,
+                run_id: req.run_id,
+                kind: OutcomeKind::Rejected,
+                executed: false,
+                reason: Some(BrokerError::TargetUnauthorized.to_string()),
+                generation: 0,
+            };
+        }
+        self.act_with(req, Some(permit))
+    }
+
+    fn act_with(
+        &self,
+        req: ActionRequest,
+        model: Option<&crate::task_consent::ExecutionPermit>,
+    ) -> ActionOutcome {
+        match self.act_inner(&req, model) {
             Ok(o) => o,
             Err(e) => ActionOutcome {
                 action_id: req.action_id,
@@ -49,7 +83,11 @@ impl ComputerUseBroker {
         }
     }
 
-    fn act_inner(&self, req: &ActionRequest) -> Result<ActionOutcome, BrokerError> {
+    fn act_inner(
+        &self,
+        req: &ActionRequest,
+        model: Option<&crate::task_consent::ExecutionPermit>,
+    ) -> Result<ActionOutcome, BrokerError> {
         if let Err(s) = req.validate_schema() {
             return Err(BrokerError::Schema(s));
         }
@@ -87,7 +125,11 @@ impl ComputerUseBroker {
             let _ = self.pause_due_to(&req.run_id, "session locked");
             return Err(BrokerError::Schema("session locked; run paused".into()));
         }
-        if !adapter.foreground_input_available(&req.target_id) {
+        // A closed target is rejected by the action ledger below. Do not
+        // misclassify it as focus drift or leave its actionId retryable.
+        if adapter.target_alive(&req.target_id)
+            && !adapter.foreground_input_available(&req.target_id)
+        {
             let _ = self.pause_due_to(&req.run_id, "focus drifted");
             return Err(BrokerError::Schema("focus drifted; run paused".into()));
         }
@@ -107,10 +149,31 @@ impl ComputerUseBroker {
                 return Err(BrokerError::IdentityMismatch("geometryRevision"));
             }
         }
-        let (generation, cancellation, inflight, dispatch_target, managed_request) = {
+        let (generation, cancellation, inflight, dispatch_target, managed_request, admit_hook) = {
             let mut g = self.inner.lock();
             if !g.feature_enabled {
                 return Err(BrokerError::FeatureDisabled);
+            }
+            {
+                let run = g.runs.get(&req.run_id).ok_or(BrokerError::RunNotFound)?;
+                super::admit_consent(&g.consent, g.feature_enabled, g.feature_epoch, run)?;
+                if let ConsentGate::Bound(binding) = &run.consent {
+                    if !g.consent.binding_capability(binding, "input") {
+                        return Err(BrokerError::Schema(
+                            "capability does not allow this tool".into(),
+                        ));
+                    }
+                }
+                if let Some(permit) = model {
+                    if permit.run_id != req.run_id
+                        || permit.capability != "input"
+                        || permit.target_id != req.target_id
+                    {
+                        return Err(BrokerError::TargetUnauthorized);
+                    }
+                    g.consent
+                        .recheck_permit(permit, g.feature_enabled, g.feature_epoch)?;
+                }
             }
             let run = g
                 .runs
@@ -130,62 +193,10 @@ impl ComputerUseBroker {
                     "action budget exhausted; start a new run".into(),
                 ));
             }
-            if run.last_unknown {
-                return Err(BrokerError::Schema(
-                    "unknown result must observe before the next action".into(),
-                ));
-            }
-            if (matches!(req.target, crate::protocol::ActionTarget::Coord { .. })
-                || req.action == crate::protocol::ActionKind::Drag)
-                && !run.last_image_ok
-            {
-                return Err(BrokerError::Schema(
-                    "coordinate action requires a visual observation".into(),
-                ));
-            }
+            super::action_claim::validate_action_observation(run, req)?;
             let t = run.target.as_ref().ok_or(BrokerError::TargetUnauthorized)?;
-            if t.target_id != req.target_id {
-                return Err(BrokerError::IdentityMismatch("targetId"));
-            }
             if t.surface != surface || t.executor_generation != executor.generation {
                 return Err(BrokerError::IdentityMismatch("surfaceExecutorGeneration"));
-            }
-            if t.target_generation != req.target_generation {
-                return Err(BrokerError::IdentityMismatch("targetGeneration"));
-            }
-            match run.snapshot_id.as_deref() {
-                Some(s) if s == req.snapshot_id => {}
-                _ => return Err(BrokerError::IdentityMismatch("snapshotId")),
-            }
-            if run.geometry_revision != req.geometry_revision {
-                return Err(BrokerError::IdentityMismatch("geometryRevision"));
-            }
-            match &req.target {
-                crate::protocol::ActionTarget::Element { element_ref }
-                    if !run.element_refs.contains(element_ref) =>
-                {
-                    return Err(BrokerError::IdentityMismatch("elementRef"));
-                }
-                crate::protocol::ActionTarget::Coord { x, y }
-                    if *x < 0.0
-                        || *y < 0.0
-                        || *x >= run.image_size.0 as f64
-                        || *y >= run.image_size.1 as f64 =>
-                {
-                    return Err(BrokerError::Schema(
-                        "coordinates outside observed image".into(),
-                    ));
-                }
-                _ => {}
-            }
-            if req.action == crate::protocol::ActionKind::Drag {
-                let (x, y) = crate::protocol::drag_destination(&req.parameters)
-                    .map_err(BrokerError::Schema)?;
-                if x >= run.image_size.0 as f64 || y >= run.image_size.1 as f64 {
-                    return Err(BrokerError::Schema(
-                        "drag destination outside observed image".into(),
-                    ));
-                }
             }
             let mut dispatch_target = req.target.clone();
             if prefer_semantic {
@@ -223,6 +234,10 @@ impl ComputerUseBroker {
                 None
             };
             run.in_flight.store(true, Ordering::SeqCst);
+            run.unknown_idle_confirmed = false;
+            if let Some(activity) = &run.activity {
+                activity.begin();
+            }
             // Reserve before releasing admission; concurrent retries cannot dispatch twice.
             run.seen.insert(
                 req.action_id.clone(),
@@ -235,17 +250,22 @@ impl ComputerUseBroker {
                     generation: run.generation,
                 },
             );
+            let generation = run.generation;
+            let cancellation = run.cancellation.clone();
+            let inflight = run.in_flight.clone();
+            let admit_hook = g.consent.take_before_final_admit();
             (
-                run.generation,
-                run.cancellation.clone(),
-                run.in_flight.clone(),
+                generation,
+                cancellation,
+                inflight,
                 dispatch_target,
                 managed_request,
+                admit_hook,
             )
         };
         // Both the caller (through outcome publication) and the worker (through
         // physical completion, even after timeout) must release admission.
-        let inflight_guard = Arc::new(InFlightClear(inflight));
+        let inflight_guard = Arc::new(InFlightClear::new(inflight, &self.changes));
         self.trace_stage(
             "prepare",
             req,
@@ -255,15 +275,37 @@ impl ComputerUseBroker {
                 adapter.backend_id()
             ),
         );
+        if let Some(hook) = admit_hook {
+            hook();
+        }
+        if let Some(permit) = model {
+            if let Err(error) = self.recheck_model_call(permit) {
+                return self.record(
+                    req,
+                    generation,
+                    OutcomeKind::Rejected,
+                    false,
+                    Some(error.to_string()),
+                    WorkTiming {
+                        elapsed_ms: 0,
+                        completed: false,
+                    },
+                );
+            }
+        }
 
         if !adapter.target_alive(&req.target_id) {
+            self.record_closed_target(&req.run_id, generation, &req.target_id);
             return self.record(
                 req,
                 generation,
                 OutcomeKind::Rejected,
                 false,
                 Some(BrokerError::DeadTarget.to_string()),
-                0,
+                WorkTiming {
+                    elapsed_ms: 0,
+                    completed: false,
+                },
             );
         }
 
@@ -294,7 +336,10 @@ impl ComputerUseBroker {
                         kind,
                         executed,
                         Some(detail),
-                        t0.elapsed().as_millis() as u64,
+                        WorkTiming {
+                            elapsed_ms: t0.elapsed().as_millis() as u64,
+                            completed: kind != OutcomeKind::Unknown,
+                        },
                     )
                 }
                 Err(error) => {
@@ -309,7 +354,10 @@ impl ComputerUseBroker {
                         OutcomeKind::Rejected,
                         false,
                         Some(text),
-                        t0.elapsed().as_millis() as u64,
+                        WorkTiming {
+                            elapsed_ms: t0.elapsed().as_millis() as u64,
+                            completed: true,
+                        },
                     )
                 }
             };
@@ -334,7 +382,10 @@ impl ComputerUseBroker {
                     OutcomeKind::Rejected,
                     false,
                     Some(error.to_string()),
-                    0,
+                    WorkTiming {
+                        elapsed_ms: 0,
+                        completed: false,
+                    },
                 );
             }
         }
@@ -343,11 +394,18 @@ impl ComputerUseBroker {
 
         let (tx, rx) = mpsc::channel();
         let worker_guard = inflight_guard.clone();
+        let completion_activity = self
+            .inner
+            .lock()
+            .runs
+            .get(&req.run_id)
+            .and_then(|run| run.activity.clone());
         let worker = std::thread::Builder::new()
             .name("computer-use-action".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     cancellation.check()?;
+                    let _completion = super::activity::PhysicalCompletion::new(completion_activity);
                     adapter.act(&dispatch)
                 }))
                 .unwrap_or_else(|_| Err("adapter worker panicked; outcome unknown".into()));
@@ -364,7 +422,10 @@ impl ComputerUseBroker {
                 OutcomeKind::Rejected,
                 false,
                 Some(format!("could not start action worker: {error}")),
-                0,
+                WorkTiming {
+                    elapsed_ms: 0,
+                    completed: false,
+                },
             );
         }
 
@@ -381,7 +442,10 @@ impl ComputerUseBroker {
                     OutcomeKind::Unknown,
                     true,
                     Some(e),
-                    t0.elapsed().as_millis() as u64,
+                    WorkTiming {
+                        elapsed_ms: t0.elapsed().as_millis() as u64,
+                        completed: false,
+                    },
                 );
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -392,7 +456,10 @@ impl ComputerUseBroker {
                     OutcomeKind::Unknown,
                     true,
                     Some("timeout; not auto-replayed".into()),
-                    t0.elapsed().as_millis() as u64,
+                    WorkTiming {
+                        elapsed_ms: t0.elapsed().as_millis() as u64,
+                        completed: false,
+                    },
                 );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -403,7 +470,10 @@ impl ComputerUseBroker {
                     OutcomeKind::Unknown,
                     true,
                     Some("adapter worker dropped".into()),
-                    t0.elapsed().as_millis() as u64,
+                    WorkTiming {
+                        elapsed_ms: t0.elapsed().as_millis() as u64,
+                        completed: false,
+                    },
                 );
             }
         };
@@ -428,7 +498,10 @@ impl ComputerUseBroker {
             kind,
             adapter_result.applied,
             Some(adapter_result.detail),
-            t0.elapsed().as_millis() as u64,
+            WorkTiming {
+                elapsed_ms: t0.elapsed().as_millis() as u64,
+                completed: kind != OutcomeKind::Unknown,
+            },
         )
     }
 
@@ -486,7 +559,7 @@ impl ComputerUseBroker {
             if self.stop_state(&req.run_id)? != StopState::Running {
                 return Err(BrokerError::StopRequested);
             }
-            let observation = self.capture(&req.run_id, false, false, Some(permit))?;
+            let observation = self.capture(&req.run_id, false, false, Some(permit), None, None)?;
             if observation
                 .nodes
                 .iter()
@@ -508,7 +581,7 @@ impl ComputerUseBroker {
         kind: OutcomeKind,
         executed: bool,
         reason: Option<String>,
-        act_ms: u64,
+        timing: WorkTiming,
     ) -> Result<ActionOutcome, BrokerError> {
         let outcome = ActionOutcome {
             action_id: req.action_id.clone(),
@@ -535,7 +608,10 @@ impl ComputerUseBroker {
                 );
                 true
             } else {
-                run.timings.act_ms = act_ms;
+                run.timings.act_ms = timing.elapsed_ms;
+                if let Some(failure) = host_task::HostExecutionFailure::from_outcome(kind) {
+                    run.last_failure = Some(failure);
+                }
                 if kind == OutcomeKind::Unknown {
                     run.last_unknown = true;
                 }
@@ -545,6 +621,9 @@ impl ComputerUseBroker {
         } else {
             false
         };
+        if !late && timing.completed && kind != OutcomeKind::Unknown {
+            super::note_locked_activity(&mut g, &req.run_id);
+        }
         if late {
             g.dropped_late += 1;
             push_trace(

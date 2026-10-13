@@ -22,6 +22,7 @@ describe("computer-use golden catalog", () => {
   it("matches TypeScript constants", () => {
     expect(catalog.protocolVersion).toBe(COMPUTER_USE_PROTOCOL_VERSION);
     expect(catalog.modelTools).toEqual([...COMPUTER_USE_MODEL_TOOLS]);
+    expect(COMPUTER_USE_MODEL_TOOLS).toContain("computer_upload");
     expect(catalog.hostOnlyTools).toEqual([...COMPUTER_USE_HOST_ONLY_TOOLS]);
     expect(catalog.errorCodes).toEqual([...COMPUTER_USE_ERROR_CODES]);
     for (const name of catalog.hostOnlyTools) {

@@ -5,6 +5,27 @@ use crate::archive_zip::write_test_zip;
 use std::io::Cursor;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
+#[test]
+fn production_scope_identity_module_is_packed_and_hash_recorded() {
+    let root = std::env::temp_dir().join(format!("cu-scope-pack-{}", uuid::Uuid::new_v4()));
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/computer-use-browser");
+    pack_worker(&root, &source).unwrap();
+    let expected = fs::read(source.join("scope-identity.mjs")).unwrap();
+    assert_eq!(
+        fs::read(root.join("playwright/scope-identity.mjs")).unwrap(),
+        expected
+    );
+    let listing = fs::read_to_string(root.join("playwright/modules.sha256list")).unwrap();
+    assert!(listing.lines().any(|line| line
+        == format!(
+            "scope-identity.mjs\t{}\t{}",
+            expected.len(),
+            sha256_hex(&expected)
+        )));
+    assert!(!root.join("playwright/scope-identity.test.mjs").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
 pub(super) fn source_lock(target: RuntimeTarget) -> RuntimeLock {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../resources/computer-use")

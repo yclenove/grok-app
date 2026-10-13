@@ -6,6 +6,7 @@ mod existing_adapter;
 pub mod extension_action;
 pub mod extension_completion;
 pub(crate) mod extension_image;
+pub mod extension_observation;
 pub mod extension_protocol;
 mod host;
 pub mod host_allowlist;
@@ -15,13 +16,17 @@ pub mod observation;
 mod recording;
 mod request;
 mod run_lifecycle;
+mod scope_identity;
 pub use request::{ManagedRequest, ManagedRequestIdentity};
+pub use scope_identity::{parse_managed_scope_identity, ManagedScopeIdentity};
 #[cfg(any(test, feature = "test-support"))]
 mod tests_gates;
 #[cfg(test)]
 mod tests_profile_lifecycle;
 #[cfg(test)]
 mod tests_request_binding;
+#[cfg(test)]
+mod tests_scope_identity;
 #[cfg(test)]
 mod tests_worker_error;
 mod types;
@@ -31,7 +36,8 @@ pub mod worker_env;
 pub mod worker_http;
 
 pub use existing_adapter::ExistingBrowserAdapter;
-pub use host::{ExistingTabHost, TabAttachment};
+pub(crate) use host::ScopePairing;
+pub use host::{ExistingScopeIdentity, ExistingTabHost, TabAttachment};
 pub use managed_adapter::ManagedBrowserAdapter;
 pub use observation::{
     model_visible_url, parse_managed_observation, parse_managed_page, parse_worker_success,

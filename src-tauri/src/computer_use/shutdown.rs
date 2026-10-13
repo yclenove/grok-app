@@ -15,9 +15,50 @@ const APP_EXIT_CATALOG_BUDGET: Duration = Duration::from_millis(2_500);
 
 static EXIT_STATE: AtomicU8 = AtomicU8::new(EXIT_IDLE);
 
+/// Probe process uses the same original worker joins as cooperative App exit.
+#[cfg(feature = "computer-use-probe")]
+pub(crate) async fn join_request_probe_workers() -> Result<(), String> {
+    super::consent_watch::stop();
+    super::task_access::stop();
+    super::task_scope::stop();
+    super::task_picker::stop();
+    super::task_events::stop();
+    super::task_controls::stop();
+    super::feature_lifecycle::stop();
+    // A failure in one registry must not skip joining the other owners.
+    let results = [
+        super::consent_watch::join().await,
+        super::task_access::join().await,
+        super::task_scope::join().await,
+        super::task_picker::join().await,
+        super::task_events::join().await,
+        super::task_controls::join().await,
+        super::feature_lifecycle::join().await,
+    ];
+    let errors = results
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 /// Immediately deny new dispatch while the event loop is still deciding
 /// whether it can exit. Remote ACP cleanup is awaited separately.
 pub(crate) fn fence_all() {
+    super::consent_watch::stop();
+    super::task_access::stop();
+    super::task_scope::stop();
+    super::task_picker::stop();
+    super::task_events::stop();
+    super::task_controls::stop();
+    super::feature_lifecycle::stop();
+    if let Some(broker) = super::global_broker() {
+        broker.set_feature_enabled(false);
+    }
     if let Err(error) = super::sessions::fence_all_checked() {
         tracing::warn!(%error, "Computer Use authority fence during App shutdown failed");
     }
@@ -28,7 +69,32 @@ pub(crate) async fn shutdown_with_catalog_barrier(
     budget: Duration,
 ) -> McpShutdownReport {
     fence_all();
-    let report = manager.shutdown_computer_use_catalogs(budget).await;
+    manager.stop_computer_use_dispatcher();
+    let mut report = manager.shutdown_computer_use_catalogs(budget).await;
+    if let Err(error) = manager.join_computer_use_dispatcher().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::consent_watch::join().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::task_access::join().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::task_scope::join().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::task_picker::join().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::task_events::join().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::task_controls::join().await {
+        report.errors.push(error);
+    }
+    if let Err(error) = super::feature_lifecycle::join().await {
+        report.errors.push(error);
+    }
     if report.is_clean() {
         tracing::info!(
             attempted = report.attempted,
@@ -84,6 +150,13 @@ pub(crate) fn intercept_exit_requested(app: &AppHandle, code: Option<i32>) -> bo
             let _ = shutdown_with_catalog_barrier(&manager, APP_EXIT_CATALOG_BUDGET).await;
         } else {
             tracing::warn!("Computer Use App shutdown has no managed SessionManager");
+            let _ = super::consent_watch::join().await;
+            let _ = super::task_access::join().await;
+            let _ = super::task_scope::join().await;
+            let _ = super::task_picker::join().await;
+            let _ = super::task_events::join().await;
+            let _ = super::task_controls::join().await;
+            let _ = super::feature_lifecycle::join().await;
             let _ = tauri::async_runtime::spawn_blocking(super::shutdown_product).await;
         }
         EXIT_STATE.store(EXIT_COMPLETE, Ordering::SeqCst);

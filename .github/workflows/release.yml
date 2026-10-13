@@ -102,6 +102,7 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             libssl-dev \
+            libclang-dev build-essential pkg-config meson ninja-build python3-jinja2 patch \
             rpm \
             file
 
@@ -118,6 +119,26 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Prepare audited private native SDK on the Linux release baseline
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "$ID:$VERSION_ID" = ubuntu:22.04
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.35'
+          bash scripts/build-computer-use-pipewire.sh "$RUNNER_TEMP/cu-pw-release"
+          bash scripts/build-computer-use-libei.sh "$RUNNER_TEMP/cu-ei-release"
+          PKG_CONFIG_PATH="$RUNNER_TEMP/cu-pw-release/lib/pkgconfig:$RUNNER_TEMP/cu-ei-release/lib/pkgconfig" \
+            bash scripts/check-computer-use-linux-sdk.sh
+          bash scripts/check-computer-use-pipewire-runtime.sh \
+            "$RUNNER_TEMP/cu-pw-release" "$RUNNER_TEMP/cu-ei-release" "$RUNNER_TEMP/cu-native-release-proof"
+          {
+            echo "PKG_CONFIG_PATH=$RUNNER_TEMP/cu-pw-release/lib/pkgconfig:$RUNNER_TEMP/cu-ei-release/lib/pkgconfig"
+            echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cu-pw-release/lib"
+            echo "GROK_CU_PIPEWIRE_RUNTIME=$RUNNER_TEMP/cu-native-release-proof/runtime"
+          } >> "$GITHUB_ENV"
 
       # Release description = CHANGELOG.md section for this version (bilingual body).
       # Fails the job if `## [X.Y.Z]` is missing — write changelog before tagging.

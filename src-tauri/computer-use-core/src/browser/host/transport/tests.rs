@@ -2,6 +2,8 @@ use super::*;
 use crate::browser::{SharedTabOffer, TabDisconnect};
 use crate::pairing::{ExtensionPairing, PairingSession, EXTENSION_ID};
 
+mod lifecycle;
+
 fn fixture() -> (ExistingTabHost, PairingSession, String) {
     let host = ExistingTabHost::new();
     let challenge = host.begin_pairing_challenge();
@@ -16,7 +18,7 @@ fn fixture() -> (ExistingTabHost, PairingSession, String) {
     (host, session, origin)
 }
 fn grant(host: &ExistingTabHost, session: &PairingSession, origin: &str, tab: &str, sequence: u64) {
-    host.offer_connected_tab(
+    host.offer_connected_tab_document(
         &connection(session),
         sequence,
         SharedTabOffer {
@@ -32,6 +34,7 @@ fn grant(host: &ExistingTabHost, session: &PairingSession, origin: &str, tab: &s
             connection_generation: session.generation,
             focused: true,
         },
+        Some("0123456789abcdef0123456789abcdef"),
     )
     .unwrap();
     let selector = host
@@ -69,6 +72,19 @@ fn result(request: ExtensionRequest) -> ExtensionResult {
         },
         request,
     }
+}
+
+fn settle(
+    host: &ExistingTabHost,
+    session: &PairingSession,
+    origin: &str,
+    request: &ExtensionRequest,
+) {
+    host.claim_extension_observation(origin, &session.session_key, &request.completion)
+        .unwrap();
+    // Synthetic reader has physically returned; this is not a Host shortcut.
+    host.settle_extension_observation(origin, &request.completion)
+        .unwrap();
 }
 
 #[test]
@@ -109,6 +125,7 @@ fn requests_are_delivered_once_and_results_require_every_bound_field() {
         .poll_extension_request(&origin, &session.session_key, &connection(&session))
         .unwrap()
         .is_none());
+    settle(&host, &session, &origin, &request);
     for field in [
         "protocol",
         "requestId",
@@ -117,6 +134,7 @@ fn requests_are_delivered_once_and_results_require_every_bound_field() {
         "session",
         "runId",
         "tabId",
+        "documentId",
         "documentGeneration",
         "grantGeneration",
     ] {
@@ -231,6 +249,7 @@ fn malformed_observation_does_not_complete_or_unblock_next_request() {
         .unwrap();
     host.poll_extension_request(&origin, &session.session_key, &connection(&session))
         .unwrap();
+    settle(&host, &session, &origin, &request);
     let mut reply = result(request);
     let ExtensionOutcome::Observation { observation } = &mut reply.outcome else {
         unreachable!()
@@ -252,6 +271,7 @@ fn screenshot_request_is_exact_and_requires_a_valid_image() {
             .unwrap();
         host.poll_extension_request(&origin, &session.session_key, &connection(&session))
             .unwrap();
+        settle(&host, &session, &origin, &request);
         let mut reply = result(request);
         let ExtensionOutcome::Observation { observation } = &mut reply.outcome else {
             unreachable!()
@@ -274,5 +294,69 @@ fn screenshot_request_is_exact_and_requires_a_valid_image() {
             receive.recv().unwrap().unwrap().screenshot.is_some(),
             screenshot
         );
+    }
+}
+
+#[test]
+fn existing_task_observation_must_match_authenticated_share_document_before_delivery() {
+    for preview in [false, true] {
+        let (host, session, origin) = fixture();
+        host.offer_connected_tab_document(
+            &connection(&session),
+            1,
+            SharedTabOffer {
+                pairing_token: &session.session_key,
+                origin: &origin,
+                extension_id: Some(EXTENSION_ID),
+                tab_id: "101",
+                title: "fixture",
+                url: "https://fixture.invalid/",
+                browser_id: "chromium",
+                profile_id: "fixture",
+                document_generation: 7,
+                connection_generation: session.generation,
+                focused: true,
+            },
+            Some("0123456789abcdef0123456789abcdef"),
+        )
+        .unwrap();
+        let selector = host.list_shared_candidates()[0].0.clone();
+        host.grant_picker_tab("owner", "run-101", &selector)
+            .unwrap();
+        let mut options = CaptureOptions::model(false);
+        options.for_model = !preview;
+        let (request, receive) = host
+            .enqueue_extension_capture("owner", "run-101", "101", options)
+            .unwrap();
+        host.poll_extension_request(&origin, &session.session_key, &connection(&session))
+            .unwrap();
+        settle(&host, &session, &origin, &request);
+        let mut wrong = result(request.clone());
+        let ExtensionOutcome::Observation { observation } = &mut wrong.outcome else {
+            unreachable!()
+        };
+        observation.document_id = "fedcba9876543210fedcba9876543210".into();
+        assert_eq!(
+            host.complete_extension_request(&origin, &session.session_key, wrong)
+                .unwrap_err(),
+            "invalid extension observation document or URL"
+        );
+        assert!(
+            receive.try_recv().is_err(),
+            "mismatched document must never reach consumer"
+        );
+        assert!(host.inner.lock().tabs["101"].current_observation.is_none());
+        assert_eq!(host.inner.lock().extension_requests.len(), 1);
+        host.complete_extension_request(&origin, &session.session_key, result(request))
+            .unwrap();
+        assert_eq!(
+            receive.recv().unwrap().unwrap().document_id,
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            host.inner.lock().tabs["101"].current_observation.is_some(),
+            !preview
+        );
+        host.return_borrowed("run-101", "101").unwrap();
     }
 }

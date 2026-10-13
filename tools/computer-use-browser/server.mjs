@@ -4,6 +4,7 @@
  * Loopback only. Not a root runtime dependency.
  */
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -35,6 +36,7 @@ import { RunOperations } from "./run-operations.mjs";
 import { InputCleanup } from "./input-cleanup.mjs";
 import { ContextClose, waitForCleanup } from "./context-close.mjs";
 import { navigatePage } from "./navigation.mjs";
+import { managedScopeIdentity } from "./scope-identity.mjs";
 import {
   WORKER_COMPLETION_NOT_STARTED,
   WORKER_COMPLETION_UNKNOWN,
@@ -55,6 +57,7 @@ const STAGING_ROOT = resolve(
   process.env.GROK_CU_BROWSER_STAGING_ROOT || join(PROFILE_ROOT, ".staging"),
 );
 const MAX_DOWNLOAD = 8 * 1024 * 1024;
+const WORKER_INSTANCE_ID = randomUUID();
 
 if (!TOKEN) {
   process.stderr.write("GROK_CU_BROWSER_TOKEN required\n");
@@ -144,7 +147,7 @@ const operations = new RunOperations();
 const openingProfiles = new Set();
 const cancellingRuns = new Map();
 let shutdownPromise = null;
-const RUN_ROUTES = new Set(["/open", "/tabs", "/new-tab", "/frames", "/goto", "/upload", "/observe", "/act", "/download", "/close"]);
+const RUN_ROUTES = new Set(["/open", "/tabs", "/new-tab", "/frames", "/goto", "/upload", "/observe", "/act", "/download", "/close", "/scope-identity"]);
 
 function forgetSlot(profile, slot) {
   if (owners.get(profile) === slot) owners.delete(profile);
@@ -191,6 +194,7 @@ function createSlot(owner, context, dir) {
     owner,
     context,
     dir,
+    contextInstanceId: randomUUID(),
     pages: new Map(),
     pageIds: new WeakMap(),
     actions: new Map(),
@@ -398,6 +402,21 @@ const server = http.createServer(async (req, res) => {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw workerException(400, "invalid_request", "object body required");
     }
+    if (url.pathname === "/scope-identity") {
+      if (String(req.headers["x-grok-cu-host"] || "") !== "1") {
+        throw workerException(403, "forbidden", "scope identity is a Host operation");
+      }
+      if (!Number.isSafeInteger(body.runRevision) || body.runRevision < 1) {
+        throw workerException(400, "invalid_run_revision", "positive integer runRevision required");
+      }
+      const got = requireOwner(body);
+      if (got.error) {
+        json(res, got.error.code, { error: got.error.error });
+        return;
+      }
+      // A metadata query cannot create a run or launch a profile/context.
+      operations.status(body.owner, body.runRevision);
+    }
     if (RUN_ROUTES.has(url.pathname)) requestOperation = operations.begin(body.owner, body.runRevision);
     if (["/pause-run", "/resume-run", "/run-status"].includes(url.pathname)) {
       if (String(req.headers["x-grok-cu-host"] || "") !== "1") {
@@ -429,6 +448,7 @@ const server = http.createServer(async (req, res) => {
         browserVersion: process.env.GROK_CU_BROWSER_VERSION || "",
         page: { observe: true, observeOptions: 1, act: true, waitCondition: 1, navigate: true },
         runLifecycle: 1,
+        scopeIdentity: 1,
         playwright: true,
         chrome: chromePath(),
         openProfiles: [...owners.keys()],
@@ -516,6 +536,15 @@ const server = http.createServer(async (req, res) => {
       } finally {
         openingProfiles.delete(profile);
       }
+      return;
+    }
+    if (url.pathname === "/scope-identity") {
+      const got = requireOwner(body);
+      if (got.error) {
+        json(res, got.error.code, { error: got.error.error });
+        return;
+      }
+      json(res, 200, managedScopeIdentity(got, body.pageId, WORKER_INSTANCE_ID), requestOperation);
       return;
     }
     if (url.pathname === "/tabs") {

@@ -59,6 +59,19 @@ function run(cmd, args) {
 }
 
 {
+  if (target.arch === "x86_64-linux") {
+    if (!process.env.GROK_CU_PIPEWIRE_RUNTIME) {
+      process.stderr.write("GROK_CU_PIPEWIRE_RUNTIME must point at an audited Jammy-compatible private runtime before Linux bundling.\n");
+      process.exit(1);
+    }
+    run("python3", [
+      join(ROOT, "scripts", "stage-computer-use-native-sdk.py"),
+      process.env.GROK_CU_PIPEWIRE_RUNTIME,
+      join(ROOT, "src-tauri", "resources", "computer-use", "native-pipewire"),
+    ]);
+  }
+  run(process.execPath, [join(ROOT, "scripts", "prepare-computer-use-extension.mjs"), "--check"]);
+  run(process.execPath, [join(ROOT, "scripts", "check-computer-use-extension.mjs")]);
   run(process.execPath, [
     join(ROOT, "scripts", "prepare-computer-use-runtime.mjs"),
     "--prepare",

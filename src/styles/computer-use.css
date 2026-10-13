@@ -167,6 +167,43 @@
 .cu-task-card__head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .cu-task-card__head > div { flex: 1; min-width: 0; }
 .cu-task-card__target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.cu-task-card__purpose, .cu-task-card__scope { overflow-wrap: anywhere; white-space: pre-wrap; line-height: var(--leading-normal); }
+.cu-task-card__purpose { font-weight: 500; }
+.cu-task-card__scope { margin: 0; color: var(--text-secondary); }
+.cu-upload { display: grid; gap: var(--space-2); min-width: 0; }
+.cu-upload__request { display: grid; gap: var(--space-2); min-width: 0; padding-block: var(--space-3); border-top: 1px solid var(--border-subtle); }
+.cu-upload p { margin: 0; overflow-wrap: anywhere; }
+.cu-upload .btn { height: auto; min-height: var(--control-height); white-space: normal; overflow-wrap: anywhere; }
+.cu-consent__permissions { margin: 0; padding-inline-start: var(--space-4); overflow-wrap: anywhere; line-height: var(--leading-normal); }
+.cu-consent__modal.modal { background: var(--bg-elevated); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.cu-consent__modal .modal-body { min-width: 0; overflow-y: auto; }
+.cu-consent__modal .modal-actions { flex-wrap: wrap; }
+.cu-consent__modal .btn { height: auto; min-height: var(--control-height); white-space: normal; overflow-wrap: anywhere; }
+.cu-consent__candidates { display: grid; gap: var(--space-2); }
+.cu-consent__preparation { display: grid; gap: var(--space-3); min-width: 0; }
+.cu-consent__preparation > p { margin: 0; }
+.cu-consent__preparation > .btn { justify-self: start; max-width: 100%; }
+.cu-consent__preparation > .btn[aria-disabled="true"] { opacity: .55; cursor: default; }
+.cu-extension-setup__body { display: grid; gap: var(--space-3); min-width: 0; }
+.cu-extension-setup__body p { margin: 0; }
+.cu-extension-setup__body > .btn { justify-self: start; max-width: 100%; white-space: normal; }
+.cu-extension-setup__body .btn[aria-disabled="true"] { opacity: .55; cursor: default; }
+.cu-extension-setup__identity { overflow-wrap: anywhere; }
+.cu-extension-setup__path { display: grid; gap: var(--space-1); min-width: 0; }
+.cu-extension-setup__path .input { width: 100%; min-width: 0; box-sizing: border-box; }
+.cu-extension-setup__steps { margin: 0; padding-inline-start: var(--space-5); overflow-wrap: anywhere; }
+.cu-pairing__copy[aria-disabled="true"] { opacity: .55; cursor: default; }
+.cu-consent__candidate {
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1);
+  min-width: 0; min-height: var(--control-height); padding: var(--space-3);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+  background: var(--bg-input); color: var(--text-primary); text-align: start;
+  font: inherit; overflow-wrap: anywhere; cursor: pointer;
+}
+.cu-consent__candidate small { color: var(--text-secondary); }
+.cu-consent__candidate[aria-pressed="true"] { border-color: var(--text-primary); background: var(--bg-hover); }
+.cu-consent__candidate:disabled { cursor: default; opacity: 0.5; }
+.cu-consent__candidate:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
 .cu-task-card__meta { color: var(--text-secondary); font-size: var(--text-xs); }
 .cu-task-card[data-state="unknown"] .cu-task-card__state { color: var(--warning); }
 .cu-settings .settings-row { gap: var(--space-4); }
@@ -209,7 +246,7 @@
 .cu-pairing__fields, .cu-pairing__field { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .cu-pairing__field > label { color: var(--text-secondary); }
 .cu-pairing__copy-row { display: flex; align-items: stretch; gap: var(--space-2); min-width: 0; }
-.cu-pairing__copy-row .input { flex: 1; font-family: var(--font-mono); }
+.cu-pairing__copy-row .input { flex: 1; min-width: 0; width: 0; font-family: var(--font-mono); }
 .cu-pairing__copy.btn { flex: 0 0 var(--control-height); padding-inline: var(--space-2); }
 .cu-pairing__feedback { min-height: 1.5em; color: var(--text-secondary); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .cu-pairing__feedback[data-state="error"] { color: var(--danger); }

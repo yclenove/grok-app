@@ -1,4 +1,10 @@
+#[path = "build/linux_native.rs"]
+mod linux_native;
+
 fn main() {
+    linux_native::configure(std::path::Path::new(
+        &std::env::var_os("CARGO_MANIFEST_DIR").unwrap(),
+    ));
     // Windows test STATUS_ENTRYPOINT_NOT_FOUND fix lives in CI (post-link mt.exe
     // Common Controls v6 on the test harness). Do NOT add /MANIFESTINPUT here:
     // tauri_build already embeds a Windows app manifest; a second one fails

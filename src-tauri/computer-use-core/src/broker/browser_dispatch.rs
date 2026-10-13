@@ -1,6 +1,19 @@
 //! Single Broker-owned admit path for every browser write.
 
 use super::*;
+
+fn require_browser_task_scope(run: &RunState, req: &BrowserWrite<'_>) -> Result<(), BrokerError> {
+    if let ConsentGate::Bound(binding) = &run.consent {
+        // No task policy currently permits profile creation or popup/new-tab
+        // expansion. The active execution binding is an exact approved member.
+        if matches!(&req.op, BrowserOp::NewTab { .. } | BrowserOp::Popup { .. })
+            || req.tab_id != binding.target_id
+        {
+            return Err(BrokerError::TargetUnauthorized);
+        }
+    }
+    Ok(())
+}
 use crate::browser::action_ledger;
 use crate::browser::{
     ManagedLocator, ManagedPage, ManagedTabAction, TabInfo, WorkerCompletion, WorkerError,
@@ -25,7 +38,7 @@ mod transaction_tests {
             let state = broker.inner.lock();
             let run = &state.runs["run"];
             run.in_flight.store(true, Ordering::SeqCst);
-            InFlightClear(run.in_flight.clone())
+            InFlightClear::new(run.in_flight.clone(), &broker.changes)
         };
         broker.finish_browser(
             "run",
@@ -35,6 +48,7 @@ mod transaction_tests {
             true,
             None,
             None,
+            false,
         );
         assert!(matches!(
             broker.observe("run"),
@@ -117,7 +131,20 @@ impl ComputerUseBroker {
         &self,
         req: BrowserWrite<'_>,
     ) -> Result<BrowserWriteResult, BrokerError> {
-        match self.admit_browser(&req)? {
+        self.dispatch_browser_with(req, None)
+    }
+
+    pub fn dispatch_browser_with(
+        &self,
+        req: BrowserWrite<'_>,
+        permit: Option<&crate::task_consent::ExecutionPermit>,
+    ) -> Result<BrowserWriteResult, BrokerError> {
+        if let Some(permit) = permit {
+            if permit.run_id != req.run_id || permit.capability != "input" {
+                return Err(BrokerError::TargetUnauthorized);
+            }
+        }
+        match self.admit_browser(&req, permit)? {
             Admit::Replay(replay) => Ok(replay_to_result(replay)),
             Admit::Execute {
                 page_generation,
@@ -125,7 +152,26 @@ impl ComputerUseBroker {
                 run_generation,
                 managed_request,
             } => {
-                let _guard = InFlightClear(inflight);
+                let _guard = InFlightClear::new(inflight, &self.changes);
+                let admit_hook = self.inner.lock().consent.take_before_final_admit();
+                if let Some(hook) = admit_hook {
+                    hook();
+                }
+                if let Some(permit) = permit {
+                    if let Err(error) = self.recheck_model_call(permit) {
+                        self.finish_browser(
+                            req.run_id,
+                            req.action_id,
+                            run_generation,
+                            OutcomeKind::Rejected,
+                            false,
+                            None,
+                            Some(&error.to_string()),
+                            false,
+                        );
+                        return Err(error);
+                    }
+                }
                 self.trace_browser(&req);
                 let result =
                     self.execute_browser(&req, page_generation, run_generation, &managed_request);
@@ -148,6 +194,7 @@ impl ComputerUseBroker {
                             false,
                             Some(result_to_replay(&result)),
                             Some("applied"),
+                            true,
                         );
                         Ok(result)
                     }
@@ -161,6 +208,7 @@ impl ComputerUseBroker {
                             unknown,
                             None,
                             Some(&error.to_string()),
+                            !unknown,
                         );
                         Err(error)
                     }
@@ -169,7 +217,11 @@ impl ComputerUseBroker {
         }
     }
 
-    fn admit_browser(&self, req: &BrowserWrite<'_>) -> Result<Admit, BrokerError> {
+    fn admit_browser(
+        &self,
+        req: &BrowserWrite<'_>,
+        permit: Option<&crate::task_consent::ExecutionPermit>,
+    ) -> Result<Admit, BrokerError> {
         crate::browser::validate_browser_action_id(req.action_id)?;
         self.preflight_browser_run(req)?;
         let replay_existing = {
@@ -244,6 +296,29 @@ impl ComputerUseBroker {
             return Err(BrokerError::FeatureDisabled);
         }
         let budget = self.action_budget;
+        {
+            let run = g.runs.get(req.run_id).ok_or(BrokerError::RunNotFound)?;
+            super::admit_consent(&g.consent, g.feature_enabled, g.feature_epoch, run)?;
+            require_browser_task_scope(run, req)?;
+            if let ConsentGate::Bound(binding) = &run.consent {
+                if !g.consent.binding_capability(binding, "input") {
+                    return Err(BrokerError::Schema(
+                        "capability does not allow this tool".into(),
+                    ));
+                }
+            }
+            if let Some(permit) = permit {
+                g.consent
+                    .recheck_permit(permit, g.feature_enabled, g.feature_epoch)?;
+                if run
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.target_id != permit.target_id)
+                {
+                    return Err(BrokerError::TargetUnauthorized);
+                }
+            }
+        }
         let run = g.runs.get_mut(req.run_id).ok_or(BrokerError::RunNotFound)?;
         if let Some(session) = req.session_id {
             if run.app_session_id != session {
@@ -297,6 +372,10 @@ impl ComputerUseBroker {
             .tabs
             .admit_managed_request(req.run_id, run.cancellation.clone())?;
         run.in_flight.store(true, Ordering::SeqCst);
+        run.unknown_idle_confirmed = false;
+        if let Some(activity) = &run.activity {
+            activity.begin();
+        }
         run.fingerprints
             .insert(req.action_id.to_string(), fingerprint);
         run.seen.insert(
@@ -324,6 +403,7 @@ impl ComputerUseBroker {
             return Err(BrokerError::FeatureDisabled);
         }
         let run = g.runs.get(req.run_id).ok_or(BrokerError::RunNotFound)?;
+        require_browser_task_scope(run, req)?;
         if let Some(session) = req.session_id {
             if run.app_session_id != session {
                 return Err(BrokerError::IdentityMismatch("appSessionId"));
@@ -450,6 +530,7 @@ impl ComputerUseBroker {
         unknown: bool,
         replay: Option<BrowserReplay>,
         reason: Option<&str>,
+        activity: bool,
     ) {
         let mut g = self.inner.lock();
         let late = g
@@ -488,9 +569,15 @@ impl ComputerUseBroker {
             if unknown {
                 run.last_unknown = true;
             }
+            if let Some(failure) = host_task::HostExecutionFailure::from_outcome(kind) {
+                run.last_failure = Some(failure);
+            }
             if let Some(replay) = replay {
                 run.browser_replay.insert(action_id.to_string(), replay);
             }
+        }
+        if !late && activity && !unknown {
+            super::note_locked_activity(&mut g, run_id);
         }
     }
 

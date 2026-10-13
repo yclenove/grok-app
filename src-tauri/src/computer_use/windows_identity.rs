@@ -1,7 +1,8 @@
 //! HWND identity stamps and host-window exclusion.
 //!
-//! `target_id` is `win:{pid}:{hwnd_hex}:{stamp}`. Stamp is a per-HWND property
-//! so a recycled handle cannot satisfy an old id. Host (`grok-app`) windows
+//! `target_id` is `win:{pid}:{hwnd_hex}:{stamp}:{process_birth}`. A live process
+//! creation time and per-HWND property fence PID and window reuse separately.
+//! These checks do not make Win32 callbacks atomic. Host (`grok-app`) windows
 //! and explicitly marked surfaces are never listed or acted on.
 
 #![cfg(target_os = "windows")]
@@ -9,7 +10,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::core::{w, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, WAIT_TIMEOUT};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenElevation,
     TokenIntegrityLevel, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
@@ -18,8 +19,9 @@ use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_SWITCHDESKTOP,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+    WaitForSingleObject, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetPropW, RemovePropW, SetPropW};
 
@@ -81,19 +83,54 @@ pub fn is_marked_protected(hwnd: HWND) -> bool {
 }
 
 pub fn format_target_id(pid: u32, hwnd: HWND, stamp: u64) -> String {
-    format!("win:{pid}:{:x}:{stamp}", hwnd.0 as usize)
+    process_birth(pid)
+        .map(|birth| format!("win:{pid}:{:x}:{stamp}:{birth}", hwnd.0 as usize))
+        .unwrap_or_default()
 }
 
+#[cfg(any(test, feature = "computer-use-probe"))]
 pub fn parse_target_id(target_id: &str) -> Option<(u32, HWND, u64)> {
+    parse_target_identity(target_id).map(|(pid, hwnd, stamp, _)| (pid, hwnd, stamp))
+}
+
+/// Decode without renewing authority. Execution must separately match birth.
+pub(super) fn parse_target_identity(target_id: &str) -> Option<(u32, HWND, u64, u64)> {
     let rest = target_id.strip_prefix("win:")?;
     let mut parts = rest.split(':');
     let pid: u32 = parts.next()?.parse().ok()?;
     let hwnd_u = usize::from_str_radix(parts.next()?, 16).ok()?;
     let stamp: u64 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
+    let birth: u64 = parts.next()?.parse().ok()?;
+    if pid == 0 || hwnd_u == 0 || stamp == 0 || birth == 0 || parts.next().is_some() {
         return None;
     }
-    Some((pid, HWND(hwnd_u as *mut _), stamp))
+    Some((pid, HWND(hwnd_u as *mut _), stamp, birth))
+}
+
+/// Query one exact live process. Inaccessible/exited processes have no witness;
+/// names and PID alone are never a fallback. Every opened handle is closed.
+pub(super) fn process_birth(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let process = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+        .ok()?;
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let read = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+        let live = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+        let _ = CloseHandle(process);
+        read.ok()?;
+        let birth = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        (live && birth != 0).then_some(birth)
+    }
 }
 
 pub fn process_image_stem(pid: u32) -> Option<String> {
@@ -240,5 +277,34 @@ pub fn session_input_available() -> bool {
             }
             Err(_) => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_birth_is_live_stable_and_not_available_for_pid_zero() {
+        let before = process_birth(std::process::id()).expect("own live process birth");
+        assert_eq!(process_birth(std::process::id()), Some(before));
+        assert_eq!(process_birth(0), None);
+    }
+
+    #[test]
+    fn root_identity_requires_process_and_window_witnesses() {
+        assert!(parse_target_id("win:42:ab:3").is_none());
+        for invalid in [
+            "win:0:ab:3:4",
+            "win:42:0:3:4",
+            "win:42:ab:0:4",
+            "win:42:ab:3:0",
+            "win:42:ab:3:4:extra",
+            "win:42:ab:3:bad",
+        ] {
+            assert!(parse_target_id(invalid).is_none(), "{invalid}");
+        }
+        let (pid, hwnd, stamp, birth) = parse_target_identity("win:42:ab:3:4").unwrap();
+        assert_eq!((pid, hwnd.0 as usize, stamp, birth), (42, 0xab, 3, 4));
     }
 }

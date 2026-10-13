@@ -24,7 +24,7 @@
     "message": "未ペアリングです。"
   },
   "forget": {
-    "message": "Revoke pairing"
+    "message": "ペアリングを解除"
   },
   "shareCurrentTab": {
     "message": "現在のタブを共有"

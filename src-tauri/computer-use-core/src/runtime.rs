@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub use crate::runtime_pins::{
+    PLAYWRIGHT_CORE_TGZ_SHA256, REQUIRED_JS_RUNTIME_VERSION, REQUIRED_PLAYWRIGHT_CORE_VERSION,
+};
+
 pub const JS_RUNTIME: &str = "js-runtime";
 pub const MCP_SERVER: &str = "mcp-server";
 pub const MCP_PROTOCOL: &str = "mcp-protocol";
@@ -188,10 +192,6 @@ impl RuntimeIssue {
 pub const PLACEHOLDER_JS_RUNTIME: &[u8] = b"GROK-APP-OWNED-JS-RUNTIME\n";
 pub const VERSION_PIN_JS_RUNTIME_STUB: &[u8] = b"grok-cu-windows-x64-js-runtime-20.18.0\n";
 pub const PLACEHOLDER_PLAYWRIGHT: &[u8] = b"export const grokComputerUsePlaywrightWorker = true;\n";
-pub const PLAYWRIGHT_CORE_TGZ_SHA256: &str =
-    "60cbf41da4e72847064ad7c720088dd133cf8601f7af9d5b1b73751d6e649562";
-pub const REQUIRED_JS_RUNTIME_VERSION: &str = "20.18.0";
-pub const REQUIRED_PLAYWRIGHT_CORE_VERSION: &str = "1.48.0";
 /// Four App-owned pack architectures. macOS/Linux verification stays not_run on Windows.
 pub const REQUIRED_PACK_ARCHS: &[&str] = &[
     "x86_64-windows",
@@ -369,6 +369,17 @@ fn component_tree_manifest(
     path: &Path,
     component: &RuntimeComponent,
 ) -> Result<(String, u64, u32), crate::playwright_materialize::MaterializeError> {
+    let limits = if component.id == CHROMIUM {
+        crate::runtime_limits::chromium()
+    } else {
+        crate::runtime_limits::playwright()
+    };
+    if component.size > limits.max_total_bytes {
+        return Err(crate::runtime_limits::error(
+            "oversize",
+            "manifest cannot raise runtime tree limits",
+        ));
+    }
     if component.id == CHROMIUM {
         crate::runtime_chromium::tree_manifest(path, &component.arch)
     } else {
@@ -478,8 +489,8 @@ impl RuntimeStore {
             components: BTreeMap::new(),
             compatibility: RuntimeCompatibility {
                 protocol: 1,
-                js_runtime_version: "20.18.0".into(),
-                playwright_core_version: "1.48.0".into(),
+                js_runtime_version: REQUIRED_JS_RUNTIME_VERSION.into(),
+                playwright_core_version: REQUIRED_PLAYWRIGHT_CORE_VERSION.into(),
                 worker_source_sha256: String::new(),
             },
         };
@@ -1070,6 +1081,13 @@ impl RuntimeStore {
             }
             let file = canon_bundle.join(&component.relpath);
             if component.kind == ComponentKind::Tree || file.is_dir() {
+                let (digest, size, _) = component_tree_manifest(&file, component)
+                    .map_err(|e| format!("{}: {}", e.code, e.message))?;
+                if digest != component.sha256 || (component.size != 0 && size != component.size) {
+                    return Err(format!(
+                        "Computer Use installer seed `{id}` tree failed integrity check"
+                    ));
+                }
                 trees.push((component.clone(), file));
                 continue;
             }
@@ -1106,6 +1124,25 @@ impl RuntimeStore {
     }
 
     pub fn repair_from_bundle(&self, bundle_dir: &Path) -> Result<String, String> {
+        // Validate resource bounds before retiring interrupted-upgrade evidence.
+        let raw = fs::read(bundle_dir.join("manifest.json")).map_err(|e| e.to_string())?;
+        let manifest: RuntimeManifest = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+        for component in manifest
+            .components
+            .values()
+            .filter(|component| component.kind == ComponentKind::Tree)
+        {
+            if Path::new(&component.relpath).is_absolute()
+                || component
+                    .relpath
+                    .split(['/', '\\'])
+                    .any(|part| part == "..")
+            {
+                return Err("installer seed path must stay inside the App bundle".into());
+            }
+            component_tree_manifest(&bundle_dir.join(&component.relpath), component)
+                .map_err(|e| format!("{}: {}", e.code, e.message))?;
+        }
         self.discard_interrupted_upgrade()?;
         let required = required_runtime_components();
         if let Some(active) = self.read_pointer().active.clone() {
@@ -1167,6 +1204,9 @@ impl RuntimeStore {
     /// Product spawn inputs. Must resolve node, worker, materialized Playwright,
     /// and Chromium independently — never guess worker from an archive parent.
     pub fn product_runtime_paths(&self) -> Result<ProductRuntimePaths, String> {
+        // Only this managed-browser launch boundary has the macOS 14 floor.
+        // MCP/bootstrap, repair and other surfaces retain the App's own floor.
+        crate::managed_browser_platform::ensure_supported().map_err(str::to_owned)?;
         let browser = self.resolve(CHROMIUM)?;
         let browser = if browser.is_dir() {
             let exe = chromium_executable_path(&browser, &host_arch())?;
@@ -2318,6 +2358,7 @@ mod tests {
         let shared = crate::runtime_test_seed::path();
         let sibling = shared.join("playwright").join("loopback.mjs");
         let before = fs::read(&sibling).expect("shared sibling");
+        let original_manifest = fs::read(shared.join("manifest.json")).unwrap();
         let isolated_root = if std::env::var_os("GROK_CU_TEST_SEED").is_some() {
             crate::runtime_mutation::isolated_clone_dir(shared.parent().expect("seed parent"))
         } else {
@@ -2325,12 +2366,32 @@ mod tests {
         };
         crate::runtime_mutation::clone_tree_hardlink(&shared, &isolated_root.join("seed"))
             .expect("same-volume hardlink clone");
-        fs::remove_file(isolated_root.join("seed/playwright/loopback.mjs")).unwrap();
         let mut ctx = crate::runtime_prepare::PrepareContext::shipped(repo, host_arch());
         ctx.seed_dir = isolated_root.join("seed");
+        let originals = ["worker.mjs", "modules.sha256list"]
+            .iter()
+            .chain(crate::runtime_prepare::WORKER_FILES)
+            .filter_map(|name| {
+                let path = shared.join("playwright").join(name);
+                fs::read(&path).ok().map(|bytes| (path, bytes))
+            })
+            .collect::<Vec<_>>();
+        let lock = crate::runtime_lock::load_lock(&ctx.lock_path).unwrap();
+        crate::runtime_prepare::refresh_fixture_worker(&ctx.seed_dir, &ctx.worker_src_dir, &lock)
+            .expect("update isolated clone without mutating shared hardlinks");
+        crate::runtime_prepare::check(&ctx)
+            .expect("positive current-source candidate before removal");
+        fs::remove_file(isolated_root.join("seed/playwright/loopback.mjs")).unwrap();
         let err = crate::runtime_prepare::check(&ctx).expect_err("missing sibling");
         assert_eq!(err.code, "missing_sibling", "{err:?}");
         assert_eq!(fs::read(&sibling).expect("shared sibling after"), before);
+        for (path, bytes) in originals {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(
+            fs::read(shared.join("manifest.json")).unwrap(),
+            original_manifest
+        );
         let _ = fs::remove_dir_all(&isolated_root);
     }
 }

@@ -26,16 +26,9 @@ fn default_timeout_ms() -> u64 {
     2000
 }
 
-pub(crate) fn wait_for_node(broker: &ComputerUseBroker, run: &str, args: Value) -> Value {
-    let request: WaitRequest = match serde_json::from_value(args) {
-        Ok(request) => request,
-        Err(e) => return error(format!("invalid wait request: {e}")),
-    };
-    if request.run_id != run {
-        return error("run does not match session credential");
-    }
-    let snapshot_id = request.snapshot_id.clone();
-    let outcome = broker.act(ActionRequest {
+pub(crate) fn parse_wait_action(args: Value) -> Result<ActionRequest, serde_json::Error> {
+    let request: WaitRequest = serde_json::from_value(args)?;
+    Ok(ActionRequest {
         version: request.version,
         action_id: request.action_id,
         run_id: request.run_id,
@@ -48,7 +41,27 @@ pub(crate) fn wait_for_node(broker: &ComputerUseBroker, run: &str, args: Value) 
             element_ref: request.element_ref,
         },
         parameters: json!({"nameEquals":request.name_equals,"timeoutMs":request.timeout_ms}),
-    });
+    })
+}
+
+pub(crate) fn wait_for_node(
+    broker: &ComputerUseBroker,
+    run: &str,
+    args: Value,
+    permit: Option<&crate::task_consent::ExecutionPermit>,
+) -> Value {
+    let request = match parse_wait_action(args) {
+        Ok(request) => request,
+        Err(e) => return error(format!("invalid wait request: {e}")),
+    };
+    if request.run_id != run {
+        return error("run does not match session credential");
+    }
+    let snapshot_id = request.snapshot_id.clone();
+    let outcome = match permit {
+        Some(permit) => broker.act_for_permit(permit, request),
+        None => broker.act(request),
+    };
     let matched = outcome.kind == OutcomeKind::Verified && outcome.executed;
     json!({"isError": !matched, "content":[{"type":"text", "text":json!({
         "matched":matched,"runId":run,"snapshotId":snapshot_id,"outcome":outcome

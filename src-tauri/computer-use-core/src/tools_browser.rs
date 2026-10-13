@@ -32,11 +32,27 @@ fn model_url(url: &str) -> String {
     crate::browser::model_visible_url(url)
 }
 
-pub(crate) fn list_tabs(broker: &ComputerUseBroker, run: &str) -> Value {
+pub(crate) fn list_tabs(
+    broker: &ComputerUseBroker,
+    run: &str,
+    permit: Option<&crate::task_consent::ExecutionPermit>,
+) -> Value {
+    let members = match permit
+        .map(|permit| broker.task_tab_ids_for_permit(permit))
+        .transpose()
+    {
+        Ok(members) => members,
+        Err(error) => return fail(&error),
+    };
     let tabs: Vec<Value> = broker
         .tabs()
         .list_for_run(run)
         .into_iter()
+        .filter(|tab| {
+            members
+                .as_ref()
+                .is_none_or(|members| members.contains(&tab.tab_id))
+        })
         .map(|tab| {
             json!({
                 "tabId": tab.tab_id,
@@ -47,14 +63,30 @@ pub(crate) fn list_tabs(broker: &ComputerUseBroker, run: &str) -> Value {
             })
         })
         .collect();
+    if let Some(permit) = permit {
+        if let Err(error) = broker.task_tab_ids_for_permit(permit) {
+            return fail(&error);
+        }
+    }
     success(json!({ "tabs": tabs }))
 }
 
-pub(crate) fn open_tab(broker: &ComputerUseBroker, run: &str, args: &Value) -> Value {
+pub(crate) fn open_tab(
+    broker: &ComputerUseBroker,
+    run: &str,
+    args: &Value,
+    permit: Option<&crate::task_consent::ExecutionPermit>,
+) -> Value {
     let tab_id = match require_id(args, "tabId") {
         Ok(id) => id,
         Err(err) => return err,
     };
+    if let Some(permit) = permit {
+        match broker.task_tab_ids_for_permit(permit) {
+            Ok(members) if members.contains(tab_id) => {}
+            _ => return fail(&crate::error::BrokerError::TargetUnauthorized),
+        }
+    }
     let Some(tab) = broker
         .tabs()
         .list_for_run(run)
@@ -63,6 +95,11 @@ pub(crate) fn open_tab(broker: &ComputerUseBroker, run: &str, args: &Value) -> V
     else {
         return error("select an already authorized tab; this cannot create a grant or profile");
     };
+    if let Some(permit) = permit {
+        if let Err(error) = broker.task_tab_ids_for_permit(permit) {
+            return fail(&error);
+        }
+    }
     success(json!({
         "tabId": tab.tab_id,
         "pageGeneration": tab.document_generation.max(1),
@@ -70,7 +107,20 @@ pub(crate) fn open_tab(broker: &ComputerUseBroker, run: &str, args: &Value) -> V
     }))
 }
 
-pub(crate) fn observe_tab(broker: &ComputerUseBroker, run: &str, args: &Value) -> Value {
+pub(crate) fn observe_tab(
+    broker: &ComputerUseBroker,
+    run: &str,
+    args: &Value,
+    permit: Option<&crate::task_consent::ExecutionPermit>,
+) -> Value {
+    if let Some(permit) = permit {
+        if permit.capability != "observe" || permit.run_id != run {
+            return fail(&crate::error::BrokerError::TargetUnauthorized);
+        }
+        if let Err(error) = broker.recheck_model_call(permit) {
+            return fail(&error);
+        }
+    }
     let tab_id = match require_id(args, "tabId") {
         Ok(id) => id,
         Err(err) => return err,
@@ -96,7 +146,21 @@ pub(crate) fn observe_tab(broker: &ComputerUseBroker, run: &str, args: &Value) -
     }
 }
 
-pub(crate) fn act_tab(broker: &ComputerUseBroker, session: &str, run: &str, args: &Value) -> Value {
+pub(crate) fn act_tab(
+    broker: &ComputerUseBroker,
+    session: &str,
+    run: &str,
+    args: &Value,
+    permit: Option<&crate::task_consent::ExecutionPermit>,
+) -> Value {
+    if let Some(permit) = permit {
+        if permit.capability != "input" || permit.run_id != run {
+            return fail(&crate::error::BrokerError::TargetUnauthorized);
+        }
+        if let Err(error) = broker.recheck_model_call(permit) {
+            return fail(&error);
+        }
+    }
     let tab_id = match require_id(args, "tabId") {
         Ok(id) => id,
         Err(err) => return err,
@@ -127,7 +191,7 @@ pub(crate) fn act_tab(broker: &ComputerUseBroker, session: &str, run: &str, args
     if let Some(key) = crate::protocol::forbidden_permission_param(&params) {
         return error(format!("{key} never grants desktop control"));
     }
-    match broker.dispatch_browser(BrowserWrite {
+    let write = BrowserWrite {
         session_id: Some(session),
         run_id: run,
         tab_id,
@@ -139,7 +203,12 @@ pub(crate) fn act_tab(broker: &ComputerUseBroker, session: &str, run: &str, args
             locator: ManagedLocator { element_ref },
             params,
         },
-    }) {
+    };
+    let acted = match permit {
+        Some(permit) => broker.dispatch_browser_with(write, Some(permit)),
+        None => broker.dispatch_browser(write),
+    };
+    match acted {
         Ok(BrowserWriteResult::Page(page)) => success(json!({
             "tabId": tab_id,
             "pageGeneration": page.page_generation,

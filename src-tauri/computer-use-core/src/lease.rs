@@ -135,23 +135,33 @@ pub(crate) fn pid_is_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
         use windows::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
         unsafe {
-            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-                return false;
+            let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                Ok(handle) => handle,
+                // Denied/uncertain is not evidence that the owner has exited.
+                Err(error) => {
+                    return error.code()
+                        != windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0)
+                }
             };
             let mut code = 0u32;
             let ok = GetExitCodeProcess(handle, &mut code).is_ok();
             let _ = CloseHandle(handle);
-            ok && code == STILL_ACTIVE.0 as u32
+            !ok || code == STILL_ACTIVE.0 as u32
         }
     }
     #[cfg(unix)]
     {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        // Never turn an unsigned PID into a negative process-group probe.
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
     #[cfg(not(any(windows, unix)))]
     {
@@ -202,7 +212,7 @@ mod tests {
         let leftover = LeaseInfo {
             run_id: "ghost".into(),
             instance_id: "dead-inst".into(),
-            pid: 1,
+            pid: crate::runtime_test_seed::retired_node_pid(),
         };
         std::fs::write(&path, serde_json::to_vec(&leftover).unwrap()).unwrap();
         let lease = DesktopLease::new(path);
@@ -212,5 +222,19 @@ mod tests {
             .expect("dead pid leftover must be stealable, not inherited");
         assert_eq!(lease.holder().unwrap().run_id, "fresh");
         lease.release("fresh").unwrap();
+    }
+
+    #[test]
+    fn current_and_reaped_native_child_have_distinct_liveness() {
+        assert!(pid_is_alive(std::process::id()));
+        assert!(!pid_is_alive(0));
+        assert!(!pid_is_alive(crate::runtime_test_seed::retired_node_pid()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_unsigned_pid_is_not_a_process_group_query() {
+        assert!(!pid_is_alive(u32::MAX));
+        assert!(!pid_is_alive(i32::MAX as u32 + 1));
     }
 }

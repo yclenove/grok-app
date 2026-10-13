@@ -177,6 +177,30 @@ impl ComputerUseAdapter for ExistingBrowserAdapter {
     fn list_targets(&self) -> Result<Vec<TargetInfo>, String> {
         Ok(Vec::new())
     }
+    fn scope_identity(&self, target: &str) -> Result<crate::adapter::NativeScopeIdentity, String> {
+        self.host
+            .existing_scope_identity(target)
+            .map(
+                |identity| crate::adapter::NativeScopeIdentity::ExistingPage {
+                    identity: Box::new(identity),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+    fn scope_target_info(&self, run: &str, target: &str) -> Result<TargetInfo, String> {
+        self.host
+            .existing_scope_info(run, target)
+            .map_err(|error| error.to_string())
+    }
+    fn scope_candidates(
+        &self,
+        limit: usize,
+        current: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<crate::adapter::ScopeCandidatePage, String> {
+        self.host
+            .existing_scope_candidates(limit, current)
+            .map_err(|error| error.to_string())
+    }
     fn list_targets_for_run(&self, run: &str) -> Result<Vec<TargetInfo>, String> {
         Ok(self
             .host
@@ -321,7 +345,7 @@ impl ComputerUseAdapter for ExistingBrowserAdapter {
         }
     }
     fn abort(&self, run: &str, _generation: u64) -> Result<(), String> {
-        self.host.cancel_existing_operations(run);
+        self.host.quiesce_existing_operations(run);
         Ok(())
     }
     fn is_idle(&self, run: &str) -> bool {

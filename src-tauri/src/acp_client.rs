@@ -73,6 +73,8 @@ pub enum AcpEvent {
     },
     PromptComplete {
         stop_reason: String,
+        /// Host turn identity. A late completion cannot settle a newer turn.
+        host_turn_id: Option<String>,
         /// True only for the `session/prompt` RPC result — the real end of the
         /// turn, ordered after every chunk the agent sent.
         ///
@@ -199,6 +201,7 @@ struct Pending {
     /// fallback free only the right waiter when one process hosts several
     /// concurrent turns (concurrent multi-session).
     session_id: Option<String>,
+    host_turn_id: Option<String>,
 }
 
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
@@ -335,6 +338,7 @@ fn prompt_fallback_due(last_update: Option<Instant>, grace: Duration, now: Insta
 }
 
 pub struct AcpClient {
+    computer_use_connections: ParkingMutex<HashMap<String, computer_use::RequestConnection>>,
     /// The spawned CLI process, or `None` in API mode (connected to a remote
     /// ACP server over TCP instead of spawning `grok agent stdio`).
     child: AsyncMutex<Option<Child>>,
@@ -350,6 +354,7 @@ pub struct AcpClient {
     stdin: AsyncMutex<Option<Box<dyn AsyncWrite + Unpin + Send>>>,
     next_id: AtomicU64,
     pending: ParkingMutex<HashMap<u64, Pending>>,
+    prompt_calls: ParkingMutex<HashMap<String, String>>,
     event_tx: mpsc::UnboundedSender<(Option<String>, AcpEvent)>,
     agent_session_id: ParkingMutex<Option<String>>,
     #[allow(dead_code)]
@@ -438,6 +443,7 @@ pub struct SpawnOptions {
     pub folder_trust: bool,
 }
 
+pub(crate) mod computer_use;
 mod spawn_flags;
 use spawn_flags::apply_grok_build_proxy_env;
 pub use spawn_flags::*;
@@ -1079,6 +1085,8 @@ impl AcpClient {
             .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child"))?;
 
         let client = Arc::new(Self {
+            computer_use_connections: ParkingMutex::new(HashMap::new()),
+            prompt_calls: ParkingMutex::new(HashMap::new()),
             child: AsyncMutex::new(Some(child)),
             child_pid,
             owns_local_process_tree,
@@ -1175,6 +1183,8 @@ impl AcpClient {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let client = Arc::new(Self {
+            computer_use_connections: ParkingMutex::new(HashMap::new()),
+            prompt_calls: ParkingMutex::new(HashMap::new()),
             child: AsyncMutex::new(None),
             child_pid: None,
             owns_local_process_tree: false,
@@ -1259,6 +1269,7 @@ impl AcpClient {
             if !c.reader_alive.swap(false, Ordering::SeqCst) {
                 return;
             }
+            c.retire_computer_use_transports();
             // Stdout EOF normally follows child termination. Capture the
             // status when it is already available so the Host can distinguish
             // a clean/failed CLI exit from a remote TCP EOF. `try_wait` keeps
@@ -1329,9 +1340,11 @@ impl AcpClient {
             if msg.get("result").is_some() || msg.get("error").is_some() {
                 let mut pending_method: Option<String> = None;
                 let mut pending_session: Option<String> = None;
+                let mut pending_turn: Option<String> = None;
                 if let Some(p) = self.pending.lock().remove(&id) {
                     pending_method = Some(p.method.clone());
                     pending_session = p.session_id.clone();
+                    pending_turn = p.host_turn_id.clone();
                     if let Some(err) = msg.get("error") {
                         let full = format_jsonrpc_error(err);
                         warn!("acp ← {} id={id} error: {}", p.method, full);
@@ -1363,11 +1376,7 @@ impl AcpClient {
                 // Some CLI builds omit `result.stopReason` even after a successful
                 // RPC. Always emit PromptComplete so Host clears prompt_in_flight
                 // and leaves Streaming/busy. Prefer stopReason → stop_reason → end_turn.
-                let is_prompt = pending_method
-                    .as_deref()
-                    .is_some_and(|m| m == "session/prompt")
-                    || msg.pointer("/result/stopReason").is_some()
-                    || msg.pointer("/result/stop_reason").is_some();
+                let is_prompt = pending_method.as_deref() == Some("session/prompt");
                 if is_prompt && msg.get("result").is_some() {
                     let sr = msg
                         .pointer("/result/stopReason")
@@ -1377,6 +1386,7 @@ impl AcpClient {
                     let _ = self.event_tx.send((
                         pending_session.clone(),
                         AcpEvent::PromptComplete {
+                            host_turn_id: pending_turn,
                             stop_reason: sr.to_string(),
                             authoritative: true,
                         },
@@ -1546,6 +1556,13 @@ impl AcpClient {
                     let _ = self.event_tx.send((
                         sid.clone(),
                         AcpEvent::PromptComplete {
+                            host_turn_id: sid.as_deref().and_then(|agent| {
+                                self.prompt_calls
+                                    .lock()
+                                    .get(agent)
+                                    .filter(|id| !id.is_empty())
+                                    .cloned()
+                            }),
                             stop_reason: stop.clone(),
                             authoritative: false,
                         },
@@ -1706,6 +1723,14 @@ impl AcpClient {
     }
 
     async fn write_line(&self, value: &Value) -> Result<(), String> {
+        self.write_line_admitting(value, None).await
+    }
+
+    async fn write_line_admitting(
+        &self,
+        value: &Value,
+        admission: Option<&(dyn Fn() -> Result<(), String> + Sync)>,
+    ) -> Result<(), String> {
         let mut line = serde_json::to_string(value).map_err(|e| e.to_string())?;
         line.push('\n');
         // Bound stdin lock+write: a dead/wedged agent must not pin the Host
@@ -1713,6 +1738,12 @@ impl AcpClient {
         let write_fut = async {
             let mut guard = self.stdin.lock().await;
             let stdin = guard.as_mut().ok_or_else(|| "stdin closed".to_string())?;
+            if let Some(admission) = admission {
+                admission()?;
+            }
+            if value.get("method").and_then(Value::as_str) == Some("session/prompt") {
+                self.stopped.store(false, Ordering::SeqCst);
+            }
             stdin
                 .write_all(line.as_bytes())
                 .await
@@ -2059,6 +2090,7 @@ impl AcpClient {
                 method: method.to_string(),
                 tx,
                 session_id: None,
+                host_turn_id: None,
             },
         );
         let msg = json!({
@@ -2103,7 +2135,11 @@ impl AcpClient {
     /// `session/prompt` wait: idle-based silence timeout, re-armed by every
     /// `session/update`. No absolute turn-age ceiling — a fixed wall clock
     /// killed healthy multi-image / multi-tool turns past 4 hours.
-    async fn request_prompt(&self, params: Value) -> Result<Value, String> {
+    async fn request_prompt_admitting(
+        &self,
+        params: Value,
+        admission: Option<&(dyn Fn() -> Result<(), String> + Sync)>,
+    ) -> Result<Value, String> {
         let method = "session/prompt";
         if !self.reader_alive.load(Ordering::SeqCst) {
             return Err(format!(
@@ -2126,6 +2162,13 @@ impl AcpClient {
                 method: method.to_string(),
                 tx,
                 session_id: prompt_sid.clone(),
+                host_turn_id: prompt_sid.as_deref().and_then(|agent| {
+                    self.prompt_calls
+                        .lock()
+                        .get(agent)
+                        .filter(|id| !id.is_empty())
+                        .cloned()
+                }),
             },
         );
         let msg = json!({
@@ -2134,8 +2177,9 @@ impl AcpClient {
             "method": method,
             "params": params,
         });
+        let _waiter = computer_use::PromptWaitGuard { client: self, id };
         info!("acp → {method} id={id}");
-        if let Err(e) = self.write_line(&msg).await {
+        if let Err(e) = self.write_line_admitting(&msg, admission).await {
             self.pending.lock().remove(&id);
             return Err(format!("write {method} failed: {e}"));
         }
@@ -2355,7 +2399,12 @@ impl AcpClient {
 
     /// A remote ACP server or auxiliary process cannot receive local desktop credentials.
     pub async fn supports_local_computer_use(&self) -> bool {
-        !self.empty_mcp_servers && self.ssh_alias.is_none() && self.child.lock().await.is_some()
+        computer_use::local_transport_allowed(
+            self.owns_local_process_tree,
+            self.empty_mcp_servers,
+            self.ssh_alias.is_some(),
+            self.child.lock().await.is_some(),
+        ) && self.is_alive()
     }
 
     /// [`Self::open_session`] with a caller-supplied cwd.
@@ -2370,6 +2419,17 @@ impl AcpClient {
         fork_session: bool,
         cwd: &str,
     ) -> Result<(String, bool), AgentError> {
+        self.open_session_at_with_entry(resume_session_id, fork_session, cwd, None)
+            .await
+    }
+
+    async fn open_session_at_with_entry(
+        &self,
+        resume_session_id: Option<&str>,
+        fork_session: bool,
+        cwd: &str,
+        request_entry: Option<&Value>,
+    ) -> Result<(String, bool), AgentError> {
         let cwd = cwd.to_string();
         if !crate::ssh_remote::acp_session_cwd_ok(self.ssh_alias.as_deref(), &cwd) {
             return Err(AgentError::new(
@@ -2383,51 +2443,23 @@ impl AcpClient {
         // hard budget falls back to `[]` so session/new|load always proceeds.
         // Official aux side-channel uses empty inject (no nested official-aux MCP).
         // SSH: do not scan the remote path as a local project.
-        let mcp_servers = if self.empty_mcp_servers || self.ssh_alias.is_some() {
-            if self.ssh_alias.is_some() {
-                info!("acp session open empty mcpServers (ssh remote)");
-            } else {
-                info!("acp session open empty mcpServers (side-channel)");
-            }
-            serde_json::json!([])
-        } else {
-            let project_cwd = cwd.clone();
-            let budget = crate::extensions::MCP_CONNECT_BUDGET;
-            let servers = match tokio::time::timeout(
-                budget,
-                tauri::async_runtime::spawn_blocking(move || {
-                    crate::extensions::build_session_mcp_servers_for_connect(Some(
-                        project_cwd.as_str(),
-                    ))
-                }),
-            )
+        let base = self.computer_use_base_catalog(cwd.clone()).await;
+        let mcp_servers = computer_use::merge_request_entry(base, request_entry);
+        self.open_session_with_catalog(resume_session_id, fork_session, &cwd, mcp_servers)
             .await
-            {
-                Ok(Ok(v)) => v,
-                Ok(Err(join_e)) => {
-                    warn!(
-                        "acp session open mcpServers join error ({join_e}); empty inject (connect proceeds)"
-                    );
-                    serde_json::json!([])
-                }
-                Err(_) => {
-                    warn!(
-                        budget_ms = budget.as_millis() as u64,
-                        "acp session open mcpServers exceeded budget; empty inject (connect proceeds)"
-                    );
-                    serde_json::json!([])
-                }
-            };
-            let mcp_count = servers.as_array().map(|a| a.len()).unwrap_or(0);
-            info!("acp session open injecting mcpServers count={mcp_count}");
-            servers
-        };
+    }
 
+    async fn open_session_with_catalog(
+        &self,
+        resume_session_id: Option<&str>,
+        fork_session: bool,
+        cwd: &str,
+        mcp_servers: Value,
+    ) -> Result<(String, bool), AgentError> {
         if let Some(rid) = resume_session_id.map(str::trim).filter(|s| !s.is_empty()) {
             // CLI `--fork-session`: new agent session id with parent context.
             if fork_session {
-                if let Some((sid, model_id)) = self.try_fork_session(rid, &cwd, &mcp_servers).await
-                {
+                if let Some((sid, model_id)) = self.try_fork_session(rid, cwd, &mcp_servers).await {
                     *self.agent_session_id.lock() = Some(sid.clone());
                     let _ = self.event_tx.send((
                         None,
@@ -2591,6 +2623,21 @@ impl AcpClient {
             Ok(result) => {
                 if let Some(sid) = parse_fork_session_id(&result, source_session_id) {
                     info!("acp _x.ai/session/fork ok newSessionId={sid}");
+                    // The extension fork request has no mcpServers contract.
+                    // Install the complete catalog explicitly before declaring
+                    // the request channel present on the newly forked session.
+                    if mcp_servers.as_array().is_some_and(|entries| {
+                        entries.iter().any(|entry| {
+                            entry.get("name").and_then(Value::as_str)
+                                == Some(crate::computer_use::MCP_SERVER_NAME)
+                        })
+                    }) && self
+                        .update_mcp_servers(&sid, mcp_servers.clone())
+                        .await
+                        .is_err()
+                    {
+                        return None;
+                    }
                     let model_id = result
                         .pointer("/models/currentModelId")
                         .and_then(|v| v.as_str())
@@ -2786,15 +2833,35 @@ impl AcpClient {
     /// Prompt an explicit agent session (`session/prompt`).
     /// Shared-process multi-session: callers MUST pass the session they mean.
     pub async fn prompt_for(&self, session_id: &str, text: &str) -> Result<(), AgentError> {
-        let sid = session_id.to_string();
+        self.prompt_for_admitting(session_id, text, None, None)
+            .await
+    }
 
-        self.stopped.store(false, Ordering::SeqCst);
+    pub(crate) async fn prompt_for_turn(
+        &self,
+        session_id: &str,
+        text: &str,
+        turn: &str,
+    ) -> Result<(), AgentError> {
+        self.prompt_for_admitting(session_id, text, None, Some(turn))
+            .await
+    }
+
+    async fn prompt_for_admitting(
+        &self,
+        session_id: &str,
+        text: &str,
+        admission: Option<&(dyn Fn() -> Result<(), String> + Sync)>,
+        turn: Option<&str>,
+    ) -> Result<(), AgentError> {
+        let _call = computer_use::PromptCallGuard::begin(self, session_id, turn)?;
+        let sid = session_id.to_string();
 
         // Fire and wait for completion in background via request future
         let this_params = wire_session_prompt_params(&sid, text);
 
         let result = self
-            .request_prompt(this_params)
+            .request_prompt_admitting(this_params, admission)
             .await
             .map_err(|e| classify_rpc_error(&e))?;
 
@@ -2805,21 +2872,15 @@ impl AcpClient {
             .unwrap_or("end_turn")
             .to_string();
 
-        let _ = self.event_tx.send((
-            Some(sid.clone()),
-            AcpEvent::Stream {
-                kind: StreamKind::Assistant,
-                text: String::new(),
-                message_id: None,
-                done: true,
-            },
-        ));
+        // PromptComplete owns the terminal stream flush. A duplicate unstamped
+        // Stream(done) here could arrive after Host opened the next turn.
         // Belt-and-suspenders with handle_line's unconditional PromptComplete
         // for session/prompt Ok (#522). Duplicate authoritative completes are
         // safe: second pass finds prompt_in_flight already false.
         let _ = self.event_tx.send((
             Some(sid),
             AcpEvent::PromptComplete {
+                host_turn_id: turn.map(|_| _call.id().to_string()),
                 stop_reason: stop,
                 authoritative: true,
             },
@@ -3087,6 +3148,7 @@ impl AcpClient {
         // essential for TCP ACP: closing only the writer left the reader task
         // alive and allowed ghost events from a remote peer after recycle.
         self.stopped.store(true, Ordering::SeqCst);
+        self.retire_computer_use_transports();
         self.reader_alive.store(false, Ordering::SeqCst);
         // `notify_waiters` only wakes tasks that are already waiting.  The
         // reader checks `reader_alive` immediately before entering `select!`,
@@ -5617,6 +5679,7 @@ mod prompt_fallback_tests {
                 method: "session/prompt".into(),
                 tx: first_tx,
                 session_id: Some("sidA".into()),
+                host_turn_id: None,
             },
         );
 
@@ -5633,6 +5696,7 @@ mod prompt_fallback_tests {
                 method: "session/prompt".into(),
                 tx: second_tx,
                 session_id: Some("sidA".into()),
+                host_turn_id: None,
             },
         );
 

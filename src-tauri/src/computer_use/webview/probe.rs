@@ -129,6 +129,8 @@ pub fn run_webview_gates() -> Result<(), String> {
         run_product_bind_rounds(20)?;
         super::probe_isolation::run()?;
         super::probe_dom::run()?;
+        super::probe_download::run()?;
+        super::probe_navigation::run()?;
         super::probe_timeout::run()?;
         super::probe_deadline::run()?;
         super::probe_setup::run()?;

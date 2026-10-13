@@ -5,7 +5,15 @@
 //! therefore goes through the same per-session desired-state loop. Authority
 //! is fenced by `computer_use::sessions` before this module is called.
 
+mod dispatch;
 mod lifecycle;
+mod permission;
+mod task_access;
+mod task_publication;
+mod task_recovery;
+mod task_upload;
+pub(super) use dispatch::DispatchWorker;
+pub(crate) use task_recovery::TaskResumeOutcome;
 
 use super::*;
 use crate::acp_client::AcpClient;
@@ -148,6 +156,12 @@ fn safe_resource_cleanup_error(error: impl AsRef<str>) -> String {
 }
 
 impl SessionManager {
+    pub(super) fn fence_computer_use_chat_stop(&self, session_id: &str) {
+        if let Some(endpoint) = self.mcp_endpoint(session_id) {
+            endpoint.acp.computer_use_chat_stopped(session_id);
+        }
+    }
+
     /// Snapshot App session ids that can own an ACP MCP catalog. Do not use
     /// `agent_session_id` here: a shared ACP may host several App sessions and
     /// the grant registry is keyed by the App id.
@@ -218,6 +232,24 @@ impl SessionManager {
 
     pub(crate) fn mcp_catalog_status(&self, session_id: &str) -> Option<McpCatalogStatus> {
         self.mcp_catalog_status.lock().get(session_id).cloned()
+    }
+
+    /// UI diagnostics may inspect an endpoint; the reconciliation ledger must
+    /// remain safe to read while a live/background slot is already locked.
+    pub(crate) fn computer_use_catalog_diagnostics(
+        &self,
+        session_id: &str,
+    ) -> Option<McpCatalogStatus> {
+        let mut status = self.mcp_catalog_status(session_id);
+        if let Some(error) = self
+            .mcp_endpoint(session_id)
+            .and_then(|endpoint| endpoint.acp.computer_use_request_error(session_id))
+        {
+            status
+                .get_or_insert_with(McpCatalogStatus::default)
+                .last_error = Some(error.into());
+        }
+        status
     }
 
     fn record_fenced_cleanup(
@@ -343,6 +375,7 @@ impl SessionManager {
         cwd: Option<String>,
         desired: &sessions::McpDesiredState,
         deps: &McpReconcileDeps,
+        request_entry: Option<Value>,
     ) -> Result<Value, String> {
         let sid = session_id.to_string();
         let run_id = desired.run_id.clone();
@@ -351,7 +384,12 @@ impl SessionManager {
             .await
             .map_err(|error| error.to_string())?;
         let mut catalog = Self::strip_computer_use_entries(base)?;
-        if let Some(run_id) = run_id {
+        if let Some(entry) = request_entry {
+            catalog
+                .as_array_mut()
+                .ok_or("invalid MCP catalog")?
+                .push(entry);
+        } else if let Some(run_id) = run_id {
             let entry = match (deps.build_entry)(&sid, &run_id) {
                 Ok(entry) => entry,
                 Err(error) => return Err(error),
@@ -471,11 +509,15 @@ impl SessionManager {
                 return Err(error.into());
             };
 
+            let request_entry = endpoint
+                .acp
+                .computer_use_request_entry(session_id, &endpoint.agent_session_id);
             let catalog = match Self::build_catalog(
                 session_id,
                 endpoint.cwd.clone(),
                 &desired,
                 &deps,
+                request_entry.clone(),
             )
             .await
             {
@@ -502,6 +544,13 @@ impl SessionManager {
                 continue;
             }
 
+            if endpoint
+                .acp
+                .computer_use_request_entry(session_id, &endpoint.agent_session_id)
+                != request_entry
+            {
+                continue;
+            }
             self.mark_mcp_pending(session_id, &desired);
             let update = tokio::time::timeout(
                 deps.timeout,
@@ -518,7 +567,14 @@ impl SessionManager {
             let latest_desired = sessions::mcp_desired(session_id);
             let latest_base = self.mcp_catalog_revision.load(Ordering::SeqCst);
             let endpoint_current = self.endpoint_is_current(session_id, &endpoint);
-            if latest_desired != desired || latest_base != base_revision || !endpoint_current {
+            if latest_desired != desired
+                || latest_base != base_revision
+                || !endpoint_current
+                || endpoint
+                    .acp
+                    .computer_use_request_entry(session_id, &endpoint.agent_session_id)
+                    != request_entry
+            {
                 continue;
             }
 

@@ -9,6 +9,7 @@ import { OpenLocationButton } from "@/components/OpenLocationButton";
 import { EnvInfoButton } from "@/components/side-workbench/EnvInfoButton";
 import { BottomTerminalToggle } from "@/components/bottom-terminal/BottomTerminalToggle";
 import { PaneToggleButton } from "@/components/PaneToggleButton";
+import { EmbeddedBrowserCloseNotice } from "@/components/EmbeddedBrowserCloseNotice";
 import {
   IconAttach,
   IconClock,
@@ -152,6 +153,7 @@ export function WorkbenchMain(props: WorkbenchMainProps) {
 
   return (
     <>
+      <EmbeddedBrowserCloseNotice locale={locale} />
       {!phoneLayout ? (
         <PaneToggleButton
           side="left"

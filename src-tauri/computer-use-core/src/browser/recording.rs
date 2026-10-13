@@ -43,6 +43,10 @@ pub struct RecordingBrowserWorker {
     pub clear_release: Mutex<Option<RecordingGotoBarrier>>,
     pub clear_error: Mutex<Option<WorkerError>>,
     pub clear_calls: Mutex<u32>,
+    pub scope_witness: Mutex<Option<super::ManagedScopeIdentity>>,
+    pub scope_calls: Mutex<u32>,
+    pub scope_started: Mutex<Option<RecordingGotoBarrier>>,
+    pub scope_release: Mutex<Option<RecordingGotoBarrier>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -72,6 +76,10 @@ impl RecordingBrowserWorker {
             clear_release: Mutex::new(None),
             clear_error: Mutex::new(None),
             clear_calls: Mutex::new(0),
+            scope_witness: Mutex::new(None),
+            scope_calls: Mutex::new(0),
+            scope_started: Mutex::new(None),
+            scope_release: Mutex::new(None),
         }
     }
 
@@ -82,6 +90,40 @@ impl RecordingBrowserWorker {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ManagedBrowserWorker for RecordingBrowserWorker {
+    fn scope_identity(
+        &self,
+        _owner: &str,
+        _profile: &str,
+        _page_id: &str,
+    ) -> Result<super::ManagedScopeIdentity, WorkerError> {
+        *self.scope_calls.lock() += 1;
+        if let Some(started) = self.scope_started.lock().clone() {
+            let (lock, cv) = &*started;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        if let Some(release) = self.scope_release.lock().clone() {
+            let (lock, cv) = &*release;
+            let (ready, _) = cv
+                .wait_timeout_while(
+                    lock.lock().unwrap(),
+                    std::time::Duration::from_secs(5),
+                    |ready| !*ready,
+                )
+                .unwrap();
+            if !*ready {
+                return Err(WorkerError::timeout("recording scope gate timed out"));
+            }
+        }
+        self.scope_witness.lock().clone().ok_or_else(|| {
+            WorkerError::not_started(
+                409,
+                "scope_identity_unavailable",
+                "synthetic scope witness not configured",
+            )
+        })
+    }
+
     fn bind_request(
         self: std::sync::Arc<Self>,
         identity: super::ManagedRequestIdentity,

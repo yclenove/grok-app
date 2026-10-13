@@ -30,6 +30,13 @@ computer-use-wayland-preview = []
 name = "grok-app"
 path = "src/main.rs"
 
+# Run the actual App library/IPC in an isolated debug fixture without replacing
+# a user's currently running grok-app.exe. This is never a shipping entry point.
+[[bin]]
+name = "computer-use-app-probe"
+path = "src/bin/computer_use_app_probe.rs"
+required-features = ["computer-use-probe"]
+
 [lib]
 name = "grok_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -91,6 +98,7 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 rfd = "0.15"
+mime_guess = "2"
 window-vibrancy = "0.6"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # OS secret store: macOS Keychain / Windows Credential Manager / Linux Secret Service.
@@ -137,6 +145,7 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_DataExchange",
@@ -175,6 +184,8 @@ notify-rust = "4"
 # Same gtk as Tauri — hide the app menubar on the pet overlay (KDE/GTK
 # reapplies Edit/Window/Help to every ApplicationWindow).
 gtk = { version = "0.18", features = ["v3_24"] }
+# Same WebKitGTK major as Tauri; used only for native back/forward admission.
+webkit2gtk = "2.0"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-window-state = "2"
@@ -186,6 +197,11 @@ mac-usernotifications = "0.3"
 objc2 = "0.6"
 # Local NSEvent monitor for Doubao Fn / Globe voice → IME (#1030).
 block2 = "0.6"
+
+[dev-dependencies]
+# Synthetic consent/adapter fixtures are available to tests only; production
+# builds keep the authority test hooks absent.
+grok-computer-use-core = { path = "computer-use-core", features = ["test-support"] }
 
 [profile.release]
 codegen-units = 1

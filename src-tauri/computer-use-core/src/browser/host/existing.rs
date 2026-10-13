@@ -9,7 +9,7 @@ use super::SharedOffer;
 use super::{ExistingTabHost, HomeSnapshot, TabAttachment, TabRecord, TabWriteIdentity};
 
 pub(super) fn invalidate_shared_tabs(state: &mut super::Inner) {
-    state.extension_requests.clear();
+    state.observation_completions.cancel_run(None);
     state.extension_completions.cancel_run(None);
     state.action_negotiation = None;
     state.shared.clear();
@@ -28,6 +28,7 @@ pub(super) fn invalidate_shared_tabs(state: &mut super::Inner) {
         record.pairing_token = None;
     }
     super::completion::sweep(state);
+    super::transport::sweep_requests(state);
 }
 
 pub(super) fn expire_pairing(state: &mut super::Inner) -> bool {
@@ -53,6 +54,14 @@ impl ExistingTabHost {
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_stored_pairing_connection_for_test(&self) -> bool {
         self.inner.lock().pairing.has_stored_connection_for_test()
+    }
+
+    /// Atomic raw snapshot; never runs the expiry or Share maintenance consumers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stored_pairing_lease_for_test(&self) -> (bool, std::time::Duration, usize) {
+        let state = self.inner.lock();
+        let (stored, remaining) = state.pairing.stored_lease_for_test();
+        (stored, remaining, state.shared.len())
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_installed_extension_id(&self, id: &str) {
@@ -108,6 +117,20 @@ impl ExistingTabHost {
         proof: &crate::pairing::PairingProof,
     ) -> Result<crate::pairing::PairingSession, String> {
         self.inner.lock().pairing.complete_request(proof)
+    }
+
+    /// Authenticate retained device state without extending its original lease.
+    pub fn read_pairing_connection(
+        &self,
+        origin: &str,
+        token: &str,
+        connection: &crate::pairing::PairingConnection,
+    ) -> Result<(), String> {
+        let mut state = self.inner.lock();
+        expire_pairing(&mut state);
+        state
+            .pairing
+            .authenticate_connection(origin, token, connection)
     }
 
     pub fn check_pairing_connection(
@@ -191,6 +214,7 @@ impl ExistingTabHost {
                 extension_id: extension_id.map(|s| s.to_string()),
                 pairing_token: pairing_token.to_string(),
                 document_generation,
+                document_id: None,
                 connection_generation,
                 focused,
             },
@@ -315,7 +339,7 @@ impl ExistingTabHost {
         Self::attach_existing_locked(&mut self.inner.lock(), attachment)
     }
 
-    fn attach_existing_locked(
+    pub(super) fn attach_existing_locked(
         g: &mut super::Inner,
         attachment: TabAttachment<'_>,
     ) -> Result<TabInfo, BrokerError> {
@@ -337,9 +361,9 @@ impl ExistingTabHost {
         if g.stopped_runs.contains(run_id) {
             return Err(BrokerError::StopRequested);
         }
-        if super::actions::has_tab(g, tab_id) {
+        if super::actions::has_tab(g, tab_id) || super::transport::has_tab(g, tab_id) {
             return Err(BrokerError::Schema(
-                "existing action is still settling".into(),
+                "existing operation is still settling".into(),
             ));
         }
         g.pairing
@@ -671,9 +695,12 @@ impl ExistingTabHost {
     ) -> Result<TabInfo, BrokerError> {
         let mut g = self.inner.lock();
         expire_pairing(&mut g);
-        if g.stopped_runs.contains(run_id) || super::actions::has_tab(&g, tab_id) {
+        if g.stopped_runs.contains(run_id)
+            || super::actions::has_tab(&g, tab_id)
+            || super::transport::has_tab(&g, tab_id)
+        {
             return Err(BrokerError::Schema(
-                "existing action is still settling or stopped".into(),
+                "existing operation is still settling or stopped".into(),
             ));
         }
         {

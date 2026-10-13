@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::runtime::{REQUIRED_JS_RUNTIME_VERSION, REQUIRED_PLAYWRIGHT_CORE_VERSION};
+use crate::runtime_pins::{
+    REQUIRED_CHROMIUM_REVISION, REQUIRED_CHROMIUM_VERSION, REQUIRED_JS_RUNTIME_VERSION,
+    REQUIRED_PLAYWRIGHT_CORE_VERSION,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTarget {
@@ -49,6 +52,24 @@ impl RuntimeTarget {
     pub fn node_relpath(self) -> &'static str {
         if self == Self::WindowsX64 {
             "bin/node.exe"
+        } else {
+            "bin/node"
+        }
+    }
+
+    pub fn node_archive_root(self) -> String {
+        let platform = match self {
+            Self::WindowsX64 => "win-x64",
+            Self::MacosArm64 => "darwin-arm64",
+            Self::MacosX64 => "darwin-x64",
+            Self::LinuxX64 => "linux-x64",
+        };
+        format!("node-v{REQUIRED_JS_RUNTIME_VERSION}-{platform}")
+    }
+
+    pub fn node_archive_executable(self) -> &'static str {
+        if self == Self::WindowsX64 {
+            "node.exe"
         } else {
             "bin/node"
         }
@@ -189,10 +210,24 @@ pub fn validate_lock(lock: &WindowsX64Lock) -> Result<(), LockError> {
             message: "playwright version does not match required pin".into(),
         });
     }
-    if lock.chromium.revision != "1140" || lock.chromium.browser_version != "130.0.6723.31" {
+    if lock.chromium.revision != REQUIRED_CHROMIUM_REVISION
+        || lock.chromium.browser_version != REQUIRED_CHROMIUM_VERSION
+    {
         return Err(LockError {
             code: "version_mismatch".into(),
             message: "chromium pin does not match required revision".into(),
+        });
+    }
+    if lock.js_runtime.archive_root != target.node_archive_root()
+        || lock.js_runtime.executable_relpath != target.node_archive_executable()
+        || lock.playwright.tree_relpath != "playwright/node_modules/playwright-core"
+        || lock.chromium.archive_root != target.chromium_root()
+        || lock.chromium.tree_relpath != format!("chromium/{}", target.chromium_root())
+        || lock.chromium.executable_relpath != target.chromium_executable()
+    {
+        return Err(LockError {
+            code: "layout_mismatch".into(),
+            message: "runtime lock layout does not match the compiled target contract".into(),
         });
     }
     for field in [
@@ -219,6 +254,36 @@ pub fn validate_lock(lock: &WindowsX64Lock) -> Result<(), LockError> {
             code: "schema".into(),
             message: "lock archive bytes must be non-zero".into(),
         });
+    }
+    for (files, bytes, archive, limits) in [
+        (
+            lock.chromium.tree_files,
+            lock.chromium.tree_bytes,
+            lock.chromium.archive_bytes,
+            crate::runtime_limits::chromium(),
+        ),
+        (
+            lock.playwright.tree_files,
+            lock.playwright.tree_bytes,
+            lock.playwright.archive_bytes,
+            crate::runtime_limits::playwright(),
+        ),
+        (
+            1,
+            lock.js_runtime.executable_bytes,
+            lock.js_runtime.archive_bytes,
+            crate::runtime_limits::node(),
+        ),
+    ] {
+        if files > limits.max_files
+            || bytes > limits.max_total_bytes
+            || archive > limits.max_archive_bytes
+        {
+            return Err(LockError {
+                code: "oversize".into(),
+                message: "runtime lock exceeds compile-owned resource limits".into(),
+            });
+        }
     }
     Ok(())
 }

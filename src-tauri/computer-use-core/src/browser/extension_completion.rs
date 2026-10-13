@@ -60,7 +60,7 @@ impl CompletionBinding {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CompletionKey(String);
 
@@ -70,7 +70,7 @@ impl std::fmt::Debug for CompletionKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CompletionProof {
     pub binding: CompletionBinding,
@@ -206,6 +206,15 @@ impl Default for CompletionRegistry {
 }
 
 impl CompletionRegistry {
+    /// Observation receipts have a distinct cryptographic authority. Even a
+    /// matching action binding cannot authenticate a receipt from this domain.
+    pub(super) fn for_observations() -> Self {
+        Self {
+            authority: format!("grok-cu-observation-v2:{}", super::csprng_bearer_token()),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn len(&self) -> usize {
         self.pending.len()
     }

@@ -51,6 +51,7 @@ struct SharedOffer {
     extension_id: Option<String>,
     pairing_token: String,
     document_generation: u64,
+    document_id: Option<String>,
     connection_generation: u64,
     focused: bool,
 }
@@ -72,6 +73,7 @@ struct Inner {
     extension_requests: std::collections::VecDeque<transport::PendingExtension>,
     extension_sequence: u64,
     extension_completions: super::extension_completion::CompletionRegistry,
+    observation_completions: super::extension_completion::CompletionRegistry,
     browser_session_id: Option<String>,
     extension_actions: std::collections::VecDeque<actions::PendingAction>,
     action_negotiation: Option<super::extension_action::ActionNegotiation>,
@@ -129,6 +131,8 @@ impl ExistingTabHost {
                 extension_requests: Default::default(),
                 extension_sequence: 0,
                 extension_completions: Default::default(),
+                observation_completions:
+                    super::extension_completion::CompletionRegistry::for_observations(),
                 browser_session_id: None,
                 extension_actions: Default::default(),
                 action_negotiation: None,
@@ -159,6 +163,10 @@ impl ExistingTabHost {
 
     pub fn set_staging_root(&self, root: std::path::PathBuf) {
         self.inner.lock().staging_root = root;
+    }
+
+    pub fn staging_root(&self) -> std::path::PathBuf {
+        self.inner.lock().staging_root.clone()
     }
 
     pub fn set_profile_root(&self, root: std::path::PathBuf) {
@@ -204,10 +212,16 @@ fn apply_managed_worker_page(rec: &mut TabRecord, page: &ManagedPage, apply_url:
 mod actions;
 mod completion;
 mod existing;
+mod existing_scope;
+pub use existing_scope::ExistingScopeIdentity;
 mod extension_state;
 mod managed;
 mod managed_lifecycle;
 mod managed_profiles;
+mod managed_scope;
 use managed_profiles::ProfileClearState;
+mod scope_pairing;
 mod shared;
+pub(crate) use scope_pairing::ScopePairing;
+mod observation_completion;
 mod transport;

@@ -87,7 +87,10 @@ export default defineConfig(() => ({
   server: {
     port: 1421,
     strictPort: true,
-    host: host || false,
+    // Keep the default dev origin aligned with Tauri's devUrl. On Windows,
+    // `localhost` can resolve to ::1 while Vite is only listening on IPv4,
+    // leaving an otherwise healthy WebView on ERR_CONNECTION_REFUSED.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",

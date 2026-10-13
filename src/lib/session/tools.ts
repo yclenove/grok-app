@@ -1,4 +1,4 @@
-import { currentTurnHasEndMarker } from "../endOfTurn";
+import { currentTurnHasEndMarker, isEndOfTurnMessage } from "../endOfTurn";
 import { bashArgFromToolTitle, inferKindFromToolCallId } from "../toolDisplay";
 import {
   maybeCompactToolOutputForMemory,
@@ -129,7 +129,7 @@ export function findCurrentTurnAssistantIndex(
 ): number {
   let lastUser = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
+    if (messages[i]!.role === "user" || isEndOfTurnMessage(messages[i]!)) {
       lastUser = i;
       break;
     }
@@ -466,7 +466,7 @@ export function weaveToolsIntoAssistantSegments(
   // Only assistants we actually rewrite are replaced below.
   const out = messages.slice();
 
-  // Walk by user turns so tools before/after assistant all attach to that turn.
+  // Terminal markers also bound continuations that have no new user message.
   let i = 0;
   while (i < out.length) {
     // Advance to a turn start (user) or orphan prefix.
@@ -475,7 +475,7 @@ export function weaveToolsIntoAssistantSegments(
     }
 
     let turnStart = i;
-    if (out[i]!.role === "user") {
+    if (out[i]!.role === "user" || isEndOfTurnMessage(out[i]!)) {
       turnStart = i + 1;
     } else if (i > 0) {
       i += 1;
@@ -483,7 +483,7 @@ export function weaveToolsIntoAssistantSegments(
     }
 
     let turnEnd = turnStart;
-    while (turnEnd < out.length && out[turnEnd]!.role !== "user") {
+    while (turnEnd < out.length && out[turnEnd]!.role !== "user" && !isEndOfTurnMessage(out[turnEnd]!)) {
       turnEnd += 1;
     }
 
@@ -690,7 +690,7 @@ export function mergeAssistantFragments(messages: ChatMessage[]): ChatMessage[] 
       // stream-done) painted 工作中 above a frozen 工作了 + copy/retry.
       let j = i + 1;
       const finishedIdx: number[] = [];
-      while (j < messages.length && messages[j]!.role !== "user") {
+      while (j < messages.length && messages[j]!.role !== "user" && !isEndOfTurnMessage(messages[j]!)) {
         const mm = messages[j]!;
         if (mm.role === "assistant" && !mm.isError && !mm.streaming) {
           finishedIdx.push(j);
@@ -751,11 +751,11 @@ export function mergeAssistantFragments(messages: ChatMessage[]): ChatMessage[] 
       i += 1;
       continue;
     }
-    // Collect all assistant rows of this user turn (bounded by the next user
-    // row); fragments are separated by tool rows, so group by turn not run.
+    // Collect fragments until the next user row or terminal marker. A resumed
+    // response must remain below the interruption recorded in the journal.
     let j = i;
     const asstIdx: number[] = [];
-    while (j < messages.length && messages[j]!.role !== "user") {
+    while (j < messages.length && messages[j]!.role !== "user" && !isEndOfTurnMessage(messages[j]!)) {
       const mm = messages[j]!;
       if (mm.role === "assistant" && !mm.isError && !mm.streaming) {
         asstIdx.push(j);
@@ -834,7 +834,7 @@ export function syncTurnToolsIntoAssistant(
 
   let lastUser = -1;
   for (let i = aIdx - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
+    if (messages[i]!.role === "user" || isEndOfTurnMessage(messages[i]!)) {
       lastUser = i;
       break;
     }
@@ -852,7 +852,7 @@ export function syncTurnToolsIntoAssistant(
   for (let i = lastUser + 1; i < messages.length; i++) {
     if (i === aIdx) continue;
     const m = messages[i]!;
-    if (m.role === "user") break;
+    if (m.role === "user" || isEndOfTurnMessage(m)) break;
     if (m.role === "assistant" && i > aIdx) break;
     if (!isToolStepMessage(m)) continue;
     const tcid =
@@ -1183,7 +1183,7 @@ export function pickLatestTurnTool(
 ): ChatMessage | null {
   let lastUser = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
+    if (messages[i]!.role === "user" || isEndOfTurnMessage(messages[i]!)) {
       lastUser = i;
       break;
     }
@@ -1210,7 +1210,7 @@ export function pickRunningTurnTool(
 ): ChatMessage | null {
   let lastUser = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
+    if (messages[i]!.role === "user" || isEndOfTurnMessage(messages[i]!)) {
       lastUser = i;
       break;
     }

@@ -21,6 +21,7 @@ export async function normalizeCapture(dataUrl, view, live = () => true) {
     || view.visualScale !== 1 || view.visualX !== 0 || view.visualY !== 0
     || Math.abs(sourceWidth - view.viewportWidth * view.pixelRatio) > 2
     || Math.abs(sourceHeight - view.viewportHeight * view.pixelRatio) > 2) throw new Error("capture geometry changed");
+  check();
   const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
   try {
     check();

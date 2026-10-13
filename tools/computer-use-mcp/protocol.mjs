@@ -1,4 +1,5 @@
 const id = { type: "string", minLength: 1, maxLength: 256 };
+const scopeSelection = { runId: id, targetId: id };
 const number = { type: "number", minimum: 0 };
 const object = (properties, required = []) => ({ type: "object", properties, required, additionalProperties: false });
 const target = {
@@ -20,6 +21,66 @@ const actions = [
   ["drag", { oneOf: [object({ toX: number, toY: number }, ["toX", "toY"]), object({ x1: number, y1: number }, ["x1", "y1"])] }],
   ["wait", object({ nameEquals: text, timeoutMs: { type: "integer", minimum: 1, maximum: 10000 } }, ["nameEquals"])],
 ];
+const navigateSchema = {
+  ...object({
+    ...scopeSelection,
+    tabId: id,
+    url: { type: "string", minLength: 1, maxLength: 2048 },
+    kind: { enum: ["url", "reload", "back", "forward"] },
+    actionId: id,
+    pageGeneration: { type: "integer", minimum: 1 },
+    targetGeneration: { type: "integer", minimum: 1 },
+  }, ["actionId"]),
+  oneOf: [
+    {
+      required: ["tabId", "url", "pageGeneration"],
+      properties: { kind: { const: "url" } },
+      not: { required: ["targetGeneration"] },
+    },
+    {
+      required: ["targetGeneration", "url"],
+      properties: { kind: { const: "url" } },
+      allOf: [
+        { not: { required: ["tabId"] } },
+        { not: { required: ["pageGeneration"] } },
+      ],
+    },
+    {
+      required: ["targetGeneration", "kind"],
+      properties: { kind: { enum: ["reload", "back", "forward"] } },
+      allOf: [
+        { not: { required: ["url"] } },
+        { not: { required: ["tabId"] } },
+        { not: { required: ["pageGeneration"] } },
+      ],
+    },
+  ],
+};
+const downloadSchema = {
+  ...object({
+    ...scopeSelection,
+    tabId: id,
+    filename: { type: "string", minLength: 1, maxLength: 256 },
+    actionId: id,
+    pageGeneration: { type: "integer", minimum: 1 },
+    targetGeneration: { type: "integer", minimum: 1 },
+    snapshotId: id,
+    elementRef: id,
+  }, ["actionId", "snapshotId", "elementRef"]),
+  oneOf: [
+    {
+      required: ["tabId", "pageGeneration"],
+      not: { required: ["targetGeneration"] },
+    },
+    {
+      required: ["runId", "targetId", "targetGeneration"],
+      allOf: [
+        { not: { required: ["tabId"] } },
+        { not: { required: ["pageGeneration"] } },
+      ],
+    },
+  ],
+};
 
 export const PROTOCOL_VERSION = 1;
 export const MODEL_TOOLS = [
@@ -31,8 +92,11 @@ export const MODEL_TOOLS = [
   "computer_wait",
   "computer_request_handoff",
   "computer_stop",
+  "computer_request_access",
+  "computer_complete_task",
   "computer_navigate",
   "computer_download",
+  "computer_upload",
   "browser_list_tabs",
   "browser_open",
   "browser_observe",
@@ -46,22 +110,40 @@ export const HOST_ONLY_TOOLS = [
 ];
 
 export const TOOLS = [
-  ["computer_status", "Current task, capabilities and control state. Not proof that an action succeeded.", object({})],
-  ["computer_list_targets", "List the user-authorized target only. A new window requires the Computer panel.", object({})],
-  ["computer_open_target", "Use a target already authorized by the user. This cannot grant access to a new window.", object({ targetId: id }, ["targetId"])],
-  ["computer_observe", "Observe the authorized target (observe → act → verify). Copy snapshot and target IDs from this result. Screenshots arrive as image content. Use screenshot:false for text and semantic controls only. Coordinate actions need a visible image; text-only observations cannot click pixels.", object({ screenshot: { type: "boolean", default: true } })],
+  ["computer_status", "Current task and control state. Before approval, an empty input returns only this session's original access-request metadata with authority:none; it cannot read targets or grant control. A pending response means end this turn and wait for the Host decision, not poll. Explicit runId/targetId always require the approved scope. After approval, supply those IDs from the approved inventory when more than one scope is available. Status is not proof that an action succeeded.", object(scopeSelection)],
+  ["computer_list_targets", "List live targets already approved for this task. This does not discover other windows or grant access. Copy the returned targetId and runId when choosing among approved targets.", object(scopeSelection)],
+  ["computer_open_target", "Use a target already authorized by the user. This cannot grant access to a new window or authorize a focus change. Supply runId and targetId from the approved inventory.", object(scopeSelection, ["targetId"])],
+  ["computer_observe", "Observe the authorized target (observe → act → verify). Copy snapshot and target IDs from this result. Supply runId and targetId from the approved inventory when more than one scope is available. Screenshots arrive as image content. Use screenshot:false for text and semantic controls only. Coordinate actions need a visible image; text-only observations cannot click pixels.", object({ ...scopeSelection, screenshot: { type: "boolean", default: true } })],
   ["computer_act", "One action using IDs from the observation you saw. Drag requires a visual observation and one explicit destination pair: toX/toY (or legacy x1/y1), in image pixels. Never mix the pairs. Transport success is not verification. An unknown outcome requires a new observation; do not retry the same side-effecting actionId. Reuse actionId only to retrieve its original result.", {
     type: "object", oneOf: actions.map(([action, parameters]) => object({ ...identity, action: { const: action }, parameters }, [...Object.keys(identity), "action", "parameters"])),
   }],
   ["computer_wait", "Read-only wait for the exact observed element. Copy all identity fields from the observation you saw and use a fresh actionId. Never guesses a new snapshot or matches another element by name. Both success and timeout preserve the current snapshot; observe again for a fresh view. Timeout is not success and consumes the bounded wait budget.", object({ ...waitIdentity, elementRef: id, nameEquals: { type: "string", minLength: 1, maxLength: 256 }, timeoutMs: { type: "integer", minimum: 1, maximum: 10000 } }, [...Object.keys(waitIdentity), "elementRef", "nameEquals"])],
-  ["computer_request_handoff", "Pause so the user can pick another target, log in, or handle a permission UI. Only the user can resume.", object({})],
-  ["computer_stop", "Request stop for this run. The model cannot resume, reconnect, or authorize a new target.", object({})],
-  ["computer_navigate", "Navigate the authorized managed tab. javascript, file, data and metadata URLs are rejected. Requires actionId, tabId and pageGeneration. Browser tools cannot read cookies, tokens or storage.", object({ tabId: id, url: { type: "string", minLength: 1, maxLength: 2048 }, actionId: id, pageGeneration: { type: "integer", minimum: 1 } }, ["tabId", "url", "actionId", "pageGeneration"])],
-  ["computer_download", "Download into run staging. Model filesystem paths are not trusted. Requires actionId, tabId, pageGeneration, snapshotId and elementRef.", object({ tabId: id, filename: { type: "string", minLength: 1, maxLength: 256 }, actionId: id, pageGeneration: { type: "integer", minimum: 1 }, snapshotId: id, elementRef: id }, ["tabId", "actionId", "pageGeneration", "snapshotId", "elementRef"])],
-  ["browser_list_tabs", "List tabs this run already owns or borrowed. Does not leak other titles or URLs. Does not create grants.", object({})],
-  ["browser_open", "Select a tab the user already authorized or this run owns. Does not create a grant or open an arbitrary profile.", object({ tabId: id }, ["tabId"])],
-  ["browser_observe", "Observe the selected tab (observe → act → verify). Screenshots arrive as image content; text JSON omits png bytes. Coordinate actions need a visible image.", object({ tabId: id, pageGeneration: { type: "integer", minimum: 1 } }, ["tabId", "pageGeneration"])],
-  ["browser_act", "One typed browser action using IDs from the observation you saw. An unknown outcome requires a new observation; do not retry the same side-effecting actionId. Stop cannot resume. Missing screenshots reject coordinate actions. Cannot read cookies, tokens or storage.", object({ tabId: id, actionId: id, pageGeneration: { type: "integer", minimum: 1 }, snapshotId: id, kind: { type: "string", minLength: 1, maxLength: 32 }, elementRef: id, parameters: { type: "object" } }, ["tabId", "actionId", "pageGeneration", "snapshotId", "kind"])],
+  ["computer_request_handoff", "Pause so the user can pick another target, log in, or handle a permission UI. Only the user can resume.", object(scopeSelection)],
+  ["computer_stop", "Request stop for this run. The model cannot resume, reconnect, or authorize a new target.", object(scopeSelection)],
+  ["computer_request_access", "Ask the Host for task access once. This does not grant control, start a run, or read the screen. On pending, end this turn and wait for the Host decision. Do not poll computer_status, repeat this request, or call execution tools while awaiting approval. Copy taskId from the response for explicit completion. status and cancel carry no purpose and no ids.", {
+    oneOf: [
+      object({
+        action: { const: "request" },
+        purpose: { type: "string", minLength: 1, maxLength: 200 },
+        surfaces: { type: "array", minItems: 1, maxItems: 4, items: { enum: ["desktop", "managed-browser", "existing-tabs", "app-webview"] } },
+        capabilities: { type: "array", minItems: 1, maxItems: 2, items: { enum: ["observe", "input"] } },
+        scopeIntent: { type: "string", minLength: 1, maxLength: 200 },
+      }, ["action", "purpose", "surfaces", "capabilities", "scopeIntent"]),
+      object({ action: { const: "status" } }, ["action"]),
+      object({ action: { const: "cancel" } }, ["action"]),
+    ],
+  }],
+  ["computer_complete_task", "After observing and verifying the result, finish this task before your final reply. Copy taskId from computer_request_access or computer_status. Revokes every scope of this exact task; physical cleanup may still be pending. This is not proof of business success. Do not call while waiting for approval, clarification or handoff. Cannot grant access, resume or finish a successor task.", object({ taskId: id }, ["taskId"])],
+  ["computer_navigate", "Navigate the authorized managed tab or App WebView document. URL navigation rejects javascript, file, data and metadata URLs. App WebView reload/back/forward produce a fresh document identity; copy the returned targetId and targetGeneration. Browser tools cannot read cookies, tokens or storage.", navigateSchema],
+  ["computer_download", "Download an exact retained link from an authorized managed tab or App WebView into run staging. Model filesystem paths are never accepted. Copy the surface identity, snapshotId, elementRef and a fresh actionId from the observation; replaying the same actionId returns the original terminal result without downloading again.", downloadSchema],
+  ["computer_upload", "Ask the user to choose a file for the exact observed file input in the authorized App WebView. Copy every identity field from your observation and use a fresh actionId. This original call waits for the task's Host file choice; do not poll, provide paths or file bytes, or approve the choice yourself. A verified result proves field assignment only: observe and verify website submission separately. Other surfaces are unavailable; never fall back to an unrelated browser or desktop. Reuse actionId only to retrieve the original result, never to repeat assignment.", object({ ...waitIdentity, elementRef: id,
+    targetGeneration: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    geometryRevision: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  }, [...Object.keys(waitIdentity), "elementRef"])],
+  ["browser_list_tabs", "List tabs this run already owns or borrowed. Does not leak other titles or URLs. Does not create grants.", object(scopeSelection)],
+  ["browser_open", "Select a tab the user already authorized or this run owns. Does not create a grant or open an arbitrary profile.", object({ ...scopeSelection, tabId: id }, ["tabId"])],
+  ["browser_observe", "Observe the selected tab (observe → act → verify). Screenshots arrive as image content; text JSON omits png bytes. Coordinate actions need a visible image.", object({ ...scopeSelection, tabId: id, pageGeneration: { type: "integer", minimum: 1 } }, ["tabId", "pageGeneration"])],
+  ["browser_act", "One typed browser action using IDs from the observation you saw. An unknown outcome requires a new observation; do not retry the same side-effecting actionId. Stop cannot resume. Missing screenshots reject coordinate actions. Cannot read cookies, tokens or storage.", object({ ...scopeSelection, tabId: id, actionId: id, pageGeneration: { type: "integer", minimum: 1 }, snapshotId: id, kind: { type: "string", minLength: 1, maxLength: 32 }, elementRef: id, parameters: { type: "object" } }, ["tabId", "actionId", "pageGeneration", "snapshotId", "kind"])],
 ].map(([name, description, inputSchema]) => ({ name, description, inputSchema }));
 
 const REQUEST_KEYS = new Set(["version", "actionId", "runId", "targetId", "targetGeneration", "snapshotId", "geometryRevision", "action", "target", "parameters"]);

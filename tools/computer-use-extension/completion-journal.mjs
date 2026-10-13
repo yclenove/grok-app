@@ -38,8 +38,10 @@ export class CompletionJournal {
   #scripting;
   #receipts;
   #hostLifetime;
+  #owners;
 
-  constructor({ storage, lifetime, scripting, receipts, hostLifetime }) {
+  constructor({ storage, lifetime, scripting, receipts, hostLifetime, owners }) {
+    this.#owners = owners;
     this.#storage = storage;
     if (!lifetime || !scripting || !receipts) throw new Error("documentLifetimeUnavailable");
     this.#lifetime = lifetime; this.#scripting = scripting;
@@ -69,6 +71,7 @@ export class CompletionJournal {
         const record = recordCopy(value.version < 4 ? { ...migrated, hostLifetime: null } : migrated);
         const key = completionIdentity(record.proof);
         if (this.#entries.has(key) || tabs.has(record.proof.binding.tabId)) throw new Error("duplicate record");
+        this.#owners?.claim("action", record.proof);
         tabs.add(record.proof.binding.tabId); this.#entries.set(key, record);
       }
       this.#restored = [...this.#entries.values()];
@@ -121,6 +124,7 @@ export class CompletionJournal {
         || [...this.#entries.values()].some(old => old.proof.binding.tabId === record.proof.binding.tabId)) {
         throw new Error("completionJournalUnavailable");
       }
+      this.#owners?.claim("action", record.proof);
       next.set(completionIdentity(record.proof), record);
     });
     const { binding } = record.proof;
@@ -190,11 +194,12 @@ export class CompletionJournal {
     const record = this.#current(proof);
     if (record && record.phase !== "physicallySettled") throw new Error("completionJournalUnavailable");
     await this.#receipts.forget(proof.binding.requestId);
-    return this.#write(next => {
+    await this.#write(next => {
       const record = this.#current(proof);
       if (record && record.phase !== "physicallySettled") throw new Error("completionJournalUnavailable");
       next.delete(completionIdentity(proof));
     }, true);
+    this.#owners?.release("action", proof);
   }
 
   async retiredHost(proof) {
@@ -215,10 +220,12 @@ export class CompletionJournal {
   // A storage failure leaves the local owner in place.
   async forgetBrowserExit(requestIds) {
     const ids = new Set(requestIds);
+    const removed = [];
     await this.#write((next) => {
       for (const [key, record] of [...next]) {
-        if (ids.has(record.proof.binding.requestId)) next.delete(key);
+        if (ids.has(record.proof.binding.requestId)) { next.delete(key); removed.push(record.proof); }
       }
     }, true);
+    for (const proof of removed) this.#owners?.release("action", proof);
   }
 }

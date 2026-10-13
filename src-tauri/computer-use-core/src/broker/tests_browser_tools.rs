@@ -59,7 +59,7 @@ fn legacy_observe_respects_admission_budget_and_invalidates_generic_snapshot() {
         run.in_flight.store(true, Ordering::SeqCst);
         run.in_flight.clone()
     };
-    let permit = InFlightClear(inflight);
+    let permit = InFlightClear::new(inflight, &broker.changes);
     let args = serde_json::json!({"tabId":tab,"pageGeneration":1});
     let busy = call(&broker, "browser_observe", args.clone());
     assert!(is_err(&busy), "{busy}");

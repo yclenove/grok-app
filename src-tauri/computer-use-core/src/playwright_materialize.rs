@@ -2,19 +2,12 @@
 //! Never runs npm/lifecycle scripts. Never follows archive links.
 
 use crate::runtime::{PLAYWRIGHT_CORE_TGZ_SHA256, REQUIRED_PLAYWRIGHT_CORE_VERSION};
-use flate2::read::GzDecoder;
+use crate::runtime_pins::playwright_archive_relpath;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
-
-pub const MAX_FILES: u32 = 2000;
-pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-pub const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
-pub const MAX_PATH_CHARS: usize = 240;
-pub const MAX_COMPRESSION_RATIO: f64 = 20.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaywrightTree {
@@ -48,6 +41,12 @@ pub fn materialize_playwright_tgz(
     dest_core_dir: &Path,
     expected_sha256: Option<&str>,
 ) -> Result<PlaywrightTree, MaterializeError> {
+    if tgz.len() as u64 > crate::runtime_limits::playwright().max_archive_bytes {
+        return Err(MaterializeError::new(
+            "oversize",
+            "compressed Playwright archive too large",
+        ));
+    }
     if let Some(expected) = expected_sha256 {
         let actual = sha256_hex(tgz);
         if actual != expected {
@@ -108,90 +107,27 @@ pub fn materialize_playwright_tgz(
 
 pub fn tree_manifest(dir: &Path) -> Result<(String, u64, u32), MaterializeError> {
     let listing = tree_listing(dir)?;
-    let digest = sha256_hex(listing.as_bytes());
-    let mut total = 0u64;
-    let mut count = 0u32;
-    for line in listing.lines() {
-        let mut parts = line.split('\t');
-        let _path = parts.next();
-        if let Some(size) = parts.next().and_then(|s| s.parse::<u64>().ok()) {
-            total += size;
-            count += 1;
-        }
-    }
-    Ok((digest, total, count))
+    Ok(crate::runtime_tree::manifest(&listing))
 }
 
 pub fn tree_listing(dir: &Path) -> Result<String, MaterializeError> {
-    let mut files = Vec::new();
-    collect_files(dir, dir, &mut files)?;
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut out = String::new();
-    let mut seen = BTreeSet::new();
-    for (rel, size, hash) in files {
-        if !seen.insert(rel.clone()) {
-            return Err(MaterializeError::new(
-                "duplicate_path",
-                format!("duplicate path {rel}"),
-            ));
-        }
-        out.push_str(&rel);
-        out.push('\t');
-        out.push_str(&size.to_string());
-        out.push('\t');
-        out.push_str(&hash);
-        out.push('\n');
-    }
-    Ok(out)
-}
-
-fn collect_files(
-    root: &Path,
-    current: &Path,
-    files: &mut Vec<(String, u64, String)>,
-) -> Result<(), MaterializeError> {
-    let meta =
-        fs::symlink_metadata(current).map_err(|e| MaterializeError::new("io", e.to_string()))?;
-    if meta.file_type().is_symlink() {
-        return Err(MaterializeError::new(
-            "symlink",
-            "symlink is not allowed in playwright-core tree",
-        ));
-    }
-    if meta.is_dir() {
-        for entry in
-            fs::read_dir(current).map_err(|e| MaterializeError::new("io", e.to_string()))?
-        {
-            let entry = entry.map_err(|e| MaterializeError::new("io", e.to_string()))?;
-            collect_files(root, &entry.path(), files)?;
-        }
-        return Ok(());
-    }
-    if !meta.is_file() {
-        return Err(MaterializeError::new(
-            "not_executable",
-            "non-file entry in playwright-core tree",
-        ));
-    }
-    let rel = current
-        .strip_prefix(root)
-        .map_err(|_| MaterializeError::new("path", "file escaped tree root"))?
-        .to_string_lossy()
-        .replace('\\', "/");
-    let bytes = fs::read(current).map_err(|e| MaterializeError::new("io", e.to_string()))?;
-    files.push((rel, bytes.len() as u64, sha256_hex(&bytes)));
-    Ok(())
+    crate::runtime_tree::listing(
+        dir,
+        crate::runtime_limits::playwright(),
+        &Default::default(),
+    )
 }
 
 fn extract_package_root(tgz: &[u8], staging: &Path) -> Result<(), MaterializeError> {
-    let decoder = GzDecoder::new(Cursor::new(tgz));
+    let limits = crate::runtime_limits::playwright();
+    crate::runtime_tar::validate(tgz, limits)?;
+    let decoder = crate::runtime_tar::decoder(tgz, limits)?;
     let mut archive = Archive::new(decoder);
     archive.set_preserve_permissions(false);
     archive.set_unpack_xattrs(false);
-    let mut files = 0u32;
-    let mut total = 0u64;
+    let mut budget = crate::runtime_limits::TreeBudget::default();
+    let mut seen = BTreeSet::new();
     let mut saw_package = false;
-    let mut extra_root = false;
     let staging_canon =
         fs::canonicalize(staging).map_err(|e| MaterializeError::new("io", e.to_string()))?;
     let entries = archive
@@ -200,6 +136,14 @@ fn extract_package_root(tgz: &[u8], staging: &Path) -> Result<(), MaterializeErr
     for entry in entries {
         let mut entry = entry.map_err(|e| MaterializeError::new("truncated", e.to_string()))?;
         let kind = entry.header().entry_type();
+        budget.add(
+            limits,
+            if kind.is_dir() {
+                None
+            } else {
+                Some(entry.size())
+            },
+        )?;
         if matches!(
             kind,
             EntryType::Symlink
@@ -229,66 +173,62 @@ fn extract_package_root(tgz: &[u8], staging: &Path) -> Result<(), MaterializeErr
             return Err(MaterializeError::new("path", "absolute archive path"));
         }
         if !norm.starts_with("package/") && norm != "package" {
-            extra_root = true;
-            continue;
+            return Err(MaterializeError::new(
+                "path",
+                "archive contains a root other than package/",
+            ));
+        }
+        if !seen.insert(norm.trim_end_matches('/').to_ascii_lowercase()) {
+            return Err(MaterializeError::new(
+                "duplicate_path",
+                "duplicate Playwright archive path",
+            ));
         }
         saw_package = true;
         let stripped = norm.strip_prefix("package/").unwrap_or("");
         if stripped.is_empty() {
+            if !kind.is_dir() || entry.size() != 0 {
+                return Err(MaterializeError::new(
+                    "path",
+                    "package root must be an empty directory",
+                ));
+            }
             continue;
         }
         validate_relpath(stripped)?;
-        if stripped.chars().count() > MAX_PATH_CHARS {
+        if stripped.chars().count() > limits.max_path_chars {
             return Err(MaterializeError::new("path", "archive path too long"));
         }
         let dest = staging.join(stripped.replace('/', std::path::MAIN_SEPARATOR_STR));
         if kind.is_dir() {
+            if entry.size() != 0 {
+                return Err(MaterializeError::new(
+                    "path",
+                    "archive directory has payload",
+                ));
+            }
             fs::create_dir_all(&dest).map_err(|e| MaterializeError::new("io", e.to_string()))?;
             assert_inside(&staging_canon, &dest)?;
             continue;
         }
-        if !kind.is_file() && !matches!(kind, EntryType::Regular | EntryType::GNUSparse) {
+        if !kind.is_file() {
             return Err(MaterializeError::new(
                 "symlink",
                 format!("archive entry type {kind:?} is not allowed"),
             ));
         }
-        files += 1;
-        if files > MAX_FILES {
-            return Err(MaterializeError::new("oversize", "too many archive files"));
-        }
         let size = entry.size();
-        if size > MAX_FILE_BYTES {
-            return Err(MaterializeError::new("oversize", "archive file too large"));
-        }
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| MaterializeError::new("io", e.to_string()))?;
         }
-        let mut buf = Vec::new();
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| MaterializeError::new("truncated", e.to_string()))?;
-        if buf.len() as u64 != size && size != 0 {
-            return Err(MaterializeError::new(
-                "truncated",
-                "archive file size mismatch",
-            ));
-        }
-        total += buf.len() as u64;
-        if total > MAX_TOTAL_BYTES {
-            return Err(MaterializeError::new(
-                "oversize",
-                "uncompressed archive too large",
-            ));
-        }
-        fs::write(&dest, &buf).map_err(|e| MaterializeError::new("io", e.to_string()))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|e| MaterializeError::new("io", e.to_string()))?;
+        crate::runtime_tree::copy_exact(&mut entry, &mut file, size)?;
+        drop(file);
         assert_inside(&staging_canon, &dest)?;
-    }
-    if extra_root {
-        return Err(MaterializeError::new(
-            "path",
-            "archive contains a root other than package/",
-        ));
     }
     if !saw_package {
         return Err(MaterializeError::new(
@@ -296,8 +236,8 @@ fn extract_package_root(tgz: &[u8], staging: &Path) -> Result<(), MaterializeErr
             "archive is missing the package/ root",
         ));
     }
-    let ratio = total as f64 / (tgz.len().max(1) as f64);
-    if ratio > MAX_COMPRESSION_RATIO {
+    let ratio = budget.bytes as f64 / (tgz.len().max(1) as f64);
+    if ratio > limits.max_compression_ratio {
         return Err(MaterializeError::new(
             "oversize",
             format!("compression ratio {ratio:.1} exceeds limit"),
@@ -347,13 +287,21 @@ fn assert_inside(root: &Path, child: &Path) -> Result<(), MaterializeError> {
 }
 
 pub fn copy_tree_secure(src: &Path, dest: &Path) -> Result<(), MaterializeError> {
+    copy_tree_with_limits(src, dest, crate::runtime_limits::playwright())
+}
+
+pub(crate) fn copy_tree_with_limits(
+    src: &Path,
+    dest: &Path,
+    limits: crate::runtime_limits::TreeLimits,
+) -> Result<(), MaterializeError> {
     if src.is_symlink() {
         return Err(MaterializeError::new("symlink", "source tree is a symlink"));
     }
     fs::create_dir_all(dest).map_err(|e| MaterializeError::new("io", e.to_string()))?;
     let dest_canon =
         fs::canonicalize(dest).map_err(|e| MaterializeError::new("io", e.to_string()))?;
-    copy_walk(src, src, dest, &dest_canon)
+    copy_walk(src, src, dest, &dest_canon, limits, &mut Default::default())
 }
 
 fn copy_walk(
@@ -361,6 +309,8 @@ fn copy_walk(
     current: &Path,
     dest_root: &Path,
     dest_canon: &Path,
+    limits: crate::runtime_limits::TreeLimits,
+    budget: &mut crate::runtime_limits::TreeBudget,
 ) -> Result<(), MaterializeError> {
     let meta =
         fs::symlink_metadata(current).map_err(|e| MaterializeError::new("io", e.to_string()))?;
@@ -368,6 +318,20 @@ fn copy_walk(
         return Err(MaterializeError::new("symlink", "refusing to copy symlink"));
     }
     let rel = current.strip_prefix(root).unwrap_or(Path::new(""));
+    if !rel.as_os_str().is_empty() {
+        crate::runtime_limits::validate_path(
+            &rel.to_string_lossy().replace('\\', "/"),
+            limits.max_path_chars,
+        )?;
+    }
+    budget.add(
+        limits,
+        if meta.is_dir() {
+            None
+        } else {
+            Some(meta.len())
+        },
+    )?;
     let dest = dest_root.join(rel);
     if meta.is_dir() {
         fs::create_dir_all(&dest).map_err(|e| MaterializeError::new("io", e.to_string()))?;
@@ -376,7 +340,7 @@ fn copy_walk(
             fs::read_dir(current).map_err(|e| MaterializeError::new("io", e.to_string()))?
         {
             let entry = entry.map_err(|e| MaterializeError::new("io", e.to_string()))?;
-            copy_walk(root, &entry.path(), dest_root, dest_canon)?;
+            copy_walk(root, &entry.path(), dest_root, dest_canon, limits, budget)?;
         }
         return Ok(());
     }
@@ -389,12 +353,7 @@ fn copy_walk(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| MaterializeError::new("io", e.to_string()))?;
     }
-    fs::copy(current, &dest).map_err(|e| {
-        MaterializeError::new(
-            "io",
-            format!("copy {} -> {}: {e}", current.display(), dest.display()),
-        )
-    })?;
+    crate::runtime_tree::copy_file(current, &dest, meta.len())?;
     assert_inside(dest_canon, &dest)?;
     Ok(())
 }
@@ -405,12 +364,11 @@ pub fn official_tgz_path() -> PathBuf {
         .join("resources")
         .join("computer-use")
         .join("seed")
-        .join("playwright")
-        .join("playwright-core-1.48.0.tgz")
+        .join(playwright_archive_relpath())
 }
 
 pub fn prepare_seed(seed: &Path) -> Result<PlaywrightTree, MaterializeError> {
-    let tgz_path = seed.join("playwright").join("playwright-core-1.48.0.tgz");
+    let tgz_path = seed.join(playwright_archive_relpath());
     let tgz = fs::read(&tgz_path).map_err(|e| MaterializeError::new("io", e.to_string()))?;
     let dest = seed
         .join("playwright")
@@ -587,7 +545,7 @@ mod tests {
     fn oversize_and_symlink_entries_are_rejected() {
         let root = temp_dir();
         let dest = root.join("playwright-core");
-        let big = vec![0u8; (MAX_FILE_BYTES as usize) + 1];
+        let big = vec![0u8; (crate::runtime_limits::playwright().max_file_bytes as usize) + 1];
         let err = materialize_playwright_tgz(&gzip_tar(&[("package/huge.bin", &big)]), &dest, None)
             .unwrap_err();
         assert_eq!(err.code, "oversize", "{err:?}");

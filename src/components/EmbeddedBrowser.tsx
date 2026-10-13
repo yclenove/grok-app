@@ -27,7 +27,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   isTauri,
-  sideBrowserClose,
   sideBrowserCreate,
   sideBrowserEval,
   sideBrowserInstallDownloadHook,
@@ -42,6 +41,9 @@ import type {
 import { createT, type Locale } from "@/i18n";
 import { IconExternalLink, IconRefresh } from "@/components/icons";
 import { Spinner } from "@/components/ui/spinner";
+import { embeddedBrowserLifecycle } from "@/lib/embeddedBrowserLifecycle";
+import { useEmbeddedBrowserRecovery } from "@/hooks/useEmbeddedBrowserRecovery";
+import { EmbeddedBrowserCloseDetails } from "@/components/EmbeddedBrowserCloseDetails";
 import {
   applyFloatExcludeToBounds,
   getNativeWebviewFloatExclude,
@@ -129,34 +131,8 @@ const DOWNLOAD_EVENT = "side-browser://download";
 const PAGE_LOAD_EVENT = "side-browser://page-load";
 const EXTERNAL_OPEN_EVENT = "side-browser://external-open";
 const CREATE_TIMEOUT_MS = 15_000;
-const CLOSE_GRACE_MS = 150;
 /** Drop loading UI if host never emits Finished (network hang / offline). */
 const PAGE_LOAD_TIMEOUT_MS = 45_000;
-
-// React StrictMode and quick pane remounts run effect cleanup immediately
-// before mounting the same label again. Closing the native WebView in that
-// gap can overlap the next WebView2 add_child call on Windows. Delay the close
-// briefly and cancel it when the same label is mounted again.
-const pendingCloseTimers = new Map<string, number>();
-
-function cancelPendingClose(label: string) {
-  const timer = pendingCloseTimers.get(label);
-  if (timer === undefined) return;
-  window.clearTimeout(timer);
-  pendingCloseTimers.delete(label);
-}
-
-function scheduleClose(label: string) {
-  cancelPendingClose(label);
-  const timer = window.setTimeout(() => {
-    if (pendingCloseTimers.get(label) !== timer) return;
-    pendingCloseTimers.delete(label);
-    void sideBrowserClose(label).catch((e) => {
-      console.warn("[EmbeddedBrowser] delayed close failed", e);
-    });
-  }, CLOSE_GRACE_MS);
-  pendingCloseTimers.set(label, timer);
-}
 
 async function withTimeout<T>(
   operation: Promise<T>,
@@ -248,6 +224,7 @@ export function EmbeddedBrowser({
   // Dynamic import type — keep loose to avoid hard coupling on Tauri version.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const webviewRef = useRef<any>(null);
+  const webviewEpochRef = useRef(0);
   const currentUrlRef = useRef<string>("");
   const bootUrlRef = useRef(url.trim());
   const [error, setError] = useState<string | null>(null);
@@ -264,6 +241,7 @@ export function EmbeddedBrowser({
   const [covered, setCovered] = useState(() => isNativeWebviewCovered());
   const tr = createT(locale);
   const webviewLabel = sideBrowserWebviewLabel(instanceId);
+  const { closeState, bootRevision, retryClose } = useEmbeddedBrowserRecovery(webviewLabel);
   const activeRef = useRef(active);
   const coveredRef = useRef(covered);
   const pageLoadingRef = useRef(pageLoading);
@@ -374,12 +352,17 @@ export function EmbeddedBrowser({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wv: any,
     wantShow: boolean,
+    epoch = webviewEpochRef.current,
   ) => {
+    if (webviewRef.current !== wv || webviewEpochRef.current !== epoch) return;
+    wantShow = wantShow && activeRef.current && !coveredRef.current;
     if (lastVisibleRef.current === wantShow) return;
     try {
       if (wantShow) await wv.show();
       else await wv.hide();
-      lastVisibleRef.current = wantShow;
+      if (webviewRef.current === wv && webviewEpochRef.current === epoch) {
+        lastVisibleRef.current = wantShow;
+      }
     } catch {
       /* ignore — leave lastVisible so next tick can retry */
     }
@@ -392,6 +375,7 @@ export function EmbeddedBrowser({
   applyBoundsRef.current = async () => {
     const el = hostRef.current;
     const wv = webviewRef.current;
+    const epoch = webviewEpochRef.current;
     if (!el || !wv || !isTauri()) return;
 
     const aside = el.closest(".aside");
@@ -459,13 +443,16 @@ export function EmbeddedBrowser({
 
     try {
       const { LogicalPosition, LogicalSize } = await loadDpi();
+      if (webviewRef.current !== wv || webviewEpochRef.current !== epoch) return;
       // Position then size — one pair per apply; single-flight prevents interleave.
       // When hidden (pane closed), still update bounds so the next show is correct
       // without a second full apply — but skip show/hide thrash via lastVisibleRef.
       await wv.setPosition(new LogicalPosition(next.x, next.y));
+      if (webviewRef.current !== wv || webviewEpochRef.current !== epoch) return;
       await wv.setSize(new LogicalSize(next.width, next.height));
+      if (webviewRef.current !== wv || webviewEpochRef.current !== epoch) return;
       lastBoundsRef.current = next;
-      await setWebviewVisible(wv, wantShow);
+      await setWebviewVisible(wv, wantShow, epoch);
     } catch (e) {
       console.error("[EmbeddedBrowser] syncBounds", e);
     }
@@ -633,6 +620,8 @@ export function EmbeddedBrowser({
     if (!initialUrl) return;
 
     let cancelled = false;
+    const lease = embeddedBrowserLifecycle.retain(webviewLabel, title || initialUrl);
+    webviewEpochRef.current++;
     let resizeObs: ResizeObserver | null = null;
     let io: IntersectionObserver | null = null;
 
@@ -640,7 +629,6 @@ export function EmbeddedBrowser({
     lastVisibleRef.current = null;
 
     const boot = async () => {
-      cancelPendingClose(webviewLabel);
       setError(null);
       setReady(false);
       markPageLoading(true);
@@ -657,7 +645,7 @@ export function EmbeddedBrowser({
         webviewRef.current = null;
         currentUrlRef.current = "";
         lastVisibleRef.current = null;
-        if (cancelled) return;
+        if (cancelled || !await lease.prepare()) return;
 
         const el = hostRef.current;
         const rect = el ? hostRectForWebview(el) : null;
@@ -670,7 +658,7 @@ export function EmbeddedBrowser({
         const target = bootUrlRef.current || initialUrl;
 
         await withTimeout(
-          sideBrowserCreate({
+          lease.trackCreate(sideBrowserCreate({
             label: webviewLabel,
             url: target,
             windowLabel: win.label,
@@ -678,21 +666,17 @@ export function EmbeddedBrowser({
             y,
             width: w,
             height: h,
-          }),
+          })),
           CREATE_TIMEOUT_MS,
           `side browser create timed out after ${CREATE_TIMEOUT_MS / 1000}s (${webviewLabel})`,
         );
 
         if (cancelled) {
-          try {
-            await sideBrowserClose(webviewLabel);
-          } catch {
-            /* ignore */
-          }
           return;
         }
 
         const webview = await Webview.getByLabel(webviewLabel);
+        if (cancelled) return;
         if (!webview) {
           throw new Error("side browser webview missing after create");
         }
@@ -701,12 +685,15 @@ export function EmbeddedBrowser({
         currentUrlRef.current = target;
         lastBoundsRef.current = { x, y, width: w, height: h };
         await webview.setPosition(new LogicalPosition(x, y));
+        if (cancelled) return;
         await webview.setSize(new LogicalSize(w, h));
+        if (cancelled) return;
         // Show as soon as the child exists — do not wait on pageLoading
         // (that path caused navigate-time hide/show flicker).
         const wantShow = activeRef.current && !coveredRef.current;
         if (wantShow) await webview.show();
         else await webview.hide();
+        if (cancelled) return;
         lastVisibleRef.current = wantShow;
         setReady(true);
 
@@ -722,6 +709,7 @@ export function EmbeddedBrowser({
           try {
             markPageLoading(true);
             await sideBrowserNavigate(webviewLabel, latest);
+            if (cancelled) return;
             currentUrlRef.current = latest;
             scheduleDownloadHookInject();
           } catch (e) {
@@ -754,6 +742,7 @@ export function EmbeddedBrowser({
           }
         }
 
+        if (cancelled) return;
         if (hostRef.current && typeof ResizeObserver !== "undefined") {
           resizeObs = new ResizeObserver(() => {
             scheduleSyncRaf();
@@ -769,6 +758,7 @@ export function EmbeddedBrowser({
         if (hostRef.current && typeof IntersectionObserver !== "undefined") {
           io = new IntersectionObserver(
             (entries) => {
+              if (cancelled) return;
               if (isPaneSplitMotionActive()) {
                 runAfterPaneSplitMotion(() => scheduleSyncRaf());
                 return;
@@ -795,6 +785,7 @@ export function EmbeddedBrowser({
       } catch (e) {
         if (!cancelled) {
           console.error("[EmbeddedBrowser] create failed", e);
+          embeddedBrowserLifecycle.recoverNativeFailure(webviewLabel, String(e));
           setError(String(e));
           setReady(false);
           markPageLoading(false);
@@ -810,6 +801,7 @@ export function EmbeddedBrowser({
 
     return () => {
       cancelled = true;
+      webviewEpochRef.current++;
       cancelAnimationFrame(roRafRef.current);
       clearInjectTimers();
       clearPageLoadTimeout();
@@ -820,14 +812,11 @@ export function EmbeddedBrowser({
       currentUrlRef.current = "";
       lastBoundsRef.current = null;
       lastVisibleRef.current = null;
-      // Single delayed host close path (do not also call frontend Webview.close).
-      // A same-label remount cancels this timer and reuses the existing WebView.
-      if (isTauri()) {
-        scheduleClose(webviewLabel);
-      }
+      // A lease also retains late create replies and failed native closes.
+      lease.release();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [webviewLabel]);
+  }, [webviewLabel, bootRevision]);
 
   // In-place navigate when URL changes (keeps process / session / caches warm).
   useEffect(() => {
@@ -1070,8 +1059,17 @@ export function EmbeddedBrowser({
       >
         {error ? (
           <div className="rp-preview__msg" role="alert">
-            <p>{tr("resources.browserFailed")}</p>
-            <p className="embedded-browser__err">{error}</p>
+            <p>{tr(closeState.error ? "resources.browserCloseFailed" : "resources.browserFailed")}</p>
+            {closeState.error ? <>
+              <p>{tr("resources.browserCloseRetained")}</p>
+              <button type="button" className="btn btn--primary"
+                disabled={closeState.phase === "closing"} aria-busy={closeState.phase === "closing"}
+                onClick={retryClose}>
+                {tr(closeState.phase === "closing" ? "resources.browserClosing" : "resources.browserCloseRetry")}
+              </button>
+            </> : null}
+            {closeState.error ? <EmbeddedBrowserCloseDetails locale={locale} error={closeState.error} />
+              : <p className="embedded-browser__err">{error}</p>}
             <button
               type="button"
               className="btn btn--primary"

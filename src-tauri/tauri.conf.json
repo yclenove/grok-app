@@ -5,7 +5,7 @@
   "identifier": "com.grokapp.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev:ui",
-    "devUrl": "http://localhost:1421",
+    "devUrl": "http://127.0.0.1:1421",
     "beforeBuildCommand": "node scripts/tauri-before-build.mjs",
     "frontendDist": "../dist"
   },
@@ -112,11 +112,21 @@
       "deb": {
         "depends": [
           "libwebkit2gtk-4.1-0",
-          "libgtk-3-0"
+          "libgtk-3-0",
+          "libnspr4",
+          "libnss3",
+          "libasound2 | libasound2t64"
         ]
       },
       "rpm": {
-        "release": "1"
+        "release": "1",
+        "depends": [
+          "libnspr4.so()(64bit)",
+          "libnss3.so()(64bit)",
+          "libnssutil3.so()(64bit)",
+          "libsmime3.so()(64bit)",
+          "libasound.so.2()(64bit)"
+        ]
       }
     },
     "macOS": {

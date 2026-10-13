@@ -11,6 +11,7 @@ struct WindowInstance {
     pid: u32,
     tid: u32,
     stamp: u64,
+    process_birth: u64,
 }
 
 impl WindowInstance {
@@ -25,6 +26,8 @@ impl WindowInstance {
             pid,
             tid,
             stamp: windows_identity::stamp_window(hwnd),
+            process_birth: windows_identity::process_birth(pid)
+                .ok_or("native process identity unavailable")?,
         };
         // stamp_window may fail under UIPI. Never accept an uninstalled stamp.
         instance.check()?;
@@ -38,6 +41,7 @@ impl WindowInstance {
             || pid != self.pid
             || tid != self.tid
             || windows_identity::read_stamp(self.hwnd) != Some(self.stamp)
+            || windows_identity::process_birth(self.pid) != Some(self.process_birth)
         {
             return Err("native input target identity retired".into());
         }
@@ -68,7 +72,7 @@ impl NativeTarget {
     }
 
     pub(super) fn authorized(hwnd: HWND, target_id: &str) -> Result<Self, String> {
-        let (pid, root, stamp) = windows_identity::parse_target_id(target_id)
+        let (pid, root, stamp, birth) = windows_identity::parse_target_identity(target_id)
             .ok_or("invalid native input authorization")?;
         if unsafe { GetAncestor(hwnd, GA_ROOT) } != root
             || windows_identity::read_stamp(root) != Some(stamp)
@@ -76,7 +80,11 @@ impl NativeTarget {
             return Err("native control is outside the authorized root".into());
         }
         let target = Self::capture(hwnd)?;
-        if target.root.hwnd != root || target.root.pid != pid || target.root.stamp != stamp {
+        if target.root.hwnd != root
+            || target.root.pid != pid
+            || target.root.stamp != stamp
+            || target.root.process_birth != birth
+        {
             return Err("native control authorization identity changed".into());
         }
         if windows_identity::is_protected_window(hwnd, target.instance.pid)

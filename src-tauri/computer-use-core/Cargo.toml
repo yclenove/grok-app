@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["clock"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 axum = "0.8"
 http-body-util = "0.1"
+http-body = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
@@ -67,5 +68,4 @@ test = false
 bench = false
 
 [dev-dependencies]
-http-body = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }

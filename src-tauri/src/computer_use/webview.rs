@@ -1,28 +1,51 @@
 //! Typed WebView subset. Bind is explicit; no eval and no cookie copy.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use grok_computer_use_core::execution::ActionCancellation;
 use parking_lot::Mutex;
 
 use super::adapter::{
-    AdapterActResult, Capabilities, ComputerUseAdapter, DispatchRequest, TargetInfo,
+    AdapterActResult, Capabilities, ComputerUseAdapter, DispatchRequest, DownloadError,
+    DownloadRequest, DownloadResult, NavigationError, NavigationRequest, StagedDownload,
+    StagedNavigation, StagedUpload, TargetInfo, UploadError, UploadRequest,
 };
-use super::protocol::Observation;
+use super::protocol::{ActionKind, Observation};
 
+mod authority;
+mod candidates;
 mod dom;
+mod download;
+#[cfg(windows)]
+pub(crate) use download::maintain_download_buffers;
 mod execution;
 #[cfg(windows)]
 pub(crate) mod isolated_windows;
 pub(crate) mod lifecycle;
+mod navigation;
 mod queued_script;
 mod script_result;
+mod selection;
 mod side_script;
+mod upload;
 
 pub use execution::ScriptOperation;
 use execution::ScriptTracker;
 pub(crate) use queued_script::QueuedScript;
+pub use selection::WebViewSelection;
+
+#[derive(Debug, Clone)]
+pub struct LiveNavigationDocument {
+    pub generation: u64,
+    pub url: String,
+    pub title: String,
+}
+
+#[cfg(any(test, feature = "computer-use-probe"))]
+type ScopeFixture = (Weak<WebViewAdapter>, Vec<Arc<dyn LiveWebView>>);
 
 /// Live App-owned webview. Probe uses a Host-owned WebView2; product uses side browser.
 pub trait LiveWebView: Send + Sync {
@@ -32,6 +55,14 @@ pub trait LiveWebView: Send + Sync {
     fn title(&self) -> Result<String, String>;
     fn is_alive(&self) -> bool;
     fn navigation_generation(&self) -> u64;
+    /// Retained native document lock, not a native query or an execution grant.
+    fn with_document_authority(
+        &self,
+        _generation: u64,
+        _commit: &mut dyn FnMut() -> Result<(), super::BrokerError>,
+    ) -> Result<(), super::BrokerError> {
+        Err(super::BrokerError::TargetUnauthorized)
+    }
     #[cfg(any(test, feature = "computer-use-probe"))]
     fn navigate(&self, url: &str) -> Result<u64, String>;
     #[cfg(any(test, feature = "computer-use-probe"))]
@@ -50,6 +81,28 @@ pub trait LiveWebView: Send + Sync {
         operation.finished();
         Err("owned typed host script unavailable".into())
     }
+    fn navigate_for_run(
+        &self,
+        _request: &NavigationRequest,
+        _expected_generation: u64,
+    ) -> Result<LiveNavigationDocument, NavigationError> {
+        Err(NavigationError::not_dispatched(
+            "typed WebView navigation unavailable",
+        ))
+    }
+    fn download_for_run(
+        &self,
+        _request: &DownloadRequest,
+        _expected_generation: u64,
+        _prepared_url: &str,
+        _dispatch_script: &str,
+        operation: ScriptOperation,
+    ) -> Result<DownloadResult, DownloadError> {
+        operation.finished();
+        Err(DownloadError::not_dispatched(
+            "typed WebView download unavailable",
+        ))
+    }
 }
 
 struct BoundTab {
@@ -66,8 +119,11 @@ struct BoundTab {
 }
 
 pub struct WebViewAdapter {
-    bound: Mutex<Option<Arc<BoundTab>>>,
+    bound: Arc<Mutex<BTreeMap<String, Arc<BoundTab>>>>,
     scripts: ScriptTracker,
+    scope_host: OnceLock<(tauri::AppHandle, Weak<WebViewAdapter>)>,
+    #[cfg(any(test, feature = "computer-use-probe"))]
+    scope_fixture: Mutex<Option<ScopeFixture>>,
 }
 
 impl BoundTab {
@@ -97,8 +153,11 @@ impl BoundTab {
 impl WebViewAdapter {
     pub fn new() -> Self {
         Self {
-            bound: Mutex::new(None),
+            bound: Arc::new(Mutex::new(BTreeMap::new())),
             scripts: ScriptTracker::default(),
+            scope_host: OnceLock::new(),
+            #[cfg(any(test, feature = "computer-use-probe"))]
+            scope_fixture: Mutex::new(None),
         }
     }
 
@@ -113,26 +172,29 @@ impl WebViewAdapter {
     }
 
     pub fn unbind(&self) {
-        if let Some(old) = self.bound.lock().take() {
+        for old in std::mem::take(&mut *self.bound.lock()).into_values() {
             old.binding_cancellation.cancel();
         }
     }
 
     pub fn unbind_for_run(&self, session: &str, run_id: &str) -> bool {
         let mut bound = self.bound.lock();
-        let matches = bound
-            .as_ref()
-            .is_some_and(|current| current.session == session && current.run_id == run_id);
-        if matches {
-            if let Some(old) = bound.take() {
+        let mut removed = false;
+        bound.retain(|_, old| {
+            if old.session == session && old.run_id == run_id {
                 old.binding_cancellation.cancel();
+                removed = true;
+                false
+            } else {
+                true
             }
-        }
-        matches
+        });
+        removed
     }
 
     /// Explicit bind of the user's currently selected App-owned tab.
     /// Empty selection or a dead view fails closed; cookies/tokens are rejected.
+    #[cfg(any(test, feature = "computer-use-probe"))]
     pub fn bind(
         &self,
         view: Arc<dyn LiveWebView>,
@@ -153,48 +215,12 @@ impl WebViewAdapter {
         {
             return Err("bind requires session and run".into());
         }
-        if !view.is_alive() {
-            return Err("bind requires a live App-owned webview".into());
-        }
-        let label = view.label();
-        let native_tab_id = view.tab_id();
-        let generation = view.navigation_generation();
-        if label.is_empty()
-            || label.contains('|')
-            || native_tab_id.is_empty()
-            || native_tab_id.contains('|')
-            || generation == 0
-        {
-            return Err("bind requires a valid native WebView identity".into());
-        }
-        let url = view.url()?;
-        if url.trim().is_empty() {
-            return Err("live webview has no url".into());
-        }
-        let bound = Arc::new(BoundTab {
-            view,
-            label,
-            tab_id: format!("{native_tab_id}@{}", uuid::Uuid::new_v4()),
-            native_tab_id,
-            generation,
-            session: session.into(),
-            run_id: run_id.into(),
-            observation: Mutex::new(dom::ObservationState::default()),
-            execution_epoch: AtomicU64::new(0),
-            binding_cancellation: ActionCancellation::default(),
-        });
-        let title = bound.view.title().unwrap_or_default();
-        if !bound.is_current() || bound.target_id().len() > 256 {
-            return Err("WebView document changed during bind".into());
-        }
-        let target = target_info(&bound, if title.trim().is_empty() { url } else { title });
-        if let Some(old) = self.bound.lock().replace(bound) {
-            old.binding_cancellation.cancel();
-        }
-        Ok(target)
+        let selection = WebViewSelection::capture(view)?;
+        self.bind_selected(&selection, session, run_id)
     }
 
-    /// Product path: bind a labeled side-browser child webview that already exists.
+    /// Debug harness convenience; product tasks retain an explicit selection.
+    #[cfg(debug_assertions)]
     pub fn bind_side_browser(
         &self,
         app: tauri::AppHandle,
@@ -202,21 +228,16 @@ impl WebViewAdapter {
         session: &str,
         run_id: &str,
     ) -> Result<TargetInfo, String> {
-        if !crate::side_browser_host::is_app_owned_side_browser(label) {
-            return Err("side browser label must be App-owned".into());
-        }
-        if !crate::side_browser_host::exists(&app, label) {
-            return Err("bind requires a live App-owned webview".into());
-        }
-        let view = Arc::new(SideBrowserLiveView::open(app, label.to_string())?);
-        self.bind(view, session, run_id, &serde_json::json!({}))
+        let selection = Self::select_side_browser(app, label)?;
+        self.bind_selected(&selection, session, run_id)
     }
 
     fn bound_target(&self, target_id: &str) -> Result<Arc<BoundTab>, String> {
         let bound = self
             .bound
             .lock()
-            .clone()
+            .get(target_id)
+            .cloned()
             .ok_or("webview typed subset not bound to a live tab")?;
         if parse_id(target_id).is_none() || bound.target_id() != target_id || !bound.is_current() {
             return Err("webview target not bound or stale".into());
@@ -227,7 +248,7 @@ impl WebViewAdapter {
     fn still_bound(&self, expected: &Arc<BoundTab>) -> bool {
         self.bound
             .lock()
-            .as_ref()
+            .get(&expected.target_id())
             .is_some_and(|current| Arc::ptr_eq(current, expected))
             && expected.is_current()
     }
@@ -244,7 +265,7 @@ impl WebViewAdapter {
             // from before Pause/Stop cannot admit a later side-effect script.
             let bound = self.bound.lock();
             if !bound
-                .as_ref()
+                .get(&expected.target_id())
                 .is_some_and(|current| Arc::ptr_eq(current, expected))
                 || expected.execution_epoch.load(Ordering::SeqCst) != epoch
                 || !expected.is_current()
@@ -297,11 +318,12 @@ fn parse_script_json(raw: &str) -> Result<serde_json::Value, String> {
 }
 
 fn validate_action_parameters(req: &DispatchRequest) -> Result<(), String> {
-    use super::protocol::ActionKind;
     let allowed: &[&str] = match req.action {
         ActionKind::Click => &[],
         ActionKind::SetValue => &["text", "value"],
+        ActionKind::TypeText => &["text", "via"],
         ActionKind::Scroll => &["delta", "dy"],
+        ActionKind::Wait => &["nameEquals", "timeoutMs"],
         _ => return Err("typed WebView subset does not implement this action".into()),
     };
     let parameters = req
@@ -314,15 +336,22 @@ fn validate_action_parameters(req: &DispatchRequest) -> Result<(), String> {
     {
         return Err("unsupported typed WebView action parameter".into());
     }
-    if req.action == ActionKind::SetValue {
+    if matches!(req.action, ActionKind::SetValue | ActionKind::TypeText) {
+        if req.action == ActionKind::TypeText && parameters.get("via").is_some() {
+            return Err("typed WebView type_text does not support via=clipboard".into());
+        }
+        let text = if req.action == ActionKind::SetValue {
+            parameters.get("text").or_else(|| parameters.get("value"))
+        } else {
+            parameters.get("text")
+        }
+        .and_then(serde_json::Value::as_str);
         if parameters.len() != 1
-            || !parameters
-                .get("text")
-                .or_else(|| parameters.get("value"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| text.encode_utf16().count() <= 16000)
+            || !text.is_some_and(|text| {
+                text.chars().count() <= super::protocol::TEXT_MAX_CHARS && !text.contains('\0')
+            })
         {
-            return Err("typed WebView fill requires exactly one text value".into());
+            return Err("typed WebView text action requires exactly one bounded text value".into());
         }
     } else if req.action == ActionKind::Scroll
         && (parameters.len() > 1
@@ -331,8 +360,33 @@ fn validate_action_parameters(req: &DispatchRequest) -> Result<(), String> {
                 .any(|value| !value.as_i64().is_some_and(|n| (-4096..=4096).contains(&n))))
     {
         return Err("typed WebView scroll requires one integer delta".into());
+    } else if req.action == ActionKind::Wait {
+        wait_parameters(req)?;
     }
     Ok(())
+}
+
+fn wait_parameters(req: &DispatchRequest) -> Result<(String, u64), String> {
+    let parameters = req
+        .parameters
+        .as_object()
+        .ok_or("typed WebView action parameters must be an object")?;
+    if !(parameters.len() == 1 || parameters.len() == 2) {
+        return Err("typed WebView wait requires nameEquals and optional timeoutMs".into());
+    }
+    let name = parameters
+        .get("nameEquals")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty() && name.encode_utf16().count() <= 256)
+        .ok_or("typed WebView wait requires a bounded nameEquals")?;
+    let timeout = match parameters.get("timeoutMs") {
+        None => 2000,
+        Some(value) => value
+            .as_u64()
+            .filter(|timeout| (1..=10_000).contains(timeout))
+            .ok_or("typed WebView wait timeoutMs must be between 1 and 10000")?,
+    };
+    Ok((name.to_string(), timeout))
 }
 
 fn target_info(bound: &BoundTab, title: String) -> TargetInfo {
@@ -364,54 +418,64 @@ impl ComputerUseAdapter for WebViewAdapter {
             "side_browser_host typed snapshot/actions only; no eval in Computer Use".into(),
             "Cross-origin iframe / downloads are not claimed equivalent to Playwright".into(),
         ];
-        if self
-            .bound
-            .lock()
-            .as_ref()
-            .is_some_and(|bound| bound.is_current())
-        {
+        if self.bound.lock().values().any(|bound| bound.is_current()) {
             caps.observe_ax = true;
             caps.semantic_click = true;
             caps.unicode_text = true;
             caps.chinese_ime = true;
             caps.click = super::adapter::ActionSupport::SEMANTIC;
             caps.set_value = super::adapter::ActionSupport::SEMANTIC;
+            caps.type_text = super::adapter::ActionSupport::SEMANTIC;
             caps.scroll = super::adapter::ActionSupport::SEMANTIC;
+            caps.wait = super::adapter::ActionSupport::SEMANTIC;
         }
         caps
     }
 
     fn list_targets(&self) -> Result<Vec<TargetInfo>, String> {
-        let Some(bound) = self.bound.lock().clone() else {
-            return Ok(Vec::new());
-        };
-        if !bound.is_current() {
-            return Ok(Vec::new());
-        }
-        let url = match bound.view.url() {
-            Ok(u) if !u.trim().is_empty() => u,
-            _ => return Ok(Vec::new()),
-        };
-        let title = bound.view.title().unwrap_or_default();
-        let title = if title.trim().is_empty() { url } else { title };
-        if !self.still_bound(&bound) {
-            return Ok(Vec::new());
-        }
-        Ok(vec![target_info(&bound, title)])
+        self.list_bound_targets(None)
     }
 
     fn target_alive(&self, target_id: &str) -> bool {
         self.bound_target(target_id).is_ok()
     }
+    fn scope_identity(
+        &self,
+        target_id: &str,
+    ) -> Result<super::adapter::NativeScopeIdentity, String> {
+        self.bound_scope_identity(target_id)
+    }
+    fn scope_candidates_for_task(
+        &self,
+        limit: usize,
+        is_current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<super::adapter::ScopeCandidatePage, String> {
+        self.discover_scope_candidates(limit, is_current)
+    }
+    fn bind_scope_candidate(
+        &self,
+        identity: &super::adapter::NativeScopeIdentity,
+        session: &str,
+        run: &str,
+    ) -> Result<super::adapter::ScopeCandidate, String> {
+        let super::adapter::NativeScopeIdentity::WebViewSelected { identity } = identity else {
+            return Err("WebView binding requires the original unbound receipt".into());
+        };
+        identity.receipt.bind(self, session, run)
+    }
+    fn scope_target_info(&self, run_id: &str, target_id: &str) -> Result<TargetInfo, String> {
+        self.bound_scope_target_info(run_id, target_id)
+    }
+    fn with_scope_authority(
+        &self,
+        identities: &[super::adapter::NativeScopeIdentity],
+        commit: &mut dyn FnMut() -> Result<(), super::BrokerError>,
+    ) -> Result<(), super::BrokerError> {
+        self.with_bound_authority(identities, commit)
+    }
 
     fn list_targets_for_run(&self, run_id: &str) -> Result<Vec<TargetInfo>, String> {
-        Ok(self
-            .list_targets()?
-            .into_iter()
-            .filter(|target| {
-                parse_id(&target.target_id).is_some_and(|(_, _, _, _, owner)| owner == run_id)
-            })
-            .collect())
+        self.list_bound_targets(Some(run_id))
     }
 
     fn claim_target_for_run(&self, run_id: &str, target_id: &str) -> Result<(), String> {
@@ -456,9 +520,31 @@ impl ComputerUseAdapter for WebViewAdapter {
         self.act_owned(req)
     }
 
+    fn stage_navigation(
+        &self,
+        req: &NavigationRequest,
+    ) -> Result<Box<dyn StagedNavigation>, NavigationError> {
+        self.stage_navigation_owned(req)
+    }
+
+    fn stage_download(
+        &self,
+        req: &DownloadRequest,
+    ) -> Result<Box<dyn StagedDownload>, DownloadError> {
+        self.stage_download_owned(req)
+    }
+
+    fn stage_upload(&self, req: &UploadRequest) -> Result<Box<dyn StagedUpload>, UploadError> {
+        self.stage_upload_owned(req)
+    }
+
+    fn wait_uses_retained_reference(&self) -> bool {
+        true
+    }
+
     fn abort(&self, run_id: &str, _generation: u64) -> Result<(), String> {
         let bound = self.bound.lock();
-        if let Some(bound) = bound.as_ref().filter(|bound| bound.run_id == run_id) {
+        for bound in bound.values().filter(|bound| bound.run_id == run_id) {
             bound.observation.lock().snapshot = None;
             if bound
                 .execution_epoch
@@ -490,13 +576,8 @@ impl ComputerUseAdapter for WebViewAdapter {
             return;
         };
         let mut bound = self.bound.lock();
-        let matches = bound
-            .as_ref()
-            .is_some_and(|current| current.target_id() == target_id);
-        if matches {
-            if let Some(old) = bound.take() {
-                old.binding_cancellation.cancel();
-            }
+        if let Some(old) = bound.remove(target_id) {
+            old.binding_cancellation.cancel();
         }
     }
 
@@ -509,14 +590,44 @@ impl ComputerUseAdapter for WebViewAdapter {
     fn current_geometry_revision_for(&self, target_id: &str) -> u64 {
         self.bound
             .lock()
-            .as_ref()
-            .filter(|b| b.target_id() == target_id && b.is_current())
+            .get(target_id)
+            .filter(|b| b.is_current())
             .map(|b| b.generation)
             .unwrap_or(0)
     }
 }
 
 impl WebViewAdapter {
+    fn list_bound_targets(&self, run_id: Option<&str>) -> Result<Vec<TargetInfo>, String> {
+        // Do not read another run's metadata and filter it afterwards.
+        let selected: Vec<_> = self
+            .bound
+            .lock()
+            .values()
+            .filter(|bound| run_id.is_none_or(|run| bound.run_id == run))
+            .cloned()
+            .collect();
+        let mut targets = Vec::with_capacity(selected.len());
+        for bound in selected {
+            if !bound.is_current() {
+                continue;
+            }
+            let url = match bound.view.url() {
+                Ok(url) if !url.trim().is_empty() => url,
+                _ => continue,
+            };
+            let title = bound.view.title().unwrap_or_default();
+            let title = if title.trim().is_empty() { url } else { title };
+            if self.still_bound(&bound) {
+                targets.push(target_info(
+                    &bound,
+                    title.chars().take(selection::MAX_METADATA_CHARS).collect(),
+                ));
+            }
+        }
+        Ok(targets)
+    }
+
     fn observe_owned(
         &self,
         target_id: &str,
@@ -546,7 +657,7 @@ impl WebViewAdapter {
             // Synchronize with abort and binding replacement before publishing.
             let current = self.bound.lock();
             if !current
-                .as_ref()
+                .get(&bound.target_id())
                 .is_some_and(|current| Arc::ptr_eq(current, &bound))
                 || !bound.is_current()
                 || bound.execution_epoch.load(Ordering::SeqCst) != epoch
@@ -604,6 +715,9 @@ impl WebViewAdapter {
         req.admit(self)?;
         let epoch = bound.execution_epoch.load(Ordering::SeqCst);
         bound.observation.lock().validate(req)?;
+        if req.action == ActionKind::Wait {
+            return self.wait_owned(&bound, req, epoch);
+        }
         {
             let preflight = dom::action(&bound.tab_id, req, true)?;
             let raw = self.host_script(&bound, epoch, &req.cancellation, &preflight)?;
@@ -634,124 +748,131 @@ impl WebViewAdapter {
         }
         req.cancellation.check()?;
         let snap = parse_script_json(&raw)?;
-        dom::acknowledge(&snap)?;
+        let verified = if req.action == ActionKind::TypeText {
+            dom::action_verified(snap)?
+        } else {
+            dom::acknowledge(&snap)?;
+            false
+        };
         Ok(AdapterActResult {
             applied: true,
             outcome: None,
-            // A returned script is not an independently checked page postcondition.
-            postcondition_ok: false,
-            verifiable: false,
-            detail: "typed WebView action dispatched".into(),
-        })
-    }
-}
-
-struct SideBrowserLiveView {
-    app: tauri::AppHandle,
-    webview: tauri::Webview,
-    label: String,
-    tab_id: String,
-    native: lifecycle::NativeView,
-    document: lifecycle::DocumentIdentity,
-}
-
-impl SideBrowserLiveView {
-    fn open(app: tauri::AppHandle, label: String) -> Result<Self, String> {
-        use tauri::Manager;
-        let native = lifecycle::current(&label).ok_or("WebView native identity unavailable")?;
-        let document = native.document().ok_or("WebView native identity retired")?;
-        let webview = app
-            .get_webview(&label)
-            .ok_or("WebView native instance unavailable")?;
-        let url = webview
-            .url()
-            .map_err(|_| "WebView URL unavailable")?
-            .to_string();
-        if url.trim().is_empty() {
-            return Err("selected tab has no url".into());
-        }
-        if !native.matches(document) {
-            return Err("WebView document changed during bind".into());
-        }
-        Ok(Self {
-            app,
-            webview,
-            label,
-            tab_id: format!("native-{}", document.instance),
-            native,
-            document,
+            postcondition_ok: verified,
+            verifiable: verified,
+            detail: if verified {
+                "typed WebView text inserted and field postcondition verified".into()
+            } else {
+                // A returned click/fill/scroll script is not an independently
+                // checked page postcondition.
+                "typed WebView action dispatched".into()
+            },
         })
     }
 
-    fn require_document(&self) -> Result<(), String> {
-        if self.is_alive() {
-            Ok(())
-        } else {
-            Err("WebView native document retired".into())
-        }
-    }
-}
-
-impl LiveWebView for SideBrowserLiveView {
-    fn label(&self) -> String {
-        self.label.clone()
-    }
-    fn tab_id(&self) -> String {
-        self.tab_id.clone()
-    }
-    fn url(&self) -> Result<String, String> {
-        self.require_document()?;
-        let url = self
-            .webview
-            .url()
-            .map_err(|_| "WebView URL unavailable")?
-            .to_string();
-        self.require_document()?;
-        Ok(url)
-    }
-    fn title(&self) -> Result<String, String> {
-        self.url()
-    }
-    fn is_alive(&self) -> bool {
-        self.native.matches(self.document)
-            && crate::side_browser_host::exists(&self.app, &self.label)
-    }
-    fn navigation_generation(&self) -> u64 {
-        if self.is_alive() {
-            self.document.generation
-        } else {
-            0
-        }
-    }
-    #[cfg(any(test, feature = "computer-use-probe"))]
-    fn navigate(&self, url: &str) -> Result<u64, String> {
-        self.require_document()?;
-        let url = tauri::Url::parse(url).map_err(|_| "invalid WebView URL")?;
-        if !matches!(url.scheme(), "http" | "https" | "file") {
-            return Err("typed navigate scheme not allowed".into());
-        }
-        self.native.navigation_started();
-        self.webview
-            .navigate(url)
-            .map_err(|_| "WebView navigation failed")?;
-        self.native
-            .document()
-            .map(|identity| identity.generation)
-            .ok_or_else(|| "WebView native instance retired".into())
-    }
-    fn host_script_owned(
+    fn wait_owned(
         &self,
-        js: &str,
-        generation: u64,
-        operation: ScriptOperation,
-    ) -> Result<String, String> {
-        if generation != self.document.generation {
-            operation.finished();
-            return Err("WebView native document retired".into());
+        bound: &Arc<BoundTab>,
+        req: &DispatchRequest,
+        epoch: u64,
+    ) -> Result<AdapterActResult, String> {
+        let (name_equals, timeout_ms) = wait_parameters(req)?;
+        let started = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        loop {
+            req.cancellation.check()?;
+            if !self.still_bound(bound) || bound.execution_epoch.load(Ordering::SeqCst) != epoch {
+                return Err("WebView wait retired during cancellation or document change".into());
+            }
+            bound.observation.lock().validate(req)?;
+            let js = dom::wait_check(&bound.tab_id, req, &name_equals)?;
+            let raw = self.host_script(bound, epoch, &req.cancellation, &js)?;
+            if !self.still_bound(bound) {
+                return Err("WebView document changed during wait".into());
+            }
+            if bound.execution_epoch.load(Ordering::SeqCst) != epoch {
+                return Err("WebView wait retired during cancellation".into());
+            }
+            req.cancellation.check()?;
+            bound.observation.lock().validate(req)?;
+            if dom::wait_matched(parse_script_json(&raw)?)? {
+                self.commit_wait_match(bound, req, epoch)?;
+                return Ok(AdapterActResult {
+                    applied: true,
+                    outcome: None,
+                    postcondition_ok: true,
+                    verifiable: true,
+                    detail: "observed WebView element name matched; no input dispatched".into(),
+                });
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err("typed WebView wait timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(50).min(timeout - elapsed));
         }
-        side_script::run(self, js, operation)
+    }
+
+    /// Linearize a matched reply against the original native document. The
+    /// binding map is acquired before native document authority, matching the
+    /// publication and dispatch lock order. Do not call `is_current()` from
+    /// the callback: it would query the native document recursively.
+    fn commit_wait_match(
+        &self,
+        bound: &Arc<BoundTab>,
+        req: &DispatchRequest,
+        epoch: u64,
+    ) -> Result<(), String> {
+        let current = self.bound.lock();
+        if !current
+            .get(&bound.target_id())
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, bound))
+        {
+            return Err("WebView wait binding retired before verification".into());
+        }
+        let mut commit = || {
+            if bound.execution_epoch.load(Ordering::SeqCst) != epoch {
+                return Err(super::BrokerError::StopRequested);
+            }
+            req.cancellation
+                .check()
+                .map_err(super::BrokerError::Adapter)?;
+            bound
+                .binding_cancellation
+                .check()
+                .map_err(|_| super::BrokerError::DeadTarget)?;
+            bound
+                .observation
+                .lock()
+                .validate(req)
+                .map_err(super::BrokerError::Adapter)
+        };
+        let result = bound
+            .view
+            .with_document_authority(bound.generation, &mut commit);
+        drop(current);
+        result.map_err(|error| format!("WebView wait retired before verification: {error}"))
     }
 }
+
+mod native_view;
+use native_view::SideBrowserLiveView;
+
+#[cfg(windows)]
+pub(crate) use download::{
+    cancel_instance as cancel_side_browser_downloads,
+    cancel_instance_now as cancel_side_browser_downloads_now,
+    claim_wry_requested as claim_computer_use_download, finish_wry as finish_computer_use_download,
+    retire_instance as retire_side_browser_downloads,
+    schedule_handler as schedule_computer_use_download_handler,
+    uninstall_instance as uninstall_side_browser_downloads,
+    wait_retired as wait_side_browser_downloads_retired,
+};
+
+#[cfg(all(windows, feature = "computer-use-probe"))]
+pub(crate) use download::{
+    cancel_probe_download_now, download_live_host as download_live_probe,
+    install_probe_handlers as install_probe_download_handlers,
+};
 
 #[cfg(feature = "computer-use-probe")]
 mod probe;
@@ -789,8 +910,68 @@ mod probe_isolation;
 #[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
 mod probe_dom;
 
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+mod probe_download;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+mod probe_upload;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_upload::run as run_product_upload_gate;
+#[cfg(all(windows, feature = "computer-use-probe"))]
+pub(crate) use probe_upload::run_mcp as run_product_upload_mcp_gate;
+#[cfg(all(windows, feature = "computer-use-probe"))]
+pub(crate) use probe_upload::run_task as run_product_upload_task_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+mod probe_navigation;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_navigation::run as run_navigation_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::run as run_download_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::run as run_download_lifecycle_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::shared::run as run_download_shared_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::run as run_product_download_close_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::idle_exit::run as run_product_idle_exit_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::error_unwind::run as run_product_download_error_unwind_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::before_start::run as run_product_download_before_start_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::buffer_retirement::run as run_product_download_buffer_retirement_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::buffer_crash::run as run_product_download_buffer_crash_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use probe_download::lifecycle::app::publication::run as run_product_download_publication_gate;
+
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use download::probe_download_pending;
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use download::probe_resources_retired as probe_download_resources_retired;
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use download::retire_instance_now as retire_probe_downloads_now;
+#[cfg(all(target_os = "windows", feature = "computer-use-probe"))]
+pub(crate) use download::uninstall_instance_now as uninstall_probe_downloads_now;
+
 #[cfg(feature = "computer-use-probe")]
 pub use probe::run_webview_gates;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::upload_permission::fixture as upload_permission_fixture;

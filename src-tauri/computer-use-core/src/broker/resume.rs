@@ -25,11 +25,19 @@ impl ComputerUseBroker {
                 return Err(BrokerError::FeatureDisabled);
             }
             let run = inner.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
+            if matches!(run.consent, ConsentGate::Bound(_)) {
+                return Err(BrokerError::TargetUnauthorized);
+            }
             if run.stop != StopState::Running {
                 return Err(BrokerError::StopRequested);
             }
             if run.pause_cleanup_pending {
                 return Err(BrokerError::Schema("pause cleanup still pending".into()));
+            }
+            if run.switch_in_flight || run.switch_cleanup_pending || run.resume_in_flight {
+                return Err(BrokerError::LeaseHeld {
+                    run_id: run_id.into(),
+                });
             }
             if run.in_flight.load(Ordering::SeqCst) {
                 return Err(BrokerError::LeaseHeld {
@@ -45,7 +53,7 @@ impl ComputerUseBroker {
             let admission = ResumeAdmission {
                 broker: self,
                 run_id,
-                _in_flight: InFlightClear(run.in_flight.clone()),
+                _in_flight: InFlightClear::new(run.in_flight.clone(), &self.changes),
             };
             (
                 run.target.clone(),

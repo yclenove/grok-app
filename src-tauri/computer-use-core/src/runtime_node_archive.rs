@@ -3,24 +3,34 @@
 
 use super::PrepareError;
 use crate::playwright_materialize::sha256_hex;
-use flate2::read::GzDecoder;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Cursor, Read};
 use std::path::Path;
 
 pub fn extract(bytes: &[u8], dest: &Path, root: &str, expected: &str) -> Result<(), PrepareError> {
+    let limits = crate::runtime_limits::node();
+    if bytes.len() as u64 > limits.max_archive_bytes {
+        return Err(PrepareError::new(
+            "oversize",
+            "compressed Node archive too large",
+        ));
+    }
     if sha256_hex(bytes) != expected {
         return Err(PrepareError::new(
             "hash_mismatch",
             "Node tar archive failed integrity check",
         ));
     }
+    crate::runtime_tar::validate(bytes, limits)
+        .map_err(|e| PrepareError::new(&e.code, e.message))?;
     fs::create_dir_all(dest).map_err(|e| PrepareError::new("io", e.to_string()))?;
-    let mut archive = tar::Archive::new(GzDecoder::new(Cursor::new(bytes)));
+    let mut archive = tar::Archive::new(
+        crate::runtime_tar::decoder(bytes, limits)
+            .map_err(|e| PrepareError::new(&e.code, e.message))?,
+    );
     let mut seen = BTreeSet::new();
     let mut extracted = BTreeSet::new();
-    let mut total = 0u64;
+    let mut budget = crate::runtime_limits::TreeBudget::default();
     for entry in archive
         .entries()
         .map_err(|e| PrepareError::new("truncated", e.to_string()))?
@@ -34,19 +44,32 @@ pub fn extract(bytes: &[u8], dest: &Path, root: &str, expected: &str) -> Result<
             || raw.contains(':')
             || raw.contains('\0')
             || raw.split('/').any(|part| part == ".." || part == ".")
-            || raw.len() > 1024
+            || raw.contains(['\t', '\r', '\n'])
         {
             return Err(PrepareError::new("path", "unsafe Node tar path"));
         }
-        if !seen.insert(raw.trim_end_matches('/').to_string()) || seen.len() > 10_000 {
+        if !seen.insert(raw.trim_end_matches('/').to_ascii_lowercase()) {
             return Err(PrepareError::new(
                 "oversize",
                 "duplicate path or too many Node archive entries",
             ));
         }
-        total = total.saturating_add(entry.size());
-        if total > 512 * 1024 * 1024 {
-            return Err(PrepareError::new("oversize", "Node tar is too large"));
+        let kind = entry.header().entry_type();
+        budget
+            .add(
+                limits,
+                if kind.is_dir() {
+                    None
+                } else {
+                    Some(entry.size())
+                },
+            )
+            .map_err(|e| PrepareError::new(&e.code, e.message))?;
+        if kind.is_dir() && entry.size() != 0 {
+            return Err(PrepareError::new(
+                "path",
+                "Node archive directory has payload",
+            ));
         }
         if raw.trim_end_matches('/') == root {
             if !entry.header().entry_type().is_dir() || entry.size() != 0 {
@@ -61,10 +84,24 @@ pub fn extract(bytes: &[u8], dest: &Path, root: &str, expected: &str) -> Result<
         let Some(relative) = raw.strip_prefix(&prefix) else {
             return Err(PrepareError::new("path", "unexpected Node tar root"));
         };
+        crate::runtime_limits::validate_path(relative.trim_end_matches('/'), limits.max_path_chars)
+            .map_err(|e| PrepareError::new(&e.code, e.message))?;
         let output = match relative {
             "bin/node" => "node",
             "LICENSE" => "LICENSE",
-            _ => continue,
+            _ => {
+                if !kind.is_file() && !kind.is_dir() && !kind.is_symlink() && !kind.is_hard_link() {
+                    return Err(PrepareError::new(
+                        "symlink",
+                        "unsupported Node archive entry type",
+                    ));
+                }
+                // Unselected entries are never materialized but still fully read.
+                let size = entry.size();
+                crate::runtime_tree::copy_exact(&mut entry, &mut std::io::sink(), size)
+                    .map_err(|e| PrepareError::new(&e.code, e.message))?;
+                continue;
+            }
         };
         if !entry.header().entry_type().is_file() {
             return Err(PrepareError::new(
@@ -72,24 +109,16 @@ pub fn extract(bytes: &[u8], dest: &Path, root: &str, expected: &str) -> Result<
                 "Node executable/license must be regular files",
             ));
         }
-        if entry.size() > 128 * 1024 * 1024 {
-            return Err(PrepareError::new("oversize", "Node tar file too large"));
-        }
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|e| PrepareError::new("truncated", e.to_string()))?;
-        if contents.len() as u64 != entry.size() {
-            return Err(PrepareError::new("truncated", "Node tar size mismatch"));
-        }
         let path = dest.join(output);
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .map_err(|e| PrepareError::new("io", e.to_string()))?;
-        std::io::Write::write_all(&mut file, &contents)
-            .map_err(|e| PrepareError::new("io", e.to_string()))?;
+        let size = entry.size();
+        crate::runtime_tree::copy_exact(&mut entry, &mut file, size)
+            .map_err(|e| PrepareError::new(&e.code, e.message))?;
+        drop(file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -103,6 +132,12 @@ pub fn extract(bytes: &[u8], dest: &Path, root: &str, expected: &str) -> Result<
         return Err(PrepareError::new(
             "missing",
             "Node archive must contain bin/node and LICENSE",
+        ));
+    }
+    if budget.bytes as f64 / bytes.len().max(1) as f64 > limits.max_compression_ratio {
+        return Err(PrepareError::new(
+            "oversize",
+            "Node archive compression ratio exceeds limit",
         ));
     }
     Ok(())

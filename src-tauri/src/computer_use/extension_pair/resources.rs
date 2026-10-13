@@ -1,8 +1,11 @@
 //! Ownership for disposable probe profiles and their child processes.
 use std::path::{Path, PathBuf};
 use std::process::Child;
+#[cfg(all(test, windows))]
+#[path = "resource_witness.rs"]
+mod resource_witness;
 
-pub(super) struct ProbeResources {
+pub(crate) struct ProbeResources {
     root: PathBuf,
     parent: PathBuf,
     pub profile: PathBuf,
@@ -10,6 +13,8 @@ pub(super) struct ProbeResources {
     #[cfg(windows)]
     job: Option<windows::Win32::Foundation::HANDLE>,
     cleaned: bool,
+    #[cfg(all(test, windows))]
+    retain_profile: bool,
 }
 
 impl ProbeResources {
@@ -38,6 +43,8 @@ impl ProbeResources {
             #[cfg(windows)]
             job: None,
             cleaned: false,
+            #[cfg(all(test, windows))]
+            retain_profile: false,
         })
     }
 
@@ -95,6 +102,11 @@ impl ProbeResources {
             }
             self.job = None;
         }
+        #[cfg(all(test, windows))]
+        if self.retain_profile {
+            self.cleaned = true;
+            return Ok(());
+        }
         validate_owner(&self.root, &self.parent, &self.owner)?;
         // Windows can release browser file handles shortly after Job active count
         // reaches zero. Keep the owner marker intact through every bounded retry.
@@ -117,6 +129,39 @@ impl ProbeResources {
         std::fs::remove_dir(&self.root).map_err(|e| e.to_string())?;
         self.cleaned = true;
         Ok(())
+    }
+
+    #[cfg(all(test, windows))]
+    pub fn retain_failure_profile(&mut self) {
+        self.retain_profile = true;
+    }
+
+    // Read only the original Job. This witness neither terminates a process nor
+    // releases ownership; cleanup still belongs to the original resource guard.
+    #[cfg(all(test, windows))]
+    pub fn active_processes_for_test(&self) -> Result<u32, String> {
+        use windows::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
+        let job = self.job.ok_or("native fixture Job missing")?;
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            QueryInformationJobObject(
+                Some(job),
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of_val(&info) as u32,
+                None,
+            )
+            .map_err(|_| "original fixture Job witness unavailable")?;
+        }
+        Ok(info.ActiveProcesses)
+    }
+
+    #[cfg(all(test, windows))]
+    pub fn process_members_for_test(&self) -> Result<serde_json::Value, String> {
+        resource_witness::members(self.job.ok_or("native fixture Job missing")?)
     }
 }
 

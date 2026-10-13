@@ -1,776 +1,419 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
+import { address, deferred, execution, key, pendingView, runningView, setupTaskUi } from "./taskUiTestSupport";
+import * as events from "@/lib/api/computerTaskEvents";
+import * as taskApi from "@/lib/api/computerTask";
+import * as pickerApi from "@/lib/api/computerTaskPicker";
+import type { ComputerTaskView } from "@/lib/api/computerTask";
 import { ComputerPanel } from "./ComputerPanel";
-import * as api from "@/lib/api/computerUse";
-import * as system from "@/lib/api/system";
+import { ComputerTaskCardLive } from "./ComputerTaskCardLive";
 
-vi.mock("@/lib/api/computerUse", () => ({
-  computerStatus: vi.fn(), computerListTargets: vi.fn(), computerSetPreview: vi.fn(),
-  computerAuthorizeSurface: vi.fn(), computerCancelAuthorization: vi.fn(),
-  computerObserve: vi.fn(), computerPause: vi.fn(),
-  computerResume: vi.fn(), computerTakeover: vi.fn(), computerStop: vi.fn(),
-  computerRetryCleanup: vi.fn(),
-  computerBeginPairing: vi.fn(), computerConfirmPairingApp: vi.fn(),
-  computerRevokePairing: vi.fn(), computerListSharedTabs: vi.fn(),
-  computerUnbindWebview: vi.fn(),
-}));
-
-vi.mock("@/lib/api/system", () => ({
-  sideBrowserList: vi.fn(),
-}));
-
-const state = (patch: Partial<api.ComputerStatus> = {}): api.ComputerStatus => ({
-  featureEnabled: true, enabled: false, runId: null, targetId: null, targetName: null,
-  paused: false, stopState: "stopped", backend: "test", notes: [], traces: [],
-  recovery: null, timings: null, targetAlive: false, mcpCatalog: null, ...patch,
-});
-
-const running = () => state({ runId: "run", enabled: true, targetId: "window", targetName: "Editor", stopState: "running", targetAlive: true });
-
-beforeEach(() => {
-  vi.resetAllMocks();
-  vi.mocked(api.computerStatus).mockResolvedValue(state());
-  vi.mocked(api.computerListTargets).mockResolvedValue([{ targetId: "window", title: "Editor", appName: "Editor", kind: "window" }]);
-  vi.mocked(api.computerCancelAuthorization).mockResolvedValue(false);
-  vi.mocked(api.computerSetPreview).mockResolvedValue();
-  vi.mocked(api.computerObserve).mockResolvedValue({ snapshotId: "frame", geometryRevision: 1, previewDataUrl: "data:image/png;base64,AAAA" });
-  vi.mocked(api.computerBeginPairing).mockResolvedValue({ nonce: "n1", instanceId: "inst", verificationCode: "ABCDE-ABCDE-ABCDE-ABCDE", endpoint: "http://127.0.0.1:12345", expiresAtMs: Date.now() + 300_000, installedExtensionId: "ext" });
-  vi.mocked(api.computerConfirmPairingApp).mockResolvedValue();
-  vi.mocked(api.computerRevokePairing).mockResolvedValue();
-  vi.mocked(api.computerListSharedTabs).mockResolvedValue([]);
-  vi.mocked(api.computerUnbindWebview).mockResolvedValue();
-  vi.mocked(api.computerRetryCleanup).mockResolvedValue({
-    desiredGeneration: 1,
-    appliedGeneration: 1,
-    desiredPresent: false,
-    pending: false,
-    cleanupPending: false,
-    lastError: null,
-  });
-  vi.mocked(api.computerAuthorizeSurface).mockImplementation(async (opts) => ({
-    attemptId: opts.attemptId,
-    selectorRevision: opts.selectorRevision,
-    runId: "authorized-run",
-    target: opts.surface === "managed-browser"
-      ? { targetId: "managed:alice:page-1", title: "managed", appName: "managed-browser", kind: "managed-tab", surface: "managed-browser" }
-      : opts.surface === "existing-tabs"
-        ? { targetId: "tab-1", title: "Shared", appName: "existing-tabs", kind: "existing-tab", surface: "existing-tabs" }
-        : opts.surface === "app-webview"
-          ? { targetId: "wv|tab", title: "CU-D5", appName: "webview", kind: "webview", surface: "app-webview" }
-          : { targetId: opts.targetId, title: "Editor", appName: "Editor", kind: "window", surface: "desktop" },
-  }));
-  vi.mocked(system.sideBrowserList).mockResolvedValue([{ label: "resource-browser-cu" }]);
-  Object.defineProperty(document, "hidden", { configurable: true, value: false });
-});
+let ui: ReturnType<typeof setupTaskUi>;
+beforeEach(() => { ui = setupTaskUi(); vi.useFakeTimers(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
+async function start(host = pendingView(), props: Partial<Parameters<typeof ComputerPanel>[0]> = {}) {
+  const view = render(<ComputerPanel locale="en" sessionId="chat" runId={null} {...props} />);
+  await act(async () => {}); await ui.emit(host);
+  return view;
+}
+async function openPicker() {
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Choose windows for this task" })); });
+  return within(screen.getByRole("dialog"));
+}
+const settle = () => act(async () => {});
+function paused() {
+  const host = runningView();
+  host.executions[0] = execution({ phase: "paused", generation: "18446744073709551615", hasFreshObservation: false });
+  host.grants[0] = { ...host.grants[0], suspended: true, executable: false };
+  return host;
+}
+function stopped() {
+  const host = runningView(); host.executions[0].phase = "stopped"; host.grants[0].executable = false;
+  return host;
+}
 
-describe("Computer panel lifecycle", () => {
-  it("offers explicit system consent without a target selector, fake preview or broad single-app promise", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(state({ backend: "wayland-portal", desktopSelection: "portal" }));
-    vi.mocked(api.computerAuthorizeSurface).mockReturnValue(new Promise(() => {}));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    const consent = await screen.findByRole("button", { name: "Choose screen in system dialog" });
-    expect(consent).toBeEnabled();
-    expect(screen.getByText(/Input permission applies to the desktop session, not just one app\./)).toBeInTheDocument();
-    expect(screen.getByText(/Wayland preview requires the GNOME policy helper\./)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Select target" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Refresh targets" })).toBeNull();
-    expect(screen.queryByText("No available targets. Open a window or share a tab, then refresh.")).toBeNull();
-    expect(api.computerListTargets).not.toHaveBeenCalled();
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-    fireEvent.click(consent);
-    await waitFor(() => expect(api.computerAuthorizeSurface).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "chat", surface: "desktop", targetId: "" })));
-    expect(screen.getByRole("button", { name: /^Stop$/ })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: /^Stop$/ }));
-    await waitFor(() => expect(api.computerStop).toHaveBeenCalledWith({ sessionId: "chat", runId: null }));
+describe("Computer workspace task-consent lifecycle", () => {
+  it("shows retained names for inactive scope members without discovering or capturing them", async () => {
+    const host = runningView();
+    host.grants[0].members.push({ targetId: "fixture-viewer", surface: "desktop", displayName: "Selected reference viewer" });
+    await start(host);
+    expect(screen.getByText("Selected reference viewer")).toBeInTheDocument();
+    expect(screen.queryByText("fixture-viewer")).toBeNull();
+    expect(pickerApi.computerTaskPickerBegin).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerLoad).not.toHaveBeenCalled();
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledExactlyOnceWith("chat", address);
   });
 
-  it("system cancellation shows an error and permits a new explicit attempt, never auto-reopens", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(state({ backend: "wayland-portal", desktopSelection: "portal" }));
-    vi.mocked(api.computerAuthorizeSurface).mockRejectedValue(new Error("native Wayland selection cancelled"));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Choose screen in system dialog" }));
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Choose screen in system dialog" })).toBeEnabled();
-    expect(api.computerAuthorizeSurface).toHaveBeenCalledTimes(1);
-    expect(api.computerObserve).not.toHaveBeenCalled();
+  it("opens idle without requesting, selecting, approving or capturing anything", async () => {
+    await start({ ...pendingView(), taskId: null, request: null, pickerSurfaces: [] });
+    expect(screen.getByText("Access is requested when a task needs it.")).toBeInTheDocument();
+    expect(pickerApi.computerTaskPickerBegin).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerLoad).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerApprove).not.toHaveBeenCalled();
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
   });
 
-  it("retires stale target choices on refresh failure and recovers without stale errors", async () => {
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Editor$/ }));
-    expect(screen.getByRole("button", { name: "Authorize this target" })).toBeEnabled();
-    vi.mocked(api.computerListTargets).mockRejectedValueOnce(new Error("target discovery unavailable"));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh targets" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load targets. Refresh to try again.");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh targets" })).toBeEnabled());
-    expect(screen.getByRole("button", { name: "Authorize this target" })).toBeDisabled();
-    expect(screen.queryByText("Selecting a target does not grant access.")).toBeNull();
-    expect(screen.queryByText("No available targets. Open a window or share a tab, then refresh.")).toBeNull();
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    vi.mocked(api.computerListTargets).mockResolvedValueOnce([
-      { targetId: "new-window", title: "New editor", appName: "Editor", kind: "window" },
-    ]);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh targets" }));
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(screen.getByRole("button", { name: "Authorize this target" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    expect(screen.queryByRole("button", { name: /^Editor$/ })).toBeNull();
-    fireEvent.click(await screen.findByRole("button", { name: "New editor" }));
-    expect(screen.getByRole("button", { name: "Authorize this target" })).toBeEnabled();
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-  });
-
-  it.each(["desktop", "managed-browser", "existing-tabs", "app-webview"] as const)(
-    "%s discovery failure cannot masquerade as an empty list or disable current-run Stop", async (surface) => {
-      vi.mocked(api.computerStatus).mockResolvedValue(running());
-      vi.mocked(api.computerListTargets).mockRejectedValue(new Error("discovery unavailable"));
-      vi.mocked(system.sideBrowserList).mockRejectedValue(new Error("discovery unavailable"));
-      render(<ComputerPanel locale="en" sessionId="chat" runId="run" surface={surface} />);
-      fireEvent.click(await screen.findByRole("button", { name: "Choose a target" }));
-      expect(await screen.findByRole("alert")).toHaveTextContent("Could not load targets. Refresh to try again.");
-      expect(screen.queryByText("Selecting a target does not grant access.")).toBeNull();
-      expect(screen.queryByText("No available targets. Open a window or share a tab, then refresh.")).toBeNull();
-      expect(screen.getByRole("button", { name: "Authorize this target" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Refresh targets" })).toBeEnabled();
-      expect(screen.getByRole("button", { name: /^Stop$/ })).toBeEnabled();
-      expect(screen.getByRole("button", { name: /^Pause$/ })).toBeEnabled();
-      fireEvent.click(screen.getByRole("button", { name: /^Stop$/ }));
-      await waitFor(() => expect(api.computerStop).toHaveBeenCalledWith({ sessionId: "chat", runId: "run" }));
-      expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    },
-  );
-
-  it("a successful target refresh does not erase an unrelated authorization failure", async () => {
-    vi.mocked(api.computerAuthorizeSurface).mockRejectedValueOnce(new Error("yolo never grants desktop control"));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Editor$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("YOLO does not grant desktop control.");
-    fireEvent.click(screen.getByRole("button", { name: "Refresh targets" }));
-    await waitFor(() => expect(api.computerListTargets).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh targets" })).toBeEnabled());
-    expect(screen.getByRole("alert")).toHaveTextContent("YOLO does not grant desktop control.");
-    expect(api.computerAuthorizeSurface).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows no-session, off, and backend-unavailable states", async () => {
+  it("does not create any local observer or actionable Stop without a chat", async () => {
     render(<ComputerPanel locale="en" sessionId={null} runId={null} />);
-    expect(
-      screen.getByText("Open a local chat to use Computer Use."),
-    ).toBeInTheDocument();
-    cleanup();
-    vi.mocked(api.computerStatus).mockResolvedValue(state({ featureEnabled: false }));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    expect(await screen.findByText("Computer Use is off")).toBeInTheDocument();
-    expect(
-      screen.getByText("Turn it on in Settings → Extensions → Computer Use."),
-    ).toBeInTheDocument();
-    cleanup();
-    vi.mocked(api.computerStatus).mockResolvedValue(
-      state({ featureEnabled: true, backend: "none" }),
-    );
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    expect(
-      await screen.findByText("This desktop backend is not available here."),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Surface" })).toBeEnabled();
-    expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByText("Open a local chat to use Computer Use.")).toBeInTheDocument();
+    expect(events.computerTaskSubscribe).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
-  it.each(["managed-browser", "existing-tabs", "app-webview"] as const)("does not hide %s setup behind desktop-only availability", async (surface) => {
-    vi.mocked(api.computerStatus).mockResolvedValue(state({ backend: "none" }));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} surface={surface} />);
-    expect(await screen.findByRole("button", { name: "Surface" })).toBeEnabled();
-    expect(screen.queryByText("This desktop backend is not available here.")).toBeNull();
-    expect(screen.getByRole("button", { name: "Authorize this target" })).toBeDisabled();
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
+  it("shows a pending request with feature off instead of forcing a settings visit", async () => {
+    await start();
+    expect(screen.getByText("Arrange my owned editor")).toBeInTheDocument();
+    expect(screen.getByText("Only selected fixture windows")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose windows for this task" })).toBeEnabled();
+    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
+    expect(pickerApi.computerTaskPickerBegin).not.toHaveBeenCalled();
   });
 
-  it("T24 Pause and Stop drive Host pause/stop including empty and busy paths", async () => {
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    expect(await screen.findByRole("button", { name: /^Pause$/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Stop$/ })).toBeDisabled();
-    cleanup();
-    vi.mocked(api.computerStatus).mockResolvedValue(running());
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    fireEvent.click(await screen.findByRole("button", { name: /^Pause$/ }));
-    await waitFor(() => expect(api.computerPause).toHaveBeenCalledWith({ sessionId: "chat", runId: "run" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Stop$/ }));
-    await waitFor(() => expect(api.computerStop).toHaveBeenCalledWith({ sessionId: "chat", runId: "run" }));
-    vi.mocked(api.computerPause).mockRejectedValueOnce(new Error("busy"));
-    fireEvent.click(screen.getByRole("button", { name: /^Pause$/ }));
-    await waitFor(() => expect(api.computerPause).toHaveBeenCalled());
-  });
-
-  it("shows truncated observation copy from the Host frame", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(running());
-    vi.mocked(api.computerObserve).mockResolvedValue({
-      snapshotId: "frame",
-      geometryRevision: 1,
-      previewDataUrl: "data:image/png;base64,AAAA",
-      truncated: true,
-    });
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    expect(await screen.findByText("This observation was truncated.")).toBeInTheDocument();
-  });
-
-  it("maps Host YOLO refusal onto the dedicated panel copy", async () => {
-    vi.mocked(api.computerAuthorizeSurface).mockRejectedValueOnce(
-      new Error("yolo never grants desktop control"),
-    );
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Editor$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "YOLO does not grant desktop control.",
-    );
-  });
-
-  it("lists targets before per-session authorization and does not capture them", async () => {
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    await waitFor(() => expect(api.computerListTargets).toHaveBeenCalled());
-    expect(api.computerListTargets).toHaveBeenCalledWith({
-      sessionId: "chat",
-      runId: null,
-      surface: "desktop",
-    });
-    expect(api.computerObserve).not.toHaveBeenCalled();
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Select target" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: /^Pause$/ })).toBeDisabled();
-  });
-
-  it("browser surface lists managed-browser targets instead of desktop-only listing", async () => {
-    vi.mocked(api.computerListTargets).mockResolvedValue([
-      { targetId: "managed-profile:p1", title: "p1", appName: "managed-browser", kind: "managed-profile" },
-    ]);
-    render(
-      <ComputerPanel locale="en" sessionId="chat" runId={null} surface="managed-browser" />,
-    );
-    await waitFor(() =>
-      expect(api.computerListTargets).toHaveBeenCalledWith({
-        sessionId: "chat",
-        runId: null,
-        surface: "managed-browser",
-      }),
-    );
-    expect(api.computerListTargets).not.toHaveBeenCalledWith(
-      expect.objectContaining({ surface: "desktop" }),
-    );
-    expect(screen.getByText("Managed Browser")).toBeInTheDocument();
-  });
-
-  it("candidate selection neither authorizes nor captures until explicit consent", async () => {
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Select target" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Editor$/ }));
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-    const authorize = screen.getByRole("button", { name: "Authorize this target" });
-    expect(authorize).toBeEnabled();
-    fireEvent.click(authorize);
-    fireEvent.click(authorize);
-    await waitFor(() => expect(api.computerAuthorizeSurface).toHaveBeenCalledTimes(1));
-  });
-
-  it("preserves the exact Stop target when status becomes unknown", async () => {
-    vi.useFakeTimers();
-    vi.mocked(api.computerStatus).mockResolvedValueOnce(running()).mockRejectedValue(new Error("offline"));
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    await act(async () => {});
-    expect(screen.getByRole("status")).toHaveTextContent("Control authorized");
-    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
-    expect(screen.getByRole("status")).toHaveTextContent("Status unknown");
-    expect(screen.getByRole("button", { name: "Choose a target" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop" })); });
-    expect(api.computerStop).toHaveBeenCalledWith({ sessionId: "chat", runId: "run" });
-  });
-
-  it.each(["known-run", null])("keeps the exact session stoppable after an initial status failure (run %s)", async (runId) => {
-    vi.mocked(api.computerStatus).mockRejectedValue(new Error("offline"));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={runId} />);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Status unknown"));
-    const stop = screen.getByRole("button", { name: "Stop" });
-    expect(stop).toBeEnabled();
-    fireEvent.click(stop);
-    await waitFor(() => expect(api.computerStop).toHaveBeenCalledWith({ sessionId: "chat", runId }));
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-  });
-
-  it("does not lock Stop behind a hung post-stop status read", async () => {
-    vi.useFakeTimers();
-    vi.mocked(api.computerStatus).mockResolvedValueOnce(running()).mockImplementation(() => new Promise(() => {}));
-    vi.mocked(api.computerStop).mockResolvedValue();
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    await act(async () => {});
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop" })); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
-    expect(screen.getByRole("status")).toHaveTextContent("Status unknown");
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-    expect(api.computerStop).toHaveBeenCalledTimes(1);
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop" })); });
-    expect(api.computerStop).toHaveBeenCalledTimes(2);
-    expect(api.computerStop).toHaveBeenLastCalledWith({ sessionId: "chat", runId: "run" });
-  });
-
-  it("marks a hung status request unknown without queuing duplicate Host requests", async () => {
-    vi.useFakeTimers();
-    vi.mocked(api.computerStatus).mockResolvedValueOnce(running()).mockImplementation(() => new Promise(() => {}));
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    await act(async () => {});
-    await act(async () => { await vi.advanceTimersByTimeAsync(3900); });
-    expect(screen.getByRole("status")).toHaveTextContent("Status unknown");
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-    expect(api.computerStatus).toHaveBeenCalledTimes(2);
-    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
-    expect(api.computerStatus).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not hide Stop when feature disablement still has a running Host", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue({ ...running(), featureEnabled: false });
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    expect(await screen.findByRole("button", { name: "Pause" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-    expect(screen.getByRole("status")).toHaveTextContent("This target is not authorized.");
-  });
-
-  it("allows Stop during authorization and ignores its late result", async () => {
-    let finish!: (run: string) => void;
-    vi.mocked(api.computerAuthorizeSurface).mockImplementation((opts) => new Promise((resolve) => {
-      finish = (run) => resolve({
-        attemptId: opts.attemptId,
-        selectorRevision: opts.selectorRevision,
-        runId: run,
-        target: { targetId: "window", title: "Editor", appName: "Editor", kind: "window", surface: "desktop" },
-      });
-    }));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Editor$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    await waitFor(() => expect(api.computerAuthorizeSurface).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: /^Stop$/ }));
-    await waitFor(() => expect(api.computerStop).toHaveBeenCalled());
-    await waitFor(() => expect(api.computerCancelAuthorization).toHaveBeenCalledWith({
-      sessionId: "chat",
-      attemptId: expect.any(String),
-      selectorRevision: 1,
-    }));
-    const before = vi.mocked(api.computerStatus).mock.calls.length;
-    await act(async () => { finish("revoked-run"); });
-    expect(api.computerStatus).toHaveBeenCalledTimes(before);
-    expect(api.computerObserve).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { fromSession: "a", fromRun: null, toSession: "b", toRun: null },
-    { fromSession: "a:b", fromRun: "run", toSession: "a", toRun: "b:run" },
-  ])("cancels the exact Host authorization when switching $fromSession/$fromRun to $toSession/$toRun", async ({ fromSession, fromRun, toSession, toRun }) => {
-    let finish!: (run: string) => void;
-    vi.mocked(api.computerAuthorizeSurface).mockImplementation((opts) => new Promise((resolve) => {
-      finish = (run) => resolve({
-        attemptId: opts.attemptId,
-        selectorRevision: opts.selectorRevision,
-        runId: run,
-        target: { targetId: "window", title: "Editor", appName: "Editor", kind: "window", surface: "desktop" },
-      });
-    }));
-    const view = render(<ComputerPanel locale="en" sessionId={fromSession} runId={fromRun} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Editor$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    await waitFor(() => expect(api.computerAuthorizeSurface).toHaveBeenCalled());
-
-    view.rerender(<ComputerPanel locale="en" sessionId={toSession} runId={toRun} />);
-    await waitFor(() => expect(api.computerCancelAuthorization).toHaveBeenCalledWith({
-      sessionId: fromSession,
-      attemptId: expect.any(String),
-      selectorRevision: 1,
-    }));
-    await act(async () => { finish("late-run"); });
-    expect(api.computerStatus).not.toHaveBeenCalledWith({ sessionId: fromSession, runId: "late-run" });
-    expect(screen.getByRole("button", { name: "Authorize this target" })).toBeDisabled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-  });
-
-  it("keeps the requested run bound to the exact tuple after a colliding chat switch", async () => {
-    vi.mocked(api.computerStatus).mockImplementation(async ({ runId }) => ({ ...running(), runId }));
-    const view = render(<ComputerPanel locale="en" sessionId="a:b" runId="run" />);
-    await waitFor(() => expect(api.computerObserve).toHaveBeenCalledWith({ sessionId: "a:b", runId: "run" }));
-    view.rerender(<ComputerPanel locale="en" sessionId="a" runId="b:run" />);
-    await waitFor(() => expect(api.computerStatus).toHaveBeenCalledWith({ sessionId: "a", runId: "b:run" }));
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-    await waitFor(() => expect(api.computerStop).toHaveBeenLastCalledWith({ sessionId: "a", runId: "b:run" }));
-    expect(api.computerObserve).not.toHaveBeenCalledWith({ sessionId: "a", runId: "run" });
-  });
-
-  it("retains real stopping state and cannot resume until Host confirms", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(state({ ...running(), stopState: "stop_requested" }));
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    expect(await screen.findByRole("button", { name: "Stopping…" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Pause$/ })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Choose a target" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Authorize this target" })).toBeNull();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-  });
-
-  it("does not infer a native Stop solely from pending tool cleanup", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(state({ ...running(), mcpCatalog: {
-      desiredGeneration: 4, appliedGeneration: 3, desiredPresent: false,
-      pending: true, cleanupPending: true, lastError: null,
-    } }));
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Removing Computer Use tools…"));
-    expect(screen.queryByText("Local control is stopped. Tool cleanup is still pending.")).toBeNull();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
-    expect(api.computerObserve).not.toHaveBeenCalled();
-  });
-
-  it("captures only while preview is visible and keeps the screenshot read-only", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(running());
-    render(<ComputerPanel locale="en" sessionId="chat" runId={null} />);
-    await waitFor(() => expect(api.computerObserve).toHaveBeenCalledTimes(1));
-    const frame = document.querySelector(".cu-panel__frame");
-    expect(frame?.tagName).toBe("DIV");
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "Hide preview" }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
-    expect(api.computerObserve).toHaveBeenCalledTimes(1);
-    expect(api.computerSetPreview).toHaveBeenLastCalledWith({ sessionId: "chat", runId: "run", visible: false });
-    fireEvent.click(screen.getByRole("button", { name: "Show preview" }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(api.computerObserve).toHaveBeenCalledTimes(2);
-  });
-
-  it("discards a late frame when switching chats", async () => {
-    let finish!: (frame: api.ComputerObservation) => void;
-    vi.mocked(api.computerStatus).mockImplementation(async ({ sessionId }) => sessionId === "a" ? running() : state());
-    vi.mocked(api.computerObserve).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-    const view = render(<ComputerPanel locale="en" sessionId="a" runId={null} />);
-    await waitFor(() => expect(api.computerObserve).toHaveBeenCalled());
-    view.rerender(<ComputerPanel locale="en" sessionId="b" runId={null} />);
-    await act(async () => { finish({ snapshotId: "old", geometryRevision: 1, previewDataUrl: "data:image/png;base64,PRIVATE" }); });
-    expect(document.querySelector(".cu-panel__frame img")).toBeNull();
-  });
-
-  it("locks target selection and keeps the last preview while authorization is in flight", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(running());
-    vi.mocked(api.computerListTargets).mockResolvedValue([
-      { targetId: "window", title: "Editor", appName: "Editor", kind: "window" },
-      { targetId: "tab", title: "Docs", appName: "Browser", kind: "tab" },
-    ]);
-    let finish!: (run: string) => void;
-    vi.mocked(api.computerAuthorizeSurface).mockImplementation(
-      (opts) => new Promise((resolve) => {
-        finish = (run) => resolve({
-          attemptId: opts.attemptId,
-          selectorRevision: opts.selectorRevision,
-          runId: run,
-          target: { targetId: "tab", title: "Docs", appName: "Browser", kind: "tab", surface: "desktop" },
-        });
-      }),
-    );
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" />);
-    expect(await screen.findByRole("img", { name: "Preview of the authorized target" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Choose a target" }));
-    const picker = screen.getByRole("button", { name: "Select target" });
-    fireEvent.click(picker);
-    fireEvent.click(await screen.findByRole("button", { name: /^Docs$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    await waitFor(() => expect(api.computerAuthorizeSurface).toHaveBeenCalled());
+  it("honestly disables unsupported task surfaces instead of using the legacy picker", async () => {
+    const host = pendingView(); host.pickerSurfaces = []; host.request!.surfaces = ["existing-tabs"];
+    await start(host, { surface: "existing-tabs" });
+    expect(screen.getByText("Target selection for this surface is not available yet.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Select target" })).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent("Authorizing target…");
-    expect(screen.getByRole("img", { name: "Preview of the authorized target" })).toBeInTheDocument();
-    expect(screen.getByRole("toolbar", { name: "Computer controls" })).toBeInTheDocument();
-    expect(screen.getByText("Technical details").closest("details")).not.toHaveAttribute("open");
-    await act(async () => { finish("run-2"); });
+    expect(pickerApi.computerTaskPickerBegin).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
   });
 
-  it("retries desired-absent cleanup from the keyboard and locks conflicting controls", async () => {
-    const pending = state({
-      runId: "stopped-run",
-      targetId: "window",
-      targetName: "Editor",
-      stopState: "stopped",
-      mcpCatalog: {
-        desiredGeneration: 4,
-        appliedGeneration: 3,
-        desiredPresent: false,
-        pending: true,
-        cleanupPending: true,
-        lastError: "Computer Use MCP catalog update timed out",
-      },
-    });
-    const settled = state({
-      ...pending,
-      mcpCatalog: {
-        desiredGeneration: 4,
-        appliedGeneration: 4,
-        desiredPresent: false,
-        pending: false,
-        cleanupPending: false,
-        lastError: null,
-      },
-    });
-    let current = pending;
-    vi.mocked(api.computerStatus).mockImplementation(async () => current);
-    vi.mocked(api.computerRetryCleanup).mockImplementation(async () => {
-      current = settled;
-      return settled.mcpCatalog!;
-    });
-    const user = userEvent.setup();
-    render(<ComputerPanel locale="en" sessionId="chat" runId="stopped-run" />);
-
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
-      "Local control is stopped. Tool cleanup is still pending.",
-    ));
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Latest cleanup error: Computer Use MCP catalog update timed out",
-    );
-    expect(screen.queryByRole("button", { name: "Select target" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Refresh targets" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Authorize this target" })).toBeNull();
-    const retry = screen.getByRole("button", { name: "Retry cleanup" });
-    retry.focus();
-    await user.keyboard("{Enter}");
-
-    await waitFor(() => expect(api.computerRetryCleanup).toHaveBeenCalledTimes(1));
-    expect(api.computerRetryCleanup).toHaveBeenCalledWith({ sessionId: "chat" });
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry cleanup" })).toBeNull());
-    expect(screen.getByRole("button", { name: "Select target" })).toBeEnabled();
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
+  it("performs exactly one explicit picker transaction after repeated clicks", async () => {
+    await start();
+    const allow = screen.getByRole("button", { name: "Choose windows for this task" });
+    await act(async () => { fireEvent.click(allow); fireEvent.click(allow); });
+    expect(pickerApi.computerTaskPickerBegin).toHaveBeenCalledExactlyOnceWith("chat", key, "desktop");
+    expect(pickerApi.computerTaskPickerLoad).toHaveBeenCalledTimes(1);
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerApprove).not.toHaveBeenCalled();
   });
 
-  it("deduplicates cleanup retry clicks and ignores its late response after a chat switch", async () => {
-    let finish!: (status: api.ComputerMcpCatalogStatus) => void;
-    const pending = state({
-      runId: "stopped-run",
-      targetId: "window",
-      targetName: "Editor",
-      stopState: "stopped",
-      mcpCatalog: {
-        desiredGeneration: 2,
-        appliedGeneration: 1,
-        desiredPresent: false,
-        pending: true,
-        cleanupPending: true,
-        lastError: "Computer Use MCP catalog update failed",
-      },
-    });
-    vi.mocked(api.computerStatus).mockImplementation(async ({ sessionId }) =>
-      sessionId === "a" ? pending : state(),
-    );
-    vi.mocked(api.computerRetryCleanup).mockImplementation(
-      () => new Promise((resolve) => { finish = resolve; }),
-    );
-    const view = render(<ComputerPanel locale="en" sessionId="a" runId="stopped-run" />);
-    const retry = await screen.findByRole("button", { name: "Retry cleanup" });
-    fireEvent.click(retry);
-    fireEvent.click(retry);
-    expect(api.computerRetryCleanup).toHaveBeenCalledTimes(1);
-    expect(await screen.findByRole("button", { name: "Retrying cleanup…" })).toBeDisabled();
-
-    const oldStatusCalls = vi.mocked(api.computerStatus).mock.calls.filter(
-      ([opts]) => opts.sessionId === "a",
-    ).length;
-    view.rerender(<ComputerPanel locale="en" sessionId="b" runId={null} />);
-    await act(async () => {
-      finish({
-        desiredGeneration: 2,
-        appliedGeneration: 2,
-        desiredPresent: false,
-        pending: false,
-        cleanupPending: false,
-        lastError: null,
-      });
-    });
-    expect(screen.queryByText(/Latest cleanup error/)).toBeNull();
-    expect(vi.mocked(api.computerStatus).mock.calls.filter(
-      ([opts]) => opts.sessionId === "a",
-    )).toHaveLength(oldStatusCalls);
+  it("bounds multiple window selection and approval uses only original picker ids", async () => {
+    await start(); const modal = await openPicker();
+    fireEvent.click(modal.getByRole("button", { name: /Fixture editor/ }));
+    fireEvent.click(modal.getByRole("button", { name: /Fixture viewer/ }));
+    expect(modal.getByText("Selected 2 of up to 2")).toBeInTheDocument();
+    const allow = modal.getByRole("button", { name: "Enable and allow this task" });
+    await act(async () => { fireEvent.click(allow); fireEvent.click(allow); });
+    expect(pickerApi.computerTaskPickerApprove).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(pickerApi.computerTaskPickerApprove).mock.calls[0][1]).toEqual(["fixture-A", "fixture-B"]);
+    expect(screen.queryByText("Control authorized")).toBeNull();
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
   });
 
-  it("keeps cleanup retry available and shows the latest redacted failure", async () => {
-    const pending = state({
-      runId: "stopped-run",
-      stopState: "stopped",
-      mcpCatalog: {
-        desiredGeneration: 3,
-        appliedGeneration: 2,
-        desiredPresent: false,
-        pending: true,
-        cleanupPending: true,
-        lastError: "Computer Use MCP catalog update failed",
-      },
-    });
-    vi.mocked(api.computerStatus).mockResolvedValue(pending);
-    vi.mocked(api.computerRetryCleanup).mockRejectedValue(
-      new Error("Computer Use MCP catalog update timed out"),
-    );
-    render(<ComputerPanel locale="en" sessionId="chat" runId="stopped-run" />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Retry cleanup" }));
-    await waitFor(() => expect(api.computerRetryCleanup).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(
-      "Latest cleanup error: Computer Use MCP catalog update timed out",
-    ));
-    const retry = screen.getByRole("button", { name: "Retry cleanup" });
-    expect(retry).toBeEnabled();
-    fireEvent.click(retry);
-    await waitFor(() => expect(api.computerRetryCleanup).toHaveBeenCalledTimes(2));
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
+  it("shares one observer and one modal/approval transaction between card and panel", async () => {
+    render(<><ComputerTaskCardLive locale="en" sessionId="chat" /><ComputerPanel locale="en" sessionId="chat" runId={null} /></>);
+    await settle(); await ui.emit(pendingView());
+    await act(async () => { fireEvent.click(screen.getAllByRole("button", { name: "Choose windows for this task" })[0]); });
+    expect(events.computerTaskSubscribe).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    const modal = within(screen.getByRole("dialog"));
+    fireEvent.click(modal.getByRole("button", { name: /Fixture editor/ }));
+    await act(async () => { fireEvent.click(modal.getByRole("button", { name: "Enable and allow this task" })); });
+    expect(pickerApi.computerTaskPickerApprove).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("button", { name: "Stop" })).toHaveLength(3);
   });
 
-  it("ignores cleanup retry completion after an explicit unmount", async () => {
-    let finish!: (status: api.ComputerMcpCatalogStatus) => void;
-    const pending = state({
-      runId: "stopped-run",
-      stopState: "stopped",
-      mcpCatalog: {
-        desiredGeneration: 5,
-        appliedGeneration: 4,
-        desiredPresent: false,
-        pending: true,
-        cleanupPending: true,
-        lastError: "Computer Use MCP catalog update failed",
-      },
-    });
-    vi.mocked(api.computerStatus).mockResolvedValue(pending);
-    vi.mocked(api.computerRetryCleanup).mockImplementation(
-      () => new Promise((resolve) => { finish = resolve; }),
-    );
-    const view = render(
-      <ComputerPanel locale="en" sessionId="chat" runId="stopped-run" />,
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Retry cleanup" }));
-    await waitFor(() => expect(api.computerRetryCleanup).toHaveBeenCalledTimes(1));
-    const statusCallsBeforeUnmount = vi.mocked(api.computerStatus).mock.calls.length;
+  it("does not turn an approval receipt into a grant before Host commit facts", async () => {
+    await start(); const modal = await openPicker();
+    fireEvent.click(modal.getByRole("button", { name: /Fixture editor/ }));
+    await act(async () => { fireEvent.click(modal.getByRole("button", { name: "Enable and allow this task" })); });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+    await ui.emit(runningView());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText("Control authorized")).toBeInTheDocument();
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledExactlyOnceWith("chat", address);
+  });
+
+  it("retires failed target choices and requires a new explicit choice", async () => {
+    vi.mocked(pickerApi.computerTaskPickerLoad).mockRejectedValueOnce(new Error("synthetic failure"));
+    await start(); const modal = await openPicker();
+    expect(modal.queryByText("Fixture editor")).toBeNull();
+    expect(modal.getByRole("alert")).toHaveTextContent("Could not load targets");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await openPicker();
+    expect(pickerApi.computerTaskPickerBegin).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a preparing request even while approval is awaiting its reply", async () => {
+    const approve = deferred<Awaited<ReturnType<typeof pickerApi.computerTaskPickerApprove>>>();
+    vi.mocked(pickerApi.computerTaskPickerApprove).mockReturnValue(approve.promise);
+    await start(); const modal = await openPicker();
+    fireEvent.click(modal.getByRole("button", { name: /Fixture editor/ }));
+    fireEvent.click(modal.getByRole("button", { name: "Enable and allow this task" }));
+    const host = pendingView(); host.request!.phase = "preparing"; await ui.emit(host);
+    const buttons = screen.getAllByRole("button", { name: "Cancel" });
+    fireEvent.click(buttons[buttons.length - 1]);
+    expect(taskApi.computerTaskDecide).toHaveBeenCalledExactlyOnceWith("chat", key, "cancel");
+    await act(async () => { approve.reject(new Error("obsolete approval")); });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("lets Stop overtake a pending picker without waiting for cancellation", async () => {
+    const begin = deferred<Awaited<ReturnType<typeof pickerApi.computerTaskPickerBegin>>>();
+    vi.mocked(pickerApi.computerTaskPickerBegin).mockReturnValue(begin.promise);
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: "Choose windows for this task" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Stop" }));
+    expect(taskApi.computerTaskDecide).toHaveBeenCalledExactlyOnceWith("chat", key, "stop");
+    await act(async () => { begin.resolve({ sessionId: "chat", key, pickerId: "late-picker", maxSelection: 2, surface: "desktop" }); });
+    expect(pickerApi.computerTaskPickerLoad).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows approval failures without reapproving or reopening automatically", async () => {
+    vi.mocked(pickerApi.computerTaskPickerApprove).mockRejectedValueOnce(new Error("synthetic permission refusal"));
+    await start(); const modal = await openPicker();
+    fireEvent.click(modal.getByRole("button", { name: /Fixture editor/ }));
+    await act(async () => { fireEvent.click(modal.getByRole("button", { name: "Enable and allow this task" })); });
+    expect(modal.getByRole("alert")).toHaveTextContent("Could not run that action.");
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(pickerApi.computerTaskPickerApprove).toHaveBeenCalledTimes(1);
+    expect(pickerApi.computerTaskPickerBegin).toHaveBeenCalledTimes(1);
+  });
+
+  it("denies a no-run request and waits for the Host terminal state", async () => {
+    await start();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Deny" })); });
+    expect(taskApi.computerTaskDecide).toHaveBeenCalledExactlyOnceWith("chat", key, "deny");
+    expect(screen.getByRole("button", { name: "Deny" })).toBeDisabled();
+    const host = pendingView(); host.request!.phase = "denied"; await ui.emit(host);
+    expect(screen.getByText("Request denied")).toBeInTheDocument();
+    expect(pickerApi.computerTaskPickerBegin).not.toHaveBeenCalled();
+  });
+
+  it("shows expired requests without silently requesting or retrying them", async () => {
+    const host = pendingView(); host.request!.phase = "expired";
+    await start(host);
+    expect(screen.getByText("Request expired")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Choose windows for this task" })).toBeNull();
+    expect(taskApi.computerTaskDecide).not.toHaveBeenCalled();
+  });
+
+  it("preserves original executable scope after an incremental denial", async () => {
+    const host = runningView();
+    host.request = { ...pendingView().request!, key: { ...key, requestId: "incremental-request", revision: 2 }, phase: "denied" };
+    await start(host);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(taskApi.computerTaskDecide).toHaveBeenCalledWith("chat", host.request.key, "stop");
+  });
+
+  it("pauses exact original execution and Stop remains reachable", async () => {
+    const pause = deferred<void>(); vi.mocked(taskApi.computerTaskPause).mockReturnValue(pause.promise);
+    await start(runningView());
+    const button = screen.getByRole("button", { name: "Pause" });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(taskApi.computerTaskPause).toHaveBeenCalledExactlyOnceWith("chat", address);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(taskApi.computerTaskDecide).toHaveBeenCalledTimes(1);
+    await act(async () => { pause.reject(new Error("obsolete")); });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps Stop reachable after feature disablement with a running Host row", async () => {
+    const host = runningView(); host.featureEnabled = false; host.grants[0].executable = false;
+    await start(host);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+  });
+
+  it("never resumes or reports stopped before native cleanup finishes", async () => {
+    const host = runningView(); host.executions[0].phase = "stop_requested"; host.executions[0].cleanupPending = true;
+    await start(host);
+    expect(screen.queryByText("Stopped")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled();
+    await ui.emit(stopped());
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+  });
+
+  it("settles Stop from native completion before a late control transport error", async () => {
+    const stop = deferred<Awaited<ReturnType<typeof taskApi.computerTaskDecide>>>();
+    vi.mocked(taskApi.computerTaskDecide).mockReturnValue(stop.promise);
+    await start(runningView()); fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await ui.emit(stopped());
+    await act(async () => { stop.reject(new Error("obsolete reply")); });
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps business failure after Stop while fixed request tools remain available", async () => {
+    const host = stopped(); host.executions[0].lastFailure = "outcome_unknown";
+    await start(host);
+    expect(screen.getByRole("alert")).toHaveTextContent("The action outcome is unknown.");
+    expect(screen.queryByRole("button", { name: "Retry cleanup" })).toBeNull();
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+  });
+
+  it("captures UI pixels only while the preview is visible", async () => {
+    await start(runningView());
+    expect(screen.getByRole("img")).toHaveAttribute("src", "data:image/png;base64,AAAA");
+    fireEvent.click(screen.getByRole("button", { name: "Hide preview" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("img")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show preview" })); await settle();
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not capture when the document is hidden from initial mount", async () => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    await start(runningView());
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    fireEvent(document, new Event("visibilitychange")); await settle();
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops capture on document hide and ignores an in-flight late frame", async () => {
+    const frame = deferred<Awaited<ReturnType<typeof taskApi.computerTaskPreview>>>();
+    vi.mocked(taskApi.computerTaskPreview).mockReturnValue(frame.promise);
+    await start(runningView());
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => { frame.resolve({ address, previewDataUrl: "data:image/png;base64,OLD", truncated: false }); });
+    expect(screen.queryByRole("img")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not capture a paused or unapproved target", async () => {
+    await start(paused());
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    const host = runningView(); host.grants = []; await ui.emit(host);
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+  });
+
+  it("does not preview or Pause a natively closed target, and keeps the original task stoppable", async () => {
+    const host = runningView(); host.executions[0].phase = "target_closed";
+    await start(host);
+    expect(screen.getByText("The window closed. Choose a target again.")).toBeInTheDocument();
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(screen.getByText("Backend: synthetic")).toBeInTheDocument();
+  });
+
+  it("does not queue duplicate captures while one request is hung", async () => {
+    vi.mocked(taskApi.computerTaskPreview).mockReturnValue(new Promise(() => {}));
+    await start(runningView());
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+  });
+
+  it("bounds frame freshness by request start, including slow native capture", async () => {
+    const frame = deferred<Awaited<ReturnType<typeof taskApi.computerTaskPreview>>>();
+    vi.mocked(taskApi.computerTaskPreview).mockReturnValue(frame.promise);
+    await start(runningView());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3001); });
+    await act(async () => { frame.resolve({ address, previewDataUrl: "data:image/png;base64,SLOW", truncated: false }); });
+    expect(screen.getByText("Last captured frame — not live.")).toBeInTheDocument();
+  });
+
+  it("never uses an old-generation frame for a new target or generation", async () => {
+    const frame = deferred<Awaited<ReturnType<typeof taskApi.computerTaskPreview>>>();
+    vi.mocked(taskApi.computerTaskPreview).mockReturnValueOnce(frame.promise).mockReturnValue(new Promise(() => {}));
+    await start(runningView());
+    const host = runningView(); host.executions[0].generation = "18446744073709551615"; await ui.emit(host);
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+    await act(async () => { frame.resolve({ address, previewDataUrl: "data:image/png;base64,OLD", truncated: false }); });
+    expect(screen.queryByRole("img")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards late frames after switching chats, even when run ids collide", async () => {
+    const frame = deferred<Awaited<ReturnType<typeof taskApi.computerTaskPreview>>>();
+    vi.mocked(taskApi.computerTaskPreview).mockReturnValueOnce(frame.promise);
+    const view = await start(runningView());
+    view.rerender(<ComputerPanel locale="en" sessionId="other-chat" runId={address.runId} />);
+    await settle();
+    await act(async () => { frame.resolve({ address, previewDataUrl: "data:image/png;base64,OLD", truncated: false }); });
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.queryByText("Owned editor")).toBeNull();
+    expect(taskApi.computerTaskPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects mismatched preview replies and shows no model observation ids", async () => {
+    vi.mocked(taskApi.computerTaskPreview).mockResolvedValue({ address: { ...address, generation: "1" }, previewDataUrl: "data:image/png;base64,BAD", truncated: false });
+    await start(runningView());
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not run that action.");
+    expect(screen.queryByText(address.runId)).toBeNull();
+  });
+
+  it("shows no-image and truncated observation facts from the exact Host reply", async () => {
+    vi.mocked(taskApi.computerTaskPreview).mockResolvedValue({ address, previewDataUrl: null, truncated: true });
+    await start(runningView());
+    expect(screen.getByText("This observation has no image. Coordinate clicks are blocked.")).toBeInTheDocument();
+    expect(screen.getByText("This observation was truncated.")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("keeps the exact task stoppable when metadata goes stale, with no extra polling", async () => {
+    await start(runningView());
+    await act(async () => { await vi.advanceTimersByTimeAsync(4001); });
+    expect(screen.getByText(/Status unknown/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(taskApi.computerTaskDecide).toHaveBeenCalledExactlyOnceWith("chat", key, "stop");
+    expect(events.computerTaskSubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes only metadata on explicit recovery, never access or capture", async () => {
+    await start();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4001); });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh status" })); await settle();
+    expect(events.computerTaskSubscribe).toHaveBeenCalledTimes(2);
+    expect(pickerApi.computerTaskPickerBegin).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerApprove).not.toHaveBeenCalled();
+    expect(taskApi.computerTaskPreview).not.toHaveBeenCalled();
+  });
+
+  it("Escape cancels only the original picker and restores the allow-button focus", async () => {
+    await start();
+    const allow = screen.getByRole("button", { name: "Choose windows for this task" }); allow.focus();
+    await openPicker();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(allow).toHaveFocus();
+    expect(pickerApi.computerTaskPickerCancel).toHaveBeenCalledTimes(1);
+    expect(taskApi.computerTaskDecide).not.toHaveBeenCalled();
+  });
+
+  it("last consumer unmount releases observer/picker but never Stops a grant", async () => {
+    const view = await start(); await openPicker();
     view.unmount();
-
-    await act(async () => {
-      finish({
-        desiredGeneration: 5,
-        appliedGeneration: 5,
-        desiredPresent: false,
-        pending: false,
-        cleanupPending: false,
-        lastError: null,
-      });
-    });
-    expect(api.computerStatus).toHaveBeenCalledTimes(statusCallsBeforeUnmount);
-    expect(api.computerAuthorizeSurface).not.toHaveBeenCalled();
+    expect(pickerApi.computerTaskPickerCancel).toHaveBeenCalledTimes(1);
+    expect(events.computerTaskUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(taskApi.computerTaskDecide).not.toHaveBeenCalled();
   });
 
-  it("existing-tabs requires a separate App confirmation before displaying the code", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(running());
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" surface="existing-tabs" />);
-    fireEvent.click(await screen.findByRole("button", { name: /^Pair browser extension$/ }));
-    await waitFor(() => expect(api.computerBeginPairing).toHaveBeenCalled());
-    expect(api.computerConfirmPairingApp).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("cu-pairing-code")).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /^Confirm pairing in App$/ }));
-    await waitFor(() => expect(api.computerConfirmPairingApp).toHaveBeenCalledWith("n1"));
-    const code = await screen.findByRole("textbox", { name: "Pairing code" });
-    expect(code).toHaveValue("ABCDE-ABCDE-ABCDE-ABCDE");
-    expect(code).toHaveAttribute("readonly");
-    fireEvent.click(screen.getByRole("button", { name: /^Revoke pairing$/ }));
-    await waitFor(() => expect(api.computerRevokePairing).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByTestId("cu-pairing-code")).not.toBeInTheDocument());
+  it("StrictMode remount never approves or Stops and late original callbacks cannot replace new facts", async () => {
+    render(<StrictMode><ComputerPanel locale="en" sessionId="chat" runId={null} /></StrictMode>);
+    await settle(); await ui.emit(pendingView());
+    const original = ui.streams[0];
+    if (ui.streams.length > 1) await act(async () => { ui.send(runningView(), original); });
+    expect(screen.getByRole("button", { name: "Choose windows for this task" })).toBeEnabled();
+    expect(pickerApi.computerTaskPickerApprove).not.toHaveBeenCalled();
+    expect(taskApi.computerTaskDecide).not.toHaveBeenCalled();
   });
 
-  it("managed-browser selection uses one Host authorization transaction", async () => {
-    vi.mocked(api.computerListTargets).mockResolvedValue([
-      {
-        targetId: "managed-profile:p1",
-        title: "p1",
-        appName: "managed-browser",
-        kind: "managed-profile",
-        surface: "managed-browser",
-      },
-    ]);
-    render(
-      <ComputerPanel locale="en" sessionId="chat" runId={null} surface="managed-browser" />,
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^p1$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    await waitFor(() =>
-      expect(api.computerAuthorizeSurface).toHaveBeenCalledWith({
-        sessionId: "chat",
-        runId: null,
-        targetId: "managed-profile:p1",
-        surface: "managed-browser",
-        attemptId: expect.any(String),
-        selectorRevision: 1,
-      }),
-    );
-  });
-
-  it("existing-tabs selection uses one Host authorization transaction", async () => {
-    vi.mocked(api.computerListTargets).mockResolvedValue([
-      {
-        targetId: "existing-tab:tab-1",
-        title: "Shared",
-        appName: "existing-tabs",
-        kind: "existing-tab",
-        surface: "existing-tabs",
-      },
-    ]);
-    render(
-      <ComputerPanel locale="en" sessionId="chat" runId={null} surface="existing-tabs" />,
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("button", { name: /^Shared$/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    await waitFor(() =>
-      expect(api.computerAuthorizeSurface).toHaveBeenCalledWith({
-        sessionId: "chat",
-        runId: null,
-        targetId: "existing-tab:tab-1",
-        surface: "existing-tabs",
-        attemptId: expect.any(String),
-        selectorRevision: 1,
-      }),
-    );
-  });
-
-  it("app-webview bind/unbind drives Host webview commands", async () => {
-    vi.mocked(api.computerStatus).mockResolvedValue(running());
-    render(<ComputerPanel locale="en" sessionId="chat" runId="run" surface="app-webview" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Choose a target" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Select App browser tab" }));
-    fireEvent.click(await screen.findByRole("button", { name: "resource-browser-cu" }));
-    fireEvent.click(screen.getByRole("button", { name: "Authorize this target" }));
-    await waitFor(() =>
-      expect(api.computerAuthorizeSurface).toHaveBeenCalledWith({
-        sessionId: "chat",
-        runId: "run",
-        targetId: "resource-browser-cu",
-        surface: "app-webview",
-        attemptId: expect.any(String),
-        selectorRevision: 1,
-      }),
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Choose a target" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Unbind App browser$/ }));
-    await waitFor(() => expect(api.computerUnbindWebview).toHaveBeenCalledWith({
-      sessionId: "chat",
-      runId: "authorized-run",
-    }));
+  it("keeps HTML in model purpose as inert plain text", async () => {
+    const host: ComputerTaskView = pendingView(); host.request!.purpose = "<img src=x onerror=alert(1)>";
+    await start(host);
+    expect(screen.getByText(host.request!.purpose)).toBeInTheDocument();
+    expect(screen.queryByRole("img")).toBeNull();
   });
 });

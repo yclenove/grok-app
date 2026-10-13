@@ -28,6 +28,7 @@ pub struct ScriptOperation {
     cancellation: ActionCancellation,
     caller: ActionCancellation,
     binding: ActionCancellation,
+    settles: bool,
 }
 
 impl ScriptTracker {
@@ -63,6 +64,7 @@ impl ScriptTracker {
             cancellation,
             caller: caller.clone(),
             binding: binding.clone(),
+            settles: true,
         })
     }
 
@@ -82,6 +84,15 @@ impl ScriptTracker {
 }
 
 impl ScriptOperation {
+    /// A child uses the exact parent occupancy for one initiating native
+    /// script, but its callback cannot release the long-lived operation.
+    #[cfg(any(windows, test))]
+    pub(crate) fn child(&self) -> Self {
+        let mut child = self.clone();
+        child.settles = false;
+        child
+    }
+
     /// Check again on the native dispatch thread, not only before queueing it.
     pub(crate) fn check(&self) -> Result<(), String> {
         self.cancellation.check()?;
@@ -93,10 +104,19 @@ impl ScriptOperation {
         Ok(())
     }
 
+    #[cfg(windows)]
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.check().is_err()
+            || self.caller.check().is_err()
+            || self.binding.check().is_err()
+    }
+
     /// Call only at native completion, proven native exit or before dispatch.
     /// Never call merely because the response receiver timed out/disconnected.
     pub(crate) fn finished(&self) {
-        self.tracker.0.lock().remove(&self.id);
+        if self.settles {
+            self.tracker.0.lock().remove(&self.id);
+        }
     }
 }
 
@@ -185,5 +205,19 @@ mod tests {
             .begin("run", "overflow", &Default::default(), &Default::default())
             .is_err());
         assert_eq!(tracker.0.lock().len(), MAX_PENDING);
+    }
+
+    #[test]
+    fn initiating_child_cannot_release_its_long_lived_parent() {
+        let tracker = ScriptTracker::default();
+        let parent = tracker
+            .begin("run", "view", &Default::default(), &Default::default())
+            .unwrap();
+        let child = parent.child();
+        assert!(child.check().is_ok());
+        child.finished();
+        assert!(!tracker.is_idle("run"));
+        parent.finished();
+        assert!(tracker.is_idle("run"));
     }
 }

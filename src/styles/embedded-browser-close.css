@@ -1,0 +1,35 @@
+.embedded-browser-close .modal-body {
+  overflow-wrap: anywhere;
+}
+
+.embedded-browser-close .modal-actions .btn {
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  min-height: 32px;
+  padding: 8px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+
+.embedded-browser-close__failure,
+.embedded-browser-close__page {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.embedded-browser-close__details {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.embedded-browser-close__details summary {
+  cursor: pointer;
+}
+
+.embedded-browser-close__details p {
+  max-height: 160px;
+  overflow: auto;
+}

@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 /** Read-only bundle hygiene audit, not a signature or runtime-integrity verifier. */
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
+import process from "node:process";
 import { createReadStream, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { computerUseTarget } from "./computer-use-targets.mjs";
+import { runtimeLimits, treeBudget } from "./computer-use-runtime-limits.mjs";
 
 const usage = "usage: audit-computer-use-bundle.mjs <root> --target <target> [--seed-only]";
 const args = process.argv.slice(2);
@@ -39,6 +42,17 @@ const macLinks = new Map([
 const isMac = target.arch.endsWith("-macos");
 const hits = [];
 const entries = [];
+const budgets = new Map();
+function componentBudget(rel, st, linkSize) {
+  const match = /(?:^|\/)(chromium\/[^/]+|playwright\/node_modules\/playwright-core)(?:\/|$)/.exec(rel);
+  if (!match) return;
+  const offset = match.index + (rel[match.index] === "/" ? 1 : 0);
+  const base = rel.slice(0, offset + match[1].length);
+  const kind = match[1].startsWith("chromium/") ? "chromium" : "playwright";
+  if (!budgets.has(base)) budgets.set(base, treeBudget(runtimeLimits[kind]));
+  const local = rel.slice(base.length).replace(/^\//, "");
+  budgets.get(base)(local, linkSize ?? (st.isFile() ? st.size : undefined));
+}
 const relativeName = path => relative(root, path).split(sep).join("/");
 function inside(base, path) {
   const rel = relative(base, path);
@@ -62,6 +76,11 @@ function checkManifest(path, rel) {
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   for (const id of ["js-runtime", "chromium"]) {
     if (manifest.components?.[id]?.arch !== target.arch) hits.push(`${rel} (${id} target mismatch)`);
+  }
+  for (const [id, component] of Object.entries(manifest.components ?? {})) {
+    const limits = id === "chromium" ? runtimeLimits.chromium : id === "playwright-runtime" ? runtimeLimits.playwright : null;
+    if (limits && component.size !== undefined && (!Number.isSafeInteger(component.size)
+        || component.size < 0 || component.size > limits.maxTotalBytes)) hits.push(`${rel} (${id} resource limit)`);
   }
   if (isMac && manifest.components?.chromium?.relpath === "chromium/chrome-mac") {
     const base = rel.slice(0, -"manifest.json".length) + "chromium/chrome-mac/";
@@ -88,19 +107,28 @@ async function inspect(path) {
     if (st.isSymbolicLink()) {
       const destination = allowedMacLink(path, rel);
       if (!destination) hits.push(`${rel} (symlink)`);
-      else entries.push({ rel, kind: "link", size: Buffer.byteLength(destination),
-        sha256: createHash("sha256").update(destination).digest("hex") });
+      else {
+        componentBudget(rel, st, Buffer.byteLength(destination));
+        entries.push({ rel, kind: "link", size: Buffer.byteLength(destination),
+          sha256: createHash("sha256").update(destination).digest("hex") });
+      }
       return; // Never traverse a link, including a permitted framework alias.
     }
+    componentBudget(rel, st);
     if (st.isDirectory()) {
       for (const name of readdirSync(path).sort()) await inspect(join(path, name));
       return;
     }
     if (!st.isFile()) { hits.push(`${rel} (special file)`); return; }
     const hash = createHash("sha256");
-    for await (const chunk of createReadStream(path)) hash.update(chunk);
+    let readBytes = 0;
+    for await (const chunk of createReadStream(path, { end: st.size })) {
+      readBytes += chunk.length;
+      if (readBytes > st.size) throw new Error("file grew during audit");
+      hash.update(chunk);
+    }
     const after = lstatSync(path);
-    if (!after.isFile() || after.size !== st.size || after.mtimeMs !== st.mtimeMs) {
+    if (!after.isFile() || readBytes !== st.size || after.size !== st.size || after.mtimeMs !== st.mtimeMs) {
       hits.push(`${rel} (changed during audit)`); return;
     }
     entries.push({ rel, kind: "file", size: st.size, sha256: hash.digest("hex") });
@@ -109,7 +137,7 @@ async function inspect(path) {
       if (text.includes("sk-") && text.includes("sentinel")) hits.push(`${rel} sentinel`);
     }
     checkManifest(path, rel);
-  } catch { hits.push(`${rel || "."} (unreadable or invalid)`); }
+  } catch (error) { hits.push(`${rel || "."} (unreadable or invalid: ${error.message})`); }
 }
 
 try {

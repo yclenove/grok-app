@@ -1692,10 +1692,15 @@ pub fn reconcile_journal_from_chat_history(
     // (terminal ACP updates are status-only; chat_history carries no input).
     let tool_calls =
         load_tool_calls_from_updates(&dir.join("updates.jsonl"), &dir.join("events.jsonl"));
-    let rows = match parse_chat_history_rows(&history) {
+    let mut rows = match parse_chat_history_rows(&history) {
         Ok(r) => r,
         Err(_) => return Ok(0),
     };
+    let host_turns =
+        crate::computer_use::host_history::fingerprints(app_session_id, agent_session_id)?;
+    rows.retain(|(role, body, _)| {
+        role != "user" || !crate::computer_use::host_history::is_host_turn(&host_turns, body)
+    });
     let pairs: Vec<(String, String)> = rows
         .iter()
         .filter(|(role, _, _)| role == "user" || role == "assistant")

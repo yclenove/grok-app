@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, openSync, ftruncateSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, URL } from "node:url";
+import process from "node:process";
+import { runtimeLimits } from "./computer-use-runtime-limits.mjs";
 
 const script = fileURLToPath(new URL("./audit-computer-use-bundle.mjs", import.meta.url));
 const targets = ["x86_64-windows", "aarch64-macos", "x86_64-macos", "x86_64-linux"];
@@ -163,4 +165,49 @@ test("flattened and retargeted framework links fail closed", t => {
     assert.equal(rejected.status, 1);
     assert(rejected.report.hits.some(hit => hit.includes("invalid pinned framework link")));
   }
+});
+
+test("Chromium tree file count accepts exactly the contract and rejects one over", t => {
+  const f = fixture(t);
+  for (let i = 0; i < runtimeLimits.chromium.maxFiles; i++) f.put(`chromium/chrome-win/file-${i}`, "");
+  assert.equal(audit(f.root, "x86_64-windows", ["--seed-only"]).status, 0);
+  f.put("chromium/chrome-win/one-over", "");
+  const rejected = audit(f.root, "x86_64-windows", ["--seed-only"]);
+  assert.equal(rejected.status, 1);
+  assert(rejected.report.hits.some(hit => hit.includes("limit exceeded")));
+});
+
+test("tree directory count includes the component root and empty directories", t => {
+  const f = fixture(t);
+  mkdirSync(join(f.root, "chromium/chrome-win"), { recursive: true });
+  for (let i = 1; i < runtimeLimits.chromium.maxEntries; i++) mkdirSync(join(f.root, `chromium/chrome-win/dir-${i}`));
+  assert.equal(audit(f.root, "x86_64-windows", ["--seed-only"]).status, 0);
+  mkdirSync(join(f.root, "chromium/chrome-win/over"));
+  const rejected = audit(f.root, "x86_64-windows", ["--seed-only"]);
+  assert.equal(rejected.status, 1);
+  assert(rejected.report.hits.some(hit => hit.includes("entry limit")));
+});
+
+test("oversize sparse files fail before hashing in seed and packaged layouts", t => {
+  for (const prefix of ["", "resources/computer-use/seed/"]) {
+    const f = fixture(t); if (prefix) f.put("Grok.exe");
+    const path = f.put(`${prefix}chromium/chrome-win/too-big`, "");
+    const fd = openSync(path, "r+");
+    try { ftruncateSync(fd, runtimeLimits.chromium.maxFileBytes + 1); } finally { closeSync(fd); }
+    const rejected = audit(f.root, "x86_64-windows", prefix ? [] : ["--seed-only"]);
+    assert.equal(rejected.status, 1);
+    assert.equal(rejected.report.bytes, prefix ? 7 : 0);
+    assert(rejected.report.hits.some(hit => hit.includes("limit exceeded")));
+  }
+});
+
+test("manifest resource ceilings are compile-owned even when the tree is small", t => {
+  const f = fixture(t);
+  f.put("manifest.json", JSON.stringify({ components: {
+    "js-runtime": { arch: "x86_64-windows" },
+    chromium: { arch: "x86_64-windows", kind: "tree", size: runtimeLimits.chromium.maxTotalBytes + 1 },
+  } }));
+  const rejected = audit(f.root, "x86_64-windows", ["--seed-only"]);
+  assert.equal(rejected.status, 1);
+  assert(rejected.report.hits.some(hit => hit.includes("chromium resource limit")));
 });

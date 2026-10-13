@@ -22,6 +22,49 @@ fn paired() -> (ExtensionPairing, PairingSession, PairingConnection) {
 }
 
 #[test]
+fn raw_lease_witness_does_not_renew_or_retire_expired_storage() {
+    let (mut pairing, session, _) = paired();
+    let original_deadline = pairing.lease_deadline;
+    let (stored, remaining) = pairing.stored_lease_for_test();
+    assert!(stored && !remaining.is_zero() && remaining <= CONNECTION_LEASE);
+    assert_eq!(pairing.lease_deadline, original_deadline);
+    // Controlled unit boundary, NOT evidence of the native natural expiry gate.
+    let expired_deadline = Instant::now() - Duration::from_secs(1);
+    pairing.lease_deadline = Some(expired_deadline);
+    let generation = pairing.generation;
+    for _ in 0..2 {
+        assert_eq!(pairing.stored_lease_for_test(), (true, Duration::ZERO));
+        assert_eq!(pairing.lease_deadline, Some(expired_deadline));
+        assert_eq!(pairing.generation, generation);
+        assert_eq!(
+            pairing.session_key.as_deref(),
+            Some(session.session_key.as_str())
+        );
+    }
+    assert!(pairing.expire_connection());
+    assert_eq!(pairing.stored_lease_for_test(), (false, Duration::ZERO));
+}
+
+#[test]
+fn passive_authentication_does_not_extend_the_exact_monotonic_lease() {
+    let (pairing, session, binding) = paired();
+    let deadline = pairing.lease_deadline.unwrap();
+    for now in [
+        deadline - Duration::from_secs(5),
+        deadline - Duration::from_nanos(1),
+    ] {
+        pairing
+            .authenticate_connection_at(ORIGIN, &session.session_key, &binding, now)
+            .unwrap();
+        assert_eq!(pairing.lease_deadline, Some(deadline));
+    }
+    assert!(pairing
+        .authenticate_connection_at(ORIGIN, &session.session_key, &binding, deadline)
+        .is_err());
+    assert_eq!(pairing.lease_deadline, Some(deadline));
+}
+
+#[test]
 fn exact_monotonic_deadline_is_a_dispatch_and_renewal_boundary() {
     let (mut pairing, session, binding) = paired();
     let deadline = pairing.lease_deadline.unwrap();

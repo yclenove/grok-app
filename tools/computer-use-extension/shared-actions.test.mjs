@@ -28,7 +28,7 @@ async function fixture() {
   } };
   const shared = new SharedTabs({ client, tabs, scripting, clock: new ExecutionClock(1) });
   await shared.share(101);
-  const observed = { requestId: randomUUID(), tabId: "101", session: "owner", runId: "run", grantGeneration: 1,
+  const observed = { requestId: randomUUID(), tabId: "101", documentId, session: "owner", runId: "run", grantGeneration: 1,
     documentGeneration: 1, deadlineMs: Date.now() + 10000,
     command: { kind: "observe", snapshotId: randomUUID(), screenshot: false, preview: false } };
   await shared.observe(observed);

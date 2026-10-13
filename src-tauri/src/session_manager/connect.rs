@@ -1057,7 +1057,8 @@ impl SessionManager {
                     }
                 }
                 let cwd_str = cwd.to_string_lossy().to_string();
-                let open_result = Self::with_handshake_budget(acp.open_session_at(
+                let open_result = Self::with_handshake_budget(acp.open_app_session_at(
+                    &meta.id,
                     resume_agent_sid.as_deref(),
                     false,
                     &cwd_str,
@@ -1415,9 +1416,12 @@ impl SessionManager {
             "connect session_open_begin"
         );
         let rewind_index = meta.fork_rewind_prompt_index;
-        let open_result = Self::with_handshake_budget(
-            client.initialize_and_open_session(resume_agent_sid.as_deref(), fork_agent),
-        )
+        let open_result = Self::with_handshake_budget(async {
+            client.initialize_and_auth().await?;
+            client
+                .open_app_session_at(&meta.id, resume_agent_sid.as_deref(), fork_agent, &cwd_str)
+                .await
+        })
         .await;
 
         match open_result {
@@ -1484,7 +1488,7 @@ impl SessionManager {
                                     ),
                                 }
                                 match Self::with_handshake_budget(
-                                    client.open_session_at(None, false, &cwd_str),
+                                    client.open_app_session_at(&meta.id, None, false, &cwd_str),
                                 )
                                 .await
                                 {

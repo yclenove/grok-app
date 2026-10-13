@@ -5,7 +5,7 @@ pub use super::extension_image::ExtensionScreenshot;
 use crate::pairing::PairingConnection;
 use crate::protocol::{OBSERVATION_ARIA_CHARS, OBSERVATION_NAME_CHARS, OBSERVATION_NODE_CAP};
 
-pub const EXTENSION_PROTOCOL: u32 = 1;
+pub const EXTENSION_PROTOCOL: u32 = 2;
 // 400k image + worst-case escaped text/node strings; other IPC routes stay at 64 KiB.
 pub const EXTENSION_RESULT_BYTES: usize = 768 * 1024;
 
@@ -20,9 +20,29 @@ pub struct ExtensionRequest {
     pub session: String,
     pub run_id: String,
     pub tab_id: String,
+    pub document_id: String,
     pub document_generation: u64,
     pub grant_generation: u64,
     pub command: ExtensionCommand,
+    pub completion: super::extension_observation::ObservationProof,
+}
+
+impl ExtensionRequest {
+    pub(crate) fn completion_binding(&self) -> super::extension_completion::CompletionBinding {
+        let ExtensionCommand::Observe { snapshot_id, .. } = &self.command;
+        super::extension_completion::CompletionBinding {
+            protocol: EXTENSION_PROTOCOL,
+            request_id: self.request_id.clone(),
+            connection: self.connection.clone(),
+            session: self.session.clone(),
+            run_id: self.run_id.clone(),
+            tab_id: self.tab_id.clone(),
+            document_id: self.document_id.clone(),
+            document_generation: self.document_generation,
+            grant_generation: self.grant_generation,
+            snapshot_id: snapshot_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

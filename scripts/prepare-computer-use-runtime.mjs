@@ -1,72 +1,33 @@
 #!/usr/bin/env node
 /**
- * Deterministic Computer Use runtime seed prepare/check.
+ * Deterministic Computer Use runtime seed prepare/check or source-only audit.
  * Does not run npm, postinstall, or network latest.
  * Target must be explicit — never guess host equals target.
  */
 import { spawnSync } from "node:child_process";
+import process from "node:process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { computerUseTarget } from "./computer-use-targets.mjs";
+import { runtimeCargoArgs, runtimeRequest, runtimeUsage } from "./computer-use-runtime-command.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(HERE);
 
-const mode = process.argv.includes("--check")
-  ? "check"
-  : process.argv.includes("--prepare")
-    ? "prepare"
-    : null;
-if (!mode) {
-  process.stderr.write(
-    "usage: prepare-computer-use-runtime.mjs --prepare|--check --target <target>\n",
-  );
-  process.exit(2);
-}
-
-const targetIdx = process.argv.indexOf("--target");
-const target =
-  targetIdx >= 0
-    ? process.argv[targetIdx + 1]
-    : process.env.GROK_CU_TARGET || "";
-if (!target) {
-  process.stderr.write(
-    "--target is required (example: x86_64-windows). Do not guess host equals target.\n",
-  );
-  process.exit(2);
-}
-try { computerUseTarget(target); }
+let request;
+try { request = runtimeRequest(process.argv.slice(2), process.env); }
 catch (error) {
-  process.stderr.write(`${error.message}\n`);
+  process.stderr.write(`${error.message}\n${runtimeUsage}\n`);
   process.exit(2);
 }
-
-const extra = [];
-const seed = process.env.GROK_CU_SEED;
-if (seed) extra.push("--seed", seed);
-const cache = process.env.GROK_CU_CACHE;
-if (cache) extra.push("--cache", cache);
+if (request.help) {
+  process.stdout.write(`${runtimeUsage}\n--verify-sources does not prepare or publish a runtime seed.\n`);
+  process.exit(0);
+}
 
 const cargo = spawnSync(
   "cargo",
-  [
-    "run",
-    "-p",
-    "grok-computer-use-core",
-    "--locked",
-    "--quiet",
-    "--bin",
-    "cu-prepare-runtime",
-    "--target-dir",
-    "target-cu-review",
-    "--",
-    `--${mode}`,
-    "--target",
-    target,
-    "--repo",
-    ROOT,
-    ...extra,
-  ],
+  runtimeCargoArgs(request, ROOT),
   { cwd: join(ROOT, "src-tauri"), stdio: "inherit" },
 );
+if (cargo.error) process.stderr.write(`Unable to launch cargo: ${cargo.error.message}\n`);
 process.exit(cargo.status ?? 1);

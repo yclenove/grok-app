@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "chromium": {
+    "maxEntries": 2048,
+    "maxFiles": 1024,
+    "maxFileBytes": 629145600,
+    "maxTotalBytes": 1073741824,
+    "maxPathChars": 320,
+    "maxArchiveBytes": 536870912,
+    "maxCompressionRatio": 20
+  },
+  "playwright": {
+    "maxEntries": 4096,
+    "maxFiles": 2000,
+    "maxFileBytes": 8388608,
+    "maxTotalBytes": 33554432,
+    "maxPathChars": 240,
+    "maxArchiveBytes": 16777216,
+    "maxCompressionRatio": 20
+  },
+  "node": {
+    "maxEntries": 10000,
+    "maxFiles": 8000,
+    "maxFileBytes": 134217728,
+    "maxTotalBytes": 536870912,
+    "maxPathChars": 240,
+    "maxArchiveBytes": 134217728,
+    "maxCompressionRatio": 20
+  }
+}

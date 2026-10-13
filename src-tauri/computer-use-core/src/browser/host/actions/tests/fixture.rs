@@ -61,7 +61,7 @@ impl Fixture {
 
     pub fn observe(&self, tab: &str, sequence: u64) -> ExtensionActionCommand {
         self.host
-            .offer_connected_tab(
+            .offer_connected_tab_document(
                 &self.connection,
                 sequence,
                 SharedTabOffer {
@@ -77,6 +77,7 @@ impl Fixture {
                     connection_generation: self.connection.generation,
                     focused: true,
                 },
+                Some("0123456789abcdef0123456789abcdef"),
             )
             .unwrap();
         let selector = self
@@ -120,6 +121,16 @@ impl Fixture {
             truncated: false,
             screenshot: None,
         };
+        self.host
+            .claim_extension_observation(
+                &self.origin,
+                &self.session.session_key,
+                &request.completion,
+            )
+            .unwrap();
+        self.host
+            .settle_extension_observation(&self.origin, &request.completion)
+            .unwrap();
         self.host
             .complete_extension_request(
                 &self.origin,

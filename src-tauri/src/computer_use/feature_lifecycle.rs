@@ -7,7 +7,30 @@
 use super::{sessions, ComputerUseBroker};
 use crate::session_manager::SessionManager;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+
+static FEATURE_CHOICE: AtomicU64 = AtomicU64::new(0);
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+fn workers() -> &'static super::owned_tasks::OwnedTasks<Result<(), String>> {
+    static WORKERS: OnceLock<super::owned_tasks::OwnedTasks<Result<(), String>>> = OnceLock::new();
+    WORKERS.get_or_init(Default::default)
+}
+
+pub(super) fn stop() {
+    STOPPING.store(true, Ordering::SeqCst);
+    FEATURE_CHOICE.fetch_add(1, Ordering::SeqCst);
+    workers().stop();
+}
+
+pub(super) async fn join() -> Result<(), String> {
+    workers().join().await
+}
+
+pub(super) fn choice_revision() -> u64 {
+    FEATURE_CHOICE.load(Ordering::SeqCst)
+}
 
 pub(super) fn transition_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -66,12 +89,11 @@ pub(crate) async fn persist_feature_transition<F>(
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
 {
-    let _transition = transition_lock().lock().await;
-    let broker = super::ensure_host_runtime();
+    let broker = super::ensure_request_endpoint()?;
     persist_feature_transition_with_broker(manager, broker, enabled, persist).await
 }
 
-async fn persist_feature_transition_with_broker<F>(
+pub(super) async fn persist_feature_transition_with_broker<F>(
     manager: Arc<SessionManager>,
     broker: Arc<ComputerUseBroker>,
     enabled: bool,
@@ -80,19 +102,45 @@ async fn persist_feature_transition_with_broker<F>(
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
 {
-    if enabled {
-        tauri::async_runtime::spawn_blocking(persist)
-            .await
-            .map_err(|error| error.to_string())??;
-        super::set_feature_enabled(true);
-        broker.set_feature_enabled(true);
-        return Ok(());
+    if STOPPING.load(Ordering::SeqCst) {
+        return Err("Computer Use is shutting down".into());
     }
-
-    fence_feature_off(&manager, &broker);
-    tauri::async_runtime::spawn_blocking(persist)
-        .await
-        .map_err(|error| error.to_string())?
+    let revision = FEATURE_CHOICE
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
+            revision.checked_add(1)
+        })
+        .map_err(|_| "Computer Use preference revision exhausted")?
+        + 1;
+    // Closing authority must not wait behind an in-progress preference write
+    // or native preparation. Its persistence still joins the ordered writer.
+    if !enabled {
+        fence_feature_off(&manager, &broker);
+    }
+    // Keep the original I/O and transition lock owned if the command future
+    // is dropped. An explicit later choice wins at both publication checks.
+    workers()
+        .run(
+            async move {
+                let _transition = transition_lock().lock().await;
+                if STOPPING.load(Ordering::SeqCst) || choice_revision() != revision {
+                    return Err("Computer Use preference transition superseded".into());
+                }
+                tauri::async_runtime::spawn_blocking(persist)
+                    .await
+                    .map_err(|_| "Computer Use preference writer did not join")??;
+                if STOPPING.load(Ordering::SeqCst) || choice_revision() != revision {
+                    return Err("Computer Use preference transition superseded".into());
+                }
+                if enabled {
+                    broker.supersede_access_approvals_for_explicit_enable();
+                    broker.set_feature_enabled(true);
+                    super::set_feature_enabled(true);
+                }
+                Ok(())
+            },
+            || {},
+        )
+        .await?
 }
 
 #[cfg(test)]
@@ -131,7 +179,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feature_off_fences_while_an_older_enable_is_still_writing() {
+        let _feature_guard = super::super::feature::TEST_LOCK.lock().await;
+        let broker = broker(Arc::new(CountingAdapter::default()));
+        super::super::set_feature_enabled(true);
+        let manager = Arc::new(SessionManager::new());
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let slow = entered.clone();
+        let gate = release.clone();
+        let enable = tokio::spawn(persist_feature_transition_with_broker(
+            manager.clone(),
+            broker.clone(),
+            true,
+            move || {
+                slow.store(true, Ordering::SeqCst);
+                while !gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(())
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("original preference write entered");
+        let off = tokio::spawn(persist_feature_transition_with_broker(
+            manager,
+            broker.clone(),
+            false,
+            || Ok(()),
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while broker.feature_enabled() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("off did not wait for the older store writer");
+        assert!(
+            !off.is_finished(),
+            "new preference write still waits for the original writer"
+        );
+        release.store(true, Ordering::SeqCst);
+        assert!(
+            enable.await.unwrap().is_err(),
+            "superseded enable must never publish"
+        );
+        off.await.unwrap().unwrap();
+        assert!(!broker.feature_enabled());
+        assert!(!super::super::feature::feature_enabled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn feature_off_fences_before_slow_persist_and_releases_each_target_once() {
+        let _feature_guard = super::super::feature::TEST_LOCK.lock().await;
         super::super::set_feature_enabled(true);
         let adapter = Arc::new(CountingAdapter::default());
         adapter.set_abort_blocked(true);

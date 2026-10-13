@@ -136,6 +136,14 @@ impl ExtensionPairing {
         self.pending.clone()
     }
 
+    pub(crate) fn app_confirmed_for(&self, nonce: &str) -> bool {
+        self.app_confirmed
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|ch| ch.nonce == nonce && !ch.expired())
+    }
+
     pub fn session_key(&self) -> Option<&str> {
         self.lease_deadline
             .filter(|deadline| Instant::now() < *deadline)
@@ -189,6 +197,17 @@ impl ExtensionPairing {
             return Err("pairing challenge changed".into());
         }
         self.confirm_app()
+    }
+
+    pub(crate) fn cancel_pending_for(&mut self, nonce: &str) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.nonce == nonce)
+        {
+            self.pending = None;
+            self.app_confirmed = false;
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -393,6 +412,17 @@ impl ExtensionPairing {
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_stored_connection_for_test(&self) -> bool {
         self.session_key.is_some()
+    }
+
+    /// Raw witness only: a zero remaining lease is not physical retirement.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stored_lease_for_test(&self) -> (bool, Duration) {
+        (
+            self.session_key.is_some(),
+            self.lease_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_default(),
+        )
     }
 
     pub fn revoke(&mut self) {

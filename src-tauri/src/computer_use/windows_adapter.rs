@@ -186,8 +186,12 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return true.into();
     }
     let stamp = super::windows_identity::stamp_window(hwnd);
+    let target_id = super::windows_identity::format_target_id(pid, hwnd, stamp);
+    if target_id.is_empty() || super::windows_identity::read_stamp(hwnd) != Some(stamp) {
+        return true.into();
+    }
     state.out.push(TargetInfo {
-        target_id: super::windows_identity::format_target_id(pid, hwnd, stamp),
+        target_id,
         title: title.clone(),
         app_name,
         kind: "window".into(),
@@ -204,7 +208,8 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 fn parse_hwnd(target_id: &str) -> Option<(u32, HWND, u64)> {
-    super::windows_identity::parse_target_id(target_id)
+    let (pid, hwnd, stamp, birth) = super::windows_identity::parse_target_identity(target_id)?;
+    (super::windows_identity::process_birth(pid) == Some(birth)).then_some((pid, hwnd, stamp))
 }
 
 const PW_RENDERFULLCONTENT: u32 = 2;
@@ -388,12 +393,21 @@ fn capture_png(hwnd: HWND) -> Result<(u32, u32, Vec<u8>), String> {
 
 mod input;
 mod native_target;
+mod scope_picker;
 mod text;
 #[cfg(feature = "computer-use-probe")]
 pub(super) mod text_probe;
 use self::input::*;
 
 impl ComputerUseAdapter for WindowsAdapter {
+    fn scope_candidates(
+        &self,
+        limit: usize,
+        is_current: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<super::adapter::ScopeCandidatePage, String> {
+        scope_picker::discover(self, limit, is_current)
+    }
+
     fn backend_id(&self) -> &'static str {
         "windows"
     }
@@ -444,6 +458,62 @@ impl ComputerUseAdapter for WindowsAdapter {
             }
             super::windows_identity::read_stamp(hwnd) == Some(stamp)
         }
+    }
+
+    fn scope_identity(
+        &self,
+        target_id: &str,
+    ) -> Result<super::adapter::NativeScopeIdentity, String> {
+        let (pid, hwnd, stamp, birth) = super::windows_identity::parse_target_identity(target_id)
+            .ok_or("invalid Windows scope identity")?;
+        // The real native root, process birth and window instance all match.
+        // No screenshot, UIA tree, focus change or title search is involved.
+        native_target::NativeTarget::authorized(hwnd, target_id)?;
+        Ok(super::adapter::NativeScopeIdentity::WindowsRoot {
+            process_id: pid,
+            process_birth: birth,
+            root_hwnd: hwnd.0 as usize,
+            window_stamp: stamp,
+        })
+    }
+
+    fn scope_target_info(&self, _run_id: &str, target_id: &str) -> Result<TargetInfo, String> {
+        let (pid, hwnd, stamp) = parse_hwnd(target_id).ok_or("invalid Windows selected target")?;
+        let native = native_target::NativeTarget::authorized(hwnd, target_id)?;
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() || unsafe { IsIconic(hwnd) }.as_bool() {
+            return Err("selected Windows window is hidden or minimized".into());
+        }
+        let mut title = [0u16; 512];
+        let count = unsafe { GetWindowTextW(hwnd, &mut title) };
+        if count <= 0 {
+            return Err("selected Windows window title unavailable".into());
+        }
+        let title = String::from_utf16_lossy(&title[..count as usize]);
+        let app_name = super::windows_identity::process_image_stem(pid)
+            .ok_or("selected Windows process metadata unavailable")?;
+        native.check()?;
+        if super::adapter::skip_desktop_target(&title, &app_name)
+            || super::windows_identity::is_protected_window(hwnd, pid)
+            || !super::windows_identity::can_control_process(pid)
+            || !unsafe { IsWindowVisible(hwnd) }.as_bool()
+            || unsafe { IsIconic(hwnd) }.as_bool()
+        {
+            return Err("selected Windows window is protected".into());
+        }
+        Ok(TargetInfo {
+            target_id: target_id.into(),
+            title: title.clone(),
+            app_name,
+            kind: "window".into(),
+            pid: Some(pid),
+            backend: "windows".into(),
+            execution_mode: "exclusive".into(),
+            replay_policy: "never".into(),
+            lifecycle_stamp: stamp,
+            display_id: "win32".into(),
+            coordinate_space: "image-pixels".into(),
+            scope_label: format!("Windows window “{title}”"),
+        })
     }
 
     fn observe(&self, target_id: &str) -> Result<Observation, String> {

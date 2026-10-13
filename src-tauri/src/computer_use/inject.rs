@@ -11,6 +11,41 @@ pub const MCP_SERVER_NAME: &str = "grok-computer-use";
 const SCRIPT: &str = include_str!("../../../tools/computer-use-mcp/server.mjs");
 const PROTOCOL: &str = include_str!("../../../tools/computer-use-mcp/protocol.mjs");
 
+/// A reserved Host transport is independent of feature/run/target permission.
+pub(crate) fn request_mcp_entry(
+    session: &str,
+    token: &str,
+    endpoint: &IpcServer,
+) -> Result<Value, String> {
+    super::refuse_if_not_local(session)?;
+    build_entry(session, token.to_string(), endpoint)
+}
+
+fn build_entry(session: &str, token: String, endpoint: &IpcServer) -> Result<Value, String> {
+    super::runtime::ensure_request_runtime()?;
+    super::runtime::ensure_embedded_mcp(SCRIPT, PROTOCOL)?;
+    let script = super::runtime::resolve(super::runtime::MCP_SERVER)?;
+    let node = super::runtime::resolve(super::runtime::JS_RUNTIME)?;
+    refuse_path_node(&node)?;
+    let def = McpServerDef {
+        name: MCP_SERVER_NAME.into(),
+        command: Some(node.to_string_lossy().into_owned()),
+        args: Some(vec![script.to_string_lossy().into_owned()]),
+        env: Some(HashMap::from([
+            ("GROK_APP_CU_SESSION".into(), session.to_string()),
+            ("GROK_APP_CU_TOKEN".into(), token),
+            ("GROK_APP_CU_IPC".into(), endpoint.url.clone()),
+        ])),
+        url: None,
+        headers: None,
+        transport: Some("stdio".into()),
+        enabled: Some(true),
+        scope: Some("session".into()),
+    };
+    crate::extensions::mcp_def_to_acp(&def)
+        .ok_or_else(|| "Computer Use MCP entry could not be built".into())
+}
+
 fn check_inject_allowed(session: &str) -> Result<(), String> {
     if session.trim().is_empty() {
         return Err("select a local chat first".into());
@@ -60,32 +95,11 @@ pub fn mcp_acp_entry_with(
     broker
         .authorized_target(run)
         .map_err(|_| "authorize a target in the Computer panel first".to_string())?;
-    super::runtime::ensure_embedded_mcp(SCRIPT, PROTOCOL)?;
-    let script = super::runtime::resolve(super::runtime::MCP_SERVER)?;
-    let node = super::runtime::resolve(super::runtime::JS_RUNTIME)?;
-    refuse_path_node(&node)?;
     // Catalog rebuilds and ambiguous ACP retries must keep the credential used
     // by the currently installed MCP child. Explicit security rotation has a
     // separate IPC API and must be coordinated with catalog replacement.
     let token = endpoint.credential_for_session(session, run)?;
-    let env = HashMap::from([
-        ("GROK_APP_CU_SESSION".into(), session.to_string()),
-        ("GROK_APP_CU_TOKEN".into(), token),
-        ("GROK_APP_CU_IPC".into(), endpoint.url.clone()),
-    ]);
-    let def = McpServerDef {
-        name: MCP_SERVER_NAME.into(),
-        command: Some(node.to_string_lossy().into_owned()),
-        args: Some(vec![script.to_string_lossy().into_owned()]),
-        env: Some(env),
-        url: None,
-        headers: None,
-        transport: Some("stdio".into()),
-        enabled: Some(true),
-        scope: Some("session".into()),
-    };
-    crate::extensions::mcp_def_to_acp(&def)
-        .ok_or_else(|| "Computer Use MCP entry could not be built".into())
+    build_entry(session, token, endpoint)
 }
 
 #[cfg(feature = "computer-use-probe")]

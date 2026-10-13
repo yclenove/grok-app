@@ -36,11 +36,14 @@ export class CompletionScope {
   #statusTask = null;
   #settleTask = null;
   #settled = false;
+  #purpose;
 
-  constructor({ endpoint, proof, fetch = (...args) => globalThis.fetch(...args), journal }) {
+  constructor({ endpoint, proof, fetch = (...args) => globalThis.fetch(...args), journal, purpose = "action" }) {
+    if (!["action", "observation"].includes(purpose)) throw new Error("invalidCompletion");
+    this.#purpose = purpose;
     this.#endpoint = parseEndpoint(endpoint);
     this.#proof = copyCompletionProof(proof);
-    this.#body = JSON.stringify(this.#proof);
+    this.#body = JSON.stringify(purpose === "observation" ? { purpose, proof: this.#proof } : this.#proof);
     this.#journal = journal;
     this.#fetch = fetch;
   }
@@ -57,7 +60,8 @@ export class CompletionScope {
     const timer = setTimeout(abort, 5000);
     let reader;
     try {
-      const response = await this.#fetch(this.#endpoint + "/cu/extension-completion/" + route, {
+      const prefix = this.#purpose === "observation" ? "/cu/extension-observation/" : "/cu/extension-completion/";
+      const response = await this.#fetch(this.#endpoint + prefix + route, {
         method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
         headers: { "content-type": "application/json" }, body: this.#body, signal: controller.signal,
       });
@@ -93,6 +97,14 @@ export class CompletionScope {
       return { ...reply.status };
     }).finally(() => { this.#statusTask = null; });
     return this.#statusTask;
+  }
+
+  // A capture boundary must not reuse a status request that started before the
+  // original native read returned. Join that reader, then issue a fresh check.
+  async recheck(signal) {
+    if (this.#statusTask) await this.#statusTask;
+    if (signal.aborted) throw new Error("completionUnavailable");
+    return this.status(signal);
   }
 
   settle() {

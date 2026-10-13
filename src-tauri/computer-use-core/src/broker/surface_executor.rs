@@ -25,6 +25,15 @@ pub(crate) struct SurfaceExecutorRegistry {
 }
 
 impl SurfaceExecutorRegistry {
+    pub(crate) fn empty() -> Self {
+        Self {
+            inner: RwLock::new(RegistryState {
+                next_generation: 1,
+                entries: HashMap::new(),
+            }),
+        }
+    }
+
     pub(crate) fn new(desktop: Arc<dyn ComputerUseAdapter>) -> Self {
         let mut entries = HashMap::new();
         entries.insert(

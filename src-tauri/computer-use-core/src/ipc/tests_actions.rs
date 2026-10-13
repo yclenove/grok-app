@@ -86,6 +86,7 @@ fn fixture(parameters: Value, action: &str) -> Fixture {
     .json()
     .unwrap();
     let request = &polled["request"];
+    super::tests_transport::physically_complete_observation(&server, &session, request);
     let snapshot = request["command"]["snapshotId"].as_str().unwrap();
     let element = format!("{snapshot}-1");
     let result = json!({"request":request,"outcome":{"kind":"observation","observation":{

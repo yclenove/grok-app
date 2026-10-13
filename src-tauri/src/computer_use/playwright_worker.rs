@@ -2,14 +2,27 @@
 
 use grok_computer_use_core::adapter::CaptureOptions;
 use grok_computer_use_core::browser::{
-    bounded_loopback_post, parse_managed_observation, parse_managed_page, parse_worker_run_state,
-    ManagedBrowserWorker, ManagedDownload, ManagedObservation, ManagedPage, ManagedProfile,
-    ManagedRequestIdentity, ManagedWorkerAction, ManagedWorkerUpload, WorkerError, WorkerRunPhase,
-    WorkerRunRevision, WorkerRunState,
+    bounded_loopback_post, parse_managed_observation, parse_managed_page,
+    parse_managed_scope_identity, parse_worker_run_state, ManagedBrowserWorker, ManagedDownload,
+    ManagedObservation, ManagedPage, ManagedProfile, ManagedRequestIdentity, ManagedScopeIdentity,
+    ManagedWorkerAction, ManagedWorkerUpload, WorkerError, WorkerRunPhase, WorkerRunRevision,
+    WorkerRunState,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[cfg(all(test, windows))]
+#[path = "playwright_worker/scope_tests.rs"]
+mod scope_tests;
+
+#[cfg(all(test, windows))]
+#[path = "playwright_worker/profile_cleanup.rs"]
+mod profile_cleanup;
+
+#[cfg(all(test, windows))]
+#[path = "playwright_worker/managed_task_tests.rs"]
+pub(crate) mod managed_task_tests;
 
 pub struct LoopbackPlaywrightWorker {
     base: String,
@@ -47,7 +60,11 @@ impl LoopbackPlaywrightWorker {
             &self.token,
             path,
             &body,
-            &[],
+            if path == "/scope-identity" {
+                &[("x-grok-cu-host", "1")]
+            } else {
+                &[]
+            },
             timeout,
             request.cancellation(),
         )
@@ -73,6 +90,44 @@ impl LoopbackPlaywrightWorker {
 }
 
 impl ManagedBrowserWorker for LoopbackPlaywrightWorker {
+    fn scope_identity(
+        &self,
+        owner: &str,
+        profile: &str,
+        page_id: &str,
+    ) -> Result<ManagedScopeIdentity, WorkerError> {
+        let Some(request) = &self.request else {
+            return Err(WorkerError::not_started(
+                409,
+                "scope_identity_unavailable",
+                "managed scope identity requires a retained Host request",
+            ));
+        };
+        if request.owner() != owner {
+            return Err(WorkerError::not_started(
+                409,
+                "request_owner_mismatch",
+                "scope owner differs from retained admission",
+            ));
+        }
+        let health = self.post("/health", json!({}))?;
+        if health.get("scopeIdentity").and_then(Value::as_u64) != Some(1) {
+            return Err(WorkerError::not_started(
+                409,
+                "scope_identity_unavailable",
+                "repair the managed browser runtime before selecting its task scope",
+            ));
+        }
+        let identity = parse_managed_scope_identity(&self.post(
+            "/scope-identity",
+            json!({"owner":owner,"profile":profile,"pageId":page_id}),
+        )?)?;
+        if identity.owner != owner || identity.profile != profile || identity.page_id != page_id {
+            return Err(WorkerError::invalid_response(200));
+        }
+        Ok(identity)
+    }
+
     fn bind_request(
         self: Arc<Self>,
         identity: ManagedRequestIdentity,

@@ -43,6 +43,10 @@ pub fn export_bundle() -> Result<PathBuf, String> {
 }
 
 pub fn clear(kind: CleanupKind) -> Result<(), String> {
+    #[cfg(windows)]
+    if kind == CleanupKind::Staging {
+        super::webview::maintain_download_buffers(&crate::paths::app_data_root())?;
+    }
     let root = ensure_root()?;
     let dir = root.join(kind.dir_name());
     if !dir.exists() {

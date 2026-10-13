@@ -323,6 +323,8 @@ fn allowed_origins() -> &'static [&'static str] {
     &[
         "http://localhost:1421",
         "https://localhost:1421",
+        "http://127.0.0.1:1421",
+        "https://127.0.0.1:1421",
         "tauri://localhost",
         "http://tauri.localhost",
         "https://tauri.localhost",
@@ -912,5 +914,11 @@ mod tests {
         assert_eq!(chunk.status, StatusCode::OK);
         assert_eq!(chunk.body.len(), size);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allows_ipv4_dev_origin() {
+        assert!(allowed_origins().contains(&"http://127.0.0.1:1421"));
+        assert!(allowed_origins().contains(&"https://127.0.0.1:1421"));
     }
 }

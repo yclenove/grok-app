@@ -1,8 +1,10 @@
 import { isDisplayableAttachmentPath } from "../attachments";
+import { isEndOfTurnMessage } from "../endOfTurn";
 import type {
   ChatMessage,
   MessageAttachment,
   MessageSegment,
+  SessionSnapshot,
   StreamPayload,
 } from "./types";
 import { isTurnPromptMessage } from "./types";
@@ -118,6 +120,42 @@ export function lastUserRowIndex(messages: ChatMessage[]): number {
     if (messages[i]?.role === "user") return i;
   }
   return -1;
+}
+
+/** Resume can start a new stream without painting another user row. */
+function lastStreamBoundaryIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user" || isEndOfTurnMessage(messages[i]!)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Paint a fresh Host continuation before its first token, including early Stop. */
+export function ensureContinuationForHostSnapshot(
+  messages: ChatMessage[],
+  snapshot: Pick<SessionSnapshot, "state" | "streamingMessageId">,
+): ChatMessage[] {
+  if (snapshot.state !== "streaming" && snapshot.state !== "awaiting_permission") {
+    return messages;
+  }
+  const hostId = snapshot.streamingMessageId?.trim();
+  if (!hostId) return messages;
+  const floor = lastStreamBoundaryIndex(messages);
+  if (!isEndOfTurnMessage(messages[floor] ?? {})) return messages;
+  if (messages.slice(floor + 1).some((m) => m.role === "assistant")) {
+    return messages;
+  }
+  const pendingId = `a-pending-resume-${hostId}`;
+  // Late state events for a retired stream must not manufacture a new turn.
+  if (messages.some((m) => m.id === hostId || m.id === pendingId)) {
+    return messages;
+  }
+  return [
+    ...messages.map((m) => m.streaming ? { ...m, streaming: false } : m),
+    { id: pendingId, role: "assistant", content: "", streaming: true },
+  ];
 }
 
 /**
@@ -406,6 +444,13 @@ export function applyStreamChunk(
   messages: ChatMessage[],
   chunk: StreamPayload,
 ): ChatMessage[] {
+  const bindFloor = lastStreamBoundaryIndex(messages);
+  // A named late chunk from before Pause/Stop cannot revive that response or
+  // leak into the resumed task. Steer keeps its existing fallback behavior.
+  if (chunk.messageId && isEndOfTurnMessage(messages[bindFloor] ?? {})) {
+    const named = messages.findIndex((m) => m.id === chunk.messageId);
+    if (named >= 0 && named <= bindFloor) return messages;
+  }
   // done-only with empty text: settle finished segments — but never kill an
   // *empty* post-steer shell. Mid-turn interject freezes the prior stream and
   // seeds a live row; a blanket done would clear that row → blank gap until
@@ -478,7 +523,6 @@ export function applyStreamChunk(
   } else {
     // Refuse to append onto an assistant from a previous turn (stale id reuse)
     // or a frozen pre-steer bubble (interjection sits after it).
-    const bindFloor = lastUserRowIndex(messages);
     if (idx <= bindFloor) {
       const fallback = findCurrentTurnAssistantForStream(messages, undefined);
       idx = fallback ?? -1;
@@ -543,18 +587,18 @@ function adoptHostStreamMessageId(
 
 /**
  * Find the streaming assistant for the *current* paint segment only
- * (after the last user row, including mid-turn 引导).
+ * (after the last user row or terminal marker, including mid-turn 引导).
  */
 function findCurrentTurnStreamingAssistant(
   messages: ChatMessage[],
   messageId: string | undefined,
 ): number | undefined {
-  const bindFloor = lastUserRowIndex(messages);
+  const bindFloor = lastStreamBoundaryIndex(messages);
   if (messageId) {
     const byId = messages.findIndex((m) => m.id === messageId);
     // Named id is only valid after the last user/steer row. A pre-steer
     // match would revive the frozen bubble (chat flicker).
-    if (byId > bindFloor) return byId;
+    if (byId > bindFloor && messages[byId]?.role === "assistant") return byId;
   }
   for (let i = messages.length - 1; i > bindFloor; i--) {
     const m = messages[i]!;
@@ -575,7 +619,7 @@ function findCurrentTurnAssistantForStream(
 ): number | undefined {
   const live = findCurrentTurnStreamingAssistant(messages, messageId);
   if (live != null) return live;
-  const bindFloor = lastUserRowIndex(messages);
+  const bindFloor = lastStreamBoundaryIndex(messages);
   for (let i = messages.length - 1; i > bindFloor; i--) {
     const m = messages[i]!;
     if (m.role === "assistant" && !m.isError) return i;

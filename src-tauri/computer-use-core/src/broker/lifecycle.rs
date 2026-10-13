@@ -12,8 +12,10 @@ impl ComputerUseBroker {
     /// worker, filesystem, or network.  Callers can therefore publish their
     /// local Stop acknowledgement before starting surface cleanup.
     pub fn fence_stop(&self, run_id: &str) -> Result<Option<StopCleanupTicket>, BrokerError> {
+        let _change = self.changes.notice();
         let generation = {
             let mut inner = self.inner.lock();
+            inner.consent.revoke_run(run_id);
             let run = inner.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
             if run.stop == StopState::Stopped {
                 return Ok(None);
@@ -28,6 +30,10 @@ impl ComputerUseBroker {
                 run.last_image_ok = false;
             }
             let generation = run.generation;
+            let incarnation = match &run.consent {
+                ConsentGate::Bound(binding) => binding.incarnation,
+                ConsentGate::Pending | ConsentGate::Legacy => 0,
+            };
             push_trace(
                 &mut inner,
                 "stop_requested",
@@ -35,11 +41,12 @@ impl ComputerUseBroker {
                 "fenced",
                 TraceAudience::Model,
             );
-            generation
+            (generation, incarnation)
         };
         Ok(Some(StopCleanupTicket {
             run_id: run_id.to_string(),
-            generation,
+            generation: generation.0,
+            incarnation: generation.1,
         }))
     }
 
@@ -51,22 +58,30 @@ impl ComputerUseBroker {
         &self,
         ticket: &StopCleanupTicket,
     ) -> Result<StopState, BrokerError> {
-        let (target, cleanup_required) = {
+        let _change = self.changes.notice();
+        let (target, webview_targets, cleanup_required) = {
             let mut inner = self.inner.lock();
             let run = inner
                 .runs
                 .get_mut(&ticket.run_id)
                 .ok_or(BrokerError::RunNotFound)?;
-            if run.generation != ticket.generation || run.stop == StopState::Running {
+            let bound_incarnation = match &run.consent {
+                ConsentGate::Bound(binding) => binding.incarnation,
+                ConsentGate::Pending | ConsentGate::Legacy => 0,
+            };
+            if run.generation != ticket.generation
+                || bound_incarnation != ticket.incarnation
+                || run.stop == StopState::Running
+            {
                 return Err(BrokerError::IdentityMismatch("stop generation"));
             }
             if run.stop == StopState::Stopped || !run.stop_cleanup_pending {
-                (None, false)
+                (None, Vec::new(), false)
             } else if run.stop_cleanup_in_flight {
                 return Ok(StopState::StopRequested);
             } else {
                 run.stop_cleanup_in_flight = true;
-                (run.target.clone(), true)
+                (run.target.clone(), run.webview_targets.clone(), true)
             }
         };
         if !cleanup_required {
@@ -97,6 +112,28 @@ impl ComputerUseBroker {
         };
         let browser_cleanup = self.tabs.cancel_run(&ticket.run_id).map(|_| ());
         let mut cleanup_errors = Vec::new();
+        let webview_executor = if webview_targets.is_empty() {
+            None
+        } else {
+            match self.require_surface_executor(SurfaceKind::WebView) {
+                Ok(executor) => {
+                    if target.as_ref().map(|target| target.surface) != Some(SurfaceKind::WebView) {
+                        if let Err(error) =
+                            executor.adapter.abort(&ticket.run_id, ticket.generation)
+                        {
+                            cleanup_errors
+                                .push(format!("WebView cancellation did not complete: {error}"));
+                        }
+                    }
+                    Some(executor)
+                }
+                Err(error) => {
+                    cleanup_errors
+                        .push(format!("WebView executor unavailable during stop: {error}"));
+                    None
+                }
+            }
+        };
         if let Err(error) = adapter_cleanup {
             cleanup_errors.push(error);
         }
@@ -118,11 +155,19 @@ impl ComputerUseBroker {
                     .release_target_for_run(&ticket.run_id, &target.target_id);
             }
         }
+        if let Some(executor) = webview_executor {
+            for target in &webview_targets {
+                executor
+                    .adapter
+                    .release_target_for_run(&ticket.run_id, target);
+            }
+        }
         if let Some(run) = self.inner.lock().runs.get_mut(&ticket.run_id) {
             if run.generation == ticket.generation && run.stop != StopState::Running {
                 run.stop_cleanup_pending = false;
                 run.stop_cleanup_in_flight = false;
                 run.pause_cleanup_pending = false;
+                run.webview_targets.clear();
             }
         }
         self.stop_state(&ticket.run_id)
@@ -155,7 +200,13 @@ impl ComputerUseBroker {
         let (target, cleanup_pending) = {
             let inner = self.inner.lock();
             let run = inner.runs.get(run_id).ok_or(BrokerError::RunNotFound)?;
-            (run.target.clone(), run.stop_cleanup_pending)
+            (
+                run.target.clone(),
+                run.stop_cleanup_pending
+                    || run.pause_cleanup_pending
+                    || run.switch_in_flight
+                    || run.resume_in_flight,
+            )
         };
         let adapter_idle = if cleanup_pending {
             false
@@ -167,7 +218,13 @@ impl ComputerUseBroker {
         };
         let mut inner = self.inner.lock();
         let run = inner.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
-        if !run.stop_cleanup_pending && !run.in_flight.load(Ordering::SeqCst) && adapter_idle {
+        if !run.stop_cleanup_pending
+            && !run.pause_cleanup_pending
+            && !run.switch_in_flight
+            && !run.resume_in_flight
+            && !run.in_flight.load(Ordering::SeqCst)
+            && adapter_idle
+        {
             if run.stop == StopState::StopRequested {
                 run.stop = StopState::Stopped;
                 if target.as_ref().map(|t| t.surface) == Some(SurfaceKind::Desktop) {
@@ -198,8 +255,20 @@ impl ComputerUseBroker {
 
     /// Pause without treating the source as a user resume grant.
     pub fn pause_due_to(&self, run_id: &str, reason: &str) -> Result<(), BrokerError> {
+        self.pause_due_to_checked(run_id, reason, |_| Ok(()))
+    }
+
+    pub(super) fn pause_due_to_checked(
+        &self,
+        run_id: &str,
+        reason: &str,
+        check: impl FnOnce(&Inner) -> Result<(), BrokerError>,
+    ) -> Result<(), BrokerError> {
+        let _change = self.changes.notice();
         let (generation, target, cleanup_required) = {
             let mut inner = self.inner.lock();
+            check(&inner)?;
+            inner.consent.suspend_run(run_id);
             let run = inner.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
             if run.stop != StopState::Running {
                 return Err(BrokerError::StopRequested);
@@ -244,7 +313,18 @@ impl ComputerUseBroker {
                 "surface executor unavailable during pause: {error}"
             )),
         };
-        let browser_cleanup = if target
+        let retain_existing = target
+            .as_ref()
+            .is_some_and(|t| t.surface == SurfaceKind::ExistingTab)
+            && matches!(
+                self.inner.lock().runs.get(run_id).map(|run| &run.consent),
+                Some(ConsentGate::Bound(_))
+            );
+        let browser_cleanup = if retain_existing {
+            // Task authority is suspended above. Keep the original active
+            // share for a proved Host recovery, not a legacy raw-tab regrant.
+            self.tabs.pause_managed_run(run_id)
+        } else if target
             .as_ref()
             .is_some_and(|t| t.surface == SurfaceKind::ManagedBrowser)
         {

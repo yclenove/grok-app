@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::BrokerError;
+use sha2::{Digest, Sha256};
 
 pub const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -77,6 +78,50 @@ pub fn staging_file(root: &Path, run_id: &str, filename: &str) -> Result<PathBuf
     Ok(dir.join(name))
 }
 
+/// Allocate a fresh, action-private download directory under the run staging
+/// root.  Keeping the requested basename inside a random directory avoids
+/// overwriting an earlier staged file while preserving a useful filename.
+pub fn staging_download_file(
+    root: &Path,
+    run_id: &str,
+    filename: &str,
+) -> Result<PathBuf, BrokerError> {
+    let run = run_id.trim();
+    if run.is_empty() || run.contains("..") || run.contains('/') || run.contains('\\') {
+        return Err(BrokerError::IdentityMismatch("runId"));
+    }
+    let name = sanitize_filename(filename)?;
+    let run_root = root
+        .join("computer-use-staging")
+        .join(download_run_component(run));
+    std::fs::create_dir_all(&run_root).map_err(|e| BrokerError::Adapter(e.to_string()))?;
+    let directory = run_root
+        .join("downloads")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&directory).map_err(|e| BrokerError::Adapter(e.to_string()))?;
+
+    let canonical_run = std::fs::canonicalize(&run_root)
+        .map_err(|e| BrokerError::Adapter(format!("cannot resolve run staging root: {e}")))?;
+    let canonical_directory = std::fs::canonicalize(&directory)
+        .map_err(|e| BrokerError::Adapter(format!("cannot resolve download staging: {e}")))?;
+    if !path_is_under(&canonical_directory, &canonical_run)
+        || canonical_directory == canonical_run
+        || std::fs::symlink_metadata(&directory)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        return Err(BrokerError::Schema(
+            "download staging is outside the run-owned root".into(),
+        ));
+    }
+    Ok(canonical_directory.join(name))
+}
+
+fn download_run_component(run_id: &str) -> String {
+    let digest = Sha256::digest(run_id.as_bytes());
+    format!("run-{}", hex::encode(&digest[..16]))
+}
+
 pub fn path_is_under(child: &Path, root: &Path) -> bool {
     let child = child.components().collect::<Vec<_>>();
     let root = root.components().collect::<Vec<_>>();
@@ -132,6 +177,34 @@ mod tests {
         assert!(!path.to_string_lossy().contains(".."));
         std::fs::write(&path, "abc").unwrap();
         assert_eq!(accept_staged_file(&path, &root).unwrap(), 3);
+        let first = staging_download_file(&root, "run-a", "report.bin").unwrap();
+        let second = staging_download_file(&root, "run-a", "report.bin").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("report.bin")
+        );
+        assert!(path_is_under(
+            first.parent().unwrap(),
+            &std::fs::canonicalize(
+                root.join("computer-use-staging")
+                    .join(download_run_component("run-a"))
+            )
+            .unwrap()
+        ));
+        let long_run = format!("cu-task-{}", "a".repeat(96));
+        let compact = staging_download_file(&root, &long_run, "compact.bin").unwrap();
+        assert!(!compact.to_string_lossy().contains(&long_run));
+        assert_eq!(
+            compact
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::len),
+            Some(36)
+        );
         let outside = std::env::temp_dir().join(format!("cu-out-{}", uuid::Uuid::new_v4()));
         std::fs::write(&outside, "nope").unwrap();
         assert!(accept_staged_file(&outside, &root).is_err());

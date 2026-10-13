@@ -80,7 +80,10 @@ describe("App pairing lifecycle", () => {
     const confirm = await screen.findByText("Confirm pairing in App");
     confirm.focus();
     fireEvent.click(confirm);
-    expect(await screen.findByRole("textbox", { name: "App address" })).toHaveFocus();
+    const address = await screen.findByRole("textbox", { name: "App address" });
+    // Finding the committed field does not prove its passive focus effect has
+    // run yet. Assert the actual keyboard destination, not render timing.
+    await waitFor(() => expect(address).toHaveFocus());
   });
   it("does not steal focus moved elsewhere while confirmation is pending", async () => {
     let resolve!: () => void;

@@ -30,7 +30,7 @@ fn t1_dead_lease_not_inherited() -> Result<(), String> {
     let leftover = crate::lease::LeaseInfo {
         run_id: "ghost".into(),
         instance_id: "dead-inst".into(),
-        pid: 1,
+        pid: crate::runtime_test_seed::retired_node_pid(),
     };
     std::fs::write(
         &path,

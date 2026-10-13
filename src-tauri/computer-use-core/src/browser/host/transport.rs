@@ -4,6 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{existing::expire_pairing, ExistingTabHost, Inner};
 use crate::adapter::CaptureOptions;
+use crate::browser::extension_completion::CompletionBinding;
+use crate::browser::extension_observation::{ObservationProof, ObservationPurpose};
 use crate::browser::extension_protocol::*;
 use crate::error::BrokerError;
 use crate::pairing::PairingConnection;
@@ -15,11 +17,14 @@ const MAX_PENDING: usize = 8;
 const REQUEST_TTL: Duration = Duration::from_secs(10);
 
 pub(super) struct PendingExtension {
-    request: ExtensionRequest,
+    pub(super) request: ExtensionRequest,
     deadline: Instant,
-    delivered: bool,
-    sender: SyncSender<Result<ExtensionObservation, BrokerError>>,
-    cancellation: crate::execution::ActionCancellation,
+    pub(super) delivered: bool,
+    pub(super) claimed: bool,
+    pub(super) settled: bool,
+    processing: bool,
+    sender: Option<SyncSender<Result<ExtensionObservation, BrokerError>>>,
+    pub(super) cancellation: crate::execution::ActionCancellation,
 }
 
 pub(super) fn request_busy(state: &Inner, tab: &str) -> bool {
@@ -28,13 +33,22 @@ pub(super) fn request_busy(state: &Inner, tab: &str) -> bool {
         + super::actions::additional_occupancy(state)
         >= MAX_PENDING
         || super::actions::has_tab(state, tab)
+        || has_tab(state, tab)
+}
+
+pub(super) fn has_tab(state: &Inner, tab: &str) -> bool {
+    state.observation_completions.has_tab(tab)
         || state
             .extension_requests
             .iter()
             .any(|pending| pending.request.tab_id == tab)
 }
 
-fn live_request(state: &Inner, request: &ExtensionRequest) -> bool {
+pub(super) fn live_request(state: &Inner, request: &ExtensionRequest) -> bool {
+    request.protocol == EXTENSION_PROTOCOL && live_binding(state, &request.completion_binding())
+}
+
+fn live_binding(state: &Inner, request: &CompletionBinding) -> bool {
     let Some(record) = state.tabs.get(&request.tab_id) else {
         return false;
     };
@@ -42,6 +56,7 @@ fn live_request(state: &Inner, request: &ExtensionRequest) -> bool {
         return false;
     };
     state.pairing.live_connection().as_ref() == Some(&request.connection)
+        && !state.stopped_runs.contains(&request.run_id)
         && record.info.user_owned
         && record.info.borrowed
         && !record.info.closed
@@ -52,6 +67,7 @@ fn live_request(state: &Inner, request: &ExtensionRequest) -> bool {
         && record.info.document_generation == request.document_generation
         && record.info.connection_generation == request.connection.generation
         && offer.document_generation == request.document_generation
+        && offer.document_id.as_deref() == Some(request.document_id.as_str())
         && offer.connection_generation == request.connection.generation
         && record.pairing_token.as_deref() == state.pairing.session_key()
 }
@@ -59,7 +75,7 @@ fn live_request(state: &Inner, request: &ExtensionRequest) -> bool {
 pub(super) fn sweep_requests(state: &mut Inner) {
     let now = Instant::now();
     // Bounded queue: collect IDs first to avoid aliasing the registry during retain.
-    let stale: Vec<_> = state
+    let stale: std::collections::HashSet<_> = state
         .extension_requests
         .iter()
         .filter(|pending| {
@@ -69,18 +85,29 @@ pub(super) fn sweep_requests(state: &mut Inner) {
         })
         .map(|pending| pending.request.request_id.clone())
         .collect();
-    state.extension_requests.retain(|pending| {
+    for pending in &mut state.extension_requests {
         if stale.contains(&pending.request.request_id) {
+            pending.cancellation.cancel();
             let error = if now >= pending.deadline {
                 BrokerError::Timeout
             } else {
                 BrokerError::TargetUnauthorized
             };
-            let _ = pending.sender.try_send(Err(error));
-            false
-        } else {
-            true
+            if let Some(sender) = pending.sender.take() {
+                let _ = sender.try_send(Err(error));
+            }
         }
+    }
+    state.observation_completions.sweep(&stale);
+    let held: std::collections::HashSet<_> = state
+        .observation_completions
+        .bindings()
+        .map(|binding| binding.request_id.clone())
+        .collect();
+    state.extension_requests.retain(|pending| {
+        !stale.contains(&pending.request.request_id)
+            || pending.processing
+            || held.contains(&pending.request.request_id)
     });
 }
 
@@ -123,6 +150,15 @@ impl ExistingTabHost {
         }
         let document_generation = record.info.document_generation;
         let grant_generation = record.info.generation;
+        let document_id = state
+            .shared
+            .get(tab)
+            .and_then(|offer| offer.document_id.clone())
+            .ok_or_else(|| {
+                BrokerError::Schema(
+                    "observation lifecycle requires a shared document identity".into(),
+                )
+            })?;
         if request_busy(&state, tab) {
             return Err(BrokerError::Schema("extension request busy".into()));
         }
@@ -131,9 +167,43 @@ impl ExistingTabHost {
             .checked_add(1)
             .filter(|seq| *seq <= crate::protocol::JS_MAX_SAFE_INTEGER)
             .ok_or_else(|| BrokerError::Schema("extension sequence exhausted".into()))?;
-        let request = ExtensionRequest {
+        let binding = CompletionBinding {
             protocol: EXTENSION_PROTOCOL,
             request_id: uuid::Uuid::new_v4().to_string(),
+            connection: connection.clone(),
+            session: session.into(),
+            run_id: run.into(),
+            tab_id: tab.into(),
+            document_id: document_id.clone(),
+            document_generation,
+            grant_generation,
+            snapshot_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let snapshot_id = binding.snapshot_id.clone();
+        let request_id = binding.request_id.clone();
+        if !live_binding(&state, &binding) {
+            return Err(BrokerError::TargetUnauthorized);
+        }
+        let browser_session_id = state.browser_session_id.clone();
+        state
+            .observation_completions
+            .reserve_with_browser(
+                binding,
+                options.cancellation.clone(),
+                true,
+                browser_session_id,
+            )
+            .map_err(BrokerError::Schema)?;
+        let completion = ObservationProof {
+            purpose: ObservationPurpose::Observation,
+            proof: state
+                .observation_completions
+                .deliver(&request_id)
+                .map_err(BrokerError::Schema)?,
+        };
+        let request = ExtensionRequest {
+            protocol: EXTENSION_PROTOCOL,
+            request_id,
             sequence: state.extension_sequence,
             deadline_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -144,23 +214,25 @@ impl ExistingTabHost {
             session: session.into(),
             run_id: run.into(),
             tab_id: tab.into(),
+            document_id,
             document_generation,
             grant_generation,
             command: ExtensionCommand::Observe {
-                snapshot_id: uuid::Uuid::new_v4().to_string(),
+                snapshot_id,
                 screenshot: options.screenshot,
                 preview: !options.for_model,
             },
+            completion,
         };
-        if !live_request(&state, &request) {
-            return Err(BrokerError::TargetUnauthorized);
-        }
         let (sender, receiver) = mpsc::sync_channel(1);
         state.extension_requests.push_back(PendingExtension {
             request: request.clone(),
             deadline: Instant::now() + REQUEST_TTL,
             delivered: false,
-            sender,
+            claimed: false,
+            settled: false,
+            processing: false,
+            sender: Some(sender),
             cancellation: options.cancellation,
         });
         Ok((request, receiver))
@@ -232,20 +304,43 @@ impl ExistingTabHost {
         token: &str,
         result: ExtensionResult,
     ) -> Result<(), String> {
+        self.complete_extension_request_validated(
+            origin,
+            token,
+            result,
+            ExtensionObservation::validate,
+        )
+    }
+
+    fn complete_extension_request_validated(
+        &self,
+        origin: &str,
+        token: &str,
+        result: ExtensionResult,
+        validate: impl FnOnce(&ExtensionObservation, &str, bool) -> bool,
+    ) -> Result<(), String> {
         {
             let mut state = self.inner.lock();
             expire_pairing(&mut state);
             state
                 .pairing
                 .authenticate_connection(origin, token, &result.request.connection)?;
-            if !state
-                .extension_requests
-                .iter()
-                .any(|p| p.request == result.request && p.delivered)
-                || !live_request(&state, &result.request)
+            if !state.extension_requests.iter().any(|p| {
+                p.request == result.request
+                    && p.delivered
+                    && p.claimed
+                    && p.settled
+                    && !p.processing
+            }) || !live_request(&state, &result.request)
             {
                 return Err("extension result does not match a live request".into());
             }
+            state
+                .extension_requests
+                .iter_mut()
+                .find(|p| p.request == result.request)
+                .ok_or("extension request unavailable")?
+                .processing = true;
         }
         // Decode only authenticated pending data, outside the authority lock. Revocation
         // can proceed while decoding; the complete request is revalidated below.
@@ -256,17 +351,27 @@ impl ExistingTabHost {
         } = &result.request.command;
         let observation = match result.outcome {
             ExtensionOutcome::Observation { observation } => {
-                if !observation.validate(snapshot_id, *screenshot) {
-                    return Err("invalid extension observation".into());
+                if validate(&observation, snapshot_id, *screenshot) {
+                    Ok(Ok(observation))
+                } else {
+                    Err("invalid extension observation")
                 }
-                Ok(observation)
             }
-            ExtensionOutcome::Rejected { .. } => Err(BrokerError::Adapter(
+            ExtensionOutcome::Rejected { .. } => Ok(Err(BrokerError::Adapter(
                 "extension observation rejected".into(),
-            )),
+            ))),
         };
         let mut state = self.inner.lock();
+        // All decode outcomes return the Host's physical occupancy before any
+        // fallible authority check. Cancellation during decode cannot bypass it.
+        state
+            .extension_requests
+            .iter_mut()
+            .find(|p| p.request == result.request)
+            .ok_or("extension processing request unavailable")?
+            .processing = false;
         expire_pairing(&mut state);
+        let observation = observation.map_err(str::to_string)?;
         state
             .pairing
             .authenticate_connection(origin, token, &result.request.connection)?;
@@ -282,9 +387,15 @@ impl ExistingTabHost {
             state
                 .shared
                 .get(&result.request.tab_id)
-                .is_none_or(|offer| offer.url != observation.url)
+                .is_none_or(|offer| {
+                    offer.url != observation.url
+                        || offer
+                            .document_id
+                            .as_ref()
+                            .is_some_and(|id| *id != observation.document_id)
+                })
         }) {
-            return Err("invalid extension observation URL".into());
+            return Err("invalid extension observation document or URL".into());
         }
         if !preview {
             if let Ok(observation) = &observation {
@@ -315,12 +426,14 @@ impl ExistingTabHost {
                     });
             }
         }
-        let pending = state
+        let mut pending = state
             .extension_requests
             .remove(index)
             .ok_or("extension request changed")?;
         pending
             .sender
+            .take()
+            .ok_or("extension receiver retired")?
             .try_send(observation)
             .map_err(|_| "extension receiver unavailable".into())
     }
@@ -328,20 +441,45 @@ impl ExistingTabHost {
     pub fn existing_operations_idle(&self, run: &str) -> bool {
         let mut state = self.inner.lock();
         expire_pairing(&mut state);
-        state.extension_completions.idle(run)
-            && !state
-                .extension_actions
-                .iter()
-                .any(|pending| pending.request.run_id == run)
-            && !state
-                .extension_requests
-                .iter()
-                .any(|pending| pending.request.run_id == run)
+        retained_operations_idle(&state, run)
+    }
+
+    /// Host presentation reads only original retained occupancy. No expiration,
+    /// adapter query, native cleanup, renewal or runtime start occurs here.
+    pub(crate) fn retained_existing_operations_idle(&self, run: &str) -> bool {
+        retained_operations_idle(&self.inner.lock(), run)
+    }
+
+    /// Cancel physical work and retire observations without returning the
+    /// approved borrow. Pause/switch keep resource identity until their owned
+    /// transaction commits or rolls back; terminal Stop releases separately.
+    pub(crate) fn quiesce_existing_operations(&self, run: &str) {
+        let mut state = self.inner.lock();
+        state.extension_completions.cancel_run(Some(run));
+        state.observation_completions.cancel_run(Some(run));
+        for pending in state
+            .extension_requests
+            .iter()
+            .filter(|pending| pending.request.run_id == run)
+        {
+            pending.cancellation.cancel();
+        }
+        for record in state
+            .tabs
+            .values_mut()
+            .filter(|record| record.info.user_owned && record.info.run_id == run)
+        {
+            record.current_observation = None;
+            record.info.preview_generation = 0;
+        }
+        sweep_requests(&mut state);
+        super::completion::sweep(&mut state);
     }
 
     pub fn cancel_existing_operations(&self, run: &str) {
         let mut state = self.inner.lock();
         state.extension_completions.cancel_run(Some(run));
+        state.observation_completions.cancel_run(Some(run));
         for record in state
             .tabs
             .values_mut()
@@ -355,6 +493,19 @@ impl ExistingTabHost {
         sweep_requests(&mut state);
         super::completion::sweep(&mut state);
     }
+}
+
+fn retained_operations_idle(state: &Inner, run: &str) -> bool {
+    state.extension_completions.idle(run)
+        && state.observation_completions.idle(run)
+        && !state
+            .extension_actions
+            .iter()
+            .any(|pending| pending.request.run_id == run)
+        && !state
+            .extension_requests
+            .iter()
+            .any(|pending| pending.request.run_id == run)
 }
 
 #[cfg(test)]

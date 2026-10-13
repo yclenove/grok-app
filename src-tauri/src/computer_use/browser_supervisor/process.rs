@@ -297,6 +297,25 @@ impl BrowserSupervisor {
             // A native process-lifetime authority is still required here.
             return Err("worker exited without confirmed browser cleanup".into());
         }
+        #[cfg(all(test, windows))]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::Threading::WaitForSingleObject;
+            // Observe the ORIGINAL handle, never reopen a possibly reused PID.
+            // This is diagnostic only: it neither retries nor weakens teardown.
+            let signaled = unsafe { WaitForSingleObject(HANDLE(child.as_raw_handle()), 0) };
+            println!(
+                "native supervisor exit witness: {}",
+                serde_json::json!({
+                    "root": self.profile_root, "originalPid": self.pid,
+                    "jobActive": super::process_tree::active_job_processes(self.job),
+                    "originalHandleWait": signaled.0,
+                    "originalChildStatus": child.try_wait().map(|status| status.map(|status| status.code())).map_err(|error| error.to_string()),
+                "physicalTeardownBudgetMs": 5_000,
+                })
+            );
+        }
         *closed = true;
         Ok(())
     }

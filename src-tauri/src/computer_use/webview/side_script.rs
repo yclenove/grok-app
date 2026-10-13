@@ -2,23 +2,31 @@
 
 use super::{QueuedScript, ScriptOperation, SideBrowserLiveView};
 
+pub(super) const SCRIPT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[cfg(windows)]
 pub(super) fn run(
     view: &SideBrowserLiveView,
     script: &str,
+    generation: u64,
     operation: ScriptOperation,
 ) -> Result<String, String> {
-    if let Err(error) = view.require_document().and_then(|()| operation.check()) {
-        operation.finished();
-        return Err(error);
-    }
+    let document = match view
+        .document_identity(generation)
+        .and_then(|document| operation.check().map(|()| document))
+    {
+        Ok(document) => document,
+        Err(error) => {
+            operation.finished();
+            return Err(error);
+        }
+    };
     let Some(world) = view.native.script_world() else {
         operation.finished();
         return Err("WebView native world unavailable".into());
     };
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     let native = view.native.clone();
-    let document = view.document;
     let queued = QueuedScript::new(operation, tx.clone());
     let script = script.to_string();
     let scheduled = view.webview.with_webview(move |platform| {
@@ -56,9 +64,9 @@ pub(super) fn run(
         return Err("WebView native dispatch unavailable".into());
     }
     let result = rx
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(SCRIPT_REPLY_TIMEOUT)
         .map_err(|_| "WebView typed script outcome unknown")??;
-    view.require_document()?;
+    view.document_identity(generation)?;
     Ok(result)
 }
 
@@ -67,16 +75,22 @@ pub(super) fn run(
 pub(super) fn run(
     view: &SideBrowserLiveView,
     script: &str,
+    generation: u64,
     operation: ScriptOperation,
 ) -> Result<String, String> {
-    if let Err(error) = view.require_document().and_then(|()| operation.check()) {
-        operation.finished();
-        return Err(error);
-    }
+    let document = match view
+        .document_identity(generation)
+        .and_then(|document| operation.check().map(|()| document))
+    {
+        Ok(document) => document,
+        Err(error) => {
+            operation.finished();
+            return Err(error);
+        }
+    };
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     let webview = view.webview.clone();
     let native = view.native.clone();
-    let document = view.document;
     let queued = QueuedScript::new(operation, tx.clone());
     let script = script.to_string();
     // Tauri's dispatcher executes immediately on its native UI thread. Re-check
@@ -105,8 +119,8 @@ pub(super) fn run(
         return Err("WebView native dispatch unavailable".into());
     }
     let result = rx
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(SCRIPT_REPLY_TIMEOUT)
         .map_err(|_| "WebView typed script outcome unknown")??;
-    view.require_document()?;
+    view.document_identity(generation)?;
     Ok(result)
 }

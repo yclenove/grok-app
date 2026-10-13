@@ -18,6 +18,68 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it.each(["traces", "profiles"] as const)("does not classify %s cleanup as native-buffer maintenance", async (kind) => {
+  const tr = createT("en");
+  const action = kind === "traces" ? api.computerClearTraces : api.computerClearManagedProfiles;
+  const title = kind === "traces" ? "cu.settings.clearTraces" : "cu.settings.clearProfiles";
+  vi.mocked(action).mockRejectedValueOnce(new Error("native download journal filesystem unavailable or changed"));
+  render(<ComputerUseSettings locale="en" />);
+  await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+  fireEvent.click(screen.getByText(tr("cu.settings.maintenance")));
+  fireEvent.click(screen.getByRole("button", { name: tr(title) }));
+  const dialog = screen.getByRole("dialog", { name: tr(title) });
+  fireEvent.click(within(dialog).getByRole("button", { name: tr("common.confirm") }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(tr("cu.panel.error"));
+  expect(action).toHaveBeenCalledTimes(1);
+  expect(api.computerClearStaging).not.toHaveBeenCalled();
+});
+
+it("keeps the staging failure classification after dismissing the confirmation without retrying", async () => {
+  const tr = createT("en");
+  vi.mocked(api.computerClearStaging).mockRejectedValueOnce(new Error("native download retirement receipt invalid"));
+  render(<ComputerUseSettings locale="en" />);
+  await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+  fireEvent.click(screen.getByText(tr("cu.settings.maintenance")));
+  fireEvent.click(screen.getByRole("button", { name: tr("cu.settings.clearStaging") }));
+  const dialog = screen.getByRole("dialog", { name: tr("cu.settings.clearStaging") });
+  fireEvent.click(within(dialog).getByRole("button", { name: tr("common.confirm") }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(tr("cu.settings.nativeCleanupRetained"));
+  fireEvent.click(within(dialog).getByRole("button", { name: tr("common.cancel") }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("alert")).toHaveTextContent(tr("cu.settings.nativeCleanupRetained"));
+  expect(api.computerClearStaging).toHaveBeenCalledTimes(1);
+});
+
+it("does not show cleanup instructions after an ordinary runtime action fails", async () => {
+  const tr = createT("en");
+  vi.mocked(api.computerRuntimeRepair).mockRejectedValueOnce(new Error("native download journal publication failed"));
+  render(<ComputerUseSettings locale="en" />);
+  const repair = screen.getByRole("button", { name: tr("cu.settings.repair") });
+  await waitFor(() => expect(repair).toBeEnabled());
+  fireEvent.click(repair);
+  expect(await screen.findByRole("alert")).toHaveTextContent(tr("cu.panel.error"));
+  expect(api.computerRuntimeRepair).toHaveBeenCalledTimes(1);
+  expect(api.computerClearStaging).not.toHaveBeenCalled();
+});
+
+it.each<Locale>(["en", "zh", "zh-TW", "de", "es", "fil", "fr", "id", "it", "ja", "ko", "pt-BR", "ru", "ta", "uk"])("retains the staging confirmation and requires explicit retry after native cleanup failure in %s", async (locale) => {
+  const tr = createT(locale);
+  vi.mocked(api.computerClearStaging).mockRejectedValueOnce(new Error("native download original App or browser is still live; retained"));
+  render(<ComputerUseSettings locale={locale} />);
+  await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+  fireEvent.click(screen.getByText(tr("cu.settings.maintenance")));
+  fireEvent.click(screen.getByRole("button", { name: tr("cu.settings.clearStaging") }));
+  const dialog = screen.getByRole("dialog", { name: tr("cu.settings.clearStaging") });
+  fireEvent.click(within(dialog).getByRole("button", { name: tr("common.confirm") }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(tr("cu.settings.nativeCleanupLive"));
+  expect(api.computerClearStaging).toHaveBeenCalledTimes(1);
+  expect(dialog).not.toHaveTextContent("native download original");
+  vi.mocked(api.computerClearStaging).mockResolvedValueOnce();
+  fireEvent.click(within(dialog).getByRole("button", { name: tr("common.confirm") }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.computerClearStaging).toHaveBeenCalledTimes(2);
+});
+
 it.each<[Locale, string]>([
   ["en", "Clear activity history"], ["zh", "清除操作记录"], ["zh-TW", "清除操作記錄"],
   ["de", "Aktivitätsverlauf löschen"], ["es", "Borrar historial de actividad"],

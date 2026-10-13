@@ -17,6 +17,21 @@ pub trait ManagedBrowserWorker: Send + Sync {
         Err(super::run_lifecycle::lifecycle_unavailable())
     }
 
+    /// Exact metadata of an already-owned context/page. Does not open, list,
+    /// capture, navigate, or authorize. Older workers remain unavailable.
+    fn scope_identity(
+        &self,
+        _owner: &str,
+        _profile: &str,
+        _page_id: &str,
+    ) -> Result<super::ManagedScopeIdentity, WorkerError> {
+        Err(WorkerError::not_started(
+            409,
+            "scope_identity_unavailable",
+            "managed browser exact scope identity is unavailable",
+        ))
+    }
+
     fn pause_run(
         &self,
         _owner: &str,

@@ -99,7 +99,7 @@ fn fixture() -> (
         ))
         .unwrap();
     let origin = format!("chrome-extension://{EXTENSION_ID}");
-    host.offer_connected_tab(
+    host.offer_connected_tab_document(
         &connection(&session),
         1,
         SharedTabOffer {
@@ -115,6 +115,7 @@ fn fixture() -> (
             connection_generation: session.generation,
             focused: true,
         },
+        Some("0123456789abcdef0123456789abcdef"),
     )
     .unwrap();
     let candidate = broker
@@ -161,6 +162,14 @@ fn complete(
     origin: &str,
     request: ExtensionRequest,
 ) {
+    broker
+        .tabs()
+        .claim_extension_observation(origin, &session.session_key, &request.completion)
+        .unwrap();
+    broker
+        .tabs()
+        .settle_extension_observation(origin, &request.completion)
+        .unwrap();
     let ExtensionCommand::Observe {
         snapshot_id,
         screenshot,

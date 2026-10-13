@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, webcrypto } from "node:crypto";
-import { PairingClient, createProof, EXTENSION_ID, normalizeCode, parseEndpoint } from "./pairing-client.mjs";
+import { PairingClient, createProof, ExecutionSuspended, EXTENSION_ID, normalizeCode, parseEndpoint } from "./pairing-client.mjs";
 
 const endpoint = "http://127.0.0.1:32100";
 const code = "12345-67890-ABCDE-F0123";
@@ -27,6 +27,7 @@ function fixture() {
     if (path === "/cu/pairing-challenge") return Response.json(challenge);
     if (path === "/cu/pairing-confirm") return Response.json({ sessionKey: "a".repeat(64),
       instanceId: challenge.instance, connectionNonce: body.connectionNonce, generation: 2 });
+    if (path === "/cu/extension-observation/negotiate") return Response.json({ ok: true, protocol: 2, completionProtocol: 2, purpose: "observation" });
     return Response.json({ ok: true });
   };
   return { saved, storage, fetch, calls, options: { storage, fetch, crypto: webcrypto, now: () => 10000 } };
@@ -94,6 +95,45 @@ test("pair stores only short-lived session data and never returns the key", asyn
   await client.forget();
   assert.deepEqual(f.saved, {});
   assert.equal(f.calls.at(-1).path, "/cu/extension-disconnect");
+});
+
+test("readiness is authenticated metadata and false does not retire the pairing", async () => {
+  const f = fixture(); const client = new PairingClient(f.options);
+  await client.pair(endpoint, code); const epoch = client.connectionEpoch;
+  try {
+    for (const ready of [false, true, false]) {
+      client.fetch = async (url, init) => url.endsWith("/cu/extension-status")
+        ? Response.json({ ok: true, executionReady: ready }) : f.fetch(url, init);
+      assert.equal(await client.executionReady(epoch), ready);
+      assert.equal(client.connectionEpoch, epoch);
+      assert(f.saved.cuPairing);
+    }
+    assert.equal(await client.executionReady(epoch + 1), false);
+    client.fetch = async () => Response.json({ ok: true, executionReady: "true" });
+    assert.equal(await client.executionReady(epoch), false);
+    assert.equal(client.connectionEpoch, null); assert.deepEqual(f.saved, {});
+  } finally { await client.forget(); }
+});
+
+test("a late old readiness response cannot make a replacement connection executable", async () => {
+  const f = fixture(); const client = new PairingClient(f.options);
+  await client.pair(endpoint, code); const old = client.connectionEpoch;
+  let enter; let release; const reached = new Promise(resolve => { enter = resolve; });
+  client.fetch = async (url, init) => {
+    if (url.endsWith("/cu/extension-status")) {
+      enter(); await new Promise(resolve => { release = resolve; });
+      return Response.json({ ok: true, executionReady: true });
+    }
+    return f.fetch(url, init);
+  };
+  const pending = client.executionReady(old); await reached;
+  await client.pair(endpoint, code); const current = client.connectionEpoch;
+  release(); assert.equal(await pending, false);
+  client.fetch = async (url, init) => url.endsWith("/cu/extension-status")
+    ? Response.json({ ok: true, executionReady: false }) : f.fetch(url, init);
+  assert.equal(await client.executionReady(current), false);
+  assert.equal(client.connectionEpoch, current);
+  await client.forget();
 });
 
 test("worker restart drops the previous session and requests Host revocation", async () => {
@@ -303,6 +343,23 @@ test("scheduler failure cannot publish a session whose Host key was retired", as
 });
 
 const sharedTab = { tabId: 101, title: "fixture", url: "https://fixture.invalid/", documentGeneration: 7, focused: true };
+test("Share carries the exact document proof, rejects malformed proofs before HTTP and supports legacy omission", async () => {
+  const f = fixture(); const client = new PairingClient(f.options);
+  await client.pair(endpoint, code);
+  try {
+    for (const documentId of [null, "", "bad", "z".repeat(32), 12]) {
+      const before = f.calls.length;
+      await assert.rejects(client.shareCurrentTab({ ...sharedTab, documentId }), /shareUnavailable/);
+      assert.equal(f.calls.length, before, "invalid proof must send no request");
+    }
+    const documentId = "0123456789abcdef0123456789abcdef";
+    await client.shareCurrentTab({ ...sharedTab, documentId });
+    assert.equal(f.calls.at(-1).path, "/cu/tab-offer");
+    assert.equal(f.calls.at(-1).body.documentId, documentId);
+    await client.shareCurrentTab(sharedTab);
+    assert(!Object.hasOwn(f.calls.at(-1).body, "documentId"));
+  } finally { await client.forget(); }
+});
 test("share requires a real document generation and unshare binds it with an increasing sequence", async () => {
   const f = fixture(); const client = new PairingClient(f.options);
   await client.pair(endpoint, code);
@@ -377,6 +434,103 @@ test("connection replacement while waiting for ready cannot redirect share or un
   }
 });
 
+test("only forbidden execution polls with exact authenticated disabled status suspend the original Pair", async () => {
+  for (const operation of ["observation", "action", "negotiate", "observation-negotiate"]) {
+    const f = fixture(); const client = new PairingClient(f.options);
+    await client.pair(endpoint, code);
+    const epoch = client.connectionEpoch;
+    const signal = new AbortController().signal;
+    const route = operation === "observation" ? "/cu/extension-poll"
+      : operation === "action" ? "/cu/extension-actions/poll"
+        : operation === "observation-negotiate" ? "/cu/extension-observation/negotiate" : "/cu/extension-actions/negotiate";
+    let statuses = 0;
+    client.fetch = async (url, init) => {
+      if (url.endsWith("/cu/extension-actions/negotiate") && operation === "action")
+        return Response.json({ ok: true, protocol: 2, completionProtocol: 2 });
+      if (url.endsWith(route)) return new Response(null, { status: 403 });
+      if (url.endsWith("/cu/extension-status")) {
+        statuses++;
+        assert.equal(init.headers.authorization, "Bearer " + f.saved.cuPairing.sessionKey);
+        const saved = f.saved.cuPairing;
+        assert.deepEqual(JSON.parse(init.body), { instanceId: saved.instanceId,
+          connectionNonce: saved.connectionNonce, generation: saved.generation });
+        return Response.json({ ok: true, executionReady: false });
+      }
+      return f.fetch(url, init);
+    };
+    try {
+      if (operation === "action") await client.negotiateActions(epoch, signal);
+      if (operation === "observation") await client.negotiateObservations(epoch, signal);
+      const work = operation === "observation" ? client.pollExtension(epoch, signal)
+        : operation === "action" ? client.pollAction(epoch, signal)
+          : operation === "observation-negotiate" ? client.negotiateObservations(epoch, signal) : client.negotiateActions(epoch, signal);
+      await assert.rejects(work, ExecutionSuspended);
+      assert.equal(statuses, 1);
+      assert.equal(client.connectionEpoch, epoch);
+      assert(f.saved.cuPairing);
+      assert(!f.calls.some(call => call.path === "/cu/extension-disconnect"));
+    } finally { await client.forget(); }
+  }
+});
+
+test("forbidden polling with enabled, invalid or lost status and other failures cannot suspend", async () => {
+  for (const failure of ["enabled", "invalid", "expired", "network", "rate", "protocol"]) {
+    const f = fixture(); const client = new PairingClient(f.options);
+    await client.pair(endpoint, code);
+    const epoch = client.connectionEpoch;
+    let statuses = 0;
+    client.fetch = async (url, init) => {
+      if (url.endsWith("/cu/extension-poll")) {
+        if (failure === "network") throw new Error("offline");
+        if (failure === "protocol") return Response.json({ ok: false });
+        return new Response(null, { status: failure === "rate" ? 429 : 403 });
+      }
+      if (url.endsWith("/cu/extension-status")) {
+        statuses++;
+        if (failure === "expired") return new Response(null, { status: 403 });
+        return Response.json({ ok: true, executionReady: failure === "invalid" ? "false" : true });
+      }
+      return f.fetch(url, init);
+    };
+    try {
+      await client.negotiateObservations(epoch, new AbortController().signal);
+      await assert.rejects(client.pollExtension(epoch, new AbortController().signal), error =>
+        error instanceof Error && !(error instanceof ExecutionSuspended));
+      assert.equal(statuses, ["enabled", "invalid", "expired"].includes(failure) ? 1 : 0);
+      if (["invalid", "expired"].includes(failure)) assert.equal(client.connectionEpoch, null);
+    } finally { await client.forget(); }
+  }
+});
+
+test("cancellation or replacement during authenticated suspension check cannot follow the new Pair", async () => {
+  for (const replacement of [false, true]) {
+    const f = fixture(); const client = new PairingClient(f.options);
+    await client.pair(endpoint, code);
+    const epoch = client.connectionEpoch;
+    const controller = new AbortController();
+    let reached; let release;
+    const entered = new Promise(resolve => { reached = resolve; });
+    client.fetch = async (url, init) => {
+      if (url.endsWith("/cu/extension-poll")) return new Response(null, { status: 403 });
+      if (url.endsWith("/cu/extension-status")) {
+        reached(); await new Promise(resolve => { release = resolve; });
+        return Response.json({ ok: true, executionReady: false });
+      }
+      return f.fetch(url, init);
+    };
+    await client.negotiateObservations(epoch, controller.signal);
+    const work = client.pollExtension(epoch, controller.signal);
+    const rejected = assert.rejects(work, error => error instanceof Error && !(error instanceof ExecutionSuspended));
+    await entered;
+    if (replacement) await client.pair(endpoint, code); else controller.abort();
+    const current = client.connectionEpoch;
+    release(); await rejected;
+    assert.equal(client.connectionEpoch, current);
+    if (replacement) assert.notEqual(current, epoch);
+    await client.forget();
+  }
+});
+
 test("transport rejects cross-connection requests and stale result writes without exposing keys", async () => {
   const f = fixture(); const client = new PairingClient(f.options);
   await client.pair(endpoint, code);
@@ -385,6 +539,7 @@ test("transport rejects cross-connection requests and stale result writes withou
   client.fetch = async (url, init) => url.endsWith("/cu/extension-poll")
     ? Response.json({ ok: true, request: { connection: { instanceId: "other", connectionNonce: connection, generation: 2 } } })
     : f.fetch(url, init);
+  await client.negotiateObservations(epoch, signal);
   await assert.rejects(client.pollExtension(epoch, signal), /connection/);
   const requestIdentity = { instanceId: f.saved.cuPairing.instanceId, connectionNonce: f.saved.cuPairing.connectionNonce,
     generation: f.saved.cuPairing.generation };
@@ -403,6 +558,68 @@ function completionProof(session) {
     session: "owner", runId: "run", tabId: "101", documentId: "0".repeat(32), documentGeneration: 7,
     grantGeneration: 1, snapshotId: webcrypto.randomUUID() }, completionKey: "b".repeat(64) };
 }
+
+test("observation negotiation rejects legacy or incomplete capabilities and cannot grant polling or claim", async () => {
+  const f = fixture(); const client = new PairingClient(f.options); await client.pair(endpoint, code);
+  const epoch = client.connectionEpoch; const signal = new AbortController().signal;
+  const completion = { purpose: "observation", proof: completionProof(f.saved.cuPairing) };
+  try {
+    const before = f.calls.length;
+    await assert.rejects(client.pollExtension(epoch, signal), /invalidObservationScope/);
+    await assert.rejects(client.claimObservation(epoch, completion, signal), /invalidObservationScope/);
+    assert.equal(f.calls.length, before);
+    for (const reply of [{ ok: true, protocol: 1, completionProtocol: 2, purpose: "observation" },
+      { ok: true, protocol: 2, completionProtocol: 2 }, { ok: true, protocol: 2, completionProtocol: 2, purpose: "action" },
+      { ok: true, protocol: 2, completionProtocol: 2, purpose: "observation", extra: true }]) {
+      client.fetch = async () => Response.json(reply);
+      await assert.rejects(client.negotiateObservations(epoch, signal), /invalidObservationScope/);
+      await assert.rejects(client.pollExtension(epoch, signal), /invalidObservationScope/);
+      await assert.rejects(client.claimObservation(epoch, completion, signal), /invalidObservationScope/);
+    }
+  } finally { await client.forget(); }
+});
+
+test("observation claims use exactly the negotiated Pair and acknowledgements; cleanup carries no Pair Bearer", async () => {
+  const f = fixture(); const client = new PairingClient(f.options); await client.pair(endpoint, code);
+  const epoch = client.connectionEpoch; const signal = new AbortController().signal;
+  const completion = { purpose: "observation", proof: completionProof(f.saved.cuPairing) };
+  try {
+    await client.negotiateObservations(epoch, signal);
+    const negotiation = f.calls.at(-1);
+    assert.deepEqual(negotiation.body, { protocol: 2, completionProtocol: 2, purpose: "observation", connection: completion.proof.binding.connection });
+    const scope = client.observationScope(epoch, completion);
+    const wrong = structuredClone(completion); wrong.proof.binding.connection.generation++;
+    const before = f.calls.length;
+    assert.throws(() => client.observationScope(epoch, wrong), /cancelled/);
+    await assert.rejects(client.claimObservation(epoch, wrong, signal), /cancelled/); assert.equal(f.calls.length, before);
+    await client.claimObservation(epoch, completion, signal);
+    assert.deepEqual(f.calls.at(-1).body, completion); assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer " + f.saved.cuPairing.sessionKey);
+    client.fetch = async (url, init) => url.endsWith("/claim") ? Response.json({ ok: true, extra: true }) : f.fetch(url, init);
+    await assert.rejects(client.claimObservation(epoch, completion, signal), /invalidObservationScope/);
+    await client.forget(); await client.pair(endpoint, code);
+    const replacement = structuredClone(f.saved.cuPairing);
+    await assert.rejects(client.claimObservation(client.connectionEpoch, completion, signal), /invalidObservationScope/);
+    await scope.settle(); const cleanup = f.calls.at(-1);
+    assert.equal(cleanup.path, "/cu/extension-observation/settle"); assert.deepEqual(cleanup.body, completion);
+    assert.equal(cleanup.init.headers.authorization, undefined); assert.deepEqual(f.saved.cuPairing, replacement);
+  } finally { await client.forget(); }
+});
+
+test("late observation negotiation cannot authorize a replacement Pair", async () => {
+  const f = fixture(); const client = new PairingClient(f.options); await client.pair(endpoint, code);
+  let enter; let release; const reached = new Promise(resolve => { enter = resolve; });
+  const epoch = client.connectionEpoch; const signal = new AbortController().signal;
+  client.fetch = async (url, init) => {
+    if (url.endsWith("/cu/extension-observation/negotiate")) { enter(); await new Promise(resolve => { release = resolve; }); }
+    return f.fetch(url, init);
+  };
+  const work = client.negotiateObservations(epoch, signal); const rejected = assert.rejects(work, /cancelled/);
+  try {
+    await reached; await client.forget(); await client.pair(endpoint, code); release(); await rejected;
+    await assert.rejects(client.pollExtension(client.connectionEpoch, signal), /invalidObservationScope/);
+    assert.notEqual(client.connectionEpoch, epoch);
+  } finally { release?.(); await rejected; await client.forget(); }
+});
 
 test("late claim cannot survive replacement pairing but its captured cleanup scope can settle", async () => {
   for (const lost of [false, true]) {

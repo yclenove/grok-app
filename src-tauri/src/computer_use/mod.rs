@@ -19,29 +19,42 @@ mod browser_supervisor;
 mod browser_supervisor_gates;
 #[cfg(feature = "computer-use-probe")]
 mod browser_supervisor_gates_nav;
+mod consent_watch;
 #[cfg(feature = "computer-use-probe")]
 mod d8;
 #[cfg(feature = "computer-use-probe")]
 mod d8_faults;
 pub(crate) mod diagnostics;
 mod eligibility;
+mod execution_runtime;
+pub(crate) mod extension_bundle;
 #[cfg(feature = "computer-use-probe")]
 mod extension_pair;
 mod feature;
 mod feature_lifecycle;
+pub(crate) mod feature_preferences;
 pub(crate) mod gnome_helper;
+pub(crate) mod host_history;
 mod inject;
 pub(crate) mod ipc;
 #[cfg(feature = "computer-use-probe")]
 mod mcp_scripted_agent;
 #[cfg(feature = "computer-use-probe")]
 mod mcp_scripted_agent_run;
+mod owned_tasks;
 mod playwright_worker;
+mod request_runtime;
 pub(crate) mod runtime;
 pub(crate) mod sessions;
 pub(crate) mod shutdown;
 #[cfg(test)]
 mod synthetic;
+pub(crate) mod task_access;
+pub(crate) mod task_controls;
+pub(crate) mod task_events;
+pub(crate) mod task_picker;
+pub(crate) mod task_scope;
+pub(crate) mod task_upload;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod webview;
@@ -95,6 +108,7 @@ pub use feature::{
     should_inject_session_mcp, FEATURE_DEFAULT,
 };
 pub(crate) use feature_lifecycle::persist_feature_transition;
+pub(crate) use inject::request_mcp_entry;
 pub use inject::{mcp_acp_entry, MCP_SERVER_NAME};
 pub use lease::DesktopLease;
 pub use preview::PreviewController;
@@ -102,6 +116,7 @@ pub use protocol::{
     ActionKind, ActionOutcome, ActionRequest, ActionTarget, Observation, ObservationImage,
     OutcomeKind, PROTOCOL_VERSION,
 };
+pub(crate) use request_runtime::ensure_request_endpoint;
 #[cfg(test)]
 pub use synthetic::{render_synthetic_png, SyntheticOracle};
 
@@ -159,39 +174,13 @@ pub(crate) fn shutdown_product_checked() -> Result<(), String> {
 
 /// Start the process-wide broker + loopback IPC (used by Tauri commands and MCP inject).
 pub fn ensure_host_runtime() -> Arc<ComputerUseBroker> {
-    let mut slot = runtime_slot().lock();
-    if let Some(existing) = slot.as_ref() {
-        if let Err(error) = existing.register_existing_browser_adapter() {
-            tracing::warn!(%error, "computer-use existing-tab executor registration failed");
-        }
-        // Feature transitions are owned by `persist_feature_transition`.
-        // Refreshing adapters/IPC must never fence runs and discard their
-        // generation-bound cleanup tickets.
-        if let Err(error) = existing.register_surface_adapter(
-            grok_computer_use_core::adapter::SurfaceKind::WebView,
-            product_webview(),
-        ) {
-            tracing::warn!(%error, "computer-use WebView executor registration failed");
-        }
-        if ipc::endpoint().is_none() {
-            let _ = ipc::ensure(existing.clone());
-        }
-        if let Err(e) = browser_supervisor::ensure_product_attached(existing) {
-            tracing::info!("computer-use managed browser attach retry: {e}");
-        }
-        return existing.clone();
+    let broker = request_runtime::broker();
+    // The stable executor Arc is installed only on this explicit Host path.
+    // Pending MCP connection never reaches platform_adapter or browser attach.
+    let desktop = execution_runtime::prepared_desktop();
+    if let Err(error) = broker.register_surface_adapter(SurfaceKind::Desktop, desktop) {
+        tracing::warn!(%error, "computer-use desktop executor registration failed");
     }
-    let enabled = crate::store::load_settings().computer_use_enabled;
-    set_feature_enabled(enabled);
-    let cu_root = crate::paths::app_data_root().join("computer-use");
-    let _ = grok_computer_use_core::privacy::write_owner(&cu_root, "grok-app");
-    let opts = BrokerOptions {
-        feature_enabled: enabled,
-        lease_path: cu_root.join("desktop.lease"),
-        action_timeout: std::time::Duration::from_secs(8),
-        ..BrokerOptions::default()
-    };
-    let broker = Arc::new(ComputerUseBroker::new(platform_adapter(), opts));
     if let Err(error) = broker.register_existing_browser_adapter() {
         tracing::warn!(%error, "computer-use existing-tab executor registration failed");
     }
@@ -201,10 +190,9 @@ pub fn ensure_host_runtime() -> Arc<ComputerUseBroker> {
     ) {
         tracing::warn!(%error, "computer-use WebView executor registration failed");
     }
-    if let Err(e) = browser_supervisor::attach_product(&broker) {
+    if let Err(e) = browser_supervisor::ensure_product_attached(&broker) {
         tracing::info!("computer-use managed browser not attached: {e}");
     }
-    *slot = Some(broker.clone());
     if let Ok(ep) = ipc::ensure(broker.clone()) {
         tracing::info!(url = %ep.url, "computer-use ipc bound on loopback");
     }
@@ -224,6 +212,7 @@ pub fn computer_use_probe_main() -> i32 {
             return 2;
         }
         return match command.as_str() {
+            "normal-cli-task-consent" => crate::acp_client::computer_use::normal_cli_probe(),
             "existing-tab-host-fixture" => match extension_pair::run_restart_host_fixture() {
                 Ok(()) => 0,
                 Err(error) => {
@@ -584,6 +573,38 @@ pub fn computer_use_probe_main() -> i32 {
                     }
                 }
             }
+            #[cfg(target_os = "windows")]
+            "webview-navigation" => match webview::run_navigation_gate() {
+                Ok(()) => return 0,
+                Err(error) => {
+                    eprintln!("computer_use WebView navigation: FAIL {error}");
+                    return 1;
+                }
+            },
+            #[cfg(target_os = "windows")]
+            "webview-download" => match webview::run_download_gate() {
+                Ok(()) => return 0,
+                Err(error) => {
+                    eprintln!("computer_use WebView download: FAIL {error}");
+                    return 1;
+                }
+            },
+            #[cfg(target_os = "windows")]
+            "webview-download-lifecycle" => match webview::run_download_lifecycle_gate() {
+                Ok(()) => return 0,
+                Err(error) => {
+                    eprintln!("computer_use WebView download lifecycle: FAIL {error}");
+                    return 1;
+                }
+            },
+            #[cfg(target_os = "windows")]
+            "webview-download-shared-close" => match webview::run_download_shared_gate() {
+                Ok(()) => return 0,
+                Err(error) => {
+                    eprintln!("computer_use WebView shared download close: FAIL {error}");
+                    return 1;
+                }
+            },
             "webview" => match webview::run_webview_gates() {
                 Ok(()) => {
                     println!("computer_use webview: PASS");
@@ -922,8 +943,14 @@ pub fn desktop_selection_mode() -> &'static str {
 
 /// Product desktop path: Host-owned wrapper around the OS adapter.
 /// Attaches a private worker when the App runtime pack contains a driver binary.
+#[cfg(feature = "computer-use-probe")]
 pub fn platform_adapter() -> Arc<dyn ComputerUseAdapter> {
     let owned = grok_computer_use_core::owned::HostOwnedAdapter::new(os_adapter());
+    attach_platform_worker(&owned);
+    Arc::new(owned)
+}
+
+fn attach_platform_worker(owned: &grok_computer_use_core::owned::HostOwnedAdapter) {
     if let Ok(binary) = runtime::resolve(grok_computer_use_core::runtime::DRIVER) {
         if let Some(pack) = binary.parent().and_then(|p| p.parent()) {
             let manifest = pack.join("manifest.json");
@@ -939,5 +966,4 @@ pub fn platform_adapter() -> Arc<dyn ComputerUseAdapter> {
             }
         }
     }
-    Arc::new(owned)
 }

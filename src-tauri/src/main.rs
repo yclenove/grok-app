@@ -2,6 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = grok_app_lib::prepare_linux_runtime() {
+        eprintln!("grok-app: private native runtime invalid: {error}");
+        std::process::exit(2);
+    }
     #[cfg(target_os = "windows")]
     if let Some(code) = tauri_plugin_updater::windows_update_dispatch_entrypoint(|| {
         if !cfg!(grok_updater_enabled) || cfg!(debug_assertions) {

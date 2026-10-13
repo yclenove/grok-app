@@ -32,10 +32,13 @@ jobs:
       - run: pnpm test
       - name: Windows portable resource mapping (inert fixture EXEs)
         run: node --test scripts/stage-windows-portable.test.mjs
+      - name: Computer Use platform targets and production build contracts
+        run: node --test scripts/computer-use-targets.test.mjs
       - name: Computer Use DOM, extension and MCP regressions
         run: >-
           node --test tools/computer-use-extension/*.test.mjs
           tools/computer-use-mcp/*.test.mjs
+          tools/computer-use-probe/app-webview-fixture.test.mjs
           tools/computer-use-probe/existing-mcp-live.test.mjs
           tools/computer-use-probe/webview-dom.test.mjs
       - name: ESLint (minimal quality rules)
@@ -77,6 +80,159 @@ jobs:
       - name: Website download contract self-test
         run: python3 scripts/publish-website-downloads.py --self-test
       - run: pnpm build:ui
+      - name: Preserve frontend for the production Jammy build
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-frontend
+          path: dist/
+          if-no-files-found: error
+
+  linux-native-sdk-jammy:
+    # Actual SDK + product loader module; not full App/desktop/portal acceptance.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install baseline SDK build tools
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "$ID:$VERSION_ID" = ubuntu:22.04
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.35'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl meson ninja-build python3-jinja2 \
+            libgtk-3-dev binutils patch patchelf libpipewire-0.3-0
+      - name: SDK guard and audit regressions
+        run: |
+          set -euo pipefail
+          python3 scripts/test-computer-use-pipewire-sdk.py
+          python3 scripts/test-computer-use-native-sdk.py
+          python3 scripts/test-stage-computer-use-native-sdk.py
+          python3 scripts/test-computer-use-wayland-runner.py
+          bash -n scripts/build-computer-use-pipewire.sh scripts/check-computer-use-pipewire-runtime.sh
+      - name: Native build, private loading and relocation on glibc 2.35
+        run: |
+          set -euo pipefail
+          bash scripts/build-computer-use-pipewire.sh "$RUNNER_TEMP/cu-pw-jammy" 2>&1 | tee "$RUNNER_TEMP/cu-pw-jammy.log"
+          bash scripts/build-computer-use-libei.sh "$RUNNER_TEMP/cu-ei-jammy" 2>&1 | tee "$RUNNER_TEMP/cu-ei-jammy.log"
+          PKG_CONFIG_PATH="$RUNNER_TEMP/cu-pw-jammy/lib/pkgconfig:$RUNNER_TEMP/cu-ei-jammy/lib/pkgconfig" \
+            bash scripts/check-computer-use-linux-sdk.sh
+          bash scripts/check-computer-use-pipewire-runtime.sh \
+            "$RUNNER_TEMP/cu-pw-jammy" "$RUNNER_TEMP/cu-ei-jammy" "$RUNNER_TEMP/cu-sdk-jammy-proof" \
+            2>&1 | tee "$RUNNER_TEMP/cu-sdk-jammy-proof.log"
+          python3 tools/computer-use-probe/jammy-sdk-runtime-faults.py \
+            "$RUNNER_TEMP/cu-sdk-jammy-proof" "$RUNNER_TEMP/cu-sdk-jammy-faults"
+      - name: Actual product loader module, installed and relocated layouts
+        run: |
+          set -euo pipefail
+          fixture=tools/computer-use-probe/native-loader
+          mkdir -p "$fixture/resources/computer-use"
+          python3 scripts/stage-computer-use-native-sdk.py "$RUNNER_TEMP/cu-sdk-jammy-proof/runtime" \
+            "$GITHUB_WORKSPACE/$fixture/resources/computer-use/native-pipewire"
+          export GROK_CU_LOADER_LINK_SDK="$RUNNER_TEMP/cu-pw-jammy"
+          cargo build --manifest-path "$fixture/Cargo.toml" --locked --release
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/$fixture/resources/computer-use/native-pipewire/runtime/lib" \
+            cargo test --manifest-path "$fixture/Cargo.toml" --locked
+          cargo clippy --manifest-path "$fixture/Cargo.toml" --locked --all-targets -- -D warnings
+          python3 tools/computer-use-probe/jammy-product-loader-faults.py \
+            "$fixture/target/release/grok-native-loader-probe" \
+            "$fixture/resources/computer-use/native-pipewire" "$RUNNER_TEMP/cu-loader-jammy" \
+            --fallback-library /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0
+      - name: Preserve SDK evidence (not runtime release artifacts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-native-sdk-jammy-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/cu-*-jammy*.log
+            ${{ runner.temp }}/cu-sdk-jammy-proof/*.json
+            ${{ runner.temp }}/cu-sdk-jammy-proof/*.txt
+            ${{ runner.temp }}/cu-sdk-jammy-faults/results.json
+            ${{ runner.temp }}/cu-loader-jammy/results.json
+            ${{ runner.temp }}/cu-loader-jammy/*.txt
+
+  linux-production-jammy:
+    # Production cfg/link/frontend regression, not desktop/portal/install acceptance.
+    needs: frontend
+    runs-on: ubuntu-22.04
+    # Cold release/test LTO plus SDK preparation needs more than the fast smoke jobs.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: production-frontend
+          path: dist/
+      - name: Install production baseline build dependencies
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "$ID:$VERSION_ID" = ubuntu:22.04
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.35'
+          test -f dist/index.html
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl meson ninja-build python3-jinja2 patch patchelf \
+            libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libssl-dev libclang-dev libdbus-1-dev binutils
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: ci-jammy-production-v1
+      - name: Frozen input and immutable seed verifier oracles
+        run: python3 tools/computer-use-probe/test-jammy-app-inputs.py
+      - name: Prepare and verify private production runtimes
+        run: |
+          set -euo pipefail
+          bash scripts/build-computer-use-pipewire.sh "$RUNNER_TEMP/cu-app-pw-jammy" \
+            2>&1 | tee "$RUNNER_TEMP/cu-app-pw-jammy.log"
+          bash scripts/build-computer-use-libei.sh "$RUNNER_TEMP/cu-app-ei-jammy" \
+            2>&1 | tee "$RUNNER_TEMP/cu-app-ei-jammy.log"
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/cu-app-pw-jammy/lib/pkgconfig:$RUNNER_TEMP/cu-app-ei-jammy/lib/pkgconfig"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/cu-app-pw-jammy/lib"
+          bash scripts/check-computer-use-linux-sdk.sh
+          bash scripts/check-computer-use-pipewire-runtime.sh "$RUNNER_TEMP/cu-app-pw-jammy" \
+            "$RUNNER_TEMP/cu-app-ei-jammy" "$RUNNER_TEMP/cu-app-native-jammy" \
+            2>&1 | tee "$RUNNER_TEMP/cu-app-native-jammy.log"
+          python3 scripts/stage-computer-use-native-sdk.py "$RUNNER_TEMP/cu-app-native-jammy/runtime" \
+            "$GITHUB_WORKSPACE/src-tauri/resources/computer-use/native-pipewire"
+          node scripts/prepare-computer-use-runtime.mjs --prepare --target x86_64-unknown-linux-gnu
+          node scripts/prepare-computer-use-runtime.mjs --check --target x86_64-unknown-linux-gnu
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+      - name: Full production App, strict release cfg and navigation regressions
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          # Read the product config instead of maintaining a second resource map.
+          export TAURI_CONFIG="$(<tauri.linux.conf.json)"
+          cargo build --locked --release --features tauri/custom-protocol --bin grok-app \
+            2>&1 | tee "$RUNNER_TEMP/cu-app-build-jammy.log"
+          sha256sum target/release/grok-app > "$RUNNER_TEMP/cu-app-elf-jammy.sha256"
+          readelf --dynamic target/release/grok-app > "$RUNNER_TEMP/cu-app-dynamic-jammy.txt"
+          readelf --version-info target/release/grok-app > "$RUNNER_TEMP/cu-app-versions-jammy.txt"
+          cargo clippy --locked --release --all-targets --features tauri/custom-protocol -- -D warnings \
+            2>&1 | tee "$RUNNER_TEMP/cu-app-clippy-jammy.log"
+          cargo test --locked --release --features tauri/custom-protocol \
+            --lib computer_use::webview::tests::navigation -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/cu-app-navigation-jammy.log"
+      - name: Preserve full App evidence (not distributable packages)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-production-jammy-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/cu-app-*-jammy.log
+            ${{ runner.temp }}/cu-app-*-jammy.txt
+            ${{ runner.temp }}/cu-app-*-jammy.sha256
 
   rust:
     strategy:

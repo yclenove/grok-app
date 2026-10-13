@@ -45,7 +45,7 @@ impl ComputerUseBroker {
             (
                 request,
                 run.generation,
-                InFlightClear(run.in_flight.clone()),
+                InFlightClear::new(run.in_flight.clone(), &self.changes),
             )
         };
         let tabs = self.tabs.for_managed_request(&request)?;

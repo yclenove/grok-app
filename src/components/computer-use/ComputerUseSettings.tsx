@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale, type MessageKey } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
 import { UiSwitch } from "@/components/settings/shared";
-import { computerUseErrorKey } from "@/lib/computer-use/errors";
+import { computerUseErrorKey, computerUseStagingCleanupErrorKey } from "@/lib/computer-use/errors";
 import * as api from "@/lib/api/computerUse";
 import { ComputerRuntimeHealth } from "./ComputerRuntimeHealth";
 import { ComputerGnomeHelper } from "./ComputerGnomeHelper";
@@ -24,7 +24,7 @@ export function ComputerUseSettings({ locale }: { locale: Locale }) {
   const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<MessageKey | null>(null);
   const [notice, setNotice] = useState<{ path?: string } | null>(null);
   const [runtime, setRuntime] = useState<api.ComputerRuntimeStatus | null>(null);
   const [pendingCleanup, setPendingCleanup] = useState<CleanupKind | null>(null);
@@ -71,7 +71,11 @@ export function ComputerUseSettings({ locale }: { locale: Locale }) {
     };
   }, [load]);
 
-  async function perform(action: () => Promise<void>, refreshAfter = false) {
+  async function perform(
+    action: () => Promise<void>,
+    refreshAfter = false,
+    errorKey: (message: string) => MessageKey = computerUseErrorKey,
+  ) {
     if (inFlight.current || readAttempt.current) return;
     inFlight.current = true;
     setBusy(true);
@@ -81,7 +85,7 @@ export function ComputerUseSettings({ locale }: { locale: Locale }) {
     try {
       await action();
     } catch (cause) {
-      if (live.current) setError(String(cause));
+      if (live.current) setError(errorKey(String(cause)));
     } finally {
       inFlight.current = false;
       if (live.current) {
@@ -150,7 +154,7 @@ export function ComputerUseSettings({ locale }: { locale: Locale }) {
       </div>
       <ComputerGnomeHelper locale={locale} featureEnabled={on} />
       {(error || loadFailed) && !cleanup ? <div className="cu-settings__group">
-        <p role="alert" className="cu-panel__error">{tr(error ? computerUseErrorKey(error) : "cu.settings.loadFailed")}</p>
+        <p role="alert" className="cu-panel__error">{tr(error ?? "cu.settings.loadFailed")}</p>
         <button type="button" className="btn btn--ghost" disabled={disabled} onClick={() => void load()}>
           {tr("ui.errorBoundary.retry")}
         </button>
@@ -168,10 +172,10 @@ export function ComputerUseSettings({ locale }: { locale: Locale }) {
             onClick={() => { if (cleanup) void perform(async () => {
               await cleanup.run();
               if (live.current) { setPendingCleanup(null); setNotice({}); }
-            }); }}>{tr(busy ? "cu.panel.busy" : "common.confirm")}</button>
+            }, false, pendingCleanup === "staging" ? computerUseStagingCleanupErrorKey : computerUseErrorKey); }}>{tr(busy ? "cu.panel.busy" : "common.confirm")}</button>
         </>}>
         <p className="settings-desc">{cleanup ? tr(cleanup.hint) : ""}</p>
-        {error ? <p role="alert" className="cu-panel__error">{tr(computerUseErrorKey(error))}</p> : null}
+        {error ? <p role="alert" className="cu-panel__error">{tr(error)}</p> : null}
       </GlassModal>
     </section>
   );

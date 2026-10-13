@@ -24,7 +24,7 @@
     "message": "Non associé."
   },
   "forget": {
-    "message": "Revoke pairing"
+    "message": "Révoquer l’association"
   },
   "shareCurrentTab": {
     "message": "Partager l’onglet actuel"

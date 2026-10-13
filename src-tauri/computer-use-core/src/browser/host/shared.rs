@@ -67,12 +67,29 @@ impl ExistingTabHost {
         sequence: u64,
         offer: SharedTabOffer<'_>,
     ) -> Result<(), String> {
+        self.offer_connected_tab_document(connection, sequence, offer, None)
+    }
+
+    /// Authenticated extension metadata only. Missing documentId cannot claim
+    /// observation lifecycle authority or prove a new task scope instance.
+    pub fn offer_connected_tab_document(
+        &self,
+        connection: &PairingConnection,
+        sequence: u64,
+        offer: SharedTabOffer<'_>,
+        document_id: Option<&str>,
+    ) -> Result<(), String> {
         let mut state = self.inner.lock();
         expire_pairing(&mut state);
         state
             .pairing
             .authenticate_connection(offer.origin, offer.pairing_token, connection)?;
         validate_offer(&offer)?;
+        if document_id
+            .is_some_and(|id| id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err("invalid shared document identity".into());
+        }
         sequence_ok(&state, sequence)?;
         if offer.connection_generation != connection.generation
             || offer.extension_id != Some(state.installed_extension_id.as_str())
@@ -103,6 +120,7 @@ impl ExistingTabHost {
                 extension_id: offer.extension_id.map(str::to_owned),
                 pairing_token: offer.pairing_token.into(),
                 document_generation: offer.document_generation,
+                document_id: document_id.map(str::to_owned),
                 connection_generation: connection.generation,
                 focused: offer.focused,
             },

@@ -24,7 +24,7 @@
     "message": "Nicht gekoppelt."
   },
   "forget": {
-    "message": "Revoke pairing"
+    "message": "Kopplung aufheben"
   },
   "shareCurrentTab": {
     "message": "Aktuellen Tab teilen"

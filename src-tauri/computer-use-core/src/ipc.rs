@@ -34,15 +34,20 @@ struct Service {
     slots: Arc<Semaphore>,
     stop_slots: Arc<Semaphore>,
     handoff_slots: Arc<Semaphore>,
+    request_slots: Arc<Semaphore>,
+    completion_slots: Arc<Semaphore>,
     extension_poll_slot: Arc<Semaphore>,
     extension_result_slot: Arc<Semaphore>,
     rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    upload_calls: upload::UploadCalls,
 }
 
 const RATE_MAX: usize = 8;
 const RATE_WINDOW: Duration = Duration::from_millis(800);
 const CONTROL_RATE_MAX: usize = 4;
 const CONTROL_SLOTS: usize = 2;
+const REQUEST_RATE_MAX: usize = 4;
+const REQUEST_SLOTS: usize = 2;
 
 impl Service {
     fn tool_admission(&self, name: &str) -> (&Arc<Semaphore>, usize, &'static str) {
@@ -52,9 +57,22 @@ impl Service {
         match name {
             "computer_stop" => (&self.stop_slots, CONTROL_RATE_MAX, "stop:"),
             "computer_request_handoff" => (&self.handoff_slots, CONTROL_RATE_MAX, "handoff:"),
+            "computer_request_access" => (&self.request_slots, REQUEST_RATE_MAX, "request:"),
+            "computer_complete_task" => (&self.completion_slots, CONTROL_RATE_MAX, "complete:"),
             _ => (&self.slots, RATE_MAX, ""),
         }
     }
+}
+
+fn forget_retired_rates(service: &Service) {
+    let retired = service.broker.take_retired_tokens();
+    if retired.is_empty() {
+        return;
+    }
+    service
+        .rate
+        .lock()
+        .retain(|key, _| !retired.iter().any(|token| key.ends_with(token.as_str())));
 }
 
 fn tool_rate_limited(hits: &[Instant], now: Instant) -> Value {
@@ -126,6 +144,10 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
+    #[cfg(test)]
+    pub(crate) fn test_upload_waiter_counts(&self) -> (usize, usize) {
+        self.service.upload_calls.waiter_counts()
+    }
     fn validate_session_binding(&self, session: &str, run: &str) -> Result<(), String> {
         self.service
             .broker
@@ -155,6 +177,7 @@ impl IpcServer {
             rate.remove(token);
             rate.remove(&format!("stop:{token}"));
             rate.remove(&format!("handoff:{token}"));
+            rate.remove(&format!("request:{token}"));
         }
     }
 
@@ -190,6 +213,15 @@ impl IpcServer {
         drop(entries);
         self.remove_rate_entries(&removed);
         Ok(token)
+    }
+
+    /// Stable pre-approval credential. Does not read or replace legacy run tokens.
+    pub fn issue_transport_credential(&self, app_session_id: &str) -> Result<String, String> {
+        self.service
+            .broker
+            .issue_transport_credential(app_session_id)
+            .map(|issued| issued.token().to_string())
+            .map_err(|err| err.to_string())
     }
 
     /// Explicitly rotate a live credential. Catalog reconciliation must use
@@ -241,6 +273,9 @@ impl IpcServer {
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
+        // Listener shutdown must retire its original upload waiters before
+        // graceful HTTP shutdown waits for their still-connected responses.
+        self.service.upload_calls.close_all();
         self.service.broker.tabs().revoke_pairing();
         let bindings = std::mem::take(&mut *self.service.credentials.0.lock());
         for binding in bindings.values() {
@@ -281,12 +316,16 @@ pub fn spawn_with_stop_handler(
         slots: Arc::new(Semaphore::new(8)),
         stop_slots: Arc::new(Semaphore::new(CONTROL_SLOTS)),
         handoff_slots: Arc::new(Semaphore::new(CONTROL_SLOTS)),
+        request_slots: Arc::new(Semaphore::new(REQUEST_SLOTS)),
+        completion_slots: Arc::new(Semaphore::new(CONTROL_SLOTS)),
         extension_poll_slot: Arc::new(Semaphore::new(1)),
         extension_result_slot: Arc::new(Semaphore::new(1)),
         rate: Arc::default(),
+        upload_calls: Arc::default(),
     };
     let app = Router::new()
         .route("/cu/tool", post(tool_call))
+        .route("/cu/upload", post(upload::call))
         .route(
             "/cu/pairing-challenge",
             get(pairing_challenge)
@@ -364,6 +403,7 @@ pub fn spawn_with_stop_handler(
                 )),
         )
         .nest("/cu/extension-actions", extension_actions::routes())
+        .nest("/cu/extension-observation", extension_observation::routes())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(service.clone());
     let (shutdown, stop) = oneshot::channel();
@@ -385,6 +425,7 @@ pub fn spawn_with_stop_handler(
                         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         loop {
                             tick.tick().await;
+                            lease_broker.expire_existing_share_preparation();
                             lease_broker.tabs().expire_pairing_connection();
                         }
                     };
@@ -407,8 +448,12 @@ struct ToolCall {
     name: String,
     #[serde(default)]
     session: Option<String>,
-    #[serde(default)]
+    #[serde(default = "empty_tool_arguments")]
     arguments: Value,
+}
+
+fn empty_tool_arguments() -> Value {
+    Value::Object(Default::default())
 }
 
 #[derive(Deserialize)]
@@ -424,6 +469,8 @@ struct SharedTabOfferRequest {
     browser_id: String,
     profile_id: String,
     document_generation: u64,
+    #[serde(default)]
+    document_id: Option<String>,
     focused: bool,
 }
 
@@ -459,6 +506,22 @@ struct BrowserExitCleanupBody {
     phase: String,
 }
 
+fn transport_session_override(call: &ToolCall, session: &str) -> bool {
+    if call.session.as_ref().is_some_and(|value| value != session) {
+        return true;
+    }
+    for key in ["session", "appSessionId", "app_session_id"] {
+        if call
+            .arguments
+            .get(key)
+            .is_some_and(|value| value.as_str() != Some(session))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn identity_overrides_binding(call: &ToolCall, binding: &SessionBinding) -> bool {
     if call
         .session
@@ -490,6 +553,20 @@ async fn tool_call(
     headers: HeaderMap,
     Json(call): Json<ToolCall>,
 ) -> (StatusCode, Json<Value>) {
+    if let Err(error) = tool_headers(&headers) {
+        return error;
+    }
+    let presented = bearer_token(&headers).unwrap_or("");
+    if presented.is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(error("invalid session credential")),
+        );
+    }
+    tool_call_authenticated(service, presented.to_string(), call).await
+}
+
+fn tool_headers(headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
     // CORS is not authentication. A browser page must never reach the control endpoint.
     if headers.contains_key("origin")
         || headers.contains_key("referer")
@@ -501,20 +578,97 @@ async fn tool_call(
         || headers.contains_key("sec-fetch-dest")
         || headers.contains_key("cookie")
     {
-        return (
+        return Err((
             StatusCode::FORBIDDEN,
             Json(error("browser origin is not allowed")),
-        );
+        ));
     }
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !host_is_loopback(host) {
-        return (StatusCode::FORBIDDEN, Json(error("host is not loopback")));
+    if !host_is_loopback(host)
+        || headers.get_all("host").iter().count() != 1
+        || headers.get_all("authorization").iter().count() > 1
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error("host is not loopback or headers are ambiguous")),
+        ));
     }
-    let binding =
-        bearer_token(&headers).and_then(|token| service.credentials.0.lock().get(token).cloned());
+    Ok(())
+}
+
+fn admit_tool(
+    service: &Service,
+    token: &str,
+    name: &str,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, Json<Value>)> {
+    let (slots, rate_max, prefix) = service.tool_admission(name);
+    {
+        let mut hits = service.rate.lock();
+        let queue = hits.entry(format!("{prefix}{token}")).or_default();
+        let now = Instant::now();
+        if !admit_rate(queue, now, rate_max, RATE_WINDOW) {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(tool_rate_limited(queue, now)),
+            ));
+        }
+    }
+    Arc::clone(slots).try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error("too many pending calls")),
+        )
+    })
+}
+
+async fn tool_call_authenticated(
+    service: Service,
+    presented: String,
+    call: ToolCall,
+) -> (StatusCode, Json<Value>) {
+    if let crate::task_consent::BearerClass::Live(ctx) = service.broker.classify_bearer(&presented)
+    {
+        if transport_session_override(&call, &ctx.app_session_id) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(error("session/run does not match credential")),
+            );
+        }
+        let token = presented;
+        let permit = match admit_tool(&service, &token, &call.name) {
+            Ok(permit) => permit,
+            Err(error) => return error,
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let result = crate::tools::dispatch_with_transport(
+                &service.broker,
+                &token,
+                &call.name,
+                call.arguments,
+                service.stop_handler.as_deref(),
+            );
+            forget_retired_rates(&service);
+            result
+        })
+        .await
+        .unwrap_or_else(|_| error("tool worker failed; outcome unknown"));
+        return (StatusCode::OK, Json(result));
+    }
+    if matches!(
+        service.broker.classify_bearer(&presented),
+        crate::task_consent::BearerClass::Retired
+    ) {
+        forget_retired_rates(&service);
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(error("invalid session credential")),
+        );
+    }
+    let binding = service.credentials.0.lock().get(&presented).cloned();
     let Some(binding) = binding else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -527,33 +681,16 @@ async fn tool_call(
             Json(error("session/run does not match credential")),
         );
     }
-    let token = bearer_token(&headers).unwrap_or("");
-    let (slots, rate_max, prefix) = service.tool_admission(&call.name);
-    {
-        let mut hits = service.rate.lock();
-        let queue = hits.entry(format!("{prefix}{token}")).or_default();
-        let now = Instant::now();
-        if !admit_rate(queue, now, rate_max, RATE_WINDOW) {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(tool_rate_limited(queue, now)),
-            );
-        }
-    }
-    let permit = match Arc::clone(slots).try_acquire_owned() {
+    let permit = match admit_tool(&service, &presented, &call.name) {
         Ok(permit) => permit,
-        Err(_) => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(error("too many pending calls")),
-            )
-        }
+        Err(error) => return error,
     };
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         crate::tools::dispatch_with_stop_handler(
             &service.broker,
             &binding,
+            None,
             &call.name,
             call.arguments,
             service.stop_handler.as_deref(),
@@ -712,14 +849,17 @@ async fn pairing_challenge(
         Ok(cors) => cors,
         Err(err) => return *err,
     };
-    if !service.broker.feature_enabled() {
-        return (
-            StatusCode::FORBIDDEN,
-            cors,
-            Json(json!({"error": "computer use is disabled"})),
-        );
-    }
-    let Some(ch) = service.broker.tabs().public_pairing_challenge() else {
+    let ch = match service.broker.public_pairing_challenge() {
+        Ok(ch) => ch,
+        Err(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                cors,
+                Json(json!({"error": "pairing preparation unavailable"})),
+            )
+        }
+    };
+    let Some(ch) = ch else {
         return (
             StatusCode::NOT_FOUND,
             cors,
@@ -762,13 +902,6 @@ async fn pairing_confirm(
         Ok(cors) => cors,
         Err(err) => return *err,
     };
-    if !service.broker.feature_enabled() {
-        return (
-            StatusCode::FORBIDDEN,
-            cors,
-            Json(json!({"error": "computer use is disabled"})),
-        );
-    }
     // Identity, MAC verification and one-shot consumption share one Host lock.
     match service.broker.complete_pairing(&body) {
         Ok(session) => (StatusCode::OK, cors, Json(json!(session))),
@@ -781,7 +914,12 @@ async fn extension_status(
     headers: HeaderMap,
     Json(connection): Json<crate::pairing::PairingConnection>,
 ) -> (StatusCode, HeaderMap, Json<Value>) {
-    extension_connection(&service, &headers, &connection, false)
+    extension_connection(
+        &service,
+        &headers,
+        &connection,
+        ExtensionConnectionOperation::Status,
+    )
 }
 
 async fn extension_disconnect(
@@ -789,7 +927,12 @@ async fn extension_disconnect(
     headers: HeaderMap,
     Json(connection): Json<crate::pairing::PairingConnection>,
 ) -> (StatusCode, HeaderMap, Json<Value>) {
-    extension_connection(&service, &headers, &connection, true)
+    extension_connection(
+        &service,
+        &headers,
+        &connection,
+        ExtensionConnectionOperation::Disconnect,
+    )
 }
 
 async fn extension_heartbeat(
@@ -797,7 +940,12 @@ async fn extension_heartbeat(
     headers: HeaderMap,
     Json(connection): Json<crate::pairing::PairingConnection>,
 ) -> (StatusCode, HeaderMap, Json<Value>) {
-    extension_connection(&service, &headers, &connection, false)
+    extension_connection(
+        &service,
+        &headers,
+        &connection,
+        ExtensionConnectionOperation::Heartbeat,
+    )
 }
 
 async fn browser_restart(
@@ -829,7 +977,7 @@ async fn browser_restart(
             },
         )
         .collect::<Vec<_>>();
-    match service.broker.tabs().browser_restart(
+    match service.broker.register_extension_browser(
         origin,
         bearer_token(&headers).unwrap_or_default(),
         &body.connection,
@@ -877,7 +1025,7 @@ async fn tab_offer(
         generation: body.generation,
     };
     let extension_id = service.broker.tabs().installed_extension_id();
-    match service.broker.offer_connected_tab(
+    match service.broker.offer_connected_tab_document(
         &connection,
         body.sequence,
         crate::browser::SharedTabOffer {
@@ -893,6 +1041,7 @@ async fn tab_offer(
             connection_generation: body.generation,
             focused: body.focused,
         },
+        body.document_id.as_deref(),
     ) {
         Ok(()) => (
             StatusCode::OK,
@@ -939,13 +1088,19 @@ async fn tab_unoffer(
     }
 }
 
+enum ExtensionConnectionOperation {
+    Status,
+    Heartbeat,
+    Disconnect,
+}
+
 fn extension_connection(
     service: &Service,
     headers: &HeaderMap,
     connection: &crate::pairing::PairingConnection,
-    disconnect: bool,
+    operation: ExtensionConnectionOperation,
 ) -> (StatusCode, HeaderMap, Json<Value>) {
-    let bucket = if disconnect {
+    let bucket = if matches!(operation, ExtensionConnectionOperation::Disconnect) {
         "extension-retirement"
     } else {
         "extension-lease"
@@ -959,20 +1114,31 @@ fn extension_connection(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     let token = bearer_token(headers).unwrap_or_default();
-    if !service.broker.feature_enabled()
-        || service
+    let result = match operation {
+        ExtensionConnectionOperation::Status => service
             .broker
-            .tabs()
-            .check_pairing_connection(origin, token, connection, disconnect)
-            .is_err()
-    {
-        return (
+            .pairing_connection_status(origin, token, connection),
+        ExtensionConnectionOperation::Heartbeat | ExtensionConnectionOperation::Disconnect => {
+            service.broker.check_pairing_connection(
+                origin,
+                token,
+                connection,
+                matches!(operation, ExtensionConnectionOperation::Disconnect),
+            )
+        }
+    };
+    match result {
+        Ok(ready) => (
+            StatusCode::OK,
+            cors,
+            Json(json!({"ok": true, "executionReady": ready})),
+        ),
+        Err(_) => (
             StatusCode::FORBIDDEN,
             cors,
             Json(json!({"error": "pairing connection unavailable"})),
-        );
+        ),
     }
-    (StatusCode::OK, cors, Json(json!({"ok": true})))
 }
 
 pub(crate) fn error(message: impl ToString) -> Value {
@@ -1003,10 +1169,16 @@ mod tests_transport;
 
 mod extension_actions;
 mod extension_completion;
+mod extension_observation;
 mod extension_transport;
 mod result_body;
+mod upload;
 
 #[cfg(test)]
 mod tests_actions;
 #[cfg(test)]
 mod tests_completion;
+#[cfg(test)]
+mod tests_existing_first_use;
+#[cfg(test)]
+mod tests_task_consent;

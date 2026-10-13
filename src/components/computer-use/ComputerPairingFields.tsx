@@ -67,7 +67,7 @@ export function ComputerPairingFields({ locale, challenge, disabled, onExpired, 
             data-testid={field === "code" ? "cu-pairing-code" : undefined}
             onFocus={event => event.currentTarget.select()} />
           <button type="button" className="btn btn--ghost cu-pairing__copy"
-            disabled={disabled || pending} aria-label={copyLabel} title={copyLabel}
+            disabled={disabled} aria-disabled={disabled || pending} aria-label={copyLabel} title={copyLabel}
             onClick={() => void copy(field)}>
             {copied === field ? <IconCheck size={16} aria-hidden /> : <IconCopy size={16} aria-hidden />}
           </button>

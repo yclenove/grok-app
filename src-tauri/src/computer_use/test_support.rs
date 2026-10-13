@@ -3,6 +3,28 @@ use grok_computer_use_core::adapter::{
 };
 use grok_computer_use_core::protocol::Observation;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+mod approval;
+#[cfg(all(windows, not(feature = "computer-use-probe")))]
+#[path = "extension_pair/resources.rs"]
+mod extension_resources;
+#[cfg(all(windows, feature = "computer-use-probe"))]
+use super::extension_pair::resources as extension_resources;
+#[cfg(windows)]
+mod extension_peer;
+#[cfg(windows)]
+pub(crate) use extension_peer::ExtensionPeer;
+mod cleanup;
+#[cfg(windows)]
+pub(crate) use super::consent_watch::run_fixture_cleanup_watch;
+#[cfg(windows)]
+pub(crate) use approval::FixtureApprovals;
+pub(crate) use cleanup::finish_fixture_cleanup;
+
+#[cfg(windows)]
+pub(crate) use super::browser_supervisor::{BrowserSupervisor, SpawnRequest};
+#[cfg(windows)]
+pub(crate) use super::playwright_worker::managed_task_tests::remove_owned_root;
 
 pub(crate) const COUNTING_TARGET: &str = "test:window:computer-use";
 

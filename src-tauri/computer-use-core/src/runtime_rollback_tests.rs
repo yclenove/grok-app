@@ -51,6 +51,50 @@ fn rollback_refuses_corrupt_component_and_preserves_current_pointer() {
 }
 
 #[test]
+fn rollback_refuses_oversize_tree_and_preserves_current_pointer() {
+    let (store, root, previous) = rollback_fixture();
+    let manifest: RuntimeManifest =
+        serde_json::from_slice(&fs::read(store.pack_dir(&previous).join("manifest.json")).unwrap())
+            .unwrap();
+    let tree = store
+        .pack_dir(&previous)
+        .join(&manifest.components[CHROMIUM].relpath);
+    let file = fs::File::create(tree.join("oversize")).unwrap();
+    file.set_len(crate::runtime_limits::chromium().max_file_bytes + 1)
+        .unwrap();
+    drop(file);
+    let err = assert_refused_without_pointer_write(&store);
+    assert!(err.contains("oversize"), "{err}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repair_refuses_oversize_seed_before_retiring_interrupted_upgrade_evidence() {
+    let (store, root, _) = rollback_fixture();
+    let bundle = super::tests::write_full_seed_bundle(&root);
+    let manifest: RuntimeManifest =
+        serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    let file = fs::File::create(
+        bundle
+            .join(&manifest.components[CHROMIUM].relpath)
+            .join("oversize"),
+    )
+    .unwrap();
+    file.set_len(crate::runtime_limits::chromium().max_file_bytes + 1)
+        .unwrap();
+    drop(file);
+    let evidence = store.root.join(".staging/previous-attempt/evidence");
+    fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+    fs::write(&evidence, b"interrupted upgrade evidence").unwrap();
+    let before = fs::read(store.pointer_path()).unwrap();
+    let err = store.repair_from_bundle(&bundle).unwrap_err();
+    assert!(err.contains("oversize"), "{err}");
+    assert_eq!(fs::read(store.pointer_path()).unwrap(), before);
+    assert_eq!(fs::read(evidence).unwrap(), b"interrupted upgrade evidence");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn rollback_refuses_missing_worker_sibling_and_preserves_current_pointer() {
     let (store, root, previous) = rollback_fixture();
     fs::remove_file(store.pack_dir(&previous).join("playwright/loopback.mjs")).unwrap();

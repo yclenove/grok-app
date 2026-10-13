@@ -3,6 +3,7 @@ import {
   parseAttachmentsFromContent,
 } from "../attachments";
 import type { ChatMessage, MessageSegment, SessionState } from "./types";
+import { isEndOfTurnMessage } from "../endOfTurn";
 import { isTurnPromptMessage } from "./types";
 import {
   buildSegmentsFromLegacy,
@@ -801,11 +802,13 @@ export function ensureBusyTurnStreaming(
   if (sessionState !== "streaming" && sessionState !== "awaiting_permission") {
     return messages;
   }
+  const idx = lastTurnAssistantIndex(messages);
+  if (idx < 0 || messages.slice(idx + 1).some(isEndOfTurnMessage)) {
+    return messages;
+  }
   if (messages.some((m) => m.role === "assistant" && m.streaming)) {
     return messages;
   }
-  const idx = lastTurnAssistantIndex(messages);
-  if (idx < 0) return messages;
   const row = messages[idx]!;
   if (row.isError) return messages;
   const next = messages.slice();

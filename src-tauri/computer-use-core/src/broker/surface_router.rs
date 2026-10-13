@@ -32,6 +32,60 @@ impl SurfaceRouter {
         target_id: &str,
     ) -> Result<u64, BrokerError> {
         broker.require_owner(session, run_id)?;
+        Self::authorize_checked_owner(broker, session, run_id, surface, target_id)
+    }
+
+    /// A pending run cannot enter the model/legacy owner path. Only the exact
+    /// current Host reservation may prepare its executor before final commit.
+    pub(super) fn authorize_prepared(
+        broker: &ComputerUseBroker,
+        ticket: &crate::task_consent::PrepareTicket,
+    ) -> Result<u64, BrokerError> {
+        {
+            let inner = broker.inner.lock();
+            if !inner.consent.preparation_matches(
+                ticket,
+                inner.feature_enabled,
+                inner.feature_epoch,
+            ) {
+                return Err(BrokerError::StopRequested);
+            }
+            let run = inner
+                .runs
+                .get(&ticket.run_id)
+                .ok_or(BrokerError::RunNotFound)?;
+            if run.app_session_id != ticket.session_id
+                || !matches!(run.consent, ConsentGate::Pending)
+            {
+                return Err(BrokerError::TargetUnauthorized);
+            }
+        }
+        broker.recheck_prepared_scope(ticket)?;
+        if ticket.surface == SurfaceKind::Desktop && ticket.native.is_some() {
+            return broker.authorize_prepared_desktop(ticket);
+        }
+        if ticket.surface == SurfaceKind::ManagedBrowser && ticket.native.is_some() {
+            return broker.authorize_prepared_managed(ticket);
+        }
+        if ticket.surface == SurfaceKind::ExistingTab && ticket.native.is_some() {
+            return broker.authorize_prepared_existing(ticket);
+        }
+        Self::authorize_checked_owner(
+            broker,
+            &ticket.session_id,
+            &ticket.run_id,
+            ticket.surface,
+            &ticket.target_id,
+        )
+    }
+
+    fn authorize_checked_owner(
+        broker: &ComputerUseBroker,
+        session: &str,
+        run_id: &str,
+        surface: SurfaceKind,
+        target_id: &str,
+    ) -> Result<u64, BrokerError> {
         broker.prepare_authorize(run_id)?;
         broker.reject_cross_surface(run_id, surface)?;
         let classified = Self::classify_target_id(target_id);

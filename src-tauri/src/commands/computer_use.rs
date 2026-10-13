@@ -239,7 +239,7 @@ pub async fn computer_use_status(
         let target_alive = rid.as_deref().is_some_and(|r| b.authorized_target_alive(r));
         let mcp_catalog = session_id
             .as_deref()
-            .and_then(|sid| manager.mcp_catalog_status(sid))
+            .and_then(|sid| manager.computer_use_catalog_diagnostics(sid))
             .map(|status| ComputerMcpCatalogStatusDto {
                 desired_generation: status.desired_generation,
                 applied_generation: status.applied_generation,
@@ -285,9 +285,7 @@ pub async fn computer_use_set_feature(
 ) -> Result<(), String> {
     let manager = mgr.inner().clone();
     crate::computer_use::persist_feature_transition(manager, enabled, move || {
-        let mut settings = store::load_settings();
-        settings.computer_use_enabled = enabled;
-        store::save_settings(&settings)
+        crate::computer_use::feature_preferences::FeaturePreferences::product().set_explicit(enabled)
     })
     .await
 }
@@ -422,22 +420,27 @@ pub async fn computer_use_authorize_surface(
             .as_ref()
             .map(|p| p.target().to_string())
             .unwrap_or(requested_target);
+        // Freeze the selected native document before yielding to the owned
+        // worker. Never resolve a label again after navigation or replacement.
+        let webview_selection = if surface == grok_computer_use_core::adapter::SurfaceKind::WebView
+            && !requested_target.starts_with("wv|")
+            && !requested_target.starts_with("wv:")
+            && !requested_target.starts_with("webview:")
+        {
+            Some(crate::computer_use::webview::WebViewAdapter::select_side_browser(
+                app,
+                &requested_target,
+            )?)
+        } else {
+            None
+        };
         let target = cu_blocking(move || {
             let target_id = computer_use_prepare_target(
                 &work_ticket,
                 || {
-                    if surface == grok_computer_use_core::adapter::SurfaceKind::WebView
-                        && !requested_target.starts_with("wv|")
-                        && !requested_target.starts_with("wv:")
-                        && !requested_target.starts_with("webview:")
-                    {
+                    if let Some(selection) = webview_selection {
                         Ok(crate::computer_use::product_webview()
-                            .bind_side_browser(
-                                app,
-                                &requested_target,
-                                &work_sid,
-                                &work_ticket.run_id,
-                            )
+                            .bind_selected(&selection, &work_sid, &work_ticket.run_id)
                             .map_err(|e| e.to_string())?
                             .target_id)
                     } else {
@@ -630,7 +633,7 @@ async fn computer_use_retry_cleanup_impl(
         .ok_or("select a local chat first")?;
     mgr.retry_computer_use_cleanup(&sid).await?;
     let status = mgr
-        .mcp_catalog_status(&sid)
+        .computer_use_catalog_diagnostics(&sid)
         .ok_or("Computer Use cleanup status is unavailable")?;
     Ok(ComputerMcpCatalogStatusDto {
         desired_generation: status.desired_generation,

@@ -33,6 +33,8 @@ pub enum StopState {
 pub struct StopCleanupTicket {
     pub(crate) run_id: String,
     pub(crate) generation: u64,
+    /// Owner incarnation captured when the run was fenced.
+    pub(crate) incarnation: u64,
 }
 
 impl StopCleanupTicket {
@@ -42,6 +44,10 @@ impl StopCleanupTicket {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
     }
 }
 
@@ -109,15 +115,28 @@ const OBSERVES_PER_RUN: usize = 10_000;
 struct AuthorizedTarget {
     target_id: String,
     title: String,
+    backend: String,
+    closed: bool,
     target_generation: u64,
     surface: SurfaceKind,
     executor_generation: u64,
 }
 
+#[derive(Clone)]
+pub(super) enum ConsentGate {
+    Legacy,
+    Pending,
+    Bound(crate::task_consent::ConsentBinding),
+}
+
 struct RunState {
     app_session_id: String,
     generation: u64,
+    consent: ConsentGate,
     target: Option<AuthorizedTarget>,
+    // Keep every prepared member until terminal cleanup, including inactive
+    // members and bindings prepared before the active target is published.
+    webview_targets: Vec<String>,
     snapshot_id: Option<String>,
     geometry_revision: u64,
     stop: StopState,
@@ -130,7 +149,13 @@ struct RunState {
     image_size: (u32, u32),
     element_refs: std::collections::HashSet<String>,
     element_boxes: Vec<crate::protocol::ObservationNode>,
+    // Semantic file inputs do not require coordinate geometry.
+    upload_refs: HashMap<String, String>,
     last_unknown: bool,
+    // Retained typed business outcome, independent of trace retention/cleanup.
+    last_failure: Option<host_task::HostExecutionFailure>,
+    unknown_idle_confirmed: bool,
+    activity: Option<Arc<crate::task_consent::PhysicalActivity>>,
     timings: RunTimings,
     geometry_epoch: u64,
     observe_count: usize,
@@ -138,8 +163,16 @@ struct RunState {
     stop_cleanup_in_flight: bool,
     pause_cleanup_pending: bool,
     resume_in_flight: bool,
+    // Original paused generation identifies the owned Host recovery worker.
+    resume_origin: Option<u64>,
+    switch_in_flight: bool,
+    switch_cleanup_pending: bool,
     fingerprints: HashMap<String, [u8; 32]>,
     browser_replay: HashMap<String, browser_dispatch::BrowserReplay>,
+    navigation_replay: HashMap<String, webview_navigation::NavigationReplay>,
+    download_replay: HashMap<String, webview_download::DownloadReplay>,
+    upload: Option<Arc<webview_upload::PendingUpload>>,
+    upload_replay: HashMap<String, webview_upload::UploadReplay>,
 }
 
 fn drop_execution_identity(run: &mut RunState) {
@@ -150,7 +183,10 @@ fn drop_execution_identity(run: &mut RunState) {
     run.geometry_epoch = 0;
     run.element_refs.clear();
     run.element_boxes.clear();
+    run.upload_refs.clear();
     run.last_unknown = false;
+    run.unknown_idle_confirmed = false;
+    run.activity = None;
     run.image_size = (0, 0);
 }
 
@@ -158,7 +194,9 @@ fn fresh_run(app_session_id: String, recovery: Option<RecoverySource>) -> RunSta
     RunState {
         app_session_id,
         generation: 1,
+        consent: ConsentGate::Legacy,
         target: None,
+        webview_targets: Vec::new(),
         snapshot_id: None,
         geometry_revision: 0,
         stop: StopState::Running,
@@ -171,7 +209,11 @@ fn fresh_run(app_session_id: String, recovery: Option<RecoverySource>) -> RunSta
         image_size: (0, 0),
         element_refs: Default::default(),
         element_boxes: Vec::new(),
+        upload_refs: HashMap::new(),
         last_unknown: false,
+        last_failure: None,
+        unknown_idle_confirmed: false,
+        activity: None,
         timings: RunTimings::default(),
         geometry_epoch: 0,
         observe_count: 0,
@@ -179,8 +221,15 @@ fn fresh_run(app_session_id: String, recovery: Option<RecoverySource>) -> RunSta
         stop_cleanup_in_flight: false,
         pause_cleanup_pending: false,
         resume_in_flight: false,
+        resume_origin: None,
+        switch_in_flight: false,
+        switch_cleanup_pending: false,
         fingerprints: HashMap::new(),
         browser_replay: HashMap::new(),
+        navigation_replay: HashMap::new(),
+        download_replay: HashMap::new(),
+        upload: None,
+        upload_replay: HashMap::new(),
     }
 }
 
@@ -197,6 +246,8 @@ fn push_trace(inner: &mut Inner, kind: &str, run_id: &str, detail: &str, audienc
         let drop_n = inner.traces.len() - TRACE_CAP;
         inner.traces.drain(0..drop_n);
     }
+    // Atomic invalidation only: subscribers read retained state after unlock.
+    inner.changes.publish();
 }
 
 fn image_is_visual(obs: &Observation) -> bool {
@@ -234,15 +285,24 @@ impl Default for BrokerOptions {
 }
 
 struct Inner {
+    changes: HostTaskChanges,
     feature_enabled: bool,
+    feature_epoch: u64,
+    consent: crate::task_consent::ConsentState,
+    existing_share_preparation: Option<existing_share_preparation::ExistingSharePreparation>,
     runs: HashMap<String, RunState>,
+    cleanup_tickets: Vec<StopCleanupTicket>,
     dropped_late: u64,
     traces: Vec<TraceEvent>,
     started: Instant,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+type ScopeDiscoveryHook = Box<dyn FnOnce(usize) + Send>;
+
 pub struct ComputerUseBroker {
     inner: Mutex<Inner>,
+    changes: HostTaskChanges,
     executors: surface_executor::SurfaceExecutorRegistry,
     lease: DesktopLease,
     preview: PreviewController,
@@ -250,40 +310,79 @@ pub struct ComputerUseBroker {
     managed_browser: Arc<ManagedBrowserAdapter>,
     existing_browser: Arc<ExistingBrowserAdapter>,
     existing_authorization: Mutex<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    scope_reservation_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    scope_discovery_hook: Mutex<Option<ScopeDiscoveryHook>>,
     instance_id: String,
     action_timeout: Duration,
     action_budget: usize,
     observe_budget: usize,
 }
 
-struct InFlightClear(Arc<AtomicBool>);
+struct InFlightClear(Arc<AtomicBool>, HostTaskChanges);
+
+impl InFlightClear {
+    fn new(inflight: Arc<AtomicBool>, changes: &HostTaskChanges) -> Self {
+        changes.publish();
+        Self(inflight, changes.clone())
+    }
+}
 
 impl Drop for InFlightClear {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+        self.1.publish();
     }
 }
 
 impl ComputerUseBroker {
     pub fn new(adapter: Arc<dyn ComputerUseAdapter>, opts: BrokerOptions) -> Self {
+        Self::with_executors(
+            surface_executor::SurfaceExecutorRegistry::new(adapter),
+            opts,
+        )
+    }
+
+    /// Request transport only. No native adapter, helper or browser is started.
+    /// Host selection must register the actual executor before binding a grant.
+    pub fn request_endpoint(opts: BrokerOptions) -> Self {
+        Self::with_executors(surface_executor::SurfaceExecutorRegistry::empty(), opts)
+    }
+
+    fn with_executors(
+        executors: surface_executor::SurfaceExecutorRegistry,
+        opts: BrokerOptions,
+    ) -> Self {
         let tabs = Arc::new(ExistingTabHost::new());
         let managed_browser = Arc::new(ManagedBrowserAdapter::new(tabs.clone()));
         let existing_browser = Arc::new(ExistingBrowserAdapter::new(tabs.clone()));
+        let changes = HostTaskChanges::default();
         Self {
             inner: Mutex::new(Inner {
+                changes: changes.clone(),
                 feature_enabled: opts.feature_enabled,
+                feature_epoch: 0,
+                consent: crate::task_consent::ConsentState::new(),
+                existing_share_preparation: None,
                 runs: HashMap::new(),
+                cleanup_tickets: Vec::new(),
                 dropped_late: 0,
                 traces: Vec::new(),
                 started: Instant::now(),
             }),
-            executors: surface_executor::SurfaceExecutorRegistry::new(adapter),
+            changes,
+            executors,
             lease: DesktopLease::new(opts.lease_path),
             preview: PreviewController::new(),
             tabs,
             managed_browser,
             existing_browser,
             existing_authorization: Mutex::new(()),
+            #[cfg(any(test, feature = "test-support"))]
+            scope_reservation_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            scope_discovery_hook: Mutex::new(None),
             instance_id: opts.instance_id,
             action_timeout: opts.action_timeout,
             action_budget: opts.action_budget.max(1),
@@ -364,12 +463,21 @@ impl ComputerUseBroker {
     /// touching a surface adapter or browser worker. Host applications retain
     /// the returned tickets and finish cleanup on their blocking boundary.
     pub fn fence_feature_enabled(&self, on: bool) -> Vec<StopCleanupTicket> {
+        let _change = self.changes.notice();
         let runs = {
             let mut inner = self.inner.lock();
+            let was = inner.feature_enabled;
             inner.feature_enabled = on;
+            if was != on {
+                inner.feature_epoch = inner.feature_epoch.saturating_add(1);
+                if !on {
+                    inner.consent.on_feature_off();
+                }
+            }
             if on {
                 return Vec::new();
             }
+            inner.existing_share_preparation = None;
             self.tabs.revoke_pairing();
             inner.runs.keys().cloned().collect::<Vec<_>>()
         };
@@ -388,6 +496,7 @@ impl ComputerUseBroker {
     }
 
     pub fn open_run(&self, app_session_id: &str, run_id: &str) -> Result<(), BrokerError> {
+        let _change = self.changes.notice();
         if app_session_id.trim().is_empty() || run_id.trim().is_empty() {
             return Err(BrokerError::IdentityMismatch("session/run"));
         }
@@ -419,14 +528,59 @@ impl ComputerUseBroker {
             .get(run_id)
             .is_some_and(|run| run.target.is_some() && run.stop == StopState::Running)
     }
+}
 
+fn note_locked_activity(inner: &mut Inner, run_id: &str) {
+    let Some(binding) = inner.runs.get(run_id).and_then(|run| match &run.consent {
+        ConsentGate::Bound(binding) => Some(binding.clone()),
+        ConsentGate::Pending | ConsentGate::Legacy => None,
+    }) else {
+        return;
+    };
+    let enabled = inner.feature_enabled;
+    let epoch = inner.feature_epoch;
+    inner.consent.note_model_activity(&binding, enabled, epoch);
+}
+
+fn admit_consent(
+    consent: &crate::task_consent::ConsentState,
+    enabled: bool,
+    epoch: u64,
+    run: &RunState,
+) -> Result<(), BrokerError> {
+    if run.switch_in_flight || run.switch_cleanup_pending {
+        return Err(BrokerError::TargetUnauthorized);
+    }
+    match &run.consent {
+        ConsentGate::Legacy => Ok(()),
+        ConsentGate::Pending => Err(BrokerError::TargetUnauthorized),
+        ConsentGate::Bound(binding) => {
+            if binding.app_session_id != run.app_session_id {
+                return Err(BrokerError::IdentityMismatch("appSessionId"));
+            }
+            if let Some(target) = &run.target {
+                if target.target_id != binding.target_id {
+                    return Err(BrokerError::TargetUnauthorized);
+                }
+            }
+            consent.recheck_binding(binding, enabled, epoch)
+        }
+    }
+}
+
+impl ComputerUseBroker {
     pub fn require_owner(&self, session: &str, run_id: &str) -> Result<(), BrokerError> {
         let inner = self.inner.lock();
         let run = inner.runs.get(run_id).ok_or(BrokerError::RunNotFound)?;
         if session.is_empty() || run.app_session_id != session {
             return Err(BrokerError::IdentityMismatch("appSessionId"));
         }
-        Ok(())
+        admit_consent(
+            &inner.consent,
+            inner.feature_enabled,
+            inner.feature_epoch,
+            run,
+        )
     }
 
     pub fn authorize_target(&self, run_id: &str, target_id: &str) -> Result<u64, BrokerError> {
@@ -581,6 +735,11 @@ impl ComputerUseBroker {
                 run_id: run_id.into(),
             });
         }
+        if run.switch_in_flight || run.switch_cleanup_pending || run.resume_in_flight {
+            return Err(BrokerError::LeaseHeld {
+                run_id: run_id.into(),
+            });
+        }
         Ok(())
     }
 
@@ -593,6 +752,11 @@ impl ComputerUseBroker {
         executor_generation: u64,
         admission: Option<(u64, &InFlightClear)>,
     ) -> Result<u64, BrokerError> {
+        let executor = self.require_surface_executor(surface)?;
+        if executor.generation != executor_generation {
+            return Err(BrokerError::IdentityMismatch("surfaceExecutorGeneration"));
+        }
+        let backend = executor.adapter.backend_id().to_string();
         let mut g = self.inner.lock();
         if !g.feature_enabled {
             return Err(BrokerError::FeatureDisabled);
@@ -601,6 +765,11 @@ impl ComputerUseBroker {
             let run = g.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
             if run.stop != StopState::Running {
                 return Err(BrokerError::StopRequested);
+            }
+            if run.switch_in_flight || run.switch_cleanup_pending || run.resume_in_flight {
+                return Err(BrokerError::LeaseHeld {
+                    run_id: run_id.into(),
+                });
             }
             let owns_admission = admission.is_some_and(|(generation, permit)| {
                 generation == run.generation && Arc::ptr_eq(&permit.0, &run.in_flight)
@@ -620,6 +789,11 @@ impl ComputerUseBroker {
                     ));
                 }
             }
+            if let ConsentGate::Bound(binding) = &run.consent {
+                if binding.target_id != target_id {
+                    return Err(BrokerError::TargetUnauthorized);
+                }
+            }
             run.cancellation.cancel();
             run.cancellation = crate::execution::ActionCancellation::default();
             run.generation = run.generation.saturating_add(1);
@@ -627,6 +801,8 @@ impl ComputerUseBroker {
             run.target = Some(AuthorizedTarget {
                 target_id: target_id.to_string(),
                 title,
+                backend,
+                closed: false,
                 target_generation: gen,
                 surface,
                 executor_generation,
@@ -643,6 +819,11 @@ impl ComputerUseBroker {
             &format!("{}:{}", surface.as_wire(), target_id),
             TraceAudience::Model,
         );
+        let hook = g.consent.take_after_target_switch();
+        drop(g);
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(gen)
     }
 
@@ -905,9 +1086,13 @@ impl ComputerUseBroker {
 
     pub fn capabilities(&self) -> super::adapter::Capabilities {
         self.require_surface_executor(SurfaceKind::Desktop)
-            .expect("Desktop executor is registered by ComputerUseBroker::new")
-            .adapter
-            .capabilities()
+            .map(|executor| executor.adapter.capabilities())
+            .unwrap_or_else(|_| {
+                let mut capabilities =
+                    super::adapter::Capabilities::for_surface(SurfaceKind::WebView, "request-only");
+                capabilities.notes = vec!["Host execution resources are not initialized".into()];
+                capabilities
+            })
     }
 
     pub fn capabilities_for_run(
@@ -950,6 +1135,7 @@ impl ComputerUseBroker {
 
     /// Restores traces and run identity. Does not restore authorization or snapshot.
     pub fn restore_run(&self, snap: PersistedRun) -> Result<(), BrokerError> {
+        let _change = self.changes.notice();
         if snap.app_session_id.trim().is_empty() || snap.run_id.trim().is_empty() {
             return Err(BrokerError::IdentityMismatch("session/run"));
         }
@@ -967,6 +1153,9 @@ impl ComputerUseBroker {
             run.paused = false;
             run.observe_count = 0;
             run.browser_replay.clear();
+            run.navigation_replay.clear();
+            run.download_replay.clear();
+            run.upload_replay.clear();
             for action_id in &snap.consumed_action_ids {
                 if action_id.trim().is_empty() {
                     continue;
@@ -1249,28 +1438,107 @@ mod tests_typed_actions;
 #[cfg(test)]
 mod tests_wait_tabs;
 
+mod access_status;
+mod action_claim;
 mod actions;
+mod activity;
 mod browser_dispatch;
+mod existing_share_preparation;
 mod extension_actions;
+mod file_action;
 mod observation;
 mod pairing;
+mod permission;
 mod surface_executor;
 mod surface_router;
 mod target_readback;
+mod webview_download;
+mod webview_navigation;
+mod webview_upload;
 pub use browser_dispatch::{BrowserOp, BrowserWrite, BrowserWriteResult};
 pub use surface_router::SurfaceRouter;
+pub(crate) use webview_download::{WebViewDownloadCompletion, WebViewDownloadIntent};
+pub(crate) use webview_navigation::WebViewNavigationCompletion;
+pub use webview_upload::{
+    HostUploadCancel, HostUploadPhase, HostUploadSelection, HostUploadView, WebViewUploadCall,
+    WebViewUploadCompletion, WebViewUploadIntent, WebViewUploadReady,
+};
+mod access_approval;
+mod consent;
+#[cfg(test)]
+mod tests_approval_publication;
+pub use access_approval::{AccessApproval, AccessApprovalCancel, AccessApprovalReady};
+mod consent_transport;
+mod host_changes;
+mod host_task;
+mod task_completion;
+pub use host_changes::HostTaskChanges;
+pub use host_task::{
+    HostExecutionFailure, HostExecutionPhase, HostExecutionView, HostTaskDecision,
+    HostTaskDecisionReceipt, HostTaskView,
+};
+mod host_execution;
+pub use host_execution::HostExecutionAddress;
 mod lifecycle;
 mod managed_authorization;
+mod managed_scope_preparation;
+mod model_inventory;
+mod scope_metadata;
+mod scope_picker;
+#[cfg(test)]
+mod tests_managed_scope_preparation;
+mod webview_scope_preparation;
+pub use scope_picker::{
+    HostExistingSharePreparationView, HostScopeCandidateView, HostScopePicker, HostScopePickerCall,
+    HostScopePickerCancel, MAX_SCOPE_CANDIDATES,
+};
+mod scope_selection;
+mod scope_switch;
+pub use scope_selection::{HostScopeSelection, HostScopeSelectionCall, HostScopeSelectionCancel};
 mod resume;
+mod task_resume;
+pub use task_resume::{
+    HostTaskResume, HostTaskResumeCancel, HostTaskResumeReady, HostTaskResumeReceipt,
+};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_access_approval;
+#[cfg(test)]
+mod tests_access_status;
+#[cfg(test)]
 mod tests_auth;
+#[cfg(test)]
+mod tests_consent_transport;
+#[cfg(test)]
+mod tests_host_changes;
+#[cfg(test)]
+mod tests_host_execution;
+#[cfg(test)]
+mod tests_host_task;
 #[cfg(test)]
 mod tests_identity;
 #[cfg(test)]
 mod tests_outcomes;
 #[cfg(test)]
+mod tests_permission;
+#[cfg(test)]
 mod tests_postcondition;
+#[cfg(test)]
+mod tests_scope_picker;
+#[cfg(test)]
+mod tests_scope_selection;
+#[cfg(test)]
+mod tests_scope_switch;
+#[cfg(test)]
+mod tests_task_consent;
+#[cfg(test)]
+mod tests_task_consent_completion;
+#[cfg(test)]
+mod tests_task_consent_rework;
+#[cfg(test)]
+mod tests_task_consent_rework2;
+#[cfg(test)]
+mod tests_webview_selection;
 #[cfg(any(test, feature = "test-support"))]
 mod verification_probe;

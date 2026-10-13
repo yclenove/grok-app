@@ -2,6 +2,8 @@ import { EXTENSION_ID, PairingClient } from "./pairing-client.mjs";
 import { SharedTabs } from "./shared-tabs.mjs";
 import { ExtensionTransport } from "./extension-transport.mjs";
 import { CompletionJournal } from "./completion-journal.mjs";
+import { ObservationJournal } from "./observation-journal.mjs";
+import { CleanupOwners } from "./cleanup-owners.mjs";
 import { CompletionRecovery } from "./completion-recovery.mjs";
 import { allocateWorkerEpoch, ExecutionClock } from "./execution-clock.mjs";
 import { DocumentLifetime } from "./document-lifetime.mjs";
@@ -17,15 +19,19 @@ let transport;
 // A hint only: popup re-reads local state. Never broadcast credentials or page metadata.
 const notifyState = () => { void chrome.runtime.sendMessage({ type: "cu-state-changed" }).catch(() => {}); };
 let journal;
+let observationJournal;
+let journalReady;
 let sessionChangeRevision = 0;
 const client = new PairingClient({ storage: chrome.storage.session, onSessionChanged: () => {
   const revision = ++sessionChangeRevision;
   sharing?.reset(); transport?.reset();
   void (async () => {
-    await browserSession.ready; await journal?.ready;
+    await browserSession.ready; await journalReady;
     if (revision !== sessionChangeRevision || client.connectionEpoch === null) { notifyState(); return; }
     const session = await browserSession.snapshot();
-    const cleanups = session.previousId ? await journal.cleanupRecords(session.previousId) : [];
+    const cleanups = session.previousId ? (await Promise.all([
+      journal.cleanupRecords(session.previousId), observationJournal.cleanupRecords(session.previousId),
+    ])).flat() : [];
     const registration = await client.registerBrowser(session.id, session.previousId, cleanups);
     if (revision !== sessionChangeRevision || client.connectionEpoch === null) return;
     if (session.previousId && cleanups.length > 0) {
@@ -49,6 +55,7 @@ const client = new PairingClient({ storage: chrome.storage.session, onSessionCha
       });
       if (confirmed && registration.results.length === cleanups.length) {
         await journal.forgetBrowserExit(registration.results.map((item) => item.requestId));
+        await observationJournal.forgetBrowserExit(registration.results.map((item) => item.requestId));
         await browserSession.acknowledgeRestart(session);
       }
     } else if (session.previousId && cleanups.length === 0) {
@@ -59,21 +66,31 @@ const client = new PairingClient({ storage: chrome.storage.session, onSessionCha
   })().catch(() => { if (revision === sessionChangeRevision) notifyState(); });
 } });
 const lifetime = new DocumentLifetime({ navigation: chrome.webNavigation, tabs: chrome.tabs, extension: chrome.extension });
+const owners = new CleanupOwners();
 journal = new CompletionJournal({ storage: chrome.storage.local, lifetime, scripting: chrome.scripting,
-  receipts: chrome.storage.session, hostLifetime: new HostLifetimeClient({ client }) });
+  receipts: chrome.storage.session, hostLifetime: new HostLifetimeClient({ client }), owners });
+observationJournal = new ObservationJournal({ storage: chrome.storage.local, owners,
+  hostLifetime: new HostLifetimeClient({ client, purpose: "observation" }) });
+journalReady = Promise.all([journal.ready, observationJournal.ready]); void journalReady.catch(() => {});
 const clock = new ExecutionClock(allocateWorkerEpoch());
-sharing = new SharedTabs({ client, tabs: chrome.tabs, scripting: chrome.scripting, journal, clock });
-transport = new ExtensionTransport({ client, journal, observe: request => sharing.observe(request),
+const shareJournal = { async hasTab(tabId) {
+  await journalReady;
+  return await journal.hasTab(tabId) || await observationJournal.hasTab(tabId);
+} };
+sharing = new SharedTabs({ client, tabs: chrome.tabs, scripting: chrome.scripting, journal: shareJournal, clock });
+transport = new ExtensionTransport({ client, journal, observationJournal, observe: (request, signal, checkpoint) => sharing.observe(request, signal, checkpoint),
   act: (request, signal) => sharing.act(request, signal), recovered: binding => sharing.releaseRecovered(binding) });
 const recovery = new CompletionRecovery({ journal, scripting: chrome.scripting, notify: notifyState });
+const observationRecovery = new CompletionRecovery({ journal: observationJournal, purpose: "observation", notify: notifyState });
 void recovery.start(client.ready).then(notifyState, notifyState);
+void observationRecovery.start(client.ready).then(notifyState, notifyState);
 void client.ready.then(notifyState, notifyState);
 const popupUrl = chrome.runtime.getURL("popup.html");
 const errors = new Set(["invalidAddress", "invalidCode", "challengeChanged", "pairingRejected", "busy", "cancelled", "shareUnavailable"]);
 const changedTab = tabId => {
   void sharing.invalidate(tabId).catch(() => {}).finally(() => {
     // Only already-owned receipts match this tab. Navigation of unrelated tabs does not query their frames.
-    void recovery.retry(tabId); void transport.retryCleanup(tabId); notifyState();
+    void recovery.retry(tabId); void observationRecovery.retry(tabId); void transport.retryCleanup(tabId); notifyState();
   });
 };
 chrome.tabs.onUpdated.addListener((tabId, change) => {

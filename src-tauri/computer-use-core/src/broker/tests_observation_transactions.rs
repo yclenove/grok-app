@@ -409,7 +409,7 @@ fn wait_keeps_admission_and_stop_rejects_its_late_match() {
     let (entered, release) = adapter.gate_next();
     let caller = broker.clone();
     let pending =
-        std::thread::spawn(move || crate::tools_wait::wait_for_node(&caller, "run", args));
+        std::thread::spawn(move || crate::tools_wait::wait_for_node(&caller, "run", args, None));
     entered.recv_timeout(Duration::from_secs(2)).unwrap();
     let busy = broker.observe_preview("run");
     assert!(matches!(busy, Err(BrokerError::LeaseHeld { .. })));

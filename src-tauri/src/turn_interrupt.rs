@@ -460,6 +460,99 @@ mod tests {
         });
     }
 
+    fn seed_pause(session_id: &str) {
+        seed_user(session_id);
+        store::append_message(
+            session_id,
+            ChatMessageStored {
+                id: "pause".into(),
+                role: "tool".into(),
+                content: "turn_cancelled|cancelled".into(),
+                thought: None,
+                created_at: Utc::now() - chrono::Duration::seconds(1),
+                is_error: false,
+                attachments: None,
+                marker: Some("turn_cancelled".into()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resume_without_user_or_output_reopens_terminal_detection() {
+        with_home(|_| {
+            let sid = "resume-no-output";
+            seed_pause(sid);
+            begin_active(sid, Some("agent"), Some("resumed-turn"));
+            assert!(!has_turn_end_marker_after_last_user(sid));
+            assert!(heal_interrupted_turn(sid).is_some());
+            assert!(has_turn_end_marker_after_last_user(sid));
+            assert!(heal_interrupted_turn(sid).is_none());
+            assert_eq!(host_exit_count(sid), 1);
+        });
+    }
+
+    #[test]
+    fn resumed_assistant_reopens_legacy_terminal_without_lease() {
+        with_home(|_| {
+            let sid = "resume-legacy";
+            seed_pause(sid);
+            store::append_message(
+                sid,
+                ChatMessageStored {
+                    id: "resumed".into(),
+                    role: "assistant".into(),
+                    content: "Count is now six".into(),
+                    thought: None,
+                    created_at: Utc::now(),
+                    is_error: false,
+                    attachments: None,
+                    marker: None,
+                },
+            )
+            .unwrap();
+            assert!(!has_turn_end_marker_after_last_user(sid));
+        });
+    }
+
+    #[test]
+    fn delayed_tool_does_not_reopen_stop_and_reply_text_is_not_a_terminal() {
+        with_home(|_| {
+            let sid = "late-tool-terminal";
+            seed_pause(sid);
+            store::append_message(
+                sid,
+                ChatMessageStored {
+                    id: "late-tool".into(),
+                    role: "tool".into(),
+                    content: "tool_step|completed|observe".into(),
+                    thought: None,
+                    created_at: Utc::now(),
+                    is_error: false,
+                    attachments: None,
+                    marker: Some("tool_step".into()),
+                },
+            )
+            .unwrap();
+            assert!(has_turn_end_marker_after_last_user(sid));
+            store::append_message(
+                sid,
+                ChatMessageStored {
+                    id: "reply".into(),
+                    role: "assistant".into(),
+                    content: "turn_cancelled|cancelled is the format".into(),
+                    thought: None,
+                    created_at: Utc::now(),
+                    is_error: false,
+                    attachments: None,
+                    marker: None,
+                },
+            )
+            .unwrap();
+            assert!(!has_turn_end_marker_after_last_user(sid));
+        });
+    }
+
     #[test]
     fn heal_uses_lease_even_without_agent_dir() {
         with_home(|_| {

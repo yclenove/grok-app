@@ -133,12 +133,19 @@ impl SessionManager {
             AcpEvent::PromptComplete {
                 stop_reason,
                 authoritative,
+                host_turn_id,
             } => {
                 let mut pending_emits = Vec::new();
                 let mut pending_persists = Vec::new();
                 let finished = {
                     let mut bg = self.background.lock();
                     if let Some(s) = bg.get_mut(app_session_id) {
+                        if host_turn_id
+                            .as_deref()
+                            .is_some_and(|turn| s.active_turn_id.as_deref() != Some(turn))
+                        {
+                            return;
+                        }
                         if let Some(p) = Self::take_pending_stream_emit(s) {
                             pending_emits.push(p);
                         }
@@ -216,6 +223,18 @@ impl SessionManager {
                 options,
                 raw,
             } => {
+                if self
+                    .respond_computer_use_permission(
+                        app_session_id,
+                        process_id,
+                        rpc_id,
+                        &raw,
+                        &options,
+                    )
+                    .await
+                {
+                    return;
+                }
                 let preview = permission_preview_text(&raw, &title);
                 let path_target = permission_path_target(&raw, &tool_name);
                 let shell_command = extract_shell_command(&raw);

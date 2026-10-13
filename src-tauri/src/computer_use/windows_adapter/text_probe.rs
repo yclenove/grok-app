@@ -8,12 +8,14 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 mod identity;
 mod peer;
+mod scope_group;
 pub(in crate::computer_use) use peer::run_peer;
 
 struct State {
     original: WNDPROC,
     reject: Cell<u32>,
     effects: Cell<usize>,
+    reads: Cell<usize>,
     read_fault: Cell<u8>,
     alive: Cell<bool>,
     retire_on: Cell<u32>,
@@ -32,6 +34,9 @@ unsafe extern "system" fn procedure(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
         return DefWindowProcW(h, m, w, l);
     }
     let state = &*p;
+    if matches!(m, WM_GETTEXT | WM_GETTEXTLENGTH) {
+        state.reads.set(state.reads.get() + 1);
+    }
     if m == WM_NCDESTROY {
         state.alive.set(false);
     }
@@ -92,14 +97,22 @@ impl Edit {
         Self::with_parent(initial, None)
     }
     fn with_parent(initial: &str, parent: Option<HWND>) -> Result<Self, String> {
+        Self::with_visibility(initial, parent, false)
+    }
+    fn with_visibility(initial: &str, parent: Option<HWND>, visible: bool) -> Result<Self, String> {
         let value: Vec<u16> = initial.encode_utf16().chain(Some(0)).collect();
         let hwnd = unsafe {
             CreateWindowExW(
-                Default::default(),
+                if visible {
+                    WS_EX_NOACTIVATE
+                } else {
+                    Default::default()
+                },
                 w!("EDIT"),
                 windows::core::PCWSTR(value.as_ptr()),
                 (if parent.is_some() { WS_CHILD } else { WS_POPUP })
-                    | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32),
+                    | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32)
+                    | if visible { WS_VISIBLE } else { WINDOW_STYLE(0) },
                 0,
                 0,
                 200,
@@ -117,6 +130,7 @@ impl Edit {
             },
             reject: Cell::new(0),
             effects: Cell::new(0),
+            reads: Cell::new(0),
             read_fault: Cell::new(0),
             alive: Cell::new(true),
             retire_on: Cell::new(0),
@@ -314,6 +328,7 @@ pub fn run() -> Result<(), String> {
         },
     );
     identity::run(&mut run);
+    scope_group::run(&mut run);
     run(
         "cross-process edit and private clipboard",
         &peer::run_parent,

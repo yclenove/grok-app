@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createT, intlLocale, type Locale } from "@/i18n";
 import * as api from "@/lib/api/computerUse";
 import { ComputerPairingFields } from "./ComputerPairingFields";
+import { ComputerExtensionSetup } from "./ComputerExtensionSetup";
 
 export function ComputerPairing({ locale, disabled, onChanged }: {
   locale: Locale;
@@ -72,6 +73,7 @@ export function ComputerPairing({ locale, disabled, onChanged }: {
   }
 
   return <section className="cu-panel__pairing" aria-label={tr("cu.panel.pairExtension")}>
+    <ComputerExtensionSetup locale={locale} disabled={disabled} />
     <ol className="cu-pairing__steps" aria-label={tr("cu.pairing.steps")}>
       {(["cu.pairing.stepStart", "cu.pairing.stepConfirm", "cu.pairing.stepShare"] as const).map((key, index) => (
         <li key={key} aria-current={index === step ? "step" : undefined}

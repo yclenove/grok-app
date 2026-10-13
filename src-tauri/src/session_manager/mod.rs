@@ -65,12 +65,14 @@ use crate::session_fsm::SessionState;
 use types::*;
 
 pub(crate) use computer_use::McpShutdownReport;
+pub(crate) use computer_use::TaskResumeOutcome;
 pub(crate) use types::{
     extract_tool_input, tool_journal_richer, RewindExecuteResult, RewindPointDto, SessionSnapshot,
     UiAskUserRequest, UiPermissionRequest, TOOL_OUTPUT_MAX_PUB, TOOL_OUTPUT_SENTINEL,
 };
 
 pub struct SessionManager {
+    computer_use_dispatcher: computer_use::DispatchWorker,
     /// Currently focused live session (UI-bound for send).
     pub(super) inner: Mutex<Option<LiveSession>>,
     /// Busy sessions still receiving ACP events (streaming / permission).
@@ -140,6 +142,7 @@ impl Default for SessionManager {
 impl SessionManager {
     pub fn new() -> Self {
         Self {
+            computer_use_dispatcher: computer_use::DispatchWorker::default(),
             inner: Mutex::new(None),
             background: Mutex::new(HashMap::new()),
             parked: Mutex::new(HashMap::new()),

@@ -19,7 +19,12 @@ use crate::store;
 mod desktop;
 mod managed;
 mod mcp;
+#[cfg(all(windows, feature = "computer-use-probe"))]
+pub(crate) mod probe_entry;
+#[cfg(all(windows, feature = "computer-use-probe"))]
+pub(crate) mod probe_exit;
 mod webview;
+mod webview_selection;
 
 use desktop::one_round;
 #[cfg(target_os = "windows")]
@@ -52,14 +57,105 @@ pub fn maybe_spawn(app: &tauri::AppHandle) {
         tracing::warn!("GROK_CU_APP_HARNESS ignored without isolated identity");
         return;
     }
+    #[cfg(all(windows, feature = "computer-use-probe"))]
+    if matches!(
+        std::env::var("GROK_CU_APP_HARNESS_MODE").ok().as_deref(),
+        Some(
+            "webview-download-close"
+                | "webview-exit-idle"
+                | "webview-download-error-unwind"
+                | "webview-download-before-start"
+                | "webview-download-buffer-retirement"
+                | "webview-download-buffer-crash"
+                | "webview-download-publication"
+                | "webview-upload"
+                | "webview-upload-task"
+                | "webview-upload-mcp"
+        )
+    ) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let worker_app = app.clone();
+            let report = tauri::async_runtime::spawn_blocking(move || {
+                match std::env::var("GROK_CU_APP_HARNESS_MODE").ok().as_deref() {
+                    Some("webview-exit-idle") => {
+                        crate::computer_use::webview::run_product_idle_exit_gate(worker_app)
+                    }
+                    Some("webview-download-error-unwind") => {
+                        crate::computer_use::webview::run_product_download_error_unwind_gate(
+                            worker_app,
+                        )
+                    }
+                    Some("webview-download-before-start") => {
+                        crate::computer_use::webview::run_product_download_before_start_gate(
+                            worker_app,
+                        )
+                    }
+                    Some("webview-download-publication") => {
+                        crate::computer_use::webview::run_product_download_publication_gate(
+                            worker_app,
+                        )
+                    }
+                    Some("webview-download-buffer-retirement") => {
+                        crate::computer_use::webview::run_product_download_buffer_retirement_gate(
+                            worker_app,
+                        )
+                    }
+                    Some("webview-download-buffer-crash") => {
+                        crate::computer_use::webview::run_product_download_buffer_crash_gate(
+                            worker_app,
+                        )
+                    }
+                    Some("webview-upload") => {
+                        crate::computer_use::webview::run_product_upload_gate(worker_app)
+                    }
+                    Some("webview-upload-task") => {
+                        crate::computer_use::webview::run_product_upload_task_gate(worker_app)
+                    }
+                    Some("webview-upload-mcp") => {
+                        crate::computer_use::webview::run_product_upload_mcp_gate(worker_app)
+                    }
+                    _ => crate::computer_use::webview::run_product_download_close_gate(worker_app),
+                }
+            })
+            .await
+            .unwrap_or_else(
+                |_| json!({"ok":false,"error":"App download gate worker did not join"}),
+            );
+            write_report(&report);
+            probe_exit::record("before-harness-shutdown");
+            let _ =
+                tauri::async_runtime::spawn_blocking(crate::computer_use::shutdown_product).await;
+            probe_exit::record("after-harness-shutdown");
+            let ok = report.get("ok").and_then(Value::as_bool) == Some(true);
+            app.exit(if ok { 0 } else { 2 });
+        });
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(900)).await;
-        let report = run(app.clone()).await;
+        let selection_only =
+            std::env::var("GROK_CU_APP_HARNESS_MODE").ok().as_deref() == Some("webview-selection");
+        let task_only =
+            std::env::var("GROK_CU_APP_HARNESS_MODE").ok().as_deref() == Some("webview-task");
+        let report = if task_only {
+            webview_selection::task::run(&app).await
+        } else if selection_only {
+            webview_selection::run(&app).await
+        } else {
+            run(app.clone()).await
+        };
         write_report(&report);
         let _ = tauri::async_runtime::spawn_blocking(crate::computer_use::shutdown_product).await;
         let ok = report.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-        std::process::exit(if ok { 0 } else { 2 });
+        if selection_only || task_only {
+            // Exercise the normal App exit barrier after closing the exact
+            // native child; this focused harness creates no agent/browser task.
+            app.exit(if ok { 0 } else { 2 });
+        } else {
+            std::process::exit(if ok { 0 } else { 2 });
+        }
     });
 }
 
@@ -679,7 +775,7 @@ async fn verify_normal_stop_catalog_cleanup(
     let (detached_total, detached_cu) = last_stub_catalog(ledger)?;
     let status = manager
         .inner()
-        .mcp_catalog_status(session_id)
+        .computer_use_catalog_diagnostics(session_id)
         .ok_or("normal Stop did not publish MCP catalog status")?;
     if detached_cu != 0 || status.pending || status.desired_present {
         return Err(format!(

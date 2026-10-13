@@ -102,8 +102,10 @@ pub async fn side_browser_create(
 }
 
 #[tauri::command]
-pub fn side_browser_close(app: AppHandle, label: String) -> Result<(), String> {
-    side_browser_host::close(&app, label)
+pub async fn side_browser_close(app: AppHandle, label: String) -> Result<(), String> {
+    // Download cancellation needs the UI loop to deliver native/Wry callbacks.
+    tauri::async_runtime::spawn_blocking(move || side_browser_host::close(&app, label))
+        .await.map_err(|error| format!("side_browser_close join: {error}"))?
 }
 
 #[tauri::command]

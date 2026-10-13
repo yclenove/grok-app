@@ -127,7 +127,14 @@ impl SessionManager {
             // early prompt_complete Readies it while the agent is still working,
             // and a second `session/prompt` would then be dispatched into a busy
             // agent (the CLI rejects it as `task_already_running`).
-            if s.prompt_in_flight {
+            if s.prompt_in_flight
+                || s.acp.as_ref().is_some_and(|acp| {
+                    s.meta
+                        .agent_session_id
+                        .as_deref()
+                        .is_some_and(|agent| acp.prompt_rpc_in_flight(agent))
+                })
+            {
                 return Err(format!(
                     "{}: chat {} is still running its previous turn",
                     AgentErrorCode::ConnectFailed.as_str(),
@@ -228,6 +235,9 @@ impl SessionManager {
                 s.deferred_prompt_complete = None;
                 s.saw_model_output = false;
                 return Err(format!("JOURNAL_WRITE_FAILED: {e}"));
+            }
+            if let Some(acp) = s.acp.as_ref() {
+                acp.computer_use_chat_started(&s.app_session_id);
             }
             // Sidebar recency: last activity, not last click. Pin stays organizational.
             s.meta.updated_at = user_row.created_at;
@@ -522,7 +532,7 @@ impl SessionManager {
             // bound” id may belong to another App session — prompts must
             // target this chat's own agent session.
             let outcome = match agent_sid {
-                Some(sid) => acp.prompt_for(&sid, &agent_prompt).await,
+                Some(sid) => acp.prompt_for_turn(&sid, &agent_prompt, &turn_id).await,
                 None => Err(AgentError::new(
                     AgentErrorCode::AgentCrashed,
                     "chat has no agent session id (reconnect)",
@@ -538,6 +548,9 @@ impl SessionManager {
                     let mut pending_emits = Vec::new();
                     let mut pending_persists = Vec::new();
                     mgr.with_session_mut(&turn_sid, |s| {
+                        if s.active_turn_id.as_deref() != Some(turn_id.as_str()) {
+                            return;
+                        }
                         // The RPC failed, so no authoritative PromptComplete will
                         // arrive. Release the turn or the chat stays un-parkable
                         // and refuses further sends.
@@ -581,6 +594,12 @@ impl SessionManager {
                     let mut pending_emits = Vec::new();
                     let mut pending_persists = Vec::new();
                     mgr.with_session_mut(&turn_sid, |s| {
+                        // A retired RPC cannot clear a newer user/Host turn.
+                        // A normally finished turn has no active id and needs
+                        // no sticky-stream repair here.
+                        if s.active_turn_id.as_deref() != Some(turn_id.as_str()) {
+                            return;
+                        }
                         // Only heal sticky *Streaming* here — leave
                         // AwaitingPermission alone (user gate still live).
                         let sticky_streaming = s.fsm.state() == SessionState::Streaming;
@@ -888,6 +907,7 @@ impl SessionManager {
         // Fence Computer Use before touching the turn state.  The returned
         // plan contains only local authority changes; its adapter/browser
         // cleanup is scheduled after the Stop snapshot is emitted.
+        self.fence_computer_use_chat_stop(&target);
         let computer_use_stop = self.fence_computer_use_stop(&target);
         // Handshake is not a turn. Stop / Retry must tear it down so the
         // user is not stuck on 连接中 until restart.

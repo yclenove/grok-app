@@ -21,10 +21,10 @@ pub fn run_identity_host_protect() -> Result<(), String> {
         .find(|t| t.title.contains(&title))
         .ok_or_else(|| format!("fixture not listed: {title}"))?;
     let parts: Vec<&str> = target.target_id.split(':').collect();
-    if parts.len() != 4 || parts[0] != "win" {
+    if parts.len() != 5 || parts[0] != "win" {
         fx.close();
         return Err(format!(
-            "target_id must be win:pid:hwnd:stamp, got {}",
+            "target_id must be win:pid:hwnd:stamp:process_birth, got {}",
             target.target_id
         ));
     }

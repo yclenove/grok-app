@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 mod completion;
 mod dispatch;
 mod mcp;
-mod resources;
+pub(super) mod resources;
 mod restart;
 
 const PAIRING_CHECKS: &[&str] = &[

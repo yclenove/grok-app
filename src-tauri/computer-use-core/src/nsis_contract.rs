@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn missing_target_triple_fails_closed() {
         let script = repo_root().join("scripts/tauri-before-build.mjs");
-        let out = std::process::Command::new("node")
+        let out = std::process::Command::new(crate::runtime_test_seed::node())
             .arg(&script)
             .arg("--gate-only")
             .env_remove("TAURI_ENV_TARGET_TRIPLE")
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn windows_msvc_triple_is_admitted() {
         let script = repo_root().join("scripts/tauri-before-build.mjs");
-        let out = std::process::Command::new("node")
+        let out = std::process::Command::new(crate::runtime_test_seed::node())
             .arg(&script)
             .arg("--gate-only")
             .env("TAURI_ENV_TARGET_TRIPLE", "x86_64-pc-windows-msvc")
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn macos_triple_does_not_require_windows_seed() {
         let script = repo_root().join("scripts/tauri-before-build.mjs");
-        let out = std::process::Command::new("node")
+        let out = std::process::Command::new(crate::runtime_test_seed::node())
             .arg(&script)
             .arg("--gate-only")
             .env("TAURI_ENV_TARGET_TRIPLE", "aarch64-apple-darwin")
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn unsupported_windows_triple_fails_closed() {
         let script = repo_root().join("scripts/tauri-before-build.mjs");
-        let out = std::process::Command::new("node")
+        let out = std::process::Command::new(crate::runtime_test_seed::node())
             .arg(&script)
             .arg("--gate-only")
             .env("TAURI_ENV_TARGET_TRIPLE", "aarch64-pc-windows-msvc")

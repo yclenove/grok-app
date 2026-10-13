@@ -121,11 +121,19 @@ impl ExistingTabHost {
             return Err("invalid browser session identity".into());
         }
         state.browser_session_id = Some(current_id.into());
-        Ok(previous_id.map_or_else(Vec::new, |previous| {
-            state
+        let released = previous_id.map_or_else(Vec::new, |previous| {
+            let mut released = state
                 .extension_completions
-                .converge_browser_exit(previous, cleanups)
-        }))
+                .converge_browser_exit(previous, cleanups);
+            released.extend(
+                state
+                    .observation_completions
+                    .converge_browser_exit(previous, cleanups),
+            );
+            released
+        });
+        super::transport::sweep_requests(&mut state);
+        Ok(released)
     }
 
     pub fn claim_existing_completion(

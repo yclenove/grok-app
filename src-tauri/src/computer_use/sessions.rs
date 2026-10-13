@@ -155,6 +155,7 @@ pub fn fail_checked(
     grants().fail_checked(broker, ticket, || clear(&ticket.session))
 }
 
+#[cfg(debug_assertions)]
 pub fn revoke(session: &str) {
     if let Some(broker) = super::global_broker() {
         grants().revoke(&broker, session, || clear(session));

@@ -3,6 +3,7 @@ import { inspectDocument, sameView } from "./document-state.mjs";
 import { normalizeCapture } from "./capture-document.mjs";
 import { actDocument, cancelDocumentOperation } from "./act-document.mjs";
 import { fenceDocument } from "./document-execution.mjs";
+import { ObservationOperation } from "./observation-operation.mjs";
 
 async function bounded(promise) {
   let timer;
@@ -20,6 +21,7 @@ export class SharedTabs {
   #epoch = 0;
   #activity = 0;
   #actions = new Map();
+  #observations = new Map();
   #journal;
   #clock;
 
@@ -30,11 +32,18 @@ export class SharedTabs {
     this.#clock = clock;
   }
 
-  reset() { ++this.#epoch; this.#entries.clear(); this.#cancelActions(); }
+  reset() { ++this.#epoch; this.#entries.clear(); this.#cancelActions(); this.#cancelObservations(); }
   activityChanged() {
     ++this.#activity;
     for (const entry of this.#entries.values()) entry.modelSnapshot = null;
     this.#cancelActions();
+    this.#cancelObservations();
+  }
+
+  #cancelObservations(tabId) {
+    for (const [id, operation] of this.#observations) {
+      if (tabId === undefined || tabId === id) operation.cancel();
+    }
   }
 
   #cancelActions(tabId) {
@@ -52,6 +61,7 @@ export class SharedTabs {
   }
 
   actionsIdle() { return this.#actions.size === 0; }
+  observationsIdle() { return this.#observations.size === 0; }
 
   releaseRecovered(binding) {
     const operation = this.#actions.get(Number(binding.tabId));
@@ -61,8 +71,9 @@ export class SharedTabs {
     this.#actions.delete(operation.tabId);
   }
 
-  async current() {
-    const rows = await bounded(this.tabs.query({ active: true, lastFocusedWindow: true }));
+  async current(operation) {
+    const query = () => this.tabs.query({ active: true, lastFocusedWindow: true });
+    const rows = await (operation ? operation.run(query) : bounded(query()));
     if (rows.length !== 1 || !Number.isSafeInteger(rows[0].id) || rows[0].id < 0) throw new Error("shareUnavailable");
     const tab = rows[0];
     const entry = this.#entries.get(tab.id);
@@ -74,11 +85,12 @@ export class SharedTabs {
       && this.client.connectionEpoch !== null && this.client.connectionEpoch === entry.connection;
   }
 
-  async #document(tabId, documentId) {
-    const results = await bounded(this.scripting.executeScript({
+  async #document(tabId, documentId, operation) {
+    const inspect = () => this.scripting.executeScript({
       target: documentId ? { tabId, documentIds: [documentId] } : { tabId, frameIds: [0] },
       world: "ISOLATED", func: inspectDocument,
-    }));
+    });
+    const results = await (operation ? operation.run(inspect) : bounded(inspect()));
     if (results.length !== 1 || results[0].frameId !== 0 || typeof results[0].documentId !== "string"
       || !/^[0-9a-f]{32}$/i.test(results[0].documentId)
       || (documentId && results[0].documentId !== documentId)) throw new Error("shareUnavailable");
@@ -95,11 +107,12 @@ export class SharedTabs {
 
   async share(expectedTabId) {
     if (this.client.connectionEpoch === null) throw new Error("pairingRejected");
+    if (this.#observations.has(expectedTabId)) throw new Error("busy");
     const epoch = this.#epoch;
     if (this.#journal && await this.#journal.hasTab(expectedTabId)) throw new Error("busy");
     const tab = await this.current();
     if (epoch !== this.#epoch || tab.tabId !== expectedTabId) throw new Error("cancelled");
-    if (this.#entries.has(tab.tabId) || this.#actions.has(tab.tabId)) throw new Error("busy");
+    if (this.#entries.has(tab.tabId) || this.#actions.has(tab.tabId) || this.#observations.has(tab.tabId)) throw new Error("busy");
     if (this.#entries.size >= 64 || !Number.isSafeInteger(this.#documentSequence + 1)) throw new Error("shareUnavailable");
     const entry = { tabId: tab.tabId, epoch, connection: this.client.connectionEpoch,
       documentGeneration: ++this.#documentSequence, offered: false, shared: false, retirement: null };
@@ -125,7 +138,7 @@ export class SharedTabs {
       }
       entry.offered = true;
       await this.client.shareCurrentTab({ tabId: tab.tabId, title: snapshot.title, url: snapshot.url,
-        documentGeneration: entry.documentGeneration, focused: true }, entry.connection);
+        documentGeneration: entry.documentGeneration, documentId: entry.documentId, focused: true }, entry.connection);
       if (!this.#live(entry)) throw new Error("cancelled");
       // Even same-URL reloads have a new Chrome documentId. Never inherit authority.
       await this.#document(tab.tabId, entry.documentId);
@@ -154,6 +167,7 @@ export class SharedTabs {
     entry.cancelled = true;
     entry.modelSnapshot = null;
     this.#cancelActions(tabId);
+    this.#cancelObservations(tabId);
     try { await this.#retire(entry); }
     finally { if (this.#entries.get(tabId) === entry) this.#entries.delete(tabId); }
   }
@@ -166,21 +180,38 @@ export class SharedTabs {
     return { tabId: tab.tabId, shared: false };
   }
 
-  async observe(request) {
+  async observe(request, signal, checkpoint) {
     const entry = this.#entries.get(Number(request.tabId));
     const activity = this.#activity;
     const live = () => entry && entry.shared && this.#live(entry)
-      && activity === this.#activity && entry.documentGeneration === request.documentGeneration && Date.now() < request.deadlineMs;
-    if (!live() || request.command.kind !== "observe") throw new Error("cancelled");
-    if (this.#actions.has(entry.tabId)) throw new Error("busy");
-    const executionIdentity = await this.#clock.next();
+      && !signal?.aborted && activity === this.#activity
+      && request.documentId === entry.documentId
+      && entry.documentGeneration === request.documentGeneration && Date.now() < request.deadlineMs;
+    if (!live() || request.command.kind !== "observe"
+      || (request.protocol === 2 && typeof checkpoint !== "function")) throw new Error("cancelled");
+    if (this.#actions.has(entry.tabId) || this.#observations.has(entry.tabId)
+      || this.#actions.size + this.#observations.size >= 8) throw new Error("busy");
+    const operation = new ObservationOperation(request.deadlineMs, signal);
+    this.#observations.set(entry.tabId, operation);
+    if (request.command.preview !== true) entry.modelSnapshot = null;
+    try { return await this.#observe(request, entry, operation, () => live() && operation.live(), checkpoint); }
+    finally {
+      if (!operation.live()) entry.modelSnapshot = null;
+      operation.close();
+      // Reset/unshare cannot delete or transfer the slot of this original owner.
+      this.#observations.delete(entry.tabId);
+    }
+  }
+
+  async #observe(request, entry, operation, live, checkpoint) {
+    const executionIdentity = await operation.run(() => this.#clock.next());
     if (!live()) throw new Error("cancelled");
-    const active = await this.current();
+    const active = await this.current(operation);
     if (!live() || active.tabId !== entry.tabId) throw new Error("cancelled");
-    const before = await this.#document(entry.tabId, entry.documentId);
+    const before = await this.#document(entry.tabId, entry.documentId, operation);
     if (before.url !== entry.url) throw new Error("cancelled");
     if (!live()) throw new Error("cancelled");
-    const results = await bounded(this.scripting.executeScript({
+    const results = await operation.run(() => this.scripting.executeScript({
       target: { tabId: entry.tabId, documentIds: [entry.documentId] }, world: "ISOLATED",
       func: observeDocument, args: [request.command.snapshotId, request.command.preview !== true, executionIdentity],
     }));
@@ -188,25 +219,29 @@ export class SharedTabs {
       || results[0].result?.snapshotId !== request.command.snapshotId) throw new Error("cancelled");
     let screenshot = null;
     if (request.command.screenshot === true) {
-      const captureView = await this.#document(entry.tabId, entry.documentId);
-      const [captureTab] = await bounded(this.tabs.query({ active: true, lastFocusedWindow: true }));
+      const captureView = await this.#document(entry.tabId, entry.documentId, operation);
+      const [captureTab] = await operation.run(() => this.tabs.query({ active: true, lastFocusedWindow: true }));
       if (!live() || !sameView(before, captureView) || captureTab?.id !== entry.tabId
         || !Number.isSafeInteger(captureTab.windowId) || captureTab.windowId < 0) throw new Error("cancelled");
-      const dataUrl = await bounded(this.tabs.captureVisibleTab(captureTab.windowId, { format: "png" }));
+      const dataUrl = await operation.run(() => this.tabs.captureVisibleTab(captureTab.windowId, { format: "png" }));
+      // The Host may cancel between two watcher polls. Recheck the same request
+      // after its native read returns, before handing any bytes to the decoder.
+      if (checkpoint) await operation.run(checkpoint);
       // Drop a suspect image before decoding or returning it to the Host.
       if (!live()) throw new Error("cancelled");
-      const capturedView = await this.#document(entry.tabId, entry.documentId);
+      const capturedView = await this.#document(entry.tabId, entry.documentId, operation);
       if (!live() || !sameView(before, capturedView)) throw new Error("cancelled");
-      screenshot = await bounded(normalizeCapture(dataUrl, before, live));
+      screenshot = await operation.run(() => normalizeCapture(dataUrl, before, live));
     }
     if (!live()) throw new Error("cancelled");
-    const after = await this.#document(entry.tabId, entry.documentId);
+    const after = await this.#document(entry.tabId, entry.documentId, operation);
     if (!sameView(before, after) || results[0].result.url !== entry.url) throw new Error("cancelled");
-    const finalActive = await this.current();
+    const finalActive = await this.current(operation);
+    if (checkpoint) await operation.run(checkpoint);
     if (!live() || finalActive.tabId !== entry.tabId) throw new Error("cancelled");
     if (!request.command.preview) entry.modelSnapshot = {
       id: request.command.snapshotId, session: request.session, runId: request.runId,
-      grantGeneration: request.grantGeneration, activity, view: before,
+      grantGeneration: request.grantGeneration, activity: this.#activity, view: before,
     };
     return { ...results[0].result, documentId: entry.documentId, screenshot };
   }
@@ -217,7 +252,8 @@ export class SharedTabs {
     const snapshot = entry?.modelSnapshot;
     const command = request.command;
     const rejected = { status: "rejected", detail: "stale_snapshot", physicallySettled: true };
-    if (!entry || !snapshot || command?.kind !== "act" || this.#actions.size >= 8 || this.#actions.has(entry.tabId)
+    if (!entry || !snapshot || command?.kind !== "act" || this.#actions.size + this.#observations.size >= 8
+      || this.#actions.has(entry.tabId) || this.#observations.has(entry.tabId)
       || Object.keys(command).some(key => !["kind", "snapshotId", "elementRef", "action", "parameters"].includes(key))) return rejected;
     const operation = { id: request.requestId, tabId: entry.tabId, documentId: entry.documentId,
       snapshotId: snapshot.id, cancelled: signal.aborted, dispatched: false, cancellation: null };

@@ -59,6 +59,7 @@ fn turn_output_events_are_never_droppable() {
     ));
     assert!(SessionManager::event_carries_turn_output(
         &AcpEvent::PromptComplete {
+            host_turn_id: None,
             stop_reason: "end_turn".into(),
             authoritative: true,
         }
@@ -74,6 +75,7 @@ fn turn_output_events_are_never_droppable() {
     ));
     assert_eq!(
         SessionManager::event_kind_name(&AcpEvent::PromptComplete {
+            host_turn_id: None,
             stop_reason: "end_turn".into(),
             authoritative: false,
         }),

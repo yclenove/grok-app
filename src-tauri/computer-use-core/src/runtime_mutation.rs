@@ -263,7 +263,7 @@ mod tests {
         let repo = seed.parent().unwrap().to_path_buf();
         let path = mutation_lock_path(&seed);
         let leftover = MutationOwner {
-            pid: 1,
+            pid: crate::runtime_test_seed::retired_node_pid(),
             run_id: "ghost".into(),
             seed: seed.display().to_string(),
             repo: repo.display().to_string(),

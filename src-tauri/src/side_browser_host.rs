@@ -36,6 +36,9 @@ use std::sync::mpsc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+#[cfg(windows)]
+mod close_windows;
+
 use crate::side_browser_google_auth::{
     handoff_google_auth_externally, should_open_google_auth_externally,
     side_browser_data_directory, SIDE_BROWSER_DATA_STORE,
@@ -303,6 +306,8 @@ pub fn create(
     height: f64,
 ) -> Result<(), String> {
     validate_side_label(&label)?;
+    #[cfg(windows)]
+    close_windows::ensure_openable(&label)?;
     let mut url = url;
     let mut parsed = validate_url(&url)?;
     // Address-bar / deep-link into Google auth: hand off before the child
@@ -351,11 +356,21 @@ pub fn create(
             if handoff_google_auth_externally(app, &label, &parsed) {
                 return Ok(());
             }
+            #[cfg(windows)]
+            if let Some(document) = crate::computer_use::webview::lifecycle::current(&label)
+                .and_then(|native| native.document())
+            {
+                crate::computer_use::webview::cancel_side_browser_downloads(
+                    &existing,
+                    document.instance,
+                );
+            }
             crate::computer_use::webview::lifecycle::navigation_started(&label);
             emit_page_load(app, "started", &label, &url);
-            existing
-                .navigate(parsed)
-                .map_err(|e| format!("reuse side browser navigate: {e}"))?;
+            if let Err(error) = existing.navigate(parsed) {
+                crate::computer_use::webview::lifecycle::navigation_cancelled(&label);
+                return Err(format!("reuse side browser navigate: {error}"));
+            }
         }
         tracing::info!(
             target: "side_browser",
@@ -375,6 +390,11 @@ pub fn create(
     // These CU identities belong to this native instance, not its reusable
     // Tauri label. Old navigation callbacks cannot fence a replacement.
     let cu_native = crate::computer_use::webview::lifecycle::creating()?;
+    #[cfg(windows)]
+    let cu_download_instance = cu_native
+        .document()
+        .ok_or("WebView native identity unavailable during create")?
+        .instance;
     let cu_navigation = cu_native.clone();
     let cu_page_load = cu_native.clone();
     let nav_label = label.clone();
@@ -397,10 +417,16 @@ pub fn create(
         .on_navigation(move |url| {
             // Retire document-scoped CU authority before either navigation or
             // the Google auth handoff. Both policies must share one callback.
+            #[cfg(windows)]
+            crate::computer_use::webview::cancel_side_browser_downloads_now(cu_download_instance);
             cu_navigation.navigation_started();
             // Google Sign-In inside child WebView2 hard-freezes Windows (#1154).
             // Open a shared-cookie top-level window and cancel in-child load.
-            !handoff_google_auth_externally(&nav_app, &nav_label, url)
+            let handed_off = handoff_google_auth_externally(&nav_app, &nav_label, url);
+            if handed_off {
+                cu_navigation.navigation_cancelled();
+            }
+            !handed_off
         })
         .on_new_window(move |url, _features| {
             if handoff_google_auth_externally(&new_win_app, &new_win_label, &url) {
@@ -423,10 +449,15 @@ pub fn create(
             };
             match payload.event() {
                 PageLoadEvent::Started => {
+                    #[cfg(windows)]
+                    crate::computer_use::webview::cancel_side_browser_downloads_now(
+                        cu_download_instance,
+                    );
                     cu_page_load.navigation_started();
                     emit_page_load(webview.app_handle(), "started", &label, &url);
                 }
                 PageLoadEvent::Finished => {
+                    cu_page_load.navigation_finished();
                     emit_page_load(webview.app_handle(), "finished", &label, &url);
                     let _ = webview.eval(polyfill_reload.clone());
                 }
@@ -449,6 +480,14 @@ pub fn create(
             match event {
                 DownloadEvent::Requested { url, destination } => {
                     let url_s = url.to_string();
+                    #[cfg(windows)]
+                    if crate::computer_use::webview::claim_computer_use_download(
+                        cu_download_instance,
+                        &url_s,
+                        destination,
+                    ) {
+                        return true;
+                    }
                     let suggested = suggested_download_name(destination, &url_s);
                     // Accept immediately into a unique staging path. Modal save
                     // dialogs inside this callback frequently fail on macOS
@@ -491,6 +530,15 @@ pub fn create(
                 }
                 DownloadEvent::Finished { url, path, success } => {
                     let url_s = url.to_string();
+                    #[cfg(windows)]
+                    if crate::computer_use::webview::finish_computer_use_download(
+                        cu_download_instance,
+                        &url_s,
+                        path.as_deref(),
+                        success,
+                    ) {
+                        return true;
+                    }
                     let pending = take_pending(&url_s);
                     // Prefer platform path; macOS wry often yields None — use staging.
                     let staging = path
@@ -684,6 +732,18 @@ pub fn create(
         let _ = created.close();
         return Err(error);
     }
+    #[cfg(windows)]
+    if let Err(error) = crate::computer_use::webview::schedule_computer_use_download_handler(
+        &created,
+        cu_download_instance,
+    ) {
+        tracing::warn!(
+            target: "side_browser",
+            %webview_label,
+            error = %error,
+            "Computer Use download handler setup deferred"
+        );
+    }
 
     tracing::info!(
         target: "side_browser",
@@ -698,18 +758,23 @@ pub fn create(
 /// Close a side-browser webview if present (no error when already gone).
 pub fn close(app: &AppHandle, label: String) -> Result<(), String> {
     validate_side_label(&label)?;
-    // Capture the native handle before retiring its routing identity, so a
-    // replacement created after that fence is never looked up and closed.
-    let webview = app.get_webview(&label);
-    if let Some(native) = crate::computer_use::webview::lifecycle::current(&label) {
-        // Fence first, even if native close later fails. Failure is not proof
-        // that a previously queued CU operation can safely regain authority.
-        crate::computer_use::webview::lifecycle::closed(&label, &native);
+    #[cfg(windows)]
+    return close_windows::close(app, label);
+    #[cfg(not(windows))]
+    {
+        // Capture the native handle before retiring its routing identity, so a
+        // replacement created after that fence is never looked up and closed.
+        let webview = app.get_webview(&label);
+        if let Some(native) = crate::computer_use::webview::lifecycle::current(&label) {
+            // Fence first, even if native close later fails. Failure is not proof
+            // that a previously queued CU operation can safely regain authority.
+            crate::computer_use::webview::lifecycle::closed(&label, &native);
+        }
+        if let Some(wv) = webview {
+            wv.close().map_err(|e| format!("side browser close: {e}"))?;
+        }
+        Ok(())
     }
-    if let Some(wv) = webview {
-        wv.close().map_err(|e| format!("side browser close: {e}"))?;
-    }
-    Ok(())
 }
 
 /// List known side-browser webviews (label prefix `resource-browser`).
@@ -733,19 +798,39 @@ pub fn navigate(app: &AppHandle, label: String, url: String) -> Result<(), Strin
         return Ok(());
     }
     let wv = get_side_webview(app, &label)?;
+    #[cfg(windows)]
+    if let Some(document) = crate::computer_use::webview::lifecycle::current(&label)
+        .and_then(|native| native.document())
+    {
+        crate::computer_use::webview::cancel_side_browser_downloads(&wv, document.instance);
+    }
     crate::computer_use::webview::lifecycle::navigation_started(&label);
     // Optimistic start so the UI can paint a progress bar before WK/WebView2
     // fires PageLoadEvent::Started (can lag on slow DNS / first byte).
     emit_page_load(app, "started", &label, &url);
-    wv.navigate(parsed).map_err(|e| format!("navigate: {e}"))
+    if let Err(error) = wv.navigate(parsed) {
+        crate::computer_use::webview::lifecycle::navigation_cancelled(&label);
+        return Err(format!("navigate: {error}"));
+    }
+    Ok(())
 }
 
 pub fn reload(app: &AppHandle, label: String) -> Result<(), String> {
     let wv = get_side_webview(app, &label)?;
+    #[cfg(windows)]
+    if let Some(document) = crate::computer_use::webview::lifecycle::current(&label)
+        .and_then(|native| native.document())
+    {
+        crate::computer_use::webview::cancel_side_browser_downloads(&wv, document.instance);
+    }
     crate::computer_use::webview::lifecycle::navigation_started(&label);
     let url = wv.url().ok().map(|u| u.to_string()).unwrap_or_default();
     emit_page_load(app, "started", &label, &url);
-    wv.reload().map_err(|e| format!("reload: {e}"))
+    if let Err(error) = wv.reload() {
+        crate::computer_use::webview::lifecycle::navigation_cancelled(&label);
+        return Err(format!("reload: {error}"));
+    }
+    Ok(())
 }
 
 pub fn current_url(app: &AppHandle, label: String) -> Result<String, String> {

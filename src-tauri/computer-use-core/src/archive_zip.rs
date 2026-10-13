@@ -4,7 +4,7 @@
 use crate::playwright_materialize::sha256_hex;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::Path;
 use zip::CompressionMethod;
 use zip::ZipArchive;
@@ -27,9 +27,12 @@ impl ZipError {
 #[derive(Debug, Clone)]
 pub struct ZipPolicy {
     pub expected_root: String,
+    /// Counts directories and links too, not just extracted files.
+    pub max_entries: u32,
     pub max_files: u32,
     pub max_file_bytes: u64,
     pub max_total_bytes: u64,
+    pub max_archive_bytes: u64,
     pub max_path_chars: usize,
     pub max_compression_ratio: f64,
     /// If set, only these paths (relative to expected_root) are written.
@@ -42,26 +45,32 @@ pub struct ZipPolicy {
 
 impl ZipPolicy {
     pub fn chromium() -> Self {
+        let limits = crate::runtime_limits::chromium();
         Self {
             expected_root: "chrome-win".into(),
-            max_files: 200,
-            max_file_bytes: 400 * 1024 * 1024,
-            max_total_bytes: 512 * 1024 * 1024,
-            max_path_chars: 240,
-            max_compression_ratio: 20.0,
+            max_entries: limits.max_entries,
+            max_files: limits.max_files,
+            max_file_bytes: limits.max_file_bytes,
+            max_total_bytes: limits.max_total_bytes,
+            max_archive_bytes: limits.max_archive_bytes,
+            max_path_chars: limits.max_path_chars,
+            max_compression_ratio: limits.max_compression_ratio,
             extract_allowlist: None,
             allowed_symlinks: BTreeMap::new(),
         }
     }
 
     pub fn node_win_x64() -> Self {
+        let limits = crate::runtime_limits::node();
         Self {
-            expected_root: "node-v20.18.0-win-x64".into(),
-            max_files: 8000,
-            max_file_bytes: 120 * 1024 * 1024,
-            max_total_bytes: 512 * 1024 * 1024,
-            max_path_chars: 240,
-            max_compression_ratio: 20.0,
+            expected_root: crate::runtime_lock::RuntimeTarget::WindowsX64.node_archive_root(),
+            max_entries: limits.max_entries,
+            max_files: limits.max_files,
+            max_file_bytes: limits.max_file_bytes,
+            max_total_bytes: limits.max_total_bytes,
+            max_archive_bytes: limits.max_archive_bytes,
+            max_path_chars: limits.max_path_chars,
+            max_compression_ratio: limits.max_compression_ratio,
             extract_allowlist: Some(vec!["node.exe".into(), "LICENSE".into()]),
             allowed_symlinks: BTreeMap::new(),
         }
@@ -74,6 +83,9 @@ pub fn extract_zip(
     policy: &ZipPolicy,
     expected_sha256: Option<&str>,
 ) -> Result<u32, ZipError> {
+    if bytes.len() as u64 > policy.max_archive_bytes {
+        return Err(ZipError::new("oversize", "compressed archive too large"));
+    }
     if let Some(expected) = expected_sha256 {
         let actual = sha256_hex(bytes);
         if actual != expected {
@@ -83,25 +95,24 @@ pub fn extract_zip(
             ));
         }
     }
-    if dest.exists() {
-        fs::remove_dir_all(dest).map_err(|e| ZipError::new("io", e.to_string()))?;
-    }
-    fs::create_dir_all(dest).map_err(|e| ZipError::new("io", e.to_string()))?;
     let staging_parent = dest
         .parent()
         .ok_or_else(|| ZipError::new("invalid_dest", "zip dest must have a parent"))?;
+    fs::create_dir_all(staging_parent).map_err(|e| ZipError::new("io", e.to_string()))?;
     let staging = staging_parent.join(format!(".zip-staging-{}", uuid::Uuid::new_v4()));
     let result = (|| {
         fs::create_dir_all(&staging).map_err(|e| ZipError::new("io", e.to_string()))?;
         let written = extract_into(&staging, bytes, policy)?;
+        // Invalid archives must not destroy an existing validated destination.
+        // Runtime preparation calls this only within its owned staging tree.
+        if dest.exists() {
+            fs::remove_dir_all(dest).map_err(|e| ZipError::new("io", e.to_string()))?;
+        }
         fs::rename(&staging, dest).map_err(|e| ZipError::new("io", e.to_string()))?;
         Ok(written)
     })();
     if staging.exists() {
         let _ = fs::remove_dir_all(&staging);
-    }
-    if result.is_err() && dest.exists() {
-        let _ = fs::remove_dir_all(dest);
     }
     result
 }
@@ -109,6 +120,9 @@ pub fn extract_zip(
 fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32, ZipError> {
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| ZipError::new("truncated", e.to_string()))?;
+    if archive.len() > policy.max_entries as usize {
+        return Err(ZipError::new("oversize", "too many archive entries"));
+    }
     let staging_canon =
         fs::canonicalize(staging).map_err(|e| ZipError::new("io", e.to_string()))?;
     let mut files = 0u32;
@@ -138,20 +152,40 @@ fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32,
             }
         }
         let is_symlink = entry.is_symlink();
-        if let Some(mode) = entry.unix_mode() {
-            // S_IFLNK | S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK
-            let kind = mode & 0o170000;
-            if matches!(kind, 0o020000 | 0o060000 | 0o010000 | 0o140000) {
-                return Err(ZipError::new(
-                    "symlink",
-                    "zip special unix mode is not allowed",
-                ));
-            }
+        let kind = entry.unix_mode().unwrap_or_default() & 0o170000;
+        if !matches!(kind, 0 | 0o040000 | 0o100000 | 0o120000) {
+            return Err(ZipError::new(
+                "symlink",
+                "zip special unix mode is not allowed",
+            ));
         }
         let raw = entry.name().to_string();
-        let norm = validate_zip_name(&raw, policy.max_path_chars)?;
+        // The shared path quota is relative to the component root.
+        let norm = validate_zip_name(
+            &raw,
+            policy.max_path_chars + policy.expected_root.chars().count() + 1,
+        )?;
         let rel = classify_zip_path(&norm, &policy.expected_root)?;
-        if matches!(rel, ZipRel::Root) || entry.is_dir() || norm.ends_with('/') {
+        if let ZipRel::Inside(relative) = &rel {
+            if relative.chars().count() > policy.max_path_chars {
+                return Err(ZipError::new("path", "archive path too long"));
+            }
+        }
+        if !seen_case.insert(norm.to_ascii_lowercase()) {
+            return Err(ZipError::new(
+                "duplicate_path",
+                format!("duplicate zip path after case fold: {norm}"),
+            ));
+        }
+        if matches!(rel, ZipRel::Root) || entry.is_dir() {
+            if is_symlink {
+                return Err(ZipError::new("symlink", "zip directory cannot be a link"));
+            }
+            if !entry.is_dir() || !matches!(kind, 0 | 0o040000) || entry.size() != 0 {
+                return Err(ZipError::new("path", "zip directory must have no payload"));
+            }
+            crate::runtime_tree::copy_exact(&mut entry, &mut std::io::sink(), 0)
+                .map_err(|e| ZipError::new(&e.code, e.message))?;
             if matches!(rel, ZipRel::Root) {
                 saw_root = true;
             }
@@ -169,15 +203,13 @@ fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32,
         if is_symlink && !policy.allowed_symlinks.contains_key(&rel) {
             return Err(ZipError::new("symlink", "zip symlink is not allowlisted"));
         }
-        saw_root = true;
-        let folded = rel.to_ascii_lowercase();
-        if !seen_case.insert(folded) {
-            return Err(ZipError::new(
-                "duplicate_path",
-                format!("duplicate zip path after case fold: {rel}"),
-            ));
+        if !matches!(kind, 0 | 0o100000 | 0o120000) {
+            return Err(ZipError::new("path", "zip file mode is not regular"));
         }
-        files += 1;
+        saw_root = true;
+        files = files
+            .checked_add(1)
+            .ok_or_else(|| ZipError::new("oversize", "archive file count overflow"))?;
         if files > policy.max_files {
             return Err(ZipError::new("oversize", "too many archive files"));
         }
@@ -185,40 +217,32 @@ fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32,
         if size > policy.max_file_bytes {
             return Err(ZipError::new("oversize", "archive file too large"));
         }
-        total = total.saturating_add(size);
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| ZipError::new("oversize", "archive byte count overflow"))?;
         if total > policy.max_total_bytes {
             return Err(ZipError::new("oversize", "uncompressed archive too large"));
         }
         let should_write = allow.as_ref().map(|set| set.contains(&rel)).unwrap_or(true);
         if !should_write {
-            let mut sink = vec![0u8; 8192];
-            let mut read_total = 0u64;
-            loop {
-                let n = entry
-                    .read(&mut sink)
-                    .map_err(|e| ZipError::new("truncated", e.to_string()))?;
-                if n == 0 {
-                    break;
-                }
-                read_total += n as u64;
-                if read_total > size && size != 0 {
-                    return Err(ZipError::new("truncated", "zip file size mismatch"));
-                }
-            }
+            crate::runtime_tree::copy_exact(&mut entry, &mut std::io::sink(), size)
+                .map_err(|e| ZipError::new(&e.code, e.message))?;
             continue;
         }
         let dest = staging.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| ZipError::new("io", e.to_string()))?;
         }
-        let mut buf = Vec::new();
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| ZipError::new("truncated", e.to_string()))?;
-        if size != 0 && buf.len() as u64 != size {
-            return Err(ZipError::new("truncated", "zip file size mismatch"));
-        }
         if is_symlink {
+            if size != policy.allowed_symlinks[&rel].len() as u64 {
+                return Err(ZipError::new(
+                    "symlink",
+                    "zip symlink target size differs from pinned layout",
+                ));
+            }
+            let mut buf = Vec::new();
+            crate::runtime_tree::copy_exact(&mut entry, &mut buf, size)
+                .map_err(|e| ZipError::new(&e.code, e.message))?;
             let target = std::str::from_utf8(&buf)
                 .map_err(|_| ZipError::new("symlink", "invalid symlink target"))?;
             if policy.allowed_symlinks.get(&rel).map(String::as_str) != Some(target) {
@@ -230,7 +254,14 @@ fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32,
             links.push((rel, target.to_string()));
             continue;
         }
-        fs::write(&dest, &buf).map_err(|e| ZipError::new("io", e.to_string()))?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|e| ZipError::new("io", e.to_string()))?;
+        crate::runtime_tree::copy_exact(&mut entry, &mut output, size)
+            .map_err(|e| ZipError::new(&e.code, e.message))?;
+        drop(output);
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
@@ -273,8 +304,11 @@ fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32,
 }
 
 fn validate_zip_name(raw: &str, max_chars: usize) -> Result<String, ZipError> {
-    if raw.contains('\0') {
-        return Err(ZipError::new("path", "archive path contains NUL"));
+    if raw.contains(['\0', '\t', '\r', '\n']) {
+        return Err(ZipError::new(
+            "path",
+            "archive path contains a listing delimiter",
+        ));
     }
     if raw.contains(':') {
         return Err(ZipError::new(
@@ -295,9 +329,10 @@ fn validate_zip_name(raw: &str, max_chars: usize) -> Result<String, ZipError> {
     if s.chars().count() > max_chars {
         return Err(ZipError::new("path", "archive path too long"));
     }
+    let s = s.trim_end_matches('/');
     for part in s.split('/') {
         if part.is_empty() {
-            continue;
+            return Err(ZipError::new("path", "empty archive path segment"));
         }
         if part == "." || part == ".." {
             return Err(ZipError::new("path", "archive path must not traverse"));
@@ -306,7 +341,7 @@ fn validate_zip_name(raw: &str, max_chars: usize) -> Result<String, ZipError> {
             return Err(ZipError::new("path", "illegal path segment"));
         }
     }
-    Ok(s.trim_end_matches('/').to_string())
+    Ok(s.to_string())
 }
 
 enum ZipRel {
@@ -381,9 +416,11 @@ mod tests {
     fn policy_tiny() -> ZipPolicy {
         ZipPolicy {
             expected_root: "root".into(),
+            max_entries: 16,
             max_files: 8,
             max_file_bytes: 1024,
             max_total_bytes: 4096,
+            max_archive_bytes: 8192,
             max_path_chars: 80,
             max_compression_ratio: 20.0,
             extract_allowlist: None,
@@ -467,3 +504,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+#[path = "archive_zip_tests.rs"]
+mod bounds_tests;

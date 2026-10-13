@@ -14,12 +14,15 @@ use super::protocol::{Observation, ObservationImage, ObservationNode, PROTOCOL_V
 struct Inner {
     executions: Vec<String>,
     list_calls: u32,
+    scope_metadata_calls: u32,
     fail_listing: bool,
     desktop_fallback: u32,
     observe_calls: u32,
     preview_ticks: u32,
     preview_active: bool,
     target_alive: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    synthetic_scope_instance: Option<u64>,
     in_flight: u32,
     abort_called: u32,
     abort_blocked: bool,
@@ -60,11 +63,18 @@ struct Inner {
     include_statusbar: bool,
     truncate_ref: Option<String>,
     stale_observe_revision: bool,
+    pinned: Vec<String>,
+    last_observe_target_id: String,
 }
 
 pub struct FakeAdapter {
     inner: Mutex<Inner>,
     cv: Condvar,
+    liveness_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    scope_metadata_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    capture_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeAdapter {
@@ -73,12 +83,15 @@ impl FakeAdapter {
             inner: Mutex::new(Inner {
                 executions: Vec::new(),
                 list_calls: 0,
+                scope_metadata_calls: 0,
                 fail_listing: false,
                 desktop_fallback: 0,
                 observe_calls: 0,
                 preview_ticks: 0,
                 preview_active: false,
                 target_alive: true,
+                #[cfg(any(test, feature = "test-support"))]
+                synthetic_scope_instance: None,
                 in_flight: 0,
                 abort_called: 0,
                 abort_blocked: false,
@@ -118,13 +131,40 @@ impl FakeAdapter {
                 include_statusbar: false,
                 truncate_ref: None,
                 stale_observe_revision: false,
+                pinned: Vec::new(),
+                last_observe_target_id: String::new(),
             }),
             cv: Condvar::new(),
+            liveness_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            scope_metadata_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            capture_hook: Mutex::new(None),
         }
     }
 
     pub fn fixture_id(&self) -> String {
         self.inner.lock().fixture_id.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_synthetic_scope_instance(&self, instance: Option<u64>) {
+        self.inner.lock().synthetic_scope_instance = instance;
+    }
+
+    /// Synthetic callback interleave. Never invokes a native target API.
+    pub fn arm_liveness_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.liveness_hook.lock() = Some(hook);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_scope_metadata_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.scope_metadata_hook.lock() = Some(hook);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn arm_capture_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.capture_hook.lock() = Some(hook);
     }
 
     pub fn set_listing_error(&self, fail: bool) {
@@ -135,6 +175,10 @@ impl FakeAdapter {
         self.inner.lock().list_calls
     }
 
+    pub fn scope_metadata_calls(&self) -> u32 {
+        self.inner.lock().scope_metadata_calls
+    }
+
     pub fn host_id(&self) -> String {
         self.inner.lock().host_id.clone()
     }
@@ -142,6 +186,24 @@ impl FakeAdapter {
     pub fn rotate_identity(&self) {
         let mut g = self.inner.lock();
         g.fixture_id = format!("fake:window:{}", g.snapshot_seq.saturating_add(1000));
+    }
+
+    /// Keep a synthetic member alive after [`Self::rotate_identity`].
+    /// This is test data, not a real App or operating-system window.
+    pub fn pin_synthetic_member(&self, target_id: &str) {
+        let mut g = self.inner.lock();
+        if !target_id.is_empty() && !g.pinned.iter().any(|id| id == target_id) {
+            g.pinned.push(target_id.to_string());
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unpin_synthetic_member(&self, target_id: &str) {
+        self.inner.lock().pinned.retain(|id| id != target_id);
+    }
+
+    pub fn last_observe_target_id(&self) -> String {
+        self.inner.lock().last_observe_target_id.clone()
     }
 
     pub fn set_session_locked(&self, locked: bool) {
@@ -199,6 +261,7 @@ impl FakeAdapter {
 
     pub fn set_hang(&self, hang: bool) {
         self.inner.lock().hang = hang;
+        self.cv.notify_all();
     }
 
     pub fn set_abort_does_not_quiesce(&self, v: bool) {
@@ -218,7 +281,7 @@ impl FakeAdapter {
     }
 
     pub fn set_node_count(&self, n: usize) {
-        self.inner.lock().node_count = n.max(1);
+        self.inner.lock().node_count = n;
     }
 
     pub fn set_huge_png(&self, on: bool) {
@@ -481,19 +544,131 @@ impl ComputerUseAdapter for FakeAdapter {
                 scope_label: "status chrome (skipped)".into(),
             });
         }
+        for id in &g.pinned {
+            if id == &g.fixture_id || id == &g.host_id || out.iter().any(|row| row.target_id == *id)
+            {
+                continue;
+            }
+            out.push(TargetInfo {
+                target_id: id.clone(),
+                title: "SyntheticMember".into(),
+                app_name: "synthetic-fixture".into(),
+                kind: "window".into(),
+                pid: Some(std::process::id()),
+                backend: "fake".into(),
+                execution_mode: "exclusive".into(),
+                replay_policy: "never".into(),
+                lifecycle_stamp: 1,
+                display_id: "fake-display".into(),
+                coordinate_space: "image-pixels".into(),
+                scope_label: "synthetic member, not an App or OS target".into(),
+            });
+        }
         Ok(out)
     }
 
+    fn scope_candidates(
+        &self,
+        limit: usize,
+        is_current: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<super::adapter::ScopeCandidatePage, String> {
+        if !is_current() {
+            return Err("synthetic picker cancelled".into());
+        }
+        let listed = self.list_targets()?;
+        let mut candidates = Vec::new();
+        let mut truncated = false;
+        for info in listed {
+            if !is_current() {
+                return Err("synthetic picker cancelled".into());
+            }
+            if super::adapter::skip_desktop_target(&info.title, &info.app_name) {
+                continue;
+            }
+            if candidates.len() >= limit {
+                truncated = true;
+                break;
+            }
+            let identity = self.scope_identity(&info.target_id)?;
+            candidates.push(super::adapter::ScopeCandidate { info, identity });
+        }
+        Ok(super::adapter::ScopeCandidatePage {
+            candidates,
+            truncated,
+        })
+    }
+
     fn target_alive(&self, target_id: &str) -> bool {
+        let hook = self.liveness_hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         let g = self.inner.lock();
-        g.target_alive && target_id == g.fixture_id
+        member_alive(&g, target_id)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn scope_identity(
+        &self,
+        target_id: &str,
+    ) -> Result<super::adapter::NativeScopeIdentity, String> {
+        let instance = self
+            .inner
+            .lock()
+            .synthetic_scope_instance
+            .filter(|instance| *instance != 0)
+            .ok_or("synthetic scope witness disabled")?;
+        if !self.target_alive(target_id) {
+            return Err("synthetic scope identity retired".into());
+        }
+        Ok(super::adapter::NativeScopeIdentity::Synthetic {
+            target_id: target_id.into(),
+            instance,
+        })
+    }
+
+    fn scope_target_info(&self, _run_id: &str, target_id: &str) -> Result<TargetInfo, String> {
+        let mut g = self.inner.lock();
+        g.scope_metadata_calls += 1;
+        if !member_alive(&g, target_id) || g.iconic {
+            return Err("synthetic selected target retired".into());
+        }
+        let row = TargetInfo {
+            target_id: target_id.into(),
+            title: if target_id == g.fixture_id {
+                "GrokCuFixture"
+            } else {
+                "SyntheticMember"
+            }
+            .into(),
+            app_name: "synthetic-fixture".into(),
+            kind: "window".into(),
+            pid: Some(std::process::id()),
+            backend: "fake".into(),
+            execution_mode: "exclusive".into(),
+            replay_policy: "never".into(),
+            lifecycle_stamp: 1,
+            display_id: "fake-display".into(),
+            coordinate_space: "image-pixels".into(),
+            scope_label: "synthetic member, not an App or OS target".into(),
+        };
+        drop(g);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let hook = self.scope_metadata_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        Ok(row)
     }
 
     fn observe(&self, target_id: &str) -> Result<Observation, String> {
         let mut g = self.inner.lock();
-        if !g.target_alive || target_id != g.fixture_id {
+        if !member_alive(&g, target_id) {
             return Err("dead target".into());
         }
+        g.last_observe_target_id = target_id.to_string();
         g.observe_calls += 1;
         g.snapshot_seq += 1;
         let snap = format!("snap-{}", g.snapshot_seq);
@@ -553,7 +728,7 @@ impl ComputerUseAdapter for FakeAdapter {
                 }
             })
             .collect();
-        Ok(Observation {
+        let observation = Observation {
             text: String::new(),
             version: PROTOCOL_VERSION,
             run_id: String::new(),
@@ -575,7 +750,15 @@ impl ComputerUseAdapter for FakeAdapter {
             origin_x: origin.0,
             origin_y: origin.1,
             topology_revision: 0,
-        })
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let hook = self.capture_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        Ok(observation)
     }
 
     fn act(&self, req: &DispatchRequest) -> Result<AdapterActResult, String> {
@@ -612,7 +795,7 @@ impl ComputerUseAdapter for FakeAdapter {
         let hang;
         {
             let mut g = self.inner.lock();
-            if !g.target_alive {
+            if !member_alive(&g, &effective.target_id) {
                 return Err("dead target".into());
             }
             g.last_generation = effective.generation;
@@ -722,7 +905,7 @@ impl ComputerUseAdapter for FakeAdapter {
 
     fn foreground_input_available(&self, target_id: &str) -> bool {
         let g = self.inner.lock();
-        g.focus_on_fixture && target_id == g.fixture_id
+        g.focus_on_fixture && member_alive(&g, target_id)
     }
 
     fn current_geometry_revision(&self) -> u64 {
@@ -732,4 +915,9 @@ impl ComputerUseAdapter for FakeAdapter {
     fn user_input_active(&self) -> bool {
         self.inner.lock().user_input
     }
+}
+
+fn member_alive(inner: &Inner, target_id: &str) -> bool {
+    inner.target_alive
+        && (target_id == inner.fixture_id || inner.pinned.iter().any(|id| id == target_id))
 }

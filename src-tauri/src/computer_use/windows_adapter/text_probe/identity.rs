@@ -195,6 +195,107 @@ pub(super) fn run(run: &mut GateRunner<'_>) {
         Ok(())
     });
     run(
+        "PID-only root authorization cannot reach owned text",
+        &|| {
+            let edit = Edit::new("old")?;
+            let id = format_target_id(std::process::id(), edit.hwnd, stamp_window(edit.hwnd));
+            let legacy = id.split(':').take(4).collect::<Vec<_>>().join(":");
+            if let Ok(target) = NativeTarget::authorized(edit.hwnd, &legacy) {
+                let _ = text::set_value(&target, "unauthorized", &|| Ok(()));
+            }
+            if edit.state.effects.get() != 0 {
+                return Err("PID-only authorization dispatched a native write".into());
+            }
+            edit.assert_value("old")
+        },
+    );
+    run(
+        "changed process birth cannot reuse an unchanged root",
+        &|| {
+            let edit = Edit::new("old")?;
+            let id = format_target_id(std::process::id(), edit.hwnd, stamp_window(edit.hwnd));
+            NativeTarget::authorized(edit.hwnd, &id)?;
+            let mut parts: Vec<String> = id.split(':').map(str::to_owned).collect();
+            if parts.len() != 5 {
+                return Err("missing process witness".into());
+            }
+            let birth: u64 = parts[4].parse().map_err(|_| "bad process witness")?;
+            parts[4] = birth.saturating_add(1).to_string();
+            let forged = parts.join(":");
+            if NativeTarget::authorized(edit.hwnd, &forged).is_ok() || edit.state.effects.get() != 0
+            {
+                return Err("root with another process birth inherited authorization".into());
+            }
+            edit.assert_value("old")
+        },
+    );
+    run("native scope receipt is not an execution grant", &|| {
+        use crate::computer_use::adapter::ComputerUseAdapter;
+        use grok_computer_use_core::adapter::SurfaceKind;
+        use grok_computer_use_core::broker::{
+            AccessApprovalReady, BrokerOptions, ComputerUseBroker,
+        };
+        use std::sync::Arc;
+        let edit = Edit::new("old")?;
+        let id = format_target_id(std::process::id(), edit.hwnd, stamp_window(edit.hwnd));
+        let adapter = Arc::new(super::super::WindowsAdapter::new());
+        // Actual Win32 witness, while the Host decision itself is synthetic.
+        adapter.scope_identity(&id)?;
+        let broker = Arc::new(ComputerUseBroker::new(
+            adapter,
+            BrokerOptions {
+                feature_enabled: false,
+                lease_path: std::env::temp_dir()
+                    .join(format!("cu-native-scope-{}.lease", uuid::Uuid::new_v4())),
+                ..BrokerOptions::default()
+            },
+        ));
+        let token = broker
+            .issue_transport_credential("owned-native-scope")
+            .map_err(|e| e.to_string())?;
+        broker
+            .bind_agent_session("owned-native-scope", "synthetic-native-agent")
+            .map_err(|e| e.to_string())?;
+        let request = broker.submit_access(token.token(), serde_json::json!({
+            "action":"request", "purpose":"synthetic Host choice of isolated native root",
+            "scopeIntent":"owned isolated EDIT", "surfaces":["desktop"], "capabilities":["observe"]
+        })).map_err(|e| e.to_string())?;
+        let request = request["requestId"]
+            .as_str()
+            .ok_or("missing native request")?;
+        let selected = broker
+            .capture_task_scope_selection(token.token(), request, 1, SurfaceKind::Desktop, &id)
+            .map_err(|e| e.to_string())?;
+        let reserved = broker
+            .reserve_selected_access_approval(token.token(), selected)
+            .map_err(|e| e.to_string())?;
+        let AccessApprovalReady::Prepare(mut prep) = reserved else {
+            return Err("new native choice did not prepare".into());
+        };
+        if broker.feature_enabled()
+            || broker
+                .begin_model_call(token.token(), "computer_observe")
+                .is_ok()
+            || edit.state.effects.get() != 0
+        {
+            return Err("native receipt enabled execution before commit".into());
+        }
+        prep.abort();
+        let selected = broker
+            .capture_task_scope_selection(token.token(), request, 1, SurfaceKind::Desktop, &id)
+            .map_err(|e| e.to_string())?;
+        retire(edit.hwnd);
+        if broker
+            .reserve_selected_access_approval(token.token(), selected)
+            .is_ok()
+            || broker.feature_enabled()
+            || edit.state.effects.get() != 0
+        {
+            return Err("retired original root published an approval reservation".into());
+        }
+        edit.assert_value("old")
+    });
+    run(
         "directed down and up address one unchanged native instance",
         &|| {
             let edit = Edit::new("old")?;

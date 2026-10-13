@@ -124,6 +124,7 @@ describe("i18n catalog", () => {
       "cu.panel.confirmPairing", "cu.panel.revokePairing", "cu.panel.selectWebview",
       "cu.panel.unbindWebview", "cu.flag.off", "cu.task.windowClosed", "cu.task.unavailable",
       "cu.panel.targetsUnavailable",
+      "cu.consent.pausedCleanup",
     ];
     for (const locale of LOCALES) {
       if (locale === "en") continue;

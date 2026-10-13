@@ -23,26 +23,53 @@ impl ComputerUseBroker {
         if self.authorized_target(run_id)? != expected {
             return Err(BrokerError::IdentityMismatch("targetGeneration"));
         }
-        let result = executor
-            .adapter
-            .list_targets_for_run(run_id)
-            .map_err(BrokerError::Adapter)
-            .and_then(|rows| {
-                let mut matches = rows
-                    .into_iter()
-                    .filter(|row| row.target_id == binding.target_id);
-                let row = matches.next().ok_or(BrokerError::TargetUnauthorized)?;
-                if matches.next().is_some() {
-                    return Err(BrokerError::IdentityMismatch("ambiguousTargetMetadata"));
+        let member = {
+            let inner = self.inner.lock();
+            match &inner
+                .runs
+                .get(run_id)
+                .ok_or(BrokerError::RunNotFound)?
+                .consent
+            {
+                super::ConsentGate::Bound(consent) => {
+                    Some(inner.consent.scope_member_for_binding(
+                        consent,
+                        inner.feature_enabled,
+                        inner.feature_epoch,
+                    )?)
                 }
-                if SurfaceRouter::classify_target_id(&row.target_id) != surface {
-                    return Err(BrokerError::IdentityMismatch("surface"));
+                super::ConsentGate::Pending | super::ConsentGate::Legacy => None,
+            }
+        };
+        let result = if let Some(member) = member.filter(|member| member.native.is_some()) {
+            self.scope_member_info(run_id, &member, || {
+                if self.authorized_target(run_id)? != expected {
+                    return Err(BrokerError::IdentityMismatch("targetGeneration"));
                 }
-                if !executor.adapter.target_alive(&row.target_id) {
-                    return Err(BrokerError::DeadTarget);
-                }
-                Ok(row)
-            });
+                self.executor_for_target(&binding).map(|_| ())
+            })
+        } else {
+            executor
+                .adapter
+                .list_targets_for_run(run_id)
+                .map_err(BrokerError::Adapter)
+                .and_then(|rows| {
+                    let mut matches = rows
+                        .into_iter()
+                        .filter(|row| row.target_id == binding.target_id);
+                    let row = matches.next().ok_or(BrokerError::TargetUnauthorized)?;
+                    if matches.next().is_some() {
+                        return Err(BrokerError::IdentityMismatch("ambiguousTargetMetadata"));
+                    }
+                    if SurfaceRouter::classify_target_id(&row.target_id) != surface {
+                        return Err(BrokerError::IdentityMismatch("surface"));
+                    }
+                    if !executor.adapter.target_alive(&row.target_id) {
+                        return Err(BrokerError::DeadTarget);
+                    }
+                    Ok(row)
+                })
+        };
         let current = self.executor_for_target(&binding)?;
         if !Arc::ptr_eq(&current.adapter, &executor.adapter) {
             return Err(BrokerError::IdentityMismatch("surfaceExecutorGeneration"));

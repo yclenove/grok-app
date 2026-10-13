@@ -16,16 +16,21 @@ export function copyHostLifetime(value, instanceId = value?.instanceId) {
 // The trusted durable cleanup journal stores it; it never enters a page, model
 // message, or user-visible diagnostic. It cannot grant input/read authority.
 export class HostLifetimeClient {
-  constructor({ client, fetch = (...args) => globalThis.fetch(...args) }) { this.client = client; this.fetch = fetch; }
+  constructor({ client, fetch = (...args) => globalThis.fetch(...args), purpose = "action" }) {
+    if (!["action", "observation"].includes(purpose)) throw new Error("hostLifetimeUnavailable");
+    this.client = client; this.fetch = fetch; this.purpose = purpose;
+  }
 
   async capture(endpoint, proof) {
     const copied = copyCompletionProof(proof);
     let reader;
     const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 5000);
     try {
-      const response = await this.fetch(parseEndpoint(endpoint) + "/cu/extension-completion/host-lifetime", {
+      const path = this.purpose === "observation" ? "/cu/extension-observation/host-lifetime" : "/cu/extension-completion/host-lifetime";
+      const response = await this.fetch(parseEndpoint(endpoint) + path, {
         method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
-        headers: { "content-type": "application/json" }, body: JSON.stringify(copied), signal: controller.signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(this.purpose === "observation" ? { purpose: "observation", proof: copied } : copied), signal: controller.signal,
       });
       if (!response.ok) throw new Error("hostLifetimeUnavailable");
       reader = response.body.getReader(); const chunks = []; let size = 0;

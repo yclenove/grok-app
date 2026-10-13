@@ -1457,21 +1457,28 @@ pub(crate) fn infer_hard_end_reason_from_stop(
     }
 }
 
-/// True when the journal already has an end-of-turn chip after the last user.
+/// True when the latest continuation already has an end-of-turn chip.
+/// A Host continuation has its own lease even before its first journal flush;
+/// an earlier Pause must not suppress a new Stop or interrupted-turn repair.
 pub(crate) fn has_turn_end_marker_after_last_user(app_session_id: &str) -> bool {
     let msgs = store::load_messages(app_session_id);
-    let start = msgs
-        .iter()
-        .rposition(|m| m.role == "user")
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    msgs[start..].iter().any(|m| {
-        matches!(
+    let started_at = crate::turn_lease::read_lease(app_session_id)
+        .filter(|lease| lease.turn_id.is_some())
+        .and_then(|lease| chrono::DateTime::parse_from_rfc3339(&lease.started_at).ok());
+    for m in msgs.iter().rev() {
+        let terminal = matches!(
             m.marker.as_deref(),
-            Some("turn_cancelled") | Some("turn_end") | Some("end_of_turn")
-        ) || m.content.starts_with("turn_cancelled")
-            || m.content.starts_with("turn_end|")
-    })
+            Some("turn_cancelled") | Some("turn_end") | Some("end_of_turn") | Some("stream_stall")
+        ) || (m.role == "tool"
+            && (m.content.starts_with("turn_cancelled") || m.content.starts_with("turn_end|")));
+        if terminal {
+            return started_at.is_none_or(|started| m.created_at >= started);
+        }
+        if m.role == "user" || m.role == "assistant" {
+            return false;
+        }
+    }
+    false
 }
 
 /// Detect permission-reject style tool failures in the current turn journal

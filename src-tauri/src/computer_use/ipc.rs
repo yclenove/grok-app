@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use crate::session_manager::SessionManager;
 
 static ENDPOINT: OnceLock<IpcServer> = OnceLock::new();
+static ENDPOINT_INIT: Mutex<()> = Mutex::new(());
 static SESSION_MANAGER: OnceLock<Mutex<Weak<SessionManager>>> = OnceLock::new();
 
 fn session_manager_slot() -> &'static Mutex<Weak<SessionManager>> {
@@ -23,6 +24,7 @@ pub fn endpoint() -> Option<&'static IpcServer> {
 }
 
 pub fn ensure(broker: Arc<ComputerUseBroker>) -> Result<&'static IpcServer, String> {
+    let _init = ENDPOINT_INIT.lock();
     if let Some(endpoint) = ENDPOINT.get() {
         return Ok(endpoint);
     }

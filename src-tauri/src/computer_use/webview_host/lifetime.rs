@@ -59,6 +59,7 @@ impl BrowserExit {
     pub(super) fn observe(
         environment: &ICoreWebView2Environment,
         webview: &ICoreWebView2,
+        observed: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let environment = environment
             .cast::<ICoreWebView2Environment5>()
@@ -66,7 +67,6 @@ impl BrowserExit {
         let mut expected = 0;
         unsafe { webview.BrowserProcessId(&mut expected) }
             .map_err(|_| "owned browser identity unavailable")?;
-        let observed = Arc::new(AtomicBool::new(false));
         let seen = observed.clone();
         let handler = BrowserProcessExitedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {

@@ -23,7 +23,7 @@ fn connection(session: &PairingSession) -> PairingConnection {
 }
 
 fn share(host: &ExistingTabHost, session: &PairingSession, tab: &str, sequence: u64) -> String {
-    host.offer_connected_tab(
+    host.offer_connected_tab_document(
         &connection(session),
         sequence,
         SharedTabOffer {
@@ -39,6 +39,7 @@ fn share(host: &ExistingTabHost, session: &PairingSession, tab: &str, sequence: 
             connection_generation: session.generation,
             focused: true,
         },
+        Some("0123456789abcdef0123456789abcdef"),
     )
     .unwrap();
     host.list_shared_candidates()
@@ -57,6 +58,10 @@ fn observe(host: &ExistingTabHost, session: &PairingSession, origin: &str, tab: 
         .unwrap();
     let ExtensionCommand::Observe { snapshot_id, .. } = &request.command;
     let snapshot = snapshot_id.clone();
+    host.claim_extension_observation(origin, &session.session_key, &request.completion)
+        .unwrap();
+    host.settle_extension_observation(origin, &request.completion)
+        .unwrap();
     host.complete_extension_request(
         origin,
         &session.session_key,

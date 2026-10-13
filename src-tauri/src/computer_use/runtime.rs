@@ -9,6 +9,12 @@ pub use grok_computer_use_core::runtime::{
 
 const SCRIPT: &str = include_str!("../../../tools/computer-use-mcp/server.mjs");
 const PROTOCOL: &str = include_str!("../../../tools/computer-use-mcp/protocol.mjs");
+mod bootstrap;
+#[cfg(test)]
+mod embedded_catalog_tests;
+#[cfg(feature = "computer-use-probe")]
+pub(crate) use bootstrap::register_probe_installation;
+pub(crate) use bootstrap::{ensure_request_runtime, register_installation};
 
 pub fn runtime_root() -> PathBuf {
     crate::paths::app_data_root()
@@ -33,6 +39,7 @@ pub fn active_manifest() -> Result<grok_computer_use_core::runtime::RuntimeManif
 }
 
 pub fn ensure_embedded_mcp(script: &str, protocol: &str) -> Result<(), String> {
+    let _guard = bootstrap::mutation_guard(&runtime_root())?;
     store().ensure_embedded_mcp(script, protocol)
 }
 
@@ -60,13 +67,14 @@ pub fn diagnose() -> Vec<RuntimeIssue> {
         .any(|i| i.component == MCP_SERVER || i.component == "mcp-protocol")
     {
         // MCP scripts are embedded in the App binary; try to materialize them first.
-        let _ = store().ensure_embedded_mcp(SCRIPT, PROTOCOL);
+        let _ = ensure_embedded_mcp(SCRIPT, PROTOCOL);
         issues = store().diagnose(required_runtime_components());
     }
     issues
 }
 
 pub fn repair_from_install(resource_dir: &Path, exe_dir: &Path) -> Result<String, String> {
+    let _guard = bootstrap::mutation_guard(&runtime_root())?;
     let seed = find_installer_seed(resource_dir, exe_dir)?;
     let pack = store().repair_from_bundle(&seed)?;
     store().ensure_embedded_mcp(SCRIPT, PROTOCOL)?;
@@ -81,6 +89,7 @@ pub fn repair_from_install(resource_dir: &Path, exe_dir: &Path) -> Result<String
 }
 
 pub fn rollback() -> Result<String, String> {
+    let _guard = bootstrap::mutation_guard(&runtime_root())?;
     store().rollback_pack()
 }
 

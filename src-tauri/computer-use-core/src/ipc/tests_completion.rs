@@ -49,6 +49,7 @@ fn fixture() -> (
         .unwrap();
     let request = &polled["request"];
     assert!(request.is_object());
+    super::tests_transport::physically_complete_observation(&server, &session, request);
     let result = json!({"request":request,"outcome":{"kind":"observation","observation":{
         "snapshotId":request["command"]["snapshotId"],"documentId":"0123456789abcdef0123456789abcdef",
         "title":"fixture","url":"https://fixture.invalid/","text":"visible fixture","nodes":[],
@@ -477,6 +478,7 @@ fn browser_restart_deserializes_versioned_cleanup_and_releases_owner() {
         "nodes": [], "viewportWidth": 800, "viewportHeight": 600, "truncated": false,
         "screenshot": null
     }}});
+    super::tests_transport::physically_complete_observation(&server, &session, request);
     assert_eq!(
         super::tests_sharing::post(&server, &session, "/cu/extension-result", &result),
         200

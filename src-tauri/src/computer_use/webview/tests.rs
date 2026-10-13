@@ -1,14 +1,29 @@
+use super::super::adapter::{
+    DownloadError, DownloadRequest, DownloadResult, NavigationDisposition, NavigationKind,
+};
 use super::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::Barrier;
 
 struct TestView {
+    label: String,
+    native_tab_id: String,
+    url: Mutex<String>,
+    title: Mutex<String>,
     alive: AtomicBool,
     generation: AtomicU64,
     scripts: AtomicU64,
+    upload_field: AtomicBool,
     reply: Mutex<Option<serde_json::Value>>,
     pending: Mutex<Option<ScriptOperation>>,
     timeout_at: AtomicU64,
+    wait_match_at: AtomicU64,
+    history_available: AtomicBool,
+    navigation_unknown: AtomicBool,
+    download_calls: AtomicU64,
+    prepared_download_url: Mutex<Option<String>>,
+    authority: Mutex<()>,
+    block_authority: AtomicBool,
     block_at: u64,
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
@@ -16,13 +31,29 @@ struct TestView {
 
 impl TestView {
     fn new(block_at: u64) -> Arc<Self> {
+        Self::named("test", block_at)
+    }
+
+    fn named(name: &str, block_at: u64) -> Arc<Self> {
         Arc::new(Self {
+            label: format!("resource-browser-{name}"),
+            native_tab_id: format!("native-{name}"),
+            url: Mutex::new(format!("https://fixture.invalid/{name}")),
+            title: Mutex::new(format!("owned fixture {name}")),
             alive: AtomicBool::new(true),
             generation: AtomicU64::new(1),
             scripts: AtomicU64::new(0),
+            upload_field: AtomicBool::new(false),
             reply: Mutex::new(None),
             pending: Mutex::new(None),
             timeout_at: AtomicU64::new(0),
+            wait_match_at: AtomicU64::new(0),
+            history_available: AtomicBool::new(false),
+            navigation_unknown: AtomicBool::new(false),
+            download_calls: AtomicU64::new(0),
+            prepared_download_url: Mutex::new(None),
+            authority: Mutex::new(()),
+            block_authority: AtomicBool::new(false),
             block_at,
             entered: Arc::new(Barrier::new(2)),
             release: Arc::new(Barrier::new(2)),
@@ -32,16 +63,16 @@ impl TestView {
 
 impl LiveWebView for TestView {
     fn label(&self) -> String {
-        "resource-browser-test".into()
+        self.label.clone()
     }
     fn tab_id(&self) -> String {
-        "native-test".into()
+        self.native_tab_id.clone()
     }
     fn url(&self) -> Result<String, String> {
-        Ok("https://fixture.invalid/".into())
+        Ok(self.url.lock().clone())
     }
     fn title(&self) -> Result<String, String> {
-        Ok("owned fixture".into())
+        Ok(self.title.lock().clone())
     }
     fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
@@ -49,8 +80,27 @@ impl LiveWebView for TestView {
     fn navigation_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
-    fn navigate(&self, _url: &str) -> Result<u64, String> {
+    fn navigate(&self, url: &str) -> Result<u64, String> {
+        let _authority = self.authority.lock();
+        *self.url.lock() = url.to_string();
         Ok(self.generation.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+    fn with_document_authority(
+        &self,
+        generation: u64,
+        commit: &mut dyn FnMut() -> Result<(), super::super::BrokerError>,
+    ) -> Result<(), super::super::BrokerError> {
+        if self.block_authority.load(Ordering::SeqCst) {
+            self.entered.wait();
+            self.release.wait();
+        }
+        let _authority = self.authority.lock();
+        if !self.alive.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != generation
+        {
+            return Err(super::super::BrokerError::DeadTarget);
+        }
+        commit()
     }
     fn host_script(&self, js: &str) -> Result<String, String> {
         let call = self.scripts.fetch_add(1, Ordering::SeqCst) + 1;
@@ -67,10 +117,23 @@ impl LiveWebView for TestView {
                 let command: serde_json::Value = serde_json::from_str(payload).unwrap();
                 if command["kind"] == "observe" {
                     let snapshot = command["snapshot"].as_str().unwrap();
+                    let actions = if self.upload_field.load(Ordering::SeqCst) {
+                        vec!["upload", "wait"]
+                    } else {
+                        vec!["click", "type_text", "wait", "download"]
+                    };
                     serde_json::json!({"ok": true, "snapshot": snapshot, "width": 800, "height": 600,
                         "text": "Fixture", "truncated": false,
                         "nodes": [{"elementRef": format!("{snapshot}:1"), "role": "button", "name": "Owned",
-                            "actions": ["click"], "x": 10, "y": 10, "width": 100, "height": 30}]})
+                            "actions": actions, "x": 10, "y": 10, "width": 100, "height": 30}]})
+                } else if command["kind"] == "wait_check" {
+                    let match_at = self.wait_match_at.load(Ordering::SeqCst);
+                    serde_json::json!({"ok": true, "matched": match_at > 0 && call >= match_at})
+                } else if (command["kind"] == "act" && command["action"] == "type_text")
+                    || command["kind"] == "upload_dispatch" {
+                    serde_json::json!({"ok": true, "verified": true})
+                } else if command["kind"] == "download_prepare" {
+                    serde_json::json!({"ok": true, "url": "https://fixture.invalid/download.bin"})
                 } else {
                     serde_json::json!({"ok": true})
                 }
@@ -94,6 +157,125 @@ impl LiveWebView for TestView {
         }
         operation.finished();
         result
+    }
+    fn navigate_for_run(
+        &self,
+        request: &NavigationRequest,
+        expected_generation: u64,
+    ) -> Result<LiveNavigationDocument, NavigationError> {
+        request
+            .cancellation
+            .check()
+            .map_err(NavigationError::not_dispatched)?;
+        let _authority = self.authority.lock();
+        if !self.alive.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != expected_generation
+        {
+            return Err(NavigationError::not_dispatched(
+                "fixture document changed before navigation",
+            ));
+        }
+        request
+            .cancellation
+            .check()
+            .map_err(NavigationError::not_dispatched)?;
+        match request.kind {
+            NavigationKind::Url => {
+                let url = request.url.as_deref().ok_or_else(|| {
+                    NavigationError::not_dispatched("url navigation requires url")
+                })?;
+                super::super::browser::is_allowed_navigate_url(url)
+                    .map_err(|error| NavigationError::not_dispatched(error.to_string()))?;
+                *self.url.lock() = url.to_string();
+            }
+            NavigationKind::Reload => {
+                if request.url.is_some() {
+                    return Err(NavigationError::not_dispatched(
+                        "url is only valid for kind=url",
+                    ));
+                }
+            }
+            NavigationKind::Back | NavigationKind::Forward => {
+                if request.url.is_some() {
+                    return Err(NavigationError::not_dispatched(
+                        "url is only valid for kind=url",
+                    ));
+                }
+                if !self.history_available.load(Ordering::SeqCst) {
+                    return Err(NavigationError::not_dispatched(
+                        "WebView has no history entry",
+                    ));
+                }
+                let suffix = match request.kind {
+                    NavigationKind::Back => "back",
+                    NavigationKind::Forward => "forward",
+                    _ => unreachable!(),
+                };
+                *self.url.lock() = format!("https://fixture.invalid/{suffix}");
+            }
+        }
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.navigation_unknown.swap(false, Ordering::SeqCst) {
+            return Err(NavigationError::dispatched_unknown(
+                "fixture navigation outcome unknown",
+            ));
+        }
+        Ok(LiveNavigationDocument {
+            generation,
+            url: self.url.lock().clone(),
+            title: self.title.lock().clone(),
+        })
+    }
+    fn download_for_run(
+        &self,
+        request: &DownloadRequest,
+        expected_generation: u64,
+        prepared_url: &str,
+        dispatch_script: &str,
+        operation: ScriptOperation,
+    ) -> Result<DownloadResult, DownloadError> {
+        if let Err(error) = operation.check() {
+            operation.finished();
+            return Err(DownloadError::not_dispatched(error));
+        }
+        let _authority = self.authority.lock();
+        if !self.alive.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != expected_generation
+        {
+            operation.finished();
+            return Err(DownloadError::not_dispatched(
+                "fixture document changed before download",
+            ));
+        }
+        *self.prepared_download_url.lock() = Some(prepared_url.to_string());
+
+        let child = operation.child();
+        if let Err(error) = child.check() {
+            operation.finished();
+            return Err(DownloadError::not_dispatched(error));
+        }
+        let reply = self.host_script(dispatch_script);
+        child.finished();
+        let dispatched = match reply
+            .and_then(|raw| parse_script_json(&raw))
+            .and_then(|value| dom::acknowledge(&value))
+        {
+            Ok(()) => true,
+            Err(_) => {
+                operation.finished();
+                return Err(DownloadError::dispatched_unknown(
+                    "fixture download dispatch outcome unknown",
+                ));
+            }
+        };
+        debug_assert!(dispatched);
+        self.download_calls.fetch_add(1, Ordering::SeqCst);
+        let write = std::fs::write(&request.destination, b"fixture-download");
+        operation.finished();
+        write.map_err(|_| DownloadError::dispatched_rejected("fixture download write failed"))?;
+        Ok(DownloadResult {
+            path: request.destination.clone(),
+        })
     }
 }
 
@@ -195,6 +377,8 @@ fn rebind_revokes_queued_old_script_without_falsely_settling_it() {
     assert!(adapter.observe(&old.target_id).is_err());
     let old_callback = view.pending.lock().take().unwrap();
     assert!(old_callback.check().is_ok());
+    // Transfer requires release; native completion stays pending.
+    assert!(adapter.unbind_for_run("session", "run"));
     let new = adapter
         .bind(view, "next", "new-run", &serde_json::json!({}))
         .unwrap();
@@ -251,19 +435,188 @@ fn bind(adapter: &WebViewAdapter, view: Arc<TestView>) -> TargetInfo {
     // Race fixtures seed a mock observation without advancing native call
     // counters. DOM behavior is exercised separately against the actual kernel.
     adapter
-        .bound
-        .lock()
-        .as_ref()
+        .bound_target(&target.target_id)
         .unwrap()
         .observation
         .lock()
         .snapshot = Some(dom::Published {
         id: "mock-snapshot".into(),
-        nodes: [("mock-snapshot:1".into(), vec!["click".into()])]
-            .into_iter()
-            .collect(),
+        nodes: [(
+            "mock-snapshot:1".into(),
+            vec!["click".into(), "type_text".into(), "wait".into()],
+        )]
+        .into_iter()
+        .collect(),
     });
     target
+}
+
+fn download_request(target: &TargetInfo, destination: std::path::PathBuf) -> DownloadRequest {
+    DownloadRequest {
+        run_id: "run".into(),
+        target_id: target.target_id.clone(),
+        target_generation: target.lifecycle_stamp,
+        action_id: "download-once".into(),
+        snapshot_id: "mock-snapshot".into(),
+        element_ref: "mock-snapshot:1".into(),
+        destination,
+        cancellation: Default::default(),
+    }
+}
+
+fn download_destination(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let directory = root.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    directory.join(name)
+}
+
+#[test]
+fn download_is_staged_once_and_published_only_under_original_document_authority() {
+    let adapter = WebViewAdapter::new();
+    let view = TestView::new(0);
+    let target = bind(&adapter, view.clone());
+    adapter
+        .bound_target(&target.target_id)
+        .unwrap()
+        .observation
+        .lock()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .nodes
+        .get_mut("mock-snapshot:1")
+        .unwrap()
+        .push("download".into());
+    let root = std::env::temp_dir().join(format!("cu-webview-download-{}", uuid::Uuid::new_v4()));
+    let destination = download_destination(&root, "report.bin");
+    let mut request = download_request(&target, destination.clone());
+    // Broker run generations and native WebView document generations are
+    // independent clocks. The adapter authorizes the exact encoded target,
+    // retained snapshot and native document rather than comparing the clocks.
+    request.target_generation += 41;
+
+    let staged = adapter.stage_download(&request).unwrap();
+    assert_eq!(staged.result().path, destination);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"fixture-download");
+    assert_eq!(view.download_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        view.prepared_download_url.lock().as_deref(),
+        Some("https://fixture.invalid/download.bin")
+    );
+    assert_eq!(view.scripts.load(Ordering::SeqCst), 2);
+    assert!(adapter.is_idle("run"));
+    assert!(adapter
+        .bound_target(&target.target_id)
+        .unwrap()
+        .observation
+        .lock()
+        .snapshot
+        .is_none());
+
+    let mut commits = 0;
+    staged
+        .commit(&mut || {
+            commits += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(commits, 1);
+    assert!(destination.is_file());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn dropped_or_retired_download_cleans_only_its_action_private_staging() {
+    for retire_with_abort in [false, true] {
+        let adapter = WebViewAdapter::new();
+        let view = TestView::new(0);
+        let target = bind(&adapter, view.clone());
+        adapter
+            .bound_target(&target.target_id)
+            .unwrap()
+            .observation
+            .lock()
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .nodes
+            .get_mut("mock-snapshot:1")
+            .unwrap()
+            .push("download".into());
+        let root =
+            std::env::temp_dir().join(format!("cu-webview-download-{}", uuid::Uuid::new_v4()));
+        let destination = download_destination(&root, "report.bin");
+        let sibling = download_destination(&root, "keep.bin");
+        std::fs::write(&sibling, b"keep").unwrap();
+        let staged = adapter
+            .stage_download(&download_request(&target, destination.clone()))
+            .unwrap();
+
+        if retire_with_abort {
+            adapter.abort("run", 1).unwrap();
+        } else {
+            view.navigate("https://fixture.invalid/replaced").unwrap();
+        }
+        let error = staged.commit(&mut || Ok(())).unwrap_err();
+        assert!(matches!(
+            error,
+            super::super::BrokerError::StopRequested | super::super::BrokerError::DeadTarget
+        ));
+        assert!(!destination.exists());
+        assert!(!destination.parent().unwrap().exists());
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn invalid_download_run_snapshot_or_ref_never_prepares_or_dispatches() {
+    let adapter = WebViewAdapter::new();
+    let view = TestView::new(0);
+    let target = bind(&adapter, view.clone());
+    adapter
+        .bound_target(&target.target_id)
+        .unwrap()
+        .observation
+        .lock()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .nodes
+        .get_mut("mock-snapshot:1")
+        .unwrap()
+        .push("download".into());
+    let root = std::env::temp_dir().join(format!("cu-webview-download-{}", uuid::Uuid::new_v4()));
+
+    let mut requests = Vec::new();
+    let mut wrong_run = download_request(&target, download_destination(&root, "run.bin"));
+    wrong_run.run_id = "other-run".into();
+    requests.push(wrong_run);
+    let mut wrong_snapshot = download_request(&target, download_destination(&root, "snapshot.bin"));
+    wrong_snapshot.snapshot_id = "other-snapshot".into();
+    requests.push(wrong_snapshot);
+    let mut wrong_ref = download_request(&target, download_destination(&root, "ref.bin"));
+    wrong_ref.element_ref = "mock-snapshot:missing".into();
+    requests.push(wrong_ref);
+
+    for request in requests {
+        let error = adapter.stage_download(&request).err().unwrap();
+        assert_eq!(
+            error.disposition,
+            super::super::adapter::DownloadDisposition::NotDispatched
+        );
+        assert!(!request.destination.exists());
+    }
+    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
+    assert_eq!(view.download_calls.load(Ordering::SeqCst), 0);
+    assert!(adapter
+        .bound_target(&target.target_id)
+        .unwrap()
+        .observation
+        .lock()
+        .snapshot
+        .is_some());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn click_request(target: TargetInfo) -> DispatchRequest {
@@ -288,305 +641,211 @@ fn click_request(target: TargetInfo) -> DispatchRequest {
     }
 }
 
-#[test]
-fn navigation_fences_target_until_explicit_reauthorization() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let old = bind(&adapter, view.clone());
-    view.navigate("https://fixture.invalid/new").unwrap();
-    assert!(!adapter.target_alive(&old.target_id));
-    assert!(adapter.list_targets().unwrap().is_empty());
-    assert!(adapter.observe(&old.target_id).is_err());
-    let new = bind(&adapter, view);
-    assert_ne!(new.target_id, old.target_id);
-    assert!(adapter.target_alive(&new.target_id));
-}
-
-#[test]
-fn rebind_same_document_rotates_binding_and_old_release_cannot_unbind_it() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let old = bind(&adapter, view.clone());
-    let new = bind(&adapter, view);
-    assert_ne!(old.target_id, new.target_id);
-    adapter.release_target(&old.target_id);
-    assert!(adapter.target_alive(&new.target_id));
-    adapter.release_target(&new.target_id);
-    assert!(adapter.list_targets().unwrap().is_empty());
-}
-
-#[test]
-fn trailing_target_identity_fields_are_rejected() {
-    let adapter = WebViewAdapter::new();
-    let target = bind(&adapter, TestView::new(0));
-    assert!(!adapter.target_alive(&format!("{}|replacement", target.target_id)));
-    assert!(parse_id(&format!("{}|replacement", target.target_id)).is_none());
-}
-
-#[test]
-fn navigation_while_observation_is_inflight_discards_the_old_result() {
-    let adapter = Arc::new(WebViewAdapter::new());
-    let view = TestView::new(1);
-    let target = bind(&adapter, view.clone());
-    let observing = {
-        let adapter = adapter.clone();
-        std::thread::spawn(move || adapter.observe(&target.target_id))
-    };
-    view.entered.wait();
-    view.navigate("https://fixture.invalid/new").unwrap();
-    view.release.wait();
-    assert!(observing.join().unwrap().unwrap_err().contains("changed"));
-}
-
-#[test]
-fn rebind_while_observation_is_inflight_never_publishes_under_the_new_owner() {
-    let adapter = Arc::new(WebViewAdapter::new());
-    let old_view = TestView::new(1);
-    let target = bind(&adapter, old_view.clone());
-    let observing = {
-        let adapter = adapter.clone();
-        std::thread::spawn(move || adapter.observe(&target.target_id))
-    };
-    old_view.entered.wait();
-    let replacement = bind(&adapter, TestView::new(0));
-    old_view.release.wait();
-    assert!(observing.join().unwrap().is_err());
-    assert!(adapter.target_alive(&replacement.target_id));
-}
-
-#[test]
-fn old_action_reply_cannot_modify_the_replacement_published_snapshot() {
-    let adapter = Arc::new(WebViewAdapter::new());
-    // act validates the model reference, then dispatches the side-effect script.
-    let old_view = TestView::new(2);
-    let target = bind(&adapter, old_view.clone());
-    let acting = {
-        let adapter = adapter.clone();
-        std::thread::spawn(move || adapter.act(&click_request(target)))
-    };
-    old_view.entered.wait();
-    let replacement = bind(&adapter, TestView::new(0));
-    old_view.release.wait();
-    assert!(acting.join().unwrap().unwrap_err().contains("unknown"));
-    assert!(adapter.target_alive(&replacement.target_id));
-    assert_eq!(
-        adapter
-            .bound
-            .lock()
-            .as_ref()
-            .unwrap()
-            .observation
-            .lock()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .id,
-        "mock-snapshot"
-    );
-}
-
-#[test]
-fn navigation_during_preflight_prevents_side_effect_dispatch() {
-    let adapter = Arc::new(WebViewAdapter::new());
-    let view = TestView::new(1);
-    let target = bind(&adapter, view.clone());
-    let acting = {
-        let adapter = adapter.clone();
-        std::thread::spawn(move || adapter.act(&click_request(target)))
-    };
-    view.entered.wait();
-    view.navigate("https://fixture.invalid/new").unwrap();
-    view.release.wait();
-    assert!(acting
-        .join()
-        .unwrap()
-        .unwrap_err()
-        .contains("before dispatch"));
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn wrong_run_cannot_dispatch_any_script_against_a_live_binding() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    let mut request = click_request(target);
-    request.run_id = "replacement-run".into();
-    assert!(adapter.act(&request).unwrap_err().contains("run identity"));
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn closed_bound_view_cannot_observe_or_advertise_a_live_target() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    view.alive.store(false, Ordering::SeqCst);
-    assert!(!adapter.target_alive(&target.target_id));
-    assert!(adapter.list_targets().unwrap().is_empty());
-    assert!(adapter.observe(&target.target_id).is_err());
-}
-
-#[test]
-fn cancellation_epoch_exhaustion_retires_binding_instead_of_restoring_old_authority() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    let current = adapter.bound.lock().clone().unwrap();
-    current.execution_epoch.store(u64::MAX, Ordering::SeqCst);
-    adapter.abort("run", 1).unwrap();
-    assert_eq!(current.execution_epoch.load(Ordering::SeqCst), u64::MAX);
-    assert!(!adapter.target_alive(&target.target_id));
-    assert!(adapter.list_targets().unwrap().is_empty());
-    assert!(adapter.observe(&target.target_id).is_err());
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
-    let replacement = bind(&adapter, view);
-    assert!(adapter.target_alive(&replacement.target_id));
-}
-
-#[test]
-fn href_cannot_bypass_element_identity_as_hidden_navigation() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    let mut request = click_request(target);
-    request.parameters = serde_json::json!({"href": "file:///private.txt"});
-    assert!(adapter.act(&request).unwrap_err().contains("parameter"));
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
-    assert_eq!(view.generation.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn fill_never_silently_clears_on_missing_ambiguous_or_wrong_type_input() {
-    use super::super::protocol::ActionKind;
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    let mut request = click_request(target);
-    request.action = ActionKind::SetValue;
-    for parameters in [
-        serde_json::json!({}),
-        serde_json::json!({"text": null}),
-        serde_json::json!({"text": "a", "value": "b"}),
-        serde_json::json!({"text": "a", "selector": "#replacement"}),
-        serde_json::json!(["text", "a"]),
-    ] {
-        request.parameters = parameters;
-        assert!(adapter.act(&request).is_err());
-    }
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
-    for parameters in [
-        serde_json::json!({"text": ""}),
-        serde_json::json!({"value": "你好"}),
-    ] {
-        request.parameters = parameters;
-        assert!(validate_action_parameters(&request).is_ok());
+fn wait_request(target: TargetInfo, name_equals: &str, timeout_ms: u64) -> DispatchRequest {
+    use super::super::adapter::ActionScope;
+    use super::super::protocol::{ActionKind, ActionTarget};
+    DispatchRequest {
+        managed_request: None,
+        cancellation: Default::default(),
+        run_id: "run".into(),
+        action_id: "wait".into(),
+        generation: 1,
+        target_id: target.target_id,
+        target_generation: target.lifecycle_stamp,
+        snapshot_id: "mock-snapshot".into(),
+        geometry_revision: target.lifecycle_stamp,
+        action: ActionKind::Wait,
+        target: ActionTarget::Element {
+            element_ref: "mock-snapshot:1".into(),
+        },
+        parameters: serde_json::json!({
+            "nameEquals": name_equals,
+            "timeoutMs": timeout_ms,
+        }),
+        scope: ActionScope::Directed,
     }
 }
 
-#[test]
-fn returned_script_is_applied_not_independently_verified_and_does_not_echo_page_data() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    *view.reply.lock() = Some(serde_json::json!({"ok": true, "value": "PRIVATE_INPUT_SENTINEL"}));
-    let target = bind(&adapter, view.clone());
-    let outcome = adapter.act(&click_request(target)).unwrap();
-    assert!(outcome.applied);
-    assert!(!outcome.verifiable);
-    assert!(!outcome.postcondition_ok);
-    assert!(!outcome.detail.contains("PRIVATE_INPUT_SENTINEL"));
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 2);
+fn type_text_request(target: TargetInfo, text: &str) -> DispatchRequest {
+    let mut request = click_request(target);
+    request.action_id = "type-text".into();
+    request.action = ActionKind::TypeText;
+    request.parameters = serde_json::json!({"text": text});
+    request
 }
 
-#[test]
-fn rejected_action_does_not_echo_page_controlled_error_data() {
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    *view.reply.lock() = Some(serde_json::json!({"ok": false, "error": "PRIVATE_INPUT_SENTINEL"}));
-    let target = bind(&adapter, view);
-    let error = adapter.act(&click_request(target)).unwrap_err();
-    assert!(!error.contains("PRIVATE_INPUT_SENTINEL"));
-}
-
-#[test]
-fn product_observation_never_extracts_fixture_input_values() {
-    for id in ["name", "mark", "count", "scroller"] {
-        assert!(!dom::KERNEL.contains(&format!("getElementById('{id}')")));
+fn navigation_request(
+    target: &TargetInfo,
+    action_id: &str,
+    kind: NavigationKind,
+    url: Option<&str>,
+) -> NavigationRequest {
+    NavigationRequest {
+        run_id: "run".into(),
+        target_id: target.target_id.clone(),
+        target_generation: 1,
+        action_id: action_id.into(),
+        kind,
+        url: url.map(str::to_string),
+        cancellation: Default::default(),
     }
 }
 
-#[test]
-fn preview_preserves_model_snapshot_and_forged_preview_action_never_dispatches() {
-    use super::super::adapter::CaptureOptions;
-    use super::super::protocol::ActionTarget;
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    let model = adapter.observe(&target.target_id).unwrap();
-    let preview = adapter
-        .capture_for_run(
-            "run",
-            &target.target_id,
-            CaptureOptions {
-                managed_request: None,
-                for_model: false,
-                screenshot: false,
-                cancellation: Default::default(),
+struct NavigationBrokerWorld {
+    broker: Arc<super::super::ComputerUseBroker>,
+    adapter: Arc<WebViewAdapter>,
+    views: Vec<(String, Arc<TestView>)>,
+    owners: Mutex<Vec<String>>,
+}
+
+struct NavigationGrant {
+    token: String,
+    run_id: String,
+}
+
+impl NavigationBrokerWorld {
+    fn new(names: &[&str]) -> Self {
+        let adapter = Arc::new(WebViewAdapter::new());
+        let views = names
+            .iter()
+            .map(|name| ((*name).to_string(), TestView::named(name, 0)))
+            .collect::<Vec<_>>();
+        adapter.install_scope_fixture(
+            views
+                .iter()
+                .map(|(_, view)| view.clone() as Arc<dyn LiveWebView>)
+                .collect(),
+        );
+        let broker = Arc::new(super::super::ComputerUseBroker::request_endpoint(
+            super::super::BrokerOptions {
+                feature_enabled: false,
+                lease_path: std::env::temp_dir()
+                    .join(format!("cu-wv-navigation-{}.lease", uuid::Uuid::new_v4())),
+                ..Default::default()
             },
-        )
-        .unwrap();
-    assert_ne!(model.snapshot_id, preview.snapshot_id);
-    let mut request = click_request(target);
-    request.snapshot_id = preview.snapshot_id;
-    request.target = ActionTarget::Element {
-        element_ref: preview.nodes[0].node_ref.clone(),
-    };
-    assert!(adapter.act(&request).unwrap_err().contains("stale"));
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 2);
-    request.snapshot_id = model.snapshot_id;
-    request.target = ActionTarget::Element {
-        element_ref: model.nodes[0].node_ref.clone(),
-    };
-    assert!(adapter.act(&request).unwrap().applied);
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 4);
-    assert!(adapter.act(&request).unwrap_err().contains("stale"));
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 4);
-}
-
-#[test]
-fn missing_observation_and_unadvertised_action_fail_before_any_native_call() {
-    use super::super::protocol::ActionKind;
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = adapter
-        .bind(view.clone(), "session", "run", &serde_json::json!({}))
-        .unwrap();
-    assert!(adapter.act(&click_request(target)).is_err());
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
-    let target = bind(&adapter, view.clone());
-    let mut request = click_request(target);
-    request.action = ActionKind::Scroll;
-    request.parameters = serde_json::json!({"dy": 100});
-    assert!(adapter.act(&request).is_err());
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
-    assert!(adapter.capabilities().scroll.semantic);
-    assert!(!adapter.capabilities().scroll.coordinate);
-}
-
-#[test]
-fn oversized_fill_and_scroll_parameters_are_rejected_before_native_dispatch() {
-    use super::super::protocol::ActionKind;
-    let adapter = WebViewAdapter::new();
-    let view = TestView::new(0);
-    let target = bind(&adapter, view.clone());
-    let mut request = click_request(target);
-    request.action = ActionKind::SetValue;
-    request.parameters = serde_json::json!({"text": "😀".repeat(8001)});
-    assert!(adapter.act(&request).is_err());
-    request.action = ActionKind::Scroll;
-    for n in [4097i64, -4097, i64::MIN, i64::MAX] {
-        request.parameters = serde_json::json!({"dy": n});
-        assert!(adapter.act(&request).is_err());
+        ));
+        broker
+            .register_surface_adapter(super::super::SurfaceKind::WebView, adapter.clone())
+            .unwrap();
+        Self {
+            broker,
+            adapter,
+            views,
+            owners: Mutex::new(Vec::new()),
+        }
     }
-    assert_eq!(view.scripts.load(Ordering::SeqCst), 0);
+
+    fn view(&self, name: &str) -> Arc<TestView> {
+        self.views
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, view)| view.clone())
+            .unwrap()
+    }
+
+    fn grant(&self, owner: &str, selected: &[&str]) -> NavigationGrant {
+        let connection = self.broker.reserve_transport_connection(owner).unwrap();
+        let token = connection.token().to_string();
+        self.broker
+            .bind_transport_agent(&token, &format!("agent-{owner}"))
+            .unwrap();
+        self.broker
+            .submit_access(
+                &token,
+                serde_json::json!({
+                    "action": "request",
+                    "purpose": "App WebView navigation replay regression",
+                    "scopeIntent": "selected fixture pages only",
+                    "surfaces": ["app-webview"],
+                    "capabilities": ["observe", "input"]
+                }),
+            )
+            .unwrap();
+        let key = self
+            .broker
+            .host_task_view(&token)
+            .unwrap()
+            .request
+            .unwrap()
+            .key;
+        let picker = self
+            .broker
+            .begin_task_scope_picker(&token, &key, super::super::SurfaceKind::WebView)
+            .unwrap()
+            .discover()
+            .unwrap();
+        let wanted = selected
+            .iter()
+            .map(|name| format!("owned fixture {name}"))
+            .collect::<std::collections::HashSet<_>>();
+        let candidate_ids = picker
+            .views()
+            .unwrap()
+            .into_iter()
+            .filter(|candidate| wanted.contains(&candidate.title))
+            .map(|candidate| candidate.candidate_id)
+            .collect::<Vec<_>>();
+        assert_eq!(candidate_ids.len(), selected.len());
+        let selection = picker.select(&candidate_ids).unwrap();
+        let grok_computer_use_core::broker::AccessApprovalReady::Prepare(mut approval) = self
+            .broker
+            .reserve_selected_access_approval(&token, selection)
+            .unwrap()
+        else {
+            panic!("fresh WebView grant must require preparation")
+        };
+        approval.publish_feature().unwrap();
+        approval.prepare_execution().unwrap();
+        approval.prepare_publication().unwrap();
+        let outcome = approval.commit_for_transport(&token).unwrap();
+        self.owners.lock().push(owner.to_string());
+        NavigationGrant {
+            token,
+            run_id: outcome.run_id,
+        }
+    }
 }
+
+impl Drop for NavigationBrokerWorld {
+    fn drop(&mut self) {
+        for owner in self.owners.get_mut().drain(..) {
+            self.broker.fence_task_consent(&owner);
+        }
+        for ticket in self.broker.take_cleanup_tickets() {
+            self.broker.finish_stop_cleanup(&ticket).unwrap();
+        }
+    }
+}
+
+fn navigation_tool_args(
+    run_id: &str,
+    target_id: Option<&str>,
+    target_generation: u64,
+    action_id: &str,
+    kind: &str,
+    url: Option<&str>,
+) -> serde_json::Value {
+    let mut args = serde_json::json!({
+        "runId": run_id,
+        "targetGeneration": target_generation,
+        "actionId": action_id,
+        "kind": kind
+    });
+    if let Some(target_id) = target_id {
+        args["targetId"] = serde_json::json!(target_id);
+    }
+    if let Some(url) = url {
+        args["url"] = serde_json::json!(url);
+    }
+    args
+}
+
+fn tool_payload(result: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+mod navigation;
+
+mod actions;
+mod upload;
+pub(crate) mod upload_permission;

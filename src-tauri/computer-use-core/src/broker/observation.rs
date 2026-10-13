@@ -1,12 +1,49 @@
 //! Per-run observation admission spans adapter work and snapshot publication.
 use super::*;
 
+pub(super) fn store_model_observation(
+    run: &mut RunState,
+    obs: &Observation,
+    epoch: u64,
+    elapsed: u64,
+) {
+    run.snapshot_id = Some(obs.snapshot_id.clone());
+    run.geometry_revision = obs.geometry_revision;
+    run.geometry_epoch = epoch;
+    run.last_image_ok = image_is_visual(obs);
+    run.image_size = (obs.image.width, obs.image.height);
+    run.element_refs = obs
+        .nodes
+        .iter()
+        .filter(|node| !node.truncated)
+        .map(|node| node.node_ref.clone())
+        .collect();
+    run.element_boxes = obs
+        .nodes
+        .iter()
+        .filter(|node| !node.truncated)
+        .filter(|node| {
+            node.x.is_some() && node.y.is_some() && node.width.is_some() && node.height.is_some()
+        })
+        .cloned()
+        .collect();
+    run.upload_refs = obs
+        .nodes
+        .iter()
+        .filter(|node| !node.truncated && node.actions.iter().any(|action| action == "upload"))
+        .map(|node| (node.node_ref.clone(), node.name.clone()))
+        .collect();
+    run.last_unknown = false;
+    run.timings.observe_ms = elapsed;
+}
+
 fn admit_capture(
     run: &mut RunState,
     run_id: &str,
     for_model: bool,
     budget: usize,
     inherited: Option<&InFlightClear>,
+    changes: &HostTaskChanges,
 ) -> Result<Option<InFlightClear>, BrokerError> {
     if run.stop != StopState::Running {
         return Err(BrokerError::StopRequested);
@@ -33,7 +70,7 @@ fn admit_capture(
         None
     } else {
         run.in_flight.store(true, Ordering::SeqCst);
-        Some(InFlightClear(run.in_flight.clone()))
+        Some(InFlightClear::new(run.in_flight.clone(), changes))
     };
     // Charge admitted attempts, not just successes; failed adapters cannot
     // create an unbounded retry loop. UI previews use no model budget.
@@ -53,11 +90,24 @@ impl ComputerUseBroker {
         run_id: &str,
         screenshot: bool,
     ) -> Result<Observation, BrokerError> {
-        self.capture(run_id, true, screenshot, None)
+        self.capture(run_id, true, screenshot, None, None, None)
+    }
+
+    pub fn observe_for_permit(
+        &self,
+        permit: &crate::task_consent::ExecutionPermit,
+        screenshot: bool,
+    ) -> Result<Observation, BrokerError> {
+        if permit.capability != "observe" {
+            return Err(BrokerError::Schema(
+                "capability does not allow this tool".into(),
+            ));
+        }
+        self.capture(&permit.run_id, true, screenshot, None, Some(permit), None)
     }
 
     pub fn observe_preview(&self, run_id: &str) -> Result<Observation, BrokerError> {
-        self.capture(run_id, false, true, None)
+        self.capture(run_id, false, true, None, None, None)
     }
 
     pub(super) fn capture(
@@ -66,16 +116,64 @@ impl ComputerUseBroker {
         for_model: bool,
         screenshot: bool,
         inherited: Option<&InFlightClear>,
+        model: Option<&crate::task_consent::ExecutionPermit>,
+        host: Option<(
+            &crate::task_consent::TransportContext,
+            &HostExecutionAddress,
+        )>,
     ) -> Result<Observation, BrokerError> {
         let t0 = Instant::now();
-        let (target, gen, cancellation, managed_request, _guard) = {
+        let (target, gen, cancellation, managed_request, _guard, admit_hook) = {
             let mut g = self.inner.lock();
             if !g.feature_enabled {
                 return Err(BrokerError::FeatureDisabled);
             }
+            if let Some((ctx, address)) = host {
+                host_execution::require_execution(&g, ctx, address)?;
+                let run = g.runs.get(run_id).ok_or(BrokerError::RunNotFound)?;
+                if let ConsentGate::Bound(binding) = &run.consent {
+                    if !g.consent.binding_capability(binding, "observe") {
+                        return Err(BrokerError::TargetUnauthorized);
+                    }
+                }
+            }
+            {
+                let run = g.runs.get(run_id).ok_or(BrokerError::RunNotFound)?;
+                super::admit_consent(&g.consent, g.feature_enabled, g.feature_epoch, run)?;
+                if for_model {
+                    if let ConsentGate::Bound(binding) = &run.consent {
+                        if !g.consent.binding_capability(binding, "observe") {
+                            return Err(BrokerError::Schema(
+                                "capability does not allow this tool".into(),
+                            ));
+                        }
+                    }
+                }
+                if let Some(permit) = model {
+                    if permit.run_id != run_id || permit.capability != "observe" {
+                        return Err(BrokerError::TargetUnauthorized);
+                    }
+                    g.consent
+                        .recheck_permit(permit, g.feature_enabled, g.feature_epoch)?;
+                    if run
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.target_id != permit.target_id)
+                    {
+                        return Err(BrokerError::TargetUnauthorized);
+                    }
+                }
+            }
             let run = g.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
             let target = run.target.clone().ok_or(BrokerError::TargetUnauthorized)?;
-            let guard = admit_capture(run, run_id, for_model, self.observe_budget, inherited)?;
+            let guard = admit_capture(
+                run,
+                run_id,
+                for_model,
+                self.observe_budget,
+                inherited,
+                &self.changes,
+            )?;
             let managed = if target.surface == SurfaceKind::ManagedBrowser {
                 Some(
                     self.tabs
@@ -84,14 +182,21 @@ impl ComputerUseBroker {
             } else {
                 None
             };
-            (
-                target,
-                run.generation,
-                run.cancellation.clone(),
-                managed,
-                guard,
-            )
+            let generation = run.generation;
+            let cancellation = run.cancellation.clone();
+            let admit_hook = if for_model {
+                g.consent.take_before_final_admit()
+            } else {
+                None
+            };
+            (target, generation, cancellation, managed, guard, admit_hook)
         };
+        if let Some(hook) = admit_hook {
+            hook();
+        }
+        if let Some(permit) = model {
+            self.recheck_model_call(permit)?;
+        }
         let executor = self.executor_for_target(&target)?;
         let adapter = &executor.adapter;
         let target_id = target.target_id.clone();
@@ -100,21 +205,34 @@ impl ComputerUseBroker {
             return Err(BrokerError::Schema("session locked; run paused".into()));
         }
         if !adapter.target_alive(&target_id) {
+            self.record_closed_target(run_id, gen, &target_id);
             return Err(BrokerError::DeadTarget);
         }
-        let mut obs = adapter
-            .capture_for_run_at_generation(
-                run_id,
-                &target_id,
-                gen,
-                crate::adapter::CaptureOptions {
-                    for_model,
-                    screenshot,
-                    cancellation,
-                    managed_request,
-                },
-            )
-            .map_err(BrokerError::Adapter)?;
+        let mut obs = match adapter.capture_for_run_at_generation(
+            run_id,
+            &target_id,
+            gen,
+            crate::adapter::CaptureOptions {
+                for_model,
+                screenshot,
+                cancellation,
+                managed_request,
+            },
+        ) {
+            Ok(obs) => obs,
+            Err(error) => {
+                if for_model {
+                    let mut g = self.inner.lock();
+                    let still = g.runs.get(run_id).is_some_and(|run| {
+                        run.stop == StopState::Running && run.generation == gen && !run.paused
+                    });
+                    if still && g.feature_enabled {
+                        super::note_locked_activity(&mut g, run_id);
+                    }
+                }
+                return Err(BrokerError::Adapter(error));
+            }
+        };
         let epoch = adapter.current_geometry_revision_for(&target_id);
         if obs.geometry_revision != 0 && obs.geometry_revision != epoch {
             return Err(BrokerError::IdentityMismatch("observation revision"));
@@ -129,6 +247,9 @@ impl ComputerUseBroker {
         let mut g = self.inner.lock();
         if !g.feature_enabled {
             return Err(BrokerError::FeatureDisabled);
+        }
+        if let Some((ctx, address)) = host {
+            host_execution::require_execution(&g, ctx, address)?;
         }
         {
             let run = g.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
@@ -149,31 +270,10 @@ impl ComputerUseBroker {
             if !for_model {
                 return Ok(obs);
             }
-            run.snapshot_id = Some(obs.snapshot_id.clone());
-            run.geometry_revision = obs.geometry_revision;
-            run.geometry_epoch = epoch;
-            run.last_image_ok = visual;
-            run.image_size = (obs.image.width, obs.image.height);
-            run.element_refs = obs
-                .nodes
-                .iter()
-                .filter(|node| !node.truncated)
-                .map(|node| node.node_ref.clone())
-                .collect();
-            run.element_boxes = obs
-                .nodes
-                .iter()
-                .filter(|node| !node.truncated)
-                .filter(|node| {
-                    node.x.is_some()
-                        && node.y.is_some()
-                        && node.width.is_some()
-                        && node.height.is_some()
-                })
-                .cloned()
-                .collect();
-            run.last_unknown = false;
-            run.timings.observe_ms = elapsed;
+            store_model_observation(run, &obs, epoch, elapsed);
+        }
+        if for_model {
+            super::note_locked_activity(&mut g, run_id);
         }
         push_trace(
             &mut g,
@@ -204,8 +304,22 @@ impl ComputerUseBroker {
             if !g.feature_enabled {
                 return Err(BrokerError::FeatureDisabled);
             }
+            {
+                let run = g.runs.get(run_id).ok_or(BrokerError::RunNotFound)?;
+                super::admit_consent(&g.consent, g.feature_enabled, g.feature_epoch, run)?;
+                if let ConsentGate::Bound(binding) = &run.consent {
+                    if binding.target_id != tab_id {
+                        return Err(BrokerError::TargetUnauthorized);
+                    }
+                    if !g.consent.binding_capability(binding, "observe") {
+                        return Err(BrokerError::Schema(
+                            "capability does not allow this tool".into(),
+                        ));
+                    }
+                }
+            }
             let run = g.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
-            let guard = admit_capture(run, run_id, true, self.observe_budget, None)?;
+            let guard = admit_capture(run, run_id, true, self.observe_budget, None, &self.changes)?;
             let managed = self
                 .tabs
                 .admit_managed_request(run_id, run.cancellation.clone())?;
@@ -229,6 +343,11 @@ impl ComputerUseBroker {
         if !g.feature_enabled {
             return Err(BrokerError::FeatureDisabled);
         }
+        let run = g.runs.get(run_id).ok_or(BrokerError::RunNotFound)?;
+        super::admit_consent(&g.consent, g.feature_enabled, g.feature_epoch, run)?;
+        if matches!(&run.consent, ConsentGate::Bound(binding) if binding.target_id != tab_id) {
+            return Err(BrokerError::TargetUnauthorized);
+        }
         let run = g.runs.get_mut(run_id).ok_or(BrokerError::RunNotFound)?;
         if run.stop != StopState::Running || run.paused || run.generation != generation {
             return Err(BrokerError::IdentityMismatch("observation generation"));
@@ -240,6 +359,7 @@ impl ComputerUseBroker {
         run.element_boxes.clear();
         run.last_image_ok = false;
         run.last_unknown = false;
+        super::note_locked_activity(&mut g, run_id);
         Ok(obs)
     }
 }

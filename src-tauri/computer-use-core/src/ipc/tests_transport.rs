@@ -1,6 +1,8 @@
 use super::tests_sharing::{fixture, post};
 use super::*;
 
+mod observation_lifecycle;
+
 #[test]
 fn extension_poll_rejects_wrong_connection_and_arbitrary_script_fields() {
     let (_broker, server, session) = fixture();
@@ -38,6 +40,32 @@ fn http(
         .unwrap()
 }
 
+pub(super) fn physically_complete_observation(
+    server: &IpcServer,
+    session: &crate::pairing::PairingSession,
+    request: &Value,
+) {
+    assert_eq!(
+        post(
+            server,
+            session,
+            "/cu/extension-observation/claim",
+            &request["completion"]
+        ),
+        200
+    );
+    // Synthetic original reader has ended before its cleanup receipt is sent.
+    assert_eq!(
+        post(
+            server,
+            session,
+            "/cu/extension-observation/settle",
+            &request["completion"]
+        ),
+        200
+    );
+}
+
 #[test]
 fn real_http_observation_is_bounded_and_replay_or_forged_binding_cannot_complete() {
     let (broker, server, session) = fixture();
@@ -72,6 +100,7 @@ fn real_http_observation_is_bounded_and_replay_or_forged_binding_cannot_complete
     assert!(!polled.to_string().contains(&session.session_key));
     let request = polled["request"].clone();
     assert!(request.is_object());
+    physically_complete_observation(&server, &session, &request);
     let body = json!({"request":request,"outcome":{"kind":"observation","observation":{
         "snapshotId":request["command"]["snapshotId"],"documentId":"0123456789abcdef0123456789abcdef",
         "title":"fixture","url":"https://fixture.invalid/","text":"界".repeat(32000),

@@ -24,7 +24,7 @@
     "message": "페어링되지 않았습니다."
   },
   "forget": {
-    "message": "Revoke pairing"
+    "message": "연결 해제"
   },
   "shareCurrentTab": {
     "message": "현재 탭 공유"

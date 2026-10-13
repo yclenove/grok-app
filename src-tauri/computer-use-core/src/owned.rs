@@ -161,6 +161,59 @@ impl HostOwnedAdapter {
 }
 
 impl ComputerUseAdapter for HostOwnedAdapter {
+    fn scope_candidates_for_task(
+        &self,
+        limit: usize,
+        is_current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<crate::adapter::ScopeCandidatePage, String> {
+        self.inner.scope_candidates_for_task(limit, is_current)
+    }
+
+    fn bind_scope_candidate(
+        &self,
+        identity: &crate::adapter::NativeScopeIdentity,
+        session: &str,
+        run: &str,
+    ) -> Result<crate::adapter::ScopeCandidate, String> {
+        let bound = self.inner.bind_scope_candidate(identity, session, run)?;
+        // Bindings exist before active-target preparation. Retain the wrapper
+        // claim for every member so partial/terminal cleanup reaches the inner
+        // adapter even when this member was never selected for execution.
+        if let Err(error) = self.claim_owned(Some(run), &bound.info.target_id) {
+            self.inner
+                .release_target_for_run(run, &bound.info.target_id);
+            return Err(error);
+        }
+        Ok(bound)
+    }
+
+    fn with_scope_authority(
+        &self,
+        identities: &[crate::adapter::NativeScopeIdentity],
+        commit: &mut dyn FnMut() -> Result<(), crate::error::BrokerError>,
+    ) -> Result<(), crate::error::BrokerError> {
+        self.inner.with_scope_authority(identities, commit)
+    }
+
+    fn scope_candidates(
+        &self,
+        limit: usize,
+        is_current: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<crate::adapter::ScopeCandidatePage, String> {
+        self.inner.scope_candidates(limit, is_current)
+    }
+
+    fn scope_identity(
+        &self,
+        target_id: &str,
+    ) -> Result<crate::adapter::NativeScopeIdentity, String> {
+        self.inner.scope_identity(target_id)
+    }
+
+    fn scope_target_info(&self, run_id: &str, target_id: &str) -> Result<TargetInfo, String> {
+        self.inner.scope_target_info(run_id, target_id)
+    }
+
     fn backend_id(&self) -> &'static str {
         self.inner.backend_id()
     }
@@ -255,6 +308,16 @@ impl ComputerUseAdapter for HostOwnedAdapter {
         self.inner.wait_uses_retained_reference()
     }
 
+    fn stage_upload(
+        &self,
+        request: &crate::adapter::UploadRequest,
+    ) -> Result<Box<dyn crate::adapter::StagedUpload>, crate::adapter::UploadError> {
+        self.claim_target_for_run(&request.run_id, &request.target_id)
+            .and_then(|()| self.admit(&request.run_id, &request.cancellation))
+            .map_err(crate::adapter::UploadError::NotDispatched)?;
+        self.inner.stage_upload(request)
+    }
+
     fn abort(&self, run_id: &str, generation: u64) -> Result<(), String> {
         // Fence native input before any optional worker IPC can wait.
         let native = self.inner.abort(run_id, generation);
@@ -337,6 +400,34 @@ impl ComputerUseAdapter for HostOwnedAdapter {
 mod tests {
     use super::*;
     use crate::fake::FakeAdapter;
+
+    #[test]
+    fn selected_scope_identity_and_metadata_reach_the_original_owned_adapter() {
+        let fake = Arc::new(FakeAdapter::new());
+        fake.set_synthetic_scope_instance(Some(1));
+        let owned = HostOwnedAdapter::new(fake.clone());
+        let target = fake.fixture_id();
+        assert_eq!(
+            owned.scope_identity(&target).unwrap(),
+            fake.scope_identity(&target).unwrap()
+        );
+        assert_eq!(
+            owned
+                .scope_target_info("selected-run", &target)
+                .unwrap()
+                .target_id,
+            target
+        );
+        assert_eq!(fake.list_calls(), 0);
+        assert_eq!(fake.observe_calls(), 0);
+        assert!(fake.executions().is_empty());
+        assert!(!owned.worker_attached());
+        fake.set_synthetic_scope_instance(None);
+        assert!(
+            owned.scope_identity(&target).is_err(),
+            "no liveness fallback"
+        );
+    }
 
     #[test]
     fn host_owned_adapter_rejects_backend_switch_without_release() {

@@ -44,6 +44,7 @@ test("only explicit share inspects the main document and offers one candidate", 
   assert.equal(f.offers.length, 0);
   assert.deepEqual(await f.shared.share(101), { tabId: 101, shared: true });
   assert.equal(f.offers.length, 1);
+  assert.equal(f.offers[0].documentId, docA, "Share must send the actual main-frame document identity to Host");
   assert.equal(f.inspected.length, 4);
   assert.deepEqual(f.inspected[0].target, { tabId: 101, frameIds: [0] });
   for (const request of f.inspected) assert.equal(request.world, "ISOLATED");
@@ -121,6 +122,7 @@ test("same-URL document replacement after offer revokes the candidate", async ()
   await assert.rejects(f.shared.share(101), /shareUnavailable/);
   assert.equal(f.offers.length, 1);
   assert.equal(f.removals.length, 1);
+  assert.equal(f.offers[0].documentId, docA, "late document B cannot rewrite the original Share proof");
 });
 
 test("old pairing callback cannot retire a new connection or new tab share", async () => {
@@ -174,11 +176,16 @@ test("a pending unshare fences the tab and blocks replacement share until retire
 
 test("observe requires an explicitly shared current document and uses fixed document-bound code", async () => {
   const f = fixture();
-  const request = { tabId: "101", documentGeneration: 1, deadlineMs: Date.now() + 10000,
+  const request = { tabId: "101", documentId: docA, documentGeneration: 1, deadlineMs: Date.now() + 10000,
     command: { kind: "observe", snapshotId: "00000000-0000-4000-8000-000000000001" } };
   await assert.rejects(f.shared.observe(request), /cancelled/);
   assert.equal(f.inspected.length, 0);
   await f.shared.share(101); request.documentGeneration = f.offers[0].documentGeneration;
+  const sharedReads = f.inspected.length;
+  for (const documentId of [undefined, "0".repeat(32)]) {
+    await assert.rejects(f.shared.observe({ ...request, documentId }), /cancelled/);
+    assert.equal(f.inspected.length, sharedReads, "no request version may bypass the original document binding");
+  }
   const inspect = f.scripting.executeScript;
   f.scripting.executeScript = async call => {
     const result = await inspect(call);
@@ -205,7 +212,7 @@ test("navigation while an observation is pending cannot return old content", asy
     if (call.func.name === "observeDocument") { await b.wait(); result[0].result = { snapshotId: call.args[0], text: "old fixture" }; }
     return result;
   };
-  const task = f.shared.observe({ tabId: "101", documentGeneration: f.offers[0].documentGeneration,
+  const task = f.shared.observe({ tabId: "101", documentId: docA, documentGeneration: f.offers[0].documentGeneration,
     deadlineMs: Date.now() + 10000, command: { kind: "observe", snapshotId: "snapshot" } });
   await b.reached; await f.shared.invalidate(101); b.release();
   await assert.rejects(task, /cancelled/);
@@ -225,7 +232,7 @@ test("switch-away-and-back, scroll-away-and-back and unshare fence a pending obs
       }
       return result;
     };
-    const task = f.shared.observe({ tabId: "101", documentGeneration: f.offers[0].documentGeneration,
+    const task = f.shared.observe({ tabId: "101", documentId: docA, documentGeneration: f.offers[0].documentGeneration,
       deadlineMs: Date.now() + 10000, command: { kind: "observe", snapshotId: "snapshot", screenshot: false } });
     await b.reached;
     if (mode === "activity") { f.shared.activityChanged(); f.shared.activityChanged(); }
@@ -250,7 +257,7 @@ test("screenshot permission denial returns no text-only success and never activa
     assert.equal(windowId, 7); assert.deepEqual(options, { format: "png" }); captures++;
     throw new Error("activeTab grant missing");
   };
-  await assert.rejects(f.shared.observe({ tabId: "101", documentGeneration: f.offers[0].documentGeneration,
+  await assert.rejects(f.shared.observe({ tabId: "101", documentId: docA, documentGeneration: f.offers[0].documentGeneration,
     deadlineMs: Date.now() + 10000, command: { kind: "observe", snapshotId: "snapshot", screenshot: true } }), /activeTab/);
   assert.equal(captures, 1);
   assert.equal((await f.shared.current()).shared, true, "a denied capture cannot change the user's tab or pairing");
@@ -269,7 +276,7 @@ test("a capture interrupted by focus, geometry, unshare or replacement is discar
     };
     f.tabs.query = async () => [{ id: 101, windowId: 7 }];
     f.tabs.captureVisibleTab = async () => { await b.wait(); return "NOT_AN_IMAGE_FROM_A_SUSPECT_CAPTURE"; };
-    const task = f.shared.observe({ tabId: "101", documentGeneration: f.offers[0].documentGeneration,
+    const task = f.shared.observe({ tabId: "101", documentId: docA, documentGeneration: f.offers[0].documentGeneration,
       deadlineMs: Date.now() + 10000, command: { kind: "observe", snapshotId: "snapshot", screenshot: true } });
     await b.reached;
     if (mode === "activity") { f.shared.activityChanged(); f.shared.activityChanged(); }

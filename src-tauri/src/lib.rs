@@ -77,6 +77,9 @@ mod commands;
 
 mod computer_use;
 
+#[cfg(all(target_os = "linux", any(grok_private_pipewire, test)))]
+mod linux_native_runtime;
+
 #[cfg(feature = "computer-use-probe")]
 pub use computer_use::computer_use_probe_main;
 
@@ -284,6 +287,38 @@ use session_manager::SessionManager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = prepare_linux_runtime() {
+        eprintln!("grok-app: private native runtime invalid: {error}");
+        std::process::exit(2);
+    }
+    run_inner(false);
+}
+
+/// Validate the installed native pack before clipboard/session or UI work.
+#[cfg(target_os = "linux")]
+pub fn prepare_linux_runtime() -> Result<(), String> {
+    #[cfg(grok_private_pipewire)]
+    {
+        static READY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        READY.get_or_init(linux_native_runtime::prepare).clone()
+    }
+    #[cfg(not(grok_private_pipewire))]
+    Ok(())
+}
+
+/// Isolated Windows debug fixture that returns after the original exit barrier.
+#[cfg(all(debug_assertions, windows, feature = "computer-use-probe"))]
+pub fn run_computer_use_app_probe() -> Result<(), &'static str> {
+    crate::computer_use::app_shell::probe_entry::validate()?;
+    if crate::computer_use::app_shell::probe_entry::try_maintenance()? {
+        return Ok(());
+    }
+    run_inner(true);
+    Ok(())
+}
+
+fn run_inner(return_after_exit: bool) {
     // Session list / continue-by-id CLI must not open a window or steal focus
     // via the single-instance plugin. Exit before any Tauri builder setup.
     if session_api::try_run_cli() {
@@ -424,7 +459,7 @@ pub fn run() {
 
     let builder = maybe_register_updater(builder);
 
-    builder
+    let application = builder
 
         .manage(session_mgr)
 
@@ -551,6 +586,9 @@ pub fn run() {
         })
 
         .setup(|app| {
+
+            computer_use::runtime::register_installation(app.handle());
+            computer_use::product_webview().attach_scope_host(app.handle().clone());
 
             #[cfg(windows)]
             updater::register_windows_install_guard(app.handle())?;
@@ -928,6 +966,7 @@ pub fn run() {
                 mgr.start_idle_watchdog(app.handle().clone());
 
                 mgr.start_stream_stall_watchdog(app.handle().clone());
+                mgr.start_computer_use_dispatcher(app.handle().clone());
 
                 // Prewarm competes with frontend probeCli (`grok --version`) if
                 // both spawn at t=0. Delay so first paint + gate probe win.
@@ -1063,62 +1102,71 @@ pub fn run() {
 
         .build(context)
 
-        .expect("error while building Grok App")
+        .expect("error while building Grok App");
 
-        .run(|app, event| {
-
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
-                // Relaunch cannot be prevented by Tauri; the updater command
-                // runs the same catalog barrier before invoking relaunch.
-                if *code != Some(tauri::RESTART_EXIT_CODE)
-                    && crate::computer_use::shutdown::intercept_exit_requested(app, *code)
-                {
-                    api.prevent_exit();
-                }
-            }
-
-            // macOS: Dock click. The pet overlay is a visible skip-taskbar
-            // window, so `has_visible_windows` stays true and must not block
-            // bringing the workbench back.
-
-            #[cfg(target_os = "macos")]
+    let on_event = |app: &tauri::AppHandle, event: tauri::RunEvent| {
+        if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+            #[cfg(all(debug_assertions, windows, feature = "computer-use-probe"))]
+            crate::computer_use::app_shell::probe_exit::record("exit-requested");
+            // Relaunch cannot be prevented by Tauri; the updater command
+            // runs the same catalog barrier before invoking relaunch.
+            if *code != Some(tauri::RESTART_EXIT_CODE)
+                && crate::computer_use::shutdown::intercept_exit_requested(app, *code)
             {
-                if let tauri::RunEvent::Opened { urls } = &event {
-                    if !automation_runner::wants_fire_due_schedules() {
-                        for url in urls {
-                            skin_deeplink::ingest_opened_url(app, url);
-                        }
-                        tray::show_main_window(app);
+                api.prevent_exit();
+            }
+        }
+
+        // macOS: Dock click. The pet overlay is a visible skip-taskbar
+        // window, so `has_visible_windows` stays true and must not block
+        // bringing the workbench back.
+
+        #[cfg(target_os = "macos")]
+        {
+            if let tauri::RunEvent::Opened { urls } = &event {
+                if !automation_runner::wants_fire_due_schedules() {
+                    for url in urls {
+                        skin_deeplink::ingest_opened_url(app, url);
                     }
-                }
-                if let tauri::RunEvent::Reopen { .. } = event {
                     tray::show_main_window(app);
                 }
             }
-
-            // Full exit (tray Quit / Cmd+Q): tear down mirror host + cloudflared group.
-
-            if let tauri::RunEvent::Exit = event {
-
-                use tauri::Manager;
-
-                pet_window::persist_pet_window_pos(app);
-
-                crate::computer_use::shutdown_product();
-
-                crate::host_runtime::on_process_shutdown();
-
-                if let Some(host) = app.try_state::<Arc<MirrorHost>>() {
-
-                    host.inner().stop_sync();
-
-                }
-
+            if let tauri::RunEvent::Reopen { .. } = event {
+                tray::show_main_window(app);
             }
+        }
 
-            let _ = (app, &event);
+        // Full exit (tray Quit / Cmd+Q): tear down mirror host + cloudflared group.
 
-        });
+        if let tauri::RunEvent::Exit = event {
+            #[cfg(all(debug_assertions, windows, feature = "computer-use-probe"))]
+            crate::computer_use::app_shell::probe_exit::record("before-exit-cleanup");
+            use tauri::Manager;
+
+            pet_window::persist_pet_window_pos(app);
+
+            crate::computer_use::shutdown_product();
+
+            crate::host_runtime::on_process_shutdown();
+
+            if let Some(host) = app.try_state::<Arc<MirrorHost>>() {
+                host.inner().stop_sync();
+            }
+            #[cfg(all(debug_assertions, windows, feature = "computer-use-probe"))]
+            crate::computer_use::app_shell::probe_exit::record("after-exit-cleanup");
+        }
+
+        let _ = (app, &event);
+    };
+
+    #[cfg(all(debug_assertions, windows, feature = "computer-use-probe"))]
+    if return_after_exit {
+        application.run_return(on_event);
+        crate::computer_use::app_shell::probe_exit::record("after-run-return");
+        return;
+    }
+    let _ = return_after_exit;
+    application.run(on_event);
 }
 
 /// NSApp activation state. Key events only reach the web while the app is
