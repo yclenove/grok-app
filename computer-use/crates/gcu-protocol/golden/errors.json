@@ -5,6 +5,7 @@
     "app_denied",
     "approval_denied",
     "approval_timeout",
+    "window_minimized",
     "window_not_found",
     "window_gone",
     "stale_element",
@@ -442,6 +443,11 @@
             "type": "string"
           },
           {
+            "const": "window_minimized",
+            "description": "The target window is minimized; restore it or ask the user.",
+            "type": "string"
+          },
+          {
             "const": "window_not_found",
             "description": "No matching window exists.",
             "type": "string"
@@ -488,7 +494,7 @@
           },
           {
             "const": "key_blocked",
-            "description": "Policy blocked the chord.",
+            "description": "Policy blocked the chord or text input.",
             "type": "string"
           },
           {

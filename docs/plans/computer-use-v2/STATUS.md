@@ -91,7 +91,7 @@
 ## 发现（卡外问题，一行一条）
 
 - 计划 v1.1 逐项决定见 [评审处置表](reviews/2026-10-13-disposition.md)；工时 P0–P9 177d + spike 3d，与 06 一致。
-- P0-03 已合入的 `ErrorCode` 缺 v1.1 新增的 `window_minimized`，且 golden/errors.json 需同步（小补丁，P0-05 合入后单独 PR）。
+- ~~P0-03 的 ErrorCode 缺 window_minimized~~ 已补（cu2/protocol-window-minimized）。
 - 外部 CI：仓库原有 `ci.yml` 会对 `computer-use/**` 改动也整套运行（Rust/frontend），浪费时间；待 CU 稳定后给它加 `paths-ignore: computer-use/**`。
 
 ## 阶段记录

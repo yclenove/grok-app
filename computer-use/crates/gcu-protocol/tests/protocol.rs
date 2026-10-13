@@ -154,8 +154,8 @@ fn batch_invalid_step_and_resource_limits_fail_preflight() {
 
 #[test]
 fn errors_all_wire_codes_match_architecture_and_roundtrip() {
-    let expected = "app_not_found ambiguous_app app_denied approval_denied approval_timeout window_not_found window_gone stale_element stale_geometry stale_screenshot out_of_bounds element_not_actionable not_settable invalid_key key_blocked user_active stopped_by_user busy handoff_required elevation_required permission_missing capability_unavailable timeout driver_error internal";
-    assert_eq!(ErrorCode::ALL.len(), 25);
+    let expected = "app_not_found ambiguous_app app_denied approval_denied approval_timeout window_minimized window_not_found window_gone stale_element stale_geometry stale_screenshot out_of_bounds element_not_actionable not_settable invalid_key key_blocked user_active stopped_by_user busy handoff_required elevation_required permission_missing capability_unavailable timeout driver_error internal";
+    assert_eq!(ErrorCode::ALL.len(), 26);
     for (code, expected) in ErrorCode::ALL.iter().zip(expected.split_whitespace()) {
         assert_eq!(serde_json::to_value(code).unwrap(), expected);
         assert_eq!(
