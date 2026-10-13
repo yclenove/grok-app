@@ -21,7 +21,7 @@
 | P0-12 | gcu-host-protocol 与 engine 模式 | P0-09 | 2.5d | todo |  |  |  | 路线 B 松耦合基础 |
 | P0-11 | 文档与 STATUS 初始化 | P0-10、P0-12 | 0.5d | todo |  |  |  | P0-12后文档收尾；保留既有进展 |
 | P1-01 | 跨平台夹具 App | P0-01 | 2.5d | done | cu2/P1-01-fixture |  | 2026-10-13 | 状态机+原子状态文件12测试；Linux 无障碍已由 CI 验证(11项通过+2已知缺口)，macOS/Windows not_run（清单见 apps/fixture/README.md）；deny 例外限 eframe 子树 |
-| P1-02 | macOS 发现与身份 | P0-05 | 2d | todo |  |  |  |  |
+| P1-02 | macOS 发现与身份 | P0-05 | 2d | done | cu2/P1-02-macos-discovery |  | 2026-10-13 | MacApi 分层；MacGate(root 拒绝/缺权限→PermissionMissing/仅安全提示窗口可见才关门)；CI macOS runner 编译真实实现并通过；真实 macOS 冒烟 ignored(not_run) |
 | P1-03 | macOS AX 树 | P1-02 | 3d | todo |  |  |  |  |
 | P1-04 | macOS SCK 截图 | P1-02、P1-03、P0-07 | 2d | todo |  |  |  |  |
 | P1-05 | macOS 语义动作 | P1-03 | 2.5d | todo |  |  |  |  |
