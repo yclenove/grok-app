@@ -220,7 +220,8 @@ pub(crate) fn gcu_string(ctx: &InstallCtx<'_>) -> Result<String, Error> {
 pub(crate) fn status_of(present: bool, matches_gcu: bool) -> Status {
     let mut notes = Vec::new();
     if present && !matches_gcu {
-        notes.push("grok-computer-use is present but does not match this gcu executable".to_owned());
+        notes
+            .push("grok-computer-use is present but does not match this gcu executable".to_owned());
     }
     Status {
         present,

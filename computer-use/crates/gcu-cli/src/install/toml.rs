@@ -110,7 +110,10 @@ pub(crate) fn install_mcp(
         .and_then(|servers| servers.get_mut(SERVER_NAME))
         .and_then(as_table_like_mut)
     else {
-        return Err(unexpected(path, "mcp_servers.grok-computer-use must be a table"));
+        return Err(unexpected(
+            path,
+            "mcp_servers.grok-computer-use must be a table",
+        ));
     };
     changed |= set_string(server, "command", gcu);
     changed |= set_strings(server, "args", &["mcp"]);
@@ -202,7 +205,10 @@ fn validate_mcp(doc: &DocumentMut, path: &Path, fix_enabled: bool) -> Result<(),
         return Ok(());
     };
     let Some(server) = as_table_like(server_item) else {
-        return Err(unexpected(path, "mcp_servers.grok-computer-use must be a table"));
+        return Err(unexpected(
+            path,
+            "mcp_servers.grok-computer-use must be a table",
+        ));
     };
     if let Some(command) = server.get("command") {
         if item_str(command).is_none() {
