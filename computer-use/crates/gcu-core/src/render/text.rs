@@ -205,23 +205,34 @@ fn assemble(
     text.push_str(note);
     text
 }
-pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
+// SnapshotStore exports this only after sanitizing secret-bearing fields. The
+// complete rendering is for a session-private overflow file, never inline MCP.
+pub(crate) fn file_text(tree: &ProcessedTree, opts: &RenderOpts) -> String {
     let nodes = tree.nodes();
-    // Stable historical indices are not preorder positions. Render native order.
-    let order: Vec<_> = nodes.iter().map(|(_, n)| n.element_index).collect();
-    let all: BTreeSet<_> = nodes.iter().map(|(_, n)| n.element_index).collect();
+    let order = nodes
+        .iter()
+        .map(|(_, n)| n.element_index)
+        .collect::<Vec<_>>();
+    let all = nodes.iter().map(|(_, n)| n.element_index).collect();
     let lines = nodes
         .iter()
         .map(|(d, n)| (n.element_index, line(*d, n, opts.text_limit, false)))
         .collect();
-    let first = assemble(
+    assemble(
         &header(opts, opts.text_limit),
         &lines,
         &all,
         &order,
         &footer(tree, opts, &all),
         "",
-    );
+    )
+}
+pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
+    let nodes = tree.nodes();
+    // Stable historical indices are not preorder positions. Render native order.
+    let order: Vec<_> = nodes.iter().map(|(_, n)| n.element_index).collect();
+    let all: BTreeSet<_> = nodes.iter().map(|(_, n)| n.element_index).collect();
+    let first = file_text(tree, opts);
     if first.len() <= FACTS_PREFIX_BYTES {
         return Layout {
             text: first,

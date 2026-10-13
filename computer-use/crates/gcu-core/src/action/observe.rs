@@ -157,8 +157,17 @@ impl ActionRouter {
     pub(crate) fn publish(
         &self,
         session: &Session,
+        fresh: Fresh,
+        attach: bool,
+    ) -> Result<ActionState, Box<ToolError>> {
+        self.publish_with_limit(session, fresh, attach, self.tree_opts.text_limit)
+    }
+    pub(crate) fn publish_with_limit(
+        &self,
+        session: &Session,
         mut fresh: Fresh,
         attach: bool,
+        text_limit: Option<usize>,
     ) -> Result<ActionState, Box<ToolError>> {
         let config = self.policy.load();
         let image = if attach {
@@ -173,7 +182,7 @@ impl ActionRouter {
         };
         let key = fresh.key();
         let mut opts = RenderOpts::new(fresh.win.app.info.clone(), fresh.info.clone());
-        opts.text_limit = self.tree_opts.text_limit;
+        opts.text_limit = text_limit;
         let mut resources = lock(&session.actions);
         // Retain only images actually handed to the model. A speculative image
         // must not replace the model's latest coordinate observation.
@@ -208,6 +217,7 @@ impl ActionRouter {
         }
         Ok(ActionState {
             text: observation.text,
+            overflow_text: observation.overflow_text,
             state: AppState {
                 app: opts.app,
                 window: opts.window,

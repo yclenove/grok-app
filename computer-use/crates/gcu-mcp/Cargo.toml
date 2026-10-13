@@ -9,6 +9,19 @@ publish.workspace = true
 gcu-protocol.workspace = true
 gcu-core.workspace = true
 gcu-host-api.workspace = true
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server", "elicitation"] }
+tokio = { workspace = true, features = ["io-util", "io-std"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+base64 = "0.23"
+tempfile = "3"
+
+[dev-dependencies]
+gcu-driver-fake.workspace = true
+gcu-host-api = { workspace = true, features = ["testing"] }
+png.workspace = true
 
 [lints]
 workspace = true

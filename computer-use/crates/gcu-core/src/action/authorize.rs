@@ -16,8 +16,8 @@ use gcu_protocol::ErrorCode;
 use std::{sync::atomic::Ordering, time::Duration};
 
 pub(crate) struct Approved {
-    config: PolicyConfig,
-    binding: ApprovalBinding,
+    pub(super) config: PolicyConfig,
+    pub(super) binding: ApprovalBinding,
     sensitive: bool,
     foreground: bool,
 }
@@ -122,7 +122,7 @@ impl ActionRouter {
         }
         Err(ErrorCode::ApprovalDenied)
     }
-    fn evaluate(
+    pub(super) fn evaluate(
         &self,
         session: &Session,
         intent: &ActionIntent,
@@ -308,7 +308,7 @@ pub(crate) fn host_app(
         },
     })
 }
-fn policy_window(fresh: &Fresh) -> PolicyWindow {
+pub(super) fn policy_window(fresh: &Fresh) -> PolicyWindow {
     PolicyWindow {
         id: fresh.win.id.clone(),
         title: fresh.info.title.clone(),

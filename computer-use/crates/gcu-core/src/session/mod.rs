@@ -15,6 +15,7 @@
 //! Approval waits are not inside the session queue, so session close can cancel
 //! them without waiting for an action to finish.
 
+mod delivery;
 mod queue;
 mod stop;
 

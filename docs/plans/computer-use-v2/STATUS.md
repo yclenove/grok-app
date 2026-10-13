@@ -16,7 +16,7 @@
 | P0-07 | SnapshotStore / Index / Diff | P0-06 | 2d | done | cu2/P0-07-snapshots |  | 2026-10-13 | 3快照/脱敏类型封装(compile-fail测试)/32x32区域哈希；105测试 |
 | P0-08 | Session / Policy / Router / Ledger | P0-04、P0-07、P0-08a | 2d | done | cu2/P0-08-1-session-policy, cu2/P0-08-2-router-ledger | #18 | 2026-10-13 | 08-1 会话+策略(#18)与 08-2 路由+账本均完成；action 行覆盖92.9%，core 94.3% |
 | P0-08a | 策略数据（P0-08 新增子卡） | P0-01 | 1d | done | cu2/P0-08a-policy-data | #4 | 2026-10-13 | 拒绝名单138条+15语言敏感词 |
-| P0-09 | gcu-mcp stdio | P0-08 | 2d | todo |  |  |  |  |
+| P0-09 | gcu-mcp stdio | P0-08 | 2d | done | cu2/P0-09-mcp-stdio |  | 2026-10-13 | 注册13个可执行工具(其余3个P6)；NDJSON+并发接收串行执行；20KB文本上限；图片短边>=256；elicitation取消回退；26测试 行覆盖90.3%；fuzz 31s/42万次无崩溃 |
 | P0-10 | gcu-cli（fake） | P0-09 | 1d | todo |  |  |  |  |
 | P0-12 | gcu-host-protocol 与 engine 模式 | P0-09 | 2.5d | todo |  |  |  | 路线 B 松耦合基础 |
 | P0-11 | 文档与 STATUS 初始化 | P0-10、P0-12 | 0.5d | todo |  |  |  | P0-12后文档收尾；保留既有进展 |
