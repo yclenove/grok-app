@@ -12,4 +12,4 @@ pub mod driver;
 pub mod identity;
 
 pub use driver::LinuxDriver;
-pub use identity::{needs_reauth, AppIdentity};
+pub use identity::{needs_reauth, same_process_instance, AppIdentity};

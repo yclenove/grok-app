@@ -20,7 +20,7 @@ use gcu_driver_linux::{
         sensitive::is_terminal_like,
         source::{FakeNode, FakeSource},
     },
-    identity::{needs_reauth, AppIdentity},
+    identity::{needs_reauth, same_process_instance, AppIdentity},
     LinuxDriver,
 };
 use gcu_protocol::{AppInfo, WindowInfo};
@@ -471,10 +471,11 @@ fn test_identity_reauth_scenarios_table() {
     new_path.exe_path = PathBuf::from("/usr/bin/app_v2");
     assert!(needs_reauth(&base, &new_path));
 
-    // PID reused
+    // PID reused: a persistent grant still applies (same image), but the process instance differs
     let mut pid_reused = base.clone();
     pid_reused.start_time = 600;
-    assert!(needs_reauth(&base, &pid_reused));
+    assert!(!needs_reauth(&base, &pid_reused));
+    assert!(!same_process_instance(&base, &pid_reused));
 
     // Desktop id updated but binary identical -> does not need reauth
     let mut new_desktop = base.clone();

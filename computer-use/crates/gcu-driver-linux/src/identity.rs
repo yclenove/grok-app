@@ -124,29 +124,30 @@ impl AppIdentity {
     }
 }
 
-/// Evaluate whether changes between `old` and `new` identities require user re-authorization.
+/// Whether a persistent ("always") grant for `old` no longer applies to `new`.
 ///
-/// Rules:
-/// - In-place binary modification or update (`sha256` changed) -> `true`
-/// - In-place inode or device replacement -> `true`
-/// - Path replacement (different canonical path) -> `true`
-/// - PID reuse (different start time or different PID) -> `true`
-/// - Same canonical path, same dev/inode, same hash, same process instance -> `false`
+/// A persistent grant binds the **image identity** only: canonical path, device/inode and
+/// sha256. Restarting the same binary (new PID, new start time) keeps the grant.
+///
+/// - Content changed in place (`sha256`), inode/device replaced, or path changed -> `true`
+/// - Same path, same dev/inode, same hash -> `false`, whatever the PID or start time
 /// - `desktop_id` changes alone do NOT require re-authorization (discovery only).
+///
+/// Use [`same_process_instance`] to bind turn/session grants to a running process.
 pub fn needs_reauth(old: &AppIdentity, new: &AppIdentity) -> bool {
-    if old.exe_path != new.exe_path {
-        return true;
-    }
-    if old.dev != new.dev || old.inode != new.inode {
-        return true;
-    }
-    if old.sha256 != new.sha256 {
-        return true;
-    }
-    if old.pid != new.pid || old.start_time != new.start_time {
-        return true;
-    }
-    false
+    old.exe_path != new.exe_path
+        || old.dev != new.dev
+        || old.inode != new.inode
+        || old.sha256 != new.sha256
+}
+
+/// Whether `new` is still the same running process as `old` (PID plus start time).
+///
+/// A recycled PID has a different start time, so a turn or session grant given to the old
+/// process must not be reused for the new one. Image identity is checked separately by
+/// [`needs_reauth`].
+pub fn same_process_instance(old: &AppIdentity, new: &AppIdentity) -> bool {
+    old.pid == new.pid && old.start_time == new.start_time
 }
 
 #[cfg(test)]
@@ -279,7 +280,7 @@ mod tests {
                 expected_reauth: true,
             },
             Case {
-                name: "pid_reused_different_start_time",
+                name: "restart_same_image_keeps_persistent_grant",
                 old: sample_identity(
                     "/usr/bin/gedit",
                     1,
@@ -298,7 +299,7 @@ mod tests {
                     999,
                     Some("gedit.desktop"),
                 ),
-                expected_reauth: true,
+                expected_reauth: false,
             },
             Case {
                 name: "desktop_id_only_changed_same_executable",
@@ -354,5 +355,19 @@ mod tests {
                 case.name, case.expected_reauth, actual
             );
         }
+    }
+
+    #[test]
+    fn process_instance_detects_pid_reuse() {
+        let base = sample_identity("/usr/bin/gedit", 1, 100, "hash_a", 1234, 555, None);
+        let mut reused = base.clone();
+        reused.start_time = 999;
+        let mut moved = base.clone();
+        moved.pid = 4321;
+        assert!(same_process_instance(&base, &base));
+        assert!(!same_process_instance(&base, &reused));
+        assert!(!same_process_instance(&base, &moved));
+        // The image is unchanged, so a persistent grant still applies.
+        assert!(!needs_reauth(&base, &reused));
     }
 }
