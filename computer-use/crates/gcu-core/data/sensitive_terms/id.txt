@@ -1,0 +1,52 @@
+# id - Indonesian Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+kirim
+kirim pesan
+
+# pay
+bayar
+bayar sekarang
+beli sekarang
+buat pesanan
+
+# delete
+hapus
+pindahkan ke sampah
+hapus permanen
+
+# submit
+kirimkan
+ajukan
+submit
+
+# transfer
+transfer
+transfer dana
+kirim uang
+
+# sign
+tanda tangani
+tandatangani dokumen
+tanda tangan digital
+
+# publish
+terbitkan
+publikasikan
+posting
+
+# confirm_purchase
+konfirmasi pembelian
+konfirmasi pesanan
+konfirmasi pembayaran
+
+# password_change
+ubah kata sandi
+atur ulang kata sandi
+ganti kata sandi
+
+# logout_all
+keluar dari semua perangkat
+akhiri semua sesi
+logout semua perangkat

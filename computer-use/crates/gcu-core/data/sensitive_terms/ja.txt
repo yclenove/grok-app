@@ -1,0 +1,53 @@
+# ja - Japanese Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+送信
+メッセージを送信
+
+# pay
+支払う
+今すぐ支払う
+購入
+今すぐ購入
+注文を確定
+
+# delete
+削除
+ごみ箱に移動
+完全に削除
+
+# submit
+提出
+送信する
+申し込む
+
+# transfer
+送金
+振込
+口座振替
+
+# sign
+署名
+電子署名
+同意して署名
+
+# publish
+公開
+投稿
+投稿する
+
+# confirm_purchase
+購入を確定
+注文を確定する
+購入手続きを完了する
+
+# password_change
+パスワードを変更
+パスワードの再設定
+パスワード変更
+
+# logout_all
+すべてのデバイスからログアウト
+すべてのセッションからログアウト
+すべての端末からサインアウト

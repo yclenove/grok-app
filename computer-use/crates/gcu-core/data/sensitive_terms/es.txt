@@ -1,0 +1,51 @@
+# es - Spanish Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+enviar
+enviar mensaje
+
+# pay
+pagar
+pagar ahora
+comprar
+comprar ahora
+realizar pedido
+
+# delete
+eliminar
+mover a la papelera
+borrar
+
+# submit
+presentar
+tramitar
+entregar
+
+# transfer
+transferir
+hacer transferencia
+enviar dinero
+
+# sign
+firmar
+firmar documento
+firma electrónica
+
+# publish
+publicar
+compartir
+
+# confirm_purchase
+confirmar compra
+confirmar pedido
+confirmar pago
+
+# password_change
+cambiar contraseña
+restablecer contraseña
+
+# logout_all
+cerrar sesión en todos los dispositivos
+cerrar todas las sesiones
+desconectar todos los dispositivos

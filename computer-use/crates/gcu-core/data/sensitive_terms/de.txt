@@ -1,0 +1,51 @@
+# de - German Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+senden
+nachricht senden
+
+# pay
+bezahlen
+jetzt bezahlen
+jetzt kaufen
+kostenpflichtig bestellen
+
+# delete
+löschen
+in den papierkorb verschieben
+endgültig löschen
+
+# submit
+einreichen
+übermitteln
+antrag einreichen
+
+# transfer
+überweisen
+geld senden
+überweisung
+
+# sign
+unterschreiben
+signieren
+dokument unterschreiben
+
+# publish
+veröffentlichen
+beitrag posten
+posten
+
+# confirm_purchase
+kauf bestätigen
+bestellung bestätigen
+zahlung bestätigen
+
+# password_change
+passwort ändern
+passwort zurücksetzen
+
+# logout_all
+von allen geräten abmelden
+alle sitzungen beenden
+auf allen geräten ausloggen

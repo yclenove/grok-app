@@ -1,0 +1,50 @@
+# zh - Simplified Chinese Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+发送
+发送消息
+
+# pay
+支付
+立即支付
+购买
+立即购买
+下单
+
+# delete
+删除
+移到废纸篓
+清空废纸篓
+
+# submit
+提交
+提交订单
+
+# transfer
+转账
+汇款
+划转
+
+# sign
+签署
+签名
+签署协议
+
+# publish
+发布
+发表
+
+# confirm_purchase
+确认购买
+确认下单
+确认付款
+
+# password_change
+修改密码
+重置密码
+
+# logout_all
+退出所有设备
+退出所有会话
+登出所有设备

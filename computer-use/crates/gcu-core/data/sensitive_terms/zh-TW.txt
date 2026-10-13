@@ -1,0 +1,50 @@
+# zh-TW - Traditional Chinese Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+傳送
+發送訊息
+
+# pay
+付款
+立即付款
+購買
+立即購買
+下單
+
+# delete
+刪除
+移至垃圾桶
+清空垃圾桶
+
+# submit
+提交
+送出
+
+# transfer
+轉帳
+匯款
+
+# sign
+簽署
+簽名
+簽署合約
+
+# publish
+發布
+發表
+
+# confirm_purchase
+確認購買
+確認下單
+確認付款
+
+# password_change
+變更密碼
+重設密碼
+修改密碼
+
+# logout_all
+登出所有裝置
+登出所有工作階段
+強制登出所有工作階段

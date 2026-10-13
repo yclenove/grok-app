@@ -1,0 +1,52 @@
+# fr - French Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+envoyer
+envoyer le message
+
+# pay
+payer
+payer maintenant
+acheter
+acheter maintenant
+passer la commande
+
+# delete
+supprimer
+déplacer vers la corbeille
+mettre à la corbeille
+
+# submit
+soumettre
+valider
+envoyer la demande
+
+# transfer
+transférer
+effectuer un virement
+virement
+
+# sign
+signer
+signer le document
+signature électronique
+
+# publish
+publier
+partager
+
+# confirm_purchase
+confirmer l'achat
+confirmer la commande
+confirmer le paiement
+
+# password_change
+changer le mot de passe
+modifier le mot de passe
+réinitialiser le mot de passe
+
+# logout_all
+se déconnecter de tous les appareils
+fermer toutes les sessions
+déconnecter toutes les sessions

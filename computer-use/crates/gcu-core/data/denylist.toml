@@ -1,0 +1,723 @@
+# 仅收录经确认的标识符
+# Grok Computer Use v2 - Built-in Denylist
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.4
+
+# ==============================================================================
+# macOS
+# Match identifier: bundle identifier (exact match)
+# ==============================================================================
+
+# Grok self
+[[macos]]
+id = "com.grokapp.desktop"
+category = "grok_self"
+match = "exact"
+
+# Terminal and shell hosts
+[[macos]]
+id = "com.apple.Terminal"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "com.googlecode.iterm2"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "org.alacritty"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "net.kovidgoyal.kitty"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "com.github.wez.wezterm"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "com.mitchellh.ghostty"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "dev.warp.Warp-Terminal"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "co.zeit.hyper"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "org.tabby"
+category = "terminal"
+match = "exact"
+
+[[macos]]
+id = "com.raphaelamorim.rio"
+category = "terminal"
+match = "exact"
+
+# Credentials and keychains
+[[macos]]
+id = "com.apple.keychainaccess"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.apple.Passwords"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.agilebits.onepassword7"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.1password.1password"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.bitwarden.desktop"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "org.keepassxc.keepassxc"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.dashlane.dashlanephone"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.dashlane.Dashlane"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "com.lastpass.LastPass"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "in.sinew.Enpass-Desktop"
+category = "credentials"
+match = "exact"
+
+[[macos]]
+id = "ch.proton.pass.desktop"
+category = "credentials"
+match = "exact"
+
+# System security prompts
+[[macos]]
+id = "com.apple.SecurityAgent"
+category = "security_prompt"
+match = "exact"
+
+[[macos]]
+id = "com.apple.CoreAuthentication.CoreAuthUI"
+category = "security_prompt"
+match = "exact"
+
+[[macos]]
+id = "com.apple.UserNotificationCenter"
+category = "security_prompt"
+match = "exact"
+
+[[macos]]
+id = "com.apple.systemuiserver"
+category = "security_prompt"
+match = "exact"
+
+# Endpoint and security software
+[[macos]]
+id = "com.malwarebytes.mbam.frontend.agent"
+category = "security_software"
+match = "exact"
+
+[[macos]]
+id = "com.crowdstrike.falcon.Agent"
+category = "security_software"
+match = "exact"
+
+[[macos]]
+id = "com.sentinelone.sentinelagent"
+category = "security_software"
+match = "exact"
+
+[[macos]]
+id = "com.sophos.macendpoint.Sophos-Endpoint"
+category = "security_software"
+match = "exact"
+
+[[macos]]
+id = "com.bitdefender.antivirusformac"
+category = "security_software"
+match = "exact"
+
+[[macos]]
+id = "com.eset.gui"
+category = "security_software"
+match = "exact"
+
+[[macos]]
+id = "com.kaspersky.kav"
+category = "security_software"
+match = "exact"
+
+# ==============================================================================
+# Windows
+# Match identifier: executable name (lowercase, exact match)
+# ==============================================================================
+
+# Grok self
+[[windows]]
+id = "grok.exe"
+category = "grok_self"
+match = "exact"
+
+[[windows]]
+id = "grok-app.exe"
+category = "grok_self"
+match = "exact"
+
+# Terminal and shell hosts
+[[windows]]
+id = "windowsterminal.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "wt.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "conhost.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "cmd.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "powershell.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "powershell_ise.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "pwsh.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "wezterm-gui.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "alacritty.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "warp.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "hyper.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "tabby.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "mintty.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "cmder.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "conemu.exe"
+category = "terminal"
+match = "exact"
+
+[[windows]]
+id = "conemu64.exe"
+category = "terminal"
+match = "exact"
+
+# Credentials and vaults
+[[windows]]
+id = "keymgr.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "vaultcmd.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "1password.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "bitwarden.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "keepass.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "keepassxc.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "dashlane.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "lastpass.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "enpass.exe"
+category = "credentials"
+match = "exact"
+
+[[windows]]
+id = "proton-pass.exe"
+category = "credentials"
+match = "exact"
+
+# System security prompts
+[[windows]]
+id = "consent.exe"
+category = "security_prompt"
+match = "exact"
+
+[[windows]]
+id = "credentialuibroker.exe"
+category = "security_prompt"
+match = "exact"
+
+[[windows]]
+id = "logonui.exe"
+category = "security_prompt"
+match = "exact"
+
+[[windows]]
+id = "smartscreen.exe"
+category = "security_prompt"
+match = "exact"
+
+# Endpoint and security software
+[[windows]]
+id = "securityhealthhost.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "securityhealthsystray.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "msmpeng.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "mbam.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "csfalconservice.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "sentinelagent.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "sophosui.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "avastui.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "avgui.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "bdagent.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "egui.exe"
+category = "security_software"
+match = "exact"
+
+[[windows]]
+id = "avpui.exe"
+category = "security_software"
+match = "exact"
+
+# ==============================================================================
+# Linux
+# Match identifier: desktop file id or executable name (exact match)
+# ==============================================================================
+
+# Grok self
+[[linux]]
+id = "grok"
+category = "grok_self"
+match = "exact"
+
+[[linux]]
+id = "grok-app"
+category = "grok_self"
+match = "exact"
+
+[[linux]]
+id = "com.grokapp.desktop.desktop"
+category = "grok_self"
+match = "exact"
+
+[[linux]]
+id = "grok.desktop"
+category = "grok_self"
+match = "exact"
+
+# Terminal and shell hosts
+[[linux]]
+id = "gnome-terminal"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "org.gnome.Terminal.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "konsole"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "org.kde.konsole.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "xterm"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "xterm.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "uxterm"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "alacritty"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "Alacritty.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "kitty"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "kitty.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "wezterm-gui"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "wezterm"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "org.wezfurlong.wezterm.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "ghostty"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "com.mitchellh.ghostty.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "tilix"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "com.gexperts.Tilix.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "foot"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "foot.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "footclient"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "terminator"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "terminator.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "xfce4-terminal"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "xfce4-terminal.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "mate-terminal"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "mate-terminal.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "lxterminal"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "lxterminal.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "hyper"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "hyper.desktop"
+category = "terminal"
+match = "exact"
+
+[[linux]]
+id = "tabby"
+category = "terminal"
+match = "exact"
+
+# Credentials and keyrings
+[[linux]]
+id = "keepassxc"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "org.keepassxc.KeePassXC.desktop"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "bitwarden"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "bitwarden.desktop"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "1password"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "1password.desktop"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "seahorse"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "org.gnome.seahorse.Application.desktop"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "kwalletmanager5"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "org.kde.kwalletmanager5.desktop"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "enpass"
+category = "credentials"
+match = "exact"
+
+[[linux]]
+id = "enpass.desktop"
+category = "credentials"
+match = "exact"
+
+# System security prompts
+[[linux]]
+id = "polkit-gnome-authentication-agent-1"
+category = "security_prompt"
+match = "exact"
+
+[[linux]]
+id = "lxpolkit"
+category = "security_prompt"
+match = "exact"
+
+[[linux]]
+id = "polkit-kde-authentication-agent-1"
+category = "security_prompt"
+match = "exact"
+
+[[linux]]
+id = "polkit-mate-authentication-agent-1"
+category = "security_prompt"
+match = "exact"
+
+[[linux]]
+id = "pinentry-gtk-2"
+category = "security_prompt"
+match = "exact"
+
+[[linux]]
+id = "pinentry-gnome3"
+category = "security_prompt"
+match = "exact"
+
+[[linux]]
+id = "pinentry-qt"
+category = "security_prompt"
+match = "exact"
+
+# Endpoint and security software
+[[linux]]
+id = "clamtk"
+category = "security_software"
+match = "exact"
+
+[[linux]]
+id = "clamtk.desktop"
+category = "security_software"
+match = "exact"
+
+[[linux]]
+id = "clamscan"
+category = "security_software"
+match = "exact"
+
+[[linux]]
+id = "freshclam"
+category = "security_software"
+match = "exact"
+
+[[linux]]
+id = "esets_gui"
+category = "security_software"
+match = "exact"
+
+[[linux]]
+id = "sophos-av"
+category = "security_software"
+match = "exact"

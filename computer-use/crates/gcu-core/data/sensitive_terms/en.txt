@@ -1,0 +1,45 @@
+# en - English Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+send
+send message
+
+# pay
+pay
+pay now
+buy now
+place order
+
+# delete
+delete
+move to trash
+remove
+
+# submit
+submit
+submit order
+
+# transfer
+transfer
+wire transfer
+
+# sign
+sign
+sign document
+
+# publish
+publish
+post
+
+# confirm_purchase
+confirm purchase
+confirm order
+
+# password_change
+change password
+reset password
+
+# logout_all
+log out of all sessions
+sign out of all devices
