@@ -1,0 +1,65 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+// The page window has an unlabeled submit control. The address window is separate
+// so address-bar checks do not shadow the page.
+(apps: [(id: "fake.submit_unknown", name: "Fixture submit", executable: "/fixtures/submit-unknown", pid: 1103,
+windows: [
+(id: "page", title: "Fixture submit", frame: (x: 40.0, y: 40.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Submit page"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "web",
+role: web_area,
+states: "ENABLED",
+name: Some("Form"),
+frame: Some((x: 12.0, y: 12.0, w: 760.0, h: 450.0)),
+url: Some("https://example.invalid/form"),
+children: [
+(id: "icon-submit",
+role: button,
+states: "ENABLED",
+frame: Some((x: 24.0, y: 24.0, w: 36.0, h: 36.0)),
+actions: [press]),
+(id: "hint",
+role: static_text,
+states: "ENABLED",
+name: Some("Press Enter to submit"),
+frame: Some((x: 72.0, y: 28.0, w: 240.0, h: 28.0))),
+(id: "comment",
+role: text_field,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Comment"),
+frame: Some((x: 24.0, y: 80.0, w: 420.0, h: 32.0)),
+value: Some(text(""))),
+(id: "ok",
+role: button,
+states: "ENABLED",
+name: Some("OK"),
+frame: Some((x: 24.0, y: 130.0, w: 80.0, h: 32.0)),
+actions: [press]),
+(id: "docs",
+role: link,
+states: "ENABLED",
+name: Some("Documentation"),
+frame: Some((x: 24.0, y: 180.0, w: 160.0, h: 28.0)),
+actions: [press],
+url: Some("https://example.invalid/docs"))
+])
+]))),
+(id: "address", title: "Fixture address", frame: (x: 40.0, y: 560.0, w: 800.0, h: 160.0), scale: 1.0,
+root: Some((id: "address-root",
+role: window,
+states: "ENABLED",
+name: Some("Address"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 160.0)),
+children: [
+(id: "address",
+role: text_field,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Address and search"),
+frame: Some((x: 16.0, y: 40.0, w: 640.0, h: 32.0)),
+value: Some(text("")))
+])))
+])])

@@ -297,6 +297,8 @@ fn check_deps_model_and_fake_support_libraries_pass() {
                 "async-trait",
                 "serde",
                 "serde_json",
+                "toml",
+                "unicode-normalization",
                 "futures-core",
             ],
         ),

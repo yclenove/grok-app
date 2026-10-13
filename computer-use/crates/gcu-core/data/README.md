@@ -9,6 +9,7 @@ This directory contains static policy datasets for Grok Computer Use v2 (`gcu-co
 ```text
 computer-use/crates/gcu-core/data/
 ├── denylist.toml               # Platform-specific denylists of prohibited applications
+├── exec_surfaces.txt           # Best-effort remote execution title/URL keywords
 ├── sensitive_terms/            # Multilingual sensitive action dictionaries (15 locales)
 │   ├── de.txt
 │   ├── en.txt
@@ -113,6 +114,12 @@ When evaluating a UI element (e.g., button, menu item) during an action request:
 2. Locate the appropriate `# <category>` section header.
 3. Add the authentic UI button text in lowercase-friendly UTF-8.
 4. Ensure no duplicate entries and no trailing whitespace.
+
+## 5. Remote execution surfaces (`exec_surfaces.txt`)
+
+Best-effort window-title and URL keywords for Web SSH, cloud shells, container consoles, and remote desktops. The matcher Unicode-normalizes (NFKC), case-folds, and then requires a whole token or a whole phrase.
+
+This table is **not** a complete detector. A hit forces observation only: input, clicks, keys, drag, batch, and script hand off. A miss does not mean the surface is safe. Mixed or unclassifiable execution UI still hands off. IDE terminals and other native consoles are a separate gate (`terminal` / `console` / REPL / task / debug roles), not this file.
 
 ### Validation
 

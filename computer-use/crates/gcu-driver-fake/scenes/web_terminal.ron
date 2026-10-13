@@ -1,0 +1,31 @@
+// Offline fixture: physical pixels; no real app or account interaction.
+// Title and URL are best-effort remote-execution keywords, not a real session.
+(apps: [(id: "fake.web_terminal", name: "Fixture web terminal", executable: "/fixtures/web-terminal", pid: 1102,
+windows: [(id: "web-terminal-window", title: "Web SSH — bastion", frame: (x: 40.0, y: 40.0, w: 800.0, h: 480.0), scale: 1.0,
+root: Some((id: "root",
+role: window,
+states: "ENABLED",
+name: Some("Web SSH"),
+frame: Some((x: 0.0, y: 0.0, w: 800.0, h: 480.0)),
+children: [
+(id: "web",
+role: web_area,
+states: "ENABLED",
+name: Some("Cloud shell"),
+frame: Some((x: 12.0, y: 12.0, w: 760.0, h: 450.0)),
+url: Some("https://example.invalid/webssh/bastion"),
+children: [
+(id: "command",
+role: text_field,
+states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Command"),
+frame: Some((x: 24.0, y: 40.0, w: 500.0, h: 32.0)),
+value: Some(text(""))),
+(id: "run",
+role: button,
+states: "ENABLED",
+name: Some("Run"),
+frame: Some((x: 540.0, y: 40.0, w: 80.0, h: 32.0)),
+actions: [press])
+])
+])))])])

@@ -10,8 +10,12 @@ pub mod driver;
 pub mod fingerprint;
 /// Raw accessibility model, without platform bindings.
 pub mod model;
+/// Authorization, denylist, sensitive-action, and input policy.
+pub mod policy;
 /// Bounded text and redacted structured observations.
 pub mod render;
+/// Session lifecycle, serial calls, window locks, and the stop latch.
+pub mod session;
 /// Shared driver contract suite; enabled only for test consumers.
 #[cfg(feature = "testing")]
 pub mod testing;
