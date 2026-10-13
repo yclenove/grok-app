@@ -64,6 +64,13 @@ class SuiteContract(unittest.TestCase):
 
 
 class OwnershipContract(unittest.TestCase):
+    def test_compositor_config_stays_private_for_both_clis(self):
+        config = Path("/private/config")
+        self.assertEqual(runner.compositor_command("/private/labwc", config),
+                         ["/private/labwc", "-C", str(config)])
+        self.assertEqual(runner.compositor_command("/private/labwc", config, True),
+                         ["/private/labwc", "-c", str(config / "rc.xml")])
+
     def test_environment_is_private(self):
         ambient = {key: "user-session" for key in
                    ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DBUS_SESSION_BUS_ADDRESS",

@@ -1,0 +1,34 @@
+From: Grok App Computer Use test fixture
+Subject: Backport xdg-foreign globals to the private labwc 0.5.3 fixture
+
+Adapted from labwc commit 64bb57afa22b4ecded17a271392964b35e8d780f
+(Add support for xdg-foreign-v1 and xdg-foreign-v2, GPL-2.0-only).
+wlroots 0.15 already implements both protocols. labwc 0.5.3 does not have
+the later sandbox global allowlist, so only the includes and creation calls
+apply. These are real wlroots exports, required by GTK's parent handle test.
+
+--- a/src/server.c
++++ b/src/server.c
+@@ -10,6 +10,9 @@
+ #include <wlr/types/wlr_primary_selection_v1.h>
+ #include <wlr/types/wlr_screencopy_v1.h>
+ #include <wlr/types/wlr_viewporter.h>
++#include <wlr/types/wlr_xdg_foreign_registry.h>
++#include <wlr/types/wlr_xdg_foreign_v1.h>
++#include <wlr/types/wlr_xdg_foreign_v2.h>
+ #include "config/rcxml.h"
+ #include "config/session.h"
+ #include "labwc.h"
+@@ -252,6 +255,12 @@
+ 	output_init(server);
+ 	seat_init(server);
+ 
++	/* These get cleaned up automatically on display destroy. */
++	struct wlr_xdg_foreign_registry *registry =
++		wlr_xdg_foreign_registry_create(server->wl_display);
++	wlr_xdg_foreign_v1_create(server->wl_display, registry);
++	wlr_xdg_foreign_v2_create(server->wl_display, registry);
++
+ 	/* Init xdg-shell */
+ 	server->xdg_shell = wlr_xdg_shell_create(server->wl_display);
+ 	if (!server->xdg_shell) {

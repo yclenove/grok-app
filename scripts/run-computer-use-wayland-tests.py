@@ -51,6 +51,12 @@ def fixture_environment(runtime, xwayland):
     return env
 
 
+def compositor_command(labwc, config, config_file=False):
+    # Jammy's private 0.5.3 accepts a file via -c; maintained distro builds
+    # accept a config directory via -C. Never fall back to the user's config.
+    return [labwc, "-c", str(config / "rc.xml")] if config_file else [labwc, "-C", str(config)]
+
+
 def verify_suite(output, diagnostics=""):
     # Reject filtered/ignored/zero-test greens and require the GTK integration.
     results = re.findall(
@@ -133,6 +139,8 @@ def main():
     parser.add_argument("--test-binary", required=True)
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--labwc", default="labwc")
+    parser.add_argument("--labwc-config-file", action="store_true",
+                        help="Use -c rc.xml for the private Jammy labwc 0.5.3 fixture")
     parser.add_argument("--xwayland", default="Xwayland")
     parser.add_argument("--test-threads", type=int, choices=range(1, 17), default=1)
     parser.add_argument("--timeout", type=float, default=180)
@@ -166,7 +174,7 @@ def main():
 
         try:
             compositor = subprocess.Popen(
-                [labwc, "-C", str(runtime / "config")], env=env,
+                compositor_command(labwc, runtime / "config", args.labwc_config_file), env=env,
                 stdin=subprocess.DEVNULL, stdout=log("labwc.stdout"),
                 stderr=log("labwc.stderr"), start_new_session=True)
             children.append(compositor)

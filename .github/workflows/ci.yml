@@ -338,6 +338,14 @@ jobs:
         if: matrix.name == 'Windows'
         with:
           node-version: 22
+      - uses: pnpm/action-setup@v4
+        if: matrix.name == 'Windows'
+      - name: Locked source-worker test dependency
+        if: matrix.name == 'Windows'
+        # Native Rust tests also exercise the source worker and its preload
+        # fixture. ESM resolves from that directory, not the prepared seed.
+        # This private package stays separate from the root App dependencies.
+        run: pnpm --dir tools/computer-use-browser install --ignore-workspace --frozen-lockfile --ignore-scripts
       - name: Windows portable ZIP roundtrip (no App or installer execution)
         if: matrix.name == 'Windows'
         run: node --test scripts/stage-windows-portable.test.mjs
@@ -380,7 +388,19 @@ jobs:
             libayatana-appindicator3-dev \
             xvfb xauth dbus-x11 at-spi2-core python3-gi gir1.2-gtk-3.0 \
             libpipewire-0.3-dev libspa-0.2-dev libclang-dev pipewire-bin meson ninja-build python3-jinja2 \
-            labwc xwayland iproute2
+            xwayland iproute2
+          if [ '${{ matrix.name }}' = 'Linux' ]; then
+            # Jammy has wlroots 0.15, but no labwc package. Build a fixed private
+            # test compositor instead of changing the App's ABI baseline.
+            sudo apt-get install -y --no-install-recommends libwlroots-dev libxml2-dev
+          else
+            sudo apt-get install -y --no-install-recommends labwc
+          fi
+      - name: Prepare private Jammy test compositor
+        if: matrix.name == 'Linux'
+        run: |
+          python3 scripts/test-computer-use-labwc.py
+          bash scripts/build-computer-use-labwc.sh "$RUNNER_TEMP/cu-labwc"
       - name: Prepare private native Wayland SDK before App compilation
         if: startsWith(matrix.os, 'ubuntu')
         run: |
@@ -462,10 +482,12 @@ jobs:
           # Some Ubuntu runners restrict unprivileged user namespaces. Elevate
           # only this namespace launcher, never change global AppArmor/sysctl.
           sudo env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+            GROK_CU_PW_BIN="$RUNNER_TEMP/cu-pw/bin" \
             GROK_CU_PW_SOURCE="$RUNNER_TEMP/cu-owned-pw-source" \
             GROK_CU_EIS_SERVER="$RUNNER_TEMP/cu-owned-eis" \
             bash ../scripts/run-computer-use-wayland-tests.sh \
               --test-binary "$TEST_BINARY" --test-threads 4 \
+              --labwc "$RUNNER_TEMP/cu-labwc/bin/labwc" --labwc-config-file \
               --evidence "$RUNNER_TEMP/cu-native-evidence"
       - name: Make owned native evidence readable for artifact upload
         if: always() && matrix.name == 'Linux'
@@ -480,6 +502,16 @@ jobs:
           name: computer-use-wayland-private-peers
           path: ${{ runner.temp }}/cu-native-evidence
           if-no-files-found: warn
+      - name: Retain private compositor provenance, including failed builds
+        if: always() && matrix.name == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: computer-use-jammy-compositor
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/cu-labwc/labwc.sha256
+            ${{ runner.temp }}/cu-labwc/share/licenses/labwc/*
+            ${{ runner.temp }}/cu-labwc/build/meson-logs/meson-log.txt
       - name: Native X11 adapter acceptance (owned Xvfb, not Wayland)
         if: matrix.name == 'Linux'
         working-directory: src-tauri

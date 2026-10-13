@@ -1,6 +1,6 @@
 # Grok App 桌面端构建与发布
 
-CU维护来源最新见[SDK / FFmpeg与同步预检](plans/2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)：准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选、源码提供与完整NOTICE仍开放；原候选07/08和18原错误保持。fork/源仓库已fetch、未合入，下一批先按同步计划处理冲突和回归。App macOS 11+ / CU受管浏览器14+、原R1–R4完整验收继续。
+CU当前状态见[CI修复检查点](plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：fork和源main已合入，再次fetch无新增；production Jammy已成功。私有SDK补齐video adapter，完整Wayland原生199项通过；Mac FFI与Windows源码worker测试依赖已修，新CI待结果。五target维护运行时、完整NOTICE和产品/安装验收仍开放。App macOS 11+ / CU受管浏览器14+不变，R1–R4继续。
 
 支持平台：
 

@@ -1,4 +1,4 @@
-当前批次见[CI修复检查点](../plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：再次fetch后两边main无新增待合入；Rust1.99本机App2399/strict通过，修atomic弃用/Mac类型/Linux SDK资源准备。[维护ARM64 browser](../plans/2026-10-13-computer-use-arm64-browser-checkpoint.md)官方固定来源已验，原生诊断job待结果；[Linux SDK 双架构](../plans/2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)原生job已成功，完整workflow尚非绿。产品pins/seed/App144与App11+/CU受管Mac14+保持；完整R1–R4仍active/partial，以下为历史批次记录。
+当前批次见[CI修复检查点](../plans/2026-10-13-computer-use-ci-fixes-checkpoint.md)：两边main已合入，再次fetch无新增；production Jammy、双架构SDK与维护ARM64 browser远端成功。补齐私有video adapter后完整Wayland原生199项通过，Mac FFI合同180项通过，Windows原失败涉及的定向13项通过；新CI待结果，Linux ARM64产品target仍开放。产品pins/seed/App144与App11+/CU受管Mac14+保持，完整R1–R4仍active/partial，以下为历史批次记录。
 
 2026-10-13 最新[SwiftShader MD5/libbacktrace特殊通知](../plans/2026-10-13-computer-use-swiftshader-copied-checkpoint.md)：13准确源/88774 bytes/四manifest/raw batches已验，五MD5与两backtrace完整原inline permission保持；Boost下载pins、libbacktrace Gitlink及CMake debug源码分支明确，不据此推导binary排除。独立01/02整个报告及10197-byte片段一致，437工具tests/0skip通过，原所有目录/字段/来源缺口保持；完整NOTICE/维护pack/产品验收及原R1–R4全部范围active/partial，App11+/CU受管Mac14+与旧产品保持。
 
