@@ -1,6 +1,7 @@
 //! Single-attempt action delivery, fresh state, and session-local audit records.
 //! Native waits are bounded and cancellable; uncertain mutations are never replayed.
 mod authorize;
+mod discovery;
 mod failure;
 /// Snapshot, geometry, and exact-handle preflight gates.
 pub mod gate;
@@ -68,6 +69,9 @@ impl fmt::Debug for ToolCall {
 pub struct ActionState {
     /// Full or fingerprint-aligned diff text.
     pub text: String,
+    /// Full sanitized text for a private overflow file, when inline text contracted.
+    /// Never deliver this directly as inline MCP content.
+    pub overflow_text: Option<String>,
     /// Compact protocol state, also used by ToolError.state.
     pub state: AppState,
     /// Optional safe image, before encoding for the transport.

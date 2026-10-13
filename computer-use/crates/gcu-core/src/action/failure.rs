@@ -92,6 +92,7 @@ impl ActionRouter {
                     serde_json::to_string(&out.windows).unwrap_or_default()
                 ),
                 image: None,
+                overflow_text: None,
                 state: AppState {
                     app: current_win.app.info,
                     window: gcu_protocol::WindowInfo {

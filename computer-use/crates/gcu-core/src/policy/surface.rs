@@ -83,6 +83,11 @@ pub(crate) fn gate(
     if remote(list, window, tree) {
         return SurfaceGate::Remote;
     }
+    // Launch has no target UI yet. The identity gate still rejects terminals,
+    // unknown execution hosts, Grok, and security apps before reaching here.
+    if intent.tool == super::Tool::LaunchApp {
+        return SurfaceGate::Clear;
+    }
     if let Some(tree) = tree {
         if let Some(resolved) = super::target::resolve(tree, intent) {
             if resolved.execution && intent.tool.is_mutating() {

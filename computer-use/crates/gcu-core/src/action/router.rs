@@ -34,7 +34,7 @@ pub struct ActionRouter {
     pub(crate) approvals: Arc<dyn ApprovalProvider>,
     pub(crate) policy: Arc<dyn PolicyStore>,
     events: Arc<dyn EventSink>,
-    locks: WindowLocks,
+    pub(super) locks: WindowLocks,
     pub(crate) policy_version: AtomicU64,
     pub(crate) epoch: Instant,
     pub(crate) tree_opts: TreeOpts,
@@ -132,7 +132,7 @@ impl ActionRouter {
                     .read(session, &win, params.include_screenshot, &opts)
                     .await
                     .map_err(|code| Box::new(error(code)))?;
-                self.publish(session, fresh, params.include_screenshot)
+                self.publish_with_limit(session, fresh, params.include_screenshot, opts.text_limit)
             })
             .await
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?

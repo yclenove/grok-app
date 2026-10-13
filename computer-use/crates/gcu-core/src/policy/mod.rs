@@ -63,6 +63,8 @@ use std::fmt;
 /// Tool the policy decision applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
+    /// Launch an authorized app, with foreground and sensitive-action policy.
+    LaunchApp,
     /// List running apps. No app authorization.
     ListApps,
     /// List windows. No app authorization.
@@ -517,6 +519,7 @@ fn summary_of(intent: &ActionIntent, node: Option<&ProcessedNode>) -> ActionSumm
         .filter(|name| !name.is_empty())
         .unwrap_or("element");
     let verb = match intent.tool {
+        Tool::LaunchApp => "launch app",
         Tool::Click => "click",
         Tool::Secondary => "secondary click",
         Tool::Menu => "open menu",

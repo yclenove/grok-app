@@ -52,6 +52,9 @@ pub struct Observation {
     pub snapshot_id: SnapshotId,
     /// Sanitized model text, full or diff.
     pub text: String,
+    /// Complete sanitized rendering when transport contraction was necessary.
+    /// Store only in a private session file; never append to inline tool output.
+    pub overflow_text: Option<String>,
     /// Whether text contains a full state or a small diff.
     pub mode: ObservationMode,
     /// Semantic patch when a prior delivered baseline exists in this turn.
@@ -204,8 +207,8 @@ impl SnapshotStore {
             .rev()
             .find(|s| &s.window == window && s.screenshot.is_some())
     }
-    /// Record the dimensions of a safe downscaled delivery. Ignores dimensions
-    /// that are empty or larger than the retained original. Memory only; no waits,
+    /// Record the dimensions of a safe encoded delivery, including ADR 0001
+    /// enlargement. Ignores empty or oversized derivatives. Memory only; no waits,
     /// timeout or cancellation. Must be called before accepting coordinate input.
     pub fn set_delivery_size(
         &mut self,
@@ -220,7 +223,15 @@ impl SnapshotStore {
             .find(|s| s.id == id && &s.window == window)
         {
             if let Some(image) = &s.screenshot {
-                if width > 0 && height > 0 && width <= image.width() && height <= image.height() {
+                if width > 0
+                    && height > 0
+                    && u64::from(width) * u64::from(height) * 4
+                        <= crate::redact::MAX_CAPTURE_BYTES as u64
+                    && (f64::from(width) / f64::from(image.width()) * f64::from(image.height())
+                        - f64::from(height))
+                    .abs()
+                        <= 1.
+                {
                     s.delivery_size = (width, height);
                 }
             }
@@ -284,6 +295,9 @@ impl SnapshotStore {
             previous.map(|s| &s.index),
             history.map_or(0, |h| h.next_index),
         )?;
+        let full_text = crate::render::text::file_text(&tree, opts);
+        let overflow_text =
+            (full_text.len() > crate::render::text::FACTS_PREFIX_BYTES).then_some(full_text);
         let rendered = RenderedState::from_tree(&tree, opts);
         let diff = if history.is_some_and(|h| !h.force_full) {
             previous.map(|s| Diff::between(&s.rendered, &rendered))
@@ -387,6 +401,7 @@ impl SnapshotStore {
         Ok(Observation {
             snapshot_id: id,
             text,
+            overflow_text,
             mode,
             diff,
         })

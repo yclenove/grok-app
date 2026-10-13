@@ -694,7 +694,7 @@
 - **测试：** 五条件即时成功/事件触发/轮询/永不满足/30s上限/窗口消失/取消/Stop/敏感观察授权；fake确定时钟验证无busy-loop、无驱动变更。
   验收命令：`rcargo test -p gcu-core --test wait_for`。
 
-- **DoD：** 状态机 ready/waiting/timed_out/cancelled覆盖；接MCP与batch/script复用入口。
+- **DoD：** 状态机 ready/waiting/timed_out/cancelled覆盖；接MCP与batch/script复用入口；实现完成后将 `wait_for` 加入 gcu-mcp 的 `IMPLEMENTED_TOOLS` 并更新注册集合/e2e 测试。
 
 ### P6-04 `computer_batch`
 - **依赖：** P6-03　**估算：** 3d
@@ -703,7 +703,7 @@
 - **测试：** fake + 夹具：全成功、中途 stale、中途敏感确认被拒、超时、预检失败零执行。
   验收命令：`rcargo test -p gcu-core --test batch`。
 
-- **DoD：** 本卡内容与测试全部通过，能力/协议/错误语义与03及07相关门禁一致；不注册空实现。
+- **DoD：** 本卡内容与测试全部通过，能力/协议/错误语义与03及07相关门禁一致；不注册空实现；实现完成后将 `computer_batch` 加入 gcu-mcp 的 `IMPLEMENTED_TOOLS` 并更新注册集合/e2e 测试。
 
 ### P6-05 `computer_script`（feature）
 - **依赖：** P6-04　**估算：** 4d
@@ -712,7 +712,7 @@
 - **测试：** 沙箱逃逸用例（访问 `globalThis` 未暴露对象、无限循环、内存炸弹、超长输出）；功能用例同 batch。
   验收命令：`rcargo test -p gcu-script --no-default-features --test sandbox`；Unix nightly另执行 cargo +nightly fuzz run script_rpc -- -max_total_time=60。
 
-- **DoD：** 安全审查清单（07 §7）签字；宿主分配≤32MB、native 并发1/队列32、总输出≤2MB、worker 总内存≤128MB，驱动调用≤200；独立 watchdog 超时 ≤500ms 杀 worker；无文件/网络/进程/环境权限，不传原生句柄。测试未启用 rust-alloc 的内存炸弹、宿主分配炸弹/并发 RPC/绑定与沙箱 fuzz、脚本或 FFI 卡死时 Stop 可达。
+- **DoD：** 安全审查清单（07 §7）签字；宿主分配≤32MB、native 并发1/队列32、总输出≤2MB、worker 总内存≤128MB，驱动调用≤200；独立 watchdog 超时 ≤500ms 杀 worker；无文件/网络/进程/环境权限，不传原生句柄。测试未启用 rust-alloc 的内存炸弹、宿主分配炸弹/并发 RPC/绑定与沙箱 fuzz、脚本或 FFI 卡死时 Stop 可达。实现完成后将 `computer_script` 加入 gcu-mcp 的 `IMPLEMENTED_TOOLS` 并更新注册集合/e2e 测试（仍受 script feature 限制）。
 
 ### P6-06 工具目录与 instructions 优化
 - **依赖：** P6-05　**估算：** 1d

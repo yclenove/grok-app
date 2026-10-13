@@ -43,6 +43,7 @@ struct Rule {
 }
 
 const CORE_DEV: &[&str] = &["insta", "criterion", "gcu-driver-fake", "proptest"];
+const MCP_DEV: &[&str] = &["gcu-driver-fake", "png"];
 
 // Keep this table aligned with docs/plans/computer-use-v2/03-architecture.md §2.
 // Inspect every declared edge: optional, target-specific, dev, and build. Using
@@ -89,9 +90,16 @@ const RULES: &[Rule] = &[
             "gcu-protocol",
             "gcu-core",
             "gcu-host-api",
+            "gcu-host-protocol",
             "rmcp",
             "tokio",
             "axum",
+            "serde",
+            "serde_json",
+            "thiserror",
+            "async-trait",
+            "base64",
+            "tempfile",
         ]),
     },
     Rule {
@@ -176,6 +184,12 @@ pub(crate) fn check_metadata(input: &str) -> Result<Vec<String>> {
             if package.name == "gcu-core"
                 && dependency.kind.as_deref() == Some("dev")
                 && CORE_DEV.contains(&dependency.name.as_str())
+            {
+                continue;
+            }
+            if package.name == "gcu-mcp"
+                && dependency.kind.as_deref() == Some("dev")
+                && MCP_DEV.contains(&dependency.name.as_str())
             {
                 continue;
             }
