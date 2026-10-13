@@ -83,6 +83,7 @@ computer-use/
 | gcu-script | gcu-protocol, gcu-core, rquickjs | OS crate、网络、文件系统、进程权限 |
 | gcu-eval | gcu-protocol, gcu-core, gcu-driver-fake, serde, serde_json, tokio；任务 YAML/CLI/报告依赖在 P9-01 固定并核实许可 | 生产凭据、非隔离运行 |
 | gcu-cli | 全部 | — |
+| gcu-fixture | 任意（仅测试夹具，不被其他 crate 依赖） | — |
 | gcu-host-protocol | gcu-protocol, serde, serde_json, tokio(io), interprocess（UDS/命名管道） | core、驱动 |
 | src-tauri（路线 B） | **仅** gcu-protocol、gcu-host-protocol | gcu-core、任何 gcu-driver-*、gcu-mcp、gcu-cli、gcu-overlay（`xtask check-deps` 同时检查 src-tauri） |
 

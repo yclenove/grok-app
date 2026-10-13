@@ -74,6 +74,7 @@ fn check_deps_compliant_metadata_passes() {
         ("gcu-cli", &["gcu-mcp", "gcu-driver-fake"]),
         ("gcu-script", &["gcu-core"]),
         ("gcu-overlay", &["gcu-host-api"]),
+        ("gcu-fixture", &["eframe", "serde", "serde_json"]),
         ("xtask", &["anyhow", "serde", "serde_json", "toml"]),
     ]);
     assert!(check_metadata(&input).unwrap().is_empty());
@@ -218,6 +219,7 @@ fn check_deps_tauri_all_forbidden_computer_use_crates_fail() {
         "gcu-cli",
         "gcu-overlay",
         "gcu-script",
+        "gcu-fixture",
         "gcu-unreviewed",
     ] {
         let input = format!("[dependencies]\n{dependency} = '0.0.0'\n");
