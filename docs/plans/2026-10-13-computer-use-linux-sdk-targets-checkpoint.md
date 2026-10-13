@@ -46,7 +46,20 @@ stager、产品 manifest parser 和 build link policy 写死 x64；release SDK
 | Rust fmt / targeted ESLint | exit0 |
 | 六份 Python AST | passed |
 | CI / release YAML 与两条 SDK shell 实例 | runner/target/ABI/stager/fallback 路径匹配，bash语法通过 |
-| ARM64 原生 SDK | 本地 not_run；交给已接入的原生 CI，实际 run 身份与结果记录在后续回执 |
+| ARM64 原生 SDK | GitHub Noble-ARM64 原生 job 已成功；62 Python / 10 Rust / strict / SDK smoke / 7故障与同ELF18场景通过 |
+
+远端实际结果：[run 38372012718](https://github.com/yclenove/grok-app/actions/runs/38372012718)，
+提交 `c92bca1b`。Jammy-x64 job `115211046909` 与 Noble-ARM64 job
+`115211046862` 均成功；每架构执行 62 Python、10 产品模块 Rust、strict
+clippy、16件 SDK 清单、7 SDK拒绝场景及同一真实ELF的18个产品loader场景。
+清单、故障结果与原日志已下载，身份/结果回读见证据根内
+`native-ci-final-receipt.json`。这证明双架构 SDK/loader，不证明安装或 portal。
+
+完整 workflow 的 frontend 成功，整体仍 failure：Windows/macOS/Linux 的
+Rust1.99 strict clippy 拒绝隐私门禁的六处多余 closure borrow；ARM64 App
+runtime prepare 缺浏览器映射；production Jammy 的 synthetic verifier
+在临时目录含下划线时 preflight 拒绝。后两项不是 SDK job 失败。
+后续修复见 [CI 修复检查点](2026-10-13-computer-use-ci-fixes-checkpoint.md)。
 
 第一次 native runner 已完成 40 Python / 10 Rust / strict / SDK smoke，
 随后 fault runner 因隔离环境不存在指定系统库而在 preflight 拒绝。
@@ -74,8 +87,8 @@ stager、产品 manifest parser 和 build link policy 写死 x64；release SDK
 
 ## 仍需完成
 
-本批证明 x64 SDK 与当前产品 loader 无回归，并将 ARM64 同一链路送入原生 CI；
-不证明 ARM64 SDK、完整 App、安装或桌面输入已经验收。
+本批已证明 x64 与 ARM64 原生 SDK/产品 loader 链路；
+不证明完整 App、安装或桌面输入已经验收。
 ARM64 Node/Playwright/Chromium 资源、compiled pins/source locks/pack mapping
 和资源来源仍开放；整体 ARM64 release 尚不可用。
 

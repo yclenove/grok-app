@@ -3,7 +3,7 @@ import hashlib
 import json
 import subprocess
 import sys
-import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -13,7 +13,11 @@ def record(path):
 
 def main():
     helper = Path(__file__).with_name("check-jammy-app-inputs.sh").resolve(strict=True)
-    root = Path(tempfile.mkdtemp(prefix="grok-cu-jammy-sdk-input-oracle-", dir="/var/tmp"))
+    # The verifier deliberately permits only alphanumeric/hyphen owner names.
+    # tempfile's random suffix can contain underscores, invalidating the fixture
+    # before any content assertion runs. Keep the production boundary unchanged.
+    root = Path("/var/tmp") / f"grok-cu-jammy-sdk-input-oracle-{uuid.uuid4().hex}"
+    root.mkdir(mode=0o700)
     results = []
     try:
         stage = root / "work/product-app-fixture"

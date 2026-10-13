@@ -518,9 +518,9 @@ fn bounded_store_gates() -> Result<(), String> {
                 audience: "ui".into(),
                 unix_secs: now_secs(),
             })
-            .map_err(&fail)?;
+            .map_err(fail)?;
     }
-    let rows = store.load_run("run-a").map_err(&fail)?;
+    let rows = store.load_run("run-a").map_err(fail)?;
     if rows.len() > MAX_RECORDS_PER_RUN {
         return Err(fail(format!(
             "per-run cap broken: {} > {MAX_RECORDS_PER_RUN}",
@@ -545,13 +545,13 @@ fn bounded_store_gates() -> Result<(), String> {
             audience: "ui".into(),
             unix_secs: now_secs(),
         })
-        .map_err(&fail)?;
-    let rows = store.load_run("run-a").map_err(&fail)?;
+        .map_err(fail)?;
+    let rows = store.load_run("run-a").map_err(fail)?;
     if rows.iter().any(|r| contains_sentinel(&r.detail).is_some()) {
         return Err(fail("persisted sentinel".into()));
     }
-    store.clear().map_err(&fail)?;
-    let after = store.load_run("run-a").map_err(&fail)?;
+    store.clear().map_err(fail)?;
+    let after = store.load_run("run-a").map_err(fail)?;
     if !after.is_empty() {
         return Err(fail("clear left records".into()));
     }

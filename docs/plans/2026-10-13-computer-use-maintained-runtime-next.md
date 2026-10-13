@@ -2,8 +2,9 @@
 
 最新同步已完成：[fork / 源仓库同步检查点](2026-10-13-computer-use-upstream-sync-checkpoint.md)，
 提交 `8107bb07` 已推送。当前处理 [Linux SDK 双架构检查点](2026-10-13-computer-use-linux-sdk-targets-checkpoint.md)：
-明确 x64/Jammy 与 ARM64/Noble 的独立 SDK/ABI/loader 合同及原生 CI，
-ARM64 浏览器资源仍开放。原 R1–R4、全部平台/surface/安装/真人/12h 范围保持；
+明确 x64/Jammy 与 ARM64/Noble 的独立 SDK/ABI/loader 合同，两架构原生 CI
+SDK job均已成功。后续[CI修复](2026-10-13-computer-use-ci-fixes-checkpoint.md)
+处理Rust1.99 lint与Jammy输入夹具；ARM64浏览器资源仍开放。原 R1–R4、全部平台/surface/安装/真人/12h 范围保持；
 下方 fetch-only、未提交和旧哈希属于历史批次，不作为当前下一步状态。
 
 当前R1：[SDK / FFmpeg与同步预检](2026-10-13-computer-use-sdk-ffmpeg-source-checkpoint.md)。准确Linux SDK整包/四许可和FFmpeg声明已回读，SDK尚未接统一候选，四平台记录参数默认走FFmpeg静态库分支，源码提供与完整NOTICE仍开放；原候选07/08和18原错误保持。fork/源仓库已fetch、未合入，下一批先保存CU源码快照、处理冲突和回归，再继续原R1–R4全部范围。App11+/CU受管Mac14+、旧产品保持，以下为原各批证据。
