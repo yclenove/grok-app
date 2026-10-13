@@ -1,5 +1,8 @@
 //! One-shot deterministic faults; no real process crashes or OS input.
-use gcu_core::model::Geometry;
+use gcu_core::{
+    driver::DriverError,
+    model::{Geometry, NodeValue},
+};
 use std::time::Duration;
 
 /// Injected at the next tree read, capture, or action. Structural faults take
@@ -35,6 +38,27 @@ pub enum Fault {
         /// Unique node identifier.
         identifier: String,
     },
+    /// Replace visible content in place, preserving geometry and native handle.
+    /// Test-only desktop mutation; fingerprints are refreshed by the next read.
+    NodeChanged {
+        /// Exact window ID.
+        window: String,
+        /// Existing unique identifier.
+        identifier: String,
+        /// Replacement accessible name.
+        name: String,
+        /// Replacement value, including None to clear it.
+        value: Option<NodeValue>,
+    },
+    /// Replace a synthetic process instance without changing its App/window IDs.
+    ProcessChanged {
+        /// Exact App ID.
+        app: String,
+        /// New synthetic process ID.
+        pid: u32,
+    },
+    /// Typed native refusal, useful for zero-side-effect gate contract tests.
+    Error(DriverError),
     /// Stall the next native read/action, subject to cancellation and hard timeout.
     Delay(Duration),
     /// Deliver now, expose the effect only after the specified settle interval.

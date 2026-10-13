@@ -191,6 +191,39 @@ impl World {
                 }
                 self.emit(window, UiEvent::Changed);
             }
+            Fault::NodeChanged {
+                window,
+                identifier,
+                name,
+                value,
+            } => {
+                let win = self
+                    .windows
+                    .iter_mut()
+                    .find(|w| &w.info.id == window)
+                    .ok_or(DriverError::WindowGone)?;
+                let node = find_mut(
+                    win.root.as_mut().ok_or(DriverError::StaleElement)?,
+                    identifier,
+                )
+                .ok_or(DriverError::StaleElement)?;
+                node.name = Some(name.clone());
+                node.value = value.clone();
+                self.emit(window, UiEvent::Changed);
+            }
+            Fault::ProcessChanged { app, pid } => {
+                let reference = self
+                    .apps
+                    .iter_mut()
+                    .find(|a| &a.info.id == app)
+                    .ok_or(DriverError::AppNotFound)?;
+                reference.info.pid = Some(*pid);
+                for win in &mut self.windows {
+                    if &win.reference.app.info.id == app {
+                        win.reference.app = reference.clone();
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())

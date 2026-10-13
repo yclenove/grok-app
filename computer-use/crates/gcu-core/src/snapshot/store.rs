@@ -78,6 +78,7 @@ pub struct Snapshot {
     state_version: Option<u64>,
     observed_at: Option<Duration>,
     memory_bytes: usize,
+    delivery_size: (u32, u32),
 }
 impl fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,6 +111,11 @@ impl Snapshot {
     /// then fail closed. Arbitrary coordinate targets use screenshot.target_hash.
     pub fn target_hash(&self, index: u32) -> Option<PixelHash> {
         self.target_hashes.get(&index).copied()
+    }
+    /// Pixel dimensions of the image actually delivered to the model. Memory
+    /// only; no waits, timeout, or cancellation. Used for coordinate conversion.
+    pub fn delivery_size(&self) -> (u32, u32) {
+        self.delivery_size
     }
     /// Window geometry observed for stale-geometry checks.
     pub fn geometry(&self) -> Geometry {
@@ -197,6 +203,28 @@ impl SnapshotStore {
             .iter()
             .rev()
             .find(|s| &s.window == window && s.screenshot.is_some())
+    }
+    /// Record the dimensions of a safe downscaled delivery. Ignores dimensions
+    /// that are empty or larger than the retained original. Memory only; no waits,
+    /// timeout or cancellation. Must be called before accepting coordinate input.
+    pub fn set_delivery_size(
+        &mut self,
+        window: &WindowKey,
+        id: SnapshotId,
+        width: u32,
+        height: u32,
+    ) {
+        if let Some(s) = self
+            .snapshots
+            .iter_mut()
+            .find(|s| s.id == id && &s.window == window)
+        {
+            if let Some(image) = &s.screenshot {
+                if width > 0 && height > 0 && width <= image.width() && height <= image.height() {
+                    s.delivery_size = (width, height);
+                }
+            }
+        }
     }
     /// Resolve a snapshot-scoped reference only if still retained and its native
     /// fingerprint still exists at the same index in the latest window state.
@@ -316,7 +344,11 @@ impl SnapshotStore {
             .next_snapshot
             .checked_add(1)
             .ok_or(SnapshotError::IndexExhausted)?;
+        let delivery_size = screenshot
+            .as_ref()
+            .map_or((0, 0), |i| (i.width(), i.height()));
         let snapshot = Snapshot {
+            delivery_size,
             id,
             window: window.clone(),
             index,

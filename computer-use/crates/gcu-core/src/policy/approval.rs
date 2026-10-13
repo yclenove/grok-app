@@ -270,6 +270,7 @@ pub async fn wait_for_app(wait: AppGrantWait<'_>) -> ApprovalDecision {
         return ApprovalDecision::Deny;
     }
     let request_cancel = Cancel::new();
+    let _dismiss_on_drop = DismissOnDrop(request_cancel.clone());
     let decision = tokio::select! {
         biased;
         _ = wait.session_cancel.cancelled() => {
@@ -342,6 +343,7 @@ pub async fn wait_for_confirm(wait: ConfirmWait<'_>) -> bool {
         return false;
     }
     let request_cancel = Cancel::new();
+    let _dismiss_on_drop = DismissOnDrop(request_cancel.clone());
     let confirmed = tokio::select! {
         biased;
         _ = wait.session_cancel.cancelled() => {
@@ -370,4 +372,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct DismissOnDrop(Cancel);
+impl Drop for DismissOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
