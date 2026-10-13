@@ -1497,12 +1497,14 @@ dependencies = [
  "futures-core",
  "gcu-core",
  "gcu-protocol",
+ "png",
  "sha2",
  "smallvec",
  "smol_str 0.3.6",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "x11rb",
  "zbus",
 ]
 
