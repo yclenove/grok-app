@@ -1,0 +1,24 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.list (pid 1001) — Fixture list
+Window: "Fixture list", id list-window, 800×480 @1x, App: Fixture list.
+0 standard window List ID: root
+    1 list Rows ID: list Secondary Actions: Scroll Up, Scroll Down
+        2 row (selectable) Row 0 ID: row-0
+        3 row (selectable) Row 1 ID: row-1
+        4 row (selectable) Row 2 ID: row-2
+        5 row (selectable) Row 3 ID: row-3
+        6 row (selectable) Row 4 ID: row-4
+        7 row (selectable) Row 5 ID: row-5
+        8 row (selectable) Row 6 ID: row-6
+        9 row (selectable) Row 7 ID: row-7
+        10 row (selectable) Row 8 ID: row-8
+        11 row (selectable) Row 9 ID: row-9
+        12 row (selectable) Row 10 ID: row-10
+        13 row (selectable) Row 11 ID: row-11
+        14 row (selectable) Row 12 ID: row-12
+        15 row (selectable) Row 13 ID: row-13
+        16 row (selectable) Row 14 ID: row-14
+[truncated: 1985 nodes omitted under 1 list]

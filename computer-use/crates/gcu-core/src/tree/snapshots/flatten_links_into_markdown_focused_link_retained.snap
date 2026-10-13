@@ -1,0 +1,101 @@
+---
+source: crates/gcu-core/src/tree/test_support.rs
+expression: "serde_json::to_string_pretty(&io).unwrap()"
+---
+{
+  "input": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [
+              {
+                "actions": [],
+                "children": [],
+                "flags": "NodeFlags(FOCUS_PATH)",
+                "index": null,
+                "name": "Docs",
+                "omitted": 0,
+                "role": "link",
+                "states": "ENABLED | FOCUSED",
+                "value": null
+              }
+            ],
+            "flags": "NodeFlags(FOCUS_PATH)",
+            "index": null,
+            "name": "Read",
+            "omitted": 0,
+            "role": "static_text",
+            "states": "ENABLED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(FOCUS_PATH)",
+        "index": null,
+        "name": "Page",
+        "omitted": 0,
+        "role": "web_area",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(FOCUS_PATH)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  },
+  "omitted": 0,
+  "output": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [
+              {
+                "actions": [],
+                "children": [],
+                "flags": "NodeFlags(FOCUS_PATH)",
+                "index": null,
+                "name": "Docs",
+                "omitted": 0,
+                "role": "link",
+                "states": "ENABLED | FOCUSED",
+                "value": null
+              }
+            ],
+            "flags": "NodeFlags(FOCUS_PATH)",
+            "index": null,
+            "name": "Read",
+            "omitted": 0,
+            "role": "static_text",
+            "states": "ENABLED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(FOCUS_PATH)",
+        "index": null,
+        "name": "Page",
+        "omitted": 0,
+        "role": "web_area",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(FOCUS_PATH)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  }
+}

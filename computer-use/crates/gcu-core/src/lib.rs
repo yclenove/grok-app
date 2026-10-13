@@ -10,6 +10,10 @@ pub mod driver;
 pub mod fingerprint;
 /// Raw accessibility model, without platform bindings.
 pub mod model;
+/// Bounded text and redacted structured observations.
+pub mod render;
 /// Shared driver contract suite; enabled only for test consumers.
 #[cfg(feature = "testing")]
 pub mod testing;
+/// Pure accessibility tree transforms and stable snapshot-local indices.
+pub mod tree;

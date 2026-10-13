@@ -1,0 +1,27 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "serde_json::to_string_pretty(&render_structured(&tree, &opts)).unwrap()"
+---
+{
+  "action": null,
+  "app": {
+    "id": "fake.form",
+    "name": "Fixture form",
+    "pid": 1001
+  },
+  "focused": 1,
+  "screenshot": null,
+  "snapshot_id": "",
+  "truncated": null,
+  "window": {
+    "frame": {
+      "h": 480.0,
+      "w": 800.0,
+      "x": 100.0,
+      "y": 100.0
+    },
+    "id": "form-window",
+    "scale": 1.0,
+    "title": "Fixture form"
+  }
+}

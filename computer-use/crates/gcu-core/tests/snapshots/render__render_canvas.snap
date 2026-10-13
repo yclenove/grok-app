@@ -1,0 +1,6 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.canvas (pid 1001) — Fixture canvas
+Window: "Fixture canvas", id canvas-window, 800×480 @1x, App: Fixture canvas.

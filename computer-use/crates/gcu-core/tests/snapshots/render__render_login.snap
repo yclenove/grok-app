@@ -1,0 +1,11 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.login (pid 1001) — Fixture login
+Window: "Fixture login", id login-window, 800×480 @1x, App: Fixture login.
+0 standard window Login ID: root
+    1 text field (settable, focused) Username ID: username
+    2 text field (settable) Password Value: ••• ID: password
+    3 button Log in ID: login
+The focused UI element is 1 text field.

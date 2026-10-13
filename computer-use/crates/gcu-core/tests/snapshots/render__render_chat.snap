@@ -1,0 +1,11 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.chat (pid 1001) — Fixture chat
+Window: "Fixture chat", id chat-window, 800×480 @1x, App: Fixture chat.
+0 standard window Chat ID: root
+    1 text field (settable, focused) Message ID: text
+    2 button 发送 ID: send
+    3 static text Offline chat ID: history
+The focused UI element is 1 text field.

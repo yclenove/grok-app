@@ -336,3 +336,22 @@ fn check_deps_script_io_and_model_os_edges_fail() {
         );
     }
 }
+
+#[test]
+fn check_deps_core_snapshot_and_bench_libraries_dev_only() {
+    for name in ["insta", "criterion", "gcu-driver-fake"] {
+        for (kind, allowed) in [
+            (json!("dev"), true),
+            (json!(null), false),
+            (json!("build"), false),
+        ] {
+            let mut input: Value =
+                serde_json::from_str(&metadata(&[("gcu-core", &[name])])).unwrap();
+            input["packages"][0]["dependencies"][0]["kind"] = kind;
+            assert_eq!(
+                check_metadata(&input.to_string()).unwrap().is_empty(),
+                allowed
+            );
+        }
+    }
+}

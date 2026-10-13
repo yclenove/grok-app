@@ -1,0 +1,65 @@
+---
+source: crates/gcu-core/src/tree/test_support.rs
+expression: "serde_json::to_string_pretty(&io).unwrap()"
+---
+{
+  "input": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "flags": "NodeFlags(0x0)",
+            "index": null,
+            "name": "Level 3",
+            "omitted": 0,
+            "role": "button",
+            "states": "ENABLED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Level 2",
+        "omitted": 0,
+        "role": "group",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(0x0)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  },
+  "omitted": 1,
+  "output": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": 1,
+        "name": "Level 2",
+        "omitted": 1,
+        "role": "group",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(0x0)",
+    "index": 0,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  }
+}

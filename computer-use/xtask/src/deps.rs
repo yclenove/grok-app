@@ -21,6 +21,8 @@ struct Package {
 struct Dependency {
     // Cargo supplies the canonical package name here, even for renamed edges.
     name: String,
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 enum CrateName {
@@ -39,6 +41,8 @@ struct Rule {
     owner: CrateName,
     allowed: Allowed,
 }
+
+const CORE_DEV: &[&str] = &["insta", "criterion", "gcu-driver-fake"];
 
 // Keep this table aligned with docs/plans/computer-use-v2/03-architecture.md §2.
 // Inspect every declared edge: optional, target-specific, dev, and build. Using
@@ -167,6 +171,12 @@ pub(crate) fn check_metadata(input: &str) -> Result<Vec<String>> {
             .with_context(|| format!("workspace member {member} missing from cargo metadata"))?;
         let rule = rule_for(&package.name)?;
         for dependency in &package.dependencies {
+            if package.name == "gcu-core"
+                && dependency.kind.as_deref() == Some("dev")
+                && CORE_DEV.contains(&dependency.name.as_str())
+            {
+                continue;
+            }
             check_edge(rule, &package.name, &dependency.name, &mut violations);
         }
     }

@@ -1,0 +1,10 @@
+---
+source: crates/gcu-core/tests/render.rs
+expression: "render_text(&tree, &opts)"
+---
+App=fake.modal (pid 1001) — Fixture modal
+Window: "Fixture modal", id modal-window, 800×480 @1x, App: Fixture modal.
+0 standard window Modal ID: root
+    1 button Background ID: background [background summary]
+    2 dialog (modal) Confirm ID: modal
+        3 button OK ID: confirm

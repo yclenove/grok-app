@@ -1,0 +1,99 @@
+---
+source: crates/gcu-core/src/tree/test_support.rs
+expression: "serde_json::to_string_pretty(&io).unwrap()"
+---
+{
+  "input": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "flags": "NodeFlags(FOCUS_PATH)",
+            "index": null,
+            "name": "Focus",
+            "omitted": 0,
+            "role": "text_field",
+            "states": "ENABLED | FOCUSED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(FOCUS_PATH)",
+        "index": null,
+        "name": "Group",
+        "omitted": 0,
+        "role": "group",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": null,
+        "name": "Next",
+        "omitted": 0,
+        "role": "button",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(FOCUS_PATH)",
+    "index": null,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  },
+  "omitted": 0,
+  "output": {
+    "actions": [],
+    "children": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "flags": "NodeFlags(FOCUS_PATH)",
+            "index": 2,
+            "name": "Focus",
+            "omitted": 0,
+            "role": "text_field",
+            "states": "ENABLED | FOCUSED",
+            "value": null
+          }
+        ],
+        "flags": "NodeFlags(FOCUS_PATH)",
+        "index": 1,
+        "name": "Group",
+        "omitted": 0,
+        "role": "group",
+        "states": "ENABLED",
+        "value": null
+      },
+      {
+        "actions": [],
+        "children": [],
+        "flags": "NodeFlags(0x0)",
+        "index": 3,
+        "name": "Next",
+        "omitted": 0,
+        "role": "button",
+        "states": "ENABLED",
+        "value": null
+      }
+    ],
+    "flags": "NodeFlags(FOCUS_PATH)",
+    "index": 0,
+    "name": "Fixture",
+    "omitted": 0,
+    "role": "window",
+    "states": "ENABLED",
+    "value": null
+  }
+}
