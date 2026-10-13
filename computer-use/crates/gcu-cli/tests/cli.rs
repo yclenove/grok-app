@@ -190,8 +190,15 @@ fn resume_non_tty_refuses_before_reading_credentials() {
 #[test]
 fn config_malformed_or_invalid_values_exit_two() {
     let h = TempDir::new().unwrap();
-    let dir = h.path().join("grok-computer-use");
-    std::fs::create_dir(&dir).unwrap();
+    // The config root differs per platform: macOS keeps it under Library/Application Support,
+    // while Windows (APPDATA) and Linux (XDG_CONFIG_HOME) use the temp root itself.
+    let root = if cfg!(target_os = "macos") {
+        h.path().join("Library").join("Application Support")
+    } else {
+        h.path().to_path_buf()
+    };
+    let dir = root.join("grok-computer-use");
+    std::fs::create_dir_all(&dir).unwrap();
     for config in [
         "[observe",
         "[guard]\nuser_idle_ms = -1",

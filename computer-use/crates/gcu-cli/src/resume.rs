@@ -339,8 +339,12 @@ async fn send(directory: &Path, request: &str) -> Result<(), Failure> {
     .await;
     match result {
         Ok(Ok(())) => Ok(()),
-        _ => Err(Failure::arguments(
-            "Control authentication/connection failed; remains stopped",
+        // Only the OS error is added; request text, tokens and challenges never appear.
+        Ok(Err(error)) => Err(Failure::arguments(format!(
+            "Control authentication/connection failed ({error}); remains stopped"
+        ))),
+        Err(_elapsed) => Err(Failure::arguments(
+            "Control authentication/connection timed out; remains stopped",
         )),
     }
 }
