@@ -655,7 +655,7 @@ fn grok_install_preserves_comments() {
     let fix = fix("grok-comments");
     let path = fix.home.path.join(".grok/config.toml");
     let original = format!(
-        "# user comment\n[mcp_servers.computer-use]\ncommand = \"{}\"\nargs = [\"mcp\"]\n# trailing\n",
+        "# user comment\n[mcp_servers.grok-computer-use]\ncommand = \"{}\"\nargs = [\"mcp\"]\n# trailing\n",
         gcu_str(&fix)
     );
     write(&path, &original);

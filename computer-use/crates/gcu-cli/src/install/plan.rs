@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 
 use super::ClientId;
 
-/// Whether the plan adds the `computer-use` entry or removes it.
+/// Whether the plan adds the `grok-computer-use` entry or removes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanAction {
-    /// Register `computer-use` and any client hook that belongs with it.
+    /// Register `grok-computer-use` and any client hook that belongs with it.
     Install,
-    /// Remove only `computer-use` and hooks this installer owns.
+    /// Remove only `grok-computer-use` and hooks this installer owns.
     Uninstall,
 }
 
@@ -172,10 +172,10 @@ pub struct ApplyOutcome {
     pub noop: bool,
 }
 
-/// Whether the client's `computer-use` registration is present and points at this `gcu`.
+/// Whether the client's `grok-computer-use` registration is present and points at this `gcu`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientStatus {
-    /// The `computer-use` entry or a hook this installer owns exists.
+    /// The `grok-computer-use` entry or a hook this installer owns exists.
     pub present: bool,
     /// `present` and an install plan for this context would change nothing.
     pub matches_gcu: bool,

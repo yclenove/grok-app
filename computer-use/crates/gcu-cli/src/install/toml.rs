@@ -48,7 +48,7 @@ fn render(doc: &DocumentMut) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// True when `[mcp_servers.computer-use]` exists, whatever its shape.
+/// True when `[mcp_servers.grok-computer-use]` exists, whatever its shape.
 pub(crate) fn mcp_present(path: &Path) -> Result<bool, InstallError> {
     let Some(bytes) = read_bytes(path)? else {
         return Ok(false);
@@ -66,7 +66,7 @@ pub(crate) fn mcp_present(path: &Path) -> Result<bool, InstallError> {
     Ok(table.contains_key(SERVER_NAME))
 }
 
-/// Set `[mcp_servers.computer-use]` command and args. Does not add `enabled` unless it is false.
+/// Set `[mcp_servers.grok-computer-use]` command and args. Does not add `enabled` unless it is false.
 pub(crate) fn install_mcp(
     doc: &mut DocumentMut,
     path: &Path,
@@ -110,7 +110,7 @@ pub(crate) fn install_mcp(
         .and_then(|servers| servers.get_mut(SERVER_NAME))
         .and_then(as_table_like_mut)
     else {
-        return Err(unexpected(path, "mcp_servers.computer-use must be a table"));
+        return Err(unexpected(path, "mcp_servers.grok-computer-use must be a table"));
     };
     changed |= set_string(server, "command", gcu);
     changed |= set_strings(server, "args", &["mcp"]);
@@ -121,7 +121,7 @@ pub(crate) fn install_mcp(
     Ok(changed)
 }
 
-/// Remove only `mcp_servers.computer-use`. The parent table is left in place.
+/// Remove only `mcp_servers.grok-computer-use`. The parent table is left in place.
 pub(crate) fn remove_mcp(doc: &mut DocumentMut, path: &Path) -> Result<bool, InstallError> {
     let Some(item) = doc.get("mcp_servers") else {
         return Ok(false);
@@ -202,25 +202,25 @@ fn validate_mcp(doc: &DocumentMut, path: &Path, fix_enabled: bool) -> Result<(),
         return Ok(());
     };
     let Some(server) = as_table_like(server_item) else {
-        return Err(unexpected(path, "mcp_servers.computer-use must be a table"));
+        return Err(unexpected(path, "mcp_servers.grok-computer-use must be a table"));
     };
     if let Some(command) = server.get("command") {
         if item_str(command).is_none() {
             return Err(unexpected(
                 path,
-                "mcp_servers.computer-use.command must be a string",
+                "mcp_servers.grok-computer-use.command must be a string",
             ));
         }
     }
     if let Some(args) = server.get("args") {
-        require_strings(args, path, "mcp_servers.computer-use.args")?;
+        require_strings(args, path, "mcp_servers.grok-computer-use.args")?;
     }
     if fix_enabled {
         if let Some(enabled) = server.get("enabled") {
             if item_bool(enabled).is_none() {
                 return Err(unexpected(
                     path,
-                    "mcp_servers.computer-use.enabled must be a boolean",
+                    "mcp_servers.grok-computer-use.enabled must be a boolean",
                 ));
             }
         }

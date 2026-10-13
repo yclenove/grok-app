@@ -1,4 +1,4 @@
-//! Install and uninstall the `computer-use` MCP entry.
+//! Install and uninstall the `grok-computer-use` MCP entry.
 //!
 //! [`ClientInstaller::plan`] and [`ClientInstaller::plan_removal`] only read.
 //! They are the `--dry-run` path: call [`Plan::render_diff`] and write nothing.
@@ -15,7 +15,7 @@
 //!   (ADR 0001). Any real change there asks for confirmation first.
 //! - Codex 0.162.1 `codex mcp add` cannot chain `notify`, so MCP and `notify`
 //!   are one edit. Project-scope `notify` still goes in the user config.
-//! - Claude Code 2.1.296 reserves the name `computer-use` and rewrites
+//! - Claude Code 2.1.296 reserves the name `computer-use` (the reason this server is called `grok-computer-use`) and rewrites
 //!   `~/.claude.json` even when add fails, so the JSON file is edited directly.
 //! - Antigravity user scope calls `agy mcp add` / `agy mcp remove`. Project
 //!   scope has no scope flag, so `.agents/mcp_config.json` is JSON.
@@ -49,7 +49,7 @@ use error::InstallError as Error;
 use plan::ClientStatus as Status;
 
 /// MCP entry name owned by this installer. No other key is added or removed.
-pub const SERVER_NAME: &str = "computer-use";
+pub const SERVER_NAME: &str = "grok-computer-use";
 
 /// Client whose MCP registration this library can edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -156,7 +156,7 @@ pub trait ClientInstaller: Send + Sync {
     /// Read-only uninstall plan. Does not create directories.
     fn plan_removal(&self, ctx: &InstallCtx<'_>) -> Result<Plan, InstallError>;
 
-    /// Read-only view of whether `computer-use` is already registered.
+    /// Read-only view of whether `grok-computer-use` is already registered.
     ///
     /// Blocking filesystem reads. Does not write. A file that cannot be parsed
     /// returns [`InstallError::Unparseable`] or [`InstallError::UnexpectedShape`].
@@ -220,7 +220,7 @@ pub(crate) fn gcu_string(ctx: &InstallCtx<'_>) -> Result<String, Error> {
 pub(crate) fn status_of(present: bool, matches_gcu: bool) -> Status {
     let mut notes = Vec::new();
     if present && !matches_gcu {
-        notes.push("computer-use is present but does not match this gcu executable".to_owned());
+        notes.push("grok-computer-use is present but does not match this gcu executable".to_owned());
     }
     Status {
         present,

@@ -73,7 +73,7 @@ fn codex_uninstall_removes_only_computer_use() {
     let fix = fix("codex-rm");
     let path = fix.home.path.join(".codex/config.toml");
     let original = format!(
-        "# codex comment\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.computer-use]\ncommand = \"{}\"\nargs = [\"mcp\"]\nnotify = [\"{}\", \"turn-ended\"]\n",
+        "# codex comment\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.grok-computer-use]\ncommand = \"{}\"\nargs = [\"mcp\"]\nnotify = [\"{}\", \"turn-ended\"]\n",
         gcu_str(&fix),
         gcu_str(&fix)
     );
@@ -281,7 +281,7 @@ fn antigravity_user_install_existing_entry_is_idempotent() {
     let fix = fix("agy-idem");
     let path = fix.home.path.join(".gemini/config/mcp_config.json");
     let original = format!(
-        "{{\n  \"mcpServers\": {{\"other\": {{\"command\": \"other\"}}, \"computer-use\": {{\"command\": \"{}\", \"args\": [\"mcp\"], \"note\": \"stay\"}}}}\n}}\n",
+        "{{\n  \"mcpServers\": {{\"other\": {{\"command\": \"other\"}}, \"grok-computer-use\": {{\"command\": \"{}\", \"args\": [\"mcp\"], \"note\": \"stay\"}}}}\n}}\n",
         gcu_str(&fix)
     );
     write(&path, &original);
@@ -302,7 +302,7 @@ fn antigravity_user_install_existing_entry_is_idempotent() {
 fn antigravity_user_uninstall_present_entry_plans_agy_remove() {
     let fix = fix("agy-rm");
     let path = fix.home.path.join(".gemini/config/mcp_config.json");
-    let original = "{\"mcpServers\":{\"other\":{\"command\":\"other\"},\"computer-use\":{\"command\":\"not-gcu\"}}}\n"
+    let original = "{\"mcpServers\":{\"other\":{\"command\":\"other\"},\"grok-computer-use\":{\"command\":\"not-gcu\"}}}\n"
         .to_string();
     write(&path, &original);
     let inst = installer(ClientId::Antigravity);

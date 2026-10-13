@@ -34,7 +34,7 @@ Torrekie ventura（对 1.0.1000387/1000451 的接口适配）、leeguooooo（对
 
 - **组件：** `Codex Computer Use.app`（`SkyComputerUseService`，权限/AX/截图/输入/光标）+ 内嵌 `SkyComputerUseClient.app`（`mcp` 与 `turn-ended` 子命令）。
   client 带 parent launch constraint，只能由 OpenAI 签名的宿主拉起。
-- **接入：** 早期是 stdio MCP（server 名 `computer-use`）；**当前版本是 code-first**：宿主提供通用 `node_repl`，插件 skill 指导模型
+- **接入：** 早期是 stdio MCP（官方 server 名 `computer-use`，因此我们的服务端不能同名）；**当前版本是 code-first**：宿主提供通用 `node_repl`，插件 skill 指导模型
   `globalThis.sky = (await import("@oai/sky")).sky`，然后在一段 JS 里连续调用 `sky.get_app_state / click / type_text …`。
   `sky` 对象有 10 个方法：`list_apps get_app_state click drag perform_secondary_action press_key scroll select_text set_value type_text`，以及 `target: "mac"`。
 - **授权：** 首次使用某 App 时发起 elicitation：`Allow Computer Use to use "<App>"?`，`persist: ["session","always"]`，带 `riskLevel`；

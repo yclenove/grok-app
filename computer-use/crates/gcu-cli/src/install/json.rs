@@ -15,7 +15,7 @@ use super::fsutil::read_bytes;
 use super::plan::FileChange;
 use super::SERVER_NAME;
 
-/// How the `computer-use` object is spelled for one client.
+/// How the `grok-computer-use` object is spelled for one client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServerShape {
     /// `{ "command": "<gcu>", "args": ["mcp"] }`.
@@ -32,7 +32,7 @@ enum Loaded {
     Object { bytes: Vec<u8>, value: Value },
 }
 
-/// Insert or refresh `computer-use` under `parent_key`. `Ok(None)` keeps the file bytes.
+/// Insert or refresh `grok-computer-use` under `parent_key`. `Ok(None)` keeps the file bytes.
 pub(crate) fn plan_upsert(
     path: &Path,
     parent_key: &str,
@@ -42,7 +42,7 @@ pub(crate) fn plan_upsert(
     edit_json(path, |map| upsert(map, path, parent_key, shape, gcu))
 }
 
-/// Remove only the `computer-use` key. An empty parent object is left in place.
+/// Remove only the `grok-computer-use` key. An empty parent object is left in place.
 pub(crate) fn plan_remove(
     path: &Path,
     parent_key: &str,
