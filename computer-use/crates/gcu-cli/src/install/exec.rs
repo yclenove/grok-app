@@ -238,6 +238,7 @@ pub struct ClientBins<'a> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn process_executor_echo_returns_stdout() {
         let executor = ProcessExecutor {
@@ -255,6 +256,7 @@ mod tests {
         assert_eq!(output.status, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn process_executor_timeout_kills_sleep() {
         let executor = ProcessExecutor {
