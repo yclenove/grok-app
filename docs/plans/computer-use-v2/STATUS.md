@@ -38,7 +38,7 @@
 | P2-07 | Windows 守卫 / 热键 / 排除截图 | P2-06 | 1.5d | todo |  |  |  |  |
 | P2-08 | Windows 剪贴板与文本 | P2-06 | 1d | todo |  |  |  |  |
 | P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | todo |  |  |  |  |
-| P3-01 | AT-SPI 树 | P0-05 | 3d | todo |  |  |  |  |
+| P3-01 | AT-SPI 树 | P0-05 | 3d | done | cu2/P3-01-atspi-tree |  | 2026-10-13 | AT-SPI 树+Linux 身份(路径+dev/inode+sha256；持久授权绑定映像，pid 复用另判)；CI 实时测试读到夹具 send_button |
 | P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | todo |  |  |  |  |
 | P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | todo |  |  |  |  |
 | P3-04 | X11 守卫与热键 | P3-03 | 1d | todo |  |  |  |  |
