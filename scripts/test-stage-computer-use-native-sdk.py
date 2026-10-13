@@ -41,7 +41,7 @@ class NativeSdkStage(unittest.TestCase):
         value = json.loads(before)
         self.assertEqual(set(value), {"schemaVersion", "target", "pipewireVersion", "glibcBaseline", "files"})
         self.assertNotIn(str(self.root), before.decode())
-        self.assertEqual(len(value["files"]), 16)
+        self.assertEqual(len(value["files"]), 17)
         self.assertIn("reused", stage.stage(self.runtime, self.destination))
         self.assertEqual(index.read_bytes(), before)
 

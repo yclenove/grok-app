@@ -31,6 +31,7 @@ def run(binary, resources, output, fallback):
         ("installed", 0), ("cargo-layout", 0), ("relocated space 中文", 0), ("nonutf8-\udcff", 0),
         ("host-sdk-prepended", 0), ("ambient-overrides", 0),
         ("missing-dso", 2), ("wrong-dso", 2), ("missing-module", 2),
+        ("missing-video-adapter", 2), ("corrupt-video-adapter", 2),
         ("changed-component", 2), ("wrong-manifest", 2),
         ("extra-config", 2), ("extra-resource", 2),
         ("linked-manifest", 2), ("fifo-manifest", 2), ("fifo-component", 2),
@@ -57,6 +58,10 @@ def run(binary, resources, output, fallback):
             shutil.copyfile(fallback, library)
         elif name == "missing-module":
             (native / "runtime/lib/pipewire-0.3/libpipewire-module-client-node.so").unlink()
+        elif name == "missing-video-adapter":
+            (native / "runtime/lib/spa-0.2/videoconvert/libspa-videoconvert.so").unlink()
+        elif name == "corrupt-video-adapter":
+            (native / "runtime/lib/spa-0.2/videoconvert/libspa-videoconvert.so").write_bytes(b"invalid video adapter ELF")
         elif name == "changed-component":
             with (native / "runtime/share/pipewire/client.conf").open("ab") as stream:
                 stream.write(b"\nchanged")

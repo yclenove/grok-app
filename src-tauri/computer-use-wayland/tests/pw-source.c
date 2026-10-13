@@ -128,7 +128,9 @@ int main(int argc, char **argv) {
         SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx),
         SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&SPA_RECTANGLE(32,24)),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&SPA_FRACTION(25,1))) };
-    if (pw_stream_connect(f.stream, PW_DIRECTION_OUTPUT, PW_ID_ANY, PW_STREAM_FLAG_DRIVER | PW_STREAM_FLAG_MAP_BUFFERS, params, 1) < 0) return 4;
+    int connected = pw_stream_connect(f.stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
+        PW_STREAM_FLAG_DRIVER | PW_STREAM_FLAG_MAP_BUFFERS, params, 1);
+    if (connected < 0) { fprintf(stderr, "source connect failed: %d\n", connected); return 4; }
     pw_main_loop_run(f.loop);
     pw_loop_destroy_source(pw_main_loop_get_loop(f.loop), sig);
     pw_loop_destroy_source(pw_main_loop_get_loop(f.loop), change);

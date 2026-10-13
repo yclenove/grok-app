@@ -57,7 +57,7 @@ meson setup "$prefix/build" "$prefix/source" --prefix="$prefix" --libdir=lib \
   -Dpipewire-jack=disabled -Dpipewire-v4l2=disabled -Dflatpak=disabled \
   -Dlegacy-rtkit=false -Drlimits-install=false -Dpam-defaults-install=false \
   -Daudiomixer=disabled -Daudioconvert=enabled -Daudiotestsrc=disabled \
-  -Dvideoconvert=disabled -Dvideotestsrc=disabled -Dcontrol=disabled
+  -Dvideoconvert=enabled -Dvideotestsrc=disabled -Dcontrol=disabled
 ninja -C "$prefix/build" -j4
 meson install -C "$prefix/build"
 mkdir -p "$prefix/share/licenses/pipewire"
@@ -73,6 +73,7 @@ for required in \
   lib/libpipewire-0.3.so \
   lib/pkgconfig/libpipewire-0.3.pc lib/pkgconfig/libspa-0.2.pc \
   lib/spa-0.2/support/libspa-support.so \
+  lib/spa-0.2/videoconvert/libspa-videoconvert.so \
   lib/pipewire-0.3/libpipewire-module-protocol-native.so \
   lib/pipewire-0.3/libpipewire-module-client-node.so \
   share/pipewire/client.conf; do

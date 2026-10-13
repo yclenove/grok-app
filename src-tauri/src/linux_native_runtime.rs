@@ -51,7 +51,7 @@ fn parse_manifest_for_arch(bytes: &[u8], arch: &str) -> Result<Manifest, String>
         || manifest.target != target
         || manifest.pipewire_version != "1.6.9"
         || manifest.glibc_baseline != glibc_baseline
-        || manifest.files.len() != 16
+        || manifest.files.len() != 17
     {
         return Err("Private PipeWire manifest policy mismatch".into());
     }
@@ -75,6 +75,7 @@ fn parse_manifest_for_arch(bytes: &[u8], arch: &str) -> Result<Manifest, String>
         "lib/libpipewire-0.3.so.0",
         "lib/spa-0.2/support/libspa-support.so",
         "lib/spa-0.2/audioconvert/libspa-audioconvert.so",
+        "lib/spa-0.2/videoconvert/libspa-videoconvert.so",
         "share/pipewire/client.conf",
         "share/licenses/pipewire/COPYING",
         "share/licenses/pipewire/LICENSE",

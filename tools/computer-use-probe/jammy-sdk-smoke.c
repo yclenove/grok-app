@@ -38,6 +38,8 @@ static int inspect_module(struct dl_phdr_info *info, size_t size, void *data)
         check->required |= 2;
     if (!strcmp(name, "libpipewire-module-client-node.so"))
         check->required |= 4;
+    if (!strcmp(name, "libspa-videoconvert.so"))
+        check->required |= 8;
     return 0;
 }
 
@@ -73,13 +75,22 @@ int main(int argc, char **argv)
         pw_main_loop_destroy(loop);
         return 5;
     }
+    /* Video stream adapters load this plugin at connect time. Prove the
+     * relocated loader can resolve it without any remote connection. */
+    char video_path[PATH_MAX];
+    int length = snprintf(video_path, sizeof(video_path),
+        "%s/lib/spa-0.2/videoconvert/libspa-videoconvert.so", argv[1]);
+    void *video = length > 0 && (size_t)length < sizeof(video_path)
+        ? dlopen(video_path, RTLD_NOW | RTLD_LOCAL) : NULL;
     struct module_check check = { .prefix = argv[1], .required = 0, .failed = 0 };
     dl_iterate_phdr(inspect_module, &check);
+    if (video)
+        dlclose(video);
     ei_unref(ei);
     pw_context_destroy(context);
     pw_main_loop_destroy(loop);
     pw_deinit();
-    if (check.failed || check.required != 7) {
+    if (check.failed || check.required != 15) {
         fprintf(stderr, "Private mandatory module mapping incomplete: %u\n", check.required);
         return 6;
     }

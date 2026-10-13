@@ -26,6 +26,7 @@ fn fixture_manifest(root: &Path) -> serde_json::Value {
         "lib/libpipewire-0.3.so.0".to_owned(),
         "lib/spa-0.2/support/libspa-support.so".into(),
         "lib/spa-0.2/audioconvert/libspa-audioconvert.so".into(),
+        "lib/spa-0.2/videoconvert/libspa-videoconvert.so".into(),
         "share/pipewire/client.conf".into(),
         "share/licenses/pipewire/COPYING".into(),
         "share/licenses/pipewire/LICENSE".into(),

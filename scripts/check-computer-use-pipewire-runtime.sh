@@ -22,6 +22,7 @@ for tool in cc pkg-config readelf timeout python3 patchelf; do
 done
 for required in lib/libpipewire-0.3.so lib/libpipewire-0.3.so.0 lib/pkgconfig/libpipewire-0.3.pc \
   lib/spa-0.2/support/libspa-support.so \
+  lib/spa-0.2/videoconvert/libspa-videoconvert.so \
   lib/pipewire-0.3/libpipewire-module-protocol-native.so \
   lib/pipewire-0.3/libpipewire-module-client-node.so share/pipewire/client.conf \
   share/licenses/pipewire/COPYING share/licenses/pipewire/LICENSE \
@@ -70,7 +71,8 @@ fi
 runtime="$out/runtime"
 mkdir -m 700 "$runtime"
 mkdir -p "$runtime/lib/pipewire-0.3" "$runtime/lib/spa-0.2/support" \
-  "$runtime/lib/spa-0.2/audioconvert" "$runtime/share/pipewire" "$runtime/share/licenses/libei"
+  "$runtime/lib/spa-0.2/audioconvert" "$runtime/lib/spa-0.2/videoconvert" \
+  "$runtime/share/pipewire" "$runtime/share/licenses/libei"
 # Dereference the SONAME alias once. No original build symlink enters the runtime.
 cp -L -- "$sdk/lib/libpipewire-0.3.so.0" "$runtime/lib/libpipewire-0.3.so.0"
 for module in rt protocol-native client-node client-device adapter metadata session-manager; do
@@ -78,7 +80,8 @@ for module in rt protocol-native client-node client-device adapter metadata sess
   [[ -f $original && ! -L $original && $(realpath -e "$original") == "$sdk/"* ]] || exit 2
   cp -- "$original" "$runtime/lib/pipewire-0.3/"
 done
-for plugin in support/libspa-support.so audioconvert/libspa-audioconvert.so; do
+for plugin in support/libspa-support.so audioconvert/libspa-audioconvert.so \
+  videoconvert/libspa-videoconvert.so; do
   original="$sdk/lib/spa-0.2/$plugin"
   [[ -f $original && ! -L $original && $(realpath -e "$original") == "$sdk/"* ]] || exit 2
   cp -- "$original" "$runtime/lib/spa-0.2/$plugin"
@@ -89,7 +92,8 @@ cp -- "$ei_sdk/share/licenses/libei/COPYING" "$runtime/share/licenses/libei/"
 # Upstream installed modules retain an absolute build RUNPATH. Strip it only
 # on the owned runtime copies; preserve the SDK and record the resulting hash.
 for library in "$runtime/lib/libpipewire-0.3.so.0" "$runtime/lib/pipewire-0.3/"*.so \
-  "$runtime/lib/spa-0.2/support/libspa-support.so" "$runtime/lib/spa-0.2/audioconvert/libspa-audioconvert.so"; do
+  "$runtime/lib/spa-0.2/support/libspa-support.so" "$runtime/lib/spa-0.2/audioconvert/libspa-audioconvert.so" \
+  "$runtime/lib/spa-0.2/videoconvert/libspa-videoconvert.so"; do
   patchelf --remove-rpath "$library"
 done
 python3 "$repo/scripts/audit-computer-use-native-sdk.py" "$runtime" --target "$target" \

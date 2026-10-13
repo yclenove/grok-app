@@ -30,6 +30,8 @@ def main():
         ("missing-support", "lib/spa-0.2/support/libspa-support.so", "missing", [3]),
         ("missing-protocol", "lib/pipewire-0.3/libpipewire-module-protocol-native.so", "missing", [4]),
         ("missing-client-node", "lib/pipewire-0.3/libpipewire-module-client-node.so", "missing", [4]),
+        ("missing-video-adapter", "lib/spa-0.2/videoconvert/libspa-videoconvert.so", "missing", [6]),
+        ("corrupt-video-adapter", "lib/spa-0.2/videoconvert/libspa-videoconvert.so", "corrupt", [6]),
     )
     def invoke(name, runtime, expected_prefix, expected_version, exits):
         env = {"PATH": "/usr/bin:/bin", "XDG_CONFIG_HOME": str(original / "empty-config"),

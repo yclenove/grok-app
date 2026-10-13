@@ -21,6 +21,7 @@ LIBRARIES = (
     *(f"lib/pipewire-0.3/libpipewire-module-{name}.so" for name in MODULES),
     "lib/spa-0.2/support/libspa-support.so",
     "lib/spa-0.2/audioconvert/libspa-audioconvert.so",
+    "lib/spa-0.2/videoconvert/libspa-videoconvert.so",
 )
 NOTICE_HASHES = {
     "share/licenses/pipewire/COPYING":
