@@ -1,0 +1,3 @@
+# Read-only Chromium resource source audit, not an App/runtime dependency.
+# Python >=3.8; older Brotli APIs cannot provide the bounded process operation.
+Brotli==1.2.0

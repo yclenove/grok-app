@@ -1,4 +1,4 @@
 {
   "extends": "../../tsconfig.json",
-  "include": ["../../src", "./ui-fixture.tsx", "./ui-resize-fixture.tsx", "./ui-helper-fixture.tsx"]
+  "include": ["../../src", "./ui-fixture.tsx", "./ui-resize-fixture.tsx", "./ui-helper-fixture.tsx", "./ui-task-consent-fixture.tsx", "./ui-browser-close-fixture.tsx"]
 }

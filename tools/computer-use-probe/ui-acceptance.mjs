@@ -41,7 +41,10 @@ try {
   const site = path.join(output, "site");
   await build({ root: repo, configFile: path.join(repo, "vite.config.ts"),
     build: { outDir: site, emptyOutDir: false, target: "esnext",
-      rollupOptions: { input: path.join(repo, "tools/computer-use-probe/ui-fixture.html") } } });
+      rollupOptions: { input: {
+        settings: path.join(repo, "tools/computer-use-probe/ui-fixture.html"),
+        task: path.join(repo, "tools/computer-use-probe/ui-task-consent-fixture.html"),
+      } } } });
   server = await preview({ root: repo, configFile: false, build: { outDir: site },
     preview: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
   const address = server.httpServer.address();
@@ -154,8 +157,58 @@ try {
       await page.close();
       continue;
     }
-    await page.goto(`${origin}/tools/computer-use-probe/ui-fixture.html?${new URLSearchParams(test)}`, { waitUntil: "networkidle", timeout: 45000 });
+    const taskUi = test.page !== "settings";
+    const taskState = ({ ready: "pending", stopping: "stop_requested", cleanup: "stop_requested",
+      "cleanup-native-running": "stop_requested", off: "pending", "initial-unknown": "unavailable",
+      "stop-reply-lost": "stopped", "stop-cleanup-reply-lost": "stopped",
+      "preview-reply-lost": "running" })[test.state] ?? test.state;
+    const query = taskUi ? { ...test, state: taskState, page: test.page === "card" ? "card" : "panel" } : test;
+    const fixture = taskUi ? "ui-task-consent-fixture.html" : "ui-fixture.html";
+    await page.goto(`${origin}/tools/computer-use-probe/${fixture}?${new URLSearchParams(query)}`, { waitUntil: "networkidle", timeout: 45000 });
     await page.waitForSelector(test.page === "settings" ? ".cu-settings" : test.page === "card" ? ".cu-task-card" : ".cu-panel");
+    if (taskUi) {
+      await page.waitForFunction(() => window.__taskUi?.calls.includes("computer_use_task_subscribe"));
+      await page.waitForFunction(() => document.querySelector(".cu-task-card__purpose") !== null);
+      const metrics = await page.evaluate(() => {
+        const panel = document.querySelector(".cu-panel,.cu-task-card");
+        const actions = panel?.querySelector(".cu-panel__footer,.cu-task-card__actions");
+        const actionBounds = actions?.getBoundingClientRect();
+        const buttons = actions ? [...actions.querySelectorAll("button")].filter((button) => {
+          const style = getComputedStyle(button);
+          return style.display !== "none" && style.visibility !== "hidden";
+        }).map((button) => {
+          const bounds = button.getBoundingClientRect();
+          return { text: button.textContent, left: bounds.left, right: bounds.right,
+            top: bounds.top, bottom: bounds.bottom };
+        }) : [];
+        const body = panel?.querySelector(".cu-panel__body");
+        return { width: innerWidth, height: innerHeight,
+          documentWidth: document.documentElement.scrollWidth, panelWidth: panel?.scrollWidth,
+          actionTop: actionBounds?.top, actionBottom: actionBounds?.bottom, buttons,
+          bodyHeight: body?.clientHeight, bodyScrollHeight: body?.scrollHeight,
+          fontFamily: getComputedStyle(document.body).fontFamily };
+      });
+      assert.deepEqual(errors, [], JSON.stringify({ test, errors }));
+      assert.match(metrics.fontFamily, /sans-serif|system-ui/i, "fixture must use the app sans-serif font stack");
+      assert.ok(metrics.documentWidth <= test.width + 1 && metrics.panelWidth <= test.width + 1,
+        JSON.stringify({ test, metrics }));
+      assert.ok(metrics.actionTop >= 0 && metrics.actionBottom <= test.height + 1,
+        JSON.stringify({ test, metrics }));
+      assert.ok(metrics.buttons.length > 0, JSON.stringify({ test, metrics }));
+      for (const button of metrics.buttons) assert.ok(button.left >= 0 && button.right <= test.width + 1
+        && button.top >= 0 && button.bottom <= test.height + 1, JSON.stringify({ test, button }));
+      const calls = await page.evaluate(() => [...window.__taskUi.calls]);
+      assert.equal(calls.filter((name) => name === "computer_use_task_subscribe").length, 1);
+      assert(!calls.includes("computer_use_status"), "task UI must use the task metadata stream");
+      if (i % 3 === 0 || test.page === "card" || test.long || test.state === "initial-unknown" || test.backend === "none") {
+        await page.screenshot({ path: path.join(output, `${i}-${test.page ?? taskState}-${test.width}-${test.theme}.png`) });
+      }
+      reports.push({ test, taskState, metrics, errors, calls,
+        evidence: "current task-consent product UI in real Chromium; mocked Host IPC" });
+      console.log(`UI ${i + 1}/${cases.length} task ${taskState} ${test.width}x${test.height} ${test.locale} ${test.theme}: PASS`);
+      await page.close();
+      continue;
+    }
     if (test.settingsRead) await verifySettingsRead(page, stage => page.screenshot({
       path: path.join(output, `${i}-${stage}-${test.settingsRead}-${test.locale}-${test.theme}.png`),
     }), test);

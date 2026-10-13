@@ -1,0 +1,12 @@
+{
+  "theme": "dark",
+  "locale": "en",
+  "sessionDataMode": "independent",
+  "permissionPolicy": "ask",
+  "mode": "agent",
+  "onboardingDone": false,
+  "setupSkipped": false,
+  "closeToTray": false,
+  "keepTrayForSchedules": false,
+  "computerUseEnabled": false
+}

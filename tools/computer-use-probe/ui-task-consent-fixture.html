@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Task consent UI fixture — synthetic Host only</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body, #fixture { margin: 0; width: 100%; height: 100%; }
+      body { font-family: var(--font-sans); background: var(--bg-aside); color: var(--text-primary); }
+      #fixture { display: flex; flex-direction: column; overflow: hidden; }
+      #fixture[data-page="card"] { padding: 12px; overflow-y: auto; }
+    </style>
+  </head>
+  <body><div id="fixture"></div><script type="module" src="./ui-task-consent-fixture.tsx"></script></body>
+</html>

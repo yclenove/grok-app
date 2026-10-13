@@ -1,0 +1,33 @@
+"""All 28 regular GN/GNI files from the original sealed SwiftShader tree."""
+
+
+SWIFTSHADER_GN_PINS = {
+    "BUILD.gn": "cec2b68d5bdd592692300cc4c54876f21492bb3a",
+    "build_overrides/build.gni": "e2af64408934f20d0b4f8ad3fb43d3d4ce7ad506",
+    "build_overrides/spirv_tools.gni": "7364b5c14183316b4614086cc55c1e0254b513e4",
+    "build_overrides/swiftshader.gni": "e2eda4735e7502aa4d74594f8b57c10cfd2dafa2",
+    "build_overrides/wayland.gni": "e50b0fda484605159aca595588be5a8feb49ffc0",
+    "src/Device/BUILD.gn": "a677f72050f5e2b791495d80c1c88a15478a7e3a",
+    "src/Pipeline/BUILD.gn": "5a14750c4dd1b63768f2b95ad04cf5eb14f1db22",
+    "src/Reactor/BUILD.gn": "d7b5350a5ed26ff99d8b9b2694147fac97d97c6c",
+    "src/Reactor/reactor.gni": "51cb8fbfe6e47b63b6adb93503711de5edf3b60f",
+    "src/System/BUILD.gn": "e61adeb55e80e45729fe17cd9f06212e68ca22ee",
+    "src/Vulkan/BUILD.gn": "03ec350950f26155b06d87cf190a145be0938162",
+    "src/Vulkan/vulkan.gni": "30bab6763c72824617e15feee9c316a62d432c45",
+    "src/WSI/BUILD.gn": "14f2b92f07de30094ed8bb33fcd46ad2a6b253d1",
+    "src/swiftshader.gni": "252150cd6f8d97a50ad6c54c62456bb948a99802",
+    "tests/ReactorUnitTests/BUILD.gn": "0cbb6e010993cb7ef9151a3dceadddc80bd8276a",
+    "tests/SystemUnitTests/BUILD.gn": "5f94900651287b0551ece876b46442bf3517c920",
+    "tests/VulkanUnitTests/BUILD.gn": "2d47fda3566fdc5a8b7e2e31c1596919cc85d412",
+    "third_party/SPIRV-Headers/BUILD.gn": "64abfcd6be6a352fb0d64f2c8e052b9f03dbcf89",
+    "third_party/SPIRV-Tools/.gn": "377a97ab8325ecc35fc2e007e6d0a547aef062c5",
+    "third_party/SPIRV-Tools/BUILD.gn": "e1d2a7e45104740ca999c3705118b76ffa8f2c59",
+    "third_party/SPIRV-Tools/build_overrides/build.gni": "cf3d6b794b0b3c0e95f3656761b091461e197784",
+    "third_party/SPIRV-Tools/build_overrides/gtest.gni": "c8b1bae4c22cc2e379411c58990359dfd4d7c633",
+    "third_party/SPIRV-Tools/build_overrides/spirv_tools.gni": "24aa033d7b136fcc7d59e223ebc79dbd07d2cce0",
+    "third_party/SPIRV-Tools/test/fuzzers/BUILD.gn": "fc458a4fb3cc8e765fe13d41daee66b74c3abe76",
+    "third_party/llvm-10.0/BUILD.gn": "f99abba3778a6d460f390e087959591d9505600c",
+    "third_party/llvm-16.0/BUILD.gn": "c7f62d9c744b1b1acfcc75cb823df3e7c5201122",
+    "third_party/llvm-16.0/scripts/template_BUILD.gn": "8d18e212d0ca7636c9f09aff611e5596edd7aa9b",
+    "third_party/marl/BUILD.gn": "4c0264892fb77d00b0ade0ba521dd6c3ea59ac20",
+}

@@ -57,9 +57,10 @@ try {
   assert(worker.url().startsWith(`chrome-extension://${EXTENSION_ID}/`));
   extensionPage = await context.newPage(); await extensionPage.goto(`chrome-extension://${EXTENSION_ID}/popup.html`);
   await extensionPage.evaluate(async () => {
-    const [{ PairingClient }, { SharedTabs }, { ExtensionTransport }, { ActionCompletions }] = await Promise.all([
+    const [{ PairingClient }, { SharedTabs }, { ExtensionTransport }, { ActionCompletions }, { ObservationJournal }, { HostLifetimeClient }] = await Promise.all([
       import(chrome.runtime.getURL("pairing-client.mjs")), import(chrome.runtime.getURL("shared-tabs.mjs")),
       import(chrome.runtime.getURL("extension-transport.mjs")), import(chrome.runtime.getURL("action-completions.mjs")),
+      import(chrome.runtime.getURL("observation-journal.mjs")), import(chrome.runtime.getURL("host-lifetime.mjs")),
     ]);
     const faults = { loseClaim: false, loseSettle: false, delayScripts: false };
     let sharing; let transport; let actions;
@@ -82,7 +83,10 @@ try {
     // This historical receipt-only fixture admits unbound offers, not v2 queued actions.
     actions = new ActionCompletions({ client, act: (request, signal) => sharing.act(request, signal),
       claim: (epoch, _request, proof, signal) => client.claimCompletion(epoch, proof, signal) });
-    transport = new ExtensionTransport({ client, observe: request => sharing.observe(request) });
+    const observationJournal = new ObservationJournal({ storage: chrome.storage.local,
+      hostLifetime: new HostLifetimeClient({ client, purpose: "observation" }) });
+    await observationJournal.ready;
+    transport = new ExtensionTransport({ client, observationJournal, observe: (request, signal, checkpoint) => sharing.observe(request, signal, checkpoint) });
     chrome.tabs.onActivated.addListener(() => sharing.activityChanged());
     chrome.windows.onFocusChanged.addListener(() => sharing.activityChanged());
     globalThis.__completionFixture = { client, sharing, actions, transport, faults };

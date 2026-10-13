@@ -1,0 +1,3 @@
+# Independent Windows checksum audit only, not an App/runtime dependency.
+# Python 3.12, fixed cp312-win_amd64 wheel, never install into a shared site.
+google-crc32c==1.7.1 --hash=sha256:b7491bdc0c7564fcf48c0179d2048ab2f7c7ba36b84ccd3a3e1c3f7a72d3bba6

@@ -34,6 +34,7 @@ export function sessionClient(binding) {
     try { return await result; } finally { clearTimeout(timer); }
   }
   return {
+    pid: child.pid,
     rpc, call: (name, args = {}) => rpc("tools/call", { name, arguments: args }),
     async close() {
       child.stdin.end();

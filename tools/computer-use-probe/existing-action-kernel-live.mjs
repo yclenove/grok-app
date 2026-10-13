@@ -185,14 +185,15 @@ try {
     const observed = await extensionPage.evaluate(async ({ tabId, snapshotId, requestId }) => {
       const { SharedTabs } = await import(chrome.runtime.getURL("shared-tabs.mjs"));
       const { allocateWorkerEpoch, ExecutionClock } = await import(chrome.runtime.getURL("execution-clock.mjs"));
-      const sharing = new SharedTabs({ client: { connectionEpoch: 1, shareCurrentTab: async () => {}, unshareTab: async () => {} },
+      let offered;
+      const sharing = new SharedTabs({ client: { connectionEpoch: 1, shareCurrentTab: async offer => { offered = offer; }, unshareTab: async () => {} },
         clock: new ExecutionClock(allocateWorkerEpoch()), tabs: chrome.tabs, scripting: chrome.scripting });
       globalThis.__kernelSharing = sharing;
       chrome.tabs.onActivated.addListener(() => sharing.activityChanged());
       chrome.windows.onFocusChanged.addListener(() => sharing.activityChanged());
       await sharing.share(tabId);
       globalThis.__kernelRequest = { requestId, tabId: String(tabId), session: "kernel", runId: "kernel-run",
-        documentGeneration: 1, grantGeneration: 1, deadlineMs: Date.now() + 10000,
+        documentId: offered.documentId, documentGeneration: offered.documentGeneration, grantGeneration: 1, deadlineMs: Date.now() + 10000,
         command: { kind: "observe", snapshotId, screenshot: false, preview: false } };
       const observed = await sharing.observe(globalThis.__kernelRequest);
       globalThis.__kernelRequest.documentId = observed.documentId;

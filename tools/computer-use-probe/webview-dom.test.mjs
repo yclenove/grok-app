@@ -7,6 +7,8 @@ import { withObservationClock } from "./dom-fixture-clock.mjs";
 const require = createRequire(new URL("../../package.json", import.meta.url));
 const { JSDOM, VirtualConsole } = require("jsdom");
 const kernel = readFileSync(new URL("../../src-tauri/src/computer_use/webview/dom.js", import.meta.url), "utf8");
+const downloadPolyfill = readFileSync(new URL("../../src-tauri/src/side_browser_blob/polyfill.js", import.meta.url), "utf8")
+  .replace("__GROK_SBDL_LABEL__", JSON.stringify("resource-browser-download-fixture"));
 const owner = "owned-native-binding";
 const snapshot = n => `wvsnap:00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 function fixture(html) {
@@ -24,9 +26,61 @@ function fixture(html) {
   return {
     window, call, read: (forModel = true, n = 1, timed = false) => call({ kind: "observe", forModel, snapshot: snapshot(n) }, timed),
     act: (node, data = {}) => call({ kind: "act", elementRef: node.elementRef, action: "click", ...data }),
+    prepareDownload: (node, data = {}) => call({ kind: "download_prepare", elementRef: node.elementRef, ...data }),
+    dispatchDownload: (node, data = {}) => call({ kind: "download_dispatch", elementRef: node.elementRef, ...data }),
     close() { window.__grokAppWebViewDom?.retire(); window.close(); },
   };
 }
+
+test("typed native download bypasses only its exact manual polyfill click and still consumes the ref", () => {
+  const f = fixture('<a download="owned.bin" href="/owned.bin">Owned</a><a download="manual.bin" href="/manual.bin">Manual</a>');
+  try {
+    const requests = [];
+    // Keep manual transfers pending; no network/body/timing is a fixture oracle.
+    f.window.fetch = url => { requests.push(String(url)); return new Promise(() => {}); };
+    f.window.eval(downloadPolyfill);
+    const links = Array.from(f.window.document.querySelectorAll("a"));
+    let native = 0;
+    links[0].addEventListener("click", event => {
+      assert.equal(event.defaultPrevented, false, "manual capture must not swallow the native event");
+      event.preventDefault(); native++;
+      // A nested click on another link keeps the ordinary manual path.
+      links[1].click();
+    });
+    const observed = f.read();
+    const owned = observed.nodes.find(node => node.name === "Owned");
+    assert.equal(f.prepareDownload(owned).ok, true);
+    assert.equal(f.dispatchDownload(owned).ok, true);
+    assert.equal(native, 1);
+    assert.deepEqual(requests, ["https://fixture.invalid/manual.bin"]);
+    assert.equal(f.dispatchDownload(owned).ok, false);
+    assert.equal(native, 1);
+    assert.deepEqual(requests, ["https://fixture.invalid/manual.bin"]);
+    assert.equal(links[0].hasAttribute("data-grok-sbdl"), false);
+    assert.equal(links[1].getAttribute("data-grok-sbdl"), "1");
+    assert.equal(links[0].hasAttribute("data-grok-native-download"), false);
+    assert.equal(links[1].hasAttribute("data-grok-native-download"), false);
+  } finally { f.close(); }
+});
+
+test("manual download interception is restored after a native click and its page handler fails", () => {
+  const f = fixture('<a download="owned.bin" href="/owned.bin">Owned</a>');
+  try {
+    const requests = [];
+    f.window.fetch = url => { requests.push(String(url)); return new Promise(() => {}); };
+    // A rejected native click tests the Host kernel's finally boundary,
+    // without swallowing a DOM handler exception or invoking a page global.
+    f.window.HTMLElement.prototype.click = () => { throw new Error("page click failed"); };
+    f.window.eval(downloadPolyfill);
+    const link = f.window.document.querySelector("a");
+    const owned = f.read().nodes.find(node => node.name === "Owned");
+    assert.throws(() => f.dispatchDownload(owned), /page click failed/);
+    assert.equal(link.hasAttribute("data-grok-native-download"), false);
+    assert.equal(f.dispatchDownload(owned).ok, false);
+    link.dispatchEvent(new f.window.MouseEvent("click", { bubbles:true, cancelable:true }));
+    assert.deepEqual(requests, ["https://fixture.invalid/owned.bin"]);
+  } finally { f.close(); }
+});
 
 test("controls without ids and duplicate ids have distinct opaque references and exact effects", () => {
   const f = fixture("<button>First</button><button id='duplicate'>Second</button><button id='duplicate'>Third</button>");
@@ -85,7 +139,7 @@ test("scroll resolves the selected real overflow container, not a fixture id or 
     const containers = Array.from(f.window.document.querySelectorAll("div"));
     containers.forEach(element => { Object.defineProperty(element, "scrollHeight", { value: 900 }); Object.defineProperty(element, "clientHeight", { value: 200 }); });
     const observed = f.read(); const selected = observed.nodes.find(n => n.name === "Second region");
-    assert.deepEqual(selected.actions, ["scroll"]);
+    assert.deepEqual(selected.actions, ["scroll", "wait"]);
     assert.equal(f.act(selected, { action: "scroll", dy: 120 }).ok, true);
     assert.deepEqual(containers.map(element => element.scrollTop), [0, 120]);
   } finally { f.close(); }
@@ -107,6 +161,50 @@ test("input content is never observed and fill data is not executable source", (
     const next = f.read(true, 2);
     assert.equal(f.act(next.nodes.find(n => n.name === "Safe label"), { snapshot: next.snapshot, action: "set_value", text: "" }).ok, true);
     assert.equal(f.window.document.querySelector("input").value, "");
+  } finally { f.close(); }
+});
+
+test("type_text inserts a literal at the retained selection and verifies input events", () => {
+  const f = fixture("<label>备注 <input value='值尾'></label><div contenteditable='true'>Rich</div>");
+  try {
+    const input = f.window.document.querySelector("input");
+    input.focus(); input.setSelectionRange(1, 1);
+    const events = [];
+    for (const type of ["beforeinput", "input", "change"]) input.addEventListener(type, event => {
+      events.push([event.type, event.inputType ?? null, event.data ?? null]);
+    });
+    const observed = f.read();
+    const field = observed.nodes.find(node => node.name === "备注");
+    const rich = observed.nodes.find(node => node.name === "");
+    assert(field.actions.includes("type_text"));
+    assert(rich.actions.includes("set_value"));
+    assert(!rich.actions.includes("type_text"));
+    const text = "中文🙂');globalThis.injected=true;//";
+    assert.deepEqual(f.act(field, { action: "type_text", text }), { ok: true, verified: true });
+    assert.equal(input.value, `值${text}尾`);
+    assert.equal(input.selectionStart, 1 + text.length);
+    assert.equal(input.selectionEnd, 1 + text.length);
+    assert.deepEqual(events, [
+      ["beforeinput", "insertText", text],
+      ["input", "insertText", text],
+    ]);
+    assert.equal(f.window.injected, undefined);
+    assert.equal(f.act(field, { action: "type_text", text: "again" }).ok, false);
+  } finally { f.close(); }
+});
+
+test("type_text consumes a prevented insertion without changing or exposing the field", () => {
+  const f = fixture("<input aria-label='Safe field' value='private'>");
+  try {
+    const input = f.window.document.querySelector("input");
+    input.focus(); input.setSelectionRange(7, 7);
+    input.addEventListener("beforeinput", event => event.preventDefault());
+    const field = f.read().nodes[0];
+    const rejected = f.act(field, { action: "type_text", text: "追加" });
+    assert.equal(rejected.ok, false);
+    assert(!JSON.stringify(rejected).includes("private"));
+    assert.equal(input.value, "private");
+    assert.equal(f.act(field, { action: "type_text", text: "retry" }).ok, false);
   } finally { f.close(); }
 });
 
@@ -148,12 +246,46 @@ test("observation and mutation work are bounded", () => {
   } finally { f.close(); }
 });
 
-test("cross-origin frames and unsupported downloads fail closed", () => {
-  for (const html of ["<iframe src='https://other.invalid/'></iframe>", "<a download href='https://fixture.invalid/file'>Save</a>"]) {
-    const f = fixture(html);
-    try { const result = f.read(); assert.equal(result.ok, false); assert(result.reason.startsWith("unsupported_")); }
-    finally { f.close(); }
-  }
+test("cross-origin frames fail closed", () => {
+  const f = fixture("<iframe src='https://other.invalid/'></iframe>");
+  try { const result = f.read(); assert.equal(result.ok, false); assert.equal(result.reason, "unsupported_cross_origin"); }
+  finally { f.close(); }
+});
+
+test("only exact retained HTTP downloads are published and dispatched once", () => {
+  const f = fixture(`<a id="safe" download="report.bin" href="/report.bin">Safe download</a>
+    <a id="blob" download href="blob:https://fixture.invalid/id">Blob download</a>
+    <a id="data" download href="data:text/plain,secret">Data download</a>
+    <a id="ordinary" href="/next">Ordinary link</a>`);
+  try {
+    const safe = f.window.document.getElementById("safe");
+    let downloads = 0;
+    safe.addEventListener("click", event => { event.preventDefault(); downloads++; });
+    const observed = f.read();
+    const serialized = JSON.stringify(observed);
+    const node = observed.nodes.find(entry => entry.name === "Safe download");
+    assert(node);
+    assert.deepEqual(node.actions, ["download", "wait"]);
+    assert.equal(serialized.includes("report.bin"), false, "href/download metadata must stay private");
+    assert.equal(observed.nodes.some(entry => entry.name === "Blob download"), false);
+    assert.equal(observed.nodes.some(entry => entry.name === "Data download"), false);
+    assert(observed.nodes.find(entry => entry.name === "Ordinary link").actions.includes("click"));
+    assert.deepEqual(f.prepareDownload(node), { ok: true, url: "https://fixture.invalid/report.bin" });
+    safe.setAttribute("href", "/changed.bin");
+    assert.equal(f.dispatchDownload(node).ok, false);
+    assert.equal(downloads, 0);
+
+    const refreshed = f.read(true, 2);
+    const current = refreshed.nodes.find(entry => entry.name === "Safe download");
+    assert.deepEqual(
+      f.prepareDownload(current, { snapshot: refreshed.snapshot }),
+      { ok: true, url: "https://fixture.invalid/changed.bin" },
+    );
+    assert.equal(f.dispatchDownload(current, { snapshot: refreshed.snapshot }).ok, true);
+    assert.equal(downloads, 1);
+    assert.equal(f.dispatchDownload(current, { snapshot: refreshed.snapshot }).ok, false);
+    assert.equal(downloads, 1);
+  } finally { f.close(); }
 });
 
 test("functional fixture clock is restored before actions, including an observation exception", () => {
