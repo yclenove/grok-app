@@ -1,0 +1,6 @@
+# src-tauri has no pinned toolchain; its CI follows stable.
+# Pin the current stable release so local and future CI checks agree.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

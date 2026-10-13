@@ -1,0 +1,13 @@
+[package]
+name = "gcu-overlay"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gcu-protocol.workspace = true
+gcu-host-api.workspace = true
+
+[lints]
+workspace = true
