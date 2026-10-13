@@ -10,7 +10,7 @@
 | P0-01 | computer-use workspace | — | 1d | done | cu2/P0-01-workspace | #2 | 2026-10-13 | 已合入；RULES扩展由P0-05承接 |
 | P0-02 | CI 骨架 | P0-01 | 1d | done | cu2/P0-02-ci | #3 | 2026-10-13 | 三平台 CI 绿；pin SHA 已核 |
 | P0-03 | gcu-protocol | P0-01 | 2d | done | cu2/P0-03-protocol | #5 | 2026-10-13 | 预算 13,821/14,000 字节；后续需同步 window_minimized 错误码 |
-| P0-04 | gcu-host-api | P0-03 | 1d | in_progress |  |  |  |  |
+| P0-04 | gcu-host-api | P0-03 | 1d | done | cu2/P0-04-host-api |  | 2026-10-13 | 24 测试；Stop 锁存无引擎清除；PolicyStore 只读 |
 | P0-05 | core 模型 / Driver trait / fake 驱动 | P0-03、P0-04 | 2.5d | in_progress |  |  |  |  |
 | P0-06 | 树管线与渲染 | P0-05 | 3d | todo |  |  |  |  |
 | P0-07 | SnapshotStore / Index / Diff | P0-06 | 2d | todo |  |  |  |  |

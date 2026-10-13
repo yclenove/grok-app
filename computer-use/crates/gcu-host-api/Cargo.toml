@@ -5,8 +5,15 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Test doubles. Off by default so production Hosts do not link the fakes.
+testing = []
+
 [dependencies]
 gcu-protocol.workspace = true
+# 0.1.91+ depends on syn 3, the same major already in this workspace.
+# An older async-trait would pull syn 2 and fail cargo-deny multiple-versions.
+async-trait = "0.1.91"
 
 [lints]
 workspace = true
