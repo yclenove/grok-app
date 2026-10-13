@@ -1,0 +1,11 @@
+---
+source: crates/gcu-core/tests/snapshot.rs
+expression: second.text
+---
+App=fake.fixture (pid 42) — Fixture
+Window: "Fixture", id window, 800×480 @1x, App: Fixture.
+Changes since last state (window window):
+~     2 button (checked) Button 1 ← was:     2 button Button 1
++     10 button Button 30
+-     1 button Button 0
+Unchanged: 8 nodes. Indices of unchanged nodes are preserved.

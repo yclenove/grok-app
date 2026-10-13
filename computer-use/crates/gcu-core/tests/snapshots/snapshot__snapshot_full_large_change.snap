@@ -1,0 +1,10 @@
+---
+source: crates/gcu-core/tests/snapshot.rs
+expression: third.text
+---
+App=fake.fixture (pid 42) — Fixture
+Window: "Fixture", id window, 800×480 @1x, App: Fixture.
+0 standard window Fixture
+    2 button Button 1
+    3 button Button 2
+[full state: large change]

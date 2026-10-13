@@ -128,6 +128,7 @@ fn line(depth: usize, node: &ProcessedNode, text_limit: Option<usize>, compact: 
 }
 fn footer(tree: &ProcessedTree, opts: &RenderOpts, selected: &BTreeSet<u32>) -> String {
     let mut text = String::new();
+    let root_index = tree.root.as_ref().map_or(0, |n| n.element_index);
     if let Some(index) = tree.focused {
         if let Some(element) = tree.element_index.get(&index) {
             text.push_str(&format!(
@@ -158,7 +159,7 @@ fn footer(tree: &ProcessedTree, opts: &RenderOpts, selected: &BTreeSet<u32>) -> 
     }
     let mut omissions = BTreeMap::new();
     if let Some(root) = &tree.root {
-        walk(root, selected, (0, Role::Window), &mut omissions);
+        walk(root, selected, (root_index, Role::Window), &mut omissions);
     } else if tree.omitted_nodes > 0 {
         omissions.insert(0, (Role::Window, tree.omitted_nodes));
     }
@@ -172,7 +173,7 @@ fn footer(tree: &ProcessedTree, opts: &RenderOpts, selected: &BTreeSet<u32>) -> 
     if details.len() > 4096 {
         let count: usize = omissions.values().map(|(_, count)| count).sum();
         text.push_str(&format!(
-            "[truncated: {count} nodes omitted under 0 standard window]\n"
+            "[truncated: {count} nodes omitted under {root_index} standard window]\n"
         ));
     } else {
         text.push_str(&details);
@@ -190,12 +191,13 @@ fn assemble(
     header: &str,
     lines: &BTreeMap<u32, String>,
     selected: &BTreeSet<u32>,
+    order: &[u32],
     footer: &str,
     note: &str,
 ) -> String {
     let mut text = header.to_owned();
-    for index in selected {
-        if let Some(line) = lines.get(index) {
+    for index in order {
+        if let Some(line) = lines.get(index).filter(|_| selected.contains(index)) {
             text.push_str(line);
         }
     }
@@ -205,6 +207,8 @@ fn assemble(
 }
 pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
     let nodes = tree.nodes();
+    // Stable historical indices are not preorder positions. Render native order.
+    let order: Vec<_> = nodes.iter().map(|(_, n)| n.element_index).collect();
     let all: BTreeSet<_> = nodes.iter().map(|(_, n)| n.element_index).collect();
     let lines = nodes
         .iter()
@@ -214,6 +218,7 @@ pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
         &header(opts, opts.text_limit),
         &lines,
         &all,
+        &order,
         &footer(tree, opts, &all),
         "",
     );
@@ -233,7 +238,7 @@ pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
         .collect();
     let head = header(opts, short);
     let note = "[text output limited to 20 KB; fields shortened and low-priority nodes omitted as needed]\n";
-    let second = assemble(&head, &lines, &all, &footer(tree, opts, &all), note);
+    let second = assemble(&head, &lines, &all, &order, &footer(tree, opts, &all), note);
     if second.len() <= FACTS_PREFIX_BYTES {
         return Layout {
             text: second,
@@ -258,6 +263,7 @@ pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
         &head,
         &lines,
         &selected,
+        &order,
         &footer(tree, opts, &selected),
         note,
     )
@@ -272,15 +278,17 @@ pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
     // A caller may request more than the default 64 levels, or a driver may expose
     // multiple focused nodes. Summarize excess ancestor lines while keeping the
     // actual focus and root, so even unusual observations respect the transport cap.
+    let root_index = tree.root.as_ref().map_or(0, |n| n.element_index);
     let mut ancestors: Vec<_> = selected
         .iter()
         .copied()
-        .filter(|index| Some(*index) != tree.focused && *index != 0)
+        .filter(|index| Some(*index) != tree.focused && *index != root_index)
         .collect();
     while assemble(
         &head,
         &lines,
         &selected,
+        &order,
         &footer(tree, opts, &selected),
         note,
     )
@@ -338,6 +346,7 @@ pub(crate) fn layout(tree: &ProcessedTree, opts: &RenderOpts) -> Layout {
         &head,
         &lines,
         &selected,
+        &order,
         &footer(tree, opts, &selected),
         note,
     );

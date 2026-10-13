@@ -134,6 +134,11 @@ pub struct PopupInfo {
 /// outlive removed nodes. This type owns no OS resources beyond opaque driver handles.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessedTree {
+    /// Trusted observation version, assigned by the observer around the driver read.
+    /// None fails closed for screenshot delivery; drivers need no interface change.
+    pub state_version: Option<u64>,
+    /// Monotonic session-clock timestamp of the tree read, never wall-clock time.
+    pub observed_at: Option<std::time::Duration>,
     /// Retained accessibility root; None for canvas-only or zero-budget observations.
     pub root: Option<ProcessedNode>,
     /// Deterministic snapshot-local indices and native identity lookup.

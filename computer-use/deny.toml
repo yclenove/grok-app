@@ -39,6 +39,8 @@ exceptions = [
     { allow = ["OFL-1.1", "Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
 ]
 
+# proptest is dev-only, with std and no fork/timeout subprocess features.
+# Its MIT/Apache-2.0 dependencies use the existing license allowlist.
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"

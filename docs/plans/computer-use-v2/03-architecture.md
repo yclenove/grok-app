@@ -77,7 +77,7 @@ computer-use/
 |---|---|---|
 | gcu-protocol | serde, serde_json, schemars, thiserror | 任何 OS crate、tokio |
 | gcu-host-api | gcu-protocol, async-trait | OS crate |
-| gcu-core | protocol, host-api, tokio(sync,time,rt,macros), parking_lot, smol_str, smallvec, bitflags, thiserror, async-trait, serde, serde_json, futures-core(事件 Stream), similar(仅渲染行 diff), unicode-segmentation, image(仅缩放/编码), tracing；仅 dev：insta(快照)、criterion(基准)、gcu-driver-fake(离线场景) | OS crate、网络、文件系统直写（经 Host） |
+| gcu-core | protocol, host-api, tokio(sync,time,rt,macros), parking_lot, smol_str, smallvec, bitflags, thiserror, async-trait, serde, serde_json, futures-core(事件 Stream), similar(仅渲染行 diff), unicode-segmentation, image(仅缩放/编码), tracing；仅 dev：insta(快照)、criterion(基准)、proptest(属性测试)、gcu-driver-fake(离线场景) | OS crate、网络、文件系统直写（经 Host） |
 | gcu-driver-* | protocol, core 中的 `Driver` trait 所在模块（core 以 `pub mod driver` 暴露），平台 crate 与支持库（fake: async-trait, tokio, futures-core, serde, thiserror, ron, png；tokio/test-util 仅测试） | 互相依赖；依赖 gcu-mcp |
 | gcu-mcp | protocol, core, host-api, host-protocol（RemoteHost 适配）, rmcp, tokio, axum(仅 loopback) | 平台 crate |
 | gcu-script | gcu-protocol, gcu-core, rquickjs | OS crate、网络、文件系统、进程权限 |
