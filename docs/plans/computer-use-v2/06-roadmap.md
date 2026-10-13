@@ -511,8 +511,17 @@
 
 - **DoD：** Stop/用户恢复的独立通道和锁存、热键冲突失效关闭路线；Wayland胶囊在选定crate后补03 §2/deny.toml，GNOME不显示并声明能力，不假定现成依赖。
 
+### P4-05a 客户端安装库（P4-05 前半，已完成）
+- **依赖：** P0-01　**估算：** 1d
+- **文件：** `computer-use/crates/gcu-cli/src/install/`、`computer-use/crates/gcu-cli/tests/install.rs`
+- **内容：** `grok-computer-use` 服务端对 Grok/Codex/Claude/Antigravity/Gemini/opencode/Cursor/VS Code 的注册与卸载库（备份、幂等、精确移除、坏文件不动、dry-run 计划）；服务端名为 `grok-computer-use`（`computer-use` 被 Claude Code 保留）。
+- **测试：** 每客户端空文件/已有其他条目/幂等/精确卸载/坏文件；官方 CLI 路径用假可执行文件，全程只用临时目录。
+  验收命令：`rcargo test -p gcu-cli`。
+
+- **DoD：** 库与测试通过；clap 子命令接线、Windows `.cmd` Stop 钩子由 P4-05 承接。
+
 ### P4-05 `gcu install/uninstall`（全客户端）
-- **依赖：** P0-10　**估算：** 2d
+- **依赖：** P0-10、P4-05a　**估算：** 1d（库部分 1d 已拆为 P4-05a；本卡为 clap 接线与 Windows 钩子）
 - **文件：** `computer-use/crates/gcu-cli/src/install/{mod.rs,toml.rs,json.rs,antigravity.rs}`、`tests/install.rs`
 - **内容：** [04 §2.1](04-route-a-standalone-mcp.md#21-gcu-install-client-写入的配置)；TOML（Grok/Codex）用 toml_edit 0.25 保注释；JSON 用 serde_json + preserve_order 按键增删，测试断言键值不断言空白；必须保 JSONC 注释时另选库并写 ADR/deny.toml；备份；`--dry-run`；`~/.grok` 写入需确认。
 - **测试：** 每个客户端：空文件、已有其他条目、已有 gcu 条目（幂等）、uninstall 精确移除——快照测试；Antigravity 走 `agy mcp add/remove`，测试中用假的 `agy` 可执行文件记录 argv。

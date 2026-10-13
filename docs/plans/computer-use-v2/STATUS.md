@@ -47,7 +47,8 @@
 | P4-02 | Onboarding 窗口 | P4-01 | 2d | todo |  |  |  |  |
 | P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | todo |  |  |  |  |
 | P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | todo |  |  |  |  |
-| P4-05 | gcu install/uninstall | P0-10 | 2d | in_progress | cu2/P4-05a-install-lib |  | 2026-10-13 | 库部分(05a)已完成：服务端名改为 grok-computer-use（Claude 保留 computer-use）；clap 子命令接线待 P0-10 |
+| P4-05a | gcu install 客户端安装库（P4-05 前半） | P0-01 | 1d | done | cu2/P4-05a-install-lib | #14 | 2026-10-13 | 服务端名 grok-computer-use；Claude 保留 computer-use |
+| P4-05 | gcu install/uninstall（clap 接线 + Windows 钩子） | P0-10、P4-05a | 1d | todo |  |  |  | 库部分已由 P4-05a 完成 |
 | P4-06 | turn-ended 接入 | P0-09、S-01 | 1d | todo |  |  |  |  |
 | P4-07 | 打包与分发 | P4-01、P4-02、P4-03、P4-04、P4-05、P4-06 | 3d | todo |  |  |  | 需签名证书（可先无签名） |
 | P4-08 | 用户文档 | P4-07 | 1d | todo |  |  |  |  |

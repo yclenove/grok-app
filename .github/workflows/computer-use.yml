@@ -6,11 +6,13 @@ on:
     branches: [main, feat/cu-v2, 'cu2/**']
     paths:
       - 'computer-use/**'
+      - 'docs/plans/computer-use-v2/**'
       - '.github/workflows/computer-use.yml'
   pull_request:
     branches: [main, feat/cu-v2]
     paths:
       - 'computer-use/**'
+      - 'docs/plans/computer-use-v2/**'
       - '.github/workflows/computer-use.yml'
 
 concurrency:
@@ -96,6 +98,11 @@ jobs:
         run: |
           python3 -I computer-use/scripts/check_policy_data.py
           python3 -I computer-use/scripts/test_check_policy_data.py
+
+      - name: Verify plan documents
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: python3 -I docs/plans/computer-use-v2/reviews/check_plan.py
 
   fixture-a11y-linux:
     name: Linux AT-SPI Accessibility Tree
