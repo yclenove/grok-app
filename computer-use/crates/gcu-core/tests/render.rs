@@ -32,7 +32,7 @@ async fn render_fake_scenes_complete_snapshots() {
         insta::assert_snapshot!(format!("render_{scene}"), render_text(&tree, &opts));
         insta::assert_snapshot!(
             format!("structured_{scene}"),
-            serde_json::to_string_pretty(&render_structured(&tree, &opts)).unwrap()
+            canonical_json(&render_structured(&tree, &opts))
         );
     }
 }
@@ -249,4 +249,23 @@ fn render_many_truncation_sites_aggregate_without_losing_total() {
         render_structured(&tree, &opts())["truncated"]["omitted_nodes"],
         100
     );
+}
+
+/// Pretty JSON with object keys sorted recursively, independent of whether any crate in the
+/// workspace enables `serde_json/preserve_order` (feature unification would reorder keys).
+fn canonical_json(value: &serde_json::Value) -> String {
+    fn sort(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let sorted: std::collections::BTreeMap<_, _> =
+                    map.iter().map(|(k, v)| (k.clone(), sort(v))).collect();
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sort).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string_pretty(&sort(value)).unwrap()
 }

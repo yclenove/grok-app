@@ -45,7 +45,26 @@ pub(crate) fn check(
     let after = transform(tree, &opts);
     let io = json!({"input": before, "output": after.root.as_ref().map(shape), "omitted": after.omitted_nodes});
     insta::with_settings!({prepend_module_to_snapshot => false}, {
-        insta::assert_snapshot!(name, serde_json::to_string_pretty(&io).unwrap());
+        insta::assert_snapshot!(name, canonical_json(&io));
     });
     after
+}
+
+/// Pretty JSON with object keys sorted recursively, independent of whether any crate in the
+/// workspace enables `serde_json/preserve_order` (feature unification would reorder keys).
+fn canonical_json(value: &serde_json::Value) -> String {
+    fn sort(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let sorted: std::collections::BTreeMap<_, _> =
+                    map.iter().map(|(k, v)| (k.clone(), sort(v))).collect();
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sort).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string_pretty(&sort(value)).unwrap()
 }

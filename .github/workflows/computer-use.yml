@@ -60,19 +60,19 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       - name: cargo run -p xtask -- check-deps
-        run: cargo run -p xtask -- check-deps
+        run: cargo run --locked -p xtask -- check-deps
 
       - name: cargo run -p xtask -- golden --check
-        run: cargo run -p xtask -- golden --check
+        run: cargo run --locked -p xtask -- golden --check
 
       - name: cargo run -p xtask -- budget
-        run: cargo run -p xtask -- budget
+        run: cargo run --locked -p xtask -- budget
 
       # Runs cargo-deny check only on Ubuntu using EmbarkStudios/cargo-deny-action.
       # Uses prebuilt action container rather than `cargo install --locked cargo-deny`
