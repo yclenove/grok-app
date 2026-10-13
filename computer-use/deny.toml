@@ -1,0 +1,39 @@
+# Check all dependency targets, including other operating systems and features.
+[graph]
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+# Vulnerabilities are errors by default in cargo-deny >= 0.18.
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[licenses]
+# Everything outside this allowlist is rejected, including GPL/AGPL/LGPL.
+# MPL-2.0 dependencies must remain dynamically linked (architecture §2).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.95
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

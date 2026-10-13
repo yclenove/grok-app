@@ -1,0 +1,13 @@
+[package]
+name = "gcu-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gcu"
+path = "src/main.rs"
+
+[lints]
+workspace = true
