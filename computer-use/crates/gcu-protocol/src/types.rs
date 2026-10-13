@@ -66,6 +66,10 @@ pub struct WindowInfo {
     pub frame: Rect,
     /// Display scale factor.
     pub scale: f64,
+    /// Whether the window is on the user's current virtual desktop/Space; `None` when the
+    /// platform cannot tell. Foreground actions on a window that is not current are refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_current_desktop: Option<bool>,
 }
 
 /// An image reference, without embedded image bytes.

@@ -343,6 +343,21 @@ pub enum DriverError {
     /// Invalid range, path, or other driver request.
     #[error("invalid driver request")]
     InvalidRequest,
+    /// The target runs at a higher integrity level, or this process is elevated; never escalate.
+    #[error("elevation required")]
+    ElevationRequired,
+    /// An OS permission needed for this operation is missing; the Host guides the user.
+    #[error("permission missing: {permission}")]
+    PermissionMissing {
+        /// Permission name, e.g. `accessibility`; metadata only.
+        permission: String,
+    },
+    /// A secure desktop (UAC, lock/login screen) is active; only the user can proceed.
+    #[error("secure desktop active")]
+    SecureDesktop,
+    /// The target window is minimized and was not restored.
+    #[error("window minimized")]
+    WindowMinimized,
     /// Native failure; message must omit payloads.
     #[error("native driver failure: {message} (maybe_executed={maybe_executed})")]
     Native {
@@ -353,6 +368,28 @@ pub enum DriverError {
     },
 }
 impl DriverError {
+    /// The protocol error this failure reports to the model. `SecureDesktop` is a handoff.
+    pub fn error_code(&self) -> gcu_protocol::ErrorCode {
+        use gcu_protocol::ErrorCode as C;
+        match self {
+            Self::Timeout { .. } => C::Timeout,
+            Self::Crashed { .. } | Self::Native { .. } => C::DriverError,
+            Self::Cancelled { .. } => C::StoppedByUser,
+            Self::AppNotFound => C::AppNotFound,
+            Self::AmbiguousApp => C::AmbiguousApp,
+            Self::WindowGone => C::WindowGone,
+            Self::StaleElement => C::StaleElement,
+            Self::CapabilityUnavailable | Self::InvalidRequest => C::CapabilityUnavailable,
+            Self::ElementNotActionable => C::ElementNotActionable,
+            Self::NotSettable => C::NotSettable,
+            Self::OutOfBounds => C::OutOfBounds,
+            Self::ElevationRequired => C::ElevationRequired,
+            Self::PermissionMissing { .. } => C::PermissionMissing,
+            Self::SecureDesktop => C::HandoffRequired,
+            Self::WindowMinimized => C::WindowMinimized,
+        }
+    }
+
     /// True only when the caller cannot prove that an operation had zero effects.
     pub fn maybe_executed(&self) -> bool {
         match self {
@@ -363,6 +400,13 @@ impl DriverError {
             _ => false,
         }
     }
+}
+
+/// State of background discovery work, so a first call can return a partial list honestly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiscoveryStatus {
+    /// An app index is still being built; `list_apps` results may be incomplete.
+    pub indexing: bool,
 }
 
 /// Native change notification; payloads stay in subsequent observations.
@@ -390,6 +434,10 @@ pub trait Driver: Send + Sync + 'static {
     async fn doctor(&self) -> DoctorReport;
     /// Running and recently used apps within NATIVE_TIMEOUT.
     async fn list_apps(&self) -> Result<Vec<AppInfo>>;
+    /// Whether background discovery is still running. Nonblocking; defaults to "complete".
+    fn discovery_status(&self) -> DiscoveryStatus {
+        DiscoveryStatus::default()
+    }
     /// Resolve an unambiguous query within NATIVE_TIMEOUT.
     async fn resolve_app(&self, query: &AppQuery) -> Result<AppRef>;
     /// Launch or unhide within NATIVE_TIMEOUT, without foreground activation.

@@ -46,6 +46,7 @@ pub fn opts() -> gcu_core::render::RenderOpts {
                 h: 480.,
             },
             scale: 1.,
+            on_current_desktop: None,
         },
     )
 }
