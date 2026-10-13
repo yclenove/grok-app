@@ -79,6 +79,11 @@ fn ctx<'a>(fix: &'a Fix, scope: Scope, interactive: bool, yes: bool) -> InstallC
     }
 }
 
+/// Escape backslashes so a Windows path can sit inside a JSON or TOML basic string.
+fn esc(text: &str) -> String {
+    text.replace('\\', "\\\\")
+}
+
 fn gcu_str(fix: &Fix) -> &str {
     fix.gcu.to_str().unwrap()
 }
@@ -242,6 +247,7 @@ fn assert_entry(value: &Value, case: &Case, gcu: &str) {
 }
 
 fn entry_json(case: &Case, gcu: &str) -> String {
+    let gcu = esc(gcu);
     match case.kind {
         Kind::Command => format!(r#"{{"note":"stay","command":"{gcu}","args":["mcp"]}}"#),
         Kind::Stdio => {
@@ -444,7 +450,10 @@ fn grok_install_missing_file_writes_server_and_stop_hook() {
     let command = hook["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    assert!(command.ends_with("computer-use-turn-ended.sh"));
+    // The Stop hook script is a Unix shell script; Windows quotes the command differently.
+    if cfg!(unix) {
+        assert!(command.ends_with("computer-use-turn-ended.sh"));
+    }
     assert_eq!(hook["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
     assert_eq!(hook["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
     let status = inst.status(&ctx).unwrap();
@@ -656,7 +665,7 @@ fn grok_install_preserves_comments() {
     let path = fix.home.path.join(".grok/config.toml");
     let original = format!(
         "# user comment\n[mcp_servers.grok-computer-use]\ncommand = \"{}\"\nargs = [\"mcp\"]\n# trailing\n",
-        gcu_str(&fix)
+        esc(gcu_str(&fix))
     );
     write(&path, &original);
     installer(ClientId::Grok)

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use gcu_cli::install::{installer, ClientId, InstallError, Scope, SERVER_NAME};
 
-use super::{backup_paths, ctx, fix, gcu_str, tget, toml_at, walk, write};
+use super::{backup_paths, ctx, esc, fix, gcu_str, tget, toml_at, walk, write};
 
 #[test]
 fn codex_install_missing_file_writes_server_and_notify() {
@@ -74,8 +74,8 @@ fn codex_uninstall_removes_only_computer_use() {
     let path = fix.home.path.join(".codex/config.toml");
     let original = format!(
         "# codex comment\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.grok-computer-use]\ncommand = \"{}\"\nargs = [\"mcp\"]\nnotify = [\"{}\", \"turn-ended\"]\n",
-        gcu_str(&fix),
-        gcu_str(&fix)
+        esc(gcu_str(&fix)),
+        esc(gcu_str(&fix))
     );
     write(&path, &original);
     let inst = installer(ClientId::Codex);
@@ -282,7 +282,7 @@ fn antigravity_user_install_existing_entry_is_idempotent() {
     let path = fix.home.path.join(".gemini/config/mcp_config.json");
     let original = format!(
         "{{\n  \"mcpServers\": {{\"other\": {{\"command\": \"other\"}}, \"grok-computer-use\": {{\"command\": \"{}\", \"args\": [\"mcp\"], \"note\": \"stay\"}}}}\n}}\n",
-        gcu_str(&fix)
+        esc(gcu_str(&fix))
     );
     write(&path, &original);
     let outcome = installer(ClientId::Antigravity)
