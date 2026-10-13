@@ -3,16 +3,13 @@
 use std::process::Command;
 
 #[test]
-fn schema_gates_pending_p0_03_skip_successfully() -> Result<(), Box<dyn std::error::Error>> {
-    for args in [vec!["golden"], vec!["golden", "--check"], vec!["budget"]] {
+fn schema_gates_generated_surface_passes() -> Result<(), Box<dyn std::error::Error>> {
+    for args in [vec!["golden", "--check"], vec!["budget"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
             .args(args)
             .output()?;
         assert!(output.status.success(), "{output:?}");
-        assert_eq!(
-            String::from_utf8(output.stdout)?,
-            "SKIP: not implemented yet: P0-03\n"
-        );
+        assert!(String::from_utf8(output.stdout)?.contains("PASS:"));
         assert!(output.stderr.is_empty());
     }
     Ok(())
@@ -20,7 +17,15 @@ fn schema_gates_pending_p0_03_skip_successfully() -> Result<(), Box<dyn std::err
 
 #[test]
 fn invalid_command_or_arguments_returns_failure() -> Result<(), Box<dyn std::error::Error>> {
-    for args in [vec![], vec!["unknown"], vec!["check-deps", "unexpected"]] {
+    for args in [
+        vec![],
+        vec!["unknown"],
+        vec!["check-deps", "unexpected"],
+        vec!["golden"],
+        vec!["golden", "--invalid"],
+        vec!["golden", "--check", "--update"],
+        vec!["budget", "unexpected"],
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
             .args(args)
             .output()?;

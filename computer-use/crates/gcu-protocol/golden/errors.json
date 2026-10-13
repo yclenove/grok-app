@@ -1,0 +1,898 @@
+{
+  "codes": [
+    "app_not_found",
+    "ambiguous_app",
+    "app_denied",
+    "approval_denied",
+    "approval_timeout",
+    "window_not_found",
+    "window_gone",
+    "stale_element",
+    "stale_geometry",
+    "stale_screenshot",
+    "out_of_bounds",
+    "element_not_actionable",
+    "not_settable",
+    "invalid_key",
+    "key_blocked",
+    "user_active",
+    "stopped_by_user",
+    "busy",
+    "handoff_required",
+    "elevation_required",
+    "permission_missing",
+    "capability_unavailable",
+    "timeout",
+    "driver_error",
+    "internal"
+  ],
+  "error": {
+    "$defs": {
+      "ActionResult": {
+        "additionalProperties": false,
+        "description": "Serializable action result; no blocking, timeouts, or cancellation occur here.",
+        "properties": {
+          "delivery": {
+            "$ref": "#/$defs/Delivery",
+            "description": "Actual delivery route."
+          },
+          "duration_ms": {
+            "description": "Total action duration in milliseconds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "effect": {
+            "$ref": "#/$defs/Effect",
+            "description": "Observed visible effect."
+          },
+          "notes": {
+            "description": "Relevant delivery and observation notes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "outcome": {
+            "$ref": "#/$defs/Outcome",
+            "description": "Execution outcome."
+          },
+          "settle": {
+            "$ref": "#/$defs/Settle",
+            "description": "Settling metadata."
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resolved target, or null for untargeted keyboard/app actions."
+          },
+          "tool": {
+            "$ref": "#/$defs/ToolName",
+            "description": "Tool called."
+          },
+          "verify": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Verification"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit verification or null."
+          }
+        },
+        "required": [
+          "tool",
+          "delivery",
+          "outcome",
+          "effect",
+          "duration_ms",
+          "settle",
+          "notes"
+        ],
+        "type": "object"
+      },
+      "ActionTarget": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Indexed accessibility element.",
+            "properties": {
+              "element_index": {
+                "description": "Element index.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "label": {
+                "description": "Accessible label.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "element_index",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Screenshot-pixel coordinates.",
+            "properties": {
+              "screenshot_id": {
+                "description": "Screenshot used for mapping.",
+                "type": "string"
+              },
+              "x": {
+                "description": "Horizontal screenshot coordinate.",
+                "format": "double",
+                "type": "number"
+              },
+              "y": {
+                "description": "Vertical screenshot coordinate.",
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "screenshot_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "Element or screenshot-pixel action target, matching architecture §6."
+      },
+      "AppIdentity": {
+        "additionalProperties": false,
+        "description": "Serializable identity used to bind app authorization to executable provenance.",
+        "properties": {
+          "code_hash": {
+            "description": "Hash for unsigned executable identities.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "executable": {
+            "description": "Canonical executable path, when available.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Bundle ID, canonical executable path, or desktop file ID.",
+            "type": "string"
+          },
+          "publisher": {
+            "description": "Windows Authenticode publisher.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "team_id": {
+            "description": "macOS signing team.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "AppInfo": {
+        "additionalProperties": false,
+        "description": "A discoverable app; recently used apps may not have a running process.",
+        "properties": {
+          "id": {
+            "description": "Platform app identifier.",
+            "type": "string"
+          },
+          "identity": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AppIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authorization identity, when probed."
+          },
+          "name": {
+            "description": "Display name.",
+            "type": "string"
+          },
+          "pid": {
+            "description": "Running process ID, when available.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "AppState": {
+        "additionalProperties": false,
+        "description": "Architecture §4.3 structuredContent, also attached to stale-state errors.",
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Action result or null."
+          },
+          "app": {
+            "$ref": "#/$defs/AppInfo",
+            "description": "Observed app."
+          },
+          "elements": {
+            "description": "Full-detail elements; omitted by default to avoid duplicating the text tree.",
+            "items": {
+              "$ref": "#/$defs/ElementInfo"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "focused": {
+            "description": "Focused element index or null.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "screenshot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScreenshotInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Screenshot metadata or null."
+          },
+          "snapshot_id": {
+            "description": "Server-held snapshot ID; callers need not echo it.",
+            "type": "string"
+          },
+          "truncated": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Truncation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Budget truncation or null."
+          },
+          "window": {
+            "$ref": "#/$defs/WindowInfo",
+            "description": "Observed window."
+          }
+        },
+        "required": [
+          "app",
+          "window",
+          "snapshot_id"
+        ],
+        "type": "object"
+      },
+      "Delivery": {
+        "description": "Actual delivery route, including refusals with no delivery.",
+        "oneOf": [
+          {
+            "const": "accessibility",
+            "description": "Accessibility semantic action.",
+            "type": "string"
+          },
+          {
+            "const": "targeted_event",
+            "description": "Process/window-targeted event.",
+            "type": "string"
+          },
+          {
+            "const": "foreground",
+            "description": "Policy-authorized foreground input.",
+            "type": "string"
+          },
+          {
+            "const": "clipboard",
+            "description": "Clipboard-assisted input.",
+            "type": "string"
+          },
+          {
+            "const": "none",
+            "description": "No input was delivered.",
+            "type": "string"
+          }
+        ]
+      },
+      "Effect": {
+        "description": "Visible effect after settling.",
+        "oneOf": [
+          {
+            "const": "changed",
+            "description": "State or pixels changed.",
+            "type": "string"
+          },
+          {
+            "const": "no_visible_change",
+            "description": "No visible change; the action may not have taken effect.",
+            "type": "string"
+          },
+          {
+            "const": "not_checked",
+            "description": "No comparison was made.",
+            "type": "string"
+          }
+        ]
+      },
+      "ElementInfo": {
+        "additionalProperties": false,
+        "description": "A serialized indexed element, without raw-tree or native-driver types.",
+        "properties": {
+          "actions": {
+            "description": "Available secondary actions.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "frame": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Rect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Window-relative frame, if available."
+          },
+          "index": {
+            "description": "Snapshot element index.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "Accessible name, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "Normalized snake_case role.",
+            "type": "string"
+          },
+          "states": {
+            "description": "Normalized state names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "index",
+          "role",
+          "states",
+          "actions"
+        ],
+        "type": "object"
+      },
+      "ErrorCode": {
+        "description": "All architecture §11.2 error codes, with stable snake_case serialization.",
+        "oneOf": [
+          {
+            "const": "app_not_found",
+            "description": "No app matches the query.",
+            "type": "string"
+          },
+          {
+            "const": "ambiguous_app",
+            "description": "Multiple apps match; ask the caller to choose.",
+            "type": "string"
+          },
+          {
+            "const": "app_denied",
+            "description": "The app is on the denylist.",
+            "type": "string"
+          },
+          {
+            "const": "approval_denied",
+            "description": "The user refused authorization.",
+            "type": "string"
+          },
+          {
+            "const": "approval_timeout",
+            "description": "Authorization timed out.",
+            "type": "string"
+          },
+          {
+            "const": "window_not_found",
+            "description": "No matching window exists.",
+            "type": "string"
+          },
+          {
+            "const": "window_gone",
+            "description": "The target window closed; attach fresh state when available.",
+            "type": "string"
+          },
+          {
+            "const": "stale_element",
+            "description": "The element fingerprint changed; attach fresh state.",
+            "type": "string"
+          },
+          {
+            "const": "stale_geometry",
+            "description": "Window geometry changed; attach fresh state.",
+            "type": "string"
+          },
+          {
+            "const": "stale_screenshot",
+            "description": "The screenshot is no longer current; attach fresh state.",
+            "type": "string"
+          },
+          {
+            "const": "out_of_bounds",
+            "description": "Coordinates are outside the screenshot.",
+            "type": "string"
+          },
+          {
+            "const": "element_not_actionable",
+            "description": "The element cannot perform that action; attach fresh state.",
+            "type": "string"
+          },
+          {
+            "const": "not_settable",
+            "description": "The element value cannot be set.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_key",
+            "description": "The chord cannot be parsed.",
+            "type": "string"
+          },
+          {
+            "const": "key_blocked",
+            "description": "Policy blocked the chord.",
+            "type": "string"
+          },
+          {
+            "const": "user_active",
+            "description": "Foreground input must wait for the user to become idle.",
+            "type": "string"
+          },
+          {
+            "const": "stopped_by_user",
+            "description": "The user stopped execution.",
+            "type": "string"
+          },
+          {
+            "const": "busy",
+            "description": "The window lock could not be acquired in time.",
+            "type": "string"
+          },
+          {
+            "const": "handoff_required",
+            "description": "The user must handle the current prompt.",
+            "type": "string"
+          },
+          {
+            "const": "elevation_required",
+            "description": "The target has a higher integrity level.",
+            "type": "string"
+          },
+          {
+            "const": "permission_missing",
+            "description": "An OS permission is missing.",
+            "type": "string"
+          },
+          {
+            "const": "capability_unavailable",
+            "description": "The required capability is unavailable.",
+            "type": "string"
+          },
+          {
+            "const": "timeout",
+            "description": "The operation exceeded its timeout.",
+            "type": "string"
+          },
+          {
+            "const": "driver_error",
+            "description": "A driver operation failed.",
+            "type": "string"
+          },
+          {
+            "const": "internal",
+            "description": "An internal error occurred.",
+            "type": "string"
+          }
+        ]
+      },
+      "Outcome": {
+        "description": "Execution status; done alone does not establish business success.",
+        "oneOf": [
+          {
+            "const": "done",
+            "description": "Delivery succeeded without an error.",
+            "type": "string"
+          },
+          {
+            "const": "refused",
+            "description": "Policy refused; definitely not executed.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "Failure with definitely no side effect.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Delivery started but execution is uncertain; never replay automatically.",
+            "type": "string"
+          }
+        ]
+      },
+      "Rect": {
+        "additionalProperties": false,
+        "description": "Window-relative physical-pixel rectangle.",
+        "properties": {
+          "h": {
+            "description": "Height.",
+            "format": "double",
+            "type": "number"
+          },
+          "w": {
+            "description": "Width.",
+            "format": "double",
+            "type": "number"
+          },
+          "x": {
+            "description": "Horizontal origin.",
+            "format": "double",
+            "type": "number"
+          },
+          "y": {
+            "description": "Vertical origin.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "type": "object"
+      },
+      "ScreenshotInfo": {
+        "additionalProperties": false,
+        "description": "An image reference, without embedded image bytes.",
+        "properties": {
+          "height": {
+            "description": "Image height in pixels.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "Session-scoped image ID.",
+            "type": "string"
+          },
+          "mime": {
+            "description": "Image MIME type.",
+            "type": "string"
+          },
+          "scale_to_window": {
+            "description": "Multiplier from screenshot pixels to window physical pixels.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "width": {
+            "description": "Image width in pixels.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "width",
+          "height",
+          "mime"
+        ],
+        "type": "object"
+      },
+      "Settle": {
+        "additionalProperties": false,
+        "description": "Reported settling time, without implementing waits in the protocol layer.",
+        "properties": {
+          "ms": {
+            "description": "Elapsed milliseconds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "$ref": "#/$defs/SettleReason",
+            "description": "Completion reason."
+          }
+        },
+        "required": [
+          "ms",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SettleReason": {
+        "description": "Why the settle wait ended.",
+        "oneOf": [
+          {
+            "const": "tree_stable",
+            "description": "Two successive tree hashes matched.",
+            "type": "string"
+          },
+          {
+            "const": "event_quiet",
+            "description": "Events were quiet for the required interval.",
+            "type": "string"
+          },
+          {
+            "const": "budget",
+            "description": "The hard settle budget expired.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolName": {
+        "description": "The sixteen default tools in architecture §11.1.",
+        "oneOf": [
+          {
+            "const": "list_apps",
+            "description": "Discover running and recently used apps.",
+            "type": "string"
+          },
+          {
+            "const": "list_windows",
+            "description": "Discover windows.",
+            "type": "string"
+          },
+          {
+            "const": "launch_app",
+            "description": "Launch an app.",
+            "type": "string"
+          },
+          {
+            "const": "get_app_state",
+            "description": "Observe an app window.",
+            "type": "string"
+          },
+          {
+            "const": "click",
+            "description": "Click an element or screenshot point.",
+            "type": "string"
+          },
+          {
+            "const": "perform_secondary_action",
+            "description": "Perform an advertised secondary action.",
+            "type": "string"
+          },
+          {
+            "const": "set_value",
+            "description": "Set an element value.",
+            "type": "string"
+          },
+          {
+            "const": "select_text",
+            "description": "Select text or a character range.",
+            "type": "string"
+          },
+          {
+            "const": "type_text",
+            "description": "Type text into an app.",
+            "type": "string"
+          },
+          {
+            "const": "press_key",
+            "description": "Press a key chord.",
+            "type": "string"
+          },
+          {
+            "const": "scroll",
+            "description": "Scroll an element or screenshot point.",
+            "type": "string"
+          },
+          {
+            "const": "drag",
+            "description": "Drag between screenshot points.",
+            "type": "string"
+          },
+          {
+            "const": "wait_for",
+            "description": "Wait for an observed condition.",
+            "type": "string"
+          },
+          {
+            "const": "computer_batch",
+            "description": "Execute a bounded batch.",
+            "type": "string"
+          },
+          {
+            "const": "computer_script",
+            "description": "Execute a bounded computer-use script.",
+            "type": "string"
+          },
+          {
+            "const": "capabilities",
+            "description": "Read runtime capabilities.",
+            "type": "string"
+          }
+        ]
+      },
+      "Truncation": {
+        "additionalProperties": false,
+        "description": "Tree budget truncation summary.",
+        "properties": {
+          "omitted_nodes": {
+            "description": "Number of omitted nodes.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "omitted_nodes"
+        ],
+        "type": "object"
+      },
+      "Verification": {
+        "additionalProperties": false,
+        "description": "An expectation and its observed truth state.",
+        "properties": {
+          "expect": {
+            "description": "Human-readable expectation.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/VerifyState",
+            "description": "Evaluation state."
+          }
+        },
+        "required": [
+          "expect",
+          "state"
+        ],
+        "type": "object"
+      },
+      "VerifyState": {
+        "description": "Verification status of an explicit batch expectation.",
+        "oneOf": [
+          {
+            "const": "satisfied",
+            "description": "Expectation is true.",
+            "type": "string"
+          },
+          {
+            "const": "unsatisfied",
+            "description": "Expectation is false.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Expectation could not be checked.",
+            "type": "string"
+          }
+        ]
+      },
+      "WindowInfo": {
+        "additionalProperties": false,
+        "description": "Window information shared by observations and discovery.",
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/Rect",
+            "description": "Physical-pixel frame."
+          },
+          "id": {
+            "description": "Opaque string returned by list_windows.",
+            "type": "string"
+          },
+          "scale": {
+            "description": "Display scale factor.",
+            "format": "double",
+            "type": "number"
+          },
+          "title": {
+            "description": "Window title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "frame",
+          "scale"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Tool-error payload; the MCP adapter wraps this as `{error: ...}` with isError.\nThe retryable flag does not authorize replay of an action with unknown outcome.",
+    "properties": {
+      "code": {
+        "$ref": "#/$defs/ErrorCode",
+        "description": "Stable protocol code."
+      },
+      "hint": {
+        "description": "Suggested corrective step.",
+        "type": "string"
+      },
+      "message": {
+        "description": "Explanation suitable for the caller.",
+        "type": "string"
+      },
+      "retryable": {
+        "description": "Whether a new call is appropriate after addressing the cause.",
+        "type": "boolean"
+      },
+      "state": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AppState"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Fresh observation for stale targets or unavailable actions."
+      }
+    },
+    "required": [
+      "code",
+      "message",
+      "hint",
+      "retryable"
+    ],
+    "title": "ToolError",
+    "type": "object"
+  }
+}
