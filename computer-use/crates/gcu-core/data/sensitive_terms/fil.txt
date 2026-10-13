@@ -1,0 +1,50 @@
+# fil - Filipino Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+ipadala
+magpadala ng mensahe
+
+# pay
+magbayad
+magbayad ngayon
+bumili ngayon
+kumpletuhin ang bayad
+
+# delete
+burahin
+ilipat sa trash
+alisin
+
+# submit
+isumite
+ipasa
+
+# transfer
+ilipat
+maglipat ng pera
+
+# sign
+lagdaan
+lagdaan ang dokumento
+pirmahan
+
+# publish
+ilathala
+i-publish
+i-post
+
+# confirm_purchase
+kumpirmahin ang pagbili
+kumpirmahin ang order
+kumpirmahin ang bayad
+
+# password_change
+baguhin ang password
+i-reset ang password
+palitan ang password
+
+# logout_all
+mag-log out sa lahat ng device
+mag-sign out sa lahat ng session
+i-log out ang lahat ng device

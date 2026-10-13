@@ -1,0 +1,52 @@
+# it - Italian Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+invia
+invia messaggio
+
+# pay
+paga
+paga ora
+acquista
+acquista ora
+effettua ordine
+
+# delete
+elimina
+sposta nel cestino
+rimuovi
+
+# submit
+inoltra
+conferma richiesta
+sottometti
+
+# transfer
+trasferisci
+effettua bonifico
+invia denaro
+
+# sign
+firma
+firma documento
+firma digitale
+
+# publish
+pubblica
+condividi post
+
+# confirm_purchase
+conferma acquisto
+conferma ordine
+conferma pagamento
+
+# password_change
+modifica password
+reimposta password
+cambia password
+
+# logout_all
+disconnetti da tutti i dispositivi
+termina tutte le sessioni
+esci da tutte le sessioni

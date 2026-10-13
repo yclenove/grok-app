@@ -1,0 +1,51 @@
+# pt-BR - Brazilian Portuguese Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+enviar
+enviar mensagem
+
+# pay
+pagar
+pagar agora
+comprar agora
+finalizar compra
+
+# delete
+excluir
+mover para a lixeira
+apagar
+
+# submit
+submeter
+encaminhar
+submeter pedido
+
+# transfer
+transferir
+fazer transferência
+pix
+
+# sign
+assinar
+assinar documento
+assinatura digital
+
+# publish
+publicar
+postar
+
+# confirm_purchase
+confirmar compra
+confirmar pedido
+confirmar pagamento
+
+# password_change
+alterar senha
+redefinir senha
+mudar senha
+
+# logout_all
+sair de todos os dispositivos
+encerrar todas as sessões
+desconectar de todos os aparelhos

@@ -1,0 +1,52 @@
+# ko - Korean Sensitive UI Terms
+# Reference: docs/plans/computer-use-v2/03-architecture.md §7.5
+
+# send
+보내기
+메시지 전송
+전송
+
+# pay
+결제
+지금 결제
+구매
+지금 구매
+주문하기
+
+# delete
+삭제
+휴지통으로 이동
+영구 삭제
+
+# submit
+제출
+제출하기
+
+# transfer
+이체
+계좌 이체
+송금
+
+# sign
+서명
+서명하기
+전자 서명
+
+# publish
+게시
+발행
+게시하기
+
+# confirm_purchase
+구매 확인
+결제 확인
+주문 확인
+
+# password_change
+비밀번호 변경
+비밀번호 재설정
+
+# logout_all
+모든 기기에서 로그아웃
+모든 세션에서 로그아웃
+다른 모든 기기에서 로그아웃
