@@ -51,6 +51,45 @@ fn reject_preserving_previous(bytes: &[u8], policy: &ZipPolicy, code: &str) {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn readonly_archive_resources_support_repeated_bundle_copies() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("cu-zip-permissions-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    for (mode, expected) in [
+        (0o444, 0o644),
+        (0o555, 0o755),
+        (0o640, 0o640),
+        (0o6755, 0o755),
+    ] {
+        let payload = b"fixed archive resource";
+        let mut bytes = archive(&[], &[("root/resource", payload)], &[]);
+        // Set the actual central-directory mode, including bits stripped by the
+        // test ZIP writer. This matches the upstream shader cache's 0100444.
+        let header = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        bytes[header + 38..header + 42]
+            .copy_from_slice(&(((0o100000 | mode) as u32) << 16).to_le_bytes());
+        let dest = root.join(format!("mode-{mode:o}"));
+        extract_zip(&bytes, &dest, &policy(), None).unwrap();
+        let source = dest.join("resource");
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o7777,
+            expected
+        );
+        assert_eq!(fs::read(&source).unwrap(), payload);
+
+        // Tauri uses fs::copy and retains source permissions. Subsequent
+        // build-script executions must be able to replace that same resource.
+        let bundled = root.join(format!("bundled-{mode:o}"));
+        fs::copy(&source, &bundled).unwrap();
+        fs::copy(&source, &bundled).unwrap();
+        assert_eq!(fs::read(&bundled).unwrap(), payload);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn directory_entries_have_a_separate_bound() {
     let bytes = archive(

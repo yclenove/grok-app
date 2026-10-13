@@ -421,7 +421,9 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-          shared-key: ci-${{ matrix.name }}-v5
+          # v6 excludes old 0444 Chromium resource copies. New preparation
+          # keeps owner write access, so subsequent builds can replace them.
+          shared-key: ci-${{ matrix.name }}-v6
       - name: Computer Use runtime prepare/check
         shell: bash
         run: |

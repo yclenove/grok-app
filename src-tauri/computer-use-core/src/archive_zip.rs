@@ -265,8 +265,11 @@ fn extract_into(staging: &Path, bytes: &[u8], policy: &ZipPolicy) -> Result<u32,
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
-            // Preserve ordinary executable bits, never setuid/setgid/sticky.
-            fs::set_permissions(&dest, fs::Permissions::from_mode(mode & 0o777))
+            // Keep executable bits, but let the staging owner read/replace
+            // ordinary files. Tauri retains these permissions in its output;
+            // an upstream 0444 asset otherwise breaks repeated resource copies.
+            // Never preserve setuid/setgid/sticky or add group/other access.
+            fs::set_permissions(&dest, fs::Permissions::from_mode((mode & 0o777) | 0o600))
                 .map_err(|e| ZipError::new("io", e.to_string()))?;
         }
         assert_inside(&staging_canon, &dest)?;

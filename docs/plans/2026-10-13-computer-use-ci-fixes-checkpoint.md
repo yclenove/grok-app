@@ -1,5 +1,9 @@
 # Computer Use：远端 CI 修复与同步
 
+当前继续处理第四批：macOS只读资源修复已通过下述本机回归，尚待新远端验证。
+`040c92d8` 的CI已暴露Windows八项原生启动时序失败与Linux私有namespace
+读取runner工作区失败；二者仍开放，不能将之前局部通过当作整体CI成功。
+
 2026-10-13，`feat/computer-use-implementation`。
 
 再次 fetch fork 与源仓库后，`origin/main` / `upstream/main` 均为当前 HEAD
@@ -146,3 +150,50 @@ SDK169-03、positive runtime、源码/依赖/seed/日志与用户App144/home均�
 继续完整维护运行时选型/许可及五target产品集成，特别是Linux ARM64；随后
 原生Mac、各安装格式/升级回滚、实际模型/ACP/MCP、四surface/UI UX和同最终
 候选12h门禁。本批只提交/push到fork，不创建PR、tag或Release，整体active/partial。
+
+## 第四批：macOS 只读资源与再次同步
+
+再次成功fetch `origin` / `upstream`，`HEAD..origin/main` 与
+`HEAD..upstream/main` 均为0；main分别仍为 `b58b97cd` / `9c5eb3b5`。
+没有新main提交需要合入，不改变用户源码、包或隔离home。
+
+`040c92d8` 的 [run 38385859129](https://github.com/yclenove/grok-app/actions/runs/38385859129)
+中frontend、两个SDK与维护ARM64 browser诊断成功；Rust Mac/Windows/Linux/
+ARM64失败，production Jammy的release检查仍在运行，未取消或重跑该run。
+Linux App库 **2327 passed / 0 failed / 3 ignored**，但后续私有Wayland
+入口在读取runner工作区脚本时permission denied，不能将整个Linux job记绿。
+Windows App库 **2391 passed / 8 failed / 87 ignored**，八项仍待定位修复。
+
+Mac失败发生在Tauri资源复制：两份固定Chromium1140的
+`gpu_shader_cache.bin`（各968826 bytes）在原ZIP中均为 `0100444`。
+原解包器逐位保留权限，Tauri的 `fs::copy` 又把只读权限保留到构建目录，
+后续复制同一路径便不能覆盖。新解包器只给普通文件补owner读写，保持
+可执行位，不增加group/other访问，并继续剥离setuid/setgid/sticky。
+资源内容/hash与归档门禁保持；Rust CI缓存版本更新至v6，避免恢复旧只读
+编译副本。已有本地旧编译副本不由只读 `--check` 变更：重新prepare后，
+需在确认归属的旧Cargo资源副本上补owner写权限，或使用新的任务构建目录；
+不要清整个target或共享cache来处理它。
+
+本批真实验证：
+
+- 原代码下新增Unix权限回归 **0 passed / 1 failed**（0444未补owner写权限）。
+- 修复后Jammy ZIP全部 **13 passed / 0 failed / 0 ignored**；额外关闭
+  `CAP_DAC_OVERRIDE` / `CAP_DAC_READ_SEARCH` 的原生进程中，新回归
+  **1 passed**，实际连续两次 `fs::copy` 成功。私有chroot根目录0700，
+  没有为切换UID放宽目录；两次runuser夹具环境错误原日志保留。
+- Windows Core完整库 **1000 passed / 0 failed / 0 ignored**；两平台Core
+  all-targets strict clippy、workspace fmt、依赖卫生与final质量门禁通过。
+  App+Workbench13552行、产品≥1000行文件80，均未增长。
+- workflow YAML与四Rust profile实例化bash语法检查通过。
+
+证据与再生命令：`tools/computer-use-probe/.run/ci-resource-permissions-20261013-01/`。
+本批不是原生Mac App/安装包或完整CU交付验收。Mac framework五条精确links
+必须继续核对真实Tauri bundle输出；source seed中links有效不证明打包后有效。
+下一批优先Windows原启动gate与Linux隔离runner路径，然后运行时CPU校验、
+维护来源/五target产品集成及原R1–R4所有安装/模型/surface/UI UX/12h门禁。
+
+原测试/编译owners退出后，仅删除新增首败测试的准确UUID临时目录，先核验
+父级/子项没有链接、只有原22-byte payload、hash一致且没有live owner。
+逻辑删除 **22 bytes**，WSL可用空间观测增加 **12288 bytes**；实际物理回收
+未知，不代表VHDX缩小。当前编译产物/依赖、原包/日志/失败证据及用户包/home
+保留；前批symlink/FIFO故障目录不在本批清理范围内。
