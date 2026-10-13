@@ -4,6 +4,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 mod catalog;
 pub mod codec;
+mod connection;
 mod elicitation;
 mod files;
 mod instructions;
@@ -13,7 +14,9 @@ mod server;
 mod stdio;
 
 pub use catalog::{Profile, IMPLEMENTED_TOOLS};
+pub use connection::Connection;
 use gcu_core::driver::Driver;
+pub use params::validate_arguments;
 use rmcp::ServiceExt;
 pub use server::{Host, ServerConfig};
 use std::sync::{atomic::Ordering, Arc};
@@ -63,10 +66,21 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let files = files::blocking(files::SessionFiles::new).await?;
-    let server = server::Server::new(driver, host, config, files)?;
-    let mut cleanup = server::Cleanup::new(server.clone());
-    let session = server.session();
+    let mut connection = Connection::open(driver, host, config).await?;
+    serve_connection(&mut connection, input, output).await
+}
+
+async fn serve_connection<R, W>(
+    connection: &mut Connection,
+    input: R,
+    output: W,
+) -> Result<(), ServeError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let server = connection.server.clone();
+    let session = connection.session();
     let transport = stdio::Stdio::new(input, output, session);
     let failed = transport.failure_flag();
     let result = match server.serve(transport).await {
@@ -80,7 +94,7 @@ where
             }),
         Err(_) => Err(ServeError::Protocol),
     };
-    cleanup.close().await?;
+    connection.close().await?;
     if failed.load(Ordering::Acquire) {
         return Err(ServeError::Protocol);
     }

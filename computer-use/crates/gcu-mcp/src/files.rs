@@ -1,7 +1,7 @@
 //! Session-owned files; paths and names never come from tool arguments.
 use std::{
     fs::OpenOptions,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     sync::Mutex,
     time::Duration,
@@ -14,6 +14,7 @@ struct Area {
     directory: Option<TempDir>,
     next: u64,
     bytes: usize,
+    files: Vec<(PathBuf, usize)>,
 }
 impl SessionFiles {
     pub(crate) fn new() -> io::Result<Self> {
@@ -29,6 +30,7 @@ impl SessionFiles {
             directory: Some(directory),
             next: 0,
             bytes: 0,
+            files: Vec::new(),
         })))
     }
     pub(crate) fn write(&self, bytes: &[u8], extension: &str) -> io::Result<PathBuf> {
@@ -52,7 +54,30 @@ impl SessionFiles {
         file.write_all(bytes)?;
         area.next += 1;
         area.bytes += bytes.len();
+        area.files.push((path.clone(), bytes.len()));
         Ok(path)
+    }
+    pub(crate) fn export(&self) -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
+        let area = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if area.directory.is_none() {
+            return Err(io::Error::other("session closed"));
+        }
+        area.files
+            .iter()
+            .map(|(path, size)| {
+                if !std::fs::symlink_metadata(path)?.is_file() {
+                    return Err(io::Error::other("session file replaced"));
+                }
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)?
+                    .take(*size as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() != *size {
+                    return Err(io::Error::other("session file changed"));
+                }
+                Ok((path.clone(), bytes))
+            })
+            .collect()
     }
     pub(crate) fn close(&self) -> io::Result<()> {
         let mut area = self.0.lock().unwrap_or_else(|e| e.into_inner());

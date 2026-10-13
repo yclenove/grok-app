@@ -2,6 +2,32 @@ use gcu_core::action::ToolCall;
 use gcu_protocol::*;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+/// Validate one-shot CLI input shapes and action parameter bounds. Pure memory
+/// operation; no IO, timeout or cancellation. Invalid keys remain MCP errors;
+/// geometry, authorization and other runtime errors still use the router.
+pub fn validate_arguments(name: &str, value: Value) -> Result<(), Box<ToolError>> {
+    macro_rules! check {
+        ($ty:ty) => {
+            parse::<$ty>(value).map(|_| ())
+        };
+    }
+    match name {
+        "list_apps" => check!(ListAppsParams),
+        "list_windows" => check!(ListWindowsParams),
+        "capabilities" => check!(CapabilitiesParams),
+        "get_app_state" => check!(GetAppStateParams),
+        "launch_app" => check!(LaunchAppParams),
+        "click"
+        | "perform_secondary_action"
+        | "set_value"
+        | "select_text"
+        | "type_text"
+        | "scroll"
+        | "drag" => action(name, value, String::new()).map(|_| ()),
+        "press_key" => check!(PressKeyParams),
+        _ => Err(Box::new(invalid("Tool is not implemented in this build."))),
+    }
+}
 pub(crate) fn parse<T: DeserializeOwned>(value: Value) -> Result<T, Box<ToolError>> {
     serde_json::from_value(value).map_err(|_| {
         Box::new(invalid(

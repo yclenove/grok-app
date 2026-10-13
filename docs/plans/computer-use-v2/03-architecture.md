@@ -98,6 +98,7 @@ computer-use/
 | 检查工具 | cargo-deny 0.20、cargo-llvm-cov 0.9、cargo-fuzz 0.13 | cov 需 llvm-tools-preview；fuzz 仅 Ubuntu/macOS nightly，不在 Windows 运行 |
 | 数据/文本 | similar 3.2、smol_str 0.3、smallvec 1.16、unicode-segmentation 1.13、unicode-normalization 0.1.24、toml 1 | similar 仅渲染行序列 diff；树对齐始终按 fingerprint；toml 只读解析编入的 denylist，不写配置；NFKC 仅用于敏感词与执行界面关键词 |
 | 通信/CLI | interprocess 2.4、axum 0.8、tokio 1.53、tracing 0.1、clap 4.6 | axum 仅 loopback；interprocess 许可 OR 可选 Apache-2.0 |
+| fake CLI / 控制通道 | rand 0.10、tempfile 3、tracing-subscriber 0.3；仅 dev：assert_cmd 2 | MIT/Apache-2.0；Unix libc 0.2、Windows windows 0.62 限私有目录 ACL/命名管道；gcu-cli 依赖规则仍为 Any |
 | 配置编辑 | toml_edit 0.25、serde_json（preserve_order） | TOML 保注释；JSON 保键顺序，不保证空白/JSONC 注释；JSONC 另选库需 ADR |
 | 审批 UI | wry 0.57、tao 0.37 | Linux 为 GTK3 的 webkit2gtk-4.1；缺库走 zenity/kdialog |
 | macOS | objc2 0.6、objc2-app-kit/objc2-foundation/objc2-screen-capture-kit/objc2-core-graphics/objc2-core-services 0.3、accessibility-sys 0.2、security-framework 3.7 | 不用 accessibility 及 servo core-graphics；SecCodeCopySigningInformation 自有 extern C |
