@@ -120,7 +120,7 @@ jobs:
       - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev
+          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev
 
       - name: cargo build -p gcu-fixture
         run: cargo build -p gcu-fixture
@@ -169,7 +169,11 @@ jobs:
             trap cleanup EXIT
 
             echo "Dumping AT-SPI tree via python3 scripts/a11y/dump_atspi.py..."
-            /usr/bin/python3 scripts/a11y/dump_atspi.py --output /tmp/fixture_tree.json --timeout 30
+            if ! /usr/bin/python3 scripts/a11y/dump_atspi.py --output /tmp/fixture_tree.json --timeout 30; then
+              echo "=== FIXTURE LOG ON DUMP FAILURE ==="
+              cat /tmp/fixture.log 2>/dev/null || true
+              exit 1
+            fi
 
             echo "Checking fixture tree conformance via python3 scripts/a11y/check_fixture_tree.py..."
             if ! /usr/bin/python3 scripts/a11y/check_fixture_tree.py --input /tmp/fixture_tree.json; then
