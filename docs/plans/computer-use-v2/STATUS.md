@@ -34,7 +34,7 @@
 | P2-03 | Windows WGC 截图 | P2-01、P2-02、P0-07 | 2d | done | cu2/P2-03-windows-capture |  | 2026-10-13 | WGC 单帧 + PrintWindow(PW_RENDERFULLCONTENT) 回退，经 CaptureSource/FakeCapture 分层；最小化→window_minimized；受保护/全黑不当成功；路径经 CaptureStats；真机遮挡/150% DPI not_run |
 | P2-04 | Windows worker 隔离 | P2-02、P2-03 | 2d | done | cu2/P2-04-worker |  | 2026-10-13 | gcu worker + supervisor：崩溃/超时/坏帧重启，只读重试一次、变更返回 unknown；Windows Job Object 随父退出；故障注入仅 test-worker-faults；语义动作(P2-05)也走 worker；真机与 300 次浸泡 not_run |
 | P2-05 | Windows 语义动作 | P2-02 | 2.5d | done | cu2/P2-05-uia-actions |  | 2026-10-13 | Invoke/Toggle/SelectionItem/ExpandCollapse/Value/RangeValue/Scroll/Text 选区/LegacyIAccessible；仅明确无副作用才回退，不确定不重放；SetValue 仅 settable 非密码；不 SetFocus；真机夹具契约 not_run |
-| P2-06 | Windows 定向消息与前台 | P2-05 | 3d | todo |  |  |  |  |
+| P2-06 | Windows 定向消息与前台 | P2-05 | 3d | done | cu2/P2-06-win-input |  | 2026-10-14 | PostMessage 定向投递+effect 检测；Chromium/UWP 不静默升级(Auto/TargetedOnly 仅后台，前台需策略放行)；SendInput 前台路径+分块 Unicode；父进程独立 InputLedger(worker 被杀仍补发 up)；UIPI→elevation_required；真机夹具后台点击/记事本中文输入 not_run |
 | P2-07 | Windows 守卫 / 热键 / 排除截图 | P2-06 | 1.5d | todo |  |  |  |  |
 | P2-08 | Windows 剪贴板与文本 | P2-06 | 1d | todo |  |  |  |  |
 | P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | todo |  |  |  |  |
