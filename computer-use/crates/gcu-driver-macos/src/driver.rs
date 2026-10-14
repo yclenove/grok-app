@@ -1,14 +1,16 @@
 //! Serial discovery worker and the portable [`Driver`] implementation.
 //!
 //! Spotlight indexing uses a separate thread. The first `list_apps` does not
-//! wait for it. Capture and input return [`DriverError::CapabilityUnavailable`]
-//! after the same gate as a real observation. Tree reads use [`crate::ax`] and,
-//! on a live macOS driver, a separate `gcu-macos-ax` thread. Queued calls that
+//! wait for it. Screenshots use [`crate::capture`] and stop at
+//! [`gcu_core::driver::DRIVER_DEADLINE`]. Focus and input stay
+//! [`DriverError::CapabilityUnavailable`]. Tree reads use [`crate::ax`] and, on
+//! a live macOS driver, a separate `gcu-macos-ax` thread. Queued calls that
 //! time out or cancel before the worker starts them never run.
 
 use crate::{
     api::MacApi,
     ax::{self, EventHub, FakeAxNode, FakeAxSource},
+    capture::{self, CaptureSource},
     discovery::State,
     gate::MacGate,
     identity::TRUST_NOTE,
@@ -50,6 +52,7 @@ pub struct MacosDriver {
     caps: Capabilities,
     listed: AtomicBool,
     injected: Mutex<Option<InjectedTree>>,
+    capture: Mutex<Option<Arc<dyn CaptureSource>>>,
     /// Declared before the AX thread so Drop restores toggles while the thread
     /// still exists.
     toggles: Mutex<Vec<Box<dyn ax::ErasedToggle>>>,
@@ -110,6 +113,7 @@ impl MacosDriver {
             caps: discovery_capabilities(),
             listed: AtomicBool::new(false),
             injected: Mutex::new(None),
+            capture: Mutex::new(None),
             toggles: Mutex::new(Vec::new()),
             events: EventHub::new(),
             snapshot: tokio::sync::Mutex::new(()),
@@ -130,7 +134,23 @@ impl MacosDriver {
         let mut driver = Self::with_api(Arc::new(crate::RealMacApi::new())).await?;
         driver.live_ax.store(true, Ordering::Release);
         driver.ax = Some(Arc::new(crate::real::AxThread::spawn()?));
+        driver.inject_capture(Arc::new(capture::SckCapture::new()));
         Ok(driver)
+    }
+
+    /// Use an in-memory screenshot backend after the window gate.
+    ///
+    /// Tests on every platform call this. A live macOS driver installs
+    /// [`capture::SckCapture`] instead. Without a source, [`Driver::capture`]
+    /// stays [`DriverError::CapabilityUnavailable`].
+    pub fn inject_capture(&self, source: Arc<dyn CaptureSource>) {
+        if let Ok(mut slot) = self.capture.lock() {
+            *slot = Some(source);
+        }
+    }
+
+    fn capture_source(&self) -> Option<Arc<dyn CaptureSource>> {
+        self.capture.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Use an in-memory tree after the accessibility gate and window check.
@@ -212,10 +232,10 @@ impl MacosDriver {
 fn discovery_capabilities() -> Capabilities {
     Capabilities {
         platform: Platform::Macos,
-        version: "macOS 14+; AX tree (P1-03)".into(),
+        version: "macOS 14+; AX tree (P1-03); screenshot (P1-04)".into(),
         observe: ObserveCapabilities {
             tree: true,
-            screenshot: false,
+            screenshot: true,
             events: true,
         },
         delivery: DeliveryCapabilities {
@@ -224,13 +244,13 @@ fn discovery_capabilities() -> Capabilities {
             targeted_keys: false,
             foreground: ForegroundCapability::Unavailable,
         },
-        background_operation: BackgroundOperation::None,
+        background_operation: BackgroundOperation::Partial,
         user_activity_guard: false,
         overlay_excluded_from_capture: false,
         private_apis: BTreeMap::new(),
         limits: CapabilityLimits {
             max_tree_nodes: ax::MAX_NODES_CEILING as u32,
-            max_image_edge: 0,
+            max_image_edge: 2560,
             type_text_max: 0,
         },
     }
@@ -265,7 +285,7 @@ impl Driver for MacosDriver {
             Err(error) => (false, vec![error.to_string()]),
         };
         issues.push(
-            "P1-04+: capture, focus, geometry, and input are unavailable. Tree reads need Accessibility.".into(),
+            "Focus and input are unavailable. Tree reads need Accessibility. Screenshots need Screen Recording.".into(),
         );
         issues.push(TRUST_NOTE.into());
         DoctorReport {
@@ -375,19 +395,29 @@ impl Driver for MacosDriver {
         opts: &CaptureOpts,
         cancel: &Cancel,
     ) -> Result<Capture> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
         let win = win.clone();
-        self.call(opts.timeout, Some(cancel), false, move |state| {
-            state.validate_window(&win)?;
-            Err(DriverError::CapabilityUnavailable)
-        })
-        .await
+        let budget = capture::capture_budget(opts.timeout);
+        let target = self
+            .call(budget, Some(cancel), false, move |state| {
+                state.prepare_capture(&win)
+            })
+            .await?;
+        let Some(source) = self.capture_source() else {
+            return Err(DriverError::CapabilityUnavailable);
+        };
+        let pixels = capture::take_capture(source, &target, budget, cancel).await?;
+        capture::capture_from_pixels(&target, pixels)
     }
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
         let win = win.clone();
-        self.call(NATIVE_TIMEOUT, None, false, move |state| {
-            state.validate_window(&win)?;
-            Err(DriverError::CapabilityUnavailable)
+        self.call(DRIVER_DEADLINE, None, false, move |state| {
+            state.prepare_geometry(&win)
         })
         .await
     }

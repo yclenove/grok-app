@@ -1,8 +1,9 @@
 //! macOS discovery and accessibility-tree driver. Native bindings compile only
 //! on macOS.
 //!
-//! [`ax::build_raw_tree`] reads a window tree. Capture, geometry, focus, and
-//! input stay unavailable. Portable identity, resolution, window alignment,
+//! [`ax::build_raw_tree`] reads a window tree. [`capture`] takes a window
+//! screenshot and [`MacosDriver::window_geometry`] reports physical pixels.
+//! Focus and input stay unavailable. Portable identity, resolution, window alignment,
 //! Spotlight cache policy, and [`gate::MacGate`] run on every platform through
 //! [`testing::FakeMacApi`].
 //!
@@ -18,6 +19,7 @@
 pub mod api;
 pub mod apps;
 pub mod ax;
+pub mod capture;
 mod discovery;
 mod driver;
 #[cfg(target_os = "macos")]

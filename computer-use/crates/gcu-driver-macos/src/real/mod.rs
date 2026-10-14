@@ -2,7 +2,7 @@
 //!
 //! `on_current_desktop` is always `None`: public CoreGraphics does not report
 //! Spaces, and this card does not resolve private SkyLight symbols (P1-06).
-//! Window scale is `1.0` until P1-04. Launch uses `NSWorkspace` with
+//! Window scale is the display backing factor. Launch uses `NSWorkspace` with
 //! `activates = false` and does not prompt.
 
 mod apps;

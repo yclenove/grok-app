@@ -423,10 +423,12 @@ async fn tree_capture_and_input_are_unavailable() {
     let caps = driver.capabilities();
     assert_eq!(caps.platform, Platform::Macos);
     assert!(caps.version.contains("P1-03"));
-    assert!(caps.observe.tree && !caps.observe.screenshot && caps.observe.events);
+    assert!(caps.version.contains("P1-04"));
+    assert!(caps.observe.tree && caps.observe.screenshot && caps.observe.events);
     assert_eq!(caps.delivery.foreground, ForegroundCapability::Unavailable);
-    assert_eq!(caps.background_operation, BackgroundOperation::None);
+    assert_eq!(caps.background_operation, BackgroundOperation::Partial);
     assert_eq!(caps.limits.max_tree_nodes, 5000);
+    assert_eq!(caps.limits.max_image_edge, 2560);
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     let windows = driver.list_windows(Some(&app)).await.unwrap();
     let win = WindowRef {
