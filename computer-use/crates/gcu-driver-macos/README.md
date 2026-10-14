@@ -44,11 +44,16 @@ at 1 because the buffer is already physical pixels.
 
 `snapshot_tree` reads the accessibility tree. It needs Accessibility and does
 not need Screen Recording. A missing permission is
-`DriverError::PermissionMissing { permission: "accessibility" }`. Focus and
-input still return `CapabilityUnavailable`. `capture` and `window_geometry`
-are implemented. `capabilities().observe.tree` and `screenshot` are true.
-`background_operation` is `Partial`: an occluded window can be screenshotted
-and the tree can be read, but input and targeted delivery cannot.
+`DriverError::PermissionMissing { permission: "accessibility" }`. Pointer,
+keyboard, and focus queries return `CapabilityUnavailable`. Semantic actions
+(`Press`, `SecondaryAction`, `SetValue`, `SelectText`, `ScrollElement`) use
+the accessibility tree and do not activate the target app. `AXRaise` and
+`AXFocus` are not used as a click. `ScrollElement` uses `AXScroll*ByPage`
+only. `capture` and `window_geometry` are implemented.
+`capabilities().observe.tree` and `screenshot` are true.
+`delivery.accessibility` is true. `background_operation` is `Partial`: an
+occluded window can be screenshotted, the tree can be read, and semantic
+actions do not need the foreground. Pointer and keyboard delivery cannot.
 `max_image_edge` is 2560; this driver does not scale. Event subscription is a
 settle skeleton (`observe.events` is true). Calls have a five-second deadline.
 A screenshot waits at most `DRIVER_DEADLINE` (4.75s). A tree walk also stops
@@ -76,6 +81,7 @@ Portable verification:
 cargo test -p gcu-driver-macos --test identity
 cargo test -p gcu-driver-macos --test discovery
 cargo test -p gcu-driver-macos --test capture
+cargo test -p gcu-driver-macos --test actions
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
 
@@ -117,7 +123,26 @@ window. The test still expects the fixture canvas cell `(95, 115, 135)`:
 cargo test -p gcu-driver-macos --test capture -- --ignored --test-threads=1
 ```
 
+Ignored semantic-action oracle (`tests/actions.rs`, `live_fixture_semantic_actions_match_state`,
+macOS only) needs Accessibility. Grant it in System Settings first; the driver
+will not prompt and will not click the dialog. Build the fixture, point
+`GCU_FIXTURE_APP` at the `.app`, and point `GCU_FIXTURE_STATE` at a writable
+JSON path. Leave another app frontmost. CI compiles this test and does not run
+it (`not_run`):
+
+```sh
+cargo build -p gcu-fixture
+export GCU_FIXTURE_APP="$PWD/target/debug/gcu-fixture.app"
+export GCU_FIXTURE_STATE="/tmp/gcu-fixture-state.json"
+cargo test -p gcu-driver-macos --test actions -- --ignored --test-threads=1
+```
+
+The oracle presses the counter once, sets the slider near 40, refuses the
+password field (`password_len` stays unchanged), toggles the checkbox, sets the
+name field when it is settable, scrolls only when `AXScroll*ByPage` exists,
+and checks `AXSelectedTextRange` on a fresh snapshot.
+
 `CROSS=1` clippy checks the macOS library and bins for `aarch64-apple-darwin`.
 It does not compile integration tests. The macOS GitHub runner compiles the
-live ScreenCaptureKit code and the ignored tests. The runner has no Screen
-Recording permission, so the real capture test is `not_run`.
+live ScreenCaptureKit code, the live accessibility actions, and the ignored
+tests. The runner does not execute those ignored tests (`not_run`).

@@ -3,7 +3,8 @@
 //!
 //! [`ax::build_raw_tree`] reads a window tree. [`capture`] takes a window
 //! screenshot and [`MacosDriver::window_geometry`] reports physical pixels.
-//! Focus and input stay unavailable. Portable identity, resolution, window alignment,
+//! Semantic accessibility actions do not activate the target app. Pointer,
+//! keyboard, and focus queries stay unavailable. Portable identity, resolution, window alignment,
 //! Spotlight cache policy, and [`gate::MacGate`] run on every platform through
 //! [`testing::FakeMacApi`].
 //!

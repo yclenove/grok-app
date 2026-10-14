@@ -375,6 +375,11 @@ impl State {
         self.prompt_gate()
     }
 
+    /// Semantic actions need the same Accessibility grant as a tree read.
+    pub(super) fn action_gate(&self) -> Result<()> {
+        self.tree_gate()
+    }
+
     fn prompt_gate(&self) -> Result<()> {
         if gate::security_prompt(&self.api.running_apps()?, &self.api.windows()?) {
             return Err(DriverError::SecureDesktop);

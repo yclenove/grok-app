@@ -9,21 +9,31 @@
 //! is observed between node calls. An in-flight native call can still finish
 //! after the caller has returned; reads report `maybe_executed = false`.
 
+mod actions;
 pub mod events;
+mod fake_act;
 pub mod owned;
 pub mod roles;
+mod scroll;
 pub mod sensitive;
 pub mod source;
+mod text;
 pub mod toggles;
 pub mod tree;
+mod value;
 
+pub(crate) use actions::is_semantic;
+pub use actions::perform;
 #[cfg(target_os = "macos")]
 pub use events::ObserverPool;
 pub use events::{parse_window_pid, AxEventSource, EventHub, FakeAxEvents, RunLoopControl};
 pub use owned::{CountRelease, Owned, Releaser};
 pub use roles::{map_ax_role, role_table, MappedAxRole, RoleRow};
 pub use sensitive::is_terminal_like;
-pub use source::{select_children, AxHandle, AxSource, AxStateBits, FakeAxNode, FakeAxSource};
+pub use source::{
+    select_children, AxCall, AxHandle, AxIdentity, AxSource, AxStateBits, FakeAct, FakeAxNode,
+    FakeAxSource,
+};
 pub use toggles::{
     needs_enhanced_accessibility, AccessibilityToggles, ErasedToggle, FakeToggleStore, ToggleName,
     ToggleStore,

@@ -23,10 +23,11 @@ use gcu_core::{
     model::{NativeHandle, NodeAction, NodeValue, Rect, TextRange},
 };
 
+use super::act;
 use super::parse::{self, Facts};
 use super::thread::{AxThread, AX_CALL_TIMEOUT};
 use super::world::{self, World};
-use crate::ax::source::{AxHandle, AxSource, AxStateBits};
+use crate::ax::source::{AxCall, AxHandle, AxIdentity, AxSource, AxStateBits};
 use crate::ax::{ToggleName, ToggleStore};
 use gcu_core::driver::Result;
 
@@ -71,15 +72,17 @@ impl RealAxSource {
         }
     }
 
-    /// Drop snapshot elements on the AX thread. Best effort.
-    pub async fn reset(&self) {
-        let _ = self
-            .thread
-            .call(AX_CALL_TIMEOUT, false, |world| {
-                world.reset_snapshot();
-                Ok(())
-            })
-            .await;
+    /// Action source for elements a snapshot already stored.
+    ///
+    /// Does not reset the element map. The next [`RealAxSource::open`] does.
+    pub fn attach(thread: Arc<AxThread>) -> Self {
+        Self {
+            thread,
+            cache: Mutex::new(HashMap::new()),
+            root: 0,
+            pid: 0,
+            text_limit: Mutex::new(None),
+        }
     }
 
     async fn ensure(&self, id: u64) -> Result<Facts> {
@@ -161,10 +164,118 @@ impl AxSource for RealAxSource {
         Ok(self.ensure(*node).await?.url)
     }
     fn handle(&self, node: &Self::Node) -> NativeHandle {
+        let identity = self
+            .cache
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(node).cloned())
+            .map(|facts| AxIdentity {
+                role: facts.role,
+                title: facts.title,
+                frame: facts.frame,
+            })
+            .unwrap_or_default();
         NativeHandle::new(AxHandle {
             pid: self.pid,
             id: *node,
+            identity,
         })
+    }
+
+    async fn action_names(&self, node: &Self::Node) -> Result<Vec<String>> {
+        let id = *node;
+        self.thread
+            .call(AX_CALL_TIMEOUT, false, move |world| {
+                act::action_names(world, id)
+            })
+            .await
+    }
+
+    async fn invoke(&self, node: &Self::Node, name: &str) -> Result<AxCall> {
+        let id = *node;
+        let name = name.to_string();
+        self.thread
+            .call(AX_CALL_TIMEOUT, true, move |world| {
+                act::invoke(world, id, &name)
+            })
+            .await
+    }
+
+    async fn attribute_settable(&self, node: &Self::Node, attribute: &str) -> Result<Option<bool>> {
+        let id = *node;
+        let attribute = attribute.to_string();
+        self.thread
+            .call(AX_CALL_TIMEOUT, false, move |world| {
+                act::attribute_settable(world, id, &attribute)
+            })
+            .await
+    }
+
+    async fn set_string(&self, node: &Self::Node, attribute: &str, value: &str) -> Result<AxCall> {
+        let id = *node;
+        let attribute = attribute.to_string();
+        let value = value.to_string();
+        self.thread
+            .call(AX_CALL_TIMEOUT, true, move |world| {
+                act::set_string(world, id, &attribute, &value)
+            })
+            .await
+    }
+
+    async fn set_number(&self, node: &Self::Node, attribute: &str, value: f64) -> Result<AxCall> {
+        let id = *node;
+        let attribute = attribute.to_string();
+        self.thread
+            .call(AX_CALL_TIMEOUT, true, move |world| {
+                act::set_number(world, id, &attribute, value)
+            })
+            .await
+    }
+
+    async fn set_text_range(&self, node: &Self::Node, range: TextRange) -> Result<AxCall> {
+        let id = *node;
+        self.thread
+            .call(AX_CALL_TIMEOUT, true, move |world| {
+                act::set_text_range(world, id, range)
+            })
+            .await
+    }
+
+    async fn select_child(&self, parent: &Self::Node, child: &Self::Node) -> Result<AxCall> {
+        let parent = *parent;
+        let child = *child;
+        self.thread
+            .call(AX_CALL_TIMEOUT, true, move |world| {
+                act::select_child(world, parent, child)
+            })
+            .await
+    }
+
+    async fn parent(&self, node: &Self::Node) -> Result<Option<Self::Node>> {
+        let id = *node;
+        self.thread
+            .call(AX_CALL_TIMEOUT, false, move |world| act::parent(world, id))
+            .await
+    }
+
+    async fn fresh_identity(&self, node: &Self::Node) -> Result<AxIdentity> {
+        let id = *node;
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.remove(&id);
+        }
+        self.thread
+            .call(AX_CALL_TIMEOUT, false, move |world| {
+                act::fresh_identity(world, id)
+            })
+            .await
+    }
+
+    async fn resolve(&self, id: u64) -> Result<Option<Self::Node>> {
+        self.thread
+            .call(AX_CALL_TIMEOUT, false, move |world| {
+                Ok(world.element(id).map(|_| id))
+            })
+            .await
     }
 }
 
