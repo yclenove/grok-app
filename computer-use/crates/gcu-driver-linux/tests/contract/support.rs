@@ -52,21 +52,19 @@ where
 }
 
 pub async fn wait_for_fixture(driver: &LinuxDriver) -> Result<(AppRef, WindowRef), DriverError> {
-    let mut fixture_app = None;
     for _ in 0..40 {
         if let Ok(app) = driver.resolve_app(&AppQuery("fixture".into())).await {
-            fixture_app = Some(app);
-            break;
+            if let Ok(win_info) = driver.key_window(&app).await {
+                let win_ref = WindowRef {
+                    app: app.clone(),
+                    id: win_info.id.clone(),
+                };
+                return Ok((app, win_ref));
+            }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let app = fixture_app.ok_or(DriverError::WindowGone)?;
-    let win_info = driver.key_window(&app).await?;
-    let win_ref = WindowRef {
-        app: app.clone(),
-        id: win_info.id.clone(),
-    };
-    Ok((app, win_ref))
+    Err(DriverError::WindowGone)
 }
 
 pub async fn ensure_modal_closed(driver: &LinuxDriver, win_ref: &WindowRef) {
