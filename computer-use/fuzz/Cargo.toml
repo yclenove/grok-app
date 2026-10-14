@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+gcu-host-protocol = { path = "../crates/gcu-host-protocol" }
 gcu-mcp = { path = "../crates/gcu-mcp" }
 
 # Deliberately independent: cargo-fuzz/nightly never enters workspace CI/builds.
@@ -18,6 +19,13 @@ members = ["."]
 [[bin]]
 name = "mcp_codec"
 path = "fuzz_targets/mcp_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "host_codec"
+path = "fuzz_targets/host_codec.rs"
 test = false
 doc = false
 bench = false

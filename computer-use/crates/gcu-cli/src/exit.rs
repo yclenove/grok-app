@@ -46,6 +46,11 @@ impl From<anyhow::Error> for Failure {
         Self::internal("Internal IO/runtime failure; no operation is replayed")
     }
 }
+impl From<gcu_host_protocol::Error> for Failure {
+    fn from(_: gcu_host_protocol::Error) -> Self {
+        Self::internal("Host authentication or connection failed")
+    }
+}
 impl From<gcu_mcp::ServeError> for Failure {
     fn from(_: gcu_mcp::ServeError) -> Self {
         Self::internal("MCP session/transport failed")

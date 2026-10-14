@@ -108,7 +108,20 @@ const RULES: &[Rule] = &[
     },
     Rule {
         owner: CrateName::Exact("gcu-host-protocol"),
-        allowed: Allowed::Only(&["gcu-protocol", "serde", "tokio", "interprocess"]),
+        allowed: Allowed::Only(&[
+            "gcu-protocol",
+            "serde",
+            "serde_json",
+            "schemars",
+            "thiserror",
+            "tokio",
+            "interprocess",
+            "hmac",
+            "sha2",
+            "rand",
+            "libc",
+            "windows",
+        ]),
     },
     Rule {
         owner: CrateName::Exact("src-tauri"),

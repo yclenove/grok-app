@@ -30,6 +30,10 @@ allow = [
 ]
 confidence-threshold = 0.95
 exceptions = [
+    # Architecture §2 permits BSD-family licenses. These interprocess 2.4
+    # transitives use the zero-clause BSD variant; no global license expansion.
+    { allow = ["0BSD"], crate = "doctest-file" },
+    { allow = ["0BSD"], crate = "recvmsg" },
     # Transitive dependencies of eframe 0.36 for gcu-fixture:
     # clipboard-win: transitive dependency via arboard on Windows
     { allow = ["BSL-1.0"], crate = "clipboard-win" },

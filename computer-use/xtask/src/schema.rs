@@ -99,6 +99,23 @@ pub(crate) fn run_golden(update: bool) -> Result<()> {
         .parent()
         .context("xtask must live under computer-use")?;
     golden(&workspace.join("crates/gcu-protocol/golden"), update)?;
+    let directory = workspace.join("crates/gcu-host-protocol/golden");
+    for (name, schema) in [
+        ("messages.json", gcu_host_protocol::messages::schemas()),
+        ("handshake.json", gcu_host_protocol::auth::schemas()),
+    ] {
+        let expected = canonical_json(&schema)?;
+        let path = directory.join(name);
+        if update {
+            fs::create_dir_all(&directory)?;
+            fs::write(&path, expected)?;
+        } else if fs::read_to_string(&path)
+            .context("missing Host golden; run xtask golden --update")?
+            != expected
+        {
+            bail!("Host golden {name} differs; review and run xtask golden --update");
+        }
+    }
     println!(
         "PASS: protocol golden files {}",
         if update { "updated" } else { "match" }

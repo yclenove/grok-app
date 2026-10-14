@@ -25,6 +25,7 @@ fn results() -> Results {
         WindowLocks::new(),
     );
     Results {
+        images: Arc::new(crate::image_cache::ImageCache::default()),
         encoding: Default::default(),
         files: Arc::new(SessionFiles::new().unwrap()),
         session: Arc::new(Session::open(

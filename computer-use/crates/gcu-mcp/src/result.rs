@@ -57,6 +57,7 @@ pub(crate) struct Results {
     pub files: Arc<SessionFiles>,
     pub session: Arc<Session>,
     pub encoding: EncodeOptions,
+    pub images: Arc<crate::image_cache::ImageCache>,
 }
 impl Results {
     pub async fn outcome(&self, out: ToolOutcome) -> CallToolResult {
@@ -113,6 +114,15 @@ impl Results {
                             text.push_str("[image attachment omitted: short edge below 256; use screenshot file]\n");
                         }
                         if let Some(shot) = &mut state.state.screenshot {
+                            self.images.insert(
+                                shot.id.clone(),
+                                gcu_host_protocol::messages::Image {
+                                    mime: encoded.mime().into(),
+                                    width: encoded.width(),
+                                    height: encoded.height(),
+                                    bytes: encoded.bytes().to_vec(),
+                                },
+                            );
                             shot.width = encoded.width();
                             shot.height = encoded.height();
                             shot.scale_to_window = Some(encoded.scale_to_window());

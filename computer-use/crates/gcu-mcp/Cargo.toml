@@ -9,14 +9,16 @@ publish.workspace = true
 gcu-protocol.workspace = true
 gcu-core.workspace = true
 gcu-host-api.workspace = true
+gcu-host-protocol.workspace = true
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server", "elicitation"] }
-tokio = { workspace = true, features = ["io-util", "io-std"] }
+tokio = { workspace = true, features = ["io-util", "io-std", "net"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 base64 = "0.23"
 tempfile = "3"
+axum = "0.8"
 
 [dev-dependencies]
 gcu-driver-fake.workspace = true

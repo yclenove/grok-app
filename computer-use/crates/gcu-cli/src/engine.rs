@@ -1,0 +1,317 @@
+//! App-managed process: Host-only approvals, isolated HTTP sessions, Stop task.
+use crate::exit::Failure;
+use gcu_core::{driver::Driver, session::Session};
+use gcu_host_protocol::{
+    auth::*,
+    messages as w,
+    server::{Incoming, Peer, RPC_TIMEOUT},
+    transport, Error,
+};
+use gcu_mcp::host::{RemoteHost, RemoteSession, StopMirror, UnavailableActivity};
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::{Mutex, RwLock};
+struct Entry {
+    lifecycle: Arc<Session>,
+    remote: Mutex<RemoteSession>,
+}
+type Sessions = Arc<RwLock<HashMap<String, Arc<Entry>>>>;
+fn parse<T: DeserializeOwned>(v: Value) -> Result<T, w::RpcError> {
+    serde_json::from_value(v).map_err(|_| w::RpcError::new(-32602, "invalid parameters"))
+}
+fn encode<T: Serialize>(v: T) -> Result<Value, w::RpcError> {
+    serde_json::to_value(v).map_err(|_| w::RpcError::new(-32603, "internal"))
+}
+fn internal(_: impl std::fmt::Debug) -> w::RpcError {
+    w::RpcError::new(-32000, "handoff_required")
+}
+async fn lookup(sessions: &Sessions, id: &str) -> Result<Arc<Entry>, w::RpcError> {
+    sessions
+        .read()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or_else(|| w::RpcError::new(-32004, "unknown session"))
+}
+
+pub(crate) async fn run(
+    driver: Arc<dyn Driver>,
+    host_fd: Option<usize>,
+    socket: Option<PathBuf>,
+    token_fd: Option<usize>,
+    stop_fd: usize,
+) -> Result<u8, Failure> {
+    let (stream, bootstrap) = if let Some(fd) = host_fd {
+        let mut stream = transport::inherited(fd)?;
+        let bootstrap = Bootstrap::read(&mut stream).await?;
+        (stream, bootstrap)
+    } else {
+        let bootstrap = transport::bootstrap_fd(
+            token_fd.ok_or_else(|| Failure::arguments("Missing host token fd"))?,
+        )
+        .await?;
+        let path = socket.ok_or_else(|| Failure::arguments("Missing host socket"))?;
+        let pin = bootstrap
+            .endpoint
+            .as_ref()
+            .ok_or_else(|| Failure::arguments("Missing private endpoint pin"))?;
+        (
+            transport::connect(&path, pin, &bootstrap.host).await?,
+            bootstrap,
+        )
+    };
+    let secret = bootstrap.secret();
+    let launcher = bootstrap.host.clone();
+    let mut config = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            transport::check_launcher(&launcher)?;
+            AuthConfig::current(Role::Engine, Channel::Rpc)
+        }),
+    )
+    .await
+    .map_err(|_| Error::Timeout)?
+    .map_err(|_| Error::Authentication)??;
+    let mut capabilities = driver.capabilities().clone();
+    capabilities.user_activity_guard = false;
+    config.capabilities = Some(capabilities);
+    // Registration is deliberately before any driver work or approval request.
+    let (peer, incoming, authenticated) =
+        Peer::connect(stream, &config, &bootstrap.host, &secret).await?;
+    let mut stop_config = config.clone();
+    stop_config.channel = Channel::Stop;
+    let (stop_peer, stop_incoming, stop_auth) = Peer::connect(
+        transport::inherited(stop_fd)?,
+        &stop_config,
+        &bootstrap.host,
+        &secret.stop_secret()?,
+    )
+    .await?;
+    if authenticated.stopped != stop_auth.stopped {
+        return Err(Failure::internal("Inconsistent Host Stop state"));
+    }
+    let stop = StopMirror::new(authenticated.stopped);
+    let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
+    let stop_task = tokio::spawn(control(
+        stop_peer.clone(),
+        stop_incoming,
+        stop.clone(),
+        sessions.clone(),
+        driver.clone(),
+    ));
+    let remote =
+        match RemoteHost::new(peer.clone(), stop.clone(), Arc::new(UnavailableActivity)).await {
+            Ok(remote) => remote,
+            Err(e) => {
+                stop_task.abort();
+                stop_peer.close();
+                peer.close();
+                return Err(e.into());
+            }
+        };
+    let result = rpc(
+        peer.clone(),
+        incoming,
+        stop_peer.clone(),
+        driver,
+        remote,
+        sessions.clone(),
+    )
+    .await;
+    stop.latch(None);
+    peer.close();
+    stop_peer.close();
+    stop_task.abort();
+    let entries: Vec<_> = sessions.write().await.drain().map(|(_, s)| s).collect();
+    for entry in entries {
+        entry.remote.lock().await.close().await?;
+    }
+    result.map(|_| 0).map_err(Failure::from)
+}
+async fn control(
+    peer: Peer,
+    mut incoming: Incoming,
+    stop: StopMirror,
+    sessions: Sessions,
+    driver: Arc<dyn Driver>,
+) {
+    loop {
+        let request = tokio::select! {biased;_=peer.disconnected()=>break,request=incoming.recv()=>{let Some(r)=request else {break};r}};
+        let answer = match request.method.as_str() {
+            "engine.session.stop" => match parse::<w::Stop>(request.params.clone()) {
+                Ok(p) => {
+                    // Synchronous latch first. Release tasks never await the action
+                    // mutex or block processing another Stop or trusted resume.
+                    stop.latch(p.session_id.as_deref());
+                    let entries: Vec<_> = sessions
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|(id, _)| p.session_id.as_ref().is_none_or(|wanted| wanted == *id))
+                        .map(|(_, e)| e.lifecycle.clone())
+                        .collect();
+                    for session in entries {
+                        tokio::spawn(async move {
+                            session.handle_stop().await;
+                        });
+                    }
+                    // Also covers a Stop received during initial policy/bootstrap.
+                    let driver = driver.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(
+                            gcu_core::session::NATIVE_CALL_TIMEOUT,
+                            driver.release_all_input(),
+                        )
+                        .await;
+                    });
+                    encode(w::Empty {})
+                }
+                Err(e) => Err(e),
+            },
+            "engine.session.resume" => match parse::<w::Resume>(request.params.clone()) {
+                Ok(p) if stop.resume_by_user(p.session_id.as_deref(), p.sequence, p.user_event) => {
+                    encode(w::Empty {})
+                }
+                Ok(_) => Err(w::RpcError::new(-32003, "untrusted or replayed user event")),
+                Err(e) => Err(e),
+            },
+            _ => Err(w::RpcError::new(-32601, "control method unavailable")),
+        };
+        peer.respond(&request, answer);
+    }
+    stop.latch(None);
+    // Losing the trusted control channel is itself a Stop. Release immediately
+    // without waiting for ordinary RPC teardown or an in-flight native call.
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            gcu_core::session::NATIVE_CALL_TIMEOUT,
+            driver.release_all_input(),
+        )
+        .await;
+    });
+    peer.close();
+}
+async fn rpc(
+    peer: Peer,
+    mut incoming: Incoming,
+    stop_peer: Peer,
+    driver: Arc<dyn Driver>,
+    host: Arc<RemoteHost>,
+    sessions: Sessions,
+) -> Result<(), Error> {
+    let start = Instant::now();
+    let mut health = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        let request = tokio::select! {biased;
+            _=peer.disconnected()=>return Ok(()),
+            _=stop_peer.disconnected()=>return Err(Error::Disconnected),
+            request=incoming.recv()=>{let Some(r)=request else {return Ok(())};r},
+            _=health.tick()=>{let _=peer.notify("host.engine.health",&w::Health {uptime_ms:start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,sessions:sessions.read().await.len() as u32});continue;}
+        };
+        let shutdown = request.method == "engine.system.shutdown";
+        let answer = tokio::select! {biased;
+            _=peer.disconnected()=>return Ok(()),
+            _=stop_peer.disconnected()=>return Err(Error::Disconnected),
+            answer=dispatch(&request, driver.clone(), host.clone(), &sessions)=>answer,
+        };
+        let success = answer.is_ok();
+        if shutdown && success {
+            peer.respond_flushed(&request, answer).await?;
+            return Ok(());
+        }
+        peer.respond(&request, answer);
+    }
+}
+async fn dispatch(
+    request: &w::Request,
+    driver: Arc<dyn Driver>,
+    host: Arc<RemoteHost>,
+    sessions: &Sessions,
+) -> Result<Value, w::RpcError> {
+    match request.method.as_str() {
+        "engine.session.open" => {
+            let p: w::SessionOpen = parse(request.params.clone())?;
+            if p.kind != w::SessionKind::Local {
+                return Err(w::RpcError::new(-32005, "local sessions only"));
+            }
+            if p.session_id.is_empty()
+                || p.session_id.len() > 256
+                || sessions.read().await.contains_key(&p.session_id)
+                || sessions.read().await.len() >= 32
+            {
+                return Err(w::RpcError::new(-32602, "invalid or duplicate session"));
+            }
+            let remote = RemoteSession::open(driver, host, &p.session_id, Default::default())
+                .await
+                .map_err(internal)?;
+            let result = encode(remote.opened())?;
+            sessions.write().await.insert(
+                p.session_id,
+                Arc::new(Entry {
+                    lifecycle: remote.session(),
+                    remote: Mutex::new(remote),
+                }),
+            );
+            Ok(result)
+        }
+        "engine.session.turnEnded" => {
+            let p: w::SessionId = parse(request.params.clone())?;
+            lookup(sessions, &p.session_id)
+                .await?
+                .remote
+                .lock()
+                .await
+                .turn_ended()
+                .await;
+            encode(w::Empty {})
+        }
+        "engine.session.close" => {
+            let p: w::SessionId = parse(request.params.clone())?;
+            let entry = sessions
+                .write()
+                .await
+                .remove(&p.session_id)
+                .ok_or_else(|| w::RpcError::new(-32004, "unknown session"))?;
+            entry.remote.lock().await.close().await.map_err(internal)?;
+            encode(w::Empty {})
+        }
+        "engine.policy.changed" => {
+            let p: w::PolicyChanged = parse(request.params.clone())?;
+            host.policy_changed(p.version).await.map_err(internal)?;
+            encode(w::Empty {})
+        }
+        "engine.system.doctor" => {
+            let _: w::Empty = parse(request.params.clone())?;
+            let r = host.doctor(
+                tokio::time::timeout(RPC_TIMEOUT, driver.doctor())
+                    .await
+                    .map_err(internal)?,
+            );
+            encode(w::DoctorReport {
+                capabilities: r.capabilities,
+                ready: r.ready,
+                issues: r.issues,
+            })
+        }
+        "engine.screenshot.get" => {
+            let p: w::ScreenshotGet = parse(request.params.clone())?;
+            let entry = lookup(sessions, &p.session_id).await?;
+            let remote = entry.remote.lock().await;
+            let image = remote
+                .screenshot(&p.id)
+                .ok_or_else(|| w::RpcError::new(-32004, "image unavailable in this session"))?;
+            encode(image)
+        }
+        "engine.system.shutdown" => {
+            let _: w::Empty = parse(request.params.clone())?;
+            encode(w::Empty {})
+        }
+        _ => Err(w::RpcError::new(-32601, "method unavailable")),
+    }
+}

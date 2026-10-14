@@ -19,10 +19,12 @@ clap = { version = "4.6", features = ["derive"] }
 gcu-core.workspace = true
 gcu-driver-fake.workspace = true
 gcu-host-api.workspace = true
+gcu-host-protocol.workspace = true
 gcu-mcp.workspace = true
 gcu-protocol.workspace = true
 rand = "0.10"
-rmcp = { version = "3.5", default-features = false }
+rmcp = { version = "3.5", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 serde.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["io-util", "io-std", "net", "signal"] }
@@ -34,6 +36,7 @@ thiserror = { workspace = true }
 toml_edit = "0.25"
 
 [dev-dependencies]
+gcu-host-protocol = { workspace = true, features = ["testing"] }
 assert_cmd = "2"
 serde_json = { workspace = true, features = ["preserve_order"] }
 toml = { workspace = true }

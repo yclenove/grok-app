@@ -84,7 +84,7 @@ computer-use/
 | gcu-eval | gcu-protocol, gcu-core, gcu-driver-fake, serde, serde_json, tokio；任务 YAML/CLI/报告依赖在 P9-01 固定并核实许可 | 生产凭据、非隔离运行 |
 | gcu-cli | 全部 | — |
 | gcu-fixture | 任意（仅测试夹具，不被其他 crate 依赖） | — |
-| gcu-host-protocol | gcu-protocol, serde, serde_json, tokio(io), interprocess（UDS/命名管道） | core、驱动 |
+| gcu-host-protocol | gcu-protocol, serde, serde_json, schemars(schema 黄金文件), thiserror(错误), tokio(io/net/sync/time/rt；仅 testing: process), interprocess（UDS/命名管道）, hmac 0.13 + sha2 0.11(双向证明), rand 0.10(随机秘密/nonce), libc(Unix 进程实例/继承), windows 0.62(Windows 进程实例/DACL) | core、驱动 |
 | src-tauri（路线 B） | **仅** gcu-protocol、gcu-host-protocol | gcu-core、任何 gcu-driver-*、gcu-mcp、gcu-cli、gcu-overlay（`xtask check-deps` 同时检查 src-tauri） |
 
 ---

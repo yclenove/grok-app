@@ -15,19 +15,38 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         }
         Some(Command::Resume { session }) => return crate::resume::run(session.clone()).await,
         Some(Command::Mcp {
+            connect: Some(url),
+            token_fd,
             transport,
-            connect,
+            port,
+            ..
+        }) => {
+            if matches!(transport, Transport::Http) || port.is_some() {
+                return Err(Failure::arguments(
+                    "--connect requires stdio proxy transport",
+                ));
+            }
+            return crate::proxy::run(
+                url,
+                token_fd.ok_or_else(|| Failure::arguments("--connect requires --token-fd"))?,
+            )
+            .await;
+        }
+        Some(Command::Mcp {
+            transport: Transport::Http,
+            token_fd: None,
+            ..
+        }) => return Err(Failure::arguments("HTTP requires a secret --token-fd")),
+        Some(Command::Mcp {
+            transport: Transport::Stdio,
+            connect: None,
             token_fd,
             port,
             ..
-        }) if matches!(transport, Transport::Http)
-            || connect.is_some()
-            || token_fd.is_some()
-            || port.is_some() =>
-        {
+        }) if token_fd.is_some() || port.is_some() => {
             return Err(Failure::arguments(
-                "HTTP/--connect/--token-fd/--port are not implemented; P0-12",
-            ));
+                "--token-fd/--port require HTTP or --connect",
+            ))
         }
         _ => (),
     }
@@ -56,6 +75,15 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             .await
             .map_err(|_| Failure::internal("Cannot inject evaluation fault"))?;
     }
+    if let Some(Command::Engine {
+        host_fd,
+        host_socket,
+        host_token_fd,
+        stop_fd,
+    }) = cli.command
+    {
+        return crate::engine::run(driver, host_fd, host_socket, host_token_fd, stop_fd).await;
+    }
     let host = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio::task::spawn_blocking(move || LocalHost::new(crate::config::load()?, mode)),
@@ -80,6 +108,45 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             host.save_summaries().await?;
             write_oracle(&driver).await?;
             result
+        }
+        Some(Command::Mcp {
+            transport: Transport::Http,
+            profile,
+            token_fd,
+            port,
+            ..
+        }) => {
+            let secret = gcu_host_protocol::auth::Secret::from_bytes(
+                gcu_host_protocol::transport::token_fd(
+                    token_fd.ok_or_else(|| Failure::arguments("Missing HTTP token fd"))?,
+                )
+                .await?,
+            );
+            let connection = gcu_mcp::Connection::open_host_only(
+                driver.clone(),
+                host.host.clone(),
+                gcu_mcp::ServerConfig {
+                    profile: profile.into(),
+                },
+            )
+            .await?;
+            let session = connection.session();
+            let control =
+                crate::resume::Control::start(session.clone(), host.activity.clone()).await?;
+            let mut endpoint = gcu_mcp::http::HttpEndpoint::start_with_secret(
+                connection,
+                port.unwrap_or(0),
+                secret,
+            )
+            .await?;
+            println!("{}", serde_json::json!({"mcp_url":endpoint.url()}));
+            let _ = tokio::signal::ctrl_c().await;
+            host.activity.latch();
+            session.handle_stop().await;
+            endpoint.close().await?;
+            drop(control);
+            host.save_summaries().await?;
+            Ok(0)
         }
         Some(Command::Mcp { profile, .. }) => {
             let connection = gcu_mcp::Connection::open_host_only(
