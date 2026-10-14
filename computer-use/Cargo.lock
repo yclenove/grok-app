@@ -1840,10 +1840,12 @@ dependencies = [
  "gcu-core",
  "gcu-protocol",
  "insta",
+ "png",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+ "tracing",
  "windows",
  "windows-core",
 ]

@@ -1,4 +1,4 @@
-# Windows discovery and UIA (P2-01/P2-02)
+# Windows discovery, UIA and capture (P2-01/P2-02/P2-03)
 
 This crate implements app/window discovery, exact executable identity, launching,
 nonactivating Win32 restoration and virtual-desktop annotations. The native
@@ -55,8 +55,8 @@ instance for ApplicationFrameHost windows. Owned dialogs retain separate IDs and
 owner metadata; ambiguous UWP child mappings fail closed.
 
 The discovery-only `with_api` constructor leaves UIA tree/focus/subscriptions
-unavailable. `new()` enables UIA observation as described below. Screenshots and
-input remain unavailable in both cases. No input is held, so
+unavailable. `new()` enables UIA observation and window capture as described below.
+Input remains unavailable. No input is held, so
 `release_all_input` is a no-op. Calls have a 4.75-second caller deadline and
 queued calls dropped after timeout/cancellation never execute. A native launch
 already started at timeout reports `maybe_executed=true`; it must never be replayed.
@@ -92,8 +92,8 @@ cross-target clippy are not evidence of native desktop behavior.
 `with_api` remains discovery-only; `with_uia` injects portable `UiaSource` and
 `UiaEventSource` implementations. Tree/event capabilities are enabled only when
 sources are attached. Geometry uses live stamped Win32 data. Focus is read only
-inside the owning app's foreground window. Capture and every input route remain
-unavailable; no pattern invocation or foreground fallback is registered.
+inside the owning app's foreground window. Every input route remains unavailable;
+no pattern invocation or foreground fallback is registered.
 
 The cache request includes names, control types, IDs, frames, enabled/offscreen/
 focus/password states, value/range/selection/toggle/expand state, and pattern
@@ -154,3 +154,86 @@ cargo test --locked -p gcu-driver-windows --test uia_native -- --ignored --test-
 These tests only read/render the system apps and drop their subscriptions. Normal
 CI compiles the real implementation and tests but excludes these ignored tests.
 Native desktop smoke status for this Linux delivery: **not_run**.
+
+## Window capture (P2-03)
+
+`new()` attaches two persistent, bounded native threads; `with_capture` injects a
+portable `CaptureBackend` for tests. Screenshot capability is true only when an
+attached source is available. WGC uses
+`IGraphicsCaptureItemInterop::CreateForWindow`, a free-threaded one-frame pool,
+and nonblocking D3D11 staging readback. Border and cursor setters are probed;
+older Windows interfaces may omit them. An access-denied setter is reported as
+permission missing, without requesting a grant or opening a system prompt.
+
+WGC unavailable/native failure selects `PrintWindow(PW_RENDERFULLCONTENT)` on an
+offscreen, zero-initialized DIB. Neither backend samples the desktop. Known
+display-affinity restrictions return `PermissionMissing` with
+`protected_window_capture`; access denied uses `window_capture`. Both are existing
+protocol errors. [GetWindowDisplayAffinity](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowdisplayaffinity)
+is documented to require a layered window and DWM. If that probe is unavailable,
+WGC still enforces system exclusion, but PrintWindow is refused with
+`window_capture_protection_unknown`: the fallback requires a confirmed WDA_NONE
+before and after painting, and cannot promise support for nonlayered windows.
+All-black buffers are refused with a payload-free native error
+(protected or unavailable content cannot be distinguished from a truly black
+window). A black WGC frame may select PrintWindow, but a black fallback never
+counts as success. Permissions, cancellation, deadline, disappearance, and
+minimization never trigger fallback. Minimized windows return `WindowMinimized`
+without restoration. `CaptureStats` and tracing report the actual successful
+path and fallback count; `Capture` and protocol types are unchanged.
+
+GetWindowRect and UIA coordinates are physical pixels on dedicated per-monitor
+DPI-aware threads. GetDpiForWindow / 96 is metadata, never another multiplier.
+If WGC omits invisible resize borders, opaque padding restores the Win32 origin;
+unmappable/moving/resizing frames are refused. Both paths share the total
+`min(opts.timeout, DRIVER_DEADLINE)` budget (4.75 seconds), including pre/postflight
+and raw PNG encoding. Cancellation abandons queued/active jobs, drops their pixels,
+and reports `maybe_executed=false`. Drop never waits for PrintWindow or a wedged
+OS call. Killable process isolation remains P2-04; a stuck thread is not replaced
+by unbounded new workers.
+
+The PNG is unscaled and **unredacted**, solely to fit the existing driver boundary.
+The observer stamps trusted state versions/timestamps. Only `gcu_core::redact`
+creates deliverable images: it collects password regions before pruning, rejects
+incomplete trees or stale stamps and unlocatable sensitive/login regions, and
+supplies model images, thumbnails, approval crops and temporary images. Portable
+tests assert this contract for WGC and PrintWindow, including fallback/pruning.
+
+```sh
+rcargo test --locked -p gcu-driver-windows --test capture
+rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+rcargo --sh 'CROSS=1 bash scripts/verify.sh'
+```
+
+Native capture status: **not_run** on this Linux delivery. Normal Windows CI
+compiles the following ignored tests. Run them serially on an unelevated,
+interactive **disposable Windows desktop** containing only fixture/system apps:
+
+```powershell
+cargo build --locked -p gcu-fixture
+$env:GCU_FIXTURE_STATE = Join-Path $env:TEMP 'wc-grid.json'
+Start-Process target/debug/gcu-fixture.exe
+```
+
+Select the fixture's **Canvas Grid** tab. For the occlusion test, cover its whole
+window with another window while leaving it unminimized; the test reads the
+fixture's own cell color rather than the covering window:
+
+```powershell
+cargo test --locked -p gcu-driver-windows --test capture live_wgc_occluded_window -- --ignored --test-threads=1
+```
+
+For the DPI test, set display scaling to **150%**, reset the fixture, select Canvas
+Grid and keep it foreground and uncovered. The test verifies a UIA grid location's
+pixel color, performs one test-only click at that screenshot pixel's physical
+screen coordinate, and checks the fixture state file for exactly cell `(2,3)`.
+Production driver input remains unavailable. Launch the command with a delay,
+then foreground the fixture during that delay:
+
+```powershell
+Start-Sleep -Seconds 5
+cargo test --locked -p gcu-driver-windows --test capture live_capture_150_percent -- --ignored --test-threads=1
+```
+
+Close the fixture/system apps, remove `wc-grid.json`, and discard the desktop.
+Fake and cross-target checks are not evidence of native pixel/click correctness.

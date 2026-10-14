@@ -17,16 +17,17 @@ use std::{
 use tokio::sync::oneshot;
 
 type Task = Box<dyn FnOnce(&mut State) + Send>;
-/// Discovery-only Windows driver. Portable constructors accept a FakeWinApi.
+/// Windows discovery, optional UIA and optional capture. Portable sources inject OS data.
 /// COM/OS calls are serialized on one worker with a five-second caller deadline;
 /// indexing uses a separate thread. Drop disconnects the worker and stops watching.
 pub struct WindowsDriver {
     worker: mpsc::SyncSender<Task>,
     indexing: Arc<std::sync::atomic::AtomicBool>,
     refreshing: Arc<std::sync::atomic::AtomicBool>,
-    caps: Capabilities,
+    pub(crate) caps: Capabilities,
     listed: std::sync::atomic::AtomicBool,
     observer: Option<crate::uia::observe::Observer>,
+    pub(crate) capture_backend: Option<Arc<crate::capture::CaptureBackend>>,
 }
 impl WindowsDriver {
     /// Start a dedicated worker and refuse elevated/noninteractive engines before
@@ -94,6 +95,7 @@ impl WindowsDriver {
             caps: discovery_capabilities(),
             listed: std::sync::atomic::AtomicBool::new(false),
             observer: None,
+            capture_backend: None,
         })
     }
     /// Start the production Windows adapter. Available only on Windows.
@@ -101,7 +103,11 @@ impl WindowsDriver {
     pub async fn new() -> Result<Self> {
         let driver = Self::with_api(Arc::new(crate::RealWinApi::new()?)).await?;
         let uia = Arc::new(crate::uia::RealUia::start().await?);
-        Ok(driver.attach_uia(uia.clone(), uia))
+        let wgc = Arc::new(crate::capture::WgcCapture::new().await?);
+        let print = Arc::new(crate::capture::PrintWindowCapture::new().await?);
+        Ok(driver
+            .attach_uia(uia.clone(), uia)
+            .with_capture(Arc::new(crate::capture::CaptureBackend::new(wgc, print))))
     }
     /// Start discovery with portable/native UIA sources. Startup validates the
     /// engine before enabling tree/events; capture and input remain unavailable.
@@ -124,7 +130,7 @@ impl WindowsDriver {
         self.caps.version = "Windows 10 1903+; discovery and UIA observation".into();
         self
     }
-    async fn call<T: Send + 'static>(
+    pub(crate) async fn call<T: Send + 'static>(
         &self,
         timeout: Duration,
         cancel: Option<&Cancel>,
@@ -219,7 +225,9 @@ impl Driver for WindowsDriver {
             Ok(issues) => (true, issues),
             Err(e) => (false, vec![e.to_string()]),
         };
-        issues.push(if self.observer.is_some() {
+        issues.push(if self.capture_backend.is_some() {
+            "Input unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
+        } else if self.observer.is_some() {
             "P2-03+: capture and input unavailable; UIA heuristics are best-effort and non-exhaustive".into()
         } else {
             "P2-02+: UIA source unavailable; capture and input unavailable".into()
@@ -417,12 +425,7 @@ impl Driver for WindowsDriver {
         opts: &CaptureOpts,
         cancel: &Cancel,
     ) -> Result<Capture> {
-        let win = win.clone();
-        self.call(opts.timeout, Some(cancel), false, move |s| {
-            s.validate_window(&win, false)?;
-            Err(DriverError::CapabilityUnavailable)
-        })
-        .await
+        self.capture_window(win, opts, cancel).await
     }
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
         let win = win.clone();

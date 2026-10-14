@@ -1,12 +1,13 @@
-//! Windows discovery and UIA driver, with portable identity and safety logic.
+//! Windows discovery, UIA and window capture with portable safety logic.
 //!
-//! Native bindings exist only on Windows. Capture/input remain unavailable.
+//! Native bindings exist only on Windows. Input remains unavailable.
 //! See the crate README for trust, completeness, and native runner boundaries.
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod api;
 pub mod apps;
+pub mod capture;
 pub mod desktop;
 mod discovery;
 mod driver;
