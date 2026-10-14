@@ -134,7 +134,7 @@ jobs:
       - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject, Mesa)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1
+          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1 xdotool
 
       - name: cargo build -p gcu-fixture and driver test binary
         run: |
@@ -142,6 +142,7 @@ jobs:
           cargo test --no-run --locked -p gcu-driver-linux --test atspi_tree
           cargo test --no-run --locked -p gcu-driver-linux --test capture
           cargo test --no-run --locked -p gcu-driver-linux --test actions
+          cargo test --no-run --locked -p gcu-driver-linux --test stop
 
 
       - name: Run fixture and verify AT-SPI tree and X11 capture

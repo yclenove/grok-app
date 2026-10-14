@@ -91,4 +91,11 @@ if ! cargo test --locked -p gcu-driver-linux --test actions -- --ignored --test-
   exit 1
 fi
 
+echo "Running live driver X11 stop and guard test..."
+if ! cargo test --locked -p gcu-driver-linux --test stop -- --ignored --test-threads=1; then
+  echo "=== FIXTURE LOG ON LIVE DRIVER STOP TEST FAILURE ==="
+  cat /tmp/fixture.log 2>/dev/null || true
+  exit 1
+fi
+
 

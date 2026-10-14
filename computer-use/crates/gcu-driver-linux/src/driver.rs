@@ -4,12 +4,14 @@ use crate::atspi::{
     bus::{AtspiBus, AtspiNodeRef},
     connect_atspi,
     events::{AtspiEventSubscriber, LiveEventSubscriber},
-    source::{AtspiSource, FakeNode, FakeSource},
+    source::{FakeNode, FakeSource},
     tree::{build_raw_tree, MAX_NODES_CEILING},
 };
 use crate::x11::{
-    align_windows, capture_window, list_x11_windows, AtspiWindowCandidate, InputLedger, RealX,
-    XServer,
+    activity::{ActivityClock, SharedActivityClock},
+    align_windows, build_caps_quad, capture_window,
+    hotkey::{attach_x11_listener, HotkeyConfig, HotkeyManager, SharedStopLatch, StopLatch},
+    list_x11_windows, update_x11_caps, AtspiWindowCandidate, InputLedger, RealX, XServer,
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -22,7 +24,7 @@ use gcu_core::{
 use gcu_protocol::{
     capabilities::{
         BackgroundOperation, CapabilityLimits, DeliveryCapabilities, ForegroundCapability,
-        ObserveCapabilities, Platform, PrivateApiStatus,
+        ObserveCapabilities, Platform,
     },
     AppInfo, Capabilities, WindowInfo,
 };
@@ -33,7 +35,10 @@ use std::{
 
 /// Concrete Linux computer-use driver backed by AT-SPI and X11.
 pub struct LinuxDriver {
-    capabilities: Capabilities,
+    caps_all: Capabilities,
+    caps_no_guard: Capabilities,
+    caps_no_hotkey: Capabilities,
+    caps_none: Capabilities,
     connection: Option<zbus::Connection>,
     subscriber: Option<Arc<dyn AtspiEventSubscriber>>,
     x_server: Option<Arc<dyn XServer>>,
@@ -44,6 +49,10 @@ pub struct LinuxDriver {
     fake_apps: Vec<AppInfo>,
     fake_windows: Vec<(String, WindowInfo)>,
     ledger: Arc<InputLedger>,
+    activity_clock: Arc<dyn ActivityClock>,
+    hotkey_manager: Arc<HotkeyManager>,
+    stop_latch: Arc<dyn StopLatch>,
+    _listener_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LinuxDriver {
@@ -78,63 +87,62 @@ impl LinuxDriver {
     /// Connect to the live system AT-SPI accessibility bus and X11 display.
     pub async fn connect() -> std::result::Result<Self, DriverError> {
         let conn = connect_atspi().await?;
-        let subscriber = Arc::new(LiveEventSubscriber::new(conn.clone()));
-        let x_server: Option<Arc<dyn XServer>> = match RealX::connect() {
-            Ok(x) => Some(Arc::new(x)),
-            Err(e) => {
-                tracing::warn!("X11 connection failed during LinuxDriver::connect: {e}");
-                None
-            }
-        };
-
-        let mut capabilities = Self::default_capabilities();
-        if let Some(ref x) = x_server {
-            update_x11_caps(&mut capabilities, x.as_ref());
-        }
-
-        Ok(Self {
-            capabilities,
-            connection: Some(conn),
-            subscriber: Some(subscriber),
-            x_server,
-            atspi_to_x: Arc::new(RwLock::new(HashMap::new())),
-            x_to_atspi: Arc::new(RwLock::new(HashMap::new())),
-            fake_source: None,
-            fake_root: None,
-            fake_apps: Vec::new(),
-            fake_windows: Vec::new(),
-            ledger: Arc::new(InputLedger::new()),
-        })
+        let sub: Arc<dyn AtspiEventSubscriber> = Arc::new(LiveEventSubscriber::new(conn.clone()));
+        let x: Option<Arc<dyn XServer>> = RealX::connect()
+            .ok()
+            .map(|x| Arc::new(x) as Arc<dyn XServer>);
+        Ok(Self::new_internal(Some(conn), Some(sub), x))
     }
 
     /// Create a driver from an existing D-Bus connection.
     pub fn from_connection(connection: zbus::Connection) -> Self {
-        let subscriber = Arc::new(LiveEventSubscriber::new(connection.clone()));
-        let x_server: Option<Arc<dyn XServer>> = match RealX::connect() {
-            Ok(x) => Some(Arc::new(x)),
-            Err(e) => {
-                tracing::warn!("X11 connection failed during LinuxDriver::from_connection: {e}");
-                None
-            }
-        };
+        let sub: Arc<dyn AtspiEventSubscriber> =
+            Arc::new(LiveEventSubscriber::new(connection.clone()));
+        let x: Option<Arc<dyn XServer>> = RealX::connect()
+            .ok()
+            .map(|x| Arc::new(x) as Arc<dyn XServer>);
+        Self::new_internal(Some(connection), Some(sub), x)
+    }
 
-        let mut capabilities = Self::default_capabilities();
-        if let Some(ref x) = x_server {
-            update_x11_caps(&mut capabilities, x.as_ref());
-        }
+    fn new_internal(
+        conn: Option<zbus::Connection>,
+        sub: Option<Arc<dyn AtspiEventSubscriber>>,
+        x: Option<Arc<dyn XServer>>,
+    ) -> Self {
+        let mut base = Self::default_capabilities();
+        let stop_latch: Arc<dyn StopLatch> = Arc::new(SharedStopLatch::default());
+        let hotkey_manager = Arc::new(HotkeyManager::new(
+            HotkeyConfig::default(),
+            stop_latch.clone(),
+        ));
+        let ledger = Arc::new(InputLedger::new());
+        let clock: Arc<dyn ActivityClock> = Arc::new(SharedActivityClock::new(false));
+        let _listener_handle = x.as_ref().and_then(|s| {
+            update_x11_caps(&mut base, s.as_ref());
+            attach_x11_listener(s.clone(), &hotkey_manager, &stop_latch, &ledger, &clock)
+        });
+
+        let (c1, c2, c3, c4) = build_caps_quad(&base);
 
         Self {
-            capabilities,
-            connection: Some(connection),
-            subscriber: Some(subscriber),
-            x_server,
+            caps_all: c1,
+            caps_no_guard: c2,
+            caps_no_hotkey: c3,
+            caps_none: c4,
+            connection: conn,
+            subscriber: sub,
+            x_server: x,
             atspi_to_x: Arc::new(RwLock::new(HashMap::new())),
             x_to_atspi: Arc::new(RwLock::new(HashMap::new())),
             fake_source: None,
             fake_root: None,
             fake_apps: Vec::new(),
             fake_windows: Vec::new(),
-            ledger: Arc::new(InputLedger::new()),
+            ledger,
+            activity_clock: clock,
+            hotkey_manager,
+            stop_latch,
+            _listener_handle,
         }
     }
 
@@ -145,26 +153,87 @@ impl LinuxDriver {
         apps: Vec<AppInfo>,
         windows: Vec<(String, WindowInfo)>,
     ) -> Self {
-        Self {
-            capabilities: Self::default_capabilities(),
-            connection: None,
-            subscriber: None,
-            x_server: None,
-            atspi_to_x: Arc::new(RwLock::new(HashMap::new())),
-            x_to_atspi: Arc::new(RwLock::new(HashMap::new())),
-            fake_source: Some(Arc::new(fake_source)),
-            fake_root: Some(root),
-            fake_apps: apps,
-            fake_windows: windows,
-            ledger: Arc::new(InputLedger::new()),
-        }
+        let mut d = Self::new_internal(None, None, None);
+        d.hotkey_manager.set_available(true);
+        d.activity_clock = Arc::new(SharedActivityClock::new(true));
+        d.fake_source = Some(Arc::new(fake_source));
+        d.fake_root = Some(root);
+        d.fake_apps = apps;
+        d.fake_windows = windows;
+        d
     }
 
     /// Attach an XServer implementation to this driver (useful for injecting FakeX).
     pub fn with_x_server(mut self, x: Arc<dyn XServer>) -> Self {
-        update_x11_caps(&mut self.capabilities, x.as_ref());
+        let mut base = Self::default_capabilities();
+        update_x11_caps(&mut base, x.as_ref());
+        let (c1, c2, c3, c4) = build_caps_quad(&base);
+        self.caps_all = c1;
+        self.caps_no_guard = c2;
+        self.caps_no_hotkey = c3;
+        self.caps_none = c4;
+
+        if let Some(h) = self._listener_handle.take() {
+            h.abort();
+        }
+        self._listener_handle = attach_x11_listener(
+            x.clone(),
+            &self.hotkey_manager,
+            &self.stop_latch,
+            &self.ledger,
+            &self.activity_clock,
+        );
+
         self.x_server = Some(x);
         self
+    }
+
+    /// Override the activity clock.
+    pub fn with_activity_clock(mut self, clock: Arc<dyn ActivityClock>) -> Self {
+        self.activity_clock = clock;
+        self
+    }
+
+    /// Override the stop latch.
+    pub fn with_stop_latch(mut self, latch: Arc<dyn StopLatch>) -> Self {
+        self.stop_latch = latch;
+        self
+    }
+
+    /// Override the hotkey manager.
+    pub fn with_hotkey_manager(mut self, mgr: Arc<HotkeyManager>) -> Self {
+        self.hotkey_manager = mgr;
+        self
+    }
+
+    /// Access the activity clock.
+    pub fn activity_clock(&self) -> &Arc<dyn ActivityClock> {
+        &self.activity_clock
+    }
+
+    /// Access the hotkey manager.
+    pub fn hotkey_manager(&self) -> &Arc<HotkeyManager> {
+        &self.hotkey_manager
+    }
+
+    /// Access the stop latch.
+    pub fn stop_latch(&self) -> &Arc<dyn StopLatch> {
+        &self.stop_latch
+    }
+
+    /// Whether Stop is currently latched.
+    pub fn is_stopped(&self) -> bool {
+        self.stop_latch.is_stopped()
+    }
+
+    /// Whether Stop hotkey is available.
+    pub fn is_hotkey_available(&self) -> bool {
+        self.hotkey_manager.is_available()
+    }
+
+    /// Whether physical user activity guard is active and healthy.
+    pub fn is_activity_guard_available(&self) -> bool {
+        self.activity_clock.is_available()
     }
 
     /// Access the underlying D-Bus connection if connected.
@@ -203,21 +272,19 @@ impl LinuxDriver {
         };
         map.get(&win.id).copied().ok_or(DriverError::WindowGone)
     }
-}
 
-fn update_x11_caps(caps: &mut Capabilities, x: &dyn XServer) {
-    let comp = if x.is_composite_available().unwrap_or(false) {
-        PrivateApiStatus::Available
-    } else {
-        PrivateApiStatus::Missing
-    };
-    caps.private_apis.insert("x11_composite".into(), comp);
-    let xtest = if x.is_xtest_available().unwrap_or(false) {
-        PrivateApiStatus::Available
-    } else {
-        PrivateApiStatus::Missing
-    };
-    caps.private_apis.insert("xtest".into(), xtest);
+    fn align_and_record(&self, x: &dyn XServer, cands: &[AtspiWindowCandidate]) -> Vec<WindowInfo> {
+        let x_cands = list_x11_windows(x).unwrap_or_default();
+        let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
+        let aligned = align_windows(cands, &x_cands, scale);
+        if let Ok(mut map) = self.atspi_to_x.write() {
+            map.extend(aligned.atspi_to_x);
+        }
+        if let Ok(mut map) = self.x_to_atspi.write() {
+            map.extend(aligned.x_to_atspi);
+        }
+        aligned.windows
+    }
 }
 
 #[async_trait]
@@ -227,7 +294,14 @@ impl Driver for LinuxDriver {
     }
 
     fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
+        let hotkey_ok = self.hotkey_manager.is_available() && !self.stop_latch.is_stopped();
+        let guard_ok = self.activity_clock.is_available();
+        match (hotkey_ok, guard_ok) {
+            (true, true) => &self.caps_all,
+            (true, false) => &self.caps_no_guard,
+            (false, true) => &self.caps_no_hotkey,
+            (false, false) => &self.caps_none,
+        }
     }
 
     async fn doctor(&self) -> DoctorReport {
@@ -264,8 +338,27 @@ impl Driver for LinuxDriver {
             issues.push("X11 server not connected: window capture unavailable".into());
         }
 
+        let guard_status = if self.activity_clock.is_available() {
+            "available"
+        } else {
+            "unavailable"
+        };
+        issues.push(format!("user_activity_guard: {guard_status}"));
+
+        if !self.hotkey_manager.is_available() {
+            let reason = self
+                .hotkey_manager
+                .last_error()
+                .unwrap_or_else(|| "not registered or listener inactive".into());
+            issues.push(format!(
+                "stop_hotkey: unavailable ({reason}); foreground input disabled"
+            ));
+        } else {
+            issues.push("stop_hotkey: available".into());
+        }
+
         DoctorReport {
-            capabilities: self.capabilities.clone(),
+            capabilities: self.capabilities().clone(),
             ready,
             issues,
         }
@@ -287,52 +380,12 @@ impl Driver for LinuxDriver {
                 permission: "accessibility".into(),
             })?;
 
-        let bus = AtspiBus::new(conn.clone());
-        let root = AtspiNodeRef {
-            destination: "org.a11y.atspi.Registry".into(),
-            path: "/org/a11y/atspi/accessible/root".into(),
-        };
-
-        let app_nodes = bus.children(&root).await.unwrap_or_default();
-        let mut apps = Vec::new();
-        for node in app_nodes {
-            let name = bus
-                .name(&node)
-                .await
-                .unwrap_or_default()
-                .unwrap_or_default();
-            if !name.is_empty() {
-                apps.push(AppInfo {
-                    id: node.destination.clone(),
-                    name,
-                    pid: None,
-                    identity: None,
-                });
-            }
-        }
-        Ok(apps)
+        crate::atspi::list_atspi_apps(conn).await
     }
 
     async fn resolve_app(&self, query: &AppQuery) -> Result<AppRef> {
-        let query_str = query.0.to_ascii_lowercase();
         let apps = self.list_apps().await?;
-        let matches: Vec<AppInfo> = apps
-            .into_iter()
-            .filter(|app| {
-                app.name.to_ascii_lowercase().contains(&query_str)
-                    || app.id.to_ascii_lowercase().contains(&query_str)
-            })
-            .collect();
-
-        if matches.is_empty() {
-            return Err(DriverError::AppNotFound);
-        }
-        if matches.len() > 1 {
-            return Err(DriverError::AmbiguousApp);
-        }
-
-        let matched = matches.into_iter().next().ok_or(DriverError::AppNotFound)?;
-        Ok(AppRef { info: matched })
+        crate::atspi::resolve_atspi_app(&apps, query)
     }
 
     async fn launch_app(&self, _app: &AppRef) -> Result<AppRef> {
@@ -352,7 +405,6 @@ impl Driver for LinuxDriver {
             };
 
             if let Some(ref x) = self.x_server {
-                let x_cands = list_x11_windows(x.as_ref()).unwrap_or_default();
                 let atspi_cands: Vec<AtspiWindowCandidate> = base_windows
                     .iter()
                     .map(|w| AtspiWindowCandidate {
@@ -362,15 +414,7 @@ impl Driver for LinuxDriver {
                         pid: app.and_then(|a| a.info.pid),
                     })
                     .collect();
-                let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
-                let aligned = align_windows(&atspi_cands, &x_cands, scale);
-                if let Ok(mut map) = self.atspi_to_x.write() {
-                    map.extend(aligned.atspi_to_x);
-                }
-                if let Ok(mut map) = self.x_to_atspi.write() {
-                    map.extend(aligned.x_to_atspi);
-                }
-                return Ok(aligned.windows);
+                return Ok(self.align_and_record(x.as_ref(), &atspi_cands));
             }
 
             return Ok(base_windows);
@@ -383,67 +427,10 @@ impl Driver for LinuxDriver {
                 permission: "accessibility".into(),
             })?;
 
-        let bus = AtspiBus::new(conn.clone());
-        let root = AtspiNodeRef {
-            destination: "org.a11y.atspi.Registry".into(),
-            path: "/org/a11y/atspi/accessible/root".into(),
-        };
-
-        let app_nodes = bus.children(&root).await.unwrap_or_default();
-        let mut atspi_candidates = Vec::new();
-
-        for a_node in app_nodes {
-            let app_name = bus
-                .name(&a_node)
-                .await
-                .unwrap_or_default()
-                .unwrap_or_default();
-            if let Some(target) = app {
-                if a_node.destination != target.info.id
-                    && !app_name.eq_ignore_ascii_case(&target.info.name)
-                {
-                    continue;
-                }
-            }
-
-            let win_nodes = bus.children(&a_node).await.unwrap_or_default();
-            for w_node in win_nodes {
-                let title = bus
-                    .name(&w_node)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default();
-                let extents = bus
-                    .extents(&w_node)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or(Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        w: 1280.0,
-                        h: 860.0,
-                    });
-
-                atspi_candidates.push(AtspiWindowCandidate {
-                    path: w_node.path.clone(),
-                    title,
-                    frame: extents,
-                    pid: app.and_then(|a| a.info.pid),
-                });
-            }
-        }
+        let atspi_candidates = crate::atspi::list_atspi_candidate_windows(conn, app).await?;
 
         if let Some(ref x) = self.x_server {
-            let x_cands = list_x11_windows(x.as_ref()).unwrap_or_default();
-            let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
-            let aligned = align_windows(&atspi_candidates, &x_cands, scale);
-            if let Ok(mut map) = self.atspi_to_x.write() {
-                map.extend(aligned.atspi_to_x);
-            }
-            if let Ok(mut map) = self.x_to_atspi.write() {
-                map.extend(aligned.x_to_atspi);
-            }
-            Ok(aligned.windows)
+            Ok(self.align_and_record(x.as_ref(), &atspi_candidates))
         } else {
             Ok(atspi_candidates
                 .into_iter()
@@ -572,6 +559,14 @@ impl Driver for LinuxDriver {
     async fn release_all_input(&self) {
         if let Some(ref x) = self.x_server {
             self.ledger.release_all(x.as_ref());
+        }
+    }
+}
+
+impl Drop for LinuxDriver {
+    fn drop(&mut self) {
+        if let Some(h) = self._listener_handle.as_ref() {
+            h.abort();
         }
     }
 }

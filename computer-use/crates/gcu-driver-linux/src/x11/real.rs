@@ -5,9 +5,10 @@ use crate::x11::server::{
 };
 use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::composite::{self, ConnectionExt as _};
+use x11rb::protocol::xinput::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, ImageFormat,
-    MapState,
+    AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, GrabMode,
+    ImageFormat, MapState, ModMask,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
@@ -412,5 +413,106 @@ impl XServer for RealX {
         self.conn
             .flush()
             .map_err(|e| XError::Protocol(e.to_string()))
+    }
+
+    fn is_xi2_available(&self) -> Result<bool, XError> {
+        let reply = self
+            .conn
+            .xinput_xi_query_version(2, 0)
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .reply();
+        match reply {
+            Ok(v) => Ok(v.major_version >= 2),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn query_xi_devices(&self) -> Result<Vec<crate::x11::activity::DeviceInfo>, XError> {
+        let reply = self
+            .conn
+            .xinput_xi_query_device(x11rb::protocol::xinput::Device::ALL)
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .reply()
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+
+        let mut devices = Vec::new();
+        for dev in reply.infos {
+            let name = String::from_utf8_lossy(&dev.name).to_string();
+            let is_xtest = crate::x11::activity::is_xtest_device_name(&name);
+            devices.push(crate::x11::activity::DeviceInfo {
+                id: dev.deviceid,
+                name,
+                is_xtest,
+            });
+        }
+        Ok(devices)
+    }
+
+    fn grab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError> {
+        let root = self.screen().root;
+        let mod_mask = ModMask::from(modifiers);
+        self.conn
+            .grab_key(
+                false,
+                root,
+                mod_mask,
+                keycode,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .check()
+            .map_err(|e| XError::Protocol(format!("GrabKey failed: {e}")))?;
+        Ok(())
+    }
+
+    fn ungrab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError> {
+        let root = self.screen().root;
+        let mod_mask = ModMask::from(modifiers);
+        self.conn
+            .ungrab_key(keycode, root, mod_mask)
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .check()
+            .map_err(|e| XError::Protocol(format!("UngrabKey failed: {e}")))?;
+        Ok(())
+    }
+
+    fn poll_event(&self) -> Result<Option<crate::x11::server::XEventKind>, XError> {
+        let ev = self
+            .conn
+            .poll_for_event()
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        match ev {
+            Some(x11rb::protocol::Event::KeyPress(kp)) => {
+                Ok(Some(crate::x11::server::XEventKind::KeyPress(kp.detail)))
+            }
+            Some(x11rb::protocol::Event::XinputRawKeyPress(e)) => Ok(Some(
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
+            )),
+            Some(x11rb::protocol::Event::XinputRawButtonPress(e)) => Ok(Some(
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
+            )),
+            Some(x11rb::protocol::Event::XinputRawMotion(e)) => Ok(Some(
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    fn select_xi2_events(&self) -> Result<(), XError> {
+        use x11rb::protocol::xinput::*;
+        let root = self.screen().root;
+        let mask =
+            XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_BUTTON_PRESS | XIEventMask::RAW_MOTION;
+        let em = EventMask {
+            deviceid: Device::ALL.into(),
+            mask: vec![mask],
+        };
+        self.conn
+            .xinput_xi_select_events(root, &[em])
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .check()
+            .map_err(|e| XError::Protocol(format!("xi_select_events failed: {e}")))?;
+        Ok(())
     }
 }
