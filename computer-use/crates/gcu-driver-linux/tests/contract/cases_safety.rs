@@ -17,7 +17,7 @@ use gcu_driver_linux::{
         hotkey::{handle_hotkey_trigger, HotkeyConfig, SharedStopLatch, StopLatch},
         resolve_or_remap_keysym,
         watchdog::run_with_watchdog,
-        FakeX, InputLedger, XRootGeometry,
+        FakeWindow, FakeX, InputLedger, XRootGeometry, XWindowGeometry,
     },
     LinuxDriver,
 };
@@ -280,6 +280,11 @@ pub async fn test_c18_stale_element_handle(
 }
 
 pub async fn test_c19_closed_window(driver: &LinuxDriver) -> Result<ContractOutcome, String> {
+    let initial = poll_oracle(Duration::from_secs(2), |v| {
+        v.get("counter").and_then(|c| c.as_u64())
+    })
+    .await?;
+
     let win = WindowRef {
         app: AppRef {
             info: AppInfo {
@@ -295,7 +300,7 @@ pub async fn test_c19_closed_window(driver: &LinuxDriver) -> Result<ContractOutc
     let res = driver
         .perform(
             &DriverAction::PointerClick {
-                win,
+                win: win.clone(),
                 at: WindowPoint { x: 50.0, y: 50.0 },
                 button: Button::Left,
                 count: 1,
@@ -305,6 +310,19 @@ pub async fn test_c19_closed_window(driver: &LinuxDriver) -> Result<ContractOutc
         )
         .await;
     assert_eq!(res.unwrap_err(), DriverError::WindowGone);
+
+    let cap_res = driver.capture(&win, &CaptureOpts::default(), &cancel).await;
+    assert_eq!(cap_res.unwrap_err(), DriverError::WindowGone);
+
+    let current = poll_oracle(Duration::from_secs(1), |v| {
+        v.get("counter").and_then(|c| c.as_u64())
+    })
+    .await?;
+    assert_eq!(
+        current, initial,
+        "closed window operation must not affect other windows"
+    );
+
     Ok(ContractOutcome::Passed)
 }
 
@@ -497,7 +515,7 @@ pub async fn test_c24_virtual_list_tree_budget(
         let this = if n
             .name
             .as_deref()
-            .is_some_and(|s| s.contains("Item ") && s.contains("列表项"))
+            .is_some_and(|s| s.contains("Item ") || s.contains("列表项"))
         {
             1
         } else {
@@ -667,6 +685,22 @@ pub async fn test_p3_hotkey_failure_disables_foreground() -> Result<ContractOutc
     let cfg = HotkeyConfig::default();
     fake_x.add_conflicting_key(kc, cfg.modifiers);
 
+    fake_x.add_window(FakeWindow {
+        id: 100,
+        pid: Some(1234),
+        name: Some("test".into()),
+        geometry: XWindowGeometry {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+            border_width: 0,
+            depth: 24,
+        },
+        is_mapped: true,
+        image: None,
+    });
+
     let driver = LinuxDriver::new_fake(
         gcu_driver_linux::atspi::source::FakeSource::default(),
         gcu_driver_linux::atspi::source::FakeNode::default(),
@@ -687,7 +721,36 @@ pub async fn test_p3_hotkey_failure_disables_foreground() -> Result<ContractOutc
         .iter()
         .any(|i| i.contains("stop_hotkey: unavailable")));
 
-    let win = WindowRef {
+    let cancel = Cancel::default();
+
+    // 1. Hotkey unavailable + nonexistent window -> WindowGone (window existence checked before route capability)
+    let win_nonexistent = WindowRef {
+        app: AppRef {
+            info: AppInfo {
+                id: "1".into(),
+                name: "test".into(),
+                pid: None,
+                identity: None,
+            },
+        },
+        id: "999999".into(),
+    };
+    let res_nonexistent = driver
+        .perform(
+            &DriverAction::PointerClick {
+                win: win_nonexistent,
+                at: WindowPoint { x: 10.0, y: 10.0 },
+                button: Button::Left,
+                count: 1,
+                route: PointerRoute::Auto,
+            },
+            &cancel,
+        )
+        .await;
+    assert_eq!(res_nonexistent.unwrap_err(), DriverError::WindowGone);
+
+    // 2. Hotkey unavailable + existing window -> CapabilityUnavailable (foreground XTEST disabled)
+    let win_exists = WindowRef {
         app: AppRef {
             info: AppInfo {
                 id: "1".into(),
@@ -698,11 +761,10 @@ pub async fn test_p3_hotkey_failure_disables_foreground() -> Result<ContractOutc
         },
         id: "100".into(),
     };
-    let cancel = Cancel::default();
-    let res = driver
+    let res_exists = driver
         .perform(
             &DriverAction::PointerClick {
-                win,
+                win: win_exists,
                 at: WindowPoint { x: 10.0, y: 10.0 },
                 button: Button::Left,
                 count: 1,
@@ -711,6 +773,6 @@ pub async fn test_p3_hotkey_failure_disables_foreground() -> Result<ContractOutc
             &cancel,
         )
         .await;
-    assert_eq!(res.unwrap_err(), DriverError::CapabilityUnavailable);
+    assert_eq!(res_exists.unwrap_err(), DriverError::CapabilityUnavailable);
     Ok(ContractOutcome::Passed)
 }

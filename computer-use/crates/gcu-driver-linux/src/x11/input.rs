@@ -35,6 +35,10 @@ pub async fn activate_and_verify(
         });
     }
 
+    if x.window_geometry(xid).is_err() {
+        return Err(DriverError::WindowGone);
+    }
+
     x.activate_window(xid)
         .map_err(|_| DriverError::CapabilityUnavailable)?;
 
@@ -58,6 +62,10 @@ pub async fn activate_and_verify(
         if active == xid {
             return Ok(());
         }
+    }
+
+    if x.window_geometry(xid).is_err() {
+        return Err(DriverError::WindowGone);
     }
 
     Err(DriverError::CapabilityUnavailable)

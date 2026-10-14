@@ -19,6 +19,7 @@ mod cases_safety;
 
 use cases_input::*;
 use cases_safety::*;
+use gcu_core::driver::Driver;
 use gcu_driver_linux::LinuxDriver;
 use support::*;
 
@@ -73,6 +74,17 @@ async fn live_contract_table_suite_c01_to_c27() {
         .expect("gcu-fixture application must be discoverable");
 
     ensure_modal_closed(&driver, &win_ref).await;
+
+    let doc = driver.doctor().await;
+    println!(
+        "  [Doctor] Ready: {}, Hotkey available: {}, Stopped: {}",
+        doc.ready,
+        driver.is_hotkey_available(),
+        driver.is_stopped()
+    );
+    for issue in &doc.issues {
+        println!("  [Doctor] Issue: {issue}");
+    }
 
     println!("\n======================================================================");
     println!("               LINUX DRIVER CONTRACT TEST SUITE (C01 - C27)          ");

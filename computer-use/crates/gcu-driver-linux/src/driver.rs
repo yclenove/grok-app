@@ -263,14 +263,21 @@ impl LinuxDriver {
 
     /// Resolve an X11 window ID from a WindowRef.
     pub fn resolve_xid(&self, win: &WindowRef) -> Result<u32, DriverError> {
-        if let Ok(id) = win.id.parse::<u32>() {
-            return Ok(id);
-        }
-        let map = match self.atspi_to_x.read() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+        let xid = if let Ok(id) = win.id.parse::<u32>() {
+            id
+        } else {
+            let map = match self.atspi_to_x.read() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *map.get(&win.id).ok_or(DriverError::WindowGone)?
         };
-        map.get(&win.id).copied().ok_or(DriverError::WindowGone)
+        if let Some(ref x) = self.x_server {
+            if x.window_geometry(xid).is_err() {
+                return Err(DriverError::WindowGone);
+            }
+        }
+        Ok(xid)
     }
 
     fn align_and_record(&self, x: &dyn XServer, cands: &[AtspiWindowCandidate]) -> Vec<WindowInfo> {

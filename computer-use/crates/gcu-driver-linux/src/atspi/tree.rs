@@ -205,7 +205,16 @@ impl<S: AtspiSource> Walk<'_, S> {
         let identifier = read!(self.source.identifier(node)).flatten();
         let attributes = read!(self.source.attributes(node)).unwrap_or_default();
         let state_set = read!(self.source.states(node)).unwrap_or_default();
-        let states = map_atspi_states(state_set, atspi_role, &attributes);
+        let mut states = map_atspi_states(state_set, atspi_role, &attributes);
+        if name
+            .as_deref()
+            .is_some_and(|s| s.to_ascii_lowercase().contains("password"))
+            || identifier
+                .as_deref()
+                .is_some_and(|s| s.to_ascii_lowercase().contains("password"))
+        {
+            states |= States::PASSWORD;
+        }
         let value = read!(self.source.value(node)).flatten();
         let extents = read!(self.source.extents(node)).flatten();
         let actions = read!(self.source.actions(node))
