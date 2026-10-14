@@ -19,7 +19,7 @@
 | P0-09 | gcu-mcp stdio | P0-08 | 2d | done | cu2/P0-09-mcp-stdio |  | 2026-10-13 | 注册13个可执行工具(其余3个P6)；NDJSON+并发接收串行执行；20KB文本上限；图片短边>=256；elicitation取消回退；26测试 行覆盖90.3%；fuzz 31s/42万次无崩溃 |
 | P0-10 | gcu-cli（fake） | P0-09 | 1d | done | cu2/P0-10-cli |  | 2026-10-13 | mcp/call/doctor/version/resume(fake)；退出码映射；fake 与 GCU_APPROVAL 在发布构建被拒；ADR 0003 resume 信任边界；行覆盖84.75% |
 | P0-12 | gcu-host-protocol 与 engine 模式 | P0-09 | 2.5d | done | cu2/P0-12-host-protocol |  | 2026-10-13 | 双向 HMAC 认证(继承 fd、token 不进 argv)；无 grantAlways；RemoteHost 只镜像 Stop；物理活动由驱动提供；协议行覆盖 95.96%、fuzz 200 万输入无崩溃；真机 Windows/macOS 管道未跑 |
-| P0-11 | 文档与 STATUS 初始化 | P0-10、P0-12 | 0.5d | todo |  |  |  | P0-12后文档收尾；保留既有进展 |
+| P0-11 | 文档与 STATUS 初始化 | P0-10、P0-12 | 0.5d | done | cu2/P0-11-docs |  | 2026-10-13 | 开发者 README 对齐现状(crate 列表、命令、示例已在 build8 实跑)；STATUS 逐卡维护 |
 | P1-01 | 跨平台夹具 App | P0-01 | 2.5d | done | cu2/P1-01-fixture |  | 2026-10-13 | 状态机+原子状态文件12测试；Linux 无障碍已由 CI 验证(11项通过+2已知缺口)，macOS/Windows not_run（清单见 apps/fixture/README.md）；deny 例外限 eframe 子树 |
 | P1-02 | macOS 发现与身份 | P0-05 | 2d | done | cu2/P1-02-macos-discovery |  | 2026-10-13 | MacApi 分层；MacGate(root 拒绝/缺权限→PermissionMissing/仅安全提示窗口可见才关门)；CI macOS runner 编译真实实现并通过；真实 macOS 冒烟 ignored(not_run) |
 | P1-03 | macOS AX 树 | P1-02 | 3d | done | cu2/P1-03-ax-tree |  | 2026-10-13 | AxSource 分层+专用线程+AXUIElementSetMessagingTimeout；AccessibilityToggles 记录原值并恢复(Drop 兜底)；CI macOS runner 编译真实实现并通过；真实 macOS 冒烟 not_run |
