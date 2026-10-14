@@ -287,3 +287,68 @@ impl HotkeyManager {
         *guard = None;
     }
 }
+
+/// Spawn a background task monitoring incoming X11 events for Stop hotkey and physical input.
+pub fn spawn_x11_listener(
+    x: Arc<dyn XServer>,
+    hotkey_mgr: Arc<HotkeyManager>,
+    stop_latch: Arc<dyn StopLatch>,
+    ledger: Arc<InputLedger>,
+    clock: Arc<dyn crate::x11::activity::ActivityClock>,
+    filter: Arc<crate::x11::activity::DeviceFilter>,
+    watchdog: crate::x11::watchdog::HeartbeatWatchdog,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    Some(handle.spawn(async move {
+        loop {
+            watchdog.record_heartbeat();
+            match x.poll_event() {
+                Ok(Some(crate::x11::server::XEventKind::KeyPress(kc))) => {
+                    if Some(kc) == hotkey_mgr.resolved_keycode() {
+                        handle_hotkey_trigger(stop_latch.as_ref(), &ledger, x.as_ref()).await;
+                    }
+                }
+                Ok(Some(crate::x11::server::XEventKind::RawDeviceInput(dev_id))) => {
+                    filter.process_event(dev_id, clock.as_ref());
+                }
+                Ok(None) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => {
+                    tracing::warn!("X11 event listener error: {e}");
+                    clock.set_available(false);
+                    hotkey_mgr.set_available(false);
+                    break;
+                }
+            }
+        }
+    }))
+}
+
+/// Attach and initialize the X11 hotkey and input event listener.
+pub fn attach_x11_listener(
+    x: Arc<dyn XServer>,
+    hotkey_mgr: &Arc<HotkeyManager>,
+    stop_latch: &Arc<dyn StopLatch>,
+    ledger: &Arc<InputLedger>,
+    clock: &Arc<dyn crate::x11::activity::ActivityClock>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let _ = hotkey_mgr.register(x.as_ref());
+    if let Ok(true) = x.is_xi2_available() {
+        let _ = x.select_xi2_events();
+        clock.set_available(true);
+    }
+    let filter = match x.query_xi_devices() {
+        Ok(devs) => Arc::new(crate::x11::activity::DeviceFilter::from_devices(&devs)),
+        Err(_) => Arc::new(crate::x11::activity::DeviceFilter::default()),
+    };
+    spawn_x11_listener(
+        x,
+        hotkey_mgr.clone(),
+        stop_latch.clone(),
+        ledger.clone(),
+        clock.clone(),
+        filter,
+        crate::x11::watchdog::HeartbeatWatchdog::new(),
+    )
+}

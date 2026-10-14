@@ -9,9 +9,9 @@ use crate::atspi::{
 };
 use crate::x11::{
     activity::{ActivityClock, SharedActivityClock},
-    align_windows, capture_window,
-    hotkey::{HotkeyConfig, HotkeyManager, SharedStopLatch, StopLatch},
-    list_x11_windows, AtspiWindowCandidate, InputLedger, RealX, XServer,
+    align_windows, build_caps_quad, capture_window,
+    hotkey::{attach_x11_listener, HotkeyConfig, HotkeyManager, SharedStopLatch, StopLatch},
+    list_x11_windows, update_x11_caps, AtspiWindowCandidate, InputLedger, RealX, XServer,
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -24,7 +24,7 @@ use gcu_core::{
 use gcu_protocol::{
     capabilities::{
         BackgroundOperation, CapabilityLimits, DeliveryCapabilities, ForegroundCapability,
-        ObserveCapabilities, Platform, PrivateApiStatus,
+        ObserveCapabilities, Platform,
     },
     AppInfo, Capabilities, WindowInfo,
 };
@@ -52,23 +52,7 @@ pub struct LinuxDriver {
     activity_clock: Arc<dyn ActivityClock>,
     hotkey_manager: Arc<HotkeyManager>,
     stop_latch: Arc<dyn StopLatch>,
-}
-
-fn build_caps_quad(
-    base: &Capabilities,
-) -> (Capabilities, Capabilities, Capabilities, Capabilities) {
-    let make = |guard: bool, fg: ForegroundCapability| {
-        let mut c = base.clone();
-        c.user_activity_guard = guard;
-        c.delivery.foreground = fg;
-        c
-    };
-    (
-        make(true, ForegroundCapability::Policy),
-        make(false, ForegroundCapability::Policy),
-        make(true, ForegroundCapability::Unavailable),
-        make(false, ForegroundCapability::Unavailable),
-    )
+    _listener_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LinuxDriver {
@@ -131,15 +115,12 @@ impl LinuxDriver {
             HotkeyConfig::default(),
             stop_latch.clone(),
         ));
-        let clock = Arc::new(SharedActivityClock::new(false));
-
-        if let Some(ref s) = x {
+        let ledger = Arc::new(InputLedger::new());
+        let clock: Arc<dyn ActivityClock> = Arc::new(SharedActivityClock::new(false));
+        let _listener_handle = x.as_ref().and_then(|s| {
             update_x11_caps(&mut base, s.as_ref());
-            let _ = hotkey_manager.register(s.as_ref());
-            if let Ok(true) = s.is_xi2_available() {
-                clock.set_available(true);
-            }
-        }
+            attach_x11_listener(s.clone(), &hotkey_manager, &stop_latch, &ledger, &clock)
+        });
 
         let (c1, c2, c3, c4) = build_caps_quad(&base);
 
@@ -157,10 +138,11 @@ impl LinuxDriver {
             fake_root: None,
             fake_apps: Vec::new(),
             fake_windows: Vec::new(),
-            ledger: Arc::new(InputLedger::new()),
+            ledger,
             activity_clock: clock,
             hotkey_manager,
             stop_latch,
+            _listener_handle,
         }
     }
 
@@ -191,10 +173,16 @@ impl LinuxDriver {
         self.caps_no_hotkey = c3;
         self.caps_none = c4;
 
-        let _ = self.hotkey_manager.register(x.as_ref());
-        if let Ok(true) = x.is_xi2_available() {
-            self.activity_clock.set_available(true);
+        if let Some(h) = self._listener_handle.take() {
+            h.abort();
         }
+        self._listener_handle = attach_x11_listener(
+            x.clone(),
+            &self.hotkey_manager,
+            &self.stop_latch,
+            &self.ledger,
+            &self.activity_clock,
+        );
 
         self.x_server = Some(x);
         self
@@ -297,19 +285,6 @@ impl LinuxDriver {
         }
         aligned.windows
     }
-}
-
-fn update_x11_caps(caps: &mut Capabilities, x: &dyn XServer) {
-    let comp = match x.is_composite_available() {
-        Ok(true) => PrivateApiStatus::Available,
-        _ => PrivateApiStatus::Missing,
-    };
-    caps.private_apis.insert("x11_composite".into(), comp);
-    let xtest = match x.is_xtest_available() {
-        Ok(true) => PrivateApiStatus::Available,
-        _ => PrivateApiStatus::Missing,
-    };
-    caps.private_apis.insert("xtest".into(), xtest);
 }
 
 #[async_trait]
@@ -584,6 +559,14 @@ impl Driver for LinuxDriver {
     async fn release_all_input(&self) {
         if let Some(ref x) = self.x_server {
             self.ledger.release_all(x.as_ref());
+        }
+    }
+}
+
+impl Drop for LinuxDriver {
+    fn drop(&mut self) {
+        if let Some(h) = self._listener_handle.as_ref() {
+            h.abort();
         }
     }
 }

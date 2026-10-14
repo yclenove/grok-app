@@ -150,6 +150,25 @@ pub trait XServer: Send + Sync {
 
     /// Ungrab a specific key and modifier combination on the root window.
     fn ungrab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError>;
+
+    /// Poll for an incoming event, if any.
+    fn poll_event(&self) -> Result<Option<XEventKind>, XError> {
+        Ok(None)
+    }
+
+    /// Select XInput2 raw input events on the root window.
+    fn select_xi2_events(&self) -> Result<(), XError> {
+        Ok(())
+    }
+}
+
+/// Simplified classification of X11 events monitored by driver listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XEventKind {
+    /// KeyPress event with the given keycode.
+    KeyPress(u8),
+    /// XInput2 raw event with the originating device ID.
+    RawDeviceInput(u16),
 }
 
 /// Converts raw ZPixmap bytes to 32-bit RGBA8 format.

@@ -476,4 +476,43 @@ impl XServer for RealX {
             .map_err(|e| XError::Protocol(format!("UngrabKey failed: {e}")))?;
         Ok(())
     }
+
+    fn poll_event(&self) -> Result<Option<crate::x11::server::XEventKind>, XError> {
+        let ev = self
+            .conn
+            .poll_for_event()
+            .map_err(|e| XError::Protocol(e.to_string()))?;
+        match ev {
+            Some(x11rb::protocol::Event::KeyPress(kp)) => {
+                Ok(Some(crate::x11::server::XEventKind::KeyPress(kp.detail)))
+            }
+            Some(x11rb::protocol::Event::XinputRawKeyPress(e)) => Ok(Some(
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid),
+            )),
+            Some(x11rb::protocol::Event::XinputRawButtonPress(e)) => Ok(Some(
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid),
+            )),
+            Some(x11rb::protocol::Event::XinputRawMotion(e)) => Ok(Some(
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid),
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    fn select_xi2_events(&self) -> Result<(), XError> {
+        use x11rb::protocol::xinput::*;
+        let root = self.screen().root;
+        let mask =
+            XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_BUTTON_PRESS | XIEventMask::RAW_MOTION;
+        let em = EventMask {
+            deviceid: Device::ALL.into(),
+            mask: vec![mask],
+        };
+        self.conn
+            .xinput_xi_select_events(root, &[em])
+            .map_err(|e| XError::Protocol(e.to_string()))?
+            .check()
+            .map_err(|e| XError::Protocol(format!("xi_select_events failed: {e}")))?;
+        Ok(())
+    }
 }

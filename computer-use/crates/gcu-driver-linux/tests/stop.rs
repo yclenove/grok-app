@@ -438,7 +438,18 @@ async fn live_xvfb_stop_hotkey_and_xtest_not_refreshing() {
     assert!(driver.is_hotkey_available());
 
     // XTEST injection must NOT refresh activity clock
-    let _ = driver.activity_clock().ms_since_physical_input();
+    let clock = driver.activity_clock();
+    assert_eq!(clock.ms_since_physical_input(), None);
+    if let Some(x) = driver.x_server() {
+        let _ = x.xtest_fake_motion(100, 100);
+        let _ = x.flush();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            clock.ms_since_physical_input(),
+            None,
+            "XTEST fake motion must NOT refresh activity clock"
+        );
+    }
 
     // If xdotool is installed, trigger hotkey
     let xdotool_check = std::process::Command::new("which").arg("xdotool").output();
@@ -451,7 +462,7 @@ async fn live_xvfb_stop_hotkey_and_xtest_not_refreshing() {
 
             if let Ok(t_out) = trigger {
                 if t_out.status.success() {
-                    for _ in 0..20 {
+                    for _ in 0..50 {
                         if driver.is_stopped() {
                             break;
                         }
