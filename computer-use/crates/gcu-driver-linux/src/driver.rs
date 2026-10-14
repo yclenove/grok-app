@@ -5,13 +5,14 @@ use crate::atspi::{
     connect_atspi,
     events::{AtspiEventSubscriber, LiveEventSubscriber},
     source::{FakeNode, FakeSource},
-    tree::{build_raw_tree, MAX_NODES_CEILING},
+    tree::build_raw_tree,
 };
+use crate::wayland::{detect_environment, LinuxEnvironment, PortalInfo, SystemEnv};
 use crate::x11::{
     activity::{ActivityClock, SharedActivityClock},
-    align_windows, build_caps_quad, capture_window,
+    align_windows, capture_window,
     hotkey::{attach_x11_listener, HotkeyConfig, HotkeyManager, SharedStopLatch, StopLatch},
-    list_x11_windows, update_x11_caps, AtspiWindowCandidate, InputLedger, RealX, XServer,
+    list_x11_windows, AtspiWindowCandidate, InputLedger, RealX, XServer,
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -21,15 +22,9 @@ use gcu_core::{
     },
     model::{Geometry, NativeHandle, RawTree, Rect},
 };
-use gcu_protocol::{
-    capabilities::{
-        BackgroundOperation, CapabilityLimits, DeliveryCapabilities, ForegroundCapability,
-        ObserveCapabilities, Platform,
-    },
-    AppInfo, Capabilities, WindowInfo,
-};
+use gcu_protocol::{capabilities::Platform, AppInfo, Capabilities, WindowInfo};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{Arc, RwLock},
 };
 
@@ -53,35 +48,14 @@ pub struct LinuxDriver {
     hotkey_manager: Arc<HotkeyManager>,
     stop_latch: Arc<dyn StopLatch>,
     _listener_handle: Option<tokio::task::JoinHandle<()>>,
+    env: LinuxEnvironment,
+    portal_info: PortalInfo,
 }
 
 impl LinuxDriver {
     /// Construct default capabilities for the Linux AT-SPI driver.
     pub fn default_capabilities() -> Capabilities {
-        Capabilities {
-            platform: Platform::Linux,
-            version: "x11-atspi".into(),
-            observe: ObserveCapabilities {
-                tree: true,
-                screenshot: true,
-                events: true,
-            },
-            delivery: DeliveryCapabilities {
-                accessibility: true,
-                targeted_pointer: false,
-                targeted_keys: false,
-                foreground: ForegroundCapability::Policy,
-            },
-            background_operation: BackgroundOperation::Partial,
-            user_activity_guard: false,
-            overlay_excluded_from_capture: false,
-            private_apis: BTreeMap::new(),
-            limits: CapabilityLimits {
-                max_tree_nodes: MAX_NODES_CEILING as u32,
-                max_image_edge: 2560,
-                type_text_max: 8192,
-            },
-        }
+        crate::wayland::capabilities::default_capabilities()
     }
 
     /// Connect to the live system AT-SPI accessibility bus and X11 display.
@@ -109,7 +83,8 @@ impl LinuxDriver {
         sub: Option<Arc<dyn AtspiEventSubscriber>>,
         x: Option<Arc<dyn XServer>>,
     ) -> Self {
-        let mut base = Self::default_capabilities();
+        let env = detect_environment(&SystemEnv);
+        let portal_info = PortalInfo::default();
         let stop_latch: Arc<dyn StopLatch> = Arc::new(SharedStopLatch::default());
         let hotkey_manager = Arc::new(HotkeyManager::new(
             HotkeyConfig::default(),
@@ -118,17 +93,14 @@ impl LinuxDriver {
         let ledger = Arc::new(InputLedger::new());
         let clock: Arc<dyn ActivityClock> = Arc::new(SharedActivityClock::new(false));
         let _listener_handle = x.as_ref().and_then(|s| {
-            update_x11_caps(&mut base, s.as_ref());
             attach_x11_listener(s.clone(), &hotkey_manager, &stop_latch, &ledger, &clock)
         });
 
-        let (c1, c2, c3, c4) = build_caps_quad(&base);
-
-        Self {
-            caps_all: c1,
-            caps_no_guard: c2,
-            caps_no_hotkey: c3,
-            caps_none: c4,
+        let mut driver = Self {
+            caps_all: Self::default_capabilities(),
+            caps_no_guard: Self::default_capabilities(),
+            caps_no_hotkey: Self::default_capabilities(),
+            caps_none: Self::default_capabilities(),
             connection: conn,
             subscriber: sub,
             x_server: x,
@@ -143,7 +115,44 @@ impl LinuxDriver {
             hotkey_manager,
             stop_latch,
             _listener_handle,
-        }
+            env,
+            portal_info,
+        };
+        driver.recompute_capabilities();
+        driver
+    }
+
+    /// Recompute the capability quad based on current environment, server, and portal status.
+    pub fn recompute_capabilities(&mut self) {
+        let has_x = self.x_server.is_some();
+        let composite = if self.fake_source.is_some() && !has_x {
+            true
+        } else {
+            self.x_server
+                .as_ref()
+                .and_then(|x| x.is_composite_available().ok())
+                .unwrap_or(false)
+        };
+        let xtest = if self.fake_source.is_some() && !has_x {
+            true
+        } else {
+            self.x_server
+                .as_ref()
+                .and_then(|x| x.is_xtest_available().ok())
+                .unwrap_or(false)
+        };
+        let (c1, c2, c3, c4) = crate::wayland::capabilities::compute_driver_caps_quad(
+            &self.env,
+            &self.portal_info,
+            has_x,
+            composite,
+            xtest,
+        );
+
+        self.caps_all = c1;
+        self.caps_no_guard = c2;
+        self.caps_no_hotkey = c3;
+        self.caps_none = c4;
     }
 
     /// Create a test driver backed by an in-memory `FakeSource`.
@@ -154,25 +163,19 @@ impl LinuxDriver {
         windows: Vec<(String, WindowInfo)>,
     ) -> Self {
         let mut d = Self::new_internal(None, None, None);
+        d.env = LinuxEnvironment::pure_x11_test();
         d.hotkey_manager.set_available(true);
         d.activity_clock = Arc::new(SharedActivityClock::new(true));
         d.fake_source = Some(Arc::new(fake_source));
         d.fake_root = Some(root);
         d.fake_apps = apps;
         d.fake_windows = windows;
+        d.recompute_capabilities();
         d
     }
 
     /// Attach an XServer implementation to this driver (useful for injecting FakeX).
     pub fn with_x_server(mut self, x: Arc<dyn XServer>) -> Self {
-        let mut base = Self::default_capabilities();
-        update_x11_caps(&mut base, x.as_ref());
-        let (c1, c2, c3, c4) = build_caps_quad(&base);
-        self.caps_all = c1;
-        self.caps_no_guard = c2;
-        self.caps_no_hotkey = c3;
-        self.caps_none = c4;
-
         if let Some(h) = self._listener_handle.take() {
             h.abort();
         }
@@ -185,24 +188,64 @@ impl LinuxDriver {
         );
 
         self.x_server = Some(x);
+        self.recompute_capabilities();
         self
+    }
+
+    /// Override the detected Linux environment.
+    pub fn with_environment(mut self, env: LinuxEnvironment) -> Self {
+        self.env = env;
+        self.recompute_capabilities();
+        self
+    }
+
+    /// Override the detected portal capabilities.
+    pub fn with_portal_info(mut self, portal: PortalInfo) -> Self {
+        self.portal_info = portal;
+        self.recompute_capabilities();
+        self
+    }
+
+    /// Access the detected Linux environment.
+    pub fn environment(&self) -> &LinuxEnvironment {
+        &self.env
+    }
+
+    /// Access the detected portal info.
+    pub fn portal_info(&self) -> &PortalInfo {
+        &self.portal_info
+    }
+
+    /// Check whether a window is a native Wayland surface (not backed by an X11 XID).
+    pub fn is_native_wayland_window(&self, win: &WindowRef) -> bool {
+        if self.resolve_xid(win).is_ok() {
+            return false;
+        }
+        if self.fake_source.is_some() {
+            return self.fake_windows.iter().any(|(_, w)| w.id == win.id);
+        }
+        self.env.session_type.is_wayland()
+            && (win.id.starts_with('/') || win.id.starts_with("wayland"))
     }
 
     /// Override the activity clock.
     pub fn with_activity_clock(mut self, clock: Arc<dyn ActivityClock>) -> Self {
         self.activity_clock = clock;
+        self.recompute_capabilities();
         self
     }
 
     /// Override the stop latch.
     pub fn with_stop_latch(mut self, latch: Arc<dyn StopLatch>) -> Self {
         self.stop_latch = latch;
+        self.recompute_capabilities();
         self
     }
 
     /// Override the hotkey manager.
     pub fn with_hotkey_manager(mut self, mgr: Arc<HotkeyManager>) -> Self {
         self.hotkey_manager = mgr;
+        self.recompute_capabilities();
         self
     }
 
@@ -266,10 +309,7 @@ impl LinuxDriver {
         let xid = if let Ok(id) = win.id.parse::<u32>() {
             id
         } else {
-            let map = match self.atspi_to_x.read() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let map = self.atspi_to_x.read().unwrap_or_else(|p| p.into_inner());
             *map.get(&win.id).ok_or(DriverError::WindowGone)?
         };
         if let Some(ref x) = self.x_server {
@@ -312,63 +352,43 @@ impl Driver for LinuxDriver {
     }
 
     async fn doctor(&self) -> DoctorReport {
-        let mut issues = Vec::new();
-        let ready = if self.fake_source.is_some() {
+        let atspi_ready = if self.fake_source.is_some() {
             true
         } else if let Some(ref conn) = self.connection {
             !conn.is_closed()
         } else {
-            match connect_atspi().await {
-                Ok(_) => true,
-                Err(e) => {
-                    issues.push(format!("AT-SPI bus not connected: {e}"));
-                    issues.push(
-                        "Note: Ensure at-spi2-core is running. Electron/Chromium apps require \
-                         '--force-renderer-accessibility' flag for full accessibility tree exposure."
-                            .into(),
-                    );
-                    false
-                }
-            }
+            connect_atspi().await.is_ok()
         };
-
-        if let Some(ref x) = self.x_server {
-            if !x.is_composite_available().unwrap_or(false) {
-                issues.push(
-                    "XComposite extension missing: window screenshots degrade to root-window \
-                     crop and will fail with CapabilityUnavailable if window is occluded or off-screen \
-                     (observe.screenshot=occluded_unsafe)"
-                        .into(),
-                );
-            }
-        } else if self.fake_source.is_none() {
-            issues.push("X11 server not connected: window capture unavailable".into());
-        }
-
-        let guard_status = if self.activity_clock.is_available() {
-            "available"
+        let has_x = self.x_server.is_some();
+        let composite = if self.fake_source.is_some() && !has_x {
+            true
         } else {
-            "unavailable"
+            self.x_server
+                .as_ref()
+                .and_then(|x| x.is_composite_available().ok())
+                .unwrap_or(false)
         };
-        issues.push(format!("user_activity_guard: {guard_status}"));
-
-        if !self.hotkey_manager.is_available() {
-            let reason = self
-                .hotkey_manager
-                .last_error()
-                .unwrap_or_else(|| "not registered or listener inactive".into());
-            issues.push(format!(
-                "stop_hotkey: unavailable ({reason}); foreground input disabled"
-            ));
+        let xtest = if self.fake_source.is_some() && !has_x {
+            true
         } else {
-            issues.push("stop_hotkey: available".into());
-        }
-
-        DoctorReport {
-            capabilities: self.capabilities().clone(),
-            ready,
-            issues,
-        }
+            self.x_server
+                .as_ref()
+                .and_then(|x| x.is_xtest_available().ok())
+                .unwrap_or(false)
+        };
+        crate::wayland::doctor::run_driver_doctor(
+            &self.env,
+            &self.portal_info,
+            self.capabilities(),
+            composite,
+            xtest,
+            self.hotkey_manager.is_available() && !self.stop_latch.is_stopped(),
+            self.activity_clock.is_available(),
+            self.stop_latch.is_stopped(),
+            atspi_ready,
+            self.hotkey_manager.last_error().as_deref(),
+            has_x,
+        )
     }
 
     fn discovery_status(&self) -> DiscoveryStatus {
@@ -401,18 +421,15 @@ impl Driver for LinuxDriver {
 
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<WindowInfo>> {
         if self.fake_source.is_some() {
-            let base_windows: Vec<WindowInfo> = if let Some(target) = app {
-                self.fake_windows
-                    .iter()
-                    .filter(|(app_id, _)| app_id == &target.info.id)
-                    .map(|(_, w)| w.clone())
-                    .collect()
-            } else {
-                self.fake_windows.iter().map(|(_, w)| w.clone()).collect()
-            };
+            let base: Vec<WindowInfo> = self
+                .fake_windows
+                .iter()
+                .filter(|(app_id, _)| app.is_none_or(|target| app_id == &target.info.id))
+                .map(|(_, w)| w.clone())
+                .collect();
 
             if let Some(ref x) = self.x_server {
-                let atspi_cands: Vec<AtspiWindowCandidate> = base_windows
+                let cands: Vec<_> = base
                     .iter()
                     .map(|w| AtspiWindowCandidate {
                         path: w.id.clone(),
@@ -421,10 +438,9 @@ impl Driver for LinuxDriver {
                         pid: app.and_then(|a| a.info.pid),
                     })
                     .collect();
-                return Ok(self.align_and_record(x.as_ref(), &atspi_cands));
+                return Ok(self.align_and_record(x.as_ref(), &cands));
             }
-
-            return Ok(base_windows);
+            return Ok(base);
         }
 
         let conn = self
@@ -434,12 +450,11 @@ impl Driver for LinuxDriver {
                 permission: "accessibility".into(),
             })?;
 
-        let atspi_candidates = crate::atspi::list_atspi_candidate_windows(conn, app).await?;
-
+        let candidates = crate::atspi::list_atspi_candidate_windows(conn, app).await?;
         if let Some(ref x) = self.x_server {
-            Ok(self.align_and_record(x.as_ref(), &atspi_candidates))
+            Ok(self.align_and_record(x.as_ref(), &candidates))
         } else {
-            Ok(atspi_candidates
+            Ok(candidates
                 .into_iter()
                 .map(|c| WindowInfo {
                     id: c.path,
@@ -514,6 +529,9 @@ impl Driver for LinuxDriver {
         _opts: &CaptureOpts,
         _cancel: &Cancel,
     ) -> Result<Capture> {
+        if self.is_native_wayland_window(win) {
+            return Err(DriverError::CapabilityUnavailable);
+        }
         let x = self
             .x_server
             .as_ref()
@@ -527,15 +545,13 @@ impl Driver for LinuxDriver {
             if let Ok(id) = self.resolve_xid(win) {
                 if let Ok(geom) = x.window_geometry(id) {
                     let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
-                    return Ok(Geometry {
-                        frame: Rect {
-                            x: geom.x as f64,
-                            y: geom.y as f64,
-                            w: geom.width as f64,
-                            h: geom.height as f64,
-                        },
-                        scale,
-                    });
+                    let frame = Rect {
+                        x: geom.x as f64,
+                        y: geom.y as f64,
+                        w: geom.width as f64,
+                        h: geom.height as f64,
+                    };
+                    return Ok(Geometry { frame, scale });
                 }
             }
         }
