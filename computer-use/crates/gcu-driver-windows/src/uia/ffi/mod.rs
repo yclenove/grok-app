@@ -1,5 +1,7 @@
 //! COM bindings. Every interface is created, used, and destroyed on the MTA.
+mod actions;
 mod events;
+mod identity;
 mod properties;
 use super::{
     cache::{Properties, BATCH_SIZE, PROPERTY_IDS},
@@ -51,6 +53,9 @@ struct State {
     generation: u64,
     slot: u64,
     registrations: Vec<events::Registration>,
+    observed: BTreeMap<NodeId, identity::Observed>,
+    window: Option<identity::WindowIdentity>,
+    api: crate::RealWinApi,
     // Last field: interfaces must release before CoUninitialize.
     _com: Com,
 }
@@ -89,6 +94,9 @@ impl State {
             generation: 0,
             slot: 0,
             registrations: Vec::new(),
+            observed: BTreeMap::new(),
+            window: None,
+            api: crate::RealWinApi::new()?,
             _com: com,
         })
     }
@@ -112,6 +120,8 @@ impl State {
     }
     fn root(&mut self, hwnd: u64, request: &Request) -> Result<Option<NodeId>> {
         self.elements.clear();
+        self.observed.clear();
+        self.window = Some(identity::window(&self.api, hwnd, request)?);
         self.generation += 1;
         self.slot = 0;
         request.check()?;
@@ -186,6 +196,25 @@ impl State {
 }
 #[async_trait]
 impl UiaSource for RealUia {
+    async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
+        self.worker
+            .call(move |s, r| s.validate(node, hwnd, r).map(|(_, p)| p))
+            .await
+    }
+    async fn action(
+        &self,
+        node: NodeId,
+        hwnd: u64,
+        action: super::patterns::PatternAction,
+        context: super::patterns::ActionContext,
+    ) -> Result<super::patterns::PatternResult> {
+        self.worker
+            .call_action(context, move |s, r| {
+                actions::perform(s, node, hwnd, action, r)
+            })
+            .await
+    }
+
     async fn root(&self, hwnd: u64) -> Result<Option<NodeId>> {
         self.worker.call(move |s, r| s.root(hwnd, r)).await
     }
@@ -193,7 +222,7 @@ impl UiaSource for RealUia {
         self.worker
             .call(move |s, r| {
                 r.check()?;
-                Ok(properties::read(&s.element(node)?))
+                s.observe(node, r)
             })
             .await
     }

@@ -1,4 +1,4 @@
-//! Portable source and fake. Each source call is one bounded cache/page job.
+//! Portable source and fake. Each call is one bounded read or semantic worker job.
 use super::cache::{Properties, BATCH_SIZE};
 use async_trait::async_trait;
 use gcu_core::driver::{DriverError, Result};
@@ -30,6 +30,19 @@ pub struct ChildPage {
 /// Futures may be abandoned on timeout/cancel; queued work must then be skipped.
 #[async_trait]
 pub trait UiaSource: Send + Sync + 'static {
+    /// Re-read the exact observed slot, RuntimeId, HWND ancestry and metadata.
+    /// A mismatch is StaleElement; no name lookup or replacement is permitted.
+    async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties>;
+    /// Revalidate on the MTA immediately before dispatching one pattern command.
+    /// Set the context marker only at mutation dispatch. Abandoned jobs cannot
+    /// start later. Only explicit Unsupported/Unavailable permit a fallback.
+    async fn action(
+        &self,
+        node: NodeId,
+        hwnd: u64,
+        action: super::patterns::PatternAction,
+        context: super::patterns::ActionContext,
+    ) -> Result<super::patterns::PatternResult>;
     /// Begin a new read of the exact HWND; no title/name fallback.
     async fn root(&self, hwnd: u64) -> Result<Option<NodeId>>;
     /// Read the entire owned property bag from a single cache request.
@@ -54,18 +67,28 @@ pub struct FakeNode {
 }
 
 #[derive(Default)]
-struct FakeState {
-    nodes: BTreeMap<NodeId, (Properties, Vec<NodeId>)>,
+pub(super) struct FakeState {
+    pub(super) nodes: BTreeMap<NodeId, (Properties, Vec<NodeId>)>,
     root: Option<NodeId>,
+    root_reads: usize,
     delay: Duration,
     error: Option<(NodeId, DriverError)>,
     child_error: Option<(NodeId, DriverError)>,
     calls: usize,
     max_page: usize,
+    pub(super) actions: super::fake_actions::FakeActions,
+}
+impl FakeState {
+    pub(super) fn node(&self, slot: u64) -> NodeId {
+        NodeId {
+            generation: self.root.map_or(1, |id| id.generation),
+            slot,
+        }
+    }
 }
 /// Portable source with deterministic errors/delays and cache-page counters.
 #[derive(Clone, Default)]
-pub struct FakeUia(Arc<Mutex<FakeState>>);
+pub struct FakeUia(pub(super) Arc<Mutex<FakeState>>);
 impl FakeUia {
     /// Flatten a fixture without invoking any OS API.
     pub fn new(root: FakeNode) -> Self {
@@ -94,25 +117,13 @@ impl FakeUia {
     /// Fail one cached property bag, with no effects.
     pub fn fail_properties(&self, slot: u64, error: DriverError) {
         if let Ok(mut s) = self.0.lock() {
-            s.error = Some((
-                NodeId {
-                    generation: 1,
-                    slot,
-                },
-                error,
-            ));
+            s.error = Some((s.node(slot), error));
         }
     }
     /// Fail a child enumeration, preserving its already-read parent.
     pub fn fail_children(&self, slot: u64, error: DriverError) {
         if let Ok(mut s) = self.0.lock() {
-            s.child_error = Some((
-                NodeId {
-                    generation: 1,
-                    slot,
-                },
-                error,
-            ));
+            s.child_error = Some((s.node(slot), error));
         }
     }
     /// Number of source calls and largest requested page.
@@ -138,19 +149,55 @@ impl FakeUia {
 }
 #[async_trait]
 impl UiaSource for FakeUia {
-    async fn root(&self, _: u64) -> Result<Option<NodeId>> {
+    async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
         self.gate().await?;
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| DriverError::Crashed {
-                maybe_executed: false,
-            })?
-            .root)
+        self.validate_action(node, hwnd)
+    }
+    async fn action(
+        &self,
+        node: NodeId,
+        hwnd: u64,
+        action: super::patterns::PatternAction,
+        context: super::patterns::ActionContext,
+    ) -> Result<super::patterns::PatternResult> {
+        self.perform_action(node, hwnd, action, context).await
+    }
+    async fn root(&self, hwnd: u64) -> Result<Option<NodeId>> {
+        self.gate().await?;
+        let mut s = self.0.lock().map_err(|_| DriverError::Crashed {
+            maybe_executed: false,
+        })?;
+        s.actions.hwnd = hwnd;
+        if s.root_reads != 0 {
+            let generation = s.root.map_or(1, |id| id.generation + 1);
+            let remap = |id: NodeId| NodeId {
+                generation,
+                slot: id.slot,
+            };
+            s.nodes = std::mem::take(&mut s.nodes)
+                .into_iter()
+                .map(|(id, (props, children))| {
+                    (
+                        remap(id),
+                        (props, children.into_iter().map(remap).collect()),
+                    )
+                })
+                .collect();
+            s.root = s.root.map(remap);
+            if let Some((id, _)) = &mut s.error {
+                *id = remap(*id);
+            }
+            if let Some((id, _)) = &mut s.child_error {
+                *id = remap(*id);
+            }
+            s.actions.new_generation(generation);
+        }
+        s.root_reads += 1;
+        Ok(s.root)
     }
     async fn properties(&self, node: NodeId) -> Result<Properties> {
         self.gate().await?;
-        let s = self.0.lock().map_err(|_| DriverError::Crashed {
+        let mut s = self.0.lock().map_err(|_| DriverError::Crashed {
             maybe_executed: false,
         })?;
         if let Some((id, error)) = &s.error {
@@ -158,10 +205,17 @@ impl UiaSource for FakeUia {
                 return Err(error.clone());
             }
         }
-        s.nodes
+        let props = s
+            .nodes
             .get(&node)
             .map(|n| n.0.clone())
-            .ok_or(DriverError::StaleElement)
+            .ok_or(DriverError::StaleElement)?;
+        let runtime = s.actions.runtime(node);
+        let hwnd = s.actions.hwnd;
+        s.actions
+            .observed
+            .insert(node, (props.clone(), runtime, hwnd));
+        Ok(props)
     }
     async fn children(
         &self,

@@ -17,9 +17,9 @@ use std::{
 use tokio::sync::oneshot;
 
 type Task = Box<dyn FnOnce(&mut State) + Send>;
-/// Windows discovery, optional UIA and optional capture. Portable sources inject OS data.
-/// COM/OS calls are serialized on one worker with a five-second caller deadline;
-/// indexing uses a separate thread. Drop disconnects the worker and stops watching.
+/// Windows discovery, optional UIA observation/actions and optional capture. Portable sources inject OS data.
+/// COM/OS calls use dedicated workers with bounded caller deadlines; indexing uses a separate
+/// thread. Drop disconnects workers and stops watching.
 pub struct WindowsDriver {
     worker: mpsc::SyncSender<Task>,
     indexing: Arc<std::sync::atomic::AtomicBool>,
@@ -110,7 +110,7 @@ impl WindowsDriver {
             .with_capture(Arc::new(crate::capture::CaptureBackend::new(wgc, print))))
     }
     /// Start discovery with portable/native UIA sources. Startup validates the
-    /// engine before enabling tree/events; capture and input remain unavailable.
+    /// engine before enabling tree/events/actions; capture and input injection remain unavailable.
     pub async fn with_uia(
         api: Arc<dyn WinApi>,
         source: Arc<dyn crate::uia::source::UiaSource>,
@@ -126,8 +126,10 @@ impl WindowsDriver {
         self.observer = Some(crate::uia::observe::Observer::new(source, events));
         self.caps.observe.tree = true;
         self.caps.observe.events = true;
+        self.caps.delivery.accessibility = true;
+        self.caps.background_operation = BackgroundOperation::Partial;
         self.caps.limits.max_tree_nodes = crate::uia::tree::NODE_CAP as u32;
-        self.caps.version = "Windows 10 1903+; discovery and UIA observation".into();
+        self.caps.version = "Windows 10 1903+; discovery and UIA semantic actions".into();
         self
     }
     pub(crate) async fn call<T: Send + 'static>(
@@ -226,9 +228,9 @@ impl Driver for WindowsDriver {
             Err(e) => (false, vec![e.to_string()]),
         };
         issues.push(if self.capture_backend.is_some() {
-            "Input unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
+            "Pointer/keyboard and foreground unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
         } else if self.observer.is_some() {
-            "P2-03+: capture and input unavailable; UIA heuristics are best-effort and non-exhaustive".into()
+            "Capture, pointer/keyboard and foreground unavailable; UIA heuristics are best-effort and non-exhaustive".into()
         } else {
             "P2-02+: UIA source unavailable; capture and input unavailable".into()
         });
@@ -494,13 +496,22 @@ impl Driver for WindowsDriver {
             })?
     }
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
-        let req = req.clone();
-        self.call(NATIVE_TIMEOUT, Some(cancel), false, move |s| {
-            let (win, foreground) = action_window(&req)?;
-            s.validate_window(win, foreground)?;
-            Err(DriverError::CapabilityUnavailable)
-        })
-        .await
+        let deadline = tokio::time::Instant::now() + DRIVER_DEADLINE;
+        let request = req.clone();
+        let hwnd = self
+            .call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
+                let (win, foreground) = action_window(&request)?;
+                Ok(s.observation_window(win, foreground)?.hwnd)
+            })
+            .await?;
+        if crate::uia::actions::target(req).is_none() {
+            return Err(DriverError::CapabilityUnavailable);
+        }
+        self.observer
+            .as_ref()
+            .ok_or(DriverError::CapabilityUnavailable)?
+            .perform(hwnd, req, cancel, deadline)
+            .await
     }
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
         let (hwnd, events) = self.observer.as_ref()?.subscription(win)?;
@@ -524,7 +535,7 @@ impl Driver for WindowsDriver {
             .ok()?;
         Some(crate::uia::events::deferred(rx))
     }
-    async fn release_all_input(&self) { /* No input is held or delivered in P2-01. */
+    async fn release_all_input(&self) { /* Semantic patterns hold no synthetic pointer/key input. */
     }
 }
 fn action_window(action: &DriverAction) -> Result<(&WindowRef, bool)> {

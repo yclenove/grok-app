@@ -1,4 +1,4 @@
-# Windows discovery, UIA and capture (P2-01/P2-02/P2-03)
+# Windows discovery, UIA, capture and semantic actions (P2-01/02/03/05)
 
 This crate implements app/window discovery, exact executable identity, launching,
 nonactivating Win32 restoration and virtual-desktop annotations. The native
@@ -8,7 +8,7 @@ nonactivating Win32 restoration and virtual-desktop annotations. The native
 `WindowsDriver::new()` starts a serial discovery worker after validating the
 engine token. High/System integrity or UIAccess refuses startup with
 `DriverError::ElevationRequired`. A live `WinGate::check` applies to observation
-and every input action variant before reporting an unavailable capability. Higher
+and every action variant before any delivery or unavailable-capability result. Higher
 integrity/UIAccess targets are refused; inactive/other sessions and UAC/login/lock
 input desktops return `SecureDesktop`. No elevation or UIPI-failure fallback is
 attempted. Unknown virtual-desktop state and `Some(false)` both prevent foreground
@@ -55,8 +55,8 @@ instance for ApplicationFrameHost windows. Owned dialogs retain separate IDs and
 owner metadata; ambiguous UWP child mappings fail closed.
 
 The discovery-only `with_api` constructor leaves UIA tree/focus/subscriptions
-unavailable. `new()` enables UIA observation and window capture as described below.
-Input remains unavailable. No input is held, so
+unavailable. `new()` enables UIA observation, window capture and semantic actions as described below.
+Pointer/keyboard injection and foreground activation remain unavailable. No input is held, so
 `release_all_input` is a no-op. Calls have a 4.75-second caller deadline and
 queued calls dropped after timeout/cancellation never execute. A native launch
 already started at timeout reports `maybe_executed=true`; it must never be replayed.
@@ -90,10 +90,10 @@ cross-target clippy are not evidence of native desktop behavior.
 
 `WindowsDriver::new()` also initializes a persistent `gcu-win-uia-mta` thread.
 `with_api` remains discovery-only; `with_uia` injects portable `UiaSource` and
-`UiaEventSource` implementations. Tree/event capabilities are enabled only when
-sources are attached. Geometry uses live stamped Win32 data. Focus is read only
-inside the owning app's foreground window. Every input route remains unavailable;
-no pattern invocation or foreground fallback is registered.
+`UiaEventSource` implementations. Tree/event/accessibility capabilities are enabled only when
+sources are attached; background operation is `partial`. Geometry uses live stamped Win32 data. Focus is read only
+inside the owning app's foreground window. Pointer/keyboard injection and foreground delivery remain unavailable.
+Semantic UIA delivery uses patterns without a focus/foreground fallback.
 
 The cache request includes names, control types, IDs, frames, enabled/offscreen/
 focus/password states, value/range/selection/toggle/expand state, and pattern
@@ -201,6 +201,49 @@ tests assert this contract for WGC and PrintWindow, including fallback/pruning.
 
 ```sh
 rcargo test --locked -p gcu-driver-windows --test capture
+```
+
+## UI Automation semantic actions (P2-05)
+
+`Press`, `SecondaryAction`, `SetValue`, `SelectText` and `ScrollElement` use the
+same persistent MTA as observation. `patterns::press_patterns` chooses Invoke,
+Toggle, SelectionItem or ExpandCollapse by control type, with LegacyIAccessible
+last. Only explicit unsupported/unavailable **zero-effect** results permit a
+fallback. A timeout, cancellation, disappearance or other provider failure after
+mutation dispatch is uncertain and never replayed. Value/RangeValue, Text and
+Scroll never substitute for activation. Raise, ShowMenu and arbitrary native
+names fail without calling SetFocus, a pointer API or foreground activation.
+
+The worker retains each observed RuntimeId and role/name/AutomationId/class/frame
+with its exact HWND. Actions share the observation generation lock and re-read
+identity, exact HWND ancestry, window generation and live security before pattern
+preparation and immediately before mutation. A replacement is stale, with no
+similar-element search; core attaches fresh state. Execution-surface ancestors
+are checked again. Writable values require `IsReadOnly=false`, a supported native
+pattern, reliable metadata, and a non-password/non-execution target. Each native
+Value/RangeValue pattern also checks its own live read-only property. Numeric
+writes reject nonfinite/out-of-range values before mutation.
+
+All awaits share one 4.75-second action deadline. Queued/preparing cancellation is
+`maybe_executed=false`; dispatched or partially completed scrolling is unknown.
+Deadline closure and dispatch arbitrate on one atomic state, preventing a timed
+out job from starting a later write. A native provider already in flight can
+still return after the caller; process termination remains P2-04's responsibility.
+No replacement worker or automatic mutation retry is started.
+
+Text selections use Unicode-scalar positions. Native endpoint movement is checked
+against document text before Select; providers whose character units cannot
+represent the requested scalar range are refused. Text reads are capped at
+1,048,576 UTF-16 units; truncated documents are refused. Scroll supports positive
+finite pages up to 100, including a final fractional page; later failure preserves
+the uncertainty of earlier successful pages.
+
+Portable contracts cover every pattern's success, explicit no-effect absence,
+stale identity, timeout, cancellation and uncertain failure; actual worker tests
+cover abandoned queued/preparing jobs and in-flight delivery. Run:
+
+```sh
+rcargo test --locked -p gcu-driver-windows --test actions
 rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
@@ -237,3 +280,24 @@ cargo test --locked -p gcu-driver-windows --test capture live_capture_150_percen
 
 Close the fixture/system apps, remove `wc-grid.json`, and discard the desktop.
 Fake and cross-target checks are not evidence of native pixel/click correctness.
+
+The ignored native action contract uses the shared synthetic `gcu-fixture` and
+its external state file for C05/C07/C10/C12/C16/password refusal. On a disposable,
+unelevated interactive Windows desktop, build and start only the fixture:
+
+```powershell
+cargo build --locked -p gcu-fixture
+$env:GCU_FIXTURE_EXE = (Resolve-Path target/debug/gcu-fixture.exe).Path
+$env:GCU_FIXTURE_STATE = "$env:TEMP\gcu-state.json"
+Start-Process $env:GCU_FIXTURE_EXE
+# Keep an unrelated visible window in front before the test starts.
+cargo test --locked -p gcu-driver-windows --test actions -- --ignored --test-threads=1
+```
+
+Every mutation is delivered once and checked using the fixture's JSON state;
+the foreground HWND must remain unchanged. These tests fail when the fixture
+cannot expose the required native pattern; they never replace a semantic action
+with focus/input. Other native pattern/provider combinations require matching
+Windows fixtures and remain unverified here. Native action contract status:
+**not_run** (Linux build host, no interactive Windows desktop). Cross-target
+compilation is not native behavioral evidence.

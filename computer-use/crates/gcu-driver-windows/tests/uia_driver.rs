@@ -71,13 +71,13 @@ async fn fixture() -> (
 }
 
 #[tokio::test]
-async fn driver_observes_tree_geometry_focus_and_events_without_advertising_input() {
+async fn driver_observes_tree_geometry_focus_and_events_with_semantic_capability() {
     let (_, _, events, driver, win) = fixture().await;
     let caps = driver.capabilities();
     assert!(caps.observe.tree && caps.observe.events);
     assert!(
         !caps.observe.screenshot
-            && !caps.delivery.accessibility
+            && caps.delivery.accessibility
             && !caps.delivery.targeted_keys
             && !caps.delivery.targeted_pointer
     );
@@ -127,40 +127,49 @@ async fn driver_observes_tree_geometry_focus_and_events_without_advertising_inpu
 }
 
 #[tokio::test]
-async fn driver_every_semantic_action_on_uia_handle_remains_unavailable() {
+async fn driver_semantic_actions_on_uia_handle_follow_advertised_patterns() {
     let (_, _, _, driver, win) = fixture().await;
     let raw = driver
         .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
         .await
         .unwrap();
     let el = raw.root.unwrap().children[0].handle.clone();
-    for action in [
-        DriverAction::Press { el: el.clone() },
-        DriverAction::SecondaryAction {
-            el: el.clone(),
-            action: NodeAction::Press,
-        },
-        DriverAction::SetValue {
-            el: el.clone(),
-            value: "text".into(),
-        },
-        DriverAction::SelectText {
-            el: el.clone(),
-            range: TextRange::default(),
-        },
-        DriverAction::ScrollElement {
-            el,
-            dir: Dir::Down,
-            pages: 1.,
-        },
+    for (action, expected) in [
+        (
+            DriverAction::Press { el: el.clone() },
+            Err(DriverError::ElementNotActionable),
+        ),
+        (
+            DriverAction::SecondaryAction {
+                el: el.clone(),
+                action: NodeAction::Press,
+            },
+            Err(DriverError::ElementNotActionable),
+        ),
+        (
+            DriverAction::SetValue {
+                el: el.clone(),
+                value: "text".into(),
+            },
+            Ok(Delivery::Accessibility),
+        ),
+        (
+            DriverAction::SelectText {
+                el: el.clone(),
+                range: TextRange::default(),
+            },
+            Err(DriverError::ElementNotActionable),
+        ),
+        (
+            DriverAction::ScrollElement {
+                el,
+                dir: Dir::Down,
+                pages: 1.,
+            },
+            Err(DriverError::ElementNotActionable),
+        ),
     ] {
-        assert_eq!(
-            driver
-                .perform(&action, &Cancel::default())
-                .await
-                .unwrap_err(),
-            DriverError::CapabilityUnavailable
-        );
+        assert_eq!(driver.perform(&action, &Cancel::default()).await, expected);
     }
 }
 

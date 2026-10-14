@@ -226,7 +226,16 @@ fn map_properties(p: Properties, id: NodeId, origin: (f64, f64)) -> RawNode {
     );
     let mut actions = Vec::new();
     for (available, action) in [
-        (p.patterns.invoke || p.patterns.legacy, NodeAction::Press),
+        (
+            super::patterns::press_patterns(p.control_type)
+                .iter()
+                .any(|pattern| {
+                    pattern.available(&p.patterns)
+                        && (*pattern != super::patterns::Pattern::ExpandCollapse
+                            || p.expand_state != Some(3))
+                }),
+            NodeAction::Press,
+        ),
         (p.patterns.toggle, NodeAction::Toggle),
         (p.patterns.selection_item, NodeAction::Select),
         (p.patterns.scroll_item, NodeAction::ScrollIntoView),
@@ -241,6 +250,9 @@ fn map_properties(p: Properties, id: NodeId, origin: (f64, f64)) -> RawNode {
         } else {
             NodeAction::Expand
         });
+    }
+    if p.patterns.range_value && p.read_only == Some(false) {
+        actions.extend([NodeAction::Increment, NodeAction::Decrement]);
     }
     if p.patterns.scroll {
         actions.extend([

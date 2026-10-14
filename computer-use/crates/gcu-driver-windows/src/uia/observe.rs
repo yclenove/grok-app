@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Exact stamped window plus a worker-local UIA slot, for future native actions.
+/// Exact stamped window plus an observed worker-local UIA action slot.
 /// Carries no COM pointer; a new read invalidates the generation.
 #[derive(Clone, Debug)]
 pub struct UiaElement {
@@ -69,6 +69,21 @@ impl Observer {
             bind(root, win);
         }
         Ok(raw)
+    }
+    pub(crate) async fn perform(
+        &self,
+        hwnd: u64,
+        req: &gcu_core::driver::DriverAction,
+        cancel: &Cancel,
+        deadline: tokio::time::Instant,
+    ) -> Result<gcu_core::driver::Delivery> {
+        // Actions and observations share the generation lock. Never let a new root
+        // invalidate the selected slot between preflight and worker dispatch.
+        let _guard = tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(DriverError::Cancelled { maybe_executed: false }),
+            guard = tokio::time::timeout_at(deadline, self.reading.lock()) => guard.map_err(|_| DriverError::Timeout { maybe_executed: false })?,
+        };
+        super::actions::perform_until(self.source.as_ref(), hwnd, req, cancel, deadline).await
     }
     pub(crate) fn remember(&self, win: &WindowRef, hwnd: u64) {
         if let Ok(mut windows) = self.windows.lock() {
