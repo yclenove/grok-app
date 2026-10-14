@@ -6,7 +6,7 @@
 | 卡 | 标题 | 依赖 | 估算 | 状态 | 分支 | PR | 日期 | 备注 |
 |---|---|---|---|---|---|---|---|---|
 | S-01 | Grok Build CLI MCP 能力探测 | — | 1.5d | done | cu2/S-01-grok-mcp-probe | #6 | 2026-10-13 | ADR 0001 已接受；影响已写入 03/04/05 |
-| S-02 | macOS TCC 与 helper 可行性 | — | 1.5d | todo |  |  |  | 需 macOS 14/15/26 机器 |
+| S-02 | macOS TCC 与 helper 可行性 | — | 1.5d | done | cu2/S-02-tcc-adr |  | 2026-10-14 | 仅 macOS 27(Mini, arm64, SIP 开)实测，维护者决定不测 Pro：助手归属/被遮挡 SCK/AppKit 后台点击(字段 51)/子进程继承可用，Chromium 后台点击不可用；见 ADR 0006。macOS 14/15、撤销/错误 PID/安全提示矩阵、Developer ID 核验未覆盖，P1-06 契约测试需在 Mac runner 补 |
 | P0-01 | computer-use workspace | — | 1d | done | cu2/P0-01-workspace | #2 | 2026-10-13 | 已合入；RULES扩展由P0-05承接 |
 | P0-02 | CI 骨架 | P0-01 | 1d | done | cu2/P0-02-ci | #3 | 2026-10-13 | 三平台 CI 绿；pin SHA 已核 |
 | P0-03 | gcu-protocol | P0-01 | 2d | done | cu2/P0-03-protocol | #5 | 2026-10-13 | 预算 13,821/14,000 字节；后续需同步 window_minimized 错误码 |
@@ -100,6 +100,7 @@
 - 偶发：`gcu-cli/tests/engine_host.rs::engine_lost_stop_channel_denies_approval_and_exits_with_rpc_still_connected` 在 macOS CI（pull_request 运行）失败过 1 次（等待调用结果超过 RPC_TIMEOUT 5s），同一提交的 push 运行与重跑均通过，Linux 本地 30 次加压全过；根因未明。再出现时先读失败日志，不要靠重跑；怀疑点：engine 退出时 `sessions` 关闭路径（`entry.remote.lock().await.close()`）等待在途调用。
 - 驱动侧 Stop 锁存（`LinuxDriver::with_stop_latch`）与活动时钟（`ActivityClock`）还未接到 Host 的 `StopMirror`/`UserActivity`：真实驱动组装（gcu engine 装配）卡里必须接上，否则热键只在驱动内生效。
 - Linux 树遍历对名称/标识含 "password" 的节点追加 PASSWORD 状态（启发式，宁可多抹）：eframe 不暴露密码角色，夹具靠它通过 C14/C20；真正的原生密码控件仍以 AT-SPI 角色/状态为准。契约表里 6 项跳过（launch_app、set_value 文本框、combobox Selection、stale geometry 快照 ID 等）是驱动能力缺口，不是通过。
+- S-02 发现：macOS 后台点击需要给 CGEvent 设置整数字段 51（窗口号），否则 postToPid 事件的 windowNumber 为 0；Chromium 在 macOS 27 后台收不到（详见 ADR 0006）。P1-06 的契约测试必须校验“实际到达”。
 
 ## 阶段记录
 
