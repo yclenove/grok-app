@@ -14,6 +14,12 @@ use gcu_driver_windows::{
 use std::sync::Arc;
 
 pub async fn driver(namespace: &str) -> Arc<dyn Driver> {
+    driver_with_input(namespace, None).await
+}
+pub async fn driver_with_input(
+    namespace: &str,
+    tracker: Option<Arc<dyn gcu_driver_windows::input::api::InputTracker>>,
+) -> Arc<dyn Driver> {
     let api = Arc::new(FakeWinApi::default());
     api.update(|s| {
         s.paths.insert(7, "C:\\Editor.exe".into());
@@ -85,5 +91,28 @@ pub async fn driver(namespace: &str) -> Arc<dyn Driver> {
         },
     );
     let print = Arc::new(FakeCapture::new(CapturePath::PrintWindow));
-    Arc::new(driver.with_capture(Arc::new(CaptureBackend::new(wgc, print))))
+    let mut driver = driver.with_capture(Arc::new(CaptureBackend::new(wgc, print)));
+    if let Some(tracker) = tracker {
+        let api = Arc::new(gcu_driver_windows::input::fake::FakeInput::default());
+        if std::env::var("GCU_TEST_FAULT").as_deref() == Ok("input_zero") {
+            api.update(|s| s.fail_at = Some(0));
+        }
+        if std::env::var("GCU_TEST_FAULT").is_ok_and(|f| f.starts_with("input_key_")) {
+            api.update(|s| s.send_pause = Some((0, std::time::Duration::from_secs(60))));
+            let watched = api.clone();
+            tokio::spawn(async move {
+                while watched.state().sent.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                let dir = std::path::PathBuf::from(std::env::var_os("GCU_TEST_DIR").unwrap());
+                std::fs::write(dir.join("held"), b"key down").unwrap();
+                if std::env::var("GCU_TEST_FAULT").as_deref() == Ok("input_key_crash") {
+                    std::process::abort();
+                }
+            });
+        }
+        let input = gcu_driver_windows::input::InputBackend::new(api).with_tracker(tracker);
+        driver = driver.with_input(Arc::new(input));
+    }
+    Arc::new(driver)
 }

@@ -22,8 +22,15 @@ pub struct WorkerDriver {
 impl WorkerDriver {
     /// Start a trusted executable and obtain its actual native capabilities.
     pub async fn start(config: WorkerConfig) -> Result<Self> {
+        Self::start_with_releaser(config, super::input::default_releaser()).await
+    }
+    /// Start isolated execution with an independent injectable parent up sender.
+    pub async fn start_with_releaser(
+        config: WorkerConfig,
+        release: std::sync::Arc<dyn crate::input::api::InputReleaser>,
+    ) -> Result<Self> {
         Ok(Self {
-            supervisor: Supervisor::start(config).await?,
+            supervisor: Supervisor::start_with_releaser(config, release).await?,
             indexing: std::sync::atomic::AtomicBool::new(true),
         })
     }
@@ -241,8 +248,6 @@ impl Driver for WorkerDriver {
         None
     }
     async fn release_all_input(&self) {
-        // Input is currently unavailable. P2-06 must release its independent
-        // parent-side input ledger here; never queue release behind worker FFI.
-        self.stop_handle().stop();
+        self.supervisor.release_all_input().await;
     }
 }

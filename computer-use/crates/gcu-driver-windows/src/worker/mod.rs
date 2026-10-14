@@ -3,6 +3,7 @@
 mod action;
 pub mod codec;
 mod driver;
+mod input;
 mod server;
 mod supervisor;
 mod tree;
@@ -12,7 +13,8 @@ mod wire;
 
 pub use action::Action;
 pub use driver::WorkerDriver;
-pub use server::serve;
+pub use input::InputPacket;
+pub use server::{serve, serve_with_input};
 pub use supervisor::{StopHandle, Supervisor, WorkerConfig};
 pub use wire::{CaptureOptions, Element, Failure, Reply, Request, Response, TreeOptions, Window};
 

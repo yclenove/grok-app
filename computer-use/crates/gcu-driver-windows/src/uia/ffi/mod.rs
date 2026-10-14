@@ -2,6 +2,7 @@
 mod actions;
 mod events;
 mod identity;
+mod input;
 mod properties;
 use super::{
     cache::{Properties, BATCH_SIZE, PROPERTY_IDS},

@@ -5,7 +5,7 @@ use gcu_core::{
     model::{NodeAction, TextRange},
 };
 
-async fn window(driver: &WindowsDriver) -> WindowRef {
+pub(super) async fn window(driver: &WindowsDriver) -> WindowRef {
     let app = driver
         .resolve_app(&AppQuery("Editor".into()))
         .await

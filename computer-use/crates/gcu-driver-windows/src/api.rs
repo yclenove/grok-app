@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Raw HWND and provenance read in one enumeration pass.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeWindow {
     /// Numeric HWND; callers receive an opaque generation-qualified string.
     pub hwnd: u64,

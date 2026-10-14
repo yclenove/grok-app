@@ -1,4 +1,4 @@
-# Windows discovery, UIA observation, capture, semantic actions and isolated worker (P2-01–P2-05)
+# Windows discovery, UIA observation, capture, semantic actions, input and isolated worker (P2-01–P2-06)
 
 This crate implements app/window discovery, exact executable identity, launching,
 nonactivating Win32 restoration and virtual-desktop annotations. The native
@@ -56,10 +56,10 @@ instance for ApplicationFrameHost windows. Owned dialogs retain separate IDs and
 owner metadata; ambiguous UWP child mappings fail closed.
 
 The discovery-only `with_api` constructor leaves UIA tree/focus/subscriptions
-unavailable. `new()` enables isolated UIA observation, window capture and semantic actions
-as described below. Pointer/keyboard injection and foreground activation remain
-unavailable. No synthetic input is held, so
-`release_all_input` is a no-op. Calls have a 4.75-second caller deadline and
+unavailable. `new()` enables isolated UIA observation, window capture, semantic
+actions and targeted/authorized foreground input as described below. The parent
+independently holds the input ledger and releases pending ups after killing a
+failed or stopped worker. Calls have a 4.75-second caller deadline and
 queued calls dropped after timeout/cancellation never execute. A native launch
 already started at timeout reports `maybe_executed=true`; it must never be replayed.
 `new_in_process()` uses dedicated threads and cannot terminate a blocked OS/COM
@@ -97,7 +97,8 @@ the worker; production `new()` keeps it out of the parent.
 `with_api` remains discovery-only; `with_uia` injects portable `UiaSource` and
 `UiaEventSource` implementations. Tree/event/accessibility capabilities are enabled only when
 sources are attached; background operation is `partial`. Geometry uses live stamped Win32 data. Focus is read only
-inside the owning app's foreground window. Pointer/keyboard injection and foreground delivery remain unavailable.
+inside the owning app's foreground window. Input capabilities require an attached
+input backend and preserve core's route permission.
 Semantic UIA delivery uses patterns without a focus/foreground fallback.
 
 The cache request includes names, control types, IDs, frames, enabled/offscreen/
@@ -276,7 +277,7 @@ For the DPI test, set display scaling to **150%**, reset the fixture, select Can
 Grid and keep it foreground and uncovered. The test verifies a UIA grid location's
 pixel color, performs one test-only click at that screenshot pixel's physical
 screen coordinate, and checks the fixture state file for exactly cell `(2,3)`.
-Production driver input remains unavailable. Launch the command with a delay,
+Production input preserves the core-approved route ceiling. Launch the command with a delay,
 then foreground the fixture during that delay:
 
 ```powershell
@@ -314,11 +315,13 @@ compilation is not native behavioral evidence.
 
 `WindowsDriver::new()` defaults to `ExecMode::Worker`. Embedders select
 `with_exec_mode(ExecMode::InProcess, config)` only for explicit diagnostics;
-`new_worker()` initializes the native adapter from the private startup frame.
+`new_worker_with_input()` initializes the native adapter and its parent-ledger
+barrier from the private startup frame.
 `WindowsDriver::isolated(WorkerConfig)` supports portable trusted launchers/tests.
 The supervisor contains no native UIA/capture code and starts no discovery thread.
-All resolved semantic action variants execute inside the worker through the same
-UIA pattern dispatch as in-process mode, with no automatic mutation retries.
+All semantic actions, pointer clicks/scrolls/drags, chords, Unicode text and
+activation execute inside the worker through the same native dispatch as
+in-process mode, with no automatic mutation retries.
 
 The private protocol uses bounded length-prefixed JSON, not bincode; see
 [ADR 0005](../../docs/adr/0005-windows-worker-json.md). RuntimeIds and HWNDs are
@@ -339,8 +342,19 @@ without replaying mutations, immediately for read retries. Failed bootstrap is
 retried by the next call. The Driver adapter retains its
 4.75-second total budget. Stop bypasses the RPC queue, invalidates active/queued
 calls and kills the child even during a restart handshake. Host owns the persistent
-Stop latch and trusted resume; worker restart never clears it. Future P2-06 input
-release must also use its independent parent-side input ledger.
+Stop latch and trusted resume; worker restart never clears it.
+
+The **InputLedger is independently held by the parent**. Before each input packet,
+the child sends its exact recipient/route and possible downs; the parent records
+the corresponding ups and acknowledges before the child can send. A correlated
+completion retires acknowledged ups or discards proven zero insertion. Lost
+completion retains possible ups. Stop signals the watchdog outside the RPC queue,
+invalidates queued calls, kills/reaps the child, then releases all pending ups on
+the parent's independent up-only Win32 path. Cancellation, abandoned calls,
+transport failure, shutdown and Drop use the same kill-before-release ordering;
+failed ups remain pending and prevent subsequent dispatch. The parent starts no
+discovery, COM, capture or input-action worker. Its only input FFI is emergency
+up delivery; normal downs and activation stay in the isolated child.
 
 The launcher clears nonessential environment, inherits only explicit standard
 handles, and assigns a noninherited Windows Job with `KILL_ON_JOB_CLOSE` before
@@ -364,3 +378,78 @@ observations against disposable portable sources. The ignored Windows
 `moving_window_observe_300_times_keeps_parent_alive` variant requires a disposable
 interactive fixture desktop and a separately built `gcu` executable; it moves only
 that fixture during observation. Native Job lifetime and `worker_restart_preserves_live_window_stamp`: **not_run** on Linux.
+
+## Input routes (P2-06)
+
+The isolated child (or explicit `new_in_process()`) attaches `RealInput`, a
+persistent MTA input worker.
+`with_input` accepts the same portable `InputBackend` with `FakeInput` for tests.
+Pointer clicks, scrolling, interpolated drags, chords, Unicode text and authorized
+activation are implemented; semantic UIA actions keep their existing behavior.
+
+`Auto` and `TargetedOnly` permit **only background messages**. Hit testing walks
+`ChildWindowFromPointEx` into the exact root; keyboard input uses the target
+thread's retained focus or an exact observed UIA HWND. Virtual UIA elements
+without an HWND cannot receive targeted messages. Chromium renderer/widget and
+UWP classes return `CapabilityUnavailable` before any input. No failed,
+unconfirmed or ineffective message delivery is retried or upgraded.
+
+Only core-approved `AllowForeground` or `Activate` uses the attach/allow/set/detach
+sequence and `SendInput`. The real foreground HWND is checked after activation
+and immediately before every global packet. A supplied UIA focus handle is
+revalidated and focused only after authorized activation. The common gate checks
+engine/target integrity, session, secure desktop, window generation, geometry,
+child ownership and virtual desktop. Higher integrity returns the existing
+`ElevationRequired`; the driver never elevates. Physical activity monitoring and
+the registered Stop hotkey belong to P2-07 and remain declared unavailable.
+The independent cancellation/input-release boundary is implemented here.
+
+The local ledger records all possible downs before insertion; in isolated mode
+the parent ledger acknowledgement is also required. Partial `SendInput` packets
+retain every possible up. Cancellation, failure, abandoned futures and explicit
+Stop close dispatch and release ups in reverse order; isolated cleanup kills the
+child first. A failed up remains pending for explicit cleanup. Proven zero
+insertion discards that packet's pending downs. Queued or stalled preparation
+cannot dispatch after its deadline, and every delivered input preserves
+`maybe_executed` even if later evidence sampling fails.
+
+Text is limited to 8192 UTF-16 units and sent in packets of at most 256 units,
+preserving surrogate pairs and CRLF. Targeted text posts `WM_CHAR`; foreground
+text batches `KEYEVENTF_UNICODE` down/up records. Chord character keys are mapped
+using the recipient thread's keyboard layout. Posted modifier messages do not
+change the OS keyboard state; shortcut support is provider-dependent. Window
+text, control state, focus/capture state and sparse client pixels are sampled
+before delivery and settled afterwards (150 ms polling, 800/1500 ms budgets).
+Those samples are internal evidence, not raw screenshots exposed to callers;
+core still owns the public tree/redacted-pixel diff. A stable, unchanged sample
+is `NoVisibleChange`, never a reason to replay or activate. Sparse native pixels
+cannot prove application/business success, especially for occluded surfaces.
+
+Portable checks, including the existing core policy `never` gate:
+
+```sh
+rcargo test --locked -p gcu-driver-windows --test input
+rcargo test --locked -p gcu-core foreground_policy_never_refuses_and_ask_confirms
+rcargo test --locked -p gcu-core foreground_ask_uses_confirmation_and_never_cannot_be_overridden
+rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+```
+
+The two native input tests are `#[cfg(windows)] #[ignore]`. On a disposable,
+unelevated interactive Windows desktop, keep an unrelated window foreground
+for the synthetic Win32 fixture click test. For the Notepad test, open only one
+blank disposable Notepad document and focus its editor first; it types only
+`GCU 中文输入 😀` and verifies the subsequent UIA tree. Run serially:
+
+```powershell
+cargo build --locked -p gcu-cli
+$env:GCU_WORKER_EXE = (Resolve-Path target/debug/gcu.exe).Path
+cargo test --locked -p gcu-driver-windows --test input live_fixture_background_message_click_keeps_foreground -- --ignored --test-threads=1
+cargo test --locked -p gcu-driver-windows --test input live_notepad_foreground_chinese_preserves_text -- --ignored --test-threads=1
+```
+
+Close Notepad without saving and discard the desktop. Native input status:
+**not_run** (Linux host; no interactive Windows desktop). Cross-target clippy
+and portable fake tests do not establish native delivery correctness.
+The tests default to Worker; set `$env:GCU_TEST_EXEC_MODE = 'in_process'` to run
+the same checks in diagnostic mode, resetting the blank Notepad document before
+each run. The worker path must point to the built CLI, never the test executable.
