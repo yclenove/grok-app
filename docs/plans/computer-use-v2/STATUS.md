@@ -81,7 +81,7 @@
 | P8-03 | DOM 树融合与动作路由 | P8-02、P6-04 | 3d | todo |  |  |  |  |
 | P8-04 | 扩展上架材料 | P8-03 | 1d | todo |  |  |  |  |
 | P8-05 | L0 vs L2 网页评测 | P8-03、P9-01 | 2d | todo |  |  |  |  |
-| P9-01 | 评测 runner | P0-10 | 4d | todo |  |  |  | 可提前到 P4 期间 |
+| P9-01 | 评测 runner | P0-10 | 4d | done | cu2/P9-01-eval-runner |  | 2026-10-13 | gcu-eval：任务 YAML、外部 oracle(含副作用检查)、EnvProvider 接口、指标/HTML 报告/A-B；仅 eval-autoapprove 自动批准；nightly 冒烟(fake，无凭据则跳过)；一次性桌面 provider、真实模型、跨客户端 not_run |
 | P9-02 | 任务集 ≥60 | P9-01 | 4d | todo |  |  |  |  |
 | P9-03 | 性能预算门禁 | P6-01 | 1.5d | todo |  |  |  |  |
 | P9-04 | 安全审查 | P6-05、P5-09 | 3d | todo |  |  |  |  |
