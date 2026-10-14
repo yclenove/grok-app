@@ -479,7 +479,12 @@ pub async fn test_c23_release_all_input_no_stuck_keys(
 
     let verified = poll_oracle(Duration::from_secs(5), |v| {
         let t = v.get("text")?.as_str()?;
-        if t.contains("xyz") {
+        if t.to_lowercase() == t
+            && !t.contains('X')
+            && !t.contains('Y')
+            && !t.contains('Z')
+            && (t.contains("xyz") || (t.contains('x') && t.contains('y') && t.contains('z')))
+        {
             Some(true)
         } else {
             None

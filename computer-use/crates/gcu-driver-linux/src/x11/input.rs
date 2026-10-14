@@ -370,6 +370,8 @@ pub async fn execute_press_keys(
         });
     }
 
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
     // Release main key
     let _ = x.xtest_fake_key(main_resolved.keycode, false);
     ledger.record_key_up(main_resolved.keycode);
@@ -385,6 +387,8 @@ pub async fn execute_press_keys(
         let _ = x.xtest_fake_key(mkc, false);
         ledger.record_key_up(mkc);
     }
+
+    tokio::time::sleep(Duration::from_millis(15)).await;
 
     // 4. Restore any remapped keycodes
     for rkc in remapped_keycodes {
@@ -432,18 +436,19 @@ pub async fn execute_type_text_x11(
             if resolved.needs_shift {
                 ledger.record_key_down(shift_kc);
                 let _ = x.xtest_fake_key(shift_kc, true);
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
             ledger.record_key_down(resolved.keycode);
             let _ = x.xtest_fake_key(resolved.keycode, true);
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
             let _ = x.xtest_fake_key(resolved.keycode, false);
             ledger.record_key_up(resolved.keycode);
             if resolved.needs_shift {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 let _ = x.xtest_fake_key(shift_kc, false);
                 ledger.record_key_up(shift_kc);
             }
+            tokio::time::sleep(Duration::from_millis(15)).await;
         }
         if !plan.remapped.is_empty() {
             // Let the application finish reading the last keystrokes before they change meaning.
