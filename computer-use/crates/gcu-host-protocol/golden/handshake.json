@@ -1,0 +1,476 @@
+{
+  "bootstrap": {
+    "$defs": {
+      "EndpointStamp": {
+        "additionalProperties": false,
+        "description": "Kernel identities of a fallback socket and its private directory. A trusted\nlauncher passes this with the secret bootstrap, never via the public path.",
+        "properties": {
+          "device": {
+            "description": "Socket device.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "directory_device": {
+            "description": "Directory device.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "directory_inode": {
+            "description": "Directory inode.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "inode": {
+            "description": "Socket inode.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "directory_device",
+          "directory_inode",
+          "device",
+          "inode"
+        ],
+        "type": "object"
+      },
+      "ProcessInstance": {
+        "additionalProperties": false,
+        "description": "Operating-system process instance. Start time prevents PID reuse.",
+        "properties": {
+          "pid": {
+            "description": "Kernel process ID.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started": {
+            "description": "OS creation timestamp/tick; interpreted only on the local machine.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "started"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Private launch bootstrap. Send through the inherited connection or token fd,\nnever through argv, environment, disk, logs, MCP, or an unauthenticated socket.",
+    "properties": {
+      "endpoint": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EndpointStamp"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Pin for the optional fallback endpoint."
+      },
+      "host": {
+        "$ref": "#/$defs/ProcessInstance",
+        "description": "Host instance supplied by the trusted launcher."
+      },
+      "token": {
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 32,
+        "minItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "host",
+      "token"
+    ],
+    "title": "Bootstrap",
+    "type": "object"
+  },
+  "hello": {
+    "$defs": {
+      "BackgroundOperation": {
+        "description": "Extent of operation without foreground activation.",
+        "oneOf": [
+          {
+            "const": "full",
+            "description": "All primary routes work in the background.",
+            "type": "string"
+          },
+          {
+            "const": "partial",
+            "description": "Only some routes work in the background.",
+            "type": "string"
+          },
+          {
+            "const": "none",
+            "description": "No background operation is available.",
+            "type": "string"
+          }
+        ]
+      },
+      "Capabilities": {
+        "additionalProperties": false,
+        "description": "Static plus runtime-probed declaration shared by capabilities and doctor.",
+        "properties": {
+          "background_operation": {
+            "$ref": "#/$defs/BackgroundOperation",
+            "description": "Honest extent of background operation."
+          },
+          "delivery": {
+            "$ref": "#/$defs/DeliveryCapabilities",
+            "description": "Delivery capabilities."
+          },
+          "limits": {
+            "$ref": "#/$defs/CapabilityLimits",
+            "description": "Hard limits."
+          },
+          "observe": {
+            "$ref": "#/$defs/ObserveCapabilities",
+            "description": "Observation capabilities."
+          },
+          "overlay_excluded_from_capture": {
+            "description": "Overlay can be excluded from captures.",
+            "type": "boolean"
+          },
+          "platform": {
+            "$ref": "#/$defs/Platform",
+            "description": "Driver platform."
+          },
+          "private_apis": {
+            "additionalProperties": {
+              "$ref": "#/$defs/PrivateApiStatus"
+            },
+            "description": "Named private APIs and runtime availability (for example skylight).",
+            "type": "object"
+          },
+          "user_activity_guard": {
+            "description": "Physical user input can be detected.",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "OS version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "version",
+          "observe",
+          "delivery",
+          "background_operation",
+          "user_activity_guard",
+          "overlay_excluded_from_capture",
+          "private_apis",
+          "limits"
+        ],
+        "type": "object"
+      },
+      "CapabilityLimits": {
+        "additionalProperties": false,
+        "description": "Hard capability limits, distinct from per-request defaults.",
+        "properties": {
+          "max_image_edge": {
+            "description": "Maximum image long edge.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_tree_nodes": {
+            "description": "Maximum tree-node request.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type_text_max": {
+            "description": "Maximum text input length.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_tree_nodes",
+          "max_image_edge",
+          "type_text_max"
+        ],
+        "type": "object"
+      },
+      "Channel": {
+        "description": "Independent transports have different authenticated transcripts.",
+        "oneOf": [
+          {
+            "const": "rpc",
+            "description": "Ordinary bidirectional RPC.",
+            "type": "string"
+          },
+          {
+            "const": "stop",
+            "description": "User Stop/resume only.",
+            "type": "string"
+          }
+        ]
+      },
+      "DeliveryCapabilities": {
+        "additionalProperties": false,
+        "description": "Available delivery mechanisms, without granting authorization.",
+        "properties": {
+          "accessibility": {
+            "description": "Semantic accessibility actions.",
+            "type": "boolean"
+          },
+          "foreground": {
+            "$ref": "#/$defs/ForegroundCapability",
+            "description": "Foreground input capability."
+          },
+          "targeted_keys": {
+            "description": "Window/process-targeted keyboard input.",
+            "type": "boolean"
+          },
+          "targeted_pointer": {
+            "description": "Window/process-targeted pointer input.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accessibility",
+          "targeted_pointer",
+          "targeted_keys",
+          "foreground"
+        ],
+        "type": "object"
+      },
+      "ForegroundCapability": {
+        "description": "Foreground input availability; policy is still enforced at action time.",
+        "oneOf": [
+          {
+            "const": "policy",
+            "description": "Available subject to policy.",
+            "type": "string"
+          },
+          {
+            "const": "unavailable",
+            "description": "Not supported by this driver.",
+            "type": "string"
+          }
+        ]
+      },
+      "ObserveCapabilities": {
+        "additionalProperties": false,
+        "description": "Observation mechanisms available at runtime.",
+        "properties": {
+          "events": {
+            "description": "Event subscriptions.",
+            "type": "boolean"
+          },
+          "screenshot": {
+            "description": "Window screenshot.",
+            "type": "boolean"
+          },
+          "tree": {
+            "description": "Accessibility tree.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tree",
+          "screenshot",
+          "events"
+        ],
+        "type": "object"
+      },
+      "Platform": {
+        "description": "Driver platform; version and display-server detail are declared separately.",
+        "oneOf": [
+          {
+            "const": "macos",
+            "description": "macOS.",
+            "type": "string"
+          },
+          {
+            "const": "windows",
+            "description": "Windows.",
+            "type": "string"
+          },
+          {
+            "const": "linux",
+            "description": "Linux (X11 or Wayland).",
+            "type": "string"
+          }
+        ]
+      },
+      "PrivateApiStatus": {
+        "description": "Runtime availability of a named private API.",
+        "oneOf": [
+          {
+            "const": "available",
+            "description": "Resolved and enabled.",
+            "type": "string"
+          },
+          {
+            "const": "disabled",
+            "description": "Explicitly disabled.",
+            "type": "string"
+          },
+          {
+            "const": "missing",
+            "description": "Could not be resolved.",
+            "type": "string"
+          }
+        ]
+      },
+      "ProcessInstance": {
+        "additionalProperties": false,
+        "description": "Operating-system process instance. Start time prevents PID reuse.",
+        "properties": {
+          "pid": {
+            "description": "Kernel process ID.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started": {
+            "description": "OS creation timestamp/tick; interpreted only on the local machine.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "started"
+        ],
+        "type": "object"
+      },
+      "Role": {
+        "description": "Authenticated direction; reflected proofs cannot authenticate the other side.",
+        "oneOf": [
+          {
+            "const": "host",
+            "description": "Trusted App process.",
+            "type": "string"
+          },
+          {
+            "const": "engine",
+            "description": "Its specifically launched child.",
+            "type": "string"
+          }
+        ]
+      },
+      "Version": {
+        "additionalProperties": false,
+        "description": "Host wire version. A major mismatch fails before any method is dispatched.",
+        "properties": {
+          "major": {
+            "description": "Incompatible protocol generation.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minor": {
+            "description": "Backwards-compatible extension level.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "major",
+          "minor"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "capabilities": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Capabilities"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "channel": {
+        "$ref": "#/$defs/Channel"
+      },
+      "engine_version": {
+        "type": "string"
+      },
+      "host_protocol": {
+        "$ref": "#/$defs/Version"
+      },
+      "instance": {
+        "$ref": "#/$defs/ProcessInstance"
+      },
+      "nonce": {
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 32,
+        "minItems": 32,
+        "type": "array"
+      },
+      "role": {
+        "$ref": "#/$defs/Role"
+      },
+      "stopped": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "host_protocol",
+      "instance",
+      "role",
+      "channel",
+      "nonce",
+      "engine_version",
+      "stopped"
+    ],
+    "title": "Hello",
+    "type": "object"
+  },
+  "proof": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "proof": {
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 32,
+        "minItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "proof"
+    ],
+    "title": "Proof",
+    "type": "object"
+  }
+}

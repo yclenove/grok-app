@@ -10,7 +10,7 @@ mod unix {
     struct Private(PathBuf);
     impl Private {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("gcu-host-test-{}", Secret::random().hex()));
+            let p = std::env::temp_dir().join(format!("gcu-ht-{}", &Secret::random().hex()[..8]));
             std::fs::create_dir(&p).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
             Self(p)
@@ -125,13 +125,14 @@ async fn named_pipe_local_current_user_endpoint_rejects_preemption_and_wrong_pro
         auth::{ProcessInstance, Secret},
         transport::*,
     };
-    let path = std::path::PathBuf::from(format!("gcu-host-test-{}", Secret::random().hex()));
+    let path = std::path::PathBuf::from(format!("gcu-ht-{}", &Secret::random().hex()[..8]));
     let listener = PrivateListener::bind(&path).unwrap();
     assert!(PrivateListener::bind(&path).is_err());
     let expected = ProcessInstance::current().unwrap();
+    let stamp = listener.stamp();
     let (a, b) = tokio::join!(
         listener.accept(&expected),
-        connect(&path, &listener.stamp(), &expected)
+        connect(&path, &stamp, &expected)
     );
     assert!(a.is_ok());
     assert!(b.is_ok());

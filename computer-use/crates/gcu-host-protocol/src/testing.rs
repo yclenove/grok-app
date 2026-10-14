@@ -212,7 +212,7 @@ impl TestHost {
             process::Stdio,
         };
         let directory =
-            std::env::temp_dir().join(format!("gcu-host-fallback-{}", Secret::random().hex()));
+            std::env::temp_dir().join(format!("gcu-hf-{}", &Secret::random().hex()[..8]));
         std::fs::create_dir(&directory)?;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
         struct Cleanup(std::path::PathBuf);

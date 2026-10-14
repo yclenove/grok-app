@@ -102,7 +102,7 @@ pub(crate) fn run_golden(update: bool) -> Result<()> {
     let directory = workspace.join("crates/gcu-host-protocol/golden");
     for (name, schema) in [
         ("messages.json", gcu_host_protocol::messages::schemas()),
-        ("auth.json", gcu_host_protocol::auth::schemas()),
+        ("handshake.json", gcu_host_protocol::auth::schemas()),
     ] {
         let expected = canonical_json(&schema)?;
         let path = directory.join(name);

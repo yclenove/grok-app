@@ -2,7 +2,7 @@
 
 External Hosts depend on this crate and `gcu-protocol` only. The engine's
 `gcu-mcp::host::RemoteHost` implements the in-process traits; this crate does not
-link `gcu-host-api`, core, MCP, drivers, or Tauri. `golden/messages.json` and `golden/auth.json` contain
+link `gcu-host-api`, core, MCP, drivers, or Tauri. `golden/messages.json` and `golden/handshake.json` contain
 the generated schemas for every parameter/result and the JSON-RPC envelope.
 `cargo run -p xtask -- golden --check` compares them in the existing CI gate.
 
