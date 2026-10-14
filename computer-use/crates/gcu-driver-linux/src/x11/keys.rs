@@ -277,6 +277,107 @@ pub fn resolve_or_remap_keysym(
     }
 }
 
+/// Keycodes and chars planned for one typing chunk (see [`plan_text_chunk`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextPlan {
+    /// How many leading chars of the input the plan covers (always at least one).
+    pub consumed: usize,
+    /// Resolved keycode per char, aligned with the consumed prefix.
+    pub keys: Vec<ResolvedKeycode>,
+    /// Distinct keycodes that were remapped for this chunk and must be restored afterwards.
+    pub remapped: Vec<u8>,
+}
+
+/// Plan the keycodes for a prefix of `chars` in a single mapping scan.
+///
+/// Characters that already have a keycode reuse it. Every other distinct keysym gets its **own**
+/// unused keycode, all remapped up front, so no keycode changes meaning while a client may still
+/// be reading it (re-using one keycode per character raced the client's asynchronous
+/// `MappingNotify` refresh and typed the wrong characters on slow machines). When the free keycodes
+/// run out the plan stops early and the caller types the covered prefix, then plans the rest.
+///
+/// After the remap this performs an X round trip, so the server has applied the new mapping
+/// before the function returns; the caller still waits for clients to refresh their key tables.
+pub fn plan_text_chunk(x: &dyn XServer, chars: &[char]) -> Result<TextPlan, DriverError> {
+    let native = |e: crate::x11::server::XError| DriverError::Native {
+        message: e.to_string(),
+        maybe_executed: false,
+    };
+    let (min_kc, max_kc) = x.keyboard_bounds().map_err(native)?;
+    if max_kc < min_kc || chars.is_empty() {
+        return Err(DriverError::CapabilityUnavailable);
+    }
+    let count = max_kc.saturating_sub(min_kc).saturating_add(1);
+    let (keysyms, per_kc) = x.get_keyboard_mapping(min_kc, count).map_err(native)?;
+    let per = per_kc.max(1) as usize;
+
+    let mut bound: std::collections::HashMap<u32, (u8, bool)> = std::collections::HashMap::new();
+    let mut free: Vec<u8> = Vec::new();
+    for (i, chunk) in keysyms.chunks(per).enumerate() {
+        let kc = min_kc.saturating_add(i as u8);
+        if chunk.iter().all(|&s| s == 0) {
+            if kc >= 8 {
+                free.push(kc);
+            }
+            continue;
+        }
+        if let Some(&s0) = chunk.first() {
+            bound.entry(s0).or_insert((kc, false));
+        }
+        if let Some(&s1) = chunk.get(1) {
+            bound.entry(s1).or_insert((kc, true));
+        }
+    }
+    free.reverse(); // pop() hands out the lowest free keycode first
+
+    let mut assigned: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
+    let mut keys = Vec::new();
+    let mut remapped: Vec<u8> = Vec::new();
+    for &ch in chars {
+        let sym = char_to_keysym(ch);
+        if let Some(&(keycode, needs_shift)) = bound.get(&sym) {
+            keys.push(ResolvedKeycode {
+                keycode,
+                needs_shift,
+                remapped_keycode: None,
+            });
+        } else if let Some(&keycode) = assigned.get(&sym) {
+            keys.push(ResolvedKeycode {
+                keycode,
+                needs_shift: false,
+                remapped_keycode: Some(keycode),
+            });
+        } else if let Some(keycode) = free.pop() {
+            assigned.insert(sym, keycode);
+            remapped.push(keycode);
+            keys.push(ResolvedKeycode {
+                keycode,
+                needs_shift: false,
+                remapped_keycode: Some(keycode),
+            });
+        } else {
+            break;
+        }
+    }
+    if keys.is_empty() {
+        return Err(DriverError::CapabilityUnavailable);
+    }
+    for (&sym, &keycode) in &assigned {
+        x.change_keyboard_mapping(keycode, per as u8, &vec![sym; per])
+            .map_err(native)?;
+    }
+    if !remapped.is_empty() {
+        let _ = x.flush();
+        // A request with a reply returns only after the server has applied the new mapping.
+        x.get_keyboard_mapping(min_kc, 1).map_err(native)?;
+    }
+    Ok(TextPlan {
+        consumed: keys.len(),
+        keys,
+        remapped,
+    })
+}
+
 /// Restore a previously dynamically remapped keycode back to NoSymbol.
 pub fn restore_remapped_keycode(x: &dyn XServer, keycode: u8) {
     let per = if let Ok((_, per_kc)) = x.get_keyboard_mapping(keycode, 1) {

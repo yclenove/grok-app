@@ -22,8 +22,8 @@ pub use input::{
     execute_press_keys, execute_type_text_x11, TYPE_TEXT_CHUNK_SIZE,
 };
 pub use keys::{
-    char_to_keysym, key_to_keysym, modifier_to_keysym, named_key_to_keysym,
-    resolve_or_remap_keysym, restore_remapped_keycode, ResolvedKeycode,
+    char_to_keysym, key_to_keysym, modifier_to_keysym, named_key_to_keysym, plan_text_chunk,
+    resolve_or_remap_keysym, restore_remapped_keycode, ResolvedKeycode, TextPlan,
 };
 pub use ledger::InputLedger;
 pub use real::RealX;

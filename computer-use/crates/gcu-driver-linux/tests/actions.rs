@@ -18,8 +18,8 @@ use gcu_driver_linux::{
     },
     x11::{
         char_to_keysym, fake::FakeXEvent, key_to_keysym, modifier_to_keysym, named_key_to_keysym,
-        resolve_or_remap_keysym, FakeWindow, FakeX, InputLedger, XRootGeometry, XWindowGeometry,
-        TYPE_TEXT_CHUNK_SIZE,
+        plan_text_chunk, resolve_or_remap_keysym, FakeWindow, FakeX, InputLedger, XRootGeometry,
+        XServer, XWindowGeometry, TYPE_TEXT_CHUNK_SIZE,
     },
     LinuxDriver,
 };
@@ -991,4 +991,54 @@ async fn live_actions_fixture_ctrl_a_backspace_clears_field() {
         }
     }
     assert!(cleared, "ctrl+a then BackSpace clears text input");
+}
+
+#[test]
+fn plan_text_chunk_unbound_chars_get_distinct_keycodes_remapped_together() {
+    let x = make_fake_x();
+    let chars: Vec<char> = "a你好😀你".chars().collect();
+    let plan = plan_text_chunk(&x, &chars).unwrap();
+
+    assert_eq!(plan.consumed, chars.len());
+    assert_eq!(plan.keys.len(), chars.len());
+    // 你 / 好 / 😀 are unbound: three distinct keycodes, none reused for another character.
+    assert_eq!(plan.remapped.len(), 3);
+    let mut distinct = plan.remapped.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 3);
+    // The repeated 你 reuses the keycode assigned earlier instead of remapping again.
+    assert_eq!(plan.keys[1].keycode, plan.keys[4].keycode);
+    assert_eq!(plan.keys[0].remapped_keycode, None);
+    assert_eq!(plan.keys[1].remapped_keycode, Some(plan.keys[1].keycode));
+    // Every remapped keycode now carries its character's keysym.
+    for (ch, resolved) in chars.iter().zip(&plan.keys) {
+        let (syms, _) = x.get_keyboard_mapping(resolved.keycode, 1).unwrap();
+        let expected = char_to_keysym(*ch);
+        assert!(
+            syms.contains(&expected),
+            "keycode {} should map {ch:?}",
+            resolved.keycode
+        );
+    }
+}
+
+#[test]
+fn plan_text_chunk_without_free_keycodes_returns_covered_prefix() {
+    let x = make_fake_x();
+    // Occupy every keycode that is unbound by default so none are free.
+    for kc in (8u8..32).chain(127..=255) {
+        x.change_keyboard_mapping(kc, 2, &[0xffee00 + kc as u32, 0])
+            .unwrap();
+    }
+    let chars: Vec<char> = "ab你c".chars().collect();
+    let plan = plan_text_chunk(&x, &chars).unwrap();
+    assert_eq!(plan.consumed, 2, "stops before the first unbound char");
+    assert!(plan.remapped.is_empty());
+
+    let only_unbound: Vec<char> = "你".chars().collect();
+    assert!(matches!(
+        plan_text_chunk(&x, &only_unbound),
+        Err(DriverError::CapabilityUnavailable)
+    ));
 }

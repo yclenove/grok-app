@@ -2,7 +2,7 @@
 
 use crate::x11::{
     keys::{
-        char_to_keysym, key_to_keysym, modifier_to_keysym, resolve_or_remap_keysym,
+        key_to_keysym, modifier_to_keysym, plan_text_chunk, resolve_or_remap_keysym,
         restore_remapped_keycode,
     },
     ledger::InputLedger,
@@ -14,10 +14,12 @@ use gcu_core::{
 };
 use gcu_protocol::{keys::KeyChord, tools::MouseButton as Button};
 use std::time::Duration;
-use unicode_segmentation::UnicodeSegmentation;
 
 /// Threshold for chunking long text typing requests.
 pub const TYPE_TEXT_CHUNK_SIZE: usize = 2000;
+/// How long to wait after remapping keycodes before typing with them, and again before
+/// restoring them, so the target client has refreshed its key table.
+const REMAP_SETTLE: Duration = Duration::from_millis(120);
 
 /// Activate target window using `_NET_ACTIVE_WINDOW` and verify activation succeeded.
 ///
@@ -394,65 +396,56 @@ pub async fn execute_type_text_x11(
 ) -> Result<Delivery, DriverError> {
     activate_and_verify(x, xid, cancel).await?;
 
-    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    let chars: Vec<char> = text.chars().collect();
     let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
     let shift_kc = resolve_or_remap_keysym(x, shift_sym)
         .map(|r| r.keycode)
         .unwrap_or(50); // standard X11 keycode for Shift_L
 
-    let mut all_remapped = Vec::new();
-
-    for chunk in graphemes.chunks(TYPE_TEXT_CHUNK_SIZE) {
-        for &g in chunk {
+    let mut pos = 0;
+    while pos < chars.len() {
+        let end = (pos + TYPE_TEXT_CHUNK_SIZE).min(chars.len());
+        let plan = plan_text_chunk(x, &chars[pos..end])?;
+        if !plan.remapped.is_empty() {
+            // Clients rebuild their key tables asynchronously after MappingNotify; type only
+            // once they have had time to, and never change these keycodes mid-chunk.
+            tokio::time::sleep(REMAP_SETTLE).await;
+        }
+        for resolved in &plan.keys {
             if cancel.is_cancelled() {
                 ledger.release_all(x);
-                for rkc in all_remapped {
-                    restore_remapped_keycode(x, rkc);
+                for &kc in &plan.remapped {
+                    restore_remapped_keycode(x, kc);
                 }
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
             }
-
-            for ch in g.chars() {
-                let sym = char_to_keysym(ch);
-                let resolved = resolve_or_remap_keysym(x, sym)?;
-
-                if let Some(rkc) = resolved.remapped_keycode {
-                    all_remapped.push(rkc);
-                    // Give X server & client event loop a moment to receive MappingNotify
-                    tokio::time::sleep(Duration::from_millis(15)).await;
-                }
-
-                if resolved.needs_shift {
-                    ledger.record_key_down(shift_kc);
-                    let _ = x.xtest_fake_key(shift_kc, true);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-
-                ledger.record_key_down(resolved.keycode);
-                let _ = x.xtest_fake_key(resolved.keycode, true);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                let _ = x.xtest_fake_key(resolved.keycode, false);
-                ledger.record_key_up(resolved.keycode);
-
-                if resolved.needs_shift {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                    let _ = x.xtest_fake_key(shift_kc, false);
-                    ledger.record_key_up(shift_kc);
-                }
+            if resolved.needs_shift {
+                ledger.record_key_down(shift_kc);
+                let _ = x.xtest_fake_key(shift_kc, true);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            ledger.record_key_down(resolved.keycode);
+            let _ = x.xtest_fake_key(resolved.keycode, true);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = x.xtest_fake_key(resolved.keycode, false);
+            ledger.record_key_up(resolved.keycode);
+            if resolved.needs_shift {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                let _ = x.xtest_fake_key(shift_kc, false);
+                ledger.record_key_up(shift_kc);
             }
         }
-        // Yield briefly between large chunks to let X server / application process input
-        tokio::task::yield_now().await;
-    }
-
-    // Allow application to process the last keystroke before unmapping
-    if !all_remapped.is_empty() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        for rkc in all_remapped {
-            restore_remapped_keycode(x, rkc);
+        if !plan.remapped.is_empty() {
+            // Let the application finish reading the last keystrokes before they change meaning.
+            tokio::time::sleep(REMAP_SETTLE).await;
+            for &kc in &plan.remapped {
+                restore_remapped_keycode(x, kc);
+            }
         }
+        pos += plan.consumed;
+        tokio::task::yield_now().await;
     }
 
     Ok(Delivery::Foreground)
