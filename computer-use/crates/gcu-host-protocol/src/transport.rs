@@ -213,7 +213,10 @@ impl PrivateListener {
             .name(name(path)?)
             .try_overwrite(false)
             .reclaim_name(false);
-        #[cfg(unix)]
+        // macOS rejects fchmod on a socket before bind (`Unsupported`), so there the 0o600 mode is
+        // applied right after bind. The 0o700 parent directory (checked above, owned by us) keeps
+        // every other user out of the endpoint in that window.
+        #[cfg(all(unix, not(target_os = "macos")))]
         let options = {
             use interprocess::os::unix::local_socket::ListenerOptionsExt;
             options.mode(0o600)
@@ -224,6 +227,11 @@ impl PrivateListener {
             options.security_descriptor(crate::unsafe_platform::pipe_descriptor()?)
         };
         let listener = options.create_tokio()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
         let stamp = stamp(path)?;
         Ok(Self {
             listener,
