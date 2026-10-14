@@ -15,6 +15,11 @@ fn require_foreground(driver: &LinuxDriver) -> Result<()> {
     if !driver.is_hotkey_available() || driver.is_stopped() {
         return Err(DriverError::CapabilityUnavailable);
     }
+    if driver.capabilities().delivery.foreground
+        == gcu_protocol::capabilities::ForegroundCapability::Unavailable
+    {
+        return Err(DriverError::CapabilityUnavailable);
+    }
     Ok(())
 }
 
@@ -81,6 +86,9 @@ async fn perform_action_inner(
             count,
             route,
         } => {
+            if driver.is_native_wayland_window(win) {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let xid = driver.resolve_xid(win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
@@ -107,6 +115,9 @@ async fn perform_action_inner(
             dy,
             route,
         } => {
+            if driver.is_native_wayland_window(win) {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let xid = driver.resolve_xid(win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
@@ -118,6 +129,9 @@ async fn perform_action_inner(
             execute_pointer_scroll(x.as_ref(), driver.ledger(), xid, *at, *dx, *dy, cancel).await
         }
         DriverAction::PointerDrag { win, path, route } => {
+            if driver.is_native_wayland_window(win) {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let xid = driver.resolve_xid(win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
@@ -154,6 +168,9 @@ async fn perform_action_inner(
             }
 
             // Otherwise fall back to X11 keyboard input
+            if driver.is_native_wayland_window(win) {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let xid = driver.resolve_xid(win)?;
             if *route == KeyRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
@@ -165,6 +182,9 @@ async fn perform_action_inner(
             execute_type_text_x11(x.as_ref(), driver.ledger(), xid, text, cancel).await
         }
         DriverAction::PressKeys { win, chord, route } => {
+            if driver.is_native_wayland_window(win) {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let xid = driver.resolve_xid(win)?;
             if *route == KeyRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
@@ -176,6 +196,9 @@ async fn perform_action_inner(
             execute_press_keys(x.as_ref(), driver.ledger(), xid, chord, cancel).await
         }
         DriverAction::Activate { win } => {
+            if driver.is_native_wayland_window(win) {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let xid = driver.resolve_xid(win)?;
             require_foreground(driver)?;
             let x = driver
