@@ -177,7 +177,19 @@ impl DeviceFilter {
     /// If the event originated from a physical device, `clock.record_physical_input()`
     /// is called and returns `true`.
     pub fn process_event(&self, device_id: u16, clock: &dyn ActivityClock) -> bool {
-        if self.is_xtest(device_id) {
+        self.process_event_with_source(device_id, device_id, clock)
+    }
+
+    /// Process an input event with both `device_id` (master) and `source_id` (slave/physical source).
+    ///
+    /// If either ID indicates an XTEST synthetic device, it is ignored and returns `false`.
+    pub fn process_event_with_source(
+        &self,
+        device_id: u16,
+        source_id: u16,
+        clock: &dyn ActivityClock,
+    ) -> bool {
+        if self.is_xtest(device_id) || self.is_xtest(source_id) {
             false
         } else {
             clock.record_physical_input();
@@ -210,6 +222,10 @@ mod tests {
 
         // Event from XTEST device does not update clock
         assert!(!filter.process_event(2, &clock));
+        assert_eq!(clock.ms_since_physical_input(), None);
+
+        // Event from master pointer where source is XTEST also does not update clock
+        assert!(!filter.process_event_with_source(1, 2, &clock));
         assert_eq!(clock.ms_since_physical_input(), None);
 
         // Event from physical device does update clock

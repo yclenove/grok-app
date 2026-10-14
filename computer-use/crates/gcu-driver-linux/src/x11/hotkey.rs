@@ -308,8 +308,8 @@ pub fn spawn_x11_listener(
                         handle_hotkey_trigger(stop_latch.as_ref(), &ledger, x.as_ref()).await;
                     }
                 }
-                Ok(Some(crate::x11::server::XEventKind::RawDeviceInput(dev_id))) => {
-                    filter.process_event(dev_id, clock.as_ref());
+                Ok(Some(crate::x11::server::XEventKind::RawDeviceInput(dev_id, src_id))) => {
+                    filter.process_event_with_source(dev_id, src_id, clock.as_ref());
                 }
                 Ok(None) => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;

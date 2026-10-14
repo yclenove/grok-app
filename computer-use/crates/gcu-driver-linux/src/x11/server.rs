@@ -167,8 +167,8 @@ pub trait XServer: Send + Sync {
 pub enum XEventKind {
     /// KeyPress event with the given keycode.
     KeyPress(u8),
-    /// XInput2 raw event with the originating device ID.
-    RawDeviceInput(u16),
+    /// XInput2 raw event with the originating master device ID and source device ID.
+    RawDeviceInput(u16, u16),
 }
 
 /// Converts raw ZPixmap bytes to 32-bit RGBA8 format.

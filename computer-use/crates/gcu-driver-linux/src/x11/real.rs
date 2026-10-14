@@ -487,13 +487,13 @@ impl XServer for RealX {
                 Ok(Some(crate::x11::server::XEventKind::KeyPress(kp.detail)))
             }
             Some(x11rb::protocol::Event::XinputRawKeyPress(e)) => Ok(Some(
-                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid),
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
             )),
             Some(x11rb::protocol::Event::XinputRawButtonPress(e)) => Ok(Some(
-                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid),
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
             )),
             Some(x11rb::protocol::Event::XinputRawMotion(e)) => Ok(Some(
-                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid),
+                crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
             )),
             _ => Ok(None),
         }

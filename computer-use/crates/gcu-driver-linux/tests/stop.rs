@@ -258,8 +258,9 @@ fn test_physical_device_refreshes_clock_and_xtest_device_does_not() {
     clock.set_test_now(Some(t1));
     assert_eq!(clock.ms_since_physical_input(), Some(300));
 
-    // Another XTEST event MUST NOT refresh elapsed clock
+    // Another XTEST event MUST NOT refresh elapsed clock (both direct device and via source ID)
     assert!(!filter.process_event(2, &clock));
+    assert!(!filter.process_event_with_source(1, 2, &clock));
     assert_eq!(clock.ms_since_physical_input(), Some(300));
 
     // Physical keyboard event MUST refresh elapsed clock
