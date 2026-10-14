@@ -300,7 +300,7 @@ async fn wait_range(before: (u64, u64)) -> (u64, u64) {
     visible_range(&read_state())
 }
 
-fn find(node: &RawNode, pred: &dyn Fn(&RawNode) -> bool) -> Option<&RawNode> {
+fn find<'a>(node: &'a RawNode, pred: &dyn Fn(&RawNode) -> bool) -> Option<&'a RawNode> {
     if pred(node) {
         return Some(node);
     }
