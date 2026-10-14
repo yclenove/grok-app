@@ -138,6 +138,18 @@ pub trait XServer: Send + Sync {
 
     /// Flush any pending buffered protocol requests to the X server.
     fn flush(&self) -> Result<(), XError>;
+
+    /// Check whether the XInput 2 extension is present and supported.
+    fn is_xi2_available(&self) -> Result<bool, XError>;
+
+    /// Query the list of XInput 2 input devices.
+    fn query_xi_devices(&self) -> Result<Vec<crate::x11::activity::DeviceInfo>, XError>;
+
+    /// Grab a specific key and modifier combination on the root window.
+    fn grab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError>;
+
+    /// Ungrab a specific key and modifier combination on the root window.
+    fn ungrab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError>;
 }
 
 /// Converts raw ZPixmap bytes to 32-bit RGBA8 format.
@@ -187,5 +199,36 @@ pub fn zpixmap_to_rgba(
         Err(XError::ImageError(format!(
             "unsupported visual depth {depth}"
         )))
+    }
+}
+
+/// Helper function to crop sub-rectangles from a source image into a destination buffer.
+pub fn crop_into(
+    dst: &mut [u8],
+    dst_w: usize,
+    dst_h: usize,
+    src: &RawImage,
+    offset_x: i32,
+    offset_y: i32,
+) {
+    let src_w = src.width as i32;
+    let src_h = src.height as i32;
+
+    for dy in 0..dst_h {
+        let sy = offset_y + dy as i32;
+        if sy < 0 || sy >= src_h {
+            continue;
+        }
+        for dx in 0..dst_w {
+            let sx = offset_x + dx as i32;
+            if sx < 0 || sx >= src_w {
+                continue;
+            }
+            let src_idx = (sy as usize * src.width as usize + sx as usize) * 4;
+            let dst_idx = (dy * dst_w + dx) * 4;
+            if src_idx + 4 <= src.data.len() && dst_idx + 4 <= dst.len() {
+                dst[dst_idx..dst_idx + 4].copy_from_slice(&src.data[src_idx..src_idx + 4]);
+            }
+        }
     }
 }

@@ -3,14 +3,28 @@
 //! Exposes the [`XServer`] trait with concrete [`RealX`] (backed by `x11rb`)
 //! and [`FakeX`] (in-memory for platform-independent testing).
 
+pub mod activity;
 pub mod capture;
 pub mod fake;
+pub mod hotkey;
 pub mod input;
 pub mod keys;
 pub mod ledger;
 pub mod real;
 pub mod server;
+pub mod watchdog;
 pub mod windows;
+
+pub use activity::{
+    is_xtest_device_name, ActivityClock, DeviceFilter, DeviceInfo, SharedActivityClock,
+};
+pub use hotkey::{
+    handle_hotkey_trigger, modifier_combinations, HotkeyConfig, HotkeyError, HotkeyManager,
+    SharedStopLatch, StopLatch,
+};
+pub use watchdog::{
+    run_with_timeout, run_with_watchdog, HeartbeatWatchdog, DEFAULT_HEARTBEAT_TIMEOUT,
+};
 
 pub use capture::{
     capture_window, check_window_visibility, decide_capture_strategy, CaptureStrategy,

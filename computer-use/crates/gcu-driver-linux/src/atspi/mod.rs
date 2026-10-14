@@ -2,11 +2,14 @@
 
 pub mod actions;
 pub mod bus;
+pub mod discovery;
 pub mod events;
 pub mod roles;
 pub mod sensitive;
 pub mod source;
 pub mod tree;
+
+pub use discovery::{list_atspi_apps, list_atspi_candidate_windows, resolve_atspi_app};
 
 pub use actions::{
     execute_atspi_action, extract_atspi_node, extract_fake_id, find_best_press_action,

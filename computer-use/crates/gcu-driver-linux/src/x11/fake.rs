@@ -1,7 +1,7 @@
 //! In-memory mock X11 server for platform-independent testing.
 
-use crate::x11::server::{RawImage, XError, XRootGeometry, XServer, XWindowGeometry};
-use std::collections::HashMap;
+use crate::x11::server::{crop_into, RawImage, XError, XRootGeometry, XServer, XWindowGeometry};
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// In-memory mock window for [`FakeX`].
@@ -64,6 +64,10 @@ pub struct FakeX {
     keymap: Mutex<HashMap<u8, Vec<u32>>>,
     activate_fails: Mutex<bool>,
     events: Mutex<Vec<FakeXEvent>>,
+    grabbed_keys: Mutex<HashSet<(u8, u16)>>,
+    conflicting_keys: Mutex<HashSet<(u8, u16)>>,
+    xi_devices: Mutex<Vec<crate::x11::activity::DeviceInfo>>,
+    xi2_available: Mutex<bool>,
 }
 
 impl FakeX {
@@ -85,21 +89,18 @@ impl FakeX {
             keymap: Mutex::new(HashMap::new()),
             activate_fails: Mutex::new(false),
             events: Mutex::new(Vec::new()),
+            grabbed_keys: Mutex::new(HashSet::new()),
+            conflicting_keys: Mutex::new(HashSet::new()),
+            xi_devices: Mutex::new(Vec::new()),
+            xi2_available: Mutex::new(true),
         }
     }
 
     /// Register a mock window.
     pub fn add_window(&self, window: FakeWindow) {
         let id = window.id;
-        let mut wins = match self.windows.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        wins.insert(id, window);
-        let mut stack = match self.stacking_order.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        lock_m(&self.windows).insert(id, window);
+        let mut stack = lock_m(&self.stacking_order);
         if !stack.contains(&id) {
             stack.push(id);
         }
@@ -107,93 +108,77 @@ impl FakeX {
 
     /// Set the active window ID.
     pub fn set_active_window(&self, window: Option<u32>) {
-        let mut active = match self.active_window.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *active = window;
+        *lock_m(&self.active_window) = window;
     }
 
     /// Set stacking order (bottom to top).
     pub fn set_stacking_order(&self, order: Vec<u32>) {
-        let mut stack = match self.stacking_order.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *stack = order;
+        *lock_m(&self.stacking_order) = order;
     }
 
     /// Set the full root window image for crop testing.
     pub fn set_root_image(&self, img: RawImage) {
-        let mut r = match self.root_image.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *r = Some(img);
+        *lock_m(&self.root_image) = Some(img);
     }
 
     /// Set whether XTEST extension is available.
     pub fn set_xtest_available(&self, avail: bool) {
-        let mut xt = match self.xtest_available.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *xt = avail;
+        *lock_m(&self.xtest_available) = avail;
     }
 
     /// Set whether window activation should fail.
     pub fn set_activate_fails(&self, fails: bool) {
-        let mut af = match self.activate_fails.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *af = fails;
+        *lock_m(&self.activate_fails) = fails;
     }
 
     /// Retrieve all recorded simulated events.
     pub fn get_events(&self) -> Vec<FakeXEvent> {
-        let ev = match self.events.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        ev.clone()
+        lock_m(&self.events).clone()
     }
 
     /// Clear recorded simulated events.
     pub fn clear_events(&self) {
-        let mut ev = match self.events.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        ev.clear();
+        lock_m(&self.events).clear();
     }
 
     /// Get current pressed buttons.
     pub fn get_pressed_buttons(&self) -> Vec<u8> {
-        let b = match self.pressed_buttons.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        b.clone()
+        lock_m(&self.pressed_buttons).clone()
     }
 
     /// Get current pressed keys.
     pub fn get_pressed_keys(&self) -> Vec<u8> {
-        let k = match self.pressed_keys.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        k.clone()
+        lock_m(&self.pressed_keys).clone()
     }
 
     /// Get current simulated mouse position.
     pub fn get_mouse_pos(&self) -> (i16, i16) {
-        let pos = match self.mouse_pos.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *pos
+        *lock_m(&self.mouse_pos)
     }
+
+    /// Configure whether XI2 extension is supported.
+    pub fn set_xi2_available(&self, avail: bool) {
+        *lock_m(&self.xi2_available) = avail;
+    }
+
+    /// Set simulated XI2 devices.
+    pub fn set_xi_devices(&self, devs: Vec<crate::x11::activity::DeviceInfo>) {
+        *lock_m(&self.xi_devices) = devs;
+    }
+
+    /// Add a key+modifier combination that triggers BadAccess grab conflict.
+    pub fn add_conflicting_key(&self, keycode: u8, modifiers: u16) {
+        lock_m(&self.conflicting_keys).insert((keycode, modifiers));
+    }
+
+    /// Check whether a key+modifier combination is currently grabbed.
+    pub fn is_key_grabbed(&self, keycode: u8, modifiers: u16) -> bool {
+        lock_m(&self.grabbed_keys).contains(&(keycode, modifiers))
+    }
+}
+
+fn lock_m<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 impl XServer for FakeX {
@@ -520,34 +505,47 @@ impl XServer for FakeX {
     fn flush(&self) -> Result<(), XError> {
         Ok(())
     }
-}
 
-fn crop_into(
-    dst: &mut [u8],
-    dst_w: usize,
-    dst_h: usize,
-    src: &RawImage,
-    offset_x: i32,
-    offset_y: i32,
-) {
-    let src_w = src.width as i32;
-    let src_h = src.height as i32;
+    fn is_xi2_available(&self) -> Result<bool, XError> {
+        let g = match self.xi2_available.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        Ok(*g)
+    }
 
-    for dy in 0..dst_h {
-        let sy = offset_y + dy as i32;
-        if sy < 0 || sy >= src_h {
-            continue;
+    fn query_xi_devices(&self) -> Result<Vec<crate::x11::activity::DeviceInfo>, XError> {
+        let g = match self.xi_devices.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        Ok(g.clone())
+    }
+
+    fn grab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError> {
+        let conflicts = match self.conflicting_keys.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if conflicts.contains(&(keycode, modifiers)) {
+            return Err(XError::Protocol(format!(
+                "BadAccess: grab conflict for keycode {keycode} modifiers {modifiers:#x}"
+            )));
         }
-        for dx in 0..dst_w {
-            let sx = offset_x + dx as i32;
-            if sx < 0 || sx >= src_w {
-                continue;
-            }
-            let src_idx = (sy as usize * src.width as usize + sx as usize) * 4;
-            let dst_idx = (dy * dst_w + dx) * 4;
-            if src_idx + 4 <= src.data.len() && dst_idx + 4 <= dst.len() {
-                dst[dst_idx..dst_idx + 4].copy_from_slice(&src.data[src_idx..src_idx + 4]);
-            }
-        }
+        let mut grabbed = match self.grabbed_keys.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        grabbed.insert((keycode, modifiers));
+        Ok(())
+    }
+
+    fn ungrab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError> {
+        let mut grabbed = match self.grabbed_keys.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        grabbed.remove(&(keycode, modifiers));
+        Ok(())
     }
 }
