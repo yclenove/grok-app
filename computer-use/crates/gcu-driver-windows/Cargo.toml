@@ -13,6 +13,8 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures-core.workspace = true
+png.workspace = true
+tracing = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 sha2.workspace = true
@@ -27,11 +29,18 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_Variant", "Win32_System_Ole",
     "Win32_Storage_Packaging_Appx", "Win32_Security_Cryptography_Catalog",
     "Win32_Security_Cryptography_Sip",
+    "Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture", "Win32_System_WinRT_Direct3D11",
+    "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dxgi", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Storage_Xps",
 ] }
 
 [dev-dependencies]
 insta = { version = "1", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [lints]
 workspace = true

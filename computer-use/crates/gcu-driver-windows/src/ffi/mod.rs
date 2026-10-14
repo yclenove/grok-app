@@ -49,16 +49,43 @@ impl Drop for Handle {
         }
     }
 }
-pub(super) struct Com;
+pub(super) struct Com {
+    _dpi: DpiContext,
+}
 impl Com {
     pub fn new() -> Result<Self> {
+        let dpi = DpiContext::new()?;
         // SAFETY: worker thread initializes its own apartment; balanced in Drop.
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()
                 .map_err(native)?;
         }
-        Ok(Self)
+        Ok(Self { _dpi: dpi })
+    }
+}
+pub(crate) struct DpiContext(::windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT);
+impl DpiContext {
+    pub(crate) fn new() -> Result<Self> {
+        use ::windows::Win32::UI::HiDpi::{
+            SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        // SAFETY: affects only the dedicated caller thread; previous context is
+        // retained and restored on that same thread in Drop.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            return Err(native("DPI context unavailable"));
+        }
+        Ok(Self(previous))
+    }
+}
+impl Drop for DpiContext {
+    fn drop(&mut self) {
+        // SAFETY: restores the context returned by this thread's successful set.
+        unsafe {
+            ::windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(self.0);
+        }
     }
 }
 impl Drop for Com {
