@@ -26,6 +26,7 @@ pub struct WindowsDriver {
     refreshing: Arc<std::sync::atomic::AtomicBool>,
     caps: Capabilities,
     listed: std::sync::atomic::AtomicBool,
+    observer: Option<crate::uia::observe::Observer>,
 }
 impl WindowsDriver {
     /// Start a dedicated worker and refuse elevated/noninteractive engines before
@@ -78,7 +79,7 @@ impl WindowsDriver {
             .map_err(|_| DriverError::Crashed {
                 maybe_executed: false,
             })?;
-        tokio::time::timeout(NATIVE_TIMEOUT, ready_rx)
+        tokio::time::timeout(DRIVER_DEADLINE, ready_rx)
             .await
             .map_err(|_| DriverError::Timeout {
                 maybe_executed: false,
@@ -92,12 +93,36 @@ impl WindowsDriver {
             refreshing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             caps: discovery_capabilities(),
             listed: std::sync::atomic::AtomicBool::new(false),
+            observer: None,
         })
     }
     /// Start the production Windows adapter. Available only on Windows.
     #[cfg(windows)]
     pub async fn new() -> Result<Self> {
-        Self::with_api(Arc::new(crate::RealWinApi::new()?)).await
+        let driver = Self::with_api(Arc::new(crate::RealWinApi::new()?)).await?;
+        let uia = Arc::new(crate::uia::RealUia::start().await?);
+        Ok(driver.attach_uia(uia.clone(), uia))
+    }
+    /// Start discovery with portable/native UIA sources. Startup validates the
+    /// engine before enabling tree/events; capture and input remain unavailable.
+    pub async fn with_uia(
+        api: Arc<dyn WinApi>,
+        source: Arc<dyn crate::uia::source::UiaSource>,
+        events: Arc<dyn crate::uia::events::UiaEventSource>,
+    ) -> Result<Self> {
+        Ok(Self::with_api(api).await?.attach_uia(source, events))
+    }
+    fn attach_uia(
+        mut self,
+        source: Arc<dyn crate::uia::source::UiaSource>,
+        events: Arc<dyn crate::uia::events::UiaEventSource>,
+    ) -> Self {
+        self.observer = Some(crate::uia::observe::Observer::new(source, events));
+        self.caps.observe.tree = true;
+        self.caps.observe.events = true;
+        self.caps.limits.max_tree_nodes = crate::uia::tree::NODE_CAP as u32;
+        self.caps.version = "Windows 10 1903+; discovery and UIA observation".into();
+        self
     }
     async fn call<T: Send + 'static>(
         &self,
@@ -123,7 +148,7 @@ impl WindowsDriver {
             .map_err(|_| DriverError::Crashed {
                 maybe_executed: false,
             })?;
-        let wait = tokio::time::timeout(timeout.min(NATIVE_TIMEOUT), rx);
+        let wait = tokio::time::timeout(timeout.min(DRIVER_DEADLINE), rx);
         let result = if let Some(cancel) = cancel {
             tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(DriverError::Cancelled { maybe_executed: mutation }),
@@ -194,9 +219,11 @@ impl Driver for WindowsDriver {
             Ok(issues) => (true, issues),
             Err(e) => (false, vec![e.to_string()]),
         };
-        issues.push(
-            "P2-02+: tree, capture, focus, geometry, subscriptions and input unavailable".into(),
-        );
+        issues.push(if self.observer.is_some() {
+            "P2-03+: capture and input unavailable; UIA heuristics are best-effort and non-exhaustive".into()
+        } else {
+            "P2-02+: UIA source unavailable; capture and input unavailable".into()
+        });
         issues.push(
             "Entry signatures do not attest loaded DLL/plugins or writable loading paths".into(),
         );
@@ -353,12 +380,36 @@ impl Driver for WindowsDriver {
         opts: &TreeOpts,
         cancel: &Cancel,
     ) -> Result<RawTree> {
-        let win = win.clone();
-        self.call(opts.timeout, Some(cancel), false, move |s| {
-            s.validate_window(&win, false)?;
-            Err(DriverError::CapabilityUnavailable)
-        })
-        .await
+        let deadline = tokio::time::Instant::now() + opts.timeout.min(DRIVER_DEADLINE);
+        let operation = async {
+            let target = win.clone();
+            let window = self
+                .call(opts.timeout, Some(cancel), false, move |s| {
+                    s.observation_window(&target, false)
+                })
+                .await?;
+            let observer = self
+                .observer
+                .as_ref()
+                .ok_or(DriverError::CapabilityUnavailable)?;
+            let mut remaining = opts.clone();
+            remaining.timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let raw = observer
+                .snapshot(window.hwnd, win, &remaining, cancel)
+                .await?;
+            // Do not release tree payloads if identity/security changed during UIA.
+            let target = win.clone();
+            self.call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
+                s.validate_window(&target, false)
+            })
+            .await?;
+            observer.remember(win, window.hwnd);
+            Ok(raw)
+        };
+        tokio::select! { biased;
+            _ = cancel.cancelled() => Err(DriverError::Cancelled { maybe_executed: false }),
+            result = tokio::time::timeout_at(deadline, operation) => result.map_err(|_| DriverError::Timeout { maybe_executed: false })?,
+        }
     }
     async fn capture(
         &self,
@@ -376,18 +427,68 @@ impl Driver for WindowsDriver {
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
         let win = win.clone();
         self.call(NATIVE_TIMEOUT, None, false, move |s| {
-            s.validate_window(&win, false)?;
-            Err(DriverError::CapabilityUnavailable)
+            let window = s.observation_window(&win, false)?;
+            Ok(Geometry {
+                frame: window.frame,
+                scale: window.scale,
+            })
         })
         .await
     }
     async fn focused_element(&self, app: &AppRef) -> Result<Option<NativeHandle>> {
-        let app = app.clone();
-        self.call(NATIVE_TIMEOUT, None, false, move |s| {
-            s.validate_app(&app)?;
-            Err(DriverError::CapabilityUnavailable)
-        })
-        .await
+        let operation = async {
+            let target = app.clone();
+            let win = self
+                .call(DRIVER_DEADLINE, None, false, move |s| {
+                    s.validate_app(&target)?;
+                    s.enumerate()?;
+                    Ok(s.windows
+                        .iter()
+                        .find(|(_, (w, _, _, identity))| {
+                            w.foreground && identity.path == target.info.id
+                        })
+                        .map(|(id, _)| WindowRef {
+                            app: target.clone(),
+                            id: id.clone(),
+                        }))
+                })
+                .await?;
+            self.observer
+                .as_ref()
+                .ok_or(DriverError::CapabilityUnavailable)?;
+            let Some(win) = win else {
+                return Ok(None);
+            };
+            let tree = self
+                .snapshot_tree(
+                    &win,
+                    &TreeOpts {
+                        max_tree_nodes: crate::uia::tree::NODE_CAP,
+                        ..Default::default()
+                    },
+                    &Cancel::default(),
+                )
+                .await?;
+            fn focused(node: &gcu_core::model::RawNode) -> Option<NativeHandle> {
+                if node.states.contains(gcu_core::model::States::FOCUSED) {
+                    return Some(node.handle.clone());
+                }
+                node.children.iter().find_map(focused)
+            }
+            let focus = tree.root.as_ref().and_then(focused);
+            if focus.is_none() && tree.incomplete.is_some() {
+                return Err(DriverError::Native {
+                    message: "UIA focus unresolved in incomplete tree".into(),
+                    maybe_executed: false,
+                });
+            }
+            Ok(focus)
+        };
+        tokio::time::timeout(DRIVER_DEADLINE, operation)
+            .await
+            .map_err(|_| DriverError::Timeout {
+                maybe_executed: false,
+            })?
     }
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
         let req = req.clone();
@@ -398,8 +499,27 @@ impl Driver for WindowsDriver {
         })
         .await
     }
-    fn subscribe(&self, _: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
-        None
+    fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
+        let (hwnd, events) = self.observer.as_ref()?.subscription(win)?;
+        let target = win.clone();
+        let expires = std::time::Instant::now() + DRIVER_DEADLINE;
+        let (tx, rx) = oneshot::channel();
+        self.worker
+            .try_send(Box::new(move |s| {
+                if tx.is_closed()
+                    || std::time::Instant::now() >= expires
+                    || s.validate_window(&target, false).is_err()
+                    || tx.is_closed()
+                    || std::time::Instant::now() >= expires
+                {
+                    return;
+                }
+                if let Some(stream) = crate::uia::events::subscribe(events.as_ref(), hwnd) {
+                    let _ = tx.send(stream);
+                }
+            }))
+            .ok()?;
+        Some(crate::uia::events::deferred(rx))
     }
     async fn release_all_input(&self) { /* No input is held or delivered in P2-01. */
     }
@@ -420,10 +540,15 @@ fn action_window(action: &DriverAction) -> Result<(&WindowRef, bool)> {
         | DriverAction::SetValue { el, .. }
         | DriverAction::SelectText { el, .. }
         | DriverAction::ScrollElement { el, .. } => {
-            let element = el
+            let win = el
                 .downcast_ref::<WindowsElement>()
+                .map(|e| &e.window)
+                .or_else(|| {
+                    el.downcast_ref::<crate::uia::UiaElement>()
+                        .map(|e| &e.window)
+                })
                 .ok_or(DriverError::StaleElement)?;
-            Ok((&element.window, false))
+            Ok((win, false))
         }
     }
 }

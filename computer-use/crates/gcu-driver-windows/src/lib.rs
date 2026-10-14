@@ -1,7 +1,7 @@
-//! Windows discovery driver, with portable identity and safety logic.
+//! Windows discovery and UIA driver, with portable identity and safety logic.
 //!
-//! Native bindings exist only on Windows. Tree, capture and input are deliberately
-//! unavailable until P2-02+. See the crate README for trust and runner boundaries.
+//! Native bindings exist only on Windows. Capture/input remain unavailable.
+//! See the crate README for trust, completeness, and native runner boundaries.
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -15,6 +15,7 @@ mod ffi;
 pub mod gate;
 pub mod identity;
 pub mod testing;
+pub mod uia;
 
 pub use driver::{WindowsDriver, WindowsElement};
 #[cfg(windows)]

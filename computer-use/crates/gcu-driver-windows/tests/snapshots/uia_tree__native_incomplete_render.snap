@@ -1,0 +1,8 @@
+---
+source: crates/gcu-driver-windows/tests/uia_tree.rs
+expression: text
+---
+App=fixture.exe (pid 7) — Fixture
+Window: "Fixture", id fixture:8, 640×480 @1.5x, App: Fixture.
+0 standard window Fixture
+[truncated: native tree incomplete (node_cap); 1 nodes read; unknown nodes unread]
