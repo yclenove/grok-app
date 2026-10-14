@@ -1,0 +1,7 @@
+---
+source: crates/gcu-cli/tests/install_support/wire.rs
+---
+# antigravity install
+# run: $AGY mcp add grok-computer-use -- $GCU mcp
+# env: HOME=$HOME
+# env: USERPROFILE=$HOME

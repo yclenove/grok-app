@@ -1,0 +1,18 @@
+---
+source: crates/gcu-cli/tests/install_support/wire.rs
+---
+# vscode install
+--- $HOME/.config/Code/User/mcp.json
++++ $HOME/.config/Code/User/mcp.json
+@@ -1,0 +1,11 @@
++{
++  "servers": {
++    "grok-computer-use": {
++      "type": "stdio",
++      "command": "$GCU",
++      "args": [
++        "mcp"
++      ]
++    }
++  }
++}

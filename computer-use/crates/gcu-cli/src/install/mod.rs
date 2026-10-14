@@ -12,7 +12,10 @@
 //!
 //! - Grok Build 1.0.52 `grok mcp add` strips TOML comments, so MCP is edited
 //!   with `toml_edit`. The Stop hook is a file under `<home>/.grok/hooks`
-//!   (ADR 0001). Any real change there asks for confirmation first.
+//!   (ADR 0001): `computer-use-turn-ended.sh` on Unix and
+//!   `computer-use-turn-ended.cmd` on Windows. Both call `gcu turn-ended` only
+//!   when `reason` is `end_turn`. Any real change under the Grok directory
+//!   asks for confirmation first. `--grok-home` replaces `<home>/.grok`.
 //! - Codex 0.162.1 `codex mcp add` cannot chain `notify`, so MCP and `notify`
 //!   are one edit. Project-scope `notify` still goes in the user config.
 //! - Claude Code 2.1.296 reserves the name `computer-use` (the reason this server is called `grok-computer-use`) and rewrites
@@ -42,6 +45,8 @@ pub use exec::{
     RecordingExecutor, StaticConfirmer,
 };
 pub use plan::{ApplyOutcome, ClientStatus, FileChange, Plan, PlanAction, PlannedCommand};
+
+pub use grok::{stop_hook_file_name, windows_stop_hook_script};
 
 use std::path::Path;
 
@@ -121,6 +126,11 @@ impl std::fmt::Display for Scope {
 pub struct InstallCtx<'a> {
     /// Absolute home. Client files live under this directory, not `std::env::home_dir`.
     pub home: &'a Path,
+    /// Absolute Grok config directory. `None` uses `<home>/.grok`.
+    ///
+    /// User-scope `config.toml` and the Stop hook live here. Project-scope MCP
+    /// config stays at `<project>/.grok/config.toml`.
+    pub grok_home: Option<&'a Path>,
     /// Absolute project root for project-scoped files and Antigravity's working directory.
     pub project_dir: &'a Path,
     /// Absolute `gcu` executable registered as the MCP command.
@@ -206,6 +216,11 @@ pub(crate) fn require_context(ctx: &InstallCtx<'_>) -> Result<(), Error> {
         return Err(Error::PathNotAbsolute {
             what: "project_dir",
         });
+    }
+    if let Some(grok_home) = ctx.grok_home {
+        if !grok_home.is_absolute() {
+            return Err(Error::PathNotAbsolute { what: "grok_home" });
+        }
     }
     Ok(())
 }

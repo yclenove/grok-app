@@ -70,6 +70,7 @@ fn ctx<'a>(fix: &'a Fix, scope: Scope, interactive: bool, yes: bool) -> InstallC
         scope,
         interactive,
         yes,
+        grok_home: None,
         backup_stamp: Some(STAMP),
         confirmer: &fix.confirmer,
         executor: &fix.executor,
@@ -86,6 +87,11 @@ fn esc(text: &str) -> String {
 
 fn gcu_str(fix: &Fix) -> &str {
     fix.gcu.to_str().unwrap()
+}
+
+fn hook_script(home: &Path) -> PathBuf {
+    home.join(".grok/hooks")
+        .join(gcu_cli::install::stop_hook_file_name())
 }
 
 fn write(path: &Path, bytes: impl AsRef<[u8]>) {
@@ -436,9 +442,8 @@ fn grok_install_missing_file_writes_server_and_stop_hook() {
         Some("mcp")
     );
     assert!(server.get("enabled").is_none());
-    let script =
-        fs::read_to_string(fix.home.path.join(".grok/hooks/computer-use-turn-ended.sh")).unwrap();
-    assert!(script.contains("# gcu-computer-use-stop"));
+    let script = fs::read_to_string(hook_script(&fix.home.path)).unwrap();
+    assert!(script.contains("gcu-computer-use-stop"));
     assert!(script.contains("end_turn"));
     assert!(script.contains("turn-ended"));
     assert!(script.contains(gcu_str(&fix)));
@@ -450,10 +455,10 @@ fn grok_install_missing_file_writes_server_and_stop_hook() {
     let command = hook["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    // The Stop hook script is a Unix shell script; Windows quotes the command differently.
-    if cfg!(unix) {
-        assert!(command.ends_with("computer-use-turn-ended.sh"));
-    }
+    assert!(
+        command.contains(gcu_cli::install::stop_hook_file_name()),
+        "{command}"
+    );
     assert_eq!(hook["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
     assert_eq!(hook["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
     let status = inst.status(&ctx).unwrap();
@@ -461,7 +466,7 @@ fn grok_install_missing_file_writes_server_and_stop_hook() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(fix.home.path.join(".grok/hooks/computer-use-turn-ended.sh"))
+        let mode = fs::metadata(hook_script(&fix.home.path))
             .unwrap()
             .permissions()
             .mode();
@@ -553,11 +558,7 @@ fn grok_uninstall_removes_only_computer_use() {
     let after = fs::read_to_string(&path).unwrap();
     assert!(after.contains("other"));
     assert!(!after.contains(SERVER_NAME));
-    assert!(!fix
-        .home
-        .path
-        .join(".grok/hooks/computer-use-turn-ended.sh")
-        .exists());
+    assert!(!hook_script(&fix.home.path).exists());
     assert!(!fix
         .home
         .path
@@ -702,7 +703,7 @@ fn grok_install_bad_hook_json_leaves_file_unchanged() {
 #[test]
 fn grok_install_foreign_stop_script_leaves_files_unchanged() {
     let fix = fix("grok-foreign");
-    let path = fix.home.path.join(".grok/hooks/computer-use-turn-ended.sh");
+    let path = hook_script(&fix.home.path);
     write(&path, b"#!/bin/sh\necho user\n");
     let err = installer(ClientId::Grok)
         .apply(&ctx(&fix, Scope::User, false, true))
@@ -721,13 +722,19 @@ fn grok_install_gcu_path_with_space_is_shell_quoted() {
     installer(ClientId::Grok)
         .apply(&ctx(&fix, Scope::User, false, true))
         .unwrap();
-    let script =
-        fs::read_to_string(fix.home.path.join(".grok/hooks/computer-use-turn-ended.sh")).unwrap();
-    assert!(script.contains(&format!("'{}'", gcu_str(&fix))), "{script}");
+    let script = fs::read_to_string(hook_script(&fix.home.path)).unwrap();
+    if cfg!(windows) {
+        assert!(script.contains(gcu_str(&fix)), "{script}");
+        assert!(script.contains("turn-ended"), "{script}");
+    } else {
+        assert!(script.contains(&format!("'{}'", gcu_str(&fix))), "{script}");
+    }
 }
 
 #[path = "install_support/cli_clients.rs"]
 mod cli_clients;
+#[path = "install_support/wire.rs"]
+mod wire;
 
 /// VS Code keeps its user `mcp.json` in a per-OS directory under the home directory.
 fn vscode_user_rel() -> &'static str {

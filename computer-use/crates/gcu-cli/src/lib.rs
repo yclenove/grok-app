@@ -15,6 +15,7 @@ mod engine;
 pub mod exit;
 mod host;
 pub mod install;
+mod install_cmd;
 mod private;
 mod proxy;
 pub mod resume;

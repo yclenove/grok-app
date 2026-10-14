@@ -4,8 +4,9 @@
 //! 1.0.52), so this editor uses `toml_edit` instead of the CLI. Grok has no
 //! Codex-style `notify`. ADR 0001 installs a `Stop` hook that forwards stdin;
 //! gcu validates the JSON and handles only Stop/end_turn. The hook lives under
-//! `<home>/.grok/hooks` for both scopes. Apply asks before it changes anything
-//! under that directory.
+//! `<home>/.grok/hooks` (or `--grok-home`) for both scopes. Unix installs
+//! `computer-use-turn-ended.sh`; Windows installs `computer-use-turn-ended.cmd`.
+//! Apply asks before it changes anything under that directory.
 
 use std::path::{Path, PathBuf};
 
@@ -22,8 +23,44 @@ use super::{
 };
 
 const MARKER: &str = "# gcu-computer-use-stop";
+const CMD_MARKER: &str = "rem gcu-computer-use-stop";
 const HOOK_JSON: &str = "computer-use-stop.json";
-const HOOK_SCRIPT: &str = "computer-use-turn-ended.sh";
+
+/// File name of the Stop hook script for this target.
+#[must_use]
+pub fn stop_hook_file_name() -> &'static str {
+    if cfg!(windows) {
+        "computer-use-turn-ended.cmd"
+    } else {
+        "computer-use-turn-ended.sh"
+    }
+}
+
+/// Windows Stop hook body. Calls `gcu turn-ended` only when `reason` is `end_turn`.
+///
+/// `gcu` is the absolute executable. `%` and `"` in that path are escaped for `set`.
+#[must_use]
+pub fn windows_stop_hook_script(gcu: &str) -> String {
+    let mut out = String::from("@echo off\r\n");
+    out.push_str("setlocal EnableExtensions DisableDelayedExpansion\r\n");
+    out.push_str(CMD_MARKER);
+    out.push_str("\r\n");
+    out.push_str("rem Forward a Grok Build Stop hook to gcu only when reason is end_turn.\r\n");
+    out.push_str("set \"GCU=");
+    out.push_str(&cmd_set_value(gcu));
+    out.push_str("\"\r\n");
+    out.push_str("set \"PAYLOAD=%TEMP%\\gcu-stop-%RANDOM%%RANDOM%.json\"\r\n");
+    out.push_str("findstr /R \".*\" > \"%PAYLOAD%\"\r\n");
+    out.push_str(
+        "findstr /C:\"\\\"reason\\\"\" \"%PAYLOAD%\" | findstr /C:\"\\\"end_turn\\\"\" >nul\r\n",
+    );
+    out.push_str("if errorlevel 1 goto gcu_stop_done\r\n");
+    out.push_str("\"%GCU%\" turn-ended < \"%PAYLOAD%\"\r\n");
+    out.push_str(":gcu_stop_done\r\n");
+    out.push_str("del /f /q \"%PAYLOAD%\" >nul 2>&1\r\n");
+    out.push_str("exit /b 0\r\n");
+    out
+}
 
 pub(crate) struct GrokInstaller;
 
@@ -35,7 +72,7 @@ impl ClientInstaller for GrokInstaller {
     fn plan(&self, ctx: &InstallCtx<'_>) -> Result<Plan, InstallError> {
         require_context(ctx)?;
         let gcu = gcu_string(ctx)?;
-        let script = script_path(ctx.home);
+        let script = script_path(ctx);
         let command = hook_command(
             script
                 .to_str()
@@ -50,10 +87,10 @@ impl ClientInstaller for GrokInstaller {
         );
         push_change(
             &mut files,
-            edit_json(&hook_json_path(ctx.home), |map| {
+            edit_json(&hook_json_path(ctx), |map| {
                 upsert_stop(
                     map,
-                    &hook_json_path(ctx.home),
+                    &hook_json_path(ctx),
                     &script_display(&script)?,
                     &command,
                 )
@@ -70,7 +107,7 @@ impl ClientInstaller for GrokInstaller {
 
     fn plan_removal(&self, ctx: &InstallCtx<'_>) -> Result<Plan, InstallError> {
         require_context(ctx)?;
-        let script = script_path(ctx.home);
+        let script = script_path(ctx);
         let command = hook_command(&script_display(&script)?);
         let mut files = Vec::new();
         push_change(
@@ -79,10 +116,10 @@ impl ClientInstaller for GrokInstaller {
                 toml::remove_mcp(doc, &config_path(ctx))
             })?,
         );
-        let hook = edit_json(&hook_json_path(ctx.home), |map| {
+        let hook = edit_json(&hook_json_path(ctx), |map| {
             remove_stop(
                 map,
-                &hook_json_path(ctx.home),
+                &hook_json_path(ctx),
                 &script_display(&script)?,
                 &command,
             )
@@ -104,23 +141,29 @@ impl ClientInstaller for GrokInstaller {
     }
 }
 
+fn grok_root(ctx: &InstallCtx<'_>) -> PathBuf {
+    ctx.grok_home
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| ctx.home.join(".grok"))
+}
+
 fn config_path(ctx: &InstallCtx<'_>) -> PathBuf {
     match ctx.scope {
-        Scope::User => ctx.home.join(".grok/config.toml"),
+        Scope::User => grok_root(ctx).join("config.toml"),
         Scope::Project => ctx.project_dir.join(".grok/config.toml"),
     }
 }
 
-fn hook_dir(home: &Path) -> PathBuf {
-    home.join(".grok/hooks")
+fn hook_dir(ctx: &InstallCtx<'_>) -> PathBuf {
+    grok_root(ctx).join("hooks")
 }
 
-fn hook_json_path(home: &Path) -> PathBuf {
-    hook_dir(home).join(HOOK_JSON)
+fn hook_json_path(ctx: &InstallCtx<'_>) -> PathBuf {
+    hook_dir(ctx).join(HOOK_JSON)
 }
 
-fn script_path(home: &Path) -> PathBuf {
-    hook_dir(home).join(HOOK_SCRIPT)
+fn script_path(ctx: &InstallCtx<'_>) -> PathBuf {
+    hook_dir(ctx).join(stop_hook_file_name())
 }
 
 fn script_display(path: &Path) -> Result<String, InstallError> {
@@ -134,11 +177,11 @@ fn grok_present(ctx: &InstallCtx<'_>) -> Result<bool, InstallError> {
     if toml::mcp_present(&config_path(ctx))? {
         return Ok(true);
     }
-    let script = script_path(ctx.home);
+    let script = script_path(ctx);
     if read_bytes(&script)?.is_some_and(|bytes| is_ours(&bytes)) {
         return Ok(true);
     }
-    let json_path = hook_json_path(ctx.home);
+    let json_path = hook_json_path(ctx);
     let Some(bytes) = read_bytes(&json_path)? else {
         return Ok(false);
     };
@@ -186,10 +229,19 @@ fn is_ours(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
-    text.lines().any(|line| line.trim() == MARKER)
+    text.lines()
+        .any(|line| matches!(line.trim(), MARKER | CMD_MARKER))
 }
 
 fn script_text(gcu: &str) -> String {
+    if cfg!(windows) {
+        windows_stop_hook_script(gcu)
+    } else {
+        unix_stop_hook_script(gcu)
+    }
+}
+
+fn unix_stop_hook_script(gcu: &str) -> String {
     let quoted = shell_single_quote(gcu);
     let mut out = String::from("#!/bin/sh\n");
     out.push_str(MARKER);
@@ -197,6 +249,18 @@ fn script_text(gcu: &str) -> String {
     out.push_str("# gcu validates Stop/end_turn JSON and diagnoses malformed stdin.\n");
     out.push_str(&quoted);
     out.push_str(" turn-ended\nexit 0\n");
+    out
+}
+
+fn cmd_set_value(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '%' => out.push_str("%%"),
+            '"' => out.push_str("\"\""),
+            _ => out.push(ch),
+        }
+    }
     out
 }
 

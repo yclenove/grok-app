@@ -21,6 +21,12 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     }
     let mode = args::approval_mode()?;
     match cli.command.as_ref() {
+        Some(Command::Install(args)) => {
+            return crate::install_cmd::execute(args.clone(), false).await
+        }
+        Some(Command::Uninstall(args)) => {
+            return crate::install_cmd::execute(args.clone(), true).await
+        }
         Some(Command::Version) => {
             println!("gcu {}", env!("CARGO_PKG_VERSION"));
             return Ok(0);

@@ -1,0 +1,17 @@
+---
+source: crates/gcu-cli/tests/install_support/wire.rs
+---
+# claude install
+--- $HOME/.claude.json
++++ $HOME/.claude.json
+@@ -1,0 +1,10 @@
++{
++  "mcpServers": {
++    "grok-computer-use": {
++      "command": "$GCU",
++      "args": [
++        "mcp"
++      ]
++    }
++  }
++}

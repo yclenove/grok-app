@@ -1722,6 +1722,7 @@ dependencies = [
  "gcu-host-protocol",
  "gcu-mcp",
  "gcu-protocol",
+ "insta",
  "libc",
  "rand",
  "reqwest",

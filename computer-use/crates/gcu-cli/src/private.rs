@@ -86,6 +86,14 @@ pub(crate) fn session_directory(prefix: &str) -> io::Result<tempfile::TempDir> {
     unsafe_platform::secure(dir.path())?;
     Ok(dir)
 }
+/// Owner-only file or directory. Windows uses an owner-only DACL.
+///
+/// Unix backups set mode `0600` in the installer. This helper is the non-Unix path.
+#[cfg(not(unix))]
+pub(crate) fn restrict_owner(path: &Path) -> io::Result<()> {
+    unsafe_platform::secure(path)
+}
+
 pub(crate) fn write_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
