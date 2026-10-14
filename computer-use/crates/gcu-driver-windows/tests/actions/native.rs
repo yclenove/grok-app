@@ -4,7 +4,11 @@ use gcu_core::{
     driver::*,
     model::{NativeHandle, RawNode},
 };
-use gcu_driver_windows::{api::WinApi, RealWinApi, WindowsDriver};
+use gcu_driver_windows::{
+    api::WinApi,
+    worker::{ExecMode, WorkerConfig},
+    RealWinApi, WindowsDriver,
+};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -49,8 +53,18 @@ fn foreground(api: &RealWinApi) -> u64 {
 }
 
 #[tokio::test]
-#[ignore = "not_run: requires disposable unelevated Windows desktop, fixture state file, and unrelated foreground window"]
+#[ignore = "not_run: requires disposable Windows desktop, fixture oracle, unrelated foreground window and GCU_WORKER_EXE"]
 async fn semantic_actions_native_external_oracle_and_background_contract() {
+    semantic_contract(ExecMode::default()).await;
+}
+
+#[tokio::test]
+#[ignore = "not_run: requires disposable unelevated Windows desktop, fixture oracle and unrelated foreground window"]
+async fn semantic_actions_in_process_native_external_oracle_and_background_contract() {
+    semantic_contract(ExecMode::InProcess).await;
+}
+
+async fn semantic_contract(mode: ExecMode) {
     let exe = PathBuf::from(
         std::env::var_os("GCU_FIXTURE_EXE").expect("absolute path to running gcu-fixture.exe"),
     );
@@ -62,7 +76,19 @@ async fn semantic_actions_native_external_oracle_and_background_contract() {
     let state = PathBuf::from(
         std::env::var_os("GCU_FIXTURE_STATE").expect("state file of that synthetic fixture"),
     );
-    let driver = WindowsDriver::new().await.unwrap();
+    let worker = if mode == ExecMode::Worker {
+        let path = PathBuf::from(
+            std::env::var_os("GCU_WORKER_EXE").expect("absolute path to built gcu.exe"),
+        );
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap().to_string_lossy(), "gcu.exe");
+        path
+    } else {
+        PathBuf::from("gcu") // InProcess never launches this executable.
+    };
+    let driver = WindowsDriver::with_exec_mode(mode, WorkerConfig::new(worker))
+        .await
+        .unwrap();
     let app = driver
         .resolve_app(&AppQuery(exe.to_string_lossy().into()))
         .await

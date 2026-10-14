@@ -17,6 +17,7 @@ pub mod gate;
 pub mod identity;
 pub mod testing;
 pub mod uia;
+pub mod worker;
 
 pub use driver::{WindowsDriver, WindowsElement};
 #[cfg(windows)]

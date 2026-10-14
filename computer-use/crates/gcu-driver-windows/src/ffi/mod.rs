@@ -137,6 +137,18 @@ impl RealWinApi {
             watcher: std::sync::Mutex::new(None),
         })
     }
+    // Stable across child restarts, private to one parent process instance.
+    pub(crate) fn for_worker(namespace: &str) -> Result<Self> {
+        if namespace.is_empty()
+            || namespace.len() > 128
+            || !namespace.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        {
+            return Err(DriverError::InvalidRequest);
+        }
+        let mut api = Self::new()?;
+        api.property = wide(&format!("GrokComputerUse.WindowGeneration.{namespace}"));
+        Ok(api)
+    }
     fn generation(&self) -> u64 {
         self.generation.fetch_add(1, Ordering::Relaxed)
     }

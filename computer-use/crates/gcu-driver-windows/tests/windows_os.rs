@@ -6,7 +6,7 @@ use gcu_driver_windows::WindowsDriver;
 use std::time::{Duration, Instant};
 
 async fn driver() -> WindowsDriver {
-    let driver = WindowsDriver::new()
+    let driver = WindowsDriver::new_in_process()
         .await
         .expect("Use an unelevated interactive Windows session");
     let deadline = Instant::now() + Duration::from_secs(30);

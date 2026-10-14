@@ -60,7 +60,7 @@ pub(super) async fn portable(props: Properties) -> (FakeUia, NativeHandle) {
         ..Default::default()
     });
     let node = source.root(8).await.unwrap().unwrap();
-    source.properties(node).await.unwrap();
+    let props = source.properties(node).await.unwrap();
     let window = WindowRef {
         app: AppRef {
             info: AppInfo {
@@ -72,7 +72,16 @@ pub(super) async fn portable(props: Properties) -> (FakeUia, NativeHandle) {
         },
         id: "8".into(),
     };
-    (source, NativeHandle::new(UiaElement { window, node }))
+    (
+        source,
+        NativeHandle::new(UiaElement {
+            window,
+            node,
+            hwnd: 8,
+            runtime_id: props.runtime_id,
+            fingerprint: 0,
+        }),
+    )
 }
 pub(super) fn request(pattern: Pattern, el: NativeHandle) -> (DriverAction, PatternAction) {
     match pattern {

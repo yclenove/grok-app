@@ -1,7 +1,7 @@
 //! Driver-owned observation coordination; no COM interfaces cross this boundary.
 use super::{
     events::UiaEventSource,
-    source::{NodeId, UiaSource},
+    source::{CachedElement, NodeId, UiaSource},
     tree,
 };
 use gcu_core::{
@@ -21,6 +21,12 @@ pub struct UiaElement {
     pub window: WindowRef,
     /// Worker-local snapshot identity.
     pub node: NodeId,
+    /// Owning HWND, copied from validated discovery.
+    pub hwnd: u64,
+    /// Cached UIA RuntimeId (never a provider pointer).
+    pub runtime_id: Vec<i32>,
+    /// Native tree identity, excluding volatile state/value.
+    pub fingerprint: u64,
 }
 pub(crate) struct Observer {
     source: Arc<dyn UiaSource>,
@@ -54,19 +60,22 @@ impl Observer {
         let mut remaining = opts.clone();
         remaining.timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
         let mut raw = tree::build_raw_tree(self.source.as_ref(), hwnd, &remaining, cancel).await?;
-        fn bind(node: &mut RawNode, win: &WindowRef) {
-            if let Some(id) = node.handle.downcast_ref::<NodeId>().copied() {
+        fn bind(node: &mut RawNode, win: &WindowRef, hwnd: u64) {
+            if let Some(id) = node.handle.downcast_ref::<CachedElement>().cloned() {
                 node.handle = NativeHandle::new(UiaElement {
                     window: win.clone(),
-                    node: id,
+                    node: id.node,
+                    hwnd,
+                    runtime_id: id.runtime_id,
+                    fingerprint: node.fingerprint.0,
                 });
             }
             for child in &mut node.children {
-                bind(child, win);
+                bind(child, win, hwnd);
             }
         }
         if let Some(root) = &mut raw.root {
-            bind(root, win);
+            bind(root, win, hwnd);
         }
         Ok(raw)
     }

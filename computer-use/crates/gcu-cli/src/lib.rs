@@ -21,6 +21,7 @@ mod proxy;
 pub mod resume;
 mod runtime;
 mod turn_ended;
+mod worker;
 
 /// Process entry used by the `gcu` binary.
 ///

@@ -230,7 +230,7 @@ async fn new_observation_invalidates_old_generation_without_rebinding_old_handle
 
 #[tokio::test]
 async fn ancestor_becoming_execution_surface_refuses_ordinary_descendant_actions() {
-    use gcu_driver_windows::uia::{source::NodeId, tree, UiaElement};
+    use gcu_driver_windows::uia::{source::UiaSource, UiaElement};
     let (_, seed) = portable(all_patterns()).await;
     let window = seed.downcast_ref::<UiaElement>().unwrap().window.clone();
     let source = FakeUia::new(FakeNode {
@@ -240,13 +240,17 @@ async fn ancestor_becoming_execution_surface_refuses_ordinary_descendant_actions
             ..Default::default()
         }],
     });
-    let tree = tree::build_raw_tree(&source, 8, &TreeOpts::default(), &Cancel::default())
-        .await
-        .unwrap();
-    let root = tree.root.unwrap();
-    let node = *root.children[0].handle.downcast_ref::<NodeId>().unwrap();
+    let root_id = source.root(8).await.unwrap().unwrap();
+    let node = source.children(root_id, None, 1).await.unwrap().nodes[0];
+    let props = source.properties(node).await.unwrap();
     source.update_properties(1, |p| p.name = Some("Debug Console REPL".into()));
-    let el = NativeHandle::new(UiaElement { window, node });
+    let el = NativeHandle::new(UiaElement {
+        window,
+        node,
+        hwnd: 8,
+        runtime_id: props.runtime_id,
+        fingerprint: 0,
+    });
     for &pattern in PATTERNS {
         assert_eq!(
             actions::perform(

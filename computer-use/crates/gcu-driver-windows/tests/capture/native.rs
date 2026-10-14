@@ -4,7 +4,7 @@ use gcu_core::driver::{AppQuery, WindowRef};
 use gcu_driver_windows::WindowsDriver;
 
 async fn fixture_window() -> (WindowsDriver, WindowRef) {
-    let driver = WindowsDriver::new()
+    let driver = WindowsDriver::new_in_process()
         .await
         .expect("unelevated interactive Windows desktop");
     let app = driver

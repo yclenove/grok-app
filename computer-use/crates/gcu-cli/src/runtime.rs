@@ -7,6 +7,9 @@ use crate::{
 use std::sync::Arc;
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
+    if matches!(cli.command, Some(Command::Worker)) {
+        return crate::worker::run().await;
+    }
     if let Some(Command::TurnEnded { session, payload }) = cli.command.as_ref() {
         let mut args = Vec::new();
         if let Some(session) = session {

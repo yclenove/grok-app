@@ -32,7 +32,7 @@
 | P2-01 | Windows 发现 / 身份 / 虚拟桌面 | P0-05 | 2d | done | cu2/P2-01-windows-discovery |  | 2026-10-13 | 34测试；WinGate 统一门禁(引擎提升/高完整性目标/安全桌面)；真实 Windows 冒烟 ignored(not_run) |
 | P2-02 | Windows UIA 树 | P2-01 | 3d | done | cu2/P2-02-uia-tree |  | 2026-10-13 | 常驻 MTA + CacheRequest 批量取属性；2s/5000 节点上限并设置 RawTree.incomplete；三类事件订阅 Drop 反注册；终端/IDE 启发式；真机冒烟(记事本/资源管理器/设置)not_run |
 | P2-03 | Windows WGC 截图 | P2-01、P2-02、P0-07 | 2d | done | cu2/P2-03-windows-capture |  | 2026-10-13 | WGC 单帧 + PrintWindow(PW_RENDERFULLCONTENT) 回退，经 CaptureSource/FakeCapture 分层；最小化→window_minimized；受保护/全黑不当成功；路径经 CaptureStats；真机遮挡/150% DPI not_run |
-| P2-04 | Windows worker 隔离 | P2-02、P2-03 | 2d | todo |  |  |  |  |
+| P2-04 | Windows worker 隔离 | P2-02、P2-03 | 2d | done | cu2/P2-04-worker |  | 2026-10-13 | gcu worker + supervisor：崩溃/超时/坏帧重启，只读重试一次、变更返回 unknown；Windows Job Object 随父退出；故障注入仅 test-worker-faults；语义动作(P2-05)也走 worker；真机与 300 次浸泡 not_run |
 | P2-05 | Windows 语义动作 | P2-02 | 2.5d | done | cu2/P2-05-uia-actions |  | 2026-10-13 | Invoke/Toggle/SelectionItem/ExpandCollapse/Value/RangeValue/Scroll/Text 选区/LegacyIAccessible；仅明确无副作用才回退，不确定不重放；SetValue 仅 settable 非密码；不 SetFocus；真机夹具契约 not_run |
 | P2-06 | Windows 定向消息与前台 | P2-05 | 3d | todo |  |  |  |  |
 | P2-07 | Windows 守卫 / 热键 / 排除截图 | P2-06 | 1.5d | todo |  |  |  |  |

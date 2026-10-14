@@ -90,7 +90,9 @@ pub(super) fn read(element: &IUIAutomationElement) -> Properties {
             None
         }
     };
+    let runtime_id = r.runtime_id().unwrap_or_default();
     Properties {
+        runtime_id,
         control_type: control_type.unwrap_or(0),
         aria_role,
         name,
@@ -120,6 +122,45 @@ struct Reader<'a> {
     partial: bool,
 }
 impl Reader<'_> {
+    fn runtime_id(&mut self) -> Option<Vec<i32>> {
+        use windows::Win32::System::Ole::{
+            SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+        };
+        let v = self.get(30000, VARENUM(VT_ARRAY.0 | VT_I4.0))?;
+        // SAFETY: get checked VT_ARRAY|VT_I4; VARIANT owns the array during access.
+        let array = unsafe { v.Anonymous.Anonymous.Anonymous.parray };
+        if array.is_null() {
+            self.partial = true;
+            return None;
+        }
+        // SAFETY: live SAFEARRAY; all scalar output pointers are valid. UIA
+        // RuntimeIds are bounded here to avoid accepting a provider-sized array.
+        let values = unsafe {
+            let bounds = (SafeArrayGetLBound(array, 1), SafeArrayGetUBound(array, 1));
+            let (Ok(lower), Ok(upper)) = bounds else {
+                self.partial = true;
+                return None;
+            };
+            if SafeArrayGetDim(array) != 1
+                || !(1..=256).contains(&(i64::from(upper) - i64::from(lower) + 1))
+            {
+                self.partial = true;
+                return None;
+            }
+            let mut result = Vec::new();
+            for index in lower..=upper {
+                let mut value = 0i32;
+                if SafeArrayGetElement(array, &index, &mut value as *mut _ as *mut _).is_err() {
+                    self.partial = true;
+                    return None;
+                }
+                result.push(value);
+            }
+            result
+        };
+        Some(values)
+    }
+
     fn get(&mut self, id: i32, expected: VARENUM) -> Option<VARIANT> {
         // SAFETY: all IDs were added to this cached element's request. The owned
         // VARIANT releases its data on Drop. No payload enters errors or logging.
