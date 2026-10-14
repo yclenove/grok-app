@@ -57,7 +57,12 @@ impl AsyncWrite for Broken {
 #[tokio::test]
 async fn read_error_records_transport_failure_and_closes_session() {
     let (session, release) = session();
-    let mut transport = Stdio::new(Broken, tokio::io::sink(), session.clone());
+    let mut transport = Stdio::new(
+        Broken,
+        tokio::io::sink(),
+        session.clone(),
+        crate::lifecycle::Lifecycle::new(session.clone()),
+    );
     assert!(transport.receive().await.is_none());
     assert!(transport.failure_flag().load(Ordering::Acquire));
     assert!(session.is_closed());
@@ -66,7 +71,12 @@ async fn read_error_records_transport_failure_and_closes_session() {
 #[tokio::test]
 async fn parse_error_write_failure_closes_session_without_spinning() {
     let (session, release) = session();
-    let mut transport = Stdio::new(&b"invalid\n"[..], Broken, session.clone());
+    let mut transport = Stdio::new(
+        &b"invalid\n"[..],
+        Broken,
+        session.clone(),
+        crate::lifecycle::Lifecycle::new(session.clone()),
+    );
     assert!(transport.receive().await.is_none());
     assert!(transport.failure_flag().load(Ordering::Acquire));
     assert!(session.is_closed());
@@ -76,7 +86,12 @@ async fn parse_error_write_failure_closes_session_without_spinning() {
 async fn protocol_write_and_shutdown_errors_are_reported() {
     let (session, _) = session();
     let (_writer, input) = tokio::io::duplex(64);
-    let mut transport = Stdio::new(input, Broken, session.clone());
+    let mut transport = Stdio::new(
+        input,
+        Broken,
+        session.clone(),
+        crate::lifecycle::Lifecycle::new(session.clone()),
+    );
     let message: ServerJsonRpcMessage =
         serde_json::from_value(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})).unwrap();
     assert!(transport.send(message).await.is_err());

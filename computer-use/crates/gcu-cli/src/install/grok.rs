@@ -2,8 +2,8 @@
 //!
 //! `grok mcp add` rewrites `config.toml` and strips comments (probed on grok
 //! 1.0.52), so this editor uses `toml_edit` instead of the CLI. Grok has no
-//! Codex-style `notify`. ADR 0001 installs a `Stop` hook and the script
-//! forwards stdin only when `reason` is `end_turn`. The hook lives under
+//! Codex-style `notify`. ADR 0001 installs a `Stop` hook that forwards stdin;
+//! gcu validates the JSON and handles only Stop/end_turn. The hook lives under
 //! `<home>/.grok/hooks` for both scopes. Apply asks before it changes anything
 //! under that directory.
 
@@ -194,15 +194,9 @@ fn script_text(gcu: &str) -> String {
     let mut out = String::from("#!/bin/sh\n");
     out.push_str(MARKER);
     out.push('\n');
-    out.push_str("# Forward a Grok Build Stop hook to gcu only when reason is end_turn.\n");
-    out.push_str("input=$(cat)\n");
-    out.push_str(
-        "reason=$(printf '%s\\n' \"$input\" | sed -n 's/.*\"reason\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' | head -n 1)\n",
-    );
-    out.push_str("if [ \"$reason\" = \"end_turn\" ]; then\n");
-    out.push_str("  printf '%s\\n' \"$input\" | ");
+    out.push_str("# gcu validates Stop/end_turn JSON and diagnoses malformed stdin.\n");
     out.push_str(&quoted);
-    out.push_str(" turn-ended\nfi\nexit 0\n");
+    out.push_str(" turn-ended\nexit 0\n");
     out
 }
 

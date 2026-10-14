@@ -37,6 +37,9 @@ pub(crate) enum Command {
         token_fd: Option<usize>,
         #[arg(long)]
         port: Option<u16>,
+        /// Idle fallback for clients without a turn hook (architecture §8: 45s).
+        #[arg(long, default_value = "45", value_parser = clap::value_parser!(u64).range(1..))]
+        turn_idle_secs: u64,
     },
     /// Run an App-managed engine over private inherited Host and Stop channels.
     Engine {
@@ -52,6 +55,18 @@ pub(crate) enum Command {
         host_token_fd: Option<usize>,
         #[arg(long)]
         stop_fd: usize,
+    },
+    /// Retire Turn authorization. Hook errors print one line and exit 0.
+    #[command(
+        long_about = "Retire Turn approvals without clearing Stop. Reads Grok Stop/end_turn JSON from stdin or Codex agent-turn-complete JSON from argv. Uses the existing private resume endpoint. Multiple sessions require --session; never broadcasts. Hook errors print a redacted stderr line and exit 0. --previous-notify forwards the original argv and stdin first, and preserves its exit status. Other clients use notifications/turn-ended or the 45-second idle fallback."
+    )]
+    TurnEnded {
+        /// Existing private control directory; required if several sessions run.
+        #[arg(long)]
+        session: Option<std::path::PathBuf>,
+        /// Previous command and appended JSON, or the notify JSON alone.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        payload: Vec<std::ffi::OsString>,
     },
     /// Execute one tool in process. Images remain in a private temporary session.
     Call {

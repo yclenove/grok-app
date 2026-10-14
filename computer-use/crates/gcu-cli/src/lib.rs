@@ -19,14 +19,20 @@ mod private;
 mod proxy;
 pub mod resume;
 mod runtime;
+mod turn_ended;
 
 /// Process entry used by the `gcu` binary.
 ///
 /// Parses arguments and runs the selected command until completion/stdio EOF.
 /// Native work caps at five seconds; interactive resume at 120 seconds. Stop
-/// runs separately from action queues. Panics/unknown failures exit with 10;
-/// payloads, credentials and panic details are never printed.
+/// runs separately from action queues. Panics/unknown failures exit with 10,
+/// except the nonfatal turn-ended hook. Payloads, credentials and panic details
+/// are never printed.
 pub fn cli_main() {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "turn-ended") {
+        turn_ended::entry(args.into_iter().skip(1).collect());
+    }
     use clap::Parser;
     std::panic::set_hook(Box::new(|_| {
         eprintln!("Internal panic; operation was not replayed")
