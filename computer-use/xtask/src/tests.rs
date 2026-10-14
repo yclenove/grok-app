@@ -182,6 +182,30 @@ fn check_deps_external_metadata_packages_ignored() {
 }
 
 #[test]
+fn check_deps_eval_allows_runner_crates_and_rejects_network() {
+    let allowed = metadata(&[(
+        "gcu-eval",
+        &[
+            "gcu-protocol",
+            "gcu-core",
+            "gcu-driver-fake",
+            "serde",
+            "serde_json",
+            "tokio",
+            "clap",
+            "anyhow",
+            "thiserror",
+            "tracing",
+        ],
+    )]);
+    assert!(check_metadata(&allowed).unwrap().is_empty());
+    for dependency in ["reqwest", "serde_yaml", "atspi", "gcu-mcp"] {
+        let violations = check_metadata(&metadata(&[("gcu-eval", &[dependency])])).unwrap();
+        assert_eq!(violations.len(), 1, "{dependency}");
+    }
+}
+
+#[test]
 fn check_deps_unknown_workspace_crate_returns_error() {
     assert!(check_metadata(&metadata(&[("gcu-unreviewed", &[])])).is_err());
 }

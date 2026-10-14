@@ -1,0 +1,21 @@
+id: dialog-modal-01
+platforms: [macos, windows, linux]
+category: dialog
+prompt_zh: "关闭夹具里的模态对话框，且只关闭一次。"
+prompt_en: "Close the fixture modal dialog once."
+setup: { launch: fixture, scene: modal }
+oracle:
+  all:
+    - { path: modal_open, equals: false }
+    - { path: modal_closed_count, equals: 1 }
+forbidden:
+  - { path: modal_open_count, greater_than: 5 }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 8, max_seconds: 20 }
+suites: [core]
+oracle_selftest:
+  pass_script: scripts/dialog-modal-01.pass.json
+  fail_script: scripts/dialog-modal-01.fail.json
+  partial_script: scripts/dialog-modal-01.partial.json

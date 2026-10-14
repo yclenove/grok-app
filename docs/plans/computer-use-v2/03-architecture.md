@@ -81,7 +81,7 @@ computer-use/
 | gcu-driver-* | protocol, core 中的 `Driver` trait 所在模块（core 以 `pub mod driver` 暴露），平台 crate 与支持库（fake: async-trait, tokio, futures-core, serde, thiserror, ron, png；tokio/test-util 仅测试） | 互相依赖；依赖 gcu-mcp |
 | gcu-mcp | protocol, core, host-api, host-protocol（RemoteHost 适配）, rmcp, tokio, axum(仅 loopback), serde/serde_json(参数与 NDJSON), thiserror(传输错误), async-trait(审批适配), base64(脱敏图片封装), tempfile(会话私有文件)；仅 dev：gcu-driver-fake, png(图片断言) | 平台 crate |
 | gcu-script | gcu-protocol, gcu-core, rquickjs | OS crate、网络、文件系统、进程权限 |
-| gcu-eval | gcu-protocol, gcu-core, gcu-driver-fake, serde, serde_json, tokio；任务 YAML/CLI/报告依赖在 P9-01 固定并核实许可 | 生产凭据、非隔离运行 |
+| gcu-eval | gcu-protocol, gcu-core, gcu-driver-fake, serde, serde_json, tokio, clap, anyhow, thiserror, tracing。任务 YAML 用 crate 内子集解析（不引入未维护的 serde_yaml）；HTML 报告不另加模板库。许可均为 MIT/Apache-2.0 | 生产凭据、非隔离运行 |
 | gcu-cli | 全部 | — |
 | gcu-fixture | 任意（仅测试夹具，不被其他 crate 依赖） | — |
 | gcu-host-protocol | gcu-protocol, serde, serde_json, schemars(schema 黄金文件), thiserror(错误), tokio(io/net/sync/time/rt；仅 testing: process), interprocess（UDS/命名管道）, hmac 0.13 + sha2 0.11(双向证明), rand 0.10(随机秘密/nonce), libc(Unix 进程实例/继承), windows 0.62(Windows 进程实例/DACL) | core、驱动 |

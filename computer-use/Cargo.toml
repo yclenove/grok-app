@@ -13,6 +13,7 @@ members = [
     "crates/gcu-mcp",
     "crates/gcu-overlay",
     "crates/gcu-cli",
+    "crates/gcu-eval",
     "apps/fixture",
     "xtask",
 ]

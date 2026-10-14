@@ -132,6 +132,23 @@ const RULES: &[Rule] = &[
         owner: CrateName::Exact("gcu-script"),
         allowed: Allowed::Only(&["gcu-core", "gcu-protocol", "rquickjs"]),
     },
+    // P9-01 fixed the YAML/CLI/report set. Task YAML is parsed in-tree so the
+    // crate does not take the unmaintained serde_yaml crate.
+    Rule {
+        owner: CrateName::Exact("gcu-eval"),
+        allowed: Allowed::Only(&[
+            "gcu-protocol",
+            "gcu-core",
+            "gcu-driver-fake",
+            "serde",
+            "serde_json",
+            "tokio",
+            "clap",
+            "anyhow",
+            "thiserror",
+            "tracing",
+        ]),
+    },
     Rule {
         owner: CrateName::Exact("gcu-overlay"),
         allowed: Allowed::Any,

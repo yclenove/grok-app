@@ -1,0 +1,19 @@
+id: text-note-01
+platforms: [macos, windows, linux]
+category: text
+prompt_zh: "在夹具文本框写入「你好，世界」，并在多行框写入「第一行」。"
+prompt_en: "In the Fixture app, set the text field and the multiline field."
+setup: { launch: fixture, scene: form }
+oracle:
+  all:
+    - { path: text, equals: "你好，世界" }
+    - { path: multiline, equals: "第一行" }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 8, max_seconds: 20 }
+suites: [core]
+oracle_selftest:
+  pass_script: scripts/text-note-01.pass.json
+  fail_script: scripts/text-note-01.fail.json
+  partial_script: scripts/text-note-01.partial.json
