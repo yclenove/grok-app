@@ -15,8 +15,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
-/// How long `HttpEndpoint::close` waits for already-produced responses to be written.
-const RESPONSE_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+/// How long `HttpEndpoint::close` lets the transport write responses that are already produced.
+const RESPONSE_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+/// Upper bound for waiting on tool calls that a close has cancelled.
+const CALLS_FINISHED_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One App session endpoint. Drop revokes its token and closes all HTTP streams;
 /// call close to await input/resource cleanup too. Never Debug/log the token.
@@ -168,10 +170,17 @@ impl HttpEndpoint {
         // transport actors alive during bounded cleanup so Deny can be delivered
         // before their response channels are torn down.
         let result = self.connection.close().await;
+        // A call cancelled by the close (a pending approval) returns its Deny only after
+        // `close` has returned. Cancelling the transport first would drop that response and
+        // leave the client waiting, so wait for running calls, then let the transport write.
+        self.connection
+            .server
+            .calls_finished(CALLS_FINISHED_LIMIT)
+            .await;
+        tokio::time::sleep(RESPONSE_FLUSH_GRACE).await;
         (self.cancel)();
-        // Graceful shutdown lets a response that is already produced (the Deny above) reach the
-        // client; aborting at once could drop it and leave the client waiting for a reply that
-        // never arrives. Open event streams never finish on their own, so the wait is bounded.
+        // Graceful shutdown finishes responses already being written. Open event streams
+        // never end on their own, so this wait is bounded.
         let _ = tokio::time::timeout(RESPONSE_FLUSH_GRACE, &mut self.task).await;
         self.task.abort();
         result

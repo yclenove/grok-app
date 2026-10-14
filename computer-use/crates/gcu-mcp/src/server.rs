@@ -63,9 +63,20 @@ struct Inner {
     calls: AtomicU64,
     lifecycle: crate::lifecycle::Lifecycle,
 }
+/// Maximum concurrently running tool calls per session.
+const SLOTS: usize = 32;
 impl Server {
     pub(crate) fn lifecycle(&self) -> crate::lifecycle::Lifecycle {
         self.0.lifecycle.clone()
+    }
+    /// Wait until no `call_tool` is still running, or `limit` passes. A call that was
+    /// cancelled by close (for example a pending approval) returns its Deny result only
+    /// after `close` has returned, so transports wait here before they tear down.
+    pub(crate) async fn calls_finished(&self, limit: std::time::Duration) {
+        let end = tokio::time::Instant::now() + limit;
+        while self.0.slots.available_permits() < SLOTS && tokio::time::Instant::now() < end {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
     pub(crate) fn session(&self) -> Arc<Session> {
         self.0.session.clone()
@@ -134,7 +145,7 @@ impl Server {
             tools,
             config,
             default_tree_nodes: policy.max_tree_nodes.clamp(1, 5000),
-            slots: Semaphore::new(32),
+            slots: Semaphore::new(SLOTS),
             delivery: tokio::sync::Mutex::new(()),
             calls: AtomicU64::new(1),
             lifecycle,
@@ -282,6 +293,7 @@ impl ServerHandler for Server {
         }
     }
 }
+
 pub(crate) struct Cleanup {
     server: Option<Server>,
     idle: tokio::task::JoinHandle<()>,
