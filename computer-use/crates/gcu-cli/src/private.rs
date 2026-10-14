@@ -71,8 +71,11 @@ fn check(path: &Path, directory: bool) -> Result<(), Failure> {
             "Private control path has an unexpected type",
         ));
     }
-    unsafe_platform::check(path, &metadata, directory).map_err(|_| {
-        Failure::arguments("Private control path has an unknown owner or unsafe permissions")
+    unsafe_platform::check(path, &metadata, directory).map_err(|error| {
+        // The detail is an OS error or an ACL/mode description, never file contents or secrets.
+        Failure::arguments(format!(
+            "Private control path has an unknown owner or unsafe permissions ({error})"
+        ))
     })
 }
 pub(crate) fn session_directory(prefix: &str) -> io::Result<tempfile::TempDir> {

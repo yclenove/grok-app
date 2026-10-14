@@ -19,6 +19,79 @@ pub(super) fn check(_: &Path, metadata: &Metadata, directory: bool) -> io::Resul
     Ok(())
 }
 
+/// Whether an SDDL DACL string grants access to the owner and nobody else, and is protected
+/// from inheritance.
+///
+/// Windows may add the `AI`/`AR` (auto-inherited) flags when it reads a descriptor back, so the
+/// flag block is checked as a set of allowed flags that must include `P`. The ACE list must be
+/// exactly one allow-all-to-owner entry; anything else (extra trustees, deny entries,
+/// inherited entries) fails closed.
+#[allow(dead_code)]
+pub(crate) fn dacl_is_owner_only(sddl: &str) -> bool {
+    let Some(rest) = sddl.strip_prefix("D:") else {
+        return false;
+    };
+    let Some(open) = rest.find('(') else {
+        return false;
+    };
+    let (flags, aces) = (&rest[..open], &rest[open..]);
+    if aces != "(A;;FA;;;OW)" {
+        return false;
+    }
+    let mut remaining = flags;
+    let mut protected = false;
+    while !remaining.is_empty() {
+        if let Some(next) = remaining
+            .strip_prefix("AI")
+            .or_else(|| remaining.strip_prefix("AR"))
+        {
+            remaining = next;
+        } else if let Some(next) = remaining.strip_prefix('P') {
+            protected = true;
+            remaining = next;
+        } else {
+            return false;
+        }
+    }
+    protected
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::dacl_is_owner_only;
+
+    #[test]
+    fn owner_only_protected_dacl_is_accepted_with_system_flags() {
+        for ok in [
+            "D:P(A;;FA;;;OW)",
+            "D:PAI(A;;FA;;;OW)",
+            "D:PAR(A;;FA;;;OW)",
+            "D:AIP(A;;FA;;;OW)",
+        ] {
+            assert!(dacl_is_owner_only(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn anything_broader_or_inheriting_is_refused() {
+        for bad in [
+            "",
+            "D:(A;;FA;;;OW)",
+            "D:AI(A;;FA;;;OW)",
+            "D:P(A;;FA;;;OW)(A;;FA;;;BA)",
+            "D:P(A;;FA;;;WD)",
+            "D:P(D;;FA;;;OW)",
+            "D:P(A;ID;FA;;;OW)",
+            "D:P(A;;FR;;;OW)",
+            "D:PXX(A;;FA;;;OW)",
+            "O:BAD:P(A;;FA;;;OW)",
+            "D:P",
+        ] {
+            assert!(!dacl_is_owner_only(bad), "{bad}");
+        }
+    }
+}
+
 #[cfg(windows)]
 mod windows_acl {
     use super::*;
@@ -128,8 +201,9 @@ mod windows_acl {
         unsafe {
             LocalFree(Some(HLOCAL(text.0.cast())));
         }
-        if string? != SDDL {
-            return Err(io::Error::other("unsafe private ACL"));
+        let string = string?;
+        if !super::dacl_is_owner_only(&string) {
+            return Err(io::Error::other(format!("unsafe private ACL: {string}")));
         }
         Ok(())
     }

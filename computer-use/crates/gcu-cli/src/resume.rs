@@ -323,7 +323,7 @@ async fn send(directory: &Path, request: &str) -> Result<(), Failure> {
         #[cfg(windows)]
         let mut stream = {
             let path = directory.join("endpoint");
-            private::check_file(&path).map_err(|_| io::Error::other("unsafe endpoint"))?;
+            private::check_file(&path).map_err(|failure| io::Error::other(failure.message))?;
             let name = std::fs::read_to_string(path)?;
             tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?
         };
