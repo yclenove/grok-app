@@ -1,4 +1,5 @@
 //! Persistent native-thread executor. Dropped futures abandon queued/in-flight work.
+use super::patterns::{ActionContext, PatternResult};
 use gcu_core::driver::{DriverError, Result, DRIVER_DEADLINE};
 use std::{
     sync::{
@@ -13,15 +14,20 @@ type Task<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub(super) struct Request {
     abandoned: AtomicBool,
     deadline: Instant,
+    context: Option<ActionContext>,
 }
 impl Request {
     fn new() -> Self {
         Self {
             abandoned: AtomicBool::new(false),
             deadline: Instant::now() + DRIVER_DEADLINE,
+            context: None,
         }
     }
     pub(super) fn check(&self) -> Result<()> {
+        if let Some(context) = &self.context {
+            context.check()?;
+        }
         if self.abandoned.load(Ordering::Acquire) || Instant::now() >= self.deadline {
             Err(DriverError::Timeout {
                 maybe_executed: false,
@@ -31,10 +37,37 @@ impl Request {
         }
     }
 }
-struct Abandon(Arc<Request>);
+impl Request {
+    pub(super) fn dispatch(
+        &self,
+        mutation: impl FnOnce() -> Result<PatternResult>,
+    ) -> Result<PatternResult> {
+        self.check()?;
+        let context = self.context.as_ref().ok_or(DriverError::InvalidRequest)?;
+        let previous = context.begin()?;
+        let result = mutation();
+        if matches!(
+            result,
+            Ok(PatternResult::Unsupported | PatternResult::Unavailable)
+        ) || result.as_ref().is_err_and(|e| !e.maybe_executed())
+        {
+            context.restore(previous);
+        }
+        result.map_err(|e| context.error(e))
+    }
+}
+struct Abandon {
+    request: Arc<Request>,
+    completed: bool,
+}
 impl Drop for Abandon {
     fn drop(&mut self) {
-        self.0.abandoned.store(true, Ordering::Release);
+        self.request.abandoned.store(true, Ordering::Release);
+        if !self.completed {
+            if let Some(context) = &self.request.context {
+                context.close();
+            }
+        }
     }
 }
 pub(super) struct Worker<T> {
@@ -80,9 +113,28 @@ impl<T: 'static> Worker<T> {
         &self,
         task: impl FnOnce(&mut T, &Request) -> Result<R> + Send + 'static,
     ) -> Result<R> {
+        self.call_inner(None, task).await
+    }
+    pub(super) async fn call_action<R: Send + 'static>(
+        &self,
+        context: ActionContext,
+        task: impl FnOnce(&mut T, &Request) -> Result<R> + Send + 'static,
+    ) -> Result<R> {
+        self.call_inner(Some(context), task).await
+    }
+    async fn call_inner<R: Send + 'static>(
+        &self,
+        context: Option<ActionContext>,
+        task: impl FnOnce(&mut T, &Request) -> Result<R> + Send + 'static,
+    ) -> Result<R> {
         let (tx, rx) = oneshot::channel();
-        let request = Arc::new(Request::new());
-        let _abandon = Abandon(request.clone());
+        let mut request = Request::new();
+        request.context = context.clone();
+        let request = Arc::new(request);
+        let mut abandon = Abandon {
+            request: request.clone(),
+            completed: false,
+        };
         self.tx
             .try_send(Box::new(move |state| {
                 if tx.is_closed() {
@@ -92,10 +144,18 @@ impl<T: 'static> Worker<T> {
                 let _ = tx.send(result);
             }))
             .map_err(|_| crashed())?;
-        tokio::time::timeout(DRIVER_DEADLINE, rx)
-            .await
-            .map_err(|_| timeout())?
-            .map_err(|_| crashed())?
+        let response = tokio::time::timeout(DRIVER_DEADLINE, rx).await;
+        if response.is_err() {
+            if let Some(context) = &context {
+                context.close();
+            }
+        }
+        let result = response
+            .map_err(|_| timeout())
+            .and_then(|r| r.map_err(|_| crashed()))
+            .and_then(|r| r);
+        abandon.completed = true;
+        result.map_err(|error| context.as_ref().map_or(error.clone(), |c| c.error(error)))
     }
     pub(super) fn enqueue(
         &self,
@@ -125,6 +185,93 @@ fn timeout() -> DriverError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn action_preparation_cancelled_before_dispatch_never_writes_later() {
+        let worker = Worker::start(|| Ok(0u32), |_| {}).await.unwrap();
+        let cancel = gcu_core::driver::Cancel::default();
+        let context = ActionContext::new(&cancel);
+        let marker = context.clone();
+        let (started, ready) = oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        let operation = worker.call_action(context, move |count, r| {
+            let _ = started.send(());
+            let _ = waiting.recv_timeout(Duration::from_millis(500));
+            r.dispatch(|| {
+                *count += 1;
+                Ok(PatternResult::Performed)
+            })
+        });
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut operation => panic!("unexpected completion: {result:?}"),
+            _ = ready => {}
+        }
+        cancel.cancel();
+        release.send(()).unwrap();
+        assert_eq!(
+            operation.await,
+            Err(DriverError::Cancelled {
+                maybe_executed: false
+            })
+        );
+        assert!(!marker.maybe_executed());
+        assert_eq!(worker.call(|count, _| Ok(*count)).await.unwrap(), 0);
+    }
+    #[tokio::test]
+    async fn action_inflight_cancelled_returns_unknown_without_replay() {
+        let worker = Worker::start(|| Ok(0u32), |_| {}).await.unwrap();
+        let cancel = gcu_core::driver::Cancel::default();
+        let context = ActionContext::new(&cancel);
+        let marker = context.clone();
+        let (started, ready) = oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        {
+            let operation = worker.call_action(context, move |count, r| {
+                r.dispatch(|| {
+                    *count += 1;
+                    let _ = started.send(());
+                    let _ = waiting.recv_timeout(Duration::from_millis(500));
+                    Ok(PatternResult::Performed)
+                })
+            });
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => panic!("unexpected completion: {result:?}"),
+                _ = ready => {}
+            }
+            cancel.cancel();
+            assert!(marker.maybe_executed());
+            // Dropping the future must not join the blocked native call.
+        }
+        release.send(()).unwrap();
+        assert_eq!(worker.call(|count, _| Ok(*count)).await.unwrap(), 1);
+    }
+    #[tokio::test]
+    async fn action_queued_future_dropped_never_dispatches_after_worker_unblocks() {
+        let worker = Worker::start(|| Ok(0u32), |_| {}).await.unwrap();
+        let (started, ready) = oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        worker
+            .enqueue(move |_, _| {
+                let _ = started.send(());
+                let _ = waiting.recv_timeout(Duration::from_millis(500));
+            })
+            .unwrap();
+        ready.await.unwrap();
+        let context = ActionContext::new(&gcu_core::driver::Cancel::default());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            worker.call_action(context.clone(), |count, r| r.dispatch(|| {
+                *count += 1;
+                Ok(PatternResult::Performed)
+            }))
+        )
+        .await
+        .is_err());
+        assert!(!context.maybe_executed());
+        release.send(()).unwrap();
+        assert_eq!(worker.call(|count, _| Ok(*count)).await.unwrap(), 0);
+    }
     #[tokio::test]
     async fn worker_reuses_thread_and_dropped_queued_calls_never_execute() {
         let worker = Worker::start(|| Ok(0u32), |_| {}).await.unwrap();

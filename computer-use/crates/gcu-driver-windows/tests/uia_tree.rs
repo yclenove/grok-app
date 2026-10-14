@@ -191,7 +191,13 @@ async fn cached_properties_map_states_patterns_ranges_and_physical_frames() {
             | States::SETTABLE
     ));
     assert!(!node.states.contains(States::ENABLED));
-    assert_eq!(node.actions.len(), 8);
+    assert_eq!(node.actions.len(), 10);
+    assert!(node
+        .actions
+        .contains(&gcu_core::model::NodeAction::Increment));
+    assert!(node
+        .actions
+        .contains(&gcu_core::model::NodeAction::Decrement));
     assert_eq!(
         node.value,
         Some(NodeValue::Range {
