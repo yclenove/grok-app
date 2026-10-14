@@ -7,32 +7,53 @@ is [architecture §2](../docs/plans/computer-use-v2/03-architecture.md#2-crate-�
 ```text
 computer-use/
 ├── Cargo.toml                 Workspace packages, dependencies, lints, profiles
-├── Cargo.lock                 Reproducible dependency resolution
+├── Cargo.lock                 Reproducible dependency resolution (always build with --locked)
 ├── rust-toolchain.toml        Pinned stable Rust, rustfmt, clippy
 ├── deny.toml                  License, advisory, and source policy
-├── .cargo/config.toml         cargo xtask alias
+├── docs/                      ADRs (docs/adr) and the CLI reference (docs/cli.md)
+├── scripts/                   verify.sh (one-shot gates), a11y fixtures, policy-data checks
+├── fuzz/                      cargo-fuzz targets (Host codec)
 ├── crates/
-│   ├── gcu-protocol/           Shared tool parameters, results, errors, capabilities
+│   ├── gcu-protocol/           Shared tool parameters, results, errors, capabilities, goldens
 │   ├── gcu-host-api/           Host traits: approval, overlay, policy, events, clock
-│   ├── gcu-host-protocol/      Versioned wire protocol for external Hosts
-│   ├── gcu-core/               Platform-independent engine logic and Driver trait
-│   ├── gcu-driver-macos/       macOS driver, gated by target_os = "macos"
-│   ├── gcu-driver-windows/     Windows driver, gated by windows
-│   ├── gcu-driver-linux/       Linux driver, gated by target_os = "linux"
+│   ├── gcu-host-protocol/      Versioned wire protocol and mutual authentication for external Hosts
+│   ├── gcu-core/               Platform-independent engine: sessions, policy, router, tree pipeline, redaction
+│   ├── gcu-driver-macos/       macOS driver (AX tree, ScreenCaptureKit), gated by target_os = "macos"
+│   ├── gcu-driver-windows/     Windows driver (discovery, UIA tree), gated by windows
+│   ├── gcu-driver-linux/       Linux driver (AT-SPI, X11 capture/input/guards), gated by target_os = "linux"
 │   ├── gcu-driver-fake/        Deterministic desktop for offline tests
-│   ├── gcu-script/             Optional script sandbox
-│   ├── gcu-mcp/                MCP transport and tool registration
-│   ├── gcu-overlay/            Standalone Host overlay
-│   └── gcu-cli/                gcu binary
-├── apps/fixture/               README only; egui + AccessKit app belongs to P1-01
-├── fixtures-native/            README only; native fixtures belong to P1-01
+│   ├── gcu-script/             Optional script sandbox (not started)
+│   ├── gcu-mcp/                MCP transport, tool registration, RemoteHost
+│   ├── gcu-overlay/            Standalone Host overlay (not started)
+│   └── gcu-cli/                gcu binary: mcp, engine, call, doctor, resume, version
+├── apps/fixture/               gcu-fixture: egui + AccessKit app with an external state file
+├── fixtures-native/            Native fixtures for what AccessKit cannot expose
 └── xtask/                      Development gates and dependency-rule tests
 ```
 
-Most crate entry points are documented skeletons; gcu-protocol defines the complete
-default tool schema, results, errors, capabilities, and chord parser. Product
-behavior belongs to subsequent roadmap cards. Platform driver libraries are empty on other
-operating systems, so all workspace members can build together on each platform.
+Progress per card lives in [STATUS.md](../docs/plans/computer-use-v2/STATUS.md); the
+plan is [docs/plans/computer-use-v2](../docs/plans/computer-use-v2/README.md). Real
+driver assembly in `gcu` is not wired yet, so the CLI runs the offline fake desktop only.
+Platform driver libraries are empty on other operating systems, so every workspace
+member builds together on each platform.
+
+Try the offline desktop (details in [docs/cli.md](docs/cli.md)):
+
+```sh
+cargo run -q -p gcu-cli -- call list_apps --driver fake --scene chat
+cargo run -q -p gcu-cli -- doctor --driver fake --json
+```
+
+Run everything the CI runs with one command, from this directory:
+
+```sh
+bash scripts/verify.sh            # fmt, clippy, test, check-deps, golden, budget, deny
+CROSS=1 bash scripts/verify.sh    # also clippy for the Windows and macOS targets
+```
+
+On a machine without a fast CPU, build remotely (`rcargo`, see the repository
+docs); test code for the other platforms is only compiled on its own CI runner,
+so also run `cargo clippy --all-targets --target <triple>` for the driver you touch.
 
 `src-tauri` has no pinned toolchain and its CI uses stable. This workspace pins
 the current stable release, **Rust 1.99.0**, with the minimal profile plus rustfmt
