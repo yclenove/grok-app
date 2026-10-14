@@ -7,9 +7,9 @@ pub const BATCH_SIZE: usize = 64;
 /// Value properties are cached, but password values are never extracted.
 /// No pattern IDs are added to the native cache request.
 pub const PROPERTY_IDS: &[i32] = &[
-    30001, 30003, 30005, 30008, 30009, 30010, 30011, 30012, 30013, 30019, 30022, 30024, 30025,
-    30028, 30031, 30033, 30034, 30035, 30036, 30040, 30041, 30043, 30045, 30046, 30047, 30048,
-    30049, 30050, 30070, 30077, 30079, 30086, 30090, 30101,
+    30000, 30001, 30003, 30005, 30008, 30009, 30010, 30011, 30012, 30013, 30019, 30022, 30024,
+    30025, 30028, 30031, 30033, 30034, 30035, 30036, 30040, 30041, 30043, 30045, 30046, 30047,
+    30048, 30049, 30050, 30070, 30077, 30079, 30086, 30090, 30101,
 ];
 
 /// Pattern availability, never a cached pattern interface.
@@ -41,6 +41,8 @@ pub struct Patterns {
 /// `partial` reports unreliable properties to the completeness pipeline.
 #[derive(Clone, Debug)]
 pub struct Properties {
+    /// Cached UIA RuntimeId; copied integers, never a COM interface.
+    pub runtime_id: Vec<i32>,
     /// UIA_ControlType integer. Unknown IDs are preserved.
     pub control_type: i32,
     /// UIA_AriaRole, when exposed by Chromium/Electron.
@@ -89,6 +91,7 @@ pub struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            runtime_id: Vec::new(),
             control_type: 50025,
             aria_role: None,
             name: None,

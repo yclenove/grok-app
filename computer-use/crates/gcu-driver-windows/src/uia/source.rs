@@ -92,11 +92,14 @@ pub struct FakeUia(pub(super) Arc<Mutex<FakeState>>);
 impl FakeUia {
     /// Flatten a fixture without invoking any OS API.
     pub fn new(root: FakeNode) -> Self {
-        fn add(node: FakeNode, state: &mut FakeState) -> NodeId {
+        fn add(mut node: FakeNode, state: &mut FakeState) -> NodeId {
             let id = NodeId {
                 generation: 1,
                 slot: state.nodes.len() as u64 + 1,
             };
+            if node.properties.runtime_id.is_empty() {
+                node.properties.runtime_id = vec![42, id.slot as i32];
+            }
             state.nodes.insert(id, (node.properties, Vec::new()));
             let children = node.children.into_iter().map(|n| add(n, state)).collect();
             if let Some((_, stored)) = state.nodes.get_mut(&id) {
@@ -253,4 +256,11 @@ impl UiaSource for FakeUia {
             more: end < children.len(),
         })
     }
+}
+
+/// Cached native identity retained while the portable tree is bound to a window.
+#[derive(Clone)]
+pub(crate) struct CachedElement {
+    pub node: NodeId,
+    pub runtime_id: Vec<i32>,
 }

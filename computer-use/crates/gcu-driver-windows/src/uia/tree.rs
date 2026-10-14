@@ -291,7 +291,10 @@ fn map_properties(p: Properties, id: NodeId, origin: (f64, f64)) -> RawNode {
         text_extras: None,
         url: None,
         children: Vec::new(),
-        handle: NativeHandle::new(id),
+        handle: NativeHandle::new(super::source::CachedElement {
+            node: id,
+            runtime_id: p.runtime_id,
+        }),
         fingerprint: Fingerprint(0),
     }
 }

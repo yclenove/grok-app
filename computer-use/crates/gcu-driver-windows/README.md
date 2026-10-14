@@ -1,11 +1,12 @@
-# Windows discovery, UIA, capture and semantic actions (P2-01/02/03/05)
+# Windows discovery, UIA observation, capture, semantic actions and isolated worker (P2-01–P2-05)
 
 This crate implements app/window discovery, exact executable identity, launching,
 nonactivating Win32 restoration and virtual-desktop annotations. The native
 `RealWinApi` is compiled only under `cfg(windows)`; the same core logic and
 `FakeWinApi` compile and run on Linux/macOS. Windows 10 1903+ is the target.
 
-`WindowsDriver::new()` starts a serial discovery worker after validating the
+`WindowsDriver::new()` starts an isolated `gcu worker`; its native adapter starts
+a serial discovery thread after validating the
 engine token. High/System integrity or UIAccess refuses startup with
 `DriverError::ElevationRequired`. A live `WinGate::check` applies to observation
 and every action variant before any delivery or unavailable-capability result. Higher
@@ -55,13 +56,14 @@ instance for ApplicationFrameHost windows. Owned dialogs retain separate IDs and
 owner metadata; ambiguous UWP child mappings fail closed.
 
 The discovery-only `with_api` constructor leaves UIA tree/focus/subscriptions
-unavailable. `new()` enables UIA observation, window capture and semantic actions as described below.
-Pointer/keyboard injection and foreground activation remain unavailable. No input is held, so
+unavailable. `new()` enables isolated UIA observation, window capture and semantic actions
+as described below. Pointer/keyboard injection and foreground activation remain
+unavailable. No synthetic input is held, so
 `release_all_input` is a no-op. Calls have a 4.75-second caller deadline and
 queued calls dropped after timeout/cancellation never execute. A native launch
 already started at timeout reports `maybe_executed=true`; it must never be replayed.
-P2-04 adds killable native worker-process isolation; this card uses dedicated
-threads and does not claim it can terminate an OS call inside the kernel/COM.
+`new_in_process()` uses dedicated threads and cannot terminate a blocked OS/COM
+call. Production `new()` uses the killable process boundary described in P2-04 below.
 
 Portable verification (build host):
 
@@ -72,12 +74,14 @@ rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
 
 Native smoke tests require an unelevated **interactive disposable Windows desktop**,
-with no real account or application data. Build the fixture and set its absolute
-path, then run the three ignored tests serially:
+with no real account or application data. Build the fixture and worker and set
+their absolute paths, then run the ignored tests serially:
 
 ```powershell
 cargo build -p gcu-fixture
+cargo build -p gcu-cli
 $env:GCU_FIXTURE_EXE = (Resolve-Path target/debug/gcu-fixture.exe).Path
+$env:GCU_WORKER_EXE = (Resolve-Path target/debug/gcu.exe).Path
 cargo test -p gcu-driver-windows -- --ignored --test-threads=1
 ```
 
@@ -88,7 +92,8 @@ cross-target clippy are not evidence of native desktop behavior.
 
 ## UI Automation trees (P2-02)
 
-`WindowsDriver::new()` also initializes a persistent `gcu-win-uia-mta` thread.
+`new_in_process()` initializes a persistent `gcu-win-uia-mta` thread inside
+the worker; production `new()` keeps it out of the parent.
 `with_api` remains discovery-only; `with_uia` injects portable `UiaSource` and
 `UiaEventSource` implementations. Tree/event/accessibility capabilities are enabled only when
 sources are attached; background operation is `partial`. Geometry uses live stamped Win32 data. Focus is read only
@@ -118,7 +123,7 @@ and transaction timeouts are 500ms. Abandoned queued jobs never start, and activ
 jobs check abandonment between native calls. Neither cancellation nor Drop joins
 the MTA. A stuck provider can occupy that single thread until it returns; the
 thread is never replaced with unlimited new workers. Killable process isolation
-belongs to P2-04. Stop/input release does not queue behind UIA.
+is implemented by P2-04 below. Stop/input release does not queue behind UIA.
 
 StructureChanged, PropertyChanged and FocusChanged each invalidate a monotonic
 version and wake bounded, coalescing streams. Registrations own all three handler
@@ -157,7 +162,7 @@ Native desktop smoke status for this Linux delivery: **not_run**.
 
 ## Window capture (P2-03)
 
-`new()` attaches two persistent, bounded native threads; `with_capture` injects a
+`new_in_process()` attaches two persistent, bounded native threads inside the worker; `with_capture` injects a
 portable `CaptureBackend` for tests. Screenshot capability is true only when an
 attached source is available. WGC uses
 `IGraphicsCaptureItemInterop::CreateForWindow`, a free-threaded one-frame pool,
@@ -189,7 +194,7 @@ unmappable/moving/resizing frames are refused. Both paths share the total
 `min(opts.timeout, DRIVER_DEADLINE)` budget (4.75 seconds), including pre/postflight
 and raw PNG encoding. Cancellation abandons queued/active jobs, drops their pixels,
 and reports `maybe_executed=false`. Drop never waits for PrintWindow or a wedged
-OS call. Killable process isolation remains P2-04; a stuck thread is not replaced
+OS call. In-process diagnostics cannot terminate blocked FFI; a stuck thread is not replaced
 by unbounded new workers.
 
 The PNG is unscaled and **unredacted**, solely to fit the existing driver boundary.
@@ -229,7 +234,8 @@ All awaits share one 4.75-second action deadline. Queued/preparing cancellation 
 Deadline closure and dispatch arbitrate on one atomic state, preventing a timed
 out job from starting a later write. A native provider already in flight can
 still return after the caller; process termination remains P2-04's responsibility.
-No replacement worker or automatic mutation retry is started.
+In-process mode cannot replace a blocked MTA; isolated mode retires its child
+without automatically retrying a mutation.
 
 Text selections use Unicode-scalar positions. Native endpoint movement is checked
 against document text before Select; providers whose character units cannot
@@ -286,14 +292,16 @@ its external state file for C05/C07/C10/C12/C16/password refusal. On a disposabl
 unelevated interactive Windows desktop, build and start only the fixture:
 
 ```powershell
-cargo build --locked -p gcu-fixture
+cargo build --locked -p gcu-fixture -p gcu-cli
 $env:GCU_FIXTURE_EXE = (Resolve-Path target/debug/gcu-fixture.exe).Path
+$env:GCU_WORKER_EXE = (Resolve-Path target/debug/gcu.exe).Path
 $env:GCU_FIXTURE_STATE = "$env:TEMP\gcu-state.json"
 Start-Process $env:GCU_FIXTURE_EXE
 # Keep an unrelated visible window in front before the test starts.
 cargo test --locked -p gcu-driver-windows --test actions -- --ignored --test-threads=1
 ```
 
+The same contract runs in default worker mode and explicit `ExecMode::InProcess`.
 Every mutation is delivered once and checked using the fixture's JSON state;
 the foreground HWND must remain unchanged. These tests fail when the fixture
 cannot expose the required native pattern; they never replace a semantic action
@@ -301,3 +309,58 @@ with focus/input. Other native pattern/provider combinations require matching
 Windows fixtures and remain unverified here. Native action contract status:
 **not_run** (Linux build host, no interactive Windows desktop). Cross-target
 compilation is not native behavioral evidence.
+
+## Native worker isolation (P2-04)
+
+`WindowsDriver::new()` defaults to `ExecMode::Worker`. Embedders select
+`with_exec_mode(ExecMode::InProcess, config)` only for explicit diagnostics;
+`new_worker()` initializes the native adapter from the private startup frame.
+`WindowsDriver::isolated(WorkerConfig)` supports portable trusted launchers/tests.
+The supervisor contains no native UIA/capture code and starts no discovery thread.
+All resolved semantic action variants execute inside the worker through the same
+UIA pattern dispatch as in-process mode, with no automatic mutation retries.
+
+The private protocol uses bounded length-prefixed JSON, not bincode; see
+[ADR 0005](../../docs/adr/0005-windows-worker-json.md). RuntimeIds and HWNDs are
+copied integers, accompanied by exact app/window stamps and process/snapshot
+generations. The Win32 generation-property namespace uses the parent's verified
+process instance and remains stable across worker restarts. COM handles remain
+in the child. A restart rejects old element
+references. Unchanged RuntimeId/HWND/fingerprint references resolve to the latest
+native slot after core screenshot/action-guard rereads. Trees are flat on the wire, retain native completeness, and captures
+remain raw until the existing mandatory core redaction stage. Worker mode reports
+events unavailable and uses core polling rather than registering an empty stream.
+
+The transport watchdog is ten seconds per attempt. Crash, timeout, bad prefix,
+invalid body or mismatched reply kills/reaps the child. Reads retry at most once;
+launch, key-window restoration and actions never replay. Any mutation transport
+loss is `maybe_executed=true` (`unknown` in core). An unusable process is restarted
+without replaying mutations, immediately for read retries. Failed bootstrap is
+retried by the next call. The Driver adapter retains its
+4.75-second total budget. Stop bypasses the RPC queue, invalidates active/queued
+calls and kills the child even during a restart handshake. Host owns the persistent
+Stop latch and trusted resume; worker restart never clears it. Future P2-06 input
+release must also use its independent parent-side input ledger.
+
+The launcher clears nonessential environment, inherits only explicit standard
+handles, and assigns a noninherited Windows Job with `KILL_ON_JOB_CLOSE` before
+its first frame allows native initialization. Parent exit kills the job tree;
+pipe EOF exits a child still waiting for that initial frame. Unix uses ordinary
+kill-on-drop subprocesses for portable supervision tests. Shutdown awaits reaping;
+Drop initiates cancellation without waiting for FFI. No fault API exists in the
+production worker. The separate test executable requires `test-worker-faults`;
+its fault code is additionally excluded by `debug_assertions` in release builds.
+
+```sh
+rcargo test --locked -p gcu-driver-windows --test worker --features test-worker-faults
+rcargo clippy --locked -p gcu-driver-windows -p gcu-cli --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+rcargo clippy --locked -p gcu-driver-windows -p gcu-cli --all-targets --target aarch64-apple-darwin -- -D warnings
+rcargo --sh 'CROSS=1 bash scripts/verify.sh'
+```
+
+Nightly soak status: **not_run**. The ignored
+`observe_repeated_300_times_keeps_supervisor_alive` test performs 300 real framed
+observations against disposable portable sources. The ignored Windows
+`moving_window_observe_300_times_keeps_parent_alive` variant requires a disposable
+interactive fixture desktop and a separately built `gcu` executable; it moves only
+that fixture during observation. Native Job lifetime and `worker_restart_preserves_live_window_stamp`: **not_run** on Linux.

@@ -25,6 +25,9 @@ pub(crate) enum DriverKind {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Private native worker; framed stdin/stdout, never an MCP tool.
+    #[command(hide = true)]
+    Worker,
     /// Serve MCP over stdio or authenticated loopback HTTP; proxy an engine endpoint.
     Mcp {
         #[arg(long, value_enum, default_value = "stdio")]

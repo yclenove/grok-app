@@ -5,11 +5,20 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+test-worker-faults = ["tokio/io-std"]
+
+[[bin]]
+name = "gcu-test-worker"
+path = "tests/worker_support/fault_bin.rs"
+required-features = ["test-worker-faults"]
+
 [dependencies]
 gcu-protocol.workspace = true
 gcu-core.workspace = true
 async-trait.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures-core.workspace = true
@@ -20,7 +29,7 @@ tracing = "0.1"
 sha2.workspace = true
 windows-core = { version = "0.62", default-features = false }
 windows = { version = "0.62", default-features = false, features = [
-    "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading",
+    "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_JobObjects",
     "Win32_Security", "Win32_Security_WinTrust",
     "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_UI_Shell",
     "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_System_StationsAndDesktops",

@@ -11,7 +11,7 @@ use gcu_driver_windows::WindowsDriver;
 async fn render_open_app(query: &str) {
     // Open only system apps on the disposable desktop before invoking these tests.
     // No account access, UI input, activation, or app launching by this test.
-    let driver = WindowsDriver::new()
+    let driver = WindowsDriver::new_in_process()
         .await
         .expect("unelevated interactive Windows desktop");
     let app = driver
