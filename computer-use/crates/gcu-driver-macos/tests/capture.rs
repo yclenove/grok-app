@@ -127,7 +127,10 @@ fn password_tree(frame: Option<Rect>, max_nodes: usize) -> gcu_core::tree::Proce
         ..Default::default()
     });
     let mut tree = Pipeline::default().run(
-        RawTree { root: Some(node) },
+        RawTree {
+            root: Some(node),
+            incomplete: None,
+        },
         &TreeOpts {
             max_tree_nodes: max_nodes,
             ..Default::default()
