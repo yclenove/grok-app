@@ -2,10 +2,11 @@
 //!
 //! Spotlight indexing uses a separate thread. The first `list_apps` does not
 //! wait for it. Screenshots use [`crate::capture`] and stop at
-//! [`gcu_core::driver::DRIVER_DEADLINE`]. Focus and input stay
-//! [`DriverError::CapabilityUnavailable`]. Tree reads use [`crate::ax`] and, on
-//! a live macOS driver, a separate `gcu-macos-ax` thread. Queued calls that
-//! time out or cancel before the worker starts them never run.
+//! [`gcu_core::driver::DRIVER_DEADLINE`]. Semantic accessibility actions use
+//! [`crate::ax`] and do not activate the target app. Pointer, keyboard, and
+//! focus queries stay [`DriverError::CapabilityUnavailable`]. Tree reads use a
+//! separate `gcu-macos-ax` thread on a live driver. Queued calls that time out
+//! or cancel before the worker starts them never run.
 
 use crate::{
     api::MacApi,
@@ -158,6 +159,7 @@ impl MacosDriver {
     /// Tests on every platform call this. A missing accessibility permission
     /// still returns `PermissionMissing` and does not read the fake tree.
     pub fn inject_tree(&self, source: Arc<FakeAxSource>, root: FakeAxNode) {
+        source.bind_root(root.clone());
         if let Ok(mut slot) = self.injected.lock() {
             *slot = Some(InjectedTree { source, root });
         }
@@ -232,14 +234,14 @@ impl MacosDriver {
 fn discovery_capabilities() -> Capabilities {
     Capabilities {
         platform: Platform::Macos,
-        version: "macOS 14+; AX tree (P1-03); screenshot (P1-04)".into(),
+        version: "macOS 14+; AX tree (P1-03); screenshot (P1-04); semantic actions (P1-05)".into(),
         observe: ObserveCapabilities {
             tree: true,
             screenshot: true,
             events: true,
         },
         delivery: DeliveryCapabilities {
-            accessibility: false,
+            accessibility: true,
             targeted_pointer: false,
             targeted_keys: false,
             foreground: ForegroundCapability::Unavailable,
@@ -285,7 +287,7 @@ impl Driver for MacosDriver {
             Err(error) => (false, vec![error.to_string()]),
         };
         issues.push(
-            "Focus and input are unavailable. Tree reads need Accessibility. Screenshots need Screen Recording.".into(),
+            "Pointer, keyboard, and focus queries are unavailable. Semantic accessibility actions do not activate the target app. Tree reads need Accessibility. Screenshots need Screen Recording.".into(),
         );
         issues.push(TRUST_NOTE.into());
         DoctorReport {
@@ -432,6 +434,9 @@ impl Driver for MacosDriver {
     }
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        if ax::is_semantic(req) {
+            return self.perform_semantic(req, cancel).await;
+        }
         let req = req.clone();
         self.call(NATIVE_TIMEOUT, Some(cancel), false, move |state| {
             let (win, _) = action_window(&req)?;
@@ -507,8 +512,51 @@ impl MacosDriver {
         walk.timeout = remaining.min(ax::TREE_BUILD_TIMEOUT);
         let root = source.root();
         let tree = ax::build_raw_tree(&source, &root, &walk, cancel, target.scale).await;
-        source.reset().await;
+        // Keep this generation until the next open. Resetting here would make
+        // every later semantic action stale. `open_root` releases the old map.
         tree
+    }
+}
+
+impl MacosDriver {
+    async fn perform_semantic(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        self.call(DRIVER_DEADLINE, Some(cancel), false, |state| {
+            state.action_gate()
+        })
+        .await?;
+        if let Some(injected) = self.injected.lock().ok().and_then(|slot| slot.clone()) {
+            return ax::perform(&*injected.source, req, cancel, DRIVER_DEADLINE).await;
+        }
+        self.perform_live_action(req, cancel).await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn perform_live_action(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        if self.live_ax.load(Ordering::Acquire) {
+            if let Some(thread) = &self.ax {
+                let source = crate::real::RealAxSource::attach(Arc::clone(thread));
+                return ax::perform(&source, req, cancel, DRIVER_DEADLINE).await;
+            }
+        }
+        Err(action_source_missing())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    async fn perform_live_action(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        let _ = (req, cancel);
+        Err(action_source_missing())
+    }
+}
+
+fn action_source_missing() -> DriverError {
+    DriverError::Native {
+        message: "accessibility action source is not connected".into(),
+        maybe_executed: false,
     }
 }
 

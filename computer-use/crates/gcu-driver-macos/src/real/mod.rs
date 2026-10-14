@@ -5,6 +5,7 @@
 //! Window scale is the display backing factor. Launch uses `NSWorkspace` with
 //! `activates = false` and does not prompt.
 
+mod act;
 mod apps;
 mod ax;
 mod parse;
