@@ -186,6 +186,13 @@ impl State {
         Ok(entry.clone())
     }
     pub(super) fn validate_window(&self, win: &WindowRef, foreground: bool) -> Result<()> {
+        self.observation_window(win, foreground).map(|_| ())
+    }
+    pub(super) fn observation_window(
+        &self,
+        win: &WindowRef,
+        foreground: bool,
+    ) -> Result<NativeWindow> {
         self.check()?;
         let (old, pid, target_created, identity) =
             self.windows.get(&win.id).ok_or(DriverError::WindowGone)?;
@@ -216,7 +223,7 @@ impl State {
         if fresh != *identity {
             return Err(DriverError::AppNotFound);
         }
-        Ok(())
+        Ok(current)
     }
 }
 fn executable_name(path: &str) -> String {

@@ -1,0 +1,14 @@
+---
+source: crates/gcu-driver-windows/tests/uia_tree.rs
+expression: rendered
+---
+App=fixture.exe (pid 7) — Fixture
+Window: "Fixture", id fixture:8, 640×480 @1.5x, App: Fixture.
+0 standard window Fixture
+    1 web area Workspace
+        2 button Save draft ID: Save draft
+        3 group Debug Console REPL [terminal]
+            4 button Continue ID: Continue [terminal]
+            5 button ID:  [terminal]
+        6 button Run Task... ID: Run Task... [terminal]
+        7 text field Password Value: •••
