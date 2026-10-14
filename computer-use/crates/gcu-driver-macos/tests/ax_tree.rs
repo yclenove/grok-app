@@ -503,7 +503,7 @@ async fn fake_events_and_driver_snapshot() {
         .unwrap();
     assert_eq!(tree.root.unwrap().role, Role::Window);
     let caps = driver.capabilities();
-    assert!(caps.observe.tree && !caps.observe.screenshot && caps.observe.events);
+    assert!(caps.observe.tree && caps.observe.screenshot && caps.observe.events);
     assert!(driver.subscribe(&win).is_some());
 
     let (ready, listed) = session(true, true).await;

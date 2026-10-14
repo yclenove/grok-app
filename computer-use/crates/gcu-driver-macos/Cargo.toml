@@ -16,6 +16,7 @@ smol_str.workspace = true
 smallvec.workspace = true
 futures-core.workspace = true
 tracing = "0.1"
+png.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility-sys = { version = "0.2.0", default-features = false }
@@ -34,6 +35,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "std",
     "CFArray",
     "CFCGTypes",
+    "CFData",
     "CFDate",
     "CFDictionary",
     "CFNumber",
@@ -42,11 +44,25 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
+    "CGDataProvider",
+    "CGDirectDisplay",
+    "CGError",
     "CGGeometry",
+    "CGImage",
     "CGWindow",
     "bitflags",
     "objc2",
     "libc",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "SCError",
+    "SCScreenshotManager",
+    "SCShareableContent",
+    "SCStream",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
 ] }
 objc2-core-services = { version = "0.3.2", default-features = false, features = [
     "std",

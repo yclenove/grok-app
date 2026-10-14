@@ -1,5 +1,6 @@
 //! Discovery worker state. OS calls go through [`crate::api::MacApi`].
 
+use crate::capture::{self, SourceWindow};
 use crate::{
     api::{BundleFacts, MacApi, RunningApp, SpotlightHit},
     apps::{self, hit_could_match, list_catalog, resolve_loaded, ResolveOutcome, ResolvedApp},
@@ -8,7 +9,10 @@ use crate::{
     spotlight::SpotlightIndex,
     windows::{self, align_pid, AlignedWindow},
 };
-use gcu_core::driver::{AppQuery, AppRef, DriverError, Result, WindowRef};
+use gcu_core::{
+    driver::{AppQuery, AppRef, DriverError, Result, WindowRef},
+    model::Geometry,
+};
 use gcu_protocol::{AppInfo, WindowInfo};
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 
@@ -195,6 +199,31 @@ impl State {
         Ok(())
     }
 
+    /// Window gate for a screenshot. Minimized windows are not restored.
+    pub(super) fn prepare_capture(&mut self, win: &WindowRef) -> Result<SourceWindow> {
+        let window = self.capture_window(win)?;
+        if window.minimized {
+            return Err(DriverError::WindowMinimized);
+        }
+        Ok(source_window(&window))
+    }
+
+    /// Physical geometry, including a minimized window whose frame is known.
+    pub(super) fn prepare_geometry(&mut self, win: &WindowRef) -> Result<Geometry> {
+        let window = self.capture_window(win)?;
+        let (width, height) = capture::physical_size(window.frame.w, window.frame.h, window.scale)
+            .ok_or(DriverError::Native {
+                message: "window frame is not a physical size".into(),
+                maybe_executed: false,
+            })?;
+        Ok(capture::physical_geometry(
+            window.frame,
+            window.scale,
+            width,
+            height,
+        ))
+    }
+
     /// Accessibility-only gate plus the window identity. Screen Recording is
     /// not required to read the tree.
     pub(super) fn prepare_tree(&mut self, win: &WindowRef) -> Result<TreeTarget> {
@@ -252,6 +281,53 @@ impl State {
             }
         }
         Ok(resolved)
+    }
+
+    fn capture_window(&mut self, win: &WindowRef) -> Result<crate::windows::AlignedWindow> {
+        self.observation_gate()?;
+        let resolved = self.validate_app(&win.app)?;
+        let prior = self.windows.get(&win.id).cloned();
+        if prior.is_none() {
+            return Err(DriverError::WindowGone);
+        }
+        let current = self
+            .collect_windows()?
+            .into_iter()
+            .find(|window| window.id == win.id);
+        if let Some(window) = current {
+            if resolved.pid.is_some_and(|pid| pid != window.pid) {
+                return Err(DriverError::AppNotFound);
+            }
+            if let Some(old) = prior {
+                if window.pid != old.pid || window.cg_id != old.cg_id {
+                    return Err(DriverError::WindowGone);
+                }
+            }
+            return Ok(window);
+        }
+        let Some(old) = prior else {
+            return Err(DriverError::WindowGone);
+        };
+        if resolved.pid.is_some_and(|pid| pid != old.pid) {
+            return Err(DriverError::AppNotFound);
+        }
+        self.minimized_prior(old)
+    }
+
+    fn minimized_prior(
+        &self,
+        old: crate::windows::AlignedWindow,
+    ) -> Result<crate::windows::AlignedWindow> {
+        let Some(index) = old.ax_index else {
+            return Err(DriverError::WindowGone);
+        };
+        let ax = self.api.ax_windows(old.pid)?;
+        if ax.iter().any(|row| row.index == index && row.minimized) {
+            let mut window = old;
+            window.minimized = true;
+            return Ok(window);
+        }
+        Err(DriverError::WindowGone)
     }
 
     fn confirm_window(
@@ -383,6 +459,14 @@ pub(super) struct TreeTarget {
     pub(super) scale: f64,
     pub(super) bundle_id: String,
     pub(super) app_name: String,
+}
+
+fn source_window(window: &crate::windows::AlignedWindow) -> SourceWindow {
+    SourceWindow {
+        cg_id: window.cg_id,
+        frame: window.frame,
+        scale: window.scale,
+    }
 }
 
 fn fact_path<'a>(bundle: &'a str, executable: &'a str) -> Option<&'a str> {

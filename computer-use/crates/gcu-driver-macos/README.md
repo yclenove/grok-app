@@ -36,17 +36,34 @@ on `apps::ResolveOutcome::Ambiguous`.
 A code signature does not prove that every byte running inside the process is
 trusted. Plugins and writable load paths can still change that code. `trust_note`
 says so on every identity. Real macOS reports `on_current_desktop: None` (no
-SkyLight) and window scale `1.0` until P1-04.
+SkyLight). Window `scale` is the display backing factor
+(`CGDisplayPixelsWide / CGDisplayBounds` for the display that covers most of
+the window). Screenshot pixels are physical: point size times that factor.
+`Geometry.scale` records the factor. Core redaction starts `scale_to_window`
+at 1 because the buffer is already physical pixels.
 
 `snapshot_tree` reads the accessibility tree. It needs Accessibility and does
 not need Screen Recording. A missing permission is
-`DriverError::PermissionMissing { permission: "accessibility" }`. Capture,
-geometry, focus, and input still return `CapabilityUnavailable`.
-`capabilities().observe.tree` is true and `screenshot` is false. Event
-subscription is a settle skeleton (`observe.events` is true). Calls have a
-five-second deadline. A tree walk also stops at 2 seconds and 5000 nodes. A
-launch that has already started at timeout reports `maybe_executed=true`. Tree
-reads report `maybe_executed=false`.
+`DriverError::PermissionMissing { permission: "accessibility" }`. Focus and
+input still return `CapabilityUnavailable`. `capture` and `window_geometry`
+are implemented. `capabilities().observe.tree` and `screenshot` are true.
+`background_operation` is `Partial`: an occluded window can be screenshotted
+and the tree can be read, but input and targeted delivery cannot.
+`max_image_edge` is 2560; this driver does not scale. Event subscription is a
+settle skeleton (`observe.events` is true). Calls have a five-second deadline.
+A screenshot waits at most `DRIVER_DEADLINE` (4.75s). A tree walk also stops
+at 2 seconds and 5000 nodes. A launch that has already started at timeout
+reports `maybe_executed=true`. Tree reads and screenshots report
+`maybe_executed=false`.
+
+Screen Recording is checked with `CGPreflightScreenCaptureAccess` at the start
+of every capture and again before pixels are returned. This crate never calls
+`CGRequestScreenCaptureAccess`. A missing or mid-session revoked grant is
+`DriverError::PermissionMissing { permission: "screen_recording" }`. A
+minimized window is `WindowMinimized` and is not restored. A covered window
+is still captured (`SCContentFilter` `desktopIndependentWindow`). Cancelling
+drops the image. The driver returns a raw PNG `Capture`. Callers must pass it
+through `gcu_core::redact` before a thumbnail, crop, or model encoding.
 
 Chromium and Electron apps get `AXEnhancedUserInterface` and
 `AXManualAccessibility` at the start of a live snapshot. The previous values
@@ -58,6 +75,7 @@ Portable verification:
 ```sh
 cargo test -p gcu-driver-macos --test identity
 cargo test -p gcu-driver-macos --test discovery
+cargo test -p gcu-driver-macos --test capture
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
 
@@ -89,6 +107,17 @@ runner and are not executed in CI:
 cargo test -p gcu-driver-macos --test ax_tree -- --ignored --test-threads=1
 ```
 
+Ignored ScreenCaptureKit smoke (`tests/capture.rs`, `live_sck_occluded_fixture_pixels_match`,
+macOS only) needs Screen Recording. Grant it in System Settings; the driver
+will not prompt and will not click the dialog. Build and launch `gcu-fixture`
+(resolve name `fixture`), then cover its window completely with another
+window. The test still expects the fixture canvas cell `(95, 115, 135)`:
+
+```sh
+cargo test -p gcu-driver-macos --test capture -- --ignored --test-threads=1
+```
+
 `CROSS=1` clippy checks the macOS library and bins for `aarch64-apple-darwin`.
 It does not compile integration tests. The macOS GitHub runner compiles the
-live AX code and the ignored tests. Those ignored tests are `not_run`.
+live ScreenCaptureKit code and the ignored tests. The runner has no Screen
+Recording permission, so the real capture test is `not_run`.

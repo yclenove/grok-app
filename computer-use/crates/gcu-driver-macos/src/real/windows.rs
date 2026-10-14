@@ -1,20 +1,26 @@
 //! `CGWindowListCopyWindowInfo` for on-screen layer-0 windows.
 //!
 //! Space membership is not available from this public call. The field stays
-//! `None` instead of guessing. Scale stays `1.0` until display capture (P1-04).
+//! `None` instead of guessing. `scale` is the backing factor of the display
+//! that covers most of the window (`CGDisplayPixelsWide / CGDisplayBounds`).
 
-use crate::api::CgWindow;
+use crate::{
+    api::CgWindow,
+    capture::{backing_scale, DisplayMetrics},
+};
 use gcu_core::driver::Result;
 use gcu_protocol::Rect;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowNumber,
-    kCGWindowOwnerName, kCGWindowOwnerPID, CGRectMakeWithDictionaryRepresentation,
-    CGWindowListCopyWindowInfo, CGWindowListOption,
+    kCGWindowOwnerName, kCGWindowOwnerPID, CGDisplayBounds, CGDisplayPixelsHigh,
+    CGDisplayPixelsWide, CGError, CGGetActiveDisplayList, CGMainDisplayID,
+    CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use std::ptr;
 
 pub(super) fn windows() -> Result<Vec<CgWindow>> {
+    let displays = active_displays();
     let option =
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
     let Some(list) = CGWindowListCopyWindowInfo(option, 0) else {
@@ -31,14 +37,14 @@ pub(super) fn windows() -> Result<Vec<CgWindow>> {
         // SAFETY: window-list values are CFDictionaries. The list keeps the
         // dictionary alive for this iteration.
         let dict = unsafe { &*value.cast::<CFDictionary>() };
-        if let Some(window) = one_window(dict) {
+        if let Some(window) = one_window(dict, &displays) {
             out.push(window);
         }
     }
     Ok(out)
 }
 
-fn one_window(dict: &CFDictionary) -> Option<CgWindow> {
+fn one_window(dict: &CFDictionary, displays: &[DisplayMetrics]) -> Option<CgWindow> {
     let window_id = u32::try_from(dict_i64(dict, unsafe { kCGWindowNumber })?).ok()?;
     if window_id == 0 {
         return None;
@@ -67,7 +73,7 @@ fn one_window(dict: &CFDictionary) -> Option<CgWindow> {
         owner_name,
         frame,
         alpha,
-        scale: 1.0,
+        scale: backing_scale(frame, displays),
         on_current_desktop: None,
     })
 }
@@ -108,6 +114,46 @@ fn dict_bounds(dict: &CFDictionary) -> Option<Rect> {
         w: rect.size.width,
         h: rect.size.height,
     })
+}
+
+fn active_displays() -> Vec<DisplayMetrics> {
+    let mut ids = [0u32; 16];
+    let mut count = 0u32;
+    // SAFETY: `ids` has room for 16 display ids and `count` is a live out-parameter.
+    let status = unsafe { CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut count) };
+    if status != CGError::Success || count == 0 {
+        return vec![main_display()];
+    }
+    let count = usize::try_from(count).unwrap_or(0).min(ids.len());
+    let mut displays = Vec::with_capacity(count);
+    for id in ids.into_iter().take(count) {
+        displays.push(metrics(id));
+    }
+    if displays.is_empty() {
+        vec![main_display()]
+    } else {
+        displays
+    }
+}
+
+fn main_display() -> DisplayMetrics {
+    metrics(CGMainDisplayID())
+}
+
+fn metrics(display: u32) -> DisplayMetrics {
+    let bounds = CGDisplayBounds(display);
+    let wide = u32::try_from(CGDisplayPixelsWide(display)).unwrap_or(0);
+    let high = u32::try_from(CGDisplayPixelsHigh(display)).unwrap_or(0);
+    DisplayMetrics {
+        bounds: Rect {
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+            w: bounds.size.width,
+            h: bounds.size.height,
+        },
+        pixels_wide: wide,
+        pixels_high: high,
+    }
 }
 
 fn lookup<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFType> {

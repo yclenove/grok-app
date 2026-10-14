@@ -78,11 +78,12 @@ pub struct CgWindow {
     pub title: String,
     /// Owning process name from the window server.
     pub owner_name: String,
-    /// Screen rectangle in pixels. Origin is top-left of the main display.
+    /// Screen rectangle in points. Origin is the top-left of the main display.
+    /// Physical pixels are this rectangle times [`Self::scale`].
     pub frame: Rect,
     /// Window alpha in `0.0..=1.0`.
     pub alpha: f64,
-    /// Display scale. The real adapter reports `1.0` until P1-04.
+    /// Display backing factor (`pixels / points`) for the display under this window.
     pub scale: f64,
     /// Current Space, when the OS can say. Public APIs often cannot.
     pub on_current_desktop: Option<bool>,
