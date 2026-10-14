@@ -86,11 +86,17 @@ fn json_string(text: &str, key: &str) -> String {
         from = found + 1;
     };
     let rest = &text[start..];
-    let mut end = 0;
+    let mut out = String::new();
     let mut escaped = false;
-    for (index, ch) in rest.char_indices() {
+    for ch in rest.chars() {
         if escaped {
             escaped = false;
+            out.push(match ch {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                other => other,
+            });
             continue;
         }
         if ch == '\\' {
@@ -98,11 +104,11 @@ fn json_string(text: &str, key: &str) -> String {
             continue;
         }
         if ch == '"' {
-            end = index;
             break;
         }
+        out.push(ch);
     }
-    rest[..end].to_string()
+    out
 }
 
 fn json_strings(text: &str, key: &str) -> Vec<String> {
