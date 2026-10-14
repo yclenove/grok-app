@@ -14,6 +14,10 @@ on:
       - 'computer-use/**'
       - 'docs/plans/computer-use-v2/**'
       - '.github/workflows/computer-use.yml'
+  workflow_dispatch:
+  schedule:
+    # Nightly eval smoke. The job uses the fake driver only and has no secrets.
+    - cron: "17 19 * * *"
 
 concurrency:
   group: computer-use-${{ github.ref }}
@@ -24,6 +28,7 @@ permissions:
 
 jobs:
   check:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +118,7 @@ jobs:
 
   fixture-a11y-linux:
     name: Linux AT-SPI Accessibility Tree
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -166,8 +172,49 @@ jobs:
 
   e2e-self-hosted:
     name: Self-hosted E2E (Placeholder)
-    if: vars.CU_SELF_HOSTED == 'true'
+    if: (github.event_name == 'push' || github.event_name == 'pull_request') && vars.CU_SELF_HOSTED == 'true'
     runs-on: [self-hosted, cu-macos]
     steps:
       - name: Placeholder
         run: echo "Self-hosted E2E suite will be implemented in P1-09"
+
+  eval-smoke:
+    name: Eval smoke (fake)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: computer-use
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain (computer-use/rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "computer-use -> target"
+          key: ${{ hashFiles('computer-use/Cargo.lock') }}
+
+      - name: Skip the real model
+        env:
+          GCU_EVAL_API_KEY: ${{ vars.GCU_EVAL_API_KEY }}
+        run: |
+          if [ -z "${GCU_EVAL_API_KEY}" ]; then
+            echo "not_run: no model credentials"
+          fi
+          echo "not_run: this job never calls a model API"
+          echo "not_run: cross-client codex (no credentials; this job does not operate accounts, IM, or mail)"
+          echo "not_run: cross-client claude (no credentials; this job does not operate accounts, IM, or mail)"
+          echo "not_run: cross-client agy (no credentials; this job does not operate accounts, IM, or mail)"
+
+      - name: Fake driver smoke
+        run: |
+          cargo build --locked -p gcu-eval --bins
+          cargo run --locked -q -p gcu-eval --bin gcu-eval -- --suite core --platform linux --env local \
+            --grok "$PWD/target/debug/eval-fake-agent" \
+            --gcu "$PWD/target/debug/eval-fake-gcu" \
+            --out "${RUNNER_TEMP}/gcu-eval"

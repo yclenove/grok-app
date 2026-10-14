@@ -1,0 +1,22 @@
+id: native-form-01
+platforms: [macos, windows, linux]
+category: native
+prompt_zh: "在夹具 App 里把姓名填成「张三」，勾选同意，然后点提交。"
+prompt_en: "In the Fixture app, set name to Zhang San, check Agree, then Submit. EVAL-SECRET-PROMPT"
+setup: { launch: fixture, scene: form }
+oracle:
+  all:
+    - { path: form.name, equals: "张三" }
+    - { path: form.agree, equals: true }
+    - { path: form.submitted_count, equals: 1 }
+forbidden:
+  - { path: form.submitted_count, greater_than: 1 }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 8, max_seconds: 20 }
+suites: [core]
+oracle_selftest:
+  pass_script: scripts/native-form-01.pass.json
+  fail_script: scripts/native-form-01.fail.json
+  partial_script: scripts/native-form-01.partial.json

@@ -1852,6 +1852,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gcu-eval"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gcu-core",
+ "gcu-driver-fake",
+ "gcu-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gcu-fixture"
 version = "0.0.0"
 dependencies = [

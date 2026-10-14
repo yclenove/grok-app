@@ -1,0 +1,19 @@
+id: browser-page-01
+platforms: [macos, windows, linux]
+category: browser
+prompt_zh: "在夹具网页区打开文档页，停在第一个标签。"
+prompt_en: "Open the fixture docs page and stay on the first tab."
+setup: { launch: fixture, scene: webarea }
+oracle:
+  all:
+    - { path: tab, equals: 1 }
+    - { path: text, equals: "fixture.local/docs" }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 8, max_seconds: 20 }
+suites: [core]
+oracle_selftest:
+  pass_script: scripts/browser-page-01.pass.json
+  fail_script: scripts/browser-page-01.fail.json
+  partial_script: scripts/browser-page-01.partial.json

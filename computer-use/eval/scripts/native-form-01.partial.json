@@ -1,0 +1,9 @@
+{
+  "state": {
+    "form": {
+      "name": "张三",
+      "agree": false,
+      "submitted_count": 0
+    }
+  }
+}
