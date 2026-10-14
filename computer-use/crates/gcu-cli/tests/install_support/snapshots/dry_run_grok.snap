@@ -28,5 +28,5 @@ source: crates/gcu-cli/tests/install_support/wire.rs
 +}
 --- $HOME/.grok/hooks/$HOOK_FILE
 +++ $HOME/.grok/hooks/$HOOK_FILE
-@@ -1,0 +1,9 @@
+@@ -1,0 +1,5 @@
 +$HOOK
