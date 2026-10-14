@@ -165,8 +165,8 @@ pub trait XServer: Send + Sync {
 /// Simplified classification of X11 events monitored by driver listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XEventKind {
-    /// KeyPress event with the given keycode.
-    KeyPress(u8),
+    /// KeyPress event with the given keycode and modifier mask.
+    KeyPress(u8, u16),
     /// XInput2 raw event with the originating master device ID and source device ID.
     RawDeviceInput(u16, u16),
 }

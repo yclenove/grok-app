@@ -143,11 +143,15 @@ jobs:
           cargo test --no-run --locked -p gcu-driver-linux --test capture
           cargo test --no-run --locked -p gcu-driver-linux --test actions
           cargo test --no-run --locked -p gcu-driver-linux --test stop
+          cargo test --no-run --locked -p gcu-driver-linux --test contract
 
-
-      - name: Run fixture and verify AT-SPI tree and X11 capture
+      - name: Run fixture and verify AT-SPI tree, X11 capture, and contract
         run: |
           dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render +extension Composite" bash scripts/a11y/run_fixture_test.sh
+
+      - name: Run Linux driver smoke test
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render +extension Composite" bash scripts/smoke-linux.sh
 
       - name: Upload AT-SPI artifacts on failure
         if: failure()

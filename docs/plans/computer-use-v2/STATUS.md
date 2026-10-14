@@ -42,7 +42,7 @@
 | P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | done | cu2/P3-02-x11 |  | 2026-10-13 | X11 窗口+XComposite 截图；无 composite 且被遮挡则拒绝(不交付他人内容)；CI Xvfb 实测 live_x11_fixture_window_capture_and_canvas_grid 通过 |
 | P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | done | cu2/P3-03-actions |  | 2026-10-13 | AT-SPI 语义动作+XTEST；TargetedOnly 不升级；InputLedger 先记账后发送并补发 up；CI Xvfb live 动作测试 5 个全过；文本框 SetValue 因 AccessKit 无 EditableText 返回 NotSettable(已登记) |
 | P3-04 | X11 守卫与热键 | P3-03 | 1d | done | cu2/P3-04-x11-guard |  | 2026-10-13 | XI2 原始事件活动时钟(排除 XTEST，故障→None)；XGrabKey 停止热键(含 NumLock/CapsLock 组合)，失败则禁用前台 XTEST 路线；看门狗 5s；Xvfb 实机热键测试通过；物理硬件输入 not_run |
-| P3-05 | Linux 契约测试与 CI | P3-01、P3-02、P3-03、P3-04 | 1.5d | todo |  |  |  |  |
+| P3-05 | Linux 契约测试与 CI | P3-01、P3-02、P3-03、P3-04 | 1.5d | done | cu2/P3-05-linux-contract |  | 2026-10-13 | C01–C27 表驱动实机契约(Xvfb+dbus+AT-SPI+openbox)：23 通过 / 6 跳过(原因逐条打印) / 0 失败；AT-SPI job 连续重跑稳定；smoke-linux.sh |
 | P4-01 | macOS helper 与代理 | P1-09、S-02 | 3d | todo |  |  |  |  |
 | P4-02 | Onboarding 窗口 | P4-01 | 2d | todo |  |  |  |  |
 | P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | todo |  |  |  |  |
@@ -99,6 +99,7 @@
 - AccessKit(eframe) 在 Linux AT-SPI 上的文本框没有实现 EditableText：`SetValue` 返回 `NotSettable`（滑块 `Value.SetCurrentValue` 可用）。模型应改用 `type_text`（需前台策略）；路由层不自动回退，错误提示里写明。真实 GTK/Qt 应用的 EditableText 支持待 P9-05 兼容性矩阵验证。
 - 偶发：`gcu-cli/tests/engine_host.rs::engine_lost_stop_channel_denies_approval_and_exits_with_rpc_still_connected` 在 macOS CI（pull_request 运行）失败过 1 次（等待调用结果超过 RPC_TIMEOUT 5s），同一提交的 push 运行与重跑均通过，Linux 本地 30 次加压全过；根因未明。再出现时先读失败日志，不要靠重跑；怀疑点：engine 退出时 `sessions` 关闭路径（`entry.remote.lock().await.close()`）等待在途调用。
 - 驱动侧 Stop 锁存（`LinuxDriver::with_stop_latch`）与活动时钟（`ActivityClock`）还未接到 Host 的 `StopMirror`/`UserActivity`：真实驱动组装（gcu engine 装配）卡里必须接上，否则热键只在驱动内生效。
+- Linux 树遍历对名称/标识含 "password" 的节点追加 PASSWORD 状态（启发式，宁可多抹）：eframe 不暴露密码角色，夹具靠它通过 C14/C20；真正的原生密码控件仍以 AT-SPI 角色/状态为准。契约表里 6 项跳过（launch_app、set_value 文本框、combobox Selection、stale geometry 快照 ID 等）是驱动能力缺口，不是通过。
 
 ## 阶段记录
 

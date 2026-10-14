@@ -303,8 +303,12 @@ impl FixtureApp {
                 .id_salt("virtual_list_scroll")
                 .max_height(180.0)
                 .show_rows(ui, row_height, VIRTUAL_LIST_TOTAL_ROWS, |ui, row_range| {
-                    self.state
-                        .set_list_visible_range((row_range.start, row_range.end));
+                    let old_range = self.state.list_visible_range;
+                    let new_range = (row_range.start, row_range.end);
+                    if old_range != new_range {
+                        self.state.set_list_visible_range(new_range);
+                        let _ = self.state.maybe_persist();
+                    }
                     for i in row_range {
                         ui.label(format!("Item {:04} / 列表项 {:04}", i, i));
                     }

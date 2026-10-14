@@ -483,9 +483,9 @@ impl XServer for RealX {
             .poll_for_event()
             .map_err(|e| XError::Protocol(e.to_string()))?;
         match ev {
-            Some(x11rb::protocol::Event::KeyPress(kp)) => {
-                Ok(Some(crate::x11::server::XEventKind::KeyPress(kp.detail)))
-            }
+            Some(x11rb::protocol::Event::KeyPress(kp)) => Ok(Some(
+                crate::x11::server::XEventKind::KeyPress(kp.detail, u16::from(kp.state)),
+            )),
             Some(x11rb::protocol::Event::XinputRawKeyPress(e)) => Ok(Some(
                 crate::x11::server::XEventKind::RawDeviceInput(e.deviceid, e.sourceid),
             )),

@@ -81,6 +81,7 @@ async fn perform_action_inner(
             count,
             route,
         } => {
+            let xid = driver.resolve_xid(win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -88,7 +89,6 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            let xid = driver.resolve_xid(win)?;
             execute_pointer_click(
                 x.as_ref(),
                 driver.ledger(),
@@ -107,6 +107,7 @@ async fn perform_action_inner(
             dy,
             route,
         } => {
+            let xid = driver.resolve_xid(win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -114,10 +115,10 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            let xid = driver.resolve_xid(win)?;
             execute_pointer_scroll(x.as_ref(), driver.ledger(), xid, *at, *dx, *dy, cancel).await
         }
         DriverAction::PointerDrag { win, path, route } => {
+            let xid = driver.resolve_xid(win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -125,7 +126,6 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            let xid = driver.resolve_xid(win)?;
             execute_pointer_drag(x.as_ref(), driver.ledger(), xid, path, cancel).await
         }
         DriverAction::TypeText {
@@ -154,6 +154,7 @@ async fn perform_action_inner(
             }
 
             // Otherwise fall back to X11 keyboard input
+            let xid = driver.resolve_xid(win)?;
             if *route == KeyRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -161,10 +162,10 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            let xid = driver.resolve_xid(win)?;
             execute_type_text_x11(x.as_ref(), driver.ledger(), xid, text, cancel).await
         }
         DriverAction::PressKeys { win, chord, route } => {
+            let xid = driver.resolve_xid(win)?;
             if *route == KeyRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -172,15 +173,14 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            let xid = driver.resolve_xid(win)?;
             execute_press_keys(x.as_ref(), driver.ledger(), xid, chord, cancel).await
         }
         DriverAction::Activate { win } => {
+            let xid = driver.resolve_xid(win)?;
             require_foreground(driver)?;
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            let xid = driver.resolve_xid(win)?;
             activate_and_verify(x.as_ref(), xid, cancel).await?;
             Ok(Delivery::Foreground)
         }
