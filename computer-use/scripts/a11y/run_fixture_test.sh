@@ -98,4 +98,12 @@ if ! cargo test --locked -p gcu-driver-linux --test stop -- --ignored --test-thr
   exit 1
 fi
 
+echo "Running live driver contract test suite..."
+if ! cargo test --locked -p gcu-driver-linux --test contract -- --ignored --test-threads=1; then
+  echo "=== FIXTURE LOG ON CONTRACT TEST FAILURE ==="
+  cat /tmp/fixture.log 2>/dev/null || true
+  exit 1
+fi
+
+
 
