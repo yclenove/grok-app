@@ -1,5 +1,6 @@
 //! AT-SPI connection management, role mapping, tree building, and toolkit detection.
 
+pub mod actions;
 pub mod bus;
 pub mod events;
 pub mod roles;
@@ -7,6 +8,10 @@ pub mod sensitive;
 pub mod source;
 pub mod tree;
 
+pub use actions::{
+    execute_atspi_action, extract_atspi_node, extract_fake_id, find_best_press_action,
+    find_secondary_action, PRESS_CANDIDATE_PATTERNS,
+};
 pub use bus::AtspiBus;
 pub use events::{AtspiEventSubscriber, FakeEventSubscriber, LiveEventSubscriber};
 pub use roles::map_atspi_role;

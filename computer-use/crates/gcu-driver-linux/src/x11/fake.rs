@@ -21,6 +21,32 @@ pub struct FakeWindow {
     pub image: Option<RawImage>,
 }
 
+/// Simulated event recorded by [`FakeX`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeXEvent {
+    /// Motion event.
+    Motion {
+        /// Target root X coordinate.
+        x: i16,
+        /// Target root Y coordinate.
+        y: i16,
+    },
+    /// Button event.
+    Button {
+        /// Button number.
+        button: u8,
+        /// Whether press or release.
+        is_press: bool,
+    },
+    /// Key event.
+    Key {
+        /// X11 keycode.
+        keycode: u8,
+        /// Whether press or release.
+        is_press: bool,
+    },
+}
+
 /// In-memory mock X11 server for unit testing.
 pub struct FakeX {
     windows: Mutex<HashMap<u32, FakeWindow>>,
@@ -31,6 +57,13 @@ pub struct FakeX {
     pixmaps: Mutex<HashMap<u32, (u32, RawImage)>>,
     next_pixmap_id: Mutex<u32>,
     root_image: Mutex<Option<RawImage>>,
+    xtest_available: Mutex<bool>,
+    mouse_pos: Mutex<(i16, i16)>,
+    pressed_buttons: Mutex<Vec<u8>>,
+    pressed_keys: Mutex<Vec<u8>>,
+    keymap: Mutex<HashMap<u8, Vec<u32>>>,
+    activate_fails: Mutex<bool>,
+    events: Mutex<Vec<FakeXEvent>>,
 }
 
 impl FakeX {
@@ -45,6 +78,13 @@ impl FakeX {
             pixmaps: Mutex::new(HashMap::new()),
             next_pixmap_id: Mutex::new(0x200_0000),
             root_image: Mutex::new(None),
+            xtest_available: Mutex::new(true),
+            mouse_pos: Mutex::new((0, 0)),
+            pressed_buttons: Mutex::new(Vec::new()),
+            pressed_keys: Mutex::new(Vec::new()),
+            keymap: Mutex::new(HashMap::new()),
+            activate_fails: Mutex::new(false),
+            events: Mutex::new(Vec::new()),
         }
     }
 
@@ -90,6 +130,69 @@ impl FakeX {
             Err(poisoned) => poisoned.into_inner(),
         };
         *r = Some(img);
+    }
+
+    /// Set whether XTEST extension is available.
+    pub fn set_xtest_available(&self, avail: bool) {
+        let mut xt = match self.xtest_available.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *xt = avail;
+    }
+
+    /// Set whether window activation should fail.
+    pub fn set_activate_fails(&self, fails: bool) {
+        let mut af = match self.activate_fails.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *af = fails;
+    }
+
+    /// Retrieve all recorded simulated events.
+    pub fn get_events(&self) -> Vec<FakeXEvent> {
+        let ev = match self.events.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ev.clone()
+    }
+
+    /// Clear recorded simulated events.
+    pub fn clear_events(&self) {
+        let mut ev = match self.events.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ev.clear();
+    }
+
+    /// Get current pressed buttons.
+    pub fn get_pressed_buttons(&self) -> Vec<u8> {
+        let b = match self.pressed_buttons.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        b.clone()
+    }
+
+    /// Get current pressed keys.
+    pub fn get_pressed_keys(&self) -> Vec<u8> {
+        let k = match self.pressed_keys.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        k.clone()
+    }
+
+    /// Get current simulated mouse position.
+    pub fn get_mouse_pos(&self) -> (i16, i16) {
+        let pos = match self.mouse_pos.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *pos
     }
 }
 
@@ -275,6 +378,147 @@ impl XServer for FakeX {
         }
 
         Err(XError::WindowNotFound(drawable))
+    }
+
+    fn is_xtest_available(&self) -> Result<bool, XError> {
+        let xt = match self.xtest_available.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        Ok(*xt)
+    }
+
+    fn xtest_fake_motion(&self, root_x: i16, root_y: i16) -> Result<(), XError> {
+        if !self.is_xtest_available()? {
+            return Err(XError::ExtensionUnavailable("XTEST".into()));
+        }
+        let mut pos = match self.mouse_pos.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *pos = (root_x, root_y);
+        let mut ev = match self.events.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ev.push(FakeXEvent::Motion {
+            x: root_x,
+            y: root_y,
+        });
+        Ok(())
+    }
+
+    fn xtest_fake_button(&self, button: u8, is_press: bool) -> Result<(), XError> {
+        if !self.is_xtest_available()? {
+            return Err(XError::ExtensionUnavailable("XTEST".into()));
+        }
+        let mut btns = match self.pressed_buttons.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if is_press {
+            if !btns.contains(&button) {
+                btns.push(button);
+            }
+        } else {
+            btns.retain(|&b| b != button);
+        }
+        let mut ev = match self.events.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ev.push(FakeXEvent::Button { button, is_press });
+        Ok(())
+    }
+
+    fn xtest_fake_key(&self, keycode: u8, is_press: bool) -> Result<(), XError> {
+        if !self.is_xtest_available()? {
+            return Err(XError::ExtensionUnavailable("XTEST".into()));
+        }
+        let mut keys = match self.pressed_keys.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if is_press {
+            if !keys.contains(&keycode) {
+                keys.push(keycode);
+            }
+        } else {
+            keys.retain(|&k| k != keycode);
+        }
+        let mut ev = match self.events.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ev.push(FakeXEvent::Key { keycode, is_press });
+        Ok(())
+    }
+
+    fn activate_window(&self, window: u32) -> Result<(), XError> {
+        let fails = match self.activate_fails.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if *fails {
+            return Err(XError::Protocol("mock window activation failed".into()));
+        }
+        let mut active = match self.active_window.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *active = Some(window);
+        Ok(())
+    }
+
+    fn keyboard_bounds(&self) -> Result<(u8, u8), XError> {
+        Ok((8, 255))
+    }
+
+    fn get_keyboard_mapping(&self, first_keycode: u8, count: u8) -> Result<(Vec<u32>, u8), XError> {
+        let map = match self.keymap.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let per_kc = 2u8;
+        let mut keysyms = Vec::with_capacity(count as usize * per_kc as usize);
+        for kc in first_keycode..(first_keycode.saturating_add(count)) {
+            if let Some(entry) = map.get(&kc) {
+                for i in 0..per_kc as usize {
+                    keysyms.push(entry.get(i).copied().unwrap_or(0));
+                }
+            } else {
+                let sym = if (32..127).contains(&kc) {
+                    kc as u32
+                } else {
+                    0
+                };
+                keysyms.push(sym);
+                keysyms.push(0);
+            }
+        }
+        Ok((keysyms, per_kc))
+    }
+
+    fn change_keyboard_mapping(
+        &self,
+        first_keycode: u8,
+        keysyms_per_keycode: u8,
+        keysyms: &[u32],
+    ) -> Result<(), XError> {
+        let mut map = match self.keymap.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let per = keysyms_per_keycode.max(1) as usize;
+        for (i, chunk) in keysyms.chunks(per).enumerate() {
+            let kc = first_keycode.saturating_add(i as u8);
+            map.insert(kc, chunk.to_vec());
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), XError> {
+        Ok(())
     }
 }
 

@@ -105,6 +105,39 @@ pub trait XServer: Send + Sync {
         width: u16,
         height: u16,
     ) -> Result<RawImage, XError>;
+
+    /// Check whether the XTEST extension is present and supported.
+    fn is_xtest_available(&self) -> Result<bool, XError>;
+
+    /// Send an XTEST fake motion event to absolute screen coordinates.
+    fn xtest_fake_motion(&self, root_x: i16, root_y: i16) -> Result<(), XError>;
+
+    /// Send an XTEST fake button event (press or release).
+    fn xtest_fake_button(&self, button: u8, is_press: bool) -> Result<(), XError>;
+
+    /// Send an XTEST fake key event (press or release).
+    fn xtest_fake_key(&self, keycode: u8, is_press: bool) -> Result<(), XError>;
+
+    /// Request activation of a window using `_NET_ACTIVE_WINDOW`.
+    fn activate_window(&self, window: u32) -> Result<(), XError>;
+
+    /// Query the keyboard min/max keycode range.
+    fn keyboard_bounds(&self) -> Result<(u8, u8), XError>;
+
+    /// Query the keyboard mapping for a range of keycodes.
+    /// Returns (keysyms, keysyms_per_keycode).
+    fn get_keyboard_mapping(&self, first_keycode: u8, count: u8) -> Result<(Vec<u32>, u8), XError>;
+
+    /// Change the keyboard mapping for a range of keycodes.
+    fn change_keyboard_mapping(
+        &self,
+        first_keycode: u8,
+        keysyms_per_keycode: u8,
+        keysyms: &[u32],
+    ) -> Result<(), XError>;
+
+    /// Flush any pending buffered protocol requests to the X server.
+    fn flush(&self) -> Result<(), XError>;
 }
 
 /// Converts raw ZPixmap bytes to 32-bit RGBA8 format.

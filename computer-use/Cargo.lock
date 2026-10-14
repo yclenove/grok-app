@@ -1711,13 +1711,16 @@ dependencies = [
  "gcu-core",
  "gcu-protocol",
  "png",
+ "serde_json",
  "sha2",
  "smallvec",
  "smol_str 0.3.6",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "unicode-segmentation",
  "x11rb",
+ "xkbcommon",
  "zbus",
 ]
 
@@ -5397,6 +5400,17 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xkbcommon"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
+dependencies = [
+ "libc",
+ "memmap2",
+ "xkeysym",
+]
 
 [[package]]
 name = "xkbcommon-dl"

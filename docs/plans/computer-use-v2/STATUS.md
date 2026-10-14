@@ -40,7 +40,7 @@
 | P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | todo |  |  |  |  |
 | P3-01 | AT-SPI 树 | P0-05 | 3d | done | cu2/P3-01-atspi-tree |  | 2026-10-13 | AT-SPI 树+Linux 身份(路径+dev/inode+sha256；持久授权绑定映像，pid 复用另判)；CI 实时测试读到夹具 send_button |
 | P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | done | cu2/P3-02-x11 |  | 2026-10-13 | X11 窗口+XComposite 截图；无 composite 且被遮挡则拒绝(不交付他人内容)；CI Xvfb 实测 live_x11_fixture_window_capture_and_canvas_grid 通过 |
-| P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | todo |  |  |  |  |
+| P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | done | cu2/P3-03-actions |  | 2026-10-13 | AT-SPI 语义动作+XTEST；TargetedOnly 不升级；InputLedger 先记账后发送并补发 up；CI Xvfb live 动作测试 5 个全过；文本框 SetValue 因 AccessKit 无 EditableText 返回 NotSettable(已登记) |
 | P3-04 | X11 守卫与热键 | P3-03 | 1d | todo |  |  |  |  |
 | P3-05 | Linux 契约测试与 CI | P3-01、P3-02、P3-03、P3-04 | 1.5d | todo |  |  |  |  |
 | P4-01 | macOS helper 与代理 | P1-09、S-02 | 3d | todo |  |  |  |  |
@@ -96,6 +96,7 @@
 - 外部 CI：仓库原有 `ci.yml` 会对 `computer-use/**` 改动也整套运行（Rust/frontend），浪费时间；待 CU 稳定后给它加 `paths-ignore: computer-use/**`。
 - eframe 0.36 在 Linux AT-SPI 上不暴露密码保护(ROLE_PASSWORD_TEXT/STATE_PROTECTED)与模态(ROLE_DIALOG/STATE_MODAL)：契约用例 C14/C20 不能靠 gcu-fixture 验证，需 fixtures-native（GTK4 等）补；脚本以 KNOWN_GAPS 显式登记，非静默跳过。
 - Windows 上 Grok `Stop` 钩子（.cmd）未实现；安装库当前钩子脚本为 Unix `.sh`，Windows 只装 MCP 条目。
+- AccessKit(eframe) 在 Linux AT-SPI 上的文本框没有实现 EditableText：`SetValue` 返回 `NotSettable`（滑块 `Value.SetCurrentValue` 可用）。模型应改用 `type_text`（需前台策略）；路由层不自动回退，错误提示里写明。真实 GTK/Qt 应用的 EditableText 支持待 P9-05 兼容性矩阵验证。
 
 ## 阶段记录
 

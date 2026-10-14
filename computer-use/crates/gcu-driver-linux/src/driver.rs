@@ -8,7 +8,8 @@ use crate::atspi::{
     tree::{build_raw_tree, MAX_NODES_CEILING},
 };
 use crate::x11::{
-    align_windows, capture_window, list_x11_windows, AtspiWindowCandidate, RealX, XServer,
+    align_windows, capture_window, list_x11_windows, AtspiWindowCandidate, InputLedger, RealX,
+    XServer,
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -42,6 +43,7 @@ pub struct LinuxDriver {
     fake_root: Option<FakeNode>,
     fake_apps: Vec<AppInfo>,
     fake_windows: Vec<(String, WindowInfo)>,
+    ledger: Arc<InputLedger>,
 }
 
 impl LinuxDriver {
@@ -87,15 +89,7 @@ impl LinuxDriver {
 
         let mut capabilities = Self::default_capabilities();
         if let Some(ref x) = x_server {
-            if x.is_composite_available().unwrap_or(false) {
-                capabilities
-                    .private_apis
-                    .insert("x11_composite".into(), PrivateApiStatus::Available);
-            } else {
-                capabilities
-                    .private_apis
-                    .insert("x11_composite".into(), PrivateApiStatus::Missing);
-            }
+            update_x11_caps(&mut capabilities, x.as_ref());
         }
 
         Ok(Self {
@@ -109,6 +103,7 @@ impl LinuxDriver {
             fake_root: None,
             fake_apps: Vec::new(),
             fake_windows: Vec::new(),
+            ledger: Arc::new(InputLedger::new()),
         })
     }
 
@@ -125,15 +120,7 @@ impl LinuxDriver {
 
         let mut capabilities = Self::default_capabilities();
         if let Some(ref x) = x_server {
-            if x.is_composite_available().unwrap_or(false) {
-                capabilities
-                    .private_apis
-                    .insert("x11_composite".into(), PrivateApiStatus::Available);
-            } else {
-                capabilities
-                    .private_apis
-                    .insert("x11_composite".into(), PrivateApiStatus::Missing);
-            }
+            update_x11_caps(&mut capabilities, x.as_ref());
         }
 
         Self {
@@ -147,6 +134,7 @@ impl LinuxDriver {
             fake_root: None,
             fake_apps: Vec::new(),
             fake_windows: Vec::new(),
+            ledger: Arc::new(InputLedger::new()),
         }
     }
 
@@ -168,20 +156,13 @@ impl LinuxDriver {
             fake_root: Some(root),
             fake_apps: apps,
             fake_windows: windows,
+            ledger: Arc::new(InputLedger::new()),
         }
     }
 
     /// Attach an XServer implementation to this driver (useful for injecting FakeX).
     pub fn with_x_server(mut self, x: Arc<dyn XServer>) -> Self {
-        if x.is_composite_available().unwrap_or(false) {
-            self.capabilities
-                .private_apis
-                .insert("x11_composite".into(), PrivateApiStatus::Available);
-        } else {
-            self.capabilities
-                .private_apis
-                .insert("x11_composite".into(), PrivateApiStatus::Missing);
-        }
+        update_x11_caps(&mut self.capabilities, x.as_ref());
         self.x_server = Some(x);
         self
     }
@@ -195,6 +176,48 @@ impl LinuxDriver {
     pub fn x_server(&self) -> Option<&Arc<dyn XServer>> {
         self.x_server.as_ref()
     }
+
+    /// Access the underlying input ledger.
+    pub fn ledger(&self) -> &Arc<InputLedger> {
+        &self.ledger
+    }
+
+    /// Access the fake root node if configured.
+    pub fn fake_root(&self) -> Option<&FakeNode> {
+        self.fake_root.as_ref()
+    }
+
+    /// Access the fake source if configured.
+    pub fn fake_source(&self) -> Option<&Arc<FakeSource>> {
+        self.fake_source.as_ref()
+    }
+
+    /// Resolve an X11 window ID from a WindowRef.
+    pub fn resolve_xid(&self, win: &WindowRef) -> Result<u32, DriverError> {
+        if let Ok(id) = win.id.parse::<u32>() {
+            return Ok(id);
+        }
+        let map = match self.atspi_to_x.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        map.get(&win.id).copied().ok_or(DriverError::WindowGone)
+    }
+}
+
+fn update_x11_caps(caps: &mut Capabilities, x: &dyn XServer) {
+    let comp = if x.is_composite_available().unwrap_or(false) {
+        PrivateApiStatus::Available
+    } else {
+        PrivateApiStatus::Missing
+    };
+    caps.private_apis.insert("x11_composite".into(), comp);
+    let xtest = if x.is_xtest_available().unwrap_or(false) {
+        PrivateApiStatus::Available
+    } else {
+        PrivateApiStatus::Missing
+    };
+    caps.private_apis.insert("xtest".into(), xtest);
 }
 
 #[async_trait]
@@ -501,33 +524,13 @@ impl Driver for LinuxDriver {
             .x_server
             .as_ref()
             .ok_or(DriverError::CapabilityUnavailable)?;
-
-        let xid = if let Ok(id) = win.id.parse::<u32>() {
-            id
-        } else {
-            let map = match self.atspi_to_x.read() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            map.get(&win.id).copied().ok_or(DriverError::WindowGone)?
-        };
-
+        let xid = self.resolve_xid(win)?;
         capture_window(x.as_ref(), xid)
     }
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
         if let Some(ref x) = self.x_server {
-            let xid = if let Ok(id) = win.id.parse::<u32>() {
-                Some(id)
-            } else {
-                let map = match self.atspi_to_x.read() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                map.get(&win.id).copied()
-            };
-
-            if let Some(id) = xid {
+            if let Ok(id) = self.resolve_xid(win) {
                 if let Ok(geom) = x.window_geometry(id) {
                     let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
                     return Ok(Geometry {
@@ -558,13 +561,17 @@ impl Driver for LinuxDriver {
         Ok(None)
     }
 
-    async fn perform(&self, _req: &DriverAction, _cancel: &Cancel) -> Result<Delivery> {
-        Err(DriverError::CapabilityUnavailable)
+    async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        crate::perform::perform_action(self, req, cancel).await
     }
 
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
         self.subscriber.as_ref().and_then(|s| s.subscribe(&win.id))
     }
 
-    async fn release_all_input(&self) {}
+    async fn release_all_input(&self) {
+        if let Some(ref x) = self.x_server {
+            self.ledger.release_all(x.as_ref());
+        }
+    }
 }
