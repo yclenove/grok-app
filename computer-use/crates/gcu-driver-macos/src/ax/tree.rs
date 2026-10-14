@@ -4,7 +4,8 @@
 //! node budget returns an empty tree. Cancellation is checked before every
 //! source call. Reads report `maybe_executed = false`. A native failure on one
 //! field becomes an empty field. `PermissionMissing`, `Cancelled`, `Timeout`,
-//! and `Crashed` stop the walk.
+//! and `Crashed` stop the walk. After the root is read, deadline expiry preserves
+//! retained nodes and reports incompleteness; before that it returns `Timeout`.
 //!
 //! Frames are AX points times `scale`, then shifted so the window origin is
 //! `(0, 0)`. The Y axis is not flipped. Text is cut to `text_limit` and to
@@ -15,7 +16,10 @@ use std::time::Duration;
 use gcu_core::{
     driver::{Cancel, DriverError, TreeOpts},
     fingerprint,
-    model::{Fingerprint, NodeAction, NodeValue, RawNode, RawTree, Rect, Role, States, TextExtras},
+    model::{
+        Fingerprint, Incomplete, IncompleteReason, NodeAction, NodeValue, RawNode, RawTree, Rect,
+        Role, States, TextExtras,
+    },
 };
 use smallvec::SmallVec;
 use smol_str::SmolStr;
@@ -54,37 +58,47 @@ pub async fn build_raw_tree<S: AxSource>(
         });
     }
     if opts.max_tree_nodes == 0 {
-        return Ok(RawTree { root: None });
+        return Ok(RawTree {
+            root: None,
+            incomplete: Some(Incomplete {
+                reason: IncompleteReason::NodeCap,
+                read_nodes: 0,
+                unread_nodes: None,
+            }),
+        });
     }
-    let timeout = opts.timeout.min(TREE_BUILD_TIMEOUT);
-    let walk = async {
-        let mut walk = Walk {
-            source,
-            opts,
-            cancel,
-            origin_x: 0.0,
-            origin_y: 0.0,
-            scale: normalized_scale(scale),
-            max_nodes: opts.max_tree_nodes.min(MAX_NODES_CEILING),
-            node_count: 0,
-        };
-        let root_frame = soften(with_cancel(cancel, source.frame(root)).await)?;
-        if let Some(Some(frame)) = root_frame {
-            walk.origin_x = frame.x;
-            walk.origin_y = frame.y;
-        }
-        let mut root_node = walk.node(root, 0).await?;
-        fingerprint::refresh_tree(&mut root_node, Fingerprint(0), 0);
-        Ok(RawTree {
-            root: Some(root_node),
-        })
+    let deadline = tokio::time::Instant::now() + opts.timeout.min(TREE_BUILD_TIMEOUT);
+    let mut walk = Walk {
+        source,
+        opts,
+        cancel,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        scale: normalized_scale(scale),
+        max_nodes: opts.max_tree_nodes.min(MAX_NODES_CEILING),
+        node_count: 0,
+        deadline,
+        reason: None,
     };
-    match tokio::time::timeout(timeout, walk).await {
-        Ok(result) => result,
-        Err(_) => Err(DriverError::Timeout {
+    let root_frame = tokio::time::timeout_at(deadline, with_cancel(cancel, source.frame(root)))
+        .await
+        .map_err(|_| DriverError::Timeout {
             maybe_executed: false,
-        }),
+        })?;
+    if let Some(Some(frame)) = soften(root_frame, &mut walk.reason)? {
+        walk.origin_x = frame.x;
+        walk.origin_y = frame.y;
     }
+    let mut root_node = walk.node(root, 0).await?;
+    fingerprint::refresh_tree(&mut root_node, Fingerprint(0), 0);
+    Ok(RawTree {
+        root: Some(root_node),
+        incomplete: walk.reason.map(|reason| Incomplete {
+            reason,
+            read_nodes: walk.node_count as u32,
+            unread_nodes: None,
+        }),
+    })
 }
 
 struct Walk<'a, S> {
@@ -96,47 +110,75 @@ struct Walk<'a, S> {
     scale: f64,
     max_nodes: usize,
     node_count: usize,
+    deadline: tokio::time::Instant,
+    reason: Option<IncompleteReason>,
 }
 
 impl<S: AxSource> Walk<'_, S> {
     async fn node(&mut self, node: &S::Node, depth: usize) -> Result<RawNode> {
-        if self.cancel.is_cancelled() {
-            return Err(DriverError::Cancelled {
-                maybe_executed: false,
-            });
-        }
+        let cancel = self.cancel;
+        let deadline = self.deadline;
+        let (mut raw, children) = with_cancel(cancel, async {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(DriverError::Timeout {
+                    maybe_executed: false,
+                });
+            }
+            tokio::time::timeout_at(deadline, self.read_node(node, depth))
+                .await
+                .map_err(|_| DriverError::Timeout {
+                    maybe_executed: false,
+                })?
+        })
+        .await?;
         self.node_count += 1;
-        let role_name = soften(with_cancel(self.cancel, self.source.role(node)).await)?
-            .unwrap_or_else(|| "AXUnknown".into());
-        let subrole =
-            soften(with_cancel(self.cancel, self.source.subrole(node)).await)?.unwrap_or(None);
+        for child in children {
+            if self.node_count >= self.max_nodes {
+                self.reason.get_or_insert(IncompleteReason::NodeCap);
+                break;
+            }
+            if depth + 1 >= self.opts.max_tree_depth {
+                self.reason.get_or_insert(IncompleteReason::DepthCap);
+                break;
+            }
+            match Box::pin(self.node(&child, depth + 1)).await {
+                Ok(child) => raw.children.push(child),
+                Err(DriverError::Timeout { .. }) => {
+                    self.reason = Some(IncompleteReason::Deadline);
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+            if self.reason == Some(IncompleteReason::Deadline) {
+                break;
+            }
+        }
+        Ok(raw)
+    }
+
+    async fn read_node(&mut self, node: &S::Node, depth: usize) -> Result<(RawNode, Vec<S::Node>)> {
+        macro_rules! read {
+            ($call:expr) => {
+                soften(with_cancel(self.cancel, $call).await, &mut self.reason)?
+            };
+        }
+        let role_name = read!(self.source.role(node)).unwrap_or_else(|| "AXUnknown".into());
+        let subrole = read!(self.source.subrole(node)).unwrap_or(None);
         let mapped = map_ax_role(&role_name, subrole.as_deref());
-        let bits =
-            soften(with_cancel(self.cancel, self.source.states(node)).await)?.unwrap_or_default();
+        let bits = read!(self.source.states(node)).unwrap_or_default();
         let states = map_ax_states(&bits, mapped.role, mapped.password, mapped.modal);
-        let name = soften(with_cancel(self.cancel, self.source.title(node)).await)?.unwrap_or(None);
-        let description =
-            soften(with_cancel(self.cancel, self.source.description(node)).await)?.unwrap_or(None);
-        let placeholder =
-            soften(with_cancel(self.cancel, self.source.placeholder(node)).await)?.unwrap_or(None);
-        let help = soften(with_cancel(self.cancel, self.source.help(node)).await)?.unwrap_or(None);
-        let identifier =
-            soften(with_cancel(self.cancel, self.source.identifier(node)).await)?.unwrap_or(None);
-        let frame =
-            soften(with_cancel(self.cancel, self.source.frame(node)).await)?.unwrap_or(None);
-        let actions =
-            soften(with_cancel(self.cancel, self.source.actions(node)).await)?.unwrap_or_default();
-        let selected =
-            soften(with_cancel(self.cancel, self.source.selected_text_range(node)).await)?
-                .unwrap_or(None);
-        let visible = soften(with_cancel(self.cancel, self.source.visible_text_range(node)).await)?
-            .unwrap_or(None);
-        let full_chars =
-            soften(with_cancel(self.cancel, self.source.number_of_characters(node)).await)?
-                .unwrap_or(None);
-        let url = soften(with_cancel(self.cancel, self.source.url(node)).await)?.unwrap_or(None);
-        let raw_value =
-            soften(with_cancel(self.cancel, self.source.value(node)).await)?.unwrap_or(None);
+        let name = read!(self.source.title(node)).unwrap_or(None);
+        let description = read!(self.source.description(node)).unwrap_or(None);
+        let placeholder = read!(self.source.placeholder(node)).unwrap_or(None);
+        let help = read!(self.source.help(node)).unwrap_or(None);
+        let identifier = read!(self.source.identifier(node)).unwrap_or(None);
+        let frame = read!(self.source.frame(node)).unwrap_or(None);
+        let actions = read!(self.source.actions(node)).unwrap_or_default();
+        let selected = read!(self.source.selected_text_range(node)).unwrap_or(None);
+        let visible = read!(self.source.visible_text_range(node)).unwrap_or(None);
+        let full_chars = read!(self.source.number_of_characters(node)).unwrap_or(None);
+        let url = read!(self.source.url(node)).unwrap_or(None);
+        let raw_value = read!(self.source.value(node)).unwrap_or(None);
         let (value, text_extras) = bound_value(
             raw_value,
             self.opts.text_limit,
@@ -163,37 +205,29 @@ impl<S: AxSource> Walk<'_, S> {
         let frame = frame.map(|rect| {
             window_relative_frame(rect, self.origin_x, self.origin_y, self.scale, depth == 0)
         });
-        let mut children = Vec::new();
-        if self.node_count < self.max_nodes && depth + 1 < self.opts.max_tree_depth {
-            if let Some(kids) = soften(with_cancel(self.cancel, self.source.children(node)).await)?
-            {
-                for child in kids {
-                    if self.node_count >= self.max_nodes {
-                        break;
-                    }
-                    children.push(Box::pin(self.node(&child, depth + 1)).await?);
-                }
-            }
-        }
-        Ok(RawNode {
-            role: mapped.role,
-            native_role,
-            subrole: mapped.subrole,
-            name,
-            value,
-            description,
-            placeholder,
-            help,
-            identifier,
-            states,
-            actions: SmallVec::from_vec(actions),
-            frame,
-            text_extras,
-            url,
+        let children = read!(self.source.children(node)).unwrap_or_default();
+        Ok((
+            RawNode {
+                role: mapped.role,
+                native_role,
+                subrole: mapped.subrole,
+                name,
+                value,
+                description,
+                placeholder,
+                help,
+                identifier,
+                states,
+                actions: SmallVec::from_vec(actions),
+                frame,
+                text_extras,
+                url,
+                children: Vec::new(),
+                handle: self.source.handle(node),
+                fingerprint: Fingerprint(0),
+            },
             children,
-            handle: self.source.handle(node),
-            fingerprint: Fingerprint(0),
-        })
+        ))
     }
 }
 
@@ -369,10 +403,13 @@ async fn with_cancel<T>(
     }
 }
 
-fn soften<T>(result: Result<T>) -> Result<Option<T>> {
+fn soften<T>(result: Result<T>, reason: &mut Option<IncompleteReason>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(DriverError::Native { .. }) => Ok(None),
+        Err(DriverError::Native { .. }) => {
+            reason.get_or_insert(IncompleteReason::PartialError);
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }

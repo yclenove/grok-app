@@ -91,6 +91,7 @@
 
 ## 发现（卡外问题，一行一条）
 
+- ADR-0004：原生树未读区域可能隐藏密码；已批准 `RawTree.incomplete`，core 统一拒图并 handoff、文本照常交付，Linux/macOS 上报上限/期限/部分错误；Windows 由 P2-02 接入。
 - 计划 v1.1 逐项决定见 [评审处置表](reviews/2026-10-13-disposition.md)；工时 P0–P9 177d + spike 3d，与 06 一致。
 - ~~P0-03 的 ErrorCode 缺 window_minimized~~ 已补（cu2/protocol-window-minimized）。
 - 外部 CI：仓库原有 `ci.yml` 会对 `computer-use/**` 改动也整套运行（Rust/frontend），浪费时间；待 CU 稳定后给它加 `paths-ignore: computer-use/**`。

@@ -307,11 +307,17 @@ impl fmt::Debug for RawNode {
     }
 }
 
+/// Shared payload-free native traversal facts (also used in structured output).
+pub use gcu_protocol::types::{Incomplete, IncompleteReason};
+
 /// Raw window observation; canvas-only windows legitimately have no root.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RawTree {
     /// Accessibility root, if available.
     pub root: Option<RawNode>,
+    /// None means native enumeration completed. Some forbids screenshot delivery,
+    /// including when unread regions might contain the only password field.
+    pub incomplete: Option<Incomplete>,
 }
 
 /// Geometry used to detect movement, resizing, or scale changes before input.

@@ -4,7 +4,7 @@ use super::{roles::map_atspi_role, sensitive::is_terminal_like, source::AtspiSou
 use gcu_core::{
     driver::{Cancel, DriverError, TreeOpts},
     fingerprint,
-    model::{Fingerprint, RawNode, RawTree, Rect, States},
+    model::{Fingerprint, Incomplete, IncompleteReason, RawNode, RawTree, Rect, States},
 };
 use smol_str::SmolStr;
 use std::{collections::HashMap, time::Duration};
@@ -91,6 +91,10 @@ pub fn map_atspi_states(
 /// - 2s hard traversal deadline, with per D-Bus call timeouts
 /// - Complete states bitflags mapping
 /// - Deterministic fingerprint generation
+///
+/// Cancellation and fatal errors return errors. Deadline expiry after the root
+/// was read retains partial nodes and marks them incomplete; an unread root times
+/// out. Native property/children failures are marked, never silently certified.
 pub async fn build_raw_tree<S: AtspiSource>(
     source: &S,
     root: &S::Node,
@@ -103,154 +107,199 @@ pub async fn build_raw_tree<S: AtspiSource>(
         });
     }
 
-    let timeout_budget = opts.timeout.min(TREE_BUILD_TIMEOUT);
-    tokio::time::timeout(timeout_budget, async {
-        let max_nodes = opts.max_tree_nodes.min(MAX_NODES_CEILING);
-        let mut node_count = 0;
-
-        let root_extents = source.extents(root).await.ok().flatten();
-        let (origin_x, origin_y) = match root_extents {
-            Some(r) => (r.x, r.y),
-            None => (0.0, 0.0),
-        };
-
-        let mut root_node = build_node_recursive(
-            source,
-            root,
-            opts,
-            cancel,
-            origin_x,
-            origin_y,
-            max_nodes,
-            &mut node_count,
-            0,
-        )
-        .await?;
-
-        fingerprint::refresh_tree(&mut root_node, Fingerprint(0), 0);
-
-        Ok(RawTree {
-            root: Some(root_node),
-        })
+    if opts.max_tree_nodes == 0 {
+        return Ok(RawTree {
+            root: None,
+            incomplete: Some(Incomplete {
+                reason: IncompleteReason::NodeCap,
+                read_nodes: 0,
+                unread_nodes: None,
+            }),
+        });
+    }
+    let deadline = tokio::time::Instant::now() + opts.timeout.min(TREE_BUILD_TIMEOUT);
+    let mut walk = Walk {
+        source,
+        opts,
+        cancel,
+        deadline,
+        origin_x: 0.,
+        origin_y: 0.,
+        max_nodes: opts.max_tree_nodes.min(MAX_NODES_CEILING),
+        node_count: 0,
+        reason: None,
+    };
+    let root_extents = bounded(cancel, deadline, source.extents(root)).await;
+    if let Some(r) = soften(root_extents, &mut walk.reason)?.flatten() {
+        walk.origin_x = r.x;
+        walk.origin_y = r.y;
+    }
+    let mut root_node = walk.node(root, 0).await?;
+    fingerprint::refresh_tree(&mut root_node, Fingerprint(0), 0);
+    Ok(RawTree {
+        root: Some(root_node),
+        incomplete: walk.reason.map(|reason| Incomplete {
+            reason,
+            read_nodes: walk.node_count as u32,
+            unread_nodes: None,
+        }),
     })
-    .await
-    .map_err(|_| DriverError::Timeout {
-        maybe_executed: false,
-    })?
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn build_node_recursive<S: AtspiSource>(
-    source: &S,
-    node: &S::Node,
-    opts: &TreeOpts,
-    cancel: &Cancel,
+struct Walk<'a, S> {
+    source: &'a S,
+    opts: &'a TreeOpts,
+    cancel: &'a Cancel,
+    deadline: tokio::time::Instant,
     origin_x: f64,
     origin_y: f64,
     max_nodes: usize,
-    node_count: &mut usize,
-    depth: usize,
-) -> Result<RawNode, DriverError> {
+    node_count: usize,
+    reason: Option<IncompleteReason>,
+}
+
+impl<S: AtspiSource> Walk<'_, S> {
+    async fn node(&mut self, node: &S::Node, depth: usize) -> Result<RawNode, DriverError> {
+        let (mut raw, children) =
+            bounded(self.cancel, self.deadline, self.read_node(node, depth)).await?;
+        self.node_count += 1;
+        for child in children {
+            if self.node_count >= self.max_nodes {
+                self.reason.get_or_insert(IncompleteReason::NodeCap);
+                break;
+            }
+            if depth >= self.opts.max_tree_depth {
+                self.reason.get_or_insert(IncompleteReason::DepthCap);
+                break;
+            }
+            match Box::pin(self.node(&child, depth + 1)).await {
+                Ok(child) => raw.children.push(child),
+                Err(DriverError::Timeout { .. }) => {
+                    self.reason = Some(IncompleteReason::Deadline);
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+            if self.reason == Some(IncompleteReason::Deadline) {
+                break;
+            }
+        }
+        Ok(raw)
+    }
+
+    async fn read_node(
+        &mut self,
+        node: &S::Node,
+        depth: usize,
+    ) -> Result<(RawNode, Vec<S::Node>), DriverError> {
+        macro_rules! read {
+            ($call:expr) => {
+                soften($call.await, &mut self.reason)?
+            };
+        }
+        let atspi_role = read!(self.source.role(node)).unwrap_or(atspi::Role::Unknown);
+        let (core_role, mut native_role) = map_atspi_role(atspi_role);
+        let name = read!(self.source.name(node)).flatten();
+        let description = read!(self.source.description(node)).flatten();
+        let help = read!(self.source.help(node)).flatten();
+        let identifier = read!(self.source.identifier(node)).flatten();
+        let attributes = read!(self.source.attributes(node)).unwrap_or_default();
+        let state_set = read!(self.source.states(node)).unwrap_or_default();
+        let states = map_atspi_states(state_set, atspi_role, &attributes);
+        let value = read!(self.source.value(node)).flatten();
+        let extents = read!(self.source.extents(node)).flatten();
+        let actions = read!(self.source.actions(node))
+            .map(smallvec::SmallVec::from_vec)
+            .unwrap_or_default();
+        let text_extras = read!(self.source.text_extras(node, self.opts.text_limit)).flatten();
+        let url = read!(self.source.url(node)).flatten();
+        let handle = self.source.handle(node);
+
+        // Convert frame into window-relative physical pixels
+        let frame = extents.map(|rect| {
+            if depth == 0 {
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: rect.w,
+                    h: rect.h,
+                }
+            } else {
+                Rect {
+                    x: rect.x - self.origin_x,
+                    y: rect.y - self.origin_y,
+                    w: rect.w,
+                    h: rect.h,
+                }
+            }
+        });
+
+        // Check terminal-like execution surface heuristic
+        if is_terminal_like(atspi_role, &native_role, name.as_deref())
+            && !native_role.to_ascii_lowercase().contains("terminal")
+        {
+            native_role = SmolStr::new(format!("{native_role}:terminal"));
+        }
+
+        let children = read!(self.source.children(node)).unwrap_or_default();
+
+        Ok((
+            RawNode {
+                role: core_role,
+                native_role,
+                subrole: None,
+                name,
+                value,
+                description,
+                placeholder: attributes.get("placeholder-text").cloned(),
+                help,
+                identifier,
+                states,
+                actions,
+                frame,
+                text_extras,
+                url,
+                children: Vec::new(),
+                handle,
+                fingerprint: Fingerprint(0),
+            },
+            children,
+        ))
+    }
+}
+
+async fn bounded<T>(
+    cancel: &Cancel,
+    deadline: tokio::time::Instant,
+    read: impl std::future::Future<Output = Result<T, DriverError>>,
+) -> Result<T, DriverError> {
     if cancel.is_cancelled() {
         return Err(DriverError::Cancelled {
             maybe_executed: false,
         });
     }
-
-    *node_count += 1;
-    let atspi_role = source.role(node).await.unwrap_or(atspi::Role::Unknown);
-    let (core_role, mut native_role) = map_atspi_role(atspi_role);
-    let name = source.name(node).await.ok().flatten();
-    let description = source.description(node).await.ok().flatten();
-    let help = source.help(node).await.ok().flatten();
-    let identifier = source.identifier(node).await.ok().flatten();
-    let attributes = source.attributes(node).await.unwrap_or_default();
-    let state_set = source
-        .states(node)
-        .await
-        .unwrap_or_else(|_| atspi::StateSet::default());
-    let states = map_atspi_states(state_set, atspi_role, &attributes);
-    let value = source.value(node).await.ok().flatten();
-    let extents = source.extents(node).await.ok().flatten();
-    let actions = source
-        .actions(node)
-        .await
-        .map(smallvec::SmallVec::from_vec)
-        .unwrap_or_default();
-    let text_extras = source
-        .text_extras(node, opts.text_limit)
-        .await
-        .ok()
-        .flatten();
-    let url = source.url(node).await.ok().flatten();
-    let handle = source.handle(node);
-
-    // Convert frame into window-relative physical pixels
-    let frame = extents.map(|rect| {
-        if depth == 0 {
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: rect.w,
-                h: rect.h,
-            }
-        } else {
-            Rect {
-                x: rect.x - origin_x,
-                y: rect.y - origin_y,
-                w: rect.w,
-                h: rect.h,
-            }
-        }
-    });
-
-    // Check terminal-like execution surface heuristic
-    if is_terminal_like(atspi_role, &native_role, name.as_deref())
-        && !native_role.to_ascii_lowercase().contains("terminal")
-    {
-        native_role = SmolStr::new(format!("{native_role}:terminal"));
+    if tokio::time::Instant::now() >= deadline {
+        return Err(DriverError::Timeout {
+            maybe_executed: false,
+        });
     }
-
-    let mut children = Vec::new();
-    if *node_count < max_nodes && depth < opts.max_tree_depth {
-        let child_nodes = source.children(node).await.unwrap_or_default();
-        for child in child_nodes {
-            if *node_count >= max_nodes {
-                break;
-            }
-            let child_raw = Box::pin(build_node_recursive(
-                source,
-                &child,
-                opts,
-                cancel,
-                origin_x,
-                origin_y,
-                max_nodes,
-                node_count,
-                depth + 1,
-            ))
-            .await?;
-            children.push(child_raw);
-        }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(DriverError::Cancelled { maybe_executed: false }),
+        result = tokio::time::timeout_at(deadline, read) => result.map_err(|_| DriverError::Timeout { maybe_executed: false })?,
     }
+}
 
-    Ok(RawNode {
-        role: core_role,
-        native_role,
-        subrole: None,
-        name,
-        value,
-        description,
-        placeholder: attributes.get("placeholder-text").cloned(),
-        help,
-        identifier,
-        states,
-        actions,
-        frame,
-        text_extras,
-        url,
-        children,
-        handle,
-        fingerprint: Fingerprint(0),
-    })
+fn soften<T>(
+    result: Result<T, DriverError>,
+    reason: &mut Option<IncompleteReason>,
+) -> Result<Option<T>, DriverError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(DriverError::Native { .. }) => {
+            reason.get_or_insert(IncompleteReason::PartialError);
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }

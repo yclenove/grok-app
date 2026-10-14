@@ -26,7 +26,10 @@ pub(crate) fn n(role: Role, name: &str, children: Vec<RawNode>) -> RawNode {
 pub(crate) fn input(children: Vec<RawNode>) -> ProcessedTree {
     let mut root = n(Role::Window, "Fixture", children);
     crate::fingerprint::refresh_tree(&mut root, Fingerprint::default(), 0);
-    prepare::prepare(RawTree { root: Some(root) })
+    prepare::prepare(RawTree {
+        root: Some(root),
+        incomplete: None,
+    })
 }
 fn shape(node: &ProcessedNode) -> Value {
     json!({"index": (node.element_index != UNASSIGNED_INDEX).then_some(node.element_index),

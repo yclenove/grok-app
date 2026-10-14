@@ -151,7 +151,10 @@ impl ActionRouter {
             .map_err(|e| (e.error_code(), false))?;
         // Authorization-only context: there is no window/tree to observe before
         // starting a process. It is never published as a fabricated observation.
-        let raw = RawTree { root: None };
+        let raw = RawTree {
+            root: None,
+            incomplete: None,
+        };
         let fresh = Fresh {
             win: WindowRef {
                 app: app.clone(),

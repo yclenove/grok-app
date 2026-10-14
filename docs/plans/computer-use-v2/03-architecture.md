@@ -120,6 +120,18 @@ computer-use/
 驱动把平台无障碍树转换为**统一原始树**（`RawNode`），core 负责变换、编号、渲染。驱动不做渲染。
 
 ```rust
+pub struct RawTree {
+    pub root: Option<RawNode>,       // canvas-only 窗口可无 root
+    pub incomplete: Option<Incomplete>, // None = 原生枚举完整；Some = 有未读/不可靠区域
+}
+// protocol 定义纯数据，core::model re-export；不含原生错误载荷。
+pub struct Incomplete {
+    pub reason: IncompleteReason,
+    pub read_nodes: u32,             // 裁剪前保留的原生节点数
+    pub unread_nodes: Option<u32>,   // 精确总数未知时 None，不能猜测子树大小
+}
+pub enum IncompleteReason { Deadline, NodeCap, PartialError, DepthCap }
+
 pub struct RawNode {
     pub role: Role,                  // 归一化角色（见下）
     pub native_role: SmolStr,        // AXButton / UIA_ButtonControlTypeId / ATSPI_ROLE_PUSH_BUTTON
@@ -152,6 +164,8 @@ pub enum NodeAction { Press, ShowMenu, Increment, Decrement, Confirm, Cancel, Ra
 
 **角色映射表**放在各驱动 `src/roles.rs`，并有表驱动单测；未知原生角色映射为 `Unknown` 且保留 `native_role`。
 
+原生完整性见 [ADR 0004](../../../computer-use/docs/adr/0004-raw-tree-completeness.md)：2s / 5000 或深度限制、容忍的字段/子节点读取失败必须上报；首个原因保留，期限中断优先。首节点未读完仍报超时，已有节点则保留部分树；取消/致命错误仍返回错误。`root: None` 本身不代表不完整。
+
 ---
 
 ## 4. 观察：树变换与渲染
@@ -175,6 +189,8 @@ pub enum NodeAction { Press, ShowMenu, Increment, Decrement, Confirm, Cancel, Ra
 | 13 | `assign_indices` | 先序遍历分配 `element_index`（0 起，窗口为 0），写入 `ElementIndex` | Codex |
 
 **弹窗优先：** 若存在 MODAL dialog/sheet/alert，预算优先分配给它与窗口标题栏；背景内容只保留一级摘要。
+
+`RawTree.incomplete` 在管线入口独立保留，不受裁剪/预算/编号影响；原生未读完仍交付文本与 `truncated` 标记，不能把缺失节点当作敏感区域不存在。
 
 ### 4.2 文本渲染格式（模型主读物）
 
@@ -204,6 +220,7 @@ The focused UI element is 21 text area.
 - 每个字符串字段受 `text_limit`（默认 500 字符/字段，`"max"` 不截断）约束，截断处标 `…(+N chars)`。
 - 密码字段的值恒为 `•••`（见 §7.6 脱敏）。
 - 末尾：焦点行、截断说明、（若动作）动作摘要行。
+- 原生未读完另附 `[truncated: native tree incomplete (reason); N nodes read; unknown nodes unread]`；精确未读数可得时替换 `unknown`，不与已知预算遗漏混算。
 
 ### 4.3 结构化内容（structuredContent，供 Host/脚本/评测）
 
@@ -214,18 +231,20 @@ The focused UI element is 21 text area.
   "snapshot_id": "s_7f3a",           // 服务端记账用，模型无需回传
   "screenshot": {"id": "i_92c1", "width": 1280, "height": 860, "mime": "image/png"} | null,
   "focused": 21,
-  "truncated": {"omitted_nodes": 143} | null,
+  "truncated": {"omitted_nodes": 143, "native_incomplete"?: {"reason":"deadline|node_cap|partial_error|depth_cap", "read_nodes":5000, "unread_nodes":null}} | null,
   "elements": [ {"index": 21, "role": "text_area", "name": null, "states": ["settable","focused"], "actions": [], "frame": {...}} ],  // 仅在 detail=full 时
   "action": { ... } | null            // 动作结果，见 §6
 }
 ```
 
 `elements` 默认不随文本重复下发（避免双倍 token）；`gcu call --json`、脚本、评测器可请求 `detail: "full"`。
+`omitted_nodes` 只数 core 已读后遗漏的节点；原生不完整时 `truncated` 恒非 null，可能 `omitted_nodes: 0`。完整树省略 `native_incomplete`，保持既有输出。
 在 Grok 1.0.52 上 `structuredContent` 会被拼进文本末尾，且工具文本只保留约 20,000 字节前缀（超出部分写入会话溢出文件，尾部 JSON 丢失）。因此：文本渲染与 `text_limit` 的总输出必须落在 20 KB 前缀内，结构化 JSON 只放精简事实（动作结果、ID），长内容放文件路径。
 
 ### 4.4 截图
 
 - 必经交付管线：原始树先收集密码/敏感区域 → 树裁剪与截图采集 → 按同一状态版本打码 → 缩放/编码 → 模型图片、缩略图、审批裁剪图、临时文件。登录/安全场景无法可靠定位敏感区域或状态不同步时，不输出截图并 `handoff_required`；首次截图交付（P0-07/P1-04/P2-03/P3-02）即验收，不能等 P9。
+- 原生树 `incomplete.is_some()` 一律视为敏感区域无法完整定位，沿同一拒图/handoff 路径处理，不依赖是否已读到登录或密码信号；截图前后任一次原生树不完整均不得交付截图。`include_screenshot: false` 仍交付已读文本。
 - 窗口级截图（不是全屏），物理像素；长边超过 `max_image_edge`（默认 1568）时等比缩放，记录 `scale_to_window`。
 - 坐标动作的 `x,y` 永远是**该截图的像素坐标**；服务端换算为窗口点坐标再到屏幕坐标。
 - 默认 PNG；`image_format: "jpeg"`（质量 82）可选；单图上限 1.5 MB，超出自动降质/缩放并在结果中注明。
@@ -475,6 +494,7 @@ web area 默认 `strict`；standard 对上述未知语义信号弹确认，不�
 
 - 密码节点值恒为 `•••`，且不进入日志/structured。
 - 截图打码为 §4.4 的必经阶段：先收集敏感区域再裁树；所有衍生物只能来自脱敏结果；无法可靠定位则不交付并 handoff（A-α 前）。
+- `RawTree.incomplete` 必须贯穿到脱敏入口；即使已读密码区域都有 frame 或渲染预算未截断，也无法证明未读区域安全，拒绝出图并 handoff，纯文本观察不受影响（[ADR 0004](../../../computer-use/docs/adr/0004-raw-tree-completeness.md)）。
 - 日志默认只记工具名、App id、结果、耗时；不记文本参数与截图（`GCU_LOG_PAYLOADS=1` 才记录脱敏载荷，且仅本地；该开关绝不取消秘密脱敏，错误信息同样脱敏）。
 - 剪贴板：不读入观察；跨会话全局互斥，保存 → 写入 → 粘贴前校验序号/内容/目标焦点 → 粘贴 → 若仍为我们写入的内容则恢复（Windows GetClipboardSequenceNumber、macOS changeCount）。变化即取消；敏感文本及高风险目标禁止剪贴板回退。无法消除恶意进程最后一刻替换，剪贴板历史/同步可能保存文本，能力说明必须如实告知。
 - 数据清单覆盖原图、缩略图、审批裁剪图、CLI 临时图片、调试载荷、错误日志：内存按会话隔离，临时文件仅当前用户可读；会话删除即清理图片及载荷，元数据日志最多保留 7 天并遵守 5×5MB 上限。截图查询必须核验会话归属；P9-04 审计所有衍生物。

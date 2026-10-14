@@ -89,12 +89,41 @@ pub struct ScreenshotInfo {
     pub scale_to_window: Option<f64>,
 }
 
-/// Tree budget truncation summary.
+/// Why a native accessibility traversal left part of the tree unread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    /// The traversal or a native read exhausted its deadline.
+    Deadline,
+    /// The native node ceiling or caller's node limit prevented further reads.
+    NodeCap,
+    /// A native property or child enumeration could not be read reliably.
+    PartialError,
+    /// The native traversal depth limit prevented further reads.
+    DepthCap,
+}
+
+/// Payload-free facts about an incomplete native accessibility traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Incomplete {
+    /// First cause encountered; a later deadline takes precedence to stop the walk.
+    pub reason: IncompleteReason,
+    /// Nodes retained from native reads, before any core transformation.
+    pub read_nodes: u32,
+    /// Exact unread node count, only when known; never a guessed subtree size.
+    pub unread_nodes: Option<u32>,
+}
+
+/// Core rendering omissions and, independently, native traversal incompleteness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Truncation {
-    /// Number of omitted nodes.
+    /// Number of nodes read but omitted by core visibility/rendering budgets.
     pub omitted_nodes: u32,
+    /// Native unread regions, independent of the core's known omission count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_incomplete: Option<Incomplete>,
 }
 
 /// A serialized indexed element, without raw-tree or native-driver types.

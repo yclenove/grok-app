@@ -549,6 +549,61 @@
           }
         ]
       },
+      "Incomplete": {
+        "additionalProperties": false,
+        "description": "Payload-free facts about an incomplete native accessibility traversal.",
+        "properties": {
+          "read_nodes": {
+            "description": "Nodes retained from native reads, before any core transformation.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "$ref": "#/$defs/IncompleteReason",
+            "description": "First cause encountered; a later deadline takes precedence to stop the walk."
+          },
+          "unread_nodes": {
+            "description": "Exact unread node count, only when known; never a guessed subtree size.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reason",
+          "read_nodes"
+        ],
+        "type": "object"
+      },
+      "IncompleteReason": {
+        "description": "Why a native accessibility traversal left part of the tree unread.",
+        "oneOf": [
+          {
+            "const": "deadline",
+            "description": "The traversal or a native read exhausted its deadline.",
+            "type": "string"
+          },
+          {
+            "const": "node_cap",
+            "description": "The native node ceiling or caller's node limit prevented further reads.",
+            "type": "string"
+          },
+          {
+            "const": "partial_error",
+            "description": "A native property or child enumeration could not be read reliably.",
+            "type": "string"
+          },
+          {
+            "const": "depth_cap",
+            "description": "The native traversal depth limit prevented further reads.",
+            "type": "string"
+          }
+        ]
+      },
       "Outcome": {
         "description": "Execution status; done alone does not establish business success.",
         "oneOf": [
@@ -776,10 +831,21 @@
       },
       "Truncation": {
         "additionalProperties": false,
-        "description": "Tree budget truncation summary.",
+        "description": "Core rendering omissions and, independently, native traversal incompleteness.",
         "properties": {
+          "native_incomplete": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Incomplete"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Native unread regions, independent of the core's known omission count."
+          },
           "omitted_nodes": {
-            "description": "Number of omitted nodes.",
+            "description": "Number of nodes read but omitted by core visibility/rendering budgets.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"

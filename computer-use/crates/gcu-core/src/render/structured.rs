@@ -16,7 +16,7 @@ pub fn render_structured(tree: &ProcessedTree, opts: &RenderOpts) -> Value {
         "snapshot_id": opts.snapshot_id.as_deref().unwrap_or_default(),
         "screenshot": opts.screenshot,
         "focused": tree.focused,
-        "truncated": (omitted > 0).then(|| json!({"omitted_nodes": omitted})),
+        "truncated": tree.truncation(omitted),
         "action": opts.action,
     });
     if opts.full_detail {
