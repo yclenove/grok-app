@@ -49,6 +49,10 @@ impl ActionRouter {
         events: Arc<dyn EventSink>,
         locks: WindowLocks,
     ) -> Self {
+        let tree_opts = TreeOpts {
+            max_tree_nodes: policy.load().max_tree_nodes.clamp(1, 5000) as usize,
+            ..TreeOpts::default()
+        };
         Self {
             driver,
             approvals,
@@ -57,7 +61,7 @@ impl ActionRouter {
             locks,
             policy_version: AtomicU64::new(1),
             epoch: Instant::now(),
-            tree_opts: TreeOpts::default(),
+            tree_opts,
         }
     }
     /// Input-release adapter for Session::open. Native release is bounded by the

@@ -59,6 +59,7 @@ struct Inner {
     results: Results,
     tools: Vec<Tool>,
     config: ServerConfig,
+    default_tree_nodes: u32,
     slots: Semaphore,
     // Includes encoding/delivery-size bookkeeping in session response order.
     delivery: tokio::sync::Mutex<()>,
@@ -71,17 +72,34 @@ impl Server {
     pub(crate) fn session(&self) -> Arc<Session> {
         self.0.session.clone()
     }
+    pub(crate) fn files(&self) -> Arc<SessionFiles> {
+        self.0.results.files.clone()
+    }
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
         host: Host,
         config: ServerConfig,
         files: SessionFiles,
     ) -> Result<Self, ServeError> {
+        Self::new_with_approvals(driver, host, config, files, true)
+    }
+    pub(crate) fn new_with_approvals(
+        driver: Arc<dyn Driver>,
+        host: Host,
+        config: ServerConfig,
+        files: SessionFiles,
+        elicitation_enabled: bool,
+    ) -> Result<Self, ServeError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         static LOCKS: OnceLock<WindowLocks> = OnceLock::new();
+        let policy = host.policy.load();
         let router = ActionRouter::new(
             driver.clone(),
-            Arc::new(elicitation::Approvals(host.approvals)),
+            if elicitation_enabled {
+                Arc::new(elicitation::Approvals(host.approvals))
+            } else {
+                host.approvals
+            },
             host.policy,
             host.events,
             LOCKS.get_or_init(WindowLocks::new).clone(),
@@ -94,6 +112,15 @@ impl Server {
         let results = Results {
             files: Arc::new(files),
             session: session.clone(),
+            encoding: gcu_core::redact::EncodeOptions {
+                max_edge: policy.max_image_edge,
+                format: if policy.image_format == "jpeg" {
+                    gcu_core::redact::ImageFormat::Jpeg
+                } else {
+                    gcu_core::redact::ImageFormat::Png
+                },
+                ..Default::default()
+            },
         };
         let tools = catalog::tools(config.profile).map_err(|_| ServeError::Protocol)?;
         Ok(Self(Arc::new(Inner {
@@ -103,6 +130,7 @@ impl Server {
             results,
             tools,
             config,
+            default_tree_nodes: policy.max_tree_nodes.clamp(1, 5000),
             slots: Semaphore::new(32),
             delivery: tokio::sync::Mutex::new(()),
             calls: AtomicU64::new(1),
@@ -111,14 +139,17 @@ impl Server {
             closed: gcu_host_api::Cancel::new(),
         })))
     }
-    async fn call(&self, name: &str, arguments: Value) -> CallToolResponse {
+    pub(crate) async fn call_result(
+        &self,
+        name: &str,
+        arguments: Value,
+    ) -> rmcp::model::CallToolResult {
         let _delivery = self.0.delivery.lock().await;
         let result = self.dispatch(name, arguments).await;
         match result {
             Ok(result) => result,
             Err(error) => self.0.results.failure(*error).await,
         }
-        .into()
     }
     async fn dispatch(
         &self,
@@ -158,6 +189,12 @@ impl Server {
                     .await)
             }
             "get_app_state" => {
+                let mut arguments = arguments;
+                if let Some(object) = arguments.as_object_mut() {
+                    object
+                        .entry("max_tree_nodes")
+                        .or_insert_with(|| json!(this.default_tree_nodes));
+                }
                 let p: GetAppStateParams = params::parse(arguments)?;
                 let state = this.router.observe(&this.session, p).await?;
                 Ok(this.results.state(state).await)
@@ -238,8 +275,9 @@ impl ServerHandler for Server {
         let _active = Active(self.clone());
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         Ok(elicitation::REQUEST_PEER
-            .scope(context.peer, self.call(&request.name, arguments))
-            .await)
+            .scope(context.peer, self.call_result(&request.name, arguments))
+            .await
+            .into())
     }
     async fn on_custom_notification(
         &self,

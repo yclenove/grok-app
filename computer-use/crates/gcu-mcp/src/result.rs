@@ -56,6 +56,7 @@ fn action_facts(action: &ActionResult) -> Value {
 pub(crate) struct Results {
     pub files: Arc<SessionFiles>,
     pub session: Arc<Session>,
+    pub encoding: EncodeOptions,
 }
 impl Results {
     pub async fn outcome(&self, out: ToolOutcome) -> CallToolResult {
@@ -176,6 +177,7 @@ impl Results {
         image: RedactedImage,
     ) -> io::Result<(gcu_core::redact::EncodedImage, String)> {
         let files = self.files.clone();
+        let encoding = self.encoding;
         blocking(move || {
             // Cropping the entire safe image uses the core's bounded enlargement
             // path; no raw Capture can enter this function.
@@ -193,9 +195,16 @@ impl Results {
             };
             let image = enlarged.as_ref().unwrap_or(&image);
             let encoded = image
-                .encode(EncodeOptions::default())
+                .encode(encoding)
                 .map_err(|_| io::Error::other("safe image encoding failed"))?;
-            let path = files.write(encoded.bytes(), "png")?;
+            let path = files.write(
+                encoded.bytes(),
+                if encoded.mime() == "image/jpeg" {
+                    "jpg"
+                } else {
+                    "png"
+                },
+            )?;
             Ok((encoded, path.to_string_lossy().into_owned()))
         })
         .await

@@ -25,6 +25,7 @@ fn results() -> Results {
         WindowLocks::new(),
     );
     Results {
+        encoding: Default::default(),
         files: Arc::new(SessionFiles::new().unwrap()),
         session: Arc::new(Session::open(
             "encoding",

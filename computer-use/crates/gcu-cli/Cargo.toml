@@ -9,14 +9,40 @@ publish.workspace = true
 name = "gcu"
 path = "src/main.rs"
 
+[features]
+eval-autoapprove = []
+
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+gcu-core.workspace = true
+gcu-driver-fake.workspace = true
+gcu-host-api.workspace = true
+gcu-mcp.workspace = true
+gcu-protocol.workspace = true
+rand = "0.10"
+rmcp = { version = "3.5", default-features = false }
+serde.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["io-util", "io-std", "net", "signal"] }
+toml.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror = { workspace = true }
 toml_edit = "0.25"
 
 [dev-dependencies]
+assert_cmd = "2"
 serde_json = { workspace = true, features = ["preserve_order"] }
 toml = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
 
 [lints]
 workspace = true
