@@ -505,7 +505,12 @@ async fn engine_lost_stop_channel_denies_approval_and_exits_with_rpc_still_conne
     pending.reply(AppDecision {
         decision: Decision::Session,
     });
-    let result = tokio::time::timeout(RPC_TIMEOUT, call).await.unwrap();
+    let Ok(result) = tokio::time::timeout(RPC_TIMEOUT, call).await else {
+        panic!(
+            "tool call still pending {RPC_TIMEOUT:?} after the stop channel closed; engine status: {:?}",
+            host.child.try_wait()
+        );
+    };
     assert!(result.is_err() || result.unwrap().is_error == Some(true));
     tokio::time::timeout(RPC_TIMEOUT, host.child.wait())
         .await
