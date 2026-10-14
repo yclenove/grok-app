@@ -98,6 +98,7 @@
 - eframe 0.36 在 Linux AT-SPI 上不暴露密码保护(ROLE_PASSWORD_TEXT/STATE_PROTECTED)与模态(ROLE_DIALOG/STATE_MODAL)：契约用例 C14/C20 不能靠 gcu-fixture 验证，需 fixtures-native（GTK4 等）补；脚本以 KNOWN_GAPS 显式登记，非静默跳过。
 - Windows 上 Grok `Stop` 钩子（.cmd）未实现；安装库当前钩子脚本为 Unix `.sh`，Windows 只装 MCP 条目。
 - AccessKit(eframe) 在 Linux AT-SPI 上的文本框没有实现 EditableText：`SetValue` 返回 `NotSettable`（滑块 `Value.SetCurrentValue` 可用）。模型应改用 `type_text`（需前台策略）；路由层不自动回退，错误提示里写明。真实 GTK/Qt 应用的 EditableText 支持待 P9-05 兼容性矩阵验证。
+- 偶发：`gcu-cli/tests/engine_host.rs::engine_lost_stop_channel_denies_approval_and_exits_with_rpc_still_connected` 在 macOS CI（pull_request 运行）失败过 1 次（等待调用结果超过 RPC_TIMEOUT 5s），同一提交的 push 运行与重跑均通过，Linux 本地 30 次加压全过；根因未明。再出现时先读失败日志，不要靠重跑；怀疑点：engine 退出时 `sessions` 关闭路径（`entry.remote.lock().await.close()`）等待在途调用。
 
 ## 阶段记录
 
