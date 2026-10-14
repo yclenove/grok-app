@@ -7,6 +7,7 @@ From `computer-use/` on the build machine:
 
 ```sh
 cargo +nightly fuzz run mcp_codec -- -max_total_time=30 -max_len=1048577
+cargo +nightly fuzz run host_codec -- -max_total_time=30 -max_len=16777220
 ```
 
 For execution worktrees use the remote compiler:

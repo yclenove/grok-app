@@ -25,7 +25,7 @@ pub(crate) enum DriverKind {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Serve MCP over stdio; HTTP and proxy assembly arrive in P0-12.
+    /// Serve MCP over stdio or authenticated loopback HTTP; proxy an engine endpoint.
     Mcp {
         #[arg(long, value_enum, default_value = "stdio")]
         transport: Transport,
@@ -34,9 +34,24 @@ pub(crate) enum Command {
         #[arg(long)]
         connect: Option<String>,
         #[arg(long)]
-        token_fd: Option<u32>,
+        token_fd: Option<usize>,
         #[arg(long)]
         port: Option<u16>,
+    },
+    /// Run an App-managed engine over private inherited Host and Stop channels.
+    Engine {
+        #[arg(
+            long,
+            conflicts_with = "host_socket",
+            required_unless_present = "host_socket"
+        )]
+        host_fd: Option<usize>,
+        #[arg(long, requires = "host_token_fd", conflicts_with = "host_fd")]
+        host_socket: Option<std::path::PathBuf>,
+        #[arg(long, requires = "host_socket")]
+        host_token_fd: Option<usize>,
+        #[arg(long)]
+        stop_fd: usize,
     },
     /// Execute one tool in process. Images remain in a private temporary session.
     Call {

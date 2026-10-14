@@ -11,10 +11,12 @@ mod args;
 mod call;
 mod config;
 mod doctor;
+mod engine;
 pub mod exit;
 mod host;
 pub mod install;
 mod private;
+mod proxy;
 pub mod resume;
 mod runtime;
 

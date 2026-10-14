@@ -48,7 +48,20 @@ fn check_deps_compliant_metadata_passes() {
         ),
         (
             "gcu-host-protocol",
-            &["gcu-protocol", "serde", "tokio", "interprocess"],
+            &[
+                "gcu-protocol",
+                "serde",
+                "serde_json",
+                "schemars",
+                "thiserror",
+                "tokio",
+                "interprocess",
+                "hmac",
+                "sha2",
+                "rand",
+                "libc",
+                "windows",
+            ],
         ),
         ("gcu-driver-macos", &["gcu-protocol", "gcu-core", "objc2"]),
         (
@@ -369,5 +382,24 @@ fn check_deps_proptest_dev_only_and_image_runtime_allowed() {
         });
         let violations = check_metadata(&input.to_string()).unwrap();
         assert_eq!(violations.len(), usize::from(kind != "dev"));
+    }
+}
+
+#[test]
+fn host_protocol_minimum_auth_schema_platform_dependencies_only() {
+    for name in [
+        "gcu-core",
+        "gcu-host-api",
+        "gcu-driver-fake",
+        "reqwest",
+        "axum",
+        "tempfile",
+    ] {
+        assert_eq!(
+            check_metadata(&metadata(&[("gcu-host-protocol", &[name])]))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

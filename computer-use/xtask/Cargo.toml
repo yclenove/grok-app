@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 gcu-protocol.workspace = true
+gcu-host-protocol.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

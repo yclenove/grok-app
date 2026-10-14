@@ -1,0 +1,2137 @@
+{
+  "envelope": {
+    "$defs": {
+      "Failure": {
+        "additionalProperties": false,
+        "description": "Failed response.",
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/RpcError",
+            "description": "Fixed error."
+          },
+          "id": {
+            "description": "Request being answered.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "jsonrpc": {
+            "description": "Exactly `2.0`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "jsonrpc",
+          "id",
+          "error"
+        ],
+        "type": "object"
+      },
+      "Request": {
+        "additionalProperties": false,
+        "description": "Strict JSON-RPC request or notification. IDs are nonzero monotonic integers.",
+        "properties": {
+          "id": {
+            "description": "Missing for a notification.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "jsonrpc": {
+            "description": "Exactly `2.0`.",
+            "type": "string"
+          },
+          "method": {
+            "description": "Method in the fixed table below.",
+            "type": "string"
+          },
+          "params": {
+            "description": "Strict method-specific parameters."
+          }
+        },
+        "required": [
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "type": "object"
+      },
+      "RpcError": {
+        "additionalProperties": false,
+        "description": "JSON-RPC error details. Never log arbitrary remote messages or data.",
+        "properties": {
+          "code": {
+            "description": "Standard JSON-RPC or application error code.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "message": {
+            "description": "Fixed diagnostic; no secrets or action payloads.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "Success": {
+        "additionalProperties": false,
+        "description": "Successful response. JSON null is an explicit result, never a missing field.",
+        "properties": {
+          "id": {
+            "description": "Request being answered.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "jsonrpc": {
+            "description": "Exactly `2.0`.",
+            "type": "string"
+          },
+          "result": {
+            "description": "Method-specific result."
+          }
+        },
+        "required": [
+          "jsonrpc",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "$ref": "#/$defs/Request",
+        "description": "Request or notification."
+      },
+      {
+        "$ref": "#/$defs/Success",
+        "description": "Successful response."
+      },
+      {
+        "$ref": "#/$defs/Failure",
+        "description": "Failed response."
+      }
+    ],
+    "description": "A single JSON-RPC frame; batching is deliberately unsupported.",
+    "title": "Envelope"
+  },
+  "methods": {
+    "engine.policy.changed": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A monotonic Host policy revision.",
+        "properties": {
+          "version": {
+            "description": "Must exceed the last loaded policy version.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "PolicyChanged",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "engine.screenshot.get": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read a retained redacted image in its owning session.",
+        "properties": {
+          "id": {
+            "description": "Opaque delivered screenshot identifier.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Must own the requested image.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "id"
+        ],
+        "title": "ScreenshotGet",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "In-memory safe image, never a path.",
+        "properties": {
+          "bytes": {
+            "description": "Redacted bytes; JSON byte array.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "height": {
+            "description": "Physical pixel height.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime": {
+            "description": "Encoded media type.",
+            "type": "string"
+          },
+          "width": {
+            "description": "Physical pixel width.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime",
+          "width",
+          "height",
+          "bytes"
+        ],
+        "title": "Image",
+        "type": "object"
+      }
+    },
+    "engine.session.close": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Target one App session.",
+        "properties": {
+          "session_id": {
+            "description": "App-owned session identity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionId",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "engine.session.open": {
+      "notification": false,
+      "params": {
+        "$defs": {
+          "SessionKind": {
+            "description": "App session origin.",
+            "oneOf": [
+              {
+                "const": "local",
+                "description": "Trusted local chat.",
+                "type": "string"
+              },
+              {
+                "const": "ssh",
+                "description": "SSH session; refused.",
+                "type": "string"
+              },
+              {
+                "const": "remote_im",
+                "description": "Remote IM session; refused.",
+                "type": "string"
+              },
+              {
+                "const": "automation",
+                "description": "Scheduled session; refused.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Open an App-owned local session.",
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/SessionKind",
+            "description": "Only local sessions may obtain endpoints."
+          },
+          "session_id": {
+            "description": "App session identity, scoped to this engine instance.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "kind"
+        ],
+        "title": "SessionOpen",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Secret endpoint returned only over the authenticated Host connection.",
+        "properties": {
+          "mcp_url": {
+            "description": "Exact loopback URL.",
+            "type": "string"
+          },
+          "token": {
+            "description": "32 random bytes, lowercase hex; never log or pass through argv/environment.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp_url",
+          "token"
+        ],
+        "title": "SessionOpened",
+        "type": "object"
+      }
+    },
+    "engine.session.resume": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Trusted user event on the independent authenticated stop channel.",
+        "properties": {
+          "sequence": {
+            "description": "Strictly increasing per stop connection; replay is refused.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "description": "None resumes every session.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_event": {
+            "description": "Fresh event nonce generated by Host only after a real user gesture.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "sequence",
+          "user_event"
+        ],
+        "title": "Resume",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "engine.session.stop": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Stop one or all sessions; applied before action/approval work.",
+        "properties": {
+          "session_id": {
+            "description": "None stops every session.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "Stop",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "engine.session.turnEnded": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Target one App session.",
+        "properties": {
+          "session_id": {
+            "description": "App-owned session identity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionId",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "engine.system.doctor": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BackgroundOperation": {
+            "description": "Extent of operation without foreground activation.",
+            "oneOf": [
+              {
+                "const": "full",
+                "description": "All primary routes work in the background.",
+                "type": "string"
+              },
+              {
+                "const": "partial",
+                "description": "Only some routes work in the background.",
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "description": "No background operation is available.",
+                "type": "string"
+              }
+            ]
+          },
+          "Capabilities": {
+            "additionalProperties": false,
+            "description": "Static plus runtime-probed declaration shared by capabilities and doctor.",
+            "properties": {
+              "background_operation": {
+                "$ref": "#/$defs/BackgroundOperation",
+                "description": "Honest extent of background operation."
+              },
+              "delivery": {
+                "$ref": "#/$defs/DeliveryCapabilities",
+                "description": "Delivery capabilities."
+              },
+              "limits": {
+                "$ref": "#/$defs/CapabilityLimits",
+                "description": "Hard limits."
+              },
+              "observe": {
+                "$ref": "#/$defs/ObserveCapabilities",
+                "description": "Observation capabilities."
+              },
+              "overlay_excluded_from_capture": {
+                "description": "Overlay can be excluded from captures.",
+                "type": "boolean"
+              },
+              "platform": {
+                "$ref": "#/$defs/Platform",
+                "description": "Driver platform."
+              },
+              "private_apis": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/PrivateApiStatus"
+                },
+                "description": "Named private APIs and runtime availability (for example skylight).",
+                "type": "object"
+              },
+              "user_activity_guard": {
+                "description": "Physical user input can be detected.",
+                "type": "boolean"
+              },
+              "version": {
+                "description": "OS version.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "platform",
+              "version",
+              "observe",
+              "delivery",
+              "background_operation",
+              "user_activity_guard",
+              "overlay_excluded_from_capture",
+              "private_apis",
+              "limits"
+            ],
+            "type": "object"
+          },
+          "CapabilityLimits": {
+            "additionalProperties": false,
+            "description": "Hard capability limits, distinct from per-request defaults.",
+            "properties": {
+              "max_image_edge": {
+                "description": "Maximum image long edge.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "max_tree_nodes": {
+                "description": "Maximum tree-node request.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type_text_max": {
+                "description": "Maximum text input length.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_tree_nodes",
+              "max_image_edge",
+              "type_text_max"
+            ],
+            "type": "object"
+          },
+          "DeliveryCapabilities": {
+            "additionalProperties": false,
+            "description": "Available delivery mechanisms, without granting authorization.",
+            "properties": {
+              "accessibility": {
+                "description": "Semantic accessibility actions.",
+                "type": "boolean"
+              },
+              "foreground": {
+                "$ref": "#/$defs/ForegroundCapability",
+                "description": "Foreground input capability."
+              },
+              "targeted_keys": {
+                "description": "Window/process-targeted keyboard input.",
+                "type": "boolean"
+              },
+              "targeted_pointer": {
+                "description": "Window/process-targeted pointer input.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "accessibility",
+              "targeted_pointer",
+              "targeted_keys",
+              "foreground"
+            ],
+            "type": "object"
+          },
+          "ForegroundCapability": {
+            "description": "Foreground input availability; policy is still enforced at action time.",
+            "oneOf": [
+              {
+                "const": "policy",
+                "description": "Available subject to policy.",
+                "type": "string"
+              },
+              {
+                "const": "unavailable",
+                "description": "Not supported by this driver.",
+                "type": "string"
+              }
+            ]
+          },
+          "ObserveCapabilities": {
+            "additionalProperties": false,
+            "description": "Observation mechanisms available at runtime.",
+            "properties": {
+              "events": {
+                "description": "Event subscriptions.",
+                "type": "boolean"
+              },
+              "screenshot": {
+                "description": "Window screenshot.",
+                "type": "boolean"
+              },
+              "tree": {
+                "description": "Accessibility tree.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tree",
+              "screenshot",
+              "events"
+            ],
+            "type": "object"
+          },
+          "Platform": {
+            "description": "Driver platform; version and display-server detail are declared separately.",
+            "oneOf": [
+              {
+                "const": "macos",
+                "description": "macOS.",
+                "type": "string"
+              },
+              {
+                "const": "windows",
+                "description": "Windows.",
+                "type": "string"
+              },
+              {
+                "const": "linux",
+                "description": "Linux (X11 or Wayland).",
+                "type": "string"
+              }
+            ]
+          },
+          "PrivateApiStatus": {
+            "description": "Runtime availability of a named private API.",
+            "oneOf": [
+              {
+                "const": "available",
+                "description": "Resolved and enabled.",
+                "type": "string"
+              },
+              {
+                "const": "disabled",
+                "description": "Explicitly disabled.",
+                "type": "string"
+              },
+              {
+                "const": "missing",
+                "description": "Could not be resolved.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Wire projection of the existing core doctor fields.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/$defs/Capabilities",
+            "description": "Actual engine capabilities; user_activity_guard is false when unavailable."
+          },
+          "issues": {
+            "description": "Metadata only, including user_activity_guard: unavailable when applicable.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ready": {
+            "description": "Ready for the declared supported operations.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "capabilities",
+          "ready",
+          "issues"
+        ],
+        "title": "DoctorReport",
+        "type": "object"
+      }
+    },
+    "engine.system.shutdown": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.approval.confirmAction": {
+      "notification": false,
+      "params": {
+        "$defs": {
+          "ActionSummary": {
+            "additionalProperties": false,
+            "description": "Sensitive action binding.",
+            "properties": {
+              "action_digest": {
+                "description": "Digest of exact action parameters.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 32,
+                "minItems": 32,
+                "type": "array"
+              },
+              "snapshot_id": {
+                "description": "State shown to the user.",
+                "type": "string"
+              },
+              "text": {
+                "description": "Engine description.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "snapshot_id",
+              "action_digest"
+            ],
+            "type": "object"
+          },
+          "App": {
+            "additionalProperties": false,
+            "description": "Application approval context.",
+            "properties": {
+              "icon": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Image"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Small icon for display only."
+              },
+              "identity": {
+                "$ref": "#/$defs/Identity",
+                "description": "OS-verified identity."
+              },
+              "name": {
+                "description": "OS display name; only a label.",
+                "type": "string"
+              },
+              "pid": {
+                "description": "Running process.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "identity"
+            ],
+            "type": "object"
+          },
+          "Identity": {
+            "additionalProperties": false,
+            "description": "OS-verified authorization identity; model names never establish identity.",
+            "properties": {
+              "image_path": {
+                "description": "Canonical executable path.",
+                "type": "string"
+              },
+              "key": {
+                "description": "Canonical authorization key.",
+                "type": "string"
+              },
+              "platform": {
+                "$ref": "#/$defs/Platform",
+                "description": "Verifying platform."
+              },
+              "publisher": {
+                "description": "Verified Windows publisher.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Verified executable digest.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 32,
+                "minItems": 32,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "signature": {
+                "$ref": "#/$defs/Signature",
+                "description": "OS verification result."
+              },
+              "team_id": {
+                "description": "macOS signing team.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "platform",
+              "key",
+              "signature",
+              "image_path"
+            ],
+            "type": "object"
+          },
+          "Image": {
+            "additionalProperties": false,
+            "description": "In-memory safe image, never a path.",
+            "properties": {
+              "bytes": {
+                "description": "Redacted bytes; JSON byte array.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "height": {
+                "description": "Physical pixel height.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mime": {
+                "description": "Encoded media type.",
+                "type": "string"
+              },
+              "width": {
+                "description": "Physical pixel width.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mime",
+              "width",
+              "height",
+              "bytes"
+            ],
+            "type": "object"
+          },
+          "Platform": {
+            "description": "Platform that verified an App identity.",
+            "oneOf": [
+              {
+                "const": "macos",
+                "description": "macOS.",
+                "type": "string"
+              },
+              {
+                "const": "windows",
+                "description": "Windows.",
+                "type": "string"
+              },
+              {
+                "const": "linux",
+                "description": "Linux.",
+                "type": "string"
+              }
+            ]
+          },
+          "Signature": {
+            "description": "OS signature verification status.",
+            "oneOf": [
+              {
+                "const": "valid",
+                "description": "Valid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Invalid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unsigned",
+                "description": "Unsigned signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "Unknown signature status.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Confirm one exact sensitive action.",
+        "properties": {
+          "app": {
+            "$ref": "#/$defs/App",
+            "description": "Verified target."
+          },
+          "crop": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Image"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Redacted target crop."
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/$defs/ActionSummary",
+            "description": "Exact state/action binding."
+          }
+        },
+        "required": [
+          "session_id",
+          "app",
+          "summary"
+        ],
+        "title": "ConfirmAction",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Sensitive action decision.",
+        "properties": {
+          "confirmed": {
+            "description": "True only for the exact request shown to the user.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "confirmed"
+        ],
+        "title": "Confirmed",
+        "type": "object"
+      }
+    },
+    "host.approval.handoff": {
+      "notification": false,
+      "params": {
+        "$defs": {
+          "App": {
+            "additionalProperties": false,
+            "description": "Application approval context.",
+            "properties": {
+              "icon": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Image"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Small icon for display only."
+              },
+              "identity": {
+                "$ref": "#/$defs/Identity",
+                "description": "OS-verified identity."
+              },
+              "name": {
+                "description": "OS display name; only a label.",
+                "type": "string"
+              },
+              "pid": {
+                "description": "Running process.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "identity"
+            ],
+            "type": "object"
+          },
+          "Identity": {
+            "additionalProperties": false,
+            "description": "OS-verified authorization identity; model names never establish identity.",
+            "properties": {
+              "image_path": {
+                "description": "Canonical executable path.",
+                "type": "string"
+              },
+              "key": {
+                "description": "Canonical authorization key.",
+                "type": "string"
+              },
+              "platform": {
+                "$ref": "#/$defs/Platform",
+                "description": "Verifying platform."
+              },
+              "publisher": {
+                "description": "Verified Windows publisher.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Verified executable digest.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 32,
+                "minItems": 32,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "signature": {
+                "$ref": "#/$defs/Signature",
+                "description": "OS verification result."
+              },
+              "team_id": {
+                "description": "macOS signing team.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "platform",
+              "key",
+              "signature",
+              "image_path"
+            ],
+            "type": "object"
+          },
+          "Image": {
+            "additionalProperties": false,
+            "description": "In-memory safe image, never a path.",
+            "properties": {
+              "bytes": {
+                "description": "Redacted bytes; JSON byte array.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "height": {
+                "description": "Physical pixel height.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mime": {
+                "description": "Encoded media type.",
+                "type": "string"
+              },
+              "width": {
+                "description": "Physical pixel width.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mime",
+              "width",
+              "height",
+              "bytes"
+            ],
+            "type": "object"
+          },
+          "Platform": {
+            "description": "Platform that verified an App identity.",
+            "oneOf": [
+              {
+                "const": "macos",
+                "description": "macOS.",
+                "type": "string"
+              },
+              {
+                "const": "windows",
+                "description": "Windows.",
+                "type": "string"
+              },
+              {
+                "const": "linux",
+                "description": "Linux.",
+                "type": "string"
+              }
+            ]
+          },
+          "Signature": {
+            "description": "OS signature verification status.",
+            "oneOf": [
+              {
+                "const": "valid",
+                "description": "Valid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Invalid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unsigned",
+                "description": "Unsigned signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "Unknown signature status.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Tell the user to take over; never interpreted as approval.",
+        "properties": {
+          "app": {
+            "$ref": "#/$defs/App",
+            "description": "Target."
+          },
+          "reason": {
+            "description": "Engine-written reason, not model text.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "app",
+          "reason"
+        ],
+        "title": "Handoff",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.approval.requestApp": {
+      "notification": false,
+      "params": {
+        "$defs": {
+          "App": {
+            "additionalProperties": false,
+            "description": "Application approval context.",
+            "properties": {
+              "icon": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Image"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Small icon for display only."
+              },
+              "identity": {
+                "$ref": "#/$defs/Identity",
+                "description": "OS-verified identity."
+              },
+              "name": {
+                "description": "OS display name; only a label.",
+                "type": "string"
+              },
+              "pid": {
+                "description": "Running process.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "identity"
+            ],
+            "type": "object"
+          },
+          "Identity": {
+            "additionalProperties": false,
+            "description": "OS-verified authorization identity; model names never establish identity.",
+            "properties": {
+              "image_path": {
+                "description": "Canonical executable path.",
+                "type": "string"
+              },
+              "key": {
+                "description": "Canonical authorization key.",
+                "type": "string"
+              },
+              "platform": {
+                "$ref": "#/$defs/Platform",
+                "description": "Verifying platform."
+              },
+              "publisher": {
+                "description": "Verified Windows publisher.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Verified executable digest.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 32,
+                "minItems": 32,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "signature": {
+                "$ref": "#/$defs/Signature",
+                "description": "OS verification result."
+              },
+              "team_id": {
+                "description": "macOS signing team.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "platform",
+              "key",
+              "signature",
+              "image_path"
+            ],
+            "type": "object"
+          },
+          "Image": {
+            "additionalProperties": false,
+            "description": "In-memory safe image, never a path.",
+            "properties": {
+              "bytes": {
+                "description": "Redacted bytes; JSON byte array.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "height": {
+                "description": "Physical pixel height.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mime": {
+                "description": "Encoded media type.",
+                "type": "string"
+              },
+              "width": {
+                "description": "Physical pixel width.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mime",
+              "width",
+              "height",
+              "bytes"
+            ],
+            "type": "object"
+          },
+          "Platform": {
+            "description": "Platform that verified an App identity.",
+            "oneOf": [
+              {
+                "const": "macos",
+                "description": "macOS.",
+                "type": "string"
+              },
+              {
+                "const": "windows",
+                "description": "Windows.",
+                "type": "string"
+              },
+              {
+                "const": "linux",
+                "description": "Linux.",
+                "type": "string"
+              }
+            ]
+          },
+          "Risk": {
+            "description": "Engine-computed action risk.",
+            "oneOf": [
+              {
+                "const": "low",
+                "description": "Ordinary approval.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "Sensitive or unknown semantics.",
+                "type": "string"
+              }
+            ]
+          },
+          "Signature": {
+            "description": "OS signature verification status.",
+            "oneOf": [
+              {
+                "const": "valid",
+                "description": "Valid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Invalid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unsigned",
+                "description": "Unsigned signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "Unknown signature status.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Request a real App approval; Host binds the RPC ID and authenticated engine.",
+        "properties": {
+          "app": {
+            "$ref": "#/$defs/App",
+            "description": "Verified target."
+          },
+          "reason": {
+            "description": "Model-provided plain text; label and sanitize in UI.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "risk": {
+            "$ref": "#/$defs/Risk",
+            "description": "Engine-computed risk."
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "app",
+          "risk"
+        ],
+        "title": "RequestApp",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "Decision": {
+            "description": "Actual user approval; timeout is an RPC error, not a grant.",
+            "oneOf": [
+              {
+                "const": "turn",
+                "description": "Turn authorization decision.",
+                "type": "string"
+              },
+              {
+                "const": "session",
+                "description": "Session authorization decision.",
+                "type": "string"
+              },
+              {
+                "const": "always",
+                "description": "Always authorization decision.",
+                "type": "string"
+              },
+              {
+                "const": "deny",
+                "description": "Deny authorization decision.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "One response to one approval; consumed at most once.",
+        "properties": {
+          "decision": {
+            "$ref": "#/$defs/Decision",
+            "description": "User decision; Host alone persists Always."
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "AppDecision",
+        "type": "object"
+      }
+    },
+    "host.engine.health": {
+      "notification": true,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Engine resource heartbeat.",
+        "properties": {
+          "sessions": {
+            "description": "Open App session count.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uptime_ms": {
+            "description": "Monotonic uptime.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "uptime_ms",
+          "sessions"
+        ],
+        "title": "Health",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.event.emit": {
+      "notification": true,
+      "params": {
+        "$defs": {
+          "Image": {
+            "additionalProperties": false,
+            "description": "In-memory safe image, never a path.",
+            "properties": {
+              "bytes": {
+                "description": "Redacted bytes; JSON byte array.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "height": {
+                "description": "Physical pixel height.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mime": {
+                "description": "Encoded media type.",
+                "type": "string"
+              },
+              "width": {
+                "description": "Physical pixel width.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mime",
+              "width",
+              "height",
+              "bytes"
+            ],
+            "type": "object"
+          },
+          "Outcome": {
+            "description": "Execution status; done alone does not establish business success.",
+            "oneOf": [
+              {
+                "const": "done",
+                "description": "Delivery succeeded without an error.",
+                "type": "string"
+              },
+              {
+                "const": "refused",
+                "description": "Policy refused; definitely not executed.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Failure with definitely no side effect.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "Delivery started but execution is uncertain; never replay automatically.",
+                "type": "string"
+              }
+            ]
+          },
+          "ToolName": {
+            "description": "The sixteen default tools in architecture §11.1.",
+            "oneOf": [
+              {
+                "const": "list_apps",
+                "description": "Discover running and recently used apps.",
+                "type": "string"
+              },
+              {
+                "const": "list_windows",
+                "description": "Discover windows.",
+                "type": "string"
+              },
+              {
+                "const": "launch_app",
+                "description": "Launch an app.",
+                "type": "string"
+              },
+              {
+                "const": "get_app_state",
+                "description": "Observe an app window.",
+                "type": "string"
+              },
+              {
+                "const": "click",
+                "description": "Click an element or screenshot point.",
+                "type": "string"
+              },
+              {
+                "const": "perform_secondary_action",
+                "description": "Perform an advertised secondary action.",
+                "type": "string"
+              },
+              {
+                "const": "set_value",
+                "description": "Set an element value.",
+                "type": "string"
+              },
+              {
+                "const": "select_text",
+                "description": "Select text or a character range.",
+                "type": "string"
+              },
+              {
+                "const": "type_text",
+                "description": "Type text into an app.",
+                "type": "string"
+              },
+              {
+                "const": "press_key",
+                "description": "Press a key chord.",
+                "type": "string"
+              },
+              {
+                "const": "scroll",
+                "description": "Scroll an element or screenshot point.",
+                "type": "string"
+              },
+              {
+                "const": "drag",
+                "description": "Drag between screenshot points.",
+                "type": "string"
+              },
+              {
+                "const": "wait_for",
+                "description": "Wait for an observed condition.",
+                "type": "string"
+              },
+              {
+                "const": "computer_batch",
+                "description": "Execute a bounded batch.",
+                "type": "string"
+              },
+              {
+                "const": "computer_script",
+                "description": "Execute a bounded computer-use script.",
+                "type": "string"
+              },
+              {
+                "const": "capabilities",
+                "description": "Read runtime capabilities.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Action timeline notification.",
+        "properties": {
+          "duration_ms": {
+            "description": "Wall time.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "outcome": {
+            "$ref": "#/$defs/Outcome",
+            "description": "Execution outcome."
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          },
+          "target": {
+            "description": "Safe short target label.",
+            "type": "string"
+          },
+          "thumbnail": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Image"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Redacted thumbnail only."
+          },
+          "tool": {
+            "$ref": "#/$defs/ToolName",
+            "description": "Tool that ran."
+          }
+        },
+        "required": [
+          "session_id",
+          "tool",
+          "target",
+          "outcome",
+          "duration_ms"
+        ],
+        "title": "Event",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.overlay.hide": {
+      "notification": true,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Target one App session.",
+        "properties": {
+          "session_id": {
+            "description": "App-owned session identity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionId",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.overlay.show": {
+      "notification": true,
+      "params": {
+        "$defs": {
+          "CursorKind": {
+            "description": "Overlay cursor appearance.",
+            "oneOf": [
+              {
+                "const": "pointer",
+                "description": "Pointer cursor.",
+                "type": "string"
+              },
+              {
+                "const": "caret",
+                "description": "Caret cursor.",
+                "type": "string"
+              },
+              {
+                "const": "drag",
+                "description": "Drag cursor.",
+                "type": "string"
+              },
+              {
+                "const": "scroll",
+                "description": "Scroll cursor.",
+                "type": "string"
+              }
+            ]
+          },
+          "Rect": {
+            "additionalProperties": false,
+            "description": "Window-relative physical-pixel rectangle.",
+            "properties": {
+              "h": {
+                "description": "Height.",
+                "format": "double",
+                "type": "number"
+              },
+              "w": {
+                "description": "Width.",
+                "format": "double",
+                "type": "number"
+              },
+              "x": {
+                "description": "Horizontal origin.",
+                "format": "double",
+                "type": "number"
+              },
+              "y": {
+                "description": "Vertical origin.",
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "w",
+              "h"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Overlay placement in physical screen pixels.",
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/Rect",
+            "description": "Screen-space window rectangle."
+          },
+          "kind": {
+            "$ref": "#/$defs/CursorKind",
+            "description": "Cursor style."
+          },
+          "scale": {
+            "description": "Backing scale.",
+            "format": "double",
+            "type": "number"
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          },
+          "title": {
+            "description": "OS title.",
+            "type": "string"
+          },
+          "window_id": {
+            "description": "Target window.",
+            "type": "string"
+          },
+          "x": {
+            "description": "Screen-space x.",
+            "format": "double",
+            "type": "number"
+          },
+          "y": {
+            "description": "Screen-space y.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "session_id",
+          "window_id",
+          "title",
+          "frame",
+          "scale",
+          "x",
+          "y",
+          "kind"
+        ],
+        "title": "OverlayShow",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.overlay.status": {
+      "notification": true,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Overlay capsule update.",
+        "properties": {
+          "foreground": {
+            "description": "Foreground route is active.",
+            "type": "boolean"
+          },
+          "message": {
+            "description": "Engine-written status.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "message",
+          "foreground"
+        ],
+        "title": "OverlayStatus",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      }
+    },
+    "host.policy.load": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Explicit empty parameters/result.",
+        "title": "Empty",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ConfirmationLevel": {
+            "description": "Sensitive confirmation policy.",
+            "oneOf": [
+              {
+                "const": "off",
+                "description": "Off confirmation.",
+                "type": "string"
+              },
+              {
+                "const": "standard",
+                "description": "Standard confirmation.",
+                "type": "string"
+              },
+              {
+                "const": "strict",
+                "description": "Strict confirmation.",
+                "type": "string"
+              }
+            ]
+          },
+          "ForegroundPolicy": {
+            "description": "Foreground delivery policy; absence of physical activity never grants it.",
+            "oneOf": [
+              {
+                "const": "never",
+                "description": "Never foreground policy.",
+                "type": "string"
+              },
+              {
+                "const": "ask",
+                "description": "Ask foreground policy.",
+                "type": "string"
+              },
+              {
+                "const": "always",
+                "description": "Always foreground policy.",
+                "type": "string"
+              }
+            ]
+          },
+          "Identity": {
+            "additionalProperties": false,
+            "description": "OS-verified authorization identity; model names never establish identity.",
+            "properties": {
+              "image_path": {
+                "description": "Canonical executable path.",
+                "type": "string"
+              },
+              "key": {
+                "description": "Canonical authorization key.",
+                "type": "string"
+              },
+              "platform": {
+                "$ref": "#/$defs/Platform",
+                "description": "Verifying platform."
+              },
+              "publisher": {
+                "description": "Verified Windows publisher.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sha256": {
+                "description": "Verified executable digest.",
+                "items": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 32,
+                "minItems": 32,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "signature": {
+                "$ref": "#/$defs/Signature",
+                "description": "OS verification result."
+              },
+              "team_id": {
+                "description": "macOS signing team.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "platform",
+              "key",
+              "signature",
+              "image_path"
+            ],
+            "type": "object"
+          },
+          "Platform": {
+            "description": "Platform that verified an App identity.",
+            "oneOf": [
+              {
+                "const": "macos",
+                "description": "macOS.",
+                "type": "string"
+              },
+              {
+                "const": "windows",
+                "description": "Windows.",
+                "type": "string"
+              },
+              {
+                "const": "linux",
+                "description": "Linux.",
+                "type": "string"
+              }
+            ]
+          },
+          "Signature": {
+            "description": "OS signature verification status.",
+            "oneOf": [
+              {
+                "const": "valid",
+                "description": "Valid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Invalid signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unsigned",
+                "description": "Unsigned signature status.",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "description": "Unknown signature status.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read-only policy snapshot owned by App.",
+        "properties": {
+          "allow_foreground": {
+            "$ref": "#/$defs/ForegroundPolicy",
+            "description": "Default ask or never."
+          },
+          "always": {
+            "description": "Host-persisted identities.",
+            "items": {
+              "$ref": "#/$defs/Identity"
+            },
+            "type": "array"
+          },
+          "always_allow_enabled": {
+            "description": "Whether persistent grants may be used.",
+            "type": "boolean"
+          },
+          "extra_denied_apps": {
+            "description": "Additional denylist.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "image_format": {
+            "description": "Image encoding.",
+            "type": "string"
+          },
+          "macos_private_spi": {
+            "description": "Allow private delivery APIs.",
+            "type": "boolean"
+          },
+          "max_image_edge": {
+            "description": "Image budget.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_tree_nodes": {
+            "description": "Tree budget.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sensitive_action_confirmation": {
+            "$ref": "#/$defs/ConfirmationLevel",
+            "description": "Confirmation threshold."
+          },
+          "stop_hotkey": {
+            "description": "Hotkey selection.",
+            "type": "string"
+          },
+          "timeout_secs": {
+            "description": "Approval timeout (default 120 seconds).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "user_idle_ms": {
+            "description": "Physical idle threshold.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "Monotonic policy revision.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "always_allow_enabled",
+          "sensitive_action_confirmation",
+          "timeout_secs",
+          "allow_foreground",
+          "macos_private_spi",
+          "user_idle_ms",
+          "stop_hotkey",
+          "max_tree_nodes",
+          "max_image_edge",
+          "image_format",
+          "extra_denied_apps",
+          "always"
+        ],
+        "title": "Policy",
+        "type": "object"
+      }
+    }
+  }
+}

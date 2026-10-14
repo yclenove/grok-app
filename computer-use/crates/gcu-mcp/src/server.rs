@@ -72,6 +72,9 @@ impl Server {
     pub(crate) fn session(&self) -> Arc<Session> {
         self.0.session.clone()
     }
+    pub(crate) fn screenshot(&self, id: &str) -> Option<gcu_host_protocol::messages::Image> {
+        self.0.results.images.get(id)
+    }
     pub(crate) fn files(&self) -> Arc<SessionFiles> {
         self.0.results.files.clone()
     }
@@ -110,6 +113,7 @@ impl Server {
             router.input_release(),
         ));
         let results = Results {
+            images: Arc::new(crate::image_cache::ImageCache::default()),
             files: Arc::new(files),
             session: session.clone(),
             encoding: gcu_core::redact::EncodeOptions {
@@ -203,7 +207,12 @@ impl Server {
                 let _: CapabilitiesParams = params::parse(arguments)?;
                 let caps = this
                     .session
-                    .enqueue(async { this.driver.capabilities().clone() })
+                    .enqueue(async {
+                        let mut capabilities = this.driver.capabilities().clone();
+                        capabilities.user_activity_guard &=
+                            this.session.activity().ms_since_physical_input().is_some();
+                        capabilities
+                    })
                     .await
                     .map_err(|_| Box::new(result::error(ErrorCode::ApprovalDenied)))?;
                 Ok(this.results.discovery(json!(caps)).await)
@@ -219,6 +228,7 @@ impl Server {
     }
     async fn close(&self) -> Result<(), ServeError> {
         self.0.closed.cancel();
+        self.0.results.images.clear();
         self.0.session.session_closed().await;
         let files = self.0.results.files.clone();
         blocking(move || files.close()).await?;
