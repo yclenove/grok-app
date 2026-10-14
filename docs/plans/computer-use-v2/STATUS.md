@@ -49,7 +49,7 @@
 | P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | todo |  |  |  |  |
 | P4-05a | gcu install 客户端安装库（P4-05 前半） | P0-01 | 1d | done | cu2/P4-05a-install-lib | #14 | 2026-10-13 | 服务端名 grok-computer-use；Claude 保留 computer-use |
 | P4-05 | gcu install/uninstall（clap 接线 + Windows 钩子） | P0-10、P4-05a | 1d | todo |  |  |  | 库部分已由 P4-05a 完成 |
-| P4-06 | turn-ended 接入 | P0-09、S-01 | 1d | todo |  |  |  |  |
+| P4-06 | turn-ended 接入 | P0-09、S-01 | 1d | done | cu2/P4-06-turn-ended |  | 2026-10-13 | gcu turn-ended(Grok Stop 钩子 stdin / Codex notify argv)经私有端点通知会话；Turn 授权到期、幂等、不解除 Stop、空闲推定；链式 notify 先转发原调用；钩子错误可见且非致命 |
 | P4-07 | 打包与分发 | P4-01、P4-02、P4-03、P4-04、P4-05、P4-06 | 3d | todo |  |  |  | 需签名证书（可先无签名） |
 | P4-08 | 用户文档 | P4-07 | 1d | todo |  |  |  |  |
 | P5-01 | ComputerUseHost 骨架 + 引擎托管 | P0-12、P1-09 | 2.5d | todo |  |  |  |  |
