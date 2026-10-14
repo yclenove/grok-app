@@ -6,7 +6,7 @@
 | 卡 | 标题 | 依赖 | 估算 | 状态 | 分支 | PR | 日期 | 备注 |
 |---|---|---|---|---|---|---|---|---|
 | S-01 | Grok Build CLI MCP 能力探测 | — | 1.5d | done | cu2/S-01-grok-mcp-probe | #6 | 2026-10-13 | ADR 0001 已接受；影响已写入 03/04/05 |
-| S-02 | macOS TCC 与 helper 可行性 | — | 1.5d | in_progress | cu2/S-02-tcc-adr |  | 2026-10-14 | Mini(macOS 27, SIP 开)完整实测：助手归属/被遮挡 SCK/AppKit 后台点击(字段 51)/子进程继承均可用，Chromium 后台点击不可用；见 ADR 0006。待补：MacBook Pro(15)、撤销/错误 PID/安全提示矩阵、Developer ID 身份核验、macOS 14 |
+| S-02 | macOS TCC 与 helper 可行性 | — | 1.5d | done | cu2/S-02-tcc-adr |  | 2026-10-14 | 仅 macOS 27(Mini, arm64, SIP 开)实测，维护者决定不测 Pro：助手归属/被遮挡 SCK/AppKit 后台点击(字段 51)/子进程继承可用，Chromium 后台点击不可用；见 ADR 0006。macOS 14/15、撤销/错误 PID/安全提示矩阵、Developer ID 核验未覆盖，P1-06 契约测试需在 Mac runner 补 |
 | P0-01 | computer-use workspace | — | 1d | done | cu2/P0-01-workspace | #2 | 2026-10-13 | 已合入；RULES扩展由P0-05承接 |
 | P0-02 | CI 骨架 | P0-01 | 1d | done | cu2/P0-02-ci | #3 | 2026-10-13 | 三平台 CI 绿；pin SHA 已核 |
 | P0-03 | gcu-protocol | P0-01 | 2d | done | cu2/P0-03-protocol | #5 | 2026-10-13 | 预算 13,821/14,000 字节；后续需同步 window_minimized 错误码 |
