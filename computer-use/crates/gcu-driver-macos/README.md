@@ -142,7 +142,27 @@ password field (`password_len` stays unchanged), toggles the checkbox, sets the
 name field when it is settable, scrolls only when `AXScroll*ByPage` exists,
 and checks `AXSelectedTextRange` on a fresh snapshot.
 
+Ignored targeted-event oracle (`tests/targeted.rs`,
+`live_fixture_background_click_type_and_drag` and
+`live_chrome_occluded_targeted_click_is_unavailable`, macOS only) follows ADR
+0006. Grant Accessibility (and Screen Recording for the window gate) in System
+Settings first. The process must create `NSApplication` on the main thread:
+launch the test from a GUI session (`open` or the helper), not an SSH worker
+that never inits AppKit. Leave another app frontmost. Build the fixture, point
+`GCU_FIXTURE_APP` at the `.app`, and point `GCU_FIXTURE_STATE` at a writable
+JSON path. Chrome must already be running and occluded for the second test.
+CI compiles both tests and does not run them (`not_run`). This card has no
+authorized Mac, so `computer-use/bench/macos.json` is not written (`not_run`):
+
+```sh
+cargo build -p gcu-fixture
+export GCU_FIXTURE_APP="$PWD/target/debug/gcu-fixture.app"
+export GCU_FIXTURE_STATE="/tmp/gcu-fixture-state.json"
+cargo test -p gcu-driver-macos --test targeted -- --ignored --test-threads=1
+```
+
 `CROSS=1` clippy checks the macOS library and bins for `aarch64-apple-darwin`.
 It does not compile integration tests. The macOS GitHub runner compiles the
-live ScreenCaptureKit code, the live accessibility actions, and the ignored
-tests. The runner does not execute those ignored tests (`not_run`).
+live ScreenCaptureKit code, the live accessibility actions, the live
+CoreGraphics input path, and the ignored tests. The runner does not execute
+those ignored tests (`not_run`).
