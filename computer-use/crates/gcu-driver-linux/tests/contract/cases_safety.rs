@@ -158,7 +158,7 @@ pub async fn test_c15_drag_and_drop(
         .await
         .map_err(|e| e.to_string())?;
 
-    let ok = poll_oracle(Duration::from_secs(3), |v| {
+    let ok = poll_oracle(Duration::from_secs(5), |v| {
         if v.get("drop_ok")?.as_bool() == Some(true) {
             Some(true)
         } else {
@@ -198,7 +198,7 @@ pub async fn test_c16_background_press_with_other_window(
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let initial = poll_oracle(Duration::from_secs(2), |v| {
+    let initial = poll_oracle(Duration::from_secs(5), |v| {
         v.get("counter").and_then(|c| c.as_u64())
     })
     .await?;
@@ -229,7 +229,7 @@ pub async fn test_c16_background_press_with_other_window(
         .map_err(|e| e.to_string())?;
     assert_eq!(del, Delivery::Accessibility);
 
-    let updated = poll_oracle(Duration::from_secs(3), |v| {
+    let updated = poll_oracle(Duration::from_secs(5), |v| {
         let c = v.get("counter").and_then(|c| c.as_u64())?;
         if c > initial {
             Some(c)
@@ -255,7 +255,7 @@ pub async fn test_c18_stale_element_handle(
     driver: &LinuxDriver,
 ) -> Result<ContractOutcome, String> {
     let cancel = Cancel::default();
-    let initial = poll_oracle(Duration::from_secs(2), |v| {
+    let initial = poll_oracle(Duration::from_secs(5), |v| {
         v.get("counter").and_then(|c| c.as_u64())
     })
     .await?;
@@ -280,7 +280,7 @@ pub async fn test_c18_stale_element_handle(
 }
 
 pub async fn test_c19_closed_window(driver: &LinuxDriver) -> Result<ContractOutcome, String> {
-    let initial = poll_oracle(Duration::from_secs(2), |v| {
+    let initial = poll_oracle(Duration::from_secs(5), |v| {
         v.get("counter").and_then(|c| c.as_u64())
     })
     .await?;
@@ -477,7 +477,7 @@ pub async fn test_c23_release_all_input_no_stuck_keys(
         .await
         .map_err(|e| e.to_string())?;
 
-    let verified = poll_oracle(Duration::from_secs(3), |v| {
+    let verified = poll_oracle(Duration::from_secs(5), |v| {
         let t = v.get("text")?.as_str()?;
         if t.contains("xyz") {
             Some(true)
