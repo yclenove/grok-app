@@ -25,15 +25,29 @@ where
     F: Fn(&serde_json::Value) -> Option<T>,
 {
     let start = tokio::time::Instant::now();
+    let mut last_state = None;
     while start.elapsed() < timeout {
         if let Some(state) = read_fixture_state() {
             if let Some(res) = f(&state) {
                 return Ok(res);
             }
+            last_state = Some(state);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Err(format!("oracle poll timed out after {:?}", timeout))
+    let state_dump = last_state
+        .as_ref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<no state read>".into());
+    let text_val = last_state
+        .as_ref()
+        .and_then(|s| s.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("<no text field>");
+    Err(format!(
+        "oracle poll timed out after {:?}; last text: {:?}; last fixture state: {}",
+        timeout, text_val, state_dump
+    ))
 }
 
 pub fn find_raw_node<'a, F>(node: &'a RawNode, pred: &F) -> Option<&'a RawNode>

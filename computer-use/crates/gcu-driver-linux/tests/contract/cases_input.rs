@@ -389,6 +389,7 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
     driver: &LinuxDriver,
     win_ref: &WindowRef,
 ) -> Result<ContractOutcome, String> {
+    let t0 = tokio::time::Instant::now();
     let cancel = Cancel::default();
     let opts = TreeOpts::default();
     let tree = driver
@@ -402,6 +403,7 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
     .ok_or("name_field missing")?;
     let frame = entry.frame.ok_or("name_field frame missing")?;
 
+    // 1. Click to focus text field
     driver
         .perform(
             &DriverAction::PointerClick {
@@ -418,7 +420,21 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let t_click = t0.elapsed();
 
+    // Confirm text field has focus via oracle before issuing keyboard commands
+    poll_oracle(Duration::from_secs(5), |v| {
+        match v.get("focused_widget").and_then(|w| w.as_str()) {
+            Some(w) if w.contains("name_field") => Some(()),
+            Some(_) => None,
+            None => Some(()), // Fallback if fixture doesn't report focused_widget
+        }
+    })
+    .await
+    .map_err(|e| format!("C09 click focus confirmation failed: {e}; t_click={t_click:?}"))?;
+    let t_focus = t0.elapsed();
+
+    // 2. Type target text into the focused field
     driver
         .perform(
             &DriverAction::TypeText {
@@ -431,6 +447,7 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let t_type = t0.elapsed();
 
     poll_oracle(Duration::from_secs(5), |v| {
         if v.get("text")?.as_str()?.contains("clear_target") {
@@ -439,8 +456,15 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
             None
         }
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        format!(
+            "C09 typing verification failed: {e}; t_click={t_click:?}, t_focus={t_focus:?}, t_type={t_type:?}"
+        )
+    })?;
+    let t_poll_type = t0.elapsed();
 
+    // 3. Select all using Ctrl+A
     driver
         .perform(
             &DriverAction::PressKeys {
@@ -452,7 +476,9 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let t_ctrl_a = t0.elapsed();
 
+    // 4. Clear selection using BackSpace
     driver
         .perform(
             &DriverAction::PressKeys {
@@ -464,7 +490,9 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let t_backspace = t0.elapsed();
 
+    // 5. Verify the field is completely cleared
     let is_empty = poll_oracle(Duration::from_secs(5), |v| {
         let t = v.get("text")?.as_str()?;
         if t.is_empty() {
@@ -473,7 +501,12 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
             None
         }
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        format!(
+            "C09 field empty verification failed: {e}; t_click={t_click:?}, t_focus={t_focus:?}, t_type={t_type:?}, t_poll_type={t_poll_type:?}, t_ctrl_a={t_ctrl_a:?}, t_backspace={t_backspace:?}"
+        )
+    })?;
     assert!(is_empty);
     Ok(ContractOutcome::Passed)
 }
