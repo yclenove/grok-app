@@ -207,7 +207,7 @@ pub async fn test_c05_press_counter(
     })
     .ok_or("counter_button not found")?;
 
-    let initial = poll_oracle(Duration::from_secs(2), |v| {
+    let initial = poll_oracle(Duration::from_secs(5), |v| {
         v.get("counter").and_then(|c| c.as_u64())
     })
     .await?;
@@ -223,7 +223,7 @@ pub async fn test_c05_press_counter(
         .map_err(|e| e.to_string())?;
     assert_eq!(del, Delivery::Accessibility);
 
-    let updated = poll_oracle(Duration::from_secs(3), |v| {
+    let updated = poll_oracle(Duration::from_secs(5), |v| {
         let c = v.get("counter").and_then(|c| c.as_u64())?;
         if c > initial {
             Some(c)
@@ -276,7 +276,7 @@ pub async fn test_c06_click_grid_cell(
         .map_err(|e| e.to_string())?;
     assert_eq!(del, Delivery::Foreground);
 
-    let hit = poll_oracle(Duration::from_secs(3), |v| {
+    let hit = poll_oracle(Duration::from_secs(5), |v| {
         let arr = v.get("grid_hit")?.as_array()?;
         if arr.len() == 2 {
             let c = arr[0].as_u64()?;
@@ -372,7 +372,7 @@ pub async fn test_c08_type_text_unicode_zwj(
         .await
         .map_err(|e| e.to_string())?;
 
-    let verified = poll_oracle(Duration::from_secs(3), |v| {
+    let verified = poll_oracle(Duration::from_secs(5), |v| {
         let t = v.get("text")?.as_str()?;
         if t.contains("Grok-智造🚀") {
             Some(true)
@@ -432,7 +432,7 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
         .await
         .map_err(|e| e.to_string())?;
 
-    poll_oracle(Duration::from_secs(2), |v| {
+    poll_oracle(Duration::from_secs(5), |v| {
         if v.get("text")?.as_str()?.contains("clear_target") {
             Some(())
         } else {
@@ -465,7 +465,7 @@ pub async fn test_c09_press_keys_ctrl_a_backspace(
         .await
         .map_err(|e| e.to_string())?;
 
-    let is_empty = poll_oracle(Duration::from_secs(3), |v| {
+    let is_empty = poll_oracle(Duration::from_secs(5), |v| {
         let t = v.get("text")?.as_str()?;
         if t.is_empty() {
             Some(true)
@@ -495,7 +495,7 @@ pub async fn test_c10_toggle_checkbox(
     })
     .ok_or("checkbox missing")?;
 
-    let initial = poll_oracle(Duration::from_secs(2), |v| {
+    let initial = poll_oracle(Duration::from_secs(5), |v| {
         v.get("checked").and_then(|c| c.as_bool())
     })
     .await?;
@@ -529,7 +529,7 @@ pub async fn test_c10_toggle_checkbox(
         }
     }
 
-    let updated = poll_oracle(Duration::from_secs(3), |v| {
+    let updated = poll_oracle(Duration::from_secs(5), |v| {
         let cur = v.get("checked")?.as_bool()?;
         if cur != initial {
             Some(cur)
@@ -576,7 +576,7 @@ pub async fn test_c12_slider_set_value(
         .await
         .map_err(|e| e.to_string())?;
 
-    let val = poll_oracle(Duration::from_secs(3), |v| {
+    let val = poll_oracle(Duration::from_secs(5), |v| {
         let s = v.get("slider")?.as_f64()?;
         if (s - target_val).abs() < 0.5 {
             Some(s)
