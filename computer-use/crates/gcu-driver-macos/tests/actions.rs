@@ -841,4 +841,5 @@ async fn driver_missing_accessibility_does_not_run_the_action() {
 }
 
 #[cfg(target_os = "macos")]
+#[path = "actions/live.rs"]
 mod live;
