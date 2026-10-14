@@ -2,8 +2,8 @@
 source: crates/gcu-cli/tests/install_support/wire.rs
 ---
 # vscode install
---- $HOME/.config/Code/User/mcp.json
-+++ $HOME/.config/Code/User/mcp.json
+--- $VSCODE_MCP
++++ $VSCODE_MCP
 @@ -1,0 +1,11 @@
 +{
 +  "servers": {

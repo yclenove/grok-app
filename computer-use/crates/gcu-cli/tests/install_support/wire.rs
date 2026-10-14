@@ -416,6 +416,13 @@ fn normalize(text: &str, layout: &Layout) -> String {
     }
     text = text.replace("computer-use-turn-ended.sh", "$HOOK_FILE");
     text = text.replace("computer-use-turn-ended.cmd", "$HOOK_FILE");
+    for rel in [
+        "$HOME/.config/Code/User/mcp.json",
+        "$HOME/Library/Application Support/Code/User/mcp.json",
+        "$HOME/AppData/Roaming/Code/User/mcp.json",
+    ] {
+        text = text.replace(rel, "$VSCODE_MCP");
+    }
     text = text.replace("\\\"$HOME", "$HOME");
     text = text.replace("$HOOK_FILE\\\"", "$HOOK_FILE");
     redact_hook(&text)
@@ -823,26 +830,32 @@ fn grok_install_tty_yes_writes_and_other_answers_do_not() {
             .env_remove("GCU_APPROVAL")
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave))
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let mut seen = String::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while !seen.contains("[y/N]") {
             assert!(Instant::now() < deadline, "prompt timed out: {seen}");
-            let mut buf = [0_u8; 1024];
-            match std::io::Read::read(&mut master, &mut buf) {
-                Ok(0) => break,
-                Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(err) => panic!("{err}"),
-            }
+            drain_pty(&mut master, &mut seen);
+            std::thread::sleep(Duration::from_millis(10));
         }
         use std::io::Write;
         write!(master, "{answer}").unwrap();
-        let status = child.wait().unwrap();
+        // Keep reading. A full PTY buffer blocks the child on stdout and wait never returns.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            drain_pty(&mut master, &mut seen);
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child timed out: {seen}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let wrote = layout.home.join(".grok/config.toml").exists();
         if answer.starts_with('y') {
             assert!(status.success(), "{seen}");
@@ -850,6 +863,21 @@ fn grok_install_tty_yes_writes_and_other_answers_do_not() {
         } else {
             assert!(!wrote);
             assert!(!status.success());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn drain_pty(master: &mut std::fs::File, seen: &mut String) {
+    let mut buf = [0_u8; 4096];
+    loop {
+        match std::io::Read::read(master, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            // Linux and macOS report EIO once the slave side has closed.
+            Err(err) if err.raw_os_error() == Some(5) => break,
+            Err(err) => panic!("{err}"),
         }
     }
 }
