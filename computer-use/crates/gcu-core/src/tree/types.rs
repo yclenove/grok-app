@@ -145,13 +145,15 @@ pub struct ProcessedTree {
     pub element_index: BTreeMap<u32, IndexedElement>,
     /// Total visibility/budget omissions, including when the entire root was omitted.
     pub omitted_nodes: usize,
+    /// Native traversal facts retained independently of known core omissions.
+    pub incomplete: Option<crate::model::Incomplete>,
     /// Retained focused element's index, if available.
     pub focused: Option<u32>,
     /// Retained modal dialogs/sheets/native alerts.
     pub popups: Vec<PopupInfo>,
     /// Raw password regions; collected before pruning, independent of element_index.
     pub sensitive_regions: Vec<SensitiveRegion>,
-    /// False if any password region is missing, empty, or non-finite.
+    /// False if native traversal is incomplete or any password region is invalid.
     /// Screenshot delivery must fail closed when this is false.
     pub sensitive_regions_reliable: bool,
     /// Terminal-like nodes and descendants, for P0-08 policy gates.
@@ -159,6 +161,17 @@ pub struct ProcessedTree {
     pub(crate) title_elements: Vec<TitleAssociation>,
 }
 impl ProcessedTree {
+    /// Structured truncation without treating unknown native counts as zero omissions.
+    /// Pure and synchronous; does not read or wait for native state.
+    pub fn truncation(&self, omitted_nodes: usize) -> Option<gcu_protocol::types::Truncation> {
+        (omitted_nodes > 0 || self.incomplete.is_some()).then_some(
+            gcu_protocol::types::Truncation {
+                omitted_nodes: omitted_nodes.min(u32::MAX as usize) as u32,
+                native_incomplete: self.incomplete,
+            },
+        )
+    }
+
     /// Borrow nodes in preorder with their zero-based nesting depth; no IO or blocking.
     pub fn nodes(&self) -> Vec<(usize, &ProcessedNode)> {
         fn walk<'a>(

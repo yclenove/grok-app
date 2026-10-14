@@ -496,7 +496,10 @@ impl MacosDriver {
             self.track_toggles(ArcToggle(toggles));
         }
         let Some(index) = target.ax_index else {
-            return Ok(RawTree { root: None });
+            return Ok(RawTree {
+                root: None,
+                incomplete: None,
+            });
         };
         let source = crate::real::RealAxSource::open(thread, target.pid, index).await?;
         source.set_text_limit(opts.text_limit);

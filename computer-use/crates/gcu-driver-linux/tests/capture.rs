@@ -465,7 +465,10 @@ fn make_password_tree(frame: Option<Rect>, max_nodes: usize) -> ProcessedTree {
     });
 
     let mut tree = Pipeline::default().run(
-        RawTree { root: Some(n) },
+        RawTree {
+            root: Some(n),
+            incomplete: None,
+        },
         &TreeOpts {
             max_tree_nodes: max_nodes,
             ..Default::default()

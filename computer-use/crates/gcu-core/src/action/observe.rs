@@ -13,10 +13,7 @@ use crate::{
     snapshot::{ElementIndex, WindowKey},
     tree::{Pipeline, ProcessedTree},
 };
-use gcu_protocol::{
-    types::{ScreenshotInfo, Truncation},
-    AppState, ErrorCode, ToolError, WindowInfo,
-};
+use gcu_protocol::{types::ScreenshotInfo, AppState, ErrorCode, ToolError, WindowInfo};
 use serde_json::{json, Value};
 
 pub(crate) struct Fresh {
@@ -71,6 +68,9 @@ impl ActionRouter {
         let mut image = None;
         let captured_at;
         if screenshot {
+            if raw.incomplete.is_some() {
+                return Err(ErrorCode::HandoffRequired);
+            }
             let capture = self
                 .native(
                     session,
@@ -90,6 +90,9 @@ impl ActionRouter {
                 )
                 .await
                 .map_err(|e| e.error_code())?;
+            if after.incomplete.is_some() {
+                return Err(ErrorCode::HandoffRequired);
+            }
             if before != signature(&after)? {
                 return Err(ErrorCode::StaleScreenshot);
             }
@@ -224,9 +227,7 @@ impl ActionRouter {
                 snapshot_id: format!("s_{}", observation.snapshot_id.0),
                 screenshot,
                 focused: fresh.tree.focused,
-                truncated: (fresh.tree.omitted_nodes > 0).then_some(Truncation {
-                    omitted_nodes: fresh.tree.omitted_nodes as u32,
-                }),
+                truncated: fresh.tree.truncation(fresh.tree.omitted_nodes),
                 elements: None,
                 action: None,
             },
@@ -256,7 +257,8 @@ pub(crate) fn signature(raw: &RawTree) -> Result<String, ErrorCode> {
             n.children.iter().map(node).collect::<Vec<_>>()
         ])
     }
-    serde_json::to_string(&raw.root.as_ref().map(node)).map_err(|_| ErrorCode::Internal)
+    serde_json::to_string(&(raw.incomplete, raw.root.as_ref().map(node)))
+        .map_err(|_| ErrorCode::Internal)
 }
 pub(crate) fn digest(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325, |h, b| {

@@ -1,7 +1,7 @@
 //! One-shot deterministic faults; no real process crashes or OS input.
 use gcu_core::{
     driver::DriverError,
-    model::{Geometry, NodeValue},
+    model::{Geometry, Incomplete, NodeValue},
 };
 use std::time::Duration;
 
@@ -9,6 +9,8 @@ use std::time::Duration;
 /// effect before that operation; uncertainty faults apply a mutation at most once.
 #[derive(Debug, Clone)]
 pub enum Fault {
+    /// Report native incompleteness on the next tree read, retaining fixture nodes.
+    IncompleteTree(Incomplete),
     /// Return timeout, optionally after one successful delivery.
     Timeout {
         /// Execute a mutation once before reporting uncertainty.

@@ -90,7 +90,8 @@ fn convert(mut node: RawNode, inherited: NodeFlags, tree: &mut ProcessedTree) ->
 }
 pub(crate) fn prepare(raw: RawTree) -> ProcessedTree {
     let mut tree = ProcessedTree {
-        sensitive_regions_reliable: true,
+        sensitive_regions_reliable: raw.incomplete.is_none(),
+        incomplete: raw.incomplete,
         ..Default::default()
     };
     tree.root = raw

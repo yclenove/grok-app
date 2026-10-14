@@ -48,6 +48,7 @@ pub struct FakeDriver {
     perform_calls: Arc<AtomicUsize>,
     release_calls: Arc<AtomicUsize>,
     action_faults: Arc<Mutex<std::collections::VecDeque<Fault>>>,
+    incomplete: Option<Incomplete>,
 }
 impl FakeDriver {
     /// Construct from validated RON data, synchronously, without filesystem access.
@@ -63,11 +64,18 @@ impl FakeDriver {
             perform_calls: Arc::new(AtomicUsize::new(0)),
             release_calls: Arc::new(AtomicUsize::new(0)),
             action_faults: Arc::new(Mutex::new(Default::default())),
+            incomplete: None,
         })
     }
     /// Construct a built-in fixture, synchronously, without OS resources.
     pub fn from_scene(name: &str) -> std::result::Result<Self, scene::SceneError> {
         Self::from_ron(scene::builtin(name).ok_or(scene::SceneError::Invalid("unknown scene"))?)
+    }
+    /// Report an incomplete native read in offline safety tests. No OS IO or waits;
+    /// apply before sharing the driver. The retained fixture nodes stay deterministic.
+    pub fn with_incomplete_tree(mut self, incomplete: Incomplete) -> Self {
+        self.incomplete = Some(incomplete);
+        self
     }
     /// Disable targeted routes to test route ceilings. Accessibility remains available.
     /// Apply before sharing the driver; callers never gain foreground authorization here.
@@ -315,7 +323,12 @@ impl Driver for FakeDriver {
         cancel: &Cancel,
     ) -> Result<RawTree> {
         bounded(cancel, opts.timeout, async {
-            read_fault(&self.prepare(cancel, opts.timeout).await?)?;
+            let fault = self.prepare(cancel, opts.timeout).await?;
+            read_fault(&fault)?;
+            let incomplete = match fault {
+                Some(Fault::IncompleteTree(fact)) => Some(fact),
+                _ => self.incomplete,
+            };
             let mut root = self.lock().await?.window(win)?.root.clone();
             if cancel.is_cancelled() {
                 return Err(DriverError::Cancelled {
@@ -326,7 +339,7 @@ impl Driver for FakeDriver {
                 limit_extras(root, opts.text_limit);
                 refresh_tree(root, Fingerprint::default(), 0);
             }
-            Ok(RawTree { root })
+            Ok(RawTree { root, incomplete })
         })
         .await
     }
@@ -495,6 +508,7 @@ impl FakeDriver {
             perform_calls: Arc::new(AtomicUsize::new(0)),
             release_calls: Arc::new(AtomicUsize::new(0)),
             action_faults: Arc::new(Mutex::new(Default::default())),
+            incomplete: None,
         })
     }
 }

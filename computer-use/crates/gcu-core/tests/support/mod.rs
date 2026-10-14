@@ -25,7 +25,10 @@ pub fn node(role: Role, name: &str, children: Vec<RawNode>) -> RawNode {
 pub fn raw(children: Vec<RawNode>) -> RawTree {
     let mut root = node(Role::Window, "Fixture", children);
     gcu_core::fingerprint::refresh_tree(&mut root, Fingerprint::default(), 0);
-    RawTree { root: Some(root) }
+    RawTree {
+        root: Some(root),
+        incomplete: None,
+    }
 }
 pub fn opts() -> gcu_core::render::RenderOpts {
     use gcu_protocol::{AppInfo, WindowInfo};

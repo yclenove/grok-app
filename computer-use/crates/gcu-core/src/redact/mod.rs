@@ -118,7 +118,7 @@ pub fn apply(tree: &ProcessedTree, frame: CapturedFrame) -> Result<RedactedImage
     {
         return Err(RedactionError::Stale);
     }
-    if !tree.sensitive_regions_reliable {
+    if tree.incomplete.is_some() || !tree.sensitive_regions_reliable {
         return Err(RedactionError::NeedsHandoff);
     }
     let capture = frame.capture;

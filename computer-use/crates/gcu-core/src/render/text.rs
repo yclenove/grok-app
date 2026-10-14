@@ -178,6 +178,21 @@ fn footer(tree: &ProcessedTree, opts: &RenderOpts, selected: &BTreeSet<u32>) -> 
     } else {
         text.push_str(&details);
     }
+    if let Some(fact) = tree.incomplete {
+        let reason = match fact.reason {
+            IncompleteReason::Deadline => "deadline",
+            IncompleteReason::NodeCap => "node_cap",
+            IncompleteReason::PartialError => "partial_error",
+            IncompleteReason::DepthCap => "depth_cap",
+        };
+        let unread = fact
+            .unread_nodes
+            .map_or_else(|| "unknown".into(), |n| n.to_string());
+        text.push_str(&format!(
+            "[truncated: native tree incomplete ({reason}); {} nodes read; {unread} nodes unread]\n",
+            fact.read_nodes
+        ));
+    }
     if let Some(action) = &opts.action {
         // Do not echo payload-bearing target labels, notes, or verification strings.
         text.push_str(&format!(
