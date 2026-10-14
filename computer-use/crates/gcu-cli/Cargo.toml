@@ -39,6 +39,7 @@ toml_edit = "0.25"
 gcu-host-api = { workspace = true, features = ["testing"] }
 gcu-host-protocol = { workspace = true, features = ["testing"] }
 assert_cmd = "2"
+insta = { version = "1.49", default-features = false }
 serde_json = { workspace = true, features = ["preserve_order"] }
 toml = { workspace = true }
 

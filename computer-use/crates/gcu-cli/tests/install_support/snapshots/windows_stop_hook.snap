@@ -1,0 +1,16 @@
+---
+source: crates/gcu-cli/tests/install_support/wire.rs
+---
+@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+rem gcu-computer-use-stop
+rem Forward a Grok Build Stop hook to gcu only when reason is end_turn.
+set "GCU=C:\Program Files\gcu.exe"
+set "PAYLOAD=%TEMP%\gcu-stop-%RANDOM%%RANDOM%.json"
+findstr /R ".*" > "%PAYLOAD%"
+findstr /C:"\"reason\"" "%PAYLOAD%" | findstr /C:"\"end_turn\"" >nul
+if errorlevel 1 goto gcu_stop_done
+"%GCU%" turn-ended < "%PAYLOAD%"
+:gcu_stop_done
+del /f /q "%PAYLOAD%" >nul 2>&1
+exit /b 0

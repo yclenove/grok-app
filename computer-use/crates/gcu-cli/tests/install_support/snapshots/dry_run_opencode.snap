@@ -1,0 +1,19 @@
+---
+source: crates/gcu-cli/tests/install_support/wire.rs
+---
+# opencode install
+--- $HOME/.config/opencode/opencode.json
++++ $HOME/.config/opencode/opencode.json
+@@ -1,0 +1,12 @@
++{
++  "mcp": {
++    "grok-computer-use": {
++      "type": "local",
++      "command": [
++        "$GCU",
++        "mcp"
++      ],
++      "enabled": true
++    }
++  }
++}

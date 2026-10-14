@@ -92,6 +92,129 @@ pub(crate) enum Command {
         #[arg(long)]
         session: Option<std::path::PathBuf>,
     },
+    /// Register grok-computer-use with one MCP client.
+    #[command(
+        long_about = "Register grok-computer-use. Pass the client positionally (`gcu install grok`) or as `--client grok`. Writing the Grok directory requires a typed TTY confirmation or --yes. A pipe or an environment variable cannot confirm."
+    )]
+    Install(InstallArgs),
+    /// Remove grok-computer-use and hooks this installer owns.
+    #[command(
+        long_about = "Remove only grok-computer-use and hooks this installer owns. Pass the client positionally or as `--client`. Writing the Grok directory requires a typed TTY confirmation or --yes."
+    )]
+    Uninstall(InstallArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct InstallArgs {
+    /// Client name. Same values as `--client`.
+    #[arg(value_enum, value_name = "CLIENT", id = "client_pos")]
+    pub client_pos: Option<ClientName>,
+    /// Client name. Same values as the positional client.
+    #[arg(long = "client", value_enum)]
+    pub client: Option<ClientName>,
+    /// Where the MCP entry is written.
+    #[arg(long, value_enum, default_value = "user")]
+    pub scope: ScopeName,
+    /// Print the diff and run nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Modify the Grok directory without a prompt. Environment variables cannot replace this flag.
+    #[arg(long)]
+    pub yes: bool,
+    /// Print a JSON object instead of the text diff.
+    #[arg(long)]
+    pub json: bool,
+    /// Home that contains client config. Overrides `GCU_HOME`.
+    #[arg(long)]
+    pub home: Option<std::path::PathBuf>,
+    /// Project directory for `--scope project`. Overrides `GCU_PROJECT`.
+    #[arg(long)]
+    pub project: Option<std::path::PathBuf>,
+    /// Absolute `gcu` path stored in the client config. Default: this executable.
+    #[arg(long)]
+    pub gcu: Option<std::path::PathBuf>,
+    /// `agy` executable for Antigravity user scope. Default: search `PATH`.
+    #[arg(long)]
+    pub agy: Option<std::path::PathBuf>,
+    /// Grok config directory when it is not `<home>/.grok`.
+    #[arg(long)]
+    pub grok_home: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ClientName {
+    #[value(name = "grok")]
+    Grok,
+    #[value(name = "codex")]
+    Codex,
+    #[value(name = "claude")]
+    Claude,
+    #[value(name = "antigravity")]
+    Antigravity,
+    #[value(name = "gemini")]
+    Gemini,
+    #[value(name = "opencode")]
+    Opencode,
+    #[value(name = "cursor")]
+    Cursor,
+    #[value(name = "vscode")]
+    VsCode,
+}
+
+impl ClientName {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Grok => "grok",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+            Self::Cursor => "cursor",
+            Self::VsCode => "vscode",
+        }
+    }
+}
+
+impl From<ClientName> for crate::install::ClientId {
+    fn from(client: ClientName) -> Self {
+        match client {
+            ClientName::Grok => Self::Grok,
+            ClientName::Codex => Self::Codex,
+            ClientName::Claude => Self::Claude,
+            ClientName::Antigravity => Self::Antigravity,
+            ClientName::Gemini => Self::Gemini,
+            ClientName::Opencode => Self::Opencode,
+            ClientName::Cursor => Self::Cursor,
+            ClientName::VsCode => Self::VsCode,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ScopeName {
+    #[value(name = "user")]
+    User,
+    #[value(name = "project")]
+    Project,
+}
+
+impl ScopeName {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+        }
+    }
+}
+
+impl From<ScopeName> for crate::install::Scope {
+    fn from(scope: ScopeName) -> Self {
+        match scope {
+            ScopeName::User => Self::User,
+            ScopeName::Project => Self::Project,
+        }
+    }
 }
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Transport {

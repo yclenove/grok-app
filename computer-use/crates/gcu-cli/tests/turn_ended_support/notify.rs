@@ -68,6 +68,7 @@ async fn installed_codex_chain_preserves_argv_stdin_exit_status_then_notifies_an
     std::fs::write(&path, format!("notify = {array}\n")).unwrap();
     let ctx = InstallCtx {
         home: home.path(),
+        grok_home: None,
         project_dir: home.path(),
         gcu_exe: Path::new(assert_cmd::cargo::cargo_bin!("gcu")),
         scope: Scope::User,
@@ -154,6 +155,7 @@ async fn installed_grok_hook_malformed_stdin_is_diagnosed_without_turn_failure()
     let home = home();
     let ctx = InstallCtx {
         home: home.path(),
+        grok_home: None,
         project_dir: home.path(),
         gcu_exe: Path::new(assert_cmd::cargo::cargo_bin!("gcu")),
         scope: Scope::User,

@@ -357,6 +357,7 @@ async fn installed_codex_empty_previous_notify_is_restored_and_hook_still_works(
     std::fs::write(&path, "notify = []\n").unwrap();
     let ctx = InstallCtx {
         home: home.path(),
+        grok_home: None,
         project_dir: home.path(),
         gcu_exe: Path::new(assert_cmd::cargo::cargo_bin!("gcu")),
         scope: Scope::User,

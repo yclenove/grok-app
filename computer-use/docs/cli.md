@@ -13,8 +13,45 @@ gcu mcp --driver fake --scene form --profile minimal --transport stdio
 
 `mcp` accepts default/minimal/full profiles. HTTP, `--connect`, `--token-fd` and
 `--port` are parsed but return an explicit P0-12 not-implemented error (exit 2).
-Install/uninstall command wiring belongs to P4-05; the existing install library
-is unchanged.
+
+## install / uninstall
+
+`gcu install` and `gcu uninstall` register or remove the `grok-computer-use` MCP
+server. They do not start a driver. The client is positional or `--client`:
+
+```sh
+gcu install grok --dry-run
+gcu install --client codex --scope user --json
+gcu uninstall --client claude --yes
+```
+
+Clients: `grok`, `codex`, `claude`, `antigravity`, `gemini`, `opencode`, `cursor`,
+`vscode`. `--scope` is `user` (default) or `project`. `--dry-run` prints the diff
+and writes nothing. `--json` prints one object (`client`, `action`, `scope`,
+`dry_run`, `noop`, `backups`, `diff`) instead of the text diff.
+
+Repeating install does not duplicate an entry. Uninstall removes only
+`grok-computer-use` and hooks this installer owns. Existing files are copied to
+`<name>.gcu-backup-<unix-time>` beside the original before a real change. Backup
+files are owner-only (`0600` on Unix, an owner-only ACL on Windows). Replacing a
+config keeps that file's previous mode. A failed write removes its temporary file.
+
+Paths: `--home` overrides `GCU_HOME`, which overrides `HOME` (or `USERPROFILE` on
+Windows). `--project` overrides `GCU_PROJECT`, which overrides the working
+directory. `--grok-home` is the Grok directory when it is not `<home>/.grok`.
+`--gcu` is the absolute executable written into the client config. Antigravity
+user scope runs `agy mcp add` / `agy mcp remove` (`--agy` overrides `PATH`).
+
+Writing the Grok directory asks on a terminal (`y` or `yes`). Anything else
+cancels. A non-terminal needs `--yes`. A pipe and environment variables such as
+`GCU_YES` are not confirmation. The Stop hook is `computer-use-turn-ended.sh`
+under `<home>/.grok/hooks` on Unix, and `computer-use-turn-ended.cmd` on Windows
+(both follow `--grok-home` when that flag is set). It calls `gcu turn-ended` only
+when the payload reason is `end_turn`.
+
+Exit 2 covers a missing client, a refused confirmation, and a config file this
+command will not parse. Exit 10 covers an IO or `agy` failure. A refused command
+leaves the config unchanged.
 
 App observations/actions are denied with a P4 approval-window message until the
 real approval UI lands; MCP client elicitation cannot override this CLI Host.

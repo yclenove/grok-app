@@ -1,0 +1,12 @@
+---
+source: crates/gcu-cli/tests/install_support/wire.rs
+---
+# codex install
+--- $HOME/.codex/config.toml
++++ $HOME/.codex/config.toml
+@@ -1,0 +1,5 @@
++notify = ["$GCU", "turn-ended"]
++
++[mcp_servers.grok-computer-use]
++command = "$GCU"
++args = ["mcp"]

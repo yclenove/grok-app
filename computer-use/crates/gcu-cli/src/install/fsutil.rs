@@ -3,6 +3,7 @@
 //! `apply_plan` is synchronous. It blocks on filesystem IO and then on the
 //! injected command executor. It does not start worker threads of its own.
 //! A noop plan returns before confirmation, backup, or any write.
+//! Backup files are owner-only (`0600`, or the Windows owner-only DACL).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -36,11 +37,13 @@ pub(crate) fn apply_plan(ctx: &InstallCtx<'_>, plan: &Plan) -> Result<ApplyOutco
 }
 
 fn confirm_grok(ctx: &InstallCtx<'_>, plan: &Plan) -> Result<(), InstallError> {
-    let root = ctx.home.join(".grok");
-    let touches = plan
-        .files
-        .iter()
-        .any(|change| change.is_rewrite() && change.path.starts_with(&root));
+    let mut roots = vec![ctx.home.join(".grok")];
+    if let Some(grok_home) = ctx.grok_home {
+        roots.push(grok_home.to_path_buf());
+    }
+    let touches = plan.files.iter().any(|change| {
+        change.is_rewrite() && roots.iter().any(|root| change.path.starts_with(root))
+    });
     if !touches {
         return Ok(());
     }
@@ -156,16 +159,42 @@ fn backup_destination(path: &Path, stamp: &str) -> Result<PathBuf, InstallError>
 
 fn copy_new(src: &Path, dest: &Path) -> Result<(), InstallError> {
     let bytes = fs::read(src).map_err(|source| read_err(src, source))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(dest)
         .map_err(|source| write_err(dest, source))?;
-    file.write_all(&bytes)
+    let result = write_backup(&mut file, dest, &bytes);
+    if result.is_err() {
+        drop(file);
+        let _ = fs::remove_file(dest);
+    }
+    result
+}
+
+fn write_backup(file: &mut fs::File, dest: &Path, bytes: &[u8]) -> Result<(), InstallError> {
+    file.write_all(bytes)
         .map_err(|source| write_err(dest, source))?;
+    file.sync_all().map_err(|source| write_err(dest, source))?;
+    restrict_backup(file, dest)
+}
+
+fn restrict_backup(file: &fs::File, dest: &Path) -> Result<(), InstallError> {
     #[cfg(unix)]
-    if let Ok(meta) = fs::metadata(src) {
-        let _ = file.set_permissions(meta.permissions());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|source| write_err(dest, source))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        crate::private::restrict_owner(dest).map_err(|source| write_err(dest, source))?;
     }
     Ok(())
 }
