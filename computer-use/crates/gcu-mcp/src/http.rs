@@ -15,6 +15,9 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
+/// How long `HttpEndpoint::close` waits for already-produced responses to be written.
+const RESPONSE_FLUSH_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// One App session endpoint. Drop revokes its token and closes all HTTP streams;
 /// call close to await input/resource cleanup too. Never Debug/log the token.
 pub struct HttpEndpoint {
@@ -166,6 +169,10 @@ impl HttpEndpoint {
         // before their response channels are torn down.
         let result = self.connection.close().await;
         (self.cancel)();
+        // Graceful shutdown lets a response that is already produced (the Deny above) reach the
+        // client; aborting at once could drop it and leave the client waiting for a reply that
+        // never arrives. Open event streams never finish on their own, so the wait is bounded.
+        let _ = tokio::time::timeout(RESPONSE_FLUSH_GRACE, &mut self.task).await;
         self.task.abort();
         result
     }
