@@ -54,6 +54,7 @@ struct Auth {
     directory: PathBuf,
     activity: Arc<Activity>,
     session: Arc<Session>,
+    lifecycle: gcu_mcp::lifecycle::Lifecycle,
     active: std::sync::atomic::AtomicBool,
 }
 impl Auth {
@@ -102,6 +103,32 @@ impl Auth {
         if self.session.is_closed() {
             return stream.write_all(b"DENIED\n").await;
         }
+        if let Some(notification) = request.strip_prefix("turn-ended ") {
+            let Some((token, event)) = notification.split_once(' ') else {
+                return stream.write_all(b"DENIED\n").await;
+            };
+            let this = self.clone();
+            let token = token.to_owned();
+            let valid_event = event.len() <= 128;
+            // Resume rotates credentials under this mutex while doing file IO.
+            // Authentication must not block the independent Stop event loop.
+            let accepted = tokio::task::spawn_blocking(move || {
+                let c = this.credentials.lock().unwrap_or_else(|e| e.into_inner());
+                this.active.load(std::sync::atomic::Ordering::Acquire)
+                    && !c.token.is_empty()
+                    && token == c.token
+                    && valid_event
+            })
+            .await
+            .map_err(io::Error::other)?;
+            if !accepted {
+                return stream.write_all(b"DENIED\n").await;
+            }
+            self.lifecycle
+                .turn_ended((!event.is_empty()).then_some(event))
+                .await;
+            return stream.write_all(b"OK\n").await;
+        }
         let this = self.clone();
         let request = request.into_owned();
         let accepted = tokio::task::spawn_blocking(move || {
@@ -141,9 +168,10 @@ pub(crate) struct Control {
     auth: Arc<Auth>,
 }
 impl Control {
-    pub(crate) async fn start(
+    pub(crate) async fn start_with_lifecycle(
         session: Arc<Session>,
         activity: Arc<Activity>,
+        lifecycle: gcu_mcp::lifecycle::Lifecycle,
     ) -> Result<Self, Failure> {
         let directory = private::work(|| {
             private::session_directory(PREFIX)
@@ -158,6 +186,7 @@ impl Control {
             directory: directory.path().into(),
             activity,
             session,
+            lifecycle,
             active: std::sync::atomic::AtomicBool::new(true),
         });
         let publisher = auth.clone();
@@ -179,8 +208,13 @@ impl Control {
                 Failure::arguments("Cannot bind private control socket (check runtime path length)")
             })?;
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|_| Failure::internal("Cannot secure control socket"))?;
+            let directory = directory.path().to_owned();
+            private::work(move || {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|_| Failure::internal("Cannot secure control socket"))?;
+                private::endpoint::publish(&directory, None)
+            })
+            .await?;
             listener
         };
         #[cfg(windows)]
@@ -188,8 +222,14 @@ impl Control {
             let pipe_name = format!(r"\\.\pipe\gcu-{}", random());
             let listener = private::unsafe_platform::pipe(&pipe_name, true)
                 .map_err(|_| Failure::internal("Cannot create private control pipe"))?;
-            private::write_secret(&directory.path().join("endpoint"), pipe_name.as_bytes())
-                .map_err(|_| Failure::internal("Cannot publish control pipe"))?;
+            let path = directory.path().to_owned();
+            let name = pipe_name.clone();
+            private::work(move || {
+                private::write_secret(&path.join("endpoint"), name.as_bytes())
+                    .map_err(|_| Failure::internal("Cannot publish control pipe"))?;
+                private::endpoint::publish(&path, Some(name))
+            })
+            .await?;
             (listener, pipe_name)
         };
         let task_auth = auth.clone();
@@ -245,7 +285,7 @@ impl Drop for Control {
     }
 }
 
-fn discover(selected: Option<PathBuf>) -> Result<PathBuf, Failure> {
+pub(crate) fn discover(selected: Option<PathBuf>) -> Result<PathBuf, Failure> {
     if let Some(path) = selected {
         private::check_dir(&path)?;
         return Ok(path);
@@ -316,23 +356,40 @@ pub(crate) async fn run(selected: Option<PathBuf>) -> Result<u8, Failure> {
     println!("Resumed model operations.");
     Ok(0)
 }
-async fn send(directory: &Path, request: &str) -> Result<(), Failure> {
+pub(crate) async fn read_token(directory: &Path) -> Result<String, Failure> {
+    let directory = directory.to_owned();
+    private::work(move || {
+        private::check_dir(&directory)?;
+        private::check_file(&directory.join("token"))?;
+        let token = std::fs::read_to_string(directory.join("token"))
+            .map_err(|_| Failure::arguments("Cannot read control token"))?;
+        if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Failure::arguments("Invalid control token"));
+        }
+        Ok(token)
+    })
+    .await
+}
+pub(crate) async fn send(directory: &Path, request: &str) -> Result<(), Failure> {
+    let path = directory.to_owned();
+    let endpoint = private::work(move || private::endpoint::inspect(&path)).await?;
     let result = tokio::time::timeout(TIMEOUT, async {
         #[cfg(unix)]
         let mut stream = tokio::net::UnixStream::connect(directory.join("control.sock")).await?;
         #[cfg(windows)]
-        let mut stream = {
-            let path = directory.join("endpoint");
-            private::check_file(&path).map_err(|failure| io::Error::other(failure.message))?;
-            let name = std::fs::read_to_string(path)?;
-            tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?
-        };
+        let mut stream =
+            { tokio::net::windows::named_pipe::ClientOptions::new().open(&endpoint.name)? };
+        private::endpoint::check_peer(&stream, &endpoint)?;
+        let path = directory.to_owned();
+        private::work(move || private::endpoint::recheck(&path, &endpoint))
+            .await
+            .map_err(|failure| io::Error::other(failure.message))?;
         stream.write_u16(request.len() as u16).await?;
         stream.write_all(request.as_bytes()).await?;
         let mut response = [0; 3];
         stream.read_exact(&mut response).await?;
         if &response != b"OK\n" {
-            return Err(io::Error::other("resume authentication failed"));
+            return Err(io::Error::other("control request refused"));
         }
         Ok::<_, io::Error>(())
     })
@@ -370,6 +427,58 @@ mod tests {
         assert!(tty_gate(&Tty(true, true)).is_ok());
     }
     #[tokio::test]
+    async fn turn_ended_authentication_wait_does_not_block_independent_stop() {
+        let fixture = tempfile::TempDir::new().unwrap();
+        let host = crate::host::LocalHost::fixture(fixture.path());
+        let driver = Arc::new(gcu_driver_fake::FakeDriver::from_scene("form").unwrap());
+        let mut connection =
+            gcu_mcp::Connection::open(driver.clone(), host.host.clone(), Default::default())
+                .await
+                .unwrap();
+        let control = Control::start_with_lifecycle(
+            connection.session(),
+            host.activity.clone(),
+            connection.lifecycle(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let token = std::fs::read_to_string(control.directory().join("token")).unwrap();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let auth = control.auth.clone();
+        let holder = tokio::task::spawn_blocking(move || {
+            let _credentials = auth.credentials.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            // Simulate slow credential-file rotation, with a bounded fallback
+            // so a regression blocks the runtime for two seconds, not forever.
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+        locked_rx.await.unwrap();
+        let (mut server, mut client) = tokio::io::duplex(256);
+        let request = format!("turn-ended {token} event");
+        client.write_u16(request.len() as u16).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        let auth = control.auth.clone();
+        let started = std::time::Instant::now();
+        let notification = tokio::spawn(async move {
+            auth.handle(&mut server).await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        send(control.directory(), "stop")
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(host.activity.latched_stop());
+        assert!(driver.release_calls() > 0);
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+        notification.await.unwrap();
+        let mut ack = [0; 3];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(&ack, b"OK\n");
+        connection.close().await.unwrap();
+    }
+    #[tokio::test]
     async fn control_unauthenticated_replay_refused_authenticated_clears_latch() {
         let fixture = tempfile::TempDir::new().unwrap();
         let host = crate::host::LocalHost::fixture(fixture.path());
@@ -378,9 +487,13 @@ mod tests {
             gcu_mcp::Connection::open(driver.clone(), host.host.clone(), Default::default())
                 .await
                 .unwrap();
-        let control = Control::start(connection.session(), host.activity.clone())
-            .await
-            .unwrap_or_else(|e| panic!("control start failed: {}", e.message));
+        let control = Control::start_with_lifecycle(
+            connection.session(),
+            host.activity.clone(),
+            connection.lifecycle(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("control start failed: {}", e.message));
         send(control.directory(), "stop")
             .await
             .unwrap_or_else(|e| panic!("send failed: {}", e.message));

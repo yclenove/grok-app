@@ -46,6 +46,11 @@ impl Connection {
     pub fn session(&self) -> Arc<Session> {
         self.server.session()
     }
+    /// Session-local hook/idle lifecycle. Memory only, nonblocking; no timeout
+    /// or cancellation. This handle can retire grants but cannot resume Stop.
+    pub fn lifecycle(&self) -> crate::lifecycle::Lifecycle {
+        self.server.lifecycle()
+    }
     /// Export only files recorded by this session's safe result encoder, for a
     /// CLI inspection lease. Never parses paths from model text. At most 32 MB;
     /// blocking reads cap at five seconds, and dropping cancels the wait.

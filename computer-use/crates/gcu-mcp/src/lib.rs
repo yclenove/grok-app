@@ -11,6 +11,7 @@ pub mod host;
 pub mod http;
 mod image_cache;
 mod instructions;
+pub mod lifecycle;
 mod params;
 mod result;
 mod server;
@@ -84,7 +85,7 @@ where
 {
     let server = connection.server.clone();
     let session = connection.session();
-    let transport = stdio::Stdio::new(input, output, session);
+    let transport = stdio::Stdio::new(input, output, session, server.lifecycle());
     let failed = transport.failure_flag();
     let result = match server.serve(transport).await {
         Ok(running) => running

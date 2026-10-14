@@ -1,6 +1,23 @@
 //! Platform ownership and discretionary access checks. All CLI FFI lives here.
 use std::{fs::Metadata, io, path::Path};
 
+pub(crate) fn exit_like(status: std::process::ExitStatus) -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            // SAFETY: signal is an OS-provided valid terminating signal. Reset
+            // its disposition and deliver it only to this wrapper process.
+            unsafe {
+                libc::signal(signal, libc::SIG_DFL);
+                libc::raise(signal);
+            }
+            std::process::exit(128 + signal);
+        }
+    }
+    std::process::exit(status.code().unwrap_or(0))
+}
+
 #[cfg(unix)]
 pub(super) fn secure(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -228,6 +245,65 @@ mod windows_acl {
                 )
         }
     }
+    pub(crate) fn check_pipe_peer(
+        stream: &tokio::net::windows::named_pipe::NamedPipeClient,
+        expected_pid: u32,
+    ) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT},
+            System::Pipes::GetNamedPipeServerProcessId,
+        };
+        let handle = HANDLE(stream.as_raw_handle());
+        let mut pid = 0;
+        // SAFETY: the borrowed pipe handle is alive and pid is writable.
+        unsafe { GetNamedPipeServerProcessId(handle, &mut pid) }.map_err(io::Error::other)?;
+        if pid != expected_pid {
+            return Err(io::Error::other(
+                "Private control server process was replaced",
+            ));
+        }
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: handle is live, sd is writable, and omitted outputs are optional.
+        unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                Some(&mut sd),
+            )
+        }
+        .ok()
+        .map_err(io::Error::other)?;
+        let sd = Descriptor(sd);
+        let mut text = PWSTR::null();
+        // SAFETY: the descriptor is live and conversion allocates the output.
+        unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd.0,
+                1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                None,
+            )
+        }
+        .map_err(io::Error::other)?;
+        // SAFETY: successful conversion returns a terminated UTF-16 allocation.
+        let value = unsafe { text.to_string() }.map_err(io::Error::other);
+        // SAFETY: the conversion allocation is released once after copying it.
+        unsafe {
+            LocalFree(Some(HLOCAL(text.0.cast())));
+        }
+        if !super::dacl_is_owner_only(&value?) {
+            return Err(io::Error::other("Unsafe control pipe ACL"));
+        }
+        Ok(())
+    }
 }
 #[cfg(windows)]
 pub(super) fn secure(path: &Path) -> io::Result<()> {
@@ -237,5 +313,7 @@ pub(super) fn secure(path: &Path) -> io::Result<()> {
 pub(super) fn check(path: &Path, _: &Metadata, _: bool) -> io::Result<()> {
     windows_acl::check(path)
 }
+#[cfg(windows)]
+pub(crate) use windows_acl::check_pipe_peer;
 #[cfg(windows)]
 pub(crate) use windows_acl::pipe;

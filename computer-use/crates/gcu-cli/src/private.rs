@@ -1,4 +1,5 @@
 //! Private filesystem areas; symlinks and unknown owners/permissions fail closed.
+pub(crate) mod endpoint;
 pub(crate) mod unsafe_platform;
 use crate::exit::Failure;
 use std::{

@@ -23,14 +23,11 @@ use rmcp::{
     ErrorData, RoleServer, ServerHandler,
 };
 use serde_json::{json, Value};
-use std::{
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, OnceLock,
 };
-use tokio::{sync::Semaphore, time::Instant};
+use tokio::sync::Semaphore;
 
 /// Trusted in-process Host adapters. No environment variable can grant access.
 #[derive(Clone)]
@@ -64,11 +61,12 @@ struct Inner {
     // Includes encoding/delivery-size bookkeeping in session response order.
     delivery: tokio::sync::Mutex<()>,
     calls: AtomicU64,
-    active: AtomicUsize,
-    last: Mutex<Instant>,
-    closed: gcu_host_api::Cancel,
+    lifecycle: crate::lifecycle::Lifecycle,
 }
 impl Server {
+    pub(crate) fn lifecycle(&self) -> crate::lifecycle::Lifecycle {
+        self.0.lifecycle.clone()
+    }
     pub(crate) fn session(&self) -> Arc<Session> {
         self.0.session.clone()
     }
@@ -127,6 +125,7 @@ impl Server {
             },
         };
         let tools = catalog::tools(config.profile).map_err(|_| ServeError::Protocol)?;
+        let lifecycle = crate::lifecycle::Lifecycle::new(session.clone());
         Ok(Self(Arc::new(Inner {
             driver,
             router,
@@ -138,9 +137,7 @@ impl Server {
             slots: Semaphore::new(32),
             delivery: tokio::sync::Mutex::new(()),
             calls: AtomicU64::new(1),
-            active: AtomicUsize::new(0),
-            last: Mutex::new(Instant::now()),
-            closed: gcu_host_api::Cancel::new(),
+            lifecycle,
         })))
     }
     pub(crate) async fn call_result(
@@ -148,6 +145,7 @@ impl Server {
         name: &str,
         arguments: Value,
     ) -> rmcp::model::CallToolResult {
+        let _active = self.0.lifecycle.active();
         let _delivery = self.0.delivery.lock().await;
         let result = self.dispatch(name, arguments).await;
         match result {
@@ -167,8 +165,9 @@ impl Server {
                 "This tool will be available in a later release or another profile.".into();
             return Err(Box::new(error));
         }
-        this.session
+        this.lifecycle
             .begin_turn()
+            .await
             .map_err(|_| Box::new(result::error(ErrorCode::ApprovalDenied)))?;
         let id = format!("mcp_{}", this.calls.fetch_add(1, Ordering::Relaxed));
         match name {
@@ -227,26 +226,12 @@ impl Server {
         }
     }
     async fn close(&self) -> Result<(), ServeError> {
-        self.0.closed.cancel();
+        self.0.lifecycle.close();
         self.0.results.images.clear();
         self.0.session.session_closed().await;
         let files = self.0.results.files.clone();
         blocking(move || files.close()).await?;
         Ok(())
-    }
-    async fn idle(self) {
-        loop {
-            tokio::select! {
-                _ = self.0.closed.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    let elapsed = self.0.last.lock().unwrap_or_else(|e| e.into_inner()).elapsed();
-                    if self.0.active.load(Ordering::Acquire) == 0 && elapsed >= Duration::from_secs(45) {
-                        self.0.session.turn_ended().await;
-                        *self.0.last.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-                    }
-                }
-            }
-        }
     }
 }
 impl ServerHandler for Server {
@@ -281,8 +266,6 @@ impl ServerHandler for Server {
                 .await
                 .into());
         };
-        self.0.active.fetch_add(1, Ordering::AcqRel);
-        let _active = Active(self.clone());
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         Ok(elicitation::REQUEST_PEER
             .scope(context.peer, self.call_result(&request.name, arguments))
@@ -295,15 +278,8 @@ impl ServerHandler for Server {
         _context: NotificationContext<RoleServer>,
     ) {
         if notification.method == "notifications/turn-ended" {
-            self.0.session.turn_ended().await;
+            self.0.lifecycle.turn_ended(None).await;
         }
-    }
-}
-struct Active(Server);
-impl Drop for Active {
-    fn drop(&mut self) {
-        *self.0 .0.last.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-        self.0 .0.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 pub(crate) struct Cleanup {
@@ -312,7 +288,7 @@ pub(crate) struct Cleanup {
 }
 impl Cleanup {
     pub(crate) fn new(server: Server) -> Self {
-        let idle = tokio::spawn(server.clone().idle());
+        let idle = tokio::spawn(server.lifecycle().idle());
         Self {
             server: Some(server),
             idle,
@@ -331,7 +307,7 @@ impl Drop for Cleanup {
     fn drop(&mut self) {
         self.idle.abort();
         if let Some(server) = self.server.take() {
-            server.0.closed.cancel();
+            server.0.lifecycle.close();
             drop(tokio::spawn(async move {
                 let _ = server.close().await;
             }));

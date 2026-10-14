@@ -27,7 +27,7 @@ rmcp = { version = "3.5", default-features = false, features = ["client", "trans
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 serde.workspace = true
 tempfile = "3"
-tokio = { workspace = true, features = ["io-util", "io-std", "net", "signal"] }
+tokio = { workspace = true, features = ["io-util", "io-std", "net", "signal", "process"] }
 toml.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
@@ -36,6 +36,7 @@ thiserror = { workspace = true }
 toml_edit = "0.25"
 
 [dev-dependencies]
+gcu-host-api = { workspace = true, features = ["testing"] }
 gcu-host-protocol = { workspace = true, features = ["testing"] }
 assert_cmd = "2"
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -45,7 +46,7 @@ toml = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes"] }
 
 [lints]
 workspace = true

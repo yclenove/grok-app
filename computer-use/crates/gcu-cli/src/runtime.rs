@@ -7,6 +7,18 @@ use crate::{
 use std::sync::Arc;
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
+    if let Some(Command::TurnEnded { session, payload }) = cli.command.as_ref() {
+        let mut args = Vec::new();
+        if let Some(session) = session {
+            args.push("--session".into());
+            args.push(session.as_os_str().to_owned());
+        }
+        args.extend(payload.iter().cloned());
+        if let Some(status) = crate::turn_ended::run(args).await {
+            crate::private::unsafe_platform::exit_like(status);
+        }
+        return Ok(0);
+    }
     let mode = args::approval_mode()?;
     match cli.command.as_ref() {
         Some(Command::Version) => {
@@ -114,6 +126,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             profile,
             token_fd,
             port,
+            turn_idle_secs,
             ..
         }) => {
             let secret = gcu_host_protocol::auth::Secret::from_bytes(
@@ -131,8 +144,14 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             )
             .await?;
             let session = connection.session();
-            let control =
-                crate::resume::Control::start(session.clone(), host.activity.clone()).await?;
+            let lifecycle = connection.lifecycle();
+            lifecycle.set_idle_timeout(std::time::Duration::from_secs(turn_idle_secs));
+            let control = crate::resume::Control::start_with_lifecycle(
+                session.clone(),
+                host.activity.clone(),
+                lifecycle,
+            )
+            .await?;
             let mut endpoint = gcu_mcp::http::HttpEndpoint::start_with_secret(
                 connection,
                 port.unwrap_or(0),
@@ -148,7 +167,11 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             host.save_summaries().await?;
             Ok(0)
         }
-        Some(Command::Mcp { profile, .. }) => {
+        Some(Command::Mcp {
+            profile,
+            turn_idle_secs,
+            ..
+        }) => {
             let connection = gcu_mcp::Connection::open_host_only(
                 driver.clone(),
                 host.host.clone(),
@@ -158,8 +181,14 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             )
             .await?;
             let session = connection.session();
-            let control =
-                crate::resume::Control::start(session.clone(), host.activity.clone()).await?;
+            let lifecycle = connection.lifecycle();
+            lifecycle.set_idle_timeout(std::time::Duration::from_secs(turn_idle_secs));
+            let control = crate::resume::Control::start_with_lifecycle(
+                session.clone(),
+                host.activity.clone(),
+                lifecycle,
+            )
+            .await?;
             tracing::info!(directory = %control.directory().display(), "Resume control ready");
             // SIGINT/SIGTERM latch Stop and release input independently of stdio.
             let activity = host.activity.clone();

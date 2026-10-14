@@ -29,11 +29,17 @@ pub(crate) struct Stdio<R, W> {
     failed: Arc<AtomicBool>,
     failed_cancel: gcu_host_api::Cancel,
     session: Arc<Session>,
+    turns: crate::lifecycle::Lifecycle,
     lifecycle: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     error_send: Option<Pin<Box<dyn Future<Output = io::Result<()>> + Send>>>,
 }
 impl<R, W> Stdio<R, W> {
-    pub(crate) fn new(input: R, output: W, session: Arc<Session>) -> Self {
+    pub(crate) fn new(
+        input: R,
+        output: W,
+        session: Arc<Session>,
+        turns: crate::lifecycle::Lifecycle,
+    ) -> Self {
         Self {
             input,
             output: Arc::new(Mutex::new(output)),
@@ -43,6 +49,7 @@ impl<R, W> Stdio<R, W> {
             failed: Arc::new(AtomicBool::new(false)),
             failed_cancel: gcu_host_api::Cancel::new(),
             session,
+            turns,
             lifecycle: None,
             error_send: None,
         }
@@ -127,9 +134,9 @@ where
                                 && value.get("id").is_none();
                             if let Ok(message) = serde_json::from_value(value) {
                                 if turn_ended {
-                                    let session = self.session.clone();
+                                    let turns = self.turns.clone();
                                     self.lifecycle = Some(Box::pin(async move {
-                                        session.turn_ended().await;
+                                        turns.turn_ended(None).await;
                                     }));
                                     continue;
                                 }
