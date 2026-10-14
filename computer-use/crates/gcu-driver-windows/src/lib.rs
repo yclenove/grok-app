@@ -1,6 +1,6 @@
 //! Windows discovery, UIA and window capture with portable safety logic.
 //!
-//! Native bindings exist only on Windows. Input remains unavailable.
+//! Native bindings exist only on Windows. Input preserves core route ceilings.
 //! See the crate README for trust, completeness, and native runner boundaries.
 #![deny(missing_docs, unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -15,6 +15,7 @@ mod driver;
 mod ffi;
 pub mod gate;
 pub mod identity;
+pub mod input;
 pub mod testing;
 pub mod uia;
 pub mod worker;

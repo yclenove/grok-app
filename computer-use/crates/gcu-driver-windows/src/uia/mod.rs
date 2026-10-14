@@ -18,6 +18,6 @@ pub use observe::UiaElement;
 #[cfg(windows)]
 mod ffi;
 #[cfg(any(windows, test))]
-mod worker;
+pub(crate) mod worker;
 #[cfg(windows)]
 pub use ffi::RealUia;

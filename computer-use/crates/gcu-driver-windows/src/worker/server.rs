@@ -63,6 +63,25 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<Arc<dyn Driver>>>,
 {
+    serve_with_input(&mut input, &mut output, |namespace, _| {
+        initialize(namespace)
+    })
+    .await
+}
+/// Serve input-capable native adapters with an independent parent ledger barrier.
+/// `initialize` must attach the supplied tracker to every synthetic input backend.
+/// The tracker is serviced alongside native dispatch; Stop remains parent-owned.
+pub async fn serve_with_input<R, W, F, Fut>(
+    mut input: R,
+    mut output: W,
+    initialize: F,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnOnce(String, Arc<dyn crate::input::api::InputTracker>) -> Fut,
+    Fut: Future<Output = Result<Arc<dyn Driver>>>,
+{
     let Some(first): Option<Call> = codec::read_frame(&mut input).await.map_err(|_| invalid())?
     else {
         return Ok(());
@@ -80,7 +99,8 @@ where
     {
         return Err(invalid());
     }
-    let driver = match initialize(first.namespace.clone()).await {
+    let (tracker, mut notices) = super::input::channel();
+    let driver = match initialize(first.namespace.clone(), tracker.clone()).await {
         Ok(driver) => driver,
         Err(error) => {
             codec::write_frame(
@@ -103,7 +123,17 @@ where
     let mut call = first;
     loop {
         let id = call.id;
-        let result = dispatch(driver.as_ref(), &mut handles, epoch, call.request).await;
+        let operation = dispatch(driver.as_ref(), &mut handles, epoch, call.request);
+        tokio::pin!(operation);
+        let result = loop {
+            tokio::select! { biased;
+                notice = notices.recv() => {
+                    let notice = notice.ok_or_else(invalid)?;
+                    super::input::notify(notice, &mut input, &mut output, id, epoch).await?;
+                }
+                result = &mut operation => break result,
+            }
+        };
         codec::write_frame(
             &mut output,
             &Response {

@@ -25,7 +25,9 @@ impl Driver for WindowsDriver {
             Ok(issues) => (true, issues),
             Err(e) => (false, vec![e.to_string()]),
         };
-        issues.push(if self.capture_backend.is_some() {
+        issues.push(if self.input.is_some() {
+            "Targeted messages are partial (Chromium/UWP refused); foreground requires core approval; native activity guard/hotkey pending P2-07".into()
+        } else if self.capture_backend.is_some() {
             "Pointer/keyboard and foreground unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
         } else if self.observer.is_some() {
             "Capture, pointer/keyboard and foreground unavailable; UIA heuristics are best-effort and non-exhaustive".into()
@@ -329,19 +331,24 @@ impl Driver for WindowsDriver {
         }
         let deadline = tokio::time::Instant::now() + DRIVER_DEADLINE;
         let request = req.clone();
-        let hwnd = self
+        let window = self
             .call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
                 let (win, foreground) = action_window(&request)?;
-                Ok(s.observation_window(win, foreground)?.hwnd)
+                s.observation_window(win, foreground)
             })
             .await?;
         if crate::uia::actions::target(req).is_none() {
-            return Err(DriverError::CapabilityUnavailable);
+            return self
+                .input
+                .as_ref()
+                .ok_or(DriverError::CapabilityUnavailable)?
+                .perform(window, req, cancel, deadline)
+                .await;
         }
         self.observer
             .as_ref()
             .ok_or(DriverError::CapabilityUnavailable)?
-            .perform(hwnd, req, cancel, deadline)
+            .perform(window.hwnd, req, cancel, deadline)
             .await
     }
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
@@ -372,7 +379,10 @@ impl Driver for WindowsDriver {
     async fn release_all_input(&self) {
         if let Some(worker) = &self.isolated {
             return worker.release_all_input().await;
-        } /* Semantic patterns hold no synthetic pointer/key input. */
+        }
+        if let Some(input) = &self.input {
+            input.release_all().await;
+        }
     }
 }
 fn action_window(action: &DriverAction) -> Result<(&WindowRef, bool)> {

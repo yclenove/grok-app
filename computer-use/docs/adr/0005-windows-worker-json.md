@@ -46,8 +46,13 @@ first frame; the child does no native work until that frame. Rust Command limits
 inheritance to its explicit standard handles. Parent death closes the Job; before
 assignment, pipe EOF terminates the idle child. Unix uses ordinary kill-on-drop
 children for portable tests. Events are honestly unavailable across worker RPC;
-core's polling fallback applies. Input-ledger releases remain the independent
-parent-side responsibility of P2-06, which first enables synthetic input.
+core's polling fallback applies. P2-06 adds a private packet prepare/complete
+acknowledgement to this transport: the parent independently records possible ups
+before acknowledging permission to send; completed ups or proven zero insertion
+retire the reservation. Stop, transport failure, cancellation and abandonment
+kill/reap the child before parent-side up-only cleanup, without entering the RPC
+queue. Normal input and activation remain in the child; failed release blocks
+further dispatch. This versioned private extension changes no Driver/public type.
 
 ## 备选与为什么不选
 

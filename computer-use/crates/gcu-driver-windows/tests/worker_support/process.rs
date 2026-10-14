@@ -462,4 +462,5 @@ async fn cancelled_queued_mutation_returns_promptly_without_dispatch() {
     s.shutdown().await.unwrap();
 }
 
+mod input;
 mod semantic;

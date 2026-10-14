@@ -4,6 +4,8 @@
 #[cfg(debug_assertions)]
 mod fixture;
 #[cfg(debug_assertions)]
+mod input_fault;
+#[cfg(debug_assertions)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     use gcu_driver_windows::worker::{codec, serve, Reply, Request, Response};
@@ -27,6 +29,10 @@ async fn main() {
     writeln!(starts, "{}", std::process::id()).unwrap();
     let fault = std::env::var("GCU_TEST_FAULT").unwrap_or_default();
     if fault == "fail_startup" {
+        return;
+    }
+    if fault.starts_with("input_") {
+        input_fault::run(dir, fault).await;
         return;
     }
     if matches!(

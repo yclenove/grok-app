@@ -5,7 +5,7 @@ use gcu_protocol::{AppInfo, Capabilities, WindowInfo};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 /// Exact app and stamped HWND identity; never a name-based fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,11 +218,15 @@ pub enum Reply {
     Focused(Option<Element>),
     /// Successful route.
     Delivery(WireDelivery),
+    /// Reserve a packet in the parent ledger; wait for its correlated ack.
+    InputPrepare(super::input::InputPacket),
+    /// Retire acknowledged ups or discard a proven zero insertion.
+    InputComplete(bool),
 }
 /// Native error adapter preserving certainty and refusal kinds.
 #[derive(Serialize, Deserialize)]
 pub struct Failure(#[serde(with = "ErrorDef")] pub DriverError);
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Actual successful delivery route.
 pub enum WireDelivery {

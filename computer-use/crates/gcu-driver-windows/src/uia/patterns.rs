@@ -169,18 +169,33 @@ impl PatternError {
 pub struct ActionContext {
     cancel: Cancel,
     state: Arc<AtomicU8>,
+    deadline: Option<std::time::Instant>,
 }
 impl ActionContext {
     pub(crate) fn new(cancel: &Cancel) -> Self {
         Self {
             cancel: cancel.clone(),
             state: Arc::new(AtomicU8::new(0)),
+            deadline: None,
         }
     }
-    /// Nonblocking cancellation check, with uncertainty from earlier steps.
+    pub(crate) fn until(cancel: &Cancel, deadline: std::time::Instant) -> Self {
+        Self {
+            deadline: Some(deadline),
+            ..Self::new(cancel)
+        }
+    }
+    /// Nonblocking cancellation/deadline check, with uncertainty from earlier steps.
     pub fn check(&self) -> Result<()> {
         if self.cancel.is_cancelled() {
             Err(DriverError::Cancelled {
+                maybe_executed: self.close(),
+            })
+        } else if self
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            Err(DriverError::Timeout {
                 maybe_executed: self.close(),
             })
         } else if self.state.load(Ordering::Acquire) & 2 != 0 {
@@ -214,6 +229,9 @@ impl ActionContext {
     /// Whether at least one mutation might have executed.
     pub fn maybe_executed(&self) -> bool {
         self.state.load(Ordering::Acquire) & 1 != 0
+    }
+    pub(crate) fn closed(&self) -> bool {
+        self.state.load(Ordering::Acquire) & 2 != 0
     }
     pub(crate) fn close(&self) -> bool {
         self.state.fetch_or(2, Ordering::AcqRel) & 1 != 0

@@ -25,6 +25,7 @@ pub struct WindowsDriver {
     indexing: Arc<std::sync::atomic::AtomicBool>,
     refreshing: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) caps: Capabilities,
+    input: Option<Arc<crate::input::InputBackend>>,
     listed: std::sync::atomic::AtomicBool,
     observer: Option<crate::uia::observe::Observer>,
     pub(crate) capture_backend: Option<Arc<crate::capture::CaptureBackend>>,
@@ -95,6 +96,7 @@ impl WindowsDriver {
             refreshing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             caps: discovery_capabilities(),
             listed: std::sync::atomic::AtomicBool::new(false),
+            input: None,
             observer: None,
             capture_backend: None,
         })
@@ -128,10 +130,22 @@ impl WindowsDriver {
     /// capabilities; there is no discovery/UIA/capture thread in this process.
     pub async fn isolated(config: crate::worker::WorkerConfig) -> Result<Self> {
         let isolated = crate::worker::WorkerDriver::start(config).await?;
+        Ok(Self::from_isolated(isolated))
+    }
+    /// Inject the parent's independent up-only sender for portable worker tests.
+    pub async fn isolated_with_releaser(
+        config: crate::worker::WorkerConfig,
+        release: Arc<dyn crate::input::api::InputReleaser>,
+    ) -> Result<Self> {
+        let isolated = crate::worker::WorkerDriver::start_with_releaser(config, release).await?;
+        Ok(Self::from_isolated(isolated))
+    }
+    fn from_isolated(isolated: crate::worker::WorkerDriver) -> Self {
         let caps = isolated.capabilities().clone();
         let (worker, _) = mpsc::sync_channel(1);
-        Ok(Self {
+        Self {
             isolated: Some(isolated),
+            input: None,
             worker,
             caps,
             indexing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -139,7 +153,7 @@ impl WindowsDriver {
             listed: std::sync::atomic::AtomicBool::new(false),
             observer: None,
             capture_backend: None,
-        })
+        }
     }
     /// Start native threads inside this process. For the worker executable or
     /// explicit diagnostics only; caller timeouts cannot terminate blocked FFI.
@@ -153,13 +167,33 @@ impl WindowsDriver {
     pub async fn new_worker(namespace: &str) -> Result<Self> {
         Self::native(Arc::new(crate::RealWinApi::for_worker(namespace)?)).await
     }
+    /// Worker startup with the parent's press-before-send acknowledgement path.
+    #[cfg(windows)]
+    pub async fn new_worker_with_input(
+        namespace: &str,
+        tracker: Arc<dyn crate::input::api::InputTracker>,
+    ) -> Result<Self> {
+        let mut driver = Self::new_worker(namespace).await?;
+        let input = driver
+            .input
+            .take()
+            .ok_or(DriverError::CapabilityUnavailable)?;
+        driver.input = Some(Arc::new(
+            Arc::try_unwrap(input)
+                .map_err(|_| DriverError::CapabilityUnavailable)?
+                .with_tracker(tracker),
+        ));
+        Ok(driver)
+    }
     #[cfg(windows)]
     async fn native(api: Arc<dyn WinApi>) -> Result<Self> {
-        let driver = Self::with_api(api).await?;
+        let driver = Self::with_api(api.clone()).await?;
         let uia = Arc::new(crate::uia::RealUia::start().await?);
         let wgc = Arc::new(crate::capture::WgcCapture::new().await?);
         let print = Arc::new(crate::capture::PrintWindowCapture::new().await?);
+        let input = Arc::new(crate::input::RealInput::start(api, uia.clone()).await?);
         Ok(driver
+            .with_input(Arc::new(crate::input::InputBackend::new(input)))
             .attach_uia(uia.clone(), uia)
             .with_capture(Arc::new(crate::capture::CaptureBackend::new(wgc, print))))
     }
@@ -184,6 +218,17 @@ impl WindowsDriver {
         self.caps.background_operation = BackgroundOperation::Partial;
         self.caps.limits.max_tree_nodes = crate::uia::tree::NODE_CAP as u32;
         self.caps.version = "Windows 10 1903+; discovery and UIA semantic actions".into();
+        self
+    }
+    /// Enable complete targeted/foreground input. Native or fake APIs preserve
+    /// route ceilings; foreground requires core's explicit permission.
+    pub fn with_input(mut self, input: Arc<crate::input::InputBackend>) -> Self {
+        self.input = Some(input);
+        self.caps.delivery.targeted_pointer = true;
+        self.caps.delivery.targeted_keys = true;
+        self.caps.delivery.foreground = ForegroundCapability::Policy;
+        self.caps.background_operation = BackgroundOperation::Partial;
+        self.caps.limits.type_text_max = crate::input::messages::TEXT_MAX_UNITS as u32;
         self
     }
     pub(crate) async fn call<T: Send + 'static>(

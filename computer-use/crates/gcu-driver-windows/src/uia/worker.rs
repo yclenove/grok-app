@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::oneshot;
 
 type Task<T> = Box<dyn FnOnce(&mut T) + Send>;
-pub(super) struct Request {
+pub(crate) struct Request {
     abandoned: AtomicBool,
     deadline: Instant,
     context: Option<ActionContext>,
@@ -24,7 +24,7 @@ impl Request {
             context: None,
         }
     }
-    pub(super) fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         if let Some(context) = &self.context {
             context.check()?;
         }
@@ -38,7 +38,7 @@ impl Request {
     }
 }
 impl Request {
-    pub(super) fn dispatch(
+    pub(crate) fn dispatch(
         &self,
         mutation: impl FnOnce() -> Result<PatternResult>,
     ) -> Result<PatternResult> {
@@ -70,11 +70,11 @@ impl Drop for Abandon {
         }
     }
 }
-pub(super) struct Worker<T> {
+pub(crate) struct Worker<T> {
     tx: mpsc::SyncSender<Task<T>>,
 }
 impl<T: 'static> Worker<T> {
-    pub(super) async fn start(
+    pub(crate) async fn start(
         factory: impl FnOnce() -> Result<T> + Send + 'static,
         maintain: fn(&mut T),
     ) -> Result<Self> {
@@ -109,13 +109,13 @@ impl<T: 'static> Worker<T> {
             .map_err(|_| crashed())??;
         Ok(Self { tx })
     }
-    pub(super) async fn call<R: Send + 'static>(
+    pub(crate) async fn call<R: Send + 'static>(
         &self,
         task: impl FnOnce(&mut T, &Request) -> Result<R> + Send + 'static,
     ) -> Result<R> {
         self.call_inner(None, task).await
     }
-    pub(super) async fn call_action<R: Send + 'static>(
+    pub(crate) async fn call_action<R: Send + 'static>(
         &self,
         context: ActionContext,
         task: impl FnOnce(&mut T, &Request) -> Result<R> + Send + 'static,
@@ -157,7 +157,7 @@ impl<T: 'static> Worker<T> {
         abandon.completed = true;
         result.map_err(|error| context.as_ref().map_or(error.clone(), |c| c.error(error)))
     }
-    pub(super) fn enqueue(
+    pub(crate) fn enqueue(
         &self,
         task: impl FnOnce(&mut T, &Request) + Send + 'static,
     ) -> Result<()> {

@@ -52,6 +52,8 @@ impl WorkerConfig {
 struct StopState {
     generation: AtomicU64,
     notify: Notify,
+    completed: AtomicU64,
+    cleaned: Notify,
 }
 /// Independent Stop signal. It never takes the RPC mutex or enters its queue.
 /// Host owns the persistent Stop latch; new calls require Host authorization.
@@ -65,6 +67,21 @@ impl StopHandle {
     }
     fn generation(&self) -> u64 {
         self.0.generation.load(Ordering::SeqCst)
+    }
+    fn cleaned(&self) {
+        self.0.completed.store(self.generation(), Ordering::SeqCst);
+        self.0.cleaned.notify_waiters();
+    }
+    async fn wait_cleaned(&self, generation: u64) {
+        loop {
+            let wake = self.0.cleaned.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            if self.0.completed.load(Ordering::SeqCst) >= generation {
+                return;
+            }
+            wake.await;
+        }
     }
     async fn changed(&self, previous: u64) {
         loop {
@@ -98,7 +115,15 @@ pub struct Supervisor {
 impl Supervisor {
     /// Launch, attach lifetime containment, then probe readiness over private pipes.
     /// Startup is bounded and cancellable by dropping this future.
-    pub async fn start(mut config: WorkerConfig) -> Result<Self> {
+    pub async fn start(config: WorkerConfig) -> Result<Self> {
+        Self::start_with_releaser(config, super::input::default_releaser()).await
+    }
+    /// Attach independent parent cleanup (fake on portable tests). No native
+    /// UIA/discovery work runs here; cleanup emits only recorded up events.
+    pub async fn start_with_releaser(
+        mut config: WorkerConfig,
+        release: Arc<dyn crate::input::api::InputReleaser>,
+    ) -> Result<Self> {
         config.timeout = config.timeout.min(WORKER_TIMEOUT);
         #[cfg(windows)]
         let owner = super::unsafe_job::owner_instance()?;
@@ -110,7 +135,7 @@ impl Supervisor {
         }
         let mut process = Process::spawn(&config, 1).await?;
         let probe = process
-            .exchange(Request::Doctor, 0, config.timeout, None)
+            .exchange(Request::Doctor, 0, config.timeout, None, None)
             .await?;
         let Reply::Doctor {
             mut capabilities,
@@ -135,6 +160,7 @@ impl Supervisor {
             shutdown.clone(),
             Some(process),
             done_tx,
+            super::input::Recovery::new(release),
         ));
         Ok(Self {
             queue: tx,
@@ -147,6 +173,21 @@ impl Supervisor {
     /// Clone the independent watchdog signal. No IO or lock.
     pub fn stop_handle(&self) -> StopHandle {
         self.stop.clone()
+    }
+    /// Kill current input dispatch independently of the RPC queue, then await
+    /// the parent's up-only cleanup. Host retains its persistent Stop latch.
+    pub async fn release_all_input(&self) {
+        self.stop.stop();
+        let generation = self.stop.generation();
+        if tokio::time::timeout(
+            Duration::from_millis(400),
+            self.stop.wait_cleaned(generation),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("worker stop cleanup deadline exceeded");
+        }
     }
     /// Execute one closed-set request. Reads retry once after transport/native
     /// timeout/crash. Mutations return uncertain errors after any dispatch loss.
@@ -268,6 +309,7 @@ impl Process {
         id: u64,
         timeout: Duration,
         dispatched: Option<&AtomicBool>,
+        recovery: Option<&super::input::Recovery>,
     ) -> Result<Reply> {
         let mutation = !request.is_read_only();
         if !request.valid_epoch(self.epoch) {
@@ -293,16 +335,28 @@ impl Process {
             codec::write_payload(&mut self.input, &bytes)
                 .await
                 .map_err(|_| crashed(mutation))?;
-            let reply: Response = codec::read_frame(&mut self.output)
-                .await
-                .map_err(|_| crashed(mutation))?
-                .ok_or_else(|| crashed(mutation))?;
-            if reply.version != VERSION || reply.id != id || reply.epoch != self.epoch {
-                return Err(crashed(mutation));
-            }
+            let result = loop {
+                let reply: Response = codec::read_frame(&mut self.output)
+                    .await
+                    .map_err(|_| crashed(mutation))?
+                    .ok_or_else(|| crashed(mutation))?;
+                if reply.version != VERSION || reply.id != id || reply.epoch != self.epoch {
+                    return Err(crashed(mutation));
+                }
+                let result = reply.result.map_err(|Failure(e)| e)?;
+                if let Some(recovery) = recovery {
+                    if let Some(result) = recovery
+                        .receive(result, &expected, &mut self.input, id, self.epoch)
+                        .await?
+                    {
+                        break result;
+                    }
+                } else {
+                    break result;
+                }
+            };
             // A correlated native response knows whether mutation dispatch began.
             // Only transport loss must conservatively assume possible execution.
-            let result = reply.result.map_err(|Failure(e)| e)?;
             if !matches_reply(&expected, &result, self.epoch) {
                 return Err(crashed(mutation));
             }
@@ -365,14 +419,22 @@ async fn run(
     shutdown: Cancel,
     mut process: Option<Process>,
     done: oneshot::Sender<()>,
+    recovery: super::input::Recovery,
 ) {
     let mut epoch = 1;
     let mut sequence = 0u64;
     let mut generation = stop.generation();
+    let mut shutdown_cleaned = false;
     loop {
         let mut work = tokio::select! { biased;
             _ = shutdown.cancelled() => break,
-            _ = stop.changed(generation) => { kill(&mut process).await; generation = stop.generation(); continue; },
+            _ = stop.changed(generation) => {
+                kill(&mut process).await;
+                recovery.cleanup().await;
+                generation = stop.generation();
+                stop.cleaned();
+                continue;
+            },
             work = queue.recv() => match work { Some(w) => w, None => break },
         };
         if work.reply.is_closed() {
@@ -383,12 +445,19 @@ async fn run(
             continue;
         }
         let mutation = !work.request.is_read_only();
+        if mutation && !recovery.ready() {
+            let _ = work.reply.send(Err(DriverError::CapabilityUnavailable));
+            continue;
+        }
         let operation = async {
             for attempt in 0..=1 {
                 if process.is_none() {
                     epoch += 1;
                     let mut p = Process::spawn(&config, epoch).await?;
-                    match p.exchange(Request::Doctor, 0, config.timeout, None).await? {
+                    match p
+                        .exchange(Request::Doctor, 0, config.timeout, None, None)
+                        .await?
+                    {
                         Reply::Doctor { ready: true, .. } => (),
                         _ => return Err(crashed(false)),
                     }
@@ -404,6 +473,7 @@ async fn run(
                         sequence,
                         config.timeout,
                         Some(work.dispatched.as_ref()),
+                        Some(&recovery),
                     )
                     .await;
                 if matches!(
@@ -435,6 +505,20 @@ async fn run(
                 ))
             }
         };
+        // A failed input action may have abandoned a native send. Terminate the
+        // child before releasing the authoritative parent ledger.
+        if mutation || work.stop_generation != stop.generation() || shutdown.is_cancelled() {
+            if !recovery.ready() && result.is_err() {
+                kill(&mut process).await;
+            }
+            recovery.cleanup().await;
+            shutdown_cleaned = shutdown.is_cancelled();
+        }
+        if work.stop_generation != stop.generation() {
+            kill(&mut process).await;
+            generation = stop.generation();
+            stop.cleaned();
+        }
         let restart = process.is_none()
             && stop.generation() == work.stop_generation
             && matches!(
@@ -449,7 +533,10 @@ async fn run(
             let stopped_at = stop.generation();
             let bootstrap = async {
                 let mut p = Process::spawn(&config, epoch).await?;
-                match p.exchange(Request::Doctor, 0, config.timeout, None).await? {
+                match p
+                    .exchange(Request::Doctor, 0, config.timeout, None, None)
+                    .await?
+                {
                     Reply::Doctor { ready: true, .. } => Ok(p),
                     _ => Err(crashed(false)),
                 }
@@ -465,5 +552,9 @@ async fn run(
         }
     }
     kill(&mut process).await;
+    if !shutdown_cleaned {
+        recovery.cleanup().await;
+    }
+    stop.cleaned();
     let _ = done.send(());
 }
