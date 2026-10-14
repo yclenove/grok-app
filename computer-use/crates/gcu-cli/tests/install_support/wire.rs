@@ -410,19 +410,19 @@ fn normalize(text: &str, layout: &Layout) -> String {
         *pair = pair.replace('\\', "/");
     }
     let mut text = text.replace('\\', "/");
+    // Replace before `$HOME`: the user mcp.json path contains the home prefix,
+    // and that prefix differs on Linux, macOS, and Windows.
+    let vscode = user_config("vscode", &layout.home)
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    text = text.replace(&vscode, "$VSCODE_MCP");
     let tokens = ["$GCU", "$AGY", "$PROJECT", "$HOME"];
     for (path, token) in pairs.iter().zip(tokens) {
         text = text.replace(path, token);
     }
     text = text.replace("computer-use-turn-ended.sh", "$HOOK_FILE");
     text = text.replace("computer-use-turn-ended.cmd", "$HOOK_FILE");
-    for rel in [
-        "$HOME/.config/Code/User/mcp.json",
-        "$HOME/Library/Application Support/Code/User/mcp.json",
-        "$HOME/AppData/Roaming/Code/User/mcp.json",
-    ] {
-        text = text.replace(rel, "$VSCODE_MCP");
-    }
     text = text.replace("\\\"$HOME", "$HOME");
     text = text.replace("$HOOK_FILE\\\"", "$HOOK_FILE");
     redact_hook(&text)
@@ -812,7 +812,8 @@ fn windows_stop_hook_calls_turn_ended_and_quotes_paths() {
 #[test]
 fn grok_install_tty_yes_writes_and_other_answers_do_not() {
     let _guard = Guard::new();
-    for answer in ["n\n", "y\n"] {
+    // `\r` completes a macOS canonical line (ICRNL). `\n` completes a Linux one.
+    for answer in ["n\r\n", "y\r\n"] {
         let layout = layout("pty");
         let (mut master, slave) = open_pty().unwrap();
         let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gcu"))
@@ -869,14 +870,26 @@ fn grok_install_tty_yes_writes_and_other_answers_do_not() {
 
 #[cfg(unix)]
 fn drain_pty(master: &mut std::fs::File, seen: &mut String) {
+    use std::os::fd::AsRawFd;
+    let fd = master.as_raw_fd();
     let mut buf = [0_u8; 4096];
     loop {
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: one live master descriptor; a zero timeout does not block.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, 0) };
+        if ready <= 0 {
+            break;
+        }
         match std::io::Read::read(master, &mut buf) {
             Ok(0) => break,
             Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
             // Linux and macOS report EIO once the slave side has closed.
-            Err(err) if err.raw_os_error() == Some(5) => break,
+            Err(err) if err.raw_os_error() == Some(libc::EIO) => break,
             Err(err) => panic!("{err}"),
         }
     }
@@ -900,6 +913,8 @@ fn open_pty() -> std::io::Result<(std::fs::File, std::fs::File)> {
     if result != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // Deliver `\n` immediately. macOS canonical mode can hold a line until `\r`.
+    pass_lines(slave)?;
     // SAFETY: openpty returned two distinct owned descriptors.
     let (master_file, slave_file) = unsafe {
         (
@@ -912,4 +927,21 @@ fn open_pty() -> std::io::Result<(std::fs::File, std::fs::File)> {
         return Err(std::io::Error::last_os_error());
     }
     Ok((master_file, slave_file))
+}
+
+#[cfg(unix)]
+fn pass_lines(slave: i32) -> std::io::Result<()> {
+    // SAFETY: slave is the openpty descriptor; tcgetattr writes a termios.
+    let mut term = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(slave, &mut term) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    term.c_lflag &= !(libc::ICANON | libc::ECHO);
+    term.c_cc[libc::VMIN] = 1;
+    term.c_cc[libc::VTIME] = 0;
+    // SAFETY: term is an initialized termios for this slave only.
+    if unsafe { libc::tcsetattr(slave, libc::TCSANOW, &term) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
