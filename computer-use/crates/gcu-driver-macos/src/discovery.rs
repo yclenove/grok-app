@@ -208,6 +208,36 @@ impl State {
         Ok(source_window(&window))
     }
 
+    /// Window identity for targeted input. Minimized windows are not restored.
+    pub(super) fn prepare_input(&mut self, win: &WindowRef) -> Result<crate::input::InputTarget> {
+        self.observation_gate()?;
+        let window = self.confirm_window(win, true)?;
+        if window.minimized {
+            return Err(DriverError::WindowMinimized);
+        }
+        if window.pid == 0 || window.cg_id == 0 {
+            return Err(DriverError::WindowGone);
+        }
+        if !window.scale.is_finite() || window.scale <= 0.0 {
+            return Err(DriverError::Native {
+                message: "window scale is not usable".into(),
+                maybe_executed: false,
+            });
+        }
+        let pid = i32::try_from(window.pid).map_err(|_| DriverError::InvalidRequest)?;
+        Ok(crate::input::InputTarget {
+            pid,
+            window_id: window.cg_id,
+            bundle_id: win.app.info.id.clone(),
+            app_name: win.app.info.name.clone(),
+            origin_x: window.frame.x,
+            origin_y: window.frame.y,
+            width_px: window.frame.w * window.scale,
+            height_px: window.frame.h * window.scale,
+            scale: window.scale,
+        })
+    }
+
     /// Physical geometry, including a minimized window whose frame is known.
     pub(super) fn prepare_geometry(&mut self, win: &WindowRef) -> Result<Geometry> {
         let window = self.capture_window(win)?;

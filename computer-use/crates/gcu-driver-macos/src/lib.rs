@@ -3,8 +3,9 @@
 //!
 //! [`ax::build_raw_tree`] reads a window tree. [`capture`] takes a window
 //! screenshot and [`MacosDriver::window_geometry`] reports physical pixels.
-//! Semantic accessibility actions do not activate the target app. Pointer,
-//! keyboard, and focus queries stay unavailable. Portable identity, resolution, window alignment,
+//! Semantic accessibility actions do not activate the target app. Pointer and
+//! keyboard input go through [`input`] when a backend is connected. Focus
+//! queries stay unavailable. Portable identity, resolution, window alignment,
 //! Spotlight cache policy, and [`gate::MacGate`] run on every platform through
 //! [`testing::FakeMacApi`].
 //!
@@ -27,8 +28,10 @@ mod driver;
 mod ffi;
 pub mod gate;
 pub mod identity;
+pub mod input;
 #[cfg(target_os = "macos")]
 mod real;
+mod semantic;
 pub mod spotlight;
 pub mod testing;
 pub mod windows;
