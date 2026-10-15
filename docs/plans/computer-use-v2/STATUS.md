@@ -36,7 +36,7 @@
 | P2-05 | Windows 语义动作 | P2-02 | 2.5d | done | cu2/P2-05-uia-actions |  | 2026-10-13 | Invoke/Toggle/SelectionItem/ExpandCollapse/Value/RangeValue/Scroll/Text 选区/LegacyIAccessible；仅明确无副作用才回退，不确定不重放；SetValue 仅 settable 非密码；不 SetFocus；真机夹具契约 not_run |
 | P2-06 | Windows 定向消息与前台 | P2-05 | 3d | done | cu2/P2-06-win-input |  | 2026-10-14 | PostMessage 定向投递+effect 检测；Chromium/UWP 不静默升级(Auto/TargetedOnly 仅后台，前台需策略放行)；SendInput 前台路径+分块 Unicode；父进程独立 InputLedger(worker 被杀仍补发 up)；UIPI→elevation_required；真机夹具后台点击/记事本中文输入 not_run |
 | P2-07 | Windows 守卫 / 热键 / 排除截图 | P2-06 | 1.5d | todo |  |  |  |  |
-| P2-08 | Windows 剪贴板与文本 | P2-06 | 1d | todo |  |  |  |  |
+| P2-08 | Windows 剪贴板与文本 | P2-06 | 1d | done | cu2/P2-08-win-clipboard |  | 2026-10-15 | 全局互斥+序号/内容/焦点粘贴前校验；恢复不覆盖外来内容；敏感/高风险文本拒绝剪贴板回退(gcu-core policy::clipboard 共享分类，供 macOS 复用)；>8192 分批；Stop 接入位待 P2-07 合入对接；真机 not_run |
 | P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | todo |  |  |  |  |
 | P3-01 | AT-SPI 树 | P0-05 | 3d | done | cu2/P3-01-atspi-tree |  | 2026-10-13 | AT-SPI 树+Linux 身份(路径+dev/inode+sha256；持久授权绑定映像，pid 复用另判)；CI 实时测试读到夹具 send_button |
 | P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | done | cu2/P3-02-x11 |  | 2026-10-13 | X11 窗口+XComposite 截图；无 composite 且被遮挡则拒绝(不交付他人内容)；CI Xvfb 实测 live_x11_fixture_window_capture_and_canvas_grid 通过 |
