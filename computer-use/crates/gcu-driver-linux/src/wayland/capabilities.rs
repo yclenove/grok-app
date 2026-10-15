@@ -177,17 +177,29 @@ pub fn build_environment_capabilities(
 
     let screenshot = match target {
         TargetEnvironment::NativeWayland => {
-            let next_step = if !portal.available {
-                Some("Install xdg-desktop-portal and a backend for your compositor.".into())
-            } else if portal.screencast_version.is_none() {
-                Some("Compositor missing org.freedesktop.portal.ScreenCast backend.".into())
+            if portal.available && portal.screencast_version.is_some() {
+                CapabilityItem {
+                    status: CapabilityStatus::Available,
+                    reason: "Native Wayland window capture via xdg-desktop-portal ScreenCast and PipeWire".into(),
+                    next_step: None,
+                }
             } else {
-                Some("Native Wayland capture pipeline scheduled for P7-02.".into())
-            };
-            CapabilityItem {
-                status: CapabilityStatus::Unavailable,
-                reason: "Native Wayland window capture requires xdg-desktop-portal ScreenCast and PipeWire (P7-02 implementation pending)".into(),
-                next_step,
+                let (reason, next_step) = if !portal.available {
+                    (
+                        "Native Wayland window capture unavailable: xdg-desktop-portal service missing on D-Bus session bus".into(),
+                        Some("Install xdg-desktop-portal and a backend suitable for your desktop environment.".into()),
+                    )
+                } else {
+                    (
+                        "Native Wayland window capture unavailable: org.freedesktop.portal.ScreenCast backend interface missing".into(),
+                        Some("Install or configure the compositor screencast backend (e.g. xdg-desktop-portal-gnome, xdg-desktop-portal-kde, or xdg-desktop-portal-wlr).".into()),
+                    )
+                };
+                CapabilityItem {
+                    status: CapabilityStatus::Unavailable,
+                    reason,
+                    next_step,
+                }
             }
         }
         TargetEnvironment::PureX11 | TargetEnvironment::XWaylandWindow => {

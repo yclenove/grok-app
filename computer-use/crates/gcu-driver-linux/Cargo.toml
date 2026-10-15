@@ -19,15 +19,24 @@ smallvec = { workspace = true }
 sha2.workspace = true
 futures-core = { workspace = true }
 png = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 x11rb = { version = "0.13", features = ["composite", "xtest", "xinput"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xkbcommon = "0.9"
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop"] }
+pipewire = { version = "0.9", default-features = false, optional = true }
+
+[features]
+default = []
+pipewire = ["ashpd/pipewire", "dep:pipewire"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 unicode-segmentation = "1"
+tempfile = "3"
 
 [lints]
 workspace = true

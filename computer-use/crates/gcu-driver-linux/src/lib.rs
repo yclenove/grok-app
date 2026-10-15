@@ -20,7 +20,12 @@ pub mod x11;
 pub use driver::LinuxDriver;
 pub use identity::{needs_reauth, same_process_instance, AppIdentity};
 pub use wayland::{
-    detect_environment, Compositor, EnvSource, FakePortalChecker, LinuxEnvironment,
-    LinuxSessionType, MockEnv, PortalChecker, PortalInfo, SystemEnv, TargetEnvironment,
+    detect_environment, CaptureError, Compositor, EnvSource, FakeFrameReceiver, FakePortalChecker,
+    FakePortalClient, FakePortalSession, LinuxEnvironment, LinuxSessionType, MockEnv,
+    OriginBinding, PipeWireFrameReceiver, PixelRegion, PortalChecker, PortalCursorMode,
+    PortalError, PortalInfo, PortalScreenCastClient, PortalScreenCastResult,
+    PortalScreenCastSession, PortalSourceKind, PortalStream, RawCapturedFrame, RestoreError,
+    RestoreRecord, RestoreTokenStore, SystemEnv, TargetEnvironment, VideoTransform,
+    WaylandCapturePipeline, MAX_TOKEN_LIFETIME_SECS,
 };
 pub use x11::{FakeX, InputLedger, RealX, XServer};

@@ -1,13 +1,31 @@
 //! Wayland environment detection, compositor classification, and portal probing.
 
 pub mod capabilities;
+pub mod capture;
 pub mod doctor;
+pub mod portal;
+pub mod restore;
 
 pub use capabilities::{
     build_environment_capabilities, CapabilityItem, CapabilityStatus, EnvironmentCapabilities,
     TargetEnvironment,
 };
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub use capture::RealPipeWireFrameReceiver;
+pub use capture::{
+    CaptureError, FakeFrameReceiver, PipeWireFrameReceiver, PixelRegion, RawCapturedFrame,
+    VideoTransform, WaylandCapturePipeline,
+};
 pub use doctor::build_doctor_report;
+#[cfg(target_os = "linux")]
+pub use portal::{AshpdPortalClient, AshpdSessionWrapper};
+pub use portal::{
+    FakePortalClient, FakePortalSession, PortalCursorMode, PortalError, PortalScreenCastClient,
+    PortalScreenCastResult, PortalScreenCastSession, PortalSourceKind, PortalStream,
+};
+pub use restore::{
+    OriginBinding, RestoreError, RestoreRecord, RestoreTokenStore, MAX_TOKEN_LIFETIME_SECS,
+};
 
 use async_trait::async_trait;
 use std::collections::HashMap;
