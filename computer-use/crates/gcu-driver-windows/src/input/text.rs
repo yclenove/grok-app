@@ -1,0 +1,152 @@
+//! Bounded long text and one-shot, explicitly foreground-authorized paste.
+use super::{api::*, clipboard::ClipboardApi, ledger::InputLedger, messages};
+use crate::uia::patterns::ActionContext;
+use gcu_core::{driver::*, model::NativeHandle};
+use std::sync::Arc;
+
+/// Total UTF-16 ceiling; larger requests refuse before activation or mutation.
+pub const TEXT_MAX_UNITS: usize = 65_536;
+/// Plan Unicode packets in batches of at most 8192 UTF-16 units. Preserve scalar
+/// and CRLF boundaries both between batches and inside native packets.
+pub fn chunks(text: &str) -> Result<Vec<Vec<Event>>> {
+    if text.encode_utf16().count() > TEXT_MAX_UNITS || text.contains('\0') {
+        return Err(DriverError::InvalidRequest);
+    }
+    let mut packets = Vec::new();
+    let mut start = 0;
+    let mut units = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        let mut size = c.len_utf16();
+        if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+            chars.next();
+            size += 1;
+        }
+        if units + size > messages::TEXT_MAX_UNITS {
+            packets.extend(messages::text_chunks(&text[start..offset])?);
+            start = offset;
+            units = 0;
+        }
+        units += size;
+    }
+    packets.extend(messages::text_chunks(&text[start..])?);
+    Ok(packets)
+}
+
+pub(super) struct Paste<'a> {
+    pub api: &'a dyn InputApi,
+    pub clipboard: Arc<dyn ClipboardApi>,
+    pub tracker: Option<Arc<dyn InputTracker>>,
+    pub ledger: Arc<InputLedger>,
+    pub target: Target,
+    pub focus: Option<NativeHandle>,
+    pub text: String,
+    pub context: ActionContext,
+}
+impl Paste<'_> {
+    pub async fn run(self) -> Result<()> {
+        self.context.check()?;
+        let recovery = Recovery {
+            clipboard: self.clipboard.clone(),
+            tracker: self.tracker.clone(),
+        };
+        let result = async {
+            let sequence = if let Some(tracker) = &self.tracker {
+                tracker
+                    .clipboard_stage(self.target.clone(), self.text.clone())
+                    .await?
+            } else {
+                self.clipboard
+                    .stage(self.text.clone(), self.context.clone())
+                    .await?
+            };
+            self.context.check()?;
+            let packet = messages::chord_events(
+                &KeyChord::parse("ctrl+v").map_err(|_| DriverError::InvalidRequest)?,
+                Some((0x56, Vec::new())),
+            )?;
+            // The accounting handshake may await parent IO. Do it BEFORE the
+            // final content/focus/Stop checks, not between checks and dispatch.
+            if let Some(tracker) = &self.tracker {
+                tracker
+                    .prepare(self.target.clone(), packet.clone(), Delivery::Foreground)
+                    .await?;
+            }
+            self.api.validate(self.target.clone(), true).await?;
+            self.api
+                .before_paste(
+                    self.target.clone(),
+                    self.focus.clone(),
+                    self.context.clone(),
+                )
+                .await?;
+            if !self.clipboard.matches(sequence, self.text.clone()).await? {
+                return Err(DriverError::CapabilityUnavailable);
+            }
+            self.context.check()?;
+            // Recheck focus/Stop after the clipboard read as well.
+            self.api
+                .before_paste(self.target.clone(), self.focus, self.context.clone())
+                .await?;
+            let result = self
+                .api
+                .send(
+                    self.target,
+                    packet,
+                    Delivery::Foreground,
+                    self.ledger,
+                    self.context.clone(),
+                )
+                .await;
+            if let Some(tracker) = &self.tracker {
+                if result.is_ok() || result.as_ref().is_err_and(|e| !e.maybe_executed()) {
+                    tracker.complete(result.is_ok()).await?;
+                }
+            }
+            result?;
+            // Ctrl+V is asynchronous; do not restore before the target has had
+            // a chance to request the data. This is not proof of consumption.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            self.context.check()
+        }
+        .await;
+        let cleanup = recovery.restore().await;
+        match result {
+            Err(error) => {
+                if cleanup.is_err() {
+                    tracing::warn!("clipboard recovery failed after interrupted paste");
+                    return Err(match error {
+                        DriverError::Cancelled { .. } => DriverError::Cancelled {
+                            maybe_executed: true,
+                        },
+                        DriverError::Timeout { .. } => DriverError::Timeout {
+                            maybe_executed: true,
+                        },
+                        DriverError::Crashed { .. } => DriverError::Crashed {
+                            maybe_executed: true,
+                        },
+                        _ => DriverError::Native {
+                            message: "paste interrupted; clipboard recovery pending".into(),
+                            maybe_executed: true,
+                        },
+                    });
+                }
+                Err(self.context.error(error))
+            }
+            Ok(()) => cleanup.map_err(|e| self.context.error(e)),
+        }
+    }
+}
+struct Recovery {
+    clipboard: Arc<dyn ClipboardApi>,
+    tracker: Option<Arc<dyn InputTracker>>,
+}
+impl Recovery {
+    async fn restore(&self) -> Result<()> {
+        if let Some(tracker) = &self.tracker {
+            tracker.clipboard_restore().await
+        } else {
+            self.clipboard.restore().await
+        }
+    }
+}

@@ -188,7 +188,7 @@ fn check_cancel(cancel: &Cancel) -> Result<()> {
     }
 }
 
-fn map_properties(p: Properties, id: NodeId, origin: (f64, f64)) -> RawNode {
+pub(crate) fn map_properties(p: Properties, id: NodeId, origin: (f64, f64)) -> RawNode {
     let mut native_role = if p.control_type == 50037 {
         "UIA_TitleBarControlTypeId".to_owned()
     } else {

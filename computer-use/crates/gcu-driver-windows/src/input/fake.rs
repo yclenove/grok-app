@@ -22,6 +22,8 @@ pub struct Sent {
 /// Scriptable fake state. Failures/cancellation can be injected at exact events.
 #[derive(Clone)]
 pub struct FakeState {
+    /// Test-only eligibility for exercising parent clipboard accounting.
+    pub clipboard_safe: bool,
     /// Child HWND chosen by hit testing/focus.
     pub child: u64,
     /// Native class name.
@@ -66,6 +68,7 @@ pub struct FakeState {
 impl Default for FakeState {
     fn default() -> Self {
         Self {
+            clipboard_safe: false,
             child: 9,
             class: "Edit".into(),
             sent: Vec::new(),
@@ -109,6 +112,22 @@ impl FakeInput {
 }
 #[async_trait]
 impl InputApi for FakeInput {
+    async fn before_paste(
+        &self,
+        target: Target,
+        _: Option<NativeHandle>,
+        context: ActionContext,
+    ) -> Result<()> {
+        context.check()?;
+        if self.state().foreground != target.window.hwnd {
+            return Err(DriverError::CapabilityUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn clipboard_safe(&self, _: Target, _: Option<NativeHandle>, _: String) -> Result<bool> {
+        Ok(self.state().clipboard_safe)
+    }
     async fn resolve(
         &self,
         window: NativeWindow,
@@ -172,7 +191,12 @@ impl InputApi for FakeInput {
     ) -> Result<()> {
         self.update(|s| s.packet_sizes.push(events.len()));
         for event in events {
-            let n = self.state().sent.len();
+            let n = self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .sent
+                .len();
             // The callback runs inside the ledger lock; inspect through the
             // explicit down marker instead of recursively acquiring that lock.
             ledger.dispatch(&target, event, delivery, &context, |recorded| {
@@ -195,7 +219,12 @@ impl InputApi for FakeInput {
                 }
                 Ok(())
             })?;
-            if let Some((at, delay)) = self.state().send_pause {
+            let pause = self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .send_pause;
+            if let Some((at, delay)) = pause {
                 if at == n {
                     tokio::time::sleep(delay).await;
                 }

@@ -1,4 +1,5 @@
 //! Win32 adapter. COM and reads use a persistent MTA; release bypasses it.
+pub(crate) mod clipboard;
 mod native;
 mod sample;
 use super::{api::*, ledger::InputLedger};
@@ -23,10 +24,17 @@ pub struct RealInput {
     worker: Worker<State>,
     uia: Arc<RealUia>,
 }
-/// Up-only sender for the isolated parent. Starts no COM/provider/action worker.
-pub struct NativeRelease;
+/// Up-only sender and lazy clipboard owner for the isolated parent.
+/// Starts no COM/provider/input-action worker.
+#[derive(Default)]
+pub struct NativeRelease {
+    clipboard: Arc<clipboard::NativeClipboard>,
+}
 #[async_trait]
 impl InputReleaser for NativeRelease {
+    fn clipboard(&self) -> Option<Arc<dyn super::clipboard::ClipboardApi>> {
+        Some(self.clipboard.clone())
+    }
     async fn release(&self, ledger: Arc<InputLedger>) {
         release_ledger(ledger).await;
     }
@@ -185,6 +193,34 @@ impl State {
 }
 #[async_trait]
 impl InputApi for RealInput {
+    async fn clipboard_safe(
+        &self,
+        _: Target,
+        focus: Option<NativeHandle>,
+        text: String,
+    ) -> Result<bool> {
+        let Some(el) = focus
+            .as_ref()
+            .and_then(|f| f.downcast_ref::<UiaElement>())
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        self.uia.clipboard_safe(el, text).await
+    }
+    async fn before_paste(
+        &self,
+        _: Target,
+        focus: Option<NativeHandle>,
+        context: ActionContext,
+    ) -> Result<()> {
+        let el = focus
+            .as_ref()
+            .and_then(|f| f.downcast_ref::<UiaElement>())
+            .cloned()
+            .ok_or(DriverError::CapabilityUnavailable)?;
+        self.uia.verify_paste_focus(el, context).await
+    }
     async fn resolve(
         &self,
         window: NativeWindow,

@@ -93,7 +93,7 @@ pub(super) fn prepare(window: &NativeWindow, req: &DriverAction) -> Result<Plan>
                     return Err(DriverError::StaleElement);
                 }
             }
-            plan.packets = messages::text_chunks(text)?;
+            plan.packets = super::text::chunks(text)?;
             plan.focus = focus.clone();
             plan.foreground = *route == KeyRoute::AllowForeground;
             plan.text = true;

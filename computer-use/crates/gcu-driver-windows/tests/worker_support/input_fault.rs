@@ -20,6 +20,23 @@ struct FaultTracker {
 }
 #[async_trait::async_trait]
 impl InputTracker for FaultTracker {
+    async fn clipboard_stage(&self, target: Target, text: String) -> Result<u32> {
+        let receipt = self.inner.clipboard_stage(target, text).await?;
+        if self.fault != "input_clipboard_key_hang" {
+            std::fs::write(self.dir.join("held"), b"clipboard staged").unwrap();
+        }
+        if self.fault == "input_clipboard_crash" {
+            std::process::abort();
+        }
+        if self.fault == "input_clipboard_hang" {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+        Ok(receipt)
+    }
+    async fn clipboard_restore(&self) -> Result<()> {
+        self.inner.clipboard_restore().await
+    }
+
     async fn prepare(&self, target: Target, events: Vec<Event>, delivery: Delivery) -> Result<()> {
         self.down.store(
             events.len() == 1 && matches!(events[0], Event::Button(_, true, ..)),

@@ -37,9 +37,39 @@ pub(crate) fn assess(
     tree: Option<&ProcessedTree>,
     intent: &ActionIntent,
 ) -> RiskAssessment {
+    assess_with_browser(terms, browser(app, window_url), tree, intent)
+}
+
+pub(crate) fn clipboard_high_risk(
+    terms: &TermIndex,
+    app: &gcu_protocol::AppInfo,
+    tree: &ProcessedTree,
+    intent: &ActionIntent,
+) -> bool {
+    let Some(identity) = &app.identity else {
+        return true;
+    };
+    let Some(image) = identity.executable.as_deref() else {
+        return true;
+    };
+    assess_with_browser(
+        terms,
+        browser_identity_strings(&identity.id, image),
+        Some(tree),
+        intent,
+    )
+    .high
+}
+
+fn assess_with_browser(
+    terms: &TermIndex,
+    browser: bool,
+    tree: Option<&ProcessedTree>,
+    intent: &ActionIntent,
+) -> RiskAssessment {
     let resolved = tree.and_then(|tree| target::resolve(tree, intent));
     let web = resolved.as_ref().is_some_and(|hit| hit.in_web);
-    let elevated = web || browser(app, window_url) || unknown(resolved.as_ref(), intent);
+    let elevated = web || browser || unknown(resolved.as_ref(), intent);
     let signal = term_hit(terms, resolved.as_ref())
         || password(tree, resolved.as_ref(), intent.tool)
         || chord_signal(intent, elevated)
@@ -155,8 +185,9 @@ fn is_http(url: &str) -> bool {
 }
 
 fn browser_identity(app: &AppInfo) -> bool {
-    let key = app.identity.key.as_str();
-    let image = app.identity.image_path.as_str();
+    browser_identity_strings(&app.identity.key, &app.identity.image_path)
+}
+fn browser_identity_strings(key: &str, image: &str) -> bool {
     FRAGMENTS
         .iter()
         .any(|fragment| contains_ignore(key, fragment) || contains_ignore(image, fragment))

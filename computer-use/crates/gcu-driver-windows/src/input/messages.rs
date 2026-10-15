@@ -11,7 +11,7 @@ use gcu_protocol::{
 
 /// Maximum UTF-16 units per input packet (pairs of down/up events).
 pub const TEXT_CHUNK_UNITS: usize = 256;
-/// Hard text ceiling in UTF-16 units, matching the capability declaration.
+/// Maximum UTF-16 units accepted by this single-batch planner.
 pub const TEXT_MAX_UNITS: usize = 8192;
 /// Known window classes that cannot accept ordinary posted keyboard/mouse input.
 pub fn ineffective_class(class: &str) -> bool {

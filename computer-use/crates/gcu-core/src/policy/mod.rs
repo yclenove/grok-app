@@ -37,6 +37,8 @@
 //! the stop latch and the idle clock once. Approval waits live on the session.
 
 mod approval;
+/// Clipboard exposure classification shared by native drivers.
+pub mod clipboard;
 mod guard;
 mod identity;
 mod risk;
