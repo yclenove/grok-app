@@ -1,0 +1,12 @@
+{
+  "state": {
+    "alert": {
+      "dismissed": 1,
+      "open": false
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

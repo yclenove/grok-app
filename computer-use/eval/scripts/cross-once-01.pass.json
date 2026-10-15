@@ -1,0 +1,12 @@
+{
+  "state": {
+    "transfer": {
+      "count": 1,
+      "target": "fixture-b"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

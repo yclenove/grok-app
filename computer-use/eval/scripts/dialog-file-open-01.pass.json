@@ -1,0 +1,12 @@
+{
+  "state": {
+    "dialog": {
+      "choice": "fixture-sample.txt",
+      "accepted": 1
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

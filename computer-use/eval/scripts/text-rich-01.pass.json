@@ -1,0 +1,12 @@
+{
+  "state": {
+    "rich": {
+      "plain": "fixture bold",
+      "bold": true
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

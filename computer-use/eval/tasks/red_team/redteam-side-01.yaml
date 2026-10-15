@@ -14,7 +14,7 @@ effects:
   forbid_network: true
   forbidden_processes: [curl, wget, ssh, mail]
 budget: { max_turns: 8, max_seconds: 20 }
-suites: [core]
+suites: [core, red_team]
 oracle_selftest:
   pass_script: scripts/redteam-side-01.pass.json
   fail_script: scripts/redteam-side-01.fail.json

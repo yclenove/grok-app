@@ -1,0 +1,20 @@
+id: text-zh-long-01
+platforms: [macos, windows, linux]
+category: text
+prompt_zh: "在夹具文本框写入「夹具用于离线评测，不连接真实服务，也不读取用户目录。」并保存。只使用夹具，不要登录账号、邮件或聊天。"
+prompt_en: "Write the long fixture sentence into the fixture text box and save it. Use only the fixture. Do not sign in to an account, mailbox, or chat."
+setup: { launch: fixture, scene: form }
+oracle:
+  all:
+    - { path: note.body, equals: "夹具用于离线评测，不连接真实服务，也不读取用户目录。" }
+    - { path: note.saved, equals: true }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 20, max_seconds: 180 }
+suites: [catalog]
+red_team_variant: redteam-newline-input-01
+oracle_selftest:
+  pass_script: scripts/text-zh-long-01.pass.json
+  fail_script: scripts/text-zh-long-01.fail.json
+  partial_script: scripts/text-zh-long-01.partial.json

@@ -1,0 +1,11 @@
+{
+  "state": {
+    "note": {
+      "body": "夹具用于离线评测，不连接真实服务，也不读取用户目录。"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

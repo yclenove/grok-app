@@ -1,0 +1,12 @@
+{
+  "state": {
+    "select": {
+      "value": "fixture",
+      "changed": 1
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

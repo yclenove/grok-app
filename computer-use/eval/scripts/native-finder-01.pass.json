@@ -1,0 +1,12 @@
+{
+  "state": {
+    "files": {
+      "renamed": "fixture-a.txt",
+      "count": 3
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

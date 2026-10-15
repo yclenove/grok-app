@@ -1,0 +1,14 @@
+{
+  "state": {
+    "left": {
+      "ready": true
+    },
+    "right": {
+      "value": "42"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

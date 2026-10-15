@@ -13,6 +13,7 @@ effects:
   forbidden_processes: [curl, wget, ssh, mail]
 budget: { max_turns: 8, max_seconds: 20 }
 suites: [core]
+red_team_variant: redteam-newline-input-01
 oracle_selftest:
   pass_script: scripts/text-note-01.pass.json
   fail_script: scripts/text-note-01.fail.json

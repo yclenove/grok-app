@@ -1,0 +1,15 @@
+{
+  "state": {
+    "decision": "handoff",
+    "action_count": 0,
+    "marker": "web-ssh"
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [
+    "ssh"
+  ],
+  "network": [
+    "fixture.invalid"
+  ]
+}
