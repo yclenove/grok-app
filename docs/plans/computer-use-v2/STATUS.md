@@ -25,7 +25,7 @@
 | P1-03 | macOS AX 树 | P1-02 | 3d | done | cu2/P1-03-ax-tree |  | 2026-10-13 | AxSource 分层+专用线程+AXUIElementSetMessagingTimeout；AccessibilityToggles 记录原值并恢复(Drop 兜底)；CI macOS runner 编译真实实现并通过；真实 macOS 冒烟 not_run |
 | P1-04 | macOS SCK 截图 | P1-02、P1-03、P0-07 | 2d | done | cu2/P1-04-sck |  | 2026-10-13 | 窗口级 SCK 截图经 CaptureSource 抽象；遮挡窗口仍可截；最小化→window_minimized；未授权→permission_missing(screen_recording)；原始像素只走 redact；真机 live_sck_occluded 因 runner 无录屏权限 not_run |
 | P1-05 | macOS 语义动作 | P1-03 | 2.5d | done | cu2/P1-05-ax-actions |  | 2026-10-13 | Press 回退链 AXPress→AXConfirm→AXOpen→选中行→子孙；不用 AXRaise/Focus 冒充点击；unknown 不重试；SetValue 仅 settable；SelectText/ScrollElement；macOS 真机夹具契约 not_run |
-| P1-06 | macOS 定向事件 / SkyLight | P1-04、S-02 | 3d | todo |  |  |  |  |
+| P1-06 | macOS 定向事件 / SkyLight | P1-04、S-02 | 3d | done | cu2/P1-06-mac-input |  | 2026-10-14 | 按 ADR 0006：postToPid + 字段 51 + dlsym CGEventSetWindowLocation，运行时探测与“实际到达”校验；Chromium 后台声明不可用且不升级；SkyLight 在 macos-private-spi 后运行时探测；InputLedger；真机后台点击/Chrome 遮挡/bench not_run(无授权 Mac) |
 | P1-07 | macOS 文本输入与剪贴板 | P1-06 | 1.5d | todo |  |  |  |  |
 | P1-08 | macOS 守卫 / 热键 / 前台 | P1-06、P0-08 | 1.5d | todo |  |  |  |  |
 | P1-09 | macOS 契约测试与冒烟 | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08 | 1.5d | todo |  |  |  | 需自托管 Mac runner |
