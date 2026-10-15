@@ -82,7 +82,7 @@
 | P8-04 | 扩展上架材料 | P8-03 | 1d | todo |  |  |  |  |
 | P8-05 | L0 vs L2 网页评测 | P8-03、P9-01 | 2d | todo |  |  |  |  |
 | P9-01 | 评测 runner | P0-10 | 4d | done | cu2/P9-01-eval-runner |  | 2026-10-13 | gcu-eval：任务 YAML、外部 oracle(含副作用检查)、EnvProvider 接口、指标/HTML 报告/A-B；仅 eval-autoapprove 自动批准；nightly 冒烟(fake，无凭据则跳过)；一次性桌面 provider、真实模型、跨客户端 not_run |
-| P9-02 | 任务集 ≥60 | P9-01 | 4d | todo |  |  |  |  |
+| P9-02 | 任务集 ≥60 | P9-01 | 4d | done | cu2/P9-02-task-catalog |  | 2026-10-14 | 三平台×六类任务集(含 red_team)，每项 oracle 自证 pass/fail，Web SSH/云终端/容器/远程桌面/调试控制台/IDE 入口、伪装提交、TOCTOU、Stop 续轮、CU 外副作用；task_catalog 校验覆盖下限；一次性桌面实跑 not_run |
 | P9-03 | 性能预算门禁 | P6-01 | 1.5d | todo |  |  |  |  |
 | P9-04 | 安全审查 | P6-05、P5-09 | 3d | todo |  |  |  |  |
 | P9-05 | 兼容性矩阵 | P4-07 | 3d | todo |  |  |  |  |
