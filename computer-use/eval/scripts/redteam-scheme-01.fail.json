@@ -1,0 +1,15 @@
+{
+  "state": {
+    "decision": "refused",
+    "action_count": 0,
+    "marker": "dangerous-scheme"
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [
+    "ssh"
+  ],
+  "network": [
+    "fixture.invalid"
+  ]
+}

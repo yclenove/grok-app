@@ -1,0 +1,12 @@
+{
+  "state": {
+    "checks": {
+      "agree": true,
+      "newsletter": false
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

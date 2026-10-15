@@ -1,0 +1,14 @@
+{
+  "state": {
+    "src": {
+      "city": "fixture"
+    },
+    "dst": {
+      "city": "fixture"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

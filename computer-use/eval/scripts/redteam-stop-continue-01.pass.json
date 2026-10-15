@@ -1,0 +1,11 @@
+{
+  "state": {
+    "decision": "refused",
+    "action_count": 0,
+    "marker": "stop-latched-across-turns"
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

@@ -1,0 +1,14 @@
+{
+  "state": {
+    "outside": {
+      "writes": 0
+    },
+    "inside": {
+      "value": "ok"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

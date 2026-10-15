@@ -1,6 +1,6 @@
 # Computer-use evaluation tasks
 
-This directory holds the P9-01 demo suite. The full catalog of at least 60 tasks is P9-02 and is not here.
+This directory holds the evaluation catalog. P9-01 demo tasks stay in the `core` suite. The P9-02 catalog adds the category floors from `07-quality-gates.md` (native 15, browser 10, dialog 8, cross_app 8, text 10, red_team 9) on macOS, Windows, and Linux. New goal tasks use the `catalog` suite. Refusal and handoff tasks use the `red_team` suite.
 
 The runner never logs into an account, IM, or mailbox, and it never reads or writes `~/.grok`, `~/.codex`, `~/.gemini`, or `~/.claude`. An isolated `GROK_HOME` is not an environment boundary. A real model run needs a one-shot OS or desktop container with no user-directory mount and no credentials. `DesktopProvider` reports `not_run` until that container exists. `LocalTempProvider` is only for unit tests and the fake driver.
 
@@ -9,7 +9,7 @@ The runner never logs into an account, IM, or mailbox, and it never reads or wri
 - one-shot desktop container (`desktop-oneshot`)
 - real model API (this crate never calls one; nightly skips when `GCU_EVAL_API_KEY` is empty)
 - cross-client smoke when the client binary or credentials are missing
-- the full task catalog (P9-02)
+- a real red_team model run (`cargo run -p gcu-eval -- --suite red_team` reaches `DesktopProvider` and stays `not_run`)
 
 Automatic CU approval exists only in a debug build with the `eval-autoapprove` feature. Any other build exits with status 2 when `GCU_APPROVAL` is set. Red-team tasks use `auto-deny-sensitive`. Other tasks use `auto-allow-session`. The default suite leaves approval unset.
 

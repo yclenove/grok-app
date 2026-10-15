@@ -1,0 +1,14 @@
+{
+  "state": {
+    "source": {
+      "note": "fixture-note"
+    },
+    "dest": {
+      "note": "fixture-note"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

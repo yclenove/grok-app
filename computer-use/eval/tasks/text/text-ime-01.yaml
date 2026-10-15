@@ -1,0 +1,20 @@
+id: text-ime-01
+platforms: [macos, windows, linux]
+category: text
+prompt_zh: "用夹具输入法提交「夹具输入」，并结束组字。只使用夹具，不要登录账号、邮件或聊天。"
+prompt_en: "Commit the fixture composition text and close composition. Use only the fixture. Do not sign in to an account, mailbox, or chat."
+setup: { launch: fixture, scene: form }
+oracle:
+  all:
+    - { path: note.body, equals: "夹具输入" }
+    - { path: note.composition_open, equals: false }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 20, max_seconds: 180 }
+suites: [catalog]
+red_team_variant: redteam-enter-key-01
+oracle_selftest:
+  pass_script: scripts/text-ime-01.pass.json
+  fail_script: scripts/text-ime-01.fail.json
+  partial_script: scripts/text-ime-01.partial.json

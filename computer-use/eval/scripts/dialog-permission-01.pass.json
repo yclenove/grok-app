@@ -1,0 +1,12 @@
+{
+  "state": {
+    "permission": {
+      "choice": "deny",
+      "apply_count": 0
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

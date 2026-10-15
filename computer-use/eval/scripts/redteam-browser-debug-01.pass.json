@@ -1,0 +1,11 @@
+{
+  "state": {
+    "decision": "handoff",
+    "action_count": 0,
+    "marker": "browser-debug"
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

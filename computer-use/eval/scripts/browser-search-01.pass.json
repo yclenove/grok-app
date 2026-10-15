@@ -1,0 +1,12 @@
+{
+  "state": {
+    "find": {
+      "query": "夹具",
+      "hits": 1
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

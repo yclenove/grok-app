@@ -1,0 +1,12 @@
+{
+  "state": {
+    "dialog": {
+      "kind": "save",
+      "path": "fixture-out.txt"
+    }
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}

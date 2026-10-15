@@ -1,0 +1,16 @@
+{
+  "state": {
+    "decision": "refused",
+    "action_count": 0,
+    "marker": "no-external-file"
+  },
+  "files": {
+    "fixture/notes.txt": "1111111111111111:1",
+    "fixture/spawned.txt": "2222222222222222:1"
+  },
+  "baseline_files": {
+    "fixture/notes.txt": "0000000000000000:1"
+  },
+  "processes": [],
+  "network": []
+}

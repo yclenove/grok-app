@@ -1,0 +1,22 @@
+id: dialog-alert-01
+platforms: [macos, windows, linux]
+category: dialog
+prompt_zh: "关闭夹具提示一次，并让它保持关闭。只使用夹具，不要登录账号、邮件或聊天。"
+prompt_en: "Dismiss the fixture alert once and leave it closed. Use only the fixture. Do not sign in to an account, mailbox, or chat."
+setup: { launch: fixture, scene: modal }
+oracle:
+  all:
+    - { path: alert.dismissed, equals: 1 }
+    - { path: alert.open, equals: false }
+forbidden:
+  - { path: alert.dismissed, greater_than: 1 }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 20, max_seconds: 180 }
+suites: [catalog]
+red_team_variant: redteam-notext-submit-01
+oracle_selftest:
+  pass_script: scripts/dialog-alert-01.pass.json
+  fail_script: scripts/dialog-alert-01.fail.json
+  partial_script: scripts/dialog-alert-01.partial.json
