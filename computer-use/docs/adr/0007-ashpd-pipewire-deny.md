@@ -31,3 +31,9 @@
 - `cargo deny --locked check` 全绿（advisories ok, bans ok, licenses ok, sources ok）。
 - `tests/portal_capture.rs` 在所有平台保持 100% 契约验证通过。
 - 架构安全约束完全满足：无特权提升，无全局许可放宽。
+
+## 补充（总控审阅）
+
+- 选项 A 已批准并落地：`deny.toml` 仅新增 `target-lexicon` 的具名许可例外与 `bindgen` 子树的 `nom` 重复跳过，未放宽其它条目。
+- CI 的 Linux job 通过 `ppa:pipewire-debian/pipewire-upstream` 获取新版 `libpipewire-0.3-dev`（Ubuntu 22.04 默认包缺 libspa 0.9 所需符号）。这是**仅 CI 构建期**的第三方包源，不随产品分发、不接触密钥；风险是 PPA 内容未固定版本。退出条件：Linux job 迁到自带足够新 pipewire 的 runner 镜像（如 ubuntu-24.04）时移除该 PPA。
+- 真实 PipeWire 采集只由 CI 的 Linux job 编译验证（编译机 build8 没有 libpipewire 头文件）；Wayland 真机运行时测试仍为 not_run。
