@@ -20,6 +20,9 @@ static TEMP_WRITE_SEQ: AtomicU64 = AtomicU64::new(1);
 /// Maximum number of recent events preserved in [`FixtureState::event_log`].
 pub const MAX_EVENT_LOG_ENTRIES: usize = 50;
 
+/// Maximum number of recent raw keyboard events preserved for test diagnostics.
+pub const MAX_KEY_LOG_ENTRIES: usize = 50;
+
 /// Number of columns in the canvas test grid.
 pub const CANVAS_GRID_COLS: usize = 8;
 
@@ -63,6 +66,23 @@ pub struct EventLogEntry {
     /// Optional structured or human-readable event detail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// A recorded raw key event entry for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawKeyEvent {
+    /// Key descriptor or character string.
+    pub key: String,
+    /// Whether this is a key press (true) or key release (false).
+    pub pressed: bool,
+    /// State of Ctrl modifier during the event.
+    pub ctrl: bool,
+    /// State of Shift modifier during the event.
+    pub shift: bool,
+    /// State of Alt modifier during the event.
+    pub alt: bool,
+    /// Epoch timestamp in milliseconds.
+    pub timestamp_ms: u64,
 }
 
 /// Form sub-state structure queried by evaluation tasks and contract oracles.
@@ -132,8 +152,14 @@ pub struct FixtureState {
     pub send_clicked: u64,
     /// Form sub-object matching eval oracle queries (e.g., `form.name`).
     pub form: FormState,
+    /// Currently focused widget identifier, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_widget: Option<String>,
     /// Recent chronological event log bounded to [`MAX_EVENT_LOG_ENTRIES`].
     pub event_log: Vec<EventLogEntry>,
+    /// Bounded trace of recent raw keyboard events with modifier states for test diagnostics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_events: Vec<RawKeyEvent>,
 }
 
 impl fmt::Debug for FixtureState {
@@ -165,7 +191,9 @@ impl fmt::Debug for FixtureState {
             .field("submitted_count", &self.submitted_count)
             .field("send_clicked", &self.send_clicked)
             .field("form", &self.form)
+            .field("focused_widget", &self.focused_widget)
             .field("event_log_len", &self.event_log.len())
+            .field("key_events_len", &self.key_events.len())
             .finish()
     }
 }
@@ -199,7 +227,9 @@ impl Default for FixtureState {
             submitted_count: 0,
             send_clicked: 0,
             form: FormState::default(),
+            focused_widget: None,
             event_log: Vec::new(),
+            key_events: Vec::new(),
         }
     }
 }
@@ -429,6 +459,36 @@ impl FixtureState {
         self.sync_mirrors();
         let detail = Some(format!("tab={tab}"));
         self.log_event(source, "set_tab", detail);
+    }
+
+    /// Updates the currently focused widget name. Returns true if the focus value changed.
+    pub fn set_focused_widget(&mut self, widget: Option<String>) -> bool {
+        if self.focused_widget != widget {
+            self.focused_widget = widget;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Records a raw keyboard event with modifier state for test diagnostics.
+    pub fn record_key(&mut self, key: String, pressed: bool, ctrl: bool, shift: bool, alt: bool) {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|dur| dur.as_millis() as u64)
+            .unwrap_or(0);
+        self.key_events.push(RawKeyEvent {
+            key,
+            pressed,
+            ctrl,
+            shift,
+            alt,
+            timestamp_ms,
+        });
+        if self.key_events.len() > MAX_KEY_LOG_ENTRIES {
+            let overflow = self.key_events.len() - MAX_KEY_LOG_ENTRIES;
+            self.key_events.drain(0..overflow);
+        }
     }
 
     /// Resets all state values to defaults.

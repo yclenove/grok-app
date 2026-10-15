@@ -119,60 +119,90 @@ impl FixtureApp {
             ui.label(egui::RichText::new("Form Controls / 表单控件").strong());
 
             // 1. Single-line text input
-            ui.horizontal(|ui| {
-                ui.label("Name / 姓名 👤:");
-                let text_res = ui.add(
-                    egui::TextEdit::singleline(&mut self.state.text)
-                        .id_salt("name_field")
-                        .hint_text("Enter text / 输入姓名"),
-                );
-                text_res.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "name_field")
-                });
-                if text_res.changed() {
-                    let source = detect_event_source(ui);
-                    self.state.set_text(self.state.text.clone(), source);
-                    let _ = self.state.maybe_persist();
-                }
-            });
+            let text_res = ui
+                .horizontal(|ui| {
+                    ui.label("Name / 姓名 👤:");
+                    let text_res = ui.add(
+                        egui::TextEdit::singleline(&mut self.state.text)
+                            .id_salt("name_field")
+                            .hint_text("Enter text / 输入姓名"),
+                    );
+                    text_res.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "name_field")
+                    });
+                    if text_res.changed() {
+                        let source = detect_event_source(ui);
+                        self.state.set_text(self.state.text.clone(), source);
+                        let _ = self.state.maybe_persist();
+                    }
+                    text_res
+                })
+                .inner;
 
             // 2. Multiline text input
-            ui.horizontal(|ui| {
-                ui.label("Notes / 备注 📝:");
-                let multi_res = ui.add(
-                    egui::TextEdit::multiline(&mut self.state.multiline)
-                        .id_salt("multiline_field")
-                        .desired_rows(2),
-                );
-                multi_res.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "multiline_field")
-                });
-                if multi_res.changed() {
-                    let source = detect_event_source(ui);
-                    self.state
-                        .set_multiline(self.state.multiline.clone(), source);
-                    let _ = self.state.maybe_persist();
-                }
-            });
+            let multi_res = ui
+                .horizontal(|ui| {
+                    ui.label("Notes / 备注 📝:");
+                    let multi_res = ui.add(
+                        egui::TextEdit::multiline(&mut self.state.multiline)
+                            .id_salt("multiline_field")
+                            .desired_rows(2),
+                    );
+                    multi_res.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::TextEdit,
+                            true,
+                            "multiline_field",
+                        )
+                    });
+                    if multi_res.changed() {
+                        let source = detect_event_source(ui);
+                        self.state
+                            .set_multiline(self.state.multiline.clone(), source);
+                        let _ = self.state.maybe_persist();
+                    }
+                    multi_res
+                })
+                .inner;
 
             // 3. Password input (masked, plaintext never persisted)
-            ui.horizontal(|ui| {
-                ui.label("Password / 密码 🔒:");
-                let pwd_res = ui.add(
-                    egui::TextEdit::singleline(&mut self.password_input)
-                        .password(true)
-                        .id_salt("password_field")
-                        .hint_text("Password / 密码"),
-                );
-                pwd_res.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "password_field")
-                });
-                if pwd_res.changed() {
-                    let source = detect_event_source(ui);
-                    self.state.set_password(&self.password_input, source);
-                    let _ = self.state.maybe_persist();
-                }
-            });
+            let pwd_res = ui
+                .horizontal(|ui| {
+                    ui.label("Password / 密码 🔒:");
+                    let pwd_res = ui.add(
+                        egui::TextEdit::singleline(&mut self.password_input)
+                            .password(true)
+                            .id_salt("password_field")
+                            .hint_text("Password / 密码"),
+                    );
+                    pwd_res.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::TextEdit,
+                            true,
+                            "password_field",
+                        )
+                    });
+                    if pwd_res.changed() {
+                        let source = detect_event_source(ui);
+                        self.state.set_password(&self.password_input, source);
+                        let _ = self.state.maybe_persist();
+                    }
+                    pwd_res
+                })
+                .inner;
+
+            let focused = if text_res.has_focus() {
+                Some("name_field".to_string())
+            } else if multi_res.has_focus() {
+                Some("multiline_field".to_string())
+            } else if pwd_res.has_focus() {
+                Some("password_field".to_string())
+            } else {
+                None
+            };
+            if self.state.set_focused_widget(focused) {
+                let _ = self.state.maybe_persist();
+            }
 
             // 4. Checkbox
             let mut agree = self.state.checkbox;
@@ -551,6 +581,46 @@ impl FixtureApp {
 
 impl eframe::App for FixtureApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let mut key_recorded = false;
+        ui.input(|input| {
+            for ev in &input.events {
+                match ev {
+                    egui::Event::Key {
+                        key,
+                        pressed,
+                        repeat,
+                        modifiers,
+                        ..
+                    } => {
+                        if !repeat {
+                            self.state.record_key(
+                                format!("{key:?}"),
+                                *pressed,
+                                modifiers.ctrl,
+                                modifiers.shift,
+                                modifiers.alt,
+                            );
+                            key_recorded = true;
+                        }
+                    }
+                    egui::Event::Text(t) => {
+                        self.state.record_key(
+                            format!("Text({t})"),
+                            true,
+                            input.modifiers.ctrl,
+                            input.modifiers.shift,
+                            input.modifiers.alt,
+                        );
+                        key_recorded = true;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        if key_recorded {
+            let _ = self.state.maybe_persist();
+        }
+
         egui::CentralPanel::default().show(ui, |ui| {
             self.render_top_bar(ui);
             ui.separator();

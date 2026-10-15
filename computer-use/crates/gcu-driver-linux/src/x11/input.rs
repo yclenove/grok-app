@@ -39,6 +39,16 @@ pub async fn activate_and_verify(
         return Err(DriverError::WindowGone);
     }
 
+    // If the target window is already active, do not issue another _NET_ACTIVE_WINDOW
+    // request. Re-activating an already active window causes the window manager
+    // (such as Openbox) to asynchronously re-focus the window, which can disrupt
+    // intra-window focus state and race with immediate subsequent typing or key presses.
+    if let Ok(Some(active)) = x.active_window() {
+        if active == xid {
+            return Ok(());
+        }
+    }
+
     x.activate_window(xid)
         .map_err(|_| DriverError::CapabilityUnavailable)?;
 
@@ -126,6 +136,7 @@ pub async fn execute_pointer_click(
                 maybe_executed: true,
             });
         }
+        tokio::time::sleep(Duration::from_millis(15)).await;
 
         if let Err(e) = x.xtest_fake_button(btn_code, false) {
             ledger.release_all(x);
@@ -136,9 +147,12 @@ pub async fn execute_pointer_click(
         }
         ledger.record_button_up(btn_code);
 
-        if effective_count > 1 {
-            tokio::time::sleep(Duration::from_millis(40)).await;
-        }
+        tokio::time::sleep(Duration::from_millis(if effective_count > 1 {
+            40
+        } else {
+            25
+        }))
+        .await;
     }
 
     Ok(Delivery::Foreground)
@@ -333,6 +347,11 @@ pub async fn execute_press_keys(
         held_mod_keycodes.push(resolved.keycode);
     }
 
+    // Settle modifier press so client event loops register active modifier mask before main key down
+    if !held_mod_keycodes.is_empty() {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
     // 2. Resolve and press main key
     let main_sym = key_to_keysym(&chord.key);
     let main_resolved = resolve_or_remap_keysym(x, main_sym)?;
@@ -375,6 +394,11 @@ pub async fn execute_press_keys(
     // Release main key
     let _ = x.xtest_fake_key(main_resolved.keycode, false);
     ledger.record_key_up(main_resolved.keycode);
+
+    // Settle key release so main key up is dispatched before releasing modifiers
+    if !held_mod_keycodes.is_empty() {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
 
     // Release extra shift if added
     if let Some(skc) = extra_shift {
