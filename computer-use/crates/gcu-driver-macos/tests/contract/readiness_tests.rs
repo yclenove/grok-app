@@ -66,7 +66,9 @@ pub async fn readiness_partial_then_complete_reports_activation_time() {
         ready.evidence["first"]["incomplete"]["reason"],
         "partial_error"
     );
-    let activation = ready.evidence["first_incomplete_to_complete_ms"].as_f64().unwrap();
+    let activation = ready.evidence["first_incomplete_to_complete_ms"]
+        .as_f64()
+        .unwrap();
     assert!((100.0..=105.0).contains(&activation), "{activation}");
     assert_eq!(ready.evidence["last_incomplete"], serde_json::Value::Null);
     assert!(fixture_tree::missing(&ready.tree).is_empty());
