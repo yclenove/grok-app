@@ -56,9 +56,31 @@ impl WorkerDriver {
         self.supervisor.shutdown().await
     }
     async fn rpc(&self, request: Request, timeout: Duration, cancel: &Cancel) -> Result<Reply> {
-        self.supervisor
+        // Include the whole bounded transport call in parent diagnostics. A
+        // multi-call Router case can exhaust its total budget even when every
+        // native call returned before DRIVER_DEADLINE.
+        let stage = match &request {
+            Request::Doctor => "rpc_doctor",
+            Request::ListApps => "rpc_list_apps",
+            Request::ResolveApp(_) => "rpc_resolve_app",
+            Request::LaunchApp(_) => "rpc_launch_app",
+            Request::ListWindows(_) => "rpc_list_windows",
+            Request::KeyWindow(_) => "rpc_key_window",
+            Request::Snapshot(..) => "rpc_snapshot",
+            Request::Capture(..) => "rpc_capture",
+            Request::Geometry(_) => "rpc_geometry",
+            Request::Focused(_) => "rpc_focused",
+            Request::Perform(_) => "rpc_perform",
+        };
+        let _timing = crate::timing::Timing::start(stage);
+        let result = self
+            .supervisor
             .execute_bounded(request, cancel, timeout.min(DRIVER_DEADLINE))
-            .await
+            .await;
+        if let Err(error) = &result {
+            tracing::warn!(target: "gcu_windows_timing", stage, phase = "failed", error = %error);
+        }
+        result
     }
 }
 fn invalid() -> DriverError {

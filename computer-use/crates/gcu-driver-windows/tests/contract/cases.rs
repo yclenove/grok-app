@@ -332,13 +332,11 @@ async fn background(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) 
     .await?;
     let count = fixture.read()?["counter"].as_u64().unwrap();
     perform(driver, DriverAction::Press { el: button.handle }).await?;
+    let after_invoke = unsafe_desktop::foreground();
     fixture
         .wait("background counter", |v| v["counter"] == count + 1)
         .await?;
-    require(
-        unsafe_desktop::foreground() == cover.hwnd,
-        "background press stole foreground",
-    )?;
+    background_foreground(win, cover.hwnd, after_invoke, "press").await?;
     // Refresh handles after the provider's next generation.
     perform(
         driver,
@@ -348,14 +346,35 @@ async fn background(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) 
         },
     )
     .await?;
+    let after_set_value = unsafe_desktop::foreground();
     fixture
         .wait("background text", |v| v["text"] == "background")
         .await?;
-    require(
-        unsafe_desktop::foreground() == cover.hwnd,
-        "background SetValue stole foreground",
-    )?;
+    background_foreground(win, cover.hwnd, after_set_value, "SetValue").await?;
     Ok(Outcome::Passed)
+}
+async fn background_foreground(
+    win: &WindowRef,
+    expected: u64,
+    after_dispatch: u64,
+    action: &str,
+) -> Result<(), String> {
+    let after_effect = unsafe_desktop::foreground();
+    progress(format!("BACKGROUND: action={action}; expected={expected:x}; after_dispatch={after_dispatch:x}; after_effect={after_effect:x}; waiting for WM_NULL responsiveness"));
+    // The JSON oracle is written inside egui's frame, before the native pump
+    // returns. Wait only for that pump, never for foreground restoration, and
+    // never call SetForegroundWindow to conceal an activation.
+    let health = poll_async(
+        &mut DesktopClock::default(),
+        Duration::from_secs(5),
+        "background fixture WM_NULL readiness",
+        async || unsafe_desktop::responsiveness(win).await,
+        |probe| probe.responsive,
+    )
+    .await?;
+    let actual = unsafe_desktop::foreground();
+    progress(format!("BACKGROUND: action={action}; expected={expected:x}; after_dispatch={after_dispatch:x}; after_effect={after_effect:x}; responsive_foreground={actual:x}; WM_NULL Win32={}; elapsed_ms={}", health.win32, health.elapsed_ms));
+    require(actual == expected, format!("background {action} stole foreground: expected={expected:x}; actual={actual:x}; after_dispatch={after_dispatch:x}; after_effect={after_effect:x}; WM_NULL={health:?}"))
 }
 async fn removed_element(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) -> CaseResult {
     let old = node(driver, win, "counter_button").await?;

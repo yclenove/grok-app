@@ -92,7 +92,7 @@ async fn stuck_startup_retains_pending_call_and_late_completion_never_revives_he
     let guard = task.await.unwrap();
     let mut issues = Vec::new();
     guard.doctor_issues(&mut issues);
-    assert!(issues.iter().any(|i| i.contains("250ms")
+    assert!(issues.iter().any(|i| i.contains("3000ms")
         && i.contains("SetWindowsHookExW pending")
         && i.contains("Win32 result unobserved")));
     release.send(()).unwrap();
@@ -101,6 +101,136 @@ async fn stuck_startup_retains_pending_call_and_late_completion_never_revives_he
     events.hotkey_heartbeat();
     assert!(!guard.available());
     assert!(!guard.activity_clock().available());
+}
+
+#[derive(Default)]
+struct ManualTime(Mutex<Option<Instant>>);
+impl MonotonicTime for ManualTime {
+    fn now(&self) -> Instant {
+        *self.0.lock().unwrap().get_or_insert_with(Instant::now)
+    }
+}
+impl ManualTime {
+    fn advance(&self, elapsed: Duration) {
+        let at = self.now() + elapsed;
+        *self.0.lock().unwrap() = Some(at);
+    }
+}
+
+#[test]
+fn startup_probe_taking_226ms_succeeds_without_relaxing_armed_health_deadline() {
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    let first_keyboard = time.now();
+    guard
+        .events
+        .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    time.advance(Duration::from_millis(226));
+    guard.events.check_health();
+    assert!(!guard.available());
+    assert!(!guard.events.failed.load(Ordering::Acquire));
+    // The first mouse arrives after a 226ms native dispatch. An old keyboard
+    // proof must not arm, nor permanently fail a listener still in setup.
+    guard
+        .events
+        .confirm_hook_proofs(Some(first_keyboard), Some(time.now()))
+        .unwrap();
+    guard.events.heartbeat();
+    guard.events.hotkey_heartbeat();
+    assert!(!guard.available());
+    guard
+        .events
+        .confirm_hook_proofs(Some(time.now()), Some(time.now()))
+        .unwrap();
+    guard.events.heartbeat();
+    guard.events.hotkey_heartbeat();
+    assert!(guard.available());
+    time.advance(watchdog::HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+    assert!(guard
+        .events
+        .confirm_hook_proofs(Some(first_keyboard), Some(time.now()))
+        .is_err());
+    guard.events.check_health();
+    assert!(!guard.available());
+    assert!(guard.is_stopped());
+}
+
+#[test]
+fn stuck_native_stage_fails_at_its_bound_and_late_proofs_cannot_rearm() {
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    guard
+        .events
+        .startup_step("hook_install", STARTUP_STEP_TIMEOUT);
+    guard.events.startup_progress(
+        "hook_install",
+        "SetWindowsHookExW pending; Win32 result unobserved",
+    );
+    time.advance(STARTUP_STEP_TIMEOUT - Duration::from_millis(1));
+    guard.events.check_health();
+    assert!(!guard.events.failed.load(Ordering::Acquire));
+    time.advance(Duration::from_millis(1));
+    guard.events.check_health();
+    let reason = guard.events.reason.lock().unwrap().clone().unwrap();
+    assert!(reason.contains("hook_install timed out after 1000ms"));
+    assert!(reason.contains("Win32 result unobserved"));
+    guard.events.clock().confirm(time.now());
+    guard.events.heartbeat();
+    guard.events.hotkey_heartbeat();
+    assert!(!guard.available());
+}
+
+#[test]
+fn startup_stages_cannot_extend_the_overall_deadline() {
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    for stage in [
+        "listener_thread",
+        "hook_desktop",
+        "hook_install",
+        "hook_proofs",
+    ] {
+        guard.events.startup_step(stage, STARTUP_STEP_TIMEOUT);
+        time.advance(Duration::from_millis(750));
+        guard.events.check_health();
+    }
+    assert!(guard
+        .events
+        .reason
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .contains("3000ms"));
+    assert!(!guard.available());
+}
+
+#[test]
+fn late_startup_proofs_cannot_beat_the_next_watchdog_poll_or_reset_a_stage() {
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    guard
+        .events
+        .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    time.advance(STARTUP_STEP_TIMEOUT);
+    guard
+        .events
+        .startup_step("late_stage", STARTUP_STEP_TIMEOUT);
+    guard
+        .events
+        .confirm_hook_proofs(Some(time.now()), Some(time.now()))
+        .unwrap();
+    guard.events.heartbeat();
+    guard.events.hotkey_heartbeat();
+    assert!(!guard.available());
+    assert!(guard
+        .events
+        .reason
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .contains("hook_proofs timed out after 1000ms"));
 }
 
 #[test]
@@ -138,6 +268,9 @@ fn listener_failure_revokes_health_and_latches_stop_before_entering_diagnostic_s
     assert!(guard.available());
     let inspected = Arc::new(AtomicBool::new(false));
     tracing::subscriber::with_default(Inspect(guard.clone(), inspected.clone()), || {
+        // Parallel tests hit this callsite with no subscriber and the process-wide
+        // interest cache can still say "never"; refresh it for this scoped sink.
+        tracing::callsite::rebuild_interest_cache();
         guard.disable("fault injection");
     });
     assert!(inspected.load(Ordering::Acquire));

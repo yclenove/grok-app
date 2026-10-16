@@ -134,7 +134,13 @@ pub async fn raw_windows(pid: u32) -> Result<Vec<WindowProbe>, String> {
         .map_err(|e| e.to_string())?
 }
 
-pub async fn responsiveness(win: &WindowRef) -> Result<String, String> {
+#[derive(Debug)]
+pub struct Responsiveness {
+    pub responsive: bool,
+    pub win32: u32,
+    pub elapsed_ms: u128,
+}
+pub async fn responsiveness(win: &WindowRef) -> Result<Responsiveness, String> {
     let win = win.clone();
     let work = tokio::task::spawn_blocking(move || {
         let h = owned(&win, win.app.info.pid.ok_or("missing fixture PID")?)?;
@@ -154,10 +160,11 @@ pub async fn responsiveness(win: &WindowRef) -> Result<String, String> {
             );
             (result.0 != 0, windows::Win32::Foundation::GetLastError().0)
         };
-        Ok(format!(
-            "WM_NULL responsive={result}; Win32={code}; elapsed_ms={}",
-            started.elapsed().as_millis()
-        ))
+        Ok(Responsiveness {
+            responsive: result,
+            win32: code,
+            elapsed_ms: started.elapsed().as_millis(),
+        })
     });
     tokio::time::timeout(Duration::from_secs(1), work)
         .await

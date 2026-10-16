@@ -1,8 +1,11 @@
 //! Thread-affine low-level hooks; global hotkey has its own message pump.
 use crate::input::{
     hooks::HookEvent,
-    hotkey::{GuardEvents, HotkeyConfig, SafetyApi, SafetyPump},
-    watchdog::{HEARTBEAT_TIMEOUT, POLL_INTERVAL},
+    hotkey::{
+        GuardEvents, HotkeyConfig, SafetyApi, SafetyPump, HOTKEY_STARTUP_TIMEOUT,
+        STARTUP_STEP_TIMEOUT,
+    },
+    watchdog::POLL_INTERVAL,
 };
 use std::{
     cell::RefCell,
@@ -21,12 +24,15 @@ use windows::Win32::{
 };
 const HOTKEY_ID: i32 = 0x4732;
 const PROBE_TAG: usize = 0x47435532;
+mod probe;
 struct Context {
     events: Arc<GuardEvents>,
     keyboard: Option<Instant>,
     mouse: Option<Instant>,
     keyboard_probe_flags: Option<u32>,
     mouse_probe_flags: Option<u32>,
+    last_keyboard_flags: Option<u32>,
+    last_mouse_flags: Option<u32>,
 }
 thread_local! { static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) }; }
 
@@ -39,6 +45,7 @@ impl SafetyApi for RealSafetyApi {
         config: HotkeyConfig,
         events: Arc<GuardEvents>,
     ) -> Result<Box<dyn SafetyPump>, String> {
+        events.startup_step("hook_desktop", STARTUP_STEP_TIMEOUT);
         events.startup_progress("hook_desktop", "OpenInputDesktop pending");
         interactive_desktop()?;
         events.startup_progress("hook_desktop", "Default desktop verified");
@@ -53,13 +60,17 @@ impl SafetyApi for RealSafetyApi {
                 mouse: None,
                 keyboard_probe_flags: None,
                 mouse_probe_flags: None,
+                last_keyboard_flags: None,
+                last_mouse_flags: None,
             })
         });
+        let probe = probe::Sender::start(pump_events.clone())?;
         Ok(Box::new(Pump {
             hooks,
             _hotkey: hotkey,
             events: pump_events,
             first_probe: true,
+            probe,
         }))
     }
 }
@@ -69,6 +80,9 @@ struct Hooks {
 }
 impl Hooks {
     fn install(events: Option<&GuardEvents>) -> Result<Self, String> {
+        if let Some(events) = events {
+            events.startup_step("hook_install", STARTUP_STEP_TIMEOUT);
+        }
         let progress = |detail| {
             if let Some(events) = events {
                 events.startup_progress("hook_install", detail);
@@ -138,6 +152,10 @@ fn callback(event: HookEvent, tag: usize) {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(context) = slot.as_mut() {
                 let now = Instant::now();
+                match event {
+                    HookEvent::Keyboard(flags) => context.last_keyboard_flags = Some(flags),
+                    HookEvent::Mouse(flags) => context.last_mouse_flags = Some(flags),
+                }
                 if tag == PROBE_TAG {
                     match event {
                         HookEvent::Keyboard(flags) => context.keyboard_probe_flags = Some(flags),
@@ -150,7 +168,11 @@ fn callback(event: HookEvent, tag: usize) {
                         HookEvent::Mouse(_) => context.mouse = Some(now),
                     }
                 }
-                context.events.clock().event(event, now);
+                // A tagged synthetic probe is never physical activity, even if
+                // an upstream filter unexpectedly strips its injected flag.
+                if tag != PROBE_TAG {
+                    context.events.clock().event(event, now);
+                }
             }
         }
     });
@@ -160,6 +182,7 @@ struct Pump {
     _hotkey: HotkeyThread,
     events: Arc<GuardEvents>,
     first_probe: bool,
+    probe: probe::Sender,
 }
 impl SafetyPump for Pump {
     fn poll(&mut self, reinstall: bool) -> Result<(), String> {
@@ -170,75 +193,22 @@ impl SafetyPump for Pump {
         }
         if self.first_probe {
             self.events
+                .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+            self.events
                 .startup_progress("hook_probe_pump", "PeekMessageW pending");
         }
         pump_messages(false, None)?;
         if self.first_probe {
             self.events
                 .startup_progress("hook_probe_pump", "message queue drained");
-            self.events.startup_progress(
-                "hook_SendInput",
-                "SendInput pending; Win32 result unobserved",
-            );
             self.first_probe = false;
         }
+        // Never call SendInput on its own hook thread: Windows may wait for
+        // that thread to service the injected low-level callback. One bounded
+        // sender lets this thread keep pumping throughout native dispatch.
+        self.probe.poll()?;
         self.confirm_probes()?;
-        // Up-only unused F24 and zero relative mouse move test both hook chains.
-        // These are synthetic health probes, never physical activity, normal
-        // action downs or foreground activation. No user cursor movement.
-        let probes = [
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_F24,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        dwExtraInfo: PROBE_TAG,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
-                        dwExtraInfo: PROBE_TAG,
-                        ..Default::default()
-                    },
-                },
-            },
-        ];
-        // SAFETY: fully initialized two-record slice; only up/zero motion probes.
-        let sent = unsafe {
-            SetLastError(ERROR_SUCCESS);
-            SendInput(&probes, std::mem::size_of::<INPUT>() as i32)
-        };
-        // SAFETY: capture immediately; never use a stale unrelated last error.
-        let code = unsafe { GetLastError() }.0;
-        CONTEXT.with(|slot| {
-            if let Some(context) = slot.borrow().as_ref() {
-                context.events.startup_progress(
-                    "hook_SendInput",
-                    format!(
-                        "sent={sent}/2; Win32={code}; keyboard_seen={}; mouse_seen={}; keyboard_probe_flags={:?}; mouse_probe_flags={:?}",
-                        context.keyboard.is_some(),
-                        context.mouse.is_some(),
-                        context.keyboard_probe_flags,
-                        context.mouse_probe_flags
-                    ),
-                );
-            }
-        });
-        if sent != 2 {
-            return Err(format!(
-                "SendInput(hook probes): GetLastError={code}; UIPI may suppress errors"
-            ));
-        }
-        // Drain callbacks before readiness is checked, rather than deferring the
-        // initial proof to a later scheduled poll. Health still requires both.
-        pump_messages(false, None)?;
-        self.confirm_probes()?;
+
         Ok(())
     }
 }
@@ -246,15 +216,9 @@ impl Pump {
     fn confirm_probes(&self) -> Result<(), String> {
         CONTEXT.with(|slot| {
             if let Some(context) = slot.borrow().as_ref() {
-                if let (Some(keyboard), Some(mouse)) = (context.keyboard, context.mouse) {
-                    let at = keyboard.min(mouse);
-                    if at.elapsed() > HEARTBEAT_TIMEOUT {
-                        return Err(
-                            "low-level hook probe expired (possibly silently removed)".into()
-                        );
-                    }
-                    context.events.clock().confirm(at);
-                }
+                context
+                    .events
+                    .confirm_hook_proofs(context.keyboard, context.mouse)?;
             }
             Ok(())
         })
@@ -268,6 +232,7 @@ impl Drop for Pump {
 struct HotkeyThread(Arc<AtomicBool>);
 impl HotkeyThread {
     fn start(config: HotkeyConfig, events: Arc<GuardEvents>) -> Result<Self, String> {
+        events.startup_step("hotkey_register", HOTKEY_STARTUP_TIMEOUT);
         let close = Arc::new(AtomicBool::new(false));
         let closed = close.clone();
         let (ready, wait) = mpsc::sync_channel(1);
@@ -321,7 +286,7 @@ impl HotkeyThread {
             })
             .map_err(|e| format!("Stop hotkey thread spawn: {e}"))?;
         let owner = Self(close);
-        wait.recv_timeout(std::time::Duration::from_millis(100))
+        wait.recv_timeout(HOTKEY_STARTUP_TIMEOUT)
             .map_err(|e| format!("RegisterHotKey startup/FFI timed out: {e}"))??;
         Ok(owner)
     }

@@ -223,3 +223,90 @@ fn fixture_set_value_full_frame_handles_unfocused_text_and_next_observation() {
         1
     );
 }
+
+#[test]
+fn modal_open_and_close_preserve_canvas_pixels_and_childless_accessibility_node() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = gcu_fixture::ui::FixtureApp::default();
+    let expected = egui::Color32::from_rgb(95, 115, 135);
+    let mut canvas_bounds = None;
+    for phase in 0..3 {
+        if phase == 1 {
+            app.state.open_modal(EventSource::Keyboard);
+        } else if phase == 2 {
+            app.state.close_modal(true, EventSource::Keyboard);
+        }
+        for frame_index in 0..12 {
+            let output = frame(
+                &ctx,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280., 900.),
+                    )),
+                    time: Some((phase * 12 + frame_index) as f64),
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            if frame_index != 11 {
+                continue;
+            }
+            let update = output.platform_output.accesskit_update.as_ref().unwrap();
+            assert_acyclic(update);
+            let canvas = &update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.label() == Some("grid_canvas"))
+                .unwrap()
+                .1;
+            assert_eq!(canvas.role(), accesskit::Role::Image);
+            assert!(canvas.children().is_empty());
+            let bounds = canvas.bounds().unwrap();
+            assert_eq!(*canvas_bounds.get_or_insert(bounds), bounds);
+            assert_eq!(update.nodes.iter().any(|(_, n)| n.is_modal()), phase == 1);
+            // Sample well inside cell (0,0), away from its border and text.
+            // Check the final tessellated paint order, so a dim modal backdrop
+            // cannot pass merely because the original grid shape still exists.
+            let point = egui::pos2(bounds.x0 as f32 + 6., bounds.y0 as f32 + 6.);
+            assert_eq!(flat_paint_at(&ctx, output, point), Some(expected));
+        }
+    }
+}
+
+fn flat_paint_at(
+    ctx: &egui::Context,
+    output: egui::FullOutput,
+    point: egui::Pos2,
+) -> Option<egui::Color32> {
+    let mut painted = None;
+    for primitive in ctx.tessellate(output.shapes, output.pixels_per_point) {
+        if !primitive.clip_rect.contains(point) {
+            continue;
+        }
+        if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
+            for indices in mesh.indices.as_chunks::<3>().0 {
+                let vertices =
+                    [indices[0], indices[1], indices[2]].map(|i| mesh.vertices[i as usize]);
+                let a = vertices[1].pos - vertices[0].pos;
+                let b = vertices[2].pos - vertices[0].pos;
+                if (a.x * b.y - a.y * b.x).abs() <= f32::EPSILON {
+                    continue;
+                }
+                let sides = [0, 1, 2].map(|i| {
+                    let edge = vertices[(i + 1) % 3].pos - vertices[i].pos;
+                    let offset = point - vertices[i].pos;
+                    edge.x * offset.y - edge.y * offset.x
+                });
+                if sides.iter().all(|s| *s >= 0.) || sides.iter().all(|s| *s <= 0.) {
+                    assert!(vertices.iter().all(|v| v.uv == egui::epaint::WHITE_UV && v.color == vertices[0].color), "sample must stay inside a flat painted region");
+                    if vertices[0].color != egui::Color32::TRANSPARENT {
+                        painted = Some(vertices[0].color);
+                    }
+                }
+            }
+        }
+    }
+    painted
+}

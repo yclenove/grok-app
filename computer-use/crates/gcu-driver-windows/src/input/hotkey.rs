@@ -13,9 +13,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Preserve the existing startup ceiling; diagnostics distinguish scheduling,
-// pending FFI and missing proofs before any timeout change is considered.
-pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_millis(250);
+// One-time setup includes scheduling and native probe delivery (226ms observed
+// on windows-2022). Armed Stop/health leases still use the 100ms watchdog.
+pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const STARTUP_STEP_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(windows)]
+pub(crate) const HOTKEY_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 
 mod fake;
 #[cfg(test)]
@@ -96,14 +99,52 @@ pub struct GuardEvents {
     reason: Mutex<Option<String>>,
     startup: Mutex<BTreeMap<&'static str, (u64, String)>>,
     startup_started: Instant,
+    startup_step: Mutex<Option<(&'static str, Instant, Duration)>>,
+    time: Arc<dyn MonotonicTime>,
     signal: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl GuardEvents {
+    /// Accept only a fresh pair of tagged injected hook callbacks. A slow first
+    /// setup probe may be replaced within the startup budget; once armed, the
+    /// same 100ms proof lease applies throughout all input actions.
+    pub fn confirm_hook_proofs(
+        &self,
+        keyboard: Option<Instant>,
+        mouse: Option<Instant>,
+    ) -> std::result::Result<(), String> {
+        if let (Some(keyboard), Some(mouse)) = (keyboard, mouse) {
+            let at = keyboard.min(mouse);
+            if self.time.now().saturating_duration_since(at) > watchdog::HEARTBEAT_TIMEOUT {
+                if self.armed.load(Ordering::Acquire) {
+                    return Err("low-level hook probe expired (possibly silently removed)".into());
+                }
+            } else {
+                self.clock.confirm(at);
+            }
+        }
+        Ok(())
+    }
+    /// Bound one setup stage independently of the overall startup deadline.
+    /// The FFI-free watchdog enforces this even while the native thread is stuck.
+    pub fn startup_step(&self, stage: &'static str, limit: Duration) {
+        self.check_startup_deadline();
+        if !self.armed.load(Ordering::Acquire) {
+            *self.startup_step.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((stage, self.time.now(), limit));
+        }
+    }
     /// Record native setup/probe facts before entering FFI. A startup timeout
     /// retains pending calls and observed Win32 results, without input payloads.
     pub fn startup_progress(&self, stage: &'static str, detail: impl Into<String>) {
+        if self.armed.load(Ordering::Acquire) {
+            return;
+        }
         let detail = detail.into();
-        let elapsed_ms = self.startup_started.elapsed().as_millis() as u64;
+        let elapsed_ms = self
+            .time
+            .now()
+            .saturating_duration_since(self.startup_started)
+            .as_millis() as u64;
         let changed = {
             let mut facts = self.startup.lock().unwrap_or_else(|p| p.into_inner());
             if facts.get(stage).map(|(_, detail)| detail) != Some(&detail)
@@ -144,6 +185,7 @@ impl GuardEvents {
     }
     /// True only while both hook proofs and the hotkey pump are fresh.
     pub fn available(&self) -> bool {
+        self.check_startup_deadline();
         let available = !self.failed.load(Ordering::Acquire)
             && self.heartbeat.alive()
             && self.hotkey_heartbeat.alive()
@@ -152,6 +194,23 @@ impl GuardEvents {
             self.armed.store(true, Ordering::Release);
         }
         available
+    }
+    fn check_startup_deadline(&self) {
+        if !self.armed.load(Ordering::Acquire) && !self.failed.load(Ordering::Acquire) {
+            let now = self.time.now();
+            let step = *self.startup_step.lock().unwrap_or_else(|p| p.into_inner());
+            let expired =
+                step.filter(|(_, at, limit)| now.saturating_duration_since(*at) >= *limit);
+            if let Some((stage, _, limit)) = expired {
+                self.fail(format!("Stop listener startup stage {stage} timed out after {}ms; last native facts: {}", limit.as_millis(), self.startup_snapshot()));
+            } else if now.saturating_duration_since(self.startup_started) >= STARTUP_TIMEOUT {
+                self.fail(format!(
+                    "Stop listener startup/FFI timed out after {}ms; last native facts: {}",
+                    STARTUP_TIMEOUT.as_millis(),
+                    self.startup_snapshot()
+                ));
+            }
+        }
     }
     pub(super) fn check_health(&self) {
         if !self.available() && self.armed.load(Ordering::Acquire) {
@@ -190,9 +249,9 @@ impl GuardEvents {
         }
     }
 }
-/// Owns two bounded parent threads: Win32 pump and FFI-free health watchdog.
+/// Owns bounded parent monitoring threads and an FFI-free health watchdog.
 /// Drop signals exit without joining a possibly stuck native call. A stuck pump
-/// is never replaced with unbounded new threads. Start waits at most 250ms;
+/// is never replaced with unbounded new threads. Start waits at most three seconds;
 /// foreground remains disabled until both hook proofs and hotkey are healthy.
 pub struct SafetyGuard {
     events: Arc<GuardEvents>,
@@ -209,6 +268,9 @@ impl SafetyGuard {
         guard
             .events
             .startup_progress("listener_thread", "scheduled");
+        guard
+            .events
+            .startup_step("listener_thread", STARTUP_STEP_TIMEOUT);
         let events = guard.events.clone();
         let close = guard.close.clone();
         if config.validate().is_err() {
@@ -275,6 +337,7 @@ impl SafetyGuard {
         guard
     }
     fn new(latch: Arc<dyn StopLatch>, time: Arc<dyn MonotonicTime>) -> Arc<Self> {
+        let startup_started = time.now();
         let events = Arc::new(GuardEvents {
             clock: Arc::new(PhysicalClock::with_time(time.clone())),
             heartbeat: Heartbeat::with_time(time.clone()),
@@ -285,7 +348,9 @@ impl SafetyGuard {
             armed: AtomicBool::new(false),
             reason: Mutex::default(),
             startup: Mutex::default(),
-            startup_started: Instant::now(),
+            startup_started,
+            startup_step: Mutex::default(),
+            time,
             signal: Mutex::default(),
         });
         let close = Arc::new(AtomicBool::new(false));
