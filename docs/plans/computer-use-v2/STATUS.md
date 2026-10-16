@@ -27,7 +27,7 @@
 | P1-05 | macOS 语义动作 | P1-03 | 2.5d | done | cu2/P1-05-ax-actions |  | 2026-10-13 | Press 回退链 AXPress→AXConfirm→AXOpen→选中行→子孙；不用 AXRaise/Focus 冒充点击；unknown 不重试；SetValue 仅 settable；SelectText/ScrollElement；macOS 真机夹具契约 not_run |
 | P1-06 | macOS 定向事件 / SkyLight | P1-04、S-02 | 3d | done | cu2/P1-06-mac-input |  | 2026-10-14 | 按 ADR 0006：postToPid + 字段 51 + dlsym CGEventSetWindowLocation，运行时探测与“实际到达”校验；Chromium 后台声明不可用且不升级；SkyLight 在 macos-private-spi 后运行时探测；InputLedger；真机后台点击/Chrome 遮挡/bench not_run(无授权 Mac) |
 | P1-07 | macOS 文本输入与剪贴板 | P1-06 | 1.5d | done | cu2/P1-07-mac-text |  | 2026-10-15 | NSPasteboard changeCount/内容/焦点校验；恢复不覆盖外来内容；敏感/高风险文本拒回退(复用 gcu-core policy::clipboard)；Unicode 经 CGEvent 字符串事件分块；Fake 任意平台测试；4 项真机用例待在 Mac 上跑 |
-| P1-08 | macOS 守卫 / 热键 / 前台 | P1-06、P0-08 | 1.5d | todo |  |  |  |  |
+| P1-08 | macOS 守卫 / 热键 / 前台 | P1-06、P0-08 | 1.5d | done | cu2/P1-08-mac-guards |  | 2026-10-15 | 物理/合成输入区分的活动时钟(不可用→None)；Stop 热键；≤100ms 锁存/≤500ms 释放/≤5s watchdog(可注入时钟)；前台激活核验；失效禁依赖路线；真机/TCC 撤销/物理热键 not_run |
 | P1-09 | macOS 契约测试与冒烟 | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08 | 1.5d | todo |  |  |  | 需自托管 Mac runner |
 | P2-01 | Windows 发现 / 身份 / 虚拟桌面 | P0-05 | 2d | done | cu2/P2-01-windows-discovery |  | 2026-10-13 | 34测试；WinGate 统一门禁(引擎提升/高完整性目标/安全桌面)；真实 Windows 冒烟 ignored(not_run) |
 | P2-02 | Windows UIA 树 | P2-01 | 3d | done | cu2/P2-02-uia-tree |  | 2026-10-13 | 常驻 MTA + CacheRequest 批量取属性；2s/5000 节点上限并设置 RawTree.incomplete；三类事件订阅 Drop 反注册；终端/IDE 启发式；真机冒烟(记事本/资源管理器/设置)not_run |
