@@ -1,0 +1,9 @@
+<schemalist>
+  <schema id="org.grok.computer-use.windows" path="/org/grok/computer-use/windows/">
+    <key name="activation-owner" type="s">
+      <default>''</default>
+      <summary>Trusted engine unique D-Bus owner</summary>
+      <description>Empty disables activation. Only trusted user setup may bind the current engine unique owner; never use a well-known name or accept model requests to change this.</description>
+    </key>
+  </schema>
+</schemalist>
