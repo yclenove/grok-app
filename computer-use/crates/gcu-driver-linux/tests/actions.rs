@@ -152,7 +152,12 @@ async fn test_set_value_editable_and_not_settable() {
             &cancel,
         )
         .await;
-    assert!(matches!(err.unwrap_err(), DriverError::NotSettable));
+    assert!(matches!(
+        err.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    ));
 
     let ok_slider = driver
         .perform(
@@ -174,7 +179,12 @@ async fn test_set_value_editable_and_not_settable() {
             &cancel,
         )
         .await;
-    assert!(matches!(err_slider.unwrap_err(), DriverError::NotSettable));
+    assert!(matches!(
+        err_slider.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    ));
 }
 
 #[tokio::test]
@@ -767,7 +777,9 @@ async fn live_actions_fixture_set_value_on_name_field() {
         .await;
     assert_eq!(
         text_res.unwrap_err(),
-        DriverError::NotSettable,
+        DriverError::NotSettable {
+            maybe_executed: false
+        },
         "non-EditableText field correctly returns NotSettable"
     );
 }

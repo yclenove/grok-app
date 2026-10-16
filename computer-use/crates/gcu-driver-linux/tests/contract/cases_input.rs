@@ -317,7 +317,12 @@ pub async fn test_c07_set_value_textfield(
             &cancel,
         )
         .await;
-    assert_eq!(res.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        res.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
 
     Ok(ContractOutcome::Skipped(
         "AT-SPI EditableText interface unsupported by egui/accesskit fixture text fields (returns NotSettable)",

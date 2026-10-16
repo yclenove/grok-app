@@ -73,6 +73,26 @@ pub async fn perform<S: AxSource>(
     cancel: &Cancel,
     deadline: Duration,
 ) -> Result<Delivery> {
+    perform_clocked(
+        source,
+        req,
+        cancel,
+        deadline,
+        &crate::input::clock::RuntimeClock::default(),
+    )
+    .await
+}
+
+/// [`perform`] with an injected clock. Production uses [`crate::input::clock::RuntimeClock`].
+///
+/// Readback waits on `clock` only. Cancel and the driver deadline still apply.
+pub async fn perform_clocked<S: AxSource>(
+    source: &S,
+    req: &DriverAction,
+    cancel: &Cancel,
+    deadline: Duration,
+    clock: &dyn crate::input::clock::Clock,
+) -> Result<Delivery> {
     if cancel.is_cancelled() {
         return Err(DriverError::Cancelled {
             maybe_executed: false,
@@ -90,7 +110,7 @@ pub async fn perform<S: AxSource>(
             secondary(source, &node, action, &budget).await
         }
         DriverAction::SetValue { value, .. } => {
-            super::value::set_value(source, &node, value, &budget).await
+            super::value::set_value(source, &node, value, &budget, clock).await
         }
         DriverAction::SelectText { range, .. } => {
             super::text::select_text(source, &node, *range, &budget).await
@@ -136,6 +156,18 @@ impl<'a> Budget<'a> {
         }
         self.inflight.store(false, Ordering::Relaxed);
     }
+
+    pub(super) fn remaining(&self) -> Duration {
+        self.deadline.saturating_sub(self.started.elapsed())
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(super) async fn until_cancel(&self) {
+        self.cancel.cancelled().await;
+    }
 }
 
 pub(super) async fn guarded<T>(
@@ -143,6 +175,7 @@ pub(super) async fn guarded<T>(
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
     if budget.cancel.is_cancelled() {
+        crate::diagnostics::note("CANCEL_REASON", "caller_cancel_token; between AX calls");
         return Err(DriverError::Cancelled {
             maybe_executed: budget.uncertain(),
         });

@@ -19,6 +19,8 @@ mod world;
 pub(crate) use reader::{AxToggleStore, RealAxSource};
 pub(crate) use text::RealText;
 pub(crate) use thread::AxThread;
+pub(crate) use thread::AX_CALL_TIMEOUT;
+pub(crate) use world::MESSAGING_TIMEOUT_SECS;
 
 use crate::api::{AxWindow, BundleFacts, CgWindow, MacApi, RunningApp, SpotlightHit};
 use gcu_core::driver::Result;

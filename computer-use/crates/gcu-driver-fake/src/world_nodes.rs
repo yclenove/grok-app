@@ -52,13 +52,17 @@ pub(crate) fn settable(node: &RawNode) -> Result<()> {
     if node.states.intersects(States::SETTABLE | States::EDITABLE) {
         Ok(())
     } else {
-        Err(DriverError::NotSettable)
+        Err(DriverError::NotSettable {
+            maybe_executed: false,
+        })
     }
 }
 pub(crate) fn text(node: &RawNode) -> Result<&str> {
     match &node.value {
         Some(NodeValue::Text(value)) => Ok(value),
-        _ => Err(DriverError::NotSettable),
+        _ => Err(DriverError::NotSettable {
+            maybe_executed: false,
+        }),
     }
 }
 pub(crate) fn replace_selection(

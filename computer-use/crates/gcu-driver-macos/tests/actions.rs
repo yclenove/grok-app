@@ -431,7 +431,12 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         &Cancel::default(),
     )
     .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        result.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
     assert_eq!(calls, ["refuse:not-settable"]);
 
     let (result, calls) = run(
@@ -445,7 +450,12 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         &Cancel::default(),
     )
     .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        result.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
     assert_eq!(calls, ["refuse:sensitive"]);
     assert!(calls.iter().all(|entry| !entry.contains("hunter2")));
 
@@ -462,7 +472,12 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         &Cancel::default(),
     )
     .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        result.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
     assert_eq!(calls, ["refuse:sensitive"]);
 
     let mut slider = field("AXSlider", true);
@@ -496,7 +511,9 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         )
         .await
         .unwrap_err(),
-        DriverError::NotSettable
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
     );
     assert_eq!(source.calls(), ["set:AXValue", "refuse:not-settable"]);
 
@@ -513,6 +530,29 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
     )
     .await;
     assert!(result.unwrap_err().maybe_executed());
+    assert_eq!(calls, ["set:AXValue"]);
+}
+
+#[tokio::test]
+async fn set_value_range_readback_accepts_the_written_number() {
+    let mut range = field("AXSlider", true);
+    range.value = Some(NodeValue::Range {
+        value: 10.0,
+        min: 0.0,
+        max: 100.0,
+    });
+    let (result, calls) = run(
+        range,
+        FakeAct::default(),
+        |el| DriverAction::SetValue {
+            el,
+            value: "80".into(),
+        },
+        DRIVER_DEADLINE,
+        &Cancel::default(),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Delivery::Accessibility);
     assert_eq!(calls, ["set:AXValue"]);
 }
 
@@ -732,6 +772,50 @@ async fn driver_press_does_not_raise_or_activate() {
     let state = api.state().unwrap();
     assert!(state.raises.is_empty());
     assert_eq!(state.frontmost, Some(11));
+}
+
+#[tokio::test]
+async fn driver_semantic_press_host_stopped_cancels_before_ax() {
+    use gcu_driver_macos::input::{
+        activity::ActivityMonitor,
+        clock::RuntimeClock,
+        hotkey::{Guards, SharedStopLatch},
+        FakeEvents,
+    };
+    let (_api, mut driver, _win) = session(true).await;
+    let source = Arc::new(FakeAxSource::default());
+    let node = button(1, &["AXPress"]);
+    let handle = source.handle(&node);
+    driver.inject_tree(source.clone(), node);
+    for stopped in [true, false] {
+        let clock = Arc::new(RuntimeClock::default());
+        let events = Arc::new(FakeEvents::ready());
+        events.set_guards(Arc::new(Guards::new(
+            clock.clone(),
+            Arc::new(ActivityMonitor::new(clock)),
+            Arc::new(SharedStopLatch::new(stopped)),
+            3000,
+        )));
+        driver.inject_events(events);
+        let result = driver
+            .perform(
+                &DriverAction::Press { el: handle.clone() },
+                &Cancel::default(),
+            )
+            .await;
+        if stopped {
+            assert_eq!(
+                result,
+                Err(DriverError::Cancelled {
+                    maybe_executed: false
+                })
+            );
+            assert!(source.calls().is_empty());
+        } else {
+            assert_eq!(result, Ok(Delivery::Accessibility));
+            assert_eq!(source.calls(), ["perform:AXPress"]);
+        }
+    }
 }
 
 #[tokio::test]

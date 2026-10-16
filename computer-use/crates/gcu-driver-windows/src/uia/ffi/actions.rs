@@ -168,7 +168,9 @@ impl Guard<'_> {
             || (writing && props.read_only != Some(false))
         {
             return Err(if writing {
-                DriverError::NotSettable
+                DriverError::NotSettable {
+                    maybe_executed: false,
+                }
             } else {
                 DriverError::ElementNotActionable
             });

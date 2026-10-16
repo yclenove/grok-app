@@ -23,7 +23,7 @@ pub mod tree;
 mod value;
 
 pub(crate) use actions::is_semantic;
-pub use actions::perform;
+pub use actions::{perform, perform_clocked};
 #[cfg(target_os = "macos")]
 pub use events::ObserverPool;
 pub use events::{parse_window_pid, AxEventSource, EventHub, FakeAxEvents, RunLoopControl};
@@ -41,3 +41,4 @@ pub use toggles::{
 pub use tree::{
     build_raw_tree, map_ax_states, MAX_NODES_CEILING, RENDER_BYTE_CAP, TREE_BUILD_TIMEOUT,
 };
+pub use value::{READBACK_BUDGET, READBACK_GAP};

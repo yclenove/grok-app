@@ -36,7 +36,18 @@ fn every_driver_error_maps_to_a_protocol_code() {
             DriverError::ElementNotActionable,
             ErrorCode::ElementNotActionable,
         ),
-        (DriverError::NotSettable, ErrorCode::NotSettable),
+        (
+            DriverError::NotSettable {
+                maybe_executed: false,
+            },
+            ErrorCode::NotSettable,
+        ),
+        (
+            DriverError::NotSettable {
+                maybe_executed: true,
+            },
+            ErrorCode::NotSettable,
+        ),
         (DriverError::OutOfBounds, ErrorCode::OutOfBounds),
         (
             DriverError::InvalidRequest,
@@ -79,6 +90,14 @@ fn gate_errors_prove_zero_effects() {
             "{error} must not claim a possible effect"
         );
     }
+    assert!(!DriverError::NotSettable {
+        maybe_executed: false
+    }
+    .maybe_executed());
+    assert!(DriverError::NotSettable {
+        maybe_executed: true
+    }
+    .maybe_executed());
 }
 
 #[test]

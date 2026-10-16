@@ -10,7 +10,9 @@ async fn every_pattern_absent_or_pre_cancelled_has_zero_native_calls() {
         })
         .await;
         let expected = if matches!(pattern, Pattern::Value | Pattern::RangeValue) {
-            DriverError::NotSettable
+            DriverError::NotSettable {
+                maybe_executed: false,
+            }
         } else {
             DriverError::ElementNotActionable
         };
@@ -118,7 +120,9 @@ async fn set_value_becoming_readonly_during_preparation_has_zero_writes() {
             &Cancel::default()
         )
         .await,
-        Err(DriverError::NotSettable)
+        Err(DriverError::NotSettable {
+            maybe_executed: false
+        })
     );
     trigger.await.unwrap();
     assert!(source.action_calls().is_empty());

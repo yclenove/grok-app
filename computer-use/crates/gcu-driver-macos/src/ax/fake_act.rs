@@ -5,7 +5,7 @@
 //! [`super::source::FakeAxSource::delay`]; that delay is for tree reads.
 
 use gcu_core::driver::{DriverError, Result};
-use gcu_core::model::TextRange;
+use gcu_core::model::{NodeValue, TextRange};
 
 use super::actions::ax_action_name;
 use super::source::{AxCall, AxIdentity, FakeAct, FakeAxNode, FakeAxSource};
@@ -61,18 +61,26 @@ pub(super) async fn set_string(
     source: &FakeAxSource,
     node: &FakeAxNode,
     attribute: &str,
-    _value: &str,
+    value: &str,
 ) -> Result<AxCall> {
-    mutate(source, node, attribute).await
+    let call = mutate(source, node, attribute).await?;
+    if sticks(source, attribute, call)? {
+        store_text(source, node.id, value)?;
+    }
+    Ok(call)
 }
 
 pub(super) async fn set_number(
     source: &FakeAxSource,
     node: &FakeAxNode,
     attribute: &str,
-    _value: f64,
+    value: f64,
 ) -> Result<AxCall> {
-    mutate(source, node, attribute).await
+    let call = mutate(source, node, attribute).await?;
+    if sticks(source, attribute, call)? {
+        store_number(source, node.id, value)?;
+    }
+    Ok(call)
 }
 
 pub(super) async fn set_text_range(
@@ -234,6 +242,122 @@ fn root(source: &FakeAxSource) -> Result<Option<FakeAxNode>> {
         maybe_executed: false,
     })?;
     Ok(guard.clone())
+}
+
+pub(super) fn live_value(source: &FakeAxSource, id: u64) -> Option<Option<NodeValue>> {
+    let mut act = source.act.lock().ok()?;
+    if act.lag_left > 0 && act.pending_value.is_some() {
+        act.lag_left -= 1;
+        let current = stored_value(source, id);
+        if act.lag_left == 0 {
+            if let Some(pending) = act.pending_value.take() {
+                drop(act);
+                let _ = write_stored(source, id, pending);
+            }
+        }
+        return current;
+    }
+    drop(act);
+    stored_value(source, id)
+}
+
+fn stored_value(source: &FakeAxSource, id: u64) -> Option<Option<NodeValue>> {
+    let guard = source.root.lock().ok()?;
+    find(guard.as_ref()?, id).map(|node| node.value.clone())
+}
+
+fn sticks(source: &FakeAxSource, attribute: &str, call: AxCall) -> Result<bool> {
+    Ok(call == AxCall::Performed && attribute == "AXValue" && !act(source)?.ignore_value_write)
+}
+
+fn store_text(source: &FakeAxSource, id: u64, value: &str) -> Result<()> {
+    let next = NodeValue::Text(value.to_string());
+    if defer_write(source, next)? {
+        return Ok(());
+    }
+    update_value(source, id, |_| NodeValue::Text(value.to_string()))
+}
+
+fn store_number(source: &FakeAxSource, id: u64, value: f64) -> Result<()> {
+    let next = {
+        let guard = source.root.lock().map_err(|_| DriverError::Crashed {
+            maybe_executed: false,
+        })?;
+        let current = guard
+            .as_ref()
+            .and_then(|root| find(root, id))
+            .and_then(|node| node.value.clone());
+        match current {
+            Some(NodeValue::Range { min, max, .. }) => NodeValue::Range { value, min, max },
+            _ => NodeValue::Number(value),
+        }
+    };
+    if defer_write(source, next)? {
+        return Ok(());
+    }
+    update_value(source, id, |current| match current {
+        Some(NodeValue::Range { min, max, .. }) => NodeValue::Range { value, min, max },
+        _ => NodeValue::Number(value),
+    })
+}
+
+/// Hold the new value for [`FakeAct::value_lag_reads`] fresh reads.
+fn defer_write(source: &FakeAxSource, next: NodeValue) -> Result<bool> {
+    let mut act = act(source)?;
+    if act.value_lag_reads == 0 {
+        return Ok(false);
+    }
+    act.lag_left = act.value_lag_reads;
+    act.pending_value = Some(next);
+    Ok(true)
+}
+
+fn write_stored(source: &FakeAxSource, id: u64, next: NodeValue) -> Result<()> {
+    update_value(source, id, |_| next)
+}
+
+fn update_value(
+    source: &FakeAxSource,
+    id: u64,
+    next: impl FnOnce(Option<NodeValue>) -> NodeValue,
+) -> Result<()> {
+    let mut guard = source.root.lock().map_err(|_| DriverError::Crashed {
+        maybe_executed: false,
+    })?;
+    let Some(root) = guard.as_mut() else {
+        return Ok(());
+    };
+    if let Some(found) = find_mut(root, id) {
+        let updated = next(found.value.clone());
+        found.value = Some(updated);
+    }
+    Ok(())
+}
+
+fn find_mut(node: &mut FakeAxNode, id: u64) -> Option<&mut FakeAxNode> {
+    if node.id == id {
+        return Some(node);
+    }
+    if let Some(list) = node.visible_children.as_mut() {
+        for child in list.iter_mut() {
+            if let Some(found) = find_mut(child, id) {
+                return Some(found);
+            }
+        }
+    }
+    if let Some(list) = node.contents.as_mut() {
+        for child in list.iter_mut() {
+            if let Some(found) = find_mut(child, id) {
+                return Some(found);
+            }
+        }
+    }
+    for child in &mut node.children {
+        if let Some(found) = find_mut(child, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn find(node: &FakeAxNode, id: u64) -> Option<&FakeAxNode> {

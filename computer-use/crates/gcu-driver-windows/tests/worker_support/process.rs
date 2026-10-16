@@ -291,6 +291,7 @@ async fn supervisor_shutdown_and_drop_kill_child() {
     for explicit in [false, true] {
         let f = Fixture::new();
         let s = Supervisor::start(f.config("none")).await.unwrap();
+        #[cfg(target_os = "linux")]
         let pids = f.pids();
         if explicit {
             s.shutdown().await.unwrap();

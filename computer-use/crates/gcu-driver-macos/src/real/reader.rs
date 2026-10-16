@@ -133,6 +133,12 @@ impl AxSource for RealAxSource {
     async fn value(&self, node: &Self::Node) -> Result<Option<NodeValue>> {
         Ok(self.ensure(*node).await?.value)
     }
+    async fn fresh_value(&self, node: &Self::Node) -> Result<Option<NodeValue>> {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.remove(node);
+        }
+        self.value(node).await
+    }
     async fn description(&self, node: &Self::Node) -> Result<Option<String>> {
         Ok(self.ensure(*node).await?.description)
     }
@@ -277,6 +283,10 @@ impl AxSource for RealAxSource {
             })
             .await
     }
+
+    fn note(&self, entry: &str) {
+        crate::diagnostics::note("AX_FALLBACK", entry);
+    }
 }
 
 /// Writes `AXEnhancedUserInterface` and `AXManualAccessibility` on the AX thread.
@@ -314,8 +324,14 @@ fn read_toggle(world: &mut World, pid: u32, name: ToggleName) -> Result<Option<b
     let mut result: CFTypeRef = std::ptr::null();
     let cf = CFString::new(name.as_str());
     // SAFETY: app is the cached +1 application element. result is +1 on success.
-    let status =
-        unsafe { AXUIElementCopyAttributeValue(app, cf.as_concrete_TypeRef(), &mut result) };
+    let status = unsafe {
+        crate::diagnostics::ax_call(
+            "AXUIElementCopyAttributeValue",
+            (app) as usize,
+            name.as_str(),
+            || AXUIElementCopyAttributeValue(app, cf.as_concrete_TypeRef(), &mut result),
+        )
+    };
     if status == kAXErrorAPIDisabled {
         return Err(DriverError::PermissionMissing {
             permission: "accessibility".into(),
@@ -345,10 +361,17 @@ fn write_toggle(world: &mut World, pid: u32, name: ToggleName, value: bool) -> R
     // SAFETY: app is live. bit is a process-lifetime boolean singleton. The
     // call copies it and does not take ownership.
     let status = unsafe {
-        accessibility_sys::AXUIElementSetAttributeValue(
-            app,
-            cf.as_concrete_TypeRef(),
-            bit.as_CFTypeRef(),
+        crate::diagnostics::ax_call(
+            "AXUIElementSetAttributeValue",
+            (app) as usize,
+            name.as_str(),
+            || {
+                accessibility_sys::AXUIElementSetAttributeValue(
+                    app,
+                    cf.as_concrete_TypeRef(),
+                    bit.as_CFTypeRef(),
+                )
+            },
         )
     };
     if status == kAXErrorAPIDisabled {

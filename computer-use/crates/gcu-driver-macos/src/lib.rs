@@ -23,6 +23,7 @@ pub mod apps;
 pub mod ax;
 pub mod capture;
 mod catalog;
+pub mod diagnostics;
 mod discovery;
 mod driver;
 #[cfg(target_os = "macos")]

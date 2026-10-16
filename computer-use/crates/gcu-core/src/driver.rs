@@ -341,9 +341,15 @@ pub enum DriverError {
     /// Native control does not accept this action.
     #[error("element not actionable")]
     ElementNotActionable,
-    /// Native control cannot accept a value.
+    /// Native control cannot accept a value, or the readback never matched.
+    ///
+    /// `maybe_executed` is false when the write was refused. It is true when a
+    /// write was submitted and the value may already have been applied.
     #[error("element not settable")]
-    NotSettable,
+    NotSettable {
+        /// Whether a write may already have landed.
+        maybe_executed: bool,
+    },
     /// Physical-pixel point is outside the window.
     #[error("point out of bounds")]
     OutOfBounds,
@@ -388,7 +394,7 @@ impl DriverError {
             Self::StaleElement => C::StaleElement,
             Self::CapabilityUnavailable | Self::InvalidRequest => C::CapabilityUnavailable,
             Self::ElementNotActionable => C::ElementNotActionable,
-            Self::NotSettable => C::NotSettable,
+            Self::NotSettable { .. } => C::NotSettable,
             Self::OutOfBounds => C::OutOfBounds,
             Self::ElevationRequired => C::ElevationRequired,
             Self::PermissionMissing { .. } => C::PermissionMissing,
@@ -403,7 +409,8 @@ impl DriverError {
             Self::Timeout { maybe_executed }
             | Self::Crashed { maybe_executed }
             | Self::Cancelled { maybe_executed }
-            | Self::Native { maybe_executed, .. } => *maybe_executed,
+            | Self::Native { maybe_executed, .. }
+            | Self::NotSettable { maybe_executed } => *maybe_executed,
             _ => false,
         }
     }

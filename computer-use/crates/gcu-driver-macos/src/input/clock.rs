@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -43,6 +43,15 @@ impl Clock for RuntimeClock {
 pub struct FakeClock {
     millis: AtomicU64,
     changed: Notify,
+    waiters: AtomicUsize,
+}
+
+struct WaitCount<'a>(&'a AtomicUsize);
+
+impl Drop for WaitCount<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl FakeClock {
@@ -50,6 +59,11 @@ impl FakeClock {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Waiters currently blocked in [`Clock::wait_until`].
+    pub fn waiters(&self) -> usize {
+        self.waiters.load(Ordering::Acquire)
+    }
+
     /// Advance monotonically, saturating at the largest millisecond value.
     pub fn advance(&self, by: Duration) {
         let delta = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
@@ -68,11 +82,14 @@ impl Clock for FakeClock {
         Duration::from_millis(self.millis.load(Ordering::Acquire))
     }
     async fn wait_until(&self, deadline: Duration) {
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+        let _count = WaitCount(&self.waiters);
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.now() >= deadline {
+            let now = Duration::from_millis(self.millis.load(Ordering::Acquire));
+            if now >= deadline {
                 return;
             }
             changed.await;
