@@ -45,6 +45,16 @@ pub enum Outcome {
 }
 pub type CaseResult = Result<Outcome, String>;
 
+pub fn uipi_fixture(pid: Option<&str>, unavailable: Option<&str>) -> Result<u32, Outcome> {
+    if let Some(pid) = pid.and_then(|s| s.parse::<u32>().ok()).filter(|p| *p != 0) {
+        return Ok(pid);
+    }
+    match unavailable.filter(|reason| !reason.trim().is_empty()) {
+        Some(reason) => Err(Outcome::Skip(reason.into())),
+        None => Err(Outcome::NotRun("GCU_ELEVATED_PID must identify the launcher's disposable elevated fixture; no UAC automation".into())),
+    }
+}
+
 pub fn requires_foreground(id: &str) -> bool {
     matches!(
         id,
@@ -306,6 +316,42 @@ mod tests {
             (report.passed, report.skipped, report.not_run, report.failed),
             (1, 1, 1, 1)
         );
+    }
+    #[test]
+    fn uipi_unavailable_skips_only_control_case_preserving_remaining_rows() {
+        let reason = "TokenElevation=1; TokenIntegrityLevel=Medium; parent=High; SessionId=2";
+        for pid in [None, Some("0"), Some("invalid")] {
+            assert_eq!(
+                uipi_fixture(pid, Some(reason)),
+                Err(Outcome::Skip(reason.into()))
+            );
+        }
+        // A supplied PID still reaches the native integrity check, even if a
+        // stale skip reason is inherited. A missing launch is never a pass.
+        assert_eq!(uipi_fixture(Some("42"), Some(reason)), Ok(42));
+        for reason in [None, Some(""), Some("  ")] {
+            assert!(matches!(
+                uipi_fixture(None, reason),
+                Err(Outcome::NotRun(_))
+            ));
+        }
+        let mut report = Report::default();
+        for (id, _) in CASES {
+            report.record(
+                id,
+                if *id == "W-UIPI" {
+                    Ok(uipi_fixture(None, Some(reason)).unwrap_err())
+                } else {
+                    Ok(Outcome::Passed)
+                },
+            );
+        }
+        assert_eq!(
+            (report.passed, report.skipped, report.not_run, report.failed),
+            (28, 1, 0, 0)
+        );
+        assert_eq!(report.rows.len(), CASES.len());
+        assert_eq!(report.pending_snapshot().not_run, 0);
     }
     #[tokio::test]
     async fn panic_records_failed_row_without_losing_report_totals() {

@@ -399,12 +399,11 @@ pub async fn hotkey_conflict(
 }
 
 pub async fn uipi(_: &Fixture) -> CaseResult {
-    let Some(pid) = std::env::var("GCU_ELEVATED_PID")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|pid| *pid != 0)
-    else {
-        return Ok(Outcome::NotRun("GCU_ELEVATED_PID must identify the launcher's disposable elevated fixture; no UAC automation".into()));
+    let pid = std::env::var("GCU_ELEVATED_PID").ok();
+    let unavailable = std::env::var("GCU_UIPI_SKIP_REASON").ok();
+    let pid = match uipi_fixture(pid.as_deref(), unavailable.as_deref()) {
+        Ok(pid) => pid,
+        Err(outcome) => return Ok(outcome),
     };
     let api = RealWinApi::new().map_err(|e| e.to_string())?;
     let facts = unsafe_token::facts(pid)?;

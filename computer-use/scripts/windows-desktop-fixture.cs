@@ -1,9 +1,7 @@
-// CI-only elevated fixture: retain the parent's token, never activate its HWND.
+// CI-only independent token oracle for the parent's disposable elevated fixture.
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
-using System.Text;
 
 namespace Gcu
 {
@@ -40,22 +38,6 @@ namespace Gcu
                 return facts;
             }
             finally { if (token != IntPtr.Zero) CloseHandle(token); CloseHandle(process); }
-        }
-
-        public static Process StartUnactivatedFixture(string executable)
-        {
-            // CreateProcessW inherits this verified High parent primary token.
-            // ShellExecute/Start-Process may delegate to a Medium shell instead.
-            StartupInfo startup = new StartupInfo {
-                cb = (uint)Marshal.SizeOf(typeof(StartupInfo)), lpDesktop = @"WinSta0\Default",
-                dwFlags = 1, wShowWindow = 4 // STARTF_USESHOWWINDOW / SW_SHOWNOACTIVATE
-            };
-            ProcessInfo info;
-            Check(CreateProcessW(executable, new StringBuilder(QuoteArgument(executable)),
-                IntPtr.Zero, IntPtr.Zero, false, CREATE_UNICODE_ENVIRONMENT, IntPtr.Zero,
-                System.IO.Path.GetDirectoryName(executable), ref startup, out info), "CreateProcessW High fixture");
-            try { return Process.GetProcessById(checked((int)info.dwProcessId)); }
-            finally { CloseHandle(info.hThread); CloseHandle(info.hProcess); }
         }
     }
 }

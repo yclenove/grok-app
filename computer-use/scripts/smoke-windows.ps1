@@ -24,6 +24,7 @@ if ($DesktopChild) {
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-watch.ps1')
+. (Join-Path $PSScriptRoot 'windows-desktop-uipi.ps1')
 Add-Type -Path (@('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs','windows-desktop-fixture.cs') |
     ForEach-Object { Join-Path $PSScriptRoot $_ })
 
@@ -57,10 +58,11 @@ Write-Output "Desktop token: $diagnostic"
 # Only this disposable CI harness lowers its token; the engine gate is unchanged.
 if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
     $high = $null
+    $highDirectory = $null
     $acl = @{context=$null}
     $workspace = $null
     $payload = $null
-    foreach ($name in @('desktop-exit.json','desktop.log','contract.json','smoke.json','launch.json')) {
+    foreach ($name in @('desktop-exit.json','desktop.log','contract.json','smoke.json','launch.json','uipi-fixture.json')) {
         Remove-Item (Join-Path $OutputDir $name) -ErrorAction SilentlyContinue
     }
     try {
@@ -92,22 +94,11 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
             return $result
         }
         if ($Suite -ne 'Smoke') {
-            $highExe = Join-Path $workspace 'hi.exe'
-            Copy-Item $FixtureExe $highExe
-            $savedState = $env:GCU_FIXTURE_STATE
-            $savedActivation = $env:GCU_FIXTURE_NO_ACTIVATE
-            try {
-                $env:GCU_FIXTURE_STATE = Join-Path $payload.OutputDir 'high-state.json'
-                $env:GCU_FIXTURE_NO_ACTIVATE = '1'
-                $high = [Gcu.DesktopLauncher]::StartUnactivatedFixture($highExe)
-            } finally { $env:GCU_FIXTURE_STATE = $savedState; $env:GCU_FIXTURE_NO_ACTIVATE = $savedActivation }
-            $null = Wait-Oracle 'elevated fixture window' { $high.Refresh(); @{ exited=$high.HasExited; hwnd=$high.MainWindowHandle.ToInt64() } } { param($s) -not $s.exited -and $s.hwnd -ne 0 }
-            $ElevatedPid = $high.Id
-            $highToken = [Gcu.DesktopLauncher]::ReadFixtureToken($ElevatedPid)
-            Write-DesktopProgress "HIGH FIXTURE TOKEN: $highToken"
-            if ($highToken.IntegrityRid -lt 12288 -or $highToken.SessionId -ne $ExpectedSessionId) {
-                throw "elevated fixture token invalid: $highToken; parent $diagnostic"
-            }
+            $highDirectory = Join-Path $env:TEMP ('gh' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+            $uipi = Start-UipiFixture -FixtureExe $FixtureExe -Directory $highDirectory -OutputDir $payload.OutputDir `
+                -ParentFacts $facts -ExpectedSessionId $ExpectedSessionId
+            $high = $uipi.process
+            $ElevatedPid = $uipi.pid
         }
         # The selected profile is used exactly once; any timeout/failure is final.
         $request = @{Variant=$variant;Stage='suite';Workspace=$workspace;OutputDir=$payload.OutputDir;
@@ -138,6 +129,7 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
             }
         } finally {
             try {
+                if ($null -ne $highDirectory) { Remove-Item -LiteralPath $highDirectory -Recurse -Force -ErrorAction Continue }
                 if ($null -ne $payload) { Copy-DesktopReports $payload.OutputDir $OutputDir }
             } finally {
                 try { if ($null -ne $acl.context) { $acl.context.Dispose(); Write-DesktopProgress 'Desktop ACLs restored' } }
@@ -190,6 +182,11 @@ try {
     $env:GCU_CONTRACT_WORKER_EXE = Join-Path (Split-Path $WorkerExe -Parent) 'gcu-contract-worker.exe'
     $env:GCU_FIXTURE_EXE = $FixtureExe
     $env:GCU_ELEVATED_PID = "$ElevatedPid"
+    $env:GCU_UIPI_SKIP_REASON = ''
+    $uipiReport = Join-Path $OutputDir 'uipi-fixture.json'
+    if ($ElevatedPid -eq 0 -and (Test-Path -LiteralPath $uipiReport)) {
+        $env:GCU_UIPI_SKIP_REASON = (Get-Content -Raw -LiteralPath $uipiReport | ConvertFrom-Json).reason
+    }
     $env:GCU_CONTRACT_REPORT = Join-Path $OutputDir 'contract.json'
     if ($Suite -ne 'Smoke') {
         Write-DesktopProgress 'CONTRACT SUITE START: C01-C27, W-UIPI, W-HOTKEY; external fixture oracle; Skip reasons printed per row'

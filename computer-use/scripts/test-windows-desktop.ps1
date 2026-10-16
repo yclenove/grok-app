@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-watch.ps1')
+. (Join-Path $PSScriptRoot 'windows-desktop-uipi.ps1')
 
 function Assert-True([bool]$Value, [string]$Label) {
     if (-not $Value) { throw "assertion failed: $Label" }
@@ -97,6 +98,71 @@ foreach ($change in @(@{IsAdmin=$true}, @{IntegrityRid=12288}, @{IntegrityRid=40
 $diagnostic = Format-DesktopTokenFacts $facts
 foreach ($key in @('SessionId=2','IsAdmin=False','IntegrityLevel=Medium','UserInteractive=True')) {
     Assert-True ($diagnostic.Contains($key)) "diagnostic includes $key"
+}
+
+# Inject creation/token/window oracles: never start real processes or sleep here.
+$dir = Join-Path ([IO.Path]::GetTempPath()) ('wu' + [Guid]::NewGuid().ToString('N').Substring(0,6))
+$savedState = $env:GCU_FIXTURE_STATE; $savedActivation = $env:GCU_FIXTURE_NO_ACTIVATE
+try {
+    New-Item -ItemType Directory $dir | Out-Null
+    $source = Join-Path $dir 'fixture.exe'
+    'fixture stub' | Set-Content -Encoding UTF8 $source
+    $fixtureToken.IntegrityRid = 12288
+    $highParent = $highFacts.Clone(); $highParent.IsAdmin = $true
+    $fake = [pscustomobject]@{Id=7;HasExited=$false;MainWindowHandle=[IntPtr]42;Reads=0}
+    $fake | Add-Member ScriptMethod Refresh { $this.Reads++ }
+    $launches = [Collections.Generic.List[string]]::new()
+    $parentStart = {
+        param($executable,$workingDirectory)
+        Assert-True ((Split-Path $executable -Leaf) -ceq 'hi.exe' -and
+            (Split-Path $executable -Parent) -ceq $workingDirectory) 'High fixture uses its own absolute working directory'
+        Assert-True ($env:GCU_FIXTURE_NO_ACTIVATE -ceq '1' -and
+            $env:GCU_FIXTURE_STATE -ceq (Join-Path $dir 'high-state.json')) 'fixture environment targets only disposable state'
+        Assert-True ((Get-Content -Raw -LiteralPath $executable).Trim() -ceq 'fixture stub') 'original fixture copied before parent launch'
+        $launches.Add($executable)
+        return $fake
+    }
+    $env:GCU_FIXTURE_STATE = 'parent-state'; $env:GCU_FIXTURE_NO_ACTIVATE = 'parent-activation'
+    $result = Start-UipiFixture $source (Join-Path $dir 'high') $dir $highParent 2 -Start $parentStart `
+        -ReadToken { param($processId) Assert-True ($processId -eq 7) 'token oracle checks exact child PID'; $fixtureToken } `
+        -Tick { throw 'ready fixture must not wait' }
+    Assert-True ($result.pid -eq 7 -and $result.reason -ceq '' -and $fake.Reads -eq 1) 'High fixture admitted by token and HWND oracles'
+    Assert-True ($env:GCU_FIXTURE_STATE -ceq 'parent-state' -and $env:GCU_FIXTURE_NO_ACTIVATE -ceq 'parent-activation') 'parent fixture environment restored'
+    foreach ($case in @('medium','wrong-session','wrong-pid','query-failure','launch-failure','window-timeout','medium-parent')) {
+        $fixtureToken.IntegrityRid = 12288; $fixtureToken.IntegritySid = 'S-1-16-12288'
+        $fixtureToken.SessionId = 2; $fixtureToken.Pid = 7
+        $parent = $highParent.Clone(); $fake.MainWindowHandle = [IntPtr]42
+        if ($case -eq 'medium') { $fixtureToken.IntegrityRid = 8192; $fixtureToken.IntegritySid = 'S-1-16-8192' }
+        if ($case -eq 'wrong-session') { $fixtureToken.SessionId = 3 }
+        if ($case -eq 'wrong-pid') { $fixtureToken.Pid = 8 }
+        if ($case -eq 'window-timeout') { $fake.MainWindowHandle = [IntPtr]0 }
+        if ($case -eq 'medium-parent') { $parent.IntegrityRid = 8192 }
+        $clock = @{ms=0}
+        $result = Start-UipiFixture $source (Join-Path $dir $case) $dir $parent 2 -Start {
+            param($executable,$workingDirectory)
+            if ($case -eq 'launch-failure') { throw 'Start-Process Win32=5' }
+            & $parentStart $executable $workingDirectory
+        } -ReadToken {
+            param($processId)
+            if ($case -eq 'query-failure') { throw 'GetTokenInformation Win32=5' }
+            $fixtureToken
+        } -Now { $clock.ms } -Tick { $clock.ms += 10000 }
+        Assert-True ($result.pid -eq 0 -and $result.reason.Contains('High UIPI fixture unavailable:') -and
+            $result.reason.Contains('parent pid=') -and $result.reason.Contains('SessionId=2')) "unavailable $case returns control-case reason without aborting suite"
+        if ($case -eq 'medium') {
+            Assert-True ($result.reason.Contains('TokenElevation)=1') -and $result.reason.Contains('S-1-16-8192')) 'elevation bit alone never passes Medium token'
+        }
+        if ($case -eq 'window-timeout') { Assert-True ($result.reason.Contains('last oracle=') -and $clock.ms -eq 20000) 'window deadline uses injected clock and retains token/HWND oracle' }
+        $report = Get-Content -Raw (Join-Path $dir 'uipi-fixture.json') | ConvertFrom-Json
+        Assert-True ($report.pid -eq 0 -and $report.reason -ceq $result.reason) 'only UIPI prerequisite is recorded; main contract report remains untouched'
+        Assert-True (-not (Test-Path (Join-Path $dir 'contract.json'))) 'failed High launch never marks C01-C27 not_run'
+        Assert-True ($env:GCU_FIXTURE_STATE -ceq 'parent-state' -and $env:GCU_FIXTURE_NO_ACTIVATE -ceq 'parent-activation') 'environment restored on every unavailable fixture path'
+        if ($case -notin @('launch-failure','medium-parent')) { Assert-True ($result.process -eq $fake) 'unusable process remains owned for parent cleanup' }
+    }
+    Assert-True ($launches.Count -eq 6) 'one parent launch per scenario; no automatic replay'
+} finally {
+    $env:GCU_FIXTURE_STATE = $savedState; $env:GCU_FIXTURE_NO_ACTIVATE = $savedActivation
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
 }
 
 $clock = @{ms=0;reads=0}
