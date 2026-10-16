@@ -139,6 +139,50 @@ function Stop-SmokeApplication {
     }
 }
 
+function Get-SmokeIntegrityLabel {
+    param([int]$Rid)
+    if ($Rid -lt 4096) { return 'Untrusted' }
+    if ($Rid -lt 8192) { return 'Low' }
+    if ($Rid -lt 8448) { return 'Medium' }
+    if ($Rid -lt 12288) { return 'Medium Plus' }
+    if ($Rid -lt 16384) { return 'High' }
+    if ($Rid -lt 20480) { return 'System' }
+    return 'Protected'
+}
+
+function Stop-SmokeSettingsApplication {
+    param($Process,
+        [scriptblock]$Stop = { param($processId) Stop-Process -Id $processId -Force -ErrorAction Stop },
+        [scriptblock]$ReadToken = { param($processId) [Gcu.DesktopLauncher]::ReadFixtureToken($processId) },
+        [scriptblock]$Log = { param($message) Write-DesktopProgress $message })
+    if ($null -eq $Process) { return }
+    try { if (-not $Process.HasExited) { & $Stop $Process.Id } }
+    catch {
+        $failure = $_
+        $exception = $failure.Exception
+        $denied = $false
+        while ($null -ne $exception) {
+            if (($exception -is [ComponentModel.Win32Exception] -and $exception.NativeErrorCode -eq 5) -or
+                $exception -is [UnauthorizedAccessException]) { $denied = $true; break }
+            $exception = $exception.InnerException
+        }
+        $higher = $false
+        try {
+            $target = & $ReadToken $Process.Id
+            $harness = & $ReadToken $PID
+            $higher = $target.IntegrityRid -gt $harness.IntegrityRid
+            $facts = "target=$(Get-SmokeIntegrityLabel $target.IntegrityRid) [pid=$($Process.Id); TokenIntegrityLevel=$($target.IntegritySid); TokenElevation=$($target.TokenElevation)]; " +
+                "harness=$(Get-SmokeIntegrityLabel $harness.IntegrityRid) [pid=$PID; TokenIntegrityLevel=$($harness.IntegritySid); TokenElevation=$($harness.TokenElevation)]"
+        } catch { $facts = "cleanup token measurement failed: $($_.Exception.Message)" }
+        $reason = if ($denied -and $higher) { 'access denied (target integrity higher)' }
+            elseif ($denied) { 'access denied' } else { 'stop failed' }
+        & $Log "SMOKE Settings cleanup skipped: $reason; $facts; error_id=$($failure.FullyQualifiedErrorId); $($failure.Exception.Message)"
+    } finally {
+        try { $Process.Dispose() }
+        catch { & $Log "SMOKE Settings cleanup skipped: process Dispose failed; $($_.Exception.Message)" }
+    }
+}
+
 function Invoke-NotepadSmoke {
     param([string]$TempDir)
     $command = Get-Command notepad.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -209,7 +253,10 @@ function Invoke-SettingsSmoke {
         # ShellExecute may legitimately return no process for a protocol. Only
         # an actual launch error qualifies for Skip; otherwise observe the UI.
         if ($launch.reason) { return @{outcome='skipped';reason="$($launch.reason); $($availability.reason)"} }
-    } else { $launch.process.Dispose() }
+    } else {
+        try { $launch.process.Dispose() }
+        catch { Write-DesktopProgress "SMOKE Settings cleanup skipped: launch process Dispose failed; $($_.Exception.Message)" }
+    }
     $settingsProcess = $null
     try {
         $settingsProcess = Wait-Oracle 'Settings process' {
@@ -244,7 +291,7 @@ function Invoke-SettingsSmoke {
             @{query=$query;results=$results}
         } { param($s) $s.query -and $s.results.Count -gt 0 }
         return @{outcome='passed';reason='independent UIA query and newly displayed search results'}
-    } finally { Stop-SmokeApplication $settingsProcess }
+    } finally { Stop-SmokeSettingsApplication $settingsProcess }
 }
 
 function Invoke-WindowsSmoke {

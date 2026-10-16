@@ -10,22 +10,21 @@ use gcu_core::{
 use gcu_driver_windows::WindowsDriver;
 use std::time::Duration;
 
-async fn target(driver: &WindowsDriver, pid: u32) -> Result<WindowRef, String> {
+#[path = "../smoke/integrity.rs"]
+mod integrity;
+#[path = "../smoke/unsafe_token.rs"]
+mod unsafe_token;
+
+async fn target(driver: &WindowsDriver, pid: u32) -> Result<WindowRef, integrity::DiscoveryError> {
     use gcu_driver_windows::{api::WinApi, RealWinApi};
-    let api = RealWinApi::new().map_err(|e| e.to_string())?;
-    let path = api.process_path(pid).map_err(|e| e.to_string())?;
-    let app = driver
-        .resolve_app(&AppQuery(path))
-        .await
-        .map_err(|e| e.to_string())?;
+    let api = RealWinApi::new()?;
+    let path = api.process_path(pid)?;
+    let app = driver.resolve_app(&AppQuery(path)).await?;
     let hwnd = std::env::var("GCU_SMOKE_HWND")
         .ok()
         .map(|n| n.parse::<u64>().map_err(|e| format!("GCU_SMOKE_HWND: {e}")))
         .transpose()?;
-    let windows = driver
-        .list_windows(Some(&app))
-        .await
-        .map_err(|e| e.to_string())?;
+    let windows = driver.list_windows(Some(&app)).await?;
     let window = windows
         .into_iter()
         .find(|w| {
@@ -35,7 +34,7 @@ async fn target(driver: &WindowsDriver, pid: u32) -> Result<WindowRef, String> {
                 unsafe_desktop::pid(&w.id) == Some(pid)
             }
         })
-        .ok_or("exact smoke HWND missing")?;
+        .ok_or_else(|| "exact smoke HWND missing".to_owned())?;
     Ok(WindowRef { app, id: window.id })
 }
 fn pid() -> Result<u32, String> {
@@ -88,9 +87,23 @@ enum Scenario {
 
 async fn actions(driver: &WindowsDriver, scenario: Scenario) -> Result<Outcome, String> {
     let pid = pid()?;
-    let win = target(driver, pid)
-        .await
-        .map_err(|e| format!("exact executable/window discovery: {e}"))?;
+    let tokens = if matches!(scenario, Scenario::Settings) {
+        let tokens =
+            integrity::TokenPair::measure(&unsafe_token::NativeTokens, pid, std::process::id())?;
+        progress(format!("SMOKE PROBE Settings token integrity: {tokens}"));
+        Some(tokens)
+    } else {
+        None
+    };
+    let win = match target(driver, pid).await {
+        Ok(win) => win,
+        Err(error) => {
+            if let Some(tokens) = tokens {
+                return tokens.discovery_refusal(error).map(Outcome::Skip);
+            }
+            return Err(format!("exact executable/window discovery: {error}"));
+        }
+    };
     progress(format!(
         "SMOKE ASSERT: exact process executable resolved; requested PID={pid}; window={}",
         win.id

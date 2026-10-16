@@ -77,3 +77,51 @@ try {
     $env:GCU_SMOKE_REPORT = $savedSmokeReport
     Remove-Item -LiteralPath $smokeReport -ErrorAction SilentlyContinue
 }
+
+# Cleanup is diagnostic only, including access denied and Dispose failures.
+foreach ($targetRid in @(12288,8192)) {
+    $cleanup = @{logs=[Collections.Generic.List[string]]::new();stops=0;disposed=0;reads=[Collections.Generic.List[int]]::new()}
+    $process = [pscustomobject]@{Id=7;HasExited=$false;State=$cleanup}
+    $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.State.disposed++ }
+    $row = @{app='Settings';outcome='not_run';reason='pending'}
+    Invoke-SmokeCase $row -LogPrefix 'SELFTEST: ' -Save {} -Run {
+        try { return @{outcome='skipped';reason='native measured refusal'} }
+        finally {
+            Stop-SmokeSettingsApplication $process -Stop {
+                param($processId)
+                $cleanup.stops++
+                throw [ComponentModel.Win32Exception]::new(5)
+            } -ReadToken {
+                param($processId)
+                $cleanup.reads.Add($processId)
+                $rid = if ($processId -eq 7) { $targetRid } else { 8192 }
+                [pscustomobject]@{IntegrityRid=$rid;IntegritySid="S-1-16-$rid";TokenElevation=[int]($rid -gt 8192)}
+            } -Log { param($message) $cleanup.logs.Add($message) }
+        }
+    }
+    Assert-True ($row.outcome -eq 'skipped' -and $row.reason -eq 'native measured refusal') 'cleanup denial cannot override the native outcome'
+    Assert-True ($cleanup.stops -eq 1 -and $cleanup.disposed -eq 1 -and ($cleanup.reads -join ',') -eq "7,$PID") 'cleanup attempts stop once, measures both exact PIDs, and disposes'
+    $log = $cleanup.logs -join ';'
+    Assert-True ($log.Contains('cleanup skipped: access denied') -and $log.Contains('harness=Medium') -and
+        $log.Contains('TokenElevation=') -and $log.Contains('S-1-16-8192')) 'cleanup denial is explicit with measured token facts'
+    if ($targetRid -gt 8192) {
+        Assert-True ($log.Contains('access denied (target integrity higher)') -and $log.Contains('target=High')) 'higher integrity cleanup denial is labelled only with proof'
+    } else {
+        Assert-True (-not $log.Contains('target integrity higher') -and $log.Contains('target=Medium')) 'same-level denial is logged without inventing a cause'
+    }
+}
+$cleanup.logs.Clear()
+$process | Add-Member -Force -MemberType ScriptMethod -Name Dispose -Value { throw 'fake Dispose failure' }
+$row = @{app='Settings';outcome='not_run';reason='pending'}
+Invoke-SmokeCase $row -LogPrefix 'SELFTEST: ' -Save {} -Run {
+    try { throw 'original search assertion failed' }
+    finally {
+        Stop-SmokeSettingsApplication $process -Stop { param($processId) throw 'fake stop failure' } `
+            -ReadToken { param($processId) throw 'fake token query failure' } -Log { param($message) $cleanup.logs.Add($message) }
+    }
+}
+Assert-True ($row.outcome -eq 'failed' -and $row.reason -eq 'original search assertion failed') 'best-effort cleanup preserves the original assertion failure'
+$log = $cleanup.logs -join ';'
+Assert-True ($cleanup.logs.Count -eq 2 -and $log.Contains('fake stop failure') -and
+    $log.Contains('fake token query failure') -and $log.Contains('fake Dispose failure') -and
+    -not $log.Contains('target integrity higher')) 'unknown cleanup and measurement failures are all logged without guessed causes'
