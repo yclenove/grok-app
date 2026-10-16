@@ -58,6 +58,17 @@ async fn elicitation_cancel_error_or_invalid_answer_falls_back_to_host() {
             request["params"]["requestedSchema"],
             json!({"type":"object","properties":{"decision":{"type":"string","enum":["turn","session","always","deny"]}},"required":["decision"]})
         );
+        let meta = &request["params"]["_meta"];
+        assert_eq!(meta["gcu/app"]["key"], "fake.form");
+        assert_eq!(meta["gcu/app"]["image_path"], "/fixtures/form");
+        assert_eq!(meta["gcu/app"]["signature"], "unknown");
+        assert_eq!(meta["gcu/app"]["platform"], "linux");
+        assert!(meta["gcu/app"].get("icon").is_none());
+        assert_eq!(meta["gcu/risk"], "low");
+        assert!(meta["gcu/reason"].is_null());
+        let message = request["params"]["message"].as_str().unwrap();
+        assert!(message.contains("Fixture form"), "{message}");
+        assert!(!message.contains("App identity:"), "{message}");
         let mut response = response;
         response["jsonrpc"] = json!("2.0");
         response["id"] = request["id"].clone();
@@ -144,4 +155,30 @@ async fn launch_requires_authorization_and_respects_denylist_stop_and_foreground
     assert_eq!(r["structuredContent"]["error"]["code"], "app_denied");
     assert!(h.approvals.app_requests().is_empty());
     h.close().await;
+}
+
+#[test]
+fn elicitation_meta_strips_bidirectional_controls_from_model_reason() {
+    use gcu_host_api::{AppIdentity, AppInfo, ModelReason, Platform, Risk, SignatureState};
+    let app = AppInfo {
+        name: "Fixture form".into(),
+        pid: Some(1),
+        icon: None,
+        identity: AppIdentity {
+            platform: Platform::Linux,
+            key: "fake.form".into(),
+            team_id: None,
+            publisher: None,
+            sha256: None,
+            signature: SignatureState::Unknown,
+            image_path: "/fixtures/form".into(),
+        },
+    };
+    let reason = ModelReason::new("\u{202E}<pay>\nnow");
+    let meta = gcu_mcp::approval_meta(&app, Some(&reason), Risk::Low);
+    let text = meta["gcu/reason"].as_str().unwrap();
+    assert!(text.contains('\u{FFFD}'), "{text}");
+    assert!(!text.contains('\u{202E}'), "{text}");
+    assert!(!text.contains('\n'), "{text}");
+    assert!(text.contains("<pay>"), "{text}");
 }

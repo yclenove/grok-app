@@ -7,6 +7,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod approval;
 mod args;
 mod call;
 mod config;

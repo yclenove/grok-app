@@ -89,6 +89,11 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List or revoke one persistent approval.
+    #[command(
+        long_about = "List or revoke one persistent approval. There is no command that grants every application."
+    )]
+    Approvals(ApprovalArgs),
     /// Print the CLI version.
     Version,
     /// Explicitly resume a stopped MCP session from an interactive terminal.
@@ -110,6 +115,27 @@ pub(crate) enum Command {
         long_about = "Remove only grok-computer-use and hooks this installer owns. Pass the client positionally or as `--client`. Writing the Grok directory requires a typed TTY confirmation or --yes."
     )]
     Uninstall(InstallArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct ApprovalArgs {
+    #[command(subcommand)]
+    pub action: ApprovalAction,
+}
+
+#[derive(Subcommand, Clone)]
+pub(crate) enum ApprovalAction {
+    /// List persistent approvals.
+    List {
+        /// Print stored records as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one persistent approval by the key printed by list.
+    Revoke {
+        /// Storage key from `gcu approvals list`.
+        key: String,
+    },
 }
 
 #[derive(Args, Clone)]

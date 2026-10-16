@@ -53,13 +53,23 @@ Exit 2 covers a missing client, a refused confirmation, and a config file this
 command will not parse. Exit 10 covers an IO or `agy` failure. A refused command
 leaves the config unchanged.
 
-App observations/actions are denied with a P4 approval-window message until the
-real approval UI lands; MCP client elicitation cannot override this CLI Host.
+App observations and actions ask this trusted Host. When the client advertises
+form elicitation, the Host tries that inside `tools/call` first. An `always`
+answer from elicitation is not stored; only this Host writes `approvals.json`
+(mode 0600) after the user picks always. This build has no WebKit view. A desktop
+falls back to zenity, then kdialog, on Linux; macOS uses `osascript`; Windows uses
+a fixed PowerShell prompt. CI, a missing display, and `GCU_ALLOW_FAKE` deny
+instead of opening a window.
+
+`gcu approvals list` prints persistent grants. `gcu approvals list --json` prints
+the stored records. `gcu approvals revoke KEY` removes the key printed by list.
+There is no command that grants every app.
+
 Offline evaluation may use a debug build with `--features eval-autoapprove` and
 `GCU_APPROVAL=auto-allow-turn|auto-allow-session|auto-allow-always|auto-deny`.
-The minimal in-memory Host bounds auto-allow-always to the session; it creates no
-persistent grant. All release builds and builds without that feature reject any
-`GCU_APPROVAL` value with exit 2.
+`auto-allow-always` stays inside the session and does not write `approvals.json`.
+All release builds and builds without that feature reject any `GCU_APPROVAL`
+value with exit 2.
 
 `call` executes the existing MCP dispatcher in process. Actions first obtain an
 authorized fresh observation to establish indices and screenshot geometry.

@@ -16,15 +16,18 @@ mod params;
 mod result;
 mod server;
 mod stdio;
+mod ui_text;
 
 pub use catalog::{Profile, IMPLEMENTED_TOOLS};
 pub use connection::Connection;
+pub use elicitation::{app_decision_schema, approval_message, approval_meta};
 use gcu_core::driver::Driver;
 pub use params::validate_arguments;
 use rmcp::ServiceExt;
 pub use server::{Host, ServerConfig};
 use std::sync::{atomic::Ordering, Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
+pub use ui_text::{active_locale, audit, fill, locale_id, sanitize_plain, text, LOCALES};
 
 /// Startup/transport failure. Payloads and client parameters are never included.
 #[derive(Debug, thiserror::Error)]
