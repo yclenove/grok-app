@@ -234,6 +234,9 @@ jobs:
           if ($null -eq $test) { throw 'contract test artifact missing' }
           "GCU_CONTRACT_EXE=$($test.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Check desktop launcher syntax, ABI layout, and token admission policy
+        run: ./scripts/test-windows-desktop.ps1
+
       - name: Desktop session diagnostics (temporary)
         run: |
           "PSVersion=$($PSVersionTable.PSVersion) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"

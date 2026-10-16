@@ -7,31 +7,14 @@ param(
     [string]$OutputDir = (Join-Path $env:TEMP 'gcu-win'),
     [ValidateSet('All','Contract','Smoke')][string]$Suite = 'All',
     [switch]$DesktopChild,
-    [int]$ElevatedPid = 0
+    [int]$ElevatedPid = 0,
+    [int]$ExpectedSessionId = 0
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Injectable monotonic clock/wait: every wait is bounded and tests an external
-# predicate. No unconditional startup sleeps or retries of driver mutations.
-function Wait-Oracle {
-    param([string]$Label, [scriptblock]$Read, [scriptblock]$Accept,
-        [int]$TimeoutMs = 20000,
-        [scriptblock]$Now = { [double][Diagnostics.Stopwatch]::GetTimestamp() * 1000 / [Diagnostics.Stopwatch]::Frequency },
-        [scriptblock]$Tick = { Start-Sleep -Milliseconds 50 })
-    $start = & $Now
-    $last = $null
-    do {
-        try {
-            $last = & $Read
-            if (& $Accept $last) { return $last }
-        } catch { $last = $_.Exception.Message }
-        if ((& $Now) - $start -ge $TimeoutMs) {
-            throw "$Label timeout; last oracle=$($last | ConvertTo-Json -Compress -Depth 8)"
-        }
-        & $Tick
-    } while ($true)
-}
+. (Join-Path $PSScriptRoot 'windows-desktop.ps1')
+Add-Type -Path (Join-Path $PSScriptRoot 'windows-desktop-token.cs')
 
 function Invoke-NativeCase {
     param([string]$Name)
@@ -39,7 +22,9 @@ function Invoke-NativeCase {
     # on a wrong/cached artifact instead of reporting an unexecuted case passed.
     $listing = @(& $TestExe --list --ignored --exact $Name)
     if ($LASTEXITCODE -ne 0 -or "$($Name): test" -notin $listing) { throw "native test missing: $Name; listing=$listing" }
-    & $TestExe --exact $Name --ignored --nocapture --test-threads=1
+    # Force native stdout through PowerShell so the hidden child's transcript
+    # contains the per-case diagnostics forwarded to the parent.
+    & $TestExe --exact $Name --ignored --nocapture --test-threads=1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$Name failed: exit $LASTEXITCODE" }
 }
 
@@ -48,18 +33,25 @@ $OutputDir = (Resolve-Path $OutputDir).Path
 $TestExe = (Resolve-Path $TestExe).Path
 $WorkerExe = (Resolve-Path $WorkerExe).Path
 $FixtureExe = (Resolve-Path $FixtureExe).Path
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$admin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$facts = Get-DesktopTokenFacts
+if ($ExpectedSessionId -eq 0 -and -not $DesktopChild) { $ExpectedSessionId = $facts.SessionId }
+$diagnostic = Format-DesktopTokenFacts $facts
+Write-Output "Desktop token: $diagnostic"
 
-# Hosted Windows runners launch job steps elevated. This trusted test launcher
-# uses the existing interactive user's LIMITED scheduled-task token. The engine
-# keeps its production High/UIAccess rejection; no credentials or UAC clicks.
-if ($admin -and -not $DesktopChild) {
-    $task = 'gcu-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
+# UAC may be disabled on hosted runners: a Limited scheduled task can retain a
+# High admin token. Explicitly construct a restricted primary token instead.
+# Only this disposable CI harness lowers its token; the engine gate is unchanged.
+if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
     $high = $null
+    $child = $null
     $done = Join-Path $OutputDir 'desktop-exit.json'
-    Remove-Item $done -ErrorAction SilentlyContinue
+    foreach ($name in @('desktop-exit.json','desktop.log','contract.json','smoke.json')) {
+        Remove-Item (Join-Path $OutputDir $name) -ErrorAction SilentlyContinue
+    }
     try {
+        if (-not $facts.UserInteractive -or $facts.SessionId -le 0 -or $facts.Desktop -ine 'WinSta0\Default') {
+            throw "parent interactive Default desktop unavailable; $diagnostic"
+        }
         if ($Suite -ne 'Smoke') {
             $highExe = Join-Path $OutputDir 'hi.exe'
             Copy-Item $FixtureExe $highExe
@@ -71,23 +63,32 @@ if ($admin -and -not $DesktopChild) {
             $null = Wait-Oracle 'elevated fixture window' { $high.Refresh(); @{ exited=$high.HasExited; hwnd=$high.MainWindowHandle.ToInt64() } } { param($s) -not $s.exited -and $s.hwnd -ne 0 }
             $ElevatedPid = $high.Id
         }
-        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),'-DesktopChild',
-            '-TestExe',('"'+$TestExe+'"'),'-WorkerExe',('"'+$WorkerExe+'"'),'-FixtureExe',('"'+$FixtureExe+'"'),
-            '-OutputDir',('"'+$OutputDir+'"'),'-Suite',$Suite,'-ElevatedPid',$ElevatedPid) -join ' '
-        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments
-        $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
-        Register-ScheduledTask -TaskName $task -Action $action -Principal $principal -Settings $settings | Out-Null
-        Start-ScheduledTask -TaskName $task
-        $result = Wait-Oracle 'limited interactive suite' {
-            if (Test-Path $done) { Get-Content -Raw $done | ConvertFrom-Json }
-            else { @{ task=(Get-ScheduledTask -TaskName $task).State.ToString(); result=(Get-ScheduledTaskInfo -TaskName $task).LastTaskResult } }
-        } { param($s) $null -ne $s.PSObject.Properties['exit_code'] } -TimeoutMs 900000
-        Get-Content (Join-Path $OutputDir 'desktop.log')
+        $arguments = [string[]]@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-DesktopChild',
+            '-TestExe',$TestExe,'-WorkerExe',$WorkerExe,'-FixtureExe',$FixtureExe,
+            '-OutputDir',$OutputDir,'-Suite',$Suite,'-ElevatedPid',"$ElevatedPid",'-ExpectedSessionId',"$ExpectedSessionId")
+        $child = [Gcu.DesktopLauncher]::Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", $arguments, $ExpectedSessionId)
+        $last = Wait-Oracle "restricted interactive suite; parent $diagnostic" {
+            @{pid=$child.ProcessId;exited=$child.HasExited;done=(Test-Path $done)}
+        } { param($s) $s.exited } -TimeoutMs 900000
+        if (Test-Path (Join-Path $OutputDir 'desktop.log')) { Get-Content (Join-Path $OutputDir 'desktop.log') }
+        if (-not $last.done) { throw "child exited without done.json; exit=$($child.ExitCode); last oracle=$($last | ConvertTo-Json -Compress)" }
+        $result = Get-Content -Raw $done | ConvertFrom-Json
+        if ([int]$result.exit_code -ne $child.ExitCode) { throw "child exit mismatch: process=$($child.ExitCode); done=$($result.exit_code)" }
+        Write-Output "Child token: $(Format-DesktopTokenFacts $result.token_facts)"
         exit ([int]$result.exit_code)
+    } catch {
+        $reason = "restricted desktop launch failed: $($_.Exception.Message); parent $diagnostic"
+        Write-Output $reason
+        if (Test-Path (Join-Path $OutputDir 'desktop.log')) { Get-Content (Join-Path $OutputDir 'desktop.log') }
+        if (-not (Test-Path (Join-Path $OutputDir 'contract.json'))) { Write-DesktopNotRun $OutputDir $Suite $reason }
+        if (-not (Test-Path (Join-Path $OutputDir 'smoke.json'))) {
+            @('Notepad','Explorer','Settings') | ForEach-Object { @{app=$_;outcome='not_run';reason=$reason} } |
+                ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'smoke.json')
+            Write-Output "SMOKE SUMMARY: 0 passed, 0 skipped, 3 not_run, 0 failed; $reason"
+        }
+        exit 1
     } finally {
-        Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+        if ($null -ne $child) { try { $child.Stop() } finally { $child.Dispose() } }
         if ($null -ne $high -and -not $high.HasExited) { Stop-Process -Id $high.Id -Force }
         Remove-Item (Join-Path $OutputDir 'hi.exe') -ErrorAction SilentlyContinue
     }
@@ -105,9 +106,17 @@ foreach ($app in @('Notepad','Explorer','Settings')) {
 $activeSmoke = $null
 Start-Transcript -Path (Join-Path $OutputDir 'desktop.log') -Force | Out-Null
 try {
-    if ($admin -or -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
-        Write-Output 'SUMMARY: 0 passed, 0 skipped, 29 not_run, 0 failed; unelevated interactive desktop unavailable'
-        throw 'not_run: runner needs a limited token on an interactive Default desktop'
+    # Re-read in the child. Neither the API flags nor a parent's claim prove that
+    # the effective child token is Medium, non-admin, and on the intended desktop.
+    $facts = Get-DesktopTokenFacts
+    $diagnostic = Format-DesktopTokenFacts $facts
+    Write-Output "Verified desktop token: $diagnostic; ExpectedSessionId=$ExpectedSessionId"
+    whoami.exe /groups | Out-Host
+    if (-not (Test-DesktopTokenFacts $facts $ExpectedSessionId)) {
+        $reason = "unelevated interactive desktop unavailable; $diagnostic; ExpectedSessionId=$ExpectedSessionId"
+        Write-DesktopNotRun $OutputDir $Suite $reason
+        foreach ($row in $smokeRows) { $row.reason = $reason }
+        throw "not_run: $reason"
     }
     $env:GCU_DESKTOP = '1'
     $env:GCU_WORKER_EXE = $WorkerExe
@@ -212,6 +221,6 @@ try {
     Write-Output "SMOKE SUMMARY: $passed passed, 0 skipped, $notRun not_run, $failed failed"
     $smokeRows | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'smoke.json')
     Stop-Transcript | Out-Null
-    @{exit_code=$exitCode} | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'desktop-exit.json')
+    @{exit_code=$exitCode;token_facts=$facts} | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'desktop-exit.json')
 }
 exit $exitCode
