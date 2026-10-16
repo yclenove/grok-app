@@ -39,6 +39,9 @@ pub enum Error {
     /// The child exited before its process id could be read.
     #[error("engine exited before handshake")]
     Exited,
+    /// No authenticated engine peer is available for session RPC.
+    #[error("engine is not connected")]
+    Disconnected,
     /// The crash breaker is open. Disable the feature to clear it.
     #[error("engine restart breaker is open")]
     Tripped,

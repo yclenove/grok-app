@@ -92,7 +92,7 @@ impl LivePrivilege {
 }
 
 /// Process the supervisor can shut down without knowing the transport.
-pub trait EngineProcess: Send {
+pub trait EngineProcess: Send + Sync {
     /// Non-blocking exit poll. IO errors are crashes.
     fn poll_exit(&mut self) -> PollExit;
     /// Ask the engine to leave. The later exit is clean even if the RPC fails.
@@ -101,6 +101,10 @@ pub trait EngineProcess: Send {
     fn kill(&mut self);
     /// Live token, or [`LivePrivilege::normal`] where elevation does not apply.
     fn privilege(&self) -> LivePrivilege;
+    /// Authenticated RPC peer. Test doubles and a child that is not up return None.
+    fn peer(&self) -> Option<Peer> {
+        None
+    }
 }
 
 /// A connected engine. Drop kills the child and does not wait.
@@ -197,6 +201,10 @@ impl EngineProcess for EngineSession {
 
     fn privilege(&self) -> LivePrivilege {
         privilege_of(Some(self.child.id()))
+    }
+
+    fn peer(&self) -> Option<Peer> {
+        Some(self.peer.clone())
     }
 }
 

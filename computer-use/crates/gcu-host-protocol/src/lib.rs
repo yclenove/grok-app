@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 pub mod auth;
 pub mod codec;
+pub mod inject;
 pub mod messages;
 pub mod server;
 pub mod supervisor;

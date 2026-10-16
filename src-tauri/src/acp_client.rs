@@ -385,6 +385,8 @@ pub struct AcpClient {
     rewind_supported: ParkingMutex<Option<bool>>,
     /// OpenSSH alias this process was spawned with. Remote cwd is not local.
     ssh_alias: Option<String>,
+    /// Scheme-1 Computer Use MCP entry for the next session open. None clears a stale entry.
+    computer_use_entry: ParkingMutex<Option<Value>>,
 }
 
 /// Options applied at agent process start (CLI flags).
@@ -1101,6 +1103,7 @@ impl AcpClient {
             route_provider_id,
             rewind_supported: ParkingMutex::new(None),
             ssh_alias: ssh_alias.clone(),
+            computer_use_entry: ParkingMutex::new(None),
         });
 
         client.start_read_loop(Box::new(stdout));
@@ -1118,6 +1121,7 @@ impl AcpClient {
                         Ok(_) => {
                             let t = line.trim_end().to_string();
                             if !t.is_empty() {
+                                let t = gcu_host_protocol::inject::scrub(&t);
                                 c.push_stderr(&t);
                                 let _ = c.event_tx.send((None, AcpEvent::Stderr { line: t }));
                             }
@@ -1201,6 +1205,7 @@ impl AcpClient {
             route_provider_id: crate::providers::SESSION_PROVIDER_OFFICIAL.to_string(),
             rewind_supported: ParkingMutex::new(None),
             ssh_alias: None,
+            computer_use_entry: ParkingMutex::new(None),
         });
         client.start_read_loop(Box::new(read_half));
         Ok((client, event_rx))
@@ -1280,8 +1285,9 @@ impl AcpClient {
     }
 
     fn push_stderr(&self, line: &str) {
+        let line = gcu_host_protocol::inject::scrub(line);
         let mut buf = self.stderr_tail.lock();
-        buf.push(line.to_string());
+        buf.push(line);
         const MAX: usize = 40;
         if buf.len() > MAX {
             let drain = buf.len() - MAX;
@@ -1294,18 +1300,7 @@ impl AcpClient {
     }
 
     fn format_exit_detail(&self, head: &str) -> String {
-        let tail = self.stderr_joined();
-        if tail.is_empty() {
-            head.to_string()
-        } else {
-            // Cap length for UI
-            let t = if tail.len() > 800 {
-                format!("…{}", &tail[tail.len() - 800..])
-            } else {
-                tail
-            };
-            format!("{head}; stderr: {t}")
-        }
+        gcu_host_protocol::inject::crash_report(head, &self.stderr_joined())
     }
 
     fn fail_all_pending(&self, message: &str) {
@@ -1319,7 +1314,8 @@ impl AcpClient {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                warn!("acp non-json line: {e}: {}", &line[..line.len().min(200)]);
+                let shown = gcu_host_protocol::inject::scrub(&line[..line.len().min(200)]);
+                warn!("acp non-json line: {e}: {shown}");
                 return;
             }
         };
@@ -1333,7 +1329,7 @@ impl AcpClient {
                     pending_method = Some(p.method.clone());
                     pending_session = p.session_id.clone();
                     if let Some(err) = msg.get("error") {
-                        let full = format_jsonrpc_error(err);
+                        let full = gcu_host_protocol::inject::scrub(&format_jsonrpc_error(err));
                         warn!("acp ← {} id={id} error: {}", p.method, full);
                         let _ = p.tx.send(Err(full));
                     } else {
@@ -1344,7 +1340,7 @@ impl AcpClient {
                     // Race: prompt_complete fallback already resolved pending, but the
                     // real RPC error arrived later (official subscription / provider fails).
                     // Must still surface the error — do not drop as "unknown id".
-                    let full = format_jsonrpc_error(err);
+                    let full = gcu_host_protocol::inject::scrub(&format_jsonrpc_error(err));
                     warn!("acp late error response id={id} (pending already resolved): {full}");
                     let _ = self.event_tx.send((
                         None,
@@ -2344,6 +2340,11 @@ impl AcpClient {
     /// `session/fork` (standard ACP) then `_x.ai/session/fork` (Grok extension)
     /// before falling back to `session/new` — never `session/load` (would reuse
     /// the source id and violate `--fork-session` semantics).
+    /// Replace the Computer Use entry sent on the next `session/new`, `session/load`, or fork.
+    pub fn set_computer_use_entry(&self, entry: Option<Value>) {
+        *self.computer_use_entry.lock() = entry;
+    }
+
     pub async fn open_session(
         &self,
         resume_session_id: Option<&str>,
@@ -2378,8 +2379,14 @@ impl AcpClient {
         // hard budget falls back to `[]` so session/new|load always proceeds.
         // Official aux side-channel uses empty inject (no nested official-aux MCP).
         // SSH: do not scan the remote path as a local project.
-        let mcp_servers = if self.empty_mcp_servers || self.ssh_alias.is_some() {
-            if self.ssh_alias.is_some() {
+        let facts = gcu_host_protocol::inject::InjectFacts {
+            ssh: self.ssh_alias.is_some(),
+            scheduled: false,
+            remote_im: false,
+            side_channel: self.empty_mcp_servers,
+        };
+        let mcp_servers = if gcu_host_protocol::inject::omit_local_mcp_catalog(facts) {
+            if facts.ssh {
                 info!("acp session open empty mcpServers (ssh remote)");
             } else {
                 info!("acp session open empty mcpServers (side-channel)");
@@ -2388,7 +2395,7 @@ impl AcpClient {
         } else {
             let project_cwd = cwd.clone();
             let budget = crate::extensions::MCP_CONNECT_BUDGET;
-            let servers = match tokio::time::timeout(
+            let mut servers = match tokio::time::timeout(
                 budget,
                 tauri::async_runtime::spawn_blocking(move || {
                     crate::extensions::build_session_mcp_servers_for_connect(Some(
@@ -2413,8 +2420,13 @@ impl AcpClient {
                     serde_json::json!([])
                 }
             };
+            if let Some(entry) = self.computer_use_entry.lock().clone() {
+                if let Some(list) = servers.as_array_mut() {
+                    list.push(entry);
+                }
+            }
             let mcp_count = servers.as_array().map(|a| a.len()).unwrap_or(0);
-            info!("acp session open injecting mcpServers count={mcp_count}");
+            info!("{}", gcu_host_protocol::inject::catalog_log(mcp_count));
             servers
         };
 

@@ -7,7 +7,8 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::server::HostCallbacks;
+use crate::messages::{Empty, SessionId, SessionKind, SessionOpen, SessionOpened};
+use crate::server::{HostCallbacks, RPC_TIMEOUT};
 
 use super::{
     admit, baseline_policy, closed_callbacks, privilege_allowed, EngineChoice, EngineFacts,
@@ -164,6 +165,49 @@ impl<L: Launch> Control<L> {
                 }
             };
         }
+    }
+
+    /// Open one local MCP session. The engine mints the bearer; this call does not log it.
+    ///
+    /// Five-second RPC budget. Missing peer is [`Error::Disconnected`].
+    pub async fn open_local_endpoint(&self, session_id: &str) -> Result<SessionOpened, Error> {
+        let peer = self
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.peer())
+            .ok_or(Error::Disconnected)?;
+        peer.call(
+            "engine.session.open",
+            &SessionOpen {
+                session_id: session_id.to_owned(),
+                kind: SessionKind::Local,
+            },
+            RPC_TIMEOUT,
+        )
+        .await
+        .map_err(Error::Handshake)
+    }
+
+    /// Close one engine session so its HTTP bearer stops working.
+    ///
+    /// Five-second RPC budget. Missing peer is [`Error::Disconnected`].
+    pub async fn close_endpoint(&self, session_id: &str) -> Result<(), Error> {
+        let peer = self
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.peer())
+            .ok_or(Error::Disconnected)?;
+        let _: Empty = peer
+            .call(
+                "engine.session.close",
+                &SessionId {
+                    session_id: session_id.to_owned(),
+                },
+                RPC_TIMEOUT,
+            )
+            .await
+            .map_err(Error::Handshake)?;
+        Ok(())
     }
 
     async fn start(&mut self, now_ms: u64) -> Result<(), Error> {
