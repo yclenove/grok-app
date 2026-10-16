@@ -78,6 +78,12 @@ opt-level = 3
 [profile.dev.package.simd-adler32]
 opt-level = 3
 
+# The redacted-image reduction loop (resize + PNG re-encode until under the byte budget) lives in
+# gcu-core and is per-pixel; unoptimized it exceeds the product's 5s file/image ceiling on slower
+# hosts. Optimize only this crate in dev/test; its code stays debuggable via debug info.
+[profile.dev.package.gcu-core]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
