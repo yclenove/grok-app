@@ -192,6 +192,17 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             let session = connection.session();
             let lifecycle = connection.lifecycle();
             lifecycle.set_idle_timeout(std::time::Duration::from_secs(turn_idle_secs));
+            // Register SIGINT/SIGTERM before the control directory appears: the directory is the
+            // readiness signal for everything outside this process, so a Stop signal sent once it
+            // exists must never hit the default action and kill the process without a latch.
+            #[cfg(unix)]
+            let (mut interrupt, mut term) = {
+                use tokio::signal::unix::{signal, SignalKind};
+                (
+                    signal(SignalKind::interrupt()).ok(),
+                    signal(SignalKind::terminate()).ok(),
+                )
+            };
             let control = crate::resume::Control::start_with_lifecycle(
                 session.clone(),
                 host.activity.clone(),
@@ -202,15 +213,16 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             // SIGINT/SIGTERM latch Stop and release input independently of stdio.
             let activity = host.activity.clone();
             let stop_task = tokio::spawn(async move {
-                #[cfg(unix)]
-                let mut term = {
-                    use tokio::signal::unix::{signal, SignalKind};
-                    signal(SignalKind::terminate()).ok()
-                };
                 loop {
                     #[cfg(unix)]
                     tokio::select! {
-                        _ = tokio::signal::ctrl_c() => (),
+                        _ = async {
+                            if let Some(s) = &mut interrupt {
+                                s.recv().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => (),
                         _ = async {
                             if let Some(s) = &mut term {
                                 s.recv().await;
