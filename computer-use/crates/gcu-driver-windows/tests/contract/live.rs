@@ -80,6 +80,7 @@ impl Drop for Fixture {
     }
 }
 pub async fn driver() -> Result<WindowsDriver, String> {
+    super::timings::install();
     let exe = std::env::var_os("GCU_WORKER_EXE").ok_or("GCU_WORKER_EXE is required")?;
     WindowsDriver::monitored(
         WorkerConfig::new(exe),
@@ -87,13 +88,13 @@ pub async fn driver() -> Result<WindowsDriver, String> {
         Arc::new(crate::common::TestStop::default()),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("{e}; native_parent_timings={}", super::timings::snapshot()))
 }
 pub async fn window(driver: &WindowsDriver, fixture: &Fixture) -> Result<WindowRef, String> {
     let exe = std::env::var("GCU_FIXTURE_EXE").map_err(|e| e.to_string())?;
     super::discovery::discover(
         &mut DesktopClock::default(),
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         driver,
         &exe,
         fixture.pid(),

@@ -167,12 +167,15 @@ impl WinApi for RealWinApi {
         security::security(pid)
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
+        let timing = crate::timing::Timing::start("enum_windows_lock");
         // Only HWND metadata is serialized, never hashing or signature IO. This
         // keeps concurrent discovery threads from racing GetProp/SetProp stamps.
         let _enumeration = self
             .enumeration
             .lock()
             .map_err(|_| native("enumeration lock"))?;
+        drop(timing);
+        let _timing = crate::timing::Timing::start("enum_windows");
         windows::enumerate(self)
     }
     fn process_path(&self, pid: u32) -> Result<String> {

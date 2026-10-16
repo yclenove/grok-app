@@ -19,6 +19,7 @@ pub mod identity;
 pub mod input;
 pub mod overlay;
 pub mod testing;
+mod timing;
 pub mod uia;
 pub mod worker;
 

@@ -157,10 +157,16 @@ impl WindowsDriver {
     }
     #[cfg(windows)]
     async fn native(api: Arc<dyn WinApi>) -> Result<Self> {
-        let driver = Self::with_api(api.clone()).await?;
-        let uia = Arc::new(crate::uia::RealUia::start().await?);
-        let wgc = Arc::new(crate::capture::WgcCapture::new().await?);
-        let print = Arc::new(crate::capture::PrintWindowCapture::new().await?);
+        let _timing = crate::timing::Timing::start("native_initialize");
+        // Prewarm COM/UIA immediately alongside discovery and capture, before
+        // the parent handshake. No first-window request initializes UIA.
+        let (driver, uia, wgc, print) = tokio::try_join!(
+            Self::with_api(api.clone()),
+            crate::uia::RealUia::start(),
+            crate::capture::WgcCapture::new(),
+            crate::capture::PrintWindowCapture::new(),
+        )?;
+        let (uia, wgc, print) = (Arc::new(uia), Arc::new(wgc), Arc::new(print));
         let input = Arc::new(crate::input::RealInput::start(api, uia.clone()).await?);
         let mut driver = driver
             .with_input(Arc::new(
@@ -253,18 +259,18 @@ impl WindowsDriver {
         hotkey: crate::input::hotkey::HotkeyConfig,
         latch: Arc<dyn crate::input::hotkey::StopLatch>,
     ) -> Result<Self> {
-        let guard = crate::input::hotkey::SafetyGuard::start(
-            Arc::new(crate::input::RealSafetyApi),
-            hotkey,
-            latch,
-        )
-        .await;
-        let overlay =
-            crate::overlay::OverlayExclusion::probe(Arc::new(crate::overlay::RealOverlayApi)).await;
-        Ok(Self::isolated(config)
-            .await?
-            .with_safety(guard)
-            .with_overlay_exclusion(overlay))
+        // Launch/handshake the child as soon as construction starts. Parent
+        // monitoring and overlay probing must not defer its COM/UIA warmup.
+        let (driver, guard, overlay) = tokio::join!(
+            Self::isolated(config),
+            crate::input::hotkey::SafetyGuard::start(
+                Arc::new(crate::input::RealSafetyApi),
+                hotkey,
+                latch,
+            ),
+            crate::overlay::OverlayExclusion::probe(Arc::new(crate::overlay::RealOverlayApi)),
+        );
+        Ok(driver?.with_safety(guard).with_overlay_exclusion(overlay))
     }
     pub(crate) async fn call<T: Send + 'static>(
         &self,

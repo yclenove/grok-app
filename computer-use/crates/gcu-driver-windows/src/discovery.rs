@@ -37,6 +37,7 @@ impl State {
         &mut self,
         target: Option<&AppRef>,
     ) -> Result<Vec<(WindowInfo, String)>> {
+        let _timing = crate::timing::Timing::start("windows_metadata");
         self.check()?;
         let entries = self.entries.lock().map_err(|_| crashed())?.clone();
         let mut result = Vec::new();
@@ -83,9 +84,11 @@ impl State {
     /// Resolve only matching live images. Start Menu/registry scans and unrelated
     /// signatures never occur on this queue; cached shortcuts only detect ambiguity.
     pub(super) fn resolve_running(&mut self, query: &AppQuery) -> Result<Option<AppRef>> {
+        let _timing = crate::timing::Timing::start("resolve_running");
         self.check()?;
         let query = query.0.to_lowercase().replace('/', "\\");
         let mut candidates = BTreeMap::new();
+        let matching = crate::timing::Timing::start("resolve_process_match");
         for window in visible_windows(self.api.enum_windows()?) {
             let candidate = (|| {
                 let pid = window_process(self.api.as_ref(), &window)?;
@@ -105,6 +108,7 @@ impl State {
                 Err(error) => self.note(error),
             }
         }
+        drop(matching);
         if candidates.is_empty() {
             return Ok(None);
         }
@@ -126,7 +130,11 @@ impl State {
             .next()
             .ok_or(DriverError::AppNotFound)?;
         let before = self.api.process_security(pid)?;
-        let identity = identity_for_path(self.api.as_ref(), &path)?;
+        let identity = {
+            let _timing = crate::timing::Timing::start("resolve_identity");
+            identity_for_path(self.api.as_ref(), &path)?
+        };
+        let _binding = crate::timing::Timing::start("resolve_process_binding");
         // Bind a process instance only if it still names the verified image.
         if self.api.process_security(pid)?.created != before.created
             || crate::identity::normalize_path(&self.api.process_path(pid)?)? != identity.path
@@ -147,6 +155,7 @@ impl State {
     }
     /// Installed/direct-path verification has a separate queue from live lookup.
     pub(super) fn resolve(&mut self, query: &AppQuery) -> Result<AppRef> {
+        let _timing = crate::timing::Timing::start("resolve_installed");
         let query = query.0.to_lowercase().replace('/', "\\");
         self.check()?;
         let mut matches = BTreeMap::new();
@@ -209,6 +218,7 @@ impl State {
         self.issues.truncate(8);
     }
     pub(super) fn validate_app(&self, app: &AppRef) -> Result<Entry> {
+        let _timing = crate::timing::Timing::start("validate_app");
         self.check()?;
         let entry = self
             .entries
@@ -226,8 +236,10 @@ impl State {
         }
         if let Some(pid) = app.info.pid {
             WinGate.check(self.api.as_ref(), pid, false, None)?;
-            let process = identity_for_path(self.api.as_ref(), &self.api.process_path(pid)?)?;
-            if process != fresh {
+            // The exact canonical file was just verified above. Only an alias
+            // needs another canonical-file comparison; never hash the same path twice.
+            let process = crate::identity::normalize_path(&self.api.process_path(pid)?)?;
+            if process != fresh.path && identity_for_path(self.api.as_ref(), &process)? != fresh {
                 return Err(DriverError::AppNotFound);
             }
         }
@@ -237,6 +249,21 @@ impl State {
         self.observation_window(win, foreground).map(|_| ())
     }
     pub(super) fn observation_window(
+        &self,
+        win: &WindowRef,
+        foreground: bool,
+    ) -> Result<NativeWindow> {
+        let current = self.metadata_window(win, foreground)?;
+        let (_, pid, _, identity) = self.windows.get(&win.id).ok_or(DriverError::WindowGone)?;
+        let fresh = identity_for_path(self.api.as_ref(), &self.api.process_path(*pid)?)?;
+        if fresh != *identity {
+            return Err(DriverError::AppNotFound);
+        }
+        Ok(current)
+    }
+    // Win32 metadata only. Used after this call's validate_app or as the first
+    // half of full observation; never an authorization gate for content/input.
+    pub(super) fn metadata_window(
         &self,
         win: &WindowRef,
         foreground: bool,
@@ -267,8 +294,8 @@ impl State {
         if security.created != *target_created {
             return Err(DriverError::WindowGone);
         }
-        let fresh = identity_for_path(self.api.as_ref(), &self.api.process_path(*pid)?)?;
-        if fresh != *identity {
+        let path = crate::identity::normalize_path(&self.api.process_path(*pid)?)?;
+        if path != identity.path && identity_for_path(self.api.as_ref(), &path)? != *identity {
             return Err(DriverError::AppNotFound);
         }
         Ok(current)

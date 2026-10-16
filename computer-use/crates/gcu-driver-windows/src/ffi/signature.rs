@@ -225,6 +225,7 @@ fn product(path: PCWSTR) -> Result<Option<String>> {
     })
 }
 pub(super) fn image(path: &str) -> Result<ImageInfo> {
+    let _timing = crate::timing::Timing::start("image_verify");
     // Deny write/delete sharing so hash, path, certificate and product refer to
     // the same immutable file while these native calls run (also resolves junctions).
     let mut file = OpenOptions::new()
@@ -247,6 +248,7 @@ pub(super) fn image(path: &str) -> Result<ImageInfo> {
     }
     let canonical_path = string(&final_path[..count as usize]);
     let path = wide(&canonical_path);
+    let hashing = crate::timing::Timing::start("image_hash");
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -256,10 +258,17 @@ pub(super) fn image(path: &str) -> Result<ImageInfo> {
         }
         digest.update(&buffer[..count]);
     }
-    let signature = signature(PCWSTR(path.as_ptr()), handle)?;
+    drop(hashing);
+    let signature = {
+        let _timing = crate::timing::Timing::start("authenticode");
+        signature(PCWSTR(path.as_ptr()), handle)?
+    };
     // Conservative boundary: user profile/temp/program data images can load
     // user-writable plugins; absence of this signal is explicitly not a proof.
-    let writable_load_path = writable_loading_path(&canonical_path)?;
+    let writable_load_path = {
+        let _timing = crate::timing::Timing::start("image_load_path");
+        writable_loading_path(&canonical_path)?
+    };
     Ok(ImageInfo {
         canonical_path,
         sha256: hex(&digest.finalize()),

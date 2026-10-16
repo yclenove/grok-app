@@ -88,6 +88,7 @@ impl Driver for WindowsDriver {
         discovery.list()
     }
     async fn resolve_app(&self, query: &AppQuery) -> Result<AppRef> {
+        let _timing = crate::timing::Timing::start("resolve_app");
         if let Some(worker) = &self.isolated {
             return worker.resolve_app(query).await;
         }
@@ -144,6 +145,7 @@ impl Driver for WindowsDriver {
         .await
     }
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<WindowInfo>> {
+        let _timing = crate::timing::Timing::start("list_windows");
         if let Some(worker) = &self.isolated {
             return worker.list_windows(app).await;
         }
@@ -161,6 +163,7 @@ impl Driver for WindowsDriver {
         .await
     }
     async fn key_window(&self, app: &AppRef) -> Result<WindowInfo> {
+        let _timing = crate::timing::Timing::start("key_window");
         self.check_safety(false)?;
         if let Some(worker) = &self.isolated {
             return worker.key_window(app).await;
@@ -182,7 +185,9 @@ impl Driver for WindowsDriver {
                 app,
                 id: info.id.clone(),
             };
-            s.validate_window(&win, false)?;
+            // validate_app above already checked exact file provenance. Listing
+            // the selected HWND uses only Win32 stamps/path/token/geometry.
+            s.metadata_window(&win, false)?;
             let hwnd = s
                 .windows
                 .get(&info.id)

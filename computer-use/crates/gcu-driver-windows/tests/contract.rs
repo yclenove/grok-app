@@ -14,3 +14,5 @@ mod portable;
 #[cfg(windows)]
 #[path = "contract/smoke.rs"]
 mod smoke;
+#[path = "contract/timings.rs"]
+mod timings;

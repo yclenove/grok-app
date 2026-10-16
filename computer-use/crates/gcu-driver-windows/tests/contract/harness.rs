@@ -173,6 +173,12 @@ impl Report {
 pub trait Clock {
     fn now(&self) -> Duration;
     fn tick(&mut self) -> impl Future<Output = ()>;
+    async fn wait(&mut self, duration: Duration) {
+        let start = self.now();
+        while self.now().saturating_sub(start) < duration {
+            self.tick().await;
+        }
+    }
 }
 #[cfg(windows)]
 pub struct DesktopClock(tokio::time::Instant);
@@ -189,6 +195,9 @@ impl Clock for DesktopClock {
     }
     async fn tick(&mut self) {
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    async fn wait(&mut self, duration: Duration) {
+        tokio::time::sleep(duration).await;
     }
 }
 

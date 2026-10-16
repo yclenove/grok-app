@@ -62,6 +62,7 @@ struct State {
 }
 impl State {
     fn new() -> Result<Self> {
+        let _timing = crate::timing::Timing::start("uia_initialize");
         let com = Com::new()?;
         // SAFETY: this dedicated thread has initialized MTA; interfaces stay here.
         let (automation, walker, cache) = unsafe {

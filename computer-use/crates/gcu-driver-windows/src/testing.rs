@@ -47,6 +47,10 @@ pub struct FakeState {
     pub launches: Vec<Shortcut>,
     /// Recorded restoration HWNDs.
     pub restores: Vec<u64>,
+    /// Full image-verification calls, for detecting redundant hashing/signatures.
+    pub image_reads: Vec<String>,
+    /// Top-level metadata enumeration count (never UIA).
+    pub enumerations: usize,
     /// Windows/native metadata probe failure.
     pub failure: Option<DriverError>,
 }
@@ -68,6 +72,8 @@ impl Default for FakeState {
             refuse_restore: false,
             launches: Vec::new(),
             restores: Vec::new(),
+            image_reads: Vec::new(),
+            enumerations: 0,
             failure: None,
         }
     }
@@ -154,6 +160,7 @@ impl WinApi for FakeWinApi {
             .ok_or(DriverError::WindowGone)
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
+        self.update(|s| s.enumerations += 1);
         let block = self
             .enum_block
             .lock()
@@ -179,6 +186,7 @@ impl WinApi for FakeWinApi {
         Ok(self.state()?.aumids.get(&pid).cloned())
     }
     fn image(&self, path: &str) -> Result<ImageInfo> {
+        self.update(|s| s.image_reads.push(path.to_lowercase()));
         let block = self
             .image_blocks
             .lock()

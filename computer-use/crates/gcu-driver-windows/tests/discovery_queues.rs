@@ -106,6 +106,30 @@ async fn reads_blocked_catalog_signature_resolve_and_list_target_windows() {
 }
 
 #[tokio::test]
+async fn windows_metadata_with_uia_attached_never_enters_uia() {
+    use gcu_driver_windows::uia::{
+        events::FakeUiaEvents,
+        source::{FakeNode, FakeUia},
+    };
+    let api = fixture();
+    let source = Arc::new(FakeUia::new(FakeNode::default()));
+    let driver = WindowsDriver::with_uia(api, source.clone(), Arc::new(FakeUiaEvents::default()))
+        .await
+        .unwrap();
+    let app = driver
+        .resolve_app(&AppQuery::from("fixture"))
+        .await
+        .unwrap();
+    assert_eq!(driver.list_windows(Some(&app)).await.unwrap().len(), 1);
+    assert_eq!(driver.key_window(&app).await.unwrap().title, "GCU Fixture");
+    assert_eq!(
+        source.stats(),
+        (0, 0),
+        "window discovery must use only Win32 metadata"
+    );
+}
+
+#[tokio::test]
 async fn reads_blocked_installed_resolution_keep_running_queue_available() {
     let api = fixture();
     let driver = Arc::new(WindowsDriver::with_api(api.clone()).await.unwrap());

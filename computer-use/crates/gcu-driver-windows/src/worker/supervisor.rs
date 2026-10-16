@@ -134,10 +134,7 @@ impl Supervisor {
         if config.timeout.is_zero() {
             return Err(DriverError::InvalidRequest);
         }
-        let mut process = Process::spawn(&config, 1).await?;
-        let probe = process
-            .exchange(Request::Doctor, 0, config.timeout, None, None)
-            .await?;
+        let (process, probe) = Process::ready(&config, 1).await?;
         let Reply::Doctor {
             mut capabilities,
             ready,
@@ -279,7 +276,20 @@ struct Process {
     _job: super::unsafe_job::Job,
 }
 impl Process {
+    async fn ready(config: &WorkerConfig, epoch: u64) -> Result<(Self, Reply)> {
+        let _startup = crate::timing::Timing::start("worker_startup");
+        let mut process = Self::spawn(config, epoch).await?;
+        let _handshake = crate::timing::Timing::start("worker_handshake");
+        let probe = process
+            .exchange(Request::Doctor, 0, config.timeout, None, None)
+            .await?;
+        if !matches!(probe, Reply::Doctor { ready: true, .. }) {
+            return Err(crashed(false));
+        }
+        Ok((process, probe))
+    }
     async fn spawn(config: &WorkerConfig, epoch: u64) -> Result<Self> {
+        let _timing = crate::timing::Timing::start("worker_spawn");
         let mut command = Command::new(&config.executable);
         command
             .args(&config.args)
@@ -287,7 +297,9 @@ impl Process {
             .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            // Only stderr carries payload-free tracing; stdout remains private
+            // framed RPC. Native stage timings must survive startup/read failures.
+            .stderr(Stdio::inherit());
         // No Host/Stop secret handles or credential environment reaches the child.
         for key in [
             "SystemRoot",
@@ -475,14 +487,7 @@ async fn run(
             for attempt in 0..=1 {
                 if process.is_none() {
                     epoch += 1;
-                    let mut p = Process::spawn(&config, epoch).await?;
-                    match p
-                        .exchange(Request::Doctor, 0, config.timeout, None, None)
-                        .await?
-                    {
-                        Reply::Doctor { ready: true, .. } => (),
-                        _ => return Err(crashed(false)),
-                    }
+                    let (p, _) = Process::ready(&config, epoch).await?;
                     process = Some(p);
                 }
                 let Some(p) = process.as_mut() else {
@@ -554,14 +559,8 @@ async fn run(
             epoch += 1;
             let stopped_at = stop.generation();
             let bootstrap = async {
-                let mut p = Process::spawn(&config, epoch).await?;
-                match p
-                    .exchange(Request::Doctor, 0, config.timeout, None, None)
-                    .await?
-                {
-                    Reply::Doctor { ready: true, .. } => Ok(p),
-                    _ => Err(crashed(false)),
-                }
+                let (p, _) = Process::ready(&config, epoch).await?;
+                Ok::<_, DriverError>(p)
             };
             process = tokio::select! { biased;
                 _ = shutdown.cancelled() => None,

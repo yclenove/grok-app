@@ -47,9 +47,10 @@ pub async fn discover<C: Clock>(
         let diagnostic = format!(
             "attempt={attempt}, list_count={:?}, list_error={:?}, last_resolve_error={last_resolve_error:?}, \
              discovery_status={:?}, list_ms={list_ms}, resolve_ms={resolve_ms}, windows_ms={windows_ms}, \
-             elapsed_ms={}, last_window={:?}, last_oracle={:?}",
+             elapsed_ms={}, last_window={:?}, last_oracle={:?}, native_parent_timings={}",
             listed.as_ref().ok().map(Vec::len), listed.as_ref().err().map(ToString::to_string),
             driver.discovery_status(), elapsed.as_millis(), window.as_ref().err(), read_oracle(),
+            super::timings::snapshot(),
         );
         progress(format!("FIXTURE DISCOVERY: {diagnostic}"));
         if window.is_ok() {
@@ -58,7 +59,9 @@ pub async fn discover<C: Clock>(
         if elapsed >= budget {
             return Err(format!("fixture discovery: timeout; {diagnostic}"));
         }
-        clock.tick().await;
+        clock
+            .wait(Duration::from_millis(200).min(budget.saturating_sub(elapsed)))
+            .await;
     }
 }
 
@@ -139,5 +142,73 @@ mod tests {
         .unwrap();
         assert_eq!(window.app.info.pid, Some(7));
         assert_eq!(clock.now(), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn discovery_missing_fixture_retries_at_200ms_and_reports_last_attempt() {
+        let driver = WindowsDriver::with_api(Arc::new(FakeWinApi::default()))
+            .await
+            .unwrap();
+        let mut clock = Manual::default();
+        let error = discover(
+            &mut clock,
+            Duration::from_millis(600),
+            &driver,
+            "C:\\missing.exe",
+            7,
+            || Ok(serde_json::json!({"counter": 0})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(clock.now(), Duration::from_millis(600));
+        assert!(error.contains("attempt=4"), "{error}");
+        assert!(error.contains("elapsed_ms=600"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn discovery_delayed_external_fixture_succeeds_on_next_attempt() {
+        struct Appears {
+            now: Duration,
+            api: Arc<FakeWinApi>,
+        }
+        impl Clock for Appears {
+            fn now(&self) -> Duration {
+                self.now
+            }
+            async fn tick(&mut self) {
+                self.now += Duration::from_millis(25);
+                if self.now == Duration::from_millis(200) {
+                    self.api.update(|s| {
+                        s.paths.insert(7, "C:\\gcu-fixture.exe".into());
+                        s.images.insert(
+                            "C:\\gcu-fixture.exe".into(),
+                            signed_image("C:\\gcu-fixture.exe"),
+                        );
+                        s.processes.insert(7, medium_security());
+                        let mut w = window(8, 7);
+                        w.title = "GCU Fixture".into();
+                        s.windows.push(w);
+                    });
+                }
+            }
+        }
+        let api = Arc::new(FakeWinApi::default());
+        let driver = WindowsDriver::with_api(api.clone()).await.unwrap();
+        let mut clock = Appears {
+            now: Duration::ZERO,
+            api,
+        };
+        let window = discover(
+            &mut clock,
+            Duration::from_secs(30),
+            &driver,
+            "C:\\gcu-fixture.exe",
+            7,
+            || Ok(serde_json::json!({"counter": 0})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(clock.now(), Duration::from_millis(200));
+        assert_eq!(window.app.info.pid, Some(7));
     }
 }
