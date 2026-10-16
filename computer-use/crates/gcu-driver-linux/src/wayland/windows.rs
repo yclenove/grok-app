@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use gcu_core::driver::Cancel;
 use std::{future::Future, sync::Arc, time::Duration};
 
-/// Bound for all asynchronous identity/native calls; uses Tokio's injectable clock.
+/// Bound for individual native/IPC calls; cold image inspection has a separate budget.
 pub const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Metadata-only identity failure; no automatic retry of possibly delivered activation.
@@ -130,7 +130,8 @@ pub trait WindowBackend: Send + Sync {
 /// OS process/image inspection, isolated from D-Bus and replaceable in tests.
 #[async_trait]
 pub trait ProcessSource: Send + Sync {
-    /// Inspect the running image afresh; do not cache a digest across grant uses.
+    /// Reopen and revalidate the running image/process on every grant use.
+    /// Digests may be cached only by fresh file metadata, including dev/inode/size/mtime.
     /// Implementations bound/cancel blocking work and reject unreadable/replaced images.
     async fn inspect(&self, pid: u32) -> Result<AppIdentity, IdentityError>;
 }
@@ -147,7 +148,7 @@ impl WaylandWindows {
         Self { backend, processes }
     }
 
-    /// List discovery metadata; cancellable, at most five seconds. Unknown compositors refuse.
+    /// List discovery metadata; cancellable, with a separate cold-image inspection budget.
     pub async fn list(&self, cancel: &Cancel) -> Result<WindowSnapshot, IdentityError> {
         if !matches!(
             self.backend.compositor(),
@@ -155,7 +156,7 @@ impl WaylandWindows {
         ) {
             return Err(IdentityError::Unsupported);
         }
-        let snapshot = bounded(cancel, false, self.backend.snapshot()).await?;
+        let snapshot = bounded_inspection(cancel, self.backend.snapshot()).await?;
         if snapshot.compositor != self.backend.compositor()
             || snapshot.epoch.is_empty()
             || snapshot.windows.len() > 4096
@@ -212,7 +213,7 @@ impl WaylandWindows {
             .pid
             .filter(|p| *p > 0)
             .ok_or(IdentityError::Handoff)?;
-        let image = bounded(cancel, false, self.processes.inspect(pid)).await?;
+        let image = bounded_inspection(cancel, self.processes.inspect(pid)).await?;
         if image.pid != pid
             || image.start_time == 0
             || !image.exe_path.is_absolute()
@@ -319,109 +320,39 @@ pub(crate) async fn bounded<T>(
     }
 }
 
-/// Live Linux process inspector. Uses an opened `/proc/PID/exe` image, not a desktop entry.
+/// Bound read-only image observations independently from input/native call deadlines.
+pub(crate) async fn bounded_inspection<T>(
+    cancel: &Cancel,
+    future: impl Future<Output = Result<T, IdentityError>>,
+) -> Result<T, IdentityError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(IdentityError::Cancelled { maybe_executed: false }),
+        result = tokio::time::timeout(crate::identity::inspection::INSPECTION_TIMEOUT, future) =>
+            result.unwrap_or(Err(IdentityError::Timeout { maybe_executed: false })),
+    }
+}
+
+/// Live Linux process inspector using an opened `/proc/PID/exe` image.
+/// Hashes on `spawn_blocking` with a 64 KiB buffer and a metadata-keyed shared cache.
+/// Drop cancels between chunks; a 185s cold inspection timeout never grants trust.
 #[derive(Debug, Default)]
 pub struct NativeProcesses;
 
 #[async_trait]
 impl ProcessSource for NativeProcesses {
     async fn inspect(&self, pid: u32) -> Result<AppIdentity, IdentityError> {
-        // Dropping the caller (timeout/cancellation) signals the blocking hashing loop.
-        struct Stop(Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for Stop {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        let stop = Stop(Arc::new(std::sync::atomic::AtomicBool::new(false)));
-        let flag = stop.0.clone();
-        tokio::time::timeout(
-            IDENTITY_TIMEOUT,
-            tokio::task::spawn_blocking(move || inspect_process(pid, &flag)),
-        )
-        .await
-        .map_err(|_| IdentityError::Timeout {
-            maybe_executed: false,
-        })?
-        .map_err(|_| IdentityError::Transport {
-            maybe_executed: false,
-        })?
+        crate::identity::inspection::inspect_async(pid)
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::TimedOut => IdentityError::Timeout {
+                    maybe_executed: false,
+                },
+                std::io::ErrorKind::Interrupted => IdentityError::Cancelled {
+                    maybe_executed: false,
+                },
+                std::io::ErrorKind::Unsupported => IdentityError::Unsupported,
+                _ => IdentityError::Handoff,
+            })
     }
-}
-
-#[cfg(target_os = "linux")]
-fn inspect_process(
-    pid: u32,
-    cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<AppIdentity, IdentityError> {
-    use sha2::{Digest, Sha256};
-    use std::{fs, io::Read, os::unix::fs::MetadataExt, sync::atomic::Ordering};
-    let inspect = || -> std::io::Result<AppIdentity> {
-        let start_time = crate::identity::get_process_start_time(pid)?;
-        let link = format!("/proc/{pid}/exe");
-        let exe_path = fs::canonicalize(&link)?;
-        let mut file = fs::File::open(&link)?;
-        let before = file.metadata()?;
-        let stamp = |m: &fs::Metadata| {
-            (
-                m.dev(),
-                m.ino(),
-                m.len(),
-                m.mtime(),
-                m.mtime_nsec(),
-                m.ctime(),
-                m.ctime_nsec(),
-            )
-        };
-        if !before.is_file()
-            || before.len() > 256 * 1024 * 1024
-            || stamp(&before) != stamp(&fs::metadata(&exe_path)?)
-        {
-            return Err(std::io::ErrorKind::InvalidData.into());
-        }
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 65536];
-        let mut total = 0u64;
-        loop {
-            if cancelled.load(Ordering::Acquire) {
-                return Err(std::io::ErrorKind::Interrupted.into());
-            }
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total += count as u64;
-            if total > 256 * 1024 * 1024 {
-                return Err(std::io::ErrorKind::InvalidData.into());
-            }
-            hash.update(&buffer[..count]);
-        }
-        if total != before.len()
-            || stamp(&before) != stamp(&file.metadata()?)
-            || stamp(&before) != stamp(&fs::metadata(&exe_path)?)
-            || stamp(&before) != stamp(&fs::metadata(&link)?)
-            || exe_path != fs::canonicalize(&link)?
-            || start_time != crate::identity::get_process_start_time(pid)?
-        {
-            return Err(std::io::ErrorKind::InvalidData.into());
-        }
-        Ok(AppIdentity {
-            exe_path,
-            dev: before.dev(),
-            inode: before.ino(),
-            sha256: hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
-            pid,
-            start_time,
-            desktop_id: None,
-        })
-    };
-    inspect().map_err(|_| IdentityError::Handoff)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn inspect_process(
-    _pid: u32,
-    _cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<AppIdentity, IdentityError> {
-    Err(IdentityError::Unsupported)
 }

@@ -8,10 +8,12 @@
 //!
 //! Note: `desktop_id` is used strictly for discovery, never as an authorization key.
 
-use sha2::{Digest, Sha256};
+#[cfg(unix)]
+mod hash;
+pub(crate) mod inspection;
+
 use std::{
-    fs::File,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -34,21 +36,22 @@ pub struct AppIdentity {
     pub desktop_id: Option<String>,
 }
 
-/// Compute SHA-256 hash of a file at `path`.
+/// Compute a streaming SHA-256 digest on a dedicated blocking worker.
+///
+/// Blocks the caller for at most 185s (180s hashing + 5s read/queue allowance).
+/// Reuses only complete, metadata-validated digests; timeout cancels further reads.
+/// Async callers must use a blocking thread or the native async process inspector.
 pub fn compute_sha256(path: &Path) -> Result<String, io::Error> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
+    #[cfg(unix)]
+    {
+        let path = path.to_owned();
+        inspection::blocking(move |control| inspection::digest_path(path, control))
     }
-    // sha2 0.11 digests no longer implement `LowerHex`; format the bytes explicitly.
-    let digest = hasher.finalize();
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// Read process start time from `/proc/<pid>/stat`.
@@ -91,36 +94,21 @@ pub fn parse_stat_start_time(stat_content: &str) -> Option<u64> {
 }
 
 impl AppIdentity {
-    /// Inspect a running process by PID and construct its verified `AppIdentity`.
+    /// Inspect the opened running image, path and process instance on a dedicated worker.
+    /// Blocks for at most 185s; uses the same cancellable streaming cache as Wayland.
+    /// Unreadable, replaced or unstable images fail closed; no partial digest is returned.
     pub fn from_pid(pid: u32, desktop_id: Option<String>) -> Result<Self, io::Error> {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let exe_symlink = format!("/proc/{pid}/exe");
-            let canonical_exe = std::fs::canonicalize(&exe_symlink)?;
-            let meta = std::fs::metadata(&canonical_exe)?;
-            let dev = meta.dev();
-            let inode = meta.ino();
-            let sha256 = compute_sha256(&canonical_exe)?;
-            let start_time = get_process_start_time(pid)?;
-
-            Ok(Self {
-                exe_path: canonical_exe,
-                dev,
-                inode,
-                sha256,
-                pid,
-                start_time,
-                desktop_id,
-            })
+            let mut identity =
+                inspection::blocking(move |control| inspection::inspect(pid, control))?;
+            identity.desktop_id = desktop_id;
+            Ok(identity)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
             let _ = (pid, desktop_id);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "process inspection is only supported on Linux",
-            ))
+            Err(io::ErrorKind::Unsupported.into())
         }
     }
 }

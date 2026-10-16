@@ -4,7 +4,9 @@
 //! and helper-generation fence; no Shell Eval, input hooks or native-policy grants.
 
 use super::{windows::*, Compositor};
-use crate::identity::{needs_reauth, same_process_instance, AppIdentity};
+use crate::identity::{
+    inspection::INSPECTION_TIMEOUT, needs_reauth, same_process_instance, AppIdentity,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -113,7 +115,7 @@ pub struct CompositorPeer {
 
 impl CompositorPeer {
     /// Pin GNOME/KWin's bus credentials to the trusted launch/session process anchor.
-    /// Cancellable by dropping the future, with a five-second Tokio-clock deadline.
+    /// Drop cancels inspection; cold image hashing has a separate 185s budget.
     /// The caller must obtain `expected` from its trusted compositor/session resolver.
     pub async fn pin(
         bus: Arc<dyn CompositorBus>,
@@ -126,8 +128,8 @@ impl CompositorPeer {
             Compositor::Kde => "org.kde.KWin",
             _ => return Err(IdentityError::Unsupported),
         };
-        tokio::time::timeout(IDENTITY_TIMEOUT, async {
-            let owner = bus.owner(name).await?;
+        tokio::time::timeout(INSPECTION_TIMEOUT, async {
+            let owner = native_read(bus.owner(name)).await?;
             if !owner.starts_with(':') {
                 return Err(IdentityError::Handoff);
             }
@@ -162,14 +164,18 @@ impl CompositorPeer {
     }
 
     pub(crate) async fn check(&self) -> Result<(), IdentityError> {
-        if self.bus.owner(self.name).await? != self.owner {
+        if native_read(self.bus.owner(self.name)).await? != self.owner {
             return Err(IdentityError::StaleWindow);
         }
-        let pid = self.bus.pid(&self.owner).await?;
+        let pid = native_read(self.bus.pid(&self.owner)).await?;
         if pid != self.image.pid {
             return Err(IdentityError::Handoff);
         }
-        let actual = self.processes.inspect(pid).await?;
+        let actual = bounded_inspection(
+            &gcu_core::driver::Cancel::default(),
+            self.processes.inspect(pid),
+        )
+        .await?;
         if needs_reauth(&self.image, &actual) || !same_process_instance(&self.image, &actual) {
             return Err(IdentityError::Reauthorize);
         }
@@ -194,7 +200,7 @@ impl GnomeBackend {
     async fn read(&self) -> Result<WindowSnapshot, IdentityError> {
         self.peer.check().await?;
         let (version, epoch, records): (u32, String, Vec<WireWindow>) =
-            self.peer.bus.list(self.peer.owner()).await?;
+            native_read(self.peer.bus.list(self.peer.owner())).await?;
         self.peer.check().await?;
         if version != 1 {
             return Err(IdentityError::Unsupported);
@@ -210,7 +216,7 @@ impl WindowBackend for GnomeBackend {
     }
 
     async fn snapshot(&self) -> Result<WindowSnapshot, IdentityError> {
-        tokio::time::timeout(IDENTITY_TIMEOUT, self.read())
+        tokio::time::timeout(INSPECTION_TIMEOUT, self.read())
             .await
             .map_err(|_| IdentityError::Timeout {
                 maybe_executed: false,
@@ -236,10 +242,10 @@ impl WindowBackend for GnomeBackend {
             .pid
             .filter(|_| window.peer_pid)
             .ok_or(IdentityError::Handoff)?;
-        // The coherent compositor read above may have taken time. Rehash the
-        // approved target immediately before IPC, not only before that read.
+        // The compositor read may have taken time. Revalidate the opened image
+        // and its cache key immediately before IPC, not only before that read.
         let current_image =
-            tokio::time::timeout(IDENTITY_TIMEOUT, self.peer.processes.inspect(pid))
+            tokio::time::timeout(INSPECTION_TIMEOUT, self.peer.processes.inspect(pid))
                 .await
                 .map_err(|_| IdentityError::Timeout {
                     maybe_executed: false,
@@ -317,4 +323,14 @@ pub(crate) fn decode_snapshot(
         epoch: format!("{owner}/{epoch}"),
         windows,
     })
+}
+
+async fn native_read<T>(
+    future: impl std::future::Future<Output = Result<T, IdentityError>>,
+) -> Result<T, IdentityError> {
+    tokio::time::timeout(IDENTITY_TIMEOUT, future)
+        .await
+        .unwrap_or(Err(IdentityError::Timeout {
+            maybe_executed: false,
+        }))
 }
