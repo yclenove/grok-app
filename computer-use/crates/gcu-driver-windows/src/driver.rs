@@ -1,6 +1,9 @@
-//! Serial discovery worker and the portable Driver implementation.
+//! Independent discovery queues and the portable Driver implementation.
 use crate::{
-    api::WinApi, apps::AppIndex, desktop::HwndStamp, discovery::State, gate::check_engine,
+    api::WinApi,
+    desktop::HwndStamp,
+    discovery::State,
+    discovery_workers::{Discovery, Task},
     identity::identity_for_path,
 };
 use gcu_core::{
@@ -15,15 +18,14 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-type Task = Box<dyn FnOnce(&mut State) + Send>;
 /// Windows discovery, optional UIA observation/actions and optional capture. Portable sources inject OS data.
-/// COM/OS calls use dedicated workers with bounded caller deadlines; indexing uses a separate
-/// thread. Drop disconnects workers and stops watching.
+/// COM/OS calls use dedicated workers with bounded caller deadlines. Catalog
+/// enrichment, Start Menu scanning, running resolution and installed lookup have
+/// independent queues. Drop disconnects workers and stops watching.
 pub struct WindowsDriver {
     isolated: Option<crate::worker::WorkerDriver>,
     worker: mpsc::SyncSender<Task>,
-    indexing: Arc<std::sync::atomic::AtomicBool>,
-    refreshing: Arc<std::sync::atomic::AtomicBool>,
+    discovery: Option<Discovery>,
     pub(crate) caps: Capabilities,
     pub(crate) safety_caps: std::sync::OnceLock<[Capabilities; 8]>,
     pub(crate) safety: Option<Arc<crate::input::hotkey::SafetyGuard>>,
@@ -31,81 +33,26 @@ pub struct WindowsDriver {
     child: bool,
     diagnostic: bool,
     input: Option<Arc<crate::input::InputBackend>>,
-    listed: std::sync::atomic::AtomicBool,
     observer: Option<crate::uia::observe::Observer>,
     pub(crate) capture_backend: Option<Arc<crate::capture::CaptureBackend>>,
 }
 impl WindowsDriver {
-    /// Start a dedicated worker and refuse elevated/noninteractive engines before
-    /// creating the index. Startup is bounded by NATIVE_TIMEOUT; no auto-elevation.
+    /// Start independent native queues after refusing elevated/noninteractive
+    /// engines. Each startup probe has a DRIVER_DEADLINE timeout; no auto-elevation.
+    /// Lists read in-memory hints after an independent live engine-token gate;
+    /// they never wait for indexing. Resolution still verifies fresh provenance.
     pub async fn with_api(api: Arc<dyn WinApi>) -> Result<Self> {
-        let (tx, rx) = mpsc::sync_channel::<Task>(32);
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let indexing = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let flag = indexing.clone();
-        std::thread::Builder::new()
-            .name("gcu-win-discovery".into())
-            .spawn(move || {
-                let result = (|| {
-                    check_engine(&api.engine_security()?)?;
-                    Ok(State {
-                        _thread_context: api.enter_thread()?,
-                        index: AppIndex::start(api.clone())?,
-                        api,
-                        entries: BTreeMap::new(),
-                        issues: Vec::new(),
-                        windows: BTreeMap::new(),
-                    })
-                })();
-                match result {
-                    Ok(mut state) => {
-                        if ready_tx.send(Ok(())).is_err() {
-                            return;
-                        }
-                        while let Ok(task) =
-                            rx.recv_timeout(Duration::from_millis(50))
-                                .or_else(|e| match e {
-                                    mpsc::RecvTimeoutError::Timeout => {
-                                        Ok(Box::new(|_: &mut State| {}) as Task)
-                                    }
-                                    mpsc::RecvTimeoutError::Disconnected => Err(e),
-                                })
-                        {
-                            task(&mut state);
-                            flag.store(
-                                state.index.indexing(),
-                                std::sync::atomic::Ordering::Release,
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
-                    }
-                }
-            })
-            .map_err(|_| DriverError::Crashed {
-                maybe_executed: false,
-            })?;
-        tokio::time::timeout(DRIVER_DEADLINE, ready_rx)
-            .await
-            .map_err(|_| DriverError::Timeout {
-                maybe_executed: false,
-            })?
-            .map_err(|_| DriverError::Crashed {
-                maybe_executed: false,
-            })??;
+        let (discovery, worker) = Discovery::start(api).await?;
         Ok(Self {
             isolated: None,
-            worker: tx,
-            indexing,
-            refreshing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker,
+            discovery: Some(discovery),
             caps: discovery_capabilities(),
             safety_caps: std::sync::OnceLock::new(),
             safety: None,
             overlay: None,
             child: false,
             diagnostic: false,
-            listed: std::sync::atomic::AtomicBool::new(false),
             input: None,
             observer: None,
             capture_backend: None,
@@ -171,9 +118,7 @@ impl WindowsDriver {
             overlay: None,
             child: false,
             diagnostic: false,
-            indexing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            refreshing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            listed: std::sync::atomic::AtomicBool::new(false),
+            discovery: None,
             observer: None,
             capture_backend: None,
         }
@@ -328,13 +273,22 @@ impl WindowsDriver {
         mutation: bool,
         task: impl FnOnce(&mut State) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        Self::call_on(&self.worker, timeout, cancel, mutation, task).await
+    }
+    pub(super) async fn call_on<T: Send + 'static>(
+        worker: &mpsc::SyncSender<Task>,
+        timeout: Duration,
+        cancel: Option<&Cancel>,
+        mutation: bool,
+        task: impl FnOnce(&mut State) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         if cancel.is_some_and(Cancel::is_cancelled) {
             return Err(DriverError::Cancelled {
                 maybe_executed: false,
             });
         }
         let (tx, rx) = oneshot::channel();
-        self.worker
+        worker
             .try_send(Box::new(move |state| {
                 // Timed-out/cancelled queued calls must never begin work later.
                 if !tx.is_closed() {

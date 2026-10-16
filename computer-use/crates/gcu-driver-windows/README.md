@@ -6,7 +6,7 @@ nonactivating Win32 restoration and virtual-desktop annotations. The native
 `FakeWinApi` compile and run on Linux/macOS. Windows 10 1903+ is the target.
 
 `WindowsDriver::new()` starts an isolated `gcu worker`; its native adapter starts
-a serial discovery thread after validating the
+independent discovery and catalog threads after validating the
 engine token. High/System integrity or UIAccess refuses startup with
 `DriverError::ElevationRequired`. A live `WinGate::check` applies to observation
 and every action variant before any delivery or unavailable-capability result. Higher
@@ -16,8 +16,9 @@ attempted. Unknown virtual-desktop state and `Some(false)` both prevent foregrou
 operations. Discovery labels are not authorization grants.
 
 Start Menu shortcuts and registered AppsFolder packages are indexed on a separate
-thread. Calls can use the existing versioned cache while `discovery_status().indexing`
-is true; they never wait for a directory scan. The cache is
+thread. Lists return possibly empty in-memory hints with `discovery_status().indexing`
+while catalog/scanning work continues. Live resolution verifies only matching
+processes on its own queue, independent of installed lookup and UIA. The cache is
 `%LOCALAPPDATA%\grok-computer-use\apps.json`; corruption triggers rebuilding.
 Persistent directory notification handles track recursive Start Menu changes.
 Cached names/paths are hints: .lnk sources and registered package manifests are

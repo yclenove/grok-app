@@ -1,12 +1,17 @@
 //! Worker execution boundary. Initialization starts only after the parent frame.
 use super::{codec, tree::Tree, wire::*};
 use gcu_core::{driver::*, model::NativeHandle};
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    sync::Arc,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Default)]
 struct Handles {
     elements: BTreeMap<ElementKey, (Element, NativeHandle)>,
+    bound_apps: BTreeSet<String>,
     generation: u64,
 }
 type ElementKey = (u64, Vec<i32>);
@@ -188,6 +193,13 @@ async fn dispatch(
         let fresh = driver.resolve_app(&AppQuery(expected.id.clone())).await?;
         if fresh.info.id != expected.id || fresh.info.identity != expected.identity {
             return Err(DriverError::AppNotFound);
+        }
+        // Resolution no longer fills the window registry by scanning/hashing
+        // every application. Rebind live stamps on the read queue after restart.
+        // No activation or mutation; later observation still checks the exact ID.
+        if fresh.info.pid.is_some() && !handles.bound_apps.contains(&fresh.info.id) {
+            driver.list_windows(Some(&fresh)).await?;
+            handles.bound_apps.insert(fresh.info.id);
         }
     }
     Ok(match request {

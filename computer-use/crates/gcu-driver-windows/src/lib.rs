@@ -10,6 +10,7 @@ pub mod apps;
 pub mod capture;
 pub mod desktop;
 mod discovery;
+mod discovery_workers;
 mod driver;
 #[cfg(windows)]
 mod ffi;

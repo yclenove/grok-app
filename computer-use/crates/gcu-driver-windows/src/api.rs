@@ -86,6 +86,11 @@ pub trait WinApi: Send + Sync + 'static {
     fn enum_windows(&self) -> Result<Vec<NativeWindow>>;
     /// Query the process image path, not an untrusted window label.
     fn process_path(&self, pid: u32) -> Result<String>;
+    /// Running process AppUserModelId, if packaged. Discovery hint only; never
+    /// an authorization identity. No installed-package or Start Menu scan.
+    fn process_aumid(&self, _pid: u32) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Resolve the final file path, hash and verify its signature coherently.
     fn image(&self, path: &str) -> Result<ImageInfo>;
     /// Query IVirtualDesktopManager; None means detection unavailable.

@@ -50,19 +50,11 @@ pub struct AppIndex {
     stop: Arc<AtomicBool>,
 }
 impl AppIndex {
-    /// Load a small existing cache on the discovery worker, then asynchronously
-    /// rebuild and watch. Native caller deadlines cover startup cache IO.
+    /// Start cache loading, rebuilding and watching on a dedicated thread.
+    /// Returns immediately; no cache IO or scan runs on a discovery read queue.
     pub fn start(api: Arc<dyn WinApi>) -> Result<Self> {
-        let mut state = IndexState::default();
-        match api.read_cache()? {
-            None => {}
-            Some(bytes) => match decode_cache(&bytes) {
-                Ok(shortcuts) => state.shortcuts = shortcuts,
-                Err(_) => state.issues.push("App cache invalid; rebuilding".into()),
-            },
-        }
         let index = Self {
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Mutex::new(IndexState::default())),
             indexing: Arc::new(AtomicBool::new(true)),
             stop: Arc::new(AtomicBool::new(false)),
         };
@@ -82,6 +74,24 @@ impl AppIndex {
                         return;
                     }
                 };
+                let cached = api
+                    .read_cache()
+                    .and_then(|bytes| bytes.map(|b| decode_cache(&b)).transpose());
+                match cached {
+                    Ok(Some(shortcuts)) => {
+                        if let Ok(mut state) = shared.lock() {
+                            state.shortcuts = shortcuts;
+                        }
+                    }
+                    Ok(None) => (),
+                    Err(error) => {
+                        if let Ok(mut state) = shared.lock() {
+                            state.issues.push(format!(
+                                "App cache invalid or unreadable; rebuilding: {error}"
+                            ));
+                        }
+                    }
+                }
                 // Establish notifications before scanning so changes during the
                 // initial rebuild remain signaled on the persistent handles.
                 if let Err(error) = api.links_changed(Duration::ZERO) {

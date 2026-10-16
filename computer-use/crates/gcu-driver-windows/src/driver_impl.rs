@@ -44,6 +44,9 @@ impl Driver for WindowsDriver {
             Ok(issues) => (true, issues),
             Err(e) => (false, vec![e.to_string()]),
         };
+        if let Some(discovery) = &self.discovery {
+            issues.extend(discovery.issues());
+        }
         issues.push(if self.input.is_some() {
             "Targeted messages are partial (Chromium/UWP refused); foreground requires core approval and healthy parent Stop monitoring".into()
         } else if self.capture_backend.is_some() {
@@ -70,57 +73,47 @@ impl Driver for WindowsDriver {
             return worker.discovery_status();
         }
         DiscoveryStatus {
-            indexing: self.indexing.load(std::sync::atomic::Ordering::Acquire)
-                || self.refreshing.load(std::sync::atomic::Ordering::Acquire),
+            indexing: self.discovery.as_ref().is_some_and(Discovery::indexing),
         }
     }
     async fn list_apps(&self) -> Result<Vec<AppInfo>> {
         if let Some(worker) = &self.isolated {
             return worker.list_apps().await;
         }
-        // Return in-memory hints without signature hashing/directory traversal.
-        // Running-app refresh follows the response on the dedicated worker.
-        let timeout = if !self.listed.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            Duration::from_millis(100)
-        } else {
-            NATIVE_TIMEOUT
-        };
-        let apps = self.call(timeout, None, false, State::list).await?;
-        if self
-            .refreshing
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            let refreshing = self.refreshing.clone();
-            if self
-                .worker
-                .try_send(Box::new(move |s| {
-                    if let Err(error) = s.enumerate() {
-                        s.issues.push(error.to_string());
-                        s.issues.truncate(8);
-                    }
-                    refreshing.store(false, std::sync::atomic::Ordering::Release);
-                }))
-                .is_err()
-            {
-                self.refreshing
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
-        }
-        Ok(apps)
+        let discovery = self
+            .discovery
+            .as_ref()
+            .ok_or(DriverError::CapabilityUnavailable)?;
+        discovery.check().await?;
+        discovery.list()
     }
     async fn resolve_app(&self, query: &AppQuery) -> Result<AppRef> {
         if let Some(worker) = &self.isolated {
             return worker.resolve_app(query).await;
         }
+        let discovery = self
+            .discovery
+            .as_ref()
+            .ok_or(DriverError::CapabilityUnavailable)?;
+        let started = tokio::time::Instant::now();
+        let fast_query = query.clone();
+        if let Some(app) =
+            Self::call_on(&discovery.running, NATIVE_TIMEOUT, None, false, move |s| {
+                s.resolve_running(&fast_query)
+            })
+            .await?
+        {
+            return Ok(app);
+        }
         let query = query.clone();
-        self.call(NATIVE_TIMEOUT, None, false, move |s| s.resolve(&query))
-            .await
+        Self::call_on(
+            &discovery.installed,
+            DRIVER_DEADLINE.saturating_sub(started.elapsed()),
+            None,
+            false,
+            move |s| s.resolve(&query),
+        )
+        .await
     }
     async fn launch_app(&self, app: &AppRef) -> Result<AppRef> {
         self.check_safety(false)?;
@@ -159,7 +152,7 @@ impl Driver for WindowsDriver {
             if let Some(app) = &app {
                 s.validate_app(app)?;
             }
-            Ok(s.enumerate()?
+            Ok(s.enumerate(app.as_ref())?
                 .into_iter()
                 .filter(|(_, id)| app.as_ref().is_none_or(|a| &a.info.id == id))
                 .map(|(w, _)| w)
@@ -175,7 +168,7 @@ impl Driver for WindowsDriver {
         let app = app.clone();
         self.call(NATIVE_TIMEOUT, None, true, move |s| {
             s.validate_app(&app)?;
-            let windows = s.enumerate()?;
+            let windows = s.enumerate(Some(&app))?;
             let (mut info, _) = windows
                 .into_iter()
                 .filter(|(_, id)| id == &app.info.id)
@@ -300,7 +293,7 @@ impl Driver for WindowsDriver {
             let win = self
                 .call(DRIVER_DEADLINE, None, false, move |s| {
                     s.validate_app(&target)?;
-                    s.enumerate()?;
+                    s.enumerate(Some(&target))?;
                     Ok(s.windows
                         .iter()
                         .find(|(_, (w, _, _, identity))| {

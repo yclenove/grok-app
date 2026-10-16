@@ -91,32 +91,17 @@ pub async fn driver() -> Result<WindowsDriver, String> {
 }
 pub async fn window(driver: &WindowsDriver, fixture: &Fixture) -> Result<WindowRef, String> {
     let exe = std::env::var("GCU_FIXTURE_EXE").map_err(|e| e.to_string())?;
-    poll_async(
+    super::discovery::discover(
         &mut DesktopClock::default(),
         Duration::from_secs(5),
-        "fixture discovery",
-        async || {
-            let app = driver
-                .resolve_app(&AppQuery(exe.clone()))
-                .await
-                .map_err(|e| e.to_string())?;
-            require(
-                app.info.pid == Some(fixture.pid()),
-                format!("unexpected fixture PID: {:?}", app.info.pid),
-            )?;
-            let info = driver
-                .list_windows(Some(&app))
-                .await
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .find(|w| w.title == "GCU Fixture")
-                .ok_or("fixture window missing")?;
-            Ok(WindowRef { app, id: info.id })
-        },
-        |_| true,
+        driver,
+        &exe,
+        fixture.pid(),
+        || fixture.read(),
     )
     .await
 }
+
 pub async fn tree(driver: &WindowsDriver, win: &WindowRef) -> Result<RawTree, String> {
     let tree = driver
         .snapshot_tree(win, &TreeOpts::default(), &Cancel::default())

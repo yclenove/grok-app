@@ -2,6 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
+#[path = "contract/discovery.rs"]
+mod discovery;
 #[path = "contract/harness.rs"]
 mod harness;
 #[cfg(windows)]
