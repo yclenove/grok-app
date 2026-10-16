@@ -115,7 +115,8 @@ pub async fn run(
             perform(driver, DriverAction::PointerDrag { win: win.clone(), path: vec![start, end], route: PointerRoute::AllowForeground }).await?;
             fixture.wait("drop target", |v| v["drop_ok"] == true).await?;
         }
-        "C16" => return background(driver, fixture, win).await,
+        "C16" => return background::virtual_element(driver, fixture, win).await,
+        "C16-BUTTON" => return background::native_button(driver).await,
         "C17" => return safety::geometry_gate(driver, fixture, win).await,
         "C18" => return removed_element(driver, fixture, win).await,
         "C19" => return closed_window(driver, fixture, win).await,
@@ -215,14 +216,13 @@ async fn capture_occluded(
         .ok_or("grid frame missing")?;
     let geometry = unsafe_desktop::window_rect(win, fixture.pid())?;
     let cover = unsafe_desktop::Cover::start(geometry)?;
-    poll(
-        &mut DesktopClock::default(),
-        Duration::from_secs(5),
-        "cover foreground",
-        || Ok(unsafe_desktop::foreground()),
-        |h| *h == cover.hwnd,
-    )
-    .await?;
+    // Occlusion is a Z-order property, independent of foreground ownership.
+    for (col, row) in [(0, 0), (2, 3), (7, 5)] {
+        cover.require_occludes(
+            geometry.x + grid.x + (f64::from(col) + 0.25) * grid.w / 8.,
+            geometry.y + grid.y + (f64::from(row) + 0.25) * grid.h / 6.,
+        )?;
+    }
     let capture = driver
         .capture(win, &Default::default(), &Cancel::default())
         .await
@@ -315,102 +315,6 @@ async fn modal(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) -> Ca
     )?;
     Ok(Outcome::Passed)
 }
-async fn background(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) -> CaseResult {
-    let field = node(driver, win, "name_field").await?;
-    let button = node(driver, win, "counter_button").await?;
-    if !field.states.contains(States::SETTABLE) {
-        return Ok(Outcome::Skip(
-            "provider: no writable UIA text ValuePattern; C16 requires both background C05 and C07"
-                .into(),
-        ));
-    }
-    let cover = unsafe_desktop::Cover::start(unsafe_desktop::window_rect(win, fixture.pid())?)?;
-    poll(
-        &mut DesktopClock::default(),
-        Duration::from_secs(5),
-        "unrelated foreground",
-        || Ok(unsafe_desktop::foreground()),
-        |h| *h == cover.hwnd,
-    )
-    .await?;
-    let count = fixture.read()?["counter"].as_u64().unwrap();
-    let activation = unsafe_activation::Trace::start()?;
-    let fixture_hwnd = u64::from_str_radix(win.id.split(':').next().ok_or("missing HWND")?, 16)
-        .map_err(|e| e.to_string())?;
-    activation
-        .record("before background press", fixture_hwnd, cover.hwnd)
-        .await;
-    require(
-        unsafe_desktop::foreground() == cover.hwnd,
-        "cover lost foreground before dispatch",
-    )?;
-    let delivery = perform(driver, DriverAction::Press { el: button.handle }).await?;
-    require(
-        delivery == Delivery::TargetedEvent,
-        "background press must use a non-activating targeted route",
-    )?;
-    let after_invoke = unsafe_desktop::foreground();
-    activation
-        .record("after background press dispatch", fixture_hwnd, cover.hwnd)
-        .await;
-    fixture
-        .wait("background counter", |v| v["counter"] == count + 1)
-        .await?;
-    let foreground = background_foreground(win, cover.hwnd, after_invoke, "press").await;
-    activation
-        .record(
-            "after background press effect/pump",
-            fixture_hwnd,
-            cover.hwnd,
-        )
-        .await;
-    foreground?;
-    // Refresh handles after the provider's next generation.
-    perform(
-        driver,
-        DriverAction::SetValue {
-            el: node(driver, win, "name_field").await?.handle,
-            value: "background".into(),
-        },
-    )
-    .await?;
-    let after_set_value = unsafe_desktop::foreground();
-    activation
-        .record(
-            "after background SetValue dispatch",
-            fixture_hwnd,
-            cover.hwnd,
-        )
-        .await;
-    fixture
-        .wait("background text", |v| v["text"] == "background")
-        .await?;
-    background_foreground(win, cover.hwnd, after_set_value, "SetValue").await?;
-    Ok(Outcome::Passed)
-}
-async fn background_foreground(
-    win: &WindowRef,
-    expected: u64,
-    after_dispatch: u64,
-    action: &str,
-) -> Result<(), String> {
-    let after_effect = unsafe_desktop::foreground();
-    progress(format!("BACKGROUND: action={action}; expected={expected:x}; after_dispatch={after_dispatch:x}; after_effect={after_effect:x}; waiting for WM_NULL responsiveness"));
-    // The JSON oracle is written inside egui's frame, before the native pump
-    // returns. Wait only for that pump, never for foreground restoration, and
-    // never call SetForegroundWindow to conceal an activation.
-    let health = poll_async(
-        &mut DesktopClock::default(),
-        Duration::from_secs(5),
-        "background fixture WM_NULL readiness",
-        async || unsafe_desktop::responsiveness(win).await,
-        |probe| probe.responsive,
-    )
-    .await?;
-    let actual = unsafe_desktop::foreground();
-    progress(format!("BACKGROUND: action={action}; expected={expected:x}; after_dispatch={after_dispatch:x}; after_effect={after_effect:x}; responsive_foreground={actual:x}; WM_NULL Win32={}; elapsed_ms={}", health.win32, health.elapsed_ms));
-    require(actual == expected, format!("background {action} stole foreground: expected={expected:x}; actual={actual:x}; after_dispatch={after_dispatch:x}; after_effect={after_effect:x}; WM_NULL={health:?}"))
-}
 async fn removed_element(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) -> CaseResult {
     let old = node(driver, win, "counter_button").await?;
     let count = fixture.read()?["counter"].clone();
@@ -450,6 +354,9 @@ async fn closed_window(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRe
         |pid| pid.is_none(),
     )
     .await?;
+    // Closing the fixture can itself change foreground. Measure after close,
+    // immediately before the rejected action; no activation is needed here.
+    let foreground_before = unsafe_desktop::foreground();
     let result = driver
         .perform(
             &DriverAction::PointerClick {
@@ -475,8 +382,8 @@ async fn closed_window(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRe
         "closed-window action sent input to the other window",
     )?;
     require(
-        unsafe_desktop::foreground() == cover.hwnd,
-        "closed-window action changed the other foreground window",
+        unsafe_desktop::foreground() == foreground_before,
+        "closed-window action changed foreground",
     )?;
     Ok(Outcome::Passed)
 }

@@ -220,10 +220,10 @@ try {
         catch { Write-DesktopProgress "BACKGROUND DIAGNOSTIC FAILED: $($_.Exception.Message); C16 equality assertion still runs" }
     }
     if ($Suite -ne 'Smoke') {
-        Write-DesktopProgress 'CONTRACT SUITE START: C01-C27, W-UIPI, W-HOTKEY; external fixture oracle; Skip reasons printed per row'
+        Write-DesktopProgress 'CONTRACT SUITE START: C01-C27, C16-BUTTON, W-UIPI, W-HOTKEY; external fixture oracle; Skip reasons printed per row'
         Invoke-NativeCase 'live::live_contract_table_c01_to_c27'
         $report = Get-Content -Raw $env:GCU_CONTRACT_REPORT | ConvertFrom-Json
-        if ($report.passed + $report.skipped -ne 29 -or $report.not_run -ne 0 -or $report.failed -ne 0) { throw 'incomplete native contract report' }
+        if ($report.passed + $report.skipped -ne 30 -or $report.not_run -ne 0 -or $report.failed -ne 0) { throw 'incomplete native contract report' }
     }
     if ($Suite -ne 'Contract') {
         Add-Type -AssemblyName UIAutomationClient

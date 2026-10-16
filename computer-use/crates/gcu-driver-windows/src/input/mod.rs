@@ -106,17 +106,6 @@ impl InputBackend {
         cancel: &Cancel,
         deadline: tokio::time::Instant,
     ) -> Result<Delivery> {
-        self.perform_checked(window, req, cancel, deadline, None)
-            .await
-    }
-    pub(crate) async fn perform_checked(
-        &self,
-        window: NativeWindow,
-        req: &DriverAction,
-        cancel: &Cancel,
-        deadline: tokio::time::Instant,
-        preflight: Option<&dyn api::InputPreflight>,
-    ) -> Result<Delivery> {
         // Reserve cleanup time inside the shared deadline, including queueing.
         let work_deadline = deadline - std::time::Duration::from_millis(110);
         let serial = tokio::select! { biased;
@@ -244,10 +233,6 @@ impl InputBackend {
                         .await?;
                 }
                 let result = async {
-                    context.check()?;
-                    if let Some(preflight) = preflight {
-                        preflight.check().await?;
-                    }
                     context.check()?;
                     self.api
                         .send(

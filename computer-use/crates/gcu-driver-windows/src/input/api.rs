@@ -97,13 +97,6 @@ impl Event {
         )
     }
 }
-/// Exact semantic provenance check retained when press becomes targeted input.
-#[async_trait]
-pub(crate) trait InputPreflight: Send + Sync {
-    /// Read-only revalidation after queueing and the parent preparation barrier.
-    async fn check(&self) -> Result<()>;
-}
-
 /// All OS operations sit behind this boundary. Reads are abandoned when their
 /// futures drop. `send` must use ledger dispatch immediately around the native
 /// call, restore uncertainty only on proven zero delivery, and never retry.

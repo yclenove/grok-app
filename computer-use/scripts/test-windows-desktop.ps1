@@ -181,8 +181,8 @@ try {
     New-Item -ItemType Directory $dir | Out-Null
     Write-DesktopNotRun $dir All "token rejected; $diagnostic"
     $report = Get-Content -Raw (Join-Path $dir 'contract.json') | ConvertFrom-Json
-    Assert-True ($report.passed -eq 0 -and $report.skipped -eq 0 -and $report.not_run -eq 29 -and $report.failed -eq 0) 'unavailable desktop is not_run'
-    Assert-True ($report.rows.Count -eq 29) 'all native contract rows retained'
+    Assert-True ($report.passed -eq 0 -and $report.skipped -eq 0 -and $report.not_run -eq 30 -and $report.failed -eq 0) 'unavailable desktop is not_run'
+    Assert-True ($report.rows.Count -eq 30) 'all native contract rows retained'
     foreach ($row in $report.rows) {
         Assert-True ($row[1].outcome -eq 'not_run' -and $row[1].reason.Contains($diagnostic)) 'each native row explains token rejection'
     }

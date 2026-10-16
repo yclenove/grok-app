@@ -47,8 +47,11 @@ impl Driver for WindowsDriver {
         if let Some(discovery) = &self.discovery {
             issues.extend(discovery.issues());
         }
+        if self.observer.is_some() {
+            issues.push("background_operation=partial: UIA Invoke/Legacy may activate the target window on Windows (measured against native BUTTON controls); native BUTTON press uses non-activating BM_CLICK. Explicit TargetedOnly clicks never fall back to UIA or foreground".into());
+        }
         issues.push(if self.input.is_some() {
-            "background_operation=partial: UIA Invoke/Legacy can activate; press uses BM_CLICK or TargetedOnly messages (Chromium/UWP refused), never an implicit foreground fallback; explicit foreground pointer actions require core approval and healthy parent Stop monitoring".into()
+            "Explicit foreground pointer actions require core approval and healthy parent Stop monitoring".into()
         } else if self.capture_backend.is_some() {
             "Pointer/keyboard and foreground unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
         } else if self.observer.is_some() {
@@ -373,7 +376,7 @@ impl Driver for WindowsDriver {
         self.observer
             .as_ref()
             .ok_or(DriverError::CapabilityUnavailable)?
-            .perform(window, self.input.as_deref(), req, cancel, deadline)
+            .perform(window.hwnd, req, cancel, deadline)
             .await
     }
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {

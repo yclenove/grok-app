@@ -3,20 +3,17 @@ use super::{unsafe_activation, unsafe_desktop, Fixture};
 use crate::harness::*;
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
     },
     time::Duration,
 };
 use windows::{
-    core::{w, Interface},
+    core::w,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        System::{
-            Com::*, LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId,
-            Variant::VARIANT,
-        },
-        UI::{Accessibility::*, WindowsAndMessaging::*},
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        UI::WindowsAndMessaging::*,
     },
 };
 static CLICKS: AtomicU64 = AtomicU64::new(0);
@@ -28,13 +25,16 @@ unsafe extern "system" fn procedure(h: HWND, message: u32, wp: WPARAM, lp: LPARA
     // SAFETY: forward unchanged OS-owned parameters.
     unsafe { DefWindowProcW(h, message, wp, lp) }
 }
-struct Native {
-    root: u64,
-    button: u64,
+pub(super) struct Native {
+    pub root: u64,
+    pub button: u64,
     thread: u32,
 }
 impl Native {
-    fn start() -> Result<Self, String> {
+    pub fn clicks(&self) -> u64 {
+        CLICKS.load(Ordering::SeqCst)
+    }
+    pub fn start() -> Result<Self, String> {
         let (ready, wait) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             // SAFETY: static class/procedure; windows and pump belong to this thread.
@@ -52,7 +52,7 @@ impl Native {
                         WINDOW_EX_STYLE::default(),
                         w!("GcuNativeBackgroundProbe"),
                         w!("GCU native background control"),
-                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        WS_OVERLAPPEDWINDOW,
                         20,
                         20,
                         300,
@@ -76,7 +76,27 @@ impl Native {
                         Some(instance),
                         None,
                     ) {
-                        Ok(button) => Ok((root, button)),
+                        Ok(button) => {
+                            // Show an ordinary native window without taking foreground
+                            // during setup; its styles do not suppress later activation.
+                            if let Err(error) = SetWindowPos(
+                                root,
+                                None,
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_SHOWWINDOW
+                                    | SWP_NOACTIVATE
+                                    | SWP_NOMOVE
+                                    | SWP_NOSIZE
+                                    | SWP_NOZORDER,
+                            ) {
+                                let _ = DestroyWindow(root);
+                                return Err(error);
+                            }
+                            Ok((root, button))
+                        }
                         Err(error) => {
                             let _ = DestroyWindow(root);
                             Err(error)
@@ -134,67 +154,6 @@ impl Drop for Native {
 fn hwnd(id: u64) -> HWND {
     HWND(id as usize as *mut _)
 }
-async fn invoke(root: u64, name: Option<&str>, expected: u64) -> Result<(), String> {
-    let name = name.map(str::to_owned);
-    let closed = Arc::new(AtomicBool::new(false));
-    let abandoned = closed.clone();
-    let (reply, job) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let result = (|| {
-            // SAFETY: dedicated MTA, with all interfaces dropped before CoUninitialize.
-            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-                .ok()
-                .map_err(|e| e.to_string())?;
-            struct Com;
-            impl Drop for Com {
-                fn drop(&mut self) {
-                    // SAFETY: balances this thread's successful initialization.
-                    unsafe { CoUninitialize() };
-                }
-            }
-            let _com = Com;
-            // SAFETY: COM initialized here; targets are exact disposable fixture HWNDs.
-            let result = unsafe {
-                (|| -> windows::core::Result<()> {
-                    let automation: IUIAutomation =
-                        CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
-                    let limits: IUIAutomation2 = automation.cast()?;
-                    limits.SetConnectionTimeout(500)?;
-                    limits.SetTransactionTimeout(500)?;
-                    let root = automation.ElementFromHandle(hwnd(root))?;
-                    let element = if let Some(name) = name {
-                        let condition = automation.CreatePropertyCondition(
-                            UIA_NamePropertyId,
-                            &VARIANT::from(name.as_str()),
-                        )?;
-                        root.FindFirst(TreeScope_Descendants, &condition)?
-                    } else {
-                        root
-                    };
-                    let pattern: IUIAutomationInvokePattern =
-                        element.GetCurrentPatternAs(UIA_InvokePatternId)?;
-                    let before_invoke = unsafe_desktop::foreground();
-                    progress(format!(
-                    "DIRECT UIA: resolved; before_Invoke={before_invoke:x}; expected={expected:x}"
-                ));
-                    if abandoned.load(Ordering::Acquire) || before_invoke != expected {
-                        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
-                            0x80004004u32 as i32,
-                        )));
-                    }
-                    pattern.Invoke()
-                })()
-            };
-            result.map_err(|e| format!("direct UIA Invoke: {e}"))
-        })();
-        let _ = reply.send(result);
-    });
-    let result = tokio::time::timeout(Duration::from_secs(5), job).await;
-    closed.store(true, Ordering::Release);
-    result
-        .map_err(|_| "direct UIA diagnostic timed out; mutation unknown, no retry".to_string())?
-        .map_err(|e| e.to_string())?
-}
 async fn native_row(
     native: &Native,
     cover: &unsafe_desktop::Cover,
@@ -214,7 +173,9 @@ async fn native_row(
         "native PostMessage BM_CLICK"
     };
     let dispatch = if direct {
-        invoke(native.button, None, cover.hwnd).await
+        super::unsafe_invoke::invoke(native.button, None, cover.hwnd, None)
+            .await
+            .map(|_| ())
     } else {
         // SAFETY: pointer-free BM_CLICK to our exact native child BUTTON, once.
         unsafe { PostMessageW(Some(hwnd(native.button)), BM_CLICK, WPARAM(0), LPARAM(0)) }
@@ -264,7 +225,7 @@ async fn live_background_activation_probe() {
         .record("egui direct UIA before", root, cover.hwnd)
         .await;
     let count = fixture.read().unwrap()["counter"].as_u64().unwrap();
-    let result = invoke(root, Some("counter_button"), cover.hwnd).await;
+    let result = super::unsafe_invoke::invoke(root, Some("counter_button"), cover.hwnd, None).await;
     let after_dispatch = unsafe_desktop::foreground();
     progress(format!("EGUI DIRECT UIA DISPATCH: result={result:?}; expected={:x}; after_dispatch={after_dispatch:x}", cover.hwnd));
     let effect = if result.is_ok() {

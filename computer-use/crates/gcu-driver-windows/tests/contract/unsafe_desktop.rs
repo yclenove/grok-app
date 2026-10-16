@@ -135,6 +135,7 @@ pub async fn raw_windows(pid: u32) -> Result<Vec<WindowProbe>, String> {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // win32/elapsed_ms are read through the Debug diagnostics in failure messages
 pub struct Responsiveness {
     pub responsive: bool,
     pub win32: u32,
@@ -241,10 +242,33 @@ impl Drop for Title {
 /// An unrelated own-process native window that completely covers the fixture.
 pub struct Cover {
     pub hwnd: u64,
+    pub foreground_setup: Result<(), String>,
     thread: u32,
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl Cover {
+    /// Check physical Z order, independently of which window owns foreground.
+    pub fn require_occludes(&self, x: f64, y: f64) -> Result<(), String> {
+        let _dpi = PhysicalDpi::enter()?;
+        // SAFETY: read-only hit test in physical pixels; no activation or input.
+        let top = unsafe {
+            GetAncestor(
+                WindowFromPoint(windows::Win32::Foundation::POINT {
+                    x: x as i32,
+                    y: y as i32,
+                }),
+                GA_ROOT,
+            )
+        }
+        .0 as usize as u64;
+        require(
+            top == self.hwnd,
+            format!(
+                "cover does not occlude physical point ({x},{y}); top={top:x}; cover={:x}",
+                self.hwnd
+            ),
+        )
+    }
     pub async fn acquire_foreground_for_setup(&self) -> Result<(), String> {
         let window = self.hwnd;
         tokio::time::timeout(
@@ -311,14 +335,27 @@ impl Cover {
                     let _ = tx.send(Err("cover creation failed".to_string()));
                     return;
                 };
-                if let Err(error) = super::unsafe_foreground::acquire(h.0 as usize as u64) {
+                let foreground_setup = super::unsafe_foreground::acquire(h.0 as usize as u64);
+                if let Err(error) = &foreground_setup {
+                    progress(format!("COVER SETUP: {error}; keep topmost cover; foreground-dependent cases decide Skip"));
+                }
+                if let Err(error) = SetWindowPos(
+                    h,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                ) {
                     let _ = DestroyWindow(h);
-                    let _ = tx.send(Err(error));
+                    let _ = tx.send(Err(format!("cover topmost positioning: {error}")));
                     return;
                 }
                 let _ = tx.send(Ok((
                     h.0 as usize as u64,
                     windows::Win32::System::Threading::GetCurrentThreadId(),
+                    foreground_setup,
                 )));
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -328,11 +365,12 @@ impl Cover {
                 let _ = DestroyWindow(h);
             }
         });
-        let (hwnd, thread) = rx
+        let (hwnd, thread, foreground_setup) = rx
             .recv_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())??;
         Ok(Self {
             hwnd,
+            foreground_setup,
             thread,
             join: Some(join),
         })

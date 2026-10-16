@@ -28,9 +28,9 @@ fn interrupted_contract_report_preserves_completed_rows_and_marks_remaining_not_
     let saved = report.pending_snapshot();
     assert_eq!(
         (saved.passed, saved.skipped, saved.failed, saved.not_run),
-        (1, 1, 1, 26)
+        (1, 1, 1, 27)
     );
-    assert_eq!(saved.rows.len(), 29);
+    assert_eq!(saved.rows.len(), 30);
     for (_, outcome) in saved.rows.iter().skip(3) {
         assert!(matches!(outcome, Outcome::NotRun(reason) if reason.contains("did not finish")));
     }
@@ -292,7 +292,7 @@ fn desktop_absent_reports_native_cases_not_run() {
     report.finish();
     assert_eq!(
         (report.passed, report.skipped, report.not_run, report.failed),
-        (0, 0, 29, 0)
+        (0, 0, 30, 0)
     );
 }
 

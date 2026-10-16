@@ -68,10 +68,10 @@ function Write-DesktopNotRun {
     param([string]$OutputDir, [string]$Suite, [string]$Reason)
     if ($Suite -ne 'Smoke') {
         $rows = [Collections.Generic.List[object]]::new()
-        $ids = @(1..27 | ForEach-Object { 'C{0:00}' -f $_ }) + @('W-UIPI','W-HOTKEY')
+        $ids = @(1..27 | ForEach-Object { 'C{0:00}' -f $_ }) + @('C16-BUTTON','W-UIPI','W-HOTKEY')
         foreach ($id in $ids) { $rows.Add(@($id, @{outcome='not_run';reason=$Reason})) }
-        @{passed=0;skipped=0;not_run=29;failed=0;rows=$rows.ToArray()} | ConvertTo-Json -Depth 8 |
+        @{passed=0;skipped=0;not_run=30;failed=0;rows=$rows.ToArray()} | ConvertTo-Json -Depth 8 |
             Set-Content -Encoding UTF8 (Join-Path $OutputDir 'contract.json')
-        Write-Output "SUMMARY: 0 passed, 0 skipped, 29 not_run, 0 failed; $Reason"
+        Write-Output "SUMMARY: 0 passed, 0 skipped, 30 not_run, 0 failed; $Reason"
     }
 }

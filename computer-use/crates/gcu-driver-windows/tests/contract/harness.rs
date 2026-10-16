@@ -19,7 +19,14 @@ pub const CASES: &[(&str, &str)] = &[
     ("C13", "two-page list scroll"),
     ("C14", "modal lifecycle and priority"),
     ("C15", "drag to target"),
-    ("C16", "background press and SetValue"),
+    (
+        "C16-BUTTON",
+        "native BUTTON background press preserves foreground",
+    ),
+    (
+        "C16",
+        "background press and SetValue with same-run Invoke control",
+    ),
     ("C17", "old screenshot geometry gate"),
     ("C18", "deleted element never substituted"),
     ("C19", "closed window never substituted"),
@@ -315,7 +322,8 @@ mod tests {
     }
     #[test]
     fn table_unique_ids_covers_all_contracts_and_uipi() {
-        assert_eq!(CASES.len(), 29);
+        assert_eq!(CASES.len(), 30);
+        assert_eq!(CASES.iter().filter(|r| r.0 == "C16-BUTTON").count(), 1);
         for i in 1..=27 {
             assert_eq!(
                 CASES.iter().filter(|r| r.0 == format!("C{i:02}")).count(),
@@ -329,7 +337,17 @@ mod tests {
             assert!(requires_foreground(id), "{id}");
         }
         for id in [
-            "C05", "C07", "C10", "C12", "C13", "C16", "C19", "C23", "C27", "W-UIPI",
+            "C05",
+            "C07",
+            "C10",
+            "C12",
+            "C13",
+            "C16",
+            "C16-BUTTON",
+            "C19",
+            "C23",
+            "C27",
+            "W-UIPI",
         ] {
             assert!(!requires_foreground(id), "{id}");
         }
@@ -377,7 +395,7 @@ mod tests {
         }
         assert_eq!(
             (report.passed, report.skipped, report.not_run, report.failed),
-            (28, 1, 0, 0)
+            (29, 1, 0, 0)
         );
         assert_eq!(report.rows.len(), CASES.len());
         assert_eq!(report.pending_snapshot().not_run, 0);
@@ -421,7 +439,7 @@ mod tests {
         assert_eq!(report.failed, 1);
         assert!(report.first_failure().unwrap().contains("C05: timeout"));
         assert!(report.first_failure().unwrap().contains("counter:0"));
-        assert_eq!(report.pending_snapshot().not_run, 28);
+        assert_eq!(report.pending_snapshot().not_run, 29);
     }
     #[tokio::test]
     async fn case_deadline_preserves_ready_error_and_panic_before_timeout() {

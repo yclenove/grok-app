@@ -16,8 +16,8 @@ mod common;
 #[path = "actions/fixtures.rs"]
 mod fixtures;
 use fixtures::*;
-#[path = "actions/targeted_press.rs"]
-mod targeted_press;
+#[path = "actions/press_routes.rs"]
+mod press_routes;
 
 #[test]
 fn priority_control_types_use_semantically_equivalent_patterns_only() {

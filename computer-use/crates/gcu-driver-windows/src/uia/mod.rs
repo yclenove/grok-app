@@ -9,7 +9,6 @@ pub mod events;
 mod fake_actions;
 pub(crate) mod observe;
 pub mod patterns;
-mod press;
 pub mod roles;
 mod scroll;
 pub mod sensitive;

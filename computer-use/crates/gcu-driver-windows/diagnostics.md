@@ -73,28 +73,40 @@ is not a substitute implemented by these diagnostics.
 
 ## Background activation attribution
 
-C16 prints `ACTIVATION` identities (HWND, class, title, PID and window thread) for
-the expected cover, exact fixture and actual foreground before/after dispatch and
-after the fixture responds to WM_NULL. The foreground assertion stays exact.
-A WinEvent observer also records EVENT_SYSTEM_FOREGROUND with notification thread
-and OS time. That thread identifies the event generator, **not** the stack or
-caller of SetForegroundWindow; it is not by itself proof that winit activated.
+C16 runs a bare UIA Invoke control **inside the contract process and run** on the
+same fixture counter element, checking its observed RuntimeId before dispatch.
+The control records foreground HWND/class/PID immediately before Invoke, immediately
+after dispatch, after the exact external JSON increment, and after WM_NULL readiness.
+A change during UIA resolution aborts before mutation. A successful control that
+changes foreground to the fixture proves activation for that virtual element type:
+only that C16 element variant Skips, with every measured identity and counter value
+in its reason. A change to an unrelated process is unresolved and fails. If the
+control preserves foreground, the driver press and SetValue must preserve the exact
+same unrelated HWND at every checkpoint and produce the original external effects.
+No assertion is relaxed and no action is replayed.
 
-`live::unsafe_background_probe::live_background_activation_probe` compares:
+C16-BUTTON is an independent, mandatory contract row. It observes an ordinary native
+BUTTON through the driver, performs Press, requires TargetedEvent (BM_CLICK), checks
+an exact WM_COMMAND count of +1 including a native pump barrier, and asserts exact
+foreground equality after dispatch, effect and pump. It cannot inherit the virtual
+element Skip. The native window is shown without activation during setup; it retains
+normal styles, so the oracle can detect subsequent activation.
 
-1. PostMessage BM_CLICK to an owned native BUTTON, with exact WM_COMMAND count.
-2. Direct UIA Invoke on the same BUTTON, bypassing the driver.
-3. Direct UIA Invoke on the fixture counter, with exact external JSON increment.
+Cover creation attempts foreground once, logging AllowSetForegroundWindow,
+AttachThreadInput (with scoped detach), SetForegroundWindow's return/error, actual
+foreground HWND/class/PID, and SPI_GETFOREGROUNDLOCKTIMEOUT/result. Denial retains
+the topmost cover. C04 verifies physical occlusion at all sampled marker pixels
+independently of foreground. C19 measures foreground after closing the fixture and
+before the rejected action, retaining window_gone, zero unintended input and exact
+foreground equality assertions. C16 can use an already unrelated actual foreground
+if cover preparation fails; only an absent/unusable background precondition Skips,
+with preparation diagnostics. No Alt injection or post-action foreground repair runs.
 
-Each scenario establishes the cover foreground before dispatch, then records the
-result without restoring foreground. Harness preparation logs AllowSetForegroundWindow,
-AttachThreadInput (with scoped detach), and, if required, a balanced Alt down/up
-trick. These are test setup actions only, never product fallbacks or post-action
-foreground repair. Failure/timeout to acquire the exact cover aborts before dispatch. Native comparisons require exact foreground
-equality. UIA resolution and pattern acquisition are logged before Invoke; a
-pre-dispatch foreground change aborts the diagnostic action. This separates
-precondition/provider discovery changes from actual Invoke delivery. The separate
-contract process performs the original driver path after diagnostics complete.
+`ACTIVATION` traces include identities and EVENT_SYSTEM_FOREGROUND notifications.
+The notification thread is evidence of the event generator, not the call stack or
+caller of SetForegroundWindow. The separate opt-in diagnostic still compares bare
+UIA Invoke on native/virtual controls against raw native PostMessage BM_CLICK; its
+results cannot grant a contract Skip or satisfy C16-BUTTON.
 
 The fixture's opt-in egui plugin observes AccessKit action kinds and Focus commands
 in frame output. It never consumes an action, removes Focus, or changes activation.
@@ -102,32 +114,27 @@ in frame output. It never consumes an action, removes Focus, or changes activati
 script. Matching fixture PID + direct reproduction + stable native comparisons
 can isolate a provider-specific effect. A Focus command is evidence of a request
 for egui-winit's focus path; absence does not establish which other native call
-activated the window. Unresolved activation remains a failure, with no speculative
-Skip or weakened equality assertion.
+activated the window. The same-run control, rather than speculative provider
+attribution or a separate diagnostic process, determines the virtual-element Skip.
 
 ## Background press routing
 
-Windows background capability remains Partial (03 §5.2/5.4, P2-06). UIA
-InvokePattern and Legacy default actions are not treated as non-activating delivery.
-The native standard BUTTON path posts BM_CLICK to its exact validated child HWND
-and returns TargetedEvent. Invoke/Legacy presses on other controls use their exact
-revalidated UIA bounds through the existing TargetedOnly pointer path, including
-child hit testing, stamped-window checks, parent InputLedger acknowledgements,
-cancellation cleanup, and effect sampling. Each packet revalidates the exact UIA
-slot/RuntimeId/metadata after queueing and the parent preparation barrier, so a
-removed, moved or disabled element cannot be replaced by a click on old coordinates. Secondary Press/Confirm use the same
-route. Unsupported Chromium/UWP recipients, missing bounds or absent input backend
-are refused without Invoke, SetFocus, or a foreground fallback. Other semantic
-patterns retain their explicit pattern routes.
+Windows background capability remains Partial (03 §5.2/5.4, P2-05/P2-06). Exact
+native BUTTONs post BM_CLICK to their validated child HWND and return TargetedEvent.
+Other Invoke/Legacy elements use their semantic UIA pattern on the observation MTA
+and return Accessibility. Providers can activate the target window: doctor declares
+this measured limitation explicitly. DriverAction/capabilities have no separate
+per-action activation bit; this change does not extend the architecture interface.
 
-Doctor tells Router/callers that Invoke/Legacy may activate and unsupported presses
-require an explicitly authorized foreground pointer action. The DriverAction and
-capability interfaces are unchanged. This trades arbitrary-provider Invoke coverage
-for a background press path with an honest delivery label and no implicit activation.
-C16 still requires the exact unrelated foreground HWND after press and SetValue,
-plus exact external counter/text effects; it additionally checks targeted delivery.
-The native direct-Invoke diagnostic retains its exact equality comparison, so an
-activation is reported even though the product no longer uses that route.
+Semantic delivery retains the existing exact slot/RuntimeId/HWND/metadata/security
+rechecks immediately before mutation, cancellation marker, worker timeout/unknown
+classification and no-replay rule. Secondary Press/Confirm use the same pattern
+priority. Explicit TargetedOnly pointer clicks retain child hit testing, stamped
+window validation, parent InputLedger acknowledgements, Stop/cancel cleanup and
+honest unsupported-recipient errors; they never fall back to UIA or foreground.
+Other semantic patterns retain their existing routes. Restoring Invoke preserves
+virtual-control coverage in egui, Chromium and UWP while honestly limiting background
+operation; semantic delivery is not a non-activation guarantee.
 
 ## Required physical-mouse Windows release checks
 
@@ -144,9 +151,10 @@ physical mouse on the interactive Default desktop and record these results:
 - Verify Stop during a held key, click/drag and blocked worker: latch <=100ms,
   release <=500ms, kill blocked worker <=5s; queued actions stay stopped and
   reconnect/restart cannot resume. Exercise real hotkey conflict and trusted resume.
-- Run C16 with an unrelated foreground cover for both native BUTTON/BM_CLICK and
-  the virtual fixture/targeted-message press, including SetValue. Assert exact
-  foreground equality and external effects; also check Chromium/UWP refusal.
+- Run C16's same-run bare Invoke control and conditional exact foreground/effect
+  assertions for virtual controls, including SetValue. C16-BUTTON must pass its
+  driver/BM_CLICK foreground and count assertions. Check explicit TargetedOnly
+  Chromium/UWP refusal separately; semantic Invoke remains available.
 - Complete Notepad Unicode write/save, Explorer navigation, Settings search, plus
   high-DPI C06, password redaction C20, and worker timeout/no replay C22.
 
@@ -158,5 +166,6 @@ covers injected/physical classification, hotkey conflict, hook loss, fail-closed
 capabilities and deterministic watchdog budgets; `tests/stop/worker` covers the
 parent release/kill path. `src/input/hotkey/startup` verifies keyboard-only proof
 cannot arm the guard. These tests are required even when native cases Skip; they
-are not claimed as physical-device evidence. `tests/actions/targeted_press` adds
-route refusal, ledger cleanup, delivery labeling and zero Invoke/activation checks.
+are not claimed as physical-device evidence. `tests/actions/press_routes` covers
+virtual Invoke/Legacy delivery, exact revalidation, Partial/doctor disclosure,
+explicit TargetedOnly refusal and partial-dispatch cleanup without semantic fallback.

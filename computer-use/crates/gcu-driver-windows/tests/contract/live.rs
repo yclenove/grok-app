@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+#[path = "background.rs"]
+mod background;
 #[path = "cases.rs"]
 mod cases;
 #[path = "safety.rs"]
@@ -29,6 +31,8 @@ pub mod unsafe_desktop;
 mod unsafe_foreground;
 #[path = "unsafe_hotkey.rs"]
 mod unsafe_hotkey;
+#[path = "unsafe_invoke.rs"]
+mod unsafe_invoke;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct Fixture {

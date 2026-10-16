@@ -212,10 +212,10 @@ rcargo test --locked -p gcu-driver-windows --test capture
 
 ## UI Automation semantic actions (P2-05)
 
-`Press`/`SecondaryAction` choose patterns by control type; native Invoke/Legacy
-presses instead use exact BUTTON BM_CLICK or ledger-backed TargetedOnly clicks.
-These report TargetedEvent, keep background capability Partial, and refuse unsupported
-targets without Invoke, SetFocus or implicit foreground escalation. See [diagnostics](diagnostics.md).
+`Press`/`SecondaryAction` choose patterns by control type. Exact native BUTTONs use
+non-activating BM_CLICK (TargetedEvent); other Invoke/Legacy elements retain UIA semantics
+(Accessibility), which may activate the target window on Windows. Background remains Partial.
+Explicit TargetedOnly clicks never fall back to UIA or foreground. See [diagnostics](diagnostics.md).
 Other semantic patterns use the observation MTA. Only proven zero-effect absence
 permits fallback; uncertain native failures never replay. Value, range, text and
 scroll never substitute for press. Raise, ShowMenu and arbitrary native names

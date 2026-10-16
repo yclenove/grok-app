@@ -82,7 +82,7 @@ pub(super) fn perform(
         request: r,
         action: &action,
     };
-    let result = execute(&el, &action, &guard);
+    let result = execute(&el, &action, &guard, props.class_name.as_deref());
     match result {
         Ok(v) => Ok(v),
         Err(ActionError::Unsupported) => Ok(PatternResult::Unsupported),
@@ -94,9 +94,25 @@ fn execute(
     el: &IUIAutomationElement,
     action: &PatternAction,
     r: &Guard<'_>,
+    class_name: Option<&str>,
 ) -> Prepared<PatternResult> {
     let result = match action {
-        PatternAction::Invoke | PatternAction::LegacyDefault => return press::post(el, r),
+        PatternAction::Invoke | PatternAction::LegacyDefault => {
+            if let Some(result) = press::post(el, class_name, r)? {
+                return Ok(result);
+            }
+            // Virtual UIA controls have no native BUTTON recipient. Preserve
+            // their semantic channel; providers may activate the owning window.
+            // This is never reached from an explicit TargetedOnly pointer action.
+            if matches!(action, PatternAction::Invoke) {
+                let p: IUIAutomationInvokePattern = pattern(el, UIA_InvokePatternId, r)?;
+                mutate!(r, p.Invoke())
+            } else {
+                let p: IUIAutomationLegacyIAccessiblePattern =
+                    pattern(el, UIA_LegacyIAccessiblePatternId, r)?;
+                mutate!(r, p.DoDefaultAction())
+            }
+        }
         PatternAction::Toggle => {
             let p: IUIAutomationTogglePattern = pattern(el, UIA_TogglePatternId, r)?;
             mutate!(r, p.Toggle())
