@@ -51,15 +51,19 @@ impl TextApi for RealText {
                 {
                     return Err(DriverError::StaleElement);
                 }
-                let mut value = fresh.plain_value.ok_or(DriverError::NotSettable)?;
-                value.push_str(&text);
+                let previous = fresh.plain_value.clone();
+                let mut full = previous.clone().ok_or(DriverError::NotSettable)?;
+                full.push_str(&text);
                 if !live() {
                     return Err(DriverError::Cancelled {
                         maybe_executed: false,
                     });
                 }
-                match act::set_string(world, fresh.handle.id, "AXValue", &value)? {
-                    crate::ax::AxCall::Performed => Ok(()),
+                let id = fresh.handle.id;
+                match act::set_string(world, id, "AXValue", &full)? {
+                    crate::ax::AxCall::Performed => {
+                        confirm_append(world, id, &full, previous.as_deref())
+                    }
                     _ => Err(DriverError::NotSettable),
                 }
             })
@@ -200,6 +204,43 @@ fn focus(world: &mut World, target: &InputTarget) -> Result<TextFocus> {
         high_risk,
         frontmost,
     })
+}
+
+fn confirm_append(world: &mut World, id: u64, full: &str, previous: Option<&str>) -> Result<()> {
+    let Some(element) = world.element(id) else {
+        return Err(DriverError::Native {
+            message: "AXValue readback lost the element".into(),
+            maybe_executed: true,
+        });
+    };
+    if let Err(error) = world::set_messaging_timeout(element) {
+        return Err(mark_executed(error));
+    }
+    let after = match string(element, "AXValue") {
+        Ok(value) => value,
+        Err(error) => return Err(mark_executed(error)),
+    };
+    if after.as_deref() == Some(full) {
+        return Ok(());
+    }
+    if after.as_deref() == previous || after.is_none() {
+        return Err(DriverError::NotSettable);
+    }
+    Err(DriverError::Native {
+        message: "AXValue readback did not match".into(),
+        maybe_executed: true,
+    })
+}
+
+fn mark_executed(error: DriverError) -> DriverError {
+    if error.maybe_executed() {
+        error
+    } else {
+        DriverError::Native {
+            message: "AXValue readback failed".into(),
+            maybe_executed: true,
+        }
+    }
 }
 
 fn read(element: AXUIElementRef, name: &str) -> Result<Option<CFType>> {

@@ -6,6 +6,8 @@
 //! `PointerRoute::TargetedOnly` and `KeyRoute::TargetedOnly` never become a
 //! HID-tap event here; the router returns [`DriverError::CapabilityUnavailable`].
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use gcu_core::{
     driver::{Button, DriverError, Result},
@@ -368,7 +370,17 @@ pub fn plan_scroll(
     Ok(vec![event])
 }
 
+/// Gap between drag samples.
+///
+/// egui 0.36 ignores a press and release in the same frame. 32ms is longer
+/// than one 60 Hz frame and stays inside the driver deadline.
+pub const DRAG_SAMPLE_GAP: Duration = Duration::from_millis(32);
+
 /// Drag along `path_points`. Fewer than two points is [`DriverError::InvalidRequest`].
+///
+/// Every point after the press is a drag sample, including the destination,
+/// and then the button goes up. The router waits [`DRAG_SAMPLE_GAP`] between
+/// those samples so a same-frame press-release is not the whole gesture.
 pub fn plan_drag(
     target: &InputTarget,
     path_points: &[WindowPoint],
@@ -391,7 +403,7 @@ pub fn plan_drag(
         1,
         true,
     ));
-    for local in locals.iter().skip(1).take(locals.len().saturating_sub(2)) {
+    for local in locals.iter().skip(1) {
         events.push(pointer(
             target,
             path,

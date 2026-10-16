@@ -1,7 +1,12 @@
 //! `SetValue` for a settable `AXValue`. No macOS calls.
 //!
 //! Password roles and terminal-like controls are refused before any write.
+//! A performed write is read back. A value that still does not match is
+//! [`DriverError::NotSettable`], never a successful delivery. Numeric
+//! controls may apply on the next frame, so only a mismatch is polled.
 //! The typed text is not logged.
+
+use std::time::Duration;
 
 use gcu_core::driver::{Delivery, DriverError, Result};
 use gcu_core::model::NodeValue;
@@ -10,6 +15,10 @@ use super::actions::{guarded, Budget};
 use super::roles::map_ax_role;
 use super::sensitive::is_terminal_like;
 use super::source::{AxCall, AxSource};
+
+const READBACK_TRIES: u32 = 5;
+const READBACK_GAP: Duration = Duration::from_millis(25);
+const NUMBER_EPSILON: f64 = 1e-3;
 
 /// Replace `AXValue` when the attribute is settable.
 ///
@@ -68,8 +77,16 @@ pub(super) async fn set_value<S: AxSource>(
     };
     match result {
         Ok(AxCall::Performed) => {
-            budget.finish(true);
-            Ok(Delivery::Accessibility)
+            match confirm_readback(source, node, value, number, budget).await {
+                Ok(()) => {
+                    budget.finish(true);
+                    Ok(Delivery::Accessibility)
+                }
+                Err(error) => {
+                    budget.finish(error.maybe_executed());
+                    Err(error)
+                }
+            }
         }
         Ok(AxCall::Unsupported | AxCall::Unavailable) => {
             budget.finish(false);
@@ -78,6 +95,63 @@ pub(super) async fn set_value<S: AxSource>(
         Err(error) => {
             budget.finish(error.maybe_executed());
             Err(error)
+        }
+    }
+}
+
+/// Five reads, 25ms apart, only while the value disagrees. About 100ms total.
+async fn confirm_readback<S: AxSource>(
+    source: &S,
+    node: &S::Node,
+    value: &str,
+    number: Option<f64>,
+    budget: &Budget<'_>,
+) -> Result<()> {
+    for attempt in 0..READBACK_TRIES {
+        if attempt > 0 {
+            let left = budget.remaining();
+            if left.is_zero() || budget.is_cancelled() {
+                source.note("reject:readback");
+                return Err(DriverError::NotSettable);
+            }
+            tokio::select! {
+                biased;
+                _ = budget.until_cancel() => {
+                    source.note("reject:readback");
+                    return Err(DriverError::NotSettable);
+                }
+                _ = tokio::time::sleep(READBACK_GAP.min(left)) => {}
+            }
+        }
+        match guarded(budget, source.value(node)).await {
+            Ok(now) if value_matches(&now, value, number) => return Ok(()),
+            Ok(_) => {}
+            Err(error) => return Err(mark_executed(error)),
+        }
+    }
+    source.note("reject:readback");
+    Err(DriverError::NotSettable)
+}
+
+fn value_matches(now: &Option<NodeValue>, text: &str, number: Option<f64>) -> bool {
+    if let Some(want) = number {
+        let got = match now {
+            Some(NodeValue::Number(value)) => *value,
+            Some(NodeValue::Range { value, .. }) => *value,
+            _ => return false,
+        };
+        return (got - want).abs() <= NUMBER_EPSILON;
+    }
+    matches!(now, Some(NodeValue::Text(got)) if got == text)
+}
+
+fn mark_executed(error: DriverError) -> DriverError {
+    if error.maybe_executed() {
+        error
+    } else {
+        DriverError::Native {
+            message: "AXValue readback failed".into(),
+            maybe_executed: true,
         }
     }
 }

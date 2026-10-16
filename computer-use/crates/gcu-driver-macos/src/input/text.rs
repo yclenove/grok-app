@@ -190,11 +190,11 @@ async fn run(
     }
     if focus.plain_value.is_some() && !focus.sensitive {
         op.sent.store(true, Ordering::Release);
-        let result = op.guard(ctx.text.append(target, &focus, text)).await;
-        if result.as_ref().is_err_and(|error| !error.maybe_executed()) {
-            op.sent.store(false, Ordering::Release);
+        match op.guard(ctx.text.append(target, &focus, text)).await {
+            Ok(()) => return Ok(Delivery::Accessibility),
+            Err(error) if error.maybe_executed() => return Err(error),
+            Err(_) => op.sent.store(false, Ordering::Release),
         }
-        return result.map(|()| Delivery::Accessibility);
     }
     if text.chars().count() > 2000 && options.allow_clipboard {
         if options.sensitive_text
@@ -242,6 +242,8 @@ async fn run(
             pair,
             op.cancel,
             op.sent,
+            None,
+            ctx.clock.as_ref(),
         ))
         .await?;
     }

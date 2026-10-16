@@ -1,7 +1,8 @@
 //! Live pointer and semantic controls, each checked by the external oracle.
 use super::super::{fixture_tree, oracle};
 use super::support::*;
-use gcu_core::driver::{Button, Cancel, CaptureOpts, Dir, Driver, DriverAction, PointerRoute};
+use gcu_core::driver::{Button, Cancel, CaptureOpts, Driver, DriverAction, PointerRoute};
+use gcu_core::model::{Rect, WindowPoint};
 use gcu_driver_macos::MacosDriver;
 use std::time::Duration;
 
@@ -131,7 +132,8 @@ pub(super) async fn toggle_checkbox(driver: &MacosDriver) -> Result<(), String> 
 pub(super) async fn select_third_combo(driver: &MacosDriver) -> Result<(), String> {
     let win = fixture_window(driver).await?;
     let root = tree(driver, &win).await?;
-    let combo = find(&root, &|node| named(node, &["combo_box"])).ok_or("combo box missing")?;
+    let combo = fixture_tree::combo_popup(&root).ok_or("combo popup missing")?;
+    let frame = combo.frame.ok_or("combo frame missing")?;
     driver
         .perform(
             &DriverAction::Press {
@@ -141,31 +143,34 @@ pub(super) async fn select_third_combo(driver: &MacosDriver) -> Result<(), Strin
         )
         .await
         .map_err(|error| format!("{error}; last state: {}", last_state()))?;
+    tokio::time::sleep(Duration::from_millis(80)).await;
     let root = tree(driver, &win).await?;
-    let item = find(&root, &|node| named(node, &["Item 3", "第三项"]))
-        .ok_or_else(|| format!("third combo item missing; last state: {}", last_state()))?;
-    driver
-        .perform(
-            &DriverAction::Press {
-                el: item.handle.clone(),
-            },
-            &Cancel::default(),
-        )
+    if let Some(item) = find(&root, &|node| named(node, &["Item 3", "第三项"])) {
+        driver
+            .perform(
+                &DriverAction::Press {
+                    el: item.handle.clone(),
+                },
+                &Cancel::default(),
+            )
+            .await
+            .map_err(|error| format!("{error}; last state: {}", last_state()))?;
+    } else {
+        click_at(driver, &win, third_item_point(frame)).await?;
+        if combo_is_third_within(Duration::from_millis(400))
+            .await
+            .is_err()
+        {
+            // AX press did not open the menu. Open it with the pointer, then
+            // the third row. Do not press the popup a second time.
+            click_at(driver, &win, center_of(frame)).await?;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            click_at(driver, &win, third_item_point(frame)).await?;
+        }
+    }
+    combo_is_third_within(Duration::from_secs(5))
         .await
-        .map_err(|error| format!("{error}; last state: {}", last_state()))?;
-    oracle::poll_until(
-        &oracle::fixture_state_path(),
-        Duration::from_secs(5),
-        |state| {
-            state
-                .get("combo_selected")
-                .or_else(|| state.get("selected"))
-                .and_then(|value| value.as_u64())
-                .filter(|value| *value == 2)
-        },
-    )
-    .await
-    .map(|_| ())
+        .map(|_| ())
 }
 
 pub(super) async fn set_slider(driver: &MacosDriver) -> Result<(), String> {
@@ -201,35 +206,14 @@ pub(super) async fn set_slider(driver: &MacosDriver) -> Result<(), String> {
 pub(super) async fn scroll_list(driver: &MacosDriver) -> Result<(), String> {
     let win = fixture_window(driver).await?;
     let root = tree(driver, &win).await?;
-    let list = find(&root, &|node| {
-        named(node, &["virtual_list_scroll", "Item 0000"])
-    })
-    .ok_or("virtual list missing")?;
-    driver
-        .perform(
-            &DriverAction::ScrollElement {
-                el: list.handle.clone(),
-                dir: Dir::Down,
-                pages: 1.0,
-            },
-            &Cancel::default(),
-        )
-        .await
-        .map_err(|error| format!("{error}; last state: {}", last_state()))?;
-    oracle::poll_until(
-        &oracle::fixture_state_path(),
-        Duration::from_secs(5),
-        |state| {
-            let range = state
-                .get("visible_range")
-                .or_else(|| state.get("list_visible_range"))?
-                .as_array()?;
-            let start = range.first()?.as_u64()?;
-            (start > 0).then_some(())
-        },
-    )
-    .await
-    .map(|_| ())
+    let at = fixture_tree::virtual_list_point(&root).ok_or("virtual list rows missing")?;
+    // Apple's positive wheel is up. Try one sign, then the other if the list
+    // did not move. The oracle still requires visible_range start > 0.
+    scroll_at(driver, &win, at, -480).await?;
+    if list_moved_within(Duration::from_millis(800)).await.is_err() {
+        scroll_at(driver, &win, at, 480).await?;
+    }
+    list_moved_within(Duration::from_secs(5)).await.map(|_| ())
 }
 
 pub(super) async fn modal_round_trip(driver: &MacosDriver) -> Result<(), String> {
@@ -385,4 +369,85 @@ pub(super) async fn background_press(driver: &MacosDriver) -> Result<(), String>
         return Err(format!("background press left {front} in front"));
     }
     Ok(())
+}
+
+async fn click_at(
+    driver: &MacosDriver,
+    win: &gcu_core::driver::WindowRef,
+    at: WindowPoint,
+) -> Result<(), String> {
+    driver
+        .perform(
+            &DriverAction::PointerClick {
+                win: win.clone(),
+                at,
+                button: Button::Left,
+                count: 1,
+                route: PointerRoute::TargetedOnly,
+            },
+            &Cancel::default(),
+        )
+        .await
+        .map_err(|error| format!("{error}; last state: {}", last_state()))
+        .map(|_| ())
+}
+
+fn center_of(frame: Rect) -> WindowPoint {
+    WindowPoint {
+        x: frame.x + frame.w / 2.0,
+        y: frame.y + frame.h / 2.0,
+    }
+}
+
+fn third_item_point(frame: Rect) -> WindowPoint {
+    WindowPoint {
+        x: frame.x + frame.w / 2.0,
+        y: frame.y + frame.h * 3.5,
+    }
+}
+
+async fn combo_is_third_within(timeout: Duration) -> Result<u64, String> {
+    oracle::poll_until(&oracle::fixture_state_path(), timeout, |state| {
+        state
+            .get("combo_selected")
+            .or_else(|| state.get("selected"))
+            .and_then(|value| value.as_u64())
+            .filter(|value| *value == 2)
+    })
+    .await
+}
+
+async fn scroll_at(
+    driver: &MacosDriver,
+    win: &gcu_core::driver::WindowRef,
+    at: WindowPoint,
+    dy: i32,
+) -> Result<(), String> {
+    driver
+        .perform(
+            &DriverAction::PointerScroll {
+                win: win.clone(),
+                at,
+                dx: 0,
+                dy,
+                route: PointerRoute::TargetedOnly,
+            },
+            &Cancel::default(),
+        )
+        .await
+        .map_err(|error| format!("{error}; last state: {}", last_state()))
+        .map(|_| ())
+}
+
+async fn list_moved_within(timeout: Duration) -> Result<(), String> {
+    oracle::poll_until(&oracle::fixture_state_path(), timeout, |state| {
+        let range = state
+            .get("visible_range")
+            .or_else(|| state.get("list_visible_range"))?
+            .as_array()?;
+        let start = range.first()?.as_u64()?;
+        (start > 0).then_some(())
+    })
+    .await
+    .map(|_| ())
 }

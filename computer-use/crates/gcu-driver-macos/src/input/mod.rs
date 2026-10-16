@@ -37,7 +37,7 @@ pub use pasteboard_native::NativePasteboard;
 
 pub use events::{
     plan_click, plan_drag, plan_scroll, Call, EventApi, EventKind, InputTarget, PostFault,
-    PostPath, Probe, SyntheticEvent, FIELD_WINDOW_NUMBER,
+    PostPath, Probe, SyntheticEvent, DRAG_SAMPLE_GAP, FIELD_WINDOW_NUMBER,
 };
 pub use fake_events::FakeEvents;
 pub use keys::utf16_chunks;
@@ -146,6 +146,7 @@ pub async fn deliver(
     let api_op = Arc::clone(&api);
     let ledger_op = Arc::clone(&ledger);
     let sent_op = Arc::clone(&sent);
+    let clock_op = Arc::clone(&clock);
     let target = target.clone();
     let action = action.clone();
     let cancel_op = cancel.clone();
@@ -157,6 +158,7 @@ pub async fn deliver(
             &action,
             &cancel_op,
             &sent_op,
+            clock_op.as_ref(),
         )
         .await
     };
@@ -184,6 +186,7 @@ async fn run(
     action: &DriverAction,
     cancel: &Cancel,
     sent: &AtomicBool,
+    clock: &dyn clock::Clock,
 ) -> Result<Delivery> {
     if cancel.is_cancelled() {
         return Err(DriverError::Cancelled {
@@ -212,7 +215,8 @@ async fn run(
     } else {
         Delivery::TargetedEvent
     };
-    post_all(api, ledger, &events, cancel, sent).await?;
+    let gap = matches!(action, DriverAction::PointerDrag { .. }).then_some(events::DRAG_SAMPLE_GAP);
+    post_all(api, ledger, &events, cancel, sent, gap, clock).await?;
     if delivery == Delivery::TargetedEvent {
         confirm_arrival(api, target, sent).await?;
     }
@@ -290,8 +294,24 @@ async fn post_all(
     events: &[SyntheticEvent],
     cancel: &Cancel,
     sent: &AtomicBool,
+    gap: Option<Duration>,
+    clock: &dyn clock::Clock,
 ) -> Result<()> {
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 {
+            if let Some(gap) = gap {
+                let until = clock.now() + gap;
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(DriverError::Cancelled {
+                            maybe_executed: sent.load(Ordering::Acquire),
+                        });
+                    }
+                    _ = clock.wait_until(until) => {}
+                }
+            }
+        }
         if let Some(guards) = api.guards() {
             if let Err(error) = guards.check(event.path == PostPath::HidTap) {
                 return Err(if sent.load(Ordering::Acquire) {

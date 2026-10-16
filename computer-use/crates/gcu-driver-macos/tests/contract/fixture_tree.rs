@@ -92,3 +92,98 @@ pub fn cell_pixel(
         format!("screenshot missing grid cell {cell:?} color {color:?} inside canvas {canvas:?}")
     })
 }
+
+/// Unique popup in the band between radios and the slider.
+///
+/// egui's combo has no accessibility name. One popup is used when that band
+/// cannot be measured. Several popups in the band is ambiguous.
+pub fn combo_popup(root: &RawNode) -> Option<&RawNode> {
+    let popups = collect(root, &|node| node.role == Role::PopUpButton);
+    let Some((low, high)) = combo_band(root) else {
+        return (popups.len() == 1).then_some(popups[0]);
+    };
+    let hits: Vec<_> = popups
+        .into_iter()
+        .filter(|node| center_y(node).is_some_and(|y| y > low && y < high))
+        .collect();
+    (hits.len() == 1).then_some(hits[0])
+}
+
+/// Point on the middle static-text row beside a press-only scrollbar.
+///
+/// The virtual list is not an `AXList`. Rows overlap the bar's vertical span
+/// and end at its right edge. Two such columns is ambiguous.
+pub fn virtual_list_point(root: &RawNode) -> Option<WindowPoint> {
+    let mut hits = Vec::new();
+    for bar in collect(root, &|node| node.role == Role::ScrollBar) {
+        let Some(bar_frame) = bar.frame else {
+            continue;
+        };
+        let mut rows: Vec<Rect> = collect(root, &|node| {
+            node.role == Role::StaticText
+                && node.frame.is_some_and(|frame| row_on_bar(frame, bar_frame))
+        })
+        .iter()
+        .filter_map(|node| node.frame)
+        .collect();
+        if rows.len() < 3 {
+            continue;
+        }
+        rows.sort_by(|left, right| left.y.total_cmp(&right.y));
+        let mid = rows[rows.len() / 2];
+        hits.push(WindowPoint {
+            x: mid.x + mid.w / 2.0,
+            y: mid.y + mid.h / 2.0,
+        });
+    }
+    (hits.len() == 1).then_some(hits[0])
+}
+
+fn combo_band(root: &RawNode) -> Option<(f64, f64)> {
+    let radios = collect(root, &|node| {
+        node.role == Role::Radio && node.frame.is_some()
+    });
+    let sliders = collect(root, &|node| {
+        node.role == Role::Slider && node.frame.is_some()
+    });
+    if radios.is_empty() || sliders.is_empty() {
+        return None;
+    }
+    let radio_bottom = radios
+        .iter()
+        .filter_map(|node| node.frame)
+        .map(|frame| frame.y + frame.h)
+        .fold(f64::MIN, f64::max);
+    let slider_top = sliders
+        .iter()
+        .filter_map(|node| node.frame)
+        .map(|frame| frame.y)
+        .fold(f64::MAX, f64::min);
+    Some((radio_bottom - 4.0, slider_top + 4.0))
+}
+
+fn center_y(node: &RawNode) -> Option<f64> {
+    node.frame.map(|frame| frame.y + frame.h / 2.0)
+}
+
+fn row_on_bar(row: Rect, bar: Rect) -> bool {
+    row.w >= 40.0
+        && row.x < bar.x
+        && row.x + row.w <= bar.x + bar.w + 8.0
+        && row.y < bar.y + bar.h
+        && row.y + row.h > bar.y
+}
+
+fn collect<'a>(node: &'a RawNode, pred: &impl Fn(&RawNode) -> bool) -> Vec<&'a RawNode> {
+    let mut out = Vec::new();
+    fn walk<'a>(node: &'a RawNode, pred: &impl Fn(&RawNode) -> bool, out: &mut Vec<&'a RawNode>) {
+        if pred(node) {
+            out.push(node);
+        }
+        for child in &node.children {
+            walk(child, pred, out);
+        }
+    }
+    walk(node, pred, &mut out);
+    out
+}

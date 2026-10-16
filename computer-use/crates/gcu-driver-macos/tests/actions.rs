@@ -517,6 +517,47 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
 }
 
 #[tokio::test]
+async fn set_value_readback_mismatch_is_not_success() {
+    let mut range = field("AXSlider", true);
+    range.value = Some(NodeValue::Range {
+        value: 10.0,
+        min: 0.0,
+        max: 100.0,
+    });
+    let (result, calls) = run(
+        range,
+        FakeAct::default(),
+        |el| DriverAction::SetValue {
+            el,
+            value: "80".into(),
+        },
+        DRIVER_DEADLINE,
+        &Cancel::default(),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Delivery::Accessibility);
+    assert_eq!(calls, ["set:AXValue"]);
+
+    let mut node = field("AXTextField", true);
+    node.value = Some(NodeValue::Text(String::new()));
+    let (result, calls) = run(
+        node,
+        script(|act| act.ignore_value_write = true),
+        |el| DriverAction::SetValue {
+            el,
+            value: "hello".into(),
+        },
+        DRIVER_DEADLINE,
+        &Cancel::default(),
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert!(calls.iter().any(|entry| entry == "set:AXValue"));
+    assert!(calls.iter().any(|entry| entry == "reject:readback"));
+    assert!(calls.iter().all(|entry| !entry.contains("hello")));
+}
+
+#[tokio::test]
 async fn select_text_requires_a_settable_native_range() {
     let (result, calls) = run(
         field("AXTextField", true),

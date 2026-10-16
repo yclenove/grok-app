@@ -136,6 +136,18 @@ impl<'a> Budget<'a> {
         }
         self.inflight.store(false, Ordering::Relaxed);
     }
+
+    pub(super) fn remaining(&self) -> Duration {
+        self.deadline.saturating_sub(self.started.elapsed())
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(super) async fn until_cancel(&self) {
+        self.cancel.cancelled().await;
+    }
 }
 
 pub(super) async fn guarded<T>(

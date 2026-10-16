@@ -84,6 +84,10 @@ pub struct FakeAct {
     ///
     /// `Some(0)` fails the next mutation. `None` leaves the counter off.
     pub succeed_times: Option<u32>,
+    /// Report `AXValue` success without changing the stored value.
+    ///
+    /// Readback must then refuse. The default applies the write.
+    pub ignore_value_write: bool,
     pub(crate) log: Vec<String>,
 }
 
@@ -382,6 +386,9 @@ impl AxSource for FakeAxSource {
 
     async fn value(&self, node: &Self::Node) -> Result<Option<NodeValue>> {
         self.gate(node.id).await?;
+        if let Some(stored) = super::fake_act::live_value(self, node.id) {
+            return Ok(stored);
+        }
         Ok(node.value.clone())
     }
 

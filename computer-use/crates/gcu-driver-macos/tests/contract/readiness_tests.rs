@@ -183,6 +183,70 @@ pub fn grid_pixel_targets_exact_cell_inside_canvas_at_both_scales() {
     }
 }
 
+pub fn unnamed_popup_between_radios_and_slider_is_the_combo() {
+    let mut root = node("fixture", Role::Window);
+    root.children = vec![
+        place(Role::Radio, rect(40.0, 196.0, 80.0, 18.0)),
+        place(Role::PopUpButton, rect(141.6, 216.9, 129.9, 18.0)),
+        place(Role::Slider, rect(40.0, 238.0, 160.0, 18.0)),
+        place(Role::PopUpButton, rect(40.0, 400.0, 80.0, 18.0)),
+    ];
+    let found = fixture_tree::combo_popup(&root).unwrap();
+    assert_eq!(found.role, Role::PopUpButton);
+    assert!(found.name.is_none());
+    assert!((found.frame.unwrap().y - 216.9).abs() < 0.01);
+    root.children
+        .push(place(Role::PopUpButton, rect(20.0, 220.0, 40.0, 18.0)));
+    assert!(fixture_tree::combo_popup(&root).is_none());
+    let mut only = node("fixture", Role::Window);
+    only.children = vec![place(Role::PopUpButton, rect(1.0, 2.0, 3.0, 4.0))];
+    assert_eq!(
+        fixture_tree::combo_popup(&only).unwrap().frame.unwrap().y,
+        2.0
+    );
+}
+
+pub fn scrollbar_static_text_rows_locate_the_virtual_list() {
+    let mut root = node("fixture", Role::Window);
+    let mut rows = vec![
+        place(Role::StaticText, rect(439.0, 76.0, 402.0, 15.0)),
+        place(Role::ScrollBar, rect(831.0, 112.0, 10.0, 180.0)),
+        place(Role::StaticText, rect(439.0, 274.0, 500.0, 15.0)),
+        place(Role::StaticText, rect(439.0, 304.0, 80.0, 18.0)),
+    ];
+    for index in 0..9 {
+        rows.push(place(
+            Role::StaticText,
+            rect(439.0, 112.0 + f64::from(index) * 18.0, 402.0, 15.0),
+        ));
+    }
+    root.children = rows;
+    let at = fixture_tree::virtual_list_point(&root).unwrap();
+    assert!((at.x - 640.0).abs() < 0.01, "{at:?}");
+    assert!((at.y - 191.5).abs() < 0.01, "{at:?}");
+    root.children
+        .push(place(Role::ScrollBar, rect(20.0, 112.0, 10.0, 180.0)));
+    for index in 0..3 {
+        root.children.push(place(
+            Role::StaticText,
+            rect(-2.0, 112.0 + f64::from(index) * 18.0, 40.0, 15.0),
+        ));
+    }
+    assert!(fixture_tree::virtual_list_point(&root).is_none());
+}
+
+fn place(role: Role, frame: Rect) -> RawNode {
+    let mut node = node("unnamed", role);
+    node.name = None;
+    node.identifier = None;
+    node.frame = Some(frame);
+    node
+}
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+    Rect { x, y, w, h }
+}
+
 /// Paused tokio time rounds timer deadlines up to the next millisecond; the
 /// property is that the wait is bounded by the budget, not that it is exact.
 fn assert_within_timer_granularity(elapsed: std::time::Duration, budget: std::time::Duration) {

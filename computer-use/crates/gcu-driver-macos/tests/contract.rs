@@ -109,6 +109,16 @@ fn main() -> Result<(), String> {
             ignored: false,
             run: readiness_tests::grid_pixel_targets_exact_cell_inside_canvas_at_both_scales,
         },
+        Case {
+            name: "unnamed_popup_between_radios_and_slider_is_the_combo",
+            ignored: false,
+            run: readiness_tests::unnamed_popup_between_radios_and_slider_is_the_combo,
+        },
+        Case {
+            name: "scrollbar_static_text_rows_locate_the_virtual_list",
+            ignored: false,
+            run: readiness_tests::scrollbar_static_text_rows_locate_the_virtual_list,
+        },
         #[cfg(target_os = "macos")]
         Case {
             name: "live::live_contract_table_suite",

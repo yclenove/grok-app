@@ -115,6 +115,18 @@ async fn type_text_uncertain_ax_write_never_falls_back() {
 }
 
 #[tokio::test]
+async fn type_text_rejected_ax_append_posts_unicode() {
+    let rig = Rig::plain("original");
+    rig.text.fail_append(DriverError::NotSettable);
+    assert_eq!(
+        rig.run("x", TextOptions::default()).await.unwrap(),
+        Delivery::TargetedEvent
+    );
+    assert_eq!(rig.unicode(), "x");
+    assert_eq!(rig.text.value(), "original");
+}
+
+#[tokio::test]
 async fn type_text_focus_changed_after_first_chunk_is_unknown() {
     let rig = Rig::rich();
     rig.text.change_on_read(3);

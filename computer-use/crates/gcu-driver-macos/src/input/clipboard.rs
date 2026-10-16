@@ -230,6 +230,8 @@ async fn paste_once(
             &[event],
             op.cancel,
             op.sent,
+            None,
+            ctx.clock.as_ref(),
         ))
         .await?;
     }
