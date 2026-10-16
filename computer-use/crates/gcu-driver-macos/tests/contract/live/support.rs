@@ -157,10 +157,21 @@ pub(super) fn frontmost_pid() -> Result<u32, String> {
 
 /// Pids whose process name is exactly `gcu-fixture`.
 pub(super) fn fixture_pids() -> Result<Vec<u32>, String> {
-    let output = std::process::Command::new("pgrep")
-        .args(["-x", "gcu-fixture"])
-        .output()
-        .map_err(|error| error.to_string())?;
+    // A bundled fixture's executable name is the bundle's own (`fixture`), not
+    // `gcu-fixture`; match the launched bundle path when the harness knows it.
+    let mut command = std::process::Command::new("pgrep");
+    match std::env::var("GCU_FIXTURE_APP") {
+        Ok(app) if app.ends_with(".app") => {
+            command.args([
+                "-f",
+                &format!("{}/Contents/MacOS/", app.trim_end_matches('/')),
+            ]);
+        }
+        _ => {
+            command.args(["-x", "gcu-fixture"]);
+        }
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err("gcu-fixture is not running".into());
     }
