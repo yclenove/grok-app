@@ -30,14 +30,15 @@ struct Ack {
     version: u32,
     id: u64,
     epoch: u64,
+    clipboard_sequence: Option<u32>,
 }
 pub(super) struct Notice {
     reply: Reply,
-    done: oneshot::Sender<Result<()>>,
+    done: oneshot::Sender<Result<Option<u32>>>,
 }
 struct Tracker(mpsc::Sender<Notice>);
 impl Tracker {
-    async fn notify(&self, reply: Reply) -> Result<()> {
+    async fn notify(&self, reply: Reply) -> Result<Option<u32>> {
         let (done, wait) = oneshot::channel();
         self.0
             .send(Notice { reply, done })
@@ -48,6 +49,14 @@ impl Tracker {
 }
 #[async_trait]
 impl InputTracker for Tracker {
+    async fn clipboard_stage(&self, target: Target, text: String) -> Result<u32> {
+        self.notify(Reply::ClipboardStage { target, text })
+            .await?
+            .ok_or_else(crashed)
+    }
+    async fn clipboard_restore(&self) -> Result<()> {
+        self.notify(Reply::ClipboardRestore).await.map(|_| ())
+    }
     async fn prepare(&self, target: Target, events: Vec<Event>, delivery: Delivery) -> Result<()> {
         self.notify(Reply::InputPrepare(InputPacket {
             target,
@@ -55,9 +64,12 @@ impl InputTracker for Tracker {
             delivery: delivery.into(),
         }))
         .await
+        .map(|_| ())
     }
     async fn complete(&self, delivered: bool) -> Result<()> {
-        self.notify(Reply::InputComplete(delivered)).await
+        self.notify(Reply::InputComplete(delivered))
+            .await
+            .map(|_| ())
     }
 }
 pub(super) fn channel() -> (Arc<dyn InputTracker>, mpsc::Receiver<Notice>) {
@@ -89,7 +101,7 @@ pub(super) async fn notify<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     if ack.version != super::wire::VERSION || ack.id != id || ack.epoch != epoch {
         return Err(crashed());
     }
-    let _ = notice.done.send(Ok(()));
+    let _ = notice.done.send(Ok(ack.clipboard_sequence));
     Ok(())
 }
 fn crashed() -> DriverError {
@@ -102,17 +114,19 @@ pub(super) struct Recovery {
     ledger: Arc<InputLedger>,
     release: Arc<dyn InputReleaser>,
     pending: Mutex<Option<(InputPacket, usize)>>,
+    clipboard: Option<Arc<dyn crate::input::clipboard::ClipboardApi>>,
 }
 impl Recovery {
     pub(super) fn new(release: Arc<dyn InputReleaser>) -> Self {
         Self {
+            clipboard: release.clipboard(),
             ledger: Arc::default(),
             release,
             pending: Mutex::default(),
         }
     }
     pub(super) fn ready(&self) -> bool {
-        self.ledger.is_empty()
+        self.ledger.is_empty() && self.clipboard.as_ref().is_none_or(|c| !c.pending())
     }
     pub(super) async fn receive<W: AsyncWrite + Unpin>(
         &self,
@@ -122,7 +136,37 @@ impl Recovery {
         id: u64,
         epoch: u64,
     ) -> Result<Option<Reply>> {
+        let mut clipboard_sequence = None;
         match reply {
+            Reply::ClipboardStage { target, text } => {
+                let Request::Perform(Action::TypeText {
+                    win,
+                    text: approved,
+                    route: KeyRoute::AllowForeground,
+                    ..
+                }) = request
+                else {
+                    return Err(crashed());
+                };
+                if approved != &text
+                    || crate::desktop::HwndStamp::from(&target.window).id() != win.id
+                {
+                    return Err(crashed());
+                }
+                let clipboard = self.clipboard.as_ref().ok_or_else(crashed)?;
+                let context = crate::uia::patterns::ActionContext::until(
+                    &Cancel::default(),
+                    std::time::Instant::now() + DRIVER_DEADLINE,
+                );
+                clipboard_sequence = Some(clipboard.stage(text, context).await?);
+            }
+            Reply::ClipboardRestore => {
+                self.clipboard
+                    .as_ref()
+                    .ok_or_else(crashed)?
+                    .restore()
+                    .await?;
+            }
             Reply::InputPrepare(packet) => {
                 if !valid(&packet, request) {
                     return Err(crashed());
@@ -159,6 +203,7 @@ impl Recovery {
                 version: super::wire::VERSION,
                 id,
                 epoch,
+                clipboard_sequence,
             },
         )
         .await
@@ -172,6 +217,15 @@ impl Recovery {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take();
+        if let Some(clipboard) = &self.clipboard {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), clipboard.restore())
+                    .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("parent clipboard recovery deadline exceeded");
+            }
+        }
         if self.ledger.is_empty() {
             return;
         }
@@ -212,7 +266,7 @@ fn valid(packet: &InputPacket, request: &Request) -> bool {
 pub(super) fn default_releaser() -> Arc<dyn InputReleaser> {
     #[cfg(windows)]
     {
-        Arc::new(crate::input::NativeRelease)
+        Arc::new(crate::input::NativeRelease::default())
     }
     #[cfg(not(windows))]
     {

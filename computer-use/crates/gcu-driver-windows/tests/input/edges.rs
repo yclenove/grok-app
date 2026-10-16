@@ -252,7 +252,7 @@ async fn invalid_text_and_cancelled_preflight_send_nothing() {
             .perform(
                 &text(
                     &win,
-                    "x".repeat(TEXT_MAX_UNITS + 1),
+                    "x".repeat(gcu_driver_windows::input::text::TEXT_MAX_UNITS + 1),
                     KeyRoute::AllowForeground
                 ),
                 &Cancel::default()

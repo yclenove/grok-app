@@ -48,6 +48,10 @@ enum ButtonDef {
 pub trait InputReleaser: Send + Sync + 'static {
     /// Release recorded ups only. Failed releases remain pending. Bounded by 100ms.
     async fn release(&self, ledger: Arc<InputLedger>);
+    /// Parent-owned clipboard recovery, independent of the killable child.
+    fn clipboard(&self) -> Option<Arc<dyn super::clipboard::ClipboardApi>> {
+        None
+    }
 }
 /// Child-to-parent accounting barrier. No packet may send before preparation is
 /// acknowledged; completion retires only acknowledged up events.
@@ -57,6 +61,14 @@ pub trait InputTracker: Send + Sync + 'static {
     async fn prepare(&self, target: Target, events: Vec<Event>, delivery: Delivery) -> Result<()>;
     /// Acknowledge full insertion or proven zero insertion; uncertainty retains ups.
     async fn complete(&self, delivered: bool) -> Result<()>;
+    /// Stage text in the parent before acknowledging any paste. No retry.
+    async fn clipboard_stage(&self, _target: Target, _text: String) -> Result<u32> {
+        Err(DriverError::CapabilityUnavailable)
+    }
+    /// Restore the parent's transaction, including after cancelled dispatch.
+    async fn clipboard_restore(&self) -> Result<()> {
+        Err(DriverError::CapabilityUnavailable)
+    }
 }
 impl std::fmt::Debug for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,6 +103,26 @@ impl Event {
 /// `release` bypasses the action worker and cancelled tokens; it is bounded.
 #[async_trait]
 pub trait InputApi: Send + Sync + 'static {
+    /// Fail closed unless the exact focus/ancestry and core sensitivity detector
+    /// prove clipboard fallback suitable. Reads only; no activation or mutation.
+    async fn clipboard_safe(
+        &self,
+        _target: Target,
+        _focus: Option<NativeHandle>,
+        _text: String,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    /// P2-07 interface slot: check its live Stop latch immediately before paste.
+    /// Implementations must also compare the current precise focus to `focus`.
+    async fn before_paste(
+        &self,
+        _target: Target,
+        _focus: Option<NativeHandle>,
+        _context: ActionContext,
+    ) -> Result<()> {
+        Err(DriverError::CapabilityUnavailable)
+    }
     /// Resolve a pointer hit or exact focused/observed native element.
     async fn resolve(
         &self,

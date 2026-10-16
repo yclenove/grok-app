@@ -1,5 +1,6 @@
 //! Windows targeted messages and explicitly permitted foreground input.
 pub mod api;
+pub mod clipboard;
 pub mod fake;
 #[cfg(windows)]
 mod ffi;
@@ -7,6 +8,7 @@ pub mod foreground;
 pub mod ledger;
 pub mod messages;
 mod plan;
+pub mod text;
 use crate::{api::NativeWindow, uia::patterns::ActionContext};
 use api::{InputApi, Target};
 #[cfg(windows)]
@@ -31,6 +33,7 @@ pub struct InputBackend {
     serial: Arc<tokio::sync::Mutex<()>>,
     effect: Mutex<Option<Effect>>,
     tracker: Option<Arc<dyn api::InputTracker>>,
+    clipboard: Option<Arc<dyn clipboard::ClipboardApi>>,
 }
 impl InputBackend {
     /// Attach a complete native or fake input implementation, without OS work.
@@ -42,11 +45,17 @@ impl InputBackend {
             serial: Arc::default(),
             effect: Mutex::default(),
             tracker: None,
+            clipboard: None,
         }
     }
     /// Attach the isolated worker's parent-ledger acknowledgement barrier.
     pub fn with_tracker(mut self, tracker: Arc<dyn api::InputTracker>) -> Self {
         self.tracker = Some(tracker);
+        self
+    }
+    /// Enable bounded clipboard fallback for safe long foreground text.
+    pub fn with_clipboard(mut self, clipboard: Arc<dyn clipboard::ClipboardApi>) -> Self {
+        self.clipboard = Some(clipboard);
         self
     }
     /// Last sampled effect for diagnostics/tests. Core determines the public diff.
@@ -64,6 +73,14 @@ impl InputBackend {
             c.close();
         }
         release_bounded(self.api.clone(), self.ledger.clone()).await;
+        if let Some(board) = &self.clipboard {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), board.restore()).await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("Stop clipboard recovery pending");
+            }
+        }
     }
     /// Deliver once to an exact stamped window. Auto/TargetedOnly are background
     /// only. AllowForeground/Activate are core's explicit policy authorization.
@@ -137,11 +154,48 @@ impl InputBackend {
                         .await?;
                 }
             }
-            let delivery = if foreground {
+            let paste = if foreground {
+                if let (Some(board), DriverAction::TypeText { text, focus, .. }) =
+                    (&self.clipboard, req)
+                {
+                    if text.encode_utf16().count() > messages::TEXT_MAX_UNITS
+                        && self
+                            .api
+                            .clipboard_safe(target.clone(), focus.clone(), text.clone())
+                            .await?
+                    {
+                        Some((board.clone(), text.clone(), focus.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let delivery = if paste.is_some() {
+                Delivery::Clipboard
+            } else if foreground {
                 Delivery::Foreground
             } else {
                 Delivery::TargetedEvent
             };
+            if let Some((clipboard, text, focus)) = paste {
+                text::Paste {
+                    api: self.api.as_ref(),
+                    clipboard,
+                    tracker: self.tracker.clone(),
+                    ledger: self.ledger.clone(),
+                    target: target.clone(),
+                    focus,
+                    text,
+                    context: context.clone(),
+                }
+                .run()
+                .await?;
+                packets.clear();
+            }
             for packet in packets {
                 context.check()?;
                 self.api.validate(target.clone(), foreground).await?;
@@ -191,6 +245,16 @@ impl InputBackend {
         }.map_err(|e| context.error(e));
         context.close();
         release_bounded(self.api.clone(), self.ledger.clone()).await;
+        // The serial guard owns recovery until this finishes. Never launch a
+        // detached per-paste restore that could overwrite the next transaction.
+        if let Some(board) = &self.clipboard {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), board.restore()).await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("clipboard recovery pending");
+            }
+        }
         guard.complete = true;
         result
     }
@@ -241,12 +305,25 @@ impl Drop for Cleanup<'_> {
         if !self.complete {
             let api = self.backend.api.clone();
             let ledger = self.backend.ledger.clone();
+            let clipboard = self.backend.clipboard.clone();
             let serial = self.serial.take();
             tokio::spawn(async move {
                 // Hold serialization until cleanup, so an abandoned call cannot
                 // release the next action's newly pressed keys.
                 let _serial = serial;
                 release_bounded(api, ledger).await;
+                if let Some(board) = clipboard {
+                    if !matches!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            board.restore()
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ) {
+                        tracing::warn!("abandoned clipboard recovery pending");
+                    }
+                }
             });
         }
     }

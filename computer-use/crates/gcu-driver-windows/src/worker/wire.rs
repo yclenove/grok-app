@@ -5,7 +5,7 @@ use gcu_protocol::{AppInfo, Capabilities, WindowInfo};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub(crate) const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 3;
 /// Exact app and stamped HWND identity; never a name-based fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -222,6 +222,15 @@ pub enum Reply {
     InputPrepare(super::input::InputPacket),
     /// Retire acknowledged ups or discard a proven zero insertion.
     InputComplete(bool),
+    /// Save/stage in the parent and acknowledge the exact clipboard receipt.
+    ClipboardStage {
+        /// Exact stamped target of the approved foreground text request.
+        target: crate::input::api::Target,
+        /// Private payload, never logged or included in observations.
+        text: String,
+    },
+    /// Conditional restore in the parent; never sent to the public Host API.
+    ClipboardRestore,
 }
 /// Native error adapter preserving certainty and refusal kinds.
 #[derive(Serialize, Deserialize)]

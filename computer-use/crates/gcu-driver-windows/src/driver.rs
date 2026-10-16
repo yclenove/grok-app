@@ -115,7 +115,8 @@ impl WindowsDriver {
         .await
     }
     /// Select isolated production execution or explicit in-process diagnostics.
-    /// Only Worker can terminate wedged FFI. No native calls run in its parent.
+    /// Only Worker can terminate wedged providers. Parent-native work is limited
+    /// to independent input release and conditional clipboard recovery.
     #[cfg(windows)]
     pub async fn with_exec_mode(
         mode: crate::worker::ExecMode,
@@ -193,7 +194,10 @@ impl WindowsDriver {
         let print = Arc::new(crate::capture::PrintWindowCapture::new().await?);
         let input = Arc::new(crate::input::RealInput::start(api, uia.clone()).await?);
         Ok(driver
-            .with_input(Arc::new(crate::input::InputBackend::new(input)))
+            .with_input(Arc::new(
+                crate::input::InputBackend::new(input)
+                    .with_clipboard(Arc::new(crate::input::clipboard::NativeClipboard::default())),
+            ))
             .attach_uia(uia.clone(), uia)
             .with_capture(Arc::new(crate::capture::CaptureBackend::new(wgc, print))))
     }
@@ -228,7 +232,7 @@ impl WindowsDriver {
         self.caps.delivery.targeted_keys = true;
         self.caps.delivery.foreground = ForegroundCapability::Policy;
         self.caps.background_operation = BackgroundOperation::Partial;
-        self.caps.limits.type_text_max = crate::input::messages::TEXT_MAX_UNITS as u32;
+        self.caps.limits.type_text_max = crate::input::text::TEXT_MAX_UNITS as u32;
         self
     }
     pub(crate) async fn call<T: Send + 'static>(

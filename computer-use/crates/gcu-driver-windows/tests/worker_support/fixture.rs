@@ -97,7 +97,9 @@ pub async fn driver_with_input(
         if std::env::var("GCU_TEST_FAULT").as_deref() == Ok("input_zero") {
             api.update(|s| s.fail_at = Some(0));
         }
-        if std::env::var("GCU_TEST_FAULT").is_ok_and(|f| f.starts_with("input_key_")) {
+        if std::env::var("GCU_TEST_FAULT")
+            .is_ok_and(|f| f.starts_with("input_key_") || f == "input_clipboard_key_hang")
+        {
             api.update(|s| s.send_pause = Some((0, std::time::Duration::from_secs(60))));
             let watched = api.clone();
             tokio::spawn(async move {
@@ -111,8 +113,40 @@ pub async fn driver_with_input(
                 }
             });
         }
-        let input = gcu_driver_windows::input::InputBackend::new(api).with_tracker(tracker);
+        let clipboard_fault =
+            std::env::var("GCU_TEST_FAULT").is_ok_and(|f| f.starts_with("input_clipboard_"));
+        api.update(|s| {
+            s.clipboard_safe = clipboard_fault;
+            s.foreground = 8;
+        });
+        let mut input = gcu_driver_windows::input::InputBackend::new(api).with_tracker(tracker);
+        if clipboard_fault {
+            input = input.with_clipboard(Arc::new(UnreadClipboard));
+        }
         driver = driver.with_input(Arc::new(input));
     }
     Arc::new(driver)
+}
+
+// Clipboard bytes are owned by the parent; these subprocess tests exercise
+// staging and ledger recovery, while the portable clipboard suite checks reads.
+struct UnreadClipboard;
+#[async_trait::async_trait]
+impl gcu_driver_windows::input::clipboard::ClipboardApi for UnreadClipboard {
+    async fn stage(
+        &self,
+        _: String,
+        _: gcu_driver_windows::uia::patterns::ActionContext,
+    ) -> gcu_core::driver::Result<u32> {
+        unreachable!("parent must stage")
+    }
+    async fn matches(&self, _: u32, _: String) -> gcu_core::driver::Result<bool> {
+        Ok(true)
+    }
+    async fn restore(&self) -> gcu_core::driver::Result<()> {
+        Ok(())
+    }
+    fn pending(&self) -> bool {
+        false
+    }
 }

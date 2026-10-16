@@ -1,4 +1,4 @@
-# Windows discovery, UIA observation, capture, semantic actions, input and isolated worker (P2-01–P2-06)
+# Windows discovery, UIA observation, capture, semantic actions, input and isolated worker (P2-01–P2-06, P2-08)
 
 This crate implements app/window discovery, exact executable identity, launching,
 nonactivating Win32 restoration and virtual-desktop annotations. The native
@@ -413,7 +413,7 @@ insertion discards that packet's pending downs. Queued or stalled preparation
 cannot dispatch after its deadline, and every delivered input preserves
 `maybe_executed` even if later evidence sampling fails.
 
-Text is limited to 8192 UTF-16 units and sent in packets of at most 256 units,
+Text is limited to 65,536 UTF-16 units and sent in packets of at most 256 units,
 preserving surrogate pairs and CRLF. Targeted text posts `WM_CHAR`; foreground
 text batches `KEYEVENTF_UNICODE` down/up records. Chord character keys are mapped
 using the recipient thread's keyboard layout. Posted modifier messages do not
@@ -453,3 +453,84 @@ and portable fake tests do not establish native delivery correctness.
 The tests default to Worker; set `$env:GCU_TEST_EXEC_MODE = 'in_process'` to run
 the same checks in diagnostic mode, resetting the blank Notepad document before
 each run. The worker path must point to the built CLI, never the test executable.
+
+## Clipboard and long text (P2-08)
+
+`TypeText` accepts at most **65,536 UTF-16 units**. Unicode messages/SendInput
+remain available for all lengths in packets of 256 units, grouped into batches
+of at most 8192 units; surrogate pairs and CRLF are preserved. Cancellation or
+failure after any dispatch is uncertain and never retries or changes route.
+For explicitly allowed foreground text longer than 8192 units, clipboard delivery
+is selected only when the exact observed UIA focus and ancestry pass the shared
+core sensitivity classifier. Passwords, browsers/web areas, unknown targets,
+sensitive labels/text and credential hints cannot use clipboard fallback even
+after approval; they keep the Unicode route. Credential heuristics are
+conservative and cannot identify every secret. Missing exact focus uses Unicode.
+`Delivery::Clipboard` reports an actual paste, rather than foreground Unicode;
+the existing capability schema has no separate clipboard boolean. The declared
+text ceiling applies to both paths. P2-07 physical activity/hotkey capability
+remains unavailable on this baseline. `InputApi::before_paste` is the explicit
+live Stop-latch integration point; existing Cancel/InputLedger/parent Stop already
+abort and clean up without depending on P2-07.
+
+The transaction holds the named Windows mutex
+`Local\GrokComputerUse.Clipboard.v2` for its full lifetime, across all gcu processes
+and sessions in the interactive Windows session (Windows clipboards are separate
+between OS sessions). It saves supported materialized formats before clearing,
+then publishes Unicode, ANSI, OEM and locale together so CloseClipboard cannot
+silently synthesize text formats and invalidate the receipt. Unsupported formats,
+including opaque bitmap/metafile/owner-display handles and unknown registered
+formats, refuse before clearing. Preserved HGLOBAL formats include text, DIB,
+file-drop, locale, HTML and RTF. Snapshot size is capped at 8 MiB / 256 formats.
+This ports the validated snapshot/preallocation, text-format materialization and
+receipt-under-lock logic from
+`archive/cu-v1-2026-10-13:src-tauri/src/computer_use/windows_clipboard/`;
+it replaces v1's unbounded recovery loops with bounded, cancellation-aware work.
+
+Before Ctrl+V, the driver checks the receipt, exact Unicode content, live target
+identity and precise UIA foreground focus, after parent input accounting. Stop
+and failure release recorded ups. Restore compares both sequence and saved
+publication under OpenClipboard; an external copy, including identical text with
+a different sequence, is preserved. Failed recovery stays pending and prevents
+new clipboard transactions. In Worker mode the **parent owns the backup, owner
+window and mutex**: killing/reaping the child on Stop/cancellation/timeout/crash
+then performs conditional restore and parent InputLedger cleanup, outside RPC.
+No clipboard contents enter observations, logs or public Host messages.
+
+A malicious or unrelated process can replace clipboard data at the last moment
+between validation and the target reading Ctrl+V. This race cannot be eliminated.
+The target receives asynchronous input; the short post-injection delay permits
+consumption but is not proof of business success. Clipboard history, cloud sync,
+clipboard listeners and third-party managers can retain staged text even after
+successful restore. Restoring the live clipboard does **not** erase those copies;
+use a disposable desktop with history/sync disabled for native checks.
+
+Portable validation:
+
+```sh
+rcargo test --locked -p gcu-driver-windows --test clipboard --features test-worker-faults
+rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+rcargo --sh 'CROSS=1 bash scripts/verify.sh'
+```
+
+Native status: **not_run** (Linux host, no interactive Windows desktop). The
+`#[cfg(windows)] #[ignore]` tests compile with cross-target clippy. On an
+unelevated disposable Windows desktop, disable clipboard history/cloud sync,
+clear its clipboard, build `gcu-cli`, then run the named-mutex test serially.
+For the document test, open one blank Notepad document and focus its editor;
+use a provider exposing a named, nonpassword editor and exact UIA focus.
+The test must report Clipboard and verify the full text from the subsequent UIA
+read; an unsupported provider fails rather than silently accepting Unicode.
+
+```powershell
+cargo build --locked -p gcu-cli
+$env:GCU_WORKER_EXE = (Resolve-Path target/debug/gcu.exe).Path
+cargo test --locked -p gcu-driver-windows --test clipboard native_named_mutex_two_processes_do_not_overlap -- --ignored --test-threads=1
+cargo test --locked -p gcu-driver-windows --test clipboard native_notepad_long_text_paste_preserves_document -- --ignored --test-threads=1
+# Reset the blank document before testing diagnostic in-process mode.
+$env:GCU_TEST_EXEC_MODE = 'in_process'
+cargo test --locked -p gcu-driver-windows --test clipboard native_notepad_long_text_paste_preserves_document -- --ignored --test-threads=1
+```
+
+Close Notepad without saving and discard the desktop. Fake tests/cross compilation
+are not evidence of native clipboard or UIA behavior.
