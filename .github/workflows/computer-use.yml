@@ -69,7 +69,7 @@ jobs:
           # The upstream PipeWire PPA occasionally answers 503; without it apt falls back to the
           # stock jammy libpipewire, which is too old for libspa and fails much later with
           # confusing compile errors. Retry, then fail early with a clear message.
-          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
+          sudo add-apt-repository -y -n ppa:pipewire-debian/pipewire-upstream
           for attempt in 1 2 3 4; do
             sudo apt-get update || true
             if apt-cache policy libpipewire-0.3-dev | grep -q 'ppa.launchpadcontent.net/pipewire-debian'; then
