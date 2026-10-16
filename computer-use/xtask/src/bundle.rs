@@ -229,7 +229,8 @@ mod tests {
     fn dev_plist_matches_checked_in_template() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../apps/gcu-helper-macos/Info.plist");
-        let file = fs::read_to_string(path).unwrap();
+        // A Windows checkout may convert the template to CRLF; the bundle is always written with LF.
+        let file = fs::read_to_string(path).unwrap().replace("\r\n", "\n");
         assert_eq!(file, info_plist(false));
     }
 
