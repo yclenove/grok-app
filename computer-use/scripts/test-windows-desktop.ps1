@@ -1,4 +1,5 @@
 # No Pester dependency: portable launcher policy/clock tests plus C# compilation.
+Write-Output 'SELFTEST: BEGIN windows-desktop policy/ABI tests; smoke outcomes below are synthetic'
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
@@ -18,14 +19,15 @@ foreach ($script in Get-ChildItem $PSScriptRoot -Filter '*windows*.ps1') {
 }
 # Reproduce win16: the failed contract must not prevent any of the three apps
 # from reaching a terminal result, including after an earlier app fails.
+. (Join-Path $PSScriptRoot 'test-windows-smoke.ps1')
 $smokeTest = @{trace=[Collections.Generic.List[string]]::new();saves=0}
 $rows = @('Notepad','Explorer','Settings') | ForEach-Object { @{app=$_;outcome='not_run';reason='pending'} }
-$result = Invoke-DesktopSuites -Suite All -Contract {
+$result = Invoke-DesktopSuites -Suite All -LogPrefix 'SELFTEST: ' -Contract {
     $smokeTest.trace.Add('contract')
     throw 'original contract cause'
 } -Smoke {
     foreach ($row in $rows) {
-        Invoke-SmokeCase $row -Save { $smokeTest.saves++ } -Run {
+        Invoke-SmokeCase $row -LogPrefix 'SELFTEST: ' -Save { $smokeTest.saves++ } -Run {
             $smokeTest.trace.Add($row.app)
             switch ($row.app) {
                 'Notepad' { throw 'saved bytes mismatch' }
@@ -41,7 +43,7 @@ Assert-True (($rows.outcome -join ',') -ceq 'failed,passed,skipped' -and $smokeT
 Assert-True ($result.exit_code -eq 1 -and $result.errors.Count -eq 2 -and
     $result.errors[0].Contains('original contract cause') -and $result.errors[1].Contains('independent smoke cause')) 'both independent suite causes survive aggregation'
 foreach ($failedSuite in @('contract','smoke','none')) {
-    $result = Invoke-DesktopSuites -Suite All -Contract {
+    $result = Invoke-DesktopSuites -Suite All -LogPrefix 'SELFTEST: ' -Contract {
         if ($failedSuite -eq 'contract') { throw 'contract only' }
     } -Smoke { if ($failedSuite -eq 'smoke') { throw 'smoke only' } }
     Assert-True ($result.exit_code -eq [int]($failedSuite -ne 'none')) 'neither suite success can mask the other failure'
@@ -410,4 +412,4 @@ try {
     $result = Invoke-SupervisedDesktopStage $request $dir $dir 20 -Start { param($arguments,$directory) $fake } -Now { $clock.ms } -Tick { throw 'must not sleep' }
     Assert-True (-not $result.ok -and $result.error.Contains('exit mismatch')) 'successful result cannot override failed supervisor exit'
 } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
-Write-Output 'WINDOWS_DESKTOP_SELFTEST_OK (policy/ABI only; native token launch is checked by smoke-windows.ps1)'
+Write-Output 'SELFTEST: WINDOWS_DESKTOP_SELFTEST_OK (policy/ABI only; native token launch is checked by smoke-windows.ps1)'

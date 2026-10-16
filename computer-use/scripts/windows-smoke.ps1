@@ -1,21 +1,21 @@
 # Independent suite/case boundaries: failures remain failures and never stop a sibling.
 function Invoke-DesktopSuites {
-    param([string]$Suite, [scriptblock]$Contract, [scriptblock]$Smoke)
+    param([string]$Suite, [scriptblock]$Contract, [scriptblock]$Smoke, [string]$LogPrefix = '')
     $errors = [Collections.Generic.List[string]]::new()
     if ($Suite -ne 'Smoke') {
         try { & $Contract | Out-Host }
-        catch { $errors.Add("contract: $($_.Exception.Message)"); Write-DesktopProgress "CONTRACT FAILED: $($_.Exception.Message); smoke still runs" }
+        catch { $errors.Add("contract: $($_.Exception.Message)"); Write-DesktopProgress "${LogPrefix}CONTRACT FAILED: $($_.Exception.Message); smoke still runs" }
     }
     if ($Suite -ne 'Contract') {
         try { & $Smoke | Out-Host }
-        catch { $errors.Add("smoke: $($_.Exception.Message)"); Write-DesktopProgress "SMOKE FAILED: $($_.Exception.Message)" }
+        catch { $errors.Add("smoke: $($_.Exception.Message)"); Write-DesktopProgress "${LogPrefix}SMOKE FAILED: $($_.Exception.Message)" }
     }
     return @{exit_code=[int]($errors.Count -gt 0);errors=$errors.ToArray()}
 }
 
 function Invoke-SmokeCase {
-    param($Row, [scriptblock]$Run, [scriptblock]$Save)
-    Write-DesktopProgress "SMOKE BEGIN: $($Row.app)"
+    param($Row, [scriptblock]$Run, [scriptblock]$Save, [string]$LogPrefix = '')
+    Write-DesktopProgress "${LogPrefix}SMOKE BEGIN: $($Row.app)"
     try {
         $result = & $Run
         if ($result.outcome -notin @('passed','skipped') -or -not $result.reason) { throw 'invalid smoke result' }
@@ -26,15 +26,18 @@ function Invoke-SmokeCase {
         $Row.reason = $_.Exception.Message
     }
     $label = switch ($Row.outcome) { 'passed' { 'PASS' }; 'skipped' { 'SKIP' }; default { 'FAIL' } }
-    Write-DesktopProgress "[SMOKE $($Row.app)] ${label}: $($Row.reason)"
+    Write-DesktopProgress "${LogPrefix}[SMOKE $($Row.app)] ${label}: $($Row.reason)"
     & $Save
 }
 
 function Start-SmokeApplication {
-    param([string]$FilePath, [string]$Arguments = '',
+    param([string]$FilePath, [string]$Arguments = '', [switch]$Protocol,
         [scriptblock]$Start = { param($options) Start-Process @options })
     try {
-        $options = @{FilePath=$FilePath;PassThru=$true;ErrorAction='Stop'}
+        $options = @{FilePath=$FilePath;ErrorAction='Stop'}
+        # ShellExecute for a URI need not return a process. Discover its UI
+        # independently instead of requiring Start-Process -PassThru metadata.
+        if (-not $Protocol) { $options.PassThru = $true }
         if ($Arguments) { $options.ArgumentList = $Arguments }
         $process = & $Start $options
         return @{process=$process;reason=''}
@@ -50,9 +53,82 @@ function Start-SmokeApplication {
         }
         # Only explicit native availability failures qualify. Parameter-binding
         # mistakes and other harness errors must fail, rather than become Skip.
-        if ($win32 -notin @(2,3,5,126,740,1155)) { throw }
+        if ($win32 -notin @(2,3,5,126,740,1155)) {
+            throw "Start-Process '$FilePath' failed; error_id=$($_.FullyQualifiedErrorId); $errorText"
+        }
         return @{process=$null;reason="system app unavailable: Start-Process '$FilePath' failed; Win32=$win32; $errorText"}
     }
+}
+
+function Invoke-SmokeNativeCase {
+    param([string]$Name, [string]$ReportPath,
+        [scriptblock]$Native = { param($name) Invoke-NativeCase $name -TimeoutMs 90000 })
+    $previousReport = $env:GCU_SMOKE_REPORT
+    try {
+        if (Test-Path -LiteralPath $ReportPath) { Remove-Item -LiteralPath $ReportPath -ErrorAction Stop }
+        $env:GCU_SMOKE_REPORT = $ReportPath
+        $failure = ''
+        try { & $Native $Name | Out-Host } catch { $failure = $_.Exception.Message }
+        if (-not (Test-Path -LiteralPath $ReportPath)) { throw "$Name has no explicit native result; $failure" }
+        $result = Get-Content -Raw -LiteralPath $ReportPath | ConvertFrom-Json
+        if ($result.test -cne $Name -or $result.outcome -notin @('passed','skipped','failed') -or -not $result.reason) {
+            throw "$Name invalid native result; $failure"
+        }
+        if ($result.outcome -eq 'failed' -or $failure) { throw "$Name native failure: $($result.reason); $failure" }
+        return $result
+    } finally { $env:GCU_SMOKE_REPORT = $previousReport }
+}
+
+function Get-SmokeSettingsAvailability {
+    param([string]$SystemRoot = $env:WINDIR,
+        [scriptblock]$ReadProtocol = {
+            param($path)
+            if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) {
+                return @{present=$false;url_protocol=$false;command='';delegate='';handler_registered=$false}
+            }
+            $key = Get-Item -LiteralPath $path -ErrorAction Stop
+            $open = $key.OpenSubKey('shell\open\command')
+            try {
+                $command = if ($null -ne $open) { [string]$open.GetValue('') } else { '' }
+                $delegate = if ($null -ne $open) { [string]$open.GetValue('DelegateExecute') } else { '' }
+                $handler = -not [string]::IsNullOrWhiteSpace($command)
+                if ($delegate) { $handler = $handler -or (Test-Path -LiteralPath "Registry::HKEY_CLASSES_ROOT\CLSID\$delegate" -ErrorAction Stop) }
+                return @{present=$true;url_protocol=($key.GetValueNames() -contains 'URL Protocol');
+                    command=$command;delegate=$delegate;handler_registered=$handler}
+            } finally { if ($null -ne $open) { $open.Dispose() }; $key.Dispose() }
+        },
+        [scriptblock]$ReadPackages = { param($name) Get-AppxPackage -Name $name -ErrorAction Stop },
+        [scriptblock]$FileExists = { param($path) Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop })
+    $protocolPath = 'Registry::HKEY_CLASSES_ROOT\ms-settings'
+    $packageName = 'windows.immersivecontrolpanel'
+    $protocol = & $ReadProtocol $protocolPath
+    $packages = @()
+    $packageError = ''
+    try {
+        $packages = @(& $ReadPackages $packageName | ForEach-Object {
+            @{full_name=$_.PackageFullName;install_location=$_.InstallLocation}
+        })
+    } catch { $packageError = "Get-AppxPackage: $($_.FullyQualifiedErrorId): $($_.Exception.Message)" }
+    if (-not $SystemRoot) { throw 'Settings probe requires WINDIR' }
+    $paths = @([IO.Path]::Combine($SystemRoot,'ImmersiveControlPanel','SystemSettings.exe'))
+    foreach ($package in $packages) {
+        if ($package.install_location) { $paths += [IO.Path]::Combine($package.install_location,'SystemSettings.exe') }
+    }
+    $files = @($paths | Select-Object -Unique | ForEach-Object { @{path=$_;exists=[bool](& $FileExists $_)} })
+    $facts = @{protocol_path=$protocolPath;protocol=$protocol;package_query=$packageName;
+        packages=@($packages);package_error=$packageError;executables=$files} | ConvertTo-Json -Compress -Depth 6
+    if (-not $protocol.present -or -not $protocol.url_protocol) {
+        return @{available=$false;reason="Settings protocol absent/unregistered; measured: $facts"}
+    }
+    if (-not $protocol.handler_registered -and $packages.Count -eq 0 -and -not $packageError) {
+        return @{available=$false;reason="Settings protocol has no registered shell handler or package; measured: $facts"}
+    }
+    if (@($files | Where-Object { $_.exists }).Count -gt 0) { return @{available=$true;reason="Settings availability measured: $facts"} }
+    # Query errors and incomplete package metadata are not proof of absence.
+    if ($packageError -or @($packages | Where-Object { -not $_.install_location }).Count -gt 0) {
+        throw "Settings availability unresolved; measured: $facts"
+    }
+    return @{available=$false;reason="Settings executable absent in system and returned package locations; measured: $facts"}
 }
 
 function Stop-SmokeApplication {
@@ -79,7 +155,9 @@ function Invoke-NotepadSmoke {
         } { param($s) $s.hwnd -ne 0 }
         $env:GCU_SMOKE_PID = "$($notepad.Id)"
         Remove-Item Env:GCU_SMOKE_HWND -ErrorAction SilentlyContinue
-        Invoke-NativeCase 'smoke::live_notepad_write_save' -TimeoutMs 90000
+        Write-DesktopProgress "SMOKE ASSERT Notepad: launched pid=$($notepad.Id); nonzero MainWindowHandle observed"
+        $native = Invoke-SmokeNativeCase 'smoke::live_notepad_write_save' (Join-Path $OutputDir 'smoke-notepad-native.json')
+        if ($native.outcome -eq 'skipped') { return @{outcome='skipped';reason="launch/window assertion passed; write/save only skipped: $($native.reason)"} }
         $expected = 'GCU ' + [char]0x4e2d + [char]0x6587 + ' ' + [char]::ConvertFromUtf32(0x1f469) + [char]0x200d + [char]::ConvertFromUtf32(0x1f4bb)
         $null = Wait-Oracle 'Notepad saved exact Unicode bytes' { [IO.File]::ReadAllText($file) } { param($v) $v -ceq $expected }
         return @{outcome='passed';reason='saved file content exactly matches Unicode text'}
@@ -106,7 +184,9 @@ function Invoke-ExplorerSmoke {
         $root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$explorer.HWND)
         $env:GCU_SMOKE_PID = "$($root.Current.ProcessId)"
         $env:GCU_SMOKE_DEST = $dest.FullName
-        Invoke-NativeCase 'smoke::live_explorer_navigate' -TimeoutMs 90000
+        Write-DesktopProgress "SMOKE ASSERT Explorer: new HWND=$($explorer.HWND); exact external source folder path=$($source.FullName)"
+        $native = Invoke-SmokeNativeCase 'smoke::live_explorer_navigate' (Join-Path $OutputDir 'smoke-explorer-native.json')
+        if ($native.outcome -eq 'skipped') { return @{outcome='skipped';reason="exact external source folder assertion passed; keyboard navigation only skipped: $($native.reason)"} }
         $null = Wait-Oracle 'Explorer exact destination' { $explorer.Document.Folder.Self.Path } { param($p) $p -eq $dest.FullName }
         return @{outcome='passed';reason='Shell.Application folder path exactly matches destination'}
     } finally {
@@ -120,14 +200,15 @@ function Invoke-ExplorerSmoke {
 }
 
 function Invoke-SettingsSmoke {
-    $protocol = 'Registry::HKEY_CLASSES_ROOT\ms-settings'
-    if (-not (Test-Path -LiteralPath $protocol)) { return @{outcome='skipped';reason="system app protocol absent: Test-Path '$protocol' returned False; ms-settings: cannot be launched"} }
+    $availability = Get-SmokeSettingsAvailability
+    Write-DesktopProgress "SMOKE PROBE Settings: $($availability.reason)"
+    if (-not $availability.available) { return @{outcome='skipped';reason=$availability.reason} }
     $previous = @(Get-Process SystemSettings -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-    $launch = Start-SmokeApplication 'ms-settings:'
+    $launch = Start-SmokeApplication 'ms-settings:' -Protocol
     if ($null -eq $launch.process) {
         # ShellExecute may legitimately return no process for a protocol. Only
         # an actual launch error qualifies for Skip; otherwise observe the UI.
-        if ($launch.reason) { return @{outcome='skipped';reason=$launch.reason} }
+        if ($launch.reason) { return @{outcome='skipped';reason="$($launch.reason); $($availability.reason)"} }
     } else { $launch.process.Dispose() }
     $settingsProcess = $null
     try {
@@ -147,7 +228,8 @@ function Invoke-SettingsSmoke {
         foreach ($node in $initial) { $before[($node.GetRuntimeId() -join '.')] = $true }
         $env:GCU_SMOKE_HWND = "$($root.Current.NativeWindowHandle)"
         $env:GCU_SMOKE_PID = "$($settingsProcess.Id)"
-        Invoke-NativeCase 'smoke::live_settings_search' -TimeoutMs 90000
+        $native = Invoke-SmokeNativeCase 'smoke::live_settings_search' (Join-Path $OutputDir 'smoke-settings-native.json')
+        if ($native.outcome -eq 'skipped') { return @{outcome='skipped';reason="Settings process/UIA window assertions passed; search only skipped: $($native.reason)"} }
         $null = Wait-Oracle 'Settings query and displayed results' {
             $nodes = $root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
             $query = $false
