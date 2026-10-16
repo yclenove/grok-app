@@ -5,10 +5,10 @@ pub mod capture;
 pub mod doctor;
 pub mod gnome;
 pub mod kwin;
-pub mod toplevel;
-pub mod windows;
 pub mod portal;
 pub mod restore;
+pub mod toplevel;
+pub mod windows;
 
 pub use capabilities::{
     build_environment_capabilities, CapabilityItem, CapabilityStatus, EnvironmentCapabilities,
