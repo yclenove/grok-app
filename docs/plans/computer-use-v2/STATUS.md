@@ -53,7 +53,7 @@
 | P4-07 | 打包与分发 | P4-01、P4-02、P4-03、P4-04、P4-05、P4-06 | 3d | todo |  |  |  | 需签名证书（可先无签名） |
 | P4-08 | 用户文档 | P4-07 | 1d | todo |  |  |  |  |
 | P5-01 | ComputerUseHost 骨架 + 引擎托管 | P0-12、P1-09 | 2.5d | done | cu2/P5-01-host-skeleton |  | 2026-10-16 | 监督逻辑(准入/双向握手/空闲退出/熔断/Stop 锁存恢复/发布模式拒绝 Windows 提权与 UIAccess)放在 `gcu-host-protocol::supervisor`，24 个监督单测+13 个 engine_host 在 computer-use 工作区可测；`src-tauri/src/computer_use/` 只是薄适配(默认关闭，设置行与 UI 归 P5-08)，由 ci.yml 的 Rust 四平台编译(构建机无 webkit2gtk)。`gcu engine` 仍只接受 `--driver fake`，正式启用将失败关闭直到驱动装配。真机待验：macOS TCC 责任进程链、Developer ID 与 identifier-only、外部引擎不继承正式授权；Windows 提权/UIAccess 仅经 windows-gnu 编译 |
-| P5-02 | Gateway + 注入 | P5-01、S-01 | 2d | todo |  |  |  |  |
+| P5-02 | Gateway + 注入 | P5-01、S-01 | 2d | done | cu2/P5-02-gateway |  | 2026-10-16 | 仅本地会话注入（SSH/定时任务/Remote IM 旁路不注入；Remote IM 走独立 agent 路径不经 session_manager::connect）；引擎侧每会话生成 32 字节 token，经 ACP `type:http` 的 `Authorization: Bearer` 头注入（S-01 已确认支持自定义 headers），不进环境变量/argv，`acp_client` 对 stderr/JSON-RPC 错误/非 JSON 行/崩溃详情做 scrub，会话关闭撤销；回环网关 Host 精确 `127.0.0.1:<端口>` 单值、Origin 缺省仅带 token 的非浏览器客户端可用、有值仅 `http://127.0.0.1:<端口>`，DNS rebinding/null Origin/重复 Host/无 token/错 token/跨会话图片被拒。gcu-host-protocol inject 8 项+supervisor 25 项、gcu-mcp gateway 2 项通过。`EngineProcess` 现要求 `Send + Sync`。未做：fork/切模型撤销(P5-09)；真机未验 |
 | P5-03 | 审批卡 | P5-02 | 3d | todo |  |  |  |  |
 | P5-04 | 敏感确认卡 + 交接卡 | P5-03 | 2d | todo |  |  |  |  |
 | P5-05 | 工具调用卡 | P5-02 | 2.5d | todo |  |  |  |  |
@@ -115,6 +115,7 @@
 - P2-09：受限令牌能在该 runner 启动的前提是令牌的 TokenOwner=用户 SID 且 TokenDefaultDacl 授予用户/登录 SID/SYSTEM，否则进程以 0xC0000142 失败；runner 的 admin 令牌没有 UAC 过滤，Shell 激活的 SystemSettings 是 High 完整性，Medium 的 harness 按设计被拒(ElevationRequired)。
 - P2-09：egui 夹具在 UIA 下首读树可能不完整（和 macOS 一样懒激活），调用方要有界重读。
 - P4-03：i18n 导出脚本(P4-02)还不存在，审批文案先以 `computer-use/ui/locales/*.json` 为单一来源并有 15 语言键锁步测试；P4-02 要把它导出为 App 的 `computer-use` 命名空间(`src/i18n/messages/<locale>/computer-use.ts`)，而不是再复制一份。
+- P5-02：token 必然随 ACP 会话载荷到达 agent 进程（header 方案的代价）；Host 侧所有日志/崩溃路径都 scrub，不要新增会打印 ACP 载荷的路径而不过 `gcu_host_protocol::inject::scrub`。
 
 ## 阶段记录
 
