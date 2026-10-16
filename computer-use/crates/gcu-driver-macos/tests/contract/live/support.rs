@@ -121,10 +121,99 @@ pub(super) fn is_calculator(name: &str) -> bool {
 }
 
 pub(super) fn process_running(name: &str) -> bool {
+    // `status()` would let pgrep print the pid into the suite log.
     std::process::Command::new("pgrep")
         .args(["-x", name])
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Unix pid of the frontmost app. Harness probe only; not a driver action.
+pub(super) fn frontmost_pid() -> Result<u32, String> {
+    let output = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"System Events\" to get unix id of first application process whose frontmost is true",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "frontmost pid query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<u32>()
+        .map_err(|error| format!("frontmost pid {:?}: {error}", text.trim()))
+}
+
+/// Pids whose process name is exactly `gcu-fixture`.
+pub(super) fn fixture_pids() -> Result<Vec<u32>, String> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-x", "gcu-fixture"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("gcu-fixture is not running".into());
+    }
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|line| line.parse().ok())
+        .collect();
+    if pids.is_empty() {
+        return Err("gcu-fixture pid missing".into());
+    }
+    Ok(pids)
+}
+
+/// Bring the already-running fixture forward with `open`.
+///
+/// This is suite setup for a case that types after `release_all_input`.
+/// It is not the driver under test and does not post input.
+pub(super) async fn activate_fixture_harness() -> Result<(), String> {
+    println!(
+        "C23 harness prep: `open` activates the fixture so its window is key before the focus check. This is not a driver action."
+    );
+    let target = std::env::var("GCU_FIXTURE_APP").unwrap_or_else(|_| "gcu-fixture".into());
+    let mut command = std::process::Command::new("open");
+    if target.ends_with(".app") || std::path::Path::new(&target).is_dir() {
+        command.arg(&target);
+    } else {
+        command.args(["-a", &target]);
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "harness `open` of the fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let front = frontmost_pid();
+        let pids = fixture_pids();
+        let ready = match (&front, &pids) {
+            (Ok(front), Ok(pids)) if pids.contains(front) => Some(*front),
+            _ => None,
+        };
+        if let Some(front) = ready {
+            println!(
+                "C23 harness prep: fixture pid {front} is frontmost. No driver action has run yet."
+            );
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(match (front, pids) {
+                (Ok(front), Ok(pids)) => format!(
+                    "harness `open` did not make the fixture frontmost (front pid {front}, fixture pids {pids:?})"
+                ),
+                (Err(error), _) | (_, Err(error)) => error,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 pub(super) fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {

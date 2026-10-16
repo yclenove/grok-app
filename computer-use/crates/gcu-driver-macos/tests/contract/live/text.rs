@@ -29,19 +29,25 @@ async fn focus_name_field(driver: &MacosDriver) -> Result<(WindowRef, NativeHand
             .map_err(|error| format!("{error}; last state: {}", last_state()))?;
     }
     if !name_focused().await {
-        let _ = driver
+        // Foreground Activate is fail-closed when idle is unknown. Keep the
+        // error; do not treat a swallowed CapabilityUnavailable as success.
+        let activate = driver
             .perform(
                 &DriverAction::Activate { win: win.clone() },
                 &Cancel::default(),
             )
             .await;
         click_name(driver, &win, at).await?;
-    }
-    if !name_focused().await {
-        return Err(format!(
-            "name field did not take keyboard focus; last state: {}",
-            last_state()
-        ));
+        if !name_focused().await {
+            let note = match activate {
+                Ok(_) => "driver Activate returned without an error".to_string(),
+                Err(error) => format!("driver Activate: {error}"),
+            };
+            return Err(format!(
+                "name field did not take keyboard focus ({note}); last state: {}",
+                last_state()
+            ));
+        }
     }
     let root = tree(driver, &win).await?;
     let field =
@@ -203,8 +209,18 @@ pub(super) async fn clear_with_chord(driver: &MacosDriver) -> Result<(), String>
 }
 
 pub(super) async fn lowercase_after_release(driver: &MacosDriver) -> Result<(), String> {
-    driver.release_all_input().await;
+    // C16 leaves Calculator in front when that app was already running, and
+    // nothing between C16 and C23 restores the fixture. C23 checks lowercase
+    // typing after release_all_input, not background delivery.
+    activate_fixture_harness().await?;
     let (win, handle) = focus_name_field(driver).await?;
+    driver.release_all_input().await;
+    if !name_focused().await {
+        return Err(format!(
+            "release_all_input dropped name field focus; last state: {}",
+            last_state()
+        ));
+    }
     driver
         .perform(
             &DriverAction::TypeText {
