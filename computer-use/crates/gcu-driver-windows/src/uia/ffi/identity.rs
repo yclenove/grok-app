@@ -26,7 +26,9 @@ impl State {
     pub(super) fn observe(&mut self, node: NodeId, request: &Request) -> Result<Properties> {
         let element = self.element(node)?;
         let properties = properties::read(&element);
-        let runtime = runtime(&element, request)?;
+        let runtime = runtime(&element, request).inspect_err(|_| {
+            super::super::diagnostics::identity(&properties);
+        })?;
         let hwnd = self
             .window
             .as_ref()
@@ -144,8 +146,20 @@ impl Drop for Array {
 }
 fn runtime(element: &IUIAutomationElement, request: &Request) -> Result<Vec<i32>> {
     request.check()?;
+    let started = tokio::time::Instant::now();
     // SAFETY: live MTA-local element; successful result is an owned SAFEARRAY.
-    let array = Array(unsafe { element.GetRuntimeId() }.map_err(read_error)?);
+    let array = Array(unsafe { element.GetRuntimeId() }.map_err(|e| {
+        if e.code().0 as u32 == windows::Win32::UI::Accessibility::UIA_E_ELEMENTNOTAVAILABLE {
+            read_error(e)
+        } else {
+            super::super::diagnostics::native_call(
+                "GetRuntimeId",
+                started,
+                e,
+                &properties::read(element),
+            )
+        }
+    })?);
     if array.0.is_null() {
         return Err(DriverError::StaleElement);
     }

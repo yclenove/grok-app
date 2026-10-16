@@ -4,6 +4,7 @@
 //! Reads are cancellable within two seconds; actions share DRIVER_DEADLINE.
 pub mod actions;
 pub mod cache;
+mod diagnostics;
 pub mod events;
 mod fake_actions;
 pub(crate) mod observe;

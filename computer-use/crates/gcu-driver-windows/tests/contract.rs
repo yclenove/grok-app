@@ -11,6 +11,8 @@ mod harness;
 mod live;
 #[path = "contract/portable.rs"]
 mod portable;
+#[path = "contract/readiness.rs"]
+mod readiness;
 #[cfg(windows)]
 #[path = "contract/smoke.rs"]
 mod smoke;

@@ -1,4 +1,6 @@
 //! Cache plans and owned property bags. No COM interface/pattern objects.
+pub mod read;
+
 use gcu_core::model::{NodeValue, Rect};
 
 /// Maximum children fetched per portable page, including a one-node lookahead.
@@ -38,7 +40,7 @@ pub struct Patterns {
 }
 
 /// One cached element's owned metadata; optional unsupported properties stay absent.
-/// `partial` reports unreliable properties to the completeness pipeline.
+/// `partial` reports unreliable privacy-critical properties to the completeness pipeline.
 #[derive(Clone, Debug)]
 pub struct Properties {
     /// Cached UIA RuntimeId; copied integers, never a COM interface.
@@ -85,8 +87,10 @@ pub struct Properties {
     pub value: Option<NodeValue>,
     /// Availability properties read in the same cache request.
     pub patterns: Patterns,
-    /// A property read failed or had an unexpected type.
+    /// Privacy-critical metadata could not be read reliably.
     pub partial: bool,
+    /// First cached-field failure metadata (no names/values); used for diagnostics.
+    pub read_failure: Option<String>,
 }
 impl Default for Properties {
     fn default() -> Self {
@@ -114,6 +118,7 @@ impl Default for Properties {
             value: None,
             patterns: Patterns::default(),
             partial: false,
+            read_failure: None,
         }
     }
 }

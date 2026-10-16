@@ -82,8 +82,13 @@ impl Drop for Fixture {
 pub async fn driver() -> Result<WindowsDriver, String> {
     super::timings::install();
     let exe = std::env::var_os("GCU_WORKER_EXE").ok_or("GCU_WORKER_EXE is required")?;
+    let mut config = WorkerConfig::new(exe);
+    // Debug workers on this disposable desktop may report fixture node labels.
+    config
+        .environment
+        .push(("GCU_UIA_DIAGNOSTICS".into(), "1".into()));
     WindowsDriver::monitored(
-        WorkerConfig::new(exe),
+        config,
         Default::default(),
         Arc::new(crate::common::TestStop::default()),
     )
@@ -110,7 +115,11 @@ pub async fn tree(driver: &WindowsDriver, win: &WindowRef) -> Result<RawTree, St
         .map_err(|e| e.to_string())?;
     require(
         tree.incomplete.is_none(),
-        format!("native tree incomplete: {:?}", tree.incomplete),
+        format!(
+            "native tree incomplete: {}; native_parent_timings={}",
+            super::readiness::summary(&tree),
+            super::timings::snapshot()
+        ),
     )?;
     Ok(tree)
 }
@@ -139,6 +148,31 @@ pub async fn node(driver: &WindowsDriver, win: &WindowRef, name: &str) -> Result
         |_| true,
     )
     .await
+}
+async fn ready_fixture(
+    driver: &WindowsDriver,
+    win: &WindowRef,
+    fixture: &Fixture,
+) -> Result<(), String> {
+    super::readiness::wait(
+        &mut DesktopClock::default(),
+        Duration::from_secs(30),
+        "fixture counter_button",
+        || fixture.read(),
+        async || {
+            driver
+                .snapshot_tree(win, &TreeOpts::default(), &Cancel::default())
+                .await
+                .map_err(|e| e.to_string())
+        },
+        |raw| {
+            raw.root
+                .as_ref()
+                .is_some_and(|r| find(r, "counter_button").is_some())
+        },
+    )
+    .await?;
+    Ok(())
 }
 pub async fn perform(driver: &WindowsDriver, action: DriverAction) -> Result<Delivery, String> {
     driver
@@ -217,7 +251,7 @@ async fn live_contract_table_c01_to_c27() {
     }
     let setup = attempt_bounded(
         &mut DesktopClock::default(),
-        Duration::from_secs(60),
+        Duration::from_secs(75),
         "setup",
         async {
             require(
@@ -234,7 +268,7 @@ async fn live_contract_table_c01_to_c27() {
             progress("CONTRACT SETUP: window discovery");
             let win = window(&driver, &fixture).await?;
             progress("CONTRACT SETUP: waiting for UIA counter_button");
-            node(&driver, &win, "counter_button").await?;
+            ready_fixture(&driver, &win, &fixture).await?;
             Ok::<_, String>((fixture, driver, win))
         },
     )

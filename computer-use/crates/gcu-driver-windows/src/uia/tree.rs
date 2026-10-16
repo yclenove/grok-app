@@ -33,6 +33,7 @@ pub async fn build_raw_tree(
     opts: &TreeOpts,
     cancel: &Cancel,
 ) -> Result<RawTree> {
+    let _timing = crate::timing::Timing::start("uia_tree");
     check_cancel(cancel)?;
     let empty_reason = if opts.max_tree_nodes == 0 {
         Some(IncompleteReason::NodeCap)
@@ -111,12 +112,25 @@ impl Walk<'_> {
         }
     }
     async fn node(&mut self, id: NodeId, depth: usize) -> Result<RawNode> {
+        let started = tokio::time::Instant::now();
         let props = self.read(self.source.properties(id)).await;
+        if self.reason.is_none() {
+            if let Err(error @ (DriverError::Native { .. } | DriverError::Timeout { .. })) = &props
+            {
+                tracing::warn!(target: "gcu_windows_uia", ?id, call = "properties/observe", %error,
+                    elapsed_ms = started.elapsed().as_millis() as u64, "UIA_FIRST_PARTIAL_SOURCE");
+            }
+        }
         let props = self.recover(props)?.unwrap_or_else(|| Properties {
             partial: true,
             ..Default::default()
         });
+        super::diagnostics::field(id, &props);
         if props.partial {
+            if self.reason.is_none() {
+                tracing::warn!(target: "gcu_windows_uia", ?id, failure = ?props.read_failure, "UIA_FIRST_PARTIAL_SOURCE");
+                super::diagnostics::identity(&props);
+            }
             self.reason.get_or_insert(IncompleteReason::PartialError);
         }
         if depth == 0 {
@@ -129,7 +143,16 @@ impl Walk<'_> {
         loop {
             // One lookahead distinguishes an exactly-full/deep tree from a truncated one.
             let limit = (self.max_nodes - self.count).clamp(1, BATCH_SIZE);
+            let started = tokio::time::Instant::now();
             let page = self.read(self.source.children(id, after, limit)).await;
+            if self.reason.is_none() {
+                if let Err(error @ (DriverError::Native { .. } | DriverError::Timeout { .. })) =
+                    &page
+                {
+                    tracing::warn!(target: "gcu_windows_uia", ?id, call = "children", %error,
+                        elapsed_ms = started.elapsed().as_millis() as u64, "UIA_FIRST_PARTIAL_SOURCE");
+                }
+            }
             let page = match page {
                 Err(DriverError::Timeout { .. }) => {
                     self.reason = Some(IncompleteReason::Deadline);
