@@ -134,6 +134,8 @@ async fn concurrent_session_calls_are_serial_and_return_ordered_diffs() {
         state.text
     );
 }
+/// Settle time the fake injects; the budgeted call must end long before it.
+const SLOW_SETTLE: Duration = Duration::from_millis(5000);
 #[tokio::test]
 async fn no_events_uses_tree_polling_and_budget_is_hard() {
     let h = Harness::driver(FakeDriver::from_scene("form").unwrap().with_events(false));
@@ -142,14 +144,20 @@ async fn no_events_uses_tree_polling_and_budget_is_hard() {
     assert_eq!(out.action.settle.reason, SettleReason::TreeStable);
     assert!(out.action.settle.ms >= 150);
     h.driver
-        .inject_action(Fault::SlowSettle(Duration::from_millis(300)))
+        .inject_action(Fault::SlowSettle(SLOW_SETTLE))
         .await
         .unwrap();
     let mut call = ToolCall::new("budget", "fake.form", click(3));
     call.settle_budget_ms = Some(40);
     let out = h.router.execute(&h.session, call).await;
     assert_eq!(out.action.settle.reason, SettleReason::Budget);
-    assert!(out.action.settle.ms < 150);
+    // The budget (40ms) cut a settle that would take SLOW_SETTLE; the bound is half of that,
+    // far above timer jitter on a slow runner and far below a settle that ignored the budget.
+    assert!(
+        out.action.settle.ms < SLOW_SETTLE.as_millis() as u64 / 2,
+        "settle took {}ms",
+        out.action.settle.ms
+    );
 }
 #[tokio::test]
 async fn quiet_events_settle_and_semantic_output_omits_image() {
