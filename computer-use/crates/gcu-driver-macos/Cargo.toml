@@ -104,7 +104,11 @@ security-framework-sys = "2.17"
 sha2.workspace = true
 
 [dev-dependencies]
+png.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# Reuse gcu_core::testing::CASES / skip_reason. The contract! macro stays the
+# in-memory runner (gcu-driver-fake); this crate does not retarget it.
+gcu-core = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

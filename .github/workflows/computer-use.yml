@@ -183,12 +183,50 @@ jobs:
             /tmp/fixture_state.json
 
   e2e-self-hosted:
-    name: Self-hosted E2E (Placeholder)
+    name: Self-hosted macOS contract
     if: (github.event_name == 'push' || github.event_name == 'pull_request') && vars.CU_SELF_HOSTED == 'true'
     runs-on: [self-hosted, cu-macos]
+    defaults:
+      run:
+        working-directory: computer-use
     steps:
-      - name: Placeholder
-        run: echo "Self-hosted E2E suite will be implemented in P1-09"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain (computer-use/rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "computer-use -> target"
+          key: ${{ hashFiles('computer-use/Cargo.lock') }}
+
+      - name: Portable macOS contract tests (no TCC)
+        env:
+          GCU_CONTRACT_OUT: ${{ runner.temp }}/gcu-contract-macos.json
+        run: cargo test --locked -p gcu-driver-macos --test contract
+
+      - name: Upload contract report
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: gcu-contract-macos
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/gcu-contract-macos.json
+
+      - name: Live suite and smoke only when this runner has TCC
+        env:
+          GCU_CONTRACT_OUT: ${{ runner.temp }}/gcu-contract-macos-live.json
+        run: |
+          if [ "${GCU_MAC_LIVE:-}" = "1" ]; then
+            cargo test --locked -p gcu-driver-macos --test contract -- --ignored --test-threads=1 --nocapture
+            bash scripts/smoke-macos.sh
+          else
+            echo "not_run: live_contract_table_suite (#[ignore], macOS GUI + TCC)"
+            echo "not_run: scripts/smoke-macos.sh"
+          fi
 
   wayland-self-hosted:
     name: Wayland Contract (Self-hosted)
