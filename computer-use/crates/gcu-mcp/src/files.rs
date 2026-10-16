@@ -90,7 +90,7 @@ impl SessionFiles {
 pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    tokio::time::timeout(Duration::from_secs(15), tokio::task::spawn_blocking(work))
+    tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(work))
         .await
         .map_err(|_| io::Error::other("file/image work timed out"))?
         .map_err(|_| io::Error::other("file/image worker failed"))?
