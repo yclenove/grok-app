@@ -92,7 +92,7 @@ impl LivePrivilege {
 }
 
 /// Process the supervisor can shut down without knowing the transport.
-pub trait EngineProcess: Send {
+pub trait EngineProcess: Send + Sync {
     /// Non-blocking exit poll. IO errors are crashes.
     fn poll_exit(&mut self) -> PollExit;
     /// Ask the engine to leave. The later exit is clean even if the RPC fails.
