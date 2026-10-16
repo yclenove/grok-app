@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+rand = "0.10"
 gcu-protocol = { workspace = true }
 gcu-core = { workspace = true }
 atspi = { version = "0.30", features = ["tokio"] }

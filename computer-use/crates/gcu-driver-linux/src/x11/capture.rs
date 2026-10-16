@@ -90,6 +90,13 @@ pub fn decide_capture_strategy(
 
 /// Captures window pixels and encodes into a PNG `Capture`.
 pub fn capture_window(x: &dyn XServer, window_id: u32) -> Result<Capture, DriverError> {
+    let exclusion = x.overlay_capture_scope(window_id).map_err(|e| match e {
+        XError::WindowNotFound(_) => DriverError::WindowGone,
+        _ => DriverError::Native {
+            message: format!("Overlay capture barrier failed: {e}"),
+            maybe_executed: false,
+        },
+    })?;
     let geom = x.window_geometry(window_id).map_err(|e| match e {
         XError::WindowNotFound(_) => DriverError::WindowGone,
         _ => DriverError::Native {
@@ -123,6 +130,9 @@ pub fn capture_window(x: &dyn XServer, window_id: u32) -> Result<Capture, Driver
                 })?
             }
             Err(e) => {
+                if !exclusion.allows_root_capture() {
+                    return Err(DriverError::CapabilityUnavailable);
+                }
                 tracing::warn!(
                     error = %e,
                     window = window_id,
@@ -162,6 +172,9 @@ pub fn capture_window(x: &dyn XServer, window_id: u32) -> Result<Capture, Driver
             }
         }
     } else {
+        if !exclusion.allows_root_capture() {
+            return Err(DriverError::CapabilityUnavailable);
+        }
         let stacking = x.query_tree(root.root_id).unwrap_or_default();
         let mut geoms = HashMap::new();
         for &w in &stacking {
@@ -190,6 +203,8 @@ pub fn capture_window(x: &dyn XServer, window_id: u32) -> Result<Capture, Driver
         }
     };
 
+    // Release before PNG encoding; only the pixel read belongs to this scope.
+    drop(exclusion);
     let mut png_bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut png_bytes, geom.width, geom.height);

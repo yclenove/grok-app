@@ -49,6 +49,8 @@ pub enum FakeXEvent {
 
 /// In-memory mock X11 server for unit testing.
 pub struct FakeX {
+    /// Overlay capture barrier for deterministic cleanup and exclusion tests.
+    pub overlay: super::fake_overlay::FakeOverlayCapture,
     windows: Mutex<HashMap<u32, FakeWindow>>,
     root: XRootGeometry,
     active_window: Mutex<Option<u32>>,
@@ -74,6 +76,7 @@ impl FakeX {
     /// Create a new in-memory FakeX instance.
     pub fn new(root: XRootGeometry, composite_available: bool) -> Self {
         Self {
+            overlay: Default::default(),
             windows: Mutex::new(HashMap::new()),
             root,
             active_window: Mutex::new(None),
@@ -182,6 +185,12 @@ fn lock_m<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl XServer for FakeX {
+    fn overlay_capture_scope(
+        &self,
+        target: u32,
+    ) -> Result<Box<dyn super::overlay::CaptureScope + '_>, XError> {
+        self.overlay.begin(target)
+    }
     fn client_list(&self) -> Result<Vec<u32>, XError> {
         let wins = match self.windows.lock() {
             Ok(guard) => guard,

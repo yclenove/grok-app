@@ -46,7 +46,7 @@
 | P4-01 | macOS helper 与代理 | P1-09、S-02 | 3d | todo |  |  |  |  |
 | P4-02 | Onboarding 窗口 | P4-01 | 2d | todo |  |  |  |  |
 | P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | todo |  |  |  |  |
-| P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | todo |  |  |  |  |
+| P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | done | cu2/P4-04-overlay |  | 2026-10-16 | gcu-overlay：状态+用户 Stop 按钮(不可聚焦/穿透/排除截图，macOS/Windows/X11)；Stop 状态机去抖、独立通道；文案表接口待 App i18n 对接；原生 Wayland 覆盖层声明不可用(裁定选项1)；三平台真机 GUI not_run |
 | P4-05a | gcu install 客户端安装库（P4-05 前半） | P0-01 | 1d | done | cu2/P4-05a-install-lib | #14 | 2026-10-13 | 服务端名 grok-computer-use；Claude 保留 computer-use |
 | P4-05 | gcu install/uninstall（clap 接线 + Windows 钩子） | P0-10、P4-05a | 1d | done | cu2/P4-05-install-wiring |  | 2026-10-13 | gcu install/uninstall 接线(dry-run、0600 备份、幂等、精确移除、~/.grok 需确认)；Windows Stop 钩子 .cmd；Antigravity 走假 agy 测试 |
 | P4-06 | turn-ended 接入 | P0-09、S-01 | 1d | done | cu2/P4-06-turn-ended |  | 2026-10-13 | gcu turn-ended(Grok Stop 钩子 stdin / Codex notify argv)经私有端点通知会话；Turn 授权到期、幂等、不解除 Stop、空闲推定；链式 notify 先转发原调用；钩子错误可见且非致命 |

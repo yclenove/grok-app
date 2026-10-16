@@ -63,6 +63,15 @@ pub enum XError {
 
 /// Abstraction over the X11 server connection and protocol operations.
 pub trait XServer: Send + Sync {
+    /// Hide registered overlays for the pixel-read scope. Real X11 uses a
+    /// disposable nonce window and waits for each UI hide acknowledgment.
+    /// No server grab is used, so Stop and input release remain independent.
+    fn overlay_capture_scope(
+        &self,
+        _target: u32,
+    ) -> Result<Box<dyn super::overlay::CaptureScope + '_>, XError> {
+        Ok(Box::new(super::overlay::NoOverlays))
+    }
     /// Query `_NET_CLIENT_LIST` from the root window.
     fn client_list(&self) -> Result<Vec<u32>, XError>;
 

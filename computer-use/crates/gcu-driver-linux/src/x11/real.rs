@@ -88,6 +88,12 @@ impl RealX {
 }
 
 impl XServer for RealX {
+    fn overlay_capture_scope(
+        &self,
+        target: u32,
+    ) -> Result<Box<dyn super::overlay::CaptureScope + '_>, XError> {
+        super::overlay::begin(&self.conn, self.screen().root, target)
+    }
     fn client_list(&self) -> Result<Vec<u32>, XError> {
         let root = self.screen().root;
         let prop = self
