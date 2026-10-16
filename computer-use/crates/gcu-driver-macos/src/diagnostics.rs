@@ -89,3 +89,9 @@ pub(crate) fn forget_reference(element: usize) {
 mod native;
 #[cfg(target_os = "macos")]
 pub use native::{runtime_report, FixtureToggles};
+
+#[cfg(target_os = "macos")]
+#[path = "diagnostics/windows_ffi.rs"]
+mod windows_native;
+#[cfg(target_os = "macos")]
+pub use windows_native::fixture_window_report;

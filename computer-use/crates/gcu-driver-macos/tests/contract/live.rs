@@ -1,6 +1,7 @@
 //! Ignored live table. Grant Accessibility and Screen Recording, start gcu-fixture,
 //! then: `cargo test -p gcu-driver-macos --test contract -- --ignored --test-threads=1`
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gcu_core::driver::{
@@ -8,6 +9,7 @@ use gcu_core::driver::{
     PointerRoute, TreeOpts, WindowRef,
 };
 use gcu_core::model::{RawNode, Role, WindowPoint};
+use gcu_driver_macos::input::hotkey::{HotkeyConfig, SharedStopLatch, StopLatch};
 use gcu_driver_macos::MacosDriver;
 
 use super::oracle;
@@ -15,10 +17,31 @@ use super::report::{self, NOT_RUN};
 use super::specials;
 use super::table::{self, CaseResult, Facts};
 
-#[tokio::test]
-#[ignore = "macOS GUI session with TCC; not_run on GitHub macos-14"]
-async fn live_contract_table_suite() {
-    let driver = MacosDriver::new().await.expect("unelevated macOS driver");
+pub async fn live_contract_table_suite() {
+    // The disposable test Host starts resumed, matching Linux's contract.
+    // C27 creates its own latch; no production/persistent Stop is cleared.
+    let latch = Arc::new(SharedStopLatch::new(false));
+    let driver = MacosDriver::with_stop_latch(latch.clone(), HotkeyConfig::default(), 3000)
+        .await
+        .expect("unelevated native macOS driver with RealEvents");
+    assert!(!latch.is_stopped());
+    let guards = driver
+        .input_guards()
+        .expect("native RealEvents guards installed");
+    assert!(!guards.is_stopped());
+    let runtime = gcu_driver_macos::diagnostics::runtime_report(&driver)
+        .await
+        .expect("native backend facts");
+    assert_eq!(runtime["installed_probe"]["appkit_ready"], true);
+    assert_eq!(
+        runtime["capabilities"]["delivery"]["targeted_pointer"],
+        runtime["installed_probe"]["background_ready"]
+    );
+    assert_eq!(
+        runtime["capabilities"]["delivery"]["targeted_keys"],
+        runtime["installed_probe"]["background_ready"]
+    );
+    println!("{runtime}");
     let doc = driver.doctor().await;
     let caps = driver.capabilities().clone();
     let fixture_running = fixture_window(&driver).await.is_ok();

@@ -1,10 +1,12 @@
 //! macOS driver contract suite (07 §2 C01–C27 plus ADR 0006).
 //!
-//! Portable rows run on every host. The live table is `#[ignore]` and compiles
+//! Portable rows run on every host. The live table is ignored and compiles
 //! only for `target_os = "macos"`. GitHub's macOS runner has no TCC grant, so
 //! that table stays out of the default `cargo test` path.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "contract/harness.rs"]
+mod harness;
 #[path = "contract/oracle.rs"]
 mod oracle;
 #[path = "contract/report.rs"]
@@ -21,7 +23,57 @@ mod live;
 use report::NOT_RUN;
 use table::CaseResult;
 
-#[tokio::test]
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+}
+
+fn main() -> Result<(), String> {
+    use harness::Case;
+    let cases = [
+        Case {
+            name: "portable_matrix_passes_or_skips_and_archives_json",
+            ignored: false,
+            run: || runtime().block_on(portable_matrix_passes_or_skips_and_archives_json()),
+        },
+        Case {
+            name: "skip_reasons_match_capabilities_and_the_shared_table",
+            ignored: false,
+            run: skip_reasons_match_capabilities_and_the_shared_table,
+        },
+        Case {
+            name: "oracle_timeout_reports_the_last_state",
+            ignored: false,
+            run: oracle_timeout_reports_the_last_state,
+        },
+        Case {
+            name: "oracle_poll_returns_when_the_predicate_matches",
+            ignored: false,
+            run: oracle_poll_returns_when_the_predicate_matches,
+        },
+        Case {
+            name: "case_result_round_trip_keeps_skip_reason",
+            ignored: false,
+            run: case_result_round_trip_keeps_skip_reason,
+        },
+        #[cfg(target_os = "macos")]
+        Case {
+            name: "live::live_contract_table_suite",
+            ignored: true,
+            run: || {
+                assert!(
+                    gcu_driver_macos::input::ensure_appkit(),
+                    "AppKit on main before native probe"
+                );
+                runtime().block_on(live::live_contract_table_suite());
+            },
+        },
+    ];
+    harness::run(&cases)
+}
+
 async fn portable_matrix_passes_or_skips_and_archives_json() {
     let results = specials::run_portable_matrix().await;
     let failed: Vec<_> = results
@@ -48,7 +100,6 @@ async fn portable_matrix_passes_or_skips_and_archives_json() {
     report::archive(&results, NOT_RUN).unwrap();
 }
 
-#[test]
 fn skip_reasons_match_capabilities_and_the_shared_table() {
     table::assert_shared_scope_text();
     table::assert_background_skip_matches_probe();
@@ -56,7 +107,6 @@ fn skip_reasons_match_capabilities_and_the_shared_table() {
     table::assert_overlay_skip_matches_capability();
 }
 
-#[test]
 fn oracle_timeout_reports_the_last_state() {
     let path = std::env::temp_dir().join(format!("gcu-oracle-{}.json", std::process::id()));
     std::fs::write(&path, r#"{"text":"kept","counter":1}"#).unwrap();
@@ -72,7 +122,6 @@ fn oracle_timeout_reports_the_last_state() {
     assert!(error.contains("counter"), "{error}");
 }
 
-#[test]
 fn oracle_poll_returns_when_the_predicate_matches() {
     let path = std::env::temp_dir().join(format!("gcu-oracle-ok-{}.json", std::process::id()));
     std::fs::write(&path, r#"{"counter":2}"#).unwrap();
@@ -84,7 +133,6 @@ fn oracle_poll_returns_when_the_predicate_matches() {
     assert_eq!(got, 2);
 }
 
-#[test]
 fn case_result_round_trip_keeps_skip_reason() {
     let row = CaseResult::skipped(
         "C21",

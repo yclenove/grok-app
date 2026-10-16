@@ -5,6 +5,10 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[test]]
+name = "contract"
+harness = false
+
 [features]
 default = ["macos-private-spi"]
 # SkyLight symbols are resolved with dlsym. Missing symbols degrade the

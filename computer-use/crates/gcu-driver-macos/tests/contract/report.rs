@@ -7,7 +7,7 @@ use std::path::Path;
 /// Items this process does not execute. The live table and the smoke script
 /// run on a TCC-granted macOS GUI session.
 pub const NOT_RUN: &[&str] = &[
-    "live_contract_table_suite (#[ignore], macOS GUI + TCC)",
+    "live_contract_table_suite (ignored by default, macOS GUI + TCC)",
     "scripts/smoke-macos.sh",
 ];
 

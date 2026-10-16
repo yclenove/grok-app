@@ -67,7 +67,7 @@ impl World {
     }
 
     /// Cached application element, created +1 on first use.
-    pub(super) fn application(&mut self, pid: i32) -> Result<AXUIElementRef> {
+    pub(crate) fn application(&mut self, pid: i32) -> Result<AXUIElementRef> {
         if let Some(app) = self.apps.get(&pid).copied() {
             return Ok(app);
         }

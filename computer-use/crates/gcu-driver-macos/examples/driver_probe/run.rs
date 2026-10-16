@@ -1,39 +1,28 @@
 use gcu_core::{
-    driver::{AppQuery, Cancel, Driver, DriverAction, TreeOpts, WindowRef},
+    driver::{Cancel, Driver, TreeOpts, WindowRef},
     model::{RawNode, RawTree, Role},
 };
 use gcu_driver_macos::{
     diagnostics::{self, FixtureToggles},
-    input::hotkey::{HotkeyConfig, StopLatch},
+    input::hotkey::{HotkeyConfig, SharedStopLatch, StopLatch},
     MacosDriver,
 };
 use serde_json::json;
 use std::{
     path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 #[path = "actions.rs"]
 mod actions;
+#[path = "discovery.rs"]
+mod discovery;
+#[path = "select.rs"]
+mod select;
 
 pub(super) fn emit(kind: &str, data: serde_json::Value) {
     println!("{}", json!({"kind": kind, "data": data}));
-}
-
-// Only this explicit, disposable fixture invocation may resume this latch.
-// No production Stop state is read or cleared.
-struct FixtureLatch(AtomicBool);
-impl StopLatch for FixtureLatch {
-    fn is_stopped(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-    fn request_stop(&self) {
-        self.0.store(true, Ordering::Release);
-    }
 }
 
 pub async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -41,15 +30,17 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "START",
         json!({"fixture": path, "pid": std::process::id(),
         "format": "one JSON object per line; grep kind/AX_CALL/AX_FALLBACK/CANCEL_REASON",
-        "actions": "fixture only; semantic actions; no foreground, clipboard or CG posting"}),
+        "actions": "fixture only; semantic actions; may open/activate fixture once if no window; no clipboard or CG posting"}),
     );
-    let latch = Arc::new(FixtureLatch(AtomicBool::new(true)));
+    // This explicitly invoked disposable fixture Host starts resumed. The
+    // production constructor and persistent Host latch remain fail-closed.
+    let latch = Arc::new(SharedStopLatch::new(false));
     let started = Instant::now();
     let driver = MacosDriver::with_stop_latch(latch.clone(), HotkeyConfig::default(), 3000).await?;
     emit(
         "DRIVER",
         json!({"elapsed_ms": started.elapsed().as_secs_f64()*1000.0,
-        "initial_stop": true, "reason": "same initial Stop state as MacosDriver::new"}),
+        "initial_stop": latch.is_stopped(), "reason": "explicit fixture Host starts resumed; with_stop_latch installs RealEvents + native probe"}),
     );
     println!("{}", diagnostics::runtime_report(&driver).await?);
     let doctor = driver.doctor().await;
@@ -58,28 +49,7 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         json!({"ready": doctor.ready, "issues": doctor.issues,
         "capabilities": doctor.capabilities}),
     );
-    let query = AppQuery::from(path.to_str().ok_or("fixture path must be UTF-8")?);
-    let mut app = driver.resolve_app(&query).await?;
-    emit("RESOLVE", json!(app.info));
-    if app.info.pid.is_none() {
-        app = driver.launch_app(&app).await?;
-        emit("LAUNCH", json!(app.info));
-    }
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let win = loop {
-        app = driver.resolve_app(&query).await?;
-        match driver.key_window(&app).await {
-            Ok(info) => {
-                emit("WINDOW", json!(info));
-                break WindowRef { app, id: info.id };
-            }
-            Err(error) if Instant::now() < deadline => {
-                emit("WINDOW_WAIT", json!({"error": error.to_string()}));
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    };
+    let win = discovery::window(&driver, path).await?;
     let opts = TreeOpts {
         max_tree_nodes: 5000,
         ..TreeOpts::default()
@@ -102,31 +72,8 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     );
     emit("FIXTURE_STATE_INITIAL", actions::read_state().await);
     let baseline = snapshot(&driver, &win, &opts, "baseline").await;
-    if let Some(button) = baseline
-        .as_ref()
-        .and_then(|t| first_button(t.root.as_ref()))
-    {
-        actions::perform(
-            &driver,
-            "press_initially_stopped",
-            DriverAction::Press {
-                el: button.handle.clone(),
-            },
-        )
-        .await;
-    } else {
-        emit(
-            "ACTION_SKIP",
-            json!({"action": "press_initially_stopped", "reason": "no fixture Button in baseline tree"}),
-        );
-    }
     tokio::time::sleep(Duration::from_millis(500)).await;
     let repeat = snapshot(&driver, &win, &opts, "baseline_repeat_500ms").await;
-    latch.0.store(false, Ordering::Release);
-    emit(
-        "FIXTURE_RESUME",
-        json!({"reason": "explicit driver_probe invocation; fresh fixture latch only"}),
-    );
     let toggles = FixtureToggles::new(&driver, win.app.info.pid.ok_or("fixture has no pid")?)?;
     if let Err(error) = toggles.enable().await {
         emit(
