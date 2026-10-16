@@ -115,18 +115,54 @@ pub(super) struct Recovery {
     release: Arc<dyn InputReleaser>,
     pending: Mutex<Option<(InputPacket, usize)>>,
     clipboard: Option<Arc<dyn crate::input::clipboard::ClipboardApi>>,
+    safety: Arc<Mutex<Option<Arc<crate::input::hotkey::SafetyGuard>>>>,
 }
 impl Recovery {
-    pub(super) fn new(release: Arc<dyn InputReleaser>) -> Self {
+    pub(super) fn new(
+        release: Arc<dyn InputReleaser>,
+        safety: Arc<Mutex<Option<Arc<crate::input::hotkey::SafetyGuard>>>>,
+    ) -> Self {
         Self {
             clipboard: release.clipboard(),
             ledger: Arc::default(),
             release,
             pending: Mutex::default(),
+            safety,
         }
     }
     pub(super) fn ready(&self) -> bool {
         self.ledger.is_empty() && self.clipboard.as_ref().is_none_or(|c| !c.pending())
+    }
+    pub(super) fn check_request(&self, request: &Request) -> Result<()> {
+        if !request.is_read_only() {
+            if let Some(guard) = self
+                .safety
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                guard.check(foreground_request(request))?;
+            }
+        }
+        Ok(())
+    }
+    fn check_delivery(&self, foreground: bool) -> Result<()> {
+        if let Some(guard) = self
+            .safety
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            if guard.check(foreground).is_err() {
+                // Earlier activation/publication may already have executed.
+                // Kill the child awaiting this ack even if its ledger is empty.
+                guard.request_stop();
+                return Err(DriverError::Cancelled {
+                    maybe_executed: true,
+                });
+            }
+        }
+        Ok(())
     }
     pub(super) async fn receive<W: AsyncWrite + Unpin>(
         &self,
@@ -139,6 +175,7 @@ impl Recovery {
         let mut clipboard_sequence = None;
         match reply {
             Reply::ClipboardStage { target, text } => {
+                self.check_delivery(true)?;
                 let Request::Perform(Action::TypeText {
                     win,
                     text: approved,
@@ -159,6 +196,9 @@ impl Recovery {
                     std::time::Instant::now() + DRIVER_DEADLINE,
                 );
                 clipboard_sequence = Some(clipboard.stage(text, context).await?);
+                // Stop may latch while staging awaits clipboard ownership/FFI.
+                // Never acknowledge publication after the parent latch closes.
+                self.check_delivery(true)?;
             }
             Reply::ClipboardRestore => {
                 self.clipboard
@@ -168,6 +208,7 @@ impl Recovery {
                     .await?;
             }
             Reply::InputPrepare(packet) => {
+                self.check_delivery(Delivery::from(packet.delivery) == Delivery::Foreground)?;
                 if !valid(&packet, request) {
                     return Err(crashed());
                 }
@@ -262,6 +303,20 @@ fn valid(packet: &InputPacket, request: &Request) -> bool {
             } else {
                 Delivery::TargetedEvent
             }
+}
+pub(super) fn foreground_request(request: &Request) -> bool {
+    match request {
+        Request::Perform(Action::Activate { .. }) => true,
+        Request::Perform(
+            Action::PointerClick { route, .. }
+            | Action::PointerScroll { route, .. }
+            | Action::PointerDrag { route, .. },
+        ) => *route == PointerRoute::AllowForeground,
+        Request::Perform(Action::PressKeys { route, .. } | Action::TypeText { route, .. }) => {
+            *route == KeyRoute::AllowForeground
+        }
+        _ => false,
+    }
 }
 pub(super) fn default_releaser() -> Arc<dyn InputReleaser> {
     #[cfg(windows)]

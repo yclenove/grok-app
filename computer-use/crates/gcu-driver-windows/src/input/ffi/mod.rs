@@ -1,6 +1,7 @@
 //! Win32 adapter. COM and reads use a persistent MTA; release bypasses it.
 pub(crate) mod clipboard;
 mod native;
+mod safety;
 mod sample;
 use super::{api::*, ledger::InputLedger};
 use crate::{
@@ -12,6 +13,7 @@ use gcu_core::{
     driver::*,
     model::{NativeHandle, WindowPoint},
 };
+pub use safety::RealSafetyApi;
 use std::sync::Arc;
 use windows::Win32::{
     Foundation::{HWND, POINT},

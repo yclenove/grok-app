@@ -25,6 +25,11 @@ pub struct WindowsDriver {
     indexing: Arc<std::sync::atomic::AtomicBool>,
     refreshing: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) caps: Capabilities,
+    pub(crate) safety_caps: std::sync::OnceLock<[Capabilities; 8]>,
+    pub(crate) safety: Option<Arc<crate::input::hotkey::SafetyGuard>>,
+    pub(crate) overlay: Option<Arc<crate::overlay::OverlayExclusion>>,
+    child: bool,
+    diagnostic: bool,
     input: Option<Arc<crate::input::InputBackend>>,
     listed: std::sync::atomic::AtomicBool,
     observer: Option<crate::uia::observe::Observer>,
@@ -95,6 +100,11 @@ impl WindowsDriver {
             indexing,
             refreshing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             caps: discovery_capabilities(),
+            safety_caps: std::sync::OnceLock::new(),
+            safety: None,
+            overlay: None,
+            child: false,
+            diagnostic: false,
             listed: std::sync::atomic::AtomicBool::new(false),
             input: None,
             observer: None,
@@ -103,6 +113,7 @@ impl WindowsDriver {
     }
     /// Start the production Windows adapter in the default isolated mode.
     /// The executable must be `gcu`, which implements the private worker command.
+    /// Starts stopped until a trusted Host supplies its pre-restored latch.
     #[cfg(windows)]
     pub async fn new() -> Result<Self> {
         let executable = std::env::current_exe().map_err(|_| DriverError::Crashed {
@@ -115,8 +126,9 @@ impl WindowsDriver {
         .await
     }
     /// Select isolated production execution or explicit in-process diagnostics.
-    /// Only Worker can terminate wedged providers. Parent-native work is limited
-    /// to independent input release and conditional clipboard recovery.
+    /// Only Worker can terminate wedged action FFI. Parent FFI is limited to
+    /// safety monitoring, overlay exclusion, up-only emergency cleanup and
+    /// conditional clipboard recovery.
     #[cfg(windows)]
     pub async fn with_exec_mode(
         mode: crate::worker::ExecMode,
@@ -125,7 +137,12 @@ impl WindowsDriver {
         if mode == crate::worker::ExecMode::InProcess {
             return Self::new_in_process().await;
         }
-        Self::isolated(config).await
+        Self::monitored(
+            config,
+            Default::default(),
+            Arc::new(crate::input::hotkey::UnboundStop),
+        )
+        .await
     }
     /// Attach a portable supervisor. Startup probes the child before enabling
     /// capabilities; there is no discovery/UIA/capture thread in this process.
@@ -142,13 +159,18 @@ impl WindowsDriver {
         Ok(Self::from_isolated(isolated))
     }
     fn from_isolated(isolated: crate::worker::WorkerDriver) -> Self {
-        let caps = isolated.capabilities().clone();
+        let caps = isolated.native_capabilities().clone();
         let (worker, _) = mpsc::sync_channel(1);
         Self {
             isolated: Some(isolated),
             input: None,
             worker,
             caps,
+            safety_caps: std::sync::OnceLock::new(),
+            safety: None,
+            overlay: None,
+            child: false,
+            diagnostic: false,
             indexing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refreshing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             listed: std::sync::atomic::AtomicBool::new(false),
@@ -166,7 +188,9 @@ impl WindowsDriver {
     /// Called only after the private startup frame; window stamps survive restart.
     #[cfg(windows)]
     pub async fn new_worker(namespace: &str) -> Result<Self> {
-        Self::native(Arc::new(crate::RealWinApi::for_worker(namespace)?)).await
+        let mut driver = Self::native(Arc::new(crate::RealWinApi::for_worker(namespace)?)).await?;
+        driver.child = true;
+        Ok(driver)
     }
     /// Worker startup with the parent's press-before-send acknowledgement path.
     #[cfg(windows)]
@@ -193,13 +217,15 @@ impl WindowsDriver {
         let wgc = Arc::new(crate::capture::WgcCapture::new().await?);
         let print = Arc::new(crate::capture::PrintWindowCapture::new().await?);
         let input = Arc::new(crate::input::RealInput::start(api, uia.clone()).await?);
-        Ok(driver
+        let mut driver = driver
             .with_input(Arc::new(
                 crate::input::InputBackend::new(input)
                     .with_clipboard(Arc::new(crate::input::clipboard::NativeClipboard::default())),
             ))
             .attach_uia(uia.clone(), uia)
-            .with_capture(Arc::new(crate::capture::CaptureBackend::new(wgc, print))))
+            .with_capture(Arc::new(crate::capture::CaptureBackend::new(wgc, print)));
+        driver.diagnostic = true;
+        Ok(driver)
     }
     /// Start discovery with portable/native UIA sources. Startup validates the
     /// engine before enabling tree/events/actions; capture and input injection remain unavailable.
@@ -222,18 +248,78 @@ impl WindowsDriver {
         self.caps.background_operation = BackgroundOperation::Partial;
         self.caps.limits.max_tree_nodes = crate::uia::tree::NODE_CAP as u32;
         self.caps.version = "Windows 10 1903+; discovery and UIA semantic actions".into();
+        self.safety_caps = std::sync::OnceLock::new();
         self
     }
     /// Enable complete targeted/foreground input. Native or fake APIs preserve
     /// route ceilings; foreground requires core's explicit permission.
     pub fn with_input(mut self, input: Arc<crate::input::InputBackend>) -> Self {
+        self.child |= input.parent_controlled();
         self.input = Some(input);
         self.caps.delivery.targeted_pointer = true;
         self.caps.delivery.targeted_keys = true;
         self.caps.delivery.foreground = ForegroundCapability::Policy;
         self.caps.background_operation = BackgroundOperation::Partial;
         self.caps.limits.type_text_max = crate::input::text::TEXT_MAX_UNITS as u32;
+        self.safety_caps = std::sync::OnceLock::new();
+        if let Some(guard) = self.safety.clone() {
+            return self.with_safety(guard);
+        }
         self
+    }
+    /// Attach parent monitoring using a Host-owned, pre-restored Stop latch.
+    /// Isolated delivery rechecks this guard at the parent input-ack barrier.
+    /// In-process native diagnostics keep foreground disabled (not killable).
+    pub fn with_safety(mut self, guard: Arc<crate::input::hotkey::SafetyGuard>) -> Self {
+        if let Some(worker) = self.isolated.take() {
+            self.isolated = Some(worker.with_safety(guard.clone()));
+        } else if let Some(input) = &self.input {
+            input.set_safety(guard.clone());
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let input = input.clone();
+                guard.bind_stop(Arc::new(move || {
+                    let input = input.clone();
+                    runtime.spawn(async move {
+                        input.release_all().await;
+                    });
+                }));
+            } else {
+                guard.disable("independent input release runtime unavailable");
+            }
+        }
+        self.safety = Some(guard);
+        self.safety_caps = std::sync::OnceLock::new();
+        self
+    }
+    /// Attach an exact display-affinity probe; failure stays visible in capabilities.
+    pub fn with_overlay_exclusion(
+        mut self,
+        exclusion: Arc<crate::overlay::OverlayExclusion>,
+    ) -> Self {
+        self.overlay = Some(exclusion);
+        self.safety_caps = std::sync::OnceLock::new();
+        self
+    }
+    /// Production monitored worker. Host restores/persists Stop and supplies its
+    /// latch; no model-facing resume API exists. Guard config is trusted policy.
+    #[cfg(windows)]
+    pub async fn monitored(
+        config: crate::worker::WorkerConfig,
+        hotkey: crate::input::hotkey::HotkeyConfig,
+        latch: Arc<dyn crate::input::hotkey::StopLatch>,
+    ) -> Result<Self> {
+        let guard = crate::input::hotkey::SafetyGuard::start(
+            Arc::new(crate::input::RealSafetyApi),
+            hotkey,
+            latch,
+        )
+        .await;
+        let overlay =
+            crate::overlay::OverlayExclusion::probe(Arc::new(crate::overlay::RealOverlayApi)).await;
+        Ok(Self::isolated(config)
+            .await?
+            .with_safety(guard)
+            .with_overlay_exclusion(overlay))
     }
     pub(crate) async fn call<T: Send + 'static>(
         &self,

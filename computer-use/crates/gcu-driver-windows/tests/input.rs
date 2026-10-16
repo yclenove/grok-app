@@ -9,7 +9,11 @@ async fn fixture() -> (Arc<FakeInput>, gcu_driver_windows::WindowsDriver, Window
     let (_, driver, _, win) = common::fixture().await;
     let api = Arc::new(FakeInput::default());
     let backend = Arc::new(InputBackend::new(api.clone()));
-    (api, driver.with_input(backend), win)
+    (
+        api,
+        driver.with_input(backend).with_safety(common::fake_guard()),
+        win,
+    )
 }
 fn click(win: &WindowRef, route: PointerRoute) -> DriverAction {
     DriverAction::PointerClick {

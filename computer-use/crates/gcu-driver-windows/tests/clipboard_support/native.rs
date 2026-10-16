@@ -65,10 +65,19 @@ async fn native_notepad_long_text_paste_preserves_document() {
     } else {
         ExecMode::Worker
     };
-    let driver =
-        gcu_driver_windows::WindowsDriver::with_exec_mode(mode, WorkerConfig::new(executable))
+    let driver = if mode == ExecMode::Worker {
+        gcu_driver_windows::WindowsDriver::monitored(
+            WorkerConfig::new(executable),
+            Default::default(),
+            Arc::new(crate::common::TestStop::default()),
+        )
+        .await
+        .unwrap()
+    } else {
+        gcu_driver_windows::WindowsDriver::new_in_process()
             .await
-            .unwrap();
+            .unwrap()
+    };
     let app = driver
         .resolve_app(&AppQuery::from("notepad.exe"))
         .await
@@ -87,6 +96,14 @@ async fn native_notepad_long_text_paste_preserves_document() {
         text: text.clone(),
         route: KeyRoute::AllowForeground,
     };
+    if mode == ExecMode::InProcess {
+        assert_eq!(
+            driver.perform(&request, &Cancel::default()).await,
+            Err(DriverError::CapabilityUnavailable)
+        );
+        driver.release_all_input().await;
+        return;
+    }
     assert_eq!(
         driver.perform(&request, &Cancel::default()).await,
         Ok(Delivery::Clipboard)

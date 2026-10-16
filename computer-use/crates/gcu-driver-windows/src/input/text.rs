@@ -1,5 +1,5 @@
 //! Bounded long text and one-shot, explicitly foreground-authorized paste.
-use super::{api::*, clipboard::ClipboardApi, ledger::InputLedger, messages};
+use super::{api::*, clipboard::ClipboardApi, hotkey::SafetyGuard, ledger::InputLedger, messages};
 use crate::uia::patterns::ActionContext;
 use gcu_core::{driver::*, model::NativeHandle};
 use std::sync::Arc;
@@ -42,10 +42,33 @@ pub(super) struct Paste<'a> {
     pub focus: Option<NativeHandle>,
     pub text: String,
     pub context: ActionContext,
+    pub safety: Option<Arc<SafetyGuard>>,
 }
 impl Paste<'_> {
+    fn check_stop(&self) -> Result<()> {
+        if let Some(guard) = &self.safety {
+            guard.check(true)?;
+        }
+        self.context.check()
+    }
+    async fn before_paste(&self) -> Result<()> {
+        self.check_stop()?;
+        let result = self
+            .api
+            .before_paste(
+                self.target.clone(),
+                self.focus.clone(),
+                self.context.clone(),
+            )
+            .await;
+        // A live parent latch is authoritative even when the focus read blocks.
+        // In Worker mode InputPrepare checks that latch in the parent and the
+        // independent Stop channel kills the child throughout these reads.
+        self.check_stop()?;
+        result
+    }
     pub async fn run(self) -> Result<()> {
-        self.context.check()?;
+        self.check_stop()?;
         let recovery = Recovery {
             clipboard: self.clipboard.clone(),
             tracker: self.tracker.clone(),
@@ -60,7 +83,7 @@ impl Paste<'_> {
                     .stage(self.text.clone(), self.context.clone())
                     .await?
             };
-            self.context.check()?;
+            self.check_stop()?;
             let packet = messages::chord_events(
                 &KeyChord::parse("ctrl+v").map_err(|_| DriverError::InvalidRequest)?,
                 Some((0x56, Vec::new())),
@@ -73,28 +96,21 @@ impl Paste<'_> {
                     .await?;
             }
             self.api.validate(self.target.clone(), true).await?;
-            self.api
-                .before_paste(
-                    self.target.clone(),
-                    self.focus.clone(),
-                    self.context.clone(),
-                )
-                .await?;
-            if !self.clipboard.matches(sequence, self.text.clone()).await? {
+            self.before_paste().await?;
+            let matches = self.clipboard.matches(sequence, self.text.clone()).await?;
+            self.check_stop()?;
+            if !matches {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            self.context.check()?;
             // Recheck focus/Stop after the clipboard read as well.
-            self.api
-                .before_paste(self.target.clone(), self.focus, self.context.clone())
-                .await?;
+            self.before_paste().await?;
             let result = self
                 .api
                 .send(
-                    self.target,
+                    self.target.clone(),
                     packet,
                     Delivery::Foreground,
-                    self.ledger,
+                    self.ledger.clone(),
                     self.context.clone(),
                 )
                 .await;
@@ -107,7 +123,7 @@ impl Paste<'_> {
             // Ctrl+V is asynchronous; do not restore before the target has had
             // a chance to request the data. This is not proof of consumption.
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            self.context.check()
+            self.check_stop()
         }
         .await;
         let cleanup = recovery.restore().await;

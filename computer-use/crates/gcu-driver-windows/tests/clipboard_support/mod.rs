@@ -73,6 +73,8 @@ pub struct FakeClipboard {
     saved: Mutex<Option<Saved>>,
     change: Mutex<Option<Change>>,
     cancel: Mutex<Option<Cancel>>,
+    stop: Mutex<Option<Arc<gcu_driver_windows::input::hotkey::FakeSafetyApi>>>,
+    stop_stage: AtomicBool,
     restore_failure: AtomicBool,
 }
 impl FakeClipboard {
@@ -82,6 +84,8 @@ impl FakeClipboard {
             saved: Mutex::default(),
             change: Mutex::default(),
             cancel: Mutex::default(),
+            stop: Mutex::default(),
+            stop_stage: AtomicBool::new(false),
             restore_failure: AtomicBool::new(false),
         }
     }
@@ -102,6 +106,13 @@ impl FakeClipboard {
     }
     pub fn cancel_on_check(&self, cancel: Cancel) {
         *self.cancel.lock().unwrap() = Some(cancel);
+    }
+    pub fn stop_on_check(&self, api: Arc<gcu_driver_windows::input::hotkey::FakeSafetyApi>) {
+        *self.stop.lock().unwrap() = Some(api);
+    }
+    pub fn stop_after_stage(&self, api: Arc<gcu_driver_windows::input::hotkey::FakeSafetyApi>) {
+        self.stop_on_check(api);
+        self.stop_stage.store(true, Ordering::SeqCst);
     }
     pub fn copy_external(&self) {
         let mut s = self.desktop.state.lock().unwrap();
@@ -144,6 +155,11 @@ impl ClipboardApi for FakeClipboard {
         });
         self.desktop.writes.fetch_add(1, Ordering::SeqCst);
         self.desktop.staged.notify_waiters();
+        if self.stop_stage.swap(false, Ordering::SeqCst) {
+            if let Some(api) = self.stop.lock().unwrap().take() {
+                api.trigger();
+            }
+        }
         Ok(state.sequence)
     }
     async fn matches(&self, sequence: u32, text: String) -> Result<bool> {
@@ -158,6 +174,9 @@ impl ClipboardApi for FakeClipboard {
         }
         if let Some(cancel) = self.cancel.lock().unwrap().take() {
             cancel.cancel();
+        }
+        if let Some(api) = self.stop.lock().unwrap().take() {
+            api.trigger();
         }
         Ok(state.sequence == sequence && state.contents == vec![(13, text.into_bytes())])
     }
@@ -406,5 +425,12 @@ pub async fn fixture_on(
     let board = Arc::new(FakeClipboard::new(desktop));
     let input = Arc::new(TestInput::new(board.clone()));
     let backend = Arc::new(InputBackend::new(input.clone()).with_clipboard(board.clone()));
-    (input, board, driver.with_input(backend), win)
+    (
+        input,
+        board,
+        driver
+            .with_input(backend)
+            .with_safety(super::common::fake_guard()),
+        win,
+    )
 }

@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[path = "worker_stop.rs"]
+mod stop;
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -78,7 +80,8 @@ async fn worker_stop_cancel_timeout_crash_restore_parent_backup_without_retry() 
                 release,
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .with_safety(crate::common::fake_guard()),
         );
         let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
         let info = driver.key_window(&app).await.unwrap();
@@ -130,7 +133,8 @@ async fn worker_stop_preserves_external_copy_instead_of_parent_backup() {
             release,
         )
         .await
-        .unwrap(),
+        .unwrap()
+        .with_safety(crate::common::fake_guard()),
     );
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     let info = driver.key_window(&app).await.unwrap();
@@ -159,7 +163,8 @@ async fn worker_stop_partial_paste_parent_releases_ctrl_and_restores_clipboard()
             release.clone(),
         )
         .await
-        .unwrap(),
+        .unwrap()
+        .with_safety(crate::common::fake_guard()),
     );
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     let info = driver.key_window(&app).await.unwrap();

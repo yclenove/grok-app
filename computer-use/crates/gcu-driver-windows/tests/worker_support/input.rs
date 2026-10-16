@@ -8,9 +8,10 @@ use gcu_driver_windows::input::{api::Event, fake::FakeInput};
 use std::sync::Arc;
 
 async fn input_driver(f: &Fixture, fault: &str, release: Arc<FakeInput>) -> WindowsDriver {
-    WindowsDriver::isolated_with_releaser(f.config(fault), release)
+    let driver = WindowsDriver::isolated_with_releaser(f.config(fault), release)
         .await
-        .unwrap()
+        .unwrap();
+    driver.with_safety(crate::common::fake_guard())
 }
 fn drag(win: &gcu_core::driver::WindowRef, route: PointerRoute) -> DriverAction {
     DriverAction::PointerDrag {

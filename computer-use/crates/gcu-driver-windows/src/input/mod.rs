@@ -5,14 +5,17 @@ pub mod fake;
 #[cfg(windows)]
 mod ffi;
 pub mod foreground;
+pub mod hooks;
+pub mod hotkey;
 pub mod ledger;
 pub mod messages;
 mod plan;
 pub mod text;
+pub mod watchdog;
 use crate::{api::NativeWindow, uia::patterns::ActionContext};
 use api::{InputApi, Target};
 #[cfg(windows)]
-pub use ffi::{NativeRelease, RealInput};
+pub use ffi::{NativeRelease, RealInput, RealSafetyApi};
 use gcu_core::driver::*;
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +37,7 @@ pub struct InputBackend {
     effect: Mutex<Option<Effect>>,
     tracker: Option<Arc<dyn api::InputTracker>>,
     clipboard: Option<Arc<dyn clipboard::ClipboardApi>>,
+    safety: Mutex<std::sync::Weak<hotkey::SafetyGuard>>,
 }
 impl InputBackend {
     /// Attach a complete native or fake input implementation, without OS work.
@@ -46,6 +50,7 @@ impl InputBackend {
             effect: Mutex::default(),
             tracker: None,
             clipboard: None,
+            safety: Mutex::default(),
         }
     }
     /// Attach the isolated worker's parent-ledger acknowledgement barrier.
@@ -57,6 +62,14 @@ impl InputBackend {
     pub fn with_clipboard(mut self, clipboard: Arc<dyn clipboard::ClipboardApi>) -> Self {
         self.clipboard = Some(clipboard);
         self
+    }
+    pub(crate) fn parent_controlled(&self) -> bool {
+        self.tracker.is_some()
+    }
+    pub(crate) fn set_safety(&self, guard: Arc<hotkey::SafetyGuard>) {
+        // Guard callbacks own the backend for independent cleanup; retain only
+        // a weak backlink so dropping the driver also drops native monitoring.
+        *self.safety.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&guard);
     }
     /// Last sampled effect for diagnostics/tests. Core determines the public diff.
     pub fn last_effect(&self) -> Option<Effect> {
@@ -119,6 +132,14 @@ impl InputBackend {
             context.check()?;
 
             let plan = plan::prepare(&window, req)?;
+            let safety = self
+                .safety
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .upgrade();
+            if let Some(guard) = &safety {
+                guard.check(plan.foreground)?;
+            }
             let target = self
                 .api
                 .resolve(window, plan.point, plan.focus.clone())
@@ -191,6 +212,7 @@ impl InputBackend {
                     focus,
                     text,
                     context: context.clone(),
+                    safety,
                 }
                 .run()
                 .await?;
