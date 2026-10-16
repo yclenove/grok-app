@@ -18,14 +18,15 @@ namespace Gcu
         public int IntegrityRid;
         public bool UserInteractive;
         public string Desktop;
+        public string TokenSummary;
     }
 
-    public static class DesktopLauncher
+    public static partial class DesktopLauncher
     {
         const uint TOKEN_ALL_ACCESS = 0x000f01ff;
         const uint LUA_TOKEN = 0x4, DISABLE_MAX_PRIVILEGE = 0x1;
         const int TokenSessionId = 12, TokenIntegrityLevel = 25;
-        const uint CREATE_NEW_CONSOLE = 0x10;
+        const uint CREATE_NEW_CONSOLE = 0x10, CREATE_UNICODE_ENVIRONMENT = 0x400, CREATE_NO_WINDOW = 0x08000000;
 
         [StructLayout(LayoutKind.Sequential)]
         struct SidAndAttributes { public IntPtr Sid; public uint Attributes; }
@@ -137,7 +138,7 @@ namespace Gcu
                 return new DesktopFacts {
                     SessionId = Session(token), IsAdmin = admin, IntegrityRid = rid,
                     IntegrityLevel = (rid == 8192 ? "Medium" : rid == 12288 ? "High" : "Other") + " (" + sid + ")",
-                    UserInteractive = Environment.UserInteractive,
+                    UserInteractive = Environment.UserInteractive, TokenSummary = DescribeToken(token),
                     Desktop = ObjectName(GetProcessWindowStation()) + "\\" + ObjectName(GetThreadDesktop(GetCurrentThreadId()))
                 };
             }
@@ -158,61 +159,122 @@ namespace Gcu
             }
             return result.Append('\\', slashes * 2).Append('"').ToString();
         }
+        public static string CmdCommandLine(string executable, string command)
+        {
+            return QuoteArgument(executable) + " /d /s /c \"" + command + "\"";
+        }
         public static void CheckLayout()
         {
+            CheckAccessLayout();
             // Fail before calling Win32 if Add-Type marshalling differs from the ABI.
             if (Marshal.SizeOf(typeof(StartupInfo)) != (IntPtr.Size == 8 ? 104 : 68) ||
                 Marshal.SizeOf(typeof(SidAndAttributes)) != (IntPtr.Size == 8 ? 16 : 8) ||
                 Marshal.SizeOf(typeof(ProcessInfo)) != (IntPtr.Size == 8 ? 24 : 16))
                 throw new InvalidOperationException("unexpected Win32 structure layout");
         }
-        public static Child Start(string executable, string[] arguments, int expectedSession)
+        public static RestrictedDesktop Open(int expectedSession, string workspace)
         {
             CheckLayout();
-            IntPtr source = IntPtr.Zero, restricted = IntPtr.Zero, admins = IntPtr.Zero, medium = IntPtr.Zero;
-            try
+            return new RestrictedDesktop(expectedSession, workspace);
+        }
+
+        // A single restricted token and environment are shared by every probe and
+        // the chosen suite launch. Only harmless probes may try another variant.
+        public sealed class RestrictedDesktop : IDisposable
+        {
+            IntPtr token, environment;
+            DesktopAclScope desktopAcl;
+            readonly string workspace;
+            public string TokenSummary { get; private set; }
+            public string DesktopSecurity { get { return DescribeDesktopSecurity(); } }
+            public RestrictedDesktop(int expectedSession, string directory)
             {
-                Check(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, out source), "OpenProcessToken launch");
-                Check(ConvertStringSidToSidW("S-1-5-32-544", out admins), "Administrators SID");
-                SidAndAttributes[] disable = { new SidAndAttributes { Sid = admins } };
-                Check(CreateRestrictedToken(source, LUA_TOKEN | DISABLE_MAX_PRIVILEGE, 1, disable,
-                    0, IntPtr.Zero, 0, IntPtr.Zero, out restricted), "CreateRestrictedToken");
-                Check(ConvertStringSidToSidW("S-1-16-8192", out medium), "Medium integrity SID");
-                SidAndAttributes label = new SidAndAttributes { Sid = medium, Attributes = 0x20 }; // SE_GROUP_INTEGRITY
-                Check(SetTokenInformation(restricted, TokenIntegrityLevel, ref label,
-                    checked((uint)Marshal.SizeOf(typeof(SidAndAttributes)) + GetLengthSid(medium))), "SetTokenInformation Medium");
-                if (expectedSession <= 0 || Session(source) != expectedSession || Session(restricted) != expectedSession)
-                    throw new InvalidOperationException("restricted token is not in the parent's interactive session");
+                workspace = directory;
+                IntPtr source = IntPtr.Zero, admins = IntPtr.Zero, medium = IntPtr.Zero;
+                try
+                {
+                    Check(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, out source), "OpenProcessToken launch");
+                    Check(ConvertStringSidToSidW("S-1-5-32-544", out admins), "Administrators SID");
+                    // Disable only Administrators. In particular, preserve every
+                    // enabled logon SID used by the interactive desktop's ACL.
+                    SidAndAttributes[] disable = { new SidAndAttributes { Sid = admins } };
+                    Check(CreateRestrictedToken(source, LUA_TOKEN | DISABLE_MAX_PRIVILEGE, 1, disable,
+                        0, IntPtr.Zero, 0, IntPtr.Zero, out token), "CreateRestrictedToken");
+                    Check(ConvertStringSidToSidW("S-1-16-8192", out medium), "Medium integrity SID");
+                    SidAndAttributes label = new SidAndAttributes { Sid = medium, Attributes = 0x20 };
+                    Check(SetTokenInformation(token, TokenIntegrityLevel, ref label,
+                        checked((uint)Marshal.SizeOf(typeof(SidAndAttributes)) + GetLengthSid(medium))), "SetTokenInformation Medium");
+                    if (expectedSession <= 0 || Session(source) != expectedSession || Session(token) != expectedSession)
+                        throw new InvalidOperationException("restricted token is not in the parent's interactive session");
+                    VerifyLogonSids(source, token);
+                    PreserveTraversal(token); // DISABLE_MAX_PRIVILEGE must retain SeChangeNotifyPrivilege.
+                    TokenSummary = DescribeToken(token);
+                    environment = MakeEnvironment(token, workspace);
+                }
+                catch (Exception error)
+                {
+                    if (token != IntPtr.Zero)
+                    {
+                        string details;
+                        try { details = DescribeToken(token); }
+                        catch (Exception queryError) { details = "token diagnostics unavailable: " + queryError.Message; }
+                        finally { Dispose(); }
+                        throw new InvalidOperationException("restricted token setup failed: " + error.Message + "; " + details, error);
+                    }
+                    throw;
+                }
+                finally
+                {
+                    if (medium != IntPtr.Zero) LocalFree(medium);
+                    if (admins != IntPtr.Zero) LocalFree(admins);
+                    if (source != IntPtr.Zero) CloseHandle(source);
+                }
+            }
+            public Child Start(string executable, string[] arguments, string method, bool repairDesktop, bool newConsole)
+            {
                 string command = QuoteArgument(executable);
                 foreach (string argument in arguments) command += " " + QuoteArgument(argument);
+                return StartCommand(executable, command, method, repairDesktop, newConsole);
+            }
+            public Child StartCmd(string command, string method, bool repairDesktop, bool newConsole)
+            {
+                string executable = Environment.GetEnvironmentVariable("SystemRoot") + @"\System32\cmd.exe";
+                // cmd /S /C has its own quote rules, not the CRT argv rules.
+                return StartCommand(executable, CmdCommandLine(executable, command), method, repairDesktop, newConsole);
+            }
+            Child StartCommand(string executable, string command, string method, bool repairDesktop, bool newConsole)
+            {
+                if (token == IntPtr.Zero) throw new ObjectDisposedException("RestrictedDesktop");
+                if (repairDesktop && desktopAcl == null) desktopAcl = DesktopAclScope.Grant(token);
                 StartupInfo startup = new StartupInfo {
                     cb = (uint)Marshal.SizeOf(typeof(StartupInfo)), lpDesktop = @"WinSta0\Default",
-                    dwFlags = 1, wShowWindow = 0 // STARTF_USESHOWWINDOW / SW_HIDE: don't focus the harness console
+                    dwFlags = 1, wShowWindow = 0 // STARTF_USESHOWWINDOW / SW_HIDE
                 };
                 ProcessInfo info;
-                // Same user's restricted primary token inherits the current environment.
-                // No handles, credentials, profile loading, or UAC settings are changed.
-                bool created = CreateProcessAsUserW(restricted, executable, new StringBuilder(command),
-                    IntPtr.Zero, IntPtr.Zero, false, CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref startup, out info);
-                if (!created)
-                {
-                    int asUserError = Marshal.GetLastWin32Error();
-                    // A failed create has no child/effect to replay. This API uses
-                    // SeImpersonatePrivilege when AssignPrimaryToken/IncreaseQuota is unavailable.
-                    created = CreateProcessWithTokenW(restricted, 0, executable, new StringBuilder(command),
-                        CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref startup, out info);
-                    if (!created) throw Failure("CreateProcessWithTokenW (CreateProcessAsUserW error " + asUserError + ")",
-                        Marshal.GetLastWin32Error());
-                }
+                uint flags = (newConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW) | CREATE_UNICODE_ENVIRONMENT;
+                // No STARTF_USESTDHANDLES and no inherited handles: logs/done.json
+                // are opened by the child inside its Medium workspace instead.
+                bool created;
+                if (method == "AsUser")
+                    created = CreateProcessAsUserW(token, executable, new StringBuilder(command),
+                        IntPtr.Zero, IntPtr.Zero, false, flags, environment, workspace, ref startup, out info);
+                else if (method == "WithToken")
+                    created = CreateProcessWithTokenW(token, 0, executable, new StringBuilder(command),
+                        flags, environment, workspace, ref startup, out info);
+                else throw new ArgumentException("unknown launch method: " + method);
+                if (!created) throw Failure(method + " create", Marshal.GetLastWin32Error());
                 CloseHandle(info.hThread);
                 return new Child(info.hProcess, info.dwProcessId);
             }
-            finally
+            public void Dispose()
             {
-                if (medium != IntPtr.Zero) LocalFree(medium);
-                if (admins != IntPtr.Zero) LocalFree(admins);
-                if (restricted != IntPtr.Zero) CloseHandle(restricted);
-                if (source != IntPtr.Zero) CloseHandle(source);
+                try { if (desktopAcl != null) desktopAcl.Dispose(); }
+                finally
+                {
+                    desktopAcl = null;
+                    if (environment != IntPtr.Zero) { Marshal.FreeHGlobal(environment); environment = IntPtr.Zero; }
+                    if (token != IntPtr.Zero) { CloseHandle(token); token = IntPtr.Zero; }
+                }
             }
         }
 

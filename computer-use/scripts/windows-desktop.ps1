@@ -27,7 +27,7 @@ function Get-DesktopTokenFacts {
             return @{ SessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId
                 IsAdmin=([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
                 IntegrityLevel="unavailable ($($_.Exception.Message))"; IntegrityRid=-1
-                UserInteractive=[Environment]::UserInteractive; Desktop='unavailable' }
+                UserInteractive=[Environment]::UserInteractive; Desktop='unavailable'; TokenSummary="unavailable ($($_.Exception.Message))" }
         } finally { $identity.Dispose() }
     }
 }

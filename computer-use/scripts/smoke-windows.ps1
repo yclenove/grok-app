@@ -14,7 +14,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
-Add-Type -Path (Join-Path $PSScriptRoot 'windows-desktop-token.cs')
+. (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
+Add-Type -Path @((Join-Path $PSScriptRoot 'windows-desktop-token.cs'), (Join-Path $PSScriptRoot 'windows-desktop-access.cs'))
 
 function Invoke-NativeCase {
     param([string]$Name)
@@ -44,34 +45,53 @@ Write-Output "Desktop token: $diagnostic"
 if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
     $high = $null
     $child = $null
-    $done = Join-Path $OutputDir 'desktop-exit.json'
-    foreach ($name in @('desktop-exit.json','desktop.log','contract.json','smoke.json')) {
+    $context = $null
+    $workspace = $null
+    $payload = $null
+    foreach ($name in @('desktop-exit.json','desktop.log','contract.json','smoke.json','launch.json')) {
         Remove-Item (Join-Path $OutputDir $name) -ErrorAction SilentlyContinue
     }
     try {
         if (-not $facts.UserInteractive -or $facts.SessionId -le 0 -or $facts.Desktop -ine 'WinSta0\Default') {
             throw "parent interactive Default desktop unavailable; $diagnostic"
         }
+        Write-Output "Parent token details: $($facts.TokenSummary)"
+        Write-Output "Parent desktop security: $([Gcu.DesktopLauncher]::DescribeDesktopSecurity())"
+        $workspace = [Gcu.DesktopLauncher]::PrepareWorkspace()
+        $payload = Copy-DesktopPayload $workspace $TestExe $WorkerExe $FixtureExe
+        Write-Output "Medium workspace: $workspace; source payload staged; inheritable user DACL + Medium label"
+        $context = [Gcu.DesktopLauncher]::Open($ExpectedSessionId, $workspace)
+        Write-Output "Restricted token details: $($context.TokenSummary)"
+        $probeResults = [Collections.Generic.List[object]]::new()
+        $variant = Invoke-DesktopLaunchLadder -Probe {
+            param($variant,$stage)
+            $result = Invoke-RestrictedDesktopProbe $context $variant $stage $workspace $payload.OutputDir $ExpectedSessionId
+            $probeResults.Add($result)
+            $probeResults.ToArray() | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 (Join-Path $payload.OutputDir 'launch.json')
+            return $result
+        }
         if ($Suite -ne 'Smoke') {
-            $highExe = Join-Path $OutputDir 'hi.exe'
+            $highExe = Join-Path $workspace 'hi.exe'
             Copy-Item $FixtureExe $highExe
             $savedState = $env:GCU_FIXTURE_STATE
             try {
-                $env:GCU_FIXTURE_STATE = Join-Path $OutputDir 'high-state.json'
+                $env:GCU_FIXTURE_STATE = Join-Path $payload.OutputDir 'high-state.json'
                 $high = Start-Process -FilePath $highExe -PassThru
             } finally { $env:GCU_FIXTURE_STATE = $savedState }
             $null = Wait-Oracle 'elevated fixture window' { $high.Refresh(); @{ exited=$high.HasExited; hwnd=$high.MainWindowHandle.ToInt64() } } { param($s) -not $s.exited -and $s.hwnd -ne 0 }
             $ElevatedPid = $high.Id
         }
-        $arguments = [string[]]@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-DesktopChild',
-            '-TestExe',$TestExe,'-WorkerExe',$WorkerExe,'-FixtureExe',$FixtureExe,
-            '-OutputDir',$OutputDir,'-Suite',$Suite,'-ElevatedPid',"$ElevatedPid",'-ExpectedSessionId',"$ExpectedSessionId")
-        $child = [Gcu.DesktopLauncher]::Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", $arguments, $ExpectedSessionId)
-        $last = Wait-Oracle "restricted interactive suite; parent $diagnostic" {
-            @{pid=$child.ProcessId;exited=$child.HasExited;done=(Test-Path $done)}
-        } { param($s) $s.exited } -TimeoutMs 900000
-        if (Test-Path (Join-Path $OutputDir 'desktop.log')) { Get-Content (Join-Path $OutputDir 'desktop.log') }
-        if (-not $last.done) { throw "child exited without done.json; exit=$($child.ExitCode); last oracle=$($last | ConvertTo-Json -Compress)" }
+        $arguments = [string[]]@('-NoProfile','-ExecutionPolicy','Bypass','-File',$payload.Script,'-DesktopChild',
+            '-TestExe',$payload.TestExe,'-WorkerExe',$payload.WorkerExe,'-FixtureExe',$payload.FixtureExe,
+            '-OutputDir',$payload.OutputDir,'-Suite',$Suite,'-ElevatedPid',"$ElevatedPid",'-ExpectedSessionId',"$ExpectedSessionId")
+        $done = Join-Path $payload.OutputDir 'desktop-exit.json'
+        # Selection retries only the harmless probes. Never retry the suite,
+        # even if its process exits before done.json (side effects may exist).
+        $child = $context.Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", $arguments, $variant.Method, $variant.RepairDesktop, $variant.NewConsole)
+        $last = Wait-DesktopChild $child "restricted interactive suite; parent $diagnostic" -TimeoutMs 900000
+        $last.done = Test-Path $done
+        if (Test-Path (Join-Path $payload.OutputDir 'desktop.log')) { Get-Content (Join-Path $payload.OutputDir 'desktop.log') }
+        if (-not $last.done) { throw "child exited without done.json; exit=$($child.ExitCode) ($($last.exit_hex)); Win32=0 (create succeeded); last oracle=$($last | ConvertTo-Json -Compress)" }
         $result = Get-Content -Raw $done | ConvertFrom-Json
         if ([int]$result.exit_code -ne $child.ExitCode) { throw "child exit mismatch: process=$($child.ExitCode); done=$($result.exit_code)" }
         Write-Output "Child token: $(Format-DesktopTokenFacts $result.token_facts)"
@@ -79,18 +99,37 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
     } catch {
         $reason = "restricted desktop launch failed: $($_.Exception.Message); parent $diagnostic"
         Write-Output $reason
-        if (Test-Path (Join-Path $OutputDir 'desktop.log')) { Get-Content (Join-Path $OutputDir 'desktop.log') }
-        if (-not (Test-Path (Join-Path $OutputDir 'contract.json'))) { Write-DesktopNotRun $OutputDir $Suite $reason }
-        if (-not (Test-Path (Join-Path $OutputDir 'smoke.json'))) {
+        $reports = if ($null -ne $payload) { $payload.OutputDir } else { $OutputDir }
+        if (Test-Path (Join-Path $reports 'desktop.log')) { Get-Content (Join-Path $reports 'desktop.log') -ErrorAction Continue }
+        if (-not (Test-Path (Join-Path $reports 'contract.json'))) { Write-DesktopNotRun $OutputDir $Suite $reason }
+        if (-not (Test-Path (Join-Path $reports 'smoke.json'))) {
             @('Notepad','Explorer','Settings') | ForEach-Object { @{app=$_;outcome='not_run';reason=$reason} } |
                 ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'smoke.json')
             Write-Output "SMOKE SUMMARY: 0 passed, 0 skipped, 3 not_run, 0 failed; $reason"
         }
         exit 1
     } finally {
-        if ($null -ne $child) { try { $child.Stop() } finally { $child.Dispose() } }
-        if ($null -ne $high -and -not $high.HasExited) { Stop-Process -Id $high.Id -Force }
-        Remove-Item (Join-Path $OutputDir 'hi.exe') -ErrorAction SilentlyContinue
+        try {
+            try {
+                if ($null -ne $child) {
+                    try { $child.Stop(); $null = Wait-DesktopChild $child 'suite termination' -TimeoutMs 10000 }
+                    finally { $child.Dispose() }
+                }
+            } finally {
+                if ($null -ne $high) {
+                    if (-not $high.HasExited) { Stop-Process -Id $high.Id -Force }
+                    $null = Wait-Oracle 'elevated fixture termination' { $high.Refresh(); $high.HasExited } { param($s) $s } -TimeoutMs 10000
+                    $high.Dispose()
+                }
+            }
+        } finally {
+            try {
+                if ($null -ne $payload) { Copy-DesktopReports $payload.OutputDir $OutputDir }
+            } finally {
+                try { if ($null -ne $context) { $context.Dispose(); Write-Output 'Restricted launch resources released; desktop ACLs restored (if granted)' } }
+                finally { if ($null -ne $workspace) { Remove-Item -Recurse -Force $workspace } }
+            }
+        }
     }
 }
 
@@ -111,7 +150,7 @@ try {
     $facts = Get-DesktopTokenFacts
     $diagnostic = Format-DesktopTokenFacts $facts
     Write-Output "Verified desktop token: $diagnostic; ExpectedSessionId=$ExpectedSessionId"
-    whoami.exe /groups | Out-Host
+    whoami.exe /all | Out-Host
     if (-not (Test-DesktopTokenFacts $facts $ExpectedSessionId)) {
         $reason = "unelevated interactive desktop unavailable; $diagnostic; ExpectedSessionId=$ExpectedSessionId"
         Write-DesktopNotRun $OutputDir $Suite $reason
@@ -120,6 +159,7 @@ try {
     }
     $env:GCU_DESKTOP = '1'
     $env:GCU_WORKER_EXE = $WorkerExe
+    $env:GCU_CONTRACT_WORKER_EXE = Join-Path (Split-Path $WorkerExe -Parent) 'gcu-contract-worker.exe'
     $env:GCU_FIXTURE_EXE = $FixtureExe
     $env:GCU_ELEVATED_PID = "$ElevatedPid"
     $env:GCU_CONTRACT_REPORT = Join-Path $OutputDir 'contract.json'

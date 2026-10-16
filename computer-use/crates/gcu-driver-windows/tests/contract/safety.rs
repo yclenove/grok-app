@@ -204,7 +204,11 @@ pub async fn worker_timeout(
     fixture
         .wait("counter focus click", |v| v["counter"] == setup_count + 1)
         .await?;
-    let mut config = WorkerConfig::new(env!("CARGO_BIN_EXE_gcu-contract-worker"));
+    // The High CI parent stages every executable in a Medium-readable directory.
+    // Keep Cargo's artifact as the default for direct native test invocations.
+    let adversary = std::env::var_os("GCU_CONTRACT_WORKER_EXE")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_gcu-contract-worker").into());
+    let mut config = WorkerConfig::new(adversary);
     config
         .environment
         .push(("GCU_FAULT_DIR".into(), fixture.dir.as_os_str().to_owned()));
