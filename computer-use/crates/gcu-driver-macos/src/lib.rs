@@ -34,6 +34,7 @@ mod real;
 mod semantic;
 pub mod spotlight;
 pub mod testing;
+mod text_input;
 pub mod windows;
 
 pub use driver::{MacElement, MacosDriver};

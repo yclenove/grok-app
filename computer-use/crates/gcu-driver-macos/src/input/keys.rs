@@ -2,8 +2,7 @@
 //!
 //! Character keys use the ANSI virtual-key map. Unmapped characters are one
 //! Unicode event so a non-ASCII chord is not dropped. Text is split on UTF-16
-//! boundaries of 20 units and never cuts a surrogate pair. Grapheme and
-//! clipboard policy belong to P1-07.
+//! boundaries of 20 units, preserving grapheme clusters (P1-07).
 
 use gcu_core::driver::{DriverError, KeyChord, Result};
 use gcu_protocol::keys::{Key, Modifier, NamedKey};
@@ -12,8 +11,6 @@ use super::events::{
     key_event, EventKind, InputTarget, PostPath, SyntheticEvent, FLAG_ALTERNATE, FLAG_COMMAND,
     FLAG_CONTROL, FLAG_FN, FLAG_SHIFT,
 };
-
-const UNICODE_UNITS: usize = 20;
 
 /// Key downs then matching ups. The ledger wraps each down before it is posted.
 pub fn plan_chord(
@@ -78,7 +75,7 @@ pub fn plan_text(target: &InputTarget, text: &str, path: PostPath) -> Result<Vec
         return Err(DriverError::InvalidRequest);
     }
     let mut events = Vec::new();
-    for chunk in utf16_chunks(text) {
+    for chunk in super::text::grapheme_chunks(text)? {
         let down = key_event(target, path, EventKind::Unicode, 0, 0, true, Some(chunk));
         let up = down.release_event().ok_or(DriverError::InvalidRequest)?;
         events.push(down);
@@ -87,23 +84,10 @@ pub fn plan_text(target: &InputTarget, text: &str, path: PostPath) -> Result<Vec
     Ok(events)
 }
 
-/// UTF-16 chunks of at most 20 units. Surrogate pairs stay in one chunk.
+/// Compatibility helper; invalid oversized graphemes produce no events.
+/// Use `text::grapheme_chunks` when the rejection must be reported.
 pub fn utf16_chunks(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut buf = Vec::<u16>::new();
-    for ch in text.chars() {
-        let mut enc = [0u16; 2];
-        let units = ch.encode_utf16(&mut enc);
-        if buf.len() + units.len() > UNICODE_UNITS && !buf.is_empty() {
-            out.push(String::from_utf16_lossy(&buf));
-            buf.clear();
-        }
-        buf.extend_from_slice(units);
-    }
-    if !buf.is_empty() {
-        out.push(String::from_utf16_lossy(&buf));
-    }
-    out
+    super::text::grapheme_chunks(text).unwrap_or_default()
 }
 
 struct Resolved {

@@ -12,13 +12,20 @@
 //! [`gcu_core::driver::DRIVER_DEADLINE`]. `maybe_executed` is false until a
 //! post has been entered.
 
+pub mod clipboard;
 mod events;
 mod keys;
 mod ledger;
 mod skylight;
+pub mod text;
+pub mod timing;
 
 #[cfg(target_os = "macos")]
 mod cg;
+#[cfg(target_os = "macos")]
+mod pasteboard_native;
+#[cfg(target_os = "macos")]
+pub use pasteboard_native::NativePasteboard;
 
 pub use events::{
     plan_click, plan_drag, plan_scroll, Call, EventApi, EventKind, FakeEvents, InputTarget,
