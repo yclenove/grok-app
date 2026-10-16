@@ -51,7 +51,11 @@ async fn hook(home: &Path, args: &[&std::ffi::OsStr], stdin: &[u8]) -> std::proc
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin).await.unwrap();
+    // A hook that rejects its arguments exits without reading stdin, so the write can hit a
+    // closed pipe; that is a legitimate outcome, not a test failure.
+    let mut input = child.stdin.take().unwrap();
+    let _ = input.write_all(stdin).await;
+    drop(input);
     tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
         .await
         .unwrap()
