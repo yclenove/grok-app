@@ -2,7 +2,7 @@
 use crate::{Connection, ServeError};
 use axum::{
     body::Body,
-    http::{header, Request, StatusCode},
+    http::{header, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     Router,
@@ -41,40 +41,70 @@ async fn authorize(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if gate.host.as_ref().is_some_and(|host| !host.connected()) {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-    if gate.session.is_closed() {
-        return StatusCode::GONE.into_response();
-    }
-    let headers = request.headers();
-    let hosts: Vec<_> = headers.get_all(header::HOST).iter().collect();
-    let origins: Vec<_> = headers.get_all(header::ORIGIN).iter().collect();
-    let tokens: Vec<_> = headers.get_all(header::AUTHORIZATION).iter().collect();
-    if hosts.len() != 1
-        || hosts[0].to_str().ok() != Some(gate.authority.as_str())
-        || request
-            .uri()
-            .authority()
-            .is_some_and(|a| a.as_str() != gate.authority)
-        || origins.len() > 1
-        || origins
-            .first()
-            .is_some_and(|o| o.to_str().ok() != Some(gate.origin.as_str()))
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    if tokens.len() != 1
-        || !tokens[0]
-            .to_str()
-            .ok()
-            .and_then(|t| t.strip_prefix("Bearer "))
-            .is_some_and(|t| gate.secret.verify_hex(t))
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Some(status) = reject(&gate, &request) {
+        return status.into_response();
     }
     next.run(request).await
 }
+
+fn reject(gate: &Gate, request: &Request<Body>) -> Option<StatusCode> {
+    if gate.host.as_ref().is_some_and(|host| !host.connected()) {
+        return Some(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    if gate.session.is_closed() {
+        return Some(StatusCode::GONE);
+    }
+    if !host_ok(gate, request) || !origin_ok(gate, request.headers()) {
+        return Some(StatusCode::FORBIDDEN);
+    }
+    if !token_ok(gate, request.headers()) {
+        return Some(StatusCode::UNAUTHORIZED);
+    }
+    None
+}
+
+fn host_ok(gate: &Gate, request: &Request<Body>) -> bool {
+    let hosts: Vec<_> = request.headers().get_all(header::HOST).iter().collect();
+    hosts.len() == 1
+        && hosts[0].to_str().ok() == Some(gate.authority.as_str())
+        && request
+            .uri()
+            .authority()
+            .is_none_or(|authority| authority.as_str() == gate.authority)
+}
+
+fn origin_ok(gate: &Gate, headers: &HeaderMap) -> bool {
+    let origins: Vec<_> = headers.get_all(header::ORIGIN).iter().collect();
+    match origins.as_slice() {
+        [] => !browser_client(headers),
+        [origin] => origin.to_str().ok() == Some(gate.origin.as_str()),
+        _ => false,
+    }
+}
+
+/// Browsers send a `Sec-Fetch-*` hint. A browser that omits Origin is refused
+/// even when it copied a bearer.
+fn browser_client(headers: &HeaderMap) -> bool {
+    [
+        "sec-fetch-site",
+        "sec-fetch-mode",
+        "sec-fetch-dest",
+        "sec-fetch-user",
+    ]
+    .into_iter()
+    .any(|name| headers.contains_key(name))
+}
+
+fn token_ok(gate: &Gate, headers: &HeaderMap) -> bool {
+    let tokens: Vec<_> = headers.get_all(header::AUTHORIZATION).iter().collect();
+    tokens.len() == 1
+        && tokens[0]
+            .to_str()
+            .ok()
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|hex| gate.secret.verify_hex(hex))
+}
+
 impl HttpEndpoint {
     /// Bind 127.0.0.1 only, with a fresh 32-byte bearer secret. Port zero selects
     /// a random port. Startup IO uses the Connection's existing bounded cleanup.

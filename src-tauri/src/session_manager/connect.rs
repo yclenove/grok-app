@@ -1036,6 +1036,14 @@ impl SessionManager {
                     }
                 }
                 let cwd_str = cwd.to_string_lossy().to_string();
+                crate::computer_use::inject::attach(
+                    &app,
+                    &acp,
+                    &meta.id,
+                    ssh_alias.as_deref(),
+                    meta.scheduled,
+                )
+                .await;
                 let open_result = Self::with_handshake_budget(acp.open_session_at(
                     resume_agent_sid.as_deref(),
                     false,
@@ -1394,6 +1402,14 @@ impl SessionManager {
             "connect session_open_begin"
         );
         let rewind_index = meta.fork_rewind_prompt_index;
+        crate::computer_use::inject::attach(
+            &app,
+            &client,
+            &meta.id,
+            ssh_alias.as_deref(),
+            meta.scheduled,
+        )
+        .await;
         let open_result = Self::with_handshake_budget(
             client.initialize_and_open_session(resume_agent_sid.as_deref(), fork_agent),
         )

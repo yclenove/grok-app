@@ -547,3 +547,16 @@ async fn closed_host_loads_policy_and_denies_approval() {
         .unwrap();
     assert_eq!(confirmed["confirmed"], false);
 }
+
+#[tokio::test]
+async fn open_local_endpoint_without_peer_is_disconnected() {
+    let script = script();
+    let mut host = control(HostBuild::Dev, Arc::clone(&script));
+    let missing = host.open_local_endpoint("chat").await;
+    assert!(matches!(missing, Err(Error::Disconnected)));
+    host.handle(Signal::SetEnabled(true), 0).await.unwrap();
+    let running = host.open_local_endpoint("chat").await;
+    assert!(matches!(running, Err(Error::Disconnected)));
+    let closed = host.close_endpoint("chat").await;
+    assert!(matches!(closed, Err(Error::Disconnected)));
+}

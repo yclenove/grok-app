@@ -1,11 +1,14 @@
 //! Computer Use host. The engine is a child process, not a linked driver.
 
+mod gateway;
 mod host_server;
+pub(crate) mod inject;
 mod supervisor;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use gcu_host_protocol::inject::TokenBook;
 use gcu_host_protocol::supervisor::{Error, Phase, Signal, Status};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
@@ -21,6 +24,7 @@ struct Inner {
     stop_latched: bool,
     control:
         Option<gcu_host_protocol::supervisor::Control<gcu_host_protocol::supervisor::OsLaunch>>,
+    book: TokenBook,
 }
 
 /// In-memory engine owner. Default is off. No settings row is registered here.
@@ -36,6 +40,7 @@ impl ComputerUseHost {
                 dev_grant: false,
                 stop_latched: false,
                 control: None,
+                book: TokenBook::new(),
             }),
         }
     }
@@ -63,6 +68,9 @@ impl ComputerUseHost {
     /// Start or stop by the feature switch. The second call in the same phase is a no-op.
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
+        if !enabled {
+            gateway::revoke_all_locked(&mut inner).await;
+        }
         if enabled && inner.control.is_none() {
             let mut control = supervisor::open_control(inner.external.clone(), inner.dev_grant)?;
             if inner.stop_latched {
@@ -77,10 +85,6 @@ impl ComputerUseHost {
     }
 
     /// Enabled local sessions. Zero starts the idle clock.
-    ///
-    /// P5-02 calls this when a local session opens or closes. Keeping it on the
-    /// host now means idle exit does not wait for that card to grow a second lifecycle.
-    #[allow(dead_code)]
     pub async fn set_sessions(&self, count: u32) -> Result<(), Error> {
         self.signal(Signal::Sessions(count)).await
     }
@@ -139,7 +143,6 @@ impl ComputerUseHost {
         Ok(())
     }
 
-    #[allow(dead_code)]
     async fn signal(&self, signal: Signal) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         let Some(control) = inner.control.as_mut() else {

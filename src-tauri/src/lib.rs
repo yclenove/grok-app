@@ -75,7 +75,7 @@ mod command_registry;
 
 mod commands;
 
-mod computer_use;
+pub(crate) mod computer_use;
 
 mod pet_window;
 mod theme_editor_window;

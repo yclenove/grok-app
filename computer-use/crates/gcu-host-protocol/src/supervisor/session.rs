@@ -101,6 +101,10 @@ pub trait EngineProcess: Send {
     fn kill(&mut self);
     /// Live token, or [`LivePrivilege::normal`] where elevation does not apply.
     fn privilege(&self) -> LivePrivilege;
+    /// Authenticated RPC peer. Test doubles and a child that is not up return None.
+    fn peer(&self) -> Option<Peer> {
+        None
+    }
 }
 
 /// A connected engine. Drop kills the child and does not wait.
@@ -197,6 +201,10 @@ impl EngineProcess for EngineSession {
 
     fn privilege(&self) -> LivePrivilege {
         privilege_of(Some(self.child.id()))
+    }
+
+    fn peer(&self) -> Option<Peer> {
+        Some(self.peer.clone())
     }
 }
 
