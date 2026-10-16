@@ -8,6 +8,7 @@ use super::{
     windows::*,
     Compositor,
 };
+use crate::identity::inspection::INSPECTION_TIMEOUT;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
@@ -136,8 +137,12 @@ impl KwinBackend {
         if !peer.is_kwin() {
             return Err(IdentityError::Unsupported);
         }
+        tokio::time::timeout(INSPECTION_TIMEOUT, peer.check())
+            .await
+            .map_err(|_| IdentityError::Timeout {
+                maybe_executed: false,
+            })??;
         tokio::time::timeout(IDENTITY_TIMEOUT, async {
-            peer.check().await?;
             let reports = KwinReports::new(peer.owner().into(), clock)?;
             let added = peer
                 .connection()
@@ -182,7 +187,7 @@ impl WindowBackend for KwinBackend {
         Compositor::Kde
     }
     async fn snapshot(&self) -> Result<WindowSnapshot, IdentityError> {
-        tokio::time::timeout(IDENTITY_TIMEOUT, async {
+        tokio::time::timeout(INSPECTION_TIMEOUT, async {
             self.peer.check().await?;
             self.reports.latest()
         })
