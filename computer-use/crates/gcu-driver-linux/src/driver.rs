@@ -28,8 +28,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[path = "driver_portal.rs"]
+mod portal;
+
 /// Concrete Linux computer-use driver backed by AT-SPI and X11.
 pub struct LinuxDriver {
+    portal_input: Option<Arc<crate::wayland::input::PortalInput>>,
     caps_all: Capabilities,
     caps_no_guard: Capabilities,
     caps_no_hotkey: Capabilities,
@@ -97,6 +101,7 @@ impl LinuxDriver {
         });
 
         let mut driver = Self {
+            portal_input: None,
             caps_all: Self::default_capabilities(),
             caps_no_guard: Self::default_capabilities(),
             caps_no_hotkey: Self::default_capabilities(),
@@ -190,30 +195,6 @@ impl LinuxDriver {
         self.x_server = Some(x);
         self.recompute_capabilities();
         self
-    }
-
-    /// Override the detected Linux environment.
-    pub fn with_environment(mut self, env: LinuxEnvironment) -> Self {
-        self.env = env;
-        self.recompute_capabilities();
-        self
-    }
-
-    /// Override the detected portal capabilities.
-    pub fn with_portal_info(mut self, portal: PortalInfo) -> Self {
-        self.portal_info = portal;
-        self.recompute_capabilities();
-        self
-    }
-
-    /// Access the detected Linux environment.
-    pub fn environment(&self) -> &LinuxEnvironment {
-        &self.env
-    }
-
-    /// Access the detected portal info.
-    pub fn portal_info(&self) -> &PortalInfo {
-        &self.portal_info
     }
 
     /// Check whether a window is a native Wayland surface (not backed by an X11 XID).
@@ -341,6 +322,9 @@ impl Driver for LinuxDriver {
     }
 
     fn capabilities(&self) -> &Capabilities {
+        if let Some(input) = self.portal_input.as_ref().filter(|i| i.available()) {
+            return input.capabilities();
+        }
         let hotkey_ok = self.hotkey_manager.is_available() && !self.stop_latch.is_stopped();
         let guard_ok = self.activity_clock.is_available();
         match (hotkey_ok, guard_ok) {
@@ -359,6 +343,15 @@ impl Driver for LinuxDriver {
         } else {
             connect_atspi().await.is_ok()
         };
+        if let Some(input) = self.portal_input.as_ref().filter(|i| i.available()) {
+            return crate::wayland::doctor::build_doctor_report(
+                &self.env,
+                input.environment_capabilities(),
+                &self.portal_info,
+                atspi_ready,
+                None,
+            );
+        }
         let has_x = self.x_server.is_some();
         let composite = if self.fake_source.is_some() && !has_x {
             true
@@ -580,6 +573,11 @@ impl Driver for LinuxDriver {
     }
 
     async fn release_all_input(&self) {
+        if let Some(input) = &self.portal_input {
+            if input.release_all_input().is_err() {
+                input.stop();
+            }
+        }
         if let Some(ref x) = self.x_server {
             self.ledger.release_all(x.as_ref());
         }
@@ -588,6 +586,9 @@ impl Driver for LinuxDriver {
 
 impl Drop for LinuxDriver {
     fn drop(&mut self) {
+        if let Some(input) = &self.portal_input {
+            input.shutdown();
+        }
         if let Some(h) = self._listener_handle.as_ref() {
             h.abort();
         }

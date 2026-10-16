@@ -26,7 +26,8 @@ x11rb = { version = "0.13", features = ["composite", "xtest", "xinput"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xkbcommon = "0.9"
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop"] }
+reis = { version = "0.7", features = ["tokio"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "remote_desktop", "global_shortcuts"] }
 pipewire = { version = "0.9", default-features = false, optional = true }
 
 [features]
