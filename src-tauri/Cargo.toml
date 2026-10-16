@@ -11,6 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+sha2 = "0.10"
 
 [dependencies]
 # `unstable` — multi-webview (resource pane embedded browser)
@@ -96,6 +97,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tauri-plugin-autostart = "2"
 portable-pty = "0.9.0"
 tauri-plugin-notification = "2"
+# Route B links only the Host wire crates. Core and drivers stay in the `gcu` sidecar.
+gcu-protocol = { path = "../computer-use/crates/gcu-protocol" }
+gcu-host-protocol = { path = "../computer-use/crates/gcu-host-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,7 +1,15 @@
 //! Process-level route B contracts with a Rust Host and the offline fake driver.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use gcu_host_protocol::{messages::*, server::RPC_TIMEOUT, testing::TestHost};
+use gcu_host_protocol::{
+    messages::*,
+    server::RPC_TIMEOUT,
+    supervisor::{
+        baseline_policy, EngineSession, Error as SupervisorError, LaunchRequest, ScriptedHost,
+    },
+    testing::TestHost,
+    Error as ProtocolError,
+};
 use rmcp::{
     model::{CallToolRequestParams, ClientConfig},
     transport::{
@@ -576,4 +584,117 @@ async fn standalone_http_reads_launcher_token_fd_and_serves_real_mcp() {
         Some(true)
     );
     child.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn supervisor_fake_engine_completes_one_approval_round_trip() {
+    let mut scripted = ScriptedHost::new(baseline_policy());
+    let mut request = LaunchRequest::new(binary(), false);
+    request.extra_args = vec![
+        "--driver".into(),
+        "fake".into(),
+        "--scene".into(),
+        "form".into(),
+    ];
+    let engine = EngineSession::spawn(&request, scripted.callbacks())
+        .await
+        .unwrap();
+    let endpoint: SessionOpened = engine
+        .peer()
+        .call(
+            "engine.session.open",
+            &SessionOpen {
+                session_id: "chat-1".into(),
+                kind: SessionKind::Local,
+            },
+            RPC_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let client = client(&endpoint).await;
+    let call = client.call_tool(tool(
+        "get_app_state",
+        json!({"app":"fake.form","include_screenshot":false}),
+    ));
+    tokio::pin!(call);
+    let approval = tokio::select! {
+        biased;
+        result = &mut call => panic!("approval was bypassed: {result:?}"),
+        result = scripted.next_method("host.approval.requestApp") => result.unwrap(),
+    };
+    let params: RequestApp = serde_json::from_value(approval.request.params.clone()).unwrap();
+    assert_eq!(params.session_id, "chat-1");
+    approval.reply(AppDecision {
+        decision: Decision::Turn,
+    });
+    assert_ne!(call.await.unwrap().is_error, Some(true));
+}
+
+#[tokio::test]
+async fn supervisor_handshake_major_mismatch_reaps_the_child() {
+    let scripted = ScriptedHost::new(baseline_policy());
+    let mut request = LaunchRequest::new(binary(), true);
+    request.extra_args = vec![
+        "--driver".into(),
+        "fake".into(),
+        "--scene".into(),
+        "form".into(),
+    ];
+    request.version = Version {
+        major: 99,
+        minor: 0,
+    };
+    let error = match EngineSession::spawn(&request, scripted.callbacks()).await {
+        Ok(_) => panic!("major mismatch was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SupervisorError::Handshake(ProtocolError::Version)
+    ));
+}
+
+#[tokio::test]
+async fn supervisor_fallback_socket_completes_one_approval_round_trip() {
+    let mut scripted = ScriptedHost::new(baseline_policy());
+    let mut request = LaunchRequest::new(binary(), false);
+    request.fallback = true;
+    request.extra_args = vec![
+        "--driver".into(),
+        "fake".into(),
+        "--scene".into(),
+        "form".into(),
+    ];
+    let engine = EngineSession::spawn(&request, scripted.callbacks())
+        .await
+        .unwrap();
+    let endpoint: SessionOpened = engine
+        .peer()
+        .call(
+            "engine.session.open",
+            &SessionOpen {
+                session_id: "fallback".into(),
+                kind: SessionKind::Local,
+            },
+            RPC_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(endpoint.token.len(), 64);
+    let client = client(&endpoint).await;
+    let call = client.call_tool(tool(
+        "get_app_state",
+        json!({"app":"fake.form","include_screenshot":false}),
+    ));
+    tokio::pin!(call);
+    let approval = tokio::select! {
+        biased;
+        result = &mut call => panic!("approval was bypassed: {result:?}"),
+        result = scripted.next_method("host.approval.requestApp") => result.unwrap(),
+    };
+    approval.reply(AppDecision {
+        decision: Decision::Deny,
+    });
+    let result = call.await.unwrap();
+    assert_eq!(result.is_error, Some(true));
 }

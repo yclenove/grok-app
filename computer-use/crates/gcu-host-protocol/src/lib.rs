@@ -6,6 +6,7 @@ pub mod auth;
 pub mod codec;
 pub mod messages;
 pub mod server;
+pub mod supervisor;
 #[cfg(all(feature = "testing", unix))]
 pub mod testing;
 pub mod transport;
