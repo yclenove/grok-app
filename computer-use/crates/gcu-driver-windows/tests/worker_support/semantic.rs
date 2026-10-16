@@ -132,3 +132,54 @@ async fn native_pre_dispatch_timeout_worker_boundary_preserves_zero_effect_witho
     assert_eq!(f.calls(), ["mutation"]);
     supervisor.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn set_value_blocked_driver_deadline_recovers_next_snapshot_without_replay() {
+    let f = Fixture::new();
+    let mut config = f.config("normal_hang");
+    config.timeout = Duration::from_secs(10); // Driver deadline must win the race.
+    let driver = std::sync::Arc::new(WindowsDriver::isolated(config).await.unwrap());
+    let win = window(&driver).await;
+    let root = driver
+        .snapshot_tree(&win, &Default::default(), &Cancel::default())
+        .await
+        .unwrap()
+        .root
+        .unwrap();
+    let action = {
+        let driver = driver.clone();
+        tokio::spawn(async move {
+            driver
+                .perform(
+                    &DriverAction::SetValue {
+                        el: root.handle,
+                        value: "blocked".into(),
+                    },
+                    &Cancel::default(),
+                )
+                .await
+        })
+    };
+    dispatched(&f).await;
+    tokio::time::pause();
+    tokio::time::advance(gcu_core::driver::DRIVER_DEADLINE).await;
+    tokio::time::resume();
+    assert!(matches!(
+        action.await.unwrap(),
+        Err(DriverError::Timeout {
+            maybe_executed: true
+        })
+    ));
+    let raw = tokio::time::timeout(
+        Duration::from_secs(10),
+        driver.snapshot_tree(&win, &Default::default(), &Cancel::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(raw.root.is_some());
+    assert!(raw.incomplete.is_none());
+    assert_eq!(f.calls(), ["mutation"]);
+    assert_eq!(f.pids().len(), 2);
+    driver.release_all_input().await;
+}

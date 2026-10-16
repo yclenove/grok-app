@@ -66,7 +66,7 @@ impl HotkeyConfig {
 pub trait SafetyPump {
     /// Pump messages, prove hook health, check the desktop, periodically replace
     /// hooks. May block in FFI; the independent watchdog revokes its health lease.
-    fn poll(&mut self, reinstall: bool) -> std::result::Result<(), &'static str>;
+    fn poll(&mut self, reinstall: bool) -> std::result::Result<(), String>;
 }
 /// All hooks, hotkey and desktop FFI live behind this injectable boundary.
 pub trait SafetyApi: Send + Sync + 'static {
@@ -75,7 +75,7 @@ pub trait SafetyApi: Send + Sync + 'static {
         &self,
         config: HotkeyConfig,
         events: Arc<GuardEvents>,
-    ) -> std::result::Result<Box<dyn SafetyPump>, &'static str>;
+    ) -> std::result::Result<Box<dyn SafetyPump>, String>;
 }
 /// Small callback target shared by the listener and independent health watchdog.
 pub struct GuardEvents {
@@ -86,7 +86,7 @@ pub struct GuardEvents {
     local_stop: AtomicBool,
     failed: AtomicBool,
     armed: AtomicBool,
-    reason: Mutex<Option<&'static str>>,
+    reason: Mutex<Option<String>>,
     signal: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl GuardEvents {
@@ -123,8 +123,10 @@ impl GuardEvents {
         }
     }
     /// Fail closed. Also stop an in-flight child independently of its RPC queue.
-    pub fn fail(&self, reason: &'static str) {
+    pub fn fail(&self, reason: impl Into<String>) {
         if !self.failed.swap(true, Ordering::AcqRel) {
+            let reason = reason.into();
+            tracing::warn!(target: "gcu_windows_timing", stage = "stop_listener", phase = "failed", reason = %reason);
             *self.reason.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason);
             self.clock.disable();
             self.heartbeat.invalidate();
@@ -261,7 +263,7 @@ impl SafetyGuard {
         self.events.request_stop();
     }
     /// Revoke a listener/setup that cannot guarantee independent input release.
-    pub fn disable(&self, reason: &'static str) {
+    pub fn disable(&self, reason: impl Into<String>) {
         self.events.fail(reason);
     }
     /// No activity/Stop consumer can mistake stale pump health for availability.
@@ -305,6 +307,7 @@ impl SafetyGuard {
                 .reason
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         ));

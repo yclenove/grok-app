@@ -265,6 +265,7 @@ async fn live_contract_table_c01_to_c27() {
                 fixture.pid()
             ));
             let driver = driver().await?;
+            progress(format!("CONTRACT DOCTOR: {:?}", driver.doctor().await));
             progress("CONTRACT SETUP: window discovery");
             let win = window(&driver, &fixture).await?;
             progress("CONTRACT SETUP: waiting for UIA counter_button");

@@ -16,6 +16,8 @@ use gcu_driver_windows::{
 use gcu_protocol::result::Outcome as ActionOutcome;
 use gcu_protocol::ErrorCode;
 use serde_json::json;
+#[path = "unsafe_token.rs"]
+mod unsafe_token;
 
 fn router(driver: Arc<dyn Driver>) -> (ActionRouter, Session) {
     gcu_core::testing::host::router(driver)
@@ -405,12 +407,14 @@ pub async fn uipi(_: &Fixture) -> CaseResult {
         return Ok(Outcome::NotRun("GCU_ELEVATED_PID must identify the launcher's disposable elevated fixture; no UAC automation".into()));
     };
     let api = RealWinApi::new().map_err(|e| e.to_string())?;
+    let facts = unsafe_token::facts(pid)?;
+    progress(format!("UIPI TOKEN ORACLE: {facts}"));
+    let security = api
+        .process_security(pid)
+        .map_err(|e| format!("{e}; {facts}"))?;
     require(
-        api.process_security(pid)
-            .map_err(|e| e.to_string())?
-            .integrity
-            >= IntegrityLevel::High,
-        "UIPI fixture is not elevated",
+        security.integrity >= IntegrityLevel::High,
+        format!("UIPI fixture is not elevated: {security:?}; {facts}"),
     )?;
     let path = api.process_path(pid).map_err(|e| e.to_string())?;
     let driver = isolated().await?;

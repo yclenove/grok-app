@@ -8,7 +8,7 @@ use crate::{
 async fn fixture() -> (Arc<FakeWinApi>, WindowsDriver, Arc<ControlledBlock>) {
     let api = Arc::new(FakeWinApi::default());
     api.update(|s| {
-        // Catalog stops before it can verify the target or refresh again.
+        // Index IO remains blocked independently of the live metadata catalog.
         for (pid, path) in [(9, "C:\\Slow.exe"), (7, "C:\\gcu-fixture.exe")] {
             s.paths.insert(pid, path.into());
             s.images.insert(path.into(), signed_image(path));
@@ -16,7 +16,7 @@ async fn fixture() -> (Arc<FakeWinApi>, WindowsDriver, Arc<ControlledBlock>) {
             s.windows.push(window(u64::from(pid), pid));
         }
     });
-    let blocked = api.block_image("C:\\Slow.exe");
+    let blocked = api.block_index();
     let driver = WindowsDriver::with_api(api.clone()).await.unwrap();
     blocked.wait_entered().await;
     (api, driver, blocked)
@@ -29,6 +29,32 @@ fn target_reads(api: &FakeWinApi) -> usize {
         .iter()
         .filter(|path| *path == "c:\\gcu-fixture.exe")
         .count()
+}
+
+#[tokio::test]
+async fn restarted_worker_closed_process_returns_window_gone_without_substitution() {
+    let (api, driver, blocked) = fixture().await;
+    let app = resolve(&driver, &mut Handles::default()).await;
+    let win = Window {
+        app,
+        id: "closed-stamp".into(),
+    };
+    api.update(|s| {
+        s.windows.retain(|w| w.pid != 7);
+        s.processes.remove(&7);
+    });
+    let mut restarted = Handles::default();
+    assert!(matches!(
+        dispatch(&driver, &mut restarted, 2, Request::Geometry(win.clone())).await,
+        Err(DriverError::WindowGone)
+    ));
+    // A replacement executable still invalidates provenance, never window_gone.
+    api.update(|s| s.images.get_mut("C:\\gcu-fixture.exe").unwrap().sha256 = "f".repeat(64));
+    assert!(matches!(
+        dispatch(&driver, &mut restarted, 2, Request::Geometry(win)).await,
+        Err(DriverError::AppNotFound)
+    ));
+    blocked.release();
 }
 
 async fn resolve(driver: &dyn Driver, handles: &mut Handles) -> gcu_protocol::AppInfo {
@@ -157,9 +183,9 @@ async fn handshake_pending_initializer_never_advertises_unwarmed_capabilities() 
         _ = waiting => (),
     }
     assert_eq!(
-        api.state().unwrap().enumerations,
-        1,
-        "only background catalog has run"
+        target_reads(&api),
+        0,
+        "no request dispatched before readiness"
     );
     release.send(()).unwrap();
     tokio::select! {

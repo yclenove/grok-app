@@ -45,6 +45,13 @@ pub enum Outcome {
 }
 pub type CaseResult = Result<Outcome, String>;
 
+pub fn requires_foreground(id: &str) -> bool {
+    matches!(
+        id,
+        "C06" | "C08" | "C09" | "C11" | "C15" | "C20" | "C22" | "W-HOTKEY"
+    )
+}
+
 // Preserve the final table report even when a test assertion/provider panics.
 // The panic hook retains the libtest diagnostic; the row also receives its last
 // external fixture state from the caller. No native operation is retried.
@@ -275,6 +282,17 @@ mod tests {
                 CASES.iter().filter(|r| r.0 == format!("C{i:02}")).count(),
                 1
             );
+        }
+    }
+    #[test]
+    fn foreground_requirements_preserve_semantic_and_existing_gap_rows() {
+        for id in ["C06", "C08", "C09", "C11", "C15", "C20", "C22", "W-HOTKEY"] {
+            assert!(requires_foreground(id), "{id}");
+        }
+        for id in [
+            "C05", "C07", "C10", "C12", "C13", "C16", "C19", "C23", "C27", "W-UIPI",
+        ] {
+            assert!(!requires_foreground(id), "{id}");
         }
     }
     #[test]

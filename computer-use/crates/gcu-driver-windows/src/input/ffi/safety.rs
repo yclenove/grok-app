@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 use windows::Win32::{
-    Foundation::{HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{GetLastError, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::{LibraryLoader::GetModuleHandleW, StationsAndDesktops::*},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
@@ -34,7 +34,7 @@ impl SafetyApi for RealSafetyApi {
         &self,
         config: HotkeyConfig,
         events: Arc<GuardEvents>,
-    ) -> Result<Box<dyn SafetyPump>, &'static str> {
+    ) -> Result<Box<dyn SafetyPump>, String> {
         interactive_desktop()?;
         let hotkey = HotkeyThread::start(config, events.clone())?;
         CONTEXT.with(|slot| {
@@ -56,19 +56,20 @@ struct Hooks {
     mouse: HHOOK,
 }
 impl Hooks {
-    fn install() -> Result<Self, &'static str> {
+    fn install() -> Result<Self, String> {
         // SAFETY: process module is borrowed, callbacks have static code lifetime
         // and run only on this installing message-pump thread. No cross-thread COM.
         unsafe {
-            let module = GetModuleHandleW(None).map_err(|_| "hook module unavailable")?;
+            let module = GetModuleHandleW(None).map_err(|e| failure("GetModuleHandleW", e))?;
             let instance = Some(HINSTANCE(module.0));
             let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), instance, 0)
-                .map_err(|_| "WH_KEYBOARD_LL registration failed")?;
+                .map_err(|e| failure("SetWindowsHookExW(WH_KEYBOARD_LL)", e))?;
             match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), instance, 0) {
                 Ok(mouse) => Ok(Self { keyboard, mouse }),
-                Err(_) => {
+                Err(error) => {
+                    let reason = failure("SetWindowsHookExW(WH_MOUSE_LL)", error);
                     let _ = UnhookWindowsHookEx(keyboard);
-                    Err("WH_MOUSE_LL registration failed")
+                    Err(reason)
                 }
             }
         }
@@ -133,7 +134,7 @@ struct Pump {
     _hotkey: HotkeyThread,
 }
 impl SafetyPump for Pump {
-    fn poll(&mut self, reinstall: bool) -> Result<(), &'static str> {
+    fn poll(&mut self, reinstall: bool) -> Result<(), String> {
         interactive_desktop()?;
         if reinstall {
             // Install replacements before retiring old hooks: no unmonitored gap.
@@ -147,7 +148,7 @@ impl SafetyPump for Pump {
         });
         if let Some(at) = proof {
             if at.elapsed() > HEARTBEAT_TIMEOUT {
-                return Err("low-level hook probe expired (possibly silently removed)");
+                return Err("low-level hook probe expired (possibly silently removed)".into());
             }
             CONTEXT.with(|slot| {
                 if let Some(context) = slot.borrow().as_ref() {
@@ -183,7 +184,11 @@ impl SafetyPump for Pump {
         ];
         // SAFETY: fully initialized two-record slice; only up/zero motion probes.
         if unsafe { SendInput(&probes, std::mem::size_of::<INPUT>() as i32) } != 2 {
-            return Err("hook probe injection unavailable (desktop/UIPI)");
+            // SAFETY: capture thread-local last error immediately after SendInput.
+            let code = unsafe { GetLastError() }.0;
+            return Err(format!(
+                "SendInput(hook probes): GetLastError={code}; UIPI may suppress errors"
+            ));
         }
         Ok(())
     }
@@ -195,7 +200,7 @@ impl Drop for Pump {
 }
 struct HotkeyThread(Arc<AtomicBool>);
 impl HotkeyThread {
-    fn start(config: HotkeyConfig, events: Arc<GuardEvents>) -> Result<Self, &'static str> {
+    fn start(config: HotkeyConfig, events: Arc<GuardEvents>) -> Result<Self, String> {
         let close = Arc::new(AtomicBool::new(false));
         let closed = close.clone();
         let (ready, wait) = mpsc::sync_channel(1);
@@ -203,18 +208,21 @@ impl HotkeyThread {
             .name("gcu-win-hotkey".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // SAFETY: initialize this thread's user32 message queue before
+                    // registration; only this thread consumes its hotkey messages.
+                    unsafe {
+                        let _ = PeekMessageW(&mut MSG::default(), None, 0, 0, PM_NOREMOVE);
+                    }
                     // SAFETY: thread-owned registration, numeric validated chord.
-                    if unsafe {
+                    if let Err(error) = unsafe {
                         RegisterHotKey(
                             None,
                             HOTKEY_ID,
                             HOT_KEY_MODIFIERS(config.modifiers) | MOD_NOREPEAT,
                             config.virtual_key,
                         )
-                    }
-                    .is_err()
-                    {
-                        let _ = ready.send(Err("RegisterHotKey conflict or registration failed"));
+                    } {
+                        let _ = ready.send(Err(failure("RegisterHotKey", error)));
                         return;
                     }
                     struct Registration;
@@ -241,10 +249,10 @@ impl HotkeyThread {
                     events.fail("Stop hotkey thread crashed");
                 }
             })
-            .map_err(|_| "Stop hotkey thread unavailable")?;
+            .map_err(|e| format!("Stop hotkey thread spawn: {e}"))?;
         let owner = Self(close);
         wait.recv_timeout(std::time::Duration::from_millis(100))
-            .map_err(|_| "RegisterHotKey startup/FFI timed out")??;
+            .map_err(|e| format!("RegisterHotKey startup/FFI timed out: {e}"))??;
         Ok(owner)
     }
 }
@@ -253,7 +261,7 @@ impl Drop for HotkeyThread {
         self.0.store(true, Ordering::Release);
     }
 }
-fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), &'static str> {
+fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), String> {
     let mut message = MSG::default();
     // Bound message floods so they cannot starve probes, replacement or shutdown.
     for _ in 0..128 {
@@ -262,7 +270,7 @@ fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), &'sta
             break;
         }
         if message.message == WM_QUIT {
-            return Err("Stop listener message pump exited");
+            return Err("Stop listener message pump exited".into());
         }
         if hotkey && message.message == WM_HOTKEY && message.wParam.0 == HOTKEY_ID as usize {
             if let Some(events) = events {
@@ -272,10 +280,10 @@ fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), &'sta
     }
     Ok(())
 }
-fn interactive_desktop() -> Result<(), &'static str> {
+fn interactive_desktop() -> Result<(), String> {
     // SAFETY: read-only input desktop, noninherited. Access denied is secure.
     let desktop = unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) }
-        .map_err(|_| "UAC/secure desktop unavailable")?;
+        .map_err(|e| failure("OpenInputDesktop", e))?;
     let mut name = [0u16; 256];
     // SAFETY: valid owned desktop and bounded writable UTF-16 output.
     let read = unsafe {
@@ -293,9 +301,21 @@ fn interactive_desktop() -> Result<(), &'static str> {
     }
     let name =
         String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())]);
-    if read.is_err() || !name.eq_ignore_ascii_case("Default") {
-        Err("UAC/secure desktop active")
+    if let Err(error) = read {
+        Err(failure("GetUserObjectInformationW(UOI_NAME)", error))
+    } else if !name.eq_ignore_ascii_case("Default") {
+        Err(format!("UAC/secure desktop active: {name}"))
     } else {
         Ok(())
     }
+}
+
+fn failure(api: &str, error: windows::core::Error) -> String {
+    let hresult = error.code().0 as u32;
+    let win32 = if hresult & 0xffff0000 == 0x80070000 {
+        Some(hresult & 0xffff)
+    } else {
+        None
+    };
+    format!("{api}: HRESULT=0x{hresult:08x}, GetLastError={win32:?}; {error}")
 }

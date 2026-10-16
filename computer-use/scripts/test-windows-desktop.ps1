@@ -14,13 +14,17 @@ foreach ($script in Get-ChildItem $PSScriptRoot -Filter '*windows*.ps1') {
     $null = [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "PowerShell syntax: $($script.Name): $errors"
 }
-$sources = @('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs') |
+$sources = @('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs','windows-desktop-fixture.cs') |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     # Linux Roslyn must also accept the language used by Windows PowerShell 5.1.
     Add-Type -Path $sources -CompilerOptions '/langversion:5'
 } else { Add-Type -Path $sources }
 [Gcu.DesktopLauncher]::CheckLayout()
+$fixtureToken = [Gcu.FixtureTokenFacts]::new()
+$fixtureToken.Pid = 7; $fixtureToken.SessionId = 2; $fixtureToken.IntegritySid = 'S-1-16-12288'; $fixtureToken.TokenElevation = 1
+Assert-True ($fixtureToken.ToString().Contains('GetTokenInformation(TokenElevation)=1') -and
+    $fixtureToken.ToString().Contains('GetTokenInformation(TokenIntegrityLevel)=S-1-16-12288')) 'UIPI diagnostics include native elevation and integrity'
 $userSid = 'S-1-5-21-1-2-3-500'
 $logonSid = 'S-1-5-5-1-2'
 $defaults = [Gcu.DesktopLauncher]::DefaultTokenSecurity($userSid, [string[]]@($logonSid,$logonSid))

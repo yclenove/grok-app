@@ -86,7 +86,7 @@ function Copy-DesktopPayload {
     $out = New-Item -ItemType Directory (Join-Path $Workspace 'out')
     foreach ($name in @('smoke-windows.ps1','windows-desktop.ps1','windows-desktop-launch.ps1',
         'windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs',
-        'windows-desktop-process.cs','windows-desktop-watch.ps1','windows-desktop-stage.ps1')) {
+        'windows-desktop-process.cs','windows-desktop-fixture.cs','windows-desktop-watch.ps1','windows-desktop-stage.ps1')) {
         Copy-Item (Join-Path $PSScriptRoot $name) (Join-Path $Workspace $name)
     }
     $adversary = Join-Path (Split-Path $WorkerExe -Parent) 'gcu-contract-worker.exe'

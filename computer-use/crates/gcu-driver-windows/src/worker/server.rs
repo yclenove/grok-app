@@ -207,6 +207,23 @@ async fn dispatch(
                 || fresh.info.identity != expected.identity
                 || fresh.info.pid != expected.pid
             {
+                // A stamped-window request survives worker restarts. If the
+                // same verified image is now only installed (process exited),
+                // report the lost window rather than changing app identity.
+                if fresh.info.id == expected.id
+                    && fresh.info.identity == expected.identity
+                    && fresh.info.pid.is_none()
+                    && expected.pid.is_some()
+                    && matches!(
+                        &request,
+                        Request::Snapshot(..)
+                            | Request::Capture(..)
+                            | Request::Geometry(_)
+                            | Request::Perform(_)
+                    )
+                {
+                    return Err(DriverError::WindowGone);
+                }
                 return Err(DriverError::AppNotFound);
             }
             handles.bound_apps.remove(&expected.id);

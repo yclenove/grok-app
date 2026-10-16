@@ -24,7 +24,7 @@ if ($DesktopChild) {
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-watch.ps1')
-Add-Type -Path (@('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs') |
+Add-Type -Path (@('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs','windows-desktop-fixture.cs') |
     ForEach-Object { Join-Path $PSScriptRoot $_ })
 
 function Invoke-NativeCase {
@@ -95,12 +95,19 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
             $highExe = Join-Path $workspace 'hi.exe'
             Copy-Item $FixtureExe $highExe
             $savedState = $env:GCU_FIXTURE_STATE
+            $savedActivation = $env:GCU_FIXTURE_NO_ACTIVATE
             try {
                 $env:GCU_FIXTURE_STATE = Join-Path $payload.OutputDir 'high-state.json'
-                $high = Start-Process -FilePath $highExe -PassThru
-            } finally { $env:GCU_FIXTURE_STATE = $savedState }
+                $env:GCU_FIXTURE_NO_ACTIVATE = '1'
+                $high = [Gcu.DesktopLauncher]::StartUnactivatedFixture($highExe)
+            } finally { $env:GCU_FIXTURE_STATE = $savedState; $env:GCU_FIXTURE_NO_ACTIVATE = $savedActivation }
             $null = Wait-Oracle 'elevated fixture window' { $high.Refresh(); @{ exited=$high.HasExited; hwnd=$high.MainWindowHandle.ToInt64() } } { param($s) -not $s.exited -and $s.hwnd -ne 0 }
             $ElevatedPid = $high.Id
+            $highToken = [Gcu.DesktopLauncher]::ReadFixtureToken($ElevatedPid)
+            Write-DesktopProgress "HIGH FIXTURE TOKEN: $highToken"
+            if ($highToken.IntegrityRid -lt 12288 -or $highToken.SessionId -ne $ExpectedSessionId) {
+                throw "elevated fixture token invalid: $highToken; parent $diagnostic"
+            }
         }
         # The selected profile is used exactly once; any timeout/failure is final.
         $request = @{Variant=$variant;Stage='suite';Workspace=$workspace;OutputDir=$payload.OutputDir;

@@ -87,7 +87,7 @@ impl Driver for WorkerDriver {
             [usize::from(guard) | (usize::from(stop) << 1)]
     }
     async fn doctor(&self) -> DoctorReport {
-        match self
+        let mut report = match self
             .rpc(Request::Doctor, DRIVER_DEADLINE, &Cancel::default())
             .await
         {
@@ -105,7 +105,11 @@ impl Driver for WorkerDriver {
                 ready: false,
                 issues: vec!["worker unavailable".into()],
             },
+        };
+        if let Some(guard) = &self.safety {
+            guard.doctor_issues(&mut report.issues);
         }
+        report
     }
     fn discovery_status(&self) -> DiscoveryStatus {
         DiscoveryStatus {

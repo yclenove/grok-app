@@ -12,6 +12,7 @@ use windows::{
 macro_rules! read {
     ($request:expr, $call:expr) => {{
         $request.check()?;
+        let _timing = crate::timing::Timing::start(stringify!($call));
         // SAFETY: live UIA interface and owned arguments on their creating MTA.
         unsafe { $call }.map_err(ActionError::from)?
     }};
@@ -19,6 +20,7 @@ macro_rules! read {
 macro_rules! mutate {
     ($request:expr, $call:expr) => {{
         $request.dispatch(|| {
+            let _timing = crate::timing::Timing::start(stringify!($call));
             // SAFETY: live pattern on its MTA; identity/writability were checked.
             unsafe { $call }
                 .map(|()| PatternResult::Performed)
@@ -152,6 +154,7 @@ impl Guard<'_> {
         self.request.check()
     }
     fn dispatch(&self, mutation: impl FnOnce() -> Result<PatternResult>) -> Result<PatternResult> {
+        let _timing = crate::timing::Timing::start("uia_action_preflight");
         // Pattern acquisition and TextPattern preparation can cross provider calls.
         // Recheck again here, immediately before the one actual mutation.
         let (_, props) = self.state.validate(self.node, self.hwnd, self.request)?;

@@ -5,7 +5,7 @@ use crate::{
     desktop::{visible_windows, window_process},
     discovery::{executable_name, Entry, State},
     gate::check_engine,
-    identity::{identity_for_path, normalize_path},
+    identity::normalize_path,
 };
 use gcu_core::driver::*;
 use gcu_protocol::AppInfo;
@@ -28,6 +28,7 @@ pub(super) struct Discovery {
     pub(super) running: mpsc::SyncSender<Task>,
     pub(super) installed: mpsc::SyncSender<Task>,
     catalog: Catalog,
+    entries: Entries,
 }
 impl Discovery {
     pub(super) async fn start(api: Arc<dyn WinApi>) -> Result<(Self, mpsc::SyncSender<Task>)> {
@@ -43,7 +44,13 @@ impl Discovery {
             "gcu-win-running",
         )
         .await?;
-        let installed = start(api.clone(), index.clone(), entries, "gcu-win-installed").await?;
+        let installed = start(
+            api.clone(),
+            index.clone(),
+            entries.clone(),
+            "gcu-win-installed",
+        )
+        .await?;
         let catalog = Catalog::start(api.clone())?;
         Ok((
             Self {
@@ -52,6 +59,7 @@ impl Discovery {
                 running,
                 installed,
                 catalog,
+                entries,
             },
             read,
         ))
@@ -65,6 +73,18 @@ impl Discovery {
     }
     pub(super) fn list(&self) -> Result<Vec<AppInfo>> {
         let mut apps = self.catalog.apps.lock().map_err(|_| crashed())?.clone();
+        // Resolved live applications appear immediately, including ones opened
+        // after the catalog's last snapshot. Entries remain hints here; every
+        // observation/action still validates live process/image/window identity.
+        for entry in self.entries.lock().map_err(|_| crashed())?.values() {
+            if entry.info.pid.is_some() {
+                apps.insert(entry.info.id.clone(), entry.info.clone());
+            } else {
+                // An installed-only resolution must not hide a newer live hint.
+                apps.entry(entry.info.id.clone())
+                    .or_insert_with(|| entry.info.clone());
+            }
+        }
         for shortcut in self.index.shortcuts()? {
             // Do not duplicate a running executable using its Start Menu AUMID.
             if apps
@@ -229,18 +249,9 @@ fn refresh_catalog(
             Err(error) => note(notes, error),
         }
     }
-    // Publish hints before any file IO. No mutex is held during verification.
-    *cache.lock().map_err(|_| crashed())? = hints.clone();
-    for (path, hint) in hints {
-        match identity_for_path(api, &path) {
-            Ok(identity) => {
-                let mut info = hint;
-                info.identity = Some(identity.app_identity());
-                cache.lock().map_err(|_| crashed())?.insert(path, info);
-            }
-            Err(error) => note(notes, error),
-        }
-    }
+    // Discovery must not hash/sign unrelated images: one blocked verifier used
+    // to prevent all later running-window refreshes. Only resolve authorizes.
+    *cache.lock().map_err(|_| crashed())? = hints;
     Ok(())
 }
 fn note(notes: &Mutex<Vec<String>>, error: DriverError) {

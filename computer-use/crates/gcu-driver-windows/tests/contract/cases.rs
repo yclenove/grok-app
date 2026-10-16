@@ -8,6 +8,13 @@ pub async fn run(
     fixture: &Fixture,
     win: &WindowRef,
 ) -> CaseResult {
+    if requires_foreground(id)
+        && driver.capabilities().delivery.foreground
+            == gcu_protocol::capabilities::ForegroundCapability::Unavailable
+    {
+        let report = driver.doctor().await;
+        return Ok(Outcome::Skip(format!("capability: foreground=unavailable; Stop/physical-input listener required; doctor={:?}", report.issues)));
+    }
     match id {
         "C01" => {
             require(driver.list_apps().await.map_err(|e| e.to_string())?.iter().any(|a| a.pid == Some(fixture.pid())), "fixture absent from list_apps")?;

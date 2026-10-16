@@ -86,11 +86,7 @@ async fn resolve_running_blocked_index_matches_fixture_name_path_and_aumid() {
 async fn reads_blocked_catalog_signature_resolve_and_list_target_windows() {
     let api = fixture();
     let blocked = api.block_image("C:\\Slow.exe");
-    let driver = WindowsDriver::with_api(api).await.unwrap();
-    blocked.wait_entered().await;
-    let apps = bounded(driver.list_apps()).await.unwrap();
-    assert!(apps.iter().any(|app| app.pid == Some(7)));
-    assert!(driver.discovery_status().indexing);
+    let driver = WindowsDriver::with_api(api.clone()).await.unwrap();
     let app = bounded(driver.resolve_app(&AppQuery::from("fixture")))
         .await
         .unwrap();
@@ -102,7 +98,67 @@ async fn reads_blocked_catalog_signature_resolve_and_list_target_windows() {
         1
     );
     assert_eq!(bounded(driver.list_windows(None)).await.unwrap().len(), 2);
+    let apps = bounded(driver.list_apps()).await.unwrap();
+    assert!(apps.iter().any(|app| app.pid == Some(7)));
+    assert!(api
+        .state()
+        .unwrap()
+        .image_reads
+        .iter()
+        .all(|p| p != "c:\\slow.exe"));
     blocked.release();
+}
+
+#[tokio::test]
+async fn list_apps_newly_resolved_running_app_visible_while_index_blocked() {
+    let api = fixture();
+    let blocked = api.block_index();
+    let driver = WindowsDriver::with_api(api.clone()).await.unwrap();
+    blocked.wait_entered().await;
+    api.update(|s| {
+        s.paths.insert(11, "C:\\New.exe".into());
+        s.images
+            .insert("C:\\New.exe".into(), signed_image("C:\\New.exe"));
+        s.processes.insert(11, medium_security());
+        s.windows.push(window(11, 11));
+    });
+    let app = bounded(driver.resolve_app(&AppQuery::from("New")))
+        .await
+        .unwrap();
+    let apps = bounded(driver.list_apps()).await.unwrap();
+    assert!(apps.iter().any(|a| a == &app.info));
+    assert_eq!(apps.iter().filter(|a| a.pid == Some(11)).count(), 1);
+    blocked.release();
+}
+
+#[tokio::test]
+async fn list_apps_installed_resolution_does_not_hide_new_running_snapshot() {
+    let api = fixture();
+    api.image("C:\\Later.exe", signed_image("C:\\Later.exe"));
+    let driver = WindowsDriver::with_api(api.clone()).await.unwrap();
+    let installed = driver
+        .resolve_app(&AppQuery::from("C:\\Later.exe"))
+        .await
+        .unwrap();
+    assert_eq!(installed.info.pid, None);
+    api.update(|s| {
+        s.paths.insert(13, "C:\\Later.exe".into());
+        s.processes.insert(13, medium_security());
+        s.windows.push(window(13, 13));
+    });
+    bounded(async {
+        loop {
+            let apps = driver.list_apps().await.unwrap();
+            if apps
+                .iter()
+                .any(|a| a.id == installed.info.id && a.pid == Some(13))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
 }
 
 #[tokio::test]

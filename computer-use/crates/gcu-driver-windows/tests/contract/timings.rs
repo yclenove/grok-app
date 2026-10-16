@@ -30,21 +30,37 @@ struct Fields {
     stage: Option<String>,
     phase: Option<String>,
     elapsed_ms: Option<u64>,
+    diagnostics: Vec<String>,
 }
 impl Visit for Fields {
     fn record_str(&mut self, field: &Field, value: &str) {
         match field.name() {
             "stage" => self.stage = Some(value.into()),
             "phase" => self.phase = Some(value.into()),
+            "reason" => self.diagnostics.push(format!("reason={value}")),
             _ => (),
         }
     }
     fn record_u64(&mut self, field: &Field, value: u64) {
         if field.name() == "elapsed_ms" {
             self.elapsed_ms = Some(value);
+        } else if matches!(field.name(), "pid" | "epoch" | "attempt" | "sequence") {
+            self.diagnostics.push(format!("{}={value}", field.name()));
         }
     }
-    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        if field.name() == "mutation" {
+            self.diagnostics.push(format!("mutation={value}"));
+        }
+    }
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if matches!(
+            field.name(),
+            "error" | "pid" | "epoch" | "attempt" | "mutation"
+        ) {
+            self.diagnostics.push(format!("{}={value:?}", field.name()));
+        }
+    }
 }
 impl Subscriber for Recorder {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
@@ -62,8 +78,8 @@ impl Subscriber for Recorder {
         event.record(&mut fields);
         if let (Some(stage), Some(phase)) = (fields.stage, fields.phase) {
             super::harness::progress(format!(
-                "NATIVE TIMING: stage={stage}, phase={phase}, elapsed_ms={:?}",
-                fields.elapsed_ms
+                "NATIVE TIMING: stage={stage}, phase={phase}, elapsed_ms={:?}, diagnostics={:?}",
+                fields.elapsed_ms, fields.diagnostics
             ));
             self.0.lock().unwrap().insert(stage, fields.elapsed_ms);
         }
