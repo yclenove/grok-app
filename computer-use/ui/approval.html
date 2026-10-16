@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="{{slot:lang}}">
+<head>
+<meta charset="utf-8">
+<title>{{approval.title}}</title>
+<style>
+{{slot:css}}
+</style>
+</head>
+<body>
+<main>
+  <h1>{{approval.title}}</h1>
+  <p>{{slot:question}}</p>
+  <p class="risk">{{slot:risk}}</p>
+  <section>
+    <h2>{{approval.identity_heading}}</h2>
+    <dl>
+      <dt>{{approval.signature_label}}</dt>
+      <dd><bdi>{{slot:signature}}</bdi></dd>
+      <dt>{{approval.publisher_label}}</dt>
+      <dd><bdi>{{slot:publisher}}</bdi></dd>
+      <dt>{{approval.path_label}}</dt>
+      <dd><bdi>{{slot:path}}</bdi></dd>
+    </dl>
+    <p class="aux"><span>{{approval.name_label}}</span> <bdi>{{slot:name}}</bdi></p>
+    <p class="aux"><span>{{approval.icon_label}}</span> {{slot:icon}}</p>
+    <p>{{approval.plugin_note}}</p>
+  </section>
+  <section>
+    <h2>{{approval.reason_label}}</h2>
+    <p><bdi>{{slot:reason}}</bdi></p>
+  </section>
+  <p class="hint">{{approval.hint}}</p>
+  <div class="choices">
+    <button type="button" data-decision="turn">{{approval.choice.turn}}</button>
+    <button type="button" data-decision="session">{{approval.choice.session}}</button>
+    <button type="button" data-decision="always" {{slot:always_attr}}>{{approval.choice.always}}</button>
+    <button type="button" id="deny" data-decision="deny" autofocus>{{approval.choice.deny}}</button>
+  </div>
+</main>
+<script>
+(function () {
+  function choose(decision) {
+    if (window.gcuApproval) {
+      window.gcuApproval(decision);
+    }
+  }
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      choose("deny");
+    }
+  });
+  var nodes = document.querySelectorAll("button[data-decision]");
+  for (var index = 0; index < nodes.length; index += 1) {
+    nodes[index].addEventListener("click", function (event) {
+      choose(event.currentTarget.getAttribute("data-decision"));
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -13,13 +13,13 @@ pub(crate) async fn run(driver: &dyn Driver, host: &LocalHost, json: bool) -> Re
         "log_path":null, "recent_calls":host.summaries(),
         "recent_calls_path":host.summary_path(),
         "recent_calls_scope":"last completed process; up to 20 actions, retained at most seven days",
-        "approval_ui":"unavailable until P4; requests are denied without an evaluation build",
+        "approval_ui":"no WebKit in this build; a desktop uses zenity, kdialog, osascript, or PowerShell, otherwise requests are denied",
         "config_path":crate::config::path().ok(),
     });
     if json {
         println!("{value}");
     } else {
-        println!("Grok Computer Use {}\nDriver: fake (offline; no OS input)\nPermissions: not applicable\nPrivate APIs: not applicable\nLogs: stderr, metadata only\nRecent calls: {}\nSummary path: {}\nApproval window: not implemented until P4\nCapabilities: {}",env!("CARGO_PKG_VERSION"),value["recent_calls"],host.summary_path().display(),value["capabilities"]);
+        println!("Grok Computer Use {}\nDriver: fake (offline; no OS input)\nPermissions: not applicable\nPrivate APIs: not applicable\nLogs: stderr, metadata only\nRecent calls: {}\nSummary path: {}\nApproval window: no WebKit; desktop fallback or deny\nCapabilities: {}",env!("CARGO_PKG_VERSION"),value["recent_calls"],host.summary_path().display(),value["capabilities"]);
     }
     Ok(if report.ready { 0 } else { 3 })
 }

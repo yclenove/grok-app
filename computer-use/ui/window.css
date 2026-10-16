@@ -1,0 +1,32 @@
+html, body {
+  margin: 0;
+  background: #f4f1ea;
+  color: #1c1915;
+  font: 16px/1.45 sans-serif;
+}
+main {
+  padding: 16px 18px 20px;
+}
+h1, h2, p {
+  margin: 0 0 10px;
+}
+h1 { font-size: 1.15rem; }
+h2 { font-size: 0.95rem; }
+dl { margin: 0 0 10px; }
+dt { font-weight: 700; }
+dd { margin: 0 0 8px; }
+button {
+  min-width: 7rem;
+  min-height: 2.6rem;
+  margin: 4px 6px 0 0;
+  background: #fff;
+  color: #1c1915;
+  border: 1px solid #1c1915;
+}
+button:focus-visible {
+  outline: 3px solid #0b57d0;
+  outline-offset: 2px;
+}
+.aux { color: #5c564c; font-size: 0.9rem; }
+.risk { font-weight: 700; }
+.hint { color: #3f3a33; }

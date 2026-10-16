@@ -40,6 +40,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             println!("gcu {}", env!("CARGO_PKG_VERSION"));
             return Ok(0);
         }
+        Some(Command::Approvals(args)) => return crate::host::approvals(args.clone()).await,
         Some(Command::Resume { session }) => return crate::resume::run(session.clone()).await,
         Some(Command::Mcp {
             connect: Some(url),

@@ -1,7 +1,13 @@
-//! Minimal local Host: no approval UI, metadata-only events, persistent Stop.
+//! Local Host: approval grants, metadata-only events, persistent Stop.
+pub(crate) mod approval;
+pub(crate) mod dialog;
+pub(crate) mod page;
+pub(crate) mod policy_store;
+
 use crate::{exit::Failure, private};
-use async_trait::async_trait;
+use approval::Approvals;
 use gcu_host_api::*;
+use policy_store::HostPolicy;
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -19,15 +25,25 @@ pub(crate) struct LocalHost {
 impl LocalHost {
     pub(crate) fn new(config: PolicyConfig, mode: Option<String>) -> Result<Self, Failure> {
         let activity = Arc::new(Activity::open()?);
-        let host = Self::assemble(config, mode, activity);
+        let path = private::state_dir()?.join("approvals.json");
+        let host = Self::assemble(config, mode, activity, Some(path));
         host.events.load(&host.summary_path())?;
         Ok(host)
     }
-    fn assemble(config: PolicyConfig, mode: Option<String>, activity: Arc<Activity>) -> Self {
+    fn assemble(
+        config: PolicyConfig,
+        mode: Option<String>,
+        activity: Arc<Activity>,
+        approvals_path: Option<PathBuf>,
+    ) -> Self {
         let events = Arc::new(Events::default());
+        let policy = Arc::new(match approvals_path {
+            Some(path) => HostPolicy::open(config, path),
+            None => HostPolicy::memory(config),
+        });
         let host = gcu_mcp::Host {
-            approvals: Arc::new(Approvals { mode }),
-            policy: Arc::new(Policy(Mutex::new(config))),
+            approvals: Arc::new(Approvals::new(mode, policy.clone())),
+            policy,
             events: events.clone(),
             activity: activity.clone(),
         };
@@ -48,6 +64,7 @@ impl LocalHost {
                 generation: Mutex::new(0),
                 io: Mutex::new(()),
             }),
+            None,
         )
     }
     pub(crate) fn summaries(&self) -> serde_json::Value {
@@ -66,67 +83,49 @@ impl LocalHost {
         .await
     }
 }
-struct Policy(Mutex<PolicyConfig>);
-impl PolicyStore for Policy {
-    fn load(&self) -> PolicyConfig {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-    fn always_allowed(&self, id: &AppIdentity) -> bool {
-        self.load().always.iter().any(|g| g.grant_eq(id))
-    }
-    fn refresh(&self) {}
-}
-struct Approvals {
-    mode: Option<String>,
-}
-impl Approvals {
-    fn decision(&self) -> ApprovalDecision {
-        #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
-        match self.mode.as_deref() {
-            Some("auto-allow-turn") => return ApprovalDecision::Turn,
-            // The minimal Host has no persistent grants; Always is bounded to this session.
-            Some("auto-allow-session" | "auto-allow-always") => return ApprovalDecision::Session,
-            _ => (),
+
+pub(crate) async fn approvals(args: crate::args::ApprovalArgs) -> Result<u8, Failure> {
+    let path = private::state_dir()?.join("approvals.json");
+    let locale = gcu_mcp::active_locale();
+    match args.action {
+        crate::args::ApprovalAction::List { json } => {
+            let body = private::work(move || match json {
+                true => policy_store::list_json(&path)
+                    .map(|rows| serde_json::Value::Array(rows).to_string())
+                    .map_err(|_| unusable(locale)),
+                false => policy_store::list_text(&path, locale).map_err(|_| unusable(locale)),
+            })
+            .await?;
+            println!("{body}");
+            Ok(0)
         }
-        let _ = &self.mode;
-        tracing::warn!("Approval denied: the real approval window is not implemented until P4");
-        ApprovalDecision::Deny
-    }
-}
-#[async_trait]
-impl ApprovalProvider for Approvals {
-    async fn request_app(
-        &self,
-        _: &SessionCtx,
-        _: &AppInfo,
-        _: Option<&ModelReason>,
-        _: Risk,
-        cancel: &Cancel,
-    ) -> ApprovalDecision {
-        if cancel.is_cancelled() {
-            ApprovalDecision::Deny
-        } else {
-            self.decision()
+        crate::args::ApprovalAction::Revoke { key } => {
+            let revoke_key = key.clone();
+            let removed = private::work(move || {
+                policy_store::revoke(&path, &revoke_key).map_err(|_| unusable(locale))
+            })
+            .await?;
+            if removed {
+                println!(
+                    "{}",
+                    gcu_mcp::fill(locale, "approvals.revoked", &[("key", key.as_str())])
+                );
+                Ok(0)
+            } else {
+                println!(
+                    "{}",
+                    gcu_mcp::fill(locale, "approvals.missing", &[("key", key.as_str())])
+                );
+                Ok(2)
+            }
         }
     }
-    async fn confirm_action(
-        &self,
-        _: &SessionCtx,
-        _: &AppInfo,
-        _: &ActionSummary,
-        _: Option<&ImageRef>,
-        cancel: &Cancel,
-    ) -> bool {
-        !cancel.is_cancelled()
-            && !matches!(
-                self.decision(),
-                ApprovalDecision::Deny | ApprovalDecision::Timeout
-            )
-    }
-    async fn handoff(&self, _: &SessionCtx, _: &AppInfo, _: HandoffReason, _: &Cancel) {
-        tracing::warn!("User handoff required; use the application directly");
-    }
 }
+
+fn unusable(locale: &str) -> Failure {
+    Failure::arguments(gcu_mcp::text(locale, "approvals.unusable"))
+}
+
 #[derive(Default)]
 struct Events(Mutex<VecDeque<serde_json::Value>>);
 impl Events {
@@ -189,7 +188,6 @@ impl EventSink for Events {
         if recent.len() == 20 {
             recent.pop_front();
         }
-        // target and thumbnail are payloads; neither is retained or logged.
         let record = serde_json::json!({"tool":event.tool,"outcome":event.outcome,"duration_ms":event.duration_ms,"timestamp_ms":timestamp_ms()});
         tracing::info!(tool = ?event.tool, outcome = ?event.outcome, duration_ms = event.duration_ms, "action");
         recent.push_back(record);
@@ -227,8 +225,6 @@ impl Activity {
     }
     pub(crate) fn persist_stop(&self) -> Result<(), Failure> {
         let _io = self.io.lock().unwrap_or_else(|e| e.into_inner());
-        // A delayed persistence worker must not recreate a marker after an
-        // authenticated resume has already cleared this Stop.
         if !self.stopped.load(Ordering::Acquire) {
             return Ok(());
         }
