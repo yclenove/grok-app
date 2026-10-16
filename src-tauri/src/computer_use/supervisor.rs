@@ -81,7 +81,7 @@ pub fn open_control(
         }
     };
     let facts = probe(&chosen, &identity, dev_grant && external_path)?;
-    let path = admit(mode, &identity, &choice, &facts)?;
+    let path = decide(mode, &identity, &choice, &facts)?;
     Ok(Control::new(
         OsLaunch::callbacks(host_server::production_callbacks()),
         LaunchRequest::new(path, false),
