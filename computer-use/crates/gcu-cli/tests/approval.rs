@@ -83,18 +83,16 @@ fn gcu(home: &TempDir) -> Command {
 fn state_file(home: &TempDir) -> PathBuf {
     #[cfg(windows)]
     {
-        return home
-            .path()
+        home.path()
             .join("local")
             .join("grok-computer-use")
             .join("state")
-            .join("approvals.json");
+            .join("approvals.json")
     }
     #[cfg(target_os = "macos")]
     {
-        return home
-            .path()
-            .join("Library/Application Support/grok-computer-use/state/approvals.json");
+        home.path()
+            .join("Library/Application Support/grok-computer-use/state/approvals.json")
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {

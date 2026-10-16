@@ -45,7 +45,7 @@
 | P3-05 | Linux 契约测试与 CI | P3-01、P3-02、P3-03、P3-04 | 1.5d | done | cu2/P3-05-linux-contract |  | 2026-10-13 | C01–C27 表驱动实机契约(Xvfb+dbus+AT-SPI+openbox)：23 通过 / 6 跳过(原因逐条打印) / 0 失败；AT-SPI job 连续重跑稳定；smoke-linux.sh |
 | P4-01 | macOS helper 与代理 | P1-09、S-02 | 3d | done | cu2/P4-01-mac-helper |  | 2026-10-16 | `gcu agent` + `gcu-cli::helper::{auth,client,frame,macos,proxy,serve}`：只有同签名身份且同 cdhash 的对端才被服务；同身份不同 cdhash 只能请求旧 helper 退出；另校验 UID、端点 inode、套接字权限、版本精确匹配、10 分钟空闲退出；`xtask bundle-macos` 生成 LSUIElement 的 .app，ad-hoc 签名用 identifier-only designated requirement。30 个 helper 测试+38 个 xtask 测试通过。未做：15 语 InfoPlist.strings；构建机上的 bundle-macos 只写 plist/图标(不打包 gcu、不 codesign)。真机待验(Mini)：TCC 弹窗指向 helper app 而非终端、同二进制代理在只授权 helper 时可用而 SSH 直接执行无授权、重编译后授权仍在、未签名 arm64 app 不能启动 |
 | P4-02 | Onboarding 窗口 | P4-01 | 2d | todo |  |  |  |  |
-| P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | todo |  |  |  |  |
+| P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | done | cu2/P4-03-approval |  | 2026-10-16 | ApprovalProvider：elicitation 优先，回退到各平台原生对话框(Linux zenity/kdialog、macOS osascript、Windows PowerShell)；`approvals.json` 持久化(policy_store，`gcu approvals` 子命令)；默认拒绝、Enter 不批准；模型理由标“模型提供”并按纯文本处理双向控制字符；`GCU_APPROVAL=auto-*` 仅在 feature eval-autoapprove 可用，发布构建设置该变量(含任意 auto 值)报错退出；审批文案 15 语言放 `computer-use/ui/locales/*.json`(键与 en 锁步，单一来源，待 P4-02 导出为 App 的 computer-use 命名空间)。gcu-cli approval 12 项(带/不带 eval-autoapprove)、gcu-mcp approvals 6 项通过。未做：`approval.html` 的 WebView 窗口(构建机无 WebKit/wry)；真机待验：各平台原生对话框默认焦点是拒绝、Enter 不批准 |
 | P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | done | cu2/P4-04-overlay |  | 2026-10-16 | gcu-overlay：状态+用户 Stop 按钮(不可聚焦/穿透/排除截图，macOS/Windows/X11)；Stop 状态机去抖、独立通道；文案表接口待 App i18n 对接；原生 Wayland 覆盖层声明不可用(裁定选项1)；三平台真机 GUI not_run |
 | P4-05a | gcu install 客户端安装库（P4-05 前半） | P0-01 | 1d | done | cu2/P4-05a-install-lib | #14 | 2026-10-13 | 服务端名 grok-computer-use；Claude 保留 computer-use |
 | P4-05 | gcu install/uninstall（clap 接线 + Windows 钩子） | P0-10、P4-05a | 1d | done | cu2/P4-05-install-wiring |  | 2026-10-13 | gcu install/uninstall 接线(dry-run、0600 备份、幂等、精确移除、~/.grok 需确认)；Windows Stop 钩子 .cmd；Antigravity 走假 agy 测试 |
@@ -114,6 +114,7 @@
 - P2-09：GitHub 托管 windows-2022 runner 的受限令牌交互桌面里**没有指针输入栈**：12 种合成鼠标探针无一触发低级鼠标钩子，键盘探针可以（flags=144）。这是环境限制，产品无鼠标证明时 foreground 保持 Unavailable、Stop 语义不放宽；有物理鼠标的 Windows 上是否同样需要真机补测。
 - P2-09：受限令牌能在该 runner 启动的前提是令牌的 TokenOwner=用户 SID 且 TokenDefaultDacl 授予用户/登录 SID/SYSTEM，否则进程以 0xC0000142 失败；runner 的 admin 令牌没有 UAC 过滤，Shell 激活的 SystemSettings 是 High 完整性，Medium 的 harness 按设计被拒(ElevationRequired)。
 - P2-09：egui 夹具在 UIA 下首读树可能不完整（和 macOS 一样懒激活），调用方要有界重读。
+- P4-03：i18n 导出脚本(P4-02)还不存在，审批文案先以 `computer-use/ui/locales/*.json` 为单一来源并有 15 语言键锁步测试；P4-02 要把它导出为 App 的 `computer-use` 命名空间(`src/i18n/messages/<locale>/computer-use.ts`)，而不是再复制一份。
 
 ## 阶段记录
 
