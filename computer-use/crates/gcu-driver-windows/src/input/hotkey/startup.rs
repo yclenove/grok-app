@@ -235,11 +235,19 @@ fn late_startup_proofs_cannot_beat_the_next_watchdog_poll_or_reset_a_stage() {
 
 #[test]
 fn listener_failure_revokes_health_and_latches_stop_before_entering_diagnostic_sink() {
+    use std::cell::RefCell;
     use tracing::{
         span::{Attributes, Id, Record},
         Event, Metadata, Subscriber,
     };
-    struct Inspect(Arc<SafetyGuard>, Arc<AtomicBool>);
+    type Probe = (Arc<SafetyGuard>, Arc<AtomicBool>);
+    std::thread_local! {
+        static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+    }
+    // A process-wide sink instead of a scoped one: scoped dispatchers race with
+    // the callsite interest cache when other tests emit the same event in parallel.
+    // Only the thread that installed a probe is inspected.
+    struct Inspect;
     impl Subscriber for Inspect {
         fn enabled(&self, metadata: &Metadata<'_>) -> bool {
             metadata.target() == "gcu_windows_timing"
@@ -252,26 +260,30 @@ fn listener_failure_revokes_health_and_latches_stop_before_entering_diagnostic_s
         fn enter(&self, _: &Id) {}
         fn exit(&self, _: &Id) {}
         fn event(&self, _: &Event<'_>) {
-            // These guarantees must already hold if the sink now blocks forever.
-            assert!(!self.0.available());
-            assert!(!self.0.activity_clock().available());
-            assert!(self.0.is_stopped());
-            assert_eq!(
-                self.0.events.reason.lock().unwrap().as_deref(),
-                Some("fault injection")
-            );
-            self.1.store(true, Ordering::Release);
+            PROBE.with(|probe| {
+                let Some((guard, inspected)) = probe.borrow().clone() else {
+                    return;
+                };
+                // These guarantees must already hold if the sink now blocks forever.
+                assert!(!guard.available());
+                assert!(!guard.activity_clock().available());
+                assert!(guard.is_stopped());
+                assert_eq!(
+                    guard.events.reason.lock().unwrap().as_deref(),
+                    Some("fault injection")
+                );
+                inspected.store(true, Ordering::Release);
+            });
         }
     }
+    // Err means another test already installed a global sink; this process has none.
+    tracing::subscriber::set_global_default(Inspect).expect("single global diagnostic sink");
     let api = FakeSafetyApi::default();
     let guard = api.start(Default::default(), Arc::new(Unstopped));
     assert!(guard.available());
     let inspected = Arc::new(AtomicBool::new(false));
-    tracing::subscriber::with_default(Inspect(guard.clone(), inspected.clone()), || {
-        // Parallel tests hit this callsite with no subscriber and the process-wide
-        // interest cache can still say "never"; refresh it for this scoped sink.
-        tracing::callsite::rebuild_interest_cache();
-        guard.disable("fault injection");
-    });
+    PROBE.with(|probe| *probe.borrow_mut() = Some((guard.clone(), inspected.clone())));
+    guard.disable("fault injection");
+    PROBE.with(|probe| *probe.borrow_mut() = None);
     assert!(inspected.load(Ordering::Acquire));
 }
