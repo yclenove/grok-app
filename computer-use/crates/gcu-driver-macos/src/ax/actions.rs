@@ -143,6 +143,7 @@ pub(super) async fn guarded<T>(
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
     if budget.cancel.is_cancelled() {
+        crate::diagnostics::note("CANCEL_REASON", "caller_cancel_token; between AX calls");
         return Err(DriverError::Cancelled {
             maybe_executed: budget.uncertain(),
         });

@@ -455,6 +455,12 @@ impl Driver for MacosDriver {
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
         if let Some(guards) = self.input_guards() {
+            if guards.is_stopped() {
+                crate::diagnostics::note(
+                    "CANCEL_REASON",
+                    "host_stop_latch; before AX dispatch; maybe_executed=false",
+                );
+            }
             guards.check(false)?;
         }
         if matches!(req, DriverAction::TypeText { .. }) {

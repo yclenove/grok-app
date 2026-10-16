@@ -31,7 +31,11 @@ pub(super) fn action_names(world: &mut World, id: u64) -> Result<Vec<String>> {
     let element = prepare(world, id)?;
     let mut names: CFArrayRef = std::ptr::null();
     // SAFETY: element is a live snapshot element. On success `names` is +1.
-    let status = unsafe { AXUIElementCopyActionNames(element, &mut names) };
+    let status = unsafe {
+        crate::diagnostics::ax_call("AXUIElementCopyActionNames", (element) as usize, "", || {
+            AXUIElementCopyActionNames(element, &mut names)
+        })
+    };
     if status == kAXErrorSuccess {
         if names.is_null() {
             return Ok(Vec::new());
@@ -66,7 +70,11 @@ pub(super) fn invoke(world: &mut World, id: u64, name: &str) -> Result<AxCall> {
     let element = prepare(world, id)?;
     let action = CFString::new(name);
     // SAFETY: element is live. `action` outlives the call. AX copies the name.
-    let status = unsafe { AXUIElementPerformAction(element, action.as_concrete_TypeRef()) };
+    let status = unsafe {
+        crate::diagnostics::ax_call("AXUIElementPerformAction", (element) as usize, name, || {
+            AXUIElementPerformAction(element, action.as_concrete_TypeRef())
+        })
+    };
     classify_mutation(status)
 }
 
@@ -79,8 +87,14 @@ pub(super) fn attribute_settable(
     let mut flag: u8 = 0;
     let name = CFString::new(attribute);
     // SAFETY: element is live. `flag` is an out-parameter.
-    let status =
-        unsafe { AXUIElementIsAttributeSettable(element, name.as_concrete_TypeRef(), &mut flag) };
+    let status = unsafe {
+        crate::diagnostics::ax_call(
+            "AXUIElementIsAttributeSettable",
+            (element) as usize,
+            attribute,
+            || AXUIElementIsAttributeSettable(element, name.as_concrete_TypeRef(), &mut flag),
+        )
+    };
     if status == kAXErrorSuccess {
         return Ok(Some(flag != 0));
     }
@@ -131,7 +145,11 @@ pub(super) fn set_text_range(world: &mut World, id: u64, range: TextRange) -> Re
     let element = prepare(world, id)?;
     let native = CFRange { location, length };
     // SAFETY: AXValueCreate copies the range bytes. The result is +1.
-    let created = unsafe { AXValueCreate(kAXValueTypeCFRange, std::ptr::addr_of!(native).cast()) };
+    let created = unsafe {
+        crate::diagnostics::ax_call("AXValueCreate", 0, "", || {
+            AXValueCreate(kAXValueTypeCFRange, std::ptr::addr_of!(native).cast())
+        })
+    };
     if created.is_null() {
         return Err(DriverError::Native {
             message: "accessibility text range was not created".into(),
@@ -202,8 +220,14 @@ fn prepare(world: &mut World, id: u64) -> Result<AXUIElementRef> {
 fn set_attribute(element: AXUIElementRef, attribute: &str, value: CFTypeRef) -> Result<AxCall> {
     let name = CFString::new(attribute);
     // SAFETY: element and value are live. AX copies the value and does not take it.
-    let status =
-        unsafe { AXUIElementSetAttributeValue(element, name.as_concrete_TypeRef(), value) };
+    let status = unsafe {
+        crate::diagnostics::ax_call(
+            "AXUIElementSetAttributeValue",
+            (element) as usize,
+            attribute,
+            || AXUIElementSetAttributeValue(element, name.as_concrete_TypeRef(), value),
+        )
+    };
     classify_mutation(status)
 }
 
@@ -211,8 +235,14 @@ pub(super) fn copy_attribute(element: AXUIElementRef, name: &str) -> Result<Opti
     let mut result: CFTypeRef = std::ptr::null();
     let cf = CFString::new(name);
     // SAFETY: element is live. On success `result` is +1 and the caller releases it.
-    let status =
-        unsafe { AXUIElementCopyAttributeValue(element, cf.as_concrete_TypeRef(), &mut result) };
+    let status = unsafe {
+        crate::diagnostics::ax_call(
+            "AXUIElementCopyAttributeValue",
+            (element) as usize,
+            name,
+            || AXUIElementCopyAttributeValue(element, cf.as_concrete_TypeRef(), &mut result),
+        )
+    };
     if status == kAXErrorSuccess {
         return Ok((!result.is_null()).then_some(result));
     }
@@ -326,7 +356,13 @@ pub(super) fn string_of(ptr: CFTypeRef) -> Option<String> {
 
 pub(super) fn is_element(ptr: CFTypeRef) -> bool {
     // SAFETY: both type-id calls are pure queries.
-    !ptr.is_null() && unsafe { CFGetTypeID(ptr) } == unsafe { AXUIElementGetTypeID() }
+    !ptr.is_null()
+        && unsafe { CFGetTypeID(ptr) }
+            == unsafe {
+                crate::diagnostics::ax_call("AXUIElementGetTypeID", 0, "", || {
+                    AXUIElementGetTypeID()
+                })
+            }
 }
 
 fn ax_pair(ptr: CFTypeRef, kind: u32) -> Option<(f64, f64)> {
@@ -340,12 +376,19 @@ fn ax_pair(ptr: CFTypeRef, kind: u32) -> Option<(f64, f64)> {
     }
     let mut pair = Pair { a: 0.0, b: 0.0 };
     // SAFETY: ptr is an AXValue. Pair matches CGPoint and CGSize.
-    let ok =
-        unsafe { AXValueGetValue(ptr as AXValueRef, kind, std::ptr::addr_of_mut!(pair).cast()) };
+    let ok = unsafe {
+        crate::diagnostics::ax_call("AXValueGetValue", (ptr as AXValueRef) as usize, "", || {
+            AXValueGetValue(ptr as AXValueRef, kind, std::ptr::addr_of_mut!(pair).cast())
+        })
+    };
     ok.then_some((pair.a, pair.b))
 }
 
 fn is_ax_value(ptr: CFTypeRef) -> bool {
     // SAFETY: both type-id calls are pure queries.
-    !ptr.is_null() && unsafe { CFGetTypeID(ptr) } == unsafe { AXValueGetTypeID() }
+    !ptr.is_null()
+        && unsafe { CFGetTypeID(ptr) }
+            == unsafe {
+                crate::diagnostics::ax_call("AXValueGetTypeID", 0, "", || AXValueGetTypeID())
+            }
 }

@@ -735,6 +735,50 @@ async fn driver_press_does_not_raise_or_activate() {
 }
 
 #[tokio::test]
+async fn driver_semantic_press_host_stopped_cancels_before_ax() {
+    use gcu_driver_macos::input::{
+        activity::ActivityMonitor,
+        clock::RuntimeClock,
+        hotkey::{Guards, SharedStopLatch},
+        FakeEvents,
+    };
+    let (_api, mut driver, _win) = session(true).await;
+    let source = Arc::new(FakeAxSource::default());
+    let node = button(1, &["AXPress"]);
+    let handle = source.handle(&node);
+    driver.inject_tree(source.clone(), node);
+    for stopped in [true, false] {
+        let clock = Arc::new(RuntimeClock::default());
+        let events = Arc::new(FakeEvents::ready());
+        events.set_guards(Arc::new(Guards::new(
+            clock.clone(),
+            Arc::new(ActivityMonitor::new(clock)),
+            Arc::new(SharedStopLatch::new(stopped)),
+            3000,
+        )));
+        driver.inject_events(events);
+        let result = driver
+            .perform(
+                &DriverAction::Press { el: handle.clone() },
+                &Cancel::default(),
+            )
+            .await;
+        if stopped {
+            assert_eq!(
+                result,
+                Err(DriverError::Cancelled {
+                    maybe_executed: false
+                })
+            );
+            assert!(source.calls().is_empty());
+        } else {
+            assert_eq!(result, Ok(Delivery::Accessibility));
+            assert_eq!(source.calls(), ["perform:AXPress"]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn driver_reports_semantic_actions_without_foreground() {
     let (_api, driver, win) = session(true).await;
     let caps = driver.capabilities();

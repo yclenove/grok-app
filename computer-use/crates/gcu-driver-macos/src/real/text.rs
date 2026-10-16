@@ -108,7 +108,11 @@ fn focus(world: &mut World, target: &InputTarget) -> Result<TextFocus> {
     world::set_messaging_timeout(ptr)?;
     let mut pid = 0;
     // SAFETY: ptr is a live AX element, pid is a writable out-parameter.
-    world::ax_status(unsafe { AXUIElementGetPid(ptr, &mut pid) })?;
+    world::ax_status(unsafe {
+        crate::diagnostics::ax_call("AXUIElementGetPid", (ptr) as usize, "", || {
+            AXUIElementGetPid(ptr, &mut pid)
+        })
+    })?;
     if pid != target.pid {
         return Err(DriverError::StaleElement);
     }

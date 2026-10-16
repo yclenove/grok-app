@@ -48,14 +48,22 @@ pub(super) fn accessibility_trusted() -> Result<bool> {
     let dict = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
     // SAFETY: the dictionary lives for this call. The prompt value is false, so
     // the function does not present a system dialog. It does not retain the dict.
-    Ok(unsafe { AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef()) })
+    Ok(unsafe {
+        crate::diagnostics::ax_call("AXIsProcessTrustedWithOptions", 0, "prompt=false", || {
+            AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef())
+        })
+    })
 }
 
 pub(super) fn ax_windows(pid: u32) -> Result<Vec<AxWindow>> {
     let pid = i32::try_from(pid).map_err(|_| DriverError::InvalidRequest)?;
     // SAFETY: the pid names a process. The create rule returns +1, released by
     // the guard at the end of this function.
-    let app = unsafe { AXUIElementCreateApplication(pid) };
+    let app = unsafe {
+        crate::diagnostics::ax_call("AXUIElementCreateApplication", 0, "", || {
+            AXUIElementCreateApplication(pid)
+        })
+    };
     if app.is_null() {
         return Ok(Vec::new());
     }
@@ -74,7 +82,11 @@ pub(super) fn ax_windows(pid: u32) -> Result<Vec<AxWindow>> {
 pub(super) fn ax_raise(pid: u32, index: u32) -> Result<()> {
     let pid = i32::try_from(pid).map_err(|_| DriverError::InvalidRequest)?;
     // SAFETY: same create-rule contract as [`ax_windows`].
-    let app = unsafe { AXUIElementCreateApplication(pid) };
+    let app = unsafe {
+        crate::diagnostics::ax_call("AXUIElementCreateApplication", 0, "", || {
+            AXUIElementCreateApplication(pid)
+        })
+    };
     if app.is_null() {
         return Err(DriverError::WindowGone);
     }
@@ -84,7 +96,14 @@ pub(super) fn ax_raise(pid: u32, index: u32) -> Result<()> {
         let action = CFString::new(kAXRaiseAction);
         // SAFETY: `element` is an AX window from the array we still hold, and
         // `action` is the AXRaise constant. This does not activate the app.
-        let status = unsafe { AXUIElementPerformAction(element, action.as_concrete_TypeRef()) };
+        let status = unsafe {
+            crate::diagnostics::ax_call(
+                "AXUIElementPerformAction",
+                (element) as usize,
+                kAXRaiseAction,
+                || AXUIElementPerformAction(element, action.as_concrete_TypeRef()),
+            )
+        };
         release(value);
         if status == kAXErrorAPIDisabled {
             Err(DriverError::PermissionMissing {
@@ -139,12 +158,20 @@ fn copy_frame(element: accessibility_sys::AXUIElementRef) -> Rect {
     };
     if let Some(value) = point {
         // SAFETY: `value` is an AXValue of point type, and `origin` matches CGPoint.
-        unsafe { AXValueGetValue(value, kAXValueTypeCGPoint, ptr::addr_of_mut!(origin).cast()) };
+        unsafe {
+            crate::diagnostics::ax_call("AXValueGetValue", (value) as usize, "", || {
+                AXValueGetValue(value, kAXValueTypeCGPoint, ptr::addr_of_mut!(origin).cast())
+            })
+        };
         release(value as CFTypeRef);
     }
     if let Some(value) = size {
         // SAFETY: `value` is an AXValue of size type, and `extent` matches CGSize.
-        unsafe { AXValueGetValue(value, kAXValueTypeCGSize, ptr::addr_of_mut!(extent).cast()) };
+        unsafe {
+            crate::diagnostics::ax_call("AXValueGetValue", (value) as usize, "", || {
+                AXValueGetValue(value, kAXValueTypeCGSize, ptr::addr_of_mut!(extent).cast())
+            })
+        };
         release(value as CFTypeRef);
     }
     Rect {
@@ -196,7 +223,12 @@ fn copy_attribute(element: accessibility_sys::AXUIElementRef, name: &str) -> Res
     // SAFETY: `element` is a live AX object. `value` is an out-parameter. On
     // success it is +1 and the caller releases it.
     let status = unsafe {
-        AXUIElementCopyAttributeValue(element, attribute.as_concrete_TypeRef(), &mut value)
+        crate::diagnostics::ax_call(
+            "AXUIElementCopyAttributeValue",
+            (element) as usize,
+            name,
+            || AXUIElementCopyAttributeValue(element, attribute.as_concrete_TypeRef(), &mut value),
+        )
     };
     if status == kAXErrorAPIDisabled {
         return Err(DriverError::PermissionMissing {
@@ -228,6 +260,7 @@ fn as_array(value: CFTypeRef) -> Option<CFArray<core_foundation::base::CFType>> 
 
 fn release(value: CFTypeRef) {
     if !value.is_null() {
+        crate::diagnostics::forget_reference(value as usize);
         // SAFETY: `value` is a +1 CoreFoundation object owned by the caller.
         unsafe { CFRelease(value) };
     }

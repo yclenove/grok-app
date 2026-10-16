@@ -1,5 +1,38 @@
 # macOS discovery, accessibility and input (P1-02–P1-07)
 
+## Native fixture diagnosis (P1-09)
+
+Build `cargo build --locked -p gcu-driver-macos --example driver_probe` on the
+Mac, and run it through the same authorized GUI/helper responsible process as
+the suite (ADR 0006). Its main thread initializes AppKit before Tokio.
+Use the disposable egui fixture `.app` (bundle name containing `fixture`),
+with `GCU_FIXTURE_STATE` pointing to the JSON file used by that fixture:
+
+```sh
+./driver_probe /absolute/path/fixture.app > driver-probe.jsonl 2>&1
+```
+
+The one-shot probe prints the full capabilities table and predicates, native
+TCC/SCK/symbol/event-construction checks, baseline/repeated/enabled/restored
+trees, the first 200 nodes and every requested control, AX return codes and
+timings, fallback decisions, Stop/cancel state, and fixture-state effects.
+It excludes native title-bar close/minimize/zoom/fullscreen buttons from Press.
+It presses the first content Button, then separately presses the counter if
+present, sets a non-password TextField and Slider, and presses a CheckBox.
+Only the resolved fixture PID receives AX accessibility switches; originals
+are restored on completion/error/unwind (missing originals restore to false).
+No CG event is posted by the capability checks: field-51 readback proves
+construction only. Tree growth after enabling both switches is a hypothesis
+signal, not proof that either switch is necessary. The repeated baseline
+helps distinguish delayed publication caused by the first AX client read.
+
+`MacosDriver::new()` deliberately starts stopped. The probe first demonstrates
+that state, then explicitly resumes its own fresh fixture latch; production
+Stop state is untouched. `AX_CALL.messaging_timeout_secs` records successful
+setter values on the reference; null identifies calls with native defaults.
+AX has no messaging-timeout getter. Synchronous tracing adds timing overhead;
+these measurements are for diagnosis, not performance acceptance.
+
 This crate lists running and recently used apps, resolves an exact name, localized
 name, bundle id, or path, and builds the signing identity used for later grants.
 It also lists layer-0 windows and can unhide or `AXRaise` without activating the

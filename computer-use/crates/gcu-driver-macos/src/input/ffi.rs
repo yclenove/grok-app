@@ -234,12 +234,21 @@ fn carbon_modifiers(flags: u64) -> Option<u32> {
 
 pub(super) fn accessibility_trusted() -> bool {
     // SAFETY: Non-prompting preflight; no pointer arguments or ownership.
-    unsafe { AXIsProcessTrusted() }
+    unsafe {
+        crate::diagnostics::ax_call("AXIsProcessTrusted", 0, "prompt=false", || {
+            AXIsProcessTrusted()
+        })
+    }
 }
 
 fn listen(context: &Context, quit: &AtomicBool) {
     // SAFETY: Preflight functions do not prompt and have no pointer arguments.
-    if !unsafe { CGPreflightListenEventAccess() && AXIsProcessTrusted() } {
+    if !unsafe {
+        CGPreflightListenEventAccess()
+            && crate::diagnostics::ax_call("AXIsProcessTrusted", 0, "listener_preflight", || {
+                AXIsProcessTrusted()
+            })
+    } {
         return;
     }
     // SAFETY: Gets the current listener thread's run loop, borrowed for its life.
@@ -294,7 +303,9 @@ fn listen(context: &Context, quit: &AtomicBool) {
         let healthy = unsafe {
             CGEventTapIsEnabled(resources.tap)
                 && CGPreflightListenEventAccess()
-                && AXIsProcessTrusted()
+                && crate::diagnostics::ax_call("AXIsProcessTrusted", 0, "listener_health", || {
+                    AXIsProcessTrusted()
+                })
         };
         if !healthy || !context.monitor.is_available() {
             context.revoke();

@@ -315,6 +315,7 @@ mod live {
                 self.observer = std::ptr::null_mut();
             }
             if !self.app.is_null() {
+                crate::diagnostics::forget_reference(self.app as usize);
                 // SAFETY: AXUIElementCreateApplication returned +1.
                 unsafe { CFRelease(self.app as CFTypeRef) };
                 self.app = std::ptr::null_mut();
@@ -330,7 +331,11 @@ mod live {
 
     unsafe fn run_inner(pid: i32, hub: EventHub, stop: &AtomicBool, loop_ptr: &AtomicPtr<c_void>) {
         // SAFETY: pid names a process. Create returns +1, owned by `guard`.
-        let app = unsafe { AXUIElementCreateApplication(pid) };
+        let app = unsafe {
+            crate::diagnostics::ax_call("AXUIElementCreateApplication", 0, "", || {
+                AXUIElementCreateApplication(pid)
+            })
+        };
         let mut guard = Guard {
             app,
             observer: std::ptr::null_mut(),
@@ -341,11 +346,19 @@ mod live {
             return;
         }
         // SAFETY: app is the +1 element above. 1s caps a hung notification port.
-        unsafe { AXUIElementSetMessagingTimeout(app, 1.0) };
+        unsafe {
+            crate::diagnostics::ax_call("AXUIElementSetMessagingTimeout", app as usize, "1", || {
+                AXUIElementSetMessagingTimeout(app, 1.0)
+            })
+        };
         let mut observer: AXObserverRef = std::ptr::null_mut();
         // SAFETY: callback is `extern "C"` and only reads a live CFString plus the
         // hub pointer installed below. out-parameter receives +1 on success.
-        let status = unsafe { AXObserverCreate(pid, on_notification, &mut observer) };
+        let status = unsafe {
+            crate::diagnostics::ax_call("AXObserverCreate", 0, "", || {
+                AXObserverCreate(pid, on_notification, &mut observer)
+            })
+        };
         if status != kAXErrorSuccess || observer.is_null() {
             tracing::debug!(pid, status, "accessibility observer was not created");
             return;
@@ -358,12 +371,14 @@ mod live {
             // SAFETY: observer and app are live. cf lives for the call. refcon is
             // the leaked Arc, reclaimed only after the observer is released.
             let added = unsafe {
-                AXObserverAddNotification(
-                    observer,
-                    app,
-                    cf.as_concrete_TypeRef(),
-                    leaked as *mut c_void,
-                )
+                crate::diagnostics::ax_call("AXObserverAddNotification", app as usize, name, || {
+                    AXObserverAddNotification(
+                        observer,
+                        app,
+                        cf.as_concrete_TypeRef(),
+                        leaked as *mut c_void,
+                    )
+                })
             };
             if added != kAXErrorSuccess {
                 tracing::debug!(pid, added, name, "accessibility notification was not added");
@@ -371,7 +386,11 @@ mod live {
         }
         // SAFETY: AXObserverGetRunLoopSource is +0; the observer owns it. Get-rule
         // retains a +1 that `source`'s Drop releases. This does not free the original.
-        let source_ref = unsafe { AXObserverGetRunLoopSource(observer) };
+        let source_ref = unsafe {
+            crate::diagnostics::ax_call("AXObserverGetRunLoopSource", app as usize, "", || {
+                AXObserverGetRunLoopSource(observer)
+            })
+        };
         if source_ref.is_null() {
             return;
         }
@@ -392,7 +411,12 @@ mod live {
             let cf = CFString::new(name);
             // SAFETY: same live observer and app. Removing a missing note is fine.
             unsafe {
-                AXObserverRemoveNotification(observer, app, cf.as_concrete_TypeRef());
+                crate::diagnostics::ax_call(
+                    "AXObserverRemoveNotification",
+                    app as usize,
+                    name,
+                    || AXObserverRemoveNotification(observer, app, cf.as_concrete_TypeRef()),
+                );
             }
         }
         loop_ptr.store(std::ptr::null_mut(), Ordering::SeqCst);

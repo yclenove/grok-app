@@ -73,7 +73,11 @@ impl World {
         }
         // SAFETY: pid names a process. Create returns +1, stored in `apps` and
         // released from Drop.
-        let app = unsafe { AXUIElementCreateApplication(pid) };
+        let app = unsafe {
+            crate::diagnostics::ax_call("AXUIElementCreateApplication", 0, "", || {
+                AXUIElementCreateApplication(pid)
+            })
+        };
         if app.is_null() {
             return Err(DriverError::Native {
                 message: "accessibility application element was null".into(),
@@ -102,7 +106,14 @@ impl Drop for World {
 /// Set the per-element AX messaging timeout. `APIDisabled` is a missing permission.
 pub(super) fn set_messaging_timeout(element: AXUIElementRef) -> Result<()> {
     // SAFETY: element is a live AX object. The timeout is a float in seconds.
-    let status = unsafe { AXUIElementSetMessagingTimeout(element, MESSAGING_TIMEOUT_SECS) };
+    let status = unsafe {
+        crate::diagnostics::ax_call(
+            "AXUIElementSetMessagingTimeout",
+            (element) as usize,
+            &MESSAGING_TIMEOUT_SECS.to_string(),
+            || AXUIElementSetMessagingTimeout(element, MESSAGING_TIMEOUT_SECS),
+        )
+    };
     ax_status(status)
 }
 
@@ -156,6 +167,7 @@ pub(super) fn retain(value: CFTypeRef) -> CFTypeRef {
 /// Release a +1 object. Null is ignored.
 pub(super) fn release(value: CFTypeRef) {
     if !value.is_null() {
+        crate::diagnostics::forget_reference(value as usize);
         // SAFETY: value is a +1 CoreFoundation object owned by the caller.
         unsafe { CFRelease(value) };
     }
