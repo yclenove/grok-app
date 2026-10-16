@@ -28,7 +28,7 @@
 | P1-06 | macOS 定向事件 / SkyLight | P1-04、S-02 | 3d | done | cu2/P1-06-mac-input |  | 2026-10-14 | 按 ADR 0006：postToPid + 字段 51 + dlsym CGEventSetWindowLocation，运行时探测与“实际到达”校验；Chromium 后台声明不可用且不升级；SkyLight 在 macos-private-spi 后运行时探测；InputLedger；真机后台点击/Chrome 遮挡/bench not_run(无授权 Mac) |
 | P1-07 | macOS 文本输入与剪贴板 | P1-06 | 1.5d | done | cu2/P1-07-mac-text |  | 2026-10-15 | NSPasteboard changeCount/内容/焦点校验；恢复不覆盖外来内容；敏感/高风险文本拒回退(复用 gcu-core policy::clipboard)；Unicode 经 CGEvent 字符串事件分块；Fake 任意平台测试；4 项真机用例待在 Mac 上跑 |
 | P1-08 | macOS 守卫 / 热键 / 前台 | P1-06、P0-08 | 1.5d | done | cu2/P1-08-mac-guards |  | 2026-10-15 | 物理/合成输入区分的活动时钟(不可用→None)；Stop 热键；≤100ms 锁存/≤500ms 释放/≤5s watchdog(可注入时钟)；前台激活核验；失效禁依赖路线；真机/TCC 撤销/物理热键 not_run |
-| P1-09 | macOS 契约测试与冒烟 | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08 | 1.5d | todo |  |  |  | 需自托管 Mac runner |
+| P1-09 | macOS 契约测试与冒烟 | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08 | 1.5d | done | cu2/P1-09-mac-contract-live |  | 2026-10-16 | Mini(macOS 27, arm64)真机 live 契约表 26 通过/4 跳过/0 失败(跳过均为范围划分：C17/C24/C25 归 core、C21 无排除能力)；夹具就绪等待实测首读 7 节点 incomplete→约 588ms 后 54 节点完整(2 次轮询)；文本框 SetValue 在 egui 上读回不符→NotSettable 并回退 TypeText；非 ASCII 键入经显式允许的剪贴板 targeted cmd+v；拖拽需 32ms 帧间隔；列表滚动=悬停后 line 滚轮。仅 macOS 27 实测，macOS 14/15、Intel、物理键鼠的 Stop 热键未覆盖 |
 | P2-01 | Windows 发现 / 身份 / 虚拟桌面 | P0-05 | 2d | done | cu2/P2-01-windows-discovery |  | 2026-10-13 | 34测试；WinGate 统一门禁(引擎提升/高完整性目标/安全桌面)；真实 Windows 冒烟 ignored(not_run) |
 | P2-02 | Windows UIA 树 | P2-01 | 3d | done | cu2/P2-02-uia-tree |  | 2026-10-13 | 常驻 MTA + CacheRequest 批量取属性；2s/5000 节点上限并设置 RawTree.incomplete；三类事件订阅 Drop 反注册；终端/IDE 启发式；真机冒烟(记事本/资源管理器/设置)not_run |
 | P2-03 | Windows WGC 截图 | P2-01、P2-02、P0-07 | 2d | done | cu2/P2-03-windows-capture |  | 2026-10-13 | WGC 单帧 + PrintWindow(PW_RENDERFULLCONTENT) 回退，经 CaptureSource/FakeCapture 分层；最小化→window_minimized；受保护/全黑不当成功；路径经 CaptureStats；真机遮挡/150% DPI not_run |
@@ -103,6 +103,9 @@
 - S-02 发现：macOS 后台点击需要给 CGEvent 设置整数字段 51（窗口号），否则 postToPid 事件的 windowNumber 为 0；Chromium 在 macOS 27 后台收不到（详见 ADR 0006）。P1-06 的契约测试必须校验“实际到达”。
 - 带 worker 子进程的测试（`gcu-driver-windows` 的 `tests/{input,clipboard,worker}`）对机器负载/冷启动敏感：慢的 macOS runner（#50 稳定失败）和高负载的 build8（P2-08 一次失败）上 worker 启动超过 `DRIVER_DEADLINE` 就返回 `Timeout`。P2-07 正在查根因；原则：这类测试不得依赖真实时间/真实进程冷启动，改为可注入时钟或预热。
 - macOS 真机发现(Mini, macOS 27)：P1-02 的发现路径在真机上首次 list_apps 超时、resolve_app 找不到运行中的夹具(逐 App 签名/哈希堵住串行队列)，已修(cu2/fix-mac-discovery)；Windows 在真机 CI 上暴露同类问题，由 P2-09 分支跟进。真机/真桌面才能暴露这类问题，CI 与假驱动测不出。
+- P1-09 真机发现(Mini, macOS 27)：egui/AccessKit 的 AX 树是懒激活的——第一次访问只返回 7 节点(驱动如实标 incomplete=partial_error)，约 588ms 后才是完整 54 节点；调用方(Router/套件)必须带界限地重读直到完整，ADR 0004 的“不完整即不出图”因此在首次观察必然触发。
+- P1-09 真机发现(Mini)：accesskit_macos 的 `setAccessibilityValue:` 只是把动作入队、AppKit 立即报成功，egui 0.36 的 TextEdit 丢弃该动作，文本不变——AX 写入后必须读回验证(驱动已在注入时钟 320ms 内轮询，窗口后仍不符才 NotSettable 且 maybe_executed=true，避免“假成功”和“假失败”两种错)。同一原因使 Unicode/ZWJ/换行只能走剪贴板粘贴路径。
+- P1-09 真机发现(Mini)：egui 拖拽对同一帧内的按下+抬起不响应，两点拖拽需分帧；虚拟列表在 AX 里没有 AXList/AXTable，只有 9 个无名 AXStaticText 与只可按压的滚动条，滚动靠悬停后的 line 单位滚轮。
 
 ## 阶段记录
 
