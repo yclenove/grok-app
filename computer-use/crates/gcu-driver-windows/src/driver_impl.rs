@@ -428,6 +428,12 @@ impl WindowsDriver {
         if self.child {
             return;
         }
+        // WorkerDriver and this outer adapter share the same parent guard.
+        issues.retain(|i| {
+            !i.starts_with("user_activity_guard:")
+                && !i.starts_with("stop_hotkey:")
+                && !i.starts_with("stop_listener_native:")
+        });
         if let Some(guard) = &self.safety {
             guard.doctor_issues(issues);
         } else {

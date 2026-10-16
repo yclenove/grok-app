@@ -21,6 +21,8 @@ mod cases;
 mod safety;
 #[path = "unsafe_desktop.rs"]
 pub mod unsafe_desktop;
+#[path = "unsafe_hotkey.rs"]
+mod unsafe_hotkey;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct Fixture {
@@ -71,6 +73,22 @@ impl Fixture {
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
+    async fn stop(&mut self) -> Result<(), String> {
+        if self.child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            self.child
+                .kill()
+                .map_err(|e| format!("fixture reset kill: {e}"))?;
+        }
+        poll(
+            &mut DesktopClock::default(),
+            Duration::from_secs(5),
+            "fixture reset exit",
+            || self.child.try_wait().map_err(|e| e.to_string()),
+            |status| status.is_some(),
+        )
+        .await?;
+        Ok(())
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -81,19 +99,27 @@ impl Drop for Fixture {
 }
 pub async fn driver() -> Result<WindowsDriver, String> {
     super::timings::install();
+    WindowsDriver::monitored(
+        worker_config()?,
+        Default::default(),
+        Arc::new(crate::common::TestStop::default()),
+    )
+    .await
+    .map_err(|e| format!("{e}; native_parent_timings={}", super::timings::snapshot()))
+}
+pub fn worker_config() -> Result<WorkerConfig, String> {
     let exe = std::env::var_os("GCU_WORKER_EXE").ok_or("GCU_WORKER_EXE is required")?;
     let mut config = WorkerConfig::new(exe);
     // Debug workers on this disposable desktop may report fixture node labels.
     config
         .environment
         .push(("GCU_UIA_DIAGNOSTICS".into(), "1".into()));
-    WindowsDriver::monitored(
-        config,
-        Default::default(),
-        Arc::new(crate::common::TestStop::default()),
-    )
-    .await
-    .map_err(|e| format!("{e}; native_parent_timings={}", super::timings::snapshot()))
+    if let Some(directory) = std::env::var_os("GCU_NATIVE_TRACE_DIR") {
+        config
+            .environment
+            .push(("GCU_NATIVE_TRACE_DIR".into(), directory));
+    }
+    Ok(config)
 }
 pub async fn window(driver: &WindowsDriver, fixture: &Fixture) -> Result<WindowRef, String> {
     let exe = std::env::var("GCU_FIXTURE_EXE").map_err(|e| e.to_string())?;
@@ -173,6 +199,25 @@ async fn ready_fixture(
     )
     .await?;
     Ok(())
+}
+
+async fn reset_fixture(driver: &WindowsDriver, fixture: &mut Fixture) -> Result<WindowRef, String> {
+    driver.release_all_input().await;
+    let previous = fixture.pid();
+    fixture.stop().await?;
+    *fixture = Fixture::start().await?;
+    let state = fixture.read()?;
+    require(
+        state["counter"] == 0
+            && state["tab"] == 0
+            && state["modal_open"] == false
+            && state["text"] == "",
+        format!("fixture reset oracle mismatch: {state}"),
+    )?;
+    let win = window(driver, fixture).await?;
+    ready_fixture(driver, &win, fixture).await?;
+    progress(format!("FIXTURE RESET: previous_pid={previous}; pid={}; complete UIA counter_button; modal_open=false", fixture.pid()));
+    Ok(win)
 }
 pub async fn perform(driver: &WindowsDriver, action: DriverAction) -> Result<Delivery, String> {
     driver
@@ -258,6 +303,10 @@ async fn live_contract_table_c01_to_c27() {
                 std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
                 "explicit GCU_DESKTOP=1 required",
             )?;
+            progress(format!(
+                "STOP ALTERNATIVE NATIVE EVIDENCE: {:?}",
+                unsafe_hotkey::probe().await
+            ));
             progress("CONTRACT SETUP: fixture start; waiting for external state JSON");
             let fixture = Fixture::start().await?;
             progress(format!(
@@ -274,7 +323,7 @@ async fn live_contract_table_c01_to_c27() {
         },
     )
     .await;
-    let (fixture, driver, win) = match setup {
+    let (mut fixture, driver, mut win) = match setup {
         Ok(setup) => setup,
         Err(error) => {
             for (id, _) in CASES {
@@ -284,12 +333,45 @@ async fn live_contract_table_c01_to_c27() {
             panic!("native suite not_run: {error}");
         }
     };
-    // Each row observes its own initial oracle; actions are never retried.
-    for (id, description) in CASES
+    // A fresh process resets egui memory, popup/focus state and the external
+    // oracle. The driver/worker stays alive so reattachment is also exercised.
+    let mut reset_failure = None;
+    for (row, (id, description)) in CASES
         .iter()
         .filter(|r| r.0 != "C19")
         .chain(CASES.iter().filter(|r| r.0 == "C19"))
+        .enumerate()
     {
+        if let Some(reason) = &reset_failure {
+            report.record(
+                id,
+                Ok(Outcome::NotRun(format!("fixture reset failed: {reason}"))),
+            );
+            continue;
+        }
+        if row != 0 {
+            let reset = attempt_bounded(
+                &mut DesktopClock::default(),
+                Duration::from_secs(45),
+                "fixture reset",
+                reset_fixture(&driver, &mut fixture),
+            )
+            .await;
+            match reset {
+                Ok(fresh) => win = fresh,
+                Err(reason) => {
+                    report.record(
+                        id,
+                        Err(format!(
+                            "fixture reset before {id} failed: {reason}; last fixture={:?}",
+                            fixture.read()
+                        )),
+                    );
+                    reset_failure = Some(reason);
+                    continue;
+                }
+            }
+        }
         progress(format!(
             "CONTRACT RUN: {id}: {description}; timeout_ms=45000; no retry"
         ));
@@ -300,7 +382,13 @@ async fn live_contract_table_c01_to_c27() {
             cases::run(id, &driver, &fixture, &win),
         )
         .await;
-        let result = result.map_err(|e| format!("{e}; last fixture={:?}", fixture.read()));
+        let result = match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let health = unsafe_desktop::responsiveness(&win).await;
+                Err(format!("{error}; fixture window health={health:?}; native_parent_timings={}; last fixture={:?}", super::timings::snapshot(), fixture.read()))
+            }
+        };
         report.record(id, result);
     }
     driver.release_all_input().await;

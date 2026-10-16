@@ -124,13 +124,17 @@ impl State {
             .ok_or(DriverError::StaleElement)
     }
     fn root(&mut self, hwnd: u64, request: &Request) -> Result<Option<NodeId>> {
-        self.elements.clear();
+        {
+            let _timing = crate::timing::Timing::provider("uia_release_previous_elements");
+            self.elements.clear();
+        }
         self.observed.clear();
         self.window = Some(identity::window(&self.api, hwnd, request)?);
         self.generation += 1;
         self.slot = 0;
         request.check()?;
         let started = tokio::time::Instant::now();
+        let _timing = crate::timing::Timing::provider("ElementFromHandleBuildCache");
         // SAFETY: exact validated HWND and MTA-local automation/cache interfaces.
         let element = unsafe {
             self.automation
@@ -183,6 +187,11 @@ impl State {
         request.check()?;
         let mut result = std::ptr::null_mut();
         let started = tokio::time::Instant::now();
+        let _timing = crate::timing::Timing::provider(if first {
+            "GetFirstChildElementBuildCache"
+        } else {
+            "GetNextSiblingElementBuildCache"
+        });
         // SAFETY: all interfaces are MTA-local and live; out pointer is valid.
         // Calling the vtable preserves S_OK/null (documented end-of-list) versus
         // an actual provider E_POINTER failure, which must mark the tree partial.
@@ -290,6 +299,7 @@ impl UiaEventSource for RealUia {
     }
 }
 pub(super) fn native(error: windows::core::Error) -> DriverError {
+    tracing::warn!(target: "gcu_windows_uia", hresult = error.code().0 as u32, "UIA_NATIVE_HRESULT");
     if error.code().0 as u32 == UIA_E_TIMEOUT || error.code().0 as u32 == 0x800705b4 {
         DriverError::Timeout {
             maybe_executed: false,

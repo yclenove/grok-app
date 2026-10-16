@@ -45,6 +45,33 @@ pub enum Outcome {
 }
 pub type CaseResult = Result<Outcome, String>;
 
+// An unexplained startup timeout is a driver failure, not evidence that the
+// runner lacks a desktop. Only a measured native prerequisite refusal may Skip.
+pub fn foreground_unavailable(issues: &[String]) -> CaseResult {
+    let refusal = issues.iter().any(|i| {
+        i.starts_with("stop_hotkey: unavailable")
+            && ((i.contains("RegisterHotKey:") && i.contains("GetLastError=Some(1409)"))
+                || ([
+                    "OpenInputDesktop:",
+                    "SetWindowsHookExW(",
+                    "GetUserObjectInformationW(",
+                ]
+                .iter()
+                .any(|api| i.contains(api))
+                    && i.contains("GetLastError=Some(5)")))
+    });
+    let detail = format!("foreground=unavailable; Stop/physical-input listener required; doctor={issues:?}; independent RegisterHotKey conflict probe is reported under STOP ALTERNATIVE NATIVE EVIDENCE");
+    if refusal {
+        Ok(Outcome::Skip(format!(
+            "measured native prerequisite refusal: {detail}"
+        )))
+    } else {
+        Err(format!(
+            "unresolved Stop listener failure (no environment Skip): {detail}"
+        ))
+    }
+}
+
 pub fn uipi_fixture(pid: Option<&str>, unavailable: Option<&str>) -> Result<u32, Outcome> {
     if let Some(pid) = pid.and_then(|s| s.parse::<u32>().ok()).filter(|p| *p != 0) {
         return Ok(pid);
@@ -275,6 +302,23 @@ pub fn require(condition: bool, message: impl Into<String>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn foreground_skip_requires_measured_native_refusal_and_timeouts_fail() {
+        for issue in [
+            "stop_hotkey: unavailable (OpenInputDesktop: HRESULT=0x80070005, GetLastError=Some(5))",
+            "stop_hotkey: unavailable (RegisterHotKey: HRESULT=0x80070581, GetLastError=Some(1409))",
+        ] {
+            assert!(matches!(foreground_unavailable(&[issue.into()]), Ok(Outcome::Skip(_))));
+        }
+        for issue in [
+            "stop_hotkey: unavailable (Stop listener startup/FFI timed out)",
+            "stop_hotkey: unavailable (startup timed out; SendInput Win32=0; mouse_seen=false)",
+            "unrelated OpenInputDesktop: GetLastError=Some(5)",
+            "stop_hotkey: unavailable (listener heartbeat expired)",
+        ] {
+            assert!(foreground_unavailable(&[issue.into()]).is_err());
+        }
+    }
     struct Manual(Duration);
     impl Clock for Manual {
         fn now(&self) -> Duration {

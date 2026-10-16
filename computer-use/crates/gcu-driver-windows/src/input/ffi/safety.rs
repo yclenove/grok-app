@@ -13,7 +13,9 @@ use std::{
     time::Instant,
 };
 use windows::Win32::{
-    Foundation::{GetLastError, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{
+        GetLastError, SetLastError, ERROR_SUCCESS, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM,
+    },
     System::{LibraryLoader::GetModuleHandleW, StationsAndDesktops::*},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
@@ -23,6 +25,8 @@ struct Context {
     events: Arc<GuardEvents>,
     keyboard: Option<Instant>,
     mouse: Option<Instant>,
+    keyboard_probe_flags: Option<u32>,
+    mouse_probe_flags: Option<u32>,
 }
 thread_local! { static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) }; }
 
@@ -35,19 +39,27 @@ impl SafetyApi for RealSafetyApi {
         config: HotkeyConfig,
         events: Arc<GuardEvents>,
     ) -> Result<Box<dyn SafetyPump>, String> {
+        events.startup_progress("hook_desktop", "OpenInputDesktop pending");
         interactive_desktop()?;
+        events.startup_progress("hook_desktop", "Default desktop verified");
         let hotkey = HotkeyThread::start(config, events.clone())?;
+        let hooks = Hooks::install(Some(&events))?;
+        events.startup_progress("hook_install", "keyboard and mouse installed; Win32=0");
+        let pump_events = events.clone();
         CONTEXT.with(|slot| {
             *slot.borrow_mut() = Some(Context {
                 events,
                 keyboard: None,
                 mouse: None,
+                keyboard_probe_flags: None,
+                mouse_probe_flags: None,
             })
         });
-        let hooks = Hooks::install()?;
         Ok(Box::new(Pump {
             hooks,
             _hotkey: hotkey,
+            events: pump_events,
+            first_probe: true,
         }))
     }
 }
@@ -56,14 +68,22 @@ struct Hooks {
     mouse: HHOOK,
 }
 impl Hooks {
-    fn install() -> Result<Self, String> {
+    fn install(events: Option<&GuardEvents>) -> Result<Self, String> {
+        let progress = |detail| {
+            if let Some(events) = events {
+                events.startup_progress("hook_install", detail);
+            }
+        };
         // SAFETY: process module is borrowed, callbacks have static code lifetime
         // and run only on this installing message-pump thread. No cross-thread COM.
         unsafe {
+            progress("GetModuleHandleW pending");
             let module = GetModuleHandleW(None).map_err(|e| failure("GetModuleHandleW", e))?;
             let instance = Some(HINSTANCE(module.0));
+            progress("SetWindowsHookExW(WH_KEYBOARD_LL) pending");
             let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), instance, 0)
                 .map_err(|e| failure("SetWindowsHookExW(WH_KEYBOARD_LL)", e))?;
+            progress("SetWindowsHookExW(WH_MOUSE_LL) pending");
             match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), instance, 0) {
                 Ok(mouse) => Ok(Self { keyboard, mouse }),
                 Err(error) => {
@@ -118,6 +138,12 @@ fn callback(event: HookEvent, tag: usize) {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(context) = slot.as_mut() {
                 let now = Instant::now();
+                if tag == PROBE_TAG {
+                    match event {
+                        HookEvent::Keyboard(flags) => context.keyboard_probe_flags = Some(flags),
+                        HookEvent::Mouse(flags) => context.mouse_probe_flags = Some(flags),
+                    }
+                }
                 if event.injected() && tag == PROBE_TAG {
                     match event {
                         HookEvent::Keyboard(_) => context.keyboard = Some(now),
@@ -132,30 +158,31 @@ fn callback(event: HookEvent, tag: usize) {
 struct Pump {
     hooks: Hooks,
     _hotkey: HotkeyThread,
+    events: Arc<GuardEvents>,
+    first_probe: bool,
 }
 impl SafetyPump for Pump {
     fn poll(&mut self, reinstall: bool) -> Result<(), String> {
         interactive_desktop()?;
         if reinstall {
             // Install replacements before retiring old hooks: no unmonitored gap.
-            self.hooks = Hooks::install()?;
+            self.hooks = Hooks::install(None)?;
+        }
+        if self.first_probe {
+            self.events
+                .startup_progress("hook_probe_pump", "PeekMessageW pending");
         }
         pump_messages(false, None)?;
-        let proof = CONTEXT.with(|slot| {
-            let slot = slot.borrow();
-            slot.as_ref()
-                .and_then(|context| Some(context.keyboard?.min(context.mouse?)))
-        });
-        if let Some(at) = proof {
-            if at.elapsed() > HEARTBEAT_TIMEOUT {
-                return Err("low-level hook probe expired (possibly silently removed)".into());
-            }
-            CONTEXT.with(|slot| {
-                if let Some(context) = slot.borrow().as_ref() {
-                    context.events.clock().confirm(at);
-                }
-            });
+        if self.first_probe {
+            self.events
+                .startup_progress("hook_probe_pump", "message queue drained");
+            self.events.startup_progress(
+                "hook_SendInput",
+                "SendInput pending; Win32 result unobserved",
+            );
+            self.first_probe = false;
         }
+        self.confirm_probes()?;
         // Up-only unused F24 and zero relative mouse move test both hook chains.
         // These are synthetic health probes, never physical activity, normal
         // action downs or foreground activation. No user cursor movement.
@@ -183,14 +210,54 @@ impl SafetyPump for Pump {
             },
         ];
         // SAFETY: fully initialized two-record slice; only up/zero motion probes.
-        if unsafe { SendInput(&probes, std::mem::size_of::<INPUT>() as i32) } != 2 {
-            // SAFETY: capture thread-local last error immediately after SendInput.
-            let code = unsafe { GetLastError() }.0;
+        let sent = unsafe {
+            SetLastError(ERROR_SUCCESS);
+            SendInput(&probes, std::mem::size_of::<INPUT>() as i32)
+        };
+        // SAFETY: capture immediately; never use a stale unrelated last error.
+        let code = unsafe { GetLastError() }.0;
+        CONTEXT.with(|slot| {
+            if let Some(context) = slot.borrow().as_ref() {
+                context.events.startup_progress(
+                    "hook_SendInput",
+                    format!(
+                        "sent={sent}/2; Win32={code}; keyboard_seen={}; mouse_seen={}; keyboard_probe_flags={:?}; mouse_probe_flags={:?}",
+                        context.keyboard.is_some(),
+                        context.mouse.is_some(),
+                        context.keyboard_probe_flags,
+                        context.mouse_probe_flags
+                    ),
+                );
+            }
+        });
+        if sent != 2 {
             return Err(format!(
                 "SendInput(hook probes): GetLastError={code}; UIPI may suppress errors"
             ));
         }
+        // Drain callbacks before readiness is checked, rather than deferring the
+        // initial proof to a later scheduled poll. Health still requires both.
+        pump_messages(false, None)?;
+        self.confirm_probes()?;
         Ok(())
+    }
+}
+impl Pump {
+    fn confirm_probes(&self) -> Result<(), String> {
+        CONTEXT.with(|slot| {
+            if let Some(context) = slot.borrow().as_ref() {
+                if let (Some(keyboard), Some(mouse)) = (context.keyboard, context.mouse) {
+                    let at = keyboard.min(mouse);
+                    if at.elapsed() > HEARTBEAT_TIMEOUT {
+                        return Err(
+                            "low-level hook probe expired (possibly silently removed)".into()
+                        );
+                    }
+                    context.events.clock().confirm(at);
+                }
+            }
+            Ok(())
+        })
     }
 }
 impl Drop for Pump {
@@ -207,12 +274,14 @@ impl HotkeyThread {
         std::thread::Builder::new()
             .name("gcu-win-hotkey".into())
             .spawn(move || {
+                events.startup_progress("hotkey_thread", "entered; PeekMessageW pending");
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // SAFETY: initialize this thread's user32 message queue before
                     // registration; only this thread consumes its hotkey messages.
                     unsafe {
                         let _ = PeekMessageW(&mut MSG::default(), None, 0, 0, PM_NOREMOVE);
                     }
+                    events.startup_progress("hotkey_register", "RegisterHotKey pending");
                     // SAFETY: thread-owned registration, numeric validated chord.
                     if let Err(error) = unsafe {
                         RegisterHotKey(
@@ -225,6 +294,7 @@ impl HotkeyThread {
                         let _ = ready.send(Err(failure("RegisterHotKey", error)));
                         return;
                     }
+                    events.startup_progress("hotkey_register", "registered; Win32=0");
                     struct Registration;
                     impl Drop for Registration {
                         fn drop(&mut self) {

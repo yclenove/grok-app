@@ -38,8 +38,24 @@ function Invoke-NativeCase {
     # Force native stdout through PowerShell so the hidden child's transcript
     # contains the per-case diagnostics forwarded to the parent.
     Write-DesktopProgress "NATIVE CASE RUN: $Name; --ignored --nocapture --test-threads=1"
-    & $TestExe --exact $Name --ignored --nocapture --test-threads=1 | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "$Name failed: exit $LASTEXITCODE" }
+    # Hidden PowerShell has no console stderr handle. Explicitly pipe stderr so
+    # inherited worker COM timings reach the transcript. Windows PowerShell 5
+    # wraps native stderr as ErrorRecord; it is diagnostic text, not a cmdlet error.
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $TestExe --exact $Name --ignored --nocapture --test-threads=1 2>&1 | ForEach-Object { Write-Host "$_" }
+        $caseExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+        if ($env:GCU_NATIVE_TRACE_DIR -and (Test-Path -LiteralPath $env:GCU_NATIVE_TRACE_DIR)) {
+            Get-ChildItem -LiteralPath $env:GCU_NATIVE_TRACE_DIR -Filter '*.log' | ForEach-Object {
+                Write-DesktopProgress "WORKER TRACE TAIL: $($_.Name); full log retained in artifacts"
+                Get-Content -LiteralPath $_.FullName -Tail 60 | Out-Host
+            }
+        }
+    }
+    if ($caseExit -ne 0) { throw "$Name failed: exit $caseExit" }
     Write-DesktopProgress "NATIVE CASE END: $Name; exit=0"
 }
 
@@ -179,6 +195,8 @@ try {
     }
     $env:GCU_DESKTOP = '1'
     $env:GCU_WORKER_EXE = $WorkerExe
+    $env:GCU_NATIVE_TRACE_DIR = Join-Path $OutputDir 'native'
+    New-Item -ItemType Directory -Force -Path $env:GCU_NATIVE_TRACE_DIR | Out-Null
     $env:GCU_CONTRACT_WORKER_EXE = Join-Path (Split-Path $WorkerExe -Parent) 'gcu-contract-worker.exe'
     $env:GCU_FIXTURE_EXE = $FixtureExe
     $env:GCU_ELEVATED_PID = "$ElevatedPid"

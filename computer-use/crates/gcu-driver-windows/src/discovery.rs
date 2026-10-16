@@ -129,7 +129,10 @@ impl State {
             .into_iter()
             .next()
             .ok_or(DriverError::AppNotFound)?;
-        let before = self.api.process_security(pid)?;
+        // Refuse a visible High target before opening its High-labelled image.
+        // File verification can report NotFound/AccessDenied for that image;
+        // those errors must never hide the known integrity refusal.
+        let before = WinGate.check(self.api.as_ref(), pid, false, None)?;
         let identity = {
             let _timing = crate::timing::Timing::start("resolve_identity");
             identity_for_path(self.api.as_ref(), &path)?
@@ -214,8 +217,7 @@ impl State {
         Ok(AppRef { info: entry.info })
     }
     fn note(&mut self, error: DriverError) {
-        self.issues.push(error.to_string());
-        self.issues.truncate(8);
+        super::discovery_workers::note_window(&mut self.issues, error);
     }
     pub(super) fn validate_app(&self, app: &AppRef) -> Result<Entry> {
         let _timing = crate::timing::Timing::start("validate_app");

@@ -35,11 +35,13 @@ mod value;
 use super::super::patterns::PatternError as ActionError;
 impl From<windows::core::Error> for ActionError {
     fn from(error: windows::core::Error) -> Self {
+        tracing::warn!(target: "gcu_windows_uia", hresult = error.code().0 as u32, mutation = false, "UIA_PATTERN_HRESULT");
         Self::from_hresult(error.code().0, false)
     }
 }
 type Prepared<T> = std::result::Result<T, ActionError>;
 fn mutation_error(error: windows::core::Error) -> Result<PatternResult> {
+    tracing::warn!(target: "gcu_windows_uia", hresult = error.code().0 as u32, mutation = true, "UIA_PATTERN_HRESULT");
     match ActionError::from_hresult(error.code().0, true) {
         ActionError::Unsupported => Ok(PatternResult::Unsupported),
         ActionError::Unavailable => Ok(PatternResult::Unavailable),

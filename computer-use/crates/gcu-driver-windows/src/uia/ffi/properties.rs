@@ -10,6 +10,7 @@ use windows::Win32::{
 };
 
 pub(super) fn read(element: &IUIAutomationElement) -> Properties {
+    let _timing = crate::timing::Timing::provider("uia_cached_properties_decode");
     decode(&mut Reader {
         element,
         failure: None,

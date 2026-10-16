@@ -246,7 +246,11 @@ fn refresh_catalog(
             Ok(info) => {
                 hints.insert(info.id.clone(), info);
             }
-            Err(error) => note(notes, error),
+            Err(error) => {
+                if let Ok(mut notes) = notes.lock() {
+                    note_window(&mut notes, error);
+                }
+            }
         }
     }
     // Discovery must not hash/sign unrelated images: one blocked verifier used
@@ -258,6 +262,19 @@ fn note(notes: &Mutex<Vec<String>>, error: DriverError) {
     if let Ok(mut notes) = notes.lock() {
         notes.push(error.to_string());
         notes.truncate(8);
+    }
+}
+
+// EnumWindows is a snapshot: unrelated processes may exit before path/token
+// lookup. These per-window outcomes are diagnostics, not engine health issues.
+pub(super) fn note_window(issues: &mut Vec<String>, error: DriverError) {
+    tracing::debug!(target: "gcu_windows_discovery", %error, "window discovery omitted candidate");
+    if matches!(error, DriverError::AppNotFound | DriverError::WindowGone) {
+        return;
+    }
+    let issue = format!("window discovery: {error}");
+    if issues.len() < 8 && !issues.contains(&issue) {
+        issues.push(issue);
     }
 }
 fn crashed() -> DriverError {

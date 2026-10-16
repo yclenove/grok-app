@@ -56,7 +56,7 @@ impl Visit for Fields {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if matches!(
             field.name(),
-            "error" | "pid" | "epoch" | "attempt" | "mutation"
+            "error" | "reason" | "pid" | "epoch" | "attempt" | "mutation"
         ) {
             self.diagnostics.push(format!("{}={value:?}", field.name()));
         }

@@ -16,6 +16,52 @@ use std::{
 mod common;
 use common::{fixture, indexed, shortcut};
 
+#[tokio::test]
+async fn elevated_visible_process_refused_before_unreadable_image_verification() {
+    let (api, driver, _, _) = fixture().await;
+    api.update(|s| {
+        s.paths.insert(9, "C:\\High\\hi.exe".into());
+        let mut high = medium_security();
+        high.integrity = gcu_driver_windows::gate::IntegrityLevel::High;
+        s.processes.insert(9, high);
+        s.windows.push(window(10, 9));
+        // Medium cannot read this High-labelled file; image() would be NotFound.
+        s.image_reads.clear();
+    });
+    assert_eq!(
+        driver
+            .resolve_app(&AppQuery::from("C:\\High\\hi.exe"))
+            .await,
+        Err(DriverError::ElevationRequired)
+    );
+    assert!(!api
+        .state()
+        .unwrap()
+        .image_reads
+        .iter()
+        .any(|p| p.ends_with("hi.exe")));
+}
+
+#[tokio::test]
+async fn disappearing_unrelated_windows_do_not_accumulate_app_errors_in_doctor() {
+    let (api, driver, app, _) = fixture().await;
+    api.update(|s| {
+        for pid in 100..110 {
+            s.windows.push(window(pid as u64, pid));
+        }
+    });
+    for _ in 0..3 {
+        driver.list_windows(Some(&app)).await.unwrap();
+        driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
+    }
+    assert!(!driver
+        .doctor()
+        .await
+        .issues
+        .iter()
+        .any(|i| i == "app not found"));
+}
+
 #[test]
 fn filtering_keeps_owned_dialogs_and_excludes_hidden_tool_windows() {
     let root = window(1, 7);

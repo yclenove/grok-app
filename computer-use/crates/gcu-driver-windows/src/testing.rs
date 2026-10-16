@@ -49,7 +49,7 @@ pub struct FakeState {
     pub restores: Vec<u64>,
     /// Full image-verification calls, for detecting redundant hashing/signatures.
     pub image_reads: Vec<String>,
-    /// Top-level metadata enumeration count (never UIA).
+    /// Top-level metadata enumeration count (never UIA; background catalog excluded).
     pub enumerations: usize,
     /// Windows/native metadata probe failure.
     pub failure: Option<DriverError>,
@@ -160,7 +160,10 @@ impl WinApi for FakeWinApi {
             .ok_or(DriverError::WindowGone)
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
-        self.update(|s| s.enumerations += 1);
+        // The background catalog refresh (spawned per resolve/list) enumerates on
+        // its own thread at an unordered time; only caller-thread passes count.
+        let background = std::thread::current().name() == Some("gcu-win-catalog");
+        self.update(|s| s.enumerations += usize::from(!background));
         let block = self
             .enum_block
             .lock()

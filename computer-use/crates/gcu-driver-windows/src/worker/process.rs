@@ -50,6 +50,26 @@ impl Process {
             }
         }
         command.envs(config.environment.iter().cloned());
+        // The disposable native harness opts in to full provider timing. Write
+        // child stderr directly to a per-worker file: a slow PowerShell console
+        // must not stall COM calls and manufacture two-second tree timeouts.
+        #[cfg(debug_assertions)]
+        if let Some((_, directory)) = config
+            .environment
+            .iter()
+            .find(|(key, _)| key.to_str() == Some("GCU_NATIVE_TRACE_DIR"))
+        {
+            let path = PathBuf::from(directory.as_os_str())
+                .join(format!("worker-{}-{epoch}.log", config.namespace));
+            let file = tokio::task::spawn_blocking(move || std::fs::File::create(path))
+                .await
+                .map_err(|_| crashed(false))?
+                .map_err(|e| DriverError::Native {
+                    message: format!("worker diagnostic file: {e}"),
+                    maybe_executed: false,
+                })?;
+            command.stderr(Stdio::from(file));
+        }
         let mut child = command.spawn().map_err(|_| crashed(false))?;
         // Windows std Command uses an explicit inherited standard-handle list.
         // The child waits for our first frame, so no FFI runs before assignment.

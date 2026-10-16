@@ -13,7 +13,7 @@ pub async fn run(
             == gcu_protocol::capabilities::ForegroundCapability::Unavailable
     {
         let report = driver.doctor().await;
-        return Ok(Outcome::Skip(format!("capability: foreground=unavailable; Stop/physical-input listener required; doctor={:?}", report.issues)));
+        return foreground_unavailable(&report.issues);
     }
     match id {
         "C01" => {

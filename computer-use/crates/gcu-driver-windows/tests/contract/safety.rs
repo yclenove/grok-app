@@ -43,11 +43,9 @@ async fn observe(
 // adapters below share the same process-instance stamped identity only after discovery.
 async fn isolated() -> Result<Arc<WindowsDriver>, String> {
     Ok(Arc::new(
-        WindowsDriver::isolated(WorkerConfig::new(
-            std::env::var_os("GCU_WORKER_EXE").ok_or("GCU_WORKER_EXE")?,
-        ))
-        .await
-        .map_err(|e| e.to_string())?,
+        WindowsDriver::isolated(worker_config()?)
+            .await
+            .map_err(|e| e.to_string())?,
     ))
 }
 
@@ -356,6 +354,14 @@ pub async fn hotkey_conflict(
         !guard.available(),
         "conflicting RegisterHotKey unexpectedly succeeded",
     )?;
+    let mut issues = Vec::new();
+    guard.doctor_issues(&mut issues);
+    require(
+        issues
+            .iter()
+            .any(|i| i.contains("RegisterHotKey:") && i.contains("GetLastError=Some(1409)")),
+        format!("hotkey conflict requires measured Win32=1409; doctor={issues:?}"),
+    )?;
     let blocked = isolated().await?;
     let blocked = Arc::try_unwrap(blocked)
         .map_err(|_| "unexpected shared driver")?
@@ -408,6 +414,15 @@ pub async fn uipi(_: &Fixture) -> CaseResult {
     let api = RealWinApi::new().map_err(|e| e.to_string())?;
     let facts = unsafe_token::facts(pid)?;
     progress(format!("UIPI TOKEN ORACLE: {facts}"));
+    let raw = unsafe_desktop::raw_windows(pid).await?;
+    for window in &raw {
+        progress(format!("UIPI RAW WINDOW ORACLE: pid={pid}; HWND=0x{:x}; visible={}; class={}; EnumWindows=success; no process/property access", window.hwnd, window.visible, window.class));
+    }
+    progress(format!(
+        "UIPI RAW ENUMERATION: pid={pid}; window_count={}; visible_count={}",
+        raw.len(),
+        raw.iter().filter(|w| w.visible).count()
+    ));
     let security = api
         .process_security(pid)
         .map_err(|e| format!("{e}; {facts}"))?;
@@ -416,8 +431,32 @@ pub async fn uipi(_: &Fixture) -> CaseResult {
         format!("UIPI fixture is not elevated: {security:?}; {facts}"),
     )?;
     let path = api.process_path(pid).map_err(|e| e.to_string())?;
+    let windows = api
+        .enum_windows()
+        .map_err(|e| format!("UIPI EnumWindows: {e}; {facts}"))?;
+    let visible: Vec<_> = windows
+        .iter()
+        .filter(|w| w.pid == pid)
+        .map(|w| (w.hwnd, w.visible, w.created, &w.class))
+        .collect();
+    progress(format!(
+        "UIPI WINDOW ORACLE: pid={pid}; windows={visible:?}; process_path readable; {facts}"
+    ));
     let driver = isolated().await?;
     let result = driver.resolve_app(&AppQuery(path)).await;
+    if visible.is_empty() && !raw.iter().any(|w| w.visible) {
+        // Absence is not a UIPI refusal. Assert the measured discovery semantics
+        // and report the unexercised integrity contract separately.
+        match result {
+            Err(DriverError::AppNotFound) => (),
+            Ok(app) => {
+                let window = driver.key_window(&app).await;
+                require(matches!(window, Err(DriverError::WindowGone)), format!("High fixture invisible to Medium EnumWindows, but key_window={window:?}; {facts}"))?;
+            }
+            other => return Err(format!("High fixture invisible to Medium EnumWindows; unexpected resolution={other:?}; {facts}")),
+        }
+        return Ok(Outcome::Skip(format!("measured visibility: Medium raw EnumWindows=success, {} total / 0 visible windows for High pid={pid}; driver enumeration found no windows; resolution found no actionable window; integrity refusal was not exercised; {facts}", raw.len())));
+    }
     match result {
         Err(DriverError::ElevationRequired) => (),
         Ok(app) => {

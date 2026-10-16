@@ -24,6 +24,7 @@ pub(super) struct Observed {
 }
 impl State {
     pub(super) fn observe(&mut self, node: NodeId, request: &Request) -> Result<Properties> {
+        let _timing = crate::timing::Timing::provider("uia_observe_properties");
         let element = self.element(node)?;
         let properties = properties::read(&element);
         let runtime = runtime(&element, request).inspect_err(|_| {
@@ -71,7 +72,11 @@ impl State {
         request.check()?;
         // SAFETY: element/cache are live MTA-local interfaces. This refreshes only
         // the exact retained element; it never searches by name or other hints.
-        let fresh = unsafe { element.BuildUpdatedCache(&self.cache) }.map_err(read_error)?;
+        let fresh = {
+            let _timing = crate::timing::Timing::provider("BuildUpdatedCache(element)");
+            // SAFETY: exact retained element and cache belong to this MTA.
+            unsafe { element.BuildUpdatedCache(&self.cache) }.map_err(read_error)?
+        };
         request.check()?;
         let props = properties::read(&fresh);
         if !super::super::actions::same_identity(&old.properties, &props) {
@@ -83,20 +88,28 @@ impl State {
         for depth in 0..=super::super::tree::DEPTH_CAP {
             request.check()?;
             // SAFETY: refresh only the retained ancestor on its owning MTA.
-            let cached = unsafe { ancestor.BuildUpdatedCache(&self.cache) }.map_err(read_error)?;
+            let cached = {
+                let _timing = crate::timing::Timing::provider("BuildUpdatedCache(ancestor)");
+                // SAFETY: refresh this retained ancestor on its owning MTA.
+                unsafe { ancestor.BuildUpdatedCache(&self.cache) }.map_err(read_error)?
+            };
             let ancestor_props = properties::read(&cached);
             if depth != 0 && super::super::sensitive::is_execution_surface(&ancestor_props) {
                 return Err(DriverError::ElementNotActionable);
             }
             request.check()?;
             // SAFETY: live exact ancestor interface on its owning MTA.
-            let native_hwnd =
-                unsafe { ancestor.CurrentNativeWindowHandle() }.map_err(read_error)?;
+            let native_hwnd = {
+                let _timing = crate::timing::Timing::provider("CurrentNativeWindowHandle");
+                // SAFETY: live exact ancestor interface on its owning MTA.
+                unsafe { ancestor.CurrentNativeWindowHandle() }.map_err(read_error)?
+            };
             if native_hwnd.0 as usize as u64 == hwnd {
                 return Ok((element, props));
             }
             request.check()?;
             // SAFETY: walker/element belong to this MTA; never used after Drop.
+            let _timing = crate::timing::Timing::provider("GetParentElement");
             ancestor = unsafe { self.walker.GetParentElement(&ancestor) }.map_err(|e| {
                 if e.code().0 as u32 == 0x80004003 {
                     DriverError::StaleElement
@@ -113,6 +126,7 @@ pub(super) fn window(
     hwnd: u64,
     request: &Request,
 ) -> Result<WindowIdentity> {
+    let _timing = crate::timing::Timing::provider("uia_window_identity");
     request.check()?;
     let window = api
         .enum_windows()?
@@ -147,6 +161,7 @@ impl Drop for Array {
 fn runtime(element: &IUIAutomationElement, request: &Request) -> Result<Vec<i32>> {
     request.check()?;
     let started = tokio::time::Instant::now();
+    let _timing = crate::timing::Timing::provider("GetRuntimeId");
     // SAFETY: live MTA-local element; successful result is an owned SAFEARRAY.
     let array = Array(unsafe { element.GetRuntimeId() }.map_err(|e| {
         if e.code().0 as u32 == windows::Win32::UI::Accessibility::UIA_E_ELEMENTNOTAVAILABLE {

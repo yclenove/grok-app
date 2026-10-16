@@ -2,7 +2,7 @@
 use super::*;
 use gcu_protocol::Rect;
 use windows::{
-    core::{w, PCWSTR},
+    core::{w, BOOL, PCWSTR},
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
         UI::{HiDpi::*, WindowsAndMessaging::*},
@@ -71,6 +71,98 @@ fn owned(win: &WindowRef, expected_pid: u32) -> Result<HWND, String> {
 pub fn foreground() -> u64 {
     // SAFETY: read-only scalar query; no borrowed native memory.
     unsafe { GetForegroundWindow().0 as usize as u64 }
+}
+
+#[derive(Debug)]
+pub struct WindowProbe {
+    pub hwnd: u64,
+    pub visible: bool,
+    pub class: String,
+}
+struct WindowProbes {
+    pid: u32,
+    windows: Vec<WindowProbe>,
+    panicked: bool,
+}
+// SAFETY: EnumWindows calls synchronously with our live exclusive context.
+// No process/token/property access: this oracle must survive UIPI denial.
+unsafe extern "system" fn probe_window(h: HWND, data: LPARAM) -> BOOL {
+    // SAFETY: caller keeps WindowProbes alive until EnumWindows returns.
+    let probes = unsafe { &mut *(data.0 as *mut WindowProbes) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut pid = 0;
+        // SAFETY: Windows supplies the HWND; all outputs are bounded local storage.
+        unsafe {
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == probes.pid {
+                let mut class = [0u16; 256];
+                let length = GetClassNameW(h, &mut class).max(0) as usize;
+                probes.windows.push(WindowProbe {
+                    hwnd: h.0 as usize as u64,
+                    visible: IsWindowVisible(h).as_bool(),
+                    class: String::from_utf16_lossy(&class[..length]),
+                });
+            }
+        }
+    }));
+    probes.panicked = result.is_err();
+    BOOL(i32::from(result.is_ok()))
+}
+pub async fn raw_windows(pid: u32) -> Result<Vec<WindowProbe>, String> {
+    let work = tokio::task::spawn_blocking(move || {
+        let mut probes = WindowProbes {
+            pid,
+            windows: Vec::new(),
+            panicked: false,
+        };
+        // SAFETY: synchronous callbacks borrow probes only for this call.
+        let result = unsafe {
+            EnumWindows(
+                Some(probe_window),
+                LPARAM((&mut probes as *mut WindowProbes) as isize),
+            )
+        };
+        if probes.panicked {
+            return Err("raw EnumWindows oracle panicked".into());
+        }
+        result.map_err(|e| format!("raw EnumWindows: HRESULT=0x{:08x}; {e}", e.code().0 as u32))?;
+        Ok(probes.windows)
+    });
+    tokio::time::timeout(Duration::from_secs(1), work)
+        .await
+        .map_err(|_| "raw EnumWindows FFI timed out; native result unobserved".to_string())?
+        .map_err(|e| e.to_string())?
+}
+
+pub async fn responsiveness(win: &WindowRef) -> Result<String, String> {
+    let win = win.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        let h = owned(&win, win.app.info.pid.ok_or("missing fixture PID")?)?;
+        let started = std::time::Instant::now();
+        // SAFETY: read-only WM_NULL to the exact fixture; no payload or input.
+        // A 100ms native limit distinguishes a hung UI thread from UIA-only hangs.
+        let (result, code) = unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::ERROR_SUCCESS);
+            let result = SendMessageTimeoutW(
+                h,
+                WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                100,
+                None,
+            );
+            (result.0 != 0, windows::Win32::Foundation::GetLastError().0)
+        };
+        Ok(format!(
+            "WM_NULL responsive={result}; Win32={code}; elapsed_ms={}",
+            started.elapsed().as_millis()
+        ))
+    });
+    tokio::time::timeout(Duration::from_secs(1), work)
+        .await
+        .map_err(|_| "fixture responsiveness FFI timed out; Win32 result unobserved".to_string())?
+        .map_err(|e| e.to_string())?
 }
 pub fn window_rect(win: &WindowRef, expected_pid: u32) -> Result<Rect, String> {
     let _dpi = PhysicalDpi::enter()?;

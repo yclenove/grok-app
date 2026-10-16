@@ -5,6 +5,7 @@ use super::{
 };
 use gcu_core::driver::{DriverError, Result};
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -12,7 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Preserve the existing startup ceiling; diagnostics distinguish scheduling,
+// pending FFI and missing proofs before any timeout change is considered.
+pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_millis(250);
+
 mod fake;
+#[cfg(test)]
+mod startup;
 pub use fake::FakeSafetyApi;
 
 /// Trusted Host owns and persists this latch. Implementations must be nonblocking;
@@ -87,9 +94,38 @@ pub struct GuardEvents {
     failed: AtomicBool,
     armed: AtomicBool,
     reason: Mutex<Option<String>>,
+    startup: Mutex<BTreeMap<&'static str, (u64, String)>>,
+    startup_started: Instant,
     signal: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl GuardEvents {
+    /// Record native setup/probe facts before entering FFI. A startup timeout
+    /// retains pending calls and observed Win32 results, without input payloads.
+    pub fn startup_progress(&self, stage: &'static str, detail: impl Into<String>) {
+        let detail = detail.into();
+        let elapsed_ms = self.startup_started.elapsed().as_millis() as u64;
+        let changed = {
+            let mut facts = self.startup.lock().unwrap_or_else(|p| p.into_inner());
+            if facts.get(stage).map(|(_, detail)| detail) != Some(&detail)
+                && (facts.contains_key(stage) || facts.len() < 16)
+            {
+                facts.insert(stage, (elapsed_ms, detail.clone()));
+                true
+            } else {
+                false
+            }
+        };
+        // Never hold the diagnostic lock across a potentially blocking writer.
+        if changed {
+            tracing::info!(target: "gcu_windows_timing", stage, phase = "startup", elapsed_ms, reason = %detail);
+        }
+    }
+    fn startup_snapshot(&self) -> String {
+        format!(
+            "{:?}",
+            self.startup.lock().unwrap_or_else(|p| p.into_inner())
+        )
+    }
     /// Copy only flags from a hook; callbacks never store keyboard/text payloads.
     pub fn clock(&self) -> &PhysicalClock {
         &self.clock
@@ -126,14 +162,15 @@ impl GuardEvents {
     pub fn fail(&self, reason: impl Into<String>) {
         if !self.failed.swap(true, Ordering::AcqRel) {
             let reason = reason.into();
-            tracing::warn!(target: "gcu_windows_timing", stage = "stop_listener", phase = "failed", reason = %reason);
-            *self.reason.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason);
+            *self.reason.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
             self.clock.disable();
             self.heartbeat.invalidate();
             self.hotkey_heartbeat.invalidate();
             if self.armed.load(Ordering::Acquire) {
                 self.request_stop();
             }
+            // A slow diagnostic sink must never delay revocation or Stop.
+            tracing::warn!(target: "gcu_windows_timing", stage = "stop_listener", phase = "failed", reason = %reason);
         }
     }
     /// The first operation is an atomic local latch, before any Host/worker work.
@@ -155,7 +192,8 @@ impl GuardEvents {
 }
 /// Owns two bounded parent threads: Win32 pump and FFI-free health watchdog.
 /// Drop signals exit without joining a possibly stuck native call. A stuck pump
-/// is never replaced with unbounded new threads. Start waits at most 250ms.
+/// is never replaced with unbounded new threads. Start waits at most 250ms;
+/// foreground remains disabled until both hook proofs and hotkey are healthy.
 pub struct SafetyGuard {
     events: Arc<GuardEvents>,
     close: Arc<AtomicBool>,
@@ -168,6 +206,9 @@ impl SafetyGuard {
         latch: Arc<dyn StopLatch>,
     ) -> Arc<Self> {
         let guard = Self::new(latch, Arc::new(SystemTime));
+        guard
+            .events
+            .startup_progress("listener_thread", "scheduled");
         let events = guard.events.clone();
         let close = guard.close.clone();
         if config.validate().is_err() {
@@ -180,6 +221,7 @@ impl SafetyGuard {
         let spawned = std::thread::Builder::new()
             .name("gcu-win-hooks".into())
             .spawn(move || {
+                monitored.startup_progress("listener_thread", "entered");
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut pump = match api.open(config, monitored.clone()) {
                         Ok(pump) => pump,
@@ -219,11 +261,16 @@ impl SafetyGuard {
             });
         if spawned.is_err() || watchdog::spawn(events.clone(), close).is_err() {
             events.fail("Stop listener/watchdog thread unavailable");
-        } else if tokio::time::timeout(Duration::from_millis(250), wait)
-            .await
-            .is_err()
-        {
-            events.fail("Stop listener startup/FFI timed out");
+        } else {
+            match tokio::time::timeout(STARTUP_TIMEOUT, wait).await {
+                Ok(Ok(())) => (),
+                Ok(Err(_)) => events.fail("Stop listener readiness channel closed"),
+                Err(_) => events.fail(format!(
+                    "Stop listener startup/FFI timed out after {}ms; last native facts: {}",
+                    STARTUP_TIMEOUT.as_millis(),
+                    events.startup_snapshot()
+                )),
+            }
         }
         guard
     }
@@ -237,6 +284,8 @@ impl SafetyGuard {
             failed: AtomicBool::new(false),
             armed: AtomicBool::new(false),
             reason: Mutex::default(),
+            startup: Mutex::default(),
+            startup_started: Instant::now(),
             signal: Mutex::default(),
         });
         let close = Arc::new(AtomicBool::new(false));
@@ -311,6 +360,12 @@ impl SafetyGuard {
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         ));
+        if !self.available() {
+            issues.push(format!(
+                "stop_listener_native: {}",
+                self.events.startup_snapshot()
+            ));
+        }
         if self.is_stopped() {
             issues.push("Stop latched; trusted Host resume required".into());
         }

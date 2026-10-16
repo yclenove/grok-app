@@ -1,6 +1,12 @@
 //! Exact observed UIA recipient/focus resolution for input routes.
 use super::super::{patterns::ActionContext, source::NodeId};
 use super::*;
+macro_rules! trace_call {
+    ($call:expr) => {{
+        let _timing = crate::timing::Timing::provider(stringify!($call));
+        $call
+    }};
+}
 impl RealUia {
     /// Resolve an observed UIA handle to its own HWND. Zero means a virtual
     /// element: targeted messages are unavailable, never guessed from a parent.
@@ -16,7 +22,8 @@ impl RealUia {
                 }
                 r.check()?;
                 // SAFETY: exact validated MTA-local UIA interface, no mutation.
-                let native = unsafe { element.CurrentNativeWindowHandle() }.map_err(native)?;
+                let native =
+                    unsafe { trace_call!(element.CurrentNativeWindowHandle()) }.map_err(native)?;
                 Ok((
                     native.0 as usize as u64,
                     props.class_name.unwrap_or_default(),
@@ -52,14 +59,10 @@ impl RealUia {
                 // SAFETY: exact retained UIA element on this MTA. Calls have native
                 // transaction limits plus independently cancellable worker wait.
                 unsafe {
-                    element.SetFocus().map_err(|e| context.error(native(e)))?;
-                    let focused = s
-                        .automation
-                        .GetFocusedElement()
+                    trace_call!(element.SetFocus()).map_err(|e| context.error(native(e)))?;
+                    let focused = trace_call!(s.automation.GetFocusedElement())
                         .map_err(|e| context.error(native(e)))?;
-                    if !s
-                        .automation
-                        .CompareElements(&element, &focused)
+                    if !trace_call!(s.automation.CompareElements(&element, &focused))
                         .map_err(|e| context.error(native(e)))?
                         .as_bool()
                     {
@@ -90,8 +93,9 @@ impl RealUia {
                 let mut ancestor = element;
                 // SAFETY: exact stamped root HWND, queried on the owning MTA.
                 let root = unsafe {
-                    s.automation
-                        .ElementFromHandle(HWND(el.hwnd as usize as *mut _))
+                    trace_call!(s
+                        .automation
+                        .ElementFromHandle(HWND(el.hwnd as usize as *mut _)))
                 }
                 .map_err(native)?;
                 for _ in 0..=super::super::tree::DEPTH_CAP {
@@ -99,8 +103,9 @@ impl RealUia {
                     // SAFETY: both interfaces are live on this MTA. Descendants
                     // may report the root HWND too; only UIA identity proves the
                     // ancestor walk reached the root (including web ancestors).
-                    let is_root = unsafe { s.automation.CompareElements(&ancestor, &root) }
-                        .map_err(native)?;
+                    let is_root =
+                        unsafe { trace_call!(s.automation.CompareElements(&ancestor, &root)) }
+                            .map_err(native)?;
                     if is_root.as_bool() {
                         return Ok(!gcu_core::policy::clipboard::is_sensitive(
                             &el.window.app.info,
@@ -112,9 +117,11 @@ impl RealUia {
                         ));
                     }
                     // SAFETY: exact parent, no search by name or replacement element.
-                    ancestor = unsafe { s.walker.GetParentElement(&ancestor) }.map_err(native)?;
+                    ancestor = unsafe { trace_call!(s.walker.GetParentElement(&ancestor)) }
+                        .map_err(native)?;
                     // SAFETY: refresh this exact ancestor with bounded cached properties.
-                    let cached = unsafe { ancestor.BuildUpdatedCache(&s.cache) }.map_err(native)?;
+                    let cached = unsafe { trace_call!(ancestor.BuildUpdatedCache(&s.cache)) }
+                        .map_err(native)?;
                     let mut props = super::properties::read(&cached);
                     if props.partial {
                         return Ok(false);
@@ -148,10 +155,8 @@ impl RealUia {
                     {
                         return Err(DriverError::CapabilityUnavailable);
                     }
-                    let focused = s.automation.GetFocusedElement().map_err(native)?;
-                    if !s
-                        .automation
-                        .CompareElements(&element, &focused)
+                    let focused = trace_call!(s.automation.GetFocusedElement()).map_err(native)?;
+                    if !trace_call!(s.automation.CompareElements(&element, &focused))
                         .map_err(native)?
                         .as_bool()
                     {
