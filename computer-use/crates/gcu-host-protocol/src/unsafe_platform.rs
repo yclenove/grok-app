@@ -202,7 +202,7 @@ pub(crate) fn pipe_descriptor(
     result
 }
 
-#[cfg(all(unix, feature = "testing"))]
+#[cfg(unix)]
 pub(crate) fn inherit(command: &mut std::process::Command, fds: Vec<i32>) {
     use std::os::unix::process::CommandExt;
     // SAFETY: the post-fork hook only invokes async-signal-safe fcntl. The owned

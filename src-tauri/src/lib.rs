@@ -75,6 +75,8 @@ mod command_registry;
 
 mod commands;
 
+mod computer_use;
+
 mod pet_window;
 mod theme_editor_window;
 
@@ -544,6 +546,7 @@ pub fn run() {
         .setup(|app| {
 
             crate::path_scope::refresh_from_store();
+            crate::computer_use::install(app.handle());
 
             use tauri::Manager;
 
