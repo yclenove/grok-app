@@ -161,6 +161,7 @@ jobs:
           cargo test --no-run --locked -p gcu-driver-linux --test actions
           cargo test --no-run --locked -p gcu-driver-linux --test stop
           cargo test --no-run --locked -p gcu-driver-linux --test contract
+          cargo test --no-run --locked -p gcu-driver-linux --test wayland_contract
 
       - name: Run fixture and verify AT-SPI tree, X11 capture, and contract
         run: |
@@ -188,6 +189,30 @@ jobs:
     steps:
       - name: Placeholder
         run: echo "Self-hosted E2E suite will be implemented in P1-09"
+
+  wayland-self-hosted:
+    name: Wayland Contract (Self-hosted)
+    if: (github.event_name == 'push' || github.event_name == 'pull_request') && vars.CU_WAYLAND_RUNNER == 'true'
+    runs-on: [self-hosted, cu-wayland]
+    defaults:
+      run:
+        working-directory: computer-use
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain (computer-use/rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "computer-use -> target"
+          key: ${{ hashFiles('computer-use/Cargo.lock') }}
+
+      - name: Run Wayland contract CI script
+        run: bash scripts/wayland-ci.sh
 
   eval-smoke:
     name: Eval smoke (fake)

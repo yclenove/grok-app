@@ -18,6 +18,7 @@ fn main() {
 
         // Search common library locations for versioned libxkbcommon.so.0
         let candidates = [
+            "/home/build/cu2/lib/libxkbcommon.so.0",
             "/usr/lib/x86_64-linux-gnu/libxkbcommon.so.0",
             "/usr/lib/aarch64-linux-gnu/libxkbcommon.so.0",
             "/usr/lib64/libxkbcommon.so.0",
