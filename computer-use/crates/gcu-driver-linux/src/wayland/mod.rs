@@ -3,7 +3,16 @@
 pub mod capabilities;
 pub mod capture;
 pub mod doctor;
+pub mod ei;
 pub mod gnome;
+pub mod input;
+pub mod input_control;
+pub mod input_identity;
+pub(crate) mod input_plan;
+#[cfg(target_os = "linux")]
+pub mod input_portal;
+#[cfg(target_os = "linux")]
+pub mod input_stop;
 pub mod kwin;
 pub mod portal;
 pub mod restore;

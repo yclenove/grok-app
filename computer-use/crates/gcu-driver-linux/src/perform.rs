@@ -36,6 +36,16 @@ pub async fn perform_action(
         });
     }
 
+    // An attached portal owns one exact window. Its DriverAction path is reachable only
+    // through the same Driver boundary used by ActionRouter; X11 is never a fallback.
+    if let Some(input) = driver.portal_input() {
+        let window = crate::wayland::input_plan::window(req);
+        if window == Some(input.window())
+            && !matches!(req, DriverAction::TypeText { focus: Some(_), .. })
+        {
+            return input.perform(req, cancel).await;
+        }
+    }
     let result = run_with_watchdog(perform_action_inner(driver, req, cancel)).await;
     if result.is_err() {
         driver.release_all_input().await;
