@@ -53,9 +53,9 @@ async fn type_text_rich_uses_unicode_and_noneditable_refuses() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn type_text_cancel_timeout_and_uncertain_never_replay() {
-    let rig = Rig::rich();
+    let rig = std::sync::Arc::new(Rig::rich());
     let cancel = Cancel::default();
     cancel.cancel();
     assert!(!rig
@@ -64,9 +64,14 @@ async fn type_text_cancel_timeout_and_uncertain_never_replay() {
         .unwrap_err()
         .maybe_executed());
     rig.events.hold_posts();
-    let result = rig.run("x", TextOptions::default()).await;
+    let running = rig.clone();
+    let task = tokio::spawn(async move { running.run("x", TextOptions::default()).await });
+    while rig.events.calls().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    rig.clock.advance(support::BUDGET);
     assert!(matches!(
-        result,
+        task.await.unwrap(),
         Err(DriverError::Timeout {
             maybe_executed: true
         })
@@ -126,7 +131,6 @@ async fn type_text_focus_changed_after_first_chunk_is_unknown() {
 async fn driver_type_text_runs_window_gate_and_real_text_dispatch() {
     use gcu_core::driver::{AppQuery, Driver, DriverAction, WindowRef};
     use gcu_driver_macos::{
-        input::timing::RuntimeClock,
         testing::{cg_window, rect, signed_facts, FakeMacApi},
         MacosDriver,
     };
@@ -144,7 +148,11 @@ async fn driver_type_text_runs_window_gate_and_real_text_dispatch() {
     });
     let mut driver = MacosDriver::with_api(api.clone()).await.unwrap();
     driver.inject_events(rig.events.clone());
-    driver.inject_text(rig.text.clone(), rig.board.clone(), Arc::new(RuntimeClock));
+    driver.inject_text(
+        rig.text.clone(),
+        rig.board.clone(),
+        driver.input_guards().unwrap().clock.clone(),
+    );
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     let windows = driver.list_windows(Some(&app)).await.unwrap();
     let win = WindowRef {
@@ -167,6 +175,22 @@ async fn driver_type_text_runs_window_gate_and_real_text_dispatch() {
         driver.perform(&action, &Cancel::default()).await,
         Err(DriverError::PermissionMissing { .. })
     ));
+    assert_eq!(rig.text.value(), "prefix中文");
+    api.update(|state| state.accessibility = true);
+    driver.input_guards().unwrap().request_stop();
+    for result in [
+        driver.perform(&action, &Cancel::default()).await,
+        driver
+            .perform_text(&action, TextOptions::default(), &Cancel::default())
+            .await,
+    ] {
+        assert_eq!(
+            result,
+            Err(DriverError::Cancelled {
+                maybe_executed: false
+            })
+        );
+    }
     assert_eq!(rig.text.value(), "prefix中文");
 }
 

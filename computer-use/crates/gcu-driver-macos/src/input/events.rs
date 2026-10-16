@@ -1,8 +1,8 @@
 //! Synthetic event construction and the injectable [`EventApi`].
 //!
 //! Targeted mouse events always carry undocumented CoreGraphics field 51 (the
-//! window number) and a window-local point. [`crate::input::cg`] posts those
-//! on macOS. [`FakeEvents`] records the same sequence on every platform.
+//! window number) and a window-local point. The CoreGraphics backend posts
+//! those on macOS. [`super::FakeEvents`] records them on every platform.
 //! `PointerRoute::TargetedOnly` and `KeyRoute::TargetedOnly` never become a
 //! HID-tap event here; the router returns [`DriverError::CapabilityUnavailable`].
 
@@ -12,7 +12,6 @@ use gcu_core::{
     model::WindowPoint,
 };
 use gcu_protocol::capabilities::PrivateApiStatus;
-use std::sync::{Mutex, MutexGuard};
 
 /// Undocumented `CGEvent` field: window number. ADR 0006.
 ///
@@ -237,6 +236,15 @@ pub enum Call {
 /// Backend. Real CoreGraphics and SkyLight live behind this trait.
 #[async_trait]
 pub trait EventApi: Send + Sync {
+    /// Injectable safety sources. Missing guards disable foreground input.
+    fn guards(&self) -> Option<std::sync::Arc<super::hotkey::Guards>> {
+        None
+    }
+    /// Read the actual foreground process. The enclosing watchdog bounds it.
+    /// Unknown foreground state must not be treated as successful activation.
+    async fn frontmost_pid(&self) -> Result<Option<i32>> {
+        Ok(None)
+    }
     /// Current probe. Cheap and non-blocking.
     fn probe(&self) -> Probe;
     /// Remember that a targeted post could not be observed. No retry.
@@ -249,153 +257,6 @@ pub trait EventApi: Send + Sync {
     async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
     /// Observe whether the targeted event landed. Must not post again.
     async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault>;
-}
-
-/// In-memory backend. Records every call and never touches CoreGraphics.
-#[derive(Debug)]
-pub struct FakeEvents {
-    inner: Mutex<FakeInner>,
-}
-
-#[derive(Debug)]
-struct FakeInner {
-    probe: Probe,
-    calls: Vec<Call>,
-    frontmost: Option<i32>,
-    /// Non-up posts wait until the future is dropped (cancel/timeout).
-    hold: bool,
-    fault: Option<PostFault>,
-    /// Posts of ups ignore `hold` and `fault` so cleanup can finish.
-    fail_arrival: bool,
-    closed: Vec<(i32, u32)>,
-    activate_fails: bool,
-}
-
-impl FakeEvents {
-    /// Backend whose probe is `probe`. Frontmost starts at pid 1.
-    pub fn new(probe: Probe) -> Self {
-        Self {
-            inner: Mutex::new(FakeInner {
-                probe,
-                calls: Vec::new(),
-                frontmost: Some(1),
-                hold: false,
-                fault: None,
-                fail_arrival: false,
-                closed: Vec::new(),
-                activate_fails: false,
-            }),
-        }
-    }
-
-    /// macOS 27 probe with symbols and AppKit.
-    pub fn ready() -> Self {
-        Self::new(Probe::verified_os())
-    }
-
-    fn lock(&self) -> MutexGuard<'_, FakeInner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Calls so far, in order.
-    pub fn calls(&self) -> Vec<Call> {
-        self.lock().calls.clone()
-    }
-
-    /// Pid the fake considers frontmost.
-    pub fn frontmost(&self) -> Option<i32> {
-        self.lock().frontmost
-    }
-
-    /// Next non-up post waits until the caller drops or times out the future.
-    pub fn hold_posts(&self) {
-        self.lock().hold = true;
-    }
-
-    /// Next non-up post returns this fault immediately.
-    pub fn fail_next(&self, fault: PostFault) {
-        self.lock().fault = Some(fault);
-    }
-
-    /// Arrival checks fail once each. The router must not post again.
-    pub fn fail_arrival(&self) {
-        self.lock().fail_arrival = true;
-    }
-
-    /// `window_open` returns false for this pair.
-    pub fn close_window(&self, pid: i32, window_id: u32) {
-        self.lock().closed.push((pid, window_id));
-    }
-
-    /// Activation returns [`DriverError::CapabilityUnavailable`] and does not
-    /// change the frontmost pid.
-    pub fn fail_activate(&self) {
-        self.lock().activate_fails = true;
-    }
-
-    /// Replace the probe. Used for TCC revoke and OS-version cases.
-    pub fn set_probe(&self, probe: Probe) {
-        self.lock().probe = probe;
-    }
-}
-
-#[async_trait]
-impl EventApi for FakeEvents {
-    fn probe(&self) -> Probe {
-        self.lock().probe.clone()
-    }
-
-    fn note_arrival_failed(&self) {
-        let mut inner = self.lock();
-        inner.probe.field_51 = false;
-        inner.probe.arrival_verified = false;
-    }
-
-    fn window_open(&self, pid: i32, window_id: u32) -> bool {
-        !self.lock().closed.contains(&(pid, window_id))
-    }
-
-    async fn activate(&self, pid: i32) -> Result<()> {
-        let mut inner = self.lock();
-        inner.calls.push(Call::Activate(pid));
-        if inner.activate_fails {
-            return Err(DriverError::CapabilityUnavailable);
-        }
-        inner.frontmost = Some(pid);
-        Ok(())
-    }
-
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        let (hold, fault) = {
-            let mut inner = self.lock();
-            inner.calls.push(Call::Post(event.clone()));
-            if !event.down {
-                return Ok(());
-            }
-            let fault = inner.fault.take();
-            (inner.hold, fault)
-        };
-        if let Some(fault) = fault {
-            return Err(fault);
-        }
-        if hold {
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
-
-    async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault> {
-        let fail = {
-            let mut inner = self.lock();
-            inner.calls.push(Call::Verify { pid, window_id });
-            inner.fail_arrival
-        };
-        if fail {
-            Err(PostFault::Uncertain)
-        } else {
-            Ok(())
-        }
-    }
 }
 
 /// Physical window point to window-local points. Rejects a bad scale.

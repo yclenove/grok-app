@@ -199,12 +199,14 @@ changed AXValue containing the payload before restoring; missing consumption
 proof times out as unknown. Restoration compares the exact owned count AND full
 content. Foreign changes, even to identical text, are preserved. The blocking
 worker retains the lock and conditional restore guard after waiter cancellation
-or timeout; queued AX jobs whose receiver has gone away do not start.
+or timeout, including a latched Stop; queued AX jobs whose receiver has gone
+away do not start. Stop interrupts consumption waits and paste key posts,
+releases held keys, and restores only the still-owned clipboard snapshot.
 
 **Clipboard history and synchronization can retain text. These checks cannot
 eliminate a malicious process replacing the clipboard at the last instant.**
 The driver reports this limit in doctor output. Clipboard data is never observed
-or logged. Timing uses an injected monotonic `InputClock` in Tokio's timer domain;
+or logged. Timing uses an injected monotonic `Clock` shared with activity guards, Stop and native deadlines;
 portable timeout tests use virtual time and synchronization, not wall-clock sleeps.
 
 ```sh
@@ -223,6 +225,9 @@ general clipboard. For text oracles, open a new disposable scratch document
 whose title contains `gcu-text-fixture` in TextEdit or VS Code, click its ordinary
 editing area, and use no accounts, existing user files, terminal/REPL/task/debug
 panels. TextEdit may remain behind another app; Electron permits foreground.
+The oracle owns a fresh fixture Stop latch. For foreground modes, click the
+fixture field after startup, then leave input idle for three seconds; listener
+failure or Stop still refuses input.
 The tests assert the Unicode payload in a fresh AX tree. Close scratch documents
 without saving after the test.
 

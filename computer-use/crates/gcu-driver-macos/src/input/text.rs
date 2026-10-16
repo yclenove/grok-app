@@ -2,7 +2,8 @@
 
 use super::{
     clipboard::{self, Pasteboard},
-    timing::{InputClock, Operation},
+    clock::Clock,
+    timing::Operation,
     EventApi, InputLedger, InputTarget, PostPath,
 };
 use crate::ax::AxHandle;
@@ -118,7 +119,7 @@ pub struct TextContext {
     /// Press-before-send ledger.
     pub ledger: Arc<InputLedger>,
     /// Monotonic runtime clock.
-    pub clock: Arc<dyn InputClock>,
+    pub clock: Arc<dyn Clock>,
 }
 
 /// Input with a bounded budget, cleanup, and no retries on any uncertain result.
@@ -136,6 +137,10 @@ pub async fn type_text(
     budget: Duration,
 ) -> Result<Delivery> {
     let budget = budget.min(gcu_core::driver::DRIVER_DEADLINE);
+    let guards = ctx.events.guards();
+    if let Some(guards) = &guards {
+        guards.check(false)?;
+    }
     if text.is_empty() || text.chars().count() > 8192 {
         return Err(DriverError::InvalidRequest);
     }
@@ -146,16 +151,18 @@ pub async fn type_text(
         &sent,
         ctx.clock.as_ref(),
         budget.saturating_sub(cleanup),
+        guards,
     );
     let result = run(ctx, target, expected, text, route, options, &op).await;
-    let _ = tokio::time::timeout(
-        cleanup,
-        super::release_held(ctx.events.as_ref(), &ctx.ledger),
-    )
-    .await;
+    let cleanup_deadline = ctx.clock.now() + cleanup;
+    tokio::select! {
+        biased;
+        _ = super::release_held(ctx.events.as_ref(), &ctx.ledger) => {},
+        _ = ctx.clock.wait_until(cleanup_deadline) => {},
+    }
     result.map_err(|error| {
         if sent.load(Ordering::Acquire) && !error.maybe_executed() {
-            uncertain(&op, "text operation failed after dispatch")
+            super::foreground::uncertain(error)
         } else {
             error
         }
@@ -215,7 +222,8 @@ async fn run(
     // Validate every cluster before activation or the first post.
     let events = super::keys::plan_text(target, text, path)?;
     if path == PostPath::HidTap {
-        op.guard(super::activate_foreground(
+        op.foreground().check()?;
+        op.guard(super::foreground::activate_verified(
             ctx.events.as_ref(),
             target,
             op.sent,

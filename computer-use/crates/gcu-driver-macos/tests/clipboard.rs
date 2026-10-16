@@ -208,6 +208,26 @@ async fn clipboard_cancel_after_post_releases_and_conditionally_restores() {
     assert!(rig.ledger.is_empty());
 }
 
+#[tokio::test]
+async fn clipboard_consumption_deadline_uses_injected_clock_and_restores() {
+    let rig = std::sync::Arc::new(Rig::rich());
+    let original = rig.board.snapshot().content;
+    rig.text.hold_observed();
+    let running = rig.clone();
+    let task = tokio::spawn(async move { running.run(&"x".repeat(2001), allowed()).await });
+    rig.text.observed.notified().await;
+    rig.clock.advance(support::BUDGET);
+    assert_eq!(
+        task.await.unwrap(),
+        Err(DriverError::Timeout {
+            maybe_executed: true
+        })
+    );
+    Rig::rich().run(&"y".repeat(2001), allowed()).await.unwrap();
+    assert!(rig.board.snapshot().content == original);
+    assert!(rig.ledger.is_empty());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires GUI AppKit; isolated named NSPasteboard; not_run on Linux"]
@@ -221,21 +241,9 @@ fn live_named_pasteboard_formats_and_change_count() {
         .success());
 }
 
-struct ExpiringClock(std::sync::Arc<std::sync::atomic::AtomicBool>);
-impl gcu_driver_macos::input::timing::InputClock for ExpiringClock {
-    fn now(&self) -> tokio::time::Instant {
-        let now = tokio::time::Instant::now();
-        if self.0.load(std::sync::atomic::Ordering::Acquire) {
-            now + support::BUDGET
-        } else {
-            now
-        }
-    }
-}
-
 struct ExpireOnWrite {
     board: std::sync::Arc<support::FakePasteboard>,
-    expired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    clock: std::sync::Arc<gcu_driver_macos::input::clock::FakeClock>,
 }
 impl gcu_driver_macos::input::clipboard::Pasteboard for ExpireOnWrite {
     fn read(
@@ -250,8 +258,7 @@ impl gcu_driver_macos::input::clipboard::Pasteboard for ExpireOnWrite {
     ) -> gcu_core::driver::Result<Option<gcu_driver_macos::input::clipboard::PasteboardSnapshot>>
     {
         let result = self.board.replace_if(expected, content)?;
-        self.expired
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.clock.advance(support::BUDGET);
         Ok(result)
     }
 }
@@ -260,15 +267,15 @@ impl gcu_driver_macos::input::clipboard::Pasteboard for ExpireOnWrite {
 async fn clipboard_deadline_after_write_restores_without_paste() {
     use gcu_core::driver::{Cancel, KeyRoute};
     use gcu_driver_macos::input::text::type_text;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::Arc;
     let rig = Rig::rich();
     let original = rig.board.snapshot().content;
-    let expired = Arc::new(AtomicBool::new(false));
+    let clock = Arc::new(gcu_driver_macos::input::clock::FakeClock::new());
     let mut context = rig.context();
-    context.clock = Arc::new(ExpiringClock(expired.clone()));
+    context.clock = clock.clone();
     context.pasteboard = Arc::new(ExpireOnWrite {
         board: rig.board.clone(),
-        expired,
+        clock,
     });
     let result = type_text(
         &context,
@@ -287,6 +294,8 @@ async fn clipboard_deadline_after_write_restores_without_paste() {
             maybe_executed: false
         })
     ));
+    // The caller's deadline can win before the blocking restore completes.
+    Rig::rich().run(&"y".repeat(2001), allowed()).await.unwrap();
     assert!(rig.events.calls().is_empty());
     assert!(rig.board.snapshot().content == original);
     assert_eq!(rig.board.writes(), 2);

@@ -8,8 +8,8 @@ use super::{
 use crate::{
     ax::{sensitive::is_terminal_like, AxHandle},
     input::{
+        clock::Clock,
         text::{TextApi, TextFocus},
-        timing::InputClock,
         InputTarget,
     },
 };
@@ -24,10 +24,10 @@ use std::{sync::Arc, time::Duration};
 
 pub(crate) struct RealText {
     thread: Arc<AxThread>,
-    clock: Arc<dyn InputClock>,
+    clock: Arc<dyn Clock>,
 }
 impl RealText {
-    pub(crate) fn new(thread: Arc<AxThread>, clock: Arc<dyn InputClock>) -> Self {
+    pub(crate) fn new(thread: Arc<AxThread>, clock: Arc<dyn Clock>) -> Self {
         Self { thread, clock }
     }
 }
@@ -90,7 +90,9 @@ impl TextApi for RealText {
                     return Ok(());
                 }
             }
-            tokio::time::sleep_until(self.clock.now() + Duration::from_millis(10)).await;
+            self.clock
+                .wait_until(self.clock.now() + Duration::from_millis(10))
+                .await;
         }
     }
 }

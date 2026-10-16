@@ -12,25 +12,34 @@
 //! [`gcu_core::driver::DRIVER_DEADLINE`]. `maybe_executed` is false until a
 //! post has been entered.
 
+pub mod activity;
 pub mod clipboard;
+pub mod clock;
 mod events;
+mod fake_events;
+pub mod foreground;
+pub mod hotkey;
 mod keys;
 mod ledger;
 mod skylight;
 pub mod text;
 pub mod timing;
+pub mod watchdog;
 
 #[cfg(target_os = "macos")]
 mod cg;
+#[cfg(target_os = "macos")]
+mod ffi;
 #[cfg(target_os = "macos")]
 mod pasteboard_native;
 #[cfg(target_os = "macos")]
 pub use pasteboard_native::NativePasteboard;
 
 pub use events::{
-    plan_click, plan_drag, plan_scroll, Call, EventApi, EventKind, FakeEvents, InputTarget,
-    PostFault, PostPath, Probe, SyntheticEvent, FIELD_WINDOW_NUMBER,
+    plan_click, plan_drag, plan_scroll, Call, EventApi, EventKind, InputTarget, PostFault,
+    PostPath, Probe, SyntheticEvent, FIELD_WINDOW_NUMBER,
 };
+pub use fake_events::FakeEvents;
 pub use keys::utf16_chunks;
 pub use ledger::InputLedger;
 pub use skylight::{classify as classify_skylight, status as skylight_status};
@@ -77,11 +86,32 @@ pub fn apply_probe(caps: &mut Capabilities, probe: &Probe) {
 
 /// Post every pending up. Bounded by the caller. Does not retry a failed up.
 pub async fn release_held(api: &dyn EventApi, ledger: &InputLedger) {
-    for up in ledger.take_ups() {
-        if api.post(up).await.is_err() {
-            tracing::warn!("macos input cleanup could not post an up");
+    // Poll all releases on the first turn, even when one native call blocks.
+    let mut posts: Vec<_> = ledger
+        .take_ups()
+        .into_iter()
+        .map(|up| api.post(up))
+        .collect();
+    std::future::poll_fn(|cx| {
+        let mut index = 0;
+        while index < posts.len() {
+            match posts[index].as_mut().poll(cx) {
+                std::task::Poll::Ready(result) => {
+                    if result.is_err() {
+                        tracing::warn!("macos input cleanup could not post an up");
+                    }
+                    drop(posts.remove(index));
+                }
+                std::task::Poll::Pending => index += 1,
+            }
         }
-    }
+        if posts.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
 }
 
 /// Deliver one pointer, key, or text action. Other actions are refused.
@@ -96,6 +126,15 @@ pub async fn deliver(
     cancel: &Cancel,
     budget: Duration,
 ) -> Result<Delivery> {
+    let guards = api.guards();
+    if let Some(guards) = &guards {
+        guards.check(false)?;
+    }
+    let clock = guards
+        .as_ref()
+        .map(|g| Arc::clone(&g.clock))
+        .unwrap_or_else(clock::runtime_clock);
+    let deadline = clock.now() + budget.min(gcu_core::driver::DRIVER_DEADLINE);
     let sent = Arc::new(AtomicBool::new(false));
     let cleanup_budget = Duration::from_millis(100).min(budget);
     let work_budget = budget.saturating_sub(cleanup_budget);
@@ -126,16 +165,15 @@ pub async fn deliver(
         _ = cancel.cancelled() => Err(DriverError::Cancelled {
             maybe_executed: sent.load(Ordering::Acquire),
         }),
-        result = tokio::time::timeout(work_budget, operation) => {
-            match result {
-                Ok(result) => result,
-                Err(_) => Err(DriverError::Timeout {
-                    maybe_executed: sent.load(Ordering::Acquire),
-                }),
-            }
-        }
+        _ = async { if let Some(guards) = &guards { guards.stopped().await } else { std::future::pending().await } } => Err(DriverError::Cancelled { maybe_executed: sent.load(Ordering::Acquire) }),
+        _ = clock.wait_until(deadline.saturating_sub(cleanup_budget)) => Err(DriverError::Timeout { maybe_executed: sent.load(Ordering::Acquire) }),
+        result = operation => result,
     };
-    let _ = tokio::time::timeout(cleanup_budget, release_held(api.as_ref(), &ledger)).await;
+    tokio::select! {
+        biased;
+        _ = release_held(api.as_ref(), &ledger) => {},
+        _ = clock.wait_until(deadline.min(clock.now() + cleanup_budget)) => {},
+    }
     result
 }
 
@@ -156,7 +194,8 @@ async fn run(
     refuse_before_post(&probe, target, api)?;
     let foreground = route_foreground(action)?;
     let chromium = crate::ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name);
-    let targeted = probe.background_ready() && !chromium;
+    let targeted =
+        probe.background_ready() && !chromium && !matches!(action, DriverAction::Activate { .. });
     let path = if targeted {
         PostPath::ToPid
     } else if foreground && probe.foreground && probe.appkit_ready {
@@ -166,7 +205,9 @@ async fn run(
     };
     let events = plan(action, target, path)?;
     let delivery = if path == PostPath::HidTap {
-        activate_foreground(api, target, sent).await?;
+        let guards = api.guards().ok_or(DriverError::CapabilityUnavailable)?;
+        guards.check(true)?;
+        foreground::activate_verified(api, target, sent).await?;
         Delivery::Foreground
     } else {
         Delivery::TargetedEvent
@@ -207,6 +248,7 @@ fn route_foreground(action: &DriverAction) -> Result<bool> {
         DriverAction::PressKeys { route, .. } | DriverAction::TypeText { route, .. } => {
             *route == KeyRoute::AllowForeground
         }
+        DriverAction::Activate { .. } => true,
         _ => return Err(DriverError::CapabilityUnavailable),
     })
 }
@@ -224,19 +266,9 @@ fn plan(
         DriverAction::PointerDrag { path: points, .. } => drags(target, points, path),
         DriverAction::PressKeys { chord, .. } => plan_chord(target, chord, path),
         DriverAction::TypeText { text, .. } => plan_text(target, text, path),
+        DriverAction::Activate { .. } => Ok(Vec::new()),
         _ => Err(DriverError::CapabilityUnavailable),
     }
-}
-
-async fn activate_foreground(
-    api: &dyn EventApi,
-    target: &InputTarget,
-    sent: &AtomicBool,
-) -> Result<()> {
-    api.activate(target.pid).await?;
-    // Activation can change the frontmost app even when the later post fails.
-    sent.store(true, Ordering::Release);
-    Ok(())
 }
 
 async fn confirm_arrival(
@@ -260,6 +292,18 @@ async fn post_all(
     sent: &AtomicBool,
 ) -> Result<()> {
     for event in events {
+        if let Some(guards) = api.guards() {
+            if let Err(error) = guards.check(event.path == PostPath::HidTap) {
+                return Err(if sent.load(Ordering::Acquire) {
+                    foreground::uncertain(error)
+                } else {
+                    error
+                });
+            }
+        }
+        if event.path == PostPath::HidTap {
+            foreground::verify(api, event.pid).await?;
+        }
         if cancel.is_cancelled() {
             return Err(DriverError::Cancelled {
                 maybe_executed: sent.load(Ordering::Acquire),

@@ -25,6 +25,7 @@ mod native {
     use gcu_driver_macos::{
         input::{
             clipboard::{Pasteboard, PasteboardContent},
+            hotkey::{HotkeyConfig, SharedStopLatch},
             NativePasteboard,
         },
         MacosDriver,
@@ -80,7 +81,14 @@ mod native {
             "electron" => ("com.microsoft.VSCode", KeyRoute::AllowForeground),
             _ => return Err("unknown mode".into()),
         };
-        let driver = MacosDriver::new().await?;
+        // This explicit fixture invocation owns a fresh latch. Production
+        // engines restore their persistent Host state before enabling input.
+        let driver = MacosDriver::with_stop_latch(
+            std::sync::Arc::new(SharedStopLatch::new(false)),
+            HotkeyConfig::default(),
+            3000,
+        )
+        .await?;
         let app = driver.resolve_app(&AppQuery::from(app_id)).await?;
         let windows = driver.list_windows(Some(&app)).await?;
         // Use a fresh blank scratch document with this exact title. Never use a
@@ -117,6 +125,22 @@ mod native {
             text: payload.clone(),
             route,
         };
+        let guards = driver
+            .input_guards()
+            .ok_or("input guards are not connected")?;
+        let clock = &guards.clock;
+        if route == KeyRoute::AllowForeground {
+            // Click the disposable field after startup, then leave it idle.
+            let deadline = clock.now() + Duration::from_secs(15);
+            while !guards.foreground_ready() {
+                if guards.is_stopped() || clock.now() >= deadline {
+                    return Err("fixture Stop/activity guard is not ready".into());
+                }
+                clock
+                    .wait_until(clock.now() + Duration::from_millis(10))
+                    .await;
+            }
+        }
         let delivery = if mode == "paste" {
             driver
                 .perform_text(
@@ -153,7 +177,8 @@ mod native {
         ) {
             return Err("unexpected text delivery".into());
         }
-        tokio::time::timeout(Duration::from_secs(3), async {
+        let deadline = clock.now() + Duration::from_secs(3);
+        let observed = async {
             loop {
                 let raw = driver
                     .snapshot_tree(
@@ -172,11 +197,17 @@ mod native {
                 {
                     return Ok::<_, gcu_core::driver::DriverError>(());
                 }
-                tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_millis(10))
+                clock
+                    .wait_until(clock.now() + Duration::from_millis(10))
                     .await;
             }
-        })
-        .await??;
+        };
+        tokio::select! {
+            biased;
+            _ = guards.stopped() => return Err("fixture stopped by user".into()),
+            _ = clock.wait_until(deadline) => return Err("fixture observation timed out".into()),
+            result = observed => result?,
+        }
         driver.release_all_input().await;
         Ok(())
     }
