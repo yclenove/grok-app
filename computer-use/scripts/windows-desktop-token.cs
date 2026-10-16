@@ -169,6 +169,7 @@ namespace Gcu
             // Fail before calling Win32 if Add-Type marshalling differs from the ABI.
             if (Marshal.SizeOf(typeof(StartupInfo)) != (IntPtr.Size == 8 ? 104 : 68) ||
                 Marshal.SizeOf(typeof(SidAndAttributes)) != (IntPtr.Size == 8 ? 16 : 8) ||
+                Marshal.SizeOf(typeof(TokenPointer)) != IntPtr.Size ||
                 Marshal.SizeOf(typeof(ProcessInfo)) != (IntPtr.Size == 8 ? 24 : 16))
                 throw new InvalidOperationException("unexpected Win32 structure layout");
         }
@@ -178,19 +179,35 @@ namespace Gcu
             return new RestrictedDesktop(expectedSession, workspace);
         }
 
-        // A single restricted token and environment are shared by every probe and
-        // the chosen suite launch. Only harmless probes may try another variant.
+        // Probes and the selected launch share one token per profile. Changing
+        // profiles always derives a fresh token from the unchanged parent token.
+        // High/unrepaired profiles are diagnostics only, never suite candidates.
         public sealed class RestrictedDesktop : IDisposable
         {
             IntPtr token, environment;
             DesktopAclScope desktopAcl;
             readonly string workspace;
+            readonly int expectedSession;
+            bool repairDefaults, lowerIntegrity, duplicatePrimary, disposed;
             public string TokenSummary { get; private set; }
             public string DesktopSecurity { get { return DescribeDesktopSecurity(); } }
             public RestrictedDesktop(int expectedSession, string directory)
             {
                 workspace = directory;
+                this.expectedSession = expectedSession;
+                Configure(true, true, false);
+            }
+            public void Configure(bool repairDefaults, bool lowerIntegrity, bool duplicatePrimary)
+            {
+                if (disposed) throw new ObjectDisposedException("RestrictedDesktop");
+                if (token != IntPtr.Zero && this.repairDefaults == repairDefaults &&
+                    this.lowerIntegrity == lowerIntegrity && this.duplicatePrimary == duplicatePrimary) return;
+                ReleaseToken();
+                this.repairDefaults = repairDefaults;
+                this.lowerIntegrity = lowerIntegrity;
+                this.duplicatePrimary = duplicatePrimary;
                 IntPtr source = IntPtr.Zero, admins = IntPtr.Zero, medium = IntPtr.Zero;
+                string before = "not read", after = "not read";
                 try
                 {
                     Check(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, out source), "OpenProcessToken launch");
@@ -198,17 +215,41 @@ namespace Gcu
                     // Disable only Administrators. In particular, preserve every
                     // enabled logon SID used by the interactive desktop's ACL.
                     SidAndAttributes[] disable = { new SidAndAttributes { Sid = admins } };
-                    Check(CreateRestrictedToken(source, LUA_TOKEN | DISABLE_MAX_PRIVILEGE, 1, disable,
+                    // Retained-High diagnostic isolates LUA filtering from the
+                    // Medium label and privilege removal. It cannot run tests.
+                    uint flags = LUA_TOKEN | (lowerIntegrity ? DISABLE_MAX_PRIVILEGE : 0);
+                    Check(CreateRestrictedToken(source, flags, 1, disable,
                         0, IntPtr.Zero, 0, IntPtr.Zero, out token), "CreateRestrictedToken");
-                    Check(ConvertStringSidToSidW("S-1-16-8192", out medium), "Medium integrity SID");
-                    SidAndAttributes label = new SidAndAttributes { Sid = medium, Attributes = 0x20 };
-                    Check(SetTokenInformation(token, TokenIntegrityLevel, ref label,
-                        checked((uint)Marshal.SizeOf(typeof(SidAndAttributes)) + GetLengthSid(medium))), "SetTokenInformation Medium");
+                    if (duplicatePrimary)
+                    {
+                        IntPtr primary;
+                        Check(DuplicateTokenEx(token, TOKEN_ALL_ACCESS, IntPtr.Zero, 2, 1, out primary), "DuplicateTokenEx primary");
+                        CloseHandle(token);
+                        token = primary;
+                    }
+                    IntPtr type = TokenInfo(token, 8); // TokenType: TokenPrimary = 1
+                    try
+                    {
+                        if (Marshal.ReadInt32(type) != 1) throw new InvalidOperationException("restricted launch token is not primary");
+                    }
+                    finally { Marshal.FreeHGlobal(type); }
+                    before = DescribeTokenDefaults(token);
+                    if (repairDefaults) RepairTokenDefaults(token);
+                    after = DescribeTokenDefaults(token);
+                    if (lowerIntegrity)
+                    {
+                        Check(ConvertStringSidToSidW("S-1-16-8192", out medium), "Medium integrity SID");
+                        SidAndAttributes label = new SidAndAttributes { Sid = medium, Attributes = 0x20 };
+                        Check(SetTokenInformation(token, TokenIntegrityLevel, ref label,
+                            checked((uint)Marshal.SizeOf(typeof(SidAndAttributes)) + GetLengthSid(medium))), "SetTokenInformation Medium");
+                    }
                     if (expectedSession <= 0 || Session(source) != expectedSession || Session(token) != expectedSession)
                         throw new InvalidOperationException("restricted token is not in the parent's interactive session");
                     VerifyLogonSids(source, token);
                     PreserveTraversal(token); // DISABLE_MAX_PRIVILEGE must retain SeChangeNotifyPrivilege.
-                    TokenSummary = DescribeToken(token);
+                    TokenSummary = "RepairDefaults=" + repairDefaults + "; LowerIntegrity=" + lowerIntegrity +
+                        "; DuplicatePrimary=" + duplicatePrimary + "; DefaultsBefore={" + before +
+                        "}; DefaultsAfter={" + after + "}; " + DescribeToken(token);
                     environment = MakeEnvironment(token, workspace);
                 }
                 catch (Exception error)
@@ -218,8 +259,9 @@ namespace Gcu
                         string details;
                         try { details = DescribeToken(token); }
                         catch (Exception queryError) { details = "token diagnostics unavailable: " + queryError.Message; }
-                        finally { Dispose(); }
-                        throw new InvalidOperationException("restricted token setup failed: " + error.Message + "; " + details, error);
+                        finally { ReleaseToken(); }
+                        TokenSummary = "DefaultsBefore={" + before + "}; DefaultsAfter={" + after + "}; " + details;
+                        throw new InvalidOperationException("restricted token setup failed: " + error.Message + "; " + TokenSummary, error);
                     }
                     throw;
                 }
@@ -230,25 +272,25 @@ namespace Gcu
                     if (source != IntPtr.Zero) CloseHandle(source);
                 }
             }
-            public Child Start(string executable, string[] arguments, string method, bool repairDesktop, bool newConsole)
+            public Child Start(string executable, string[] arguments, string method, bool repairDesktop, bool newConsole, bool useShowWindow)
             {
                 string command = QuoteArgument(executable);
                 foreach (string argument in arguments) command += " " + QuoteArgument(argument);
-                return StartCommand(executable, command, method, repairDesktop, newConsole);
+                return StartCommand(executable, command, method, repairDesktop, newConsole, useShowWindow);
             }
-            public Child StartCmd(string command, string method, bool repairDesktop, bool newConsole)
+            public Child StartCmd(string command, string method, bool repairDesktop, bool newConsole, bool useShowWindow)
             {
                 string executable = Environment.GetEnvironmentVariable("SystemRoot") + @"\System32\cmd.exe";
                 // cmd /S /C has its own quote rules, not the CRT argv rules.
-                return StartCommand(executable, CmdCommandLine(executable, command), method, repairDesktop, newConsole);
+                return StartCommand(executable, CmdCommandLine(executable, command), method, repairDesktop, newConsole, useShowWindow);
             }
-            Child StartCommand(string executable, string command, string method, bool repairDesktop, bool newConsole)
+            Child StartCommand(string executable, string command, string method, bool repairDesktop, bool newConsole, bool useShowWindow)
             {
                 if (token == IntPtr.Zero) throw new ObjectDisposedException("RestrictedDesktop");
                 if (repairDesktop && desktopAcl == null) desktopAcl = DesktopAclScope.Grant(token);
                 StartupInfo startup = new StartupInfo {
                     cb = (uint)Marshal.SizeOf(typeof(StartupInfo)), lpDesktop = @"WinSta0\Default",
-                    dwFlags = 1, wShowWindow = 0 // STARTF_USESHOWWINDOW / SW_HIDE
+                    dwFlags = useShowWindow ? 1u : 0u, wShowWindow = 0 // STARTF_USESHOWWINDOW / SW_HIDE contrast
                 };
                 ProcessInfo info;
                 uint flags = (newConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW) | CREATE_UNICODE_ENVIRONMENT;
@@ -272,9 +314,14 @@ namespace Gcu
                 finally
                 {
                     desktopAcl = null;
-                    if (environment != IntPtr.Zero) { Marshal.FreeHGlobal(environment); environment = IntPtr.Zero; }
-                    if (token != IntPtr.Zero) { CloseHandle(token); token = IntPtr.Zero; }
+                    ReleaseToken();
+                    disposed = true;
                 }
+            }
+            void ReleaseToken()
+            {
+                if (environment != IntPtr.Zero) { Marshal.FreeHGlobal(environment); environment = IntPtr.Zero; }
+                if (token != IntPtr.Zero) { CloseHandle(token); token = IntPtr.Zero; }
             }
         }
 

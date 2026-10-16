@@ -184,6 +184,9 @@ namespace Gcu
         static string DescribeToken(IntPtr token)
         {
             StringBuilder text = new StringBuilder("UserSid=" + UserSid(token) + "; SessionId=" + Session(token));
+            IntPtr type = TokenInfo(token, 8); // TokenType
+            try { text.Append("; TokenType=" + Marshal.ReadInt32(type)); }
+            finally { Marshal.FreeHGlobal(type); }
             IntPtr info = TokenInfo(token, TokenIntegrityLevel);
             try { text.Append("; IntegritySid=" + new SecurityIdentifier(Marshal.ReadIntPtr(info)).Value); }
             finally { Marshal.FreeHGlobal(info); }
@@ -197,7 +200,7 @@ namespace Gcu
             text.Append("]; Privileges=[");
             foreach (KeyValuePair<string, uint> privilege in Privileges(token))
                 text.Append(privilege.Key + ":0x" + privilege.Value.ToString("X", CultureInfo.InvariantCulture) + ",");
-            return text.Append("]").ToString();
+            return text.Append("]; OwnerDefaultDacl={" + DescribeTokenDefaults(token) + "}").ToString();
         }
         static IntPtr MakeEnvironment(IntPtr token, string workspace)
         {

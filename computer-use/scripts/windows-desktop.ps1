@@ -39,6 +39,16 @@ function Test-DesktopTokenFacts {
         $Facts.UserInteractive -and $Facts.Desktop -ieq 'WinSta0\Default')
 }
 
+# High is accepted only by harmless diagnostic probes. Suite admission above
+# remains strictly Medium, including when UAC is disabled on a hosted runner.
+function Test-DesktopProbeFacts {
+    param($Facts, [int]$ExpectedSessionId, [bool]$LowerIntegrity)
+    if ($LowerIntegrity) { return Test-DesktopTokenFacts $Facts $ExpectedSessionId }
+    return ($ExpectedSessionId -gt 0 -and $Facts.SessionId -eq $ExpectedSessionId -and
+        -not $Facts.IsAdmin -and $Facts.IntegrityRid -eq 12288 -and
+        $Facts.UserInteractive -and $Facts.Desktop -ieq 'WinSta0\Default')
+}
+
 function Format-DesktopTokenFacts {
     param($Facts)
     return "SessionId=$($Facts.SessionId); IsAdmin=$($Facts.IsAdmin); IntegrityLevel=$($Facts.IntegrityLevel); UserInteractive=$($Facts.UserInteractive); Desktop=$($Facts.Desktop)"

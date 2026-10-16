@@ -13,12 +13,25 @@ foreach ($script in Get-ChildItem $PSScriptRoot -Filter '*windows*.ps1') {
     $null = [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "PowerShell syntax: $($script.Name): $errors"
 }
-$sources = @((Join-Path $PSScriptRoot 'windows-desktop-token.cs'), (Join-Path $PSScriptRoot 'windows-desktop-access.cs'))
+$sources = @('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs') |
+    ForEach-Object { Join-Path $PSScriptRoot $_ }
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     # Linux Roslyn must also accept the language used by Windows PowerShell 5.1.
     Add-Type -Path $sources -CompilerOptions '/langversion:5'
 } else { Add-Type -Path $sources }
 [Gcu.DesktopLauncher]::CheckLayout()
+$userSid = 'S-1-5-21-1-2-3-500'
+$logonSid = 'S-1-5-5-1-2'
+$defaults = [Gcu.DesktopLauncher]::DefaultTokenSecurity($userSid, [string[]]@($logonSid,$logonSid))
+Assert-True ($defaults -ceq "O:$($userSid)D:(A;;GA;;;$userSid)(A;;GA;;;$logonSid)(A;;GA;;;SY)") 'owner is user; default DACL grants user, unique logon SID and SYSTEM'
+Assert-True (-not $defaults.Contains('BA') -and -not $defaults.Contains('S-1-5-32-544')) 'deny-only Administrators never owns or receives default object access'
+Assert-True ([Gcu.DesktopLauncher]::DefaultTokenSecurity($userSid, [string[]]@()) -ceq
+    "O:$($userSid)D:(A;;GA;;;$userSid)(A;;GA;;;SY)") 'no invented logon SID'
+foreach ($bad in @(@('S-1-5-32-544',$logonSid), @($userSid,'S-1-5-32-544'), @($userSid,'S-1-5-5-1-2)(A;;GA;;;WD)'))) {
+    $rejected = $false
+    try { $null = [Gcu.DesktopLauncher]::DefaultTokenSecurity($bad[0], [string[]]@($bad[1])) } catch { $rejected = $true }
+    Assert-True $rejected 'invalid/default Administrators trustee rejected'
+}
 Assert-True ([Gcu.DesktopLauncher]::QuoteArgument('a b') -ceq '"a b"') 'space quoting'
 Assert-True ([Gcu.DesktopLauncher]::QuoteArgument('C:\a b\') -ceq '"C:\a b\\"') 'trailing slash quoting'
 Assert-True ([Gcu.DesktopLauncher]::QuoteArgument('a"b') -ceq '"a\"b"') 'embedded quote escaping'
@@ -66,6 +79,10 @@ Assert-True ($roundTrip.token_facts.SessionId -eq 2 -and $roundTrip.token_facts.
 
 $facts = @{ SessionId=2; IsAdmin=$false; IntegrityLevel='Medium (S-1-16-8192)'; IntegrityRid=8192; UserInteractive=$true; Desktop='WinSta0\Default' }
 Assert-True (Test-DesktopTokenFacts $facts 2) 'valid Medium interactive child'
+$highFacts = $facts.Clone(); $highFacts.IntegrityRid = 12288; $highFacts.IntegrityLevel = 'High (S-1-16-12288)'
+Assert-True (Test-DesktopProbeFacts $highFacts 2 $false) 'High non-admin may be diagnosed'
+Assert-True (-not (Test-DesktopTokenFacts $highFacts 2)) 'High diagnostic token never admits the real suite'
+Assert-True (-not (Test-DesktopProbeFacts $facts 2 $false)) 'diagnostic must retain the requested High integrity'
 foreach ($change in @(@{IsAdmin=$true}, @{IntegrityRid=12288}, @{IntegrityRid=4096},
     @{IntegrityRid=8448}, @{SessionId=0}, @{SessionId=3}, @{UserInteractive=$false}, @{Desktop='WinSta0\Winlogon'})) {
     $wrong = $facts.Clone()
@@ -106,22 +123,40 @@ $trace = [Collections.Generic.List[string]]::new()
 $probe = {
     param($variant, $stage)
     $trace.Add("$($variant.Name)/$stage")
-    $ok = $variant.Name -eq 'WithToken/desktop-ACL/no-window'
+    $ok = $variant.DiagnosticOnly -or ($variant.Method -eq 'WithToken' -and $variant.RepairDesktop -and -not $variant.NewConsole)
     @{ok=$ok;exit_code=$(if ($ok) { 0 } else { [uint32]3221225794 });win32_error=0;last='last token/oracle'}
 }
 $messages = [Collections.Generic.List[string]]::new()
 $chosen = Invoke-DesktopLaunchLadder -Probe $probe -Log { param($line) $messages.Add($line) }
-Assert-True ($chosen.Name -eq 'WithToken/desktop-ACL/no-window') 'fallback after post-create DLL initialization failure'
-Assert-True ($trace.Count -eq 24) 'all stages executed for all eight variants'
+Assert-True ($chosen.Method -eq 'WithToken' -and $chosen.RepairTokenDefaults -and -not $chosen.DiagnosticOnly) 'fallback after DLL-init failure always repairs owner/default DACL'
+Assert-True ($trace.Count -eq 27) 'one unmodified control and all eight repaired variants run every stage'
 Assert-True (($messages -join ' ').Contains('3221225794') -and ($messages -join ' ').Contains('last token/oracle')) 'failures preserve exit and last oracle'
 $trace.Clear()
 $chosen = Invoke-DesktopLaunchLadder -Probe { param($variant,$stage) $trace.Add($stage); @{ok=$true} } -Log { param($line) }
-Assert-True ($chosen.Name -eq 'AsUser/inherited-ACL/new-console' -and $trace.Count -eq 3) 'stop diagnostics after the first fully verified variant'
-$failure = ''
+Assert-True ($chosen.Method -eq 'AsUser' -and $chosen.RepairTokenDefaults -and $chosen.LowerIntegrity -and $trace.Count -eq 6) 'successful control is not selected; stop after first repaired Medium variant'
+$trace.Clear()
+$chosen = Invoke-DesktopLaunchLadder -Probe {
+    param($variant,$stage)
+    $trace.Add($variant.Name)
+    @{ok=$variant.DuplicatePrimary}
+} -Log { param($line) }
+Assert-True ($chosen.DuplicatePrimary -and $chosen.LowerIntegrity -and $chosen.RepairTokenDefaults) 'duplicate-primary fallback remains Medium with repaired defaults'
+$variants = @(Get-DesktopLaunchVariants)
+Assert-True ($variants.Count -eq 13) 'bounded diagnostic ladder'
+Assert-True (@($variants | Where-Object { -not $_.RepairTokenDefaults }).Count -eq 1) 'exactly one unrepaired control'
+Assert-True (@($variants | Where-Object { -not $_.LowerIntegrity -and -not $_.DiagnosticOnly }).Count -eq 0) 'retained High integrity is diagnostic only'
+Assert-True (@($variants | Where-Object { -not $_.UseShowWindow -and -not $_.NewConsole }).Count -gt 0) 'CREATE_NO_WINDOW can be tested without STARTF_USESHOWWINDOW'
+$failure = ''; $trace.Clear()
 try {
-    $null = Invoke-DesktopLaunchLadder -Probe { param($variant,$stage) throw "injected $stage Win32=5" } -Log { param($line) }
+    $null = Invoke-DesktopLaunchLadder -Probe {
+        param($variant,$stage)
+        $trace.Add($variant.Name)
+        if ($variant.DiagnosticOnly) { return @{ok=$true} }
+        throw "injected $stage Win32=5"
+    } -Log { param($line) }
 } catch { $failure = $_.Exception.Message }
 Assert-True ($failure.Contains('all restricted launch variants failed') -and $failure.Contains('Win32=5') -and $failure.Contains('powershell')) 'all-failed not_run retains every stage error'
+Assert-True ($trace.Count -eq 39 -and ($trace -join ' ').Contains('high-diagnostic')) 'all failures include duplicate, show-window and retained High diagnostics'
 
 # Native handles are replaced by an oracle here; no cold-start timing dependency.
 $clock.ms = 0
@@ -138,11 +173,17 @@ Assert-True ($state.exit_hex -eq '0xC0000142' -and $state.exit_code -eq 32212257
 $dir = Join-Path ([IO.Path]::GetTempPath()) ("wp '" + [Guid]::NewGuid().ToString('N').Substring(0,6))
 try {
     New-Item -ItemType Directory $dir | Out-Null
-    $variant = @{Name='AsUser/inherited-ACL/new-console';Method='AsUser';RepairDesktop=$false;NewConsole=$true}
+    $variant = $variants[1]
     $mock = [pscustomobject]@{TokenSummary='SID=fixture; Integrity=Medium; SeChangeNotifyPrivilege=enabled';DesktopSecurity='D:fixture';
-        OutputDir=$dir;Prefix=$variant.Name.Replace('/','-');Facts=$facts;EmitFacts=$false;FailCreate=$false}
+        OutputDir=$dir;Prefix=$variant.Name.Replace('/','-');Facts=$facts;EmitFacts=$false;FailCreate=$false;Configured=$false}
+    $mock | Add-Member ScriptMethod Configure {
+        param($repairDefaults,$lower,$duplicate)
+        if (-not $repairDefaults -or -not $lower -or $duplicate) { throw 'unexpected token profile' }
+        $this.Configured = $true
+    }
     $mock | Add-Member ScriptMethod Start {
-        param($exe,$arguments,$method,$repair,$console)
+        param($exe,$arguments,$method,$repair,$console,$show)
+        if (-not $this.Configured) { throw 'token defaults not configured before creation' }
         if ($this.FailCreate) { throw [ComponentModel.Win32Exception]::new(5) }
         $program = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($arguments[-1]))
         $tokens = $null; $errors = $null
@@ -161,6 +202,9 @@ try {
     $mock.EmitFacts = $true
     $result = Invoke-RestrictedDesktopProbe $mock $variant powershell $dir $dir 2
     Assert-True ($result.ok -and $result.last.SessionId -eq 2) 'external token oracle admits actual Medium facts'
+    $mock.Facts = $highFacts
+    $result = Invoke-RestrictedDesktopProbe $mock $variant powershell $dir $dir 2
+    Assert-True (-not $result.ok -and $result.last.IntegrityRid -eq 12288) 'Medium launch cannot pass with High token facts'
     $mock.Facts = $facts.Clone(); $mock.Facts.IsAdmin = $true
     $result = Invoke-RestrictedDesktopProbe $mock $variant powershell $dir $dir 2
     Assert-True (-not $result.ok -and $result.last.IsAdmin) 'successful process cannot override rejected token oracle'

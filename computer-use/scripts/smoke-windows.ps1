@@ -15,7 +15,8 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
-Add-Type -Path @((Join-Path $PSScriptRoot 'windows-desktop-token.cs'), (Join-Path $PSScriptRoot 'windows-desktop-access.cs'))
+Add-Type -Path (@('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs') |
+    ForEach-Object { Join-Path $PSScriptRoot $_ })
 
 function Invoke-NativeCase {
     param([string]$Name)
@@ -87,7 +88,10 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
         $done = Join-Path $payload.OutputDir 'desktop-exit.json'
         # Selection retries only the harmless probes. Never retry the suite,
         # even if its process exits before done.json (side effects may exist).
-        $child = $context.Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", $arguments, $variant.Method, $variant.RepairDesktop, $variant.NewConsole)
+        if ($variant.DiagnosticOnly -or -not $variant.LowerIntegrity -or -not $variant.RepairTokenDefaults) {
+            throw 'diagnostic token profile cannot launch the real suite'
+        }
+        $child = $context.Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", $arguments, $variant.Method, $variant.RepairDesktop, $variant.NewConsole, $variant.UseShowWindow)
         $last = Wait-DesktopChild $child "restricted interactive suite; parent $diagnostic" -TimeoutMs 900000
         $last.done = Test-Path $done
         if (Test-Path (Join-Path $payload.OutputDir 'desktop.log')) { Get-Content (Join-Path $payload.OutputDir 'desktop.log') }
