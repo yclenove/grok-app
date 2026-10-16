@@ -8,7 +8,7 @@ use gcu_core::driver::{DriverError, Result};
 use gcu_protocol::Rect;
 use std::{
     collections::BTreeMap,
-    sync::Mutex,
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -35,6 +35,8 @@ pub struct FakeState {
     pub cg_windows: Vec<CgWindow>,
     /// Accessibility windows by pid.
     pub ax_windows: BTreeMap<u32, Vec<AxWindow>>,
+    /// Pids queried through Accessibility window discovery.
+    pub ax_queries: Vec<u32>,
     /// Windows added to the Core Graphics list on unhide.
     pub reveal_on_unhide: Vec<CgWindow>,
     /// Recorded launches. `activates` is false.
@@ -62,6 +64,7 @@ impl Default for FakeState {
             spotlight_delay: Duration::ZERO,
             cg_windows: Vec::new(),
             ax_windows: BTreeMap::new(),
+            ax_queries: Vec::new(),
             reveal_on_unhide: Vec::new(),
             launches: Vec::new(),
             raises: Vec::new(),
@@ -76,9 +79,39 @@ impl Default for FakeState {
 #[derive(Default)]
 pub struct FakeMacApi {
     state: Mutex<FakeState>,
+    facts_blocks: Mutex<BTreeMap<String, Arc<FakeBlock>>>,
+    spotlight_block: Mutex<Option<Arc<FakeBlock>>>,
+    launch_block: Mutex<Option<Arc<FakeBlock>>>,
 }
 
 impl FakeMacApi {
+    /// Hold a bundle read until the test explicitly releases it.
+    pub fn block_facts(&self, path: &str) -> Arc<FakeBlock> {
+        let block = Arc::new(FakeBlock::default());
+        if let Ok(mut blocks) = self.facts_blocks.lock() {
+            blocks.insert(path.into(), block.clone());
+        }
+        block
+    }
+
+    /// Hold Spotlight without sleeping or holding the fake OS state lock.
+    pub fn block_spotlight(&self) -> Arc<FakeBlock> {
+        let block = Arc::new(FakeBlock::default());
+        if let Ok(mut slot) = self.spotlight_block.lock() {
+            *slot = Some(block.clone());
+        }
+        block
+    }
+
+    /// Hold a launch to exercise independence from the mutation worker.
+    pub fn block_launch(&self) -> Arc<FakeBlock> {
+        let block = Arc::new(FakeBlock::default());
+        if let Ok(mut slot) = self.launch_block.lock() {
+            *slot = Some(block.clone());
+        }
+        block
+    }
+
     /// Mutate fixture state.
     pub fn update(&self, update: impl FnOnce(&mut FakeState)) {
         if let Ok(mut state) = self.state.lock() {
@@ -132,6 +165,14 @@ impl MacApi for FakeMacApi {
     }
 
     fn bundle_facts(&self, path: &str) -> Result<BundleFacts> {
+        let block = self
+            .facts_blocks
+            .lock()
+            .ok()
+            .and_then(|b| b.get(path).cloned());
+        if let Some(block) = block {
+            block.wait();
+        }
         let state = self.state()?;
         state
             .facts
@@ -151,6 +192,10 @@ impl MacApi for FakeMacApi {
     }
 
     fn spotlight_recent(&self) -> Result<Vec<SpotlightHit>> {
+        let block = self.spotlight_block.lock().ok().and_then(|b| b.clone());
+        if let Some(block) = block {
+            block.wait();
+        }
         let (delay, hits) = {
             let state = self.state.lock().map_err(|_| DriverError::Crashed {
                 maybe_executed: false,
@@ -169,6 +214,7 @@ impl MacApi for FakeMacApi {
     }
 
     fn ax_windows(&self, pid: u32) -> Result<Vec<AxWindow>> {
+        self.update(|state| state.ax_queries.push(pid));
         let state = self.state()?;
         Ok(state.ax_windows.get(&pid).cloned().unwrap_or_default())
     }
@@ -203,6 +249,10 @@ impl MacApi for FakeMacApi {
     }
 
     fn launch(&self, path: &str) -> Result<()> {
+        let block = self.launch_block.lock().ok().and_then(|b| b.clone());
+        if let Some(block) = block {
+            block.wait();
+        }
         self.update(|state| {
             state.launches.push(LaunchRecord {
                 path: path.to_owned(),
@@ -210,6 +260,36 @@ impl MacApi for FakeMacApi {
             });
         });
         Ok(())
+    }
+}
+
+/// Controllable native call. Tests synchronize on entry, then explicitly release.
+#[derive(Default)]
+pub struct FakeBlock {
+    entered: tokio::sync::Notify,
+    released: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl FakeBlock {
+    /// Wait until the native thread has entered the blocked call.
+    pub async fn entered(&self) {
+        self.entered.notified().await;
+    }
+
+    /// Allow current and subsequent calls to return.
+    pub fn release(&self) {
+        if let Ok(mut released) = self.released.lock() {
+            *released = true;
+            self.wake.notify_all();
+        }
+    }
+
+    fn wait(&self) {
+        self.entered.notify_one();
+        if let Ok(released) = self.released.lock() {
+            drop(self.wake.wait_while(released, |released| !*released));
+        }
     }
 }
 
