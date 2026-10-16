@@ -245,6 +245,23 @@ fn root(source: &FakeAxSource) -> Result<Option<FakeAxNode>> {
 }
 
 pub(super) fn live_value(source: &FakeAxSource, id: u64) -> Option<Option<NodeValue>> {
+    let mut act = source.act.lock().ok()?;
+    if act.lag_left > 0 && act.pending_value.is_some() {
+        act.lag_left -= 1;
+        let current = stored_value(source, id);
+        if act.lag_left == 0 {
+            if let Some(pending) = act.pending_value.take() {
+                drop(act);
+                let _ = write_stored(source, id, pending);
+            }
+        }
+        return current;
+    }
+    drop(act);
+    stored_value(source, id)
+}
+
+fn stored_value(source: &FakeAxSource, id: u64) -> Option<Option<NodeValue>> {
     let guard = source.root.lock().ok()?;
     find(guard.as_ref()?, id).map(|node| node.value.clone())
 }
@@ -254,14 +271,49 @@ fn sticks(source: &FakeAxSource, attribute: &str, call: AxCall) -> Result<bool> 
 }
 
 fn store_text(source: &FakeAxSource, id: u64, value: &str) -> Result<()> {
+    let next = NodeValue::Text(value.to_string());
+    if defer_write(source, next)? {
+        return Ok(());
+    }
     update_value(source, id, |_| NodeValue::Text(value.to_string()))
 }
 
 fn store_number(source: &FakeAxSource, id: u64, value: f64) -> Result<()> {
+    let next = {
+        let guard = source.root.lock().map_err(|_| DriverError::Crashed {
+            maybe_executed: false,
+        })?;
+        let current = guard
+            .as_ref()
+            .and_then(|root| find(root, id))
+            .and_then(|node| node.value.clone());
+        match current {
+            Some(NodeValue::Range { min, max, .. }) => NodeValue::Range { value, min, max },
+            _ => NodeValue::Number(value),
+        }
+    };
+    if defer_write(source, next)? {
+        return Ok(());
+    }
     update_value(source, id, |current| match current {
         Some(NodeValue::Range { min, max, .. }) => NodeValue::Range { value, min, max },
         _ => NodeValue::Number(value),
     })
+}
+
+/// Hold the new value for [`FakeAct::value_lag_reads`] fresh reads.
+fn defer_write(source: &FakeAxSource, next: NodeValue) -> Result<bool> {
+    let mut act = act(source)?;
+    if act.value_lag_reads == 0 {
+        return Ok(false);
+    }
+    act.lag_left = act.value_lag_reads;
+    act.pending_value = Some(next);
+    Ok(true)
+}
+
+fn write_stored(source: &FakeAxSource, id: u64, next: NodeValue) -> Result<()> {
+    update_value(source, id, |_| next)
 }
 
 fn update_value(

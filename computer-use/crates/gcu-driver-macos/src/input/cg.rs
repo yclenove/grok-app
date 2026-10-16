@@ -291,12 +291,15 @@ fn stamp_targeted(cg: &CGEvent, event: &SyntheticEvent) -> bool {
 fn build(event: &SyntheticEvent) -> Option<CFRetained<CGEvent>> {
     let point = point_of(event);
     match event.kind {
-        EventKind::Scroll => {
-            let (dx, dy) = event.scroll?;
-            let wheel =
-                CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 2, dy, dx, 0)?;
-            CGEvent::set_location(Some(&wheel), point);
-            Some(wheel)
+        EventKind::Scroll => build_scroll(event, point),
+        EventKind::MouseMove => {
+            let mouse = CGEvent::new_mouse_event(
+                None,
+                CGEventType::MouseMoved,
+                point,
+                CGMouseButton::Left,
+            )?;
+            Some(mouse)
         }
         EventKind::KeyDown | EventKind::KeyUp | EventKind::Unicode => build_key(event),
         EventKind::MouseDown | EventKind::MouseUp | EventKind::MouseDrag => {
@@ -316,6 +319,30 @@ fn build(event: &SyntheticEvent) -> Option<CFRetained<CGEvent>> {
             Some(mouse)
         }
     }
+}
+
+fn build_scroll(event: &SyntheticEvent, point: CGPoint) -> Option<CFRetained<CGEvent>> {
+    let (dx, dy) = event.scroll?;
+    let (line_x, line_y) = super::events::wheel_axes(dx, dy);
+    // Line units with phase Changed. Pixel + a continuous flag often yields a
+    // zero precise delta, and phase Ended clears egui's wheel delta.
+    let wheel =
+        CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 2, line_y, line_x, 0)?;
+    CGEvent::set_integer_value_field(Some(&wheel), CGEventField::ScrollWheelEventIsContinuous, 0);
+    CGEvent::set_integer_value_field(Some(&wheel), CGEventField::ScrollWheelEventScrollPhase, 4);
+    CGEvent::set_integer_value_field(Some(&wheel), CGEventField::ScrollWheelEventMomentumPhase, 0);
+    CGEvent::set_integer_value_field(
+        Some(&wheel),
+        CGEventField::ScrollWheelEventPointDeltaAxis1,
+        i64::from(dy),
+    );
+    CGEvent::set_integer_value_field(
+        Some(&wheel),
+        CGEventField::ScrollWheelEventPointDeltaAxis2,
+        i64::from(dx),
+    );
+    CGEvent::set_location(Some(&wheel), point);
+    Some(wheel)
 }
 
 fn build_key(event: &SyntheticEvent) -> Option<CFRetained<CGEvent>> {

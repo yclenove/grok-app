@@ -139,6 +139,42 @@ pub fn virtual_list_point(root: &RawNode) -> Option<WindowPoint> {
     (hits.len() == 1).then_some(hits[0])
 }
 
+/// Downward drag on the one scrollbar that sits beside at least three rows.
+///
+/// The points stay on the bar: just inside the top, then just inside the
+/// bottom. A bar shorter than 40 points, or two such bars, is not a target.
+/// Only the macOS live suite posts this drag.
+#[cfg(target_os = "macos")]
+pub fn list_scrollbar_drag(root: &RawNode) -> Option<(WindowPoint, WindowPoint)> {
+    let mut hits = Vec::new();
+    for bar in collect(root, &|node| node.role == Role::ScrollBar) {
+        let Some(frame) = bar.frame else {
+            continue;
+        };
+        if frame.h < 40.0 {
+            continue;
+        }
+        let rows = collect(root, &|node| {
+            node.role == Role::StaticText && node.frame.is_some_and(|row| row_on_bar(row, frame))
+        });
+        if rows.len() < 3 {
+            continue;
+        }
+        let x = frame.x + frame.w / 2.0;
+        hits.push((
+            WindowPoint {
+                x,
+                y: frame.y + 8.0,
+            },
+            WindowPoint {
+                x,
+                y: frame.y + frame.h - 8.0,
+            },
+        ));
+    }
+    (hits.len() == 1).then_some(hits[0])
+}
+
 fn combo_band(root: &RawNode) -> Option<(f64, f64)> {
     let radios = collect(root, &|node| {
         node.role == Role::Radio && node.frame.is_some()

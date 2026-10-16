@@ -97,7 +97,9 @@ async fn set_value_readonly_or_password_refuses_without_pattern_calls() {
                 )
                 .await
                 .unwrap_err(),
-            DriverError::NotSettable
+            DriverError::NotSettable {
+                maybe_executed: false
+            }
         );
         assert!(source.action_calls().is_empty());
     }
@@ -141,7 +143,9 @@ async fn every_pattern_success_unsupported_unavailable_and_errors_delivers_at_mo
             source.reply(pattern, reply.clone());
             let result = actions::perform(&source, 8, &req, &Cancel::default()).await;
             let absent = if matches!(pattern, Pattern::Value | Pattern::RangeValue) {
-                DriverError::NotSettable
+                DriverError::NotSettable {
+                    maybe_executed: false,
+                }
             } else {
                 DriverError::ElementNotActionable
             };
@@ -294,7 +298,9 @@ async fn set_value_missing_writability_sensitive_and_partial_metadata_refuses() 
                 &Cancel::default()
             )
             .await,
-            Err(DriverError::NotSettable)
+            Err(DriverError::NotSettable {
+                maybe_executed: false
+            })
         );
         assert!(source.action_calls().is_empty());
     }
@@ -337,7 +343,9 @@ async fn value_numeric_fallback_requires_definite_no_effect_and_finite_number() 
                 &Cancel::default()
             )
             .await,
-            Err(DriverError::NotSettable)
+            Err(DriverError::NotSettable {
+                maybe_executed: false
+            })
         );
         assert!(source.action_calls().is_empty());
     }

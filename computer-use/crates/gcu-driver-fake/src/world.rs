@@ -288,7 +288,11 @@ impl World {
                             Some(NodeValue::Range { value, min, max }) => {
                                 *value = (*value + sign).clamp(*min, *max)
                             }
-                            _ => return Err(DriverError::NotSettable),
+                            _ => {
+                                return Err(DriverError::NotSettable {
+                                    maybe_executed: false,
+                                })
+                            }
                         }
                     }
                     NodeAction::ScrollUp => self.scroll(&h, Dir::Up, 1.0)?,
@@ -411,7 +415,11 @@ impl World {
                         *value =
                             *min + (last.x - frame.x).clamp(0.0, frame.w) / frame.w * (*max - *min)
                     }
-                    _ => return Err(DriverError::NotSettable),
+                    _ => {
+                        return Err(DriverError::NotSettable {
+                            maybe_executed: false,
+                        })
+                    }
                 }
             }
             DriverAction::TypeText {

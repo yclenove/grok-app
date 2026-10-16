@@ -160,7 +160,9 @@ fn map_zbus_error(e: zbus::Error, before_dispatch: bool) -> DriverError {
             return DriverError::StaleElement;
         }
         if n.contains("UnknownInterface") {
-            return DriverError::NotSettable;
+            return DriverError::NotSettable {
+                maybe_executed: false,
+            };
         }
     }
     DriverError::Native {
@@ -304,7 +306,9 @@ pub async fn execute_atspi_action(
                     }
                 }
 
-                Err(DriverError::NotSettable)
+                Err(DriverError::NotSettable {
+                    maybe_executed: false,
+                })
             }
             DriverAction::SelectText { el, range } => {
                 let node_ref = extract_atspi_node(el).ok_or(DriverError::StaleElement)?;
@@ -455,7 +459,9 @@ async fn execute_fake_atspi_action(
                     return Ok(Delivery::Accessibility);
                 }
             }
-            Err(DriverError::NotSettable)
+            Err(DriverError::NotSettable {
+                maybe_executed: false,
+            })
         }
         DriverAction::SelectText { el, .. } => {
             let id = extract_fake_id(el).ok_or(DriverError::StaleElement)?;

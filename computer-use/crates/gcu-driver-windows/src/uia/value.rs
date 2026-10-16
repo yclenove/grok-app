@@ -21,7 +21,9 @@ pub(super) async fn set(
         || super::sensitive::is_execution_surface(props)
         || props.read_only != Some(false)
     {
-        return Err(DriverError::NotSettable);
+        return Err(DriverError::NotSettable {
+            maybe_executed: false,
+        });
     }
     // Native Value and RangeValue each recheck their own CurrentIsReadOnly.
     // Only a proven no-effect absence permits trying the numeric alternative.
@@ -39,13 +41,18 @@ pub(super) async fn set(
         return Ok(Delivery::Accessibility);
     }
     if !props.patterns.range_value {
-        return Err(DriverError::NotSettable);
+        return Err(DriverError::NotSettable {
+            maybe_executed: false,
+        });
     }
-    let number = value
-        .parse::<f64>()
-        .ok()
-        .filter(|v| v.is_finite())
-        .ok_or(DriverError::NotSettable)?;
+    let number =
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or(DriverError::NotSettable {
+                maybe_executed: false,
+            })?;
     finish(
         budget
             .step(
@@ -56,7 +63,9 @@ pub(super) async fn set(
                 PatternAction::SetRangeValue(number),
             )
             .await?,
-        DriverError::NotSettable,
+        DriverError::NotSettable {
+            maybe_executed: false,
+        },
     )
 }
 
@@ -68,21 +77,29 @@ pub(super) fn range_number(
     current_step: Option<(f64, f64)>,
 ) -> Result<f64> {
     if !min.is_finite() || !max.is_finite() || min > max {
-        return Err(DriverError::NotSettable);
+        return Err(DriverError::NotSettable {
+            maybe_executed: false,
+        });
     }
     let number = match action {
         PatternAction::SetRangeValue(number) => *number,
         PatternAction::AdjustRange(increment) => {
-            let (current, step) = current_step.ok_or(DriverError::NotSettable)?;
+            let (current, step) = current_step.ok_or(DriverError::NotSettable {
+                maybe_executed: false,
+            })?;
             if !current.is_finite() || !step.is_finite() || step <= 0. {
-                return Err(DriverError::NotSettable);
+                return Err(DriverError::NotSettable {
+                    maybe_executed: false,
+                });
             }
             (current + if *increment { step } else { -step }).clamp(min, max)
         }
         _ => return Err(DriverError::InvalidRequest),
     };
     if !number.is_finite() || number < min || number > max {
-        return Err(DriverError::NotSettable);
+        return Err(DriverError::NotSettable {
+            maybe_executed: false,
+        });
     }
     Ok(number)
 }
@@ -94,7 +111,9 @@ mod tests {
         for number in [f64::NAN, f64::INFINITY, -1., 11.] {
             assert_eq!(
                 range_number(&PatternAction::SetRangeValue(number), 0., 10., None),
-                Err(DriverError::NotSettable)
+                Err(DriverError::NotSettable {
+                    maybe_executed: false
+                })
             );
         }
         assert_eq!(

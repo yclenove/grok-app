@@ -88,6 +88,12 @@ pub struct FakeAct {
     ///
     /// Readback must then refuse. The default applies the write.
     pub ignore_value_write: bool,
+    /// Fresh reads that still return the previous value after one write.
+    ///
+    /// `1` shows the old value once, then the written value. `0` applies immediately.
+    pub value_lag_reads: u32,
+    pub(crate) lag_left: u32,
+    pub(crate) pending_value: Option<NodeValue>,
     pub(crate) log: Vec<String>,
 }
 
@@ -149,6 +155,13 @@ pub trait AxSource: Send + Sync {
     async fn title(&self, node: &Self::Node) -> Result<Option<String>>;
     /// Bounded value. Password sources must not return the secret.
     async fn value(&self, node: &Self::Node) -> Result<Option<NodeValue>>;
+    /// Value for readback. Drops a snapshot cache before reading.
+    ///
+    /// The default is [`AxSource::value`]. A live source must not answer this
+    /// from the pre-write snapshot.
+    async fn fresh_value(&self, node: &Self::Node) -> Result<Option<NodeValue>> {
+        self.value(node).await
+    }
     /// `AXDescription`.
     async fn description(&self, node: &Self::Node) -> Result<Option<String>>;
     /// `AXPlaceholderValue`.

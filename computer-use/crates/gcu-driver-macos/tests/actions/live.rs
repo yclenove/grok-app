@@ -93,7 +93,9 @@ async fn live_fixture_semantic_actions_match_state() {
             )
             .await
             .unwrap_err(),
-        DriverError::NotSettable
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
     );
     assert!(!std::fs::read_to_string(state_path())
         .unwrap_or_default()
@@ -132,7 +134,7 @@ async fn live_fixture_semantic_actions_match_state() {
         .await
     {
         Ok(_) => assert_eq!(wait_text("text", "grok-name").await, "grok-name"),
-        Err(DriverError::NotSettable) => {
+        Err(DriverError::NotSettable { .. }) => {
             assert_ne!(
                 read_state()
                     .get("text")

@@ -4,20 +4,64 @@ use super::support::*;
 use gcu_core::driver::{
     Button, Cancel, Driver, DriverAction, DriverError, KeyChord, KeyRoute, PointerRoute, WindowRef,
 };
-use gcu_core::model::NativeHandle;
+use gcu_core::model::{NativeHandle, WindowPoint};
+use gcu_driver_macos::input::text::TextOptions;
 use gcu_driver_macos::MacosDriver;
 use std::time::Duration;
 
 async fn focus_name_field(driver: &MacosDriver) -> Result<(WindowRef, NativeHandle), String> {
     let win = fixture_window(driver).await?;
+    let at = name_point(driver, &win).await?;
+    click_name(driver, &win, at).await?;
+    if !name_focused().await {
+        // Down and up in one sample can miss a background egui field. A same-point
+        // drag waits one frame between them.
+        driver
+            .perform(
+                &DriverAction::PointerDrag {
+                    win: win.clone(),
+                    path: vec![at, at],
+                    route: PointerRoute::TargetedOnly,
+                },
+                &Cancel::default(),
+            )
+            .await
+            .map_err(|error| format!("{error}; last state: {}", last_state()))?;
+    }
+    if !name_focused().await {
+        let _ = driver
+            .perform(
+                &DriverAction::Activate { win: win.clone() },
+                &Cancel::default(),
+            )
+            .await;
+        click_name(driver, &win, at).await?;
+    }
+    if !name_focused().await {
+        return Err(format!(
+            "name field did not take keyboard focus; last state: {}",
+            last_state()
+        ));
+    }
     let root = tree(driver, &win).await?;
     let field =
         find(&root, &|node| named(node, &["name_field", "Name"])).ok_or("name field missing")?;
+    Ok((win, field.handle.clone()))
+}
+
+async fn name_point(driver: &MacosDriver, win: &WindowRef) -> Result<WindowPoint, String> {
+    let root = tree(driver, win).await?;
+    let field =
+        find(&root, &|node| named(node, &["name_field", "Name"])).ok_or("name field missing")?;
+    center(field)
+}
+
+async fn click_name(driver: &MacosDriver, win: &WindowRef, at: WindowPoint) -> Result<(), String> {
     driver
         .perform(
             &DriverAction::PointerClick {
                 win: win.clone(),
-                at: center(field)?,
+                at,
                 button: Button::Left,
                 count: 1,
                 route: PointerRoute::TargetedOnly,
@@ -25,12 +69,24 @@ async fn focus_name_field(driver: &MacosDriver) -> Result<(WindowRef, NativeHand
             &Cancel::default(),
         )
         .await
-        .map_err(|error| format!("{error}; last state: {}", last_state()))?;
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    let root = tree(driver, &win).await?;
-    let field =
-        find(&root, &|node| named(node, &["name_field", "Name"])).ok_or("name field missing")?;
-    Ok((win, field.handle.clone()))
+        .map_err(|error| format!("{error}; last state: {}", last_state()))
+        .map(|_| ())
+}
+
+async fn name_focused() -> bool {
+    oracle::poll_until(
+        &oracle::fixture_state_path(),
+        Duration::from_millis(300),
+        |state| {
+            state
+                .get("focused_widget")
+                .and_then(|value| value.as_str())
+                .filter(|name| *name == "name_field")
+                .map(|_| ())
+        },
+    )
+    .await
+    .is_ok()
 }
 
 pub(super) async fn set_text(driver: &MacosDriver, text: &str) -> Result<(), String> {
@@ -49,7 +105,7 @@ pub(super) async fn set_text(driver: &MacosDriver, text: &str) -> Result<(), Str
         .await
     {
         Ok(_) => {}
-        Err(DriverError::NotSettable) => {
+        Err(DriverError::NotSettable { .. }) => {
             let (win, handle) = focus_name_field(driver).await?;
             driver
                 .perform(
@@ -72,13 +128,20 @@ pub(super) async fn set_text(driver: &MacosDriver, text: &str) -> Result<(), Str
 pub(super) async fn type_sample(driver: &MacosDriver) -> Result<(), String> {
     let sample = "中文\u{200D}🚀\n";
     let (win, handle) = focus_name_field(driver).await?;
+    // Unicode CGEvent chunks do not become egui text for this field. Targeted
+    // cmd+v is the path that covers the same characters.
     driver
-        .perform(
+        .perform_text(
             &DriverAction::TypeText {
                 win,
                 focus: Some(handle),
                 text: sample.into(),
                 route: KeyRoute::TargetedOnly,
+            },
+            TextOptions {
+                allow_clipboard: true,
+                sensitive_text: false,
+                high_risk_target: false,
             },
             &Cancel::default(),
         )

@@ -133,6 +133,12 @@ impl AxSource for RealAxSource {
     async fn value(&self, node: &Self::Node) -> Result<Option<NodeValue>> {
         Ok(self.ensure(*node).await?.value)
     }
+    async fn fresh_value(&self, node: &Self::Node) -> Result<Option<NodeValue>> {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.remove(node);
+        }
+        self.value(node).await
+    }
     async fn description(&self, node: &Self::Node) -> Result<Option<String>> {
         Ok(self.ensure(*node).await?.description)
     }

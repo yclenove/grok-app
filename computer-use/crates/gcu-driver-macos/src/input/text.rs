@@ -84,6 +84,18 @@ pub trait TextApi: Send + Sync {
         text: &str,
         cancel: &Cancel,
     ) -> Result<()>;
+    /// Targeted paste oracle. Does not require the app to be frontmost.
+    ///
+    /// The default delegates to [`TextApi::paste_observed`].
+    async fn paste_seen(
+        &self,
+        target: &InputTarget,
+        expected: &TextFocus,
+        text: &str,
+        cancel: &Cancel,
+    ) -> Result<()> {
+        self.paste_observed(target, expected, text, cancel).await
+    }
 }
 
 /// Trusted per-action clipboard permission, never inferred from text content.
@@ -192,6 +204,14 @@ async fn run(
         op.sent.store(true, Ordering::Release);
         match op.guard(ctx.text.append(target, &focus, text)).await {
             Ok(()) => return Ok(Delivery::Accessibility),
+            // A rejected readback may still have landed. Keep `sent` in that case
+            // so a later failure is not reported as a zero-effect miss, and try
+            // the key or paste path because the value was not observed.
+            Err(DriverError::NotSettable { maybe_executed }) => {
+                if !maybe_executed {
+                    op.sent.store(false, Ordering::Release);
+                }
+            }
             Err(error) if error.maybe_executed() => return Err(error),
             Err(_) => op.sent.store(false, Ordering::Release),
         }
@@ -210,6 +230,20 @@ async fn run(
         return clipboard::paste(ctx, target, &focus, text, op).await;
     }
     let probe = ctx.events.probe();
+    // CGEvent unicode reaches this egui field for ASCII chunks. CJK, ZWJ, and
+    // emoji do not become Text events. An explicit clipboard permission uses
+    // targeted cmd+v instead, without a HID tap or a foreground grant.
+    if needs_targeted_paste(text)
+        && options.allow_clipboard
+        && !options.sensitive_text
+        && !options.high_risk_target
+        && !focus.sensitive
+        && !focus.high_risk
+        && focus.paste_baseline.is_some()
+        && probe.background_ready()
+    {
+        return clipboard::paste_targeted(ctx, target, &focus, text, op).await;
+    }
     let targeted = probe.background_ready()
         && !crate::ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name);
     let path = if targeted {
@@ -254,6 +288,11 @@ async fn run(
     } else {
         Ok(Delivery::Foreground)
     }
+}
+
+fn needs_targeted_paste(text: &str) -> bool {
+    text.chars()
+        .any(|ch| ch == '\n' || ch == '\r' || !ch.is_ascii())
 }
 
 pub(crate) fn validate_focus(focus: &TextFocus, target: &InputTarget) -> Result<()> {

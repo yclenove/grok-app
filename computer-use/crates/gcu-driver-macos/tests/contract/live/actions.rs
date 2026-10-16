@@ -213,6 +213,21 @@ pub(super) async fn scroll_list(driver: &MacosDriver) -> Result<(), String> {
     if list_moved_within(Duration::from_millis(800)).await.is_err() {
         scroll_at(driver, &win, at, 480).await?;
     }
+    if list_moved_within(Duration::from_millis(800)).await.is_err() {
+        if let Some((from, to)) = fixture_tree::list_scrollbar_drag(&root) {
+            driver
+                .perform(
+                    &DriverAction::PointerDrag {
+                        win,
+                        path: vec![from, to],
+                        route: PointerRoute::TargetedOnly,
+                    },
+                    &Cancel::default(),
+                )
+                .await
+                .map_err(|error| format!("{error}; last state: {}", last_state()))?;
+        }
+    }
     list_moved_within(Duration::from_secs(5)).await.map(|_| ())
 }
 

@@ -92,8 +92,39 @@ pub(crate) async fn paste(
     text: &str,
     op: &Operation<'_>,
 ) -> Result<Delivery> {
-    let foreground = op.foreground();
-    let op = &foreground;
+    paste_route(ctx, target, focus, text, op, PostPath::HidTap, true).await
+}
+
+/// `cmd+v` via `postToPid`. No foreground guard and no frontmost requirement.
+///
+/// The pasteboard transaction is the same as [`paste`]. Observation accepts the
+/// text with newlines removed, because a single-line field stores them as spaces.
+pub(crate) async fn paste_targeted(
+    ctx: &TextContext,
+    target: &InputTarget,
+    focus: &TextFocus,
+    text: &str,
+    op: &Operation<'_>,
+) -> Result<Delivery> {
+    paste_route(ctx, target, focus, text, op, PostPath::ToPid, false).await
+}
+
+async fn paste_route(
+    ctx: &TextContext,
+    target: &InputTarget,
+    focus: &TextFocus,
+    text: &str,
+    op: &Operation<'_>,
+    path: PostPath,
+    foreground: bool,
+) -> Result<Delivery> {
+    let foreground_op;
+    let op = if foreground {
+        foreground_op = op.foreground();
+        &foreground_op
+    } else {
+        op
+    };
     op.check()?;
     let lock = op.guard(async { Ok(CLIPBOARD.lock().await) }).await?;
     let ctx = ctx.clone();
@@ -116,12 +147,16 @@ pub(crate) async fn paste(
             clock: ctx.clock.as_ref(),
             deadline,
             guards,
-            foreground: true,
+            foreground,
         };
         work.check()?;
         let fresh = runtime.block_on(work.guard(ctx.text.focus(&target)))?;
         validate_focus(&fresh, &target)?;
-        if !fresh.frontmost || fresh.handle != focus.handle || fresh.sensitive || fresh.high_risk {
+        if (foreground && !fresh.frontmost)
+            || fresh.handle != focus.handle
+            || fresh.sensitive
+            || fresh.high_risk
+        {
             return Err(uncertain(&work, "paste focus changed"));
         }
         let original = ctx.pasteboard.read()?;
@@ -144,6 +179,10 @@ pub(crate) async fn paste(
             &text,
             &restore.owned,
             &work,
+            PastePost {
+                path,
+                require_frontmost: foreground,
+            },
         ));
         let cleanup = runtime.block_on(async {
             let deadline = ctx.clock.now() + Duration::from_millis(100);
@@ -183,6 +222,11 @@ pub(crate) async fn paste(
     })
 }
 
+struct PastePost {
+    path: PostPath,
+    require_frontmost: bool,
+}
+
 async fn paste_once(
     ctx: &TextContext,
     target: &InputTarget,
@@ -190,6 +234,7 @@ async fn paste_once(
     text: &str,
     owned: &PasteboardSnapshot,
     op: &Operation<'_>,
+    post: PastePost,
 ) -> Result<()> {
     op.check()?;
     if ctx.pasteboard.read()? != *owned {
@@ -197,7 +242,11 @@ async fn paste_once(
     }
     let fresh = op.guard(ctx.text.focus(target)).await?;
     validate_focus(&fresh, target)?;
-    if fresh.handle != focus.handle || !fresh.frontmost || fresh.sensitive || fresh.high_risk {
+    if fresh.handle != focus.handle
+        || (post.require_frontmost && !fresh.frontmost)
+        || fresh.sensitive
+        || fresh.high_risk
+    {
         return Err(uncertain(op, "paste focus changed"));
     }
     if ctx.pasteboard.read()? != *owned {
@@ -207,14 +256,14 @@ async fn paste_once(
     let events = super::keys::plan_chord(
         target,
         &KeyChord::parse("cmd+v").map_err(|_| DriverError::InvalidRequest)?,
-        PostPath::HidTap,
+        post.path,
     )?;
     for event in events {
         // The modifier post can yield. Revalidate immediately before V-down.
         if event.down && event.keycode == Some(0x09) {
             let fresh = op.guard(ctx.text.focus(target)).await?;
             if fresh.handle != focus.handle
-                || !fresh.frontmost
+                || (post.require_frontmost && !fresh.frontmost)
                 || !fresh.editable
                 || fresh.sensitive
                 || fresh.high_risk
@@ -235,6 +284,10 @@ async fn paste_once(
         ))
         .await?;
     }
-    op.guard(ctx.text.paste_observed(target, focus, text, op.cancel))
-        .await
+    let observed = if post.require_frontmost {
+        ctx.text.paste_observed(target, focus, text, op.cancel)
+    } else {
+        ctx.text.paste_seen(target, focus, text, op.cancel)
+    };
+    op.guard(observed).await
 }

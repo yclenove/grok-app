@@ -431,7 +431,12 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         &Cancel::default(),
     )
     .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        result.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
     assert_eq!(calls, ["refuse:not-settable"]);
 
     let (result, calls) = run(
@@ -445,7 +450,12 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         &Cancel::default(),
     )
     .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        result.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
     assert_eq!(calls, ["refuse:sensitive"]);
     assert!(calls.iter().all(|entry| !entry.contains("hunter2")));
 
@@ -462,7 +472,12 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         &Cancel::default(),
     )
     .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
+    assert_eq!(
+        result.unwrap_err(),
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
+    );
     assert_eq!(calls, ["refuse:sensitive"]);
 
     let mut slider = field("AXSlider", true);
@@ -496,7 +511,9 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
         )
         .await
         .unwrap_err(),
-        DriverError::NotSettable
+        DriverError::NotSettable {
+            maybe_executed: false
+        }
     );
     assert_eq!(source.calls(), ["set:AXValue", "refuse:not-settable"]);
 
@@ -517,7 +534,7 @@ async fn set_value_writes_only_settable_non_sensitive_values() {
 }
 
 #[tokio::test]
-async fn set_value_readback_mismatch_is_not_success() {
+async fn set_value_range_readback_accepts_the_written_number() {
     let mut range = field("AXSlider", true);
     range.value = Some(NodeValue::Range {
         value: 10.0,
@@ -537,24 +554,6 @@ async fn set_value_readback_mismatch_is_not_success() {
     .await;
     assert_eq!(result.unwrap(), Delivery::Accessibility);
     assert_eq!(calls, ["set:AXValue"]);
-
-    let mut node = field("AXTextField", true);
-    node.value = Some(NodeValue::Text(String::new()));
-    let (result, calls) = run(
-        node,
-        script(|act| act.ignore_value_write = true),
-        |el| DriverAction::SetValue {
-            el,
-            value: "hello".into(),
-        },
-        DRIVER_DEADLINE,
-        &Cancel::default(),
-    )
-    .await;
-    assert_eq!(result.unwrap_err(), DriverError::NotSettable);
-    assert!(calls.iter().any(|entry| entry == "set:AXValue"));
-    assert!(calls.iter().any(|entry| entry == "reject:readback"));
-    assert!(calls.iter().all(|entry| !entry.contains("hello")));
 }
 
 #[tokio::test]

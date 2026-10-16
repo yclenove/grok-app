@@ -215,7 +215,11 @@ async fn run(
     } else {
         Delivery::TargetedEvent
     };
-    let gap = matches!(action, DriverAction::PointerDrag { .. }).then_some(events::DRAG_SAMPLE_GAP);
+    let gap = matches!(
+        action,
+        DriverAction::PointerDrag { .. } | DriverAction::PointerScroll { .. }
+    )
+    .then_some(events::DRAG_SAMPLE_GAP);
     post_all(api, ledger, &events, cancel, sent, gap, clock).await?;
     if delivery == Delivery::TargetedEvent {
         confirm_arrival(api, target, sent).await?;

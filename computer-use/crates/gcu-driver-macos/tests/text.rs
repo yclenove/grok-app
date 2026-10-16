@@ -117,7 +117,9 @@ async fn type_text_uncertain_ax_write_never_falls_back() {
 #[tokio::test]
 async fn type_text_rejected_ax_append_posts_unicode() {
     let rig = Rig::plain("original");
-    rig.text.fail_append(DriverError::NotSettable);
+    rig.text.fail_append(DriverError::NotSettable {
+        maybe_executed: false,
+    });
     assert_eq!(
         rig.run("x", TextOptions::default()).await.unwrap(),
         Delivery::TargetedEvent
@@ -280,4 +282,46 @@ async fn type_text_not_sent_and_uncertain_posts_do_not_retry() {
         assert!(rig.ledger.is_empty());
         assert_eq!(rig.board.writes(), 0);
     }
+}
+
+#[tokio::test]
+async fn non_ascii_with_permission_posts_targeted_paste_not_unicode() {
+    use gcu_driver_macos::input::{Call, EventKind, PostPath};
+    let rig = Rig::rich();
+    let sample = "中文\u{200D}🚀\n";
+    assert_eq!(
+        rig.run(
+            sample,
+            TextOptions {
+                allow_clipboard: true,
+                sensitive_text: false,
+                high_risk_target: false,
+            },
+        )
+        .await
+        .unwrap(),
+        Delivery::Clipboard
+    );
+    let calls = rig.events.calls();
+    assert!(calls.iter().all(|call| !matches!(call, Call::Activate(_))));
+    assert!(calls.iter().all(|call| !matches!(
+        call,
+        Call::Post(event) if event.kind == EventKind::Unicode
+    )));
+    assert!(calls.iter().any(|call| matches!(
+        call,
+        Call::Post(event)
+            if event.path == PostPath::ToPid && event.keycode == Some(0x09) && event.flags != 0
+    )));
+}
+
+#[tokio::test]
+async fn non_ascii_without_permission_stays_on_unicode_events() {
+    let rig = Rig::rich();
+    assert_eq!(
+        rig.run("中文", TextOptions::default()).await.unwrap(),
+        Delivery::TargetedEvent
+    );
+    assert!(rig.unicode().contains('中'));
+    assert_eq!(rig.board.writes(), 0);
 }

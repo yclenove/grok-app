@@ -73,6 +73,26 @@ pub async fn perform<S: AxSource>(
     cancel: &Cancel,
     deadline: Duration,
 ) -> Result<Delivery> {
+    perform_clocked(
+        source,
+        req,
+        cancel,
+        deadline,
+        &crate::input::clock::RuntimeClock::default(),
+    )
+    .await
+}
+
+/// [`perform`] with an injected clock. Production uses [`crate::input::clock::RuntimeClock`].
+///
+/// Readback waits on `clock` only. Cancel and the driver deadline still apply.
+pub async fn perform_clocked<S: AxSource>(
+    source: &S,
+    req: &DriverAction,
+    cancel: &Cancel,
+    deadline: Duration,
+    clock: &dyn crate::input::clock::Clock,
+) -> Result<Delivery> {
     if cancel.is_cancelled() {
         return Err(DriverError::Cancelled {
             maybe_executed: false,
@@ -90,7 +110,7 @@ pub async fn perform<S: AxSource>(
             secondary(source, &node, action, &budget).await
         }
         DriverAction::SetValue { value, .. } => {
-            super::value::set_value(source, &node, value, &budget).await
+            super::value::set_value(source, &node, value, &budget, clock).await
         }
         DriverAction::SelectText { range, .. } => {
             super::text::select_text(source, &node, *range, &budget).await

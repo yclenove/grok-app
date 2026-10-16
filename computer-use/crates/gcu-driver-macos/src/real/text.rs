@@ -52,7 +52,9 @@ impl TextApi for RealText {
                     return Err(DriverError::StaleElement);
                 }
                 let previous = fresh.plain_value.clone();
-                let mut full = previous.clone().ok_or(DriverError::NotSettable)?;
+                let mut full = previous.clone().ok_or(DriverError::NotSettable {
+                    maybe_executed: false,
+                })?;
                 full.push_str(&text);
                 if !live() {
                     return Err(DriverError::Cancelled {
@@ -64,7 +66,9 @@ impl TextApi for RealText {
                     crate::ax::AxCall::Performed => {
                         confirm_append(world, id, &full, previous.as_deref())
                     }
-                    _ => Err(DriverError::NotSettable),
+                    _ => Err(DriverError::NotSettable {
+                        maybe_executed: false,
+                    }),
                 }
             })
             .await
@@ -96,6 +100,43 @@ impl TextApi for RealText {
             }
             self.clock
                 .wait_until(self.clock.now() + Duration::from_millis(10))
+                .await;
+        }
+    }
+    async fn paste_seen(
+        &self,
+        target: &InputTarget,
+        expected: &TextFocus,
+        text: &str,
+        cancel: &Cancel,
+    ) -> Result<()> {
+        let needle: String = text
+            .chars()
+            .filter(|ch| *ch != '\n' && *ch != '\r')
+            .collect();
+        loop {
+            if cancel.is_cancelled() {
+                return Err(DriverError::Cancelled {
+                    maybe_executed: true,
+                });
+            }
+            let fresh = self.focus(target).await?;
+            if fresh.handle != expected.handle || fresh.sensitive || fresh.high_risk {
+                return Err(DriverError::Native {
+                    message: "paste focus changed after post".into(),
+                    maybe_executed: true,
+                });
+            }
+            if let Some(value) = fresh.paste_baseline.as_deref() {
+                let changed = Some(value) != expected.paste_baseline.as_deref();
+                let landed =
+                    value.contains(text) || (!needle.is_empty() && value.contains(&needle));
+                if changed && landed {
+                    return Ok(());
+                }
+            }
+            self.clock
+                .wait_until(self.clock.now() + Duration::from_millis(16))
                 .await;
         }
     }
@@ -224,7 +265,9 @@ fn confirm_append(world: &mut World, id: u64, full: &str, previous: Option<&str>
         return Ok(());
     }
     if after.as_deref() == previous || after.is_none() {
-        return Err(DriverError::NotSettable);
+        return Err(DriverError::NotSettable {
+            maybe_executed: false,
+        });
     }
     Err(DriverError::Native {
         message: "AXValue readback did not match".into(),

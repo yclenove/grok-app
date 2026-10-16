@@ -50,6 +50,8 @@ pub enum EventKind {
     MouseUp,
     /// Move while a button is held.
     MouseDrag,
+    /// Pointer moved. Not a held button.
+    MouseMove,
     /// Wheel deltas, not a held button.
     Scroll,
     /// Virtual key went down.
@@ -100,6 +102,7 @@ impl SyntheticEvent {
             EventKind::MouseDown => "mouse_down",
             EventKind::MouseUp => "mouse_up",
             EventKind::MouseDrag => "mouse_drag",
+            EventKind::MouseMove => "mouse_move",
             EventKind::Scroll => "scroll",
             EventKind::KeyDown => "key_down",
             EventKind::KeyUp => "key_up",
@@ -305,7 +308,7 @@ fn pointer(
         field_51: targeted.then_some(i64::from(target.window_id)),
         window_local: targeted.then_some(local),
         screen: (!targeted).then_some(screen_point(target, local)),
-        button: (kind != EventKind::Scroll).then_some(button),
+        button: (!matches!(kind, EventKind::Scroll | EventKind::MouseMove)).then_some(button),
         click_count,
         scroll: None,
         keycode: None,
@@ -356,7 +359,11 @@ pub fn plan_click(
     Ok(events)
 }
 
-/// One scroll event at `at`. Deltas may be negative or zero.
+/// Hover, then one scroll at `at`. Deltas may be negative or zero.
+///
+/// The move is a separate event so a scroll area can be hovered before the
+/// wheel. `scroll` stays the caller's pixel deltas. [`wheel_axes`] is the
+/// line-unit conversion the CoreGraphics backend posts.
 pub fn plan_scroll(
     target: &InputTarget,
     at: WindowPoint,
@@ -365,9 +372,28 @@ pub fn plan_scroll(
     path: PostPath,
 ) -> Result<Vec<SyntheticEvent>> {
     let local = require_point(target, at)?;
+    let hover = pointer(target, path, EventKind::MouseMove, local, 0, 0, false);
     let mut event = pointer(target, path, EventKind::Scroll, local, 0, 0, true);
     event.scroll = Some((dx, dy));
-    Ok(vec![event])
+    Ok(vec![hover, event])
+}
+
+/// Pixel wheel deltas as line counts for egui's native line speed (40 points).
+///
+/// A non-zero axis is at least one line and at most eight, so one event can
+/// move a list without posting a burst. Zero stays zero. The CoreGraphics
+/// backend is macOS-only; the conversion still has to exist for the planner.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn wheel_axes(dx: i32, dy: i32) -> (i32, i32) {
+    (wheel_lines(dx), wheel_lines(dy))
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn wheel_lines(delta: i32) -> i32 {
+    if delta == 0 {
+        return 0;
+    }
+    delta.signum() * (delta.abs() / 40).clamp(1, 8)
 }
 
 /// Gap between drag samples.
@@ -453,5 +479,52 @@ pub(crate) fn key_event(
         flags,
         down,
         unicode,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gcu_core::model::WindowPoint;
+
+    fn target() -> InputTarget {
+        InputTarget {
+            pid: 4,
+            window_id: 7,
+            bundle_id: "com.example.Editor".into(),
+            app_name: "Editor".into(),
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width_px: 400.0,
+            height_px: 300.0,
+            scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn wheel_axes_use_egui_line_speed() {
+        assert_eq!(wheel_axes(0, 0), (0, 0));
+        assert_eq!(wheel_axes(0, -480), (0, -8));
+        assert_eq!(wheel_axes(0, 480), (0, 8));
+        assert_eq!(wheel_axes(0, -8), (0, -1));
+        assert_eq!(wheel_axes(39, 0), (1, 0));
+    }
+
+    #[test]
+    fn plan_scroll_hovers_before_the_wheel() {
+        let events = plan_scroll(
+            &target(),
+            WindowPoint { x: 20.0, y: 40.0 },
+            0,
+            -480,
+            PostPath::ToPid,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, EventKind::MouseMove);
+        assert!(!events[0].is_press());
+        assert_eq!(events[0].window_local, Some((20.0, 40.0)));
+        assert_eq!(events[1].kind, EventKind::Scroll);
+        assert_eq!(events[1].scroll, Some((0, -480)));
     }
 }

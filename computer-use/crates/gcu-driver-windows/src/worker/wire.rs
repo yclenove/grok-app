@@ -266,7 +266,9 @@ enum ErrorDef {
     StaleElement,
     CapabilityUnavailable,
     ElementNotActionable,
-    NotSettable,
+    NotSettable {
+        maybe_executed: bool,
+    },
     OutOfBounds,
     InvalidRequest,
     ElevationRequired,

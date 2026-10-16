@@ -67,7 +67,9 @@ async fn semantic_actions_worker_boundary_delivers_all_variants_once() {
                 &Cancel::default(),
             )
             .await,
-        Err(DriverError::NotSettable)
+        Err(DriverError::NotSettable {
+            maybe_executed: false
+        })
     );
     assert_eq!(
         driver

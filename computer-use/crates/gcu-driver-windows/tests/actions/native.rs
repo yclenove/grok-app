@@ -166,7 +166,9 @@ async fn semantic_contract(mode: ExecMode) {
                 &Cancel::default()
             )
             .await,
-        Err(DriverError::NotSettable)
+        Err(DriverError::NotSettable {
+            maybe_executed: false
+        })
     );
     assert_eq!(oracle(&state)["password_len"], initial["password_len"]);
     // The file is authoritative; a successful COM return alone cannot pass C05.
