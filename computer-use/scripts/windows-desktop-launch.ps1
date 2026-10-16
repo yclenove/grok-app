@@ -21,7 +21,9 @@ function Get-DesktopLaunchVariants {
             NewConsole=$true;UseShowWindow=$true;RepairTokenDefaults=$false;LowerIntegrity=$true;DuplicatePrimary=$false;DiagnosticOnly=$true}
     }
     foreach ($repair in @($false,$true)) {
-        foreach ($console in @($true,$false)) {
+        # Hosted windows-2022 has verified this AsUser/no-window profile. Try it
+        # before new consoles or desktop ACL changes, and stop once it works.
+        foreach ($console in @($false,$true)) {
             foreach ($method in @('AsUser','WithToken')) {
                 $suffix = if ($repair) { 'desktop-ACL' } else { 'inherited-ACL' }
                 $consoleName = if ($console) { 'new-console' } else { 'no-window' }
@@ -48,17 +50,25 @@ function Invoke-DesktopLaunchLadder {
     $start = & $Now
     foreach ($variant in Get-DesktopLaunchVariants -DiagnoseTokens:$DiagnoseTokens) {
         $ready = $true
-        foreach ($stage in @('cmd-exit','cmd-whoami','powershell')) {
+        $stages = @('cmd-exit')
+        if ($DiagnoseTokens) { $stages += 'cmd-whoami' }
+        $stages += 'powershell'
+        foreach ($stage in $stages) {
             $remaining = [int]($TimeoutMs - ((& $Now) - $start))
             if ($remaining -le 0) { throw "restricted launch ladder timeout; last attempts=$($attempts.ToArray() | ConvertTo-Json -Compress -Depth 8)" }
             $budget = [Math]::Min($StageTimeoutMs, $remaining)
+            if ($stage -eq 'cmd-whoami') { $budget = [Math]::Min(5000, $budget) }
             $null = & $Log "DESKTOP BEGIN: variant=$($variant.Name); stage=$stage; timeout_ms=$budget"
             try { $result = & $Probe $variant $stage $budget }
             catch { $result = @{ok=$false;error=$_.Exception.Message} }
+            if ($stage -eq 'powershell' -and $result.ok -and $result['script_entered'] -ne $true) {
+                $result.ok = $false
+                $result.error = 'PowerShell script entry oracle absent'
+            }
             $entry = @{variant=$variant.Name;stage=$stage;result=$result}
             $attempts.Add($entry)
             $null = & $Log ("DESKTOP PROBE: " + ($entry | ConvertTo-Json -Compress -Depth 8))
-            if (-not $result.ok) { $ready = $false }
+            if (-not $result.ok -and $stage -ne 'cmd-whoami') { $ready = $false }
         }
         if ($variant.DiagnosticOnly) {
             $null = & $Log "DESKTOP DIAGNOSTIC: $($variant.Name); initialized_and_verified=$ready; eligible_for_suite=False"
@@ -102,7 +112,8 @@ function Copy-DesktopReports {
 }
 
 function Invoke-RestrictedDesktopProbe {
-    param($Context, $Variant, [string]$Stage, [string]$Workspace, [string]$OutputDir, [int]$ExpectedSessionId)
+    param($Context, $Variant, [string]$Stage, [string]$Workspace, [string]$OutputDir, [int]$ExpectedSessionId,
+        [int]$TimeoutMs = 40000)
     $prefix = $Variant.Name.Replace('/','-') + '-' + $Stage
     $identityFile = Join-Path $OutputDir ($prefix + '.json')
     $logFile = Join-Path $OutputDir ($prefix + '.log')
@@ -137,7 +148,8 @@ try {
     Add-Type -Path @($token,$access,$defaults,$process)
     . $helper
     `$facts = Get-DesktopTokenFacts
-    whoami.exe /all | Out-Host
+    Write-Host ("PROBE native token facts: " + `$facts.TokenSummary)
+    [Console]::Out.Flush()
     `$facts | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 $oracle
     Write-Output (Format-DesktopTokenFacts `$facts)
     if (-not (Test-DesktopProbeFacts `$facts $ExpectedSessionId $lower)) { throw 'probe child token rejected' }
@@ -160,7 +172,8 @@ try {
             $child = $Context.StartCmd($command, $Variant.Method, $Variant.RepairDesktop, $Variant.NewConsole, $Variant.UseShowWindow)
         }
         Write-DesktopProgress "PROBE created: pid=$($child.ProcessId); waiting for process handle (no pipe EOF wait)" -ChildPid $child.ProcessId
-        $state = Wait-DesktopChild $child "$($Variant.Name)/$Stage" -TimeoutMs 40000
+        if ($Stage -eq 'cmd-whoami') { $TimeoutMs = [Math]::Min(5000, $TimeoutMs) }
+        $state = Wait-DesktopChild $child "$($Variant.Name)/$Stage" -TimeoutMs $TimeoutMs
         $result.exit_code = $state.exit_code
         $result.exit_hex = $state.exit_hex
         $result.last = $state
@@ -172,7 +185,8 @@ try {
                 $result.ok = (Test-Path $logFile) -and $result.last -match $integritySid -and $result.last -match 'SeChangeNotifyPrivilege'
             } else {
                 $result.last = if (Test-Path $identityFile) { Get-Content -Raw $identityFile | ConvertFrom-Json } else { 'PowerShell token oracle absent' }
-                $result.ok = (Test-Path $identityFile) -and (Test-DesktopProbeFacts $result.last $ExpectedSessionId $Variant.LowerIntegrity)
+                $result.ok = (Test-Path $enteredFile) -and (Test-Path $identityFile) -and
+                    (Test-DesktopProbeFacts $result.last $ExpectedSessionId $Variant.LowerIntegrity)
             }
         }
     } catch {

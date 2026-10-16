@@ -118,28 +118,51 @@ try {
     }
 } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 
-# Probe policy never starts/replays the real suite. Every variant runs all three
-# diagnostics, even after a DLL-init failure, and only a verified token can win.
+# Probe policy never starts/replays the real suite. Only cmd-exit and verified
+# PowerShell entry are required; optional whoami must never veto selection.
 $trace = [Collections.Generic.List[string]]::new()
 $probe = {
     param($variant, $stage)
     $trace.Add("$($variant.Name)/$stage")
     $ok = $variant.DiagnosticOnly -or ($variant.Method -eq 'WithToken' -and $variant.RepairDesktop -and -not $variant.NewConsole)
-    @{ok=$ok;exit_code=$(if ($ok) { 0 } else { [uint32]3221225794 });win32_error=0;last='last token/oracle'}
+    @{ok=$ok;script_entered=$ok;exit_code=$(if ($ok) { 0 } else { [uint32]3221225794 });win32_error=0;last='last token/oracle'}
 }
 $messages = [Collections.Generic.List[string]]::new()
 $chosen = Invoke-DesktopLaunchLadder -Probe $probe -Log { param($line) $messages.Add($line) }
 Assert-True ($chosen.Method -eq 'WithToken' -and $chosen.RepairTokenDefaults -and -not $chosen.DiagnosticOnly) 'fallback after DLL-init failure always repairs owner/default DACL'
-Assert-True ($trace.Count -eq 24) 'default ladder omits the known failing control'
+Assert-True ($trace.Count -eq 12 -and -not ($trace -join ' ').Contains('cmd-whoami')) 'default ladder omits whoami and stops at first usable fallback'
 Assert-True (($messages -join ' ').Contains('3221225794') -and ($messages -join ' ').Contains('last token/oracle')) 'failures preserve exit and last oracle'
 $trace.Clear()
-$chosen = Invoke-DesktopLaunchLadder -Probe { param($variant,$stage) $trace.Add($stage); @{ok=$true} } -Log { param($line) }
-Assert-True ($chosen.Method -eq 'AsUser' -and $chosen.RepairTokenDefaults -and $chosen.LowerIntegrity -and $trace.Count -eq 3) 'stop after first repaired Medium variant'
+$chosen = Invoke-DesktopLaunchLadder -Probe { param($variant,$stage) $trace.Add($stage); @{ok=$true;script_entered=$true} } -Log { param($line) }
+Assert-True ($chosen.Name -eq 'AsUser/repaired-defaults/inherited-ACL/no-window' -and
+    ($trace -join ',') -ceq 'cmd-exit,powershell') 'known-good no-window profile wins after exactly two probes'
+$trace.Clear()
+$optionalBudgets = [Collections.Generic.List[int]]::new()
+$clock.ms = 0
+$chosen = Invoke-DesktopLaunchLadder -DiagnoseTokens -Probe {
+    param($variant,$stage,$budget)
+    $trace.Add("$($variant.Name)/$stage")
+    if ($stage -eq 'cmd-whoami') {
+        $optionalBudgets.Add($budget)
+        $clock.ms += $budget
+        return @{ok=$false;error='injected whoami timeout'}
+    }
+    @{ok=$true;script_entered=$true}
+} -Log { param($line) } -Now { $clock.ms }
+Assert-True ($chosen.Name -eq 'AsUser/repaired-defaults/inherited-ACL/no-window' -and $trace.Count -eq 6) 'whoami failure cannot veto verified PowerShell or run later variants'
+Assert-True ($optionalBudgets.Count -eq 2 -and ($optionalBudgets -join ',') -eq '5000,5000' -and $clock.ms -eq 10000) 'optional diagnostics consume at most five seconds each within the ladder deadline'
+$trace.Clear()
+$chosen = Invoke-DesktopLaunchLadder -Probe {
+    param($variant,$stage)
+    $trace.Add("$($variant.Name)/$stage")
+    @{ok=$true;script_entered=($variant.Method -eq 'WithToken')}
+} -Log { param($line) }
+Assert-True ($chosen.Method -eq 'WithToken' -and $trace.Count -eq 4) 'zero exit without script entry cannot select a profile'
 $trace.Clear()
 $chosen = Invoke-DesktopLaunchLadder -Probe {
     param($variant,$stage)
     $trace.Add($variant.Name)
-    @{ok=$variant.DuplicatePrimary}
+    @{ok=$variant.DuplicatePrimary;script_entered=$variant.DuplicatePrimary}
 } -Log { param($line) }
 Assert-True ($chosen.DuplicatePrimary -and $chosen.LowerIntegrity -and $chosen.RepairTokenDefaults) 'duplicate-primary fallback remains Medium with repaired defaults'
 $variants = @(Get-DesktopLaunchVariants -DiagnoseTokens)
@@ -152,7 +175,7 @@ try {
     $null = Invoke-DesktopLaunchLadder -Probe {
         param($variant,$stage)
         $trace.Add($variant.Name)
-        if ($variant.DiagnosticOnly) { return @{ok=$true} }
+        if ($variant.DiagnosticOnly) { return @{ok=$true;script_entered=$true} }
         throw "injected $stage Win32=5"
     } -Log { param($line) } -DiagnoseTokens
 } catch { $failure = $_.Exception.Message }
@@ -204,10 +227,12 @@ $variant = $variants[1]
         if (-not $this.Configured) { throw 'token defaults not configured before creation' }
         if ($this.FailCreate) { throw [ComponentModel.Win32Exception]::new(5) }
         $program = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($arguments[-1]))
+        if ($program -match 'whoami') { throw 'PowerShell readiness must not wait for whoami' }
         $tokens = $null; $errors = $null
         $null = [Management.Automation.Language.Parser]::ParseInput($program,[ref]$tokens,[ref]$errors)
         if ($errors.Count -ne 0) { throw "generated probe syntax: $errors" }
         if ($this.EmitFacts) {
+            'PowerShell script entered' | Set-Content -Encoding UTF8 (Join-Path $this.OutputDir ($this.Prefix + '-powershell-entered.txt'))
             $this.Facts | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $this.OutputDir ($this.Prefix + '-powershell.json'))
         }
         $process = [pscustomobject]@{ProcessId=42;HasExited=$true;ExitCode=[uint32]0}

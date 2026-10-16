@@ -61,6 +61,37 @@ pub async fn attempt<T>(work: impl Future<Output = Result<T, String>>) -> Result
     .await
 }
 
+// A row has its own deadline, independent of the outer process-tree watchdog.
+// Dropping timed-out work never restarts it. Callers append the external oracle.
+pub async fn attempt_bounded<T, C: Clock>(
+    clock: &mut C,
+    budget: Duration,
+    label: &str,
+    work: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let start = clock.now();
+    let mut work = Box::pin(attempt(work));
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut work => return result,
+            () = clock.tick() => {}
+        }
+        if clock.now().saturating_sub(start) >= budget {
+            return Err(format!(
+                "{label}: timeout after {}ms; not replayed",
+                budget.as_millis()
+            ));
+        }
+    }
+}
+
+pub fn progress(message: impl std::fmt::Display) {
+    use std::io::Write;
+    println!("{message}");
+    std::io::stdout().flush().unwrap();
+}
+
 #[derive(Default, Serialize)]
 pub struct Report {
     pub passed: usize,
@@ -81,9 +112,21 @@ impl Report {
             Outcome::NotRun(_) => self.not_run += 1,
             Outcome::Failed(_) => self.failed += 1,
         }
-        println!("[{id}] {outcome:?}");
+        let status = match &outcome {
+            Outcome::Passed => "PASS",
+            Outcome::Skip(_) => "SKIP",
+            Outcome::NotRun(_) => "NOT_RUN",
+            Outcome::Failed(_) => "FAIL",
+        };
+        progress(format!("[{id}] {status}: {outcome:?}"));
         self.rows.push((id, outcome));
         self.pending_snapshot().save();
+    }
+    pub fn first_failure(&self) -> Option<String> {
+        self.rows.iter().find_map(|(id, outcome)| match outcome {
+            Outcome::Failed(reason) => Some(format!("{id}: {reason}")),
+            _ => None,
+        })
     }
     // A killed suite retains completed rows and marks unreached rows honestly.
     pub fn pending_snapshot(&self) -> Self {
@@ -114,10 +157,13 @@ impl Report {
         }
     }
     pub fn finish(&self) {
-        println!(
+        progress(format!(
             "SUMMARY: {} passed, {} skipped, {} not_run, {} failed",
             self.passed, self.skipped, self.not_run, self.failed
-        );
+        ));
+        if let Some(reason) = self.first_failure() {
+            progress(format!("FIRST FAILURE: {reason}"));
+        }
         self.save();
     }
 }
@@ -241,6 +287,63 @@ mod tests {
         report.record("C05", result);
         report.record("C06", Ok(Outcome::NotRun("desktop lost".into())));
         assert_eq!((report.failed, report.not_run, report.passed), (1, 1, 0));
+    }
+    #[tokio::test]
+    async fn case_deadline_injected_clock_drops_pending_work_without_replay() {
+        let mut clock = Manual(Duration::ZERO);
+        let polls = std::cell::Cell::new(0);
+        let dropped = std::cell::Cell::new(false);
+        struct DropFlag<'a>(&'a std::cell::Cell<bool>);
+        impl Drop for DropFlag<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let flag = DropFlag(&dropped);
+        let work = async {
+            let _flag = flag;
+            std::future::poll_fn(|_| {
+                polls.set(polls.get() + 1);
+                std::task::Poll::<Result<Outcome, String>>::Pending
+            })
+            .await
+        };
+        let error = attempt_bounded(&mut clock, Duration::from_millis(50), "C05", work)
+            .await
+            .unwrap_err();
+        assert_eq!(clock.0, Duration::from_millis(50));
+        assert_eq!(polls.get(), 2, "one future is polled, never restarted");
+        assert!(dropped.get());
+        let mut report = Report::default();
+        report.record("C05", Err(format!("{error}; last fixture=counter:0")));
+        assert_eq!(report.failed, 1);
+        assert!(report.first_failure().unwrap().contains("C05: timeout"));
+        assert!(report.first_failure().unwrap().contains("counter:0"));
+        assert_eq!(report.pending_snapshot().not_run, 28);
+    }
+    #[tokio::test]
+    async fn case_deadline_preserves_ready_error_and_panic_before_timeout() {
+        let mut clock = Manual(Duration::ZERO);
+        let result = attempt_bounded(&mut clock, Duration::ZERO, "ready", async { Ok(7) }).await;
+        assert_eq!(result, Ok(7));
+        let result = attempt_bounded::<(), _>(&mut clock, Duration::ZERO, "failed", async {
+            Err("first oracle mismatch".into())
+        })
+        .await;
+        assert_eq!(result, Err("first oracle mismatch".into()));
+        let result = attempt_bounded::<(), _>(&mut clock, Duration::ZERO, "panic", async {
+            panic!("synthetic provider failure")
+        })
+        .await;
+        assert!(result.unwrap_err().contains("contract panicked"));
+        assert_eq!(clock.0, Duration::ZERO);
+        let mut report = Report::default();
+        report.record("C01", Err("first oracle mismatch".into()));
+        report.record("C02", Err("later failure".into()));
+        assert_eq!(
+            report.first_failure().as_deref(),
+            Some("C01: first oracle mismatch")
+        );
     }
     #[tokio::test]
     async fn asynchronous_poll_injected_clock_bounds_pending_observations() {

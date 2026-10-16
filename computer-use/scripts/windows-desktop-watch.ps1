@@ -77,6 +77,7 @@ function Invoke-SupervisedDesktopStage {
     $stateFile = Join-Path $OutputDir ($prefix + '-state.json')
     $Request.StateFile = $stateFile
     $Request.ResultFile = $resultFile
+    $Request.TimeoutMs = $TimeoutMs
     $Request | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $requestFile
     $child = $null
     $result = @{ok=$false;win32_error=0;exit_hex='not_created';stage=$Request.Stage;variant=$Request.Variant.Name}

@@ -222,31 +222,36 @@ pub async fn text(driver: &WindowsDriver, win: &WindowRef, text: &str) -> Result
 async fn live_contract_table_c01_to_c27() {
     let mut report = Report::default();
     report.pending_snapshot().save();
-    println!(
+    progress(format!(
         "CONTRACT BEGIN: {} cases; setup fixture JSON, worker and UIA",
         CASES.len()
-    );
+    ));
     for (id, description) in CASES {
-        println!("CONTRACT PLANNED: {id}: {description}");
+        progress(format!("CONTRACT PLANNED: {id}: {description}"));
     }
-    let setup = attempt(async {
-        require(
-            std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
-            "explicit GCU_DESKTOP=1 required",
-        )?;
-        println!("CONTRACT SETUP: fixture start; waiting for external state JSON");
-        let fixture = Fixture::start().await?;
-        println!(
-            "CONTRACT SETUP: fixture pid={}; worker start",
-            fixture.pid()
-        );
-        let driver = driver().await?;
-        println!("CONTRACT SETUP: window discovery");
-        let win = window(&driver, &fixture).await?;
-        println!("CONTRACT SETUP: waiting for UIA counter_button");
-        node(&driver, &win, "counter_button").await?;
-        Ok::<_, String>((fixture, driver, win))
-    })
+    let setup = attempt_bounded(
+        &mut DesktopClock::default(),
+        Duration::from_secs(60),
+        "setup",
+        async {
+            require(
+                std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+                "explicit GCU_DESKTOP=1 required",
+            )?;
+            progress("CONTRACT SETUP: fixture start; waiting for external state JSON");
+            let fixture = Fixture::start().await?;
+            progress(format!(
+                "CONTRACT SETUP: fixture pid={}; worker start",
+                fixture.pid()
+            ));
+            let driver = driver().await?;
+            progress("CONTRACT SETUP: window discovery");
+            let win = window(&driver, &fixture).await?;
+            progress("CONTRACT SETUP: waiting for UIA counter_button");
+            node(&driver, &win, "counter_button").await?;
+            Ok::<_, String>((fixture, driver, win))
+        },
+    )
     .await;
     let (fixture, driver, win) = match setup {
         Ok(setup) => setup,
@@ -264,8 +269,16 @@ async fn live_contract_table_c01_to_c27() {
         .filter(|r| r.0 != "C19")
         .chain(CASES.iter().filter(|r| r.0 == "C19"))
     {
-        println!("{id}: {description}");
-        let result = attempt(cases::run(id, &driver, &fixture, &win)).await;
+        progress(format!(
+            "CONTRACT RUN: {id}: {description}; timeout_ms=45000; no retry"
+        ));
+        let result = attempt_bounded(
+            &mut DesktopClock::default(),
+            Duration::from_secs(45),
+            id,
+            cases::run(id, &driver, &fixture, &win),
+        )
+        .await;
         let result = result.map_err(|e| format!("{e}; last fixture={:?}", fixture.read()));
         report.record(id, result);
     }
@@ -274,6 +287,7 @@ async fn live_contract_table_c01_to_c27() {
     assert_eq!(
         report.failed + report.not_run,
         0,
-        "native contract failures; see report rows"
+        "native contract failures; first cause: {:?}",
+        report.first_failure()
     );
 }

@@ -169,7 +169,9 @@ try {
     $diagnostic = Format-DesktopTokenFacts $facts
     Write-Output "Verified desktop token: $diagnostic; ExpectedSessionId=$ExpectedSessionId"
     Write-DesktopProgress "DESKTOP CHILD ENTERED: Suite=$Suite; output=$OutputDir"
-    whoami.exe /all | Out-Host
+    # ReadFacts already queries SID/groups/privileges with Win32. whoami can
+    # hang under a restricted token; only the bounded optional ladder runs it.
+    Write-DesktopProgress "DESKTOP CHILD TOKEN: $($facts.TokenSummary)"
     if (-not (Test-DesktopTokenFacts $facts $ExpectedSessionId)) {
         $reason = "unelevated interactive desktop unavailable; $diagnostic; ExpectedSessionId=$ExpectedSessionId"
         Write-DesktopNotRun $OutputDir $Suite $reason

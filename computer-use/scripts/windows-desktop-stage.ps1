@@ -22,7 +22,8 @@ try {
     # Parent owns optional desktop ACL grant/restoration, surviving this job's kill.
     $variant.RepairDesktop = $false
     if ($request.Stage -ne 'suite') {
-        $result = Invoke-RestrictedDesktopProbe $context $variant $request.Stage $request.Workspace $request.OutputDir $request.ExpectedSessionId
+        $result = Invoke-RestrictedDesktopProbe $context $variant $request.Stage $request.Workspace $request.OutputDir $request.ExpectedSessionId `
+            -TimeoutMs ([Math]::Min(40000, $request.TimeoutMs))
     } else {
         if ($variant.DiagnosticOnly -or -not $variant.LowerIntegrity -or -not $variant.RepairTokenDefaults) {
             throw 'diagnostic profile cannot launch real suite'
