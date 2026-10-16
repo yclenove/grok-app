@@ -44,6 +44,11 @@ pub(crate) enum Command {
         #[arg(long, default_value = "45", value_parser = clap::value_parser!(u64).range(1..))]
         turn_idle_secs: u64,
     },
+    /// macOS helper. Launch Services starts it with `open`; it is not an MCP client.
+    ///
+    /// The process serves the per-user helper socket. Accessibility and screen
+    /// recording are attributed to this app, not to the terminal that invoked `open`.
+    Agent,
     /// Run an App-managed engine over private inherited Host and Stop channels.
     Engine {
         #[arg(

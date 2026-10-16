@@ -10,6 +10,12 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     if matches!(cli.command, Some(Command::Worker)) {
         return crate::worker::run().await;
     }
+    if matches!(cli.command, Some(Command::Agent)) {
+        if cli.driver.driver.is_some() {
+            args::require_fake(&cli.driver)?;
+        }
+        return crate::helper::run_agent(&cli.driver.scene, cli.driver.driver.is_some()).await;
+    }
     if let Some(Command::TurnEnded { session, payload }) = cli.command.as_ref() {
         let mut args = Vec::new();
         if let Some(session) = session {
@@ -70,6 +76,19 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             ))
         }
         _ => (),
+    }
+    if let Some(Command::Mcp {
+        transport: Transport::Stdio,
+        connect: None,
+        profile,
+        turn_idle_secs,
+        token_fd: None,
+        port: None,
+    }) = cli.command.as_ref()
+    {
+        if crate::helper::proxies_mcp(cli.driver.driver.is_none()) {
+            return crate::helper::run_stdio_proxy((*profile).into(), *turn_idle_secs).await;
+        }
     }
     args::require_fake(&cli.driver)?;
     let driver = Arc::new(

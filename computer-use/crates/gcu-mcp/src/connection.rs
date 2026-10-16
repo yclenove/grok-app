@@ -29,7 +29,8 @@ impl Connection {
         Ok(Self { server, cleanup })
     }
     /// Open with the injected Host as the sole approval authority, without
-    /// asking an MCP client to authorize. Used by the fake-only CLI until P4.
+    /// asking an MCP client to authorize. The offline CLI and the macOS helper
+    /// use this. Approval UI that asks an MCP client is a later phase.
     /// Private-file startup caps at five seconds; dropping cancels the wait.
     pub async fn open_host_only(
         driver: Arc<dyn Driver>,
@@ -74,5 +75,17 @@ impl Connection {
     /// Same lifecycle, timeouts and cancellation as [`crate::serve_stdio`].
     pub async fn serve_stdio(mut self) -> Result<(), ServeError> {
         crate::serve_connection(&mut self, tokio::io::stdin(), tokio::io::stdout()).await
+    }
+    /// Serve NDJSON on `input` and `output` using this session.
+    ///
+    /// Same lifecycle, timeouts, and cancellation as [`Self::serve_stdio`].
+    /// Dropping the future cancels the wait and runs session cleanup. Native
+    /// calls still cap at five seconds. No retries.
+    pub async fn serve_stream<R, W>(mut self, input: R, output: W) -> Result<(), ServeError>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        crate::serve_connection(&mut self, input, output).await
     }
 }

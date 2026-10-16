@@ -18,6 +18,7 @@ async-trait.workspace = true
 clap = { version = "4.6", features = ["derive"] }
 gcu-core.workspace = true
 gcu-driver-fake.workspace = true
+gcu-driver-macos.workspace = true
 gcu-driver-windows.workspace = true
 gcu-host-api.workspace = true
 gcu-host-protocol.workspace = true
@@ -40,9 +41,15 @@ toml_edit = "0.25"
 gcu-host-api = { workspace = true, features = ["testing"] }
 gcu-host-protocol = { workspace = true, features = ["testing"] }
 assert_cmd = "2"
+libc = "0.2"
 insta = { version = "1.49", default-features = false }
 serde_json = { workspace = true, features = ["preserve_order"] }
 toml = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt", "time", "io-util", "net"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework-sys = "2.17"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

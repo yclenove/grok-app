@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use gcu_core::driver::{DriverError, Result};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWorkspace,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+    NSRunningApplication, NSWorkspace,
 };
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
@@ -46,6 +47,23 @@ pub fn ensure_appkit() -> bool {
     let _app = NSApplication::sharedApplication(marker);
     APPKIT_READY.store(true, Ordering::Release);
     true
+}
+
+/// Create `NSApplication` and mark this process as an accessory (UI-element) app.
+///
+/// Call on the main thread before starting Tokio. [`ensure_appkit`] is unchanged.
+/// Returns false off the main thread or when AppKit refuses the accessory policy.
+/// Does not touch the network and does not grant TCC by itself. Blocking: one
+/// synchronous AppKit call on the caller thread. Timeout: none. Cancellation: none.
+pub fn ensure_agent_appkit() -> bool {
+    if !ensure_appkit() {
+        return false;
+    }
+    let Some(marker) = MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(marker)
+        .setActivationPolicy(NSApplicationActivationPolicy::Accessory)
 }
 
 fn os_major() -> u32 {

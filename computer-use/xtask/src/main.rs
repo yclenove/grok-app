@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+mod bundle;
 mod deps;
 mod schema;
 
@@ -25,6 +26,9 @@ fn main() -> Result<()> {
             _ => bail!("usage: cargo xtask golden <--check|--update>"),
         },
         Some("budget") if args.next().is_none() => schema::run_budget(),
-        _ => bail!("usage: cargo xtask <check-deps|golden <--check|--update>|budget>"),
+        Some("bundle-macos") => bundle::run(args),
+        _ => bail!(
+            "usage: cargo xtask <check-deps|golden <--check|--update>|budget|bundle-macos [--release] [--binary PATH] [--output DIR]>"
+        ),
     }
 }
