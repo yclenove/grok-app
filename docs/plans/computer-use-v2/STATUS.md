@@ -37,7 +37,7 @@
 | P2-06 | Windows 定向消息与前台 | P2-05 | 3d | done | cu2/P2-06-win-input |  | 2026-10-14 | PostMessage 定向投递+effect 检测；Chromium/UWP 不静默升级(Auto/TargetedOnly 仅后台，前台需策略放行)；SendInput 前台路径+分块 Unicode；父进程独立 InputLedger(worker 被杀仍补发 up)；UIPI→elevation_required；真机夹具后台点击/记事本中文输入 not_run |
 | P2-07 | Windows 守卫 / 热键 / 排除截图 | P2-06 | 1.5d | done | cu2/P2-07-win-guards |  | 2026-10-14 | LL 钩子过滤 injected、失效→None 并周期重装；父进程侧 RegisterHotKey Stop(≤100ms 锁存/≤500ms 释放/≤5s 杀 worker)；watchdog；覆盖层 SetWindowDisplayAffinity 探测；失效禁用前台输入路线；真机物理输入/UAC/覆盖层截图 not_run |
 | P2-08 | Windows 剪贴板与文本 | P2-06 | 1d | done | cu2/P2-08-win-clipboard |  | 2026-10-15 | 全局互斥+序号/内容/焦点粘贴前校验；恢复不覆盖外来内容；敏感/高风险文本拒绝剪贴板回退(gcu-core policy::clipboard 共享分类，供 macOS 复用)；>8192 分批；Stop 接入位待 P2-07 合入对接；真机 not_run |
-| P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | todo |  |  |  |  |
+| P2-09 | Windows 契约测试与冒烟 | P2-01、P2-02、P2-03、P2-04、P2-05、P2-06、P2-07、P2-08 | 1.5d | done | cu2/P2-09-win-contract |  | 2026-10-16 | GitHub windows-2022 受限令牌交互桌面真机(第十九次运行)：契约 15 通过/15 跳过/0 失败，冒烟 0 通过/3 跳过/0 失败。跳过全部带实测原因：8 项(C06/C08/C09/C11/C15/C20/C22/W-HOTKEY)依赖前台投递，同进程 12 种合成鼠标探针(6 类×带/不带标记)全部 sent==requested、无一到达低级鼠标钩子(光标不动)，故 Stop/前台证明不可得，foreground 保持 Unavailable(fail-closed)；C13 列表无 ScrollPattern；C02/C21/C23/C25/C26/C27 为范围/夹具原因；冒烟 Notepad/Explorer 的启动、窗口、UIA 与外部路径断言真实通过，仅前台键入 Skip；Settings 的进程/UIA 断言通过，目标=High、harness=Medium 时按设计返回 ElevationRequired 并 Skip。真机通过：C01/C03/C04/C05/C07/C10/C12/C14/C16/C16-BUTTON/C17/C18/C19/C24/W-UIPI。发布前必须在带物理鼠标的 Windows 补测(清单见 gcu-driver-windows/diagnostics.md)；win-test 实机探针待用户在桌面运行后补记 |
 | P3-01 | AT-SPI 树 | P0-05 | 3d | done | cu2/P3-01-atspi-tree |  | 2026-10-13 | AT-SPI 树+Linux 身份(路径+dev/inode+sha256；持久授权绑定映像，pid 复用另判)；CI 实时测试读到夹具 send_button |
 | P3-02 | X11 窗口与截图 | P3-01、P0-07 | 2d | done | cu2/P3-02-x11 |  | 2026-10-13 | X11 窗口+XComposite 截图；无 composite 且被遮挡则拒绝(不交付他人内容)；CI Xvfb 实测 live_x11_fixture_window_capture_and_canvas_grid 通过 |
 | P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | done | cu2/P3-03-actions |  | 2026-10-13 | AT-SPI 语义动作+XTEST；TargetedOnly 不升级；InputLedger 先记账后发送并补发 up；CI Xvfb live 动作测试 5 个全过；文本框 SetValue 因 AccessKit 无 EditableText 返回 NotSettable(已登记) |
@@ -110,6 +110,10 @@
 - 构建机的 `rcargo` 只同步 computer-use/ 与 src-tauri 的 Cargo.toml/Cargo.lock，不同步 src-tauri/src，且无 webkit2gtk：src-tauri 的代码只能由 ci.yml 编译，所以任何放进 src-tauri 的逻辑都要尽量薄，可测逻辑放进 computer-use 的 crate。
 - CI：Linux 作业依赖的 PipeWire PPA(ppa.launchpadcontent.net)会间歇 503（索引与 .deb 下载都会）；#71 加了 apt 重试并在 PPA 不可用时明确失败，而不是回退到过旧的系统 libpipewire 后在 libspa 里报一串编译错误。
 - P4-01：Windows 检出会把 `apps/gcu-helper-macos/Info.plist` 模板转成 CRLF，而生成物是 LF；读模板做比较前要归一化换行(xtask 测试已处理)。
+- P2-09：**Windows 上 UIA InvokePattern 本身会激活目标窗口**（不经我们的驱动、裸 Invoke 对照实验已证实），所以“后台 press 不改变前台”不能靠 UIA Invoke 满足；原生 BUTTON 经 `BM_CLICK` 不改变前台（C16-BUTTON 真断言）。驱动对非 BUTTON 元素的后台 press 仍用 UIA Invoke，并在能力/doctor 里诚实声明 `background_operation: Partial`（Invoke 可能激活目标窗口）；显式要求“仅目标消息”的点击不回退到会激活的路径。
+- P2-09：GitHub 托管 windows-2022 runner 的受限令牌交互桌面里**没有指针输入栈**：12 种合成鼠标探针无一触发低级鼠标钩子，键盘探针可以（flags=144）。这是环境限制，产品无鼠标证明时 foreground 保持 Unavailable、Stop 语义不放宽；有物理鼠标的 Windows 上是否同样需要真机补测。
+- P2-09：受限令牌能在该 runner 启动的前提是令牌的 TokenOwner=用户 SID 且 TokenDefaultDacl 授予用户/登录 SID/SYSTEM，否则进程以 0xC0000142 失败；runner 的 admin 令牌没有 UAC 过滤，Shell 激活的 SystemSettings 是 High 完整性，Medium 的 harness 按设计被拒(ElevationRequired)。
+- P2-09：egui 夹具在 UIA 下首读树可能不完整（和 macOS 一样懒激活），调用方要有界重读。
 
 ## 阶段记录
 

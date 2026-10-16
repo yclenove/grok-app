@@ -26,7 +26,7 @@ unicode-normalization = "0.1.24"
 workspace = true
 
 [features]
-testing = []
+testing = ["gcu-host-api/testing"]
 
 [dev-dependencies]
 proptest = { version = "1.12", default-features = false, features = ["std"] }

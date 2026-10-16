@@ -127,6 +127,7 @@ impl<T: 'static> Worker<T> {
         context: Option<ActionContext>,
         task: impl FnOnce(&mut T, &Request) -> Result<R> + Send + 'static,
     ) -> Result<R> {
+        let _timing = crate::timing::Timing::provider("uia_queue_wait_and_call");
         let (tx, rx) = oneshot::channel();
         let mut request = Request::new();
         request.context = context.clone();
@@ -137,6 +138,7 @@ impl<T: 'static> Worker<T> {
         };
         self.tx
             .try_send(Box::new(move |state| {
+                let _timing = crate::timing::Timing::provider("uia_dequeued_call");
                 if tx.is_closed() {
                     return;
                 }

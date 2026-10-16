@@ -101,6 +101,7 @@ struct Work {
     cancel: Cancel,
     dispatched: Arc<AtomicBool>,
     reply: oneshot::Sender<Result<Reply>>,
+    deadline: Option<tokio::time::Instant>,
 }
 /// Serial persistent worker with one read-only retry, no mutation retries, and
 /// cancellation/Stop independent of the queue. Drop kills the child; shutdown
@@ -134,10 +135,7 @@ impl Supervisor {
         if config.timeout.is_zero() {
             return Err(DriverError::InvalidRequest);
         }
-        let mut process = Process::spawn(&config, 1).await?;
-        let probe = process
-            .exchange(Request::Doctor, 0, config.timeout, None, None)
-            .await?;
+        let (process, probe) = Process::ready(&config, 1).await?;
         let Reply::Doctor {
             mut capabilities,
             ready,
@@ -240,6 +238,7 @@ impl Supervisor {
             cancel: cancel.clone(),
             dispatched: dispatched.clone(),
             reply,
+            deadline,
         };
         self.queue.try_send(work).map_err(|_| DriverError::Native {
             message: "worker queue unavailable".into(),
@@ -269,135 +268,9 @@ impl Drop for Supervisor {
         self.shutdown.cancel();
     }
 }
-struct Process {
-    child: Child,
-    input: ChildStdin,
-    output: ChildStdout,
-    epoch: u64,
-    namespace: String,
-    #[cfg(windows)]
-    _job: super::unsafe_job::Job,
-}
-impl Process {
-    async fn spawn(config: &WorkerConfig, epoch: u64) -> Result<Self> {
-        let mut command = Command::new(&config.executable);
-        command
-            .args(&config.args)
-            .env_clear()
-            .kill_on_drop(true)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // No Host/Stop secret handles or credential environment reaches the child.
-        for key in [
-            "SystemRoot",
-            "WINDIR",
-            "PATH",
-            "TEMP",
-            "TMP",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "USERPROFILE",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
-        command.envs(config.environment.iter().cloned());
-        let mut child = command.spawn().map_err(|_| crashed(false))?;
-        // Windows std Command uses an explicit inherited standard-handle list.
-        // The child waits for our first frame, so no FFI runs before assignment.
-        #[cfg(windows)]
-        let job = super::unsafe_job::Job::attach(&child)?;
-        let input = child.stdin.take().ok_or_else(|| crashed(false))?;
-        let output = child.stdout.take().ok_or_else(|| crashed(false))?;
-        Ok(Self {
-            child,
-            input,
-            output,
-            epoch,
-            namespace: config.namespace.clone(),
-            #[cfg(windows)]
-            _job: job,
-        })
-    }
-    async fn exchange(
-        &mut self,
-        request: Request,
-        id: u64,
-        timeout: Duration,
-        dispatched: Option<&AtomicBool>,
-        recovery: Option<&super::input::Recovery>,
-    ) -> Result<Reply> {
-        let mutation = !request.is_read_only();
-        if !request.valid_epoch(self.epoch) {
-            return Err(DriverError::StaleElement);
-        }
-        // Encoding occurs before any pipe write: invalid/oversized requests are certain.
-        let call = Call {
-            version: VERSION,
-            id,
-            epoch: self.epoch,
-            namespace: self.namespace.clone(),
-            request,
-        };
-        let expected = call.request.clone();
-        let operation = async {
-            let bytes = tokio::task::spawn_blocking(move || codec::encode(&call))
-                .await
-                .map_err(|_| crashed(false))?
-                .map_err(|_| DriverError::InvalidRequest)?;
-            if let Some(dispatched) = dispatched {
-                dispatched.store(true, Ordering::SeqCst);
-            }
-            codec::write_payload(&mut self.input, &bytes)
-                .await
-                .map_err(|_| crashed(mutation))?;
-            let result = loop {
-                let reply: Response = codec::read_frame(&mut self.output)
-                    .await
-                    .map_err(|_| crashed(mutation))?
-                    .ok_or_else(|| crashed(mutation))?;
-                if reply.version != VERSION || reply.id != id || reply.epoch != self.epoch {
-                    return Err(crashed(mutation));
-                }
-                let result = reply.result.map_err(|Failure(e)| e)?;
-                if let Some(recovery) = recovery {
-                    if let Some(result) = recovery
-                        .receive(result, &expected, &mut self.input, id, self.epoch)
-                        .await?
-                    {
-                        break result;
-                    }
-                } else {
-                    break result;
-                }
-            };
-            // A correlated native response knows whether mutation dispatch began.
-            // Only transport loss must conservatively assume possible execution.
-            if !matches_reply(&expected, &result, self.epoch) {
-                return Err(crashed(mutation));
-            }
-            Ok(result)
-        };
-        tokio::time::timeout(timeout, operation)
-            .await
-            .map_err(|_| DriverError::Timeout {
-                maybe_executed: mutation
-                    && dispatched.is_some_and(|flag| flag.load(Ordering::SeqCst)),
-            })?
-    }
-    async fn kill(&mut self) {
-        if let Err(error) = self.child.kill().await {
-            if error.kind() != std::io::ErrorKind::InvalidInput {
-                tracing::warn!("worker termination failed");
-            }
-        }
-        if self.child.wait().await.is_err() {
-            tracing::warn!("worker reap failed");
-        }
-    }
-}
+#[path = "process.rs"]
+mod process;
+use process::Process;
 fn matches_reply(request: &Request, reply: &Reply, epoch: u64) -> bool {
     if let (Request::Snapshot(window, _), Reply::Tree(tree)) = (request, reply) {
         return tree.valid(epoch, window);
@@ -475,14 +348,7 @@ async fn run(
             for attempt in 0..=1 {
                 if process.is_none() {
                     epoch += 1;
-                    let mut p = Process::spawn(&config, epoch).await?;
-                    match p
-                        .exchange(Request::Doctor, 0, config.timeout, None, None)
-                        .await?
-                    {
-                        Reply::Doctor { ready: true, .. } => (),
-                        _ => return Err(crashed(false)),
-                    }
+                    let (p, _) = Process::ready(&config, epoch).await?;
                     process = Some(p);
                 }
                 let Some(p) = process.as_mut() else {
@@ -502,6 +368,8 @@ async fn run(
                     result,
                     Err(DriverError::Timeout { .. } | DriverError::Crashed { .. })
                 ) {
+                    tracing::warn!(target: "gcu_windows_timing", stage = "worker_fault", phase = "detected",
+                        epoch, sequence, mutation, attempt, error = ?result.as_ref().err(), "worker recovery");
                     kill(&mut process).await;
                     if !mutation && attempt == 0 {
                         continue;
@@ -515,9 +383,20 @@ async fn run(
             _ = shutdown.cancelled() => None,
             _ = stop.changed(work.stop_generation) => None,
             _ = work.cancel.cancelled() => None,
+            _ = async {
+                match work.deadline { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending::<()>().await }
+            } => Some(Err(DriverError::Timeout { maybe_executed: mutation && work.dispatched.load(Ordering::SeqCst) })),
             _ = work.reply.closed() => None,
             result = operation => Some(result),
         };
+        if matches!(
+            result,
+            Some(Err(
+                DriverError::Timeout { .. } | DriverError::Crashed { .. }
+            ))
+        ) {
+            kill(&mut process).await;
+        }
         let result = match result {
             Some(result) => result,
             None => {
@@ -549,19 +428,14 @@ async fn run(
             );
         let _ = work.reply.send(result);
         if restart {
+            let _restart = crate::timing::Timing::start("worker_restart");
             // Return mutation uncertainty immediately, then warm a fresh worker
             // without replaying the operation. Stop can interrupt this bootstrap.
             epoch += 1;
             let stopped_at = stop.generation();
             let bootstrap = async {
-                let mut p = Process::spawn(&config, epoch).await?;
-                match p
-                    .exchange(Request::Doctor, 0, config.timeout, None, None)
-                    .await?
-                {
-                    Reply::Doctor { ready: true, .. } => Ok(p),
-                    _ => Err(crashed(false)),
-                }
+                let (p, _) = Process::ready(&config, epoch).await?;
+                Ok::<_, DriverError>(p)
             };
             process = tokio::select! { biased;
                 _ = shutdown.cancelled() => None,

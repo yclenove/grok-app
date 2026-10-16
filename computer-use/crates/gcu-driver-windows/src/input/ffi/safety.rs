@@ -1,8 +1,12 @@
 //! Thread-affine low-level hooks; global hotkey has its own message pump.
 use crate::input::{
+    hook_probe::{mode_at, MouseProbe},
     hooks::HookEvent,
-    hotkey::{GuardEvents, HotkeyConfig, SafetyApi, SafetyPump},
-    watchdog::{HEARTBEAT_TIMEOUT, POLL_INTERVAL},
+    hotkey::{
+        GuardEvents, HotkeyConfig, SafetyApi, SafetyPump, HOTKEY_STARTUP_TIMEOUT,
+        STARTUP_STEP_TIMEOUT,
+    },
+    watchdog::POLL_INTERVAL,
 };
 use std::{
     cell::RefCell,
@@ -13,16 +17,24 @@ use std::{
     time::Instant,
 };
 use windows::Win32::{
-    Foundation::{HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{
+        GetLastError, SetLastError, ERROR_SUCCESS, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM,
+    },
     System::{LibraryLoader::GetModuleHandleW, StationsAndDesktops::*},
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 const HOTKEY_ID: i32 = 0x4732;
 const PROBE_TAG: usize = 0x47435532;
+mod mouse;
+mod probe;
 struct Context {
     events: Arc<GuardEvents>,
     keyboard: Option<Instant>,
     mouse: Option<Instant>,
+    keyboard_probe_flags: Option<u32>,
+    mouse_probe_flags: Option<u32>,
+    last_keyboard_flags: Option<u32>,
+    last_mouse_flags: Option<u32>,
 }
 thread_local! { static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) }; }
 
@@ -34,20 +46,33 @@ impl SafetyApi for RealSafetyApi {
         &self,
         config: HotkeyConfig,
         events: Arc<GuardEvents>,
-    ) -> Result<Box<dyn SafetyPump>, &'static str> {
+    ) -> Result<Box<dyn SafetyPump>, String> {
+        events.startup_step("hook_desktop", STARTUP_STEP_TIMEOUT);
+        events.startup_progress("hook_desktop", "OpenInputDesktop pending");
         interactive_desktop()?;
+        events.startup_progress("hook_desktop", "Default desktop verified");
         let hotkey = HotkeyThread::start(config, events.clone())?;
+        let hooks = Hooks::install(Some(&events))?;
+        events.startup_progress("hook_install", "keyboard and mouse installed; Win32=0");
+        let pump_events = events.clone();
         CONTEXT.with(|slot| {
             *slot.borrow_mut() = Some(Context {
                 events,
                 keyboard: None,
                 mouse: None,
+                keyboard_probe_flags: None,
+                mouse_probe_flags: None,
+                last_keyboard_flags: None,
+                last_mouse_flags: None,
             })
         });
-        let hooks = Hooks::install()?;
+        let probe = probe::Sender::start(pump_events.clone())?;
         Ok(Box::new(Pump {
             hooks,
             _hotkey: hotkey,
+            events: pump_events,
+            first_probe: true,
+            probe,
         }))
     }
 }
@@ -56,19 +81,31 @@ struct Hooks {
     mouse: HHOOK,
 }
 impl Hooks {
-    fn install() -> Result<Self, &'static str> {
+    fn install(events: Option<&GuardEvents>) -> Result<Self, String> {
+        if let Some(events) = events {
+            events.startup_step("hook_install", STARTUP_STEP_TIMEOUT);
+        }
+        let progress = |detail| {
+            if let Some(events) = events {
+                events.startup_progress("hook_install", detail);
+            }
+        };
         // SAFETY: process module is borrowed, callbacks have static code lifetime
         // and run only on this installing message-pump thread. No cross-thread COM.
         unsafe {
-            let module = GetModuleHandleW(None).map_err(|_| "hook module unavailable")?;
+            progress("GetModuleHandleW pending");
+            let module = GetModuleHandleW(None).map_err(|e| failure("GetModuleHandleW", e))?;
             let instance = Some(HINSTANCE(module.0));
+            progress("SetWindowsHookExW(WH_KEYBOARD_LL) pending");
             let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), instance, 0)
-                .map_err(|_| "WH_KEYBOARD_LL registration failed")?;
+                .map_err(|e| failure("SetWindowsHookExW(WH_KEYBOARD_LL)", e))?;
+            progress("SetWindowsHookExW(WH_MOUSE_LL) pending");
             match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), instance, 0) {
                 Ok(mouse) => Ok(Self { keyboard, mouse }),
-                Err(_) => {
+                Err(error) => {
+                    let reason = failure("SetWindowsHookExW(WH_MOUSE_LL)", error);
                     let _ = UnhookWindowsHookEx(keyboard);
-                    Err("WH_MOUSE_LL registration failed")
+                    Err(reason)
                 }
             }
         }
@@ -117,13 +154,27 @@ fn callback(event: HookEvent, tag: usize) {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(context) = slot.as_mut() {
                 let now = Instant::now();
+                match event {
+                    HookEvent::Keyboard(flags) => context.last_keyboard_flags = Some(flags),
+                    HookEvent::Mouse(flags) => context.last_mouse_flags = Some(flags),
+                }
+                if tag == PROBE_TAG {
+                    match event {
+                        HookEvent::Keyboard(flags) => context.keyboard_probe_flags = Some(flags),
+                        HookEvent::Mouse(flags) => context.mouse_probe_flags = Some(flags),
+                    }
+                }
                 if event.injected() && tag == PROBE_TAG {
                     match event {
                         HookEvent::Keyboard(_) => context.keyboard = Some(now),
                         HookEvent::Mouse(_) => context.mouse = Some(now),
                     }
                 }
-                context.events.clock().event(event, now);
+                // A tagged synthetic probe is never physical activity, even if
+                // an upstream filter unexpectedly strips its injected flag.
+                if tag != PROBE_TAG {
+                    context.events.clock().event(event, now);
+                }
             }
         }
     });
@@ -131,61 +182,48 @@ fn callback(event: HookEvent, tag: usize) {
 struct Pump {
     hooks: Hooks,
     _hotkey: HotkeyThread,
+    events: Arc<GuardEvents>,
+    first_probe: bool,
+    probe: probe::Sender,
 }
 impl SafetyPump for Pump {
-    fn poll(&mut self, reinstall: bool) -> Result<(), &'static str> {
+    fn poll(&mut self, reinstall: bool) -> Result<(), String> {
         interactive_desktop()?;
         if reinstall {
             // Install replacements before retiring old hooks: no unmonitored gap.
-            self.hooks = Hooks::install()?;
+            self.hooks = Hooks::install(None)?;
+        }
+        if self.first_probe {
+            self.events
+                .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+            self.events
+                .startup_progress("hook_probe_pump", "PeekMessageW pending");
         }
         pump_messages(false, None)?;
-        let proof = CONTEXT.with(|slot| {
-            let slot = slot.borrow();
-            slot.as_ref()
-                .and_then(|context| Some(context.keyboard?.min(context.mouse?)))
-        });
-        if let Some(at) = proof {
-            if at.elapsed() > HEARTBEAT_TIMEOUT {
-                return Err("low-level hook probe expired (possibly silently removed)");
-            }
-            CONTEXT.with(|slot| {
-                if let Some(context) = slot.borrow().as_ref() {
-                    context.events.clock().confirm(at);
-                }
-            });
+        if self.first_probe {
+            self.events
+                .startup_progress("hook_probe_pump", "message queue drained");
+            self.first_probe = false;
         }
-        // Up-only unused F24 and zero relative mouse move test both hook chains.
-        // These are synthetic health probes, never physical activity, normal
-        // action downs or foreground activation. No user cursor movement.
-        let probes = [
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VK_F24,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        dwExtraInfo: PROBE_TAG,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
-                        dwExtraInfo: PROBE_TAG,
-                        ..Default::default()
-                    },
-                },
-            },
-        ];
-        // SAFETY: fully initialized two-record slice; only up/zero motion probes.
-        if unsafe { SendInput(&probes, std::mem::size_of::<INPUT>() as i32) } != 2 {
-            return Err("hook probe injection unavailable (desktop/UIPI)");
-        }
+        // Never call SendInput on its own hook thread: Windows may wait for
+        // that thread to service the injected low-level callback. One bounded
+        // sender lets this thread keep pumping throughout native dispatch.
+        self.probe.poll()?;
+        self.confirm_probes()?;
+
         Ok(())
+    }
+}
+impl Pump {
+    fn confirm_probes(&self) -> Result<(), String> {
+        CONTEXT.with(|slot| {
+            if let Some(context) = slot.borrow().as_ref() {
+                context
+                    .events
+                    .confirm_hook_proofs(context.keyboard, context.mouse)?;
+            }
+            Ok(())
+        })
     }
 }
 impl Drop for Pump {
@@ -195,28 +233,35 @@ impl Drop for Pump {
 }
 struct HotkeyThread(Arc<AtomicBool>);
 impl HotkeyThread {
-    fn start(config: HotkeyConfig, events: Arc<GuardEvents>) -> Result<Self, &'static str> {
+    fn start(config: HotkeyConfig, events: Arc<GuardEvents>) -> Result<Self, String> {
+        events.startup_step("hotkey_register", HOTKEY_STARTUP_TIMEOUT);
         let close = Arc::new(AtomicBool::new(false));
         let closed = close.clone();
         let (ready, wait) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("gcu-win-hotkey".into())
             .spawn(move || {
+                events.startup_progress("hotkey_thread", "entered; PeekMessageW pending");
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // SAFETY: initialize this thread's user32 message queue before
+                    // registration; only this thread consumes its hotkey messages.
+                    unsafe {
+                        let _ = PeekMessageW(&mut MSG::default(), None, 0, 0, PM_NOREMOVE);
+                    }
+                    events.startup_progress("hotkey_register", "RegisterHotKey pending");
                     // SAFETY: thread-owned registration, numeric validated chord.
-                    if unsafe {
+                    if let Err(error) = unsafe {
                         RegisterHotKey(
                             None,
                             HOTKEY_ID,
                             HOT_KEY_MODIFIERS(config.modifiers) | MOD_NOREPEAT,
                             config.virtual_key,
                         )
-                    }
-                    .is_err()
-                    {
-                        let _ = ready.send(Err("RegisterHotKey conflict or registration failed"));
+                    } {
+                        let _ = ready.send(Err(failure("RegisterHotKey", error)));
                         return;
                     }
+                    events.startup_progress("hotkey_register", "registered; Win32=0");
                     struct Registration;
                     impl Drop for Registration {
                         fn drop(&mut self) {
@@ -241,10 +286,10 @@ impl HotkeyThread {
                     events.fail("Stop hotkey thread crashed");
                 }
             })
-            .map_err(|_| "Stop hotkey thread unavailable")?;
+            .map_err(|e| format!("Stop hotkey thread spawn: {e}"))?;
         let owner = Self(close);
-        wait.recv_timeout(std::time::Duration::from_millis(100))
-            .map_err(|_| "RegisterHotKey startup/FFI timed out")??;
+        wait.recv_timeout(HOTKEY_STARTUP_TIMEOUT)
+            .map_err(|e| format!("RegisterHotKey startup/FFI timed out: {e}"))??;
         Ok(owner)
     }
 }
@@ -253,7 +298,7 @@ impl Drop for HotkeyThread {
         self.0.store(true, Ordering::Release);
     }
 }
-fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), &'static str> {
+fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), String> {
     let mut message = MSG::default();
     // Bound message floods so they cannot starve probes, replacement or shutdown.
     for _ in 0..128 {
@@ -262,7 +307,7 @@ fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), &'sta
             break;
         }
         if message.message == WM_QUIT {
-            return Err("Stop listener message pump exited");
+            return Err("Stop listener message pump exited".into());
         }
         if hotkey && message.message == WM_HOTKEY && message.wParam.0 == HOTKEY_ID as usize {
             if let Some(events) = events {
@@ -272,10 +317,10 @@ fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), &'sta
     }
     Ok(())
 }
-fn interactive_desktop() -> Result<(), &'static str> {
+fn interactive_desktop() -> Result<(), String> {
     // SAFETY: read-only input desktop, noninherited. Access denied is secure.
     let desktop = unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) }
-        .map_err(|_| "UAC/secure desktop unavailable")?;
+        .map_err(|e| failure("OpenInputDesktop", e))?;
     let mut name = [0u16; 256];
     // SAFETY: valid owned desktop and bounded writable UTF-16 output.
     let read = unsafe {
@@ -293,9 +338,21 @@ fn interactive_desktop() -> Result<(), &'static str> {
     }
     let name =
         String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())]);
-    if read.is_err() || !name.eq_ignore_ascii_case("Default") {
-        Err("UAC/secure desktop active")
+    if let Err(error) = read {
+        Err(failure("GetUserObjectInformationW(UOI_NAME)", error))
+    } else if !name.eq_ignore_ascii_case("Default") {
+        Err(format!("UAC/secure desktop active: {name}"))
     } else {
         Ok(())
     }
+}
+
+fn failure(api: &str, error: windows::core::Error) -> String {
+    let hresult = error.code().0 as u32;
+    let win32 = if hresult & 0xffff0000 == 0x80070000 {
+        Some(hresult & 0xffff)
+    } else {
+        None
+    };
+    format!("{api}: HRESULT=0x{hresult:08x}, GetLastError={win32:?}; {error}")
 }

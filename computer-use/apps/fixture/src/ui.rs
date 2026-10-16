@@ -84,7 +84,8 @@ impl Default for FixtureApp {
 
 impl FixtureApp {
     /// Creates a new fixture app instance.
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::activation_trace::install(&cc.egui_ctx);
         Self::default()
     }
 
@@ -133,7 +134,10 @@ impl FixtureApp {
                     text_res.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "name_field")
                     });
-                    if text_res.changed() {
+                    if let Some(value) = crate::accessibility::text_value(ui, &text_res) {
+                        self.state.set_text(value, EventSource::Keyboard);
+                        let _ = self.state.maybe_persist();
+                    } else if text_res.changed() {
                         let source = detect_event_source(ui);
                         self.state.set_text(self.state.text.clone(), source);
                         let _ = self.state.maybe_persist();
@@ -158,7 +162,10 @@ impl FixtureApp {
                             "multiline_field",
                         )
                     });
-                    if multi_res.changed() {
+                    if let Some(value) = crate::accessibility::text_value(ui, &multi_res) {
+                        self.state.set_multiline(value, EventSource::Keyboard);
+                        let _ = self.state.maybe_persist();
+                    } else if multi_res.changed() {
                         let source = detect_event_source(ui);
                         self.state
                             .set_multiline(self.state.multiline.clone(), source);
@@ -532,134 +539,10 @@ impl FixtureApp {
                 });
         });
     }
-
-    /// Renders the modal confirmation dialog if [`FixtureState::modal_open`] is true.
-    fn render_modal_dialog(&mut self, ctx: &egui::Context) {
-        if !self.state.modal_open {
-            return;
-        }
-
-        ctx.request_repaint();
-
-        let mut rendered = false;
-        egui::Window::new("Confirm Dialog / 确认对话框")
-            .id(egui::Id::new("modal_dialog"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                rendered = true;
-                ui.label("Please confirm or cancel the action:");
-                ui.label("请确认或取消当前操作：");
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let confirm_btn = ui.button("OK / 确定 ✅");
-                    confirm_btn.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            "modal_confirm_button",
-                        )
-                    });
-                    if confirm_btn.clicked() {
-                        let source = detect_event_source(ui);
-                        self.state.close_modal(true, source);
-                        let _ = self.state.maybe_persist();
-                    }
-
-                    let cancel_btn = ui.button("Cancel / 取消 ❌");
-                    cancel_btn.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            "modal_cancel_button",
-                        )
-                    });
-                    if cancel_btn.clicked() {
-                        let source = detect_event_source(ui);
-                        self.state.close_modal(false, source);
-                        let _ = self.state.maybe_persist();
-                    }
-                });
-            });
-
-        if rendered && self.last_persisted_modal_open_count < self.state.modal_open_count {
-            self.last_persisted_modal_open_count = self.state.modal_open_count;
-            let _ = self.state.maybe_persist();
-        }
-    }
 }
 
-impl eframe::App for FixtureApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let mut key_recorded = false;
-        ui.input(|input| {
-            for ev in &input.events {
-                match ev {
-                    egui::Event::Key {
-                        key,
-                        pressed,
-                        repeat,
-                        modifiers,
-                        ..
-                    } => {
-                        if !repeat {
-                            self.state.record_key(
-                                format!("{key:?}"),
-                                *pressed,
-                                modifiers.ctrl,
-                                modifiers.shift,
-                                modifiers.alt,
-                            );
-                            key_recorded = true;
-                        }
-                    }
-                    egui::Event::Text(t) => {
-                        self.state.record_key(
-                            format!("Text({t})"),
-                            true,
-                            input.modifiers.ctrl,
-                            input.modifiers.shift,
-                            input.modifiers.alt,
-                        );
-                        key_recorded = true;
-                    }
-                    _ => {}
-                }
-            }
-        });
-        if key_recorded {
-            let _ = self.state.maybe_persist();
-        }
+#[path = "ui_frame.rs"]
+mod frame;
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.render_top_bar(ui);
-            ui.separator();
-            match self.state.tab {
-                0 => {
-                    // All controls visible simultaneously in 3 columns
-                    ui.columns(3, |columns| {
-                        self.render_form_section(&mut columns[0]);
-                        self.render_list_and_drag_section(&mut columns[1]);
-                        self.render_canvas_section(&mut columns[2]);
-                    });
-                }
-                1 => {
-                    self.render_canvas_section(ui);
-                }
-                2 => {
-                    self.render_list_and_drag_section(ui);
-                }
-                3 => {
-                    self.render_event_log_section(ui);
-                }
-                _ => {
-                    self.state.tab = 0;
-                }
-            }
-        });
-
-        let ctx = ui.ctx().clone();
-        self.render_modal_dialog(&ctx);
-    }
-}
+#[path = "ui_modal.rs"]
+mod modal;

@@ -6,7 +6,7 @@ nonactivating Win32 restoration and virtual-desktop annotations. The native
 `FakeWinApi` compile and run on Linux/macOS. Windows 10 1903+ is the target.
 
 `WindowsDriver::new()` starts an isolated `gcu worker`; its native adapter starts
-a serial discovery thread after validating the
+independent discovery and catalog threads after validating the
 engine token. High/System integrity or UIAccess refuses startup with
 `DriverError::ElevationRequired`. A live `WinGate::check` applies to observation
 and every action variant before any delivery or unavailable-capability result. Higher
@@ -16,8 +16,9 @@ attempted. Unknown virtual-desktop state and `Some(false)` both prevent foregrou
 operations. Discovery labels are not authorization grants.
 
 Start Menu shortcuts and registered AppsFolder packages are indexed on a separate
-thread. Calls can use the existing versioned cache while `discovery_status().indexing`
-is true; they never wait for a directory scan. The cache is
+thread. Lists return possibly empty in-memory hints with `discovery_status().indexing`
+while catalog/scanning work continues. Live resolution verifies only matching
+processes on its own queue, independent of installed lookup and UIA. The cache is
 `%LOCALAPPDATA%\grok-computer-use\apps.json`; corruption triggers rebuilding.
 Persistent directory notification handles track recursive Start Menu changes.
 Cached names/paths are hints: .lnk sources and registered package manifests are
@@ -211,14 +212,14 @@ rcargo test --locked -p gcu-driver-windows --test capture
 
 ## UI Automation semantic actions (P2-05)
 
-`Press`, `SecondaryAction`, `SetValue`, `SelectText` and `ScrollElement` use the
-same persistent MTA as observation. `patterns::press_patterns` chooses Invoke,
-Toggle, SelectionItem or ExpandCollapse by control type, with LegacyIAccessible
-last. Only explicit unsupported/unavailable **zero-effect** results permit a
-fallback. A timeout, cancellation, disappearance or other provider failure after
-mutation dispatch is uncertain and never replayed. Value/RangeValue, Text and
-Scroll never substitute for activation. Raise, ShowMenu and arbitrary native
-names fail without calling SetFocus, a pointer API or foreground activation.
+`Press`/`SecondaryAction` choose patterns by control type. Exact native BUTTONs use
+non-activating BM_CLICK (TargetedEvent); other Invoke/Legacy elements retain UIA semantics
+(Accessibility), which may activate the target window on Windows. Background remains Partial.
+Explicit TargetedOnly clicks never fall back to UIA or foreground. See [diagnostics](diagnostics.md).
+Other semantic patterns use the observation MTA. Only proven zero-effect absence
+permits fallback; uncertain native failures never replay. Value, range, text and
+scroll never substitute for press. Raise, ShowMenu and arbitrary native names
+are unavailable.
 
 The worker retains each observed RuntimeId and role/name/AutomationId/class/frame
 with its exact HWND. Actions share the observation generation lock and re-read
@@ -385,7 +386,7 @@ The isolated child (or explicit `new_in_process()`) attaches `RealInput`, a
 persistent MTA input worker.
 `with_input` accepts the same portable `InputBackend` with `FakeInput` for tests.
 Pointer clicks, scrolling, interpolated drags, chords, Unicode text and authorized
-activation are implemented; semantic UIA actions keep their existing behavior.
+activation are implemented; semantic press uses the non-activating routes above.
 
 `Auto` and `TargetedOnly` permit **only background messages**. Hit testing walks
 `ChildWindowFromPointEx` into the exact root; keyboard input uses the target
@@ -517,10 +518,10 @@ monitoring starts a conservative idle interval at zero. `WH_KEYBOARD_LL` / `WH_M
 only and discard injected input, including lower-integrity injections and our own SendInput. No
 text/key payload is stored. Hook proofs and message-pump leases expire after 100ms. Failure returns
 `None`, discards input history and disables foreground; it never reports an old idle timestamp. Two
-tagged synthetic probes (unused F24 **up only**, zero relative mouse move) prove both hook chains
-without refreshing activity or moving the cursor. Hooks are replaced every second, installing the
-new pair before retiring the old pair. Silent removal is detected by missing probes, even if the
-pump lives.
+tagged injected callbacks (F24 **up only**, zero move/wheel/horizontal-wheel candidates) prove both
+hook chains; SendInput success alone is insufficient. Defaults never move or click. Replacement
+hooks install before old hooks retire each second; missing mouse proof disables foreground.
+No documented LL-hook liveness query exists; neither pump heartbeats nor registration prove delivery.
 
 `RegisterHotKey` defaults to Ctrl+Alt+Shift+Backspace; `HotkeyConfig` accepts a trusted configurable
 virtual key/modifier chord. Conflicts fail closed, with metadata in the existing `DoctorReport`. The
@@ -550,7 +551,7 @@ rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-wi
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
 
-Native status: **not_run** (Linux host, no interactive Windows desktop). The `#[cfg(windows)]
+CI probe details and side effects: [native diagnostics](diagnostics.md). The `#[cfg(windows)]
 #[ignore]` tests compile with cross-target clippy. On an unelevated disposable Windows desktop,
 disable clipboard history/cloud sync, clear its clipboard, build `gcu-cli`, then run the named-mutex
 test serially. For the document test, open one blank Notepad document and focus its editor; use a

@@ -202,6 +202,56 @@ jobs:
             /tmp/fixture.log
             /tmp/fixture_state.json
 
+  fixture-windows:
+    name: Windows desktop contracts and system-app smoke
+    runs-on: windows-2022
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: computer-use
+        shell: powershell
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain (computer-use/rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "computer-use -> target"
+          key: ${{ hashFiles('computer-use/Cargo.lock') }}
+
+      - name: Build native fixture, worker, and ignored contract suite
+        run: |
+          cargo build --locked -p gcu-fixture -p gcu-cli -p gcu-driver-windows --bins --features gcu-driver-windows/test-worker-faults
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $messages = cargo test --no-run --locked -p gcu-driver-windows --test contract --features test-worker-faults --message-format=json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $test = $messages | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'contract' -and $_.executable } | Select-Object -Last 1
+          if ($null -eq $test) { throw 'contract test artifact missing' }
+          "GCU_CONTRACT_EXE=$($test.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check desktop launcher syntax, ABI layout, and token admission policy
+        run: ./scripts/test-windows-desktop.ps1
+
+      - name: Run native diagnostics, real contracts and smoke on the limited interactive desktop
+        timeout-minutes: 20
+        run: |
+          "GCU_DESKTOP_REPORT_DIR=$(Join-Path $env:RUNNER_TEMP 'gcu-win')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          ./scripts/smoke-windows.ps1 -NativeDiagnostics -TestExe $env:GCU_CONTRACT_EXE -WorkerExe target/debug/gcu.exe -FixtureExe target/debug/gcu-fixture.exe -OutputDir (Join-Path $env:RUNNER_TEMP 'gcu-win')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload desktop contract and smoke reports
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: windows-desktop-contracts
+          if-no-files-found: warn
+          path: ${{ env.GCU_DESKTOP_REPORT_DIR }}
+
   e2e-self-hosted:
     name: Self-hosted macOS contract
     if: (github.event_name == 'push' || github.event_name == 'pull_request') && vars.CU_SELF_HOSTED == 'true'

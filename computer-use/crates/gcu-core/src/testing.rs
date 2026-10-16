@@ -6,6 +6,9 @@ use crate::{driver::*, model::*};
 use async_trait::async_trait;
 use gcu_protocol::capabilities::Capabilities;
 
+/// Test-only Host assembly for driver contracts; keeps Host dependencies in core.
+pub mod host;
+
 /// Portable hooks implemented by memory and native fixture adapters.
 #[async_trait]
 pub trait ContractFixture: Send + Sync {

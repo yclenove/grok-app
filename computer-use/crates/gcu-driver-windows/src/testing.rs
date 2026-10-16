@@ -11,6 +11,9 @@ use std::{
     time::Duration,
 };
 
+mod blocking;
+pub use blocking::ControlledBlock;
+
 /// Mutable fake OS state. No real account, window, process or filesystem access.
 #[derive(Clone, Debug)]
 pub struct FakeState {
@@ -20,6 +23,8 @@ pub struct FakeState {
     pub processes: BTreeMap<u32, ProcessSecurity>,
     /// Process executable paths.
     pub paths: BTreeMap<u32, String>,
+    /// Running process AppUserModelIds; discovery hints only.
+    pub aumids: BTreeMap<u32, String>,
     /// File metadata indexed by query path.
     pub images: BTreeMap<String, ImageInfo>,
     /// Enumerated HWNDs.
@@ -42,6 +47,10 @@ pub struct FakeState {
     pub launches: Vec<Shortcut>,
     /// Recorded restoration HWNDs.
     pub restores: Vec<u64>,
+    /// Full image-verification calls, for detecting redundant hashing/signatures.
+    pub image_reads: Vec<String>,
+    /// Top-level metadata enumeration count (never UIA; background catalog excluded).
+    pub enumerations: usize,
     /// Windows/native metadata probe failure.
     pub failure: Option<DriverError>,
 }
@@ -51,6 +60,7 @@ impl Default for FakeState {
             engine: medium_security(),
             processes: BTreeMap::new(),
             paths: BTreeMap::new(),
+            aumids: BTreeMap::new(),
             images: BTreeMap::new(),
             windows: Vec::new(),
             desktops: BTreeMap::new(),
@@ -62,6 +72,8 @@ impl Default for FakeState {
             refuse_restore: false,
             launches: Vec::new(),
             restores: Vec::new(),
+            image_reads: Vec::new(),
+            enumerations: 0,
             failure: None,
         }
     }
@@ -72,8 +84,40 @@ pub struct FakeWinApi {
     state: Mutex<FakeState>,
     changed: Mutex<bool>,
     notify: Condvar,
+    scan_block: Mutex<Option<std::sync::Arc<ControlledBlock>>>,
+    cache_block: Mutex<Option<std::sync::Arc<ControlledBlock>>>,
+    enum_block: Mutex<Option<std::sync::Arc<ControlledBlock>>>,
+    image_blocks: Mutex<BTreeMap<String, std::sync::Arc<ControlledBlock>>>,
 }
 impl FakeWinApi {
+    /// Hold the Start Menu scan until the returned gate is released.
+    pub fn block_index(&self) -> std::sync::Arc<ControlledBlock> {
+        let block = std::sync::Arc::new(ControlledBlock::default());
+        *self.scan_block.lock().unwrap_or_else(|e| e.into_inner()) = Some(block.clone());
+        block
+    }
+    /// Hold startup cache IO independently of discovery queues.
+    pub fn block_cache(&self) -> std::sync::Arc<ControlledBlock> {
+        let block = std::sync::Arc::new(ControlledBlock::default());
+        *self.cache_block.lock().unwrap_or_else(|e| e.into_inner()) = Some(block.clone());
+        block
+    }
+    /// Hold enumeration until released; no real-time fake delay required.
+    pub fn block_enumeration(&self) -> std::sync::Arc<ControlledBlock> {
+        let block = std::sync::Arc::new(ControlledBlock::default());
+        *self.enum_block.lock().unwrap_or_else(|e| e.into_inner()) = Some(block.clone());
+        block
+    }
+    /// Hold only one executable's signature/hash, without retaining fake state.
+    pub fn block_image(&self, path: &str) -> std::sync::Arc<ControlledBlock> {
+        let block = std::sync::Arc::new(ControlledBlock::default());
+        self.image_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_lowercase(), block.clone());
+        block
+    }
+
     /// Mutate fixture state. Poisoned fake state is surfaced as a driver crash.
     pub fn update(&self, update: impl FnOnce(&mut FakeState)) {
         if let Ok(mut state) = self.state.lock() {
@@ -116,6 +160,20 @@ impl WinApi for FakeWinApi {
             .ok_or(DriverError::WindowGone)
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
+        // The background catalog refresh (spawned per resolve/list) enumerates on
+        // its own thread at an unordered time; only caller-thread passes count.
+        let background = std::thread::current().name() == Some("gcu-win-catalog");
+        self.update(|s| s.enumerations += usize::from(!background));
+        let block = self
+            .enum_block
+            .lock()
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
+            .clone();
+        if let Some(block) = block {
+            block.wait();
+        }
         let state = self.state()?;
         std::thread::park_timeout(state.enum_delay);
         Ok(state.windows)
@@ -127,7 +185,22 @@ impl WinApi for FakeWinApi {
             .cloned()
             .ok_or(DriverError::AppNotFound)
     }
+    fn process_aumid(&self, pid: u32) -> Result<Option<String>> {
+        Ok(self.state()?.aumids.get(&pid).cloned())
+    }
     fn image(&self, path: &str) -> Result<ImageInfo> {
+        self.update(|s| s.image_reads.push(path.to_lowercase()));
+        let block = self
+            .image_blocks
+            .lock()
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
+            .get(&path.to_lowercase())
+            .cloned();
+        if let Some(block) = block {
+            block.wait();
+        }
         let state = self.state()?;
         state
             .images
@@ -153,6 +226,16 @@ impl WinApi for FakeWinApi {
             .ok_or(DriverError::AppNotFound)
     }
     fn start_menu_links(&self) -> Result<Vec<String>> {
+        let block = self
+            .scan_block
+            .lock()
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
+            .clone();
+        if let Some(block) = block {
+            block.wait();
+        }
         let state = self.state()?;
         std::thread::park_timeout(state.scan_delay);
         Ok(state
@@ -163,6 +246,16 @@ impl WinApi for FakeWinApi {
             .collect())
     }
     fn read_cache(&self) -> Result<Option<Vec<u8>>> {
+        let block = self
+            .cache_block
+            .lock()
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
+            .clone();
+        if let Some(block) = block {
+            block.wait();
+        }
         Ok(self.state()?.cache)
     }
     fn write_cache(&self, bytes: &[u8]) -> Result<()> {

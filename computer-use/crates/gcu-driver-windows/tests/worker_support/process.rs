@@ -159,6 +159,42 @@ async fn timeout_mutation_reports_unknown_without_retry() {
     assert_eq!(f.calls(), ["mutation"]);
     s.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn blocked_mutation_injected_deadline_reaps_worker_and_next_read_recovers() {
+    let f = Fixture::new();
+    let mut config = f.config("hang_once");
+    config.timeout = Duration::from_secs(10);
+    // Start before pausing time: child cold-start speed is not the assertion.
+    let supervisor = std::sync::Arc::new(Supervisor::start(config).await.unwrap());
+    let task = {
+        let supervisor = supervisor.clone();
+        tokio::spawn(async move { supervisor.execute(mutation(), &Cancel::default()).await })
+    };
+    dispatched(&f).await; // External trace proves the worker is inside the call.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::resume();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(DriverError::Timeout {
+            maybe_executed: true
+        })
+    ));
+    // This is a deadlock watchdog, not an assertion about process cold-start.
+    assert!(tokio::time::timeout(
+        Duration::from_secs(10),
+        supervisor.execute(Request::ListApps, &Cancel::default())
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    assert_eq!(f.calls(), ["mutation", "read"]);
+    assert_eq!(f.pids().len(), 2);
+    supervisor.shutdown().await.unwrap();
+    #[cfg(target_os = "linux")]
+    reaped(&f.pids()).await;
+}
 #[tokio::test]
 async fn malformed_truncated_oversized_uncorrelated_frames_restart_read_worker() {
     for fault in [

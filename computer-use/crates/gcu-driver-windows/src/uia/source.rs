@@ -129,6 +129,13 @@ impl FakeUia {
             s.child_error = Some((s.node(slot), error));
         }
     }
+    /// Clear injected read failures so a new observation can prove recovery.
+    pub fn clear_read_errors(&self) {
+        if let Ok(mut s) = self.0.lock() {
+            s.error = None;
+            s.child_error = None;
+        }
+    }
     /// Number of source calls and largest requested page.
     pub fn stats(&self) -> (usize, usize) {
         self.0

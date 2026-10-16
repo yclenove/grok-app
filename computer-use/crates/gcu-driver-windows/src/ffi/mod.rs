@@ -112,6 +112,7 @@ pub struct RealWinApi {
     generation: AtomicU64,
     cache: PathBuf,
     watcher: std::sync::Mutex<Option<shell::WatchSet>>,
+    enumeration: std::sync::Mutex<()>,
 }
 impl RealWinApi {
     /// Allocate adapter metadata; does not enumerate or launch any application.
@@ -135,6 +136,7 @@ impl RealWinApi {
                 .join("grok-computer-use")
                 .join("apps.json"),
             watcher: std::sync::Mutex::new(None),
+            enumeration: std::sync::Mutex::new(()),
         })
     }
     // Stable across child restarts, private to one parent process instance.
@@ -165,10 +167,22 @@ impl WinApi for RealWinApi {
         security::security(pid)
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
+        let timing = crate::timing::Timing::start("enum_windows_lock");
+        // Only HWND metadata is serialized, never hashing or signature IO. This
+        // keeps concurrent discovery threads from racing GetProp/SetProp stamps.
+        let _enumeration = self
+            .enumeration
+            .lock()
+            .map_err(|_| native("enumeration lock"))?;
+        drop(timing);
+        let _timing = crate::timing::Timing::start("enum_windows");
         windows::enumerate(self)
     }
     fn process_path(&self, pid: u32) -> Result<String> {
         security::process_path(pid)
+    }
+    fn process_aumid(&self, pid: u32) -> Result<Option<String>> {
+        security::process_aumid(pid)
     }
     fn image(&self, path: &str) -> Result<ImageInfo> {
         signature::image(path)

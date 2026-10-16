@@ -142,6 +142,7 @@ impl Budget<'_> {
 pub(super) fn finish(result: PatternResult, unavailable: DriverError) -> Result<Delivery> {
     match result {
         PatternResult::Performed => Ok(Delivery::Accessibility),
+        PatternResult::TargetedPerformed => Ok(Delivery::TargetedEvent),
         _ => Err(unavailable),
     }
 }
@@ -164,8 +165,10 @@ async fn press(
             Pattern::Legacy => PatternAction::LegacyDefault,
             _ => continue,
         };
-        if budget.step(source, node, hwnd, props, action).await? == PatternResult::Performed {
-            return Ok(Delivery::Accessibility);
+        match budget.step(source, node, hwnd, props, action).await? {
+            PatternResult::Performed => return Ok(Delivery::Accessibility),
+            PatternResult::TargetedPerformed => return Ok(Delivery::TargetedEvent),
+            PatternResult::Unsupported | PatternResult::Unavailable => (),
         }
     }
     Err(DriverError::ElementNotActionable)

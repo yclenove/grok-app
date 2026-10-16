@@ -123,6 +123,8 @@ impl std::fmt::Debug for PatternAction {
 pub enum PatternResult {
     /// Native delivery acknowledged (business effect checked by core).
     Performed,
+    /// Non-activating targeted native message acknowledged; core checks effect.
+    TargetedPerformed,
     /// Pattern/method definitely unsupported; zero effects.
     Unsupported,
     /// Pattern currently unavailable; zero effects.

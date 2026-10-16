@@ -84,7 +84,8 @@ fn click(win: &WindowRef, route: PointerRoute) -> DriverAction {
 async fn registration_conflict_disables_capability_and_perform_but_keeps_background() {
     let (_, driver, _, win) = common::fixture().await;
     let api = Arc::new(FakeSafetyApi::default());
-    api.fail_open("RegisterHotKey conflict");
+    let reason = "RegisterHotKey: HRESULT=0x80070581, GetLastError=Some(1409); conflict";
+    api.fail_open(reason);
     let guard = api.start(HotkeyConfig::default(), Arc::new(Latch::default()));
     let driver = driver
         .with_input(Arc::new(InputBackend::new(Arc::new(FakeInput::default()))))
@@ -112,7 +113,7 @@ async fn registration_conflict_disables_capability_and_perform_but_keeps_backgro
     assert!(report
         .issues
         .iter()
-        .any(|i| i.contains("stop_hotkey: unavailable") && i.contains("conflict")));
+        .any(|i| i.contains("stop_hotkey: unavailable") && i.contains(reason)));
 }
 
 #[tokio::test]
@@ -195,12 +196,12 @@ async fn hook_thread_panic_and_guard_drop_revoke_retained_clock() {
             &self,
             _: HotkeyConfig,
             events: Arc<GuardEvents>,
-        ) -> std::result::Result<Box<dyn SafetyPump>, &'static str> {
+        ) -> std::result::Result<Box<dyn SafetyPump>, String> {
             Ok(Box::new(Pump(self.0.clone(), events)))
         }
     }
     impl SafetyPump for Pump {
-        fn poll(&mut self, _: bool) -> std::result::Result<(), &'static str> {
+        fn poll(&mut self, _: bool) -> std::result::Result<(), String> {
             assert!(!self.0 .0.load(Ordering::Acquire), "fake hook panic");
             self.1.clock().confirm(Instant::now());
             self.1.hotkey_heartbeat();

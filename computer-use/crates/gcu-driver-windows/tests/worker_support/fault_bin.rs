@@ -37,7 +37,7 @@ async fn main() {
     }
     if matches!(
         fault.as_str(),
-        "normal" | "normal_restart" | "normal_unknown"
+        "normal" | "normal_restart" | "normal_unknown" | "normal_hang"
     ) {
         let (input, mut forwarding) = tokio::io::duplex(64 * 1024);
         tokio::spawn(async move {
@@ -50,6 +50,15 @@ async fn main() {
                         .open(dir.join("calls"))
                         .unwrap();
                     writeln!(calls, "mutation").unwrap();
+                    if fault == "normal_hang"
+                        && std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(dir.join("once"))
+                            .is_ok()
+                    {
+                        std::future::pending::<()>().await;
+                    }
                 }
                 if fault == "normal_restart"
                     && matches!(call.request, Request::Snapshot(..))
@@ -79,7 +88,7 @@ async fn main() {
     while let Some(call) = codec::read_frame::<_, Call>(&mut input).await.unwrap() {
         let reply = if matches!(call.request, Request::Doctor) {
             if fault == "hang_restart" && dir.join("once").exists() {
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                std::future::pending::<()>().await;
             }
             let report = driver.doctor().await;
             Reply::Doctor {
@@ -111,7 +120,7 @@ async fn main() {
             if first || fault == "crash_always" {
                 match fault.as_str() {
                     "crash_once" | "crash_always" | "hang_restart" => std::process::abort(),
-                    "hang_once" => std::thread::sleep(std::time::Duration::from_secs(60)),
+                    "hang_once" => std::future::pending::<()>().await,
                     "bad_once" => {
                         output.write_all(&[0, 0, 0, 1, b'!']).await.unwrap();
                         output.flush().await.unwrap();

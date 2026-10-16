@@ -12,6 +12,7 @@ use windows::{
 macro_rules! read {
     ($request:expr, $call:expr) => {{
         $request.check()?;
+        let _timing = crate::timing::Timing::start(stringify!($call));
         // SAFETY: live UIA interface and owned arguments on their creating MTA.
         unsafe { $call }.map_err(ActionError::from)?
     }};
@@ -19,6 +20,7 @@ macro_rules! read {
 macro_rules! mutate {
     ($request:expr, $call:expr) => {{
         $request.dispatch(|| {
+            let _timing = crate::timing::Timing::start(stringify!($call));
             // SAFETY: live pattern on its MTA; identity/writability were checked.
             unsafe { $call }
                 .map(|()| PatternResult::Performed)
@@ -26,6 +28,7 @@ macro_rules! mutate {
         })?
     }};
 }
+mod press;
 mod scroll;
 mod text;
 mod value;
@@ -33,11 +36,13 @@ mod value;
 use super::super::patterns::PatternError as ActionError;
 impl From<windows::core::Error> for ActionError {
     fn from(error: windows::core::Error) -> Self {
+        tracing::warn!(target: "gcu_windows_uia", hresult = error.code().0 as u32, mutation = false, "UIA_PATTERN_HRESULT");
         Self::from_hresult(error.code().0, false)
     }
 }
 type Prepared<T> = std::result::Result<T, ActionError>;
 fn mutation_error(error: windows::core::Error) -> Result<PatternResult> {
+    tracing::warn!(target: "gcu_windows_uia", hresult = error.code().0 as u32, mutation = true, "UIA_PATTERN_HRESULT");
     match ActionError::from_hresult(error.code().0, true) {
         ActionError::Unsupported => Ok(PatternResult::Unsupported),
         ActionError::Unavailable => Ok(PatternResult::Unavailable),
@@ -77,7 +82,7 @@ pub(super) fn perform(
         request: r,
         action: &action,
     };
-    let result = execute(&el, &action, &guard);
+    let result = execute(&el, &action, &guard, props.class_name.as_deref());
     match result {
         Ok(v) => Ok(v),
         Err(ActionError::Unsupported) => Ok(PatternResult::Unsupported),
@@ -89,11 +94,24 @@ fn execute(
     el: &IUIAutomationElement,
     action: &PatternAction,
     r: &Guard<'_>,
+    class_name: Option<&str>,
 ) -> Prepared<PatternResult> {
     let result = match action {
-        PatternAction::Invoke => {
-            let p: IUIAutomationInvokePattern = pattern(el, UIA_InvokePatternId, r)?;
-            mutate!(r, p.Invoke())
+        PatternAction::Invoke | PatternAction::LegacyDefault => {
+            if let Some(result) = press::post(el, class_name, r)? {
+                return Ok(result);
+            }
+            // Virtual UIA controls have no native BUTTON recipient. Preserve
+            // their semantic channel; providers may activate the owning window.
+            // This is never reached from an explicit TargetedOnly pointer action.
+            if matches!(action, PatternAction::Invoke) {
+                let p: IUIAutomationInvokePattern = pattern(el, UIA_InvokePatternId, r)?;
+                mutate!(r, p.Invoke())
+            } else {
+                let p: IUIAutomationLegacyIAccessiblePattern =
+                    pattern(el, UIA_LegacyIAccessiblePatternId, r)?;
+                mutate!(r, p.DoDefaultAction())
+            }
         }
         PatternAction::Toggle => {
             let p: IUIAutomationTogglePattern = pattern(el, UIA_TogglePatternId, r)?;
@@ -131,11 +149,6 @@ fn execute(
             mutate!(r, p.ScrollIntoView())
         }
         PatternAction::SelectText(range) => return text::select(el, *range, r),
-        PatternAction::LegacyDefault => {
-            let p: IUIAutomationLegacyIAccessiblePattern =
-                pattern(el, UIA_LegacyIAccessiblePatternId, r)?;
-            mutate!(r, p.DoDefaultAction())
-        }
     };
     Ok(result)
 }
@@ -152,6 +165,7 @@ impl Guard<'_> {
         self.request.check()
     }
     fn dispatch(&self, mutation: impl FnOnce() -> Result<PatternResult>) -> Result<PatternResult> {
+        let _timing = crate::timing::Timing::start("uia_action_preflight");
         // Pattern acquisition and TextPattern preparation can cross provider calls.
         // Recheck again here, immediately before the one actual mutation.
         let (_, props) = self.state.validate(self.node, self.hwnd, self.request)?;

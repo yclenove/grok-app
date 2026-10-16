@@ -5,6 +5,8 @@ pub mod fake;
 #[cfg(windows)]
 mod ffi;
 pub mod foreground;
+#[cfg(any(windows, test))]
+mod hook_probe;
 pub mod hooks;
 pub mod hotkey;
 pub mod ledger;
@@ -230,20 +232,19 @@ impl InputBackend {
                         .prepare(target.clone(), packet.clone(), delivery)
                         .await?;
                 }
-                let result = match context.check() {
-                    Ok(()) => {
-                        self.api
-                            .send(
-                                target.clone(),
-                                packet,
-                                delivery,
-                                self.ledger.clone(),
-                                context.clone(),
-                            )
-                            .await
-                    }
-                    Err(error) => Err(error),
-                };
+                let result = async {
+                    context.check()?;
+                    self.api
+                        .send(
+                            target.clone(),
+                            packet,
+                            delivery,
+                            self.ledger.clone(),
+                            context.clone(),
+                        )
+                        .await
+                }
+                .await;
                 if let Some(tracker) = &self.tracker {
                     if result.is_ok() || result.as_ref().is_err_and(|e| !e.maybe_executed()) {
                         tracker.complete(result.is_ok()).await?;

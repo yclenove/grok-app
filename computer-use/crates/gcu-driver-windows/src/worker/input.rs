@@ -292,6 +292,18 @@ fn valid(packet: &InputPacket, request: &Request) -> bool {
         Action::PressKeys { route, .. } | Action::TypeText { route, .. } => {
             *route == KeyRoute::AllowForeground
         }
+        Action::Press { .. }
+        | Action::SecondaryAction {
+            action: gcu_core::model::NodeAction::Press | gcu_core::model::NodeAction::Confirm,
+            ..
+        } => {
+            // A semantic press can become only a single targeted left click,
+            // never a key packet, drag or foreground delivery.
+            if !press_packet(&packet.events) {
+                return false;
+            }
+            false
+        }
         _ => return false,
     };
     packet.events.len() <= 512
@@ -326,5 +338,41 @@ pub(super) fn default_releaser() -> Arc<dyn InputReleaser> {
     #[cfg(not(windows))]
     {
         Arc::new(crate::input::fake::FakeInput::default())
+    }
+}
+
+fn press_packet(events: &[Event]) -> bool {
+    use gcu_core::driver::Button;
+    match events {
+        [Event::Move(point, false)] => point.x.is_finite() && point.y.is_finite(),
+        [Event::Button(Button::Left, true, down, false), Event::Button(Button::Left, false, up, false)] => {
+            down == up && down.x.is_finite() && down.y.is_finite()
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn semantic_press_packets_cannot_grant_keys_drag_or_unbalanced_downs() {
+        let p = gcu_core::model::WindowPoint { x: 20., y: 30. };
+        assert!(press_packet(&[Event::Move(p, false)]));
+        assert!(press_packet(&[
+            Event::Button(Button::Left, true, p, false),
+            Event::Button(Button::Left, false, p, false)
+        ]));
+        for events in [
+            vec![Event::Key(65, true, false, false)],
+            vec![Event::Move(p, true)],
+            vec![Event::Button(Button::Left, true, p, false)],
+            vec![
+                Event::Button(Button::Right, true, p, false),
+                Event::Button(Button::Right, false, p, false),
+            ],
+        ] {
+            assert!(!press_packet(&events));
+        }
     }
 }

@@ -13,6 +13,11 @@ name = "gcu-test-worker"
 path = "tests/worker_support/fault_bin.rs"
 required-features = ["test-worker-faults"]
 
+[[bin]]
+name = "gcu-contract-worker"
+path = "tests/contract/worker_bin.rs"
+required-features = ["test-worker-faults"]
+
 [dependencies]
 gcu-protocol.workspace = true
 gcu-core.workspace = true
@@ -47,6 +52,7 @@ windows = { version = "0.62", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+gcu-core = { workspace = true, features = ["testing"] }
 insta = { version = "1", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }
 

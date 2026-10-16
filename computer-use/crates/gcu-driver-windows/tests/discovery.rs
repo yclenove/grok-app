@@ -16,6 +16,52 @@ use std::{
 mod common;
 use common::{fixture, indexed, shortcut};
 
+#[tokio::test]
+async fn elevated_visible_process_refused_before_unreadable_image_verification() {
+    let (api, driver, _, _) = fixture().await;
+    api.update(|s| {
+        s.paths.insert(9, "C:\\High\\hi.exe".into());
+        let mut high = medium_security();
+        high.integrity = gcu_driver_windows::gate::IntegrityLevel::High;
+        s.processes.insert(9, high);
+        s.windows.push(window(10, 9));
+        // Medium cannot read this High-labelled file; image() would be NotFound.
+        s.image_reads.clear();
+    });
+    assert_eq!(
+        driver
+            .resolve_app(&AppQuery::from("C:\\High\\hi.exe"))
+            .await,
+        Err(DriverError::ElevationRequired)
+    );
+    assert!(!api
+        .state()
+        .unwrap()
+        .image_reads
+        .iter()
+        .any(|p| p.ends_with("hi.exe")));
+}
+
+#[tokio::test]
+async fn disappearing_unrelated_windows_do_not_accumulate_app_errors_in_doctor() {
+    let (api, driver, app, _) = fixture().await;
+    api.update(|s| {
+        for pid in 100..110 {
+            s.windows.push(window(pid as u64, pid));
+        }
+    });
+    for _ in 0..3 {
+        driver.list_windows(Some(&app)).await.unwrap();
+        driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
+    }
+    assert!(!driver
+        .doctor()
+        .await
+        .issues
+        .iter()
+        .any(|i| i == "app not found"));
+}
+
 #[test]
 fn filtering_keeps_owned_dialogs_and_excludes_hidden_tool_windows() {
     let root = window(1, 7);
@@ -154,19 +200,19 @@ async fn minimized_window_restores_exact_hwnd_without_activation() {
 }
 
 #[tokio::test]
-async fn first_call_slow_index_returns_cache_under_100ms() {
+async fn first_call_blocked_index_returns_cached_hints() {
     let api = Arc::new(FakeWinApi::default());
     api.update(|s| {
         s.cache = Some(encode_cache(&[shortcut()]).unwrap());
-        s.scan_delay = Duration::from_millis(400);
         s.links.push(shortcut());
     });
+    let blocked = api.block_index();
     let driver = WindowsDriver::with_api(api).await.unwrap();
-    let start = Instant::now();
+    blocked.wait_entered().await; // Cache has been published; scan cannot finish.
     let apps = driver.list_apps().await.unwrap();
-    assert!(start.elapsed() < Duration::from_millis(100));
     assert_eq!(apps[0].name, "Editor");
     assert!(driver.discovery_status().indexing);
+    blocked.release();
 }
 
 #[tokio::test]
@@ -243,18 +289,21 @@ fn cache_bad_json_version_and_oversized_input_rejected() {
 }
 
 #[tokio::test]
-async fn first_call_slow_running_enumeration_returns_cache_under_100ms() {
+async fn first_call_blocked_running_enumeration_returns_cached_hints() {
     let api = Arc::new(FakeWinApi::default());
     api.update(|s| {
         s.cache = Some(encode_cache(&[shortcut()]).unwrap());
         s.links.push(shortcut());
-        s.enum_delay = Duration::from_millis(400);
     });
+    let scan = api.block_index();
+    let enumeration = api.block_enumeration();
     let driver = WindowsDriver::with_api(api).await.unwrap();
-    let start = Instant::now();
+    scan.wait_entered().await;
+    enumeration.wait_entered().await;
     assert_eq!(driver.list_apps().await.unwrap()[0].name, "Editor");
-    assert!(start.elapsed() < Duration::from_millis(100));
     assert!(driver.discovery_status().indexing);
+    scan.release();
+    enumeration.release();
 }
 
 #[tokio::test]
@@ -365,20 +414,23 @@ async fn uwp_elevated_frame_owner_is_refused_even_with_medium_child() {
 }
 #[tokio::test]
 async fn dropped_queued_restore_never_executes_after_caller_timeout() {
-    let (api, driver, app, _) = fixture().await;
-    api.update(|s| {
-        s.enum_delay = Duration::from_millis(300);
-        s.windows[0].minimized = true;
-    });
-    driver.list_apps().await.unwrap();
+    let (api, driver, app, win) = fixture().await;
+    let driver = Arc::new(driver);
+    api.update(|s| s.windows[0].minimized = true);
+    let blocked = api.block_enumeration();
+    let read_driver = driver.clone();
+    let read = tokio::spawn(async move { read_driver.window_geometry(&win).await });
+    blocked.wait_entered().await;
+    tokio::time::pause();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), driver.key_window(&app))
             .await
             .is_err()
     );
-    // Wait for the already-running refresh to finish; the closed oneshot must
-    // remove the queued restore even though the driver remains alive.
-    driver.doctor().await;
+    tokio::time::resume();
+    blocked.release();
+    let _ = read.await.unwrap();
+    driver.doctor().await; // Barrier: queued restoration has been skipped.
     assert!(api.state().unwrap().restores.is_empty());
 }
 #[tokio::test]

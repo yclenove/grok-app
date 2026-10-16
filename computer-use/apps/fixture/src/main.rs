@@ -8,6 +8,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("GCU Fixture")
             .with_inner_size([1280.0, 860.0])
+            // The High UIPI fixture must never steal input from the Medium suite.
+            .with_active(std::env::var("GCU_FIXTURE_NO_ACTIVATE").as_deref() != Ok("1"))
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };

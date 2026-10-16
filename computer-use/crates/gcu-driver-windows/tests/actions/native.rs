@@ -146,7 +146,11 @@ async fn semantic_contract(mode: ExecMode) {
         };
         assert_eq!(
             driver.perform(&action, &Cancel::default()).await.unwrap(),
-            Delivery::Accessibility
+            if id == "counter_button" {
+                Delivery::TargetedEvent
+            } else {
+                Delivery::Accessibility
+            }
         );
         expect_oracle(&state, expected_field, expected).await;
         assert_eq!(

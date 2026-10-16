@@ -54,6 +54,31 @@ pub(super) fn process_path(pid: u32) -> Result<String> {
     }
     Ok(string(&buffer[..size as usize]))
 }
+pub(super) fn process_aumid(pid: u32) -> Result<Option<String>> {
+    use ::windows::Win32::{
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
+        Storage::Packaging::Appx::GetApplicationUserModelId,
+    };
+    let process = open_process(pid)?;
+    let mut length = 0;
+    // SAFETY: owned process handle and writable size; no buffer in sizing query.
+    let status = unsafe { GetApplicationUserModelId(process.0, &mut length, None) };
+    if status == ::windows::Win32::Foundation::APPMODEL_ERROR_NO_APPLICATION {
+        return Ok(None);
+    }
+    if status != ERROR_INSUFFICIENT_BUFFER || length == 0 || length > 32768 {
+        return Err(native("process AUMID size"));
+    }
+    let mut buffer = vec![0u16; length as usize];
+    // SAFETY: correctly sized writable buffer; process handle remains live.
+    let status = unsafe {
+        GetApplicationUserModelId(process.0, &mut length, Some(PWSTR(buffer.as_mut_ptr())))
+    };
+    if status != ERROR_SUCCESS {
+        return Err(native("process AUMID"));
+    }
+    Ok(Some(string(&buffer)))
+}
 fn token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<usize>> {
     let mut size = 0;
     // SAFETY: first call only obtains required size, so its expected error is checked below.

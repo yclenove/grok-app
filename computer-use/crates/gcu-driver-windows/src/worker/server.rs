@@ -1,12 +1,21 @@
 //! Worker execution boundary. Initialization starts only after the parent frame.
 use super::{codec, tree::Tree, wire::*};
 use gcu_core::{driver::*, model::NativeHandle};
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    sync::Arc,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Default)]
 struct Handles {
     elements: BTreeMap<ElementKey, (Element, NativeHandle)>,
+    bound_apps: BTreeSet<String>,
+    resolved_apps: BTreeMap<String, gcu_protocol::AppInfo>,
     generation: u64,
 }
 type ElementKey = (u64, Vec<i32>);
@@ -100,6 +109,7 @@ where
         return Err(invalid());
     }
     let (tracker, mut notices) = super::input::channel();
+    let initialization = crate::timing::Timing::start("worker_initialize");
     let driver = match initialize(first.namespace.clone(), tracker.clone()).await {
         Ok(driver) => driver,
         Err(error) => {
@@ -117,6 +127,7 @@ where
             return Err(error);
         }
     };
+    drop(initialization);
     let epoch = first.epoch;
     let namespace = first.namespace.clone();
     let mut handles = Handles::default();
@@ -185,9 +196,60 @@ async fn dispatch(
         _ => None,
     };
     if let Some(expected) = expected {
-        let fresh = driver.resolve_app(&AppQuery(expected.id.clone())).await?;
-        if fresh.info.id != expected.id || fresh.info.identity != expected.identity {
-            return Err(DriverError::AppNotFound);
+        // Rehydrate only after restart or a changed binding. Each native method
+        // still performs its own live token/image/window validation: this cache
+        // never authorizes content or delivery. Re-resolving every request used
+        // to hash/verify the executable before doing that same preflight again.
+        if handles.resolved_apps.get(&expected.id) != Some(expected) {
+            let _timing = crate::timing::Timing::start("worker_rehydrate");
+            let fresh = driver.resolve_app(&AppQuery(expected.id.clone())).await?;
+            if fresh.info.id != expected.id
+                || fresh.info.identity != expected.identity
+                || fresh.info.pid != expected.pid
+            {
+                // A stamped-window request survives worker restarts. If the
+                // same verified image is now only installed (process exited),
+                // report the lost window rather than changing app identity.
+                if fresh.info.id == expected.id
+                    && fresh.info.identity == expected.identity
+                    && fresh.info.pid.is_none()
+                    && expected.pid.is_some()
+                    && matches!(
+                        &request,
+                        Request::Snapshot(..)
+                            | Request::Capture(..)
+                            | Request::Geometry(_)
+                            | Request::Perform(_)
+                    )
+                {
+                    return Err(DriverError::WindowGone);
+                }
+                return Err(DriverError::AppNotFound);
+            }
+            handles.bound_apps.remove(&expected.id);
+            handles
+                .resolved_apps
+                .insert(expected.id.clone(), expected.clone());
+        }
+        // Resolution no longer fills the window registry by scanning/hashing
+        // every application. Rebind live stamps on the read queue after restart.
+        // No activation or mutation; later observation still checks the exact ID.
+        // ListWindows/KeyWindow/Focused already enumerate their own HWNDs.
+        // Only stamped-window requests need an extra binding pass after restart.
+        let needs_stamp = matches!(
+            &request,
+            Request::Snapshot(..)
+                | Request::Capture(..)
+                | Request::Geometry(_)
+                | Request::Perform(_)
+        );
+        if needs_stamp && expected.pid.is_some() && !handles.bound_apps.contains(&expected.id) {
+            driver
+                .list_windows(Some(&AppRef {
+                    info: expected.clone(),
+                }))
+                .await?;
+            handles.bound_apps.insert(expected.id.clone());
         }
     }
     Ok(match request {
@@ -206,14 +268,33 @@ async fn dispatch(
             apps: driver.list_apps().await?,
             indexing: driver.discovery_status().indexing,
         },
-        Request::ResolveApp(query) => Reply::App(driver.resolve_app(&AppQuery(query)).await?.info),
+        Request::ResolveApp(query) => {
+            let info = driver.resolve_app(&AppQuery(query)).await?.info;
+            if handles.resolved_apps.get(&info.id) != Some(&info) {
+                handles.bound_apps.remove(&info.id);
+            }
+            handles.resolved_apps.insert(info.id.clone(), info.clone());
+            Reply::App(info)
+        }
         Request::LaunchApp(info) => Reply::App(driver.launch_app(&AppRef { info }).await?.info),
-        Request::ListWindows(info) => Reply::Windows(
-            driver
+        Request::ListWindows(info) => {
+            let target = info.as_ref().map(|info| info.id.clone());
+            let windows = driver
                 .list_windows(info.map(|info| AppRef { info }).as_ref())
-                .await?,
-        ),
-        Request::KeyWindow(info) => Reply::Window(driver.key_window(&AppRef { info }).await?),
+                .await?;
+            // A successful native enumeration has populated its stamp registry.
+            for info in handles.resolved_apps.values().filter(|info| {
+                info.pid.is_some() && target.as_ref().is_none_or(|id| id == &info.id)
+            }) {
+                handles.bound_apps.insert(info.id.clone());
+            }
+            Reply::Windows(windows)
+        }
+        Request::KeyWindow(info) => {
+            let window = driver.key_window(&AppRef { info: info.clone() }).await?;
+            handles.bound_apps.insert(info.id);
+            Reply::Window(window)
+        }
         Request::Snapshot(window, opts) => {
             let tree = driver
                 .snapshot_tree(&window.into(), &opts.into(), &cancel)

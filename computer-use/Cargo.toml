@@ -84,6 +84,12 @@ opt-level = 3
 [profile.dev.package.gcu-core]
 opt-level = 2
 
+# Windows revalidates the executable bytes at every trust boundary. In dev/test,
+# unoptimized SHA-256 took 1.55–2.07s per fixture read and exhausted C17/C26's
+# aggregate budget. Keep full rehashing; optimize the compression dependency.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
