@@ -1,4 +1,5 @@
 //! Deterministic identity/TOCTOU tests; no desktop, account or wall-clock sleeps.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
