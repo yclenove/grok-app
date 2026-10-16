@@ -4,9 +4,11 @@ use gcu_core::driver::{Cancel, Delivery, DriverError, KeyRoute, Result};
 use gcu_driver_macos::{
     ax::{AxHandle, AxIdentity},
     input::{
+        activity::ActivityClock,
         clipboard::{Pasteboard, PasteboardContent, PasteboardSnapshot},
+        clock::FakeClock,
+        hotkey::{Guards, SharedStopLatch},
         text::{type_text, TextApi, TextContext, TextFocus, TextOptions},
-        timing::RuntimeClock,
         Call, EventKind, FakeEvents, InputLedger, InputTarget,
     },
 };
@@ -223,7 +225,18 @@ impl TextApi for FakeText {
     }
 }
 
+struct IdleActivity;
+impl ActivityClock for IdleActivity {
+    fn ms_since_physical_input(&self) -> Option<u64> {
+        Some(3000)
+    }
+    fn stop_available(&self) -> bool {
+        true
+    }
+}
+
 pub struct Rig {
+    pub clock: Arc<FakeClock>,
     pub text: Arc<FakeText>,
     pub events: Arc<FakeEvents>,
     pub board: Arc<FakePasteboard>,
@@ -238,9 +251,19 @@ impl Rig {
         Self::new(None)
     }
     fn new(value: Option<&str>) -> Self {
+        let clock = Arc::new(FakeClock::new());
+        let events = Arc::new(FakeEvents::ready());
+        events.set_guards(Arc::new(Guards::new(
+            clock.clone(),
+            Arc::new(IdleActivity),
+            Arc::new(SharedStopLatch::new(false)),
+            3000,
+        )));
+        events.set_frontmost(Some(4));
         Self {
+            clock,
             text: Arc::new(FakeText::new(value)),
-            events: Arc::new(FakeEvents::ready()),
+            events,
             board: Arc::new(FakePasteboard::new()),
             ledger: Arc::new(InputLedger::new()),
             target: InputTarget {
@@ -262,7 +285,7 @@ impl Rig {
             events: self.events.clone(),
             pasteboard: self.board.clone(),
             ledger: self.ledger.clone(),
-            clock: Arc::new(RuntimeClock),
+            clock: self.clock.clone(),
         }
     }
     pub async fn run(&self, text: &str, options: TextOptions) -> Result<Delivery> {

@@ -5,12 +5,17 @@
 //! Field 51 is written and read back before `postToPid`. A mismatch is not
 //! posted. `CGEventSetWindowLocation` comes from `dlsym`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use gcu_core::driver::{DriverError, Result};
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWorkspace,
+};
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton,
@@ -20,6 +25,10 @@ use objc2_foundation::NSProcessInfo;
 
 use super::events::{EventApi, EventKind, PostFault, PostPath, Probe, SyntheticEvent};
 use super::skylight;
+use super::{
+    activity::{ActivityMonitor, OWN_EVENT_TAG},
+    hotkey::{Guards, HotkeyConfig, SharedStopLatch, StopLatch},
+};
 
 static APPKIT_READY: AtomicBool = AtomicBool::new(false);
 
@@ -62,15 +71,48 @@ fn location_symbol() -> Option<SetWindowLocation> {
 type SetWindowLocation = unsafe extern "C" fn(event: *const CGEvent, point: CGPoint);
 
 /// Live CoreGraphics backend. One process-wide AppKit flag.
-#[derive(Debug, Default)]
 pub struct RealEvents {
     arrival_failed: AtomicBool,
+    guards: Arc<Guards>,
+    _listener: Option<super::ffi::Listener>,
+    post_gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl RealEvents {
-    /// Backend with no failed-arrival latch.
+    /// Backend initially stopped until a trusted Host is attached. Starting a
+    /// new engine must never implicitly reset the previous engine's Stop.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_stop_latch(
+            Arc::new(SharedStopLatch::new(true)),
+            HotkeyConfig::default(),
+            3000,
+        )
+    }
+
+    /// Attach a persistent Host latch and configurable Stop/idle settings.
+    /// AppKit must already be initialized on the main thread. Listener startup
+    /// is asynchronous; foreground stays unavailable until it becomes healthy.
+    pub fn with_stop_latch(latch: Arc<dyn StopLatch>, config: HotkeyConfig, idle_ms: u64) -> Self {
+        let clock = super::clock::runtime_clock();
+        let monitor = Arc::new(ActivityMonitor::new(clock.clone()));
+        let guards = Arc::new(Guards::new(clock, monitor.clone(), latch, idle_ms));
+        let listener = if ensure_appkit() {
+            match super::ffi::Listener::start(monitor, guards.clone(), config) {
+                Ok(listener) => Some(listener),
+                Err(_) => {
+                    tracing::warn!("macos Stop listener could not start");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            arrival_failed: AtomicBool::new(false),
+            guards,
+            _listener: listener,
+            post_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
     }
 
     fn probe_now(&self) -> Probe {
@@ -83,7 +125,7 @@ impl RealEvents {
             arrival_verified: false,
             os_major,
             appkit_ready: ensure_appkit(),
-            accessibility: true,
+            accessibility: super::ffi::accessibility_trusted(),
             secure_prompt: false,
             foreground: true,
             skylight: skylight::status(),
@@ -93,6 +135,17 @@ impl RealEvents {
 
 #[async_trait]
 impl EventApi for RealEvents {
+    fn guards(&self) -> Option<Arc<Guards>> {
+        Some(self.guards.clone())
+    }
+
+    async fn frontmost_pid(&self) -> Result<Option<i32>> {
+        tokio::task::spawn_blocking(frontmost_pid)
+            .await
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })
+    }
     fn probe(&self) -> Probe {
         self.probe_now()
     }
@@ -106,30 +159,62 @@ impl EventApi for RealEvents {
     }
 
     async fn activate(&self, pid: i32) -> Result<()> {
-        if !ensure_appkit() {
-            return Err(DriverError::Native {
-                message: "AppKit is not initialized".into(),
-                maybe_executed: false,
-            });
-        }
-        let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
-            return Err(DriverError::WindowGone);
-        };
-        let options = NSApplicationActivationOptions::ActivateAllWindows;
-        if !app.activateWithOptions(options) {
-            return Err(DriverError::Native {
-                message: "foreground activation was not accepted".into(),
-                maybe_executed: false,
-            });
-        }
-        Ok(())
+        let guards = self.guards.clone();
+        tokio::task::spawn_blocking(move || {
+            guards.check(true)?;
+            if !ensure_appkit() {
+                return Err(DriverError::CapabilityUnavailable);
+            }
+            let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                .ok_or(DriverError::WindowGone)?;
+            if !app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows) {
+                return Err(DriverError::Native {
+                    message: "foreground activation was not accepted".into(),
+                    maybe_executed: true,
+                });
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| DriverError::Crashed {
+            maybe_executed: true,
+        })?
     }
 
     async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
         if !ensure_appkit() {
             return Err(PostFault::NotSent);
         }
-        post_one(&event)
+        let guards = self.guards.clone();
+        // A stalled down keeps this permit; no new downs are queued behind it.
+        // Ups use the independent release executor and must bypass the permit.
+        let permit = if event.down {
+            Some(
+                self.post_gate
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| PostFault::NotSent)?,
+            )
+        } else {
+            None
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if event.down {
+                guards
+                    .check(event.path == PostPath::HidTap)
+                    .map_err(|_| PostFault::NotSent)?;
+                if event.path == PostPath::HidTap && frontmost_pid() != Some(event.pid) {
+                    return Err(PostFault::NotSent);
+                }
+                if !super::ffi::accessibility_trusted() {
+                    return Err(PostFault::Permission);
+                }
+            }
+            post_one(&event)
+        })
+        .await
+        .map_err(|_| PostFault::Uncertain)?
     }
 
     async fn verify_arrival(
@@ -148,8 +233,21 @@ impl EventApi for RealEvents {
     }
 }
 
+impl Default for RealEvents {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn frontmost_pid() -> Option<i32> {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier())
+}
+
 fn post_one(event: &SyntheticEvent) -> std::result::Result<(), PostFault> {
     let cg = build(event).ok_or(PostFault::NotSent)?;
+    CGEvent::set_integer_value_field(Some(&cg), CGEventField::EventSourceUserData, OWN_EVENT_TAG);
     if event.path == PostPath::ToPid {
         if !stamp_targeted(&cg, event) {
             return Err(PostFault::NotSent);

@@ -92,12 +92,16 @@ pub(crate) async fn paste(
     text: &str,
     op: &Operation<'_>,
 ) -> Result<Delivery> {
+    let foreground = op.foreground();
+    let op = &foreground;
+    op.check()?;
     let lock = op.guard(async { Ok(CLIPBOARD.lock().await) }).await?;
     let ctx = ctx.clone();
     let target = target.clone();
     let focus = focus.clone();
     let text = text.to_owned();
     let deadline = op.deadline;
+    let guards = op.guards.clone();
     let stopped = Cancel::default();
     let _cancel_on_drop = CancelOnDrop(stopped.clone());
     let sent = Arc::new(AtomicBool::new(false));
@@ -111,6 +115,8 @@ pub(crate) async fn paste(
             sent: &sent_worker,
             clock: ctx.clock.as_ref(),
             deadline,
+            guards,
+            foreground: true,
         };
         work.check()?;
         let fresh = runtime.block_on(work.guard(ctx.text.focus(&target)))?;
@@ -140,35 +146,41 @@ pub(crate) async fn paste(
             &work,
         ));
         let cleanup = runtime.block_on(async {
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                super::release_held(ctx.events.as_ref(), &ctx.ledger),
-            )
-            .await
+            let deadline = ctx.clock.now() + Duration::from_millis(100);
+            tokio::select! {
+                biased;
+                _ = super::release_held(ctx.events.as_ref(), &ctx.ledger) => Ok(()),
+                _ = ctx.clock.wait_until(deadline) => Err(DriverError::Timeout { maybe_executed: true }),
+            }
         });
         let restored = restore.finish();
         result?;
-        cleanup.map_err(|_| DriverError::Timeout {
-            maybe_executed: true,
-        })?;
+        cleanup?;
         restored.map_err(|_| DriverError::Native {
             message: "pasteboard restoration failed".into(),
             maybe_executed: true,
         })?;
         Ok(Delivery::Clipboard)
     });
-    let result = tokio::select! {
-        biased;
-        _ = op.cancel.cancelled() => { stopped.cancel(); Err(DriverError::Cancelled { maybe_executed: sent.load(Ordering::Acquire) }) },
-        result = tokio::time::timeout_at(op.deadline, &mut job) => match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(DriverError::Crashed { maybe_executed: sent.load(Ordering::Acquire) }),
-            Err(_) => { stopped.cancel(); Err(DriverError::Timeout { maybe_executed: sent.load(Ordering::Acquire) }) },
-        },
-    };
-    op.sent
-        .store(sent.load(Ordering::Acquire), Ordering::Release);
-    result
+    let result = op
+        .guard(async {
+            (&mut job).await.map_err(|_| DriverError::Crashed {
+                maybe_executed: sent.load(Ordering::Acquire),
+            })?
+        })
+        .await;
+    if result.is_err() {
+        stopped.cancel();
+    }
+    let dispatched = sent.load(Ordering::Acquire);
+    op.sent.store(dispatched, Ordering::Release);
+    result.map_err(|error| {
+        if dispatched {
+            super::foreground::uncertain(error)
+        } else {
+            error
+        }
+    })
 }
 
 async fn paste_once(

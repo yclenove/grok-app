@@ -2,13 +2,14 @@
 use crate::{
     input::{
         clipboard::Pasteboard,
+        clock::Clock,
         text::{TextApi, TextContext, TextOptions},
-        timing::InputClock,
+        timing::Operation,
     },
     MacosDriver,
 };
 use gcu_core::driver::{Cancel, Delivery, DriverAction, DriverError, Result, DRIVER_DEADLINE};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 pub(crate) const CLIPBOARD_NOTE: &str = "Text input checks editable AX focus. Clipboard is disabled by default; trusted per-action permission and AllowForeground are required for long text. Sensitive text and high-risk targets cannot use it. Clipboard history or synchronization may retain text. Sequence/content/focus checks cannot eliminate last-instant replacement by another process.";
 
@@ -16,7 +17,7 @@ pub(crate) const CLIPBOARD_NOTE: &str = "Text input checks editable AX focus. Cl
 pub(crate) struct TextBackends {
     text: Arc<dyn TextApi>,
     pasteboard: Arc<dyn Pasteboard>,
-    clock: Arc<dyn InputClock>,
+    clock: Arc<dyn Clock>,
 }
 
 impl MacosDriver {
@@ -26,7 +27,7 @@ impl MacosDriver {
         &self,
         text: Arc<dyn TextApi>,
         pasteboard: Arc<dyn Pasteboard>,
-        clock: Arc<dyn InputClock>,
+        clock: Arc<dyn Clock>,
     ) {
         if let Ok(mut slot) = self.text.lock() {
             *slot = Some(TextBackends {
@@ -47,6 +48,10 @@ impl MacosDriver {
         options: TextOptions,
         cancel: &Cancel,
     ) -> Result<Delivery> {
+        let guards = self.input_guards();
+        if let Some(guards) = &guards {
+            guards.check(false)?;
+        }
         let DriverAction::TypeText {
             win,
             focus,
@@ -63,11 +68,21 @@ impl MacosDriver {
             .and_then(|s| s.clone())
             .ok_or(DriverError::CapabilityUnavailable)?;
         let started = backend.clock.now();
+        let sent = AtomicBool::new(false);
+        let gate = Operation::new(
+            cancel,
+            &sent,
+            backend.clock.as_ref(),
+            DRIVER_DEADLINE,
+            guards,
+        );
         let win = win.clone();
-        let target = self
-            .call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
-                state.prepare_input(&win)
-            })
+        let target = gate
+            .guard(
+                self.call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
+                    state.prepare_input(&win)
+                }),
+            )
             .await?;
         let context = TextContext {
             text: backend.text,
@@ -76,8 +91,7 @@ impl MacosDriver {
             ledger: Arc::clone(&self.ledger),
             clock: backend.clock,
         };
-        let budget =
-            DRIVER_DEADLINE.saturating_sub(context.clock.now().saturating_duration_since(started));
+        let budget = DRIVER_DEADLINE.saturating_sub(context.clock.now().saturating_sub(started));
         crate::input::text::type_text(
             &context,
             &target,

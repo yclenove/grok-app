@@ -24,9 +24,8 @@ use gcu_core::{
     driver::*,
     model::{Geometry, NativeHandle, RawTree},
 };
-use gcu_protocol::{capabilities::*, AppInfo, WindowInfo};
+use gcu_protocol::{AppInfo, WindowInfo};
 use std::{
-    collections::BTreeMap,
     sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -50,7 +49,9 @@ type Task = Box<dyn FnOnce(&mut State) + Send>;
 pub struct MacosDriver {
     worker: mpsc::SyncSender<Task>,
     indexing: Arc<AtomicBool>,
-    caps: Capabilities,
+    pub(crate) caps: Capabilities,
+    pub(crate) guarded_caps: [Capabilities; 4],
+    pub(crate) guard_runtime: Option<crate::input::watchdog::GuardRuntime>,
     listed: AtomicBool,
     injected: Mutex<Option<InjectedTree>>,
     capture: Mutex<Option<Arc<dyn CaptureSource>>>,
@@ -58,7 +59,7 @@ pub struct MacosDriver {
     /// still exists.
     toggles: Mutex<Vec<Box<dyn ax::ErasedToggle>>>,
     events: EventHub,
-    input: Mutex<Option<Arc<dyn crate::input::EventApi>>>,
+    pub(crate) input: Mutex<Option<Arc<dyn crate::input::EventApi>>>,
     pub(crate) ledger: Arc<crate::input::InputLedger>,
     pub(crate) text: Mutex<Option<crate::text_input::TextBackends>>,
     snapshot: tokio::sync::Mutex<()>,
@@ -114,7 +115,9 @@ impl MacosDriver {
         Ok(Self {
             worker: tx,
             indexing,
-            caps: discovery_capabilities(),
+            caps: crate::guards::discovery_capabilities(),
+            guarded_caps: std::array::from_fn(|_| crate::guards::discovery_capabilities()),
+            guard_runtime: None,
             listed: AtomicBool::new(false),
             injected: Mutex::new(None),
             capture: Mutex::new(None),
@@ -138,12 +141,34 @@ impl MacosDriver {
     /// stays portable and never calls Accessibility.
     #[cfg(target_os = "macos")]
     pub async fn new() -> Result<Self> {
+        Self::with_stop_latch(
+            Arc::new(crate::input::hotkey::SharedStopLatch::new(true)),
+            crate::input::hotkey::HotkeyConfig::default(),
+            3000,
+        )
+        .await
+    }
+
+    /// Attach the trusted Host's persistent Stop latch before enabling input.
+    /// New engines must stay stopped until that Host restores their state.
+    #[cfg(target_os = "macos")]
+    pub async fn with_stop_latch(
+        latch: Arc<dyn crate::input::hotkey::StopLatch>,
+        config: crate::input::hotkey::HotkeyConfig,
+        idle_ms: u64,
+    ) -> Result<Self> {
         let mut driver = Self::with_api(Arc::new(crate::RealMacApi::new())).await?;
         driver.live_ax.store(true, Ordering::Release);
         driver.ax = Some(Arc::new(crate::real::AxThread::spawn()?));
         driver.inject_capture(Arc::new(capture::SckCapture::new()));
-        driver.inject_events(Arc::new(crate::input::RealEvents::new()));
-        let clock = Arc::new(crate::input::timing::RuntimeClock);
+        let events = Arc::new(crate::input::RealEvents::with_stop_latch(
+            latch, config, idle_ms,
+        ));
+        let clock = crate::input::EventApi::guards(events.as_ref())
+            .ok_or(DriverError::CapabilityUnavailable)?
+            .clock
+            .clone();
+        driver.inject_events(events);
         if let Some(thread) = &driver.ax {
             driver.inject_text(
                 Arc::new(crate::real::RealText::new(
@@ -155,22 +180,6 @@ impl MacosDriver {
             );
         }
         Ok(driver)
-    }
-
-    /// Install the event backend and refresh the capability table from its probe.
-    ///
-    /// Tests on every platform pass [`crate::input::FakeEvents`]. The macOS
-    /// constructor installs [`crate::input::RealEvents`]. Without a backend,
-    /// pointer and keyboard actions stay [`DriverError::CapabilityUnavailable`].
-    pub fn inject_events(&mut self, api: Arc<dyn crate::input::EventApi>) {
-        crate::input::apply_probe(&mut self.caps, &api.probe());
-        if let Ok(mut slot) = self.input.lock() {
-            *slot = Some(api);
-        }
-    }
-
-    pub(crate) fn event_api(&self) -> Option<Arc<dyn crate::input::EventApi>> {
-        self.input.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Use an in-memory screenshot backend after the window gate.
@@ -265,33 +274,6 @@ impl MacosDriver {
     }
 }
 
-fn discovery_capabilities() -> Capabilities {
-    Capabilities {
-        platform: Platform::Macos,
-        version: "macOS 14+; AX tree (P1-03); screenshot (P1-04); semantic actions (P1-05); targeted events (P1-06)".into(),
-        observe: ObserveCapabilities {
-            tree: true,
-            screenshot: true,
-            events: true,
-        },
-        delivery: DeliveryCapabilities {
-            accessibility: true,
-            targeted_pointer: false,
-            targeted_keys: false,
-            foreground: ForegroundCapability::Unavailable,
-        },
-        background_operation: BackgroundOperation::Partial,
-        user_activity_guard: false,
-        overlay_excluded_from_capture: false,
-        private_apis: BTreeMap::new(),
-        limits: CapabilityLimits {
-            max_tree_nodes: ax::MAX_NODES_CEILING as u32,
-            max_image_edge: 2560,
-            type_text_max: 0,
-        },
-    }
-}
-
 /// Private element binding. Action targets still use the window; tree handles
 /// carry [`crate::ax::AxHandle`] separately.
 #[derive(Clone, Debug)]
@@ -307,7 +289,7 @@ impl Driver for MacosDriver {
     }
 
     fn capabilities(&self) -> &Capabilities {
-        &self.caps
+        self.guard_capabilities()
     }
 
     async fn doctor(&self) -> DoctorReport {
@@ -323,10 +305,18 @@ impl Driver for MacosDriver {
         issues.push(
             "Focus queries are unavailable. Semantic accessibility actions do not activate the target app. Tree reads need Accessibility. Screenshots need Screen Recording. Background clicks need a passing field-51 probe and are unavailable for Chromium-class windows. Foreground input runs only when the route allows it.".into(),
         );
+        if let Some(guards) = self.input_guards() {
+            issues.push(format!(
+                "stop_hotkey: {}; user_activity_guard: {}; stopped: {}",
+                guards.stop_available(),
+                guards.ms_since_physical_input().is_some(),
+                guards.is_stopped()
+            ));
+        }
         issues.push(TRUST_NOTE.into());
         issues.push(crate::text_input::CLIPBOARD_NOTE.into());
         DoctorReport {
-            capabilities: self.caps.clone(),
+            capabilities: self.capabilities().clone(),
             ready,
             issues,
         }
@@ -469,43 +459,26 @@ impl Driver for MacosDriver {
     }
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        if let Some(guards) = self.input_guards() {
+            guards.check(false)?;
+        }
         if matches!(req, DriverAction::TypeText { .. }) {
             return self
                 .perform_text(req, crate::input::text::TextOptions::default(), cancel)
                 .await;
         }
         if ax::is_semantic(req) {
-            return self.perform_semantic(req, cancel).await;
+            let work = self.perform_semantic(req, cancel);
+            if let Some(guards) = self.input_guards() {
+                return tokio::select! {
+                    biased;
+                    _ = guards.stopped() => Err(DriverError::Cancelled { maybe_executed: true }),
+                    result = work => result,
+                };
+            }
+            return work.await;
         }
-        let Some(api) = self.event_api() else {
-            let req = req.clone();
-            return self
-                .call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
-                    let (win, _) = action_window(&req)?;
-                    state.validate_window(win)?;
-                    Err(DriverError::CapabilityUnavailable)
-                })
-                .await;
-        };
-        if matches!(req, DriverAction::Activate { .. }) {
-            let req = req.clone();
-            return self
-                .call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
-                    let (win, _) = action_window(&req)?;
-                    state.validate_window(win)?;
-                    Err(DriverError::CapabilityUnavailable)
-                })
-                .await;
-        }
-        let started = Instant::now();
-        let win = action_window(req)?.0.clone();
-        let target = self
-            .call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
-                state.prepare_input(&win)
-            })
-            .await?;
-        let left = DRIVER_DEADLINE.saturating_sub(started.elapsed());
-        crate::input::deliver(api, Arc::clone(&self.ledger), &target, req, cancel, left).await
+        self.perform_events(req, cancel).await
     }
 
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
@@ -523,11 +496,16 @@ impl Driver for MacosDriver {
     async fn release_all_input(&self) {
         self.restore_toggles();
         if let Some(api) = self.event_api() {
-            let _ = tokio::time::timeout(
-                Duration::from_millis(100),
-                crate::input::release_held(api.as_ref(), &self.ledger),
-            )
-            .await;
+            let clock = api
+                .guards()
+                .map(|g| g.clock.clone())
+                .unwrap_or_else(crate::input::clock::runtime_clock);
+            let deadline = clock.now() + Duration::from_millis(100);
+            tokio::select! {
+                biased;
+                _ = crate::input::release_held(api.as_ref(), &self.ledger) => {},
+                _ = clock.wait_until(deadline) => {},
+            }
         }
     }
 }
@@ -555,29 +533,5 @@ impl MacosDriver {
             return ax::perform(&*injected.source, req, cancel, DRIVER_DEADLINE).await;
         }
         self.perform_live_action(req, cancel).await
-    }
-}
-
-fn action_window(action: &DriverAction) -> Result<(&WindowRef, bool)> {
-    match action {
-        DriverAction::PointerClick { win, route, .. }
-        | DriverAction::PointerScroll { win, route, .. }
-        | DriverAction::PointerDrag { win, route, .. } => {
-            Ok((win, *route == PointerRoute::AllowForeground))
-        }
-        DriverAction::TypeText { win, route, .. } | DriverAction::PressKeys { win, route, .. } => {
-            Ok((win, *route == KeyRoute::AllowForeground))
-        }
-        DriverAction::Activate { win } => Ok((win, true)),
-        DriverAction::Press { el }
-        | DriverAction::SecondaryAction { el, .. }
-        | DriverAction::SetValue { el, .. }
-        | DriverAction::SelectText { el, .. }
-        | DriverAction::ScrollElement { el, .. } => {
-            let element = el
-                .downcast_ref::<MacElement>()
-                .ok_or(DriverError::StaleElement)?;
-            Ok((&element.window, false))
-        }
     }
 }

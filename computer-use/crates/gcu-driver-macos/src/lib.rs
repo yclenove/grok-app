@@ -27,6 +27,7 @@ mod driver;
 #[cfg(target_os = "macos")]
 mod ffi;
 pub mod gate;
+mod guards;
 pub mod identity;
 pub mod input;
 #[cfg(target_os = "macos")]
