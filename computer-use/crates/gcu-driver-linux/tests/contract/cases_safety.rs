@@ -26,10 +26,39 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use x11rb::connection::Connection;
 use x11rb::wrapper::ConnectionExt;
 
+fn collect_modal_diagnostic_nodes(node: &RawNode) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(n: &RawNode, out: &mut Vec<String>) {
+        let name = n.name.as_deref().unwrap_or("");
+        let ident = n.identifier.as_deref().unwrap_or("");
+        let lower_name = name.to_ascii_lowercase();
+        let lower_id = ident.to_ascii_lowercase();
+        if lower_name.contains("modal")
+            || lower_name.contains("dialog")
+            || name.contains("弹窗")
+            || name.contains("对话框")
+            || lower_id.contains("modal")
+            || n.states.contains(States::MODAL)
+            || n.role == Role::Dialog
+        {
+            out.push(format!(
+                "Node(role={:?}, native_role={}, name={:?}, id={:?}, states={:?})",
+                n.role, n.native_role, n.name, n.identifier, n.states
+            ));
+        }
+        for child in &n.children {
+            walk(child, out);
+        }
+    }
+    walk(node, &mut out);
+    out
+}
+
 pub async fn test_c14_modal_lifecycle(
     driver: &LinuxDriver,
     win_ref: &WindowRef,
 ) -> Result<ContractOutcome, String> {
+    let t0 = tokio::time::Instant::now();
     let cancel = Cancel::default();
     let opts = TreeOpts {
         timeout: Duration::from_secs(5),
@@ -61,7 +90,9 @@ pub async fn test_c14_modal_lifecycle(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let t_press_open = t0.elapsed();
 
+    // 1. Confirm modal opened in fixture state before querying AT-SPI tree
     poll_oracle(Duration::from_secs(5), |v| {
         if v.get("modal_open")?.as_bool() == Some(true) {
             Some(())
@@ -69,22 +100,72 @@ pub async fn test_c14_modal_lifecycle(
             None
         }
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        format!("C14 modal_open oracle confirmation failed: {e}; t_press={t_press_open:?}")
+    })?;
+    let t_oracle_open = t0.elapsed();
 
-    let tree_modal = driver
-        .snapshot_tree(win_ref, &opts, &cancel)
-        .await
-        .map_err(|e| e.to_string())?;
-    let root_modal = tree_modal.root.as_ref().ok_or("root modal missing")?;
-    let confirm_btn = find_raw_node(root_modal, &|n| {
-        n.role == Role::Button
-            && (n.identifier.as_deref() == Some("modal_confirm_button")
-                || n.name.as_deref().is_some_and(|s| {
-                    s.contains("modal_confirm_button") || s.contains("OK") || s.contains("确定")
-                }))
-    })
-    .ok_or("modal confirm button missing")?;
+    // 2. Poll snapshot_tree until AT-SPI tree exposes modal_confirm_button (handling async AT-SPI update)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut last_tree = None;
+    let mut confirm_btn = None;
 
+    while tokio::time::Instant::now() < deadline {
+        let tree_modal = driver
+            .snapshot_tree(win_ref, &opts, &cancel)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(ref root_modal) = tree_modal.root {
+            if let Some(btn) = find_raw_node(root_modal, &|n| {
+                n.role == Role::Button
+                    && (n.identifier.as_deref() == Some("modal_confirm_button")
+                        || n.name.as_deref().is_some_and(|s| {
+                            s.contains("modal_confirm_button")
+                                || s.contains("OK")
+                                || s.contains("确定")
+                        }))
+            }) {
+                confirm_btn = Some(btn.clone());
+                last_tree = Some(tree_modal);
+                break;
+            }
+        }
+        last_tree = Some(tree_modal);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let confirm_btn = match confirm_btn {
+        Some(btn) => btn,
+        None => {
+            let fixture_state_dump = read_fixture_state()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "<no state read>".into());
+            let modal_nodes = last_tree
+                .as_ref()
+                .and_then(|t| t.root.as_ref())
+                .map(collect_modal_diagnostic_nodes)
+                .unwrap_or_default();
+            let top_level = last_tree
+                .as_ref()
+                .and_then(|t| t.root.as_ref())
+                .map(|r| {
+                    r.children
+                        .iter()
+                        .map(|c| {
+                            format!("{:?}:{:?}", c.role, c.name.as_deref().unwrap_or("<none>"))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "modal confirm button missing after AT-SPI tree settle timeout; t_press={t_press_open:?}, t_oracle={t_oracle_open:?}; fixture_state={fixture_state_dump}; modal_related_nodes={modal_nodes:?}; root_children={top_level:?}"
+            ));
+        }
+    };
+    let t_found_modal = t0.elapsed();
+
+    // 3. Press modal confirm button and verify modal closed
     driver
         .perform(
             &DriverAction::Press {
@@ -94,6 +175,7 @@ pub async fn test_c14_modal_lifecycle(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let t_press_confirm = t0.elapsed();
 
     let closed = poll_oracle(Duration::from_secs(5), |v| {
         let is_open = v.get("modal_open")?.as_bool()?;
@@ -105,7 +187,12 @@ pub async fn test_c14_modal_lifecycle(
             None
         }
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        format!(
+            "C14 modal closure verification failed: {e}; t_found_modal={t_found_modal:?}, t_press_confirm={t_press_confirm:?}"
+        )
+    })?;
     assert!(closed);
     Ok(ContractOutcome::Passed)
 }

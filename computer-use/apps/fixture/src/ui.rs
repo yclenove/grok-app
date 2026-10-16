@@ -64,6 +64,8 @@ pub struct FixtureApp {
     pub password_input: String,
     /// Transient drag position for the drag-and-drop test box.
     pub drag_pos: Option<egui::Pos2>,
+    /// Last modal open sequence number persisted to disk after rendering.
+    pub last_persisted_modal_open_count: u64,
 }
 
 impl Default for FixtureApp {
@@ -72,6 +74,7 @@ impl Default for FixtureApp {
             state: FixtureState::default(),
             password_input: String::new(),
             drag_pos: None,
+            last_persisted_modal_open_count: 0,
         };
         // Persist initial state if GCU_FIXTURE_STATE is set.
         let _ = app.state.maybe_persist();
@@ -312,7 +315,6 @@ impl FixtureApp {
                 if modal_btn.clicked() {
                     let source = detect_event_source(ui);
                     self.state.open_modal(source);
-                    let _ = self.state.maybe_persist();
                 }
             });
         });
@@ -537,12 +539,16 @@ impl FixtureApp {
             return;
         }
 
+        ctx.request_repaint();
+
+        let mut rendered = false;
         egui::Window::new("Confirm Dialog / 确认对话框")
             .id(egui::Id::new("modal_dialog"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                rendered = true;
                 ui.label("Please confirm or cancel the action:");
                 ui.label("请确认或取消当前操作：");
                 ui.separator();
@@ -576,6 +582,11 @@ impl FixtureApp {
                     }
                 });
             });
+
+        if rendered && self.last_persisted_modal_open_count < self.state.modal_open_count {
+            self.last_persisted_modal_open_count = self.state.modal_open_count;
+            let _ = self.state.maybe_persist();
+        }
     }
 }
 
