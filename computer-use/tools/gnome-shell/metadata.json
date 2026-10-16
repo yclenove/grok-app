@@ -1,0 +1,8 @@
+{
+  "uuid": "computer-use-windows@grok.app",
+  "name": "Computer Use Window Inventory",
+  "description": "Read-only window inventory with explicitly authorized activation",
+  "shell-version": ["46", "47", "48", "49"],
+  "settings-schema": "org.grok.computer-use.windows",
+  "version": 1
+}

@@ -1,0 +1,11 @@
+{
+  "KPlugin": {
+    "Id": "gcu-window-inventory",
+    "Name": "Computer Use Window Inventory",
+    "Description": "Read-only window reports to an explicitly configured engine",
+    "Version": "1"
+  },
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js",
+  "KPackageStructure": "KWin/Script"
+}
