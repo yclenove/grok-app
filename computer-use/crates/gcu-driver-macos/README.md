@@ -1,4 +1,4 @@
-# macOS discovery and AX tree (P1-02, P1-03)
+# macOS discovery, accessibility and input (P1-02–P1-07)
 
 This crate lists running and recently used apps, resolves an exact name, localized
 name, bundle id, or path, and builds the signing identity used for later grants.
@@ -45,7 +45,8 @@ at 1 because the buffer is already physical pixels.
 `snapshot_tree` reads the accessibility tree. It needs Accessibility and does
 not need Screen Recording. A missing permission is
 `DriverError::PermissionMissing { permission: "accessibility" }`. Pointer,
-keyboard, and focus queries return `CapabilityUnavailable`. Semantic actions
+and keyboard input use the event backend. Standalone focused-element queries
+return `CapabilityUnavailable`; text input independently checks fresh AX focus. Semantic actions
 (`Press`, `SecondaryAction`, `SetValue`, `SelectText`, `ScrollElement`) use
 the accessibility tree and do not activate the target app. `AXRaise` and
 `AXFocus` are not used as a click. `ScrollElement` uses `AXScroll*ByPage`
@@ -53,7 +54,8 @@ only. `capture` and `window_geometry` are implemented.
 `capabilities().observe.tree` and `screenshot` are true.
 `delivery.accessibility` is true. `background_operation` is `Partial`: an
 occluded window can be screenshotted, the tree can be read, and semantic
-actions do not need the foreground. Pointer and keyboard delivery cannot.
+actions do not need the foreground. Native AppKit targeted input follows the
+runtime field-51 probe; Chromium-class event input requires foreground permission.
 `max_image_edge` is 2560; this driver does not scale. Event subscription is a
 settle skeleton (`observe.events` is true). Calls have a five-second deadline.
 A screenshot waits at most `DRIVER_DEADLINE` (4.75s). A tree walk also stops
@@ -166,3 +168,86 @@ It does not compile integration tests. The macOS GitHub runner compiles the
 live ScreenCaptureKit code, the live accessibility actions, the live
 CoreGraphics input path, and the ignored tests. The runner does not execute
 those ignored tests (`not_run`).
+
+## Text and clipboard (P1-07)
+
+`Driver::perform(TypeText)` checks the exact window's enabled editable AX focus,
+including any supplied element identity. Non-editable focus returns
+`ElementNotActionable`; click an editable input field first. A plain settable field gets a complete
+`AXValue` append; rich/unknown text controls use CG Unicode down/up pairs. Native
+plain detection is conservative: ordinary non-Chromium text/search fields, or
+controls explicitly reporting `AXIsRichText=false`. Unknown text areas retain
+Unicode delivery to preserve formatting. All chunks fit 20 UTF-16 units and keep
+ZWJ emoji, combining marks and CRLF intact. An individual grapheme above that
+limit is rejected before posting. Uncertain writes/posts are never replayed.
+Terminal-like ancestors are refused, independently of the router's policy gate.
+
+Clipboard is off by default. The trusted host may call `perform_text` with an
+explicit `TextOptions` assessment (non-sensitive text and low-risk target), an
+`AllowForeground` route, and more than 2000 Unicode scalars. Unknown semantics,
+password fields, sensitive payloads, high-risk targets and newline payloads
+cannot take this route. Permission is per action, not a driver-wide toggle.
+An existing frontmost window and editable focus are required; clipboard input
+does not activate a different app. The protocol and `DriverAction` are unchanged.
+
+A process-global lock covers save/write/validate/paste/consumption/restore across
+all driver instances and sessions. Complete items and formats are preserved;
+unreadable/promise formats or snapshots above 16 MiB fail before writing. Both
+changeCount and content, plus fresh foreground field/window identity, are checked
+before the chord and again immediately before V-down. The adapter waits for a
+changed AXValue containing the payload before restoring; missing consumption
+proof times out as unknown. Restoration compares the exact owned count AND full
+content. Foreign changes, even to identical text, are preserved. The blocking
+worker retains the lock and conditional restore guard after waiter cancellation
+or timeout; queued AX jobs whose receiver has gone away do not start.
+
+**Clipboard history and synchronization can retain text. These checks cannot
+eliminate a malicious process replacing the clipboard at the last instant.**
+The driver reports this limit in doctor output. Clipboard data is never observed
+or logged. Timing uses an injected monotonic `InputClock` in Tokio's timer domain;
+portable timeout tests use virtual time and synchronization, not wall-clock sleeps.
+
+```sh
+rcargo test --locked -p gcu-driver-macos --test text --test clipboard
+rcargo clippy --locked -p gcu-driver-macos --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+rcargo clippy --locked -p gcu-driver-macos --all-targets --target aarch64-apple-darwin -- -D warnings
+```
+
+Native tests are macOS-only and ignored: **not_run on Linux**. They require an
+unelevated GUI session with Accessibility/Screen Recording already granted.
+Build the oracle example on the Mac, using the approved helper/responsible
+process identity from ADR 0006. Its `main` initializes AppKit before entering
+Tokio (the Rust test harness's worker thread cannot initialize NSApplication).
+The clipboard oracle uses an isolated named NSPasteboard and never the user's
+general clipboard. For text oracles, open a new disposable scratch document
+whose title contains `gcu-text-fixture` in TextEdit or VS Code, click its ordinary
+editing area, and use no accounts, existing user files, terminal/REPL/task/debug
+panels. TextEdit may remain behind another app; Electron permits foreground.
+The tests assert the Unicode payload in a fresh AX tree. Close scratch documents
+without saving after the test.
+
+```sh
+cargo build --locked -p gcu-driver-macos --example text_smoke
+export GCU_TEXT_SMOKE_BIN="$PWD/target/debug/examples/text_smoke"
+cargo test --locked -p gcu-driver-macos --test clipboard live_named -- --ignored --test-threads=1
+cargo test --locked -p gcu-driver-macos --test text live_textedit -- --ignored --test-threads=1
+cargo test --locked -p gcu-driver-macos --test text live_electron -- --ignored --test-threads=1
+```
+
+The native clipboard oracle checks multi-format preservation, changeCount
+advancement and refusal to restore after another owner replaces the payload.
+It does not assert native Cmd+V consumption; the portable transaction tests
+cover that handshake. Actual desktop delivery still requires the Mac runner.
+
+For the separate native Cmd+V consumption oracle, use a disposable GUI test
+session with TextEdit's blank **rich-text** scratch document frontmost and its
+editor focused. Its general clipboard must contain only the fixture sentinel;
+the oracle refuses any other snapshot, then verifies long Unicode text in the
+AX value and sentinel restoration. This ignored test is also **not_run** here.
+Do not seed or run it in a desktop containing real user clipboard data.
+
+```sh
+printf gcu-clipboard-fixture | pbcopy
+export GCU_PASTE_FIXTURE=1
+cargo test --locked -p gcu-driver-macos --test clipboard live_general -- --ignored --test-threads=1
+```

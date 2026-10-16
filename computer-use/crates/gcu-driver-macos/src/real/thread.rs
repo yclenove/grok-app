@@ -61,9 +61,25 @@ impl AxThread {
         mutation: bool,
         job: impl FnOnce(&mut World) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        self.call_with_liveness(timeout, mutation, move |world, _| job(world))
+            .await
+    }
+
+    /// Run a job that can recheck waiter liveness immediately before mutation.
+    /// Dropping/timing out the future closes the receiver. Already-entered AX
+    /// writes remain uncertain; queued or still-preparing writes can stop.
+    pub(crate) async fn call_with_liveness<T: Send + 'static>(
+        &self,
+        timeout: Duration,
+        mutation: bool,
+        job: impl FnOnce(&mut World, &dyn Fn() -> bool) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.enqueue(mutation, move |world| {
-            let _ = tx.send(catch_job(mutation, job, world));
+            if !tx.is_closed() {
+                let result = catch_job(mutation, |world| job(world, &|| !tx.is_closed()), world);
+                let _ = tx.send(result);
+            }
         })?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(value)) => value,

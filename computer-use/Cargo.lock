@@ -1926,6 +1926,7 @@ dependencies = [
  "smol_str 0.3.6",
  "tokio",
  "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]

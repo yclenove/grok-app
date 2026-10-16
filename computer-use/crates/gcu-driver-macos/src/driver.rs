@@ -59,7 +59,8 @@ pub struct MacosDriver {
     toggles: Mutex<Vec<Box<dyn ax::ErasedToggle>>>,
     events: EventHub,
     input: Mutex<Option<Arc<dyn crate::input::EventApi>>>,
-    ledger: Arc<crate::input::InputLedger>,
+    pub(crate) ledger: Arc<crate::input::InputLedger>,
+    pub(crate) text: Mutex<Option<crate::text_input::TextBackends>>,
     snapshot: tokio::sync::Mutex<()>,
     /// True only after the macOS constructor. Portable drivers never set it.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -121,6 +122,7 @@ impl MacosDriver {
             events: EventHub::new(),
             input: Mutex::new(None),
             ledger: Arc::new(crate::input::InputLedger::new()),
+            text: Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(()),
             live_ax: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
@@ -141,6 +143,17 @@ impl MacosDriver {
         driver.ax = Some(Arc::new(crate::real::AxThread::spawn()?));
         driver.inject_capture(Arc::new(capture::SckCapture::new()));
         driver.inject_events(Arc::new(crate::input::RealEvents::new()));
+        let clock = Arc::new(crate::input::timing::RuntimeClock);
+        if let Some(thread) = &driver.ax {
+            driver.inject_text(
+                Arc::new(crate::real::RealText::new(
+                    Arc::clone(thread),
+                    clock.clone(),
+                )),
+                Arc::new(crate::input::NativePasteboard::general()),
+                clock,
+            );
+        }
         Ok(driver)
     }
 
@@ -156,7 +169,7 @@ impl MacosDriver {
         }
     }
 
-    fn event_api(&self) -> Option<Arc<dyn crate::input::EventApi>> {
+    pub(crate) fn event_api(&self) -> Option<Arc<dyn crate::input::EventApi>> {
         self.input.lock().ok().and_then(|slot| slot.clone())
     }
 
@@ -208,7 +221,7 @@ impl MacosDriver {
         slot.clear();
     }
 
-    async fn call<T: Send + 'static>(
+    pub(crate) async fn call<T: Send + 'static>(
         &self,
         timeout: Duration,
         cancel: Option<&Cancel>,
@@ -311,6 +324,7 @@ impl Driver for MacosDriver {
             "Focus queries are unavailable. Semantic accessibility actions do not activate the target app. Tree reads need Accessibility. Screenshots need Screen Recording. Background clicks need a passing field-51 probe and are unavailable for Chromium-class windows. Foreground input runs only when the route allows it.".into(),
         );
         issues.push(TRUST_NOTE.into());
+        issues.push(crate::text_input::CLIPBOARD_NOTE.into());
         DoctorReport {
             capabilities: self.caps.clone(),
             ready,
@@ -455,6 +469,11 @@ impl Driver for MacosDriver {
     }
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        if matches!(req, DriverAction::TypeText { .. }) {
+            return self
+                .perform_text(req, crate::input::text::TextOptions::default(), cancel)
+                .await;
+        }
         if ax::is_semantic(req) {
             return self.perform_semantic(req, cancel).await;
         }

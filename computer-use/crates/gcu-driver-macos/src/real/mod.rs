@@ -11,11 +11,13 @@ mod ax;
 mod parse;
 mod reader;
 mod spotlight;
+mod text;
 mod thread;
 mod windows;
 mod world;
 
 pub(crate) use reader::{AxToggleStore, RealAxSource};
+pub(crate) use text::RealText;
 pub(crate) use thread::AxThread;
 
 use crate::api::{AxWindow, BundleFacts, CgWindow, MacApi, RunningApp, SpotlightHit};

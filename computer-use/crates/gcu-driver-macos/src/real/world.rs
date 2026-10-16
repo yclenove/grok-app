@@ -47,6 +47,18 @@ impl World {
         id
     }
 
+    /// Consume +1, reusing the id of an equal AX object already in this walk.
+    pub(super) fn intern(&mut self, element: AXUIElementRef) -> u64 {
+        for (id, existing) in &self.elements {
+            // SAFETY: both are live AX objects owned by this world/caller.
+            if unsafe { core_foundation::base::CFEqual(*existing as _, element as _) } != 0 {
+                release(element as _);
+                return *id;
+            }
+        }
+        self.insert(element)
+    }
+
     /// Release snapshot elements. Application elements stay.
     pub(super) fn reset_snapshot(&mut self) {
         for element in self.elements.drain() {

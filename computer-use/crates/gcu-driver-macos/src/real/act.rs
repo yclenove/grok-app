@@ -207,7 +207,7 @@ fn set_attribute(element: AXUIElementRef, attribute: &str, value: CFTypeRef) -> 
     classify_mutation(status)
 }
 
-fn copy_attribute(element: AXUIElementRef, name: &str) -> Result<Option<CFTypeRef>> {
+pub(super) fn copy_attribute(element: AXUIElementRef, name: &str) -> Result<Option<CFTypeRef>> {
     let mut result: CFTypeRef = std::ptr::null();
     let cf = CFString::new(name);
     // SAFETY: element is live. On success `result` is +1 and the caller releases it.
@@ -225,7 +225,7 @@ fn copy_attribute(element: AXUIElementRef, name: &str) -> Result<Option<CFTypeRe
     Err(read_error(status))
 }
 
-fn copy_frame(element: AXUIElementRef) -> Result<Option<Rect>> {
+pub(super) fn copy_frame(element: AXUIElementRef) -> Result<Option<Rect>> {
     let origin = take_pair(
         copy_attribute(element, kAXPositionAttribute)?,
         kAXValueTypeCGPoint,
@@ -311,7 +311,7 @@ fn focus_substitute(name: &str) -> bool {
     matches!(name, "AXRaise" | "AXFocus" | "AXFocused")
 }
 
-fn string_of(ptr: CFTypeRef) -> Option<String> {
+pub(super) fn string_of(ptr: CFTypeRef) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
@@ -324,7 +324,7 @@ fn string_of(ptr: CFTypeRef) -> Option<String> {
     Some(unsafe { CFString::wrap_under_get_rule(ptr as _) }.to_string())
 }
 
-fn is_element(ptr: CFTypeRef) -> bool {
+pub(super) fn is_element(ptr: CFTypeRef) -> bool {
     // SAFETY: both type-id calls are pure queries.
     !ptr.is_null() && unsafe { CFGetTypeID(ptr) } == unsafe { AXUIElementGetTypeID() }
 }
