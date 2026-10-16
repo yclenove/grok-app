@@ -15,6 +15,32 @@ use gcu_driver_windows::{
 use gcu_protocol::{capabilities::ForegroundCapability, result::Outcome, ErrorCode};
 use std::{sync::Arc, time::Duration};
 
+#[test]
+fn interrupted_contract_report_preserves_completed_rows_and_marks_remaining_not_run() {
+    use super::harness::{Outcome, Report};
+    let mut report = Report::default();
+    report.record("C01", Ok(Outcome::Passed));
+    report.record(
+        "C02",
+        Ok(Outcome::Skip("launch capability unavailable".into())),
+    );
+    report.record("C03", Err("oracle mismatch".into()));
+    let saved = report.pending_snapshot();
+    assert_eq!(
+        (saved.passed, saved.skipped, saved.failed, saved.not_run),
+        (1, 1, 1, 26)
+    );
+    assert_eq!(saved.rows.len(), 29);
+    for (_, outcome) in saved.rows.iter().skip(3) {
+        assert!(matches!(outcome, Outcome::NotRun(reason) if reason.contains("did not finish")));
+    }
+    assert_eq!(
+        report.rows.len(),
+        3,
+        "snapshot never mutates live accounting"
+    );
+}
+
 async fn uia_fixture(name: &str) -> (Arc<FakeUia>, WindowsDriver, WindowRef) {
     let (api, _, _, win) = common::fixture().await;
     let uia = Arc::new(FakeUia::new(FakeNode {

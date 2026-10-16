@@ -221,14 +221,29 @@ pub async fn text(driver: &WindowsDriver, win: &WindowRef, text: &str) -> Result
 #[ignore = "not_run: disposable interactive unelevated Windows desktop required; CI runs --ignored"]
 async fn live_contract_table_c01_to_c27() {
     let mut report = Report::default();
+    report.pending_snapshot().save();
+    println!(
+        "CONTRACT BEGIN: {} cases; setup fixture JSON, worker and UIA",
+        CASES.len()
+    );
+    for (id, description) in CASES {
+        println!("CONTRACT PLANNED: {id}: {description}");
+    }
     let setup = attempt(async {
         require(
             std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
             "explicit GCU_DESKTOP=1 required",
         )?;
+        println!("CONTRACT SETUP: fixture start; waiting for external state JSON");
         let fixture = Fixture::start().await?;
+        println!(
+            "CONTRACT SETUP: fixture pid={}; worker start",
+            fixture.pid()
+        );
         let driver = driver().await?;
+        println!("CONTRACT SETUP: window discovery");
         let win = window(&driver, &fixture).await?;
+        println!("CONTRACT SETUP: waiting for UIA counter_button");
         node(&driver, &win, "counter_button").await?;
         Ok::<_, String>((fixture, driver, win))
     })

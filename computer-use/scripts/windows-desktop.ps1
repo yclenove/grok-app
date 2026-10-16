@@ -1,4 +1,14 @@
 # Shared by the disposable desktop launcher and its portable self-tests.
+function Write-DesktopProgress {
+    param([string]$Message, [uint32]$ChildPid = 0)
+    Write-Host $Message
+    [Console]::Out.Flush()
+    if ($env:GCU_DESKTOP_STAGE_STATE) {
+        @{message=$Message;supervisor_pid=$PID;child_pid=$ChildPid} | ConvertTo-Json -Compress |
+            Set-Content -Encoding UTF8 $env:GCU_DESKTOP_STAGE_STATE
+    }
+}
+
 function Wait-Oracle {
     param([string]$Label, [scriptblock]$Read, [scriptblock]$Accept,
         [int]$TimeoutMs = 20000,

@@ -35,7 +35,7 @@ pub const CASES: &[(&str, &str)] = &[
     ("W-HOTKEY", "native hotkey conflict disables foreground"),
 ];
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", content = "reason", rename_all = "snake_case")]
 pub enum Outcome {
     Passed,
@@ -83,15 +83,42 @@ impl Report {
         }
         println!("[{id}] {outcome:?}");
         self.rows.push((id, outcome));
+        self.pending_snapshot().save();
+    }
+    // A killed suite retains completed rows and marks unreached rows honestly.
+    pub fn pending_snapshot(&self) -> Self {
+        let mut snapshot = Self {
+            passed: self.passed,
+            skipped: self.skipped,
+            not_run: self.not_run,
+            failed: self.failed,
+            rows: self.rows.clone(),
+        };
+        for (id, _) in CASES {
+            if !self.rows.iter().any(|(done, _)| done == id) {
+                snapshot.not_run += 1;
+                snapshot.rows.push((
+                    id,
+                    Outcome::NotRun("case did not finish; suite may have been interrupted".into()),
+                ));
+            }
+        }
+        snapshot
+    }
+    pub fn save(&self) {
+        if let Some(path) = std::env::var_os("GCU_CONTRACT_REPORT") {
+            let path = std::path::PathBuf::from(path);
+            let temporary = path.with_extension("pending");
+            std::fs::write(&temporary, serde_json::to_vec_pretty(self).unwrap()).unwrap();
+            std::fs::rename(temporary, path).unwrap();
+        }
     }
     pub fn finish(&self) {
         println!(
             "SUMMARY: {} passed, {} skipped, {} not_run, {} failed",
             self.passed, self.skipped, self.not_run, self.failed
         );
-        if let Some(path) = std::env::var_os("GCU_CONTRACT_REPORT") {
-            std::fs::write(path, serde_json::to_vec_pretty(self).unwrap()).unwrap();
-        }
+        self.save();
     }
 }
 

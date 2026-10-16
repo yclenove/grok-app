@@ -2,19 +2,24 @@
 function Wait-DesktopChild {
     param($Child, [string]$Label, [int]$TimeoutMs = 30000,
         [scriptblock]$Now = { [double][Diagnostics.Stopwatch]::GetTimestamp() * 1000 / [Diagnostics.Stopwatch]::Frequency },
-        [scriptblock]$Tick = { Start-Sleep -Milliseconds 50 })
+        [scriptblock]$Tick = { Start-Sleep -Milliseconds 50 },
+        [scriptblock]$Observe = { param($s) })
     return Wait-Oracle $Label {
         $exited = $Child.HasExited
-        @{pid=$Child.ProcessId;exited=$exited;exit_code=$(if ($exited) { $Child.ExitCode } else { $null });
+        $state = @{pid=$Child.ProcessId;exited=$exited;exit_code=$(if ($exited) { $Child.ExitCode } else { $null });
             exit_hex=$(if ($exited) { '0x{0:X8}' -f [uint32]$Child.ExitCode } else { 'pending' })}
+        $null = & $Observe $state
+        $state
     } { param($s) $s.exited } -TimeoutMs $TimeoutMs -Now $Now -Tick $Tick
 }
 
 function Get-DesktopLaunchVariants {
-    # Run the sole unrepaired control even when the fix works immediately. Its
-    # successful launch cannot select an unrepaired token for the real suite.
-    @{Name='AsUser/token-default-control/inherited-ACL/new-console';Method='AsUser';RepairDesktop=$false;
-        NewConsole=$true;UseShowWindow=$true;RepairTokenDefaults=$false;LowerIntegrity=$true;DuplicatePrimary=$false;DiagnosticOnly=$true}
+    param([switch]$DiagnoseTokens)
+    # The confirmed DLL-init failure is optional and can never select a token.
+    if ($DiagnoseTokens) {
+        @{Name='AsUser/token-default-control/inherited-ACL/new-console';Method='AsUser';RepairDesktop=$false;
+            NewConsole=$true;UseShowWindow=$true;RepairTokenDefaults=$false;LowerIntegrity=$true;DuplicatePrimary=$false;DiagnosticOnly=$true}
+    }
     foreach ($repair in @($false,$true)) {
         foreach ($console in @($true,$false)) {
             foreach ($method in @('AsUser','WithToken')) {
@@ -36,12 +41,19 @@ function Get-DesktopLaunchVariants {
 }
 
 function Invoke-DesktopLaunchLadder {
-    param([scriptblock]$Probe, [scriptblock]$Log = { param($line) Write-Host $line })
+    param([scriptblock]$Probe, [scriptblock]$Log = { param($line) Write-DesktopProgress $line },
+        [switch]$DiagnoseTokens, [int]$TimeoutMs = 300000, [int]$StageTimeoutMs = 55000,
+        [scriptblock]$Now = { [double][Diagnostics.Stopwatch]::GetTimestamp() * 1000 / [Diagnostics.Stopwatch]::Frequency })
     $attempts = [Collections.Generic.List[object]]::new()
-    foreach ($variant in Get-DesktopLaunchVariants) {
+    $start = & $Now
+    foreach ($variant in Get-DesktopLaunchVariants -DiagnoseTokens:$DiagnoseTokens) {
         $ready = $true
         foreach ($stage in @('cmd-exit','cmd-whoami','powershell')) {
-            try { $result = & $Probe $variant $stage }
+            $remaining = [int]($TimeoutMs - ((& $Now) - $start))
+            if ($remaining -le 0) { throw "restricted launch ladder timeout; last attempts=$($attempts.ToArray() | ConvertTo-Json -Compress -Depth 8)" }
+            $budget = [Math]::Min($StageTimeoutMs, $remaining)
+            $null = & $Log "DESKTOP BEGIN: variant=$($variant.Name); stage=$stage; timeout_ms=$budget"
+            try { $result = & $Probe $variant $stage $budget }
             catch { $result = @{ok=$false;error=$_.Exception.Message} }
             $entry = @{variant=$variant.Name;stage=$stage;result=$result}
             $attempts.Add($entry)
@@ -63,7 +75,8 @@ function Copy-DesktopPayload {
     $bin = New-Item -ItemType Directory (Join-Path $Workspace 'bin')
     $out = New-Item -ItemType Directory (Join-Path $Workspace 'out')
     foreach ($name in @('smoke-windows.ps1','windows-desktop.ps1','windows-desktop-launch.ps1',
-        'windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs')) {
+        'windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs',
+        'windows-desktop-process.cs','windows-desktop-watch.ps1','windows-desktop-stage.ps1')) {
         Copy-Item (Join-Path $PSScriptRoot $name) (Join-Path $Workspace $name)
     }
     $adversary = Join-Path (Split-Path $WorkerExe -Parent) 'gcu-contract-worker.exe'
@@ -99,8 +112,10 @@ function Invoke-RestrictedDesktopProbe {
     $result = @{ok=$false;win32_error=0;exit_hex='not_created';token=$Context.TokenSummary;stage=$Stage;variant=$Variant.Name;
         options=$Variant;diagnostic_only=$Variant.DiagnosticOnly}
     try {
+        Write-DesktopProgress "PROBE configuring token: $($Variant.Name)/$Stage"
         $Context.Configure($Variant.RepairTokenDefaults, $Variant.LowerIntegrity, $Variant.DuplicatePrimary)
         $result.token = $Context.TokenSummary
+        Write-DesktopProgress "PROBE token: $($result.token)"
         if ($Stage -eq 'powershell') {
             # Encode only trusted harness paths. Files opened by the child prove
             # Medium write access as well as successful CLR/user32 initialization.
@@ -108,6 +123,7 @@ function Invoke-RestrictedDesktopProbe {
             $access = & $quote (Join-Path $Workspace 'windows-desktop-access.cs')
             $token = & $quote (Join-Path $Workspace 'windows-desktop-token.cs')
             $defaults = & $quote (Join-Path $Workspace 'windows-desktop-defaults.cs')
+            $process = & $quote (Join-Path $Workspace 'windows-desktop-process.cs')
             $helper = & $quote (Join-Path $Workspace 'windows-desktop.ps1')
             $lower = if ($Variant.LowerIntegrity) { '$true' } else { '$false' }
             $log = & $quote $logFile
@@ -118,7 +134,7 @@ function Invoke-RestrictedDesktopProbe {
 try {
     [IO.File]::WriteAllText($entered, 'PowerShell script entered')
     Start-Transcript -Path $log -Force | Out-Null
-    Add-Type -Path @($token,$access,$defaults)
+    Add-Type -Path @($token,$access,$defaults,$process)
     . $helper
     `$facts = Get-DesktopTokenFacts
     whoami.exe /all | Out-Host
@@ -133,15 +149,18 @@ try {
 }
 "@
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($program))
+            Write-DesktopProgress 'PROBE CreateProcess: powershell (NoProfile/NonInteractive)'
             $child = $Context.Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe",
                 [string[]]@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded), $Variant.Method, $Variant.RepairDesktop, $Variant.NewConsole, $Variant.UseShowWindow)
         } else {
-            $command = if ($Stage -eq 'cmd-exit') { 'exit /b 0' } else {
+            $command = if ($Stage -eq 'cmd-exit') { 'exit /b 0 > "' + $logFile + '" 2>&1' } else {
                 '"' + $env:SystemRoot + '\System32\whoami.exe" /all > "' + $logFile + '" 2>&1'
             }
+            Write-DesktopProgress "PROBE CreateProcess: $Stage"
             $child = $Context.StartCmd($command, $Variant.Method, $Variant.RepairDesktop, $Variant.NewConsole, $Variant.UseShowWindow)
         }
-        $state = Wait-DesktopChild $child "$($Variant.Name)/$Stage"
+        Write-DesktopProgress "PROBE created: pid=$($child.ProcessId); waiting for process handle (no pipe EOF wait)" -ChildPid $child.ProcessId
+        $state = Wait-DesktopChild $child "$($Variant.Name)/$Stage" -TimeoutMs 40000
         $result.exit_code = $state.exit_code
         $result.exit_hex = $state.exit_hex
         $result.last = $state

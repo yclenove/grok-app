@@ -166,6 +166,7 @@ namespace Gcu
         public static void CheckLayout()
         {
             CheckAccessLayout();
+            CheckJobLayout();
             // Fail before calling Win32 if Add-Type marshalling differs from the ABI.
             if (Marshal.SizeOf(typeof(StartupInfo)) != (IntPtr.Size == 8 ? 104 : 68) ||
                 Marshal.SizeOf(typeof(SidAndAttributes)) != (IntPtr.Size == 8 ? 16 : 8) ||
@@ -191,6 +192,11 @@ namespace Gcu
             bool repairDefaults, lowerIntegrity, duplicatePrimary, disposed;
             public string TokenSummary { get; private set; }
             public string DesktopSecurity { get { return DescribeDesktopSecurity(); } }
+            // The parent owns ACL restoration even if a supervised stage hangs.
+            public void EnsureDesktopAccess()
+            {
+                if (desktopAcl == null) desktopAcl = DesktopAclScope.Grant(token);
+            }
             public RestrictedDesktop(int expectedSession, string directory)
             {
                 workspace = directory;
@@ -287,13 +293,13 @@ namespace Gcu
             Child StartCommand(string executable, string command, string method, bool repairDesktop, bool newConsole, bool useShowWindow)
             {
                 if (token == IntPtr.Zero) throw new ObjectDisposedException("RestrictedDesktop");
-                if (repairDesktop && desktopAcl == null) desktopAcl = DesktopAclScope.Grant(token);
+                if (repairDesktop) EnsureDesktopAccess();
                 StartupInfo startup = new StartupInfo {
                     cb = (uint)Marshal.SizeOf(typeof(StartupInfo)), lpDesktop = @"WinSta0\Default",
                     dwFlags = useShowWindow ? 1u : 0u, wShowWindow = 0 // STARTF_USESHOWWINDOW / SW_HIDE contrast
                 };
                 ProcessInfo info;
-                uint flags = (newConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW) | CREATE_UNICODE_ENVIRONMENT;
+                uint flags = (newConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW) | CREATE_UNICODE_ENVIRONMENT | 4; // CREATE_SUSPENDED
                 // No STARTF_USESTDHANDLES and no inherited handles: logs/done.json
                 // are opened by the child inside its Medium workspace instead.
                 bool created;
@@ -305,8 +311,7 @@ namespace Gcu
                         flags, environment, workspace, ref startup, out info);
                 else throw new ArgumentException("unknown launch method: " + method);
                 if (!created) throw Failure(method + " create", Marshal.GetLastWin32Error());
-                CloseHandle(info.hThread);
-                return new Child(info.hProcess, info.dwProcessId);
+                return ContainAndResume(info);
             }
             public void Dispose()
             {
@@ -328,6 +333,8 @@ namespace Gcu
         public sealed class Child : IDisposable
         {
             readonly SafeWaitHandle handle;
+            IntPtr job;
+            internal void OwnJob(IntPtr owned) { job = owned; }
             public uint ProcessId { get; private set; }
             internal Child(IntPtr process, uint id) { handle = new SafeWaitHandle(process, true); ProcessId = id; }
             [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(SafeWaitHandle process, uint ms);
@@ -346,12 +353,19 @@ namespace Gcu
             public uint ExitCode { get { uint code; Check(GetExitCodeProcess(handle, out code), "child exit code"); return code; } }
             public void Stop()
             {
+                // Closing the parent's sole job handle kills the whole stage,
+                // including any child stuck in initialization, UIA or a dialog.
+                if (job != IntPtr.Zero) { CloseHandle(job); job = IntPtr.Zero; }
                 if (HasExited || TerminateProcess(handle, 1)) return;
                 int error = Marshal.GetLastWin32Error();
                 // Exit may race the zero-time wait; an already dead child needs no kill.
                 if (!HasExited) throw Failure("terminate desktop child", error);
             }
-            public void Dispose() { handle.Dispose(); }
+            public void Dispose()
+            {
+                if (job != IntPtr.Zero) { CloseHandle(job); job = IntPtr.Zero; }
+                handle.Dispose();
+            }
         }
     }
 }

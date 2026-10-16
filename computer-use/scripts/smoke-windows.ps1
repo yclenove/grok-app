@@ -7,27 +7,39 @@ param(
     [string]$OutputDir = (Join-Path $env:TEMP 'gcu-win'),
     [ValidateSet('All','Contract','Smoke')][string]$Suite = 'All',
     [switch]$DesktopChild,
+    [switch]$DiagnoseTokens,
     [int]$ElevatedPid = 0,
     [int]$ExpectedSessionId = 0
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($DesktopChild) {
+    # Start before Add-Type/path validation, so initialization errors reach CI.
+    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    Start-Transcript -Path (Join-Path $OutputDir 'desktop.log') -Force | Out-Null
+    Write-Host "DESKTOP CHILD BOOT: Suite=$Suite; pid=$PID; output=$OutputDir"
+    [Console]::Out.Flush()
+}
 
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
-Add-Type -Path (@('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs') |
+. (Join-Path $PSScriptRoot 'windows-desktop-watch.ps1')
+Add-Type -Path (@('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs') |
     ForEach-Object { Join-Path $PSScriptRoot $_ })
 
 function Invoke-NativeCase {
     param([string]$Name)
     # libtest exits successfully when a filter matches zero tests. Fail closed
     # on a wrong/cached artifact instead of reporting an unexecuted case passed.
+    Write-DesktopProgress "NATIVE CASE BEGIN: $Name; listing ignored test"
     $listing = @(& $TestExe --list --ignored --exact $Name)
     if ($LASTEXITCODE -ne 0 -or "$($Name): test" -notin $listing) { throw "native test missing: $Name; listing=$listing" }
     # Force native stdout through PowerShell so the hidden child's transcript
     # contains the per-case diagnostics forwarded to the parent.
+    Write-DesktopProgress "NATIVE CASE RUN: $Name; --ignored --nocapture --test-threads=1"
     & $TestExe --exact $Name --ignored --nocapture --test-threads=1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$Name failed: exit $LASTEXITCODE" }
+    Write-DesktopProgress "NATIVE CASE END: $Name; exit=0"
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
@@ -45,8 +57,7 @@ Write-Output "Desktop token: $diagnostic"
 # Only this disposable CI harness lowers its token; the engine gate is unchanged.
 if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
     $high = $null
-    $child = $null
-    $context = $null
+    $acl = @{context=$null}
     $workspace = $null
     $payload = $null
     foreach ($name in @('desktop-exit.json','desktop.log','contract.json','smoke.json','launch.json')) {
@@ -61,12 +72,21 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
         $workspace = [Gcu.DesktopLauncher]::PrepareWorkspace()
         $payload = Copy-DesktopPayload $workspace $TestExe $WorkerExe $FixtureExe
         Write-Output "Medium workspace: $workspace; source payload staged; inheritable user DACL + Medium label"
-        $context = [Gcu.DesktopLauncher]::Open($ExpectedSessionId, $workspace)
-        Write-Output "Restricted token details: $($context.TokenSummary)"
+        # Upload this exact Medium-writable directory even if the step times out.
+        # Keep it until artifact upload; payload/temp files are removed in finally.
+        if ($env:GITHUB_ENV) {
+            "GCU_DESKTOP_REPORT_DIR=$($payload.OutputDir)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        }
+        Write-DesktopProgress "DESKTOP REPORT DIRECTORY: $($payload.OutputDir)"
         $probeResults = [Collections.Generic.List[object]]::new()
-        $variant = Invoke-DesktopLaunchLadder -Probe {
-            param($variant,$stage)
-            $result = Invoke-RestrictedDesktopProbe $context $variant $stage $workspace $payload.OutputDir $ExpectedSessionId
+        $variant = Invoke-DesktopLaunchLadder -DiagnoseTokens:$DiagnoseTokens -Probe {
+            param($variant,$stage,$budget)
+            if ($variant.RepairDesktop -and $null -eq $acl.context) {
+                $acl.context = [Gcu.DesktopLauncher]::Open($ExpectedSessionId, $workspace)
+                $acl.context.EnsureDesktopAccess()
+            }
+            $request = @{Variant=$variant;Stage=$stage;Workspace=$workspace;OutputDir=$payload.OutputDir;ExpectedSessionId=$ExpectedSessionId}
+            $result = Invoke-SupervisedDesktopStage $request $workspace $payload.OutputDir $budget
             $probeResults.Add($result)
             $probeResults.ToArray() | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 (Join-Path $payload.OutputDir 'launch.json')
             return $result
@@ -82,56 +102,46 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
             $null = Wait-Oracle 'elevated fixture window' { $high.Refresh(); @{ exited=$high.HasExited; hwnd=$high.MainWindowHandle.ToInt64() } } { param($s) -not $s.exited -and $s.hwnd -ne 0 }
             $ElevatedPid = $high.Id
         }
-        $arguments = [string[]]@('-NoProfile','-ExecutionPolicy','Bypass','-File',$payload.Script,'-DesktopChild',
-            '-TestExe',$payload.TestExe,'-WorkerExe',$payload.WorkerExe,'-FixtureExe',$payload.FixtureExe,
-            '-OutputDir',$payload.OutputDir,'-Suite',$Suite,'-ElevatedPid',"$ElevatedPid",'-ExpectedSessionId',"$ExpectedSessionId")
-        $done = Join-Path $payload.OutputDir 'desktop-exit.json'
-        # Selection retries only the harmless probes. Never retry the suite,
-        # even if its process exits before done.json (side effects may exist).
-        if ($variant.DiagnosticOnly -or -not $variant.LowerIntegrity -or -not $variant.RepairTokenDefaults) {
-            throw 'diagnostic token profile cannot launch the real suite'
-        }
-        $child = $context.Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", $arguments, $variant.Method, $variant.RepairDesktop, $variant.NewConsole, $variant.UseShowWindow)
-        $last = Wait-DesktopChild $child "restricted interactive suite; parent $diagnostic" -TimeoutMs 900000
-        $last.done = Test-Path $done
-        if (Test-Path (Join-Path $payload.OutputDir 'desktop.log')) { Get-Content (Join-Path $payload.OutputDir 'desktop.log') }
-        if (-not $last.done) { throw "child exited without done.json; exit=$($child.ExitCode) ($($last.exit_hex)); Win32=0 (create succeeded); last oracle=$($last | ConvertTo-Json -Compress)" }
-        $result = Get-Content -Raw $done | ConvertFrom-Json
-        if ([int]$result.exit_code -ne $child.ExitCode) { throw "child exit mismatch: process=$($child.ExitCode); done=$($result.exit_code)" }
-        Write-Output "Child token: $(Format-DesktopTokenFacts $result.token_facts)"
-        exit ([int]$result.exit_code)
+        # The selected profile is used exactly once; any timeout/failure is final.
+        $request = @{Variant=$variant;Stage='suite';Workspace=$workspace;OutputDir=$payload.OutputDir;
+            ExpectedSessionId=$ExpectedSessionId;TestExe=$payload.TestExe;WorkerExe=$payload.WorkerExe;
+            FixtureExe=$payload.FixtureExe;Suite=$Suite;ElevatedPid=$ElevatedPid}
+        Write-DesktopProgress "DESKTOP SUITE BEGIN: $Suite; timeout_ms=720000; no retry"
+        $result = Invoke-SupervisedDesktopStage $request $workspace $payload.OutputDir 720000
+        if (-not $result.ok) { throw "suite failed; last=$($result | ConvertTo-Json -Compress -Depth 10)" }
+        exit 0
     } catch {
         $reason = "restricted desktop launch failed: $($_.Exception.Message); parent $diagnostic"
         Write-Output $reason
         $reports = if ($null -ne $payload) { $payload.OutputDir } else { $OutputDir }
         if (Test-Path (Join-Path $reports 'desktop.log')) { Get-Content (Join-Path $reports 'desktop.log') -ErrorAction Continue }
-        if (-not (Test-Path (Join-Path $reports 'contract.json'))) { Write-DesktopNotRun $OutputDir $Suite $reason }
+        if (-not (Test-Path (Join-Path $reports 'contract.json'))) { Write-DesktopNotRun $reports $Suite $reason }
         if (-not (Test-Path (Join-Path $reports 'smoke.json'))) {
             @('Notepad','Explorer','Settings') | ForEach-Object { @{app=$_;outcome='not_run';reason=$reason} } |
-                ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'smoke.json')
+                ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $reports 'smoke.json')
             Write-Output "SMOKE SUMMARY: 0 passed, 0 skipped, 3 not_run, 0 failed; $reason"
         }
         exit 1
     } finally {
         try {
-            try {
-                if ($null -ne $child) {
-                    try { $child.Stop(); $null = Wait-DesktopChild $child 'suite termination' -TimeoutMs 10000 }
-                    finally { $child.Dispose() }
-                }
-            } finally {
-                if ($null -ne $high) {
-                    if (-not $high.HasExited) { Stop-Process -Id $high.Id -Force }
-                    $null = Wait-Oracle 'elevated fixture termination' { $high.Refresh(); $high.HasExited } { param($s) $s } -TimeoutMs 10000
-                    $high.Dispose()
-                }
+            if ($null -ne $high) {
+                if (-not $high.HasExited) { Stop-Process -Id $high.Id -Force }
+                $null = Wait-Oracle 'elevated fixture termination' { $high.Refresh(); $high.HasExited } { param($s) $s } -TimeoutMs 5000
+                $high.Dispose()
             }
         } finally {
             try {
                 if ($null -ne $payload) { Copy-DesktopReports $payload.OutputDir $OutputDir }
             } finally {
-                try { if ($null -ne $context) { $context.Dispose(); Write-Output 'Restricted launch resources released; desktop ACLs restored (if granted)' } }
-                finally { if ($null -ne $workspace) { Remove-Item -Recurse -Force $workspace } }
+                try { if ($null -ne $acl.context) { $acl.context.Dispose(); Write-DesktopProgress 'Desktop ACLs restored' } }
+                finally {
+                    if ($null -ne $workspace) {
+                        # Preserve out/ for the always() upload, including on a
+                        # step deadline. Never remove the live artifact directory.
+                        Get-ChildItem -LiteralPath $workspace -Force | Where-Object { $_.Name -ne 'out' } |
+                            Remove-Item -Recurse -Force -ErrorAction Continue
+                    }
+                }
             }
         }
     }
@@ -146,14 +156,19 @@ $smokeRows = [Collections.Generic.List[object]]::new()
 foreach ($app in @('Notepad','Explorer','Settings')) {
     $smokeRows.Add(@{app=$app;outcome='not_run';reason='scenario not reached'})
 }
+function Save-SmokeRows {
+    $smokeRows | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $OutputDir 'smoke.json')
+}
+Save-SmokeRows
 $activeSmoke = $null
-Start-Transcript -Path (Join-Path $OutputDir 'desktop.log') -Force | Out-Null
+if (-not $DesktopChild) { Start-Transcript -Path (Join-Path $OutputDir 'desktop.log') -Force | Out-Null }
 try {
     # Re-read in the child. Neither the API flags nor a parent's claim prove that
     # the effective child token is Medium, non-admin, and on the intended desktop.
     $facts = Get-DesktopTokenFacts
     $diagnostic = Format-DesktopTokenFacts $facts
     Write-Output "Verified desktop token: $diagnostic; ExpectedSessionId=$ExpectedSessionId"
+    Write-DesktopProgress "DESKTOP CHILD ENTERED: Suite=$Suite; output=$OutputDir"
     whoami.exe /all | Out-Host
     if (-not (Test-DesktopTokenFacts $facts $ExpectedSessionId)) {
         $reason = "unelevated interactive desktop unavailable; $diagnostic; ExpectedSessionId=$ExpectedSessionId"
@@ -168,6 +183,7 @@ try {
     $env:GCU_ELEVATED_PID = "$ElevatedPid"
     $env:GCU_CONTRACT_REPORT = Join-Path $OutputDir 'contract.json'
     if ($Suite -ne 'Smoke') {
+        Write-DesktopProgress 'CONTRACT SUITE START: C01-C27, W-UIPI, W-HOTKEY; external fixture oracle; Skip reasons printed per row'
         Invoke-NativeCase 'live::live_contract_table_c01_to_c27'
         $report = Get-Content -Raw $env:GCU_CONTRACT_REPORT | ConvertFrom-Json
         if ($report.passed + $report.skipped -ne 29 -or $report.not_run -ne 0 -or $report.failed -ne 0) { throw 'incomplete native contract report' }
@@ -177,6 +193,7 @@ try {
         Add-Type -AssemblyName UIAutomationTypes
         New-Item -ItemType Directory -Path $temp | Out-Null
         $activeSmoke = $smokeRows[0]
+        Write-DesktopProgress 'SMOKE BEGIN: Notepad write/save; external file oracle'
         $file = Join-Path $temp 'note.txt'
         [IO.File]::WriteAllText($file,'',[Text.UTF8Encoding]::new($false))
         $notepad = Start-Process notepad.exe -ArgumentList ('"'+$file+'"') -PassThru
@@ -189,7 +206,9 @@ try {
         $null = Wait-Oracle 'Notepad saved exact Unicode bytes' { [IO.File]::ReadAllText($file) } { param($v) $v -ceq $unicodeExpected }
         $activeSmoke.outcome = 'passed'
         $activeSmoke.reason = 'saved file content'
+        Save-SmokeRows
         $activeSmoke = $smokeRows[1]
+        Write-DesktopProgress 'SMOKE BEGIN: Explorer navigation; external Shell.Application oracle'
 
         $source = New-Item -ItemType Directory -Path (Join-Path $temp 'a')
         $dest = New-Item -ItemType Directory -Path (Join-Path $temp 'b')
@@ -209,7 +228,9 @@ try {
         $null = Wait-Oracle 'Explorer exact destination' { $explorer.Document.Folder.Self.Path } { param($p) $p -eq $dest.FullName }
         $activeSmoke.outcome = 'passed'
         $activeSmoke.reason = 'Shell.Application folder path'
+        Save-SmokeRows
         $activeSmoke = $smokeRows[2]
+        Write-DesktopProgress 'SMOKE BEGIN: Settings search; independent UIA oracle'
 
         $previousSettings = @(Get-Process SystemSettings -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
         Start-Process 'ms-settings:' | Out-Null
@@ -246,6 +267,7 @@ try {
         } { param($s) $s.query -and $s.results.Count -gt 0 }
         $activeSmoke.outcome = 'passed'
         $activeSmoke.reason = 'independent UIA query and results'
+        Save-SmokeRows
         $activeSmoke = $null
     }
     $exitCode = 0

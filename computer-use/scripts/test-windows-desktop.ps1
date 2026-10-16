@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'windows-desktop.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
+. (Join-Path $PSScriptRoot 'windows-desktop-watch.ps1')
 
 function Assert-True([bool]$Value, [string]$Label) {
     if (-not $Value) { throw "assertion failed: $Label" }
@@ -13,7 +14,7 @@ foreach ($script in Get-ChildItem $PSScriptRoot -Filter '*windows*.ps1') {
     $null = [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "PowerShell syntax: $($script.Name): $errors"
 }
-$sources = @('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs') |
+$sources = @('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs') |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     # Linux Roslyn must also accept the language used by Windows PowerShell 5.1.
@@ -129,11 +130,11 @@ $probe = {
 $messages = [Collections.Generic.List[string]]::new()
 $chosen = Invoke-DesktopLaunchLadder -Probe $probe -Log { param($line) $messages.Add($line) }
 Assert-True ($chosen.Method -eq 'WithToken' -and $chosen.RepairTokenDefaults -and -not $chosen.DiagnosticOnly) 'fallback after DLL-init failure always repairs owner/default DACL'
-Assert-True ($trace.Count -eq 27) 'one unmodified control and all eight repaired variants run every stage'
+Assert-True ($trace.Count -eq 24) 'default ladder omits the known failing control'
 Assert-True (($messages -join ' ').Contains('3221225794') -and ($messages -join ' ').Contains('last token/oracle')) 'failures preserve exit and last oracle'
 $trace.Clear()
 $chosen = Invoke-DesktopLaunchLadder -Probe { param($variant,$stage) $trace.Add($stage); @{ok=$true} } -Log { param($line) }
-Assert-True ($chosen.Method -eq 'AsUser' -and $chosen.RepairTokenDefaults -and $chosen.LowerIntegrity -and $trace.Count -eq 6) 'successful control is not selected; stop after first repaired Medium variant'
+Assert-True ($chosen.Method -eq 'AsUser' -and $chosen.RepairTokenDefaults -and $chosen.LowerIntegrity -and $trace.Count -eq 3) 'stop after first repaired Medium variant'
 $trace.Clear()
 $chosen = Invoke-DesktopLaunchLadder -Probe {
     param($variant,$stage)
@@ -141,7 +142,7 @@ $chosen = Invoke-DesktopLaunchLadder -Probe {
     @{ok=$variant.DuplicatePrimary}
 } -Log { param($line) }
 Assert-True ($chosen.DuplicatePrimary -and $chosen.LowerIntegrity -and $chosen.RepairTokenDefaults) 'duplicate-primary fallback remains Medium with repaired defaults'
-$variants = @(Get-DesktopLaunchVariants)
+$variants = @(Get-DesktopLaunchVariants -DiagnoseTokens)
 Assert-True ($variants.Count -eq 13) 'bounded diagnostic ladder'
 Assert-True (@($variants | Where-Object { -not $_.RepairTokenDefaults }).Count -eq 1) 'exactly one unrepaired control'
 Assert-True (@($variants | Where-Object { -not $_.LowerIntegrity -and -not $_.DiagnosticOnly }).Count -eq 0) 'retained High integrity is diagnostic only'
@@ -153,10 +154,27 @@ try {
         $trace.Add($variant.Name)
         if ($variant.DiagnosticOnly) { return @{ok=$true} }
         throw "injected $stage Win32=5"
-    } -Log { param($line) }
+    } -Log { param($line) } -DiagnoseTokens
 } catch { $failure = $_.Exception.Message }
 Assert-True ($failure.Contains('all restricted launch variants failed') -and $failure.Contains('Win32=5') -and $failure.Contains('powershell')) 'all-failed not_run retains every stage error'
 Assert-True ($trace.Count -eq 39 -and ($trace -join ' ').Contains('high-diagnostic')) 'all failures include duplicate, show-window and retained High diagnostics'
+
+# Deadlines include process creation and blocked native calls in the supervisor.
+# No real subprocess or wall-clock delay is needed to exercise either limit.
+$clock = @{ms=0}
+$budgets = [Collections.Generic.List[int]]::new()
+$failure = ''
+try {
+    $null = Invoke-DesktopLaunchLadder -Now { $clock.ms } -TimeoutMs 100 -StageTimeoutMs 60 -Probe {
+        param($variant,$stage,$budget)
+        $budgets.Add($budget)
+        $clock.ms += $budget
+        @{ok=$false;error='injected stuck launch'}
+    } -Log { param($line) }
+} catch { $failure = $_.Exception.Message }
+Assert-True ($budgets.Count -eq 2 -and $budgets[0] -eq 60 -and $budgets[1] -eq 40) 'remaining ladder budget caps each stage'
+Assert-True ($clock.ms -eq 100 -and $failure.Contains('ladder timeout')) 'entire ladder stops at its deadline'
+Assert-True (($messages -join ' ').Contains('DESKTOP BEGIN:')) 'stage start is logged before invoking a possibly stuck native call'
 
 # Native handles are replaced by an oracle here; no cold-start timing dependency.
 $clock.ms = 0
@@ -173,7 +191,7 @@ Assert-True ($state.exit_hex -eq '0xC0000142' -and $state.exit_code -eq 32212257
 $dir = Join-Path ([IO.Path]::GetTempPath()) ("wp '" + [Guid]::NewGuid().ToString('N').Substring(0,6))
 try {
     New-Item -ItemType Directory $dir | Out-Null
-    $variant = $variants[1]
+$variant = $variants[1]
     $mock = [pscustomobject]@{TokenSummary='SID=fixture; Integrity=Medium; SeChangeNotifyPrivilege=enabled';DesktopSecurity='D:fixture';
         OutputDir=$dir;Prefix=$variant.Name.Replace('/','-');Facts=$facts;EmitFacts=$false;FailCreate=$false;Configured=$false}
     $mock | Add-Member ScriptMethod Configure {
@@ -220,5 +238,41 @@ try {
     Copy-DesktopReports $source.FullName $destination.FullName
     $published = Get-Content -Raw (Join-Path $destination.FullName 'launch.json') | ConvertFrom-Json
     Assert-True ($published.exit_code -eq 3221225794) 'probe artifacts return to the parent output directory'
+} finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+
+# A stuck native stage is killed/disposed, logs arrive before exit, and a zero
+# process exit without a result file cannot make an unexecuted stage pass.
+$dir = Join-Path ([IO.Path]::GetTempPath()) ('ww' + [Guid]::NewGuid().ToString('N').Substring(0,6))
+try {
+    New-Item -ItemType Directory $dir | Out-Null
+    $clock.ms = 0
+    $fake = [pscustomobject]@{ProcessId=42;HasExited=$false;ExitCode=[uint32]259;Stopped=0;Disposed=0}
+    $fake | Add-Member ScriptMethod Stop { $this.Stopped++; $this.HasExited = $true }
+    $fake | Add-Member ScriptMethod Dispose { $this.Disposed++ }
+    $request = @{Variant=@{Name='fake'};Stage='cmd-exit'}
+    'native stdout and stderr before exit' | Set-Content -Encoding UTF8 (Join-Path $dir 'fake-cmd-exit.log')
+    $events = [Collections.Generic.List[string]]::new()
+    $stateFile = Join-Path $dir 'fake-cmd-exit-state.json'
+    '{"child_pid":0,"message":"blocked CreateProcess"}' | Set-Content -Encoding UTF8 $stateFile
+    $failure = ''
+    try {
+        $null = Wait-DesktopStage $fake 'fake-cmd-exit' $dir $stateFile 20 -Now { $clock.ms } -Tick { $clock.ms += 10 } -Log { param($line) $events.Add($line) }
+    } catch { $failure = $_.Exception.Message }
+    Assert-True ($failure.Contains('blocked CreateProcess') -and $failure.Contains('pending')) 'deadline retains the external stage checkpoint and live process state'
+    Assert-True (@($events | Where-Object { $_.Contains('DESKTOP STREAM') }).Count -eq 1) 'stdout/stderr file is forwarded immediately without duplication on each poll'
+    Assert-True (($events -join ' ').Contains('DESKTOP TIMEOUT/FAILURE')) 'timeout details are printed before tree termination'
+    $clock.ms = 0
+    $result = Invoke-SupervisedDesktopStage $request $dir $dir 20 -Start { param($arguments,$directory) $fake } -Now { $clock.ms } -Tick { $clock.ms += 10 }
+    Assert-True (-not $result.ok -and $fake.Stopped -eq 1 -and $fake.Disposed -eq 1) 'timeout closes the complete owned job tree exactly once'
+    Assert-True ($result.last.Contains('blocked CreateProcess')) 'watchdog result retains checkpoint on timeout'
+    $result = Invoke-SupervisedDesktopStage $request $dir $dir 20 -Start { param($arguments,$directory) $fake } -Now { $clock.ms } -Tick { throw 'must not sleep' }
+    Assert-True (-not $result.ok -and $result.error.Contains('without result')) 'exit without result is rejected'
+    '{"ok":true,"exit_code":0}' | Set-Content -Encoding UTF8 (Join-Path $dir 'fake-cmd-exit-supervisor-result.json')
+    $fake.ExitCode = 0
+    $result = Invoke-SupervisedDesktopStage $request $dir $dir 20 -Start { param($arguments,$directory) $fake } -Now { $clock.ms } -Tick { throw 'must not sleep' }
+    Assert-True $result.ok 'completed supervisor forwards its external result'
+    $fake.ExitCode = 1
+    $result = Invoke-SupervisedDesktopStage $request $dir $dir 20 -Start { param($arguments,$directory) $fake } -Now { $clock.ms } -Tick { throw 'must not sleep' }
+    Assert-True (-not $result.ok -and $result.error.Contains('exit mismatch')) 'successful result cannot override failed supervisor exit'
 } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 Write-Output 'WINDOWS_DESKTOP_SELFTEST_OK (policy/ABI only; native token launch is checked by smoke-windows.ps1)'
