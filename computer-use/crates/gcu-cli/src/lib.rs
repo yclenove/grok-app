@@ -13,6 +13,7 @@ mod config;
 mod doctor;
 mod engine;
 pub mod exit;
+pub mod helper;
 mod host;
 pub mod install;
 mod install_cmd;
@@ -34,6 +35,14 @@ pub fn cli_main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "turn-ended") {
         turn_ended::entry(args.into_iter().skip(1).collect());
+    }
+    // AppKit must exist on the main thread before Tokio. `open --args agent`
+    // puts `agent` in argv. A `--scene agent` false positive only initializes
+    // AppKit; it does not grant TCC.
+    #[cfg(target_os = "macos")]
+    if args.iter().any(|arg| arg == "agent") && !gcu_driver_macos::input::ensure_agent_appkit() {
+        eprintln!("Cannot start the helper application");
+        std::process::exit(10);
     }
     use clap::Parser;
     std::panic::set_hook(Box::new(|_| {

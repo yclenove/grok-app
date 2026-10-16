@@ -45,7 +45,7 @@ pub use ledger::InputLedger;
 pub use skylight::{classify as classify_skylight, status as skylight_status};
 
 #[cfg(target_os = "macos")]
-pub use cg::{ensure_appkit, RealEvents};
+pub use cg::{ensure_agent_appkit, ensure_appkit, RealEvents};
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
