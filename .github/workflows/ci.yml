@@ -4,7 +4,16 @@ name: ci
 on:
   push:
     branches: [main, master]
+    paths-ignore:
+      # Computer Use v2 has its own workflow (computer-use.yml); skip this one when only those files change.
+      - 'computer-use/**'
+      - 'docs/plans/computer-use-v2/**'
+      - '.github/workflows/computer-use.yml'
   pull_request:
+    paths-ignore:
+      - 'computer-use/**'
+      - 'docs/plans/computer-use-v2/**'
+      - '.github/workflows/computer-use.yml'
 
 concurrency:
   group: ci-${{ github.ref }}
