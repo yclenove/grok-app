@@ -29,6 +29,7 @@ pub fn build_doctor_report(
     // 2. Desktop session and compositor
     issues.push(format!("session_type: {}", env.session_type.as_str()));
     issues.push(format!("compositor: {}", env.compositor.as_str()));
+    issues.push(caps.overlay.reason.clone());
 
     if env.compositor == Compositor::Unknown {
         issues.push(format!(

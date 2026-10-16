@@ -48,6 +48,9 @@ exceptions = [
 
 # proptest is dev-only, with std and no fork/timeout subprocess features.
 # Its MIT/Apache-2.0 dependencies use the existing license allowlist.
+# gcu-overlay dynamically loads distribution-owned Cairo/Pango/GLib on X11.
+# Their LGPL/MPL system shared libraries are not statically linked or bundled;
+# see crates/gcu-overlay/README.md for SONAMEs, licensing and failure behavior.
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"

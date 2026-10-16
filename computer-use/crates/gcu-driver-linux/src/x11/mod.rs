@@ -6,10 +6,12 @@
 pub mod activity;
 pub mod capture;
 pub mod fake;
+pub mod fake_overlay;
 pub mod hotkey;
 pub mod input;
 pub mod keys;
 pub mod ledger;
+pub mod overlay;
 pub mod real;
 pub mod server;
 pub mod watchdog;

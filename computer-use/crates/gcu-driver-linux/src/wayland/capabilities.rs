@@ -70,6 +70,8 @@ pub struct CapabilityItem {
 /// Complete capability matrix across observation, delivery, safety, and guard subsystems.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentCapabilities {
+    /// Standalone overlay eligibility, including physical-input/Stop limitations.
+    pub overlay: CapabilityItem,
     /// Target environment for which these capabilities apply.
     pub target: TargetEnvironment,
     /// Compositor family.
@@ -156,6 +158,25 @@ pub fn build_environment_capabilities(
     guard_available: bool,
     stop_latched: bool,
 ) -> EnvironmentCapabilities {
+    let overlay = if env.session_type.is_wayland() {
+        CapabilityItem {
+            status: CapabilityStatus::Unavailable,
+            reason: "overlay_unavailable_wayland: physical input provenance and independent Stop cannot be verified; includes XWayland in a Wayland session".into(),
+            next_step: None,
+        }
+    } else if env.session_type == super::LinuxSessionType::PureX11 {
+        CapabilityItem {
+            status: CapabilityStatus::Partial,
+            reason: "overlay_x11: requires native Host, ARGB compositor and physical XI2 device; hidden during capture (root fallback refused while Host attached)".into(),
+            next_step: None,
+        }
+    } else {
+        CapabilityItem {
+            status: CapabilityStatus::Unavailable,
+            reason: "overlay_unavailable_headless: no verifiable desktop display session".into(),
+            next_step: None,
+        }
+    };
     let tree_observation = CapabilityItem {
         status: CapabilityStatus::Available,
         reason: "AT-SPI2 accessibility tree observation via D-Bus".into(),
@@ -353,6 +374,20 @@ pub fn build_environment_capabilities(
     private_apis.insert("x11_composite".into(), to_status(composite_available));
     private_apis.insert("xtest".into(), to_status(xtest_available));
     private_apis.insert(
+        "overlay".into(),
+        if env.session_type.is_wayland() {
+            PrivateApiStatus::Disabled
+        } else {
+            PrivateApiStatus::Missing
+        },
+    );
+    if env.session_type.is_wayland() {
+        private_apis.insert(
+            "overlay_unavailable_no_physical_provenance_or_independent_stop".into(),
+            PrivateApiStatus::Disabled,
+        );
+    }
+    private_apis.insert(
         "portal_screencast".into(),
         to_status(portal.screencast_version.is_some()),
     );
@@ -366,6 +401,7 @@ pub fn build_environment_capabilities(
     );
 
     EnvironmentCapabilities {
+        overlay,
         target,
         compositor: env.compositor,
         tree_observation,
