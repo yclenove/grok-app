@@ -118,6 +118,68 @@ impl ManualTime {
 }
 
 #[test]
+fn keyboard_proof_without_mouse_callback_expires_even_when_both_pumps_respond() {
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    guard
+        .events
+        .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    for _ in 0..50 {
+        guard
+            .events
+            .confirm_hook_proofs(Some(time.now()), None)
+            .unwrap();
+        guard.events.heartbeat();
+        guard.events.hotkey_heartbeat();
+        assert!(!guard.available());
+        time.advance(Duration::from_millis(20));
+    }
+    guard.events.check_health();
+    assert!(guard.events.failed.load(Ordering::Acquire));
+    assert!(!guard.activity_clock().available());
+    assert_eq!(guard.check(true), Err(DriverError::CapabilityUnavailable));
+}
+
+#[test]
+fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
+    use crate::input::hook_probe::{mode_at, MouseProbe};
+    struct MouseApi;
+    impl MouseApi {
+        fn dispatch(&self, mode: MouseProbe, at: Instant) -> Option<Instant> {
+            // Fake native API: accepts all sends; drops the first two kinds.
+            (mode == MouseProbe::ZeroHWheel).then_some(at)
+        }
+    }
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    guard
+        .events
+        .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    for (elapsed, expected) in [
+        (0, MouseProbe::ZeroMove),
+        (250, MouseProbe::ZeroWheel),
+        (500, MouseProbe::ZeroHWheel),
+    ] {
+        *time.0.lock().unwrap() =
+            Some(guard.events.startup_started + Duration::from_millis(elapsed));
+        let mode = mode_at(Duration::from_millis(elapsed));
+        assert_eq!(mode, expected);
+        let mouse = MouseApi.dispatch(mode, time.now());
+        guard
+            .events
+            .confirm_hook_proofs(Some(time.now()), mouse)
+            .unwrap();
+        guard.events.heartbeat();
+        guard.events.hotkey_heartbeat();
+        assert_eq!(guard.available(), mouse.is_some());
+    }
+    time.advance(watchdog::HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+    guard.events.check_health();
+    assert!(!guard.available());
+    assert!(guard.is_stopped());
+}
+
+#[test]
 fn startup_probe_taking_226ms_succeeds_without_relaxing_armed_health_deadline() {
     let time = Arc::new(ManualTime::default());
     let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());

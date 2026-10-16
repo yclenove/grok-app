@@ -19,6 +19,10 @@ use std::{
 mod cases;
 #[path = "safety.rs"]
 mod safety;
+#[path = "unsafe_activation.rs"]
+mod unsafe_activation;
+#[path = "unsafe_background_probe.rs"]
+mod unsafe_background_probe;
 #[path = "unsafe_desktop.rs"]
 pub mod unsafe_desktop;
 #[path = "unsafe_hotkey.rs"]
@@ -42,6 +46,11 @@ impl Fixture {
         let state = dir.join("state.json");
         let child = Command::new(exe)
             .env("GCU_FIXTURE_STATE", &state)
+            .env(
+                "GCU_FIXTURE_ACTIVATION_TRACE_DIR",
+                std::env::var_os("GCU_NATIVE_TRACE_DIR")
+                    .unwrap_or_else(|| dir.clone().into_os_string()),
+            )
             .spawn()
             .map_err(|e| {
                 let _ = std::fs::remove_dir_all(&dir);

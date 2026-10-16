@@ -518,10 +518,10 @@ monitoring starts a conservative idle interval at zero. `WH_KEYBOARD_LL` / `WH_M
 only and discard injected input, including lower-integrity injections and our own SendInput. No
 text/key payload is stored. Hook proofs and message-pump leases expire after 100ms. Failure returns
 `None`, discards input history and disables foreground; it never reports an old idle timestamp. Two
-tagged synthetic probes (unused F24 **up only**, zero relative mouse move) prove both hook chains
-without refreshing activity or moving the cursor. Hooks are replaced every second, installing the
-new pair before retiring the old pair. Silent removal is detected by missing probes, even if the
-pump lives.
+tagged injected callbacks (F24 **up only**, zero move/wheel/horizontal-wheel candidates) prove both
+hook chains; SendInput success alone is insufficient. Defaults never move or click. Replacement
+hooks install before old hooks retire each second; missing mouse proof disables foreground.
+No documented LL-hook liveness query exists; neither pump heartbeats nor registration prove delivery.
 
 `RegisterHotKey` defaults to Ctrl+Alt+Shift+Backspace; `HotkeyConfig` accepts a trusted configurable
 virtual key/modifier chord. Conflicts fail closed, with metadata in the existing `DoctorReport`. The
@@ -551,7 +551,7 @@ rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-wi
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
 
-Native status: **not_run** (Linux host, no interactive Windows desktop). The `#[cfg(windows)]
+CI probe details and side effects: [native diagnostics](diagnostics.md). The `#[cfg(windows)]
 #[ignore]` tests compile with cross-target clippy. On an unelevated disposable Windows desktop,
 disable clipboard history/cloud sync, clear its clipboard, build `gcu-cli`, then run the named-mutex
 test serially. For the document test, open one blank Notepad document and focus its editor; use a

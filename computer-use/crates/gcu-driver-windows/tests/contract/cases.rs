@@ -331,12 +331,33 @@ async fn background(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) 
     )
     .await?;
     let count = fixture.read()?["counter"].as_u64().unwrap();
+    let activation = unsafe_activation::Trace::start()?;
+    let fixture_hwnd = u64::from_str_radix(win.id.split(':').next().ok_or("missing HWND")?, 16)
+        .map_err(|e| e.to_string())?;
+    activation
+        .record("before background press", fixture_hwnd, cover.hwnd)
+        .await;
+    require(
+        unsafe_desktop::foreground() == cover.hwnd,
+        "cover lost foreground before dispatch",
+    )?;
     perform(driver, DriverAction::Press { el: button.handle }).await?;
     let after_invoke = unsafe_desktop::foreground();
+    activation
+        .record("after background press dispatch", fixture_hwnd, cover.hwnd)
+        .await;
     fixture
         .wait("background counter", |v| v["counter"] == count + 1)
         .await?;
-    background_foreground(win, cover.hwnd, after_invoke, "press").await?;
+    let foreground = background_foreground(win, cover.hwnd, after_invoke, "press").await;
+    activation
+        .record(
+            "after background press effect/pump",
+            fixture_hwnd,
+            cover.hwnd,
+        )
+        .await;
+    foreground?;
     // Refresh handles after the provider's next generation.
     perform(
         driver,
@@ -347,6 +368,13 @@ async fn background(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) 
     )
     .await?;
     let after_set_value = unsafe_desktop::foreground();
+    activation
+        .record(
+            "after background SetValue dispatch",
+            fixture_hwnd,
+            cover.hwnd,
+        )
+        .await;
     fixture
         .wait("background text", |v| v["text"] == "background")
         .await?;

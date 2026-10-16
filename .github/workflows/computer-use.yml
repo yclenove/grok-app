@@ -257,11 +257,11 @@ jobs:
           Unregister-ScheduledTask -TaskName $t -Confirm:$false
           $env:GCU_CONTRACT_EXE | Out-Null
 
-      - name: Run ignored real contracts and smoke on the limited interactive desktop
+      - name: Run native diagnostics, real contracts and smoke on the limited interactive desktop
         timeout-minutes: 20
         run: |
           "GCU_DESKTOP_REPORT_DIR=$(Join-Path $env:RUNNER_TEMP 'gcu-win')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          ./scripts/smoke-windows.ps1 -TestExe $env:GCU_CONTRACT_EXE -WorkerExe target/debug/gcu.exe -FixtureExe target/debug/gcu-fixture.exe -OutputDir (Join-Path $env:RUNNER_TEMP 'gcu-win')
+          ./scripts/smoke-windows.ps1 -NativeDiagnostics -TestExe $env:GCU_CONTRACT_EXE -WorkerExe target/debug/gcu.exe -FixtureExe target/debug/gcu-fixture.exe -OutputDir (Join-Path $env:RUNNER_TEMP 'gcu-win')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload desktop contract and smoke reports

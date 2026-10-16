@@ -1,5 +1,6 @@
 //! Thread-affine low-level hooks; global hotkey has its own message pump.
 use crate::input::{
+    hook_probe::{mode_at, MouseProbe},
     hooks::HookEvent,
     hotkey::{
         GuardEvents, HotkeyConfig, SafetyApi, SafetyPump, HOTKEY_STARTUP_TIMEOUT,
@@ -24,6 +25,7 @@ use windows::Win32::{
 };
 const HOTKEY_ID: i32 = 0x4732;
 const PROBE_TAG: usize = 0x47435532;
+mod mouse;
 mod probe;
 struct Context {
     events: Arc<GuardEvents>,

@@ -8,6 +8,7 @@ param(
     [ValidateSet('All','Contract','Smoke')][string]$Suite = 'All',
     [switch]$DesktopChild,
     [switch]$DiagnoseTokens,
+    [switch]$NativeDiagnostics,
     [int]$ElevatedPid = 0,
     [int]$ExpectedSessionId = 0
 )
@@ -52,6 +53,10 @@ function Invoke-NativeCase {
             Get-ChildItem -LiteralPath $env:GCU_NATIVE_TRACE_DIR -Filter '*.log' | ForEach-Object {
                 Write-DesktopProgress "WORKER TRACE TAIL: $($_.Name); full log retained in artifacts"
                 Get-Content -LiteralPath $_.FullName -Tail 60 | Out-Host
+            }
+            Get-ChildItem -LiteralPath $env:GCU_NATIVE_TRACE_DIR -Filter 'fixture-activation-*.jsonl' | ForEach-Object {
+                Write-DesktopProgress "FIXTURE ACTIVATION TRACE: $($_.Name); observer does not change actions or Focus output"
+                Get-Content -LiteralPath $_.FullName -Tail 20 | Out-Host
             }
         }
     }
@@ -119,7 +124,7 @@ if (-not $DesktopChild -and ($facts.IsAdmin -or $facts.IntegrityRid -gt 8192)) {
         # The selected profile is used exactly once; any timeout/failure is final.
         $request = @{Variant=$variant;Stage='suite';Workspace=$workspace;OutputDir=$payload.OutputDir;
             ExpectedSessionId=$ExpectedSessionId;TestExe=$payload.TestExe;WorkerExe=$payload.WorkerExe;
-            FixtureExe=$payload.FixtureExe;Suite=$Suite;ElevatedPid=$ElevatedPid}
+            FixtureExe=$payload.FixtureExe;Suite=$Suite;ElevatedPid=$ElevatedPid;NativeDiagnostics=$NativeDiagnostics.IsPresent}
         Write-DesktopProgress "DESKTOP SUITE BEGIN: $Suite; timeout_ms=720000; no retry"
         $result = Invoke-SupervisedDesktopStage $request $workspace $payload.OutputDir 720000
         if (-not $result.ok) { throw "suite failed; last=$($result | ConvertTo-Json -Compress -Depth 10)" }
@@ -206,6 +211,14 @@ try {
         $env:GCU_UIPI_SKIP_REASON = (Get-Content -Raw -LiteralPath $uipiReport | ConvertFrom-Json).reason
     }
     $env:GCU_CONTRACT_REPORT = Join-Path $OutputDir 'contract.json'
+    if ($NativeDiagnostics -and $Suite -ne 'Smoke') {
+        $env:GCU_MOUSE_PROBE_REPORT = Join-Path $OutputDir 'mouse-probes.json'
+        Write-DesktopProgress 'CI DIAGNOSTIC: empirical mouse hook probes; disposable desktop only; movement/XBUTTON included'
+        try { Invoke-NativeCase 'unsafe_mouse_probe::live_mouse_probe_matrix' }
+        catch { Write-DesktopProgress "MOUSE PROBE DIAGNOSTIC FAILED: $($_.Exception.Message); contracts still run fail-closed" }
+        try { Invoke-NativeCase 'live::unsafe_background_probe::live_background_activation_probe' }
+        catch { Write-DesktopProgress "BACKGROUND DIAGNOSTIC FAILED: $($_.Exception.Message); C16 equality assertion still runs" }
+    }
     if ($Suite -ne 'Smoke') {
         Write-DesktopProgress 'CONTRACT SUITE START: C01-C27, W-UIPI, W-HOTKEY; external fixture oracle; Skip reasons printed per row'
         Invoke-NativeCase 'live::live_contract_table_c01_to_c27'

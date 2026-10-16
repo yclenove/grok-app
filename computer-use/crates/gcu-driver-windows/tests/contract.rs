@@ -18,3 +18,6 @@ mod readiness;
 mod smoke;
 #[path = "contract/timings.rs"]
 mod timings;
+#[cfg(windows)]
+#[path = "contract/unsafe_mouse_probe.rs"]
+mod unsafe_mouse_probe;

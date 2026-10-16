@@ -84,7 +84,8 @@ impl Default for FixtureApp {
 
 impl FixtureApp {
     /// Creates a new fixture app instance.
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::activation_trace::install(&cc.egui_ctx);
         Self::default()
     }
 

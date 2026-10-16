@@ -35,6 +35,9 @@ try {
             '-TestExe',$request.TestExe,'-WorkerExe',$request.WorkerExe,'-FixtureExe',$request.FixtureExe,
             '-OutputDir',$request.OutputDir,'-Suite',$request.Suite,'-ElevatedPid',"$($request.ElevatedPid)",
             '-ExpectedSessionId',"$($request.ExpectedSessionId)")
+        if ($request.PSObject.Properties['NativeDiagnostics'] -and $request.NativeDiagnostics) {
+            $arguments += '-NativeDiagnostics'
+        }
         Write-DesktopProgress 'SUITE CreateProcess; NonInteractive; no std-handle inheritance; no retry'
         $child = $context.Start("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe",
             $arguments, $variant.Method, $false, $variant.NewConsole, $variant.UseShowWindow)

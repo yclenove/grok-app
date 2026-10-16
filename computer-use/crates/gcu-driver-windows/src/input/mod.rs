@@ -5,6 +5,8 @@ pub mod fake;
 #[cfg(windows)]
 mod ffi;
 pub mod foreground;
+#[cfg(any(windows, test))]
+mod hook_probe;
 pub mod hooks;
 pub mod hotkey;
 pub mod ledger;

@@ -1,12 +1,5 @@
 //! One bounded sender, independent of the thread that must service LL hooks.
 use super::*;
-use std::time::Duration;
-
-#[derive(Clone, Copy, Debug)]
-enum MouseProbe {
-    ZeroMove,
-    ZeroWheel,
-}
 #[derive(Debug)]
 struct Report {
     keyboard: (u32, u32, u128),
@@ -20,10 +13,12 @@ pub(super) struct Sender {
     started: Instant,
     mode: MouseProbe,
     report: Option<Report>,
+    override_mode: Option<MouseProbe>,
 }
 impl Sender {
     pub(super) fn start(events: Arc<GuardEvents>) -> Result<Self, String> {
         events.startup_step("hook_probe_sender", STARTUP_STEP_TIMEOUT);
+        let override_mode = configured_mode()?;
         let (request, receive) = mpsc::sync_channel(1);
         let (reply, result) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -33,7 +28,7 @@ impl Sender {
                     let keyboard = send(
                         &events,
                         "hook_keyboard_dispatch",
-                        INPUT {
+                        &[INPUT {
                             r#type: INPUT_KEYBOARD,
                             Anonymous: INPUT_0 {
                                 ki: KEYBDINPUT {
@@ -43,27 +38,15 @@ impl Sender {
                                     ..Default::default()
                                 },
                             },
-                        },
+                        }],
                     );
-                    let mouse = send(
-                        &events,
-                        "hook_mouse_dispatch",
-                        INPUT {
-                            r#type: INPUT_MOUSE,
-                            Anonymous: INPUT_0 {
-                                mi: MOUSEINPUT {
-                                    dwFlags: match mode {
-                                        MouseProbe::ZeroMove => {
-                                            MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE
-                                        }
-                                        MouseProbe::ZeroWheel => MOUSEEVENTF_WHEEL,
-                                    },
-                                    dwExtraInfo: PROBE_TAG,
-                                    ..Default::default()
-                                },
-                            },
-                        },
-                    );
+                    let mouse = match super::mouse::inputs(mode, PROBE_TAG) {
+                        Ok(inputs) => send(&events, "hook_mouse_dispatch", &inputs),
+                        Err(reason) => {
+                            events.fail(reason);
+                            break;
+                        }
+                    };
                     if reply
                         .send(Report {
                             keyboard,
@@ -84,6 +67,7 @@ impl Sender {
             started: Instant::now(),
             mode: MouseProbe::ZeroMove,
             report: None,
+            override_mode,
         })
     }
     pub(super) fn poll(&mut self) -> Result<(), String> {
@@ -114,11 +98,10 @@ impl Sender {
                     else if context.last_mouse_flags.is_some() { "hook received other events; tagged probe unobserved (filter/UIPI not proven)" }
                     else { "no mouse callback observed; dispatch/pump/filter cause unproven" },
                 ));
-                // Some desktops suppress a zero-displacement move before the LL
-                // hook. Switch to a zero-delta wheel during setup; neither probe
-                // moves the cursor, scrolls content, or activates a window.
-                if context.mouse.is_none() && self.started.elapsed() >= Duration::from_millis(250) {
-                    self.mode = MouseProbe::ZeroWheel;
+                // Defaults never move the cursor or press a mouse button. Native
+                // acceptance is not a proof: only the tagged injected callback is.
+                if context.mouse.is_none() {
+                    self.mode = self.override_mode.unwrap_or_else(|| mode_at(self.started.elapsed()));
                 }
             }
         });
@@ -131,13 +114,13 @@ impl Sender {
         Ok(())
     }
 }
-fn send(events: &GuardEvents, stage: &'static str, input: INPUT) -> (u32, u32, u128) {
+fn send(events: &GuardEvents, stage: &'static str, inputs: &[INPUT]) -> (u32, u32, u128) {
     events.startup_progress(stage, "SendInput pending; Win32 result unobserved");
     let started = Instant::now();
-    // SAFETY: initialized single up/zero-motion record, no borrowed pointers.
+    // SAFETY: initialized up/zero-motion or explicitly opted-in mouse records.
     let sent = unsafe {
         SetLastError(ERROR_SUCCESS);
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32)
+        SendInput(inputs, std::mem::size_of::<INPUT>() as i32)
     };
     // SAFETY: immediately capture this exact SendInput's error, never infer UIPI.
     let code = unsafe { GetLastError() }.0;
@@ -147,4 +130,17 @@ fn send(events: &GuardEvents, stage: &'static str, input: INPUT) -> (u32, u32, u
         format!("sent={sent}/1; Win32={code}; elapsed_ms={elapsed}; UIPI cause not inferred"),
     );
     (sent, code, elapsed)
+}
+
+fn configured_mode() -> Result<Option<MouseProbe>, String> {
+    // Experimental movement is absent from release/default builds. CI may run
+    // the same-position candidate explicitly after reviewing matrix evidence.
+    #[cfg(all(feature = "test-worker-faults", debug_assertions))]
+    if let Some(mode) = std::env::var_os("GCU_HOOK_MOUSE_PROBE") {
+        return match mode.to_str() {
+            Some("absolute_same_position") => Ok(Some(MouseProbe::AbsoluteSamePosition)),
+            _ => Err("unsupported debug hook mouse probe; foreground disabled".into()),
+        };
+    }
+    Ok(None)
 }
