@@ -142,14 +142,21 @@ fn matrix() -> Result<Vec<Row>, String> {
         }
     });
     let mut rows = Vec::new();
-    for mode in [
+    // XBUTTON1/2 are browser back/forward on a real desktop. A maintainer running this on a
+    // personal machine sets GCU_MOUSE_PROBE_SKIP_XBUTTON=1 so no navigation can be triggered.
+    let skip_xbutton = std::env::var("GCU_MOUSE_PROBE_SKIP_XBUTTON").as_deref() == Ok("1");
+    let modes = [
         MouseProbe::ZeroWheel,
         MouseProbe::ZeroMove,
         MouseProbe::ZeroHWheel,
         MouseProbe::AbsoluteSamePosition,
         MouseProbe::RelativePair,
         MouseProbe::XButtonPair,
-    ] {
+    ];
+    for mode in modes
+        .into_iter()
+        .filter(|mode| !(skip_xbutton && *mode == MouseProbe::XButtonPair))
+    {
         for marked in [true, false] {
             pump();
             let tag = if marked { 0x47430000 + rows.len() } else { 0 };
@@ -229,7 +236,8 @@ fn live_mouse_probe_matrix() {
         std::fs::write(path, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
     }
     // No candidate is declared supported merely because SendInput accepted it.
-    assert_eq!(rows.len(), 12);
+    let skip_xbutton = std::env::var("GCU_MOUSE_PROBE_SKIP_XBUTTON").as_deref() == Ok("1");
+    assert_eq!(rows.len(), if skip_xbutton { 10 } else { 12 });
 }
 
 // Run in the contract process before creating the product listener. Never consume
