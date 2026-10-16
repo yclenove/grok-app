@@ -43,7 +43,7 @@
 | P3-03 | AT-SPI 动作 + XTEST | P3-02 | 2.5d | done | cu2/P3-03-actions |  | 2026-10-13 | AT-SPI 语义动作+XTEST；TargetedOnly 不升级；InputLedger 先记账后发送并补发 up；CI Xvfb live 动作测试 5 个全过；文本框 SetValue 因 AccessKit 无 EditableText 返回 NotSettable(已登记) |
 | P3-04 | X11 守卫与热键 | P3-03 | 1d | done | cu2/P3-04-x11-guard |  | 2026-10-13 | XI2 原始事件活动时钟(排除 XTEST，故障→None)；XGrabKey 停止热键(含 NumLock/CapsLock 组合)，失败则禁用前台 XTEST 路线；看门狗 5s；Xvfb 实机热键测试通过；物理硬件输入 not_run |
 | P3-05 | Linux 契约测试与 CI | P3-01、P3-02、P3-03、P3-04 | 1.5d | done | cu2/P3-05-linux-contract |  | 2026-10-13 | C01–C27 表驱动实机契约(Xvfb+dbus+AT-SPI+openbox)：23 通过 / 6 跳过(原因逐条打印) / 0 失败；AT-SPI job 连续重跑稳定；smoke-linux.sh |
-| P4-01 | macOS helper 与代理 | P1-09、S-02 | 3d | todo |  |  |  |  |
+| P4-01 | macOS helper 与代理 | P1-09、S-02 | 3d | done | cu2/P4-01-mac-helper |  | 2026-10-16 | `gcu agent` + `gcu-cli::helper::{auth,client,frame,macos,proxy,serve}`：只有同签名身份且同 cdhash 的对端才被服务；同身份不同 cdhash 只能请求旧 helper 退出；另校验 UID、端点 inode、套接字权限、版本精确匹配、10 分钟空闲退出；`xtask bundle-macos` 生成 LSUIElement 的 .app，ad-hoc 签名用 identifier-only designated requirement。30 个 helper 测试+38 个 xtask 测试通过。未做：15 语 InfoPlist.strings；构建机上的 bundle-macos 只写 plist/图标(不打包 gcu、不 codesign)。真机待验(Mini)：TCC 弹窗指向 helper app 而非终端、同二进制代理在只授权 helper 时可用而 SSH 直接执行无授权、重编译后授权仍在、未签名 arm64 app 不能启动 |
 | P4-02 | Onboarding 窗口 | P4-01 | 2d | todo |  |  |  |  |
 | P4-03 | ApprovalProvider（elicitation + 审批窗） | P0-09、P4-01 | 3d | todo |  |  |  |  |
 | P4-04 | gcu-overlay | P1-06、P2-06、P3-03 | 3.5d | done | cu2/P4-04-overlay |  | 2026-10-16 | gcu-overlay：状态+用户 Stop 按钮(不可聚焦/穿透/排除截图，macOS/Windows/X11)；Stop 状态机去抖、独立通道；文案表接口待 App i18n 对接；原生 Wayland 覆盖层声明不可用(裁定选项1)；三平台真机 GUI not_run |
@@ -109,6 +109,7 @@
 - P5-01：`interprocess` 2.4.6 需要比 src-tauri 锁里 tokio 1.53.1 更新的 tokio（`AsyncFd::register_with_interest` 缺失），src-tauri 的 Cargo.lock 固定在 2.4.5（与 computer-use/Cargo.lock 一致）；升级 tokio 前不要 `cargo update` 该 crate。
 - 构建机的 `rcargo` 只同步 computer-use/ 与 src-tauri 的 Cargo.toml/Cargo.lock，不同步 src-tauri/src，且无 webkit2gtk：src-tauri 的代码只能由 ci.yml 编译，所以任何放进 src-tauri 的逻辑都要尽量薄，可测逻辑放进 computer-use 的 crate。
 - CI：Linux 作业依赖的 PipeWire PPA(ppa.launchpadcontent.net)会间歇 503（索引与 .deb 下载都会）；#71 加了 apt 重试并在 PPA 不可用时明确失败，而不是回退到过旧的系统 libpipewire 后在 libspa 里报一串编译错误。
+- P4-01：Windows 检出会把 `apps/gcu-helper-macos/Info.plist` 模板转成 CRLF，而生成物是 LF；读模板做比较前要归一化换行(xtask 测试已处理)。
 
 ## 阶段记录
 
