@@ -99,11 +99,17 @@ impl Default for FakeState {
 #[derive(Default)]
 pub struct FakeInput {
     state: Mutex<FakeState>,
+    resolving: tokio::sync::Notify,
 }
 impl FakeInput {
     /// Change a scenario before/during delivery.
     pub fn update(&self, update: impl FnOnce(&mut FakeState)) {
         update(&mut self.state.lock().unwrap_or_else(|p| p.into_inner()));
+    }
+    /// Wait for the next resolve entry; tests can mutate provenance while its
+    /// configured read delay is pending. The caller supplies its own deadline.
+    pub async fn wait_until_resolving(&self) {
+        self.resolving.notified().await;
     }
     /// Snapshot recorded calls, without retaining the lock.
     pub fn state(&self) -> FakeState {
@@ -135,6 +141,7 @@ impl InputApi for FakeInput {
         _: Option<NativeHandle>,
     ) -> Result<Target> {
         let s = self.state();
+        self.resolving.notify_one();
         tokio::time::sleep(s.resolve_delay).await;
         Ok(Target {
             window,

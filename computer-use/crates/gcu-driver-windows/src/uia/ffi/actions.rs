@@ -28,6 +28,7 @@ macro_rules! mutate {
         })?
     }};
 }
+mod press;
 mod scroll;
 mod text;
 mod value;
@@ -95,10 +96,7 @@ fn execute(
     r: &Guard<'_>,
 ) -> Prepared<PatternResult> {
     let result = match action {
-        PatternAction::Invoke => {
-            let p: IUIAutomationInvokePattern = pattern(el, UIA_InvokePatternId, r)?;
-            mutate!(r, p.Invoke())
-        }
+        PatternAction::Invoke | PatternAction::LegacyDefault => return press::post(el, r),
         PatternAction::Toggle => {
             let p: IUIAutomationTogglePattern = pattern(el, UIA_TogglePatternId, r)?;
             mutate!(r, p.Toggle())
@@ -135,11 +133,6 @@ fn execute(
             mutate!(r, p.ScrollIntoView())
         }
         PatternAction::SelectText(range) => return text::select(el, *range, r),
-        PatternAction::LegacyDefault => {
-            let p: IUIAutomationLegacyIAccessiblePattern =
-                pattern(el, UIA_LegacyIAccessiblePatternId, r)?;
-            mutate!(r, p.DoDefaultAction())
-        }
     };
     Ok(result)
 }

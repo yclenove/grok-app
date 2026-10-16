@@ -25,6 +25,8 @@ mod unsafe_activation;
 mod unsafe_background_probe;
 #[path = "unsafe_desktop.rs"]
 pub mod unsafe_desktop;
+#[path = "unsafe_foreground.rs"]
+mod unsafe_foreground;
 #[path = "unsafe_hotkey.rs"]
 mod unsafe_hotkey;
 
@@ -108,6 +110,14 @@ impl Drop for Fixture {
 }
 pub async fn driver() -> Result<WindowsDriver, String> {
     super::timings::install();
+    if let super::mouse_matrix::Decision::Run { probe, marked } =
+        super::unsafe_mouse_probe::decision()?
+    {
+        // Debug/test-only selection; actual tagged injected callbacks must still
+        // renew both hook leases. Unmarked-only evidence never grants health.
+        std::env::set_var("GCU_HOOK_MOUSE_PROBE", probe);
+        progress(format!("MOUSE MATRIX: retry product proof with {probe}; observed marked={marked}; no environment Skip permitted"));
+    }
     WindowsDriver::monitored(
         worker_config()?,
         Default::default(),

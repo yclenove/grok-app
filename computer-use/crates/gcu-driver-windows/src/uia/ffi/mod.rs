@@ -230,6 +230,9 @@ impl State {
 }
 #[async_trait]
 impl UiaSource for RealUia {
+    fn press_uses_targeted_messages(&self) -> bool {
+        true
+    }
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
         self.worker
             .call(move |s, r| s.validate(node, hwnd, r).map(|(_, p)| p))

@@ -212,14 +212,14 @@ rcargo test --locked -p gcu-driver-windows --test capture
 
 ## UI Automation semantic actions (P2-05)
 
-`Press`, `SecondaryAction`, `SetValue`, `SelectText` and `ScrollElement` use the
-same persistent MTA as observation. `patterns::press_patterns` chooses Invoke,
-Toggle, SelectionItem or ExpandCollapse by control type, with LegacyIAccessible
-last. Only explicit unsupported/unavailable **zero-effect** results permit a
-fallback. A timeout, cancellation, disappearance or other provider failure after
-mutation dispatch is uncertain and never replayed. Value/RangeValue, Text and
-Scroll never substitute for activation. Raise, ShowMenu and arbitrary native
-names fail without calling SetFocus, a pointer API or foreground activation.
+`Press`/`SecondaryAction` choose patterns by control type; native Invoke/Legacy
+presses instead use exact BUTTON BM_CLICK or ledger-backed TargetedOnly clicks.
+These report TargetedEvent, keep background capability Partial, and refuse unsupported
+targets without Invoke, SetFocus or implicit foreground escalation. See [diagnostics](diagnostics.md).
+Other semantic patterns use the observation MTA. Only proven zero-effect absence
+permits fallback; uncertain native failures never replay. Value, range, text and
+scroll never substitute for press. Raise, ShowMenu and arbitrary native names
+are unavailable.
 
 The worker retains each observed RuntimeId and role/name/AutomationId/class/frame
 with its exact HWND. Actions share the observation generation lock and re-read
@@ -386,7 +386,7 @@ The isolated child (or explicit `new_in_process()`) attaches `RealInput`, a
 persistent MTA input worker.
 `with_input` accepts the same portable `InputBackend` with `FakeInput` for tests.
 Pointer clicks, scrolling, interpolated drags, chords, Unicode text and authorized
-activation are implemented; semantic UIA actions keep their existing behavior.
+activation are implemented; semantic press uses the non-activating routes above.
 
 `Auto` and `TargetedOnly` permit **only background messages**. Hit testing walks
 `ChildWindowFromPointEx` into the exact root; keyboard input uses the target

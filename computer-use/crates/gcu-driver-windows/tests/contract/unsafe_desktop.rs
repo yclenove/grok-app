@@ -245,6 +245,18 @@ pub struct Cover {
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl Cover {
+    pub async fn acquire_foreground_for_setup(&self) -> Result<(), String> {
+        let window = self.hwnd;
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || super::unsafe_foreground::acquire(window)),
+        )
+        .await
+        .map_err(|_| {
+            "harness foreground setup native call timed out; no action dispatched".to_string()
+        })?
+        .map_err(|e| e.to_string())?
+    }
     pub fn input_count(&self) -> u64 {
         COVER_INPUTS.load(Ordering::SeqCst)
     }
@@ -299,7 +311,11 @@ impl Cover {
                     let _ = tx.send(Err("cover creation failed".to_string()));
                     return;
                 };
-                let _ = SetForegroundWindow(h);
+                if let Err(error) = super::unsafe_foreground::acquire(h.0 as usize as u64) {
+                    let _ = DestroyWindow(h);
+                    let _ = tx.send(Err(error));
+                    return;
+                }
                 let _ = tx.send(Ok((
                     h.0 as usize as u64,
                     windows::Win32::System::Threading::GetCurrentThreadId(),

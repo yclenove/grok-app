@@ -48,7 +48,7 @@ impl Driver for WindowsDriver {
             issues.extend(discovery.issues());
         }
         issues.push(if self.input.is_some() {
-            "Targeted messages are partial (Chromium/UWP refused); foreground requires core approval and healthy parent Stop monitoring".into()
+            "background_operation=partial: UIA Invoke/Legacy can activate; press uses BM_CLICK or TargetedOnly messages (Chromium/UWP refused), never an implicit foreground fallback; explicit foreground pointer actions require core approval and healthy parent Stop monitoring".into()
         } else if self.capture_backend.is_some() {
             "Pointer/keyboard and foreground unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
         } else if self.observer.is_some() {
@@ -373,7 +373,7 @@ impl Driver for WindowsDriver {
         self.observer
             .as_ref()
             .ok_or(DriverError::CapabilityUnavailable)?
-            .perform(window.hwnd, req, cancel, deadline)
+            .perform(window, self.input.as_deref(), req, cancel, deadline)
             .await
     }
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {

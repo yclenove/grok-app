@@ -14,6 +14,7 @@ pub(super) struct Sender {
     mode: MouseProbe,
     report: Option<Report>,
     override_mode: Option<MouseProbe>,
+    attempted: std::collections::BTreeSet<MouseProbe>,
 }
 impl Sender {
     pub(super) fn start(events: Arc<GuardEvents>) -> Result<Self, String> {
@@ -41,7 +42,19 @@ impl Sender {
                         }],
                     );
                     let mouse = match super::mouse::inputs(mode, PROBE_TAG) {
-                        Ok(inputs) => send(&events, "hook_mouse_dispatch", &inputs),
+                        Ok(inputs) => {
+                            let result = send(&events, "hook_mouse_dispatch", &inputs);
+                            if mode == MouseProbe::XButtonPair && result.0 == 1 {
+                                // Partial XDOWN must have one matching XUP even
+                                // on this explicitly selected disposable CI path.
+                                let released =
+                                    send(&events, "hook_mouse_partial_release", &inputs[1..]);
+                                if released.0 != 1 {
+                                    events.fail("partial mouse probe button release failed");
+                                }
+                            }
+                            result
+                        }
                         Err(reason) => {
                             events.fail(reason);
                             break;
@@ -68,13 +81,14 @@ impl Sender {
             mode: MouseProbe::ZeroMove,
             report: None,
             override_mode,
+            attempted: Default::default(),
         })
     }
     pub(super) fn poll(&mut self) -> Result<(), String> {
         match self.reply.try_recv() {
             Ok(report) => {
                 self.pending = false;
-                let success = report.keyboard.0 == 1 && report.mouse.0 == 1;
+                let success = report.keyboard.0 == 1 && report.mouse.0 == report.mode.requested();
                 self.report = Some(report);
                 if !success {
                     return Err(format!(
@@ -88,15 +102,21 @@ impl Sender {
         }
         CONTEXT.with(|slot| {
             if let Some(context) = slot.borrow().as_ref() {
+                context.events.startup_progress("mouse_hook_proof", format!(
+                    "{} (attempted {} probe kinds)",
+                    if context.mouse.is_some() { "mouse hook liveness proven by tagged injected callback" }
+                    else { "mouse hook liveness could not be proven" }, self.attempted.len()
+                ));
                 context.events.startup_progress("hook_SendInput", format!(
-                    "hooks_install=success; dispatch={:?}; pending={}; keyboard_seen={}; mouse_seen={}; keyboard_probe_flags={:?}; mouse_probe_flags={:?}; last_keyboard_flags={:?}; last_mouse_flags={:?}; mouse_proof={}",
+                    "hooks_install=success; dispatch={:?}; pending={}; keyboard_seen={}; mouse_seen={}; keyboard_probe_flags={:?}; mouse_probe_flags={:?}; last_keyboard_flags={:?}; last_mouse_flags={:?}; mouse_proof={}; attempted_mouse_probe_kinds={}",
                     self.report.as_ref().map(|r| (r.mode, r.keyboard, r.mouse)), self.pending, context.keyboard.is_some(), context.mouse.is_some(),
                     context.keyboard_probe_flags, context.mouse_probe_flags,
                     context.last_keyboard_flags, context.last_mouse_flags,
                     if context.mouse.is_some() { "injected tagged callback observed" }
                     else if context.mouse_probe_flags.is_some() { "tagged callback observed but injected flags missing" }
                     else if context.last_mouse_flags.is_some() { "hook received other events; tagged probe unobserved (filter/UIPI not proven)" }
-                    else { "no mouse callback observed; dispatch/pump/filter cause unproven" },
+                    else { "mouse hook liveness could not be proven; no mouse callback observed; dispatch/pump/filter cause unproven" },
+                    self.attempted.len(),
                 ));
                 // Defaults never move the cursor or press a mouse button. Native
                 // acceptance is not a proof: only the tagged injected callback is.
@@ -109,6 +129,7 @@ impl Sender {
             self.request
                 .try_send(self.mode)
                 .map_err(|e| format!("hook probe submission: {e}"))?;
+            self.attempted.insert(self.mode);
             self.pending = true;
         }
         Ok(())
@@ -127,18 +148,27 @@ fn send(events: &GuardEvents, stage: &'static str, inputs: &[INPUT]) -> (u32, u3
     let elapsed = started.elapsed().as_millis();
     events.startup_progress(
         stage,
-        format!("sent={sent}/1; Win32={code}; elapsed_ms={elapsed}; UIPI cause not inferred"),
+        format!(
+            "sent={sent}/{}; Win32={code}; elapsed_ms={elapsed}; UIPI cause not inferred",
+            inputs.len()
+        ),
     );
     (sent, code, elapsed)
 }
 
 fn configured_mode() -> Result<Option<MouseProbe>, String> {
-    // Experimental movement is absent from release/default builds. CI may run
-    // the same-position candidate explicitly after reviewing matrix evidence.
+    // Release/default builds never select motion/buttons. The contract harness
+    // selects a candidate only after its same-process empirical matrix saw a
+    // callback. Selection never replaces the tagged injected liveness proof.
     #[cfg(all(feature = "test-worker-faults", debug_assertions))]
     if let Some(mode) = std::env::var_os("GCU_HOOK_MOUSE_PROBE") {
         return match mode.to_str() {
+            Some("zero_move") => Ok(Some(MouseProbe::ZeroMove)),
+            Some("zero_wheel") => Ok(Some(MouseProbe::ZeroWheel)),
+            Some("zero_hwheel") => Ok(Some(MouseProbe::ZeroHWheel)),
             Some("absolute_same_position") => Ok(Some(MouseProbe::AbsoluteSamePosition)),
+            Some("relative_pair") => Ok(Some(MouseProbe::RelativePair)),
+            Some("xbutton_pair") => Ok(Some(MouseProbe::XButtonPair)),
             _ => Err("unsupported debug hook mouse probe; foreground disabled".into()),
         };
     }

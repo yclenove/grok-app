@@ -13,7 +13,10 @@ pub async fn run(
             == gcu_protocol::capabilities::ForegroundCapability::Unavailable
     {
         let report = driver.doctor().await;
-        return foreground_unavailable(&report.issues);
+        return foreground_unavailable(
+            &report.issues,
+            super::super::unsafe_mouse_probe::decision()?,
+        );
     }
     match id {
         "C01" => {
@@ -341,7 +344,11 @@ async fn background(driver: &WindowsDriver, fixture: &Fixture, win: &WindowRef) 
         unsafe_desktop::foreground() == cover.hwnd,
         "cover lost foreground before dispatch",
     )?;
-    perform(driver, DriverAction::Press { el: button.handle }).await?;
+    let delivery = perform(driver, DriverAction::Press { el: button.handle }).await?;
+    require(
+        delivery == Delivery::TargetedEvent,
+        "background press must use a non-activating targeted route",
+    )?;
     let after_invoke = unsafe_desktop::foreground();
     activation
         .record("after background press dispatch", fixture_hwnd, cover.hwnd)

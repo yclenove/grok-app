@@ -26,7 +26,6 @@ struct Callback {
     elapsed_us: u128,
 }
 struct Observation {
-    tag: usize,
     started: Instant,
     callbacks: Vec<Callback>,
 }
@@ -40,8 +39,7 @@ unsafe extern "system" fn hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             OBSERVATION.with(|slot| {
                 if let Ok(mut slot) = slot.try_borrow_mut() {
                     if let Some(observation) = slot.as_mut() {
-                        if event.dwExtraInfo == observation.tag && observation.callbacks.len() < 16
-                        {
+                        if observation.callbacks.len() < 16 {
                             observation.callbacks.push(Callback {
                                 message: wp.0,
                                 flags: event.flags,
@@ -159,7 +157,6 @@ fn matrix() -> Result<Vec<Row>, String> {
             let started = Instant::now();
             OBSERVATION.with(|slot| {
                 *slot.borrow_mut() = Some(Observation {
-                    tag,
                     started,
                     callbacks: Vec::new(),
                 })
@@ -190,16 +187,14 @@ fn matrix() -> Result<Vec<Row>, String> {
                 mode: format!("{mode:?}"),
                 marked,
                 sent: dispatch.map(|r| r.0),
-                requested: if matches!(mode, MouseProbe::RelativePair | MouseProbe::XButtonPair) {
-                    2
-                } else {
-                    1
-                },
+                requested: mode.requested() as usize,
                 win32: dispatch.map(|r| r.2),
                 send_elapsed_us: dispatch.map(|r| r.3),
                 elapsed_us: started.elapsed().as_micros(),
                 callback_seen: !callbacks.is_empty(),
-                injected_callback_seen: callbacks.iter().any(|c| c.flags & LLMHF_INJECTED != 0),
+                injected_callback_seen: callbacks
+                    .iter()
+                    .any(|c| c.flags & LLMHF_INJECTED != 0 && c.extra_info == tag),
                 dispatch_error: report.as_ref().and_then(|r| r.as_ref().err()).cloned(),
                 partial_button_release: dispatch.and_then(|r| r.4),
                 callbacks,
@@ -235,4 +230,26 @@ fn live_mouse_probe_matrix() {
     }
     // No candidate is declared supported merely because SendInput accepted it.
     assert_eq!(rows.len(), 12);
+}
+
+// Run in the contract process before creating the product listener. Never consume
+// a stale artifact from a previous desktop/process as permission to Skip.
+pub fn decision() -> Result<&'static super::mouse_matrix::Decision, String> {
+    static MEASURED: std::sync::OnceLock<Result<super::mouse_matrix::Decision, String>> =
+        std::sync::OnceLock::new();
+    MEASURED
+        .get_or_init(|| {
+            if std::env::var("GCU_DESKTOP").as_deref() != Ok("1") {
+                return Err("mouse matrix requires disposable GCU_DESKTOP=1".into());
+            }
+            let rows = matrix()?;
+            let rows: Vec<super::mouse_matrix::Row> =
+                serde_json::from_value(serde_json::to_value(rows).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            let decision = super::mouse_matrix::decide(&rows)?;
+            println!("MOUSE MATRIX DECISION: {decision:?}");
+            Ok(decision)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }

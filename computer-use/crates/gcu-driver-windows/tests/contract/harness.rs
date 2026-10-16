@@ -45,30 +45,17 @@ pub enum Outcome {
 }
 pub type CaseResult = Result<Outcome, String>;
 
-// An unexplained startup timeout is a driver failure, not evidence that the
-// runner lacks a desktop. Only a measured native prerequisite refusal may Skip.
-pub fn foreground_unavailable(issues: &[String]) -> CaseResult {
-    let refusal = issues.iter().any(|i| {
-        i.starts_with("stop_hotkey: unavailable")
-            && ((i.contains("RegisterHotKey:") && i.contains("GetLastError=Some(1409)"))
-                || ([
-                    "OpenInputDesktop:",
-                    "SetWindowsHookExW(",
-                    "GetUserObjectInformationW(",
-                ]
-                .iter()
-                .any(|api| i.contains(api))
-                    && i.contains("GetLastError=Some(5)")))
-    });
-    let detail = format!("foreground=unavailable; Stop/physical-input listener required; doctor={issues:?}; independent RegisterHotKey conflict probe is reported under STOP ALTERNATIVE NATIVE EVIDENCE");
-    if refusal {
-        Ok(Outcome::Skip(format!(
-            "measured native prerequisite refusal: {detail}"
-        )))
-    } else {
-        Err(format!(
-            "unresolved Stop listener failure (no environment Skip): {detail}"
-        ))
+// Only complete same-process empirical silence can excuse these listener cases.
+// Native API errors, keyboard-only health and SendInput acceptance cannot.
+pub fn foreground_unavailable(
+    issues: &[String],
+    matrix: &super::mouse_matrix::Decision,
+) -> CaseResult {
+    let detail =
+        format!("foreground=unavailable; Stop/physical-input listener required; doctor={issues:?}");
+    match matrix {
+        super::mouse_matrix::Decision::NoCallbacks(summary) => Ok(Outcome::Skip(format!("measured mouse environment limitation: {summary}; {detail}"))),
+        super::mouse_matrix::Decision::Run { probe, marked } => Err(format!("unresolved Stop listener failure (no environment Skip): working mouse probe={probe}, marked={marked}; {detail}")),
     }
 }
 
@@ -303,20 +290,18 @@ pub fn require(condition: bool, message: impl Into<String>) -> Result<(), String
 mod tests {
     use super::*;
     #[test]
-    fn foreground_skip_requires_measured_native_refusal_and_timeouts_fail() {
+    fn working_mouse_matrix_never_excuses_listener_timeout_or_native_refusal() {
+        let matrix = super::super::mouse_matrix::Decision::Run {
+            probe: "zero_move".into(),
+            marked: true,
+        };
         for issue in [
-            "stop_hotkey: unavailable (OpenInputDesktop: HRESULT=0x80070005, GetLastError=Some(5))",
-            "stop_hotkey: unavailable (RegisterHotKey: HRESULT=0x80070581, GetLastError=Some(1409))",
-        ] {
-            assert!(matches!(foreground_unavailable(&[issue.into()]), Ok(Outcome::Skip(_))));
-        }
-        for issue in [
-            "stop_hotkey: unavailable (Stop listener startup/FFI timed out)",
+            "stop_hotkey: unavailable (OpenInputDesktop: GetLastError=Some(5))",
+            "stop_hotkey: unavailable (RegisterHotKey: GetLastError=Some(1409))",
             "stop_hotkey: unavailable (startup timed out; SendInput Win32=0; mouse_seen=false)",
-            "unrelated OpenInputDesktop: GetLastError=Some(5)",
             "stop_hotkey: unavailable (listener heartbeat expired)",
         ] {
-            assert!(foreground_unavailable(&[issue.into()]).is_err());
+            assert!(foreground_unavailable(&[issue.into()], &matrix).is_err());
         }
     }
     struct Manual(Duration);

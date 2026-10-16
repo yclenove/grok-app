@@ -9,6 +9,8 @@ mod harness;
 #[cfg(windows)]
 #[path = "contract/live.rs"]
 mod live;
+#[path = "contract/mouse_matrix.rs"]
+mod mouse_matrix;
 #[path = "contract/portable.rs"]
 mod portable;
 #[path = "contract/readiness.rs"]

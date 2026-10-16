@@ -30,6 +30,11 @@ pub struct ChildPage {
 /// Futures may be abandoned on timeout/cancel; queued work must then be skipped.
 #[async_trait]
 pub trait UiaSource: Send + Sync + 'static {
+    /// Native Windows Invoke/Legacy providers can activate windows. Route their
+    /// presses through targeted messages; never infer foreground authorization.
+    fn press_uses_targeted_messages(&self) -> bool {
+        false
+    }
     /// Re-read the exact observed slot, RuntimeId, HWND ancestry and metadata.
     /// A mismatch is StaleElement; no name lookup or replacement is permitted.
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties>;
@@ -77,6 +82,7 @@ pub(super) struct FakeState {
     calls: usize,
     max_page: usize,
     pub(super) actions: super::fake_actions::FakeActions,
+    targeted_press: bool,
 }
 impl FakeState {
     pub(super) fn node(&self, slot: u64) -> NodeId {
@@ -110,6 +116,12 @@ impl FakeUia {
         let mut state = FakeState::default();
         state.root = Some(add(root, &mut state));
         Self(Arc::new(Mutex::new(state)))
+    }
+    /// Exercise native press routing with fake input, without running COM.
+    pub fn use_targeted_press(&self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.targeted_press = true;
+        }
     }
     /// Delay every source call; tokio's paused clock can exercise the hard ceiling.
     pub fn set_delay(&self, delay: Duration) {
@@ -159,6 +171,9 @@ impl FakeUia {
 }
 #[async_trait]
 impl UiaSource for FakeUia {
+    fn press_uses_targeted_messages(&self) -> bool {
+        self.0.lock().map(|s| s.targeted_press).unwrap_or(true)
+    }
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
         self.gate().await?;
         self.validate_action(node, hwnd)

@@ -163,6 +163,11 @@ fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
         *time.0.lock().unwrap() =
             Some(guard.events.startup_started + Duration::from_millis(elapsed));
         let mode = mode_at(Duration::from_millis(elapsed));
+        assert_eq!(
+            mode.requested(),
+            1,
+            "defaults never use paired movement/buttons"
+        );
         assert_eq!(mode, expected);
         let mouse = MouseApi.dispatch(mode, time.now());
         guard

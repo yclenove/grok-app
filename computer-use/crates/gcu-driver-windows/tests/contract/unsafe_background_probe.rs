@@ -134,14 +134,6 @@ impl Drop for Native {
 fn hwnd(id: u64) -> HWND {
     HWND(id as usize as *mut _)
 }
-fn activate_for_setup(cover: &unsafe_desktop::Cover) -> Result<(), String> {
-    // SAFETY: owned unrelated cover, setup only; never restore focus after an action.
-    let accepted = unsafe { SetForegroundWindow(hwnd(cover.hwnd)) }.as_bool();
-    require(
-        accepted && unsafe_desktop::foreground() == cover.hwnd,
-        "background diagnostic cover could not acquire foreground before action",
-    )
-}
 async fn invoke(root: u64, name: Option<&str>, expected: u64) -> Result<(), String> {
     let name = name.map(str::to_owned);
     let closed = Arc::new(AtomicBool::new(false));
@@ -208,7 +200,7 @@ async fn native_row(
     cover: &unsafe_desktop::Cover,
     direct: bool,
 ) -> Result<(), String> {
-    activate_for_setup(cover)?;
+    cover.acquire_foreground_for_setup().await?;
     let trace = unsafe_activation::Trace::start()?;
     trace.record("native before", native.root, cover.hwnd).await;
     require(
@@ -265,7 +257,7 @@ async fn live_background_activation_probe() {
     progress(format!("BACKGROUND CONTROL RESULT: PostMessage={post:?}"));
     let uia = native_row(&native, &cover, true).await;
     progress(format!("BACKGROUND CONTROL RESULT: direct_UIA={uia:?}"));
-    activate_for_setup(&cover).unwrap();
+    cover.acquire_foreground_for_setup().await.unwrap();
     let trace = unsafe_activation::Trace::start().unwrap();
     let root = u64::from_str_radix(win.id.split(':').next().unwrap(), 16).unwrap();
     trace
