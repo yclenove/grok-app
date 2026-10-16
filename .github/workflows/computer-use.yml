@@ -237,26 +237,6 @@ jobs:
       - name: Check desktop launcher syntax, ABI layout, and token admission policy
         run: ./scripts/test-windows-desktop.ps1
 
-      - name: Desktop session diagnostics (temporary)
-        run: |
-          "PSVersion=$($PSVersionTable.PSVersion) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-          "UserInteractive=$([Environment]::UserInteractive) SessionId=$((Get-Process -Id $PID).SessionId)"
-          "IsAdmin=$(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
-          whoami /groups | Select-String -Pattern 'Mandatory Label'
-          quser 2>&1
-          Get-Process explorer -ErrorAction SilentlyContinue | Select-Object Id,SessionId,ProcessName | Format-Table | Out-String
-          Get-Process | Group-Object SessionId | ForEach-Object { "session $($_.Name): $($_.Count) processes" }
-          $t = 'diag' + [Guid]::NewGuid().ToString('N').Substring(0,6)
-          $out = Join-Path $env:RUNNER_TEMP 'diag.txt'
-          $cmd = '"s=" + (Get-Process -Id $PID).SessionId + " admin=" + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) + " ui=" + [Environment]::UserInteractive | Out-File -FilePath ' + $out
-          $id = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-          Register-ScheduledTask -TaskName $t -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument ('-NoProfile -Command ' + $cmd)) -Principal (New-ScheduledTaskPrincipal -UserId $id -LogonType Interactive -RunLevel Limited) | Out-Null
-          Start-ScheduledTask -TaskName $t; Start-Sleep -Seconds 8
-          "limited task result: $(Get-Content $out -ErrorAction SilentlyContinue)"
-          "task info: $((Get-ScheduledTaskInfo -TaskName $t).LastTaskResult)"
-          Unregister-ScheduledTask -TaskName $t -Confirm:$false
-          $env:GCU_CONTRACT_EXE | Out-Null
-
       - name: Run native diagnostics, real contracts and smoke on the limited interactive desktop
         timeout-minutes: 20
         run: |
