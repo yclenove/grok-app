@@ -16,7 +16,9 @@ use gcu_driver_macos::{
 };
 use gcu_protocol::capabilities::{BackgroundOperation, ForegroundCapability, Platform};
 use std::{
+    future::Future,
     sync::Arc,
+    task::Poll,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -89,6 +91,29 @@ async fn resolve_matches_localized_name_bundle_id_and_path() {
         assert_eq!(app.info.id, "com.apple.finder");
         assert_eq!(app.info.name, "访达");
     }
+}
+
+#[tokio::test]
+async fn resolve_running_without_executable_url_matches_bundle_stem() {
+    let api = Arc::new(FakeMacApi::default());
+    api.add_running(
+        42,
+        &signed_facts("com.example.Fixture", "/Applications/fixture.app"),
+    );
+    api.update(|state| {
+        state.running[0].localized_name = "Localized Fixture".into();
+        state.running[0].executable_path.clear();
+    });
+    let driver = start(api).await;
+    assert_eq!(
+        driver
+            .resolve_app(&AppQuery::from("fixture"))
+            .await
+            .unwrap()
+            .info
+            .pid,
+        Some(42)
+    );
 }
 
 #[tokio::test]
@@ -189,8 +214,8 @@ async fn list_apps_returns_before_spotlight_finishes() {
         4,
         &signed_facts("com.example.Running", "/Applications/Running.app"),
     );
+    let blocked = api.block_spotlight();
     api.update(|state| {
-        state.spotlight_delay = Duration::from_millis(800);
         state.spotlight.push(recent_hit(
             "Recent",
             "/Applications/Recent.app",
@@ -198,18 +223,13 @@ async fn list_apps_returns_before_spotlight_finishes() {
         ));
     });
     let driver = start(api).await;
-    let started = Instant::now();
+    blocked.entered().await;
     let apps = driver.list_apps().await.unwrap();
-    assert!(
-        started.elapsed() < Duration::from_millis(400),
-        "elapsed {:?}",
-        started.elapsed()
-    );
     assert!(driver.discovery_status().indexing);
-    assert!(apps
-        .iter()
-        .any(|app| app.id == "com.example.Running" && app.pid == Some(4)));
     assert!(apps.iter().all(|app| app.name != "Recent"));
+    let resolved = driver.resolve_app(&AppQuery::from("Running")).await;
+    blocked.release();
+    assert_eq!(resolved.unwrap().info.pid, Some(4));
     let deadline = Instant::now() + Duration::from_secs(3);
     while driver.discovery_status().indexing {
         assert!(Instant::now() < deadline, "spotlight index did not finish");
@@ -222,6 +242,211 @@ async fn list_apps_returns_before_spotlight_finishes() {
 }
 
 #[tokio::test]
+async fn list_apps_slow_identity_index_returns_hints_without_timeout() {
+    let api = Arc::new(FakeMacApi::default());
+    let slow = signed_facts("com.example.Slow", "/Applications/Slow.app");
+    api.add_running(9, &slow);
+    let blocked = api.block_facts(&slow.bundle_path);
+    let driver = Arc::new(start(api).await);
+    let first = tokio::spawn({
+        let driver = driver.clone();
+        async move { driver.list_apps().await }
+    });
+    blocked.entered().await;
+    let result = first.await.unwrap();
+    let indexing = driver.discovery_status().indexing;
+    let mut second = std::pin::pin!(driver.list_apps());
+    let second = std::future::poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx))).await;
+    // Always release before assertions, including when the old driver times out.
+    blocked.release();
+    assert!(
+        result.is_ok(),
+        "first list must serve the cache: {result:?}"
+    );
+    assert!(indexing);
+    let Poll::Ready(Ok(hints)) = second else {
+        panic!("cached list must complete in one poll");
+    };
+    assert!(hints
+        .iter()
+        .any(|app| app.pid == Some(9) && app.identity.is_none()));
+}
+
+#[tokio::test]
+async fn list_apps_recent_hit_without_bundle_id_deduplicates_running_path() {
+    let api = Arc::new(FakeMacApi::default());
+    let fixture = signed_facts("com.example.Fixture", "/Applications/Fixture.app");
+    api.add_running(42, &fixture);
+    api.update(|state| {
+        state
+            .spotlight
+            .push(recent_hit("Fixture", &fixture.bundle_path, None))
+    });
+    let driver = start(api).await;
+    while driver.discovery_status().indexing {
+        tokio::task::yield_now().await;
+    }
+    let listed = driver.list_apps().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].pid, Some(42));
+}
+
+#[tokio::test]
+async fn resolve_running_cached_name_collision_returns_ambiguous_without_loading_installed_app() {
+    let api = Arc::new(FakeMacApi::default());
+    api.add_running(
+        42,
+        &signed_facts("com.example.Running", "/Applications/Fixture.app"),
+    );
+    let other = signed_facts("com.example.Installed", "/Other/Fixture.app");
+    api.update(|state| {
+        state.facts.insert(other.bundle_path.clone(), other.clone());
+        state.spotlight.push(recent_hit(
+            "Fixture",
+            &other.bundle_path,
+            Some("com.example.Installed"),
+        ));
+    });
+    let blocked = api.block_facts(&other.bundle_path);
+    let driver = start(api).await;
+    while driver.discovery_status().indexing {
+        tokio::task::yield_now().await;
+    }
+    let result = driver.resolve_app(&AppQuery::from("Fixture")).await;
+    blocked.release();
+    assert_eq!(result.unwrap_err(), DriverError::AmbiguousApp);
+}
+
+#[tokio::test]
+async fn read_operations_slow_installed_lookup_do_not_block_running_app_or_windows() {
+    let api = Arc::new(FakeMacApi::default());
+    let fixture = signed_facts("com.example.Fixture", "/Applications/Fixture.app");
+    api.add_running(42, &fixture);
+    let installed = signed_facts("com.example.Installed", "/Applications/Installed.app");
+    api.update(|state| {
+        state
+            .facts
+            .insert(installed.bundle_path.clone(), installed.clone());
+        state
+            .cg_windows
+            .push(cg_window(7, 42, "Fixture", rect(0.0, 0.0, 80.0, 40.0)));
+    });
+    let blocked = api.block_facts(&installed.bundle_path);
+    let driver = Arc::new(start(api).await);
+    let lookup = tokio::spawn({
+        let driver = driver.clone();
+        async move {
+            driver
+                .resolve_app(&AppQuery::from(installed.bundle_path.as_str()))
+                .await
+        }
+    });
+    blocked.entered().await;
+    let running = driver.resolve_app(&AppQuery::from("Fixture")).await;
+    let window = match &running {
+        Ok(app) => driver.key_window(app).await,
+        Err(error) => Err(error.clone()),
+    };
+    blocked.release();
+    assert_eq!(running.unwrap().info.pid, Some(42));
+    assert_eq!(window.unwrap().id, "cg:7:42");
+    lookup.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn resolve_running_during_slow_index_retains_ad_hoc_identity_and_pid() {
+    let api = Arc::new(FakeMacApi::default());
+    let slow = signed_facts("com.example.Slow", "/Applications/Slow.app");
+    api.add_running(9, &slow);
+    let mut fixture = signed_facts(
+        "com.grok.gcu-s02-fixture2",
+        "/Users/fixture/bundle/fixture.app",
+    );
+    fixture.signature.team_id = None;
+    api.add_running(42, &fixture);
+    let blocked = api.block_facts(&slow.bundle_path);
+    let driver = Arc::new(start(api).await);
+    let listing = tokio::spawn({
+        let driver = driver.clone();
+        async move { driver.list_apps().await }
+    });
+    blocked.entered().await;
+    let mut results = Vec::new();
+    for query in ["fixture", &fixture.bundle_path, "com.grok.gcu-s02-fixture2"] {
+        results.push(driver.resolve_app(&AppQuery::from(query)).await);
+    }
+    blocked.release();
+    listing.await.unwrap().unwrap();
+    for result in results {
+        let app = result.unwrap();
+        assert_eq!(app.info.pid, Some(42));
+        let identity = app.info.identity.unwrap();
+        assert!(identity.team_id.is_none());
+        assert_eq!(identity.executable.as_ref(), Some(&fixture.executable_path));
+        assert_eq!(identity.code_hash.as_ref(), Some(&fixture.sha256));
+        assert!(identity.publisher.unwrap().contains("unsigned"));
+    }
+}
+
+#[tokio::test]
+async fn read_operations_blocked_launch_use_independent_channels() {
+    let api = Arc::new(FakeMacApi::default());
+    let fixture = signed_facts("com.example.Fixture", "/Applications/Fixture.app");
+    api.add_running(42, &fixture);
+    let installed = signed_facts("com.example.Installed", "/Applications/Installed.app");
+    api.update(|state| {
+        state
+            .facts
+            .insert(installed.bundle_path.clone(), installed.clone());
+    });
+    let driver = Arc::new(start(api.clone()).await);
+    let app = driver
+        .resolve_app(&AppQuery::from(installed.bundle_path.as_str()))
+        .await
+        .unwrap();
+    let blocked = api.block_launch();
+    let launch = tokio::spawn({
+        let driver = driver.clone();
+        async move { driver.launch_app(&app).await }
+    });
+    blocked.entered().await;
+    let apps = driver.list_apps().await;
+    let resolved = driver.resolve_app(&AppQuery::from("Fixture")).await;
+    blocked.release();
+    apps.unwrap();
+    assert_eq!(resolved.unwrap().info.pid, Some(42));
+    launch.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn scoped_windows_unrelated_process_does_not_query_its_ax_windows() {
+    let api = Arc::new(FakeMacApi::default());
+    api.add_running(
+        42,
+        &signed_facts("com.example.Fixture", "/Applications/Fixture.app"),
+    );
+    api.update(|state| {
+        state
+            .cg_windows
+            .push(cg_window(7, 42, "Fixture", rect(0.0, 0.0, 80.0, 40.0)));
+        state
+            .cg_windows
+            .push(cg_window(8, 10, "Unrelated", rect(0.0, 0.0, 80.0, 40.0)));
+    });
+    let driver = start(api.clone()).await;
+    let app = driver
+        .resolve_app(&AppQuery::from("Fixture"))
+        .await
+        .unwrap();
+    let windows = driver.list_windows(Some(&app)).await.unwrap();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(driver.key_window(&app).await.unwrap().id, "cg:7:42");
+    let queries = api.state().unwrap().ax_queries;
+    assert!(!queries.is_empty());
+    assert!(queries.iter().all(|pid| *pid == 42));
+}
+
+#[tokio::test]
 async fn missing_permissions_block_windows_not_app_list() {
     let api = Arc::new(FakeMacApi::default());
     api.add_running(
@@ -229,13 +454,17 @@ async fn missing_permissions_block_windows_not_app_list() {
         &signed_facts("com.example.Editor", "/Applications/Editor.app"),
     );
     api.update(|state| state.accessibility = false);
+    let published = api.block_facts("/Applications/Editor.app");
     let driver = start(Arc::clone(&api)).await;
-    assert!(driver
+    published.entered().await;
+    let listed = driver
         .list_apps()
         .await
         .unwrap()
         .iter()
-        .any(|app| app.pid == Some(4)));
+        .any(|app| app.pid == Some(4));
+    published.release();
+    assert!(listed);
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     assert_eq!(
         driver.list_windows(Some(&app)).await.unwrap_err(),
@@ -477,6 +706,34 @@ async fn changed_signature_invalidates_the_grant() {
     });
     assert_eq!(
         driver.launch_app(&app).await.unwrap_err(),
+        DriverError::AppNotFound
+    );
+}
+
+#[tokio::test]
+async fn resolve_new_process_shared_binding_rejects_previous_app_ref() {
+    let api = Arc::new(FakeMacApi::default());
+    api.add_running(
+        42,
+        &signed_facts("com.example.Fixture", "/Applications/Fixture.app"),
+    );
+    let driver = start(api.clone()).await;
+    let old = driver
+        .resolve_app(&AppQuery::from("Fixture"))
+        .await
+        .unwrap();
+    api.update(|state| {
+        let previous = state.running[0].clone();
+        state.running[0].pid = 43;
+        state.running.push(previous);
+    });
+    let fresh = driver
+        .resolve_app(&AppQuery::from("Fixture"))
+        .await
+        .unwrap();
+    assert_eq!(fresh.info.pid, Some(43));
+    assert_eq!(
+        driver.list_windows(Some(&old)).await.unwrap_err(),
         DriverError::AppNotFound
     );
 }

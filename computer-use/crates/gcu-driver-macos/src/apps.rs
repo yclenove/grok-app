@@ -171,6 +171,7 @@ pub fn matches_running(app: &RunningApp, query: &str) -> bool {
         || eq(&app.executable_path, &query)
         || file_name(&app.executable_path).is_some_and(|name| eq(name, &query))
         || file_name(&app.bundle_path).is_some_and(|name| eq(name, &query))
+        || file_name(&app.bundle_path).is_some_and(|name| eq(name.trim_end_matches(".app"), &query))
 }
 
 /// Build a resolved row. `pid` is set for a running process and absent for Spotlight.

@@ -1,7 +1,9 @@
-//! Serial discovery worker and the portable [`Driver`] implementation.
+//! Independent discovery workers and the portable [`Driver`] implementation.
 //!
-//! Spotlight indexing uses a separate thread. The first `list_apps` does not
-//! wait for it. Screenshots use [`crate::capture`] and stop at
+//! `list_apps` reads an in-memory snapshot while a catalog thread enriches
+//! running-app hints. Spotlight, running-app resolution, and installed-app
+//! lookup use independent queues. No index IO holds a cache lock. Screenshots
+//! use [`crate::capture`] and stop at
 //! [`gcu_core::driver::DRIVER_DEADLINE`]. Semantic accessibility actions use
 //! [`crate::ax`] and do not activate the target app. Pointer and keyboard
 //! input use [`crate::input`] when an event backend is connected. Without one,
@@ -14,10 +16,12 @@ use crate::{
     api::MacApi,
     ax::{self, EventHub, FakeAxNode, FakeAxSource},
     capture::{self, CaptureSource},
+    catalog::Catalog,
     discovery::State,
     gate::MacGate,
     identity::TRUST_NOTE,
     spotlight::SpotlightIndex,
+    worker::{self, Task},
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -40,19 +44,19 @@ struct InjectedTree {
     root: FakeAxNode,
 }
 
-type Task = Box<dyn FnOnce(&mut State) + Send>;
-
 /// Discovery-only macOS driver. Portable tests pass a [`crate::testing::FakeMacApi`].
 ///
 /// `new` exists only on macOS. Both constructors refuse a root engine with
 /// [`DriverError::ElevationRequired`] before any Spotlight work.
 pub struct MacosDriver {
     worker: mpsc::SyncSender<Task>,
-    indexing: Arc<AtomicBool>,
+    resolver: mpsc::SyncSender<Task>,
+    lookup: mpsc::SyncSender<Task>,
+    catalog: Catalog,
+    spotlight: Arc<SpotlightIndex>,
     pub(crate) caps: Capabilities,
     pub(crate) guarded_caps: [Capabilities; 4],
     pub(crate) guard_runtime: Option<crate::input::watchdog::GuardRuntime>,
-    listed: AtomicBool,
     injected: Mutex<Option<InjectedTree>>,
     capture: Mutex<Option<Arc<dyn CaptureSource>>>,
     /// Declared before the AX thread so Drop restores toggles while the thread
@@ -73,8 +77,11 @@ pub struct MacosDriver {
 }
 
 impl MacosDriver {
-    /// Start the worker and the Spotlight thread. Startup is bounded by
-    /// [`NATIVE_TIMEOUT`]. The caller is not blocked on the first metadata query.
+    /// Start the native queues and background catalog/Spotlight threads.
+    /// Startup is bounded by [`NATIVE_TIMEOUT`] and does not wait for indexing.
+    /// Lists return cached, possibly empty/partial hints with no native IO;
+    /// `discovery_status` reports unfinished indexing. Resolution verifies fresh
+    /// facts on independent queues with a shared five-second caller budget.
     pub async fn with_api(api: Arc<dyn MacApi>) -> Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<Task>(32);
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -83,13 +90,19 @@ impl MacosDriver {
             .spawn(move || {
                 let started = (|| {
                     MacGate::engine(api.engine_euid()?)?;
-                    let spotlight = SpotlightIndex::start(api.clone())?;
-                    let indexing = spotlight.flag();
-                    Ok((State::new(api, spotlight), indexing))
+                    let spotlight = Arc::new(SpotlightIndex::start(api.clone())?);
+                    let catalog = Catalog::start(api.clone())?;
+                    let state = State::new(api, spotlight.clone());
+                    let resolver = worker::start("gcu-macos-resolve", state.fork())?;
+                    let lookup = worker::start("gcu-macos-lookup", state.fork())?;
+                    Ok((state, catalog, spotlight, resolver, lookup))
                 })();
                 match started {
-                    Ok((mut state, indexing)) => {
-                        if ready_tx.send(Ok(indexing)).is_err() {
+                    Ok((mut state, catalog, spotlight, resolver, lookup)) => {
+                        if ready_tx
+                            .send(Ok((catalog, spotlight, resolver, lookup)))
+                            .is_err()
+                        {
                             return;
                         }
                         while let Ok(task) = rx.recv() {
@@ -104,7 +117,7 @@ impl MacosDriver {
             .map_err(|_| DriverError::Crashed {
                 maybe_executed: false,
             })?;
-        let indexing = tokio::time::timeout(NATIVE_TIMEOUT, ready_rx)
+        let (catalog, spotlight, resolver, lookup) = tokio::time::timeout(NATIVE_TIMEOUT, ready_rx)
             .await
             .map_err(|_| DriverError::Timeout {
                 maybe_executed: false,
@@ -114,11 +127,13 @@ impl MacosDriver {
             })??;
         Ok(Self {
             worker: tx,
-            indexing,
+            resolver,
+            lookup,
+            catalog,
+            spotlight,
             caps: crate::guards::discovery_capabilities(),
             guarded_caps: std::array::from_fn(|_| crate::guards::discovery_capabilities()),
             guard_runtime: None,
-            listed: AtomicBool::new(false),
             injected: Mutex::new(None),
             capture: Mutex::new(None),
             toggles: Mutex::new(Vec::new()),
@@ -237,40 +252,7 @@ impl MacosDriver {
         mutation: bool,
         task: impl FnOnce(&mut State) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        if cancel.is_some_and(Cancel::is_cancelled) {
-            return Err(DriverError::Cancelled {
-                maybe_executed: false,
-            });
-        }
-        let (tx, rx) = oneshot::channel();
-        self.worker
-            .try_send(Box::new(move |state| {
-                if !tx.is_closed() {
-                    let _ = tx.send(task(state));
-                }
-            }))
-            .map_err(|_| DriverError::Crashed {
-                maybe_executed: false,
-            })?;
-        let wait = tokio::time::timeout(timeout.min(NATIVE_TIMEOUT), rx);
-        let result = if let Some(cancel) = cancel {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    return Err(DriverError::Cancelled { maybe_executed: mutation });
-                }
-                result = wait => result,
-            }
-        } else {
-            wait.await
-        };
-        result
-            .map_err(|_| DriverError::Timeout {
-                maybe_executed: mutation,
-            })?
-            .map_err(|_| DriverError::Crashed {
-                maybe_executed: mutation,
-            })?
+        worker::call(&self.worker, timeout, cancel, mutation, task).await
     }
 }
 
@@ -313,6 +295,7 @@ impl Driver for MacosDriver {
                 guards.is_stopped()
             ));
         }
+        issues.extend(self.catalog.issues());
         issues.push(TRUST_NOTE.into());
         issues.push(crate::text_input::CLIPBOARD_NOTE.into());
         DoctorReport {
@@ -324,24 +307,36 @@ impl Driver for MacosDriver {
 
     fn discovery_status(&self) -> DiscoveryStatus {
         DiscoveryStatus {
-            indexing: self.indexing.load(std::sync::atomic::Ordering::Acquire),
+            indexing: self.catalog.indexing()
+                || self
+                    .spotlight
+                    .flag()
+                    .load(std::sync::atomic::Ordering::Acquire),
         }
     }
 
     async fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        let timeout = if !self.listed.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            Duration::from_millis(100)
-        } else {
-            NATIVE_TIMEOUT
-        };
-        self.call(timeout, None, false, State::list).await
+        self.catalog.list(&self.spotlight)
     }
 
     async fn resolve_app(&self, query: &AppQuery) -> Result<AppRef> {
-        let query = query.clone();
-        self.call(NATIVE_TIMEOUT, None, false, move |state| {
-            state.resolve(&query)
+        let started = Instant::now();
+        let running_query = query.clone();
+        if let Some(app) = worker::call(&self.resolver, NATIVE_TIMEOUT, None, false, move |state| {
+            state.resolve_running(&running_query)
         })
+        .await?
+        {
+            return Ok(app);
+        }
+        let query = query.clone();
+        worker::call(
+            &self.lookup,
+            NATIVE_TIMEOUT.saturating_sub(started.elapsed()),
+            None,
+            false,
+            move |state| state.resolve(&query),
+        )
         .await
     }
 

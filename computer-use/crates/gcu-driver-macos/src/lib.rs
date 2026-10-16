@@ -22,6 +22,7 @@ pub mod api;
 pub mod apps;
 pub mod ax;
 pub mod capture;
+mod catalog;
 mod discovery;
 mod driver;
 #[cfg(target_os = "macos")]
@@ -37,6 +38,7 @@ pub mod spotlight;
 pub mod testing;
 mod text_input;
 pub mod windows;
+mod worker;
 
 pub use driver::{MacElement, MacosDriver};
 #[cfg(target_os = "macos")]

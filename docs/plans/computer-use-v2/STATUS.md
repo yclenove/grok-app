@@ -102,6 +102,7 @@
 - Linux 树遍历对名称/标识含 "password" 的节点追加 PASSWORD 状态（启发式，宁可多抹）：eframe 不暴露密码角色，夹具靠它通过 C14/C20；真正的原生密码控件仍以 AT-SPI 角色/状态为准。契约表里 6 项跳过（launch_app、set_value 文本框、combobox Selection、stale geometry 快照 ID 等）是驱动能力缺口，不是通过。
 - S-02 发现：macOS 后台点击需要给 CGEvent 设置整数字段 51（窗口号），否则 postToPid 事件的 windowNumber 为 0；Chromium 在 macOS 27 后台收不到（详见 ADR 0006）。P1-06 的契约测试必须校验“实际到达”。
 - 带 worker 子进程的测试（`gcu-driver-windows` 的 `tests/{input,clipboard,worker}`）对机器负载/冷启动敏感：慢的 macOS runner（#50 稳定失败）和高负载的 build8（P2-08 一次失败）上 worker 启动超过 `DRIVER_DEADLINE` 就返回 `Timeout`。P2-07 正在查根因；原则：这类测试不得依赖真实时间/真实进程冷启动，改为可注入时钟或预热。
+- macOS 真机发现(Mini, macOS 27)：P1-02 的发现路径在真机上首次 list_apps 超时、resolve_app 找不到运行中的夹具(逐 App 签名/哈希堵住串行队列)，已修(cu2/fix-mac-discovery)；Windows 在真机 CI 上暴露同类问题，由 P2-09 分支跟进。真机/真桌面才能暴露这类问题，CI 与假驱动测不出。
 
 ## 阶段记录
 

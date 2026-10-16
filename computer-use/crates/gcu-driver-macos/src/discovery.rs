@@ -3,7 +3,7 @@
 use crate::capture::{self, SourceWindow};
 use crate::{
     api::{BundleFacts, MacApi, RunningApp, SpotlightHit},
-    apps::{self, hit_could_match, list_catalog, resolve_loaded, ResolveOutcome, ResolvedApp},
+    apps::{self, hit_could_match, resolve_loaded, ResolveOutcome, ResolvedApp},
     gate::{self, MacGate},
     identity::{identity_from_facts, needs_reauth},
     spotlight::SpotlightIndex,
@@ -13,23 +13,37 @@ use gcu_core::{
     driver::{AppQuery, AppRef, DriverError, Result, WindowRef},
     model::Geometry,
 };
-use gcu_protocol::{AppInfo, WindowInfo};
-use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
+use gcu_protocol::WindowInfo;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 pub(super) struct State {
     pub(super) api: Arc<dyn MacApi>,
-    pub(super) spotlight: SpotlightIndex,
-    entries: BTreeMap<String, ResolvedApp>,
+    pub(super) spotlight: Arc<SpotlightIndex>,
+    entries: Arc<Mutex<BTreeMap<String, ResolvedApp>>>,
     windows: BTreeMap<String, AlignedWindow>,
     pub(super) issues: Vec<String>,
 }
 
 impl State {
-    pub(super) fn new(api: Arc<dyn MacApi>, spotlight: SpotlightIndex) -> Self {
+    pub(super) fn new(api: Arc<dyn MacApi>, spotlight: Arc<SpotlightIndex>) -> Self {
         Self {
             api,
             spotlight,
-            entries: BTreeMap::new(),
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
+            windows: BTreeMap::new(),
+            issues: Vec::new(),
+        }
+    }
+
+    pub(super) fn fork(&self) -> Self {
+        Self {
+            api: self.api.clone(),
+            spotlight: self.spotlight.clone(),
+            entries: self.entries.clone(),
             windows: BTreeMap::new(),
             issues: Vec::new(),
         }
@@ -37,16 +51,10 @@ impl State {
 }
 
 impl State {
-    pub(super) fn list(&mut self) -> Result<Vec<AppInfo>> {
+    /// Only matching running processes incur signature/hash IO. No Spotlight
+    /// bundle is opened, even when an installed app has the same display name.
+    pub(super) fn resolve_running(&mut self, query: &AppQuery) -> Result<Option<AppRef>> {
         MacGate::engine(self.api.engine_euid()?)?;
-        let running = self.running_resolved()?;
-        let hits = self.spotlight.hits()?;
-        Ok(list_catalog(&running, &hits, SystemTime::now()))
-    }
-
-    pub(super) fn resolve(&mut self, query: &AppQuery) -> Result<AppRef> {
-        MacGate::engine(self.api.engine_euid()?)?;
-        let now = SystemTime::now();
         let running_apps = self.api.running_apps()?;
         let mut running = Vec::new();
         for app in &running_apps {
@@ -58,31 +66,72 @@ impl State {
             };
             running.push((app.clone(), self.api.bundle_facts(path)?));
         }
+        if running.is_empty() {
+            return Ok(None);
+        }
+        // Preserve ambiguity using cached hints, without opening unrelated code.
+        for hit in self.spotlight.hits()? {
+            if hit_could_match(&hit, &query.0)
+                && crate::spotlight::within_recent(hit.last_used, SystemTime::now())
+                && !running.iter().any(|(app, _)| {
+                    app.bundle_path.eq_ignore_ascii_case(&hit.path)
+                        || app.bundle_id.as_ref().is_some_and(|id| {
+                            hit.bundle_id
+                                .as_ref()
+                                .is_some_and(|other| id.eq_ignore_ascii_case(other))
+                        })
+                })
+            {
+                return Err(DriverError::AmbiguousApp);
+            }
+        }
+        self.bind(resolve_loaded(
+            &running,
+            &[],
+            None,
+            &query.0,
+            SystemTime::now(),
+        )?)
+        .map(Some)
+    }
+
+    /// Installed/direct-path lookup has its own queue, never ahead of running apps.
+    pub(super) fn resolve(&mut self, query: &AppQuery) -> Result<AppRef> {
+        // Recheck: an app can start between the fast path and this fallback.
+        if let Some(app) = self.resolve_running(query)? {
+            return Ok(app);
+        }
         let hits = self.spotlight.hits()?;
         let mut recent: Vec<(SpotlightHit, BundleFacts)> = Vec::new();
         for hit in hits {
-            if running.iter().any(|(app, _)| {
-                app.bundle_id.as_ref().is_some_and(|id| {
-                    hit.bundle_id
-                        .as_ref()
-                        .is_some_and(|other| id.eq_ignore_ascii_case(other))
-                }) || app.bundle_path.eq_ignore_ascii_case(&hit.path)
-            }) {
-                continue;
-            }
             if !hit_could_match(&hit, &query.0) {
                 continue;
             }
             recent.push((hit.clone(), self.api.bundle_facts(&hit.path)?));
         }
-        let direct = direct_facts(self.api.as_ref(), &query.0, &running, &recent)?;
-        match resolve_loaded(&running, &recent, direct.as_ref(), &query.0, now)? {
+        let direct = direct_facts(self.api.as_ref(), &query.0, &[], &recent)?;
+        self.bind(resolve_loaded(
+            &[],
+            &recent,
+            direct.as_ref(),
+            &query.0,
+            SystemTime::now(),
+        )?)
+    }
+
+    fn bind(&mut self, outcome: ResolveOutcome) -> Result<AppRef> {
+        match outcome {
             ResolveOutcome::None => Err(DriverError::AppNotFound),
             ResolveOutcome::Ambiguous(_) => Err(DriverError::AmbiguousApp),
             ResolveOutcome::One(app) => {
                 let app = *app;
                 let info = app.info.clone();
-                self.entries.insert(info.id.clone(), app);
+                self.entries
+                    .lock()
+                    .map_err(|_| DriverError::Crashed {
+                        maybe_executed: false,
+                    })?
+                    .insert(info.id.clone(), app);
                 Ok(AppRef { info })
             }
         }
@@ -119,7 +168,7 @@ impl State {
                 .collect());
         }
         Ok(self
-            .collect_windows()?
+            .collect_windows(None)?
             .into_iter()
             .map(|window| window.info())
             .collect())
@@ -163,17 +212,28 @@ impl State {
         MacGate::engine(self.api.engine_euid()?)?;
         let entry = self
             .entries
+            .lock()
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
             .get(&app.info.id)
             .cloned()
             .ok_or(DriverError::AppNotFound)?;
-        if app.info.identity.as_ref() != Some(&entry.identity.app_identity()) {
+        if app.info.pid != entry.pid
+            || app.info.identity.as_ref() != Some(&entry.identity.app_identity())
+        {
             return Err(DriverError::AppNotFound);
         }
         let fresh = identity_from_facts(self.api.bundle_facts(&entry.identity.bundle_path)?)?;
         if needs_reauth(&entry.identity, &fresh)
             || fresh.app_identity() != entry.identity.app_identity()
         {
-            self.entries.remove(&app.info.id);
+            self.entries
+                .lock()
+                .map_err(|_| DriverError::Crashed {
+                    maybe_executed: false,
+                })?
+                .remove(&app.info.id);
             return Err(DriverError::AppNotFound);
         }
         if let Some(pid) = app.info.pid {
@@ -289,39 +349,16 @@ impl State {
         Ok((accessibility && screen, issues))
     }
 
-    fn running_resolved(&mut self) -> Result<Vec<ResolvedApp>> {
-        let mut resolved = Vec::new();
-        for app in self.api.running_apps()? {
-            let Some(path) = fact_path(&app.bundle_path, &app.executable_path) else {
-                continue;
-            };
-            let facts = match self.api.bundle_facts(path) {
-                Ok(facts) => facts,
-                Err(error) => {
-                    self.note(&error);
-                    continue;
-                }
-            };
-            match apps::resolved_from(facts, Some(app.pid), app.hidden) {
-                Ok(row) => {
-                    self.entries.insert(row.info.id.clone(), row.clone());
-                    resolved.push(row);
-                }
-                Err(error) => self.note(&error),
-            }
-        }
-        Ok(resolved)
-    }
-
     fn capture_window(&mut self, win: &WindowRef) -> Result<crate::windows::AlignedWindow> {
         self.observation_gate()?;
         let resolved = self.validate_app(&win.app)?;
+        check_window_pid(win, resolved.pid)?;
         let prior = self.windows.get(&win.id).cloned();
         if prior.is_none() {
             return Err(DriverError::WindowGone);
         }
         let current = self
-            .collect_windows()?
+            .collect_windows(resolved.pid)?
             .into_iter()
             .find(|window| window.id == win.id);
         if let Some(window) = current {
@@ -366,12 +403,13 @@ impl State {
         require_prior: bool,
     ) -> Result<crate::windows::AlignedWindow> {
         let resolved = self.validate_app(&win.app)?;
+        check_window_pid(win, resolved.pid)?;
         let prior = self.windows.get(&win.id).cloned();
         if require_prior && prior.is_none() {
             return Err(DriverError::WindowGone);
         }
         let current = self
-            .collect_windows()?
+            .collect_windows(resolved.pid)?
             .into_iter()
             .find(|window| window.id == win.id)
             .ok_or(DriverError::WindowGone)?;
@@ -417,10 +455,14 @@ impl State {
         Ok(())
     }
 
-    fn collect_windows(&mut self) -> Result<Vec<AlignedWindow>> {
+    fn collect_windows(&mut self, target_pid: Option<u32>) -> Result<Vec<AlignedWindow>> {
         let cg = self.api.windows()?;
         let mut by_pid: BTreeMap<u32, Vec<_>> = BTreeMap::new();
-        for window in cg.into_iter().filter(windows::is_listed) {
+        for window in cg
+            .into_iter()
+            .filter(windows::is_listed)
+            .filter(|window| target_pid.is_none_or(|pid| window.pid == pid))
+        {
             by_pid.entry(window.pid).or_default().push(window);
         }
         let mut aligned = Vec::new();
@@ -438,25 +480,33 @@ impl State {
             aligned.extend(align_pid(pid, &rows, &ax));
         }
         aligned.sort_by(|left, right| left.id.cmp(&right.id));
-        self.windows = aligned
-            .iter()
-            .map(|window| (window.id.clone(), window.clone()))
-            .collect();
+        self.windows
+            .retain(|_, window| target_pid.is_some_and(|pid| window.pid != pid));
+        self.windows.extend(
+            aligned
+                .iter()
+                .map(|window| (window.id.clone(), window.clone())),
+        );
         Ok(aligned)
     }
 
     fn windows_for(&mut self, pid: u32) -> Result<Vec<AlignedWindow>> {
-        Ok(self
-            .collect_windows()?
-            .into_iter()
-            .filter(|window| window.pid == pid)
-            .collect())
+        self.collect_windows(Some(pid))
     }
 
     fn note(&mut self, error: &DriverError) {
         self.issues.push(error.to_string());
         self.issues.truncate(8);
     }
+}
+
+fn check_window_pid(win: &WindowRef, pid: Option<u32>) -> Result<()> {
+    let pid = pid.ok_or(DriverError::WindowGone)?;
+    let window_pid = crate::ax::parse_window_pid(&win.id).ok_or(DriverError::WindowGone)?;
+    if pid != window_pid {
+        return Err(DriverError::AppNotFound);
+    }
+    Ok(())
 }
 
 fn direct_facts(
