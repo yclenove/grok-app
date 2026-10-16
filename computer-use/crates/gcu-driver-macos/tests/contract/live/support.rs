@@ -129,24 +129,30 @@ pub(super) fn process_running(name: &str) -> bool {
 }
 
 /// Unix pid of the frontmost app. Harness probe only; not a driver action.
+/// Uses `lsappinfo` (no Apple Events / Automation permission prompt).
 pub(super) fn frontmost_pid() -> Result<u32, String> {
-    let output = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            "tell application \"System Events\" to get unix id of first application process whose frontmost is true",
-        ])
+    let front = std::process::Command::new("lsappinfo")
+        .arg("front")
         .output()
         .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(format!(
-            "frontmost pid query failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
+    if !front.status.success() || asn.is_empty() {
+        return Err(format!("lsappinfo front failed: {asn:?}"));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.trim()
-        .parse::<u32>()
-        .map_err(|error| format!("frontmost pid {:?}: {error}", text.trim()))
+    let info = std::process::Command::new("lsappinfo")
+        .args(["info", "-only", "pid", &asn])
+        .output()
+        .map_err(|error| error.to_string())?;
+    let text = String::from_utf8_lossy(&info.stdout).to_string();
+    text.split("pid")
+        .nth(1)
+        .and_then(|rest| {
+            rest.trim_start_matches([' ', '=', '"'])
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|digits| digits.parse().ok())
+        })
+        .ok_or_else(|| format!("frontmost pid not found in lsappinfo output: {text:?}"))
 }
 
 /// Pids whose process name is exactly `gcu-fixture`.
