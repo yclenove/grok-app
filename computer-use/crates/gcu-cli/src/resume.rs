@@ -408,6 +408,7 @@ pub(crate) async fn send(directory: &Path, request: &str) -> Result<(), Failure>
 
 #[cfg(test)]
 mod tests {
+    const STOP_INDEPENDENCE_FALLBACK: Duration = Duration::from_secs(10);
     use super::*;
     use gcu_host_api::UserActivity;
     struct Tty(bool, bool);
@@ -449,9 +450,10 @@ mod tests {
         let holder = tokio::task::spawn_blocking(move || {
             let _credentials = auth.credentials.lock().unwrap();
             locked_tx.send(()).unwrap();
-            // Simulate slow credential-file rotation, with a bounded fallback
-            // so a regression blocks the runtime for two seconds, not forever.
-            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            // Simulate slow credential-file rotation. If Stop ever waits for this lock
+            // it only returns after the fallback below, so a regression is separated
+            // from a merely slow machine by a wide margin instead of a tight wall clock.
+            let _ = release_rx.recv_timeout(STOP_INDEPENDENCE_FALLBACK);
         });
         locked_rx.await.unwrap();
         let (mut server, mut client) = tokio::io::duplex(256);
@@ -467,7 +469,13 @@ mod tests {
         send(control.directory(), "stop")
             .await
             .unwrap_or_else(|error| panic!("{}", error.message));
-        assert!(started.elapsed() < Duration::from_millis(500));
+        // Stop finished while the credential lock was still held, which is the property under
+        // test. The bound is half the fallback: far below a blocked Stop, far above CI jitter.
+        assert!(
+            started.elapsed() < STOP_INDEPENDENCE_FALLBACK / 2,
+            "Stop took {:?} while credentials were locked",
+            started.elapsed()
+        );
         assert!(host.activity.latched_stop());
         assert!(driver.release_calls() > 0);
         release_tx.send(()).unwrap();
