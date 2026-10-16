@@ -52,7 +52,7 @@
 | P4-06 | turn-ended 接入 | P0-09、S-01 | 1d | done | cu2/P4-06-turn-ended |  | 2026-10-13 | gcu turn-ended(Grok Stop 钩子 stdin / Codex notify argv)经私有端点通知会话；Turn 授权到期、幂等、不解除 Stop、空闲推定；链式 notify 先转发原调用；钩子错误可见且非致命 |
 | P4-07 | 打包与分发 | P4-01、P4-02、P4-03、P4-04、P4-05、P4-06 | 3d | todo |  |  |  | 需签名证书（可先无签名） |
 | P4-08 | 用户文档 | P4-07 | 1d | todo |  |  |  |  |
-| P5-01 | ComputerUseHost 骨架 + 引擎托管 | P0-12、P1-09 | 2.5d | todo |  |  |  |  |
+| P5-01 | ComputerUseHost 骨架 + 引擎托管 | P0-12、P1-09 | 2.5d | done | cu2/P5-01-host-skeleton |  | 2026-10-16 | 监督逻辑(准入/双向握手/空闲退出/熔断/Stop 锁存恢复/发布模式拒绝 Windows 提权与 UIAccess)放在 `gcu-host-protocol::supervisor`，24 个监督单测+13 个 engine_host 在 computer-use 工作区可测；`src-tauri/src/computer_use/` 只是薄适配(默认关闭，设置行与 UI 归 P5-08)，由 ci.yml 的 Rust 四平台编译(构建机无 webkit2gtk)。`gcu engine` 仍只接受 `--driver fake`，正式启用将失败关闭直到驱动装配。真机待验：macOS TCC 责任进程链、Developer ID 与 identifier-only、外部引擎不继承正式授权；Windows 提权/UIAccess 仅经 windows-gnu 编译 |
 | P5-02 | Gateway + 注入 | P5-01、S-01 | 2d | todo |  |  |  |  |
 | P5-03 | 审批卡 | P5-02 | 3d | todo |  |  |  |  |
 | P5-04 | 敏感确认卡 + 交接卡 | P5-03 | 2d | todo |  |  |  |  |
@@ -106,6 +106,9 @@
 - P1-09 真机发现(Mini, macOS 27)：egui/AccessKit 的 AX 树是懒激活的——第一次访问只返回 7 节点(驱动如实标 incomplete=partial_error)，约 588ms 后才是完整 54 节点；调用方(Router/套件)必须带界限地重读直到完整，ADR 0004 的“不完整即不出图”因此在首次观察必然触发。
 - P1-09 真机发现(Mini)：accesskit_macos 的 `setAccessibilityValue:` 只是把动作入队、AppKit 立即报成功，egui 0.36 的 TextEdit 丢弃该动作，文本不变——AX 写入后必须读回验证(驱动已在注入时钟 320ms 内轮询，窗口后仍不符才 NotSettable 且 maybe_executed=true，避免“假成功”和“假失败”两种错)。同一原因使 Unicode/ZWJ/换行只能走剪贴板粘贴路径。
 - P1-09 真机发现(Mini)：egui 拖拽对同一帧内的按下+抬起不响应，两点拖拽需分帧；虚拟列表在 AX 里没有 AXList/AXTable，只有 9 个无名 AXStaticText 与只可按压的滚动条，滚动靠悬停后的 line 单位滚轮。
+- P5-01：`interprocess` 2.4.6 需要比 src-tauri 锁里 tokio 1.53.1 更新的 tokio（`AsyncFd::register_with_interest` 缺失），src-tauri 的 Cargo.lock 固定在 2.4.5（与 computer-use/Cargo.lock 一致）；升级 tokio 前不要 `cargo update` 该 crate。
+- 构建机的 `rcargo` 只同步 computer-use/ 与 src-tauri 的 Cargo.toml/Cargo.lock，不同步 src-tauri/src，且无 webkit2gtk：src-tauri 的代码只能由 ci.yml 编译，所以任何放进 src-tauri 的逻辑都要尽量薄，可测逻辑放进 computer-use 的 crate。
+- CI：Linux 作业依赖的 PipeWire PPA(ppa.launchpadcontent.net)会间歇 503（索引与 .deb 下载都会）；#71 加了 apt 重试并在 PPA 不可用时明确失败，而不是回退到过旧的系统 libpipewire 后在 libspa 里报一串编译错误。
 
 ## 阶段记录
 
