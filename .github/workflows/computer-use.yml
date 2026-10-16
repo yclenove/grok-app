@@ -71,7 +71,7 @@ jobs:
           # confusing compile errors. Retry, then fail early with a clear message.
           sudo add-apt-repository -y -n ppa:pipewire-debian/pipewire-upstream
           for attempt in 1 2 3 4; do
-            sudo apt-get update || true
+            sudo apt-get update -o Acquire::Retries=5 || true
             if apt-cache policy libpipewire-0.3-dev | grep -q 'ppa.launchpadcontent.net/pipewire-debian'; then
               break
             fi
@@ -82,7 +82,13 @@ jobs:
             echo "::error::pipewire-upstream PPA unavailable after retries; refusing to build against the stock libpipewire"
             exit 1
           fi
-          sudo apt-get install -y libxkbcommon-dev libpipewire-0.3-dev
+          # Package downloads from the PPA flap with 503 too: let apt retry each file and the whole install.
+          for attempt in 1 2 3; do
+            sudo apt-get install -y -o Acquire::Retries=6 libxkbcommon-dev libpipewire-0.3-dev && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "apt install failed (attempt $attempt); retrying"
+            sleep 30
+          done
 
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
