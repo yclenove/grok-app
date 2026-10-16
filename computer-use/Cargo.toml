@@ -60,6 +60,24 @@ missing_docs = "warn"
 unwrap_used = "deny"
 expect_used = "deny"
 
+# PNG encode/decode and deflate are pathologically slow unoptimized. Optimizing only these leaf
+# dependencies in dev/test keeps compile times and debuggability of our own crates while the
+# redacted-image pipeline (and its 5s file/image ceiling) behaves like release on slow hosts.
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
