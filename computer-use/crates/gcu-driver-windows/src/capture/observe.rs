@@ -19,6 +19,7 @@ impl WindowsDriver {
             gcu_protocol::capabilities::BackgroundOperation::None
         };
         self.capture_backend = Some(backend);
+        self.safety_caps = std::sync::OnceLock::new();
         self
     }
     /// Payload-free path/counters. A raw capture is not a redacted delivery.

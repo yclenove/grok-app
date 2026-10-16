@@ -1,6 +1,8 @@
 //! Protocol adversaries and subprocess lifecycle; no real desktop/account data.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use gcu_driver_windows::worker::{codec, ExecMode};
+#[cfg(feature = "test-worker-faults")]
+mod common;
 
 #[tokio::test]
 async fn codec_invalid_truncated_oversized_frames_return_errors() {

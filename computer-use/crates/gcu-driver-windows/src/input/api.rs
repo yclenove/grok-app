@@ -113,8 +113,10 @@ pub trait InputApi: Send + Sync + 'static {
     ) -> Result<bool> {
         Ok(false)
     }
-    /// P2-07 interface slot: check its live Stop latch immediately before paste.
-    /// Implementations must also compare the current precise focus to `focus`.
+    /// Compare the current precise focus to `focus` and check cancellation.
+    /// The paste coordinator checks its attached parent Stop latch before/after
+    /// this read; isolated workers are stopped through the independent parent
+    /// channel and cannot send before the parent's guarded InputPrepare ack.
     async fn before_paste(
         &self,
         _target: Target,

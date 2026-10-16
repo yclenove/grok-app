@@ -2,6 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod clipboard_support;
 mod common;
+#[path = "clipboard_support/stop.rs"]
+mod stop;
 use clipboard_support::*;
 use gcu_core::driver::*;
 use gcu_driver_windows::input::{api::Event, text, InputBackend};

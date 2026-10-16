@@ -7,11 +7,30 @@ impl Driver for WindowsDriver {
         Platform::Windows
     }
     fn capabilities(&self) -> &Capabilities {
-        &self.caps
+        if self.child {
+            return &self.caps;
+        }
+        let guard = self
+            .safety
+            .as_ref()
+            .is_some_and(|s| s.activity_clock().available());
+        let stop = self
+            .safety
+            .as_ref()
+            .is_some_and(|s| s.available() && !s.is_stopped())
+            && !self.diagnostic;
+        let overlay = self.overlay.as_ref().is_some_and(|o| o.available());
+        &self
+            .safety_caps
+            .get_or_init(|| crate::input::watchdog::capabilities(&self.caps))
+            [usize::from(guard) | (usize::from(stop) << 1) | (usize::from(overlay) << 2)]
     }
     async fn doctor(&self) -> DoctorReport {
         if let Some(worker) = &self.isolated {
-            return worker.doctor().await;
+            let mut report = worker.doctor().await;
+            report.capabilities = self.capabilities().clone();
+            self.safety_issues(&mut report.issues);
+            return report;
         }
         let result = self
             .call(NATIVE_TIMEOUT, None, false, |s| {
@@ -26,7 +45,7 @@ impl Driver for WindowsDriver {
             Err(e) => (false, vec![e.to_string()]),
         };
         issues.push(if self.input.is_some() {
-            "Targeted messages are partial (Chromium/UWP refused); foreground requires core approval; native activity guard/hotkey pending P2-07".into()
+            "Targeted messages are partial (Chromium/UWP refused); foreground requires core approval and healthy parent Stop monitoring".into()
         } else if self.capture_backend.is_some() {
             "Pointer/keyboard and foreground unavailable; raw captures require core redaction; protected/all-black frames are refused".into()
         } else if self.observer.is_some() {
@@ -38,9 +57,12 @@ impl Driver for WindowsDriver {
             "Entry signatures do not attest loaded DLL/plugins or writable loading paths".into(),
         );
         DoctorReport {
-            capabilities: self.caps.clone(),
+            capabilities: self.capabilities().clone(),
             ready,
-            issues,
+            issues: {
+                self.safety_issues(&mut issues);
+                issues
+            },
         }
     }
     fn discovery_status(&self) -> DiscoveryStatus {
@@ -101,6 +123,7 @@ impl Driver for WindowsDriver {
             .await
     }
     async fn launch_app(&self, app: &AppRef) -> Result<AppRef> {
+        self.check_safety(false)?;
         if let Some(worker) = &self.isolated {
             return worker.launch_app(app).await;
         }
@@ -145,6 +168,7 @@ impl Driver for WindowsDriver {
         .await
     }
     async fn key_window(&self, app: &AppRef) -> Result<WindowInfo> {
+        self.check_safety(false)?;
         if let Some(worker) = &self.isolated {
             return worker.key_window(app).await;
         }
@@ -326,7 +350,9 @@ impl Driver for WindowsDriver {
             })?
     }
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        self.check_safety(false)?;
         if let Some(worker) = &self.isolated {
+            self.check_safety(crate::input::watchdog::foreground(req))?;
             return worker.perform(req, cancel).await;
         }
         let deadline = tokio::time::Instant::now() + DRIVER_DEADLINE;
@@ -337,6 +363,7 @@ impl Driver for WindowsDriver {
                 s.observation_window(win, foreground)
             })
             .await?;
+        self.check_safety(crate::input::watchdog::foreground(req))?;
         if crate::uia::actions::target(req).is_none() {
             return self
                 .input
@@ -382,6 +409,42 @@ impl Driver for WindowsDriver {
         }
         if let Some(input) = &self.input {
             input.release_all().await;
+        }
+    }
+}
+impl WindowsDriver {
+    fn check_safety(&self, foreground: bool) -> Result<()> {
+        if self.child {
+            return Ok(());
+        }
+        if foreground && self.diagnostic {
+            return Err(DriverError::CapabilityUnavailable);
+        }
+        match &self.safety {
+            Some(guard) => guard.check(foreground),
+            None if foreground => Err(DriverError::CapabilityUnavailable),
+            None => Ok(()),
+        }
+    }
+    fn safety_issues(&self, issues: &mut Vec<String>) {
+        if self.child {
+            return;
+        }
+        if let Some(guard) = &self.safety {
+            guard.doctor_issues(issues);
+        } else {
+            issues.extend([
+                "user_activity_guard: unavailable".into(),
+                "stop_hotkey: unavailable (trusted Host not attached; foreground disabled)".into(),
+            ]);
+        }
+        if self.diagnostic {
+            issues.push(
+                "Native in-process diagnostics: foreground disabled; FFI is not killable".into(),
+            );
+        }
+        if !self.capabilities().overlay_excluded_from_capture {
+            issues.push("overlay_excluded_from_capture: unavailable; overlay may enter capture; Host must hide it or provide verified regions to redact, otherwise withhold image".into());
         }
     }
 }

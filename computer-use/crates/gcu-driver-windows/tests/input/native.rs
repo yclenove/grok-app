@@ -23,9 +23,19 @@ async fn native_driver() -> gcu_driver_windows::WindowsDriver {
     } else {
         std::path::PathBuf::from("gcu")
     };
-    gcu_driver_windows::WindowsDriver::with_exec_mode(mode, WorkerConfig::new(worker))
+    if mode == ExecMode::Worker {
+        gcu_driver_windows::WindowsDriver::monitored(
+            WorkerConfig::new(worker),
+            Default::default(),
+            Arc::new(common::TestStop::default()),
+        )
         .await
         .unwrap()
+    } else {
+        gcu_driver_windows::WindowsDriver::new_in_process()
+            .await
+            .unwrap()
+    }
 }
 // SAFETY: Win32 supplies callback arguments; the body catches every panic.
 unsafe extern "system" fn proc(
@@ -158,6 +168,13 @@ async fn live_fixture_background_message_click_keeps_foreground() {
 #[ignore = "open a blank disposable Notepad document and focus its editor first"]
 async fn live_notepad_foreground_chinese_preserves_text() {
     let driver = native_driver().await;
+    if std::env::var("GCU_TEST_EXEC_MODE").as_deref() == Ok("in_process") {
+        assert_eq!(
+            driver.capabilities().delivery.foreground,
+            gcu_protocol::capabilities::ForegroundCapability::Unavailable
+        );
+        return;
+    }
     let app = driver
         .resolve_app(&AppQuery::from("notepad.exe"))
         .await

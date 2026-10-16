@@ -111,6 +111,7 @@ pub struct Supervisor {
     shutdown: Cancel,
     done: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
     pub(crate) capabilities: gcu_protocol::Capabilities,
+    safety: Arc<std::sync::Mutex<Option<Arc<crate::input::hotkey::SafetyGuard>>>>,
 }
 impl Supervisor {
     /// Launch, attach lifetime containment, then probe readiness over private pipes.
@@ -153,6 +154,7 @@ impl Supervisor {
         let stop = StopHandle::default();
         let shutdown = Cancel::default();
         let (done_tx, done_rx) = oneshot::channel();
+        let safety = Arc::new(std::sync::Mutex::new(None));
         tokio::spawn(run(
             config,
             rx,
@@ -160,7 +162,7 @@ impl Supervisor {
             shutdown.clone(),
             Some(process),
             done_tx,
-            super::input::Recovery::new(release),
+            super::input::Recovery::new(release, safety.clone()),
         ));
         Ok(Self {
             queue: tx,
@@ -168,11 +170,17 @@ impl Supervisor {
             shutdown,
             done: tokio::sync::Mutex::new(Some(done_rx)),
             capabilities,
+            safety,
         })
     }
     /// Clone the independent watchdog signal. No IO or lock.
     pub fn stop_handle(&self) -> StopHandle {
         self.stop.clone()
+    }
+    pub(crate) fn attach_safety(&self, guard: Arc<crate::input::hotkey::SafetyGuard>) {
+        let stop = self.stop.clone();
+        guard.bind_stop(Arc::new(move || stop.stop()));
+        *self.safety.lock().unwrap_or_else(|p| p.into_inner()) = Some(guard);
     }
     /// Kill current input dispatch independently of the RPC queue, then await
     /// the parent's up-only cleanup. Host retains its persistent Stop latch.
@@ -214,6 +222,16 @@ impl Supervisor {
             return Err(cancelled(false));
         }
         let mutation = !request.is_read_only();
+        if mutation {
+            if let Some(guard) = self
+                .safety
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                guard.check(super::input::foreground_request(&request))?;
+            }
+        }
         let dispatched = Arc::new(AtomicBool::new(false));
         let (reply, wait) = oneshot::channel();
         let work = Work {
@@ -445,6 +463,10 @@ async fn run(
             continue;
         }
         let mutation = !work.request.is_read_only();
+        if let Err(error) = recovery.check_request(&work.request) {
+            let _ = work.reply.send(Err(error));
+            continue;
+        }
         if mutation && !recovery.ready() {
             let _ = work.reply.send(Err(DriverError::CapabilityUnavailable));
             continue;

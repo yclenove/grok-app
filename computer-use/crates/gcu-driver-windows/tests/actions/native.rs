@@ -86,9 +86,17 @@ async fn semantic_contract(mode: ExecMode) {
     } else {
         PathBuf::from("gcu") // InProcess never launches this executable.
     };
-    let driver = WindowsDriver::with_exec_mode(mode, WorkerConfig::new(worker))
+    let driver = if mode == ExecMode::Worker {
+        WindowsDriver::monitored(
+            WorkerConfig::new(worker),
+            Default::default(),
+            std::sync::Arc::new(crate::common::TestStop::default()),
+        )
         .await
-        .unwrap();
+        .unwrap()
+    } else {
+        WindowsDriver::new_in_process().await.unwrap()
+    };
     let app = driver
         .resolve_app(&AppQuery(exe.to_string_lossy().into()))
         .await

@@ -401,8 +401,8 @@ revalidated and focused only after authorized activation. The common gate checks
 engine/target integrity, session, secure desktop, window generation, geometry,
 child ownership and virtual desktop. Higher integrity returns the existing
 `ElevationRequired`; the driver never elevates. Physical activity monitoring and
-the registered Stop hotkey belong to P2-07 and remain declared unavailable.
-The independent cancellation/input-release boundary is implemented here.
+the registered Stop hotkey use the parent guard described below. The independent
+cancellation/input-release boundary is implemented here.
 
 The local ledger records all possible downs before insertion; in isolated mode
 the parent ledger acknowledgement is also required. Partial `SendInput` packets
@@ -450,87 +450,150 @@ cargo test --locked -p gcu-driver-windows --test input live_notepad_foreground_c
 Close Notepad without saving and discard the desktop. Native input status:
 **not_run** (Linux host; no interactive Windows desktop). Cross-target clippy
 and portable fake tests do not establish native delivery correctness.
-The tests default to Worker; set `$env:GCU_TEST_EXEC_MODE = 'in_process'` to run
-the same checks in diagnostic mode, resetting the blank Notepad document before
-each run. The worker path must point to the built CLI, never the test executable.
+The tests default to Worker; `$env:GCU_TEST_EXEC_MODE = 'in_process'` tests targeted
+messages and verifies that foreground is unavailable in diagnostic mode. The
+worker path must point to the built CLI, never the test executable.
 
 ## Clipboard and long text (P2-08)
 
-`TypeText` accepts at most **65,536 UTF-16 units**. Unicode messages/SendInput
-remain available for all lengths in packets of 256 units, grouped into batches
-of at most 8192 units; surrogate pairs and CRLF are preserved. Cancellation or
-failure after any dispatch is uncertain and never retries or changes route.
-For explicitly allowed foreground text longer than 8192 units, clipboard delivery
-is selected only when the exact observed UIA focus and ancestry pass the shared
-core sensitivity classifier. Passwords, browsers/web areas, unknown targets,
-sensitive labels/text and credential hints cannot use clipboard fallback even
-after approval; they keep the Unicode route. Credential heuristics are
-conservative and cannot identify every secret. Missing exact focus uses Unicode.
-`Delivery::Clipboard` reports an actual paste, rather than foreground Unicode;
-the existing capability schema has no separate clipboard boolean. The declared
-text ceiling applies to both paths. P2-07 physical activity/hotkey capability
-remains unavailable on this baseline. `InputApi::before_paste` is the explicit
-live Stop-latch integration point; existing Cancel/InputLedger/parent Stop already
-abort and clean up without depending on P2-07.
+`TypeText` accepts at most **65,536 UTF-16 units**. Unicode messages/SendInput remain available for
+all lengths in packets of 256 units, grouped into batches of at most 8192 units; surrogate pairs and
+CRLF are preserved. Cancellation or failure after any dispatch is uncertain and never retries or
+changes route. For explicitly allowed foreground text longer than 8192 units, clipboard delivery is
+selected only when the exact observed UIA focus and ancestry pass the shared core sensitivity
+classifier. Passwords, browsers/web areas, unknown targets, sensitive labels/text and credential
+hints cannot use clipboard fallback even after approval; they keep the Unicode route. Credential
+heuristics are conservative and cannot identify every secret. Missing exact focus uses Unicode.
+`Delivery::Clipboard` reports an actual paste, rather than foreground Unicode; the existing
+capability schema has no separate clipboard boolean. The declared text ceiling applies to both
+paths. The paste coordinator checks the attached P2-07 Stop latch before and after
+`InputApi::before_paste`, including after the final clipboard read. In Worker mode the parent checks
+its latch before/after staging and before acknowledging the paste packet; its independent Stop
+channel kills/reaps the child throughout focus/content reads. Stop conditionally restores the
+clipboard and releases parent-ledger ups without waiting for the action queue.
 
-The transaction holds the named Windows mutex
-`Local\GrokComputerUse.Clipboard.v2` for its full lifetime, across all gcu processes
-and sessions in the interactive Windows session (Windows clipboards are separate
-between OS sessions). It saves supported materialized formats before clearing,
-then publishes Unicode, ANSI, OEM and locale together so CloseClipboard cannot
-silently synthesize text formats and invalidate the receipt. Unsupported formats,
-including opaque bitmap/metafile/owner-display handles and unknown registered
-formats, refuse before clearing. Preserved HGLOBAL formats include text, DIB,
-file-drop, locale, HTML and RTF. Snapshot size is capped at 8 MiB / 256 formats.
-This ports the validated snapshot/preallocation, text-format materialization and
-receipt-under-lock logic from
-`archive/cu-v1-2026-10-13:src-tauri/src/computer_use/windows_clipboard/`;
-it replaces v1's unbounded recovery loops with bounded, cancellation-aware work.
+The transaction holds the named Windows mutex `Local\GrokComputerUse.Clipboard.v2` for its full
+lifetime, across all gcu processes and sessions in the interactive Windows session (Windows
+clipboards are separate between OS sessions). It saves supported materialized formats before
+clearing, then publishes Unicode, ANSI, OEM and locale together so CloseClipboard cannot silently
+synthesize text formats and invalidate the receipt. Unsupported formats, including opaque
+bitmap/metafile/owner-display handles and unknown registered formats, refuse before clearing.
+Preserved HGLOBAL formats include text, DIB, file-drop, locale, HTML and RTF. Snapshot size is
+capped at 8 MiB / 256 formats. This ports the validated snapshot/preallocation, text-format
+materialization and receipt-under-lock logic from
+`archive/cu-v1-2026-10-13:src-tauri/src/computer_use/windows_clipboard/`; it replaces v1's unbounded
+recovery loops with bounded, cancellation-aware work.
 
-Before Ctrl+V, the driver checks the receipt, exact Unicode content, live target
-identity and precise UIA foreground focus, after parent input accounting. Stop
-and failure release recorded ups. Restore compares both sequence and saved
-publication under OpenClipboard; an external copy, including identical text with
-a different sequence, is preserved. Failed recovery stays pending and prevents
-new clipboard transactions. In Worker mode the **parent owns the backup, owner
-window and mutex**: killing/reaping the child on Stop/cancellation/timeout/crash
-then performs conditional restore and parent InputLedger cleanup, outside RPC.
-No clipboard contents enter observations, logs or public Host messages.
+Before Ctrl+V, the driver checks the receipt, exact Unicode content, live target identity and
+precise UIA foreground focus, after parent input accounting. Stop and failure release recorded ups.
+Restore compares both sequence and saved publication under OpenClipboard; an external copy,
+including identical text with a different sequence, is preserved. Failed recovery stays pending and
+prevents new clipboard transactions. In Worker mode the **parent owns the backup, owner window and
+mutex**: killing/reaping the child on Stop/cancellation/timeout/crash then performs conditional
+restore and parent InputLedger cleanup, outside RPC. No clipboard contents enter observations, logs
+or public Host messages.
 
-A malicious or unrelated process can replace clipboard data at the last moment
-between validation and the target reading Ctrl+V. This race cannot be eliminated.
-The target receives asynchronous input; the short post-injection delay permits
-consumption but is not proof of business success. Clipboard history, cloud sync,
-clipboard listeners and third-party managers can retain staged text even after
-successful restore. Restoring the live clipboard does **not** erase those copies;
-use a disposable desktop with history/sync disabled for native checks.
+A malicious or unrelated process can replace clipboard data at the last moment between validation
+and the target reading Ctrl+V. This race cannot be eliminated. The target receives asynchronous
+input; the short post-injection delay permits consumption but is not proof of business success.
+Clipboard history, cloud sync, clipboard listeners and third-party managers can retain staged text
+even after successful restore. Restoring the live clipboard does **not** erase those copies; use a
+disposable desktop with history/sync disabled for native checks.
 
-Portable validation:
+## Parent user activity, Stop and overlay exclusion (P2-07)
+
+`WindowsDriver::monitored(config, hotkey, host_latch)` installs native monitoring in the parent. The
+Host must restore its persistent Stop before supplying this `StopLatch`, synchronously latch
+requests, and persist on its independent control task. The driver never clears the Host latch. Only
+the existing trusted UI/CLI resume boundary may clear it; ordinary actions, worker restart and
+reconnection cannot. `new()` / `with_exec_mode(Worker, ...)` start monitoring with an unbound,
+stopped latch: delivery stays closed until a trusted Host is supplied. Portable `isolated` launchers
+require `with_safety` to enable foreground input.
+
+The Host's `UserActivity::ms_since_physical_input` delegates to
+`guard.activity_clock().ms_since_physical_input()`. Core retains the configurable `user_idle_ms`
+gate and its existing `user_active` error; the driver does not add a public error type. Initial
+monitoring starts a conservative idle interval at zero. `WH_KEYBOARD_LL` / `WH_MOUSE_LL` copy flags
+only and discard injected input, including lower-integrity injections and our own SendInput. No
+text/key payload is stored. Hook proofs and message-pump leases expire after 100ms. Failure returns
+`None`, discards input history and disables foreground; it never reports an old idle timestamp. Two
+tagged synthetic probes (unused F24 **up only**, zero relative mouse move) prove both hook chains
+without refreshing activity or moving the cursor. Hooks are replaced every second, installing the
+new pair before retiring the old pair. Silent removal is detected by missing probes, even if the
+pump lives.
+
+`RegisterHotKey` defaults to Ctrl+Alt+Shift+Backspace; `HotkeyConfig` accepts a trusted configurable
+virtual key/modifier chord. Conflicts fail closed, with metadata in the existing `DoctorReport`. The
+hotkey has a separate message thread from hooks/desktop probes, and the health watchdog runs no
+native calls. Stop latches before signaling the independent supervisor; the supervisor kills/reaps
+the child before the parent ledger sends possible ups. Registration failure before delivery keeps
+background routes available. Losing a previously healthy listener, switching to UAC/secure desktop,
+a stalled FFI or a dead pump stops active work and disables dependent foreground routes in both
+`capabilities()` and `perform`. Native in-process diagnostics cannot kill a hung FFI and keep
+foreground disabled.
+
+`OverlayExclusion` checks the real OS build with documented `RtlGetVersion` (Windows 10 2004/build
+19041+) and verifies exact `WDA_EXCLUDEFROMCAPTURE` readback on an owned top-level probe window. A
+pre-2004 WDA_MONITOR fallback is unavailable. The Host calls `exclude(hwnd)` for each of its actual
+overlay windows; foreign or child windows are refused, and failure revokes the capability. The 100ms
+probe/set deadlines bound the caller without creating replacement native threads. Exclusion is not a
+DRM guarantee. When unavailable, overlays may enter capture: hide them through capture, or send
+verified overlay rectangles through core's existing redact mask processing for every image
+derivative. If neither is reliable, withhold the image. The driver does not bypass mandatory
+password/incomplete-tree redaction.
+
+Portable tests inject flags directly; SendInput cannot simulate physical hardware:
 
 ```sh
-rcargo test --locked -p gcu-driver-windows --test clipboard --features test-worker-faults
+rcargo test --locked -p gcu-driver-windows --test clipboard --test stop --features test-worker-faults
 rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
 
-Native status: **not_run** (Linux host, no interactive Windows desktop). The
-`#[cfg(windows)] #[ignore]` tests compile with cross-target clippy. On an
-unelevated disposable Windows desktop, disable clipboard history/cloud sync,
-clear its clipboard, build `gcu-cli`, then run the named-mutex test serially.
-For the document test, open one blank Notepad document and focus its editor;
-use a provider exposing a named, nonpassword editor and exact UIA focus.
-The test must report Clipboard and verify the full text from the subsequent UIA
-read; an unsupported provider fails rather than silently accepting Unicode.
+Native status: **not_run** (Linux host, no interactive Windows desktop). The `#[cfg(windows)]
+#[ignore]` tests compile with cross-target clippy. On an unelevated disposable Windows desktop,
+disable clipboard history/cloud sync, clear its clipboard, build `gcu-cli`, then run the named-mutex
+test serially. For the document test, open one blank Notepad document and focus its editor; use a
+provider exposing a named, nonpassword editor and exact UIA focus. The test must report Clipboard
+and verify the full text from the subsequent UIA read; an unsupported provider fails rather than
+silently accepting Unicode.
 
 ```powershell
 cargo build --locked -p gcu-cli
 $env:GCU_WORKER_EXE = (Resolve-Path target/debug/gcu.exe).Path
 cargo test --locked -p gcu-driver-windows --test clipboard native_named_mutex_two_processes_do_not_overlap -- --ignored --test-threads=1
 cargo test --locked -p gcu-driver-windows --test clipboard native_notepad_long_text_paste_preserves_document -- --ignored --test-threads=1
-# Reset the blank document before testing diagnostic in-process mode.
+# In-process diagnostics must refuse foreground paste without changing the document.
 $env:GCU_TEST_EXEC_MODE = 'in_process'
 cargo test --locked -p gcu-driver-windows --test clipboard native_notepad_long_text_paste_preserves_document -- --ignored --test-threads=1
 ```
 
-Close Notepad without saving and discard the desktop. Fake tests/cross compilation
-are not evidence of native clipboard or UIA behavior.
+Close Notepad without saving and discard the desktop. Fake tests/cross compilation are not evidence
+of native clipboard or UIA behavior.
+
+Manual acceptance checklist, all **not_run** on this Linux host. Use only a disposable, unelevated
+interactive Windows desktop, fixture/system apps and a trusted test Host wired as above; record the
+Windows build and timing trace:
+
+- Physical keyboard/mouse refresh the clock; fixture SendInput does not. Core
+  refuses foreground within `user_idle_ms` as `user_active` and permits it after
+  a fully monitored idle interval. Background messages do not activate a window.
+- Register the default/custom chord in another disposable test process first.
+  Doctor reports the conflict, foreground capability is unavailable and an
+  attempted foreground action sends nothing. Remove the conflict and recreate
+  monitoring without clearing a previously latched Stop.
+- During a fixture drag/chord and a blocked fixture provider call, press the
+  physical Stop chord. Measure <=100ms latch, <=500ms parent up insertion and
+  <=5s worker termination; verify no down follows cleanup. Pending approval/action
+  queues must not delay Stop. Worker restart, engine restart and reconnect retain
+  the Host latch; only a fresh trusted user resume restores delivery.
+- Open the system UAC prompt without consenting or changing any setting; verify
+  guard clock becomes None, foreground disables and the worker stops. Cancel the
+  prompt manually. Returning to Default desktop must not automatically resume.
+- Kill the listener or suspend its hook/desktop FFI thread; verify unavailable
+  doctor/capability/clock and independent Stop/worker cleanup. Resume/dispose that
+  thread and confirm late completion cannot revive its failed guard.
+- Apply exclusion to the actual overlay and capture a fixture on Windows 2004+
+  and an older build/unsupported environment. Check exclusion versus declared
+  fallback and that screenshots, thumbnails and approval crops obey the same
+  hide/mask/withhold rule. Cross-target checks do not prove native pixel behavior.

@@ -11,6 +11,21 @@ use gcu_driver_windows::{
 };
 use std::{sync::Arc, time::Duration};
 
+#[derive(Default)]
+pub struct TestStop(pub std::sync::atomic::AtomicBool);
+impl gcu_driver_windows::input::hotkey::StopLatch for TestStop {
+    fn is_stopped(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn request_stop(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+pub fn fake_guard() -> Arc<gcu_driver_windows::input::hotkey::SafetyGuard> {
+    gcu_driver_windows::input::hotkey::FakeSafetyApi::default()
+        .start(Default::default(), Arc::new(TestStop::default()))
+}
+
 pub async fn fixture() -> (Arc<FakeWinApi>, WindowsDriver, AppRef, WindowRef) {
     let api = Arc::new(FakeWinApi::default());
     api.update(|s| {

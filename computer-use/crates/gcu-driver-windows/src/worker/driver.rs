@@ -18,6 +18,8 @@ use std::time::Duration;
 pub struct WorkerDriver {
     supervisor: Supervisor,
     indexing: std::sync::atomic::AtomicBool,
+    safety: Option<std::sync::Arc<crate::input::hotkey::SafetyGuard>>,
+    safety_caps: std::sync::OnceLock<[Capabilities; 8]>,
 }
 impl WorkerDriver {
     /// Start a trusted executable and obtain its actual native capabilities.
@@ -32,11 +34,22 @@ impl WorkerDriver {
         Ok(Self {
             supervisor: Supervisor::start_with_releaser(config, release).await?,
             indexing: std::sync::atomic::AtomicBool::new(true),
+            safety: None,
+            safety_caps: std::sync::OnceLock::new(),
         })
     }
     /// Independent Stop watchdog signal, suitable for trusted Host/hotkey wiring.
     pub fn stop_handle(&self) -> super::StopHandle {
         self.supervisor.stop_handle()
+    }
+    pub(crate) fn native_capabilities(&self) -> &Capabilities {
+        &self.supervisor.capabilities
+    }
+    /// Bind parent health and Host Stop before any foreground request can queue.
+    pub fn with_safety(mut self, guard: std::sync::Arc<crate::input::hotkey::SafetyGuard>) -> Self {
+        self.supervisor.attach_safety(guard.clone());
+        self.safety = Some(guard);
+        self
     }
     /// Terminate/reap the native process without entering its call queue.
     pub async fn shutdown(&self) -> Result<()> {
@@ -60,7 +73,18 @@ impl Driver for WorkerDriver {
         Platform::Windows
     }
     fn capabilities(&self) -> &Capabilities {
-        &self.supervisor.capabilities
+        let guard = self
+            .safety
+            .as_ref()
+            .is_some_and(|s| s.activity_clock().available());
+        let stop = self
+            .safety
+            .as_ref()
+            .is_some_and(|s| s.available() && !s.is_stopped());
+        &self
+            .safety_caps
+            .get_or_init(|| crate::input::watchdog::capabilities(&self.supervisor.capabilities))
+            [usize::from(guard) | (usize::from(stop) << 1)]
     }
     async fn doctor(&self) -> DoctorReport {
         match self
@@ -68,11 +92,11 @@ impl Driver for WorkerDriver {
             .await
         {
             Ok(Reply::Doctor {
-                capabilities,
+                capabilities: _,
                 ready,
                 issues,
             }) => DoctorReport {
-                capabilities,
+                capabilities: self.capabilities().clone(),
                 ready,
                 issues,
             },
@@ -232,6 +256,12 @@ impl Driver for WorkerDriver {
         }
     }
     async fn perform(&self, request: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        let foreground = crate::input::watchdog::foreground(request);
+        match &self.safety {
+            Some(guard) => guard.check(foreground)?,
+            None if foreground => return Err(DriverError::CapabilityUnavailable),
+            None => (),
+        }
         match self
             .rpc(
                 Request::Perform(Action::encode(request)?),
