@@ -71,7 +71,7 @@
 | P6-06 | 工具目录与 instructions 优化 | P6-05 | 1d | todo |  |  |  |  |
 | P6-07 | 效率 A/B 评测 | P6-01、P6-02、P6-03、P6-04、P6-05、P6-06、P9-01 | 2d | todo |  |  |  |  |
 | P7-01 | Wayland 检测与能力表 | P3-05 | 1d | done | cu2/P7-01-wayland-caps |  | 2026-10-14 | 环境探测(GNOME/KDE/wlroots/其他/未知、portal 接口)；纯 X11/XWayland/原生 Wayland 三类能力表；守卫或全局 Stop 不可靠则禁用依赖路线；doctor 与 capabilities 同源；不声称 Wayland 全支持 |
-| P7-02 | portal ScreenCast 截图与 restore token | P7-01 | 4d | todo |  |  |  | 真实portal/Wayland需匹配桌面runner |
+| P7-02 | portal ScreenCast 截图与 restore token | P7-01 | 4d | done | cu2/P7-02-portal-capture |  | 2026-10-15 | portal/PipeWire 在 trait 后面；restore token 0600/0700、来源绑定、24h、变化即拒、撤销/过期清理；未知范围不出图；仅授权窗口帧；ADR 0007 选项 A(deny 具名例外+CI 用 PipeWire PPA)；真实 PipeWire 仅 CI 编译验证，Wayland 真机 not_run |
 | P7-03 | portal RemoteDesktop + libei 输入 | P7-02 | 4d | todo |  |  |  | 真实portal/Wayland需匹配桌面runner |
 | P7-04 | Wayland 窗口身份 | P7-01 | 4d | todo |  |  |  | 真实portal/Wayland需匹配桌面runner |
 | P7-05 | Wayland 契约测试 | P7-02、P7-03、P7-04、P1-01 | 3d | todo |  |  |  | 真实portal/Wayland需匹配桌面runner |

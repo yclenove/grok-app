@@ -66,17 +66,28 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev
+          sudo apt-get install -y libxkbcommon-dev libpipewire-0.3-dev
 
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
 
 
-      - name: cargo clippy
+      - name: cargo clippy (Linux)
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked --workspace --all-targets --features gcu-driver-linux/pipewire -- -D warnings
+
+      - name: cargo clippy (non-Linux)
+        if: runner.os != 'Linux'
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: cargo test
+      - name: cargo test (Linux)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --workspace --features gcu-driver-linux/pipewire
+
+      - name: cargo test (non-Linux)
+        if: runner.os != 'Linux'
         run: cargo test --locked --workspace
 
       - name: cargo run -p xtask -- check-deps
@@ -140,7 +151,7 @@ jobs:
       - name: Install system dependencies (AT-SPI, Xvfb, Openbox, PyGObject, Mesa)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1 xdotool
+          sudo apt-get install -y xvfb openbox dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev libpipewire-0.3-dev mesa-vulkan-drivers libgl1-mesa-dri libvulkan1 xdotool
 
       - name: cargo build -p gcu-fixture and driver test binary
         run: |

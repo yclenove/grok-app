@@ -9,7 +9,13 @@ cd "$(dirname "$0")/.."
 step() { printf '\n== %s\n' "$*"; }
 
 step "fmt";    cargo fmt --all --check
-step "clippy"; cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+if [ "$(uname -s)" = "Linux" ] && ! pkg-config --exists libpipewire-0.3 2>/dev/null; then
+  step "clippy (portable host without libpipewire)"
+  cargo clippy --locked --workspace --exclude gcu-driver-linux --all-targets --all-features -- -D warnings
+  cargo clippy --locked -p gcu-driver-linux --all-targets -- -D warnings
+else
+  step "clippy"; cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+fi
 if [ "${CROSS:-0}" = 1 ]; then
   for target in x86_64-pc-windows-gnu aarch64-apple-darwin; do
     step "clippy ($target)"
@@ -17,7 +23,13 @@ if [ "${CROSS:-0}" = 1 ]; then
     cargo clippy --locked --workspace --exclude gcu-fixture --lib --bins --target "$target" -- -D warnings
   done
 fi
-step "test";       cargo test --locked --workspace --all-features
+if [ "$(uname -s)" = "Linux" ] && ! pkg-config --exists libpipewire-0.3 2>/dev/null; then
+  step "test (portable host without libpipewire)"
+  cargo test --locked --workspace --exclude gcu-driver-linux --all-features
+  cargo test --locked -p gcu-driver-linux
+else
+  step "test"; cargo test --locked --workspace --all-features
+fi
 step "check-deps"; cargo run --locked -q -p xtask -- check-deps
 step "golden";     cargo run --locked -q -p xtask -- golden --check
 step "budget";     cargo run --locked -q -p xtask -- budget

@@ -312,7 +312,28 @@ fn test_environment_capabilities_matrix_per_target() {
         caps_native.semantic_actions.status,
         CapabilityStatus::Available
     );
-    assert_eq!(caps_native.screenshot.status, CapabilityStatus::Unavailable);
+    assert_eq!(caps_native.screenshot.status, CapabilityStatus::Available);
+
+    // Verify screenshot is Unavailable when portal lacks screencast
+    let portal_no_screencast = PortalInfo {
+        available: true,
+        screencast_version: None,
+        ..portal_full.clone()
+    };
+    let caps_native_no_screencast = build_environment_capabilities(
+        &env_wayland,
+        TargetEnvironment::NativeWayland,
+        &portal_no_screencast,
+        true,
+        true,
+        true,
+        false,
+        false,
+    );
+    assert_eq!(
+        caps_native_no_screencast.screenshot.status,
+        CapabilityStatus::Unavailable
+    );
     assert_eq!(
         caps_native.targeted_input.status,
         CapabilityStatus::Unavailable
