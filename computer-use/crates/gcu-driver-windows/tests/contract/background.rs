@@ -4,7 +4,7 @@ use super::{
     unsafe_activation, unsafe_background_probe::Native, unsafe_desktop, unsafe_foreground,
     unsafe_invoke,
 };
-use gcu_core::model::States;
+use gcu_core::model::{Role, States};
 
 async fn responsive(driver_window: &WindowRef) -> Result<(), String> {
     // JSON is written inside the frame. Wait for the native pump as well, never
@@ -40,10 +40,12 @@ pub async fn virtual_element(
     win: &WindowRef,
 ) -> CaseResult {
     let button = node(driver, win, "counter_button").await?;
-    let element = button
-        .handle
-        .downcast_ref::<gcu_driver_windows::uia::UiaElement>()
-        .ok_or("not a UIA element")?;
+    require(
+        button.role == Role::Button,
+        "Invoke control target is not a Button",
+    )?;
+    let element = crate::invoke_target::identity(&button.handle, win)?;
+    progress(format!("C16 INVOKE TARGET: root={:x}; worker_proxy={element:?}; role={:?}; native_role={}; Name={:?}; AutomationId={:?}; selection=counter_button by Name/AutomationId, control resolves exact RuntimeId", element.hwnd, button.role, button.native_role, button.name, button.identifier));
     let cover = unsafe_desktop::Cover::start(unsafe_desktop::window_rect(win, fixture.pid())?)?;
     let expected = unsafe_foreground::current();
     if expected.hwnd == 0 || expected.pid == 0 || expected.pid == fixture.pid() {
@@ -97,16 +99,17 @@ pub async fn virtual_element(
         .filter(|f| f.hwnd != control.before.hwnd)
         .collect();
     if !changed.is_empty() {
-        require(changed.iter().all(|f| f.pid == fixture.pid()), format!("Invoke control foreground changed to an unrelated process; attribution unresolved: {data}"))?;
+        let owners: Vec<_> = changed.iter().map(|f| (f.hwnd, f.pid)).collect();
+        require(
+            crate::invoke_target::fixture_activation(fixture.pid(), &owners),
+            format!("Invoke control foreground ownership unresolved or unrelated: {data}"),
+        )?;
         return Ok(Outcome::Skip(format!("provider: bare UIA Invoke itself activates this virtual element type on Windows; {data}")));
     }
     // The control did not activate: the driver must meet the original exact
     // foreground/effect assertions. Fresh observation retains the same target.
     let button = node(driver, win, "counter_button").await?;
-    let refreshed = button
-        .handle
-        .downcast_ref::<gcu_driver_windows::uia::UiaElement>()
-        .ok_or("refreshed target is not a UIA element")?;
+    let refreshed = crate::invoke_target::identity(&button.handle, win)?;
     require(
         refreshed.hwnd == element.hwnd && refreshed.runtime_id == element.runtime_id,
         "Invoke control and driver press must address the same element",

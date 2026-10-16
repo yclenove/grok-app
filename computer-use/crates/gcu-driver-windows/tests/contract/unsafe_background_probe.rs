@@ -209,7 +209,8 @@ async fn live_background_activation_probe() {
     let fixture = Fixture::start().await.unwrap();
     let driver = super::driver().await.unwrap();
     let win = super::window(&driver, &fixture).await.unwrap();
-    super::node(&driver, &win, "counter_button").await.unwrap();
+    let button = super::node(&driver, &win, "counter_button").await.unwrap();
+    let element = crate::invoke_target::identity(&button.handle, &win).unwrap();
     let cover =
         unsafe_desktop::Cover::start(unsafe_desktop::window_rect(&win, fixture.pid()).unwrap())
             .unwrap();
@@ -225,7 +226,13 @@ async fn live_background_activation_probe() {
         .record("egui direct UIA before", root, cover.hwnd)
         .await;
     let count = fixture.read().unwrap()["counter"].as_u64().unwrap();
-    let result = super::unsafe_invoke::invoke(root, Some("counter_button"), cover.hwnd, None).await;
+    let result = super::unsafe_invoke::invoke(
+        element.hwnd,
+        Some("counter_button"),
+        cover.hwnd,
+        Some(&element.runtime_id),
+    )
+    .await;
     let after_dispatch = unsafe_desktop::foreground();
     progress(format!("EGUI DIRECT UIA DISPATCH: result={result:?}; expected={:x}; after_dispatch={after_dispatch:x}", cover.hwnd));
     let effect = if result.is_ok() {

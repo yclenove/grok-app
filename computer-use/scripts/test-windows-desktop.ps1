@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'windows-desktop-launch.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-watch.ps1')
 . (Join-Path $PSScriptRoot 'windows-desktop-uipi.ps1')
+. (Join-Path $PSScriptRoot 'windows-smoke.ps1')
 
 function Assert-True([bool]$Value, [string]$Label) {
     if (-not $Value) { throw "assertion failed: $Label" }
@@ -15,6 +16,45 @@ foreach ($script in Get-ChildItem $PSScriptRoot -Filter '*windows*.ps1') {
     $null = [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors)
     Assert-True ($errors.Count -eq 0) "PowerShell syntax: $($script.Name): $errors"
 }
+# Reproduce win16: the failed contract must not prevent any of the three apps
+# from reaching a terminal result, including after an earlier app fails.
+$smokeTest = @{trace=[Collections.Generic.List[string]]::new();saves=0}
+$rows = @('Notepad','Explorer','Settings') | ForEach-Object { @{app=$_;outcome='not_run';reason='pending'} }
+$result = Invoke-DesktopSuites -Suite All -Contract {
+    $smokeTest.trace.Add('contract')
+    throw 'original contract cause'
+} -Smoke {
+    foreach ($row in $rows) {
+        Invoke-SmokeCase $row -Save { $smokeTest.saves++ } -Run {
+            $smokeTest.trace.Add($row.app)
+            switch ($row.app) {
+                'Notepad' { throw 'saved bytes mismatch' }
+                'Explorer' { @{outcome='passed';reason='exact external folder path'} }
+                'Settings' { @{outcome='skipped';reason='measured protocol absent'} }
+            }
+        }
+    }
+    throw 'independent smoke cause'
+}
+Assert-True (($smokeTest.trace -join ',') -ceq 'contract,Notepad,Explorer,Settings') 'contract and first-app failures do not suppress siblings'
+Assert-True (($rows.outcome -join ',') -ceq 'failed,passed,skipped' -and $smokeTest.saves -eq 3) 'every smoke row is saved with a terminal outcome'
+Assert-True ($result.exit_code -eq 1 -and $result.errors.Count -eq 2 -and
+    $result.errors[0].Contains('original contract cause') -and $result.errors[1].Contains('independent smoke cause')) 'both independent suite causes survive aggregation'
+foreach ($failedSuite in @('contract','smoke','none')) {
+    $result = Invoke-DesktopSuites -Suite All -Contract {
+        if ($failedSuite -eq 'contract') { throw 'contract only' }
+    } -Smoke { if ($failedSuite -eq 'smoke') { throw 'smoke only' } }
+    Assert-True ($result.exit_code -eq [int]($failedSuite -ne 'none')) 'neither suite success can mask the other failure'
+}
+$launch = Start-SmokeApplication 'ms-settings:' -Start {
+    param($options)
+    throw [ComponentModel.Win32Exception]::new(1155)
+}
+Assert-True ($null -eq $launch.process -and $launch.reason.Contains('Win32=1155') -and $launch.reason.Contains('ms-settings:')) 'missing protocol association preserves measured launch cause for Skip'
+$launchError = ''
+try { $null = Start-SmokeApplication 'notepad.exe' -Start { param($options) throw 'invalid harness argument' } }
+catch { $launchError = $_.Exception.Message }
+Assert-True ($launchError.Contains('invalid harness argument')) 'harness errors cannot become availability Skip'
 $sources = @('windows-desktop-token.cs','windows-desktop-access.cs','windows-desktop-defaults.cs','windows-desktop-process.cs','windows-desktop-fixture.cs') |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 if ($PSVersionTable.PSVersion.Major -ge 7) {

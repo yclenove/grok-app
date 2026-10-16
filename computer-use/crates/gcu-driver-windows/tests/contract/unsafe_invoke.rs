@@ -6,17 +6,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows::{
     core::{Interface, HRESULT},
     Win32::{
         Foundation::HWND,
-        System::{
-            Com::*,
-            Ole::*,
-            Variant::{VARIANT, VT_I4},
-        },
+        System::{Com::*, Ole::*, Variant::VT_I4},
         UI::Accessibility::*,
     },
 };
@@ -70,6 +66,95 @@ fn runtime(element: &IUIAutomationElement) -> windows::core::Result<Vec<i32>> {
     Ok(values)
 }
 
+fn describe(element: &IUIAutomationElement) -> String {
+    // SAFETY: read-only properties of an interface owned by this MTA.
+    unsafe {
+        format!(
+            "Name={:?}; AutomationId={:?}; ControlType={:?}; RuntimeId={:?}",
+            element.CurrentName(),
+            element.CurrentAutomationId(),
+            element.CurrentControlType(),
+            runtime(element)
+        )
+    }
+}
+
+fn resolve(
+    automation: &IUIAutomation,
+    hwnd: u64,
+    name: Option<&str>,
+    expected_runtime: Option<&[i32]>,
+    abandoned: &AtomicBool,
+) -> Result<IUIAutomationElement, String> {
+    let start = Instant::now();
+    let mut attempt = 0;
+    loop {
+        if abandoned.load(Ordering::Acquire) {
+            return Err("direct UIA resolution abandoned; no mutation".into());
+        }
+        attempt += 1;
+        // SAFETY: MTA-local read-only traversal of the exact fixture HWND.
+        let read = unsafe {
+            (|| -> Result<IUIAutomationElement, String> {
+                let root = automation
+                    .ElementFromHandle(HWND(hwnd as usize as *mut _))
+                    .map_err(|e| format!("ElementFromHandle({hwnd:x}): {e}"))?;
+                if expected_runtime.is_none() && name.is_none() {
+                    return Ok(root);
+                }
+                // Enumerate the raw subtree: Name/ControlType filtering can hide
+                // virtual AccessKit nodes. RuntimeId is the observed identity;
+                // duplicate names must never substitute another element.
+                let condition = automation
+                    .CreateTrueCondition()
+                    .map_err(|e| e.to_string())?;
+                let nodes = root
+                    .FindAll(TreeScope_Descendants, &condition)
+                    .map_err(|e| format!("FindAll; root={}; {e}", describe(&root)))?;
+                let length = nodes.Length().map_err(|e| e.to_string())?;
+                if length > 5000 {
+                    return Err(format!("direct UIA subtree exceeds 5000 nodes: {length}"));
+                }
+                let mut candidates = Vec::new();
+                for i in 0..length {
+                    let node = nodes.GetElement(i).map_err(|e| e.to_string())?;
+                    let matches = if let Some(expected) = expected_runtime {
+                        runtime(&node).map_err(|e| format!("RuntimeId at index {i}: {e}"))?
+                            == expected
+                    } else {
+                        let name = name.unwrap_or_default();
+                        node.CurrentName().map_err(|e| e.to_string())? == name
+                            || node.CurrentAutomationId().map_err(|e| e.to_string())? == name
+                    };
+                    if matches {
+                        progress(format!("DIRECT UIA RESOLVED: root_hwnd={hwnd:x}; attempt={attempt}; elapsed_ms={}; root={}; element={}; selector_RuntimeId={expected_runtime:?}; selector_Name_or_AutomationId={name:?}", start.elapsed().as_millis(), describe(&root), describe(&node)));
+                        return Ok(node);
+                    }
+                    if candidates.len() < 64 {
+                        candidates.push(describe(&node));
+                    }
+                }
+                Err(format!("exact UIA target pending; root_hwnd={hwnd:x}; root={}; nodes={length}; expected_RuntimeId={expected_runtime:?}; Name_or_AutomationId={name:?}; first_nodes={candidates:?}", describe(&root)))
+            })()
+        };
+        match read {
+            Ok(element) => return Ok(element),
+            Err(last) => {
+                progress(format!(
+                    "DIRECT UIA READINESS: attempt={attempt}; elapsed_ms={}; {last}",
+                    start.elapsed().as_millis()
+                ));
+                if start.elapsed() >= Duration::from_secs(3) {
+                    return Err(format!(
+                        "direct UIA resolution timed out; no mutation; {last}"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 pub async fn invoke(
     root: u64,
     name: Option<&str>,
@@ -97,40 +182,35 @@ pub async fn invoke(
             let _com = Com;
             // SAFETY: initialized COM; only exact disposable fixture HWNDs/owned arguments.
             let result = unsafe {
-                (|| -> windows::core::Result<Observation> {
+                (|| -> Result<Observation, String> {
                     let automation: IUIAutomation =
-                        CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
-                    let limits: IUIAutomation2 = automation.cast()?;
-                    limits.SetConnectionTimeout(500)?;
-                    limits.SetTransactionTimeout(500)?;
-                    let root = automation.ElementFromHandle(HWND(root as usize as *mut _))?;
-                    let element = if let Some(name) = name {
-                        let condition = automation.CreatePropertyCondition(
-                            UIA_NamePropertyId,
-                            &VARIANT::from(name.as_str()),
-                        )?;
-                        root.FindFirst(TreeScope_Descendants, &condition)?
-                    } else {
-                        root
-                    };
-                    if let Some(expected) = expected_runtime {
-                        let actual = runtime(&element)?;
-                        if actual != expected {
-                            return Err(windows::core::Error::from_hresult(HRESULT(
-                                UIA_E_ELEMENTNOTAVAILABLE as i32,
-                            )));
-                        }
-                    }
-                    let pattern: IUIAutomationInvokePattern =
-                        element.GetCurrentPatternAs(UIA_InvokePatternId)?;
+                        CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+                            .map_err(|e| e.to_string())?;
+                    let limits: IUIAutomation2 = automation.cast().map_err(|e| e.to_string())?;
+                    limits
+                        .SetConnectionTimeout(500)
+                        .map_err(|e| e.to_string())?;
+                    limits
+                        .SetTransactionTimeout(500)
+                        .map_err(|e| e.to_string())?;
+                    let element = resolve(
+                        &automation,
+                        root,
+                        name.as_deref(),
+                        expected_runtime.as_deref(),
+                        &abandoned,
+                    )?;
+                    let pattern: IUIAutomationInvokePattern = element
+                        .GetCurrentPatternAs(UIA_InvokePatternId)
+                        .map_err(|e| {
+                            format!("GetCurrentPattern(Invoke); {}; {e}", describe(&element))
+                        })?;
                     let before = current();
                     progress(format!("DIRECT UIA: resolved exact element; before_Invoke={before:?}; expected={expected:x}"));
                     if abandoned.load(Ordering::Acquire) || before.hwnd != expected {
-                        return Err(windows::core::Error::from_hresult(HRESULT(
-                            0x80004004u32 as i32,
-                        )));
+                        return Err(format!("foreground changed during resolution or control abandoned; before={before:?}; expected={expected:x}; no mutation"));
                     }
-                    pattern.Invoke()?;
+                    pattern.Invoke().map_err(|e| e.to_string())?;
                     Ok(Observation {
                         before,
                         after_dispatch: current(),

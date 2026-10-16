@@ -75,12 +75,21 @@ is not a substitute implemented by these diagnostics.
 
 C16 runs a bare UIA Invoke control **inside the contract process and run** on the
 same fixture counter element, checking its observed RuntimeId before dispatch.
+The monitored driver's handle is a serialized `worker::Element`, not the
+worker-local `UiaElement`. Fixture discovery polls Name/AutomationId readiness;
+the control takes the verified owning HWND and RuntimeId from that proxy, calls
+`ElementFromHandle`, then polls `FindAll(TrueCondition)` under that exact root for
+the exact RuntimeId for up to 3 seconds (5 seconds overall including Invoke).
+It logs root/control Name, AutomationId, ControlType and RuntimeId. Resolution or
+Invoke errors fail the contract; only observations retry, never the mutation.
 The control records foreground HWND/class/PID immediately before Invoke, immediately
 after dispatch, after the exact external JSON increment, and after WM_NULL readiness.
 A change during UIA resolution aborts before mutation. A successful control that
 changes foreground to the fixture proves activation for that virtual element type:
 only that C16 element variant Skips, with every measured identity and counter value
 in its reason. A change to an unrelated process is unresolved and fails. If the
+checkpoints include a zero HWND during activation, a later nonzero fixture-owned
+HWND is required for attribution; a zero alone cannot grant Skip. If the
 control preserves foreground, the driver press and SetValue must preserve the exact
 same unrelated HWND at every checkpoint and produce the original external effects.
 No assertion is relaxed and no action is replayed.
@@ -107,6 +116,14 @@ The notification thread is evidence of the event generator, not the call stack o
 caller of SetForegroundWindow. The separate opt-in diagnostic still compares bare
 UIA Invoke on native/virtual controls against raw native PostMessage BM_CLICK; its
 results cannot grant a contract Skip or satisfy C16-BUTTON.
+
+The desktop harness runs contracts and system-app smoke behind independent error
+boundaries and aggregates both failures into its exit status. Each smoke app runs
+even after another app fails, records PASS/SKIP/FAIL with its reason, and saves its
+row immediately. Native smoke tests have a 90-second deadline without replay.
+Missing executables/protocol registration and explicit native launch availability
+errors Skip with the actual query/error; window, driver and external-oracle failures
+remain failures. Smoke summary counts those outcomes separately from contracts.
 
 The fixture's opt-in egui plugin observes AccessKit action kinds and Focus commands
 in frame output. It never consumes an action, removes Focus, or changes activation.

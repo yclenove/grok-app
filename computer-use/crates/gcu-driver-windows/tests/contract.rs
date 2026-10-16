@@ -6,6 +6,8 @@ mod common;
 mod discovery;
 #[path = "contract/harness.rs"]
 mod harness;
+#[path = "contract/invoke_target.rs"]
+mod invoke_target;
 #[cfg(windows)]
 #[path = "contract/live.rs"]
 mod live;
