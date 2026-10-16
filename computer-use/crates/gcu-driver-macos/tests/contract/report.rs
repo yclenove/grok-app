@@ -13,6 +13,15 @@ pub const NOT_RUN: &[&str] = &[
 
 /// Write the suite summary. `not_run` is copied into the archive as-is.
 pub fn write_report(path: &Path, results: &[CaseResult], not_run: &[&str]) -> Result<(), String> {
+    write_with_readiness(path, results, not_run, &[])
+}
+
+fn write_with_readiness(
+    path: &Path,
+    results: &[CaseResult],
+    not_run: &[&str],
+    readiness: &[serde_json::Value],
+) -> Result<(), String> {
     let passed = results.iter().filter(|row| row.outcome == "passed").count();
     let skipped = results
         .iter()
@@ -37,6 +46,7 @@ pub fn write_report(path: &Path, results: &[CaseResult], not_run: &[&str]) -> Re
         "failed": failed,
         "not_run": not_run,
         "cases": cases,
+        "fixture_readiness": readiness,
     });
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -56,4 +66,17 @@ pub fn archive(results: &[CaseResult], not_run: &[&str]) -> Result<(), String> {
         return Ok(());
     };
     write_report(Path::new(&path), results, not_run)
+}
+
+/// Include measured setup/recovery facts in the live JSON artifact.
+#[cfg(target_os = "macos")]
+pub fn archive_with_readiness(
+    results: &[CaseResult],
+    not_run: &[&str],
+    readiness: &[serde_json::Value],
+) -> Result<(), String> {
+    let Some(path) = std::env::var_os("GCU_CONTRACT_OUT") else {
+        return Ok(());
+    };
+    write_with_readiness(Path::new(&path), results, not_run, readiness)
 }

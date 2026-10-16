@@ -5,10 +5,16 @@
 //! that table stays out of the default `cargo test` path.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "contract/fixture_tree.rs"]
+mod fixture_tree;
 #[path = "contract/harness.rs"]
 mod harness;
 #[path = "contract/oracle.rs"]
 mod oracle;
+#[path = "contract/readiness.rs"]
+mod readiness;
+#[path = "contract/readiness_tests.rs"]
+mod readiness_tests;
 #[path = "contract/report.rs"]
 mod report;
 #[path = "contract/specials.rs"]
@@ -57,6 +63,51 @@ fn main() -> Result<(), String> {
             name: "case_result_round_trip_keeps_skip_reason",
             ignored: false,
             run: case_result_round_trip_keeps_skip_reason,
+        },
+        Case {
+            name: "readiness_partial_then_complete_reports_activation_time",
+            ignored: false,
+            run: || {
+                runtime().block_on(
+                    readiness_tests::readiness_partial_then_complete_reports_activation_time(),
+                )
+            },
+        },
+        Case {
+            name: "readiness_unmarked_partial_first_read_fails_adr0004",
+            ignored: false,
+            run: || {
+                runtime().block_on(
+                    readiness_tests::readiness_unmarked_partial_first_read_fails_adr0004(),
+                )
+            },
+        },
+        Case {
+            name: "readiness_complete_controls_with_incomplete_never_pass",
+            ignored: false,
+            run: || {
+                runtime().block_on(
+                    readiness_tests::readiness_complete_controls_with_incomplete_never_pass(),
+                )
+            },
+        },
+        Case {
+            name: "readiness_hung_read_cancels_within_setup_budget",
+            ignored: false,
+            run: || {
+                runtime()
+                    .block_on(readiness_tests::readiness_hung_read_cancels_within_setup_budget())
+            },
+        },
+        Case {
+            name: "canvas_label_collision_selects_grid_image_at_both_scales",
+            ignored: false,
+            run: readiness_tests::canvas_label_collision_selects_grid_image_at_both_scales,
+        },
+        Case {
+            name: "grid_pixel_targets_exact_cell_inside_canvas_at_both_scales",
+            ignored: false,
+            run: readiness_tests::grid_pixel_targets_exact_cell_inside_canvas_at_both_scales,
         },
         #[cfg(target_os = "macos")]
         Case {
