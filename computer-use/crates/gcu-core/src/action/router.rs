@@ -6,6 +6,7 @@ use super::{
 use crate::{
     driver::{self, AppQuery, Cancel, Driver, DriverError, TreeOpts, WindowRef},
     model::WindowPoint,
+    observe::AutoCapturePolicy,
     policy::{ActionIntent, Tool},
     session::{InputRelease, Session, WindowLocks},
     settle::SettleEngine,
@@ -40,6 +41,7 @@ pub struct ActionRouter {
     pub(crate) epoch: Instant,
     pub(crate) tree_opts: TreeOpts,
     pub(crate) settle_engine: SettleEngine,
+    pub(crate) auto_capture: AutoCapturePolicy,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -65,12 +67,19 @@ impl ActionRouter {
             epoch: Instant::now(),
             tree_opts,
             settle_engine: SettleEngine::default(),
+            auto_capture: AutoCapturePolicy::default(),
         }
     }
     /// Inject settling configuration and monotonic time before sharing the router.
     /// In-memory construction only; no waits, IO, timeout or cancellation.
     pub fn with_settle_engine(mut self, engine: SettleEngine) -> Self {
         self.settle_engine = engine;
+        self
+    }
+    /// Supply evaluated screenshot-quality boundaries before sharing the router.
+    /// In-memory construction only; no IO, waits, timeout or cancellation.
+    pub fn with_auto_capture_policy(mut self, policy: AutoCapturePolicy) -> Self {
+        self.auto_capture = policy;
         self
     }
     /// Input-release adapter for Session::open. Native release is bounded by the
@@ -113,7 +122,7 @@ impl ActionRouter {
                 };
                 opts.max_tree_nodes = params.max_tree_nodes.clamp(1, 5000) as usize;
                 let fresh = self
-                    .read(session, &win, params.include_screenshot, &opts)
+                    .read_with_mode(session, &win, params.include_screenshot, &opts)
                     .await
                     .map_err(|code| Box::new(error(code)))?;
                 let mut intent = ActionIntent::new(Tool::GetAppState);
@@ -142,10 +151,16 @@ impl ActionRouter {
                 // Read after the authorization wait, rather than releasing pre-approval
                 // contents that might now be obsolete.
                 let fresh = self
-                    .read(session, &win, params.include_screenshot, &opts)
+                    .read_with_mode(session, &win, params.include_screenshot, &opts)
                     .await
                     .map_err(|code| Box::new(error(code)))?;
-                self.publish_with_limit(session, fresh, params.include_screenshot, opts.text_limit)
+                let attach = self.observation_attachment(
+                    session,
+                    &fresh,
+                    params.include_screenshot,
+                    opts.text_limit,
+                );
+                self.publish_with_limit(session, fresh, attach, opts.text_limit)
             })
             .await
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?

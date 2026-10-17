@@ -70,7 +70,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Read an authorized window's tree and screenshot. App accepts name, ID, or path; window defaults to key window.",
+    "description": "Read an authorized window's tree and safe screenshot. App accepts name, ID, or path; window defaults to key window. include_screenshot: true (default), false, or auto by tree quality.",
     "inputSchema": {
       "additionalProperties": false,
       "definitions": {
@@ -101,8 +101,18 @@
           "type": "string"
         },
         "include_screenshot": {
-          "default": true,
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "auto"
+              ],
+              "type": "string"
+            }
+          ],
+          "default": true
         },
         "max_tree_nodes": {
           "default": 1200,

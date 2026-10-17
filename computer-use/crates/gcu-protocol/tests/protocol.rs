@@ -116,7 +116,7 @@ fn click_and_selection_alternatives_validate_exclusive_targets() {
 #[test]
 fn defaults_follow_architecture_and_required_app_is_enforced() {
     let state: GetAppStateParams = serde_json::from_value(json!({"app":"Fixture"})).unwrap();
-    assert!(state.include_screenshot);
+    assert_eq!(state.include_screenshot, ScreenshotMode::Explicit(true));
     assert_eq!(state.text_limit, TextLimit::Characters(500));
     assert_eq!(state.max_tree_nodes, 1200);
     assert!(serde_json::from_value::<ClickParams>(json!({"element_index":1})).is_err());

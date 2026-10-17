@@ -10,6 +10,8 @@ pub mod driver;
 pub mod fingerprint;
 /// Raw accessibility model, without platform bindings.
 pub mod model;
+/// Tree-quality assessment and safe screenshot attachment policy.
+pub mod observe;
 /// Authorization, denylist, sensitive-action, and input policy.
 pub mod policy;
 /// Bounded text and redacted structured observations.

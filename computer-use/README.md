@@ -303,6 +303,26 @@ More detail: [macOS driver notes](crates/gcu-driver-macos/README.md), [Windows d
 
 ## Privacy
 
+`get_app_state.include_screenshot` accepts `true`, `false`, or `"auto"` (see
+[ADR 0011](docs/adr/0011-auto-screenshot-policy.md)). The default remains `true`;
+existing boolean calls keep their behavior and serialized shape. Auto evaluates
+usable interactive nodes, controls inside popups, and the raw canvas role share.
+`gcu_core::observe::QualityThresholds.min_interactive_nodes` and
+`canvas_role_ratio` are **待评测校准**: both default to `None`, with no invented
+production cutoff. Evaluation can inject boundaries through
+`ActionRouter::with_auto_capture_policy`; these are not new `config.toml` keys.
+Without an interactive-node boundary, auto conservatively keeps the image.
+After calibration, sufficient trees may omit it; canvas/sparse trees and an empty
+rendered diff with changed safe pixels still request an image. Action results
+also attach for coordinate actions or an explicit image request.
+
+Auto still captures and redacts before deciding delivery, so it can detect pixel
+changes absent from the text tree. Omitted captures never replace the last image
+delivered to the model. Incomplete native trees, unknown sensitive regions, and
+tree/capture or geometry mismatches retain the existing refusal path. This does
+not claim a capture latency improvement. The default may change only after an
+evaluation on the same tasks proves that success rate does not decrease.
+
 Screenshots are redacted before they are shown to a model, a dialog, or `gcu call`. Sensitive regions are painted opaque gray and expanded by 4 pixels. If a sensitive region cannot be located, or the tree is incomplete, no image is returned. The text tree can still be returned. The unredacted frame is not written out for the model.
 
 `gcu call` without `--json` copies those safe images into a private `gcu-call-*` directory under `$XDG_RUNTIME_DIR` or the temp directory. The directory is mode `0700` and the files are mode `0600` (an owner-only ACL on Windows). The next `gcu` process deletes directories older than one hour. You can delete them sooner. `--json` prints the MCP result. Files owned by an MCP session, including overflow text and screenshots, are removed when the connection closes.
