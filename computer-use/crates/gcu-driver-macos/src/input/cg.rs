@@ -52,7 +52,8 @@ pub fn ensure_appkit() -> bool {
 /// Create `NSApplication` and mark this process as an accessory (UI-element) app.
 ///
 /// Call on the main thread before starting Tokio. [`ensure_appkit`] is unchanged.
-/// Returns false off the main thread or when AppKit refuses the accessory policy.
+/// Returns false off the main thread or when AppKit refuses the accessory policy
+/// and the process is not already an accessory app.
 /// Does not touch the network and does not grant TCC by itself. Blocking: one
 /// synchronous AppKit call on the caller thread. Timeout: none. Cancellation: none.
 pub fn ensure_agent_appkit() -> bool {
@@ -62,8 +63,12 @@ pub fn ensure_agent_appkit() -> bool {
     let Some(marker) = MainThreadMarker::new() else {
         return false;
     };
-    NSApplication::sharedApplication(marker)
-        .setActivationPolicy(NSApplicationActivationPolicy::Accessory)
+    let app = NSApplication::sharedApplication(marker);
+    // A bundle with `LSUIElement` already starts as Accessory, and on macOS 27
+    // `setActivationPolicy` then returns NO because nothing changed. That is
+    // the state we want, so only a different current policy needs the call.
+    app.activationPolicy() == NSApplicationActivationPolicy::Accessory
+        || app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
 }
 
 fn os_major() -> u32 {
