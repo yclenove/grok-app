@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use gcu_host_api::{ApprovalProvider, CuEvent, EventSink, PolicyStore, SessionCtx};
 use gcu_protocol::{
     result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason},
-    tools::GetAppStateParams,
+    tools::{ComputerBatchParams, GetAppStateParams},
     ErrorCode, ToolError,
 };
 use std::{
@@ -185,6 +185,53 @@ impl ActionRouter {
                 Err(_) => outcome(initial, Some(error(ErrorCode::ApprovalDenied)), None),
             },
         };
+        self.finish(session, &call.call_id, &mut out, start);
+        out
+    }
+
+    /// Run one step that is already inside the session queue.
+    ///
+    /// `computer_batch` holds that queue for the whole batch. Calling [`Self::execute`]
+    /// again would deadlock. Authorization, gates, sensitive confirmation, Stop, and
+    /// the unknown-outcome rule are unchanged. Duration includes only this step.
+    ///
+    /// Blocking: window-lock waits cap at 5s, then native and approval waits.
+    /// Timeout: native calls cap at 5s; `wait_for` may use its own horizon.
+    /// Cancellation: Stop, session close, turn end, or dropping the future.
+    pub(crate) async fn execute_enqueued(&self, session: &Session, call: ToolCall) -> ToolOutcome {
+        let start = Instant::now();
+        let initial = result(&call);
+        let mut out = match self.check_boundary(session).await {
+            Err(code) => outcome(initial, Some(error(code)), None),
+            Ok(()) => self.dispatch_queued(session, &call).await,
+        };
+        self.finish(session, &call.call_id, &mut out, start);
+        out
+    }
+
+    /// Preflight `params`, then run each step through this router.
+    ///
+    /// A preflight failure does not enqueue and does not deliver input. Otherwise the
+    /// batch enqueues once. Each step uses the same approval, gate, confirm, Stop, and
+    /// stale paths as a single call. The batch wall clock is 60s on the settle clock.
+    /// Each native call still uses the 5s ceiling and [`crate::driver::DRIVER_DEADLINE`].
+    /// Those constants are not raised. An in-flight step may finish after 60s; later
+    /// steps do not start. Unknown outcomes are not replayed. Nested batches cannot be
+    /// represented.
+    ///
+    /// Blocking: the session queue has no deadline. Timeout: 60s total on the settle
+    /// clock, and 5s for each native call. Cancellation: Stop, session close, or
+    /// dropping the future.
+    pub async fn run_batch(
+        &self,
+        session: &Session,
+        call_id: &str,
+        params: ComputerBatchParams,
+    ) -> crate::batch::BatchReport {
+        crate::batch::run(self, session, call_id, params).await
+    }
+
+    fn finish(&self, session: &Session, call_id: &str, out: &mut ToolOutcome, start: Instant) {
         out.action.duration_ms = start.elapsed().as_millis() as u64;
         if let Some(state) = &mut out.state {
             state.state.action = Some(out.action.clone());
@@ -197,7 +244,7 @@ impl ActionRouter {
         if !session.is_closed() {
             lock(&session.actions)
                 .ledger
-                .record(&call.call_id, &out.action, self.epoch.elapsed());
+                .record(call_id, &out.action, self.epoch.elapsed());
             self.events.emit(
                 &SessionCtx {
                     session_id: session.id().into(),
@@ -223,7 +270,6 @@ impl ActionRouter {
                 },
             );
         }
-        out
     }
     pub(crate) async fn execute_queued(&self, session: &Session, call: &ToolCall) -> ToolOutcome {
         let mut action = result(call);

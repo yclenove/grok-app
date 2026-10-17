@@ -32,7 +32,7 @@ fn codec_chunk_boundaries_and_overlong_eof_recover() {
 
 #[tokio::test]
 async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
-    for (profile, count) in [(Profile::Minimal, 9), (Profile::Full, 14)] {
+    for (profile, count) in [(Profile::Minimal, 9), (Profile::Full, 15)] {
         let mut h = Harness::configured(
             FakeDriver::from_scene("form").unwrap(),
             &[],
@@ -51,11 +51,16 @@ async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
                 .filter_map(|tool| tool["name"].as_str())
                 .collect();
             assert!(!names.contains(&"wait_for"));
+            assert!(!names.contains(&"computer_batch"));
             for (name, args) in [
                 ("launch_app", json!({"app":"fake.form"})),
                 (
                     "wait_for",
                     json!({"app":"fake.form","until":{"text_present":"Submit"}}),
+                ),
+                (
+                    "computer_batch",
+                    json!({"app":"fake.form","steps":[{"wait_for":{"until":{"text_present":"Submit"}}}]}),
                 ),
             ] {
                 let result = h.call(name, args).await;

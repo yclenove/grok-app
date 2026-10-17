@@ -20,8 +20,11 @@ async fn initialize_catalog_matches_implemented_protocol_subset() {
     assert!(init["capabilities"]["tools"].is_object());
     let result = h.request("tools/list", json!({})).await;
     let registered = result["result"]["tools"].as_array().unwrap();
-    assert_eq!(registered.len(), 14);
+    assert_eq!(registered.len(), 15);
     assert!(registered.iter().any(|tool| tool["name"] == "wait_for"));
+    assert!(registered
+        .iter()
+        .any(|tool| tool["name"] == "computer_batch"));
     let catalog = gcu_protocol::tools_list_json();
     for tool in registered {
         assert!(catalog.as_array().unwrap().contains(tool));
@@ -91,7 +94,11 @@ async fn stale_and_unknown_return_fresh_state_without_replay() {
 async fn every_registered_tool_reaches_its_real_handler() {
     let mut h = Harness::driver(
         FakeDriver::contract_fixture().unwrap(),
-        &[ApprovalDecision::Session, ApprovalDecision::Session],
+        &[
+            ApprovalDecision::Session,
+            ApprovalDecision::Session,
+            ApprovalDecision::Session,
+        ],
     );
     h.initialize(false).await;
     for (name, args) in [
@@ -103,6 +110,10 @@ async fn every_registered_tool_reaches_its_real_handler() {
         (
             "wait_for",
             json!({"app":"fake.form","until":{"text_present":"Submit"}}),
+        ),
+        (
+            "computer_batch",
+            json!({"app":"fake.form","steps":[{"wait_for":{"until":{"text_present":"Submit"}}}]}),
         ),
         ("click", json!({"app":"fake.form","element_index":1})),
         (
@@ -140,9 +151,13 @@ async fn every_registered_tool_reaches_its_real_handler() {
         }
         let r = h.call(name, args).await;
         assert_ne!(r["isError"], true, "{name}: {r}");
-        if name == "wait_for" {
+        if name == "wait_for" || name == "computer_batch" {
             assert_eq!(r["structuredContent"]["action"]["delivery"], "none");
             assert_eq!(r["structuredContent"]["action"]["outcome"], "done");
+        }
+        if name == "computer_batch" {
+            assert_eq!(r["structuredContent"]["steps"][0]["tool"], "wait_for");
+            assert_eq!(r["structuredContent"]["steps"][0]["outcome"], "done");
         }
     }
     assert_eq!(h.driver.perform_calls(), 8);

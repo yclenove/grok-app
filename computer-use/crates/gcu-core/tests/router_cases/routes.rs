@@ -178,8 +178,9 @@ async fn scroll_element_and_coordinate_use_correct_routes() {
 async fn unsupported_wait_does_not_start_batch_execution() {
     let h = Harness::new(true, true);
     h.observe().await;
-    let out = h.execute(BatchStep::Expect(Condition::Stable(true))).await;
+    let out = h.execute(BatchStep::Expect(Condition::Stable(false))).await;
     assert_eq!(out.error.unwrap().code, ErrorCode::CapabilityUnavailable);
+    assert_eq!(out.action.outcome, Outcome::Refused);
     assert_eq!(h.driver.perform_calls(), 0);
 }
 #[tokio::test]

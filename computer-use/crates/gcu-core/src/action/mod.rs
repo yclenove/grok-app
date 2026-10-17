@@ -2,6 +2,7 @@
 //! Native waits are bounded and cancellable; uncertain mutations are never replayed.
 mod authorize;
 mod discovery;
+mod expect;
 mod failure;
 /// Snapshot, geometry, and exact-handle preflight gates.
 pub mod gate;
@@ -34,7 +35,7 @@ pub struct ToolCall {
     /// Exact window ID; omission resolves the key window once only.
     pub window: Option<String>,
     /// Protocol action payload. `wait_for` is executed by [`ActionRouter::wait_for`].
-    /// Expect belongs to the later batch executor.
+    /// `expect` is executed by the batch path on this same router, with no input.
     pub action: BatchStep,
     /// Explicit route ceiling. TargetedOnly never falls back to foreground.
     #[serde(skip)]
