@@ -165,7 +165,7 @@ GitHub 的 `windows-2022` 运行器上，测试用的是受限令牌。那里没
 
 纯 X11 用 AT-SPI 读树和做动作，用 X 服务器管窗口和截图。被挡住的窗口只有在复合管理器能提供该窗口像素时才截。否则驱动拒绝截图，不会交回别的窗口的内容。
 
-Wayland 使用 xdg-desktop-portal 的 ScreenCast 和 RemoteDesktop。你在 portal 对话框里批准。只截你选中的来源。来源未知或合成器未知时不出图，也没有静默的全桌面退路。恢复令牌仅所有者可读写，24 小时后过期，来源变化即拒绝。原生 Wayland 没有全局覆盖层。XWayland 不被当作能证明全局 Stop 热键的场合，因此那条路径不启用覆盖层。
+完整的 Wayland 说明见 [docs/wayland.md](docs/wayland.md#zh)。Wayland 使用 xdg-desktop-portal 的 ScreenCast 和 RemoteDesktop。你在 portal 对话框里批准。只截你选中的来源。来源未知或合成器未知时不出图，也没有静默的全桌面退路。恢复令牌仅所有者可读写，24 小时后过期，来源变化即拒绝。原生 Wayland 没有全局覆盖层。XWayland 不被当作能证明全局 Stop 热键的场合，因此那条路径不启用覆盖层。
 
 真实的 GNOME、KDE 或 wlroots 桌面会话 **未验证**。可移植的 Wayland 测试已通过。无头 GNOME 作业没有跑。
 
