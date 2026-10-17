@@ -138,7 +138,8 @@ impl SettleEngine {
     /// Observe until event quiet, two equal usable trees, or the hard budget.
     /// Unchanged early samples retain the full horizon to catch delayed activation
     /// and silent effects. At the horizon they count as stable only if fresh,
-    /// complete stable evidence exists and no read is pending; otherwise Budget.
+    /// complete stable evidence exists. A horizon-limited pending read is cancelled
+    /// and discarded; an earlier native read timeout still prevents confirmation.
     /// Stop/turn changes are checked every 10ms; close wakes immediately. Dropping
     /// this future cancels the native token before dropping its read/stream.
     /// Stop issues Session's independently bounded input cleanup after cancellation.
@@ -195,10 +196,17 @@ impl SettleEngine {
                     events.received(&batch, now);
                 }
             }
-            let confirmed = read.is_none() && evidence.confirmed(now, self.config.poll_interval);
+            // A read started for another poll must not erase completed, fresh
+            // stable evidence at the horizon. Only discard a read limited by
+            // that horizon; an earlier native deadline remains a real timeout.
+            let read_allows_confirmation = read
+                .as_ref()
+                .is_none_or(|pending| now >= deadline && pending.deadline == deadline);
+            let confirmed =
+                read_allows_confirmation && evidence.confirmed(now, self.config.poll_interval);
             if now >= deadline || (evidence.changed && confirmed) {
                 let reason = if confirmed {
-                    if events.active() && now >= events.quiet_at {
+                    if read.is_none() && events.active() && now >= events.quiet_at {
                         SettleReason::EventQuiet
                     } else {
                         SettleReason::TreeStable
@@ -206,6 +214,10 @@ impl SettleEngine {
                 } else {
                     SettleReason::Budget
                 };
+                // Cancel the native token before dropping its future. The
+                // pending result never contributes evidence; observed changes
+                // remain latched independently of stability and cancellation.
+                drop(read.take());
                 return Ok(SettleReport {
                     settle: Settle {
                         ms: u64::try_from(now.saturating_sub(start).as_millis())
@@ -278,7 +290,8 @@ impl SettleEngine {
                     let raw = match raw {
                         Ok(raw) => raw,
                         Err(crate::driver::DriverError::Timeout { .. }) if now >= deadline => {
-                            continue
+                            evidence.invalidate();
+                            continue;
                         }
                         Err(error) => return Err(error.error_code()),
                     };
