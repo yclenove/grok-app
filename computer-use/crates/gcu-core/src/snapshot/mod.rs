@@ -7,6 +7,7 @@ mod index;
 mod store;
 pub use diff::{Change, Diff, RenderedNode, RenderedState};
 pub use index::ElementIndex;
+pub(crate) use store::sanitize;
 pub use store::{
     Observation, ObservationMode, Snapshot, SnapshotId, SnapshotStore, WindowKey,
     DEFAULT_MEMORY_LIMIT, SNAPSHOTS_PER_WINDOW,

@@ -104,6 +104,44 @@ fn tree_nodes() -> u32 {
     1200
 }
 
+/// Literal opt-in tree-quality screenshot policy (ADR 0011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+pub enum AutoScreenshot {
+    /// Let core decide attachment; synchronization and redaction still apply.
+    Auto,
+}
+
+/// Screenshot preference preserving boolean wire values and the true default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScreenshotMode {
+    /// Explicit true always requests a safe image; false requests text only.
+    Explicit(bool),
+    /// Opt in to the tree-quality policy without changing the default.
+    Auto(AutoScreenshot),
+}
+impl Default for ScreenshotMode {
+    fn default() -> Self {
+        Self::Explicit(true)
+    }
+}
+impl JsonSchema for ScreenshotMode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ScreenshotMode".into()
+    }
+    fn inline_schema() -> bool {
+        true
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Keep the approved model-facing union inline, without marker references.
+        schemars::json_schema!({
+            "anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto"]}]
+        })
+    }
+}
+
 /// Observe the key window or a specified window (authorization required).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -113,9 +151,9 @@ pub struct GetAppStateParams {
     /// list_windows ID; omitted means key window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<String>,
-    /// Attach a window screenshot, default true.
-    #[serde(default = "yes")]
-    pub include_screenshot: bool,
+    /// Attach a safe screenshot (true), text only (false), or tree-quality auto; default true.
+    #[serde(default)]
+    pub include_screenshot: ScreenshotMode,
     /// Per-field character limit, default 500, or max.
     #[serde(default)]
     pub text_limit: TextLimit,

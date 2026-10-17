@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     driver::{BoxStream, UiEvent},
-    model::Role,
+    observe::CaptureEvidence,
     session::Session,
     settle::SettleRequest,
 };
@@ -84,17 +84,19 @@ impl ActionRouter {
                 .notes
                 .push("Delivered without foreground activation.".into());
         }
-        let tree_changed = before.signature != after.signature;
-        let canvas = after.raw.root.is_none()
-            || after
-                .tree
-                .nodes()
-                .iter()
-                .any(|(_, n)| n.node.role == Role::Canvas);
-        let attach = !gate.points.is_empty()
-            || canvas
-            || (!tree_changed && pixels == Some(true))
-            || call.attach_image;
+        let attach = self.auto_capture.action(
+            &after.quality,
+            CaptureEvidence {
+                action_used_coordinates: !gate.points.is_empty(),
+                diff_is_empty: self.rendered_diff_is_empty(
+                    session,
+                    &after,
+                    self.tree_opts.text_limit,
+                ),
+                pixels_changed: pixels,
+                explicit: call.attach_image,
+            },
+        );
         match self.publish(session, after, attach) {
             Ok(state) => outcome(action, None, Some(state)),
             Err(error) => outcome(action, Some(*error), None),

@@ -7,13 +7,16 @@ use crate::{
     driver::{Cancel, CaptureOpts, TreeOpts, WindowRef},
     fingerprint::refresh_tree,
     model::{Fingerprint, Geometry, RawNode, RawTree},
+    observe::{CaptureEvidence, TreeQuality},
     redact::{self, CapturedFrame, RedactedImage},
     render::RenderOpts,
     session::Session,
-    snapshot::{ElementIndex, WindowKey},
+    snapshot::{ElementIndex, RenderedState, WindowKey},
     tree::{Pipeline, ProcessedTree},
 };
-use gcu_protocol::{types::ScreenshotInfo, AppState, ErrorCode, ToolError, WindowInfo};
+use gcu_protocol::{
+    tools::ScreenshotMode, types::ScreenshotInfo, AppState, ErrorCode, ToolError, WindowInfo,
+};
 use serde_json::{json, Value};
 
 pub(crate) struct Fresh {
@@ -23,6 +26,7 @@ pub(crate) struct Fresh {
     pub tree: ProcessedTree,
     pub signature: String,
     pub image: Option<RedactedImage>,
+    pub quality: TreeQuality,
 }
 impl Fresh {
     pub fn geometry(&self) -> Geometry {
@@ -46,6 +50,16 @@ impl ActionRouter {
         screenshot: bool,
         opts: &TreeOpts,
     ) -> Result<Fresh, ErrorCode> {
+        self.read_with_mode(session, win, ScreenshotMode::Explicit(screenshot), opts)
+            .await
+    }
+    pub(crate) async fn read_with_mode(
+        &self,
+        session: &Session,
+        win: &WindowRef,
+        mode: ScreenshotMode,
+        opts: &TreeOpts,
+    ) -> Result<Fresh, ErrorCode> {
         let cancel = Cancel::default();
         let mut raw = self
             .native(
@@ -65,9 +79,13 @@ impl ActionRouter {
             .map_err(|e| e.error_code())?;
         let before = signature(&raw)?;
         let mut tree = Pipeline::default().run(raw.clone(), opts);
+        let quality = TreeQuality::assess(&raw, &tree);
         let mut image = None;
         let captured_at;
-        if screenshot {
+        // Auto captures speculatively to detect visual changes that the tree
+        // cannot express. Only a synchronized, redacted image can reach policy
+        // comparison or delivery; an omitted image never enters SnapshotStore.
+        if mode != ScreenshotMode::Explicit(false) {
             if raw.incomplete.is_some() {
                 return Err(ErrorCode::HandoffRequired);
             }
@@ -155,7 +173,54 @@ impl ActionRouter {
             tree,
             signature: before,
             image,
+            quality,
         })
+    }
+    pub(crate) fn rendered_diff_is_empty(
+        &self,
+        session: &Session,
+        fresh: &Fresh,
+        text_limit: Option<usize>,
+    ) -> bool {
+        let mut opts = RenderOpts::new(fresh.win.app.info.clone(), fresh.info.clone());
+        opts.text_limit = text_limit;
+        // Match SnapshotStore's delivered baseline, including secret-bearing
+        // labels/identifiers removed after Pipeline's password-value redaction.
+        let mut tree = fresh.tree.clone();
+        crate::snapshot::sanitize(&mut tree);
+        let current = RenderedState::from_tree(&tree, &opts);
+        lock(&session.actions)
+            .snapshots
+            .latest(&fresh.key())
+            .is_some_and(|previous| previous.rendered() == &current)
+    }
+    pub(crate) fn observation_attachment(
+        &self,
+        session: &Session,
+        fresh: &Fresh,
+        mode: ScreenshotMode,
+        text_limit: Option<usize>,
+    ) -> bool {
+        if let ScreenshotMode::Explicit(attach) = mode {
+            return attach;
+        }
+        let diff_is_empty = self.rendered_diff_is_empty(session, fresh, text_limit);
+        let pixels_changed = lock(&session.actions)
+            .snapshots
+            .latest_with_screenshot(&fresh.key())
+            .and_then(|previous| previous.screenshot())
+            .zip(fresh.image.as_ref())
+            .map(|(before, after)| {
+                before.geometry() != after.geometry() || before.pixels() != after.pixels()
+            });
+        self.auto_capture.observation(
+            &fresh.quality,
+            CaptureEvidence {
+                diff_is_empty,
+                pixels_changed,
+                ..CaptureEvidence::default()
+            },
+        )
     }
     pub(crate) fn publish(
         &self,
