@@ -18,6 +18,7 @@ pub mod helper;
 mod host;
 pub mod install;
 mod install_cmd;
+pub mod native_host;
 mod private;
 mod proxy;
 pub mod resume;
@@ -66,7 +67,18 @@ pub fn cli_main() {
     }));
     let result = std::panic::catch_unwind(|| {
         args::approval_mode()?;
-        let cli = args::Cli::parse();
+        // Chrome/Edge native manifests take an executable path and no arguments.
+        // Browsers launch `gcu <origin> [--parent-window=N]`; route that launch to
+        // the same parser/validation as explicit `gcu native-host <origin>`.
+        let mut argv: Vec<_> = std::env::args_os().collect();
+        if argv
+            .get(1)
+            .and_then(|a| a.to_str())
+            .is_some_and(|a| a.starts_with("chrome-extension://"))
+        {
+            argv.insert(1, "native-host".into());
+        }
+        let cli = args::Cli::parse_from(argv);
         let _ = tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_ansi(false)

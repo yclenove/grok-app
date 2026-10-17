@@ -343,7 +343,7 @@ describe("unified DOM nodes and guarded actions", () => {
 it("manifest_permissions_are_fixed_and_all_fifteen_locales_match_en", () => {
   const root = pathToFileURL(`${process.cwd()}/computer-use/tools/browser-extension/`);
   const manifest = JSON.parse(readFileSync(new URL("manifest.json", root), "utf8"));
-  expect(manifest.permissions).toEqual(["activeTab", "scripting", "webNavigation"]);
+  expect(manifest.permissions).toEqual(["activeTab", "scripting", "webNavigation", "nativeMessaging"]);
   expect(manifest.host_permissions).toBeUndefined();
   expect(manifest.content_scripts).toBeUndefined();
   expect(manifest.externally_connectable).toBeUndefined();

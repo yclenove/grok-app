@@ -25,6 +25,14 @@ pub(crate) enum DriverKind {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Chrome/Edge private native messaging: length-prefixed JSON, no MCP tools.
+    NativeHost {
+        /// Browser-supplied origin, checked against the fixed manifest public key.
+        origin: String,
+        /// Browser launch metadata; never used as window identity or authorization.
+        #[arg(long)]
+        parent_window: Option<u64>,
+    },
     /// Private native worker; framed stdin/stdout, never an MCP tool.
     #[command(hide = true)]
     Worker,
@@ -193,6 +201,8 @@ pub(crate) enum ClientName {
     Cursor,
     #[value(name = "vscode")]
     VsCode,
+    #[value(name = "chrome-extension")]
+    ChromeExtension,
 }
 
 impl ClientName {
@@ -206,13 +216,15 @@ impl ClientName {
             Self::Opencode => "opencode",
             Self::Cursor => "cursor",
             Self::VsCode => "vscode",
+            Self::ChromeExtension => "chrome-extension",
         }
     }
 }
 
-impl From<ClientName> for crate::install::ClientId {
-    fn from(client: ClientName) -> Self {
-        match client {
+impl TryFrom<ClientName> for crate::install::ClientId {
+    type Error = &'static str;
+    fn try_from(client: ClientName) -> Result<Self, Self::Error> {
+        Ok(match client {
             ClientName::Grok => Self::Grok,
             ClientName::Codex => Self::Codex,
             ClientName::Claude => Self::Claude,
@@ -221,7 +233,10 @@ impl From<ClientName> for crate::install::ClientId {
             ClientName::Opencode => Self::Opencode,
             ClientName::Cursor => Self::Cursor,
             ClientName::VsCode => Self::VsCode,
-        }
+            ClientName::ChromeExtension => {
+                return Err("Use the native host installer for chrome-extension")
+            }
+        })
     }
 }
 
