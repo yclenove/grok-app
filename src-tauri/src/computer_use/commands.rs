@@ -177,7 +177,7 @@ pub async fn cu_doctor(
         .await
         .map_err(|_| "failed".to_owned())?;
     let report = host.office().doctor().await;
-    let count = host.inner.lock().await.book.live_count();
+    let count = host.lifecycle.live_count();
     let _ = host.set_sessions(count).await;
     report.map_err(fault_code)
 }

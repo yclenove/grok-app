@@ -15,7 +15,7 @@ mod office;
 mod text;
 
 pub use host::host_callbacks;
-pub use office::{Approval, Office};
+pub use office::{Approval, Office, Wait};
 pub use text::sanitize_plain;
 
 use crate::auth::ProcessInstance;
