@@ -76,7 +76,7 @@
 | P7-04 | Wayland 窗口身份 | P7-01 | 4d | done | cu2/P7-04-wayland-identity |  | 2026-10-15 | GNOME 扩展(只读窗口列表+策略激活 D-Bus)/KWin 脚本/wlroots foreign-toplevel；映像绑定规范路径+dev/inode+sha256；标题近似匹配不当身份；KWin/wlroots 仅观察/handoff；未知 compositor 拒绝；真实桌面 not_run |
 | P7-05 | Wayland 契约测试 | P7-02、P7-03、P7-04、P1-01 | 3d | done | cu2/P7-05-wayland-contract |  | 2026-10-16 | 表驱动 Wayland 契约(token 生命周期/源范围/Stop 失效/脱敏/执行界面/skip 与能力表一致)：可移植行三平台通过(17 通过/1 ignored)；真实 GNOME headless(mutter+portal+pipewire)行 not_run，由自托管 Wayland runner 运行(wayland-ci.sh 缺环境如实 not_run)；缺 runner 不算 passed |
 | P7-06 | Wayland 用户文档 | P7-05 | 1d | todo |  |  |  | 真实portal/Wayland需匹配桌面runner |
-| P8-01 | 精简 MV3 DOM 扩展 | P4-07 | 4d | todo |  |  |  |  |
+| P8-01 | 精简 MV3 DOM 扩展 | P4-07 | 4d | done | cu2/P8-01-extension |  | 2026-10-17 | `computer-use/tools/browser-extension/`：`manifest.json`（MV3，权限仅 `activeTab`、`scripting`、`webNavigation`，无常驻主机权限，CSP `connect-src 'none'`）、`background.ts`/`content.ts`/`dom.ts`/`shared.ts`、`build.mjs`、README、15 语言 `_locales`。只在用户共享该标签页后才读树/执行动作（共享前零读树零动作）；DOM→统一节点 role/name/value/states/frame；支持 click/set_value/scroll/select；撤销共享、标签关闭、导航即清共享；frame/shadow DOM 处理；password 字段值脱敏；未知执行界面 handoff；不读 cookie/存储、无 eval/fetch，源码 grep 已核；移除 v1 的配对/租约/HTTP。DOM 动作只响应受信通道转发的请求，扩展不决定审批、不绕过 Stop（与 Router 的连接是 native messaging，属后续的 P8-02，此卡只留接口 stub 并在 README 标明）。`tests/dom.test.ts` 30 项、`tsc --noEmit`、`build.mjs`、`rcargo test -p gcu-protocol`、`verify.sh` 通过；根 `tsconfig.json`/`vite.config.ts` 各加 1 行以纳入扩展测试。未做：真实 Chrome/Edge 中加载并手动验证；与 native messaging host 的联调(P8-02)；商店材料(P8-04) |
 | P8-02 | Native messaging host | P8-01 | 2d | todo |  |  |  |  |
 | P8-03 | DOM 树融合与动作路由 | P8-02、P6-04 | 3d | todo |  |  |  |  |
 | P8-04 | 扩展上架材料 | P8-03 | 1d | todo |  |  |  |  |

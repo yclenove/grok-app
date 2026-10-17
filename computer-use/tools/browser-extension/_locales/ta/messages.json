@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "அனுமதிக்கப்பட்ட Computer Use DOM கோரிக்கைகளுக்காக ஒரு தாவலைப் பகிரவும்."
+  },
+  "share": {
+    "message": "இந்தத் தாவலைப் பகிர்"
+  },
+  "revoke": {
+    "message": "இந்தத் தாவலைப் பகிர்வதை நிறுத்து"
+  },
+  "unavailable": {
+    "message": "இந்தத் தாவலைப் பகிர முடியாது"
+  }
+}

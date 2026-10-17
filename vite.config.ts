@@ -119,7 +119,7 @@ export default defineConfig(() => ({
         url: "http://localhost/",
       },
     },
-    include: ["src/**/*.{test,spec}.ts", "src/**/*.{test,spec}.tsx"],
+    include: ["src/**/*.{test,spec}.ts", "src/**/*.{test,spec}.tsx", "computer-use/tools/browser-extension/tests/**/*.test.ts"],
     setupFiles: ["./src/test/loadLocaleCatalogs.ts"],
   },
 }));

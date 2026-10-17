@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Condividi una scheda per le richieste DOM autorizzate di Computer Use."
+  },
+  "share": {
+    "message": "Condividi questa scheda"
+  },
+  "revoke": {
+    "message": "Interrompi la condivisione di questa scheda"
+  },
+  "unavailable": {
+    "message": "Questa scheda non può essere condivisa"
+  }
+}

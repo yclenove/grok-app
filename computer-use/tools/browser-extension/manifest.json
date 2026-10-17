@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "106",
+  "name": "__MSG_name__",
+  "description": "__MSG_description__",
+  "version": "0.1.0",
+  "default_locale": "en",
+  "permissions": ["activeTab", "scripting", "webNavigation"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "__MSG_share__" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'" }
+}

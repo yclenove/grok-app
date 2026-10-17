@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Partagez un onglet pour les requêtes DOM autorisées de Computer Use."
+  },
+  "share": {
+    "message": "Partager cet onglet"
+  },
+  "revoke": {
+    "message": "Arrêter le partage de cet onglet"
+  },
+  "unavailable": {
+    "message": "Cet onglet ne peut pas être partagé"
+  }
+}

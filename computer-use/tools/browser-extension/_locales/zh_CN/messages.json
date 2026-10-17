@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "共享单个标签页以响应已授权的 Computer Use DOM 请求。"
+  },
+  "share": {
+    "message": "共享此标签页"
+  },
+  "revoke": {
+    "message": "停止共享此标签页"
+  },
+  "unavailable": {
+    "message": "无法共享此标签页"
+  }
+}
