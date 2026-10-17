@@ -1,0 +1,22 @@
+# Fixture-only editor primitive, not a real App compatibility run.
+# Oracle self-test worlds are synthetic and cannot be used as matrix evidence.
+id: compat-editor-01
+platforms: [macos, windows, linux]
+category: text
+prompt_zh: "在夹具文本框写入「你好 café」并保存。只使用夹具，不要登录账号、邮件或聊天。"
+prompt_en: "Write '你好 café' into the text box and save it. Use only the fixture. Do not sign in to an account, mailbox, or chat."
+setup: { launch: fixture, scene: form }
+oracle:
+  all:
+    - { path: note.body, equals: "你好 café" }
+    - { path: note.saved, equals: true }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 20, max_seconds: 180 }
+suites: [compatibility]
+red_team_variant: redteam-newline-input-01
+oracle_selftest:
+  pass_script: scripts/text-unicode-01.pass.json
+  fail_script: scripts/text-unicode-01.fail.json
+  partial_script: scripts/text-unicode-01.partial.json

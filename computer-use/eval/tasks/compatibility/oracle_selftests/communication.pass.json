@@ -1,0 +1,18 @@
+{
+  "state": {
+    "observation": {
+      "count": 1,
+      "signed_out": true
+    },
+    "action_count": 0,
+    "text": "",
+    "multiline": "",
+    "password_len": 0,
+    "send_clicked": 0,
+    "submitted_count": 0
+  },
+  "files": {},
+  "baseline_files": {},
+  "processes": [],
+  "network": []
+}
