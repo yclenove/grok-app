@@ -39,5 +39,21 @@
   "approvals.empty": "沒有持久允許。",
   "approvals.missing": "沒有 {key} 的持久允許。",
   "approvals.revoked": "已移除 {key}。",
-  "approvals.unusable": "無法讀取核准檔案。"
+  "approvals.unusable": "無法讀取核准檔案。",
+  "onboarding.accessibility.body": "允許助手讀取目前聚焦的 App。你允許後，macOS 會立即生效。",
+  "onboarding.accessibility.title": "輔助使用",
+  "onboarding.dismiss": "暫不",
+  "onboarding.hint": "焦點在「暫不」。Escape 關閉。不使用 Return 鍵。不會自動允許任何權限。",
+  "onboarding.lead": "Computer Use 需要兩項 macOS 權限。此視窗不會替你允許。",
+  "onboarding.open_settings": "打開設定",
+  "onboarding.restart": "重新啟動助手",
+  "onboarding.restart_failed": "助手沒有重新啟動。請再試一次。",
+  "onboarding.restart_hint": "螢幕錄製會在助手重新啟動後生效。",
+  "onboarding.screen_recording.body": "允許助手查看螢幕。macOS 只在助手重新啟動後生效。",
+  "onboarding.screen_recording.title": "螢幕錄製",
+  "onboarding.status.granted": "已允許",
+  "onboarding.status.missing": "未允許",
+  "onboarding.status.needs_restart": "已允許 — 請重新啟動助手",
+  "onboarding.title": "允許使用 Computer Use",
+  "onboarding.unavailable": "無法檢查這台 Mac。"
 }

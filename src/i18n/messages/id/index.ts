@@ -23,6 +23,7 @@ import { idSettingsMemory } from "./settings-memory";
 import { idSettingsCode } from "./settings-code";
 import { idSettingsRemoteIm } from "./settings-remoteIm";
 import { idSettingsPet } from "./settings-pet";
+import { idComputerUse } from "./computer-use";
 
 import type { MessageKey } from "../en";
 
@@ -51,4 +52,5 @@ export const id: Record<MessageKey, string> = {
   ...idSettingsCode,
   ...idSettingsRemoteIm,
   ...idSettingsPet,
+  ...idComputerUse,
 };

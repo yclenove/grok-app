@@ -11,6 +11,10 @@ path = "src/main.rs"
 
 [features]
 eval-autoapprove = []
+# Darwin cc is required to compile this (objc2-exception-helper). Linux cross
+# builds leave it off. macOS CI must pass `--features macos-webview`.
+# Do not enable wry's `os-webview` feature: that pulls WebKitGTK.
+macos-webview = ["dep:tao", "dep:wry"]
 
 [dependencies]
 anyhow.workspace = true
@@ -50,6 +54,10 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt", "time", "io
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 security-framework-sys = "2.17"
+# WKWebView is target-gated inside wry. `os-webview` would pull WebKitGTK,
+# which this Linux build host cannot provide. Do not enable that feature.
+tao = { version = "0.37", default-features = false, features = ["rwh_06"], optional = true }
+wry = { version = "0.57", default-features = false, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

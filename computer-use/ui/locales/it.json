@@ -39,5 +39,21 @@
   "approvals.empty": "Nessuna autorizzazione persistente.",
   "approvals.missing": "Nessuna autorizzazione persistente per {key}.",
   "approvals.revoked": "{key} rimosso.",
-  "approvals.unusable": "Impossibile leggere il file delle autorizzazioni."
+  "approvals.unusable": "Impossibile leggere il file delle autorizzazioni.",
+  "onboarding.accessibility.body": "Consente all’assistente di leggere l’app in primo piano. macOS lo applica appena lo consenti.",
+  "onboarding.accessibility.title": "Accessibilità",
+  "onboarding.dismiss": "Non ora",
+  "onboarding.hint": "«Non ora» è selezionato. Esc chiude. Il tasto Invio non viene usato. Nulla è consentito automaticamente.",
+  "onboarding.lead": "Computer Use richiede due permessi di macOS. Questa finestra non li concede.",
+  "onboarding.open_settings": "Apri Impostazioni",
+  "onboarding.restart": "Riavvia assistente",
+  "onboarding.restart_failed": "L’assistente non si è riavviato. Riprova.",
+  "onboarding.restart_hint": "La registrazione dello schermo funziona dopo il riavvio dell’assistente.",
+  "onboarding.screen_recording.body": "Consente all’assistente di vedere lo schermo. macOS lo applica solo dopo il riavvio dell’assistente.",
+  "onboarding.screen_recording.title": "Registrazione schermo",
+  "onboarding.status.granted": "Consentito",
+  "onboarding.status.missing": "Non consentito",
+  "onboarding.status.needs_restart": "Consentito — riavvia l’assistente",
+  "onboarding.title": "Consenti Computer Use",
+  "onboarding.unavailable": "Impossibile controllare questo Mac."
 }

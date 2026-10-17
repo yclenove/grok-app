@@ -39,5 +39,21 @@
   "approvals.empty": "No persistent approvals.",
   "approvals.missing": "No persistent approval for {key}.",
   "approvals.revoked": "Removed {key}.",
-  "approvals.unusable": "The approvals file cannot be read."
+  "approvals.unusable": "The approvals file cannot be read.",
+  "onboarding.accessibility.body": "Lets the helper read the focused app. macOS applies this as soon as you allow it.",
+  "onboarding.accessibility.title": "Accessibility",
+  "onboarding.dismiss": "Not now",
+  "onboarding.hint": "Not now is focused. Escape closes. Enter is left untouched. Nothing is allowed automatically.",
+  "onboarding.lead": "Computer Use needs two macOS permissions. This window does not allow them for you.",
+  "onboarding.open_settings": "Open Settings",
+  "onboarding.restart": "Restart helper",
+  "onboarding.restart_failed": "The helper did not restart. Try again.",
+  "onboarding.restart_hint": "Screen Recording starts working after the helper restarts.",
+  "onboarding.screen_recording.body": "Lets the helper see the screen. macOS applies this only after the helper restarts.",
+  "onboarding.screen_recording.title": "Screen Recording",
+  "onboarding.status.granted": "Allowed",
+  "onboarding.status.missing": "Not allowed",
+  "onboarding.status.needs_restart": "Allowed — restart the helper",
+  "onboarding.title": "Allow Computer Use",
+  "onboarding.unavailable": "This Mac could not be checked."
 }

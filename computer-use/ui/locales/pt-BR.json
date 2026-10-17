@@ -39,5 +39,21 @@
   "approvals.empty": "Não há aprovações persistentes.",
   "approvals.missing": "Não há aprovação persistente para {key}.",
   "approvals.revoked": "{key} removido.",
-  "approvals.unusable": "Não foi possível ler o arquivo de aprovações."
+  "approvals.unusable": "Não foi possível ler o arquivo de aprovações.",
+  "onboarding.accessibility.body": "Permite que o assistente leia o app em foco. O macOS aplica isso assim que você permitir.",
+  "onboarding.accessibility.title": "Acessibilidade",
+  "onboarding.dismiss": "Agora não",
+  "onboarding.hint": "«Agora não» está em foco. Escape fecha. A tecla Return não é usada. Nada é permitido automaticamente.",
+  "onboarding.lead": "O Computer Use precisa de duas permissões do macOS. Esta janela não as concede.",
+  "onboarding.open_settings": "Abrir Ajustes",
+  "onboarding.restart": "Reiniciar assistente",
+  "onboarding.restart_failed": "O assistente não reiniciou. Tente de novo.",
+  "onboarding.restart_hint": "A gravação da tela passa a valer depois que o assistente reiniciar.",
+  "onboarding.screen_recording.body": "Permite que o assistente veja a tela. O macOS aplica isso só depois que o assistente reiniciar.",
+  "onboarding.screen_recording.title": "Gravação da tela",
+  "onboarding.status.granted": "Permitido",
+  "onboarding.status.missing": "Não permitido",
+  "onboarding.status.needs_restart": "Permitido — reinicie o assistente",
+  "onboarding.title": "Permitir o Computer Use",
+  "onboarding.unavailable": "Não foi possível verificar este Mac."
 }

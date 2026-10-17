@@ -39,5 +39,21 @@
   "approvals.empty": "영구 승인이 없습니다.",
   "approvals.missing": "{key}에 대한 영구 승인이 없습니다.",
   "approvals.revoked": "{key}을(를) 제거했습니다.",
-  "approvals.unusable": "승인 파일을 읽을 수 없습니다."
+  "approvals.unusable": "승인 파일을 읽을 수 없습니다.",
+  "onboarding.accessibility.body": "도우미가 앞에 있는 앱을 읽게 합니다. 허용하면 macOS가 바로 적용합니다.",
+  "onboarding.accessibility.title": "손쉬운 사용",
+  "onboarding.dismiss": "나중에",
+  "onboarding.hint": "“나중에”에 포커스가 있습니다. Escape는 닫습니다. Return 키는 쓰지 않습니다. 아무것도 자동으로 허용하지 않습니다.",
+  "onboarding.lead": "Computer Use에는 macOS 권한 두 가지가 필요합니다. 이 창은 대신 허용하지 않습니다.",
+  "onboarding.open_settings": "설정 열기",
+  "onboarding.restart": "도우미 다시 시작",
+  "onboarding.restart_failed": "도우미가 다시 시작되지 않았습니다. 다시 시도하세요.",
+  "onboarding.restart_hint": "화면 기록은 도우미를 다시 시작한 뒤에 적용됩니다.",
+  "onboarding.screen_recording.body": "도우미가 화면을 보게 합니다. macOS는 도우미를 다시 시작한 뒤에만 적용합니다.",
+  "onboarding.screen_recording.title": "화면 기록",
+  "onboarding.status.granted": "허용됨",
+  "onboarding.status.missing": "허용 안 됨",
+  "onboarding.status.needs_restart": "허용됨 — 도우미를 다시 시작",
+  "onboarding.title": "Computer Use 허용",
+  "onboarding.unavailable": "이 Mac을 확인하지 못했습니다."
 }

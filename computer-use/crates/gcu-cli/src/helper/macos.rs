@@ -393,7 +393,7 @@ async fn bridge_stdio(stream: tokio::net::UnixStream) -> Result<u8, Failure> {
     .map_err(super::helper_failure)
 }
 
-async fn launch_helper() -> Result<(), Failure> {
+pub(crate) async fn launch_helper() -> Result<(), Failure> {
     let bundle = current_bundle_id();
     let argv = launch_command(bundle)
         .ok_or_else(|| Failure::internal("Computer-use helper bundle id is not launchable"))?;

@@ -23,6 +23,7 @@ import { deSettingsMemory } from "./settings-memory";
 import { deSettingsCode } from "./settings-code";
 import { deSettingsRemoteIm } from "./settings-remoteIm";
 import { deSettingsPet } from "./settings-pet";
+import { deComputerUse } from "./computer-use";
 
 import type { MessageKey } from "../en";
 
@@ -51,4 +52,5 @@ export const de: Record<MessageKey, string> = {
   ...deSettingsCode,
   ...deSettingsRemoteIm,
   ...deSettingsPet,
+  ...deComputerUse,
 };

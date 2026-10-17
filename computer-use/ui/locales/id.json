@@ -39,5 +39,21 @@
   "approvals.empty": "Tidak ada persetujuan permanen.",
   "approvals.missing": "Tidak ada persetujuan permanen untuk {key}.",
   "approvals.revoked": "{key} dihapus.",
-  "approvals.unusable": "Berkas persetujuan tidak dapat dibaca."
+  "approvals.unusable": "Berkas persetujuan tidak dapat dibaca.",
+  "onboarding.accessibility.body": "Mengizinkan helper membaca app yang sedang fokus. macOS menerapkannya begitu Anda mengizinkan.",
+  "onboarding.accessibility.title": "Aksesibilitas",
+  "onboarding.dismiss": "Jangan sekarang",
+  "onboarding.hint": "“Jangan sekarang” yang fokus. Escape menutup. Tombol Return tidak dipakai. Tidak ada yang diizinkan otomatis.",
+  "onboarding.lead": "Computer Use memerlukan dua izin macOS. Jendela ini tidak memberikannya.",
+  "onboarding.open_settings": "Buka Pengaturan",
+  "onboarding.restart": "Mulai ulang helper",
+  "onboarding.restart_failed": "Helper tidak dimulai ulang. Coba lagi.",
+  "onboarding.restart_hint": "Rekaman Layar berlaku setelah helper dimulai ulang.",
+  "onboarding.screen_recording.body": "Mengizinkan helper melihat layar. macOS menerapkannya hanya setelah helper dimulai ulang.",
+  "onboarding.screen_recording.title": "Rekaman Layar",
+  "onboarding.status.granted": "Diizinkan",
+  "onboarding.status.missing": "Tidak diizinkan",
+  "onboarding.status.needs_restart": "Diizinkan — mulai ulang helper",
+  "onboarding.title": "Izinkan Computer Use",
+  "onboarding.unavailable": "Mac ini tidak dapat diperiksa."
 }

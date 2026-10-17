@@ -39,5 +39,21 @@
   "approvals.empty": "没有持久允许。",
   "approvals.missing": "没有 {key} 的持久允许。",
   "approvals.revoked": "已移除 {key}。",
-  "approvals.unusable": "无法读取审批文件。"
+  "approvals.unusable": "无法读取审批文件。",
+  "onboarding.accessibility.body": "允许助手读取当前聚焦的应用。你允许后，macOS 会立即生效。",
+  "onboarding.accessibility.title": "辅助功能",
+  "onboarding.dismiss": "暂不",
+  "onboarding.hint": "焦点在“暂不”。Escape 关闭。不使用 Return 键。不会自动允许任何权限。",
+  "onboarding.lead": "Computer Use 需要两项 macOS 权限。此窗口不会替你允许。",
+  "onboarding.open_settings": "打开设置",
+  "onboarding.restart": "重启助手",
+  "onboarding.restart_failed": "助手没有重启。请再试一次。",
+  "onboarding.restart_hint": "屏幕录制会在助手重启后生效。",
+  "onboarding.screen_recording.body": "允许助手查看屏幕。macOS 只在助手重启后生效。",
+  "onboarding.screen_recording.title": "屏幕录制",
+  "onboarding.status.granted": "已允许",
+  "onboarding.status.missing": "未允许",
+  "onboarding.status.needs_restart": "已允许 — 请重启助手",
+  "onboarding.title": "允许使用 Computer Use",
+  "onboarding.unavailable": "无法检查这台 Mac。"
 }

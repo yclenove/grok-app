@@ -39,5 +39,21 @@
   "approvals.empty": "Немає постійних дозволів.",
   "approvals.missing": "Немає постійного дозволу для {key}.",
   "approvals.revoked": "{key} вилучено.",
-  "approvals.unusable": "Не вдалося прочитати файл дозволів."
+  "approvals.unusable": "Не вдалося прочитати файл дозволів.",
+  "onboarding.accessibility.body": "Допомагає помічнику читати застосунок на передньому плані. macOS застосовує це щойно ви дозволите.",
+  "onboarding.accessibility.title": "Спеціальні можливості",
+  "onboarding.dismiss": "Не зараз",
+  "onboarding.hint": "«Не зараз» у фокусі. Escape закриває. Клавіша Return не використовується. Нічого не дозволяється автоматично.",
+  "onboarding.lead": "Computer Use потребує двох дозволів macOS. Це вікно не надає їх замість вас.",
+  "onboarding.open_settings": "Відкрити параметри",
+  "onboarding.restart": "Перезапустити помічника",
+  "onboarding.restart_failed": "Помічник не перезапустився. Спробуйте ще раз.",
+  "onboarding.restart_hint": "Запис екрана запрацює після перезапуску помічника.",
+  "onboarding.screen_recording.body": "Допомагає помічнику бачити екран. macOS застосовує це лише після перезапуску помічника.",
+  "onboarding.screen_recording.title": "Запис екрана",
+  "onboarding.status.granted": "Дозволено",
+  "onboarding.status.missing": "Не дозволено",
+  "onboarding.status.needs_restart": "Дозволено — перезапустіть помічника",
+  "onboarding.title": "Дозволити Computer Use",
+  "onboarding.unavailable": "Не вдалося перевірити цей Mac."
 }
