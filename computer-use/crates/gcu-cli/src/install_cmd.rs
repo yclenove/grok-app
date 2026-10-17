@@ -14,6 +14,9 @@ use crate::install::{
 
 /// Run install (`remove` is false) or uninstall. Blocking IO is off the runtime thread.
 pub(crate) async fn execute(args: InstallArgs, remove: bool) -> Result<u8, Failure> {
+    if selected_client(&args, remove)? == ClientName::ChromeExtension {
+        return crate::private::work(move || execute_native(args, remove)).await;
+    }
     let joined = tokio::task::spawn_blocking(move || execute_blocking(args, remove)).await;
     match joined {
         Ok(result) => result,
@@ -23,6 +26,9 @@ pub(crate) async fn execute(args: InstallArgs, remove: bool) -> Result<u8, Failu
 
 fn execute_blocking(args: InstallArgs, remove: bool) -> Result<u8, Failure> {
     let client = selected_client(&args, remove)?;
+    if client == ClientName::ChromeExtension {
+        return execute_native(args, remove);
+    }
     let home = resolve_home(args.home.clone())?;
     let project = resolve_project(args.project.clone())?;
     let gcu = resolve_gcu(args.gcu.clone())?;
@@ -53,7 +59,7 @@ fn execute_blocking(args: InstallArgs, remove: bool) -> Result<u8, Failure> {
             agy: agy.as_deref(),
         },
     };
-    let tool = installer(ClientId::from(client));
+    let tool = installer(ClientId::try_from(client).map_err(Failure::arguments)?);
     let plan = if remove {
         tool.plan_removal(&ctx)
     } else {
@@ -95,6 +101,73 @@ fn execute_blocking(args: InstallArgs, remove: bool) -> Result<u8, Failure> {
         ),
     )?;
     Ok(0)
+}
+
+fn execute_native(args: InstallArgs, remove: bool) -> Result<u8, Failure> {
+    use crate::native_host::{
+        install::{InstallPlan, Platform, SystemRegistry},
+        ExtensionIdentity,
+    };
+    if args.scope != ScopeName::User
+        || args.project.is_some()
+        || args.grok_home.is_some()
+        || args.agy.is_some()
+    {
+        return Err(Failure::arguments(
+            "chrome-extension supports user scope only; project/grok-home/agy do not apply",
+        ));
+    }
+    let home = resolve_home(args.home.clone())?;
+    let gcu = resolve_gcu(args.gcu.clone())?;
+    let identity = if remove {
+        None
+    } else {
+        Some(ExtensionIdentity::embedded().map_err(native_failure)?)
+    };
+    let mut registry = SystemRegistry;
+    let plan = InstallPlan::new(
+        Platform::current(),
+        &home,
+        &gcu,
+        identity.as_ref(),
+        remove,
+        &registry,
+    )
+    .map_err(native_failure)?;
+    let diff = plan.render_diff();
+    let noop = plan.is_noop();
+    let backups = if args.dry_run {
+        Vec::new()
+    } else {
+        plan.apply(&mut registry).map_err(native_failure)?
+    };
+    emit(
+        args.json,
+        &report(
+            ClientName::ChromeExtension,
+            args.scope,
+            remove,
+            args.dry_run,
+            noop,
+            &diff,
+            &backups,
+        ),
+    )?;
+    Ok(0)
+}
+
+fn native_failure(error: crate::native_host::Error) -> Failure {
+    Failure {
+        code: if matches!(
+            error,
+            crate::native_host::Error::Io(_) | crate::native_host::Error::Deadline
+        ) {
+            10
+        } else {
+            2
+        },
+        message: error.to_string(),
+    }
 }
 
 fn selected_client(args: &InstallArgs, remove: bool) -> Result<ClientName, Failure> {
