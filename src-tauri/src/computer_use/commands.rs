@@ -1,7 +1,7 @@
 //! Desktop commands for an approval decision and one redacted screenshot.
 
 use serde::Deserialize;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 use super::approval::{
     claim_from_body, confirm_from_body, fault_code, handoff_from_body, ConfirmBody, DecisionBody,
@@ -60,4 +60,31 @@ pub async fn cu_tool_shot(
     body: ShotQuery,
 ) -> Result<ShotDto, String> {
     tool_shot(&host, &body.session_id, &body.id).await
+}
+
+/// Global Stop uses the dedicated control connection and persists its latch.
+#[tauri::command]
+pub async fn cu_stop(
+    window: WebviewWindow,
+    host: State<'_, ComputerUseHost>,
+) -> Result<(), String> {
+    trusted_control(&window)?;
+    host.user_stop().await.map_err(|_| "failed".into())
+}
+
+/// Resume is not a model tool or ordinary Host method.
+#[tauri::command]
+pub async fn cu_resume(
+    window: WebviewWindow,
+    host: State<'_, ComputerUseHost>,
+) -> Result<(), String> {
+    trusted_control(&window)?;
+    host.user_resume().await.map_err(|_| "failed".into())
+}
+fn trusted_control(window: &WebviewWindow) -> Result<(), String> {
+    if matches!(window.label(), "main" | super::overlay::CONTROLS) {
+        Ok(())
+    } else {
+        Err("untrusted".into())
+    }
 }

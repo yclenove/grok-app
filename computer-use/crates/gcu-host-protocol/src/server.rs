@@ -182,6 +182,15 @@ impl Peer {
         params: &P,
         deadline: Duration,
     ) -> Result<R, Error> {
+        self.start_call(method, params)?.wait(deadline).await
+    }
+    /// Enqueue synchronously, before returning to a trusted control callback.
+    /// The returned reply owns cancellation cleanup. No IO or waits here.
+    pub fn start_call<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<PendingReply, Error> {
         if !self.connected() {
             return Err(Error::Disconnected);
         }
@@ -209,13 +218,10 @@ impl Peer {
             state.pending.insert(id, tx);
             id
         };
-        let _pending = Pending(self.clone(), id);
-        let value = tokio::time::timeout(deadline, rx)
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::Disconnected)?
-            .map_err(Error::Remote)?;
-        serde_json::from_value(value).map_err(|_| Error::Invalid)
+        Ok(PendingReply {
+            pending: Pending(self.clone(), id),
+            reply: rx,
+        })
     }
     /// Enqueue a notification without waiting. Full queues drop the update;
     /// they never block actions or the independent Stop connection.
@@ -289,6 +295,23 @@ impl Peer {
         }
     }
 }
+/// One already-enqueued request. Dropping it removes its waiter without retry.
+pub struct PendingReply {
+    pending: Pending,
+    reply: oneshot::Receiver<Answer>,
+}
+impl PendingReply {
+    /// Wait at most the supplied monotonic deadline. Late replies are ignored.
+    pub async fn wait<R: DeserializeOwned>(self, deadline: Duration) -> Result<R, Error> {
+        let _pending = self.pending;
+        let value = tokio::time::timeout(deadline, self.reply)
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Disconnected)?
+            .map_err(Error::Remote)?;
+        serde_json::from_value(value).map_err(|_| Error::Invalid)
+    }
+}
 struct Pending(Peer, u64);
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -299,12 +322,24 @@ impl Drop for Pending {
 pub type CallbackFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>>;
 /// App's independent Host implementation; no core/host-api dependency required.
 pub trait HostCallbacks: Send + Sync + 'static {
+    /// Consume a bounded notification synchronously in wire order. Optional;
+    /// must do memory work only, with no IO/waits. Returning None uses the
+    /// existing concurrent callback path (including ordinary approvals).
+    fn notification(&self, _request: &Request) -> Option<Result<Value, RpcError>> {
+        None
+    }
     /// Handle a strict typed method. Approval callbacks may wait up to 120s;
     /// all other work caps at five seconds. Dropping dismisses pending UI.
     fn handle(&self, request: Request) -> CallbackFuture<'_>;
     /// The child finished mutual authentication. Default keeps the previous
     /// callbacks unchanged. Must not block.
     fn attached(&self, _engine: ProcessInstance, _peer: Peer) {}
+    /// Current Host Stop latch for a new handshake; no IO or waits.
+    fn stop_state(&self) -> Option<bool> {
+        None
+    }
+    /// Authenticated independent control connection. Never expose it to a model.
+    fn control_attached(&self, _peer: Peer) {}
     /// Dismiss all pending approvals and preserve the Host's persistent Stop
     /// latch. Must return immediately and must not perform blocking IO.
     fn disconnected(&self);
@@ -343,6 +378,12 @@ impl HostServer {
                 Some(_)=tasks.join_next(),if !tasks.is_empty()=>(),
                 request=self.incoming.recv()=>{
                     let Some(request)=request else {break};
+                    if request.id.is_none() {
+                        if let Some(answer) = callbacks.notification(&request) {
+                            self.peer.respond(&request, answer);
+                            continue;
+                        }
+                    }
                     if tasks.len()>=QUEUE_LIMIT {self.peer.respond(&request,Err(RpcError::new(-32002,"busy")));continue;}
                     let peer=self.peer.clone(); let callbacks=callbacks.clone();
                     tasks.spawn(async move {

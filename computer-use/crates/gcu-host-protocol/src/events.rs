@@ -255,8 +255,20 @@ impl HostCallbacks for Observing {
         self.inner.handle(request)
     }
 
+    fn notification(&self, request: &Request) -> Option<Result<Value, RpcError>> {
+        self.inner.notification(request)
+    }
+
     fn attached(&self, engine: ProcessInstance, peer: Peer) {
         self.inner.attached(engine, peer);
+    }
+
+    fn stop_state(&self) -> Option<bool> {
+        self.inner.stop_state()
+    }
+
+    fn control_attached(&self, peer: Peer) {
+        self.inner.control_attached(peer);
     }
 
     fn disconnected(&self) {

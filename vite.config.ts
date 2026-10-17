@@ -106,6 +106,7 @@ export default defineConfig(() => ({
   },
   build: {
     rollupOptions: {
+      input: { main: path.resolve(root, "index.html"), computerUseOverlay: path.resolve(root, "computer-use-overlay.html") },
       output: {
         manualChunks: vendorManualChunk,
       },

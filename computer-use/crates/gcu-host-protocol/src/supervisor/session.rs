@@ -257,7 +257,7 @@ where
     let secret = Secret::random();
     let mut config = AuthConfig::current(Role::Host, Channel::Rpc).map_err(Error::Handshake)?;
     config.version = request.version;
-    config.stopped = request.stopped;
+    config.stopped = callbacks.stop_state().unwrap_or(request.stopped);
     write_frame(&mut host, &Bootstrap::new(config.instance.clone(), &secret))
         .await
         .map_err(Error::Handshake)?;
@@ -292,6 +292,7 @@ where
             return Err(error);
         }
     };
+    callbacks.control_attached(stop.clone());
     let child = match guard.into_child() {
         Ok(child) => child,
         Err(error) => {
@@ -402,7 +403,7 @@ async fn spawn_fallback(
     let secret = Secret::random();
     let mut config = AuthConfig::current(Role::Host, Channel::Rpc).map_err(Error::Handshake)?;
     config.version = request.version;
-    config.stopped = request.stopped;
+    config.stopped = callbacks.stop_state().unwrap_or(request.stopped);
     write_frame(
         &mut token_host,
         &Bootstrap::new(config.instance.clone(), &secret).with_endpoint(listener.stamp()),
