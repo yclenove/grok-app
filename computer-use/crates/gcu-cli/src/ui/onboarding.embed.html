@@ -1,0 +1,26 @@
+<!DOCTYPE html><html lang="{{slot:lang}}"><head><meta charset="utf-8"><title>{{onboarding.title}}</title><style>:root{color-scheme:dark;--bg-app:#0d0d0d;--bg-card:#1a1a1a;--text-primary:rgba(255,255,255,0.92);--text-secondary:rgba(255,255,255,0.58);--border-strong:rgba(255,255,255,0.12);--border-focus:rgba(140,170,255,0.55);--accent:#8aa4ff;--accent-fg:#0d0d0d;--danger:#f07178;--success:#3ecf8e;--font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--text-md:14px;--leading-normal:1.55;}@media (prefers-color-scheme:light){:root{color-scheme:light;--bg-app:#f4f4f6;--bg-card:#ffffff;--text-primary:rgba(0,0,0,0.88);--text-secondary:rgba(0,0,0,0.55);--border-strong:rgba(0,0,0,0.1);--border-focus:rgba(70,100,220,0.55);--accent:#3d5fd9;--accent-fg:#ffffff;--success:#1a9f63;}}html,body{margin:0;background:var(--bg-app);color:var(--text-primary);font:var(--text-md)/var(--leading-normal) var(--font-sans);}main{padding:16px 18px 20px;}h1,h2,p{margin:0 0 10px;}h1{font-size:16px;}h2{font-size:14px;}section{background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;padding:12px;margin:0 0 12px;}button{min-width:7rem;min-height:2.6rem;margin:4px 6px 0 0;padding:0 12px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-strong);border-radius:8px;}button:focus-visible{outline:3px solid var(--border-focus);outline-offset:2px;}.status{font-weight:700;}.hint{color:var(--text-secondary);}.missing{color:var(--danger);}.granted{color:var(--success);}</style></head><body><main><h1>{{onboarding.title}}</h1><p>{{onboarding.lead}}</p><section><h2>{{onboarding.accessibility.title}}</h2><p>{{onboarding.accessibility.body}}</p><p class="status {{slot:ax_class}}" id="ax-status">{{slot:ax_status}}</p><button type="button" data-action="settings" data-kind="accessibility">{{onboarding.open_settings}}</button></section><section><h2>{{onboarding.screen_recording.title}}</h2><p>{{onboarding.screen_recording.body}}</p><p class="status {{slot:screen_class}}" id="screen-status">{{slot:screen_status}}</p><p class="hint" id="restart-hint" {{slot:restart_hint_attr}}>{{slot:restart_hint}}</p><p class="hint" id="restart-error" {{slot:restart_error_attr}}>{{slot:restart_error}}</p><button type="button" id="restart" data-action="restart" {{slot:restart_attr}}>{{onboarding.restart}}</button></section><p class="hint">{{onboarding.hint}}</p><div class="choices"><button type="button" id="deny" data-action="dismiss" autofocus>{{onboarding.dismiss}}</button></div></main><script>
+(function () {
+  function post(action) {
+    if (window.ipc && window.ipc.postMessage) {
+      window.ipc.postMessage(action);
+    }
+  }
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      post("dismiss");
+    }
+  });
+  var nodes = document.querySelectorAll("button[data-action]");
+  for (var index = 0; index < nodes.length; index += 1) {
+    nodes[index].addEventListener("click", function (event) {
+      var node = event.currentTarget;
+      var action = node.getAttribute("data-action");
+      if (action === "settings") {
+        post("settings:" + (node.getAttribute("data-kind") || ""));
+        return;
+      }
+      post(action || "dismiss");
+    });
+  }
+})();
+</script></body></html>

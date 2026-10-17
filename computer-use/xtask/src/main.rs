@@ -5,6 +5,7 @@
 mod bundle;
 mod deps;
 mod schema;
+mod ui;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -27,8 +28,9 @@ fn main() -> Result<()> {
         },
         Some("budget") if args.next().is_none() => schema::run_budget(),
         Some("bundle-macos") => bundle::run(args),
+        Some("ui") => ui::run(args),
         _ => bail!(
-            "usage: cargo xtask <check-deps|golden <--check|--update>|budget|bundle-macos [--release] [--binary PATH] [--output DIR]>"
+            "usage: cargo xtask <check-deps|golden <--check|--update>|budget|bundle-macos [--release] [--binary PATH] [--output DIR]|ui <embed|export-i18n|check>>"
         ),
     }
 }

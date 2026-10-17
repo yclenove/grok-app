@@ -39,5 +39,21 @@
   "approvals.empty": "Keine dauerhaften Freigaben.",
   "approvals.missing": "Keine dauerhafte Freigabe für {key}.",
   "approvals.revoked": "{key} entfernt.",
-  "approvals.unusable": "Die Freigabedatei kann nicht gelesen werden."
+  "approvals.unusable": "Die Freigabedatei kann nicht gelesen werden.",
+  "onboarding.accessibility.body": "Damit kann der Helfer die fokussierte App lesen. macOS übernimmt das, sobald Sie es erlauben.",
+  "onboarding.accessibility.title": "Bedienungshilfen",
+  "onboarding.dismiss": "Nicht jetzt",
+  "onboarding.hint": "„Nicht jetzt“ ist fokussiert. Escape schließt. Die Eingabetaste bleibt unberührt. Es wird nichts automatisch erlaubt.",
+  "onboarding.lead": "Computer Use braucht zwei macOS-Berechtigungen. Dieses Fenster erteilt sie nicht.",
+  "onboarding.open_settings": "Einstellungen öffnen",
+  "onboarding.restart": "Helfer neu starten",
+  "onboarding.restart_failed": "Der Helfer wurde nicht neu gestartet. Versuchen Sie es erneut.",
+  "onboarding.restart_hint": "Die Bildschirmaufnahme gilt erst nach einem Neustart des Helfers.",
+  "onboarding.screen_recording.body": "Damit kann der Helfer den Bildschirm sehen. macOS übernimmt das erst nach einem Neustart des Helfers.",
+  "onboarding.screen_recording.title": "Bildschirmaufnahme",
+  "onboarding.status.granted": "Erlaubt",
+  "onboarding.status.missing": "Nicht erlaubt",
+  "onboarding.status.needs_restart": "Erlaubt — Helfer neu starten",
+  "onboarding.title": "Computer Use zulassen",
+  "onboarding.unavailable": "Dieser Mac konnte nicht geprüft werden."
 }

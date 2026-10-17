@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="{{slot:lang}}">
+<head>
+<meta charset="utf-8">
+<title>{{onboarding.title}}</title>
+<style>
+{{slot:css}}
+</style>
+</head>
+<body>
+<main>
+  <h1>{{onboarding.title}}</h1>
+  <p>{{onboarding.lead}}</p>
+  <section>
+    <h2>{{onboarding.accessibility.title}}</h2>
+    <p>{{onboarding.accessibility.body}}</p>
+    <p class="status {{slot:ax_class}}" id="ax-status">{{slot:ax_status}}</p>
+    <button type="button" data-action="settings" data-kind="accessibility">{{onboarding.open_settings}}</button>
+  </section>
+  <section>
+    <h2>{{onboarding.screen_recording.title}}</h2>
+    <p>{{onboarding.screen_recording.body}}</p>
+    <p class="status {{slot:screen_class}}" id="screen-status">{{slot:screen_status}}</p>
+    <p class="hint" id="restart-hint" {{slot:restart_hint_attr}}>{{slot:restart_hint}}</p>
+    <p class="hint" id="restart-error" {{slot:restart_error_attr}}>{{slot:restart_error}}</p>
+    <button type="button" id="restart" data-action="restart" {{slot:restart_attr}}>{{onboarding.restart}}</button>
+  </section>
+  <p class="hint">{{onboarding.hint}}</p>
+  <div class="choices">
+    <button type="button" id="deny" data-action="dismiss" autofocus>{{onboarding.dismiss}}</button>
+  </div>
+</main>
+<script>
+(function () {
+  function post(action) {
+    if (window.ipc && window.ipc.postMessage) {
+      window.ipc.postMessage(action);
+    }
+  }
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      post("dismiss");
+    }
+  });
+  var nodes = document.querySelectorAll("button[data-action]");
+  for (var index = 0; index < nodes.length; index += 1) {
+    nodes[index].addEventListener("click", function (event) {
+      var node = event.currentTarget;
+      var action = node.getAttribute("data-action");
+      if (action === "settings") {
+        post("settings:" + (node.getAttribute("data-kind") || ""));
+        return;
+      }
+      post(action || "dismiss");
+    });
+  }
+})();
+</script>
+</body>
+</html>

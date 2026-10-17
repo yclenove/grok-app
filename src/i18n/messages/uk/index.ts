@@ -23,6 +23,7 @@ import { ukSettingsMemory } from "./settings-memory";
 import { ukSettingsCode } from "./settings-code";
 import { ukSettingsRemoteIm } from "./settings-remoteIm";
 import { ukSettingsPet } from "./settings-pet";
+import { ukComputerUse } from "./computer-use";
 
 import type { MessageKey } from "../en";
 
@@ -51,4 +52,5 @@ export const uk: Record<MessageKey, string> = {
   ...ukSettingsCode,
   ...ukSettingsRemoteIm,
   ...ukSettingsPet,
+  ...ukComputerUse,
 };

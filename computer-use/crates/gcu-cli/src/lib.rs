@@ -23,6 +23,7 @@ mod proxy;
 pub mod resume;
 mod runtime;
 mod turn_ended;
+pub mod ui;
 mod worker;
 
 /// Process entry used by the `gcu` binary.
@@ -44,6 +45,20 @@ pub fn cli_main() {
     if args.iter().any(|arg| arg == "agent") && !gcu_driver_macos::input::ensure_agent_appkit() {
         eprintln!("Cannot start the helper application");
         std::process::exit(10);
+    }
+    // The wry loop must run on this thread before Tokio. `--driver fake` never
+    // opens it. Dismiss falls through and the helper serves. Restart has already
+    // spawned the waiter; exiting lets that waiter `exec open`. Other systems
+    // return `Serve` and do not open a window, so this call stays in the build.
+    if ui::argv_requests_onboarding(&args) {
+        match ui::prepare_agent_onboarding() {
+            Ok(ui::AgentStart::Serve) => {}
+            Ok(ui::AgentStart::Restarted) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("{}", error.message);
+                std::process::exit(i32::from(error.code));
+            }
+        }
     }
     use clap::Parser;
     std::panic::set_hook(Box::new(|_| {

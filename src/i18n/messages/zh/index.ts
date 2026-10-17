@@ -23,6 +23,7 @@ import { zhSettingsMemory } from "./settings-memory";
 import { zhSettingsCode } from "./settings-code";
 import { zhSettingsRemoteIm } from "./settings-remoteIm";
 import { zhSettingsPet } from "./settings-pet";
+import { zhComputerUse } from "./computer-use";
 
 import type { MessageKey } from "../en";
 
@@ -51,6 +52,7 @@ export const zh: Record<MessageKey, string> = {
   ...zhSettingsCode,
   ...zhSettingsRemoteIm,
   ...zhSettingsPet,
+  ...zhComputerUse,
 };
 
 export { zhCore } from "./core";
@@ -77,3 +79,4 @@ export { zhSettingsMemory } from "./settings-memory";
 export { zhSettingsCode } from "./settings-code";
 export { zhSettingsRemoteIm } from "./settings-remoteIm";
 export { zhSettingsPet } from "./settings-pet";
+export { zhComputerUse } from "./computer-use";

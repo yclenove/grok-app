@@ -39,5 +39,21 @@
   "approvals.empty": "Walang persistent na pag-apruba.",
   "approvals.missing": "Walang persistent na pag-apruba para sa {key}.",
   "approvals.revoked": "Inalis ang {key}.",
-  "approvals.unusable": "Hindi mabasa ang file ng mga pag-apruba."
+  "approvals.unusable": "Hindi mabasa ang file ng mga pag-apruba.",
+  "onboarding.accessibility.body": "Nababasa ng helper ang nakatutok na app. Inilalapat ito ng macOS sa sandaling payagan mo.",
+  "onboarding.accessibility.title": "Aksesibilidad",
+  "onboarding.dismiss": "Huwag muna",
+  "onboarding.hint": "Nakatutok ang “Huwag muna”. Isinasara ng Escape. Hindi ginagamit ang Return. Walang pinapayagan nang kusa.",
+  "onboarding.lead": "Kailangan ng Computer Use ang dalawang pahintulot ng macOS. Hindi ito ibinibigay ng window na ito.",
+  "onboarding.open_settings": "Buksan ang Settings",
+  "onboarding.restart": "I-restart ang helper",
+  "onboarding.restart_failed": "Hindi na-restart ang helper. Subukan muli.",
+  "onboarding.restart_hint": "Gumagana ang pag-record ng screen pagkatapos i-restart ang helper.",
+  "onboarding.screen_recording.body": "Nakikita ng helper ang screen. Inilalapat ito ng macOS pagkatapos lang i-restart ang helper.",
+  "onboarding.screen_recording.title": "Pag-record ng Screen",
+  "onboarding.status.granted": "Pinapayagan",
+  "onboarding.status.missing": "Hindi pinapayagan",
+  "onboarding.status.needs_restart": "Pinapayagan — i-restart ang helper",
+  "onboarding.title": "Payagan ang Computer Use",
+  "onboarding.unavailable": "Hindi masuri ang Mac na ito."
 }

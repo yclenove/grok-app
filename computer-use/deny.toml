@@ -11,6 +11,15 @@ unsound = "all"
 ignore = [
     # RUSTSEC-2026-0192: ttf-parser is unmaintained upstream; transitive dependency of eframe 0.36
     "RUSTSEC-2026-0192",
+    # RUSTSEC-2024-0429: glib 0.18.5 unsound VariantStrIter. Only reached through
+    # tao 0.37's Linux GTK target (gtk 0.18). The macOS helper does not compile that
+    # path. Exit: tao/wry no longer depend on glib < 0.20, or onboarding leaves tao/wry.
+    # ADR 0009. Do not widen this to other glib advisories.
+    "RUSTSEC-2024-0429",
+    # RUSTSEC-2024-0370: proc-macro-error 1.0.4 is unmaintained. Only reached through
+    # tao 0.37's Linux GTK build (glib-macros, gtk3-macros). Same exit as RUSTSEC-2024-0429.
+    # ADR 0009. unmaintained stays "all"; this is not a blanket ignore.
+    "RUSTSEC-2024-0370",
 ]
 
 [licenses]
@@ -61,6 +70,11 @@ skip-tree = [
     # ashpd 0.13 pipewire build-time bindgen introduces cexpr -> nom 7.1.3 alongside libspa -> nom 8.0.0
     # Approved via ADR 0007 Option A; restricted precisely to bindgen build-time dependency.
     { crate = "bindgen", reason = "pipewire-sys/libspa-sys build-time bindgen dependency brings in nom 7" },
+    # gcu-cli macos-webview (default off) pulls tao/wry for the macOS helper window only.
+    # cargo-deny still sees their other-target graphs. Same class of exemption as eframe.
+    # ADR 0009. multiple-versions stays "deny".
+    { crate = "tao", reason = "macOS onboarding only; Linux GTK target duplicates (ADR 0009)" },
+    { crate = "wry", reason = "macOS onboarding only; non-macOS target duplicates base64/sha2 (ADR 0009)" },
 ]
 
 [sources]

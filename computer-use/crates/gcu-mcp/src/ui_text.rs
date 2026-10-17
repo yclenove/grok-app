@@ -1,6 +1,6 @@
-//! Approval copy. `computer-use/ui/locales/*.json` is the source until P4-02
-//! exports `src/i18n/messages/<locale>/computer-use.ts` over these files.
-//! English is the key authority. Locales stay lockstep with `en`.
+//! Approval and onboarding copy. `computer-use/ui/locales/*.json` is the source.
+//! `cargo xtask ui export-i18n` writes `src/i18n/messages/<locale>/computer-use.ts`
+//! from these files. English is the key authority. Locales stay lockstep with `en`.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -213,6 +213,15 @@ pub fn audit() -> Vec<String> {
             }
             if map.get("approval.choice.deny") == english.get("approval.choice.deny") {
                 problems.push(format!("untranslated deny {locale}"));
+            }
+            if map.get("onboarding.dismiss") == english.get("onboarding.dismiss") {
+                problems.push(format!("untranslated dismiss {locale}"));
+            }
+            if map.get("onboarding.title") == english.get("onboarding.title") {
+                problems.push(format!("untranslated title {locale}"));
+            }
+            if map.get("onboarding.open_settings") == english.get("onboarding.open_settings") {
+                problems.push(format!("untranslated settings {locale}"));
             }
         }
     }

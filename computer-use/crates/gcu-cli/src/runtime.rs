@@ -91,6 +91,14 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             return crate::helper::run_stdio_proxy((*profile).into(), *turn_idle_secs).await;
         }
     }
+    // No subcommand on macOS starts the helper. `open` does not return the
+    // helper's status, so an already-permitted helper does not print doctor here.
+    // The helper probes its own TCC. `--driver fake` still falls through.
+    #[cfg(target_os = "macos")]
+    if cli.command.is_none() && cli.driver.driver.is_none() {
+        crate::helper::launch_for_onboarding().await?;
+        return Ok(0);
+    }
     args::require_fake(&cli.driver)?;
     let driver = Arc::new(
         gcu_driver_fake::FakeDriver::from_scene(&cli.driver.scene)

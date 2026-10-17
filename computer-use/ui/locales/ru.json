@@ -39,5 +39,21 @@
   "approvals.empty": "Нет постоянных разрешений.",
   "approvals.missing": "Нет постоянного разрешения для {key}.",
   "approvals.revoked": "{key} удалено.",
-  "approvals.unusable": "Не удалось прочитать файл разрешений."
+  "approvals.unusable": "Не удалось прочитать файл разрешений.",
+  "onboarding.accessibility.body": "Помощник может читать приложение на переднем плане. macOS применяет это сразу после разрешения.",
+  "onboarding.accessibility.title": "Универсальный доступ",
+  "onboarding.dismiss": "Не сейчас",
+  "onboarding.hint": "«Не сейчас» в фокусе. Escape закрывает. Клавиша Return не используется. Ничего не разрешается автоматически.",
+  "onboarding.lead": "Computer Use нужны два разрешения macOS. Это окно не выдаёт их за вас.",
+  "onboarding.open_settings": "Открыть настройки",
+  "onboarding.restart": "Перезапустить помощника",
+  "onboarding.restart_failed": "Помощник не перезапустился. Попробуйте ещё раз.",
+  "onboarding.restart_hint": "Запись экрана заработает после перезапуска помощника.",
+  "onboarding.screen_recording.body": "Помощник может видеть экран. macOS применяет это только после перезапуска помощника.",
+  "onboarding.screen_recording.title": "Запись экрана",
+  "onboarding.status.granted": "Разрешено",
+  "onboarding.status.missing": "Не разрешено",
+  "onboarding.status.needs_restart": "Разрешено — перезапустите помощника",
+  "onboarding.title": "Разрешить Computer Use",
+  "onboarding.unavailable": "Не удалось проверить этот Mac."
 }

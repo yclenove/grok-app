@@ -25,6 +25,8 @@ fn invalid_command_or_arguments_returns_failure() -> Result<(), Box<dyn std::err
         vec!["golden", "--invalid"],
         vec!["golden", "--check", "--update"],
         vec!["budget", "unexpected"],
+        vec!["ui"],
+        vec!["ui", "nope"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
             .args(args)

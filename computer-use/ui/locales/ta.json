@@ -39,5 +39,21 @@
   "approvals.empty": "நிலையான அனுமதிகள் இல்லை.",
   "approvals.missing": "{key}க்கு நிலையான அனுமதி இல்லை.",
   "approvals.revoked": "{key} நீக்கப்பட்டது.",
-  "approvals.unusable": "அனுமதி கோப்பை படிக்க முடியவில்லை."
+  "approvals.unusable": "அனுமதி கோப்பை படிக்க முடியவில்லை.",
+  "onboarding.accessibility.body": "உதவியாளர் முன்னிலையிலுள்ள பயன்பாட்டைப் படிக்க இது அனுமதிக்கும். நீங்கள் அனுமதித்தவுடன் macOS அதைப் பயன்படுத்தும்.",
+  "onboarding.accessibility.title": "அணுகல்தன்மை",
+  "onboarding.dismiss": "இப்போது வேண்டாம்",
+  "onboarding.hint": "“இப்போது வேண்டாம்” குவியத்தில் உள்ளது. Escape மூடும். Return விசையைப் பயன்படுத்தவில்லை. எதுவும் தானாக அனுமதிக்கப்படாது.",
+  "onboarding.lead": "Computer Use-க்கு இரண்டு macOS அனுமதிகள் வேண்டும். இந்த சாளரம் அவற்றை வழங்காது.",
+  "onboarding.open_settings": "அமைப்புகளைத் திற",
+  "onboarding.restart": "உதவியாளரை மறுதொடக்கம் செய்",
+  "onboarding.restart_failed": "உதவியாளர் மறுதொடக்கம் ஆகவில்லை. மீண்டும் முயலவும்.",
+  "onboarding.restart_hint": "திரைப் பதிவு உதவியாளரை மறுதொடக்கம் செய்த பிறகு செயல்படும்.",
+  "onboarding.screen_recording.body": "உதவியாளர் திரையைப் பார்க்க இது அனுமதிக்கும். உதவியாளரை மறுதொடக்கம் செய்த பிறகே macOS அதைப் பயன்படுத்தும்.",
+  "onboarding.screen_recording.title": "திரைப் பதிவு",
+  "onboarding.status.granted": "அனுமதிக்கப்பட்டது",
+  "onboarding.status.missing": "அனுமதி இல்லை",
+  "onboarding.status.needs_restart": "அனுமதிக்கப்பட்டது — உதவியாளரை மறுதொடக்கம் செய்யுங்கள்",
+  "onboarding.title": "Computer Use-ஐ அனுமதி",
+  "onboarding.unavailable": "இந்த Mac-ஐ சரிபார்க்க முடியவில்லை."
 }

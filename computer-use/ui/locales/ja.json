@@ -39,5 +39,21 @@
   "approvals.empty": "永続的な許可はありません。",
   "approvals.missing": "{key} の永続的な許可はありません。",
   "approvals.revoked": "{key} を削除しました。",
-  "approvals.unusable": "承認ファイルを読み取れません。"
+  "approvals.unusable": "承認ファイルを読み取れません。",
+  "onboarding.accessibility.body": "ヘルパーが前面のアプリを読めます。許可すると macOS はすぐに反映します。",
+  "onboarding.accessibility.title": "アクセシビリティ",
+  "onboarding.dismiss": "後で",
+  "onboarding.hint": "「後で」にフォーカスがあります。Escape で閉じます。Return キーは使いません。自動では何も許可しません。",
+  "onboarding.lead": "Computer Use には macOS の権限が 2 つ必要です。この画面は代わりに許可しません。",
+  "onboarding.open_settings": "設定を開く",
+  "onboarding.restart": "ヘルパーを再起動",
+  "onboarding.restart_failed": "ヘルパーは再起動しませんでした。もう一度試してください。",
+  "onboarding.restart_hint": "画面収録はヘルパーの再起動後に有効になります。",
+  "onboarding.screen_recording.body": "ヘルパーが画面を見られます。macOS はヘルパーの再起動後にだけ反映します。",
+  "onboarding.screen_recording.title": "画面収録",
+  "onboarding.status.granted": "許可済み",
+  "onboarding.status.missing": "未許可",
+  "onboarding.status.needs_restart": "許可済み — ヘルパーを再起動",
+  "onboarding.title": "Computer Use を許可",
+  "onboarding.unavailable": "この Mac を確認できませんでした。"
 }

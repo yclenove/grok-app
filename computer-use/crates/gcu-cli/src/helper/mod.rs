@@ -70,6 +70,17 @@ pub(crate) async fn run_stdio_proxy(
     }
 }
 
+/// Start the helper with Launch Services and return.
+///
+/// The terminal does not probe TCC: the helper's own grant is what matters,
+/// and `open` does not return the helper's exit status. macOS only. Blocking
+/// waits are capped at five seconds. Cancellation: dropping the future does
+/// not stop an `open` that Launch Services already accepted.
+#[cfg(target_os = "macos")]
+pub(crate) async fn launch_for_onboarding() -> Result<(), Failure> {
+    macos::launch_helper().await
+}
+
 pub(crate) fn helper_failure(error: HelperError) -> Failure {
     match error {
         HelperError::Unsupported => {
