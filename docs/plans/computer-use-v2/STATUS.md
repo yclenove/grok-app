@@ -119,6 +119,7 @@
 - 偶发(2026-10-16，PR #75)：Windows 桌面套件 C04(物理截图) 在某次运行里报 `native operation timed out (maybe_executed=false)`——`rpc_capture` 常态约 0.8–1.1s，那次 5s 内没有返回，同一作业总耗时 10m9s(平时约 6m)，同一提交的另一运行 14/15/0 通过、重跑通过。P5-02 没有改 Windows 驱动，判断为 runner 偶发负载；若再次出现要查截图路径(WGC/PrintWindow)是否会挂起，以及是否在 `DRIVER_DEADLINE` 内正确取消。
 - 偶发(2026-10-16，PR #75)：既有 src-tauri 测试 `plugin_auth_transport::tests::private_pipe_reaches_legacy_node_parser_on_this_host` 在慢 Windows runner 上 10s 超时("Plugin auth timed out"，node 启动慢)，重跑通过；与 Computer Use 无关，若再出现可单独把它的超时放宽到 30s。
 - P4-02：wry/tao 进入 `cargo deny` 解析图后会触发多组跨目标重复版本和两条只经 Linux GTK 路径的 advisory（RUSTSEC-2024-0429 glib、RUSTSEC-2024-0370 proc-macro-error）；已用 ADR 0009 的最小具名例外处理，退出条件是 tao/wry 升级后不再依赖它们或改用其它 WebView 方案。
+- P4-01 真机发现(Pro, macOS 15)：`codesign -r <文本>`（两个独立参数）会把需求文本当成**文件名**读，报 “No such file or directory / invalid requirement specification”；必须写成单个参数 `-r=designated => identifier "<id>"`（S-02 当时手工命令里就是带 `=` 的）。`xtask bundle-macos` 一直用独立参数且吞掉了 stderr，单元测试只校验了 argv 形状所以没发现；已修并让错误带出 codesign 的 stderr，真机上签名验证为 `Identifier=ai.grok.computer-use.helper.dev`、`designated => identifier "…"`、`codesign --verify --strict` 通过。
 
 ## 阶段记录
 

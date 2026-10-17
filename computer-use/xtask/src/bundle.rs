@@ -88,8 +88,9 @@ pub fn codesign_argv(bundle_id: &str, app: &Path) -> Result<Vec<String>> {
         "-".to_string(),
         "-i".to_string(),
         bundle_id.to_string(),
-        "-r".to_string(),
-        format!("designated => identifier \"{bundle_id}\""),
+        // `-r` takes a *file path* unless the value is attached with `=`; a separate
+        // argument made macOS read the requirement text as a missing file.
+        format!("-r=designated => identifier \"{bundle_id}\""),
         "--force".to_string(),
         app.display().to_string(),
     ])
@@ -194,7 +195,11 @@ fn sign(app: &Path, bundle_id: &str) -> Result<()> {
         }
         Err(error) => bail!("cannot run codesign: {error}"),
         Ok(output) if output.status.success() => Ok(()),
-        Ok(_) => bail!("codesign failed"),
+        Ok(output) => bail!(
+            "codesign failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
     }
 }
 
@@ -208,14 +213,13 @@ mod tests {
         let argv = codesign_argv(DEV_BUNDLE_ID, Path::new("/tmp/Helper.app")).unwrap();
         assert!(argv.windows(2).any(|pair| pair == ["-s", "-"]));
         assert!(argv.windows(2).any(|pair| pair == ["-i", DEV_BUNDLE_ID]));
-        let requirement = argv
-            .windows(2)
-            .find(|pair| pair[0] == "-r")
-            .expect("requirement");
-        assert_eq!(
-            requirement[1],
-            format!("designated => identifier \"{DEV_BUNDLE_ID}\"")
+        // Real macOS: a detached `-r <text>` is parsed as a file name and fails with
+        // "No such file or directory", so the requirement must be one `-r=<text>` argument.
+        assert!(
+            argv.contains(&format!("-r=designated => identifier \"{DEV_BUNDLE_ID}\"")),
+            "{argv:?}"
         );
+        assert!(!argv.iter().any(|arg| arg == "-r"), "{argv:?}");
         assert!(argv.iter().any(|arg| arg == "--force"));
     }
 
