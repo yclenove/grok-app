@@ -1,8 +1,9 @@
 import { type ContentRuntime, type DomRequest, type DomResult, type Listener, type Port, error, record, validRequest } from "./shared";
+import { NativeChannel, type NativeRuntime } from "./native";
 
 /** Browser-authenticated scope; the page/model cannot supply tab/document identity. */
 export interface SharedScope { tabId: number; documentId: string; shareId: string }
-/** P8-02 adapter boundary. No native connection is installed by this card.
+/** Native messaging adapter boundary.
  * The adapter must authenticate gcu, bind session/connection/one-shot Router dispatch,
  * verify approval and persistent Stop immediately before dispatch, and signal loss
  * of Stop/connection/session health synchronously through onInvalidate.
@@ -150,4 +151,4 @@ export function installBackground(api: ChromeApi, router?: TrustedRouterChannel)
   return controller;
 }
 const browser = (globalThis as typeof globalThis & { chrome?: ChromeApi }).chrome;
-if (browser) installBackground(browser);
+if (browser) installBackground(browser, new NativeChannel(browser.runtime as ContentRuntime & NativeRuntime));

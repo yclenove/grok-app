@@ -1,0 +1,9 @@
+{
+  "name": "ai.grok.computer_use",
+  "description": "Grok Computer Use native messaging host",
+  "path": "__GCU_ABSOLUTE_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__/"
+  ]
+}

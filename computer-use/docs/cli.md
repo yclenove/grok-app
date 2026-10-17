@@ -26,7 +26,8 @@ gcu uninstall --client claude --yes
 ```
 
 Clients: `grok`, `codex`, `claude`, `antigravity`, `gemini`, `opencode`, `cursor`,
-`vscode`. `--scope` is `user` (default) or `project`. `--dry-run` prints the diff
+`vscode`, `chrome-extension`. `--scope` is `user` (default) or `project` (the
+native extension host supports user scope only). `--dry-run` prints the diff
 and writes nothing. `--json` prints one object (`client`, `action`, `scope`,
 `dry_run`, `noop`, `backups`, `diff`) instead of the text diff.
 
@@ -52,6 +53,51 @@ when the payload reason is `end_turn`.
 Exit 2 covers a missing client, a refused confirmation, and a config file this
 command will not parse. Exit 10 covers an IO or `agy` failure. A refused command
 leaves the config unchanged.
+
+## native-host / chrome-extension
+
+```sh
+gcu install chrome-extension --dry-run
+gcu install chrome-extension --home /absolute/disposable/home --gcu /absolute/path/gcu
+gcu uninstall chrome-extension --home /absolute/disposable/home
+gcu native-host 'chrome-extension://__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__/'
+```
+
+The last command documents the browser entry syntax; that explicit placeholder
+is unusable. A maintainer must first set the fixed public `key` in the extension
+manifest and rebuild both artifacts. Missing/invalid key or a different origin
+returns exit 2. IDs come only from that checked-in key; there is no runtime ID
+override. Registration fails before writing when the key is missing. Uninstall
+remains available without a key.
+
+Install/uninstall write Chrome and Edge native host registrations, not MCP client
+config or browser extension settings. Both are idempotent, support existing
+`--dry-run`, `--json`, `--home`/`GCU_HOME` and `--gcu`, and do not require a driver.
+`--scope project`, `--project`, `--grok-home` and `--agy` are rejected. Existing
+foreign registrations, symlinks and files changed since planning are preserved.
+Changed owned manifests receive owner-only backups; an IO failure returns exit 10
+and may require re-running to finish both browsers.
+
+| Platform | Per-user manifest / registration |
+| --- | --- |
+| macOS Chrome | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/ai.grok.computer_use.json` |
+| macOS Edge | `~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/ai.grok.computer_use.json` |
+| Linux Chrome | `~/.config/google-chrome/NativeMessagingHosts/ai.grok.computer_use.json` |
+| Linux Edge | `~/.config/microsoft-edge/NativeMessagingHosts/ai.grok.computer_use.json` |
+| Windows | `<home>/AppData/Local/grok-computer-use/NativeMessagingHosts/{chrome,edge}/ai.grok.computer_use.json`; default values under `HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.grok.computer_use` and `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\ai.grok.computer_use` point at the corresponding absolute file. |
+
+Manifests reference the gcu executable directly. Browser launch syntax is
+`gcu <origin> [--parent-window=N]`; gcu routes it to `native-host`. The optional
+Windows parent-window argument never selects a target window or grants permission.
+Stdin/stdout use four-byte little-endian JSON lengths, with a 1 MiB limit. Stdout
+is binary framed JSON only. Partial/malformed frames and handshake/IO deadlines
+close the connection without retry; diagnostics on stderr omit payloads.
+
+The host acknowledges only explicit shared top documents and keeps no consent
+across disconnect. It accepts no page-supplied session/window IDs, no arbitrary
+script, no HTTP and no resume/approval RPC. The current entry announces consent
+only: P8-03 must assemble trusted session/window binding and full ActionRouter
+preflight before DOM delivery. See the [extension protocol](../tools/browser-extension/README.md#native-wire-protocol-version-1).
 
 App observations and actions ask this trusted Host. When the client advertises
 form elicitation, the Host tries that inside `tools/call` first. An `always`

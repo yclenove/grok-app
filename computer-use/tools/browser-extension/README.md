@@ -1,4 +1,4 @@
-# Computer Use v2 DOM extension (P8-01)
+# Computer Use v2 DOM extension
 
 This MV3 extension shares only the tab whose browser toolbar icon the user
 clicks. A second click revokes sharing. The localized tooltip changes between
@@ -6,11 +6,10 @@ share/revoke; a dot marks a shared tab and an exclamation mark marks injection
 failure. There is no popup, pairing, lease, HTTP server/client, storage access,
 cookie access, clipboard access, page message bridge, or arbitrary evaluation.
 
-**DOM delivery remains disabled in this card.** `installBackground` receives no
-`TrustedRouterChannel` in the production entry point. Sharing does not read the
-tree or perform an action. P8-02 must implement/authenticate the native messaging
-adapter; P8-03 must connect it to the complete ActionRouter and merge the tree.
-This is not yet an enabled end-to-end Computer Use feature.
+The production background uses `NativeChannel` to announce browser consent to
+`gcu native-host`. The native host entry point has no session binding or DOM
+dispatch assembly: P8-03 must connect the transport to the complete ActionRouter
+and merge the tree. Sharing alone never reads the tree or performs an action.
 
 ## Permissions (fixed allowlist)
 
@@ -19,13 +18,75 @@ This is not yet an enabled end-to-end Computer Use feature.
 | `activeTab` | Temporary access to the tab selected by the user's explicit toolbar click; no persistent site access. |
 | `scripting` | Inject the bundled `content.js` into that tab's top frame in the isolated world after the click. |
 | `webNavigation` | Revoke sharing on navigation in any frame, including history/fragment changes, before another request can use the old scope. Events for unshared tabs are ignored; no browsing history is retained. |
+| `nativeMessaging` | Connect only to the installed `ai.grok.computer_use` host; transport has no page-callable bridge, HTTP listener or pairing server. |
 
 No `host_permissions`, `<all_urls>`, static `content_scripts`, `tabs`, `storage`,
-`cookies`, `nativeMessaging`, or `externally_connectable` permissions are present.
-Tab close/update/replacement events need no `tabs` permission. P8-02 is responsible
-for the separately reviewed native messaging permission, fixed extension identity,
-host installation, and narrowly scoped authenticated routing. MV3 CSP prohibits
+`cookies`, or `externally_connectable` permissions are present.
+Tab close/update/replacement events need no `tabs` permission. MV3 CSP prohibits
 remote scripts, evaluation and network connections.
+
+## Fixed identity and installation
+
+**Maintainer key required.** No signing key has been provided. The extension
+manifest intentionally has no `key`; the public-key placeholder is
+`__MAINTAINER_BASE64_DER_PUBLIC_KEY__`, and the manifest templates' origin ID is
+`__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__`. These are explicit placeholders,
+not usable IDs. A maintainer must generate/retain the extension signing key and
+put its base64 DER public key in `manifest.json`'s `key` field. Keep the private key
+out of this repository. Rebuild both gcu and the extension after setting the key.
+
+Both sides derive Chrome's ID from the first 16 SHA-256 bytes of the decoded key,
+encoding each nibble as a–p. The adapter checks that ID against `chrome.runtime.id`.
+`gcu install chrome-extension` replaces the templates' placeholder with exactly
+that origin; neither argv, environment nor incoming JSON can add an allowed ID.
+Absent/invalid key refuses installation and host startup before any user writes
+or frame processing. Do not load an arbitrary unpacked ID as a substitute.
+
+`gcu install chrome-extension --dry-run` previews the two Chrome/Edge registrations;
+`gcu uninstall chrome-extension` removes only owned manifests/default registry
+values. Both operations are idempotent and support `--home` for disposable tests.
+User scope is the only supported scope. This registers the native host, not the
+extension in either browser; browser loading/store distribution stays explicit.
+See [CLI paths and launch behavior](../../docs/cli.md#native-host--chrome-extension).
+
+The native manifest points directly at the absolute gcu executable. Chrome/Edge
+launch it with the origin as argv[1]; gcu recognizes that launch and enters the
+same command as `gcu native-host <origin>`. No shell wrapper or fictitious `args`
+manifest field is used. Windows `--parent-window` metadata is ignored for identity.
+
+## Native wire protocol (version 1)
+
+Each stdin/stdout frame is a four-byte **little-endian** unsigned length followed
+by a UTF-8 JSON object, maximum 1 MiB in both directions. Stdout contains frames
+only; diagnostics use stderr without payloads. A partial/invalid/oversized frame,
+unexpected message or wrong connection challenge closes the connection. Handshake
+and started frames have a five-second deadline; an idle host exits after 60 seconds.
+
+| Direction | Message |
+| --- | --- |
+| Host → background | `{kind:"hello", protocol:1, connectionId}` with a fresh 256-bit challenge. |
+| Background → host | `{kind:"ready", protocol:1, connectionId}` echoes on the same pipe. |
+| Background → host | `{kind:"shared", connectionId, scope:{tabId,frameId:0,documentId,shareId}}` from the toolbar click and Chrome injection result. |
+| Host → background | `{kind:"sharedAck", connectionId, shareId}` acknowledges consent only. |
+| Background → host | `{kind:"revoked", connectionId, shareId}` on browser-owned lifecycle invalidation. |
+| Host → background | `{kind:"request", connectionId, request:DomRequest}` only after trusted session binding and full `RouterGate` preflight (P8-03). |
+| Background → host | `{kind:"response", connectionId, requestId, result:DomResult}` matched to a single pending host request. |
+
+Envelope and scope unknown fields are rejected. Extension input cannot name a native window or a
+session; the host binds a session through an in-process API after P8-03 verifies
+the real window/document alignment. Replies inherit that pending request's session.
+Only one request per share is in flight; IDs are single-use, with 256 requests per
+connection and 64 live shared tabs maximum. Only top frames are injected; readable
+child frames remain within that exact top document's DOM snapshot.
+
+Authentication relies on Chrome/Edge enforcing the installed `allowed_origins`
+and supplying the launch origin, checked again by gcu. The challenge pins messages
+to this actual connection, not to a page's identity claim. It does not authenticate
+against a compromised browser or arbitrary programs running as the same OS user.
+No page/runtime message endpoint can open or select a native session. Disconnect,
+Stop/Stop-health loss or session close must close the native pipe, clear consent
+and retire pending actions as `unknown`; observations fail with `app_denied`.
+No request is buffered/replayed across disconnect. Re-sharing cannot clear Stop.
 
 ## Trusted message boundary
 
@@ -103,7 +164,7 @@ From the repository root, using existing dependencies (no new runtime/dependenci
 ```sh
 node computer-use/tools/browser-extension/build.mjs
 pnpm exec tsc --noEmit -p computer-use/tools/browser-extension/tsconfig.json
-pnpm exec vitest run computer-use/tools/browser-extension/tests/dom.test.ts
+pnpm exec vitest run computer-use/tools/browser-extension/tests/dom.test.ts computer-use/tools/browser-extension/tests/native.test.ts
 ```
 
 The build emits a self-contained ES module worker, an IIFE content script,
