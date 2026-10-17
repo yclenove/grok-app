@@ -523,5 +523,7 @@ pub fn app_invoke_handler(
         pet_window::pet_set_hit_chrome,
         // ── Computer Use ──
         computer_use::commands::cu_approval_decide,
+        computer_use::commands::cu_confirm_decide,
+        computer_use::commands::cu_handoff_decide,
     ]
 }

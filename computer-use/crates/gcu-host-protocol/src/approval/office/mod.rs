@@ -8,15 +8,19 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::auth::ProcessInstance;
-use crate::messages::{Decision, Empty, Identity, Policy, PolicyChanged, RequestApp};
+use crate::messages::{Decision, Empty, Policy, PolicyChanged, RequestApp};
 use crate::server::{Peer, RPC_TIMEOUT};
 use crate::supervisor::baseline_policy;
 
+mod display;
+mod sensitive;
+
 use super::disk::{read_policy, write_policy};
-use super::text::sanitize_plain;
 use super::{
     timeout_secs, Act, BindFault, CardView, Claim, Fault, ImageBinding, Notice, Outcome, Settled,
 };
+use display::card_view;
+use sensitive::Lane;
 
 type Hook = Arc<dyn Fn(u64) -> bool + Send + Sync>;
 
@@ -25,6 +29,7 @@ struct Pending {
     image: ImageBinding,
     engine: ProcessInstance,
     policy_version: u64,
+    lane: Lane,
     publishing: Option<u64>,
     /// Session close or disconnect won while a publish was in flight.
     void: bool,
@@ -49,11 +54,14 @@ pub struct Office {
     inner: Arc<Mutex<Inner>>,
 }
 
-/// Waiter returned by [`Office::bind`]. Dropping it consumes the request as a timeout.
+/// Waiter returned by a bind. Dropping it releases the request.
+///
+/// An app or confirm wait times out. A handoff wait closes and does not grant.
 pub struct Wait {
     office: Office,
     request_id: u64,
-    deadline: Instant,
+    /// `None` waits until a decision or drop. Handoff uses that so a timer cannot grant.
+    deadline: Option<Instant>,
     rx: oneshot::Receiver<Outcome>,
     armed: bool,
 }
@@ -111,7 +119,7 @@ impl Office {
     /// Bind one real request to the attached engine and the current policy version.
     ///
     /// The returned [`Wait`] resolves on a decision, a timeout, or session close.
-    /// Dropping it times the request out. No other method creates a pending card.
+    /// Dropping it times the request out. Confirm and handoff use their own binds.
     pub fn bind(
         &self,
         request_id: u64,
@@ -145,6 +153,7 @@ impl Office {
                 image,
                 engine,
                 policy_version: card.policy_version,
+                lane: Lane::App,
                 publishing: None,
                 void: false,
                 tx: Some(tx),
@@ -156,7 +165,7 @@ impl Office {
                 card: Box::new(card.clone()),
             },
         );
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs(card.timeout_secs));
+        let deadline = Some(Instant::now() + Duration::from_secs(timeout_secs(card.timeout_secs)));
         drop(inner);
         Ok((
             card,
@@ -321,13 +330,16 @@ impl Office {
 
     fn expire(&self, request_id: u64) {
         let mut inner = lock(&self.inner);
-        if inner
-            .pending
-            .get(&request_id)
-            .is_some_and(|pending| pending.publishing.is_none())
-        {
-            finish(&mut inner, request_id, Outcome::TimedOut, Settled::Timeout);
-        }
+        let outcome = {
+            let Some(pending) = inner.pending.get(&request_id) else {
+                return;
+            };
+            if pending.publishing.is_some() {
+                return;
+            }
+            sensitive::release_outcome(&pending.lane, Settled::Timeout)
+        };
+        finish(&mut inner, request_id, outcome, Settled::Timeout);
     }
 }
 
@@ -345,6 +357,9 @@ fn prepare(inner: &mut Inner, claim: &Claim) -> Result<Prepared, Fault> {
     };
     if pending.publishing.is_some() || pending.void {
         return Err(Fault::Replay);
+    }
+    if !matches!(pending.lane, Lane::App) {
+        return Err(Fault::Identity);
     }
     if pending.session_id != claim.session_id
         || pending.image != claim.image
@@ -391,7 +406,7 @@ fn begin_always(inner: &mut Inner, request_id: u64) -> Result<Prepared, Fault> {
     let version = old.version.checked_add(1).ok_or(Fault::Failed)?;
     let mut next = old.clone();
     next.version = version;
-    push_identity(&mut next, &image);
+    display::push_identity(&mut next, &image);
     if !store(&inner.disk, &next) {
         return Err(Fault::Failed);
     }
@@ -424,11 +439,11 @@ fn void_or_finish(inner: &mut Inner, request_id: u64, settled: Settled) {
         .get(&request_id)
         .is_some_and(|pending| pending.publishing.is_some());
     if !publishing {
-        let outcome = if settled == Settled::Timeout {
-            Outcome::TimedOut
-        } else {
-            Outcome::Decision(Decision::Deny)
-        };
+        let outcome = inner
+            .pending
+            .get(&request_id)
+            .map(|pending| sensitive::release_outcome(&pending.lane, settled))
+            .unwrap_or(Outcome::Decision(Decision::Deny));
         finish(inner, request_id, outcome, settled);
         return;
     }
@@ -470,17 +485,11 @@ fn finish(inner: &mut Inner, request_id: u64, outcome: Outcome, settled: Settled
         return;
     };
     inner.consumed.insert(request_id);
+    let notice = sensitive::settled_notice(&pending, request_id, &outcome, settled);
     if let Some(tx) = pending.tx.take() {
         let _ = tx.send(outcome);
     }
-    emit(
-        inner,
-        Notice::Settled {
-            request_id,
-            session_id: pending.session_id,
-            outcome: settled,
-        },
-    );
+    emit(inner, notice);
 }
 
 fn deny_all(inner: &mut Inner, settled: Settled) {
@@ -488,28 +497,6 @@ fn deny_all(inner: &mut Inner, settled: Settled) {
     for id in ids {
         void_or_finish(inner, id, settled);
     }
-}
-
-fn push_identity(policy: &mut Policy, image: &ImageBinding) {
-    let identity = image.to_identity();
-    if policy
-        .always
-        .iter()
-        .any(|saved| same_identity(saved, &identity))
-    {
-        return;
-    }
-    policy.always.push(identity);
-}
-
-fn same_identity(saved: &Identity, identity: &Identity) -> bool {
-    saved.platform == identity.platform
-        && saved.key == identity.key
-        && saved.team_id == identity.team_id
-        && saved.publisher == identity.publisher
-        && saved.sha256 == identity.sha256
-        && saved.signature == identity.signature
-        && saved.image_path == identity.image_path
 }
 
 fn store(path: &Option<PathBuf>, policy: &Policy) -> bool {
@@ -525,35 +512,6 @@ fn emit(inner: &Inner, notice: Notice) {
     }
 }
 
-fn card_view(
-    request_id: u64,
-    request: &RequestApp,
-    image: &ImageBinding,
-    engine: &ProcessInstance,
-    policy: &Policy,
-    opened_ms: u64,
-) -> CardView {
-    CardView {
-        request_id,
-        session_id: request.session_id.clone(),
-        engine_pid: engine.pid,
-        engine_started: engine.started,
-        policy_version: policy.version,
-        image: image.clone(),
-        name: sanitize_plain(&request.app.name),
-        reason: request
-            .reason
-            .as_deref()
-            .map(sanitize_plain)
-            .unwrap_or_default(),
-        risk: request.risk,
-        timeout_secs: timeout_secs(policy.timeout_secs),
-        opened_ms,
-        has_icon: request.app.icon.is_some(),
-        always_enabled: policy.always_allow_enabled,
-    }
-}
-
 fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
     inner.lock().unwrap_or_else(|poison| poison.into_inner())
 }
@@ -564,18 +522,27 @@ impl Wait {
     /// The countdown uses the monotonic clock captured at bind. Cancelling this
     /// future times the request out unless it was already settled.
     pub async fn recv(mut self) -> Outcome {
-        let outcome = tokio::select! {
-            biased;
-            result = &mut self.rx => result.unwrap_or(Outcome::Decision(Decision::Deny)),
-            _ = tokio::time::sleep_until(self.deadline) => {
-                self.office.expire(self.request_id);
-                Outcome::TimedOut
+        let outcome = match self.deadline {
+            Some(deadline) => {
+                tokio::select! {
+                    biased;
+                    result = &mut self.rx => result.unwrap_or(Outcome::Decision(Decision::Deny)),
+                    _ = tokio::time::sleep_until(deadline) => self.settle_timeout(),
+                }
             }
+            None => (&mut self.rx)
+                .await
+                .unwrap_or(Outcome::Decision(Decision::Deny)),
         };
         // Disarm only after the select finishes. Cancelling this future must
-        // still time the request out via Drop.
+        // still release the request via Drop.
         self.armed = false;
         outcome
+    }
+
+    fn settle_timeout(&mut self) -> Outcome {
+        self.office.expire(self.request_id);
+        self.rx.try_recv().unwrap_or(Outcome::TimedOut)
     }
 }
 

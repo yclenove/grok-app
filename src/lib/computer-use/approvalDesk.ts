@@ -2,7 +2,7 @@
 
 export type Act = "turn" | "session" | "always" | "deny" | "timeout";
 
-export type Fault = "absent" | "identity" | "replay" | "failed";
+export type Fault = "absent" | "identity" | "replay" | "failed" | "stale";
 
 export type ImageBinding = {
   platform: "macos" | "windows" | "linux";
@@ -134,7 +134,13 @@ export function assess(card: Card, claim: Claim): Fault | null {
 
 export function faultFrom(error: unknown): Fault {
   const text = typeof error === "string" ? error : error instanceof Error ? error.message : "";
-  if (text === "absent" || text === "identity" || text === "replay" || text === "failed") {
+  if (
+    text === "absent" ||
+    text === "identity" ||
+    text === "replay" ||
+    text === "failed" ||
+    text === "stale"
+  ) {
     return text;
   }
   return "failed";

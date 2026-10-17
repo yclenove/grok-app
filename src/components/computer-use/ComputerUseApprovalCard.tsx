@@ -58,6 +58,8 @@ function errorKey(fault: Fault): MessageKey {
       return "approval.error.replay";
     case "failed":
       return "approval.error.failed";
+    case "stale":
+      return "approval.error.stale";
   }
 }
 

@@ -27,9 +27,10 @@ pub use stop::{
 
 use crate::policy::{wait_for_app, wait_for_confirm, AppGrantWait, ConfirmWait, GrantTable};
 use gcu_host_api::{
-    ActionSummary, AppInfo, ApprovalDecision, ApprovalProvider, Cancel, ImageRef, ModelReason,
-    Risk, SessionCtx, UserActivity,
+    ActionSummary, AppInfo, ApprovalDecision, ApprovalProvider, Cancel, HandoffReason, ImageRef,
+    ModelReason, Risk, SessionCtx, UserActivity,
 };
+use gcu_protocol::ErrorCode;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -361,6 +362,37 @@ impl Session {
             closed: &self.closed,
         })
         .await
+    }
+
+    /// Ask the user to take over. This is not an approval.
+    ///
+    /// Blocking: waits until the provider returns or the session is cancelled.
+    /// Timeout: none. A timer must not grant the action, and this method does
+    /// not clear the stop latch. Cancellation: session close returns
+    /// [`ErrorCode::ApprovalDenied`] and cancels the provider token. A closed
+    /// session does not call `provider`. Thread safety: does not take the grant
+    /// mutex.
+    pub async fn request_handoff(
+        &self,
+        provider: &dyn ApprovalProvider,
+        app: &AppInfo,
+        reason: HandoffReason,
+    ) -> Result<(), ErrorCode> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ErrorCode::ApprovalDenied);
+        }
+        let session = SessionCtx {
+            session_id: self.id.clone(),
+        };
+        let cancel = Cancel::default();
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                cancel.cancel();
+                Err(ErrorCode::ApprovalDenied)
+            }
+            _ = provider.handoff(&session, app, reason, &cancel) => Ok(()),
+        }
     }
 
     /// Record a decision the caller already has.

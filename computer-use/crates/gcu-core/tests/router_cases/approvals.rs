@@ -342,3 +342,47 @@ async fn confirmation_timeout_is_distinct_from_user_denial() {
     );
     assert_eq!(h.driver.perform_calls(), 0);
 }
+
+#[tokio::test]
+async fn web_terminal_click_hands_off_without_perform_or_clearing_stop() {
+    let h = Harness::driver(
+        gcu_driver_fake::FakeDriver::from_scene("web_terminal")
+            .unwrap()
+            .with_targeted_input(true, true),
+    );
+    let params = serde_json::from_value(serde_json::json!({
+        "app": "fake.web_terminal",
+        "window": "web-terminal-window",
+        "include_screenshot": false
+    }))
+    .unwrap();
+    let state = h.router.observe(&h.session, params).await.unwrap();
+    let index = state
+        .text
+        .lines()
+        .find(|line| line.contains("button") && line.contains("Run"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|token| token.parse().ok())
+        .unwrap();
+    let out = h
+        .router
+        .execute(
+            &h.session,
+            ToolCall::new("handoff", "fake.web_terminal", click(index)),
+        )
+        .await;
+    assert_eq!(out.error.unwrap().code, ErrorCode::HandoffRequired);
+    assert_eq!(h.driver.perform_calls(), 0);
+    assert_eq!(h.approvals.handoffs().len(), 1);
+    h.activity.request_stop();
+    let stopped = h
+        .router
+        .execute(
+            &h.session,
+            ToolCall::new("stopped", "fake.web_terminal", click(index)),
+        )
+        .await;
+    assert_eq!(stopped.error.unwrap().code, ErrorCode::StoppedByUser);
+    assert_eq!(h.approvals.handoffs().len(), 1);
+    assert_eq!(h.driver.perform_calls(), 0);
+}

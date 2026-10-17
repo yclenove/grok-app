@@ -144,7 +144,7 @@ async fn bind_records_session_image_engine_and_policy_version() {
     assert_eq!(card.opened_ms, 1_500);
     match notes.try_recv().unwrap() {
         Notice::Pending { card: pending } => assert_eq!(pending.request_id, 7),
-        Notice::Settled { .. } => panic!("pending notice"),
+        other => panic!("pending notice, got {other:?}"),
     }
     drop(wait);
 }
