@@ -165,7 +165,7 @@ On the GitHub `windows-2022` runner the harness used a restricted token. Foregro
 
 Pure X11 uses AT-SPI for the tree and actions, and the X server for windows and screenshots. An occluded window is captured only when a composite manager can provide that window's pixels. Otherwise the driver refuses the capture. It does not return another window's contents.
 
-Wayland uses xdg-desktop-portal ScreenCast and RemoteDesktop. You approve the portal dialog. Only the source you selected is captured. An unknown source or an unknown compositor produces no image and no silent full-desktop fallback. A restore token is stored owner-only, expires after 24 hours, and is rejected when its source changes. Native Wayland has no global overlay. XWayland is not treated as a place where a global Stop hotkey can be proved, so that path does not enable the overlay.
+The full Wayland guide is [docs/wayland.md](docs/wayland.md) ([中文](docs/wayland.md#zh)). Wayland uses xdg-desktop-portal ScreenCast and RemoteDesktop. You approve the portal dialog. Only the source you selected is captured. An unknown source or an unknown compositor produces no image and no silent full-desktop fallback. A restore token is stored owner-only, expires after 24 hours, and is rejected when its source changes. Native Wayland has no global overlay. XWayland is not treated as a place where a global Stop hotkey can be proved, so that path does not enable the overlay.
 
 A real GNOME, KDE, or wlroots desktop session is **未验证**. The portable Wayland tests passed. The headless GNOME job was not run.
 
