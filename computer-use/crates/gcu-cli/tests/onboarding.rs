@@ -424,12 +424,45 @@ fn relaunch_waiter_execs_open_after_pid_exits() {
     assert!(script.contains("kill -0 42"));
     assert!(script.contains("exit 1"));
     assert_eq!(relaunch_waiter(0, &argv).unwrap_err(), RestartError::BadPid);
-    let mut bad = argv.clone();
-    bad.push("a;rm".into());
+    // Shell metacharacters are quoted, never interpreted.
+    let mut quoted = argv.clone();
+    quoted.push("a;rm $(x) 'y'".into());
+    let script = relaunch_waiter(7, &quoted).unwrap();
+    assert!(script.contains("'a;rm $(x) '\\''y'\\'''"));
+    // Control characters and empty entries are refused.
+    for bad in ["bad\narg", "", "nul\0"] {
+        let mut argv = argv.clone();
+        argv.push(bad.into());
+        assert_eq!(
+            relaunch_waiter(7, &argv).unwrap_err(),
+            RestartError::LaunchFailed
+        );
+    }
+}
+
+// The helper app is macOS only; the sample path is a POSIX absolute path, which
+// Windows does not consider absolute.
+#[cfg(unix)]
+#[test]
+fn launch_command_at_targets_the_exact_app_path() {
+    use gcu_cli::helper::auth::launch_command_at;
+    let app = std::path::Path::new("/Users/x/Grok Computer Use (Dev).app");
+    let argv = launch_command_at(app).unwrap();
     assert_eq!(
-        relaunch_waiter(7, &bad).unwrap_err(),
-        RestartError::LaunchFailed
+        argv,
+        [
+            "open",
+            "-g",
+            "-j",
+            "/Users/x/Grok Computer Use (Dev).app",
+            "--args",
+            "agent"
+        ]
     );
+    let script = relaunch_waiter(42, &argv).unwrap();
+    assert!(script.contains("exec open -g -j '/Users/x/Grok Computer Use (Dev).app' --args agent"));
+    assert!(launch_command_at(std::path::Path::new("relative.app")).is_none());
+    assert!(launch_command_at(std::path::Path::new("/tmp/a\nb.app")).is_none());
 }
 
 #[test]
