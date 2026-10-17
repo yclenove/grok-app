@@ -19,6 +19,13 @@ pub(crate) struct ShotQuery {
     id: String,
 }
 
+/// Body of `cu_timeline`. The id is the chat session, not a path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TimelineQuery {
+    session_id: String,
+}
+
 /// Consume the card the user is looking at. Errors are `absent`, `identity`,
 /// `replay`, or `failed` — no paths or reasons.
 #[tauri::command]
@@ -49,6 +56,15 @@ pub async fn cu_handoff_decide(
 ) -> Result<HandoffEnd, String> {
     let claim = handoff_from_body(body)?;
     host.office().decide_handoff(&claim).map_err(fault_code)
+}
+
+/// Current side-panel timeline. Errors are `rejected` — no paths.
+#[tauri::command]
+pub async fn cu_timeline(
+    host: State<'_, ComputerUseHost>,
+    body: TimelineQuery,
+) -> Result<gcu_host_protocol::panel::View, String> {
+    host.timeline(&body.session_id)
 }
 
 /// Redacted thumbnail and full image for the chat tool card.

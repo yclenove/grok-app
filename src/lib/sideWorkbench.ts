@@ -6,7 +6,7 @@
 export const SIDE_TABS_MAX = 24;
 
 /** User-creatable kinds via empty state / `+` picker. */
-export type SidePickerKind = "file" | "browser" | "terminal" | "review" | "skills";
+export type SidePickerKind = "file" | "browser" | "terminal" | "computer" | "review" | "skills";
 
 /** All tab kinds including process-only plan. */
 export type SideTabKind = SidePickerKind | "plan";
@@ -25,6 +25,7 @@ export type SideTab =
   | { id: string; kind: "terminal"; sessionKey: string; name: string }
   | { id: string; kind: "review"; name: string }
   | { id: string; kind: "skills"; name: string }
+  | { id: string; kind: "computer"; name: string }
   | { id: string; kind: "plan"; planRef?: string; name: string };
 
 export type SideWorkbenchState = {
@@ -93,6 +94,10 @@ const PICKER_BASE: SidePickerOption[] = [
     labelKey: "side.picker.skills",
   },
   {
+    kind: "computer",
+    labelKey: "computerUse.panel.title",
+  },
+  {
     kind: "review",
     labelKey: "side.picker.review",
   },
@@ -135,7 +140,8 @@ export function isPickerCreatableKind(
     kind === "file" ||
     kind === "browser" ||
     kind === "terminal" ||
-    kind === "skills"
+    kind === "skills" ||
+    kind === "computer"
   );
 }
 
@@ -163,13 +169,14 @@ export const SIDE_TAB_DEFAULT_NAME_KEYS: Record<SideTabKind, string> = {
   terminal: "side.tab.terminal",
   review: "side.tab.review",
   skills: "side.tab.skills",
+  computer: "computerUse.panel.title",
   plan: "side.tab.plan",
 };
 
 /** True when `name` is a Side Workbench i18n label key (not a path/title). */
 export function isSideTabNameKey(name: string): boolean {
   const n = (name || "").trim();
-  return n.startsWith("side.tab.") || n.startsWith("side.picker.");
+  return n.startsWith("side.tab.") || n.startsWith("side.picker.") || n.startsWith("computerUse.panel.");
 }
 
 /** Pathless picker「文件」chip — not a real preview target. */
@@ -229,6 +236,8 @@ function buildTab(kind: SideTabKind, meta?: CreateSideTabMeta): SideTab {
       return { id, kind, name };
     case "skills":
       return { id, kind, name };
+    case "computer":
+      return { id, kind, name };
     case "plan":
       return { id, kind, planRef: meta?.planRef, name };
   }
@@ -238,7 +247,7 @@ function buildTab(kind: SideTabKind, meta?: CreateSideTabMeta): SideTab {
  * Create or focus a tab of the given kind.
  * - file: dedupe by path when path provided
  * - browser: dedupe by url when url provided
- * - review / plan / skills: single instance (focus existing)
+ * - review / plan / skills / computer: single instance (focus existing)
  * - terminal: **always create a new tab** unless meta.id matches an existing
  *   tab (shortcut / picker = new shell; never focus-reuse another terminal)
  */
@@ -276,7 +285,7 @@ export function openSideTab(
         (t.url || "").trim().replace(/\/+$/, "") === u,
     );
   }
-  if (existingIdx < 0 && (kind === "review" || kind === "plan" || kind === "skills")) {
+  if (existingIdx < 0 && (kind === "review" || kind === "plan" || kind === "skills" || kind === "computer")) {
     existingIdx = tabs.findIndex((t) => t.kind === kind);
   }
   // Picker「文件」: reuse a placeholder, or focus an already-open file tab.

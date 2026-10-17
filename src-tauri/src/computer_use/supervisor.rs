@@ -66,6 +66,7 @@ pub fn open_control(
     dev_grant: bool,
     office: Office,
     gallery: Gallery,
+    panel: gcu_host_protocol::panel::Panel,
     overlay: super::overlay::Overlay,
     lifecycle: gcu_host_protocol::lifecycle::Lifecycle,
 ) -> Result<Control<OsLaunch>, Error> {
@@ -90,7 +91,7 @@ pub fn open_control(
     let path = decide(mode, &identity, &choice, &facts)?;
     Ok(Control::new(
         OsLaunch::managed(
-            host_server::production_callbacks(office, gallery, overlay),
+            host_server::production_callbacks(office, gallery, panel, overlay),
             lifecycle,
         ),
         LaunchRequest::new(path, false),

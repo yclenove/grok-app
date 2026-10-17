@@ -42,6 +42,7 @@ describe("sidePickerOptions", () => {
       "browser",
       "terminal",
       "skills",
+      "computer",
       "review",
     ]);
     expect(kinds).not.toContain("plan");
@@ -55,6 +56,7 @@ describe("sidePickerOptions", () => {
       "browser",
       "terminal",
       "skills",
+      "computer",
     ]);
     expect(isPickerCreatableKind("review", { isGitProject: false })).toBe(
       false,
@@ -190,6 +192,11 @@ describe("openSideTab / close / activate", () => {
     const sk2 = openSideTab(sk, "skills");
     expect(sk2.created).toBe(false);
     expect(sk2.tabs.filter((x) => x.kind === "skills")).toHaveLength(1);
+    const computer = openSideTab(sk2, "computer");
+    expect(computer.created).toBe(true);
+    const computerAgain = openSideTab(computer, "computer");
+    expect(computerAgain.created).toBe(false);
+    expect(computerAgain.tabs.filter((x) => x.kind === "computer")).toHaveLength(1);
   });
 
   it("dedupes file by path and review to single instance", () => {

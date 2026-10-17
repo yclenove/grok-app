@@ -534,6 +534,7 @@ pub fn app_invoke_handler(
         computer_use::commands::cu_confirm_decide,
         computer_use::commands::cu_handoff_decide,
         computer_use::commands::cu_tool_shot,
+        computer_use::commands::cu_timeline,
         computer_use::commands::cu_stop,
         computer_use::commands::cu_resume,
         computer_use::overlay::cu_overlay_snapshot,

@@ -31,6 +31,7 @@ import * as api from "@/lib/api";
 import type { ResourceOpenTarget } from "@/components/resource-viewer/types";
 import type { SkillInfo } from "@/lib/slashCatalog";
 import type { SkillsPickerSkill } from "@/lib/skillsTaskPicker";
+import { ComputerUsePanel } from "@/components/computer-use/ComputerUsePanel";
 import { FilesWorkspace } from "./FilesWorkspace";
 import { PlanTab, type PlanTabChrome } from "./PlanTab";
 import { ReviewTab } from "./ReviewTab";
@@ -78,6 +79,8 @@ export type SideWorkbenchProps = {
   skillsLoading?: boolean;
   skillsLoadError?: string | null;
   onSelectSkill?: (skill: SkillsPickerSkill) => void;
+  /** Active chat. The Computer panel isolates its timeline by this id. */
+  sessionId?: string | null;
 };
 
 export function SideWorkbench({
@@ -114,6 +117,7 @@ export function SideWorkbench({
   skillsLoading = false,
   skillsLoadError = null,
   onSelectSkill,
+  sessionId = null,
 }: SideWorkbenchProps) {
   const [internal, setInternal] = useState(emptySideWorkbenchState);
   const state = controlled ?? internal;
@@ -463,6 +467,10 @@ export function SideWorkbench({
                 sshAlias={sshAlias}
                 onSelectSkill={(skill) => onSelectSkill?.(skill)}
               />
+            ) : null}
+
+            {active.kind === "computer" ? (
+              <ComputerUsePanel locale={locale} sessionId={sessionId} />
             ) : null}
 
             {/* Keep browser/terminal instances mounted so PTY/xterm sessions
