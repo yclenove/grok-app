@@ -175,6 +175,7 @@ impl ActionRouter {
             ElementIndex::assign(&mut tree, previous.map(|snapshot| snapshot.index()), next)
                 .map_err(|_| ErrorCode::StaleElement)?;
         }
+        let quality = crate::observe::TreeQuality::assess(&raw, &tree);
         let fresh = Fresh {
             win: win.clone(),
             info,
@@ -182,6 +183,7 @@ impl ActionRouter {
             tree,
             signature,
             image: None,
+            quality,
         };
         self.publish(session, fresh, false).map_err(|err| err.code)
     }
