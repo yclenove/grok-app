@@ -25,6 +25,8 @@ pub mod settle;
 pub mod testing;
 /// Pure accessibility tree transforms and stable snapshot-local indices.
 pub mod tree;
+/// Bounded `wait_for` observation. No input delivery.
+pub mod wait;
 
 /// Mandatory screenshot redaction and safe image derivatives.
 pub mod redact;

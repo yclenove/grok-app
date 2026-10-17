@@ -437,11 +437,15 @@ impl Drop for Mcp {
 #[test]
 fn mcp_profiles_never_expose_model_resume() {
     let h = TempDir::new().unwrap();
-    for (profile, count) in [("minimal", 9), ("default", 13), ("full", 13)] {
+    for (profile, count) in [("minimal", 9), ("default", 14), ("full", 14)] {
         let mut m = Mcp::start(&h, profile);
         let list = m.request("tools/list", json!({}));
         let tools = list["tools"].as_array().unwrap();
         assert_eq!(tools.len(), count);
+        assert_eq!(
+            tools.iter().any(|tool| tool["name"] == "wait_for"),
+            profile != "minimal"
+        );
         assert!(tools
             .iter()
             .all(|t| !t["name"].as_str().unwrap().contains("resume")));

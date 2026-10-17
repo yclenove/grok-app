@@ -2,8 +2,8 @@
 //! Event quiet is validated against complete, non-busy raw trees. Missing/closed
 //! subscriptions use polling; continuous events cannot starve deadlines or Stop.
 mod clock;
-mod events;
-mod poll;
+pub(crate) mod events;
+pub(crate) mod poll;
 pub use clock::{Clock, RuntimeClock};
 
 use crate::{
@@ -133,6 +133,11 @@ impl SettleEngine {
     /// Validated tuning. Nonblocking; no timeout or cancellation.
     pub fn config(&self) -> &SettleConfig {
         &self.config
+    }
+
+    /// Clock shared with `wait_for`. Nonblocking; no timeout or cancellation.
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
     }
 
     /// Observe until event quiet, two equal usable trees, or the hard budget.

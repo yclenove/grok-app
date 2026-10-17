@@ -7,13 +7,13 @@ use crate::{
 use gcu_protocol::ErrorCode;
 use std::{future::Future, pin::Pin, time::Duration};
 
-pub(super) fn usable(raw: &RawTree) -> bool {
+pub(crate) fn usable(raw: &RawTree) -> bool {
     fn busy(node: &RawNode) -> bool {
         node.states.contains(States::BUSY) || node.children.iter().any(busy)
     }
     raw.incomplete.is_none() && !raw.root.as_ref().is_some_and(busy)
 }
-pub(super) fn hash(raw: &RawTree) -> Result<u64, ErrorCode> {
+pub(crate) fn hash(raw: &RawTree) -> Result<u64, ErrorCode> {
     Ok(digest(signature(raw)?.as_bytes()))
 }
 pub(super) struct Evidence {
@@ -64,7 +64,7 @@ impl Evidence {
     }
 }
 
-pub(super) struct Read<'a> {
+pub(crate) struct Read<'a> {
     pub work: Pin<Box<dyn Future<Output = crate::driver::Result<RawTree>> + Send + 'a>>,
     pub deadline: Duration,
     cancel: Cancel,
