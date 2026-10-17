@@ -25,6 +25,9 @@ fn invalid_command_or_arguments_returns_failure() -> Result<(), Box<dyn std::err
         vec!["golden", "--invalid"],
         vec!["golden", "--check", "--update"],
         vec!["budget", "unexpected"],
+        vec!["bench-check", "unexpected"],
+        vec!["bench-check", "--reports"],
+        vec!["bench-check", "--reports", "dir", "unexpected"],
         vec!["sbom", "unexpected"],
         vec!["ui"],
         vec!["ui", "nope"],
@@ -35,6 +38,50 @@ fn invalid_command_or_arguments_returns_failure() -> Result<(), Box<dyn std::err
         assert!(!output.status.success());
         assert!(String::from_utf8(output.stderr)?.contains("usage:"));
     }
+    Ok(())
+}
+
+#[test]
+fn bench_check_missing_reports_returns_failure_without_writing(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scratch = std::env::temp_dir().join(format!("gcu-bench-missing-{}", std::process::id()));
+    std::fs::create_dir(&scratch)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["bench-check", "--reports"])
+        .arg(&scratch)
+        .current_dir(&scratch)
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    for platform in ["macos", "windows", "linux-x11"] {
+        assert!(
+            stderr.contains(&format!("missing platform {platform}")),
+            "{stderr}"
+        );
+    }
+    assert!(stderr.contains("not_run"), "{stderr}");
+    assert!(!String::from_utf8(output.stdout)?.contains("PASS:"));
+    assert_eq!(std::fs::read_dir(&scratch)?.count(), 0);
+    std::fs::remove_dir(scratch)?;
+    Ok(())
+}
+
+#[test]
+fn bench_check_invalid_schema_returns_failure_without_rewriting(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scratch = std::env::temp_dir().join(format!("gcu-bench-invalid-{}", std::process::id()));
+    std::fs::create_dir(&scratch)?;
+    let path = scratch.join("macos.json");
+    std::fs::write(&path, "{}\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["bench-check", "--reports"])
+        .arg(&scratch)
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("invalid bench report schema"));
+    assert!(!String::from_utf8(output.stdout)?.contains("PASS:"));
+    assert_eq!(std::fs::read_to_string(path)?, "{}\n");
+    std::fs::remove_dir_all(scratch)?;
     Ok(())
 }
 
