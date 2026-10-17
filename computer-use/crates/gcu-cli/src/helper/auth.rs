@@ -419,6 +419,40 @@ pub fn launch_command(bundle: &str) -> Option<Vec<String>> {
     ])
 }
 
+/// The `.app` this process runs from, when it is the helper bundle itself.
+///
+/// A restart must relaunch this exact bundle: Launch Services resolves a bundle
+/// id to one of every registered copy (an older install or a dev build can win).
+/// `None` outside a bundle. Blocking: none. Timeout: none. Cancellation: none.
+#[must_use]
+pub fn own_app_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .map(std::path::Path::to_path_buf)
+}
+
+/// `open` argv that starts the bundle at `app` (see [`own_app_path`]).
+///
+/// Same flags as [`launch_command`]. `None` for a relative path, a non-UTF-8 path or
+/// a path with control characters. The path is quoted by `relaunch_waiter`.
+/// Blocking: none. Timeout: none. Cancellation: none. Thread safety: pure.
+#[must_use]
+pub fn launch_command_at(app: &std::path::Path) -> Option<Vec<String>> {
+    let path = app.to_str()?;
+    if !app.is_absolute() || path.chars().any(char::is_control) {
+        return None;
+    }
+    Some(vec![
+        "open".to_string(),
+        "-g".to_string(),
+        "-j".to_string(),
+        path.to_string(),
+        "--args".to_string(),
+        "agent".to_string(),
+    ])
+}
+
 /// Identifier safe to embed in a codesign requirement and a bundle id.
 ///
 /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: pure.

@@ -21,6 +21,7 @@
     <h2>{{onboarding.screen_recording.title}}</h2>
     <p>{{onboarding.screen_recording.body}}</p>
     <p class="status {{slot:screen_class}}" id="screen-status">{{slot:screen_status}}</p>
+    <button type="button" data-action="settings" data-kind="screen_recording">{{onboarding.open_settings}}</button>
     <p class="hint" id="restart-hint" {{slot:restart_hint_attr}}>{{slot:restart_hint}}</p>
     <p class="hint" id="restart-error" {{slot:restart_error_attr}}>{{slot:restart_error}}</p>
     <button type="button" id="restart" data-action="restart" {{slot:restart_attr}}>{{onboarding.restart}}</button>
