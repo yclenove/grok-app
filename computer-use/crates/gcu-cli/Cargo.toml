@@ -18,6 +18,7 @@ macos-webview = ["dep:tao", "dep:wry"]
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 async-trait.workspace = true
 clap = { version = "4.6", features = ["derive"] }
 gcu-core.workspace = true
@@ -32,6 +33,7 @@ rand = "0.10"
 rmcp = { version = "3.5", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 serde.workspace = true
+sha2.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["io-util", "io-std", "net", "signal", "process"] }
 toml.workspace = true
@@ -63,7 +65,7 @@ wry = { version = "0.57", default-features = false, optional = true }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Registry"] }
 
 [lints]
 workspace = true

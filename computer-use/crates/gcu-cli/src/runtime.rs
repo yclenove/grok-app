@@ -30,6 +30,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     }
     let mode = args::approval_mode()?;
     match cli.command.as_ref() {
+        Some(Command::NativeHost { origin, .. }) => return crate::native_host::run(origin).await,
         Some(Command::Install(args)) => {
             return crate::install_cmd::execute(args.clone(), false).await
         }
