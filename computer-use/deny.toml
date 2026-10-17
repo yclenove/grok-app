@@ -20,6 +20,16 @@ ignore = [
     # tao 0.37's Linux GTK build (glib-macros, gtk3-macros). Same exit as RUSTSEC-2024-0429.
     # ADR 0009. unmaintained stays "all"; this is not a blanket ignore.
     "RUSTSEC-2024-0370",
+    # RUSTSEC-2026-0370 / -0371 / -0372: zvariant, zbus_names and zvariant_derive are
+    # "no longer maintained as standalone crates"; they were merged into zbus 6.0.0.
+    # Informational only (no vulnerability). We stay on zbus 5 because our direct
+    # dependencies (atspi 0.30 via gcu-driver-linux, ashpd 0.13) and accesskit_unix
+    # (eframe, test fixture only) still require it; there is no safe upgrade today.
+    # Exit: atspi, ashpd and accesskit_unix release versions built on zbus >= 6, then
+    # delete these three ignores. unmaintained stays "all"; this is not a blanket ignore.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
