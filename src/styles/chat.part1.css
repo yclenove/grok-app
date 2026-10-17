@@ -351,6 +351,36 @@
   color: var(--text-primary);
 }
 
+.perm-bar__identity {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.perm-bar__meta,
+.perm-bar__aux {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.perm-bar__aux {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.perm-bar__reason {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+
 /* In-thread turn notice — soft Codex-like pill (not a red alert box) */
 .chat-turn-error {
   width: 100%;

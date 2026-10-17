@@ -2,6 +2,7 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+pub mod approval;
 pub mod auth;
 pub mod codec;
 pub mod inject;

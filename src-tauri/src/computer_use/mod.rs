@@ -1,13 +1,17 @@
 //! Computer Use host. The engine is a child process, not a linked driver.
 
+pub(crate) mod approval;
+pub(crate) mod commands;
 mod gateway;
 mod host_server;
 pub(crate) mod inject;
+mod policy_store;
 mod supervisor;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use gcu_host_protocol::approval::Office;
 use gcu_host_protocol::inject::TokenBook;
 use gcu_host_protocol::supervisor::{Error, Phase, Signal, Status};
 use tauri::{AppHandle, Manager};
@@ -30,10 +34,11 @@ struct Inner {
 /// In-memory engine owner. Default is off. No settings row is registered here.
 pub struct ComputerUseHost {
     inner: Mutex<Inner>,
+    office: Office,
 }
 
 impl ComputerUseHost {
-    fn disabled() -> Self {
+    fn disabled(office: Office) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 external: None,
@@ -42,7 +47,13 @@ impl ComputerUseHost {
                 control: None,
                 book: TokenBook::new(),
             }),
+            office,
         }
+    }
+
+    /// Shared approval desk. Clone is cheap.
+    pub(crate) fn office(&self) -> Office {
+        self.office.clone()
     }
 
     /// Current phase. Stopped when the feature has never been turned on.
@@ -69,10 +80,15 @@ impl ComputerUseHost {
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         if !enabled {
+            self.office.deny_pending();
             gateway::revoke_all_locked(&mut inner).await;
         }
         if enabled && inner.control.is_none() {
-            let mut control = supervisor::open_control(inner.external.clone(), inner.dev_grant)?;
+            let mut control = supervisor::open_control(
+                inner.external.clone(),
+                inner.dev_grant,
+                self.office.clone(),
+            )?;
             if inner.stop_latched {
                 control.handle(Signal::UserStop, now_ms()).await?;
             }
@@ -169,7 +185,9 @@ pub fn install(app: &AppHandle) {
         external = SETTING_EXTERNAL_ENGINE,
         "computer use host registered"
     );
-    app.manage(ComputerUseHost::disabled());
+    let office = policy_store::open_office(app);
+    app.manage(ComputerUseHost::disabled(office.clone()));
+    approval::forward_notices(app.clone(), &office);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let host = app.state::<ComputerUseHost>();

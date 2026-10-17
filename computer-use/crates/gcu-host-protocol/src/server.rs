@@ -302,6 +302,9 @@ pub trait HostCallbacks: Send + Sync + 'static {
     /// Handle a strict typed method. Approval callbacks may wait up to 120s;
     /// all other work caps at five seconds. Dropping dismisses pending UI.
     fn handle(&self, request: Request) -> CallbackFuture<'_>;
+    /// The child finished mutual authentication. Default keeps the previous
+    /// callbacks unchanged. Must not block.
+    fn attached(&self, _engine: ProcessInstance, _peer: Peer) {}
     /// Dismiss all pending approvals and preserve the Host's persistent Stop
     /// latch. Must return immediately and must not perform blocking IO.
     fn disconnected(&self);
