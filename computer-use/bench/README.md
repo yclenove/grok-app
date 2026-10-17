@@ -1,5 +1,40 @@
 # Settle benchmark contracts
 
+## Native performance budget gate (P9-03)
+
+From `computer-use/`, on the authorized build machine:
+
+```sh
+rcargo test -p gcu-eval --test budget
+rcargo test -p xtask --test commands
+rcargo run -q -p xtask -- bench-check
+rcargo run -q -p xtask -- bench-check --reports <native-artifact-directory>
+rcargo run -q -p xtask -- budget
+```
+
+`bench-check` reads `macos.json`, `windows.json` and `linux-x11.json` from this
+directory by default, independent of the caller's working directory. All three
+platforms and all four operations must pass; missing files/samples, `not_run`,
+invalid schema/setup, duplicate entries, inconsistent p50/p95 or over-budget
+percentiles produce a nonzero exit. Successful output includes p50/p95 and raw
+sample counts. The existing 14000-byte tool schema ceiling also applies; current
+profiles are subsets of that checked schema. There are no threshold or platform
+subset overrides.
+
+See [report-v1.md](report-v1.md) for the versioned report shape, fixed fixture
+workload, window/DPI and collection semantics. Budget constants live only in
+`budgets.rs`; changes require an approved ADR. `gcu-eval::budget` exports the
+same validation sources and the native collection interface from `collector.rs`.
+The existing fake settle executable below never produces native report files.
+
+Matching desktop runners must supply real artifacts before using this command
+as a required measurement job. An absent platform stays `not_run` and fails;
+the command never generates replacement samples. Native CI integration is
+configured separately. The existing CI test suite can run the synthetic gate
+tests, which verify rejection rules and make no native performance claim.
+
+## Offline settle benchmark (P6-01)
+
 P6-01 delivers deterministic logic and an offline executable skeleton. Native
 latency, P1/P2/P3 baseline comparisons and the native false-negative rate are
 **not_run**. Fake logical time is never evidence of native p50/p95 or support.
