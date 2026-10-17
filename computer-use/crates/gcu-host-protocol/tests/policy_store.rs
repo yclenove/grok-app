@@ -1,4 +1,5 @@
 //! Settings mutations exercise the same office used by production Host callbacks.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::sync::{Arc, Mutex};
 
 use gcu_host_protocol::{
