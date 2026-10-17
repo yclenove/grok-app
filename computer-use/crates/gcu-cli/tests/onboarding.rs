@@ -440,6 +440,9 @@ fn relaunch_waiter_execs_open_after_pid_exits() {
     }
 }
 
+// The helper app is macOS only; the sample path is a POSIX absolute path, which
+// Windows does not consider absolute.
+#[cfg(unix)]
 #[test]
 fn launch_command_at_targets_the_exact_app_path() {
     use gcu_cli::helper::auth::launch_command_at;
