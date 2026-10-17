@@ -8,8 +8,9 @@
 use anyhow::Context;
 use clap::Parser;
 use gcu_eval::{
-    block_on, bundled_tasks_dir, compare_trials, host_platform, load_tasks, parse_approval,
-    run_tasks, trials_from_summary, write_reports, RunConfig, RunStatus, SuiteReport,
+    block_on, bundled_tasks_dir, compare_trials, host_platform, judge_release, load_tasks,
+    parse_approval, parse_release_evidence, run_tasks, trials_from_summary, write_release_report,
+    write_reports, RunConfig, RunStatus, SuiteReport,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -54,6 +55,9 @@ struct Cli {
     /// Exit 0 when tasks fail. Invalid oracles still fail the process.
     #[arg(long)]
     allow_fail: bool,
+    /// Judge a section 8 evidence file and skip the task run.
+    #[arg(long)]
+    release_gate: Option<PathBuf>,
     /// Ask the child for CU auto-approval. Only an eval-autoapprove debug build accepts this.
     #[arg(long)]
     auto_approve: bool,
@@ -82,6 +86,9 @@ fn dispatch() -> Result<u8, Stop> {
     }
     if let Some(paths) = &cli.compare {
         return compare(paths);
+    }
+    if let Some(path) = &cli.release_gate {
+        return release_gate(path, cli.out.as_deref());
     }
     let run_local = match cli.env.as_str() {
         "local" => true,
@@ -128,6 +135,27 @@ fn dispatch() -> Result<u8, Stop> {
         write_reports(dir, &report).map_err(|err| Stop::Run(err.into()))?;
     }
     Ok(exit_code(&report, cli.allow_fail))
+}
+
+fn release_gate(path: &std::path::Path, out: Option<&std::path::Path>) -> Result<u8, Stop> {
+    let bytes =
+        std::fs::read(path).map_err(|err| Stop::Usage(format!("read release gate: {err}")))?;
+    let evidence = parse_release_evidence(&bytes).map_err(|err| Stop::Run(err.into()))?;
+    let decision = judge_release(&evidence);
+    println!(
+        "release tier={} channel={} promote={} default_formal={}",
+        decision.tier.as_str(),
+        decision.channel.as_str(),
+        decision.promote,
+        decision.default_formal
+    );
+    for reason in &decision.reasons {
+        println!("gate {reason}");
+    }
+    if let Some(dir) = out {
+        write_release_report(dir, &decision).map_err(|err| Stop::Run(err.into()))?;
+    }
+    Ok(0)
 }
 
 fn compare(paths: &[PathBuf]) -> Result<u8, Stop> {

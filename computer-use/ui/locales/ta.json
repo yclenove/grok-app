@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "பணிமேடைச் செயலியில் மட்டுமே கிடைக்கும்.",
   "cu.settings.refresh": "புதுப்பி",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "உங்கள் ஒப்புதலுடன் உள்ளூர் செயலிகளைக் கட்டுப்படுத்தவும்.",
+  "cu.settings.release": "வெளியீடு",
+  "cu.settings.release.experimental": "சோதனை",
+  "cu.settings.release.formal": "நிலையான",
+  "cu.settings.releaseBody": "மதிப்பீட்டு வாசல் நிறைவேறும் வரை சோதனை நிலையில் இருக்கும்."
 }

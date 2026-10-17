@@ -7,6 +7,7 @@ import * as api from "@/lib/api/computerUse";
 import { prepareForAppUpdate } from "@/lib/api/system";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Approval, Doctor, Settings } from "@/lib/computer-use/settings";
+import { judgeRelease, type ReleaseEvidence } from "@/lib/computer-use/releaseGate";
 import { createT, LOCALES } from "@/i18n";
 import { buildSettingsHash, parseSettingsHash, searchSettingsEntries } from "@/lib/settingsCatalog";
 
@@ -200,6 +201,53 @@ describe("ComputerUseSection", () => {
     expect(within(screen.getByRole("region", { name: "Accessibility" })).getByText("Allowed")).toBeInTheDocument();
   });
 
+});
+
+describe("Computer Use release channel", () => {
+  function passed(): ReleaseEvidence {
+    const layers: ReleaseEvidence["layers"] = {};
+    const l6: ReleaseEvidence["l6"] = {};
+    for (const platform of ["macos", "windows", "linux"]) {
+      layers[platform] = {};
+      for (let index = 1; index <= 7; index += 1) layers[platform][`L${index}`] = "pass";
+      l6[platform] = { native_bp: 9000, text_bp: 9000, overall_bp: 9000 };
+    }
+    return {
+      source: "runner", layers, l6, security_signed: Array(10).fill(true),
+      screenshot_chain_redacted: true, unreliable_screenshot_refused: true,
+      ide_unknown_stop_regression: true, performance_budget_met: true,
+      compatibility_apps: 30, signed_and_notarized: true, red_team_violations: 0,
+    };
+  }
+
+  it("stays experimental and does not add a promotion control", async () => {
+    render(<ComputerUseSection locale="en" />);
+    const region = screen.getByRole("region", { name: "Release" });
+    expect(within(region).getByRole("status")).toHaveTextContent("Experimental");
+    expect(within(region).getByText("Stays experimental until the evaluation gate passes.")).toBeInTheDocument();
+    expect(within(region).queryByRole("switch")).not.toBeInTheDocument();
+    expect(within(region).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText("Control local apps with your approval. Experimental.")).toBeInTheDocument();
+    expect(api.cuSettingsEnabled).not.toHaveBeenCalled();
+  });
+
+  it("shows the formal label only for a passing runner report", async () => {
+    const evidence = passed();
+    expect(judgeRelease(evidence).defaultFormal).toBe(true);
+    render(<ComputerUseSection locale="en" evidence={evidence} />);
+    const region = screen.getByRole("region", { name: "Release" });
+    expect(within(region).getByRole("status")).toHaveTextContent("Standard");
+    expect(within(region).queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.getByText("Control local apps with your approval.")).toBeInTheDocument();
+    expect(screen.queryByText("Control local apps with your approval. Experimental.")).not.toBeInTheDocument();
+    expect(api.cuSettingsEnabled).not.toHaveBeenCalled();
+  });
+
+  it("search_hits_the_release_row", () => {
+    expect(searchSettingsEntries("release gate", createT("en")).some(hit => hit.entry.id === "ext.computer.release")).toBe(true);
+    expect(searchSettingsEntries("实验", createT("zh")).some(hit => hit.entry.id === "ext.computer.release")).toBe(true);
+    expect(searchSettingsEntries(createT("zh")("cu.settings.release"), createT("zh")).some(hit => hit.entry.id === "ext.computer.release")).toBe(true);
+  });
 });
 
 describe("Computer Use settings navigation", () => {

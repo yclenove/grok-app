@@ -817,3 +817,6 @@ fn cli_fake_suite_exits_0_and_compare_prints_significance() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&bad);
 }
+
+#[path = "common/runner_release.rs"]
+mod runner_release;

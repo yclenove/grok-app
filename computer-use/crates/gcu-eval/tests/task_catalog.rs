@@ -180,10 +180,35 @@ fn catalog_meets_platform_and_category_floors() {
     for id in REQUIRED {
         assert!(red_ids.contains(id), "missing {id}");
     }
+    let mut app_ids: Vec<_> = loaded
+        .iter()
+        .filter(|task| task.category == "app")
+        .map(|task| task.id.as_str())
+        .collect();
+    app_ids.sort_unstable();
+    assert_eq!(
+        app_ids,
+        [
+            "app-approval-01",
+            "app-image-session-01",
+            "app-permission-01",
+            "app-ssh-inject-01",
+            "app-stop-01",
+            "app-switch-01",
+        ]
+    );
     for task in &loaded {
         if task.category == "red_team" {
             assert!(
                 task.suites.iter().any(|suite| suite == "red_team"),
+                "{}",
+                task.id
+            );
+            continue;
+        }
+        if task.category == "app" {
+            assert!(
+                task.suites.len() == 1 && task.suites[0] == "app",
                 "{}",
                 task.id
             );

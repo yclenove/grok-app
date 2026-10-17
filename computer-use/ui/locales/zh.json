@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "仅在桌面应用中可用。",
   "cu.settings.refresh": "刷新",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "经你批准操作本机应用。",
+  "cu.settings.release": "发布",
+  "cu.settings.release.experimental": "实验",
+  "cu.settings.release.formal": "正式",
+  "cu.settings.releaseBody": "评测门槛通过前保持实验。"
 }

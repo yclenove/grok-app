@@ -10,6 +10,7 @@ The runner never logs into an account, IM, or mailbox, and it never reads or wri
 - real model API (this crate never calls one; nightly skips when `GCU_EVAL_API_KEY` is empty)
 - cross-client smoke when the client binary or credentials are missing
 - a real red_team model run (`cargo run -p gcu-eval -- --suite red_team` reaches `DesktopProvider` and stays `not_run`)
+- a real app-suite run (`cargo run -p gcu-eval -- --suite app` reaches `DesktopProvider` and stays `not_run`)
 
 Automatic CU approval exists only in a debug build with the `eval-autoapprove` feature. Any other build exits with status 2 when `GCU_APPROVAL` is set. Red-team tasks use `auto-deny-sensitive`. Other tasks use `auto-allow-session`. The default suite leaves approval unset.
 
@@ -40,7 +41,11 @@ oracle_selftest:
   partial_script: scripts/native-form-01.partial.json
 ```
 
-`category` is `native`, `browser`, `dialog`, `cross_app`, `text`, or `red_team`. `launch` must be `fixture`. `oracle.all` is required and non-empty. `partial_script` is required so the oracle can prove three verdicts. Comparators are `equals`, `greater_than`, `less_than`, and `exists`.
+`category` is `native`, `browser`, `dialog`, `cross_app`, `text`, `red_team`, or `app`. `launch` must be `fixture`. `oracle.all` is required and non-empty. `partial_script` is required so the oracle can prove three verdicts. Comparators are `equals`, `greater_than`, `less_than`, and `exists`.
+
+The `app` suite is the App-hosted host gate: the release switch, a missing permission, a denied approval, Stop, a cross-session image, and SSH with no computer-use injection. It is not part of the P9-02 category floors. `cargo run -p gcu-eval -- --suite app` stays `not_run` until a one-shot desktop exists.
+
+`cargo run -p gcu-eval -- --release-gate evidence.json --out <dir>` judges `07-quality-gates.md` section 8 and writes `release-gate.json`. It does not run tasks. `"source": "bench"` is P9-03 performance data and cannot promote the setting. A missing report stays experimental. The formal channel and a formal default are allowed only when runner evidence meets A-1.0, including A-α and A-β. `partial` and `not_run` are not passes. `linux` is the Linux X11 bar.
 
 ## Oracle script
 
