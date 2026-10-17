@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "承認済みの Computer Use DOM リクエスト用にタブを共有します。"
+  },
+  "share": {
+    "message": "このタブを共有"
+  },
+  "revoke": {
+    "message": "このタブの共有を停止"
+  },
+  "unavailable": {
+    "message": "このタブは共有できません"
+  }
+}

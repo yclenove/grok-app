@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Bagikan satu tab untuk permintaan DOM Computer Use yang diizinkan."
+  },
+  "share": {
+    "message": "Bagikan tab ini"
+  },
+  "revoke": {
+    "message": "Berhenti membagikan tab ini"
+  },
+  "unavailable": {
+    "message": "Tab ini tidak dapat dibagikan"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "共用單一分頁以回應已授權的 Computer Use DOM 請求。"
+  },
+  "share": {
+    "message": "共用此分頁"
+  },
+  "revoke": {
+    "message": "停止共用此分頁"
+  },
+  "unavailable": {
+    "message": "無法共用此分頁"
+  }
+}

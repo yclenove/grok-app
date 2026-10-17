@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Magbahagi ng isang tab para sa mga awtorisadong DOM request ng Computer Use."
+  },
+  "share": {
+    "message": "Ibahagi ang tab na ito"
+  },
+  "revoke": {
+    "message": "Ihinto ang pagbabahagi ng tab na ito"
+  },
+  "unavailable": {
+    "message": "Hindi maibabahagi ang tab na ito"
+  }
+}

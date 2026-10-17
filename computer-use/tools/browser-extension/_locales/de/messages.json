@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Einen Tab für autorisierte DOM-Anfragen von Computer Use freigeben."
+  },
+  "share": {
+    "message": "Diesen Tab freigeben"
+  },
+  "revoke": {
+    "message": "Freigabe dieses Tabs beenden"
+  },
+  "unavailable": {
+    "message": "Dieser Tab kann nicht freigegeben werden"
+  }
+}
