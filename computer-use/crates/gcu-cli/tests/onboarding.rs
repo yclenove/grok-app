@@ -454,8 +454,10 @@ fn export_module_binding_and_header_match_app_catalog() {
             )
             .unwrap();
             let expected = export_module(locale, &json).unwrap();
-            let actual =
-                std::fs::read_to_string(root.join(locale).join("computer-use.ts")).unwrap();
+            // A Windows checkout may convert the generated module to CRLF; the export is LF.
+            let actual = std::fs::read_to_string(root.join(locale).join("computer-use.ts"))
+                .unwrap()
+                .replace("\r\n", "\n");
             assert_eq!(actual, expected, "{locale}");
         }
     }
