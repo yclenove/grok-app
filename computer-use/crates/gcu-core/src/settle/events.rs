@@ -5,7 +5,7 @@ use std::{future::poll_fn, task::Poll, time::Duration};
 const MAX_BATCH: usize = 64;
 const EVENT_YIELD: Duration = Duration::from_millis(1);
 
-pub(super) struct Events {
+pub(crate) struct Events {
     stream: Option<BoxStream<'static, UiEvent>>,
     pub quiet_at: Duration,
     pub check_at: Duration,
@@ -13,7 +13,7 @@ pub(super) struct Events {
     quiet: Duration,
 }
 #[derive(Default)]
-pub(super) struct Batch {
+pub(crate) struct Batch {
     pub changed: bool,
     pub gone: bool,
     pub closed: bool,
@@ -61,6 +61,20 @@ impl Events {
         })
         .await
     }
+    /// One non-blocking drain. `None` means the stream was pending; the caller must
+    /// then wait, or a ready flood would spin.
+    pub async fn try_ready(&mut self) -> Option<Batch> {
+        std::future::poll_fn(|cx| {
+            let next = self.next();
+            tokio::pin!(next);
+            match std::future::Future::poll(next.as_mut(), cx) {
+                std::task::Poll::Ready(batch) => std::task::Poll::Ready(Some(batch)),
+                std::task::Poll::Pending => std::task::Poll::Ready(None),
+            }
+        })
+        .await
+    }
+
     pub fn received(&mut self, batch: &Batch, now: Duration) {
         if batch.changed {
             self.invalidate(now);

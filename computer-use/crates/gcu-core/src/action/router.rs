@@ -36,12 +36,13 @@ pub struct ActionRouter {
     pub(crate) approvals: Arc<dyn ApprovalProvider>,
     pub(crate) policy: Arc<dyn PolicyStore>,
     events: Arc<dyn EventSink>,
-    pub(super) locks: WindowLocks,
+    pub(crate) locks: WindowLocks,
     pub(crate) policy_version: AtomicU64,
     pub(crate) epoch: Instant,
     pub(crate) tree_opts: TreeOpts,
     pub(crate) settle_engine: SettleEngine,
     pub(crate) auto_capture: AutoCapturePolicy,
+    pub(crate) wait_engine: crate::wait::WaitEngine,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -68,11 +69,13 @@ impl ActionRouter {
             tree_opts,
             settle_engine: SettleEngine::default(),
             auto_capture: AutoCapturePolicy::default(),
+            wait_engine: crate::wait::WaitEngine::default(),
         }
     }
     /// Inject settling configuration and monotonic time before sharing the router.
     /// In-memory construction only; no waits, IO, timeout or cancellation.
     pub fn with_settle_engine(mut self, engine: SettleEngine) -> Self {
+        self.wait_engine = crate::wait::WaitEngine::new(engine.clock());
         self.settle_engine = engine;
         self
     }
@@ -166,16 +169,18 @@ impl ActionRouter {
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?
     }
     /// Execute once: exact-handle/coordinate gates, policy and cancellable approval,
-    /// revalidate, perform, bounded settle, then a fresh state/diff. Unknown is never
-    /// retried. Session queue waits have no deadline; window-lock waits cap at 5s.
-    /// Native waits cap at 5s; settle defaults to 800ms (type_text 1500ms). Stop is
-    /// checked at every boundary and polled every 10ms while awaiting native/Host work.
+    /// revalidate, perform, bounded settle, then a fresh state/diff. `wait_for` does
+    /// not perform input; its horizon is at most 30s while each snapshot stays within
+    /// the 5s native ceiling. Unknown is never retried. Session queue waits have no
+    /// deadline; window-lock waits cap at 5s. Native waits cap at 5s; settle defaults
+    /// to 800ms (type_text 1500ms). Stop is checked at every boundary and polled every
+    /// 10ms while awaiting native/Host work.
     pub async fn execute(&self, session: &Session, call: ToolCall) -> ToolOutcome {
         let start = Instant::now();
         let initial = result(&call);
         let mut out = match self.check_boundary(session).await {
             Err(code) => outcome(initial, Some(error(code)), None),
-            Ok(()) => match session.enqueue(self.execute_queued(session, &call)).await {
+            Ok(()) => match session.enqueue(self.dispatch_queued(session, &call)).await {
                 Ok(out) => out,
                 Err(_) => outcome(initial, Some(error(ErrorCode::ApprovalDenied)), None),
             },
@@ -220,7 +225,7 @@ impl ActionRouter {
         }
         out
     }
-    async fn execute_queued(&self, session: &Session, call: &ToolCall) -> ToolOutcome {
+    pub(crate) async fn execute_queued(&self, session: &Session, call: &ToolCall) -> ToolOutcome {
         let mut action = result(call);
         let win = match self
             .resolve(session, &call.app, call.window.as_deref())
@@ -420,7 +425,7 @@ impl ActionRouter {
         cancel_on_drop.0 = None;
         result
     }
-    async fn resolve(
+    pub(crate) async fn resolve(
         &self,
         session: &Session,
         app: &str,
@@ -499,7 +504,7 @@ pub(crate) fn error(code: ErrorCode) -> ToolError {
         state: None,
     }
 }
-fn result(call: &ToolCall) -> ActionResult {
+pub(crate) fn result(call: &ToolCall) -> ActionResult {
     ActionResult {
         tool: route::tool(&call.action),
         target: None,
@@ -527,7 +532,7 @@ pub(crate) fn outcome(
         windows: Vec::new(),
     }
 }
-fn window_lock_key(win: &WindowRef) -> String {
+pub(crate) fn window_lock_key(win: &WindowRef) -> String {
     format!("{}:{}:{}", win.app.info.id.len(), win.app.info.id, win.id)
 }
 fn wire_delivery(d: driver::Delivery) -> Delivery {

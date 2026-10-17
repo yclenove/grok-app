@@ -25,6 +25,7 @@ pub fn validate_arguments(name: &str, value: Value) -> Result<(), Box<ToolError>
         | "scroll"
         | "drag" => action(name, value, String::new()).map(|_| ()),
         "press_key" => check!(PressKeyParams),
+        "wait_for" => action(name, value, String::new()).map(|_| ()),
         _ => Err(Box::new(invalid("Tool is not implemented in this build."))),
     }
 }
@@ -69,6 +70,7 @@ pub(crate) fn action(name: &str, value: Value, id: String) -> Result<ToolCall, B
         "press_key" => action!(PressKeyParams, PressKey),
         "scroll" => action!(ScrollParams, Scroll),
         "drag" => action!(DragParams, Drag),
+        "wait_for" => action!(WaitForParams, WaitFor),
         _ => Err(Box::new(invalid(
             "This tool will be available in a later release.",
         ))),

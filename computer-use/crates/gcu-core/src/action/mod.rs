@@ -12,6 +12,7 @@ mod route;
 /// Policy-aware portable action executor.
 pub mod router;
 mod settle;
+mod wait;
 
 use crate::{driver::PointerRoute, redact::RedactedImage, snapshot::SnapshotStore};
 use gcu_protocol::{result::ActionResult, tools::BatchStep, AppState, ToolError, WindowInfo};
@@ -32,7 +33,8 @@ pub struct ToolCall {
     pub app: String,
     /// Exact window ID; omission resolves the key window once only.
     pub window: Option<String>,
-    /// Protocol action payload. Wait/expect belong to the later batch executor.
+    /// Protocol action payload. `wait_for` is executed by [`ActionRouter::wait_for`].
+    /// Expect belongs to the later batch executor.
     pub action: BatchStep,
     /// Explicit route ceiling. TargetedOnly never falls back to foreground.
     #[serde(skip)]

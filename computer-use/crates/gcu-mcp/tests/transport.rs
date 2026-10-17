@@ -32,7 +32,7 @@ fn codec_chunk_boundaries_and_overlong_eof_recover() {
 
 #[tokio::test]
 async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
-    for (profile, count) in [(Profile::Minimal, 9), (Profile::Full, 13)] {
+    for (profile, count) in [(Profile::Minimal, 9), (Profile::Full, 14)] {
         let mut h = Harness::configured(
             FakeDriver::from_scene("form").unwrap(),
             &[],
@@ -40,15 +40,30 @@ async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
         );
         let init = h.initialize(false).await;
         assert!(init["instructions"].as_str().unwrap().chars().count() <= 1200);
-        let result = h.request("tools/list", json!({})).await;
-        assert_eq!(result["result"]["tools"].as_array().unwrap().len(), count);
-        assert!(serde_json::to_vec(&result["result"]).unwrap().len() <= 14_000);
+        let listed = h.request("tools/list", json!({})).await;
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), count);
+        assert!(serde_json::to_vec(&listed["result"]).unwrap().len() <= 14_000);
         if count == 9 {
-            let result = h.call("launch_app", json!({"app":"fake.form"})).await;
-            assert_eq!(
-                result["structuredContent"]["error"]["code"],
-                "capability_unavailable"
-            );
+            let names: Vec<_> = listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect();
+            assert!(!names.contains(&"wait_for"));
+            for (name, args) in [
+                ("launch_app", json!({"app":"fake.form"})),
+                (
+                    "wait_for",
+                    json!({"app":"fake.form","until":{"text_present":"Submit"}}),
+                ),
+            ] {
+                let result = h.call(name, args).await;
+                assert_eq!(
+                    result["structuredContent"]["error"]["code"], "capability_unavailable",
+                    "{name}"
+                );
+            }
             assert!(h.approvals.app_requests().is_empty());
         }
         h.close().await;
