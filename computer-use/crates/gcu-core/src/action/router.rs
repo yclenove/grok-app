@@ -5,16 +5,17 @@ use super::{
 };
 use crate::{
     driver::{self, AppQuery, Cancel, Driver, DriverError, TreeOpts, WindowRef},
-    model::{Role, WindowPoint},
+    model::WindowPoint,
     policy::{ActionIntent, Tool},
     session::{InputRelease, Session, WindowLocks},
+    settle::SettleEngine,
     snapshot::WindowKey,
 };
 use async_trait::async_trait;
 use gcu_host_api::{ApprovalProvider, CuEvent, EventSink, PolicyStore, SessionCtx};
 use gcu_protocol::{
     result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason},
-    tools::{BatchStep, GetAppStateParams},
+    tools::GetAppStateParams,
     ErrorCode, ToolError,
 };
 use std::{
@@ -38,6 +39,7 @@ pub struct ActionRouter {
     pub(crate) policy_version: AtomicU64,
     pub(crate) epoch: Instant,
     pub(crate) tree_opts: TreeOpts,
+    pub(crate) settle_engine: SettleEngine,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -62,7 +64,14 @@ impl ActionRouter {
             policy_version: AtomicU64::new(1),
             epoch: Instant::now(),
             tree_opts,
+            settle_engine: SettleEngine::default(),
         }
+    }
+    /// Inject settling configuration and monotonic time before sharing the router.
+    /// In-memory construction only; no waits, IO, timeout or cancellation.
+    pub fn with_settle_engine(mut self, engine: SettleEngine) -> Self {
+        self.settle_engine = engine;
+        self
     }
     /// Input-release adapter for Session::open. Native release is bounded by the
     /// Session stop channel, independently of action/approval queues.
@@ -310,73 +319,8 @@ impl ActionRouter {
                 action.outcome = Outcome::Done;
             }
         }
-        let budget = call
-            .settle_budget_ms
-            .unwrap_or(if matches!(call.action, BatchStep::TypeText(_)) {
-                1500
-            } else {
-                800
-            })
-            .min(1500);
-        match self
-            .settle(session, &win, events, Duration::from_millis(budget))
+        self.settle_and_publish(session, call, &gate, action, before, events)
             .await
-        {
-            Ok(settle) => action.settle = settle,
-            Err(code) => return self.failure(session, action, code, &win).await,
-        }
-        let after = match self
-            .read(
-                session,
-                &win,
-                self.driver.capabilities().observe.screenshot,
-                &self.tree_opts,
-            )
-            .await
-        {
-            Ok(f) => f,
-            Err(code) => return self.failure(session, action, code, &win).await,
-        };
-        let before_opts =
-            crate::render::RenderOpts::new(before.win.app.info.clone(), before.info.clone());
-        let after_opts =
-            crate::render::RenderOpts::new(after.win.app.info.clone(), after.info.clone());
-        let tree_changed = crate::render::render_text(&before.tree, &before_opts)
-            != crate::render::render_text(&after.tree, &after_opts);
-        let pixels_changed = before
-            .image
-            .as_ref()
-            .zip(after.image.as_ref())
-            .is_some_and(|(a, b)| a.geometry() != b.geometry() || a.pixels() != b.pixels());
-        action.effect = if tree_changed || pixels_changed {
-            Effect::Changed
-        } else {
-            Effect::NoVisibleChange
-        };
-        if action.effect == Effect::NoVisibleChange {
-            action.notes.push(
-                "No visible change after delivery; the action may not have taken effect.".into(),
-            );
-        }
-        if action.delivery != Delivery::Foreground {
-            action
-                .notes
-                .push("Delivered without foreground activation.".into());
-        }
-        let canvas = after.raw.root.is_none()
-            || after
-                .tree
-                .nodes()
-                .iter()
-                .any(|(_, n)| n.node.role == Role::Canvas);
-        let attach = !gate.points.is_empty()
-            || canvas
-            || (!tree_changed && pixels_changed)
-            || call.attach_image;
-        match self.publish(session, after, attach) {
-            Ok(state) => outcome(action, None, Some(state)),
-            Err(e) => outcome(action, Some(*e), None),
-        }
     }
     pub(crate) async fn check_boundary(&self, session: &Session) -> Result<(), ErrorCode> {
         if session.is_stopped() || session.activity().stop_requested() {

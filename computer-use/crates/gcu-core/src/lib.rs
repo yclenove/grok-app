@@ -16,6 +16,8 @@ pub mod policy;
 pub mod render;
 /// Session lifecycle, serial calls, window locks, and the stop latch.
 pub mod session;
+/// Event/poll settling with injectable time, bounded cancellation and effect evidence.
+pub mod settle;
 /// Shared driver contract suite; enabled only for test consumers.
 #[cfg(feature = "testing")]
 pub mod testing;

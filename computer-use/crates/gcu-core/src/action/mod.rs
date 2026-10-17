@@ -7,7 +7,7 @@ mod failure;
 pub mod gate;
 /// Bounded metadata-only action history.
 pub mod ledger;
-mod observe;
+pub(crate) mod observe;
 mod route;
 /// Policy-aware portable action executor.
 pub mod router;
