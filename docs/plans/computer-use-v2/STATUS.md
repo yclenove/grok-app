@@ -85,7 +85,7 @@
 | P9-02 | 任务集 ≥60 | P9-01 | 4d | done | cu2/P9-02-task-catalog |  | 2026-10-14 | 三平台×六类任务集(含 red_team)，每项 oracle 自证 pass/fail，Web SSH/云终端/容器/远程桌面/调试控制台/IDE 入口、伪装提交、TOCTOU、Stop 续轮、CU 外副作用；task_catalog 校验覆盖下限；一次性桌面实跑 not_run |
 | P9-03 | 性能预算门禁 | P6-01 | 1.5d | todo |  |  |  |  |
 | P9-04 | 安全审查 | P6-05、P5-09 | 3d | todo |  |  |  |  |
-| P9-05 | 兼容性矩阵 | P4-07 | 3d | todo |  |  |  |  |
+| P9-05 | 兼容性矩阵 | P4-07 | 3d | not_run: 匹配桌面真机运行 | cu2/P9-05-compat | #106 | 2026-10-17 | 40 个 App × 三平台 120 行机器可读矩阵 + 渲染校验的 `docs/compatibility.md`，13 类固定任务/外部 oracle 骨架；**全部 not_run，不声称任何支持**；非 not_run 行测试强制要求版本/证据/日期。`gcu-eval --test compatibility` 通过。**未做**：各平台真机运行与证据 |
 | P9-06 | 长稳浸泡 | P5-11 | 2d | todo |  |  |  |  |
 | P9-07 | 1.0 发布 | P9-01、P9-02、P9-03、P9-04、P9-05、P9-06 | 1.5d | todo |  |  |  |  |
 
