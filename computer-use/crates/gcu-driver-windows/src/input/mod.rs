@@ -6,6 +6,7 @@ pub mod fake;
 mod ffi;
 pub mod foreground;
 #[cfg(any(windows, test))]
+#[cfg_attr(test, allow(dead_code))]
 mod hook_probe;
 pub mod hooks;
 pub mod hotkey;
