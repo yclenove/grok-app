@@ -154,3 +154,6 @@ fn wayland_and_xwayland_never_claim_overlay_safety() {
     }
     assert!(Availability::for_session(DisplaySession::X11).available);
 }
+
+#[path = "support/app_overlay.rs"]
+mod app_overlay;

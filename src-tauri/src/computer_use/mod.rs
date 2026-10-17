@@ -6,6 +6,7 @@ mod events;
 mod gateway;
 mod host_server;
 pub(crate) mod inject;
+pub(crate) mod overlay;
 mod policy_store;
 mod supervisor;
 
@@ -37,10 +38,11 @@ pub struct ComputerUseHost {
     inner: Mutex<Inner>,
     office: Office,
     shots: events::Shots,
+    overlay: overlay::Overlay,
 }
 
 impl ComputerUseHost {
-    fn disabled(office: Office) -> Self {
+    fn disabled(office: Office, overlay: overlay::Overlay) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 external: None,
@@ -51,12 +53,17 @@ impl ComputerUseHost {
             }),
             office,
             shots: events::Shots::open(),
+            overlay,
         }
     }
 
     /// Shared approval desk. Clone is cheap.
     pub(crate) fn office(&self) -> Office {
         self.office.clone()
+    }
+
+    pub(crate) fn overlay(&self) -> overlay::Overlay {
+        self.overlay.clone()
     }
 
     /// Current phase. Stopped when the feature has never been turned on.
@@ -67,7 +74,7 @@ impl ComputerUseHost {
     /// Latch, session count, and phase.
     pub async fn status(&self) -> Status {
         let inner = self.inner.lock().await;
-        inner
+        let mut status = inner
             .control
             .as_ref()
             .map(gcu_host_protocol::supervisor::Control::status)
@@ -76,13 +83,25 @@ impl ComputerUseHost {
                 enabled: false,
                 stop_latched: inner.stop_latched,
                 sessions: 0,
-            })
+            });
+        status.stop_latched = self.overlay.safety.stopped();
+        status
     }
 
     /// Start or stop by the feature switch. The second call in the same phase is a no-op.
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         if !enabled {
+            // Turning off a running host is a Stop and must survive restart. The
+            // startup call on a host that never ran must not latch one.
+            if inner.control.is_some() {
+                self.overlay.safety.latch();
+                self.overlay
+                    .safety
+                    .persist()
+                    .await
+                    .map_err(Error::Handshake)?;
+            }
             self.office.deny_pending();
             let ids = inner.book.live_ids();
             gateway::revoke_all_locked(&mut inner).await;
@@ -102,6 +121,7 @@ impl ComputerUseHost {
                 inner.dev_grant,
                 self.office.clone(),
                 self.shots.gallery(),
+                self.overlay.clone(),
             )?;
             if inner.stop_latched {
                 control.handle(Signal::UserStop, now_ms()).await?;
@@ -119,30 +139,24 @@ impl ComputerUseHost {
         self.signal(Signal::Sessions(count)).await
     }
 
-    /// User stop. Restart copies the latch into the next handshake.
-    ///
-    /// P5-06 calls this from the panel. The latch is already honored by spawn.
-    #[allow(dead_code)]
+    /// Stop bypasses the supervisor mutex, ordinary RPC and pending approvals.
     pub async fn user_stop(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
-        inner.stop_latched = true;
-        if let Some(control) = inner.control.as_mut() {
-            control.handle(Signal::UserStop, now_ms()).await?;
-        }
-        Ok(())
+        self.overlay.safety.latch();
+        self.office.deny_pending();
+        self.overlay
+            .safety
+            .persist()
+            .await
+            .map_err(Error::Handshake)
     }
 
-    /// Explicit user resume. Crash recovery never calls this.
-    ///
-    /// P5-06 calls this from the panel.
-    #[allow(dead_code)]
+    /// Explicit trusted user resume on the independent channel only.
     pub async fn user_resume(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
-        inner.stop_latched = false;
-        if let Some(control) = inner.control.as_mut() {
-            control.handle(Signal::UserResume, now_ms()).await?;
-        }
-        Ok(())
+        self.overlay
+            .safety
+            .resume_by_user()
+            .await
+            .map_err(Error::Handshake)
     }
 
     /// Record a developer engine. Refuses while a child is alive.
@@ -200,7 +214,8 @@ pub fn install(app: &AppHandle) {
         "computer use host registered"
     );
     let office = policy_store::open_office(app);
-    app.manage(ComputerUseHost::disabled(office.clone()));
+    let overlay = overlay::Overlay::new(app);
+    app.manage(ComputerUseHost::disabled(office.clone(), overlay));
     approval::forward_notices(app.clone(), &office);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {

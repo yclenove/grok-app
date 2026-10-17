@@ -2346,6 +2346,7 @@ dependencies = [
  "gcu-driver-macos",
  "gcu-driver-windows",
  "gcu-host-api",
+ "gcu-host-protocol",
  "gcu-protocol",
  "libc",
  "objc2 0.6.5",

@@ -228,3 +228,40 @@ fn note_thumbnail_then_drop_session_removes_file() {
 fn session_dir(root: &Path, session: &str) -> PathBuf {
     root.join(session)
 }
+
+struct Inner;
+
+impl gcu_host_protocol::server::HostCallbacks for Inner {
+    fn notification(
+        &self,
+        _request: &gcu_host_protocol::messages::Request,
+    ) -> Option<Result<serde_json::Value, gcu_host_protocol::messages::RpcError>> {
+        Some(Ok(serde_json::json!({ "seen": true })))
+    }
+
+    fn handle(
+        &self,
+        _request: gcu_host_protocol::messages::Request,
+    ) -> gcu_host_protocol::server::CallbackFuture<'_> {
+        Box::pin(async { Ok(serde_json::json!({})) })
+    }
+
+    fn stop_state(&self) -> Option<bool> {
+        Some(true)
+    }
+
+    fn disconnected(&self) {}
+}
+
+#[test]
+fn observe_forwards_stop_state_and_notifications_to_the_inner_callbacks() {
+    let temp = Temp::new();
+    let wrapped = gcu_host_protocol::events::observe(std::sync::Arc::new(Inner), temp.gallery());
+    // A Host latch that the wrapper hid would let a new engine start unstopped.
+    assert_eq!(wrapped.stop_state(), Some(true));
+    let request: gcu_host_protocol::messages::Request = serde_json::from_value(
+        serde_json::json!({ "jsonrpc": "2.0", "method": "host.overlay.cursor", "params": {} }),
+    )
+    .unwrap();
+    assert!(wrapped.notification(&request).is_some());
+}

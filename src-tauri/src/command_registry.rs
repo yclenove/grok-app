@@ -9,13 +9,21 @@ use crate::{
     updater, voice_host, wallpaper_grok_album, wallpaper_remote_commands,
 };
 
+/// Gives the macro's closure its parameter type up front; without it the
+/// `invoke.message` accesses in the wrapper below cannot be inferred.
+fn typed_handler(
+    handler: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    handler
+}
+
 /// Single invoke handler consumed by `Builder::invoke_handler` in `run()`.
 ///
 /// `generate_handler!` only accepts a flat list, so domain separation is
 /// expressed with section comments instead of nested arrays.
 pub fn app_invoke_handler(
 ) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![
+    let handler = typed_handler(tauri::generate_handler![
         // ── Sessions, turns, permissions & local session API ──
         commands::session_get_state,
         commands::session_connect,
@@ -526,5 +534,18 @@ pub fn app_invoke_handler(
         computer_use::commands::cu_confirm_decide,
         computer_use::commands::cu_handoff_decide,
         computer_use::commands::cu_tool_shot,
-    ]
+        computer_use::commands::cu_stop,
+        computer_use::commands::cu_resume,
+        computer_use::overlay::cu_overlay_snapshot,
+    ]);
+    move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+        let label = invoke.message.webview_ref().label();
+        // App commands without a generated ACL are otherwise callable by any
+        // local webview. The actual Rust webview identity is the authority.
+        if !computer_use::overlay::command_allowed(label, invoke.message.command()) {
+            invoke.resolver.reject("untrusted");
+            return true;
+        }
+        handler(invoke)
+    }
 }

@@ -149,18 +149,25 @@ async fn control(
                     // Synchronous latch first. Release tasks never await the action
                     // mutex or block processing another Stop or trusted resume.
                     stop.latch(p.session_id.as_deref());
-                    let entries: Vec<_> = sessions
-                        .read()
-                        .await
-                        .iter()
-                        .filter(|(id, _)| p.session_id.as_ref().is_none_or(|wanted| wanted == *id))
-                        .map(|(_, e)| e.lifecycle.clone())
-                        .collect();
-                    for session in entries {
-                        tokio::spawn(async move {
-                            session.handle_stop().await;
-                        });
-                    }
+                    // Session creation/close may own the map write lock. Do not
+                    // let that delay input release or acknowledgment of Stop.
+                    let sessions = sessions.clone();
+                    tokio::spawn(async move {
+                        let entries: Vec<_> = sessions
+                            .read()
+                            .await
+                            .iter()
+                            .filter(|(id, _)| {
+                                p.session_id.as_ref().is_none_or(|wanted| wanted == *id)
+                            })
+                            .map(|(_, e)| e.lifecycle.clone())
+                            .collect();
+                        for session in entries {
+                            tokio::spawn(async move {
+                                session.handle_stop().await;
+                            });
+                        }
+                    });
                     // Also covers a Stop received during initial policy/bootstrap.
                     let driver = driver.clone();
                     tokio::spawn(async move {
@@ -315,3 +322,7 @@ async fn dispatch(
         _ => Err(w::RpcError::new(-32601, "method unavailable")),
     }
 }
+
+#[cfg(test)]
+#[path = "engine_stop_tests.rs"]
+mod tests;

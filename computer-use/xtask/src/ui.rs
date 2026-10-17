@@ -50,7 +50,7 @@ fn export_i18n() -> Result<()> {
 fn check() -> Result<()> {
     let rendered = render_embed()?;
     let shipped = fs::read_to_string(embed_path()).context("read onboarding embed")?;
-    if rendered != shipped {
+    if rendered.replace("\r\n", "\n") != shipped.replace("\r\n", "\n") {
         bail!("onboarding embed is stale; run cargo xtask ui embed");
     }
     let root = i18n_root();
@@ -63,7 +63,7 @@ fn check() -> Result<()> {
         let path = root.join(&locale).join("computer-use.ts");
         let shipped =
             fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        if shipped != module {
+        if shipped.replace("\r\n", "\n") != module.replace("\r\n", "\n") {
             bail!(
                 "{} is stale; run cargo xtask ui export-i18n",
                 path.display()

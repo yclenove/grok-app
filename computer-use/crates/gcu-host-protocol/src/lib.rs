@@ -8,6 +8,7 @@ pub mod codec;
 pub mod events;
 pub mod inject;
 pub mod messages;
+pub mod overlay;
 pub mod server;
 pub mod supervisor;
 #[cfg(all(feature = "testing", unix))]

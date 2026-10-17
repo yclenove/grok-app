@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "cu-overlay",
+  "description": "Local Computer Use drawing and capsule controls",
+  "windows": ["cu-overlay", "cu-overlay-controls"],
+  "permissions": []
+}
