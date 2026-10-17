@@ -116,6 +116,8 @@
 - P2-09：egui 夹具在 UIA 下首读树可能不完整（和 macOS 一样懒激活），调用方要有界重读。
 - P4-03：i18n 导出脚本(P4-02)还不存在，审批文案先以 `computer-use/ui/locales/*.json` 为单一来源并有 15 语言键锁步测试；P4-02 要把它导出为 App 的 `computer-use` 命名空间(`src/i18n/messages/<locale>/computer-use.ts`)，而不是再复制一份。
 - P5-02：token 必然随 ACP 会话载荷到达 agent 进程（header 方案的代价）；Host 侧所有日志/崩溃路径都 scrub，不要新增会打印 ACP 载荷的路径而不过 `gcu_host_protocol::inject::scrub`。
+- 偶发(2026-10-16，PR #75)：Windows 桌面套件 C04(物理截图) 在某次运行里报 `native operation timed out (maybe_executed=false)`——`rpc_capture` 常态约 0.8–1.1s，那次 5s 内没有返回，同一作业总耗时 10m9s(平时约 6m)，同一提交的另一运行 14/15/0 通过、重跑通过。P5-02 没有改 Windows 驱动，判断为 runner 偶发负载；若再次出现要查截图路径(WGC/PrintWindow)是否会挂起，以及是否在 `DRIVER_DEADLINE` 内正确取消。
+- 偶发(2026-10-16，PR #75)：既有 src-tauri 测试 `plugin_auth_transport::tests::private_pipe_reaches_legacy_node_parser_on_this_host` 在慢 Windows runner 上 10s 超时("Plugin auth timed out"，node 启动慢)，重跑通过；与 Computer Use 无关，若再出现可单独把它的超时放宽到 30s。
 
 ## 阶段记录
 
