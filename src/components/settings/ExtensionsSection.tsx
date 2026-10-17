@@ -34,6 +34,7 @@ export function ExtensionsSection() {
                 | "hooks"
                 | "rules"
                 | "commands"
+                | "computer"
                 | "market" // legacy hash → plugins inside panel
                 | null) ?? "plugins"
             }

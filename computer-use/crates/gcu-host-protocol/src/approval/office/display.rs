@@ -48,7 +48,7 @@ pub(super) fn push_identity(policy: &mut Policy, image: &ImageBinding) {
     policy.always.push(identity);
 }
 
-fn same_identity(saved: &Identity, identity: &Identity) -> bool {
+pub(super) fn same_identity(saved: &Identity, identity: &Identity) -> bool {
     saved.platform == identity.platform
         && saved.key == identity.key
         && saved.team_id == identity.team_id

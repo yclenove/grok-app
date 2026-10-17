@@ -210,4 +210,39 @@ export const EXTENSIONS_ENTRIES: readonly SettingsEntry[] = [
       "catalog",
     ],
   },
+  {
+    id: "ext.computer", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer", labelKey: "cu.settings.title",
+    descKeys: ["cu.settings.desc", "cu.settings.enable", "cu.settings.enableDesc"],
+    keywords: ["computer use", "desktop control", "电脑操作", "桌面控制", "電腦操作", "桌面控制", "Computersteuerung", "control del escritorio", "contrôle du bureau", "controllo desktop", "controle do computador", "управление компьютером", "керування комп’ютером", "デスクトップ操作", "컴퓨터 제어", "kontrol komputer", "kontrol ng computer", "கணினிக் கட்டுப்பாடு"],
+  },
+  {
+    id: "ext.computer.permissions", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-permissions", labelKey: "cu.settings.permissions",
+    descKeys: ["cu.settings.accessBody", "cu.settings.screenBody", "cu.settings.input"],
+    keywords: ["doctor", "accessibility", "screen recording", "input monitoring", "TCC", "Wayland", "系统权限", "辅助功能", "屏幕录制", "系統權限"],
+  },
+  {
+    id: "ext.computer.approvals", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-approvals", labelKey: "cu.settings.approvals",
+    descKeys: ["cu.settings.revoke", "cu.settings.revokeBody"],
+    keywords: ["always allow", "revoke", "始终允许", "撤销", "撤銷", "一律允許"],
+  },
+  {
+    id: "ext.computer.confirmation", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-confirmation", labelKey: "cu.settings.confirmation",
+    descKeys: ["cu.settings.confirmation.off", "cu.settings.confirmation.standard", "cu.settings.confirmation.strict"],
+    keywords: ["sensitive", "confirmation", "strict", "敏感确认", "嚴格確認"],
+  },
+  {
+    id: "ext.computer.foreground", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-foreground", labelKey: "cu.settings.foreground",
+    descKeys: ["cu.settings.foreground.never", "cu.settings.foreground.ask", "cu.settings.foreground.always"],
+    keywords: ["foreground", "background", "前台策略", "前景輸入"],
+  },
+  {
+    id: "ext.computer.hotkey", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-hotkey", labelKey: "cu.settings.hotkey",
+    descKeys: ["cu.settings.hotkeyBody"], keywords: ["hotkey", "stop", "shortcut", "停止热键", "停止快速鍵"],
+  },
 ];

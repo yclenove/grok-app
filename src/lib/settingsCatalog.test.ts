@@ -177,6 +177,7 @@ describe("settingsCatalog", () => {
       "commands",
       "agents",
       "hooks",
+      "computer",
     ]);
     expect(extNav?.tabs.some((t) => t.id === "market")).toBe(false);
     expect(resolveTab("extensions", "market")).toBe("plugins");

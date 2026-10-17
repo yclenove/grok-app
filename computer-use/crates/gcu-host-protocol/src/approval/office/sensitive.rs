@@ -323,6 +323,7 @@ fn pending_row(
         policy_version,
         lane,
         publishing: None,
+        display: None,
         void: false,
         tx: Some(tx),
     }

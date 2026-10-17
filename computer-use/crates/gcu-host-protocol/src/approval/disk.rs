@@ -2,18 +2,27 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use super::office::settings::Snapshot;
 use crate::messages::Policy;
 
 /// Read a policy snapshot. Corrupt or missing files return None (fail closed).
-pub fn read_policy(path: &Path) -> Option<Policy> {
+pub fn read_policy(path: &Path) -> Option<Snapshot> {
     let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    serde_json::from_slice(&bytes).ok().or_else(|| {
+        serde_json::from_slice::<Policy>(&bytes)
+            .ok()
+            .map(|policy| Snapshot {
+                policy,
+                grants: Vec::new(),
+                computer_use_enabled: false,
+            })
+    })
 }
 
 /// Replace `path` with `policy`. Parent directories are created. Returns false
 /// on any IO or serialization failure. Nonblocking aside from the write itself;
 /// callers are already off the approval wait.
-pub fn write_policy(path: &Path, policy: &Policy) -> bool {
+pub fn write_policy(path: &Path, policy: &Snapshot) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };

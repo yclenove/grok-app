@@ -106,3 +106,17 @@ async function listenDesktop<T>(
   const unlisten = await listen<T>(event, (emitted) => handler(emitted.payload));
   return unlisten;
 }
+
+// Trusted desktop settings. Mirror clients never receive these commands.
+import type { Approval, Confirmation, Doctor, Foreground, PermissionKind, Settings } from "@/lib/computer-use/settings";
+function settingsInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isDesktopHost()) return Promise.reject(new Error("desktop-only"));
+  return invoke<T>(command, args);
+}
+export const cuSettingsGet = () => settingsInvoke<Settings>("cu_settings_get");
+export const cuSettingsEnabled = (enabled: boolean) => settingsInvoke<void>("cu_settings_enabled", { enabled });
+export const cuSettingsPolicy = (confirmation: Confirmation, foreground: Foreground) => settingsInvoke<void>("cu_settings_policy", { confirmation, foreground });
+export const cuApprovalsList = () => settingsInvoke<Approval[]>("cu_approvals_list");
+export const cuApprovalsRevoke = (id: string) => settingsInvoke<void>("cu_approvals_revoke", { id });
+export const cuDoctor = () => settingsInvoke<Doctor>("cu_doctor");
+export const cuOpenSystemSettings = (kind: PermissionKind) => settingsInvoke<void>("cu_open_system_settings", { kind });
