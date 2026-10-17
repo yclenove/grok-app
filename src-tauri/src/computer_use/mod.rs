@@ -92,12 +92,16 @@ impl ComputerUseHost {
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         if !enabled {
-            self.overlay.safety.latch();
-            self.overlay
-                .safety
-                .persist()
-                .await
-                .map_err(Error::Handshake)?;
+            // Turning off a running host is a Stop and must survive restart. The
+            // startup call on a host that never ran must not latch one.
+            if inner.control.is_some() {
+                self.overlay.safety.latch();
+                self.overlay
+                    .safety
+                    .persist()
+                    .await
+                    .map_err(Error::Handshake)?;
+            }
             self.office.deny_pending();
             let ids = inner.book.live_ids();
             gateway::revoke_all_locked(&mut inner).await;
@@ -216,6 +220,7 @@ pub fn install(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let host = app.state::<ComputerUseHost>();
+        let _ = host.set_enabled(false).await;
         let _ = host.phase().await;
         host.poll_forever().await;
     });
