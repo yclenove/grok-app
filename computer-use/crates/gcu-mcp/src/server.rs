@@ -213,6 +213,11 @@ impl Server {
                 let state = this.router.observe(&this.session, p).await?;
                 Ok(this.results.state(state).await)
             }
+            "computer_batch" => {
+                let params: ComputerBatchParams = params::parse(arguments)?;
+                let report = this.router.run_batch(&this.session, &id, params).await;
+                Ok(this.results.batch(report).await)
+            }
             "capabilities" => {
                 let _: CapabilitiesParams = params::parse(arguments)?;
                 let caps = this

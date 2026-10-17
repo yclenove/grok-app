@@ -35,3 +35,5 @@ pub mod snapshot;
 
 /// Single-attempt action routing, snapshot gates, and bounded session ledger.
 pub mod action;
+/// `computer_batch`: preflight every step, then one router attempt each.
+pub mod batch;

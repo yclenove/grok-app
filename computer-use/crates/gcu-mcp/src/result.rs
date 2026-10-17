@@ -3,10 +3,11 @@ use crate::files::{blocking, SessionFiles};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use gcu_core::{
     action::{ActionState, ToolOutcome},
+    batch::BatchReport,
     redact::{EncodeOptions, RedactedImage},
     session::Session,
 };
-use gcu_protocol::{ActionResult, AppState, ErrorCode, ToolError};
+use gcu_protocol::{result::Outcome, ActionResult, AppState, ErrorCode, ToolError};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{json, Value};
 use std::{io, sync::Arc};
@@ -29,6 +30,23 @@ fn prefix(text: &str, budget: usize) -> &str {
         n -= 1;
     }
     &text[..n]
+}
+fn step_summary(report: &BatchReport) -> String {
+    let body = report
+        .steps
+        .iter()
+        .map(|step| format!("{} {} {}", step.i, step.tool, outcome_name(step.outcome)))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("Batch: {body}.")
+}
+fn outcome_name(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Done => "done",
+        Outcome::Refused => "refused",
+        Outcome::Failed => "failed",
+        Outcome::Unknown => "unknown",
+    }
 }
 fn facts(state: &AppState) -> Value {
     json!({"app_id":state.app.id,"window_id":state.window.id,"snapshot_id":state.snapshot_id,
@@ -60,6 +78,23 @@ pub(crate) struct Results {
     pub images: Arc<crate::image_cache::ImageCache>,
 }
 impl Results {
+    pub async fn batch(&self, report: BatchReport) -> CallToolResult {
+        let mut data = json!({"steps": report.steps});
+        if let Some(index) = report.failed_step {
+            data["failed_step"] = json!(index);
+        }
+        if let Some(action) = report.failure.clone().or(report.last.clone()) {
+            let mut action = action;
+            action.notes.push(step_summary(&report));
+            data["action"] = action_facts(&action);
+        }
+        let failed = report.failed_step.is_some() || report.error.is_some();
+        let mut result = self.build(report.state, report.error, data).await;
+        if failed {
+            result.is_error = Some(true);
+        }
+        result
+    }
     pub async fn outcome(&self, out: ToolOutcome) -> CallToolResult {
         let mut data = json!({"action":action_facts(&out.action)});
         if !out.windows.is_empty() {
@@ -249,6 +284,12 @@ impl Results {
             }
             if let Some(action) = data.get("action") {
                 compact["action"] = action.clone();
+            }
+            if let Some(steps) = data.get("steps") {
+                compact["steps"] = steps.clone();
+            }
+            if let Some(index) = data.get("failed_step") {
+                compact["failed_step"] = index.clone();
             }
             data = compact;
             json = serde_json::to_string(&data).map_err(io::Error::other)?;

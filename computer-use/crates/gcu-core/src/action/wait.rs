@@ -26,12 +26,18 @@ use gcu_protocol::{
 use std::time::Duration;
 
 impl ActionRouter {
-    /// Branch `wait_for` before the mutating gate. Other steps use the normal executor.
+    /// Branch observation steps before the mutating gate. Clicks and typing use the
+    /// normal executor. `computer_batch` calls this while it already holds the session
+    /// queue; it must not call [`ActionRouter::execute`] or [`ActionRouter::wait_for`].
     pub(crate) async fn dispatch_queued(&self, session: &Session, call: &ToolCall) -> ToolOutcome {
         match &call.action {
             BatchStep::WaitFor(args) => {
                 let args = args.clone();
                 self.wait_queued(session, call, args).await
+            }
+            BatchStep::Expect(condition) => {
+                let condition = condition.clone();
+                self.expect_queued(session, call, condition).await
             }
             _ => self.execute_queued(session, call).await,
         }
@@ -40,8 +46,9 @@ impl ActionRouter {
     /// Run one `wait_for` with the same queue, authorization, Stop, and cancellation as
     /// [`ActionRouter::execute`].
     ///
-    /// Batch and script reuse this entry. It enqueues once; a second enqueue would deadlock
-    /// the session queue. No input is delivered. A match publishes the new observation.
+    /// A single `wait_for` enqueues once. `computer_batch` must not call this method:
+    /// a second enqueue would deadlock the session queue. No input is delivered. A match
+    /// publishes the new observation.
     /// The deadline publishes [`ErrorCode::Timeout`] and the last observation when one exists.
     ///
     /// Blocking: the session queue has no deadline, the window lock waits at most 5s, then

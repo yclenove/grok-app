@@ -9,7 +9,7 @@
 mod condition;
 mod deadline;
 
-pub(crate) use condition::supported;
+pub(crate) use condition::{met, supported, Stability};
 pub use deadline::{Deadline, DEFAULT_TIMEOUT, MAX_TIMEOUT, POLL_INTERVAL};
 
 use crate::{
