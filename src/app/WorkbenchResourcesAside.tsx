@@ -265,6 +265,7 @@ export function WorkbenchResourcesAside(props: WorkbenchResourcesAsideProps) {
             skillsLoading={skillsLoading}
             skillsLoadError={skillsLoadError}
             onSelectSkill={onSelectSkill}
+            sessionId={sessionId}
           />
           </UiErrorBoundary>
         </Suspense>

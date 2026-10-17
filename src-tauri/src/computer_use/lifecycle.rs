@@ -28,6 +28,7 @@ pub(crate) async fn session_closed(app: &AppHandle, session: &str) {
     };
     gateway::revoke(&host, session).await;
     host.overlay.hide_session(session);
+    host.panel.drop_session(session);
 }
 
 /// A replacement engine or revoked MCP namespace requires ACP MCP reinjection.
@@ -43,9 +44,9 @@ pub(super) fn forward_closed(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(session) = notices.recv().await {
-            app.state::<ComputerUseHost>()
-                .overlay
-                .hide_session(&session);
+            let host = app.state::<ComputerUseHost>();
+            host.overlay.hide_session(&session);
+            host.panel.drop_session(&session);
             let _ = app.emit(
                 "cu://session-closed",
                 serde_json::json!({ "sessionId": session }),

@@ -12,6 +12,7 @@
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import {
+  IconDeviceDesktop,
   IconFileDiff,
   IconFolder,
   IconSkills,
@@ -51,6 +52,8 @@ function kindIcon(kind: SidePickerKind) {
       return <IconTerminal size={16} />;
     case "skills":
       return <IconSkills size={16} />;
+    case "computer":
+      return <IconDeviceDesktop size={16} />;
     case "review":
       return <IconFileDiff size={16} />;
   }

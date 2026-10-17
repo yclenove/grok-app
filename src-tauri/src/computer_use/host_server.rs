@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use gcu_host_protocol::approval::{host_callbacks, Office};
-use gcu_host_protocol::events::{observe, Gallery};
+use gcu_host_protocol::events::observe_panel;
+use gcu_host_protocol::events::Gallery;
+use gcu_host_protocol::panel::Panel;
 use gcu_host_protocol::{
     auth::ProcessInstance,
     messages::{Request, RpcError},
@@ -12,19 +14,21 @@ use gcu_host_protocol::{
 
 /// Callbacks for a supervised engine. The office is the one the UI command uses.
 ///
-/// `gallery` keeps redacted `host.event.emit` thumbnails; `observe` forwards
-/// every other callback, including the overlay Stop state, to the inner set.
+/// `gallery` keeps redacted `host.event.emit` thumbnails. `panel` is the side
+/// timeline. Every other callback, including the overlay Stop state, is forwarded.
 pub fn production_callbacks(
     office: Office,
     gallery: Gallery,
+    panel: Panel,
     overlay: super::overlay::Overlay,
 ) -> Arc<dyn HostCallbacks> {
-    observe(
+    observe_panel(
         Arc::new(Callbacks {
             approvals: host_callbacks(office),
             overlay,
         }),
         gallery,
+        panel,
     )
 }
 struct Callbacks {

@@ -271,21 +271,49 @@ fn purge_session(state: &mut State, session: &str) {
 /// Cancellation: disconnect drops the callback.
 #[must_use]
 pub fn observe(inner: Arc<dyn HostCallbacks>, gallery: Gallery) -> Arc<dyn HostCallbacks> {
-    Arc::new(Observing { inner, gallery })
+    Arc::new(Observing {
+        inner,
+        gallery,
+        panel: None,
+    })
+}
+
+/// [`observe`] plus the side-panel timeline.
+///
+/// The panel clock is wall time. A rejected thumbnail is still recorded as a
+/// step when the event parsed. Blocking: the thumbnail write runs on the
+/// callback task. Timeout: the server's five-second cap. Cancellation:
+/// disconnect drops the callback.
+#[must_use]
+pub fn observe_panel(
+    inner: Arc<dyn HostCallbacks>,
+    gallery: Gallery,
+    panel: crate::panel::Panel,
+) -> Arc<dyn HostCallbacks> {
+    Arc::new(Observing {
+        inner,
+        gallery,
+        panel: Some(panel),
+    })
 }
 
 struct Observing {
     inner: Arc<dyn HostCallbacks>,
     gallery: Gallery,
+    panel: Option<crate::panel::Panel>,
 }
 
 impl HostCallbacks for Observing {
     fn handle(&self, request: Request) -> CallbackFuture<'_> {
         if request.method == "host.event.emit" {
             let gallery = self.gallery.clone();
+            let panel = self.panel.clone();
             return Box::pin(async move {
                 if let Ok(event) = serde_json::from_value::<Event>(request.params) {
                     let _ = gallery.note(&event);
+                    if let Some(panel) = panel {
+                        let _ = panel.push(&event, wall_ms());
+                    }
                 }
                 empty_value()
             });
@@ -337,7 +365,7 @@ fn checked_image(image: &Image) -> Result<&'static str, Fault> {
     }
 }
 
-fn safe_key(value: &str) -> bool {
+pub(crate) fn safe_key(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -357,12 +385,30 @@ fn file_name(id: &str, role: Role, ext: &str) -> String {
 }
 
 fn event_id(event: &Event) -> String {
+    thumbnail_id(event)
+}
+
+/// Stable screenshot id for one event thumbnail.
+///
+/// The wire event has no screenshot id. The key is the tool, the duration, and
+/// a hash of the target label. It does not include the session id, so the same
+/// triple in another session is [`Fault::Foreign`]. Blocking: none.
+/// Timeout: none. Cancellation: none.
+#[must_use]
+pub fn thumbnail_id(event: &Event) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in event.target.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }
     format!("e-{}-{}-{hash:x}", event.tool.as_str(), event.duration_ms)
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn ensure_root(state: &mut State) -> Result<PathBuf, Fault> {

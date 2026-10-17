@@ -8,6 +8,7 @@ mod host_server;
 pub(crate) mod inject;
 pub(crate) mod lifecycle;
 pub(crate) mod overlay;
+mod panel;
 mod policy_store;
 mod supervisor;
 
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use gcu_host_protocol::approval::Office;
 use gcu_host_protocol::lifecycle::Lifecycle;
+use gcu_host_protocol::panel::{Panel, View};
 use gcu_host_protocol::supervisor::{Error, Phase, Signal, Status};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
@@ -39,6 +41,7 @@ pub struct ComputerUseHost {
     office: Office,
     shots: events::Shots,
     lifecycle: Lifecycle,
+    panel: Panel,
     overlay: overlay::Overlay,
 }
 
@@ -56,8 +59,20 @@ impl ComputerUseHost {
             office,
             shots,
             lifecycle,
+            panel: Panel::open(),
             overlay,
         }
+    }
+
+    pub(crate) fn panel(&self) -> Panel {
+        self.panel.clone()
+    }
+
+    /// Timeline for one session. An unsafe id is `rejected`.
+    pub(crate) fn timeline(&self, session_id: &str) -> Result<View, String> {
+        self.panel
+            .view(session_id)
+            .ok_or_else(|| "rejected".to_owned())
     }
 
     /// Shared approval desk. Clone is cheap.
@@ -114,6 +129,7 @@ impl ComputerUseHost {
                 inner.dev_grant,
                 self.office.clone(),
                 self.shots.gallery(),
+                self.panel.clone(),
                 self.overlay.clone(),
                 self.lifecycle.clone(),
             )?;
@@ -137,6 +153,7 @@ impl ComputerUseHost {
     pub async fn user_stop(&self) -> Result<(), Error> {
         self.overlay.safety.latch();
         self.office.deny_pending();
+        self.panel.user_stop();
         self.overlay
             .safety
             .persist()
@@ -150,7 +167,9 @@ impl ComputerUseHost {
             .safety
             .resume_by_user()
             .await
-            .map_err(Error::Handshake)
+            .map_err(Error::Handshake)?;
+        self.panel.user_resume();
+        Ok(())
     }
 
     /// Record a developer engine. Refuses while a child is alive.
@@ -194,7 +213,15 @@ impl ComputerUseHost {
             tokio::time::sleep(Duration::from_millis(250)).await;
             let mut inner = self.inner.lock().await;
             if let Some(control) = inner.control.as_mut() {
+                let before = control.status().phase;
                 let _ = control.poll(now_ms()).await;
+                let after = control.status().phase;
+                if before == Phase::Running && after == Phase::Starting {
+                    self.panel.note_restart();
+                }
+                if after == Phase::Tripped && before != Phase::Tripped {
+                    self.panel.note_tripped();
+                }
             }
         }
     }
@@ -209,7 +236,9 @@ pub fn install(app: &AppHandle) {
     );
     let office = policy_store::open_office(app);
     let overlay = overlay::Overlay::new(app);
-    app.manage(ComputerUseHost::disabled(office.clone(), overlay));
+    let host = ComputerUseHost::disabled(office.clone(), overlay);
+    panel::forward_notices(app.clone(), &host.panel());
+    app.manage(host);
     lifecycle::forward_closed(app);
     approval::forward_notices(app.clone(), &office);
     let app = app.clone();

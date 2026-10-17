@@ -10,6 +10,7 @@ pub mod inject;
 pub mod lifecycle;
 pub mod messages;
 pub mod overlay;
+pub mod panel;
 pub mod server;
 pub mod supervisor;
 #[cfg(all(feature = "testing", unix))]

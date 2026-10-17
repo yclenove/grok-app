@@ -18,6 +18,7 @@ import { createPortal } from "react-dom";
 import { createT, type Locale } from "@/i18n";
 import {
   IconClose,
+  IconDeviceDesktop,
   IconFileDiff,
   IconFloatComposer,
   IconFolder,
@@ -101,6 +102,8 @@ function tabIcon(tab: SideTab): ReactNode {
       return <IconTerminal size={14} />;
     case "skills":
       return <IconSkills size={14} />;
+    case "computer":
+      return <IconDeviceDesktop size={14} />;
     case "review":
       return <IconFileDiff size={14} />;
     case "plan":
