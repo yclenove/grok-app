@@ -5,6 +5,7 @@
 pub mod approval;
 pub mod auth;
 pub mod codec;
+pub mod events;
 pub mod inject;
 pub mod messages;
 pub mod server;

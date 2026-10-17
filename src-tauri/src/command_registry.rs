@@ -525,5 +525,6 @@ pub fn app_invoke_handler(
         computer_use::commands::cu_approval_decide,
         computer_use::commands::cu_confirm_decide,
         computer_use::commands::cu_handoff_decide,
+        computer_use::commands::cu_tool_shot,
     ]
 }

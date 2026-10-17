@@ -1,13 +1,23 @@
-//! Desktop command for one approval decision. The desk enforces the binding.
+//! Desktop commands for an approval decision and one redacted screenshot.
 
+use serde::Deserialize;
 use tauri::State;
 
 use super::approval::{
     claim_from_body, confirm_from_body, fault_code, handoff_from_body, ConfirmBody, DecisionBody,
     HandoffBody,
 };
+use super::events::{tool_shot, ShotDto};
 use super::ComputerUseHost;
 use gcu_host_protocol::approval::{ConfirmEnd, HandoffEnd};
+
+/// Body of `cu_tool_shot`. The id is the screenshot id from tool JSON, not a path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShotQuery {
+    session_id: String,
+    id: String,
+}
 
 /// Consume the card the user is looking at. Errors are `absent`, `identity`,
 /// `replay`, or `failed` — no paths or reasons.
@@ -39,4 +49,15 @@ pub async fn cu_handoff_decide(
 ) -> Result<HandoffEnd, String> {
     let claim = handoff_from_body(body)?;
     host.office().decide_handoff(&claim).map_err(fault_code)
+}
+
+/// Redacted thumbnail and full image for the chat tool card.
+///
+/// Errors are `foreign`, `missing`, or `rejected` — no paths.
+#[tauri::command]
+pub async fn cu_tool_shot(
+    host: State<'_, ComputerUseHost>,
+    body: ShotQuery,
+) -> Result<ShotDto, String> {
+    tool_shot(&host, &body.session_id, &body.id).await
 }

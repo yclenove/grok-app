@@ -45,6 +45,9 @@ pub(super) async fn prepare(
 pub(super) async fn revoke(host: &ComputerUseHost, session_id: &str) {
     // Session close denies a pending card even when this host never issued a token.
     host.office().close_session(session_id);
+    let shots = host.shots.clone();
+    let dropped = session_id.to_owned();
+    let _ = tauri::async_runtime::spawn_blocking(move || shots.drop_session(&dropped)).await;
     let mut inner = host.inner.lock().await;
     if inner.book.current(session_id).is_none() {
         return;

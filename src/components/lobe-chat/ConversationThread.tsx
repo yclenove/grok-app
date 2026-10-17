@@ -908,6 +908,7 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
               tools={standaloneGroup.tools}
               autoCollapse={toolStepsAutoCollapse}
               locale={locale}
+              sessionId={sessionId}
             />
           </div>
         </div>,
@@ -920,6 +921,7 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
             tool={toolSeg}
             autoCollapse={toolStepsAutoCollapse}
             locale={locale}
+            sessionId={sessionId}
           />
         </div>
       </div>,
@@ -1329,6 +1331,7 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
                     }
                     messageContent={m.content}
                     onOpenExternalLink={onOpenExternalLink}
+                    sessionId={sessionId}
                   />
                 );
               }
@@ -1344,6 +1347,7 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
                       tool={unit.tool}
                       autoCollapse={toolStepsAutoCollapse}
                       locale={locale}
+                      sessionId={sessionId}
                     />
                   </div>
                 );
