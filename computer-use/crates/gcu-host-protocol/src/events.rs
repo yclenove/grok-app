@@ -10,7 +10,7 @@ use crate::auth::ProcessInstance;
 use crate::messages::{Empty, Event, Image, Request, RpcError};
 use crate::server::{CallbackFuture, HostCallbacks, Peer};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -61,6 +61,7 @@ struct State {
     root_canon: Option<PathBuf>,
     rows: HashMap<String, Row>,
     order: VecDeque<String>,
+    closed: HashSet<String>,
 }
 
 /// In-memory index plus the private directory of derivative files.
@@ -88,6 +89,7 @@ impl Gallery {
                 root_canon: None,
                 rows: HashMap::new(),
                 order: VecDeque::new(),
+                closed: HashSet::new(),
             })),
         }
     }
@@ -109,6 +111,9 @@ impl Gallery {
             return Err(Fault::Rejected);
         }
         let mut state = lock(&self.state);
+        if state.closed.contains(session) {
+            return Err(Fault::Missing);
+        }
         if let Some(row) = state.rows.get(id) {
             if row.session != session {
                 return Err(Fault::Foreign);
@@ -178,6 +183,9 @@ impl Gallery {
             return Err(Fault::Rejected);
         }
         let state = lock(&self.state);
+        if state.closed.contains(session) {
+            return Err(Fault::Missing);
+        }
         let Some(row) = state.rows.get(id) else {
             return Err(Fault::Missing);
         };
@@ -199,15 +207,33 @@ impl Gallery {
             return;
         }
         let mut state = lock(&self.state);
-        if let Some(root) = state.root_canon.clone() {
-            let dir = root.join(session);
-            if removable_session_dir(&root, &dir) {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
+        state.closed.insert(session.to_owned());
+        purge_session(&mut state, session);
+    }
+
+    /// Immediately deny late writes/reads without filesystem IO. No waits.
+    pub fn block_session(&self, session: &str) {
+        lock(&self.state).closed.insert(session.to_owned());
+    }
+
+    /// Delete a closed generation on a blocking worker. If already reopened,
+    /// the obsolete cleanup is inert. No timeout or cancellation.
+    pub fn purge_closed(&self, session: &str) {
+        let mut state = lock(&self.state);
+        if safe_key(session) && state.closed.contains(session) {
+            purge_session(&mut state, session);
         }
-        let State { rows, order, .. } = &mut *state;
-        rows.retain(|_, row| row.session != session);
-        order.retain(|id| rows.contains_key(id));
+    }
+
+    /// Clear old derivatives before admitting a fresh namespace. Blocking file
+    /// deletion; call off the async/UI thread. No timeout or cancellation.
+    pub fn open_session(&self, session: &str) {
+        if !safe_key(session) {
+            return;
+        }
+        let mut state = lock(&self.state);
+        purge_session(&mut state, session);
+        state.closed.remove(session);
     }
 
     /// Store the event thumbnail, if the engine sent one.
@@ -223,6 +249,18 @@ impl Gallery {
         self.admit(&event.session_id, &id, image, Role::Thumb)
             .map(|_| ())
     }
+}
+
+fn purge_session(state: &mut State, session: &str) {
+    if let Some(root) = state.root_canon.clone() {
+        let dir = root.join(session);
+        if removable_session_dir(&root, &dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    let State { rows, order, .. } = state;
+    rows.retain(|_, row| row.session != session);
+    order.retain(|id| rows.contains_key(id));
 }
 
 /// Forward every method, and keep `host.event.emit` thumbnails in `gallery`.

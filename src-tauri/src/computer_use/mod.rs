@@ -6,6 +6,7 @@ mod events;
 mod gateway;
 mod host_server;
 pub(crate) mod inject;
+pub(crate) mod lifecycle;
 pub(crate) mod overlay;
 mod policy_store;
 mod supervisor;
@@ -14,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gcu_host_protocol::approval::Office;
-use gcu_host_protocol::inject::TokenBook;
+use gcu_host_protocol::lifecycle::Lifecycle;
 use gcu_host_protocol::supervisor::{Error, Phase, Signal, Status};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
@@ -30,7 +31,6 @@ struct Inner {
     stop_latched: bool,
     control:
         Option<gcu_host_protocol::supervisor::Control<gcu_host_protocol::supervisor::OsLaunch>>,
-    book: TokenBook,
 }
 
 /// In-memory engine owner. Default is off. No settings row is registered here.
@@ -38,21 +38,24 @@ pub struct ComputerUseHost {
     inner: Mutex<Inner>,
     office: Office,
     shots: events::Shots,
+    lifecycle: Lifecycle,
     overlay: overlay::Overlay,
 }
 
 impl ComputerUseHost {
     fn disabled(office: Office, overlay: overlay::Overlay) -> Self {
+        let shots = events::Shots::open();
+        let lifecycle = Lifecycle::new(office.clone(), shots.gallery());
         Self {
             inner: Mutex::new(Inner {
                 external: None,
                 dev_grant: false,
                 stop_latched: false,
                 control: None,
-                book: TokenBook::new(),
             }),
             office,
-            shots: events::Shots::open(),
+            shots,
+            lifecycle,
             overlay,
         }
     }
@@ -103,17 +106,7 @@ impl ComputerUseHost {
                     .map_err(Error::Handshake)?;
             }
             self.office.deny_pending();
-            let ids = inner.book.live_ids();
-            gateway::revoke_all_locked(&mut inner).await;
-            drop(inner);
-            let shots = self.shots.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                for id in ids {
-                    shots.drop_session(&id);
-                }
-            })
-            .await;
-            inner = self.inner.lock().await;
+            gateway::revoke_all_locked(&mut inner, &self.lifecycle).await;
         }
         if enabled && inner.control.is_none() {
             let mut control = supervisor::open_control(
@@ -122,6 +115,7 @@ impl ComputerUseHost {
                 self.office.clone(),
                 self.shots.gallery(),
                 self.overlay.clone(),
+                self.lifecycle.clone(),
             )?;
             if inner.stop_latched {
                 control.handle(Signal::UserStop, now_ms()).await?;
@@ -216,6 +210,7 @@ pub fn install(app: &AppHandle) {
     let office = policy_store::open_office(app);
     let overlay = overlay::Overlay::new(app);
     app.manage(ComputerUseHost::disabled(office.clone(), overlay));
+    lifecycle::forward_closed(app);
     approval::forward_notices(app.clone(), &office);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {

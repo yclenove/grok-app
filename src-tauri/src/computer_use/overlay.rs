@@ -140,6 +140,9 @@ impl Overlay {
             _ => Err(gcu_host_protocol::Error::Invalid),
         }
     }
+    pub(crate) fn hide_session(&self, session: &str) {
+        lock(&self.desk).hide(session);
+    }
     pub fn disconnected(&self) {
         lock(&self.desk).disconnect();
     }

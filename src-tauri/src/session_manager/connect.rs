@@ -500,6 +500,13 @@ impl SessionManager {
             );
         }
 
+        // A revoked/restarted CU endpoint cannot remain in a warm ACP catalog.
+        if crate::computer_use::lifecycle::needs_reconnect(&app, &meta.id)
+            && !self.session_is_busy(&meta.id)
+        {
+            self.drop_session_agent(&app, &meta.id).await;
+        }
+
         // Already live on this App session with a healthy agent → no-op.
         // Includes mid-turn (streaming / open tools): never respawn or cancel.
         // Never no-op on Disconnected/Idle — leftover busy flags after fail_with

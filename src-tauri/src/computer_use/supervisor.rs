@@ -67,6 +67,7 @@ pub fn open_control(
     office: Office,
     gallery: Gallery,
     overlay: super::overlay::Overlay,
+    lifecycle: gcu_host_protocol::lifecycle::Lifecycle,
 ) -> Result<Control<OsLaunch>, Error> {
     let mode = host_build();
     let identity = expected_identity();
@@ -88,7 +89,10 @@ pub fn open_control(
     let facts = probe(&chosen, &identity, dev_grant && external_path)?;
     let path = decide(mode, &identity, &choice, &facts)?;
     Ok(Control::new(
-        OsLaunch::callbacks(host_server::production_callbacks(office, gallery, overlay)),
+        OsLaunch::managed(
+            host_server::production_callbacks(office, gallery, overlay),
+            lifecycle,
+        ),
         LaunchRequest::new(path, false),
         Admission {
             mode,

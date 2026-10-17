@@ -26,15 +26,13 @@ pub(crate) async fn attach(
         Some(host) => gateway::prepare(&host, session_id, facts).await,
         None => None,
     };
+    if entry.is_none() {
+        super::lifecycle::session_closed(app, session_id).await;
+        if let Some(host) = app.try_state::<super::ComputerUseHost>() {
+            host.lifecycle.catalog_cleared(session_id);
+        }
+    }
     client.set_computer_use_entry(entry);
-}
-
-/// Drop the endpoint when the App session's agent is dropped.
-pub(crate) async fn revoke_session(app: &AppHandle, session_id: &str) {
-    let Some(host) = app.try_state::<super::ComputerUseHost>() else {
-        return;
-    };
-    gateway::revoke(&host, session_id).await;
 }
 
 #[cfg(test)]

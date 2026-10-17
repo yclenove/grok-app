@@ -143,18 +143,21 @@ pub async fn session_rewind_execute(
 /// chat carries that id with a one-shot fork flag so the next connect uses
 /// CLI `--fork-session` semantics (ACP `session/fork` → new agent id).
 #[tauri::command]
-pub fn session_fork(
+pub async fn session_fork(
+    app: tauri::AppHandle,
     source_id: String,
     through_user_prompt_index: Option<u32>,
     title: Option<String>,
     fork_agent_session: Option<bool>,
 ) -> Result<store::SessionMeta, String> {
-    store::fork_session(
+    let fork = store::fork_session(
         &source_id,
         through_user_prompt_index,
         title,
         fork_agent_session.unwrap_or(false),
-    )
+    )?;
+    crate::computer_use::lifecycle::session_closed(&app, &source_id).await;
+    Ok(fork)
 }
 
 /// Set the one-shot CLI `--fork-session` flag (new agent id on next connect).
@@ -168,6 +171,9 @@ pub async fn session_set_fork_agent_session(
     fork_agent_session: bool,
 ) -> Result<store::SessionMeta, String> {
     let meta = store::set_session_fork_agent_session(&id, fork_agent_session)?;
+    if fork_agent_session {
+        crate::computer_use::lifecycle::session_closed(&app, &id).await;
+    }
     let snap = mgr.snapshot();
     if fork_agent_session && snap.session_id.as_deref() == Some(meta.id.as_str()) {
         mgr.soft_respawn_with_reason(&app, "session_fork_agent")

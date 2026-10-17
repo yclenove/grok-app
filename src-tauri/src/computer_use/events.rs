@@ -2,8 +2,7 @@
 
 use std::path::PathBuf;
 
-use gcu_host_protocol::events::{Fault, Gallery, OwnedPaths, Role};
-use gcu_host_protocol::messages::Image;
+use gcu_host_protocol::events::{Fault, Gallery, OwnedPaths};
 use serde::Serialize;
 
 use super::ComputerUseHost;
@@ -28,21 +27,8 @@ impl Shots {
         self.gallery.clone()
     }
 
-    pub(crate) fn drop_session(&self, session: &str) {
-        self.gallery.drop_session(session);
-    }
-
     pub(crate) fn paths(&self, session: &str, id: &str) -> Result<OwnedPaths, Fault> {
         self.gallery.paths(session, id)
-    }
-
-    pub(crate) fn admit_full(
-        &self,
-        session: &str,
-        id: &str,
-        image: &Image,
-    ) -> Result<PathBuf, Fault> {
-        self.gallery.admit(session, id, image, Role::Full)
     }
 }
 
@@ -73,6 +59,10 @@ pub(crate) async fn tool_shot(
     session_id: &str,
     id: &str,
 ) -> Result<ShotDto, String> {
+    let credential = host
+        .lifecycle
+        .current(session_id)
+        .ok_or_else(|| fault_code(Fault::Missing))?;
     match host.shots.paths(session_id, id) {
         Err(Fault::Foreign) => return Err(fault_code(Fault::Foreign)),
         Err(Fault::Rejected) => return Err(fault_code(Fault::Rejected)),
@@ -88,11 +78,11 @@ pub(crate) async fn tool_shot(
     };
     match fetched {
         Ok(image) => {
-            let shots = host.shots.clone();
+            let lifecycle = host.lifecycle.clone();
             let session = session_id.to_owned();
             let shot_id = id.to_owned();
             let admitted = tauri::async_runtime::spawn_blocking(move || {
-                shots.admit_full(&session, &shot_id, &image)
+                lifecycle.admit_full(&session, &credential, &shot_id, &image)
             })
             .await;
             match admitted {

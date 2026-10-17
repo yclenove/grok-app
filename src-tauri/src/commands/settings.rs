@@ -368,6 +368,10 @@ pub async fn composer_prefs_set(
     let previous_effort = effort.as_ref().map(|_| {
         store::resolve_composer_prefs(project_id.as_deref(), session_id.as_deref()).effort
     });
+    let model_changed = model_id.as_ref().is_some_and(|model| {
+        store::resolve_composer_prefs(project_id.as_deref(), session_id.as_deref()).model_id
+            != model.trim()
+    });
     let (previous_provider, ssh) = session_provider_and_ssh(session_id.as_deref());
     let pick = crate::providers::composer_provider_pick(
         ssh,
@@ -385,6 +389,11 @@ pub async fn composer_prefs_set(
         permission_policy.clone(),
         pick.provider_to_persist.clone(),
     )?;
+    if model_changed {
+        if let Some(sid) = session_id.as_deref() {
+            crate::computer_use::lifecycle::session_closed(&app, sid).await;
+        }
+    }
     if let (Some(sid), Some(pid)) = (session_id.as_deref(), pick.provider_to_persist.as_deref()) {
         mgr.remember_session_provider(sid, pid);
     }
@@ -476,6 +485,7 @@ pub async fn session_set_policy(
 
 #[tauri::command]
 pub async fn session_set_model(
+    app: tauri::AppHandle,
     mgr: State<'_, Arc<SessionManager>>,
     model_id: String,
     project_id: Option<String>,
@@ -483,6 +493,12 @@ pub async fn session_set_model(
 ) -> Result<store::ComposerPrefs, String> {
     let (live_proj, live_sess) = mgr.current_context_ids();
     let session_id = session_id.or(live_sess);
+    let model_changed = store::resolve_composer_prefs(
+        project_id.as_deref().or(live_proj.as_deref()),
+        session_id.as_deref(),
+    )
+    .model_id
+        != model_id.trim();
     let prefs = store::save_composer_prefs(
         project_id.or(live_proj).as_deref(),
         session_id.as_deref(),
@@ -492,6 +508,11 @@ pub async fn session_set_model(
         None,
         None,
     )?;
+    if model_changed {
+        if let Some(sid) = session_id.as_deref() {
+            crate::computer_use::lifecycle::session_closed(&app, sid).await;
+        }
+    }
     if let Err(e) = mgr.set_model(model_id, session_id.as_deref()).await {
         tracing::warn!("session_set_model soft-fail: {e}");
     }
