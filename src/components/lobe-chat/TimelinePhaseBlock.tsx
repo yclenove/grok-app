@@ -28,7 +28,9 @@ import {
 } from "react";
 import type { Locale, MessageKey } from "@/i18n";
 import { createT } from "@/i18n";
+import { ComputerUseToolCard } from "@/components/computer-use/ComputerUseToolCard";
 import { COLLAPSE_ALL_ACTIVITY_EVENT } from "@/lib/collapseAllActivity";
+import { isComputerUseTool } from "@/lib/computer-use/events";
 import type { TimelinePhase } from "@/lib/timelinePhases";
 import {
   loadToolStepsAutoCollapsePref,
@@ -270,6 +272,7 @@ const GrokActivityStepRow = memo(function GrokActivityStepRow({
   findActiveOccurrence,
   messageContent,
   onOpenExternalLink,
+  sessionId = null,
 }: {
   step: GrokActivityStep;
   isLast: boolean;
@@ -303,6 +306,7 @@ const GrokActivityStepRow = memo(function GrokActivityStepRow({
   findActiveOccurrence?: number | null;
   messageContent?: string;
   onOpenExternalLink?: (url: string) => void;
+  sessionId?: string | null;
 }) {
   const failed =
     step.type !== "thought" &&
@@ -385,6 +389,17 @@ const GrokActivityStepRow = memo(function GrokActivityStepRow({
     expanded: showBody,
     followKey: thoughtFollowKey,
   });
+
+  if (step.type === "tool" && isComputerUseTool(step.tool)) {
+    return (
+      <ComputerUseToolCard
+        tool={step.tool}
+        sessionId={sessionId}
+        locale={locale}
+        isLast={isLast}
+      />
+    );
+  }
 
   if (step.type === "speech") {
     const speechFindBase = findMatchesBeforeVisible({
@@ -488,6 +503,7 @@ const GrokActivityStepRow = memo(function GrokActivityStepRow({
                 findActiveOccurrence={findActiveOccurrence}
                 messageContent={messageContent}
                 onOpenExternalLink={onOpenExternalLink}
+                sessionId={sessionId}
               />
             </div>
           ) : step.type === "thought" ? (
@@ -530,6 +546,7 @@ export function GrokActivitySteps({
   findActiveOccurrence,
   messageContent,
   onOpenExternalLink,
+  sessionId = null,
 }: {
   steps: GrokActivityStep[];
   tr: ReturnType<typeof createT>;
@@ -540,6 +557,7 @@ export function GrokActivitySteps({
   findActiveOccurrence?: number | null;
   messageContent?: string;
   onOpenExternalLink?: (url: string) => void;
+  sessionId?: string | null;
 }) {
   const total = steps.length;
   const [expandState, setExpandState] = useState<ActivityStepExpandState>(() =>
@@ -567,7 +585,11 @@ export function GrokActivitySteps({
     if (s.type !== "thought") return n;
     return n + (s.streaming && s.text.trim() ? 1 : 0);
   }, 0);
+  const hasComputerUse = steps.some(
+    (step) => step.type === "tool" && isComputerUseTool(step.tool),
+  );
   const virtualize =
+    !hasComputerUse &&
     !steps.some((s) => s.type === "speech") &&
     shouldVirtualizeActivityWithExpand(
       total,
@@ -618,6 +640,7 @@ export function GrokActivitySteps({
         findActiveOccurrence={findActiveOccurrence}
         messageContent={messageContent}
         onOpenExternalLink={onOpenExternalLink}
+        sessionId={sessionId}
       />
     ),
     [
@@ -632,6 +655,7 @@ export function GrokActivitySteps({
       findActiveOccurrence,
       messageContent,
       onOpenExternalLink,
+      sessionId,
     ],
   );
 
@@ -667,6 +691,7 @@ export function GrokActivitySteps({
             findActiveOccurrence={findActiveOccurrence}
             messageContent={messageContent}
             onOpenExternalLink={onOpenExternalLink}
+            sessionId={sessionId}
             expanded={expandState.expandedKeys.has(step.key)}
             onUserToggle={onUserToggle}
             onPolicySync={onPolicySync}
@@ -712,6 +737,7 @@ export const TimelinePhaseBlock = memo(function TimelinePhaseBlock({
   findActiveOccurrence,
   messageContent,
   onOpenExternalLink,
+  sessionId = null,
 }: {
   phase: TimelinePhase;
   locale: Locale;
@@ -723,6 +749,7 @@ export const TimelinePhaseBlock = memo(function TimelinePhaseBlock({
   findActiveOccurrence?: number | null;
   messageContent?: string;
   onOpenExternalLink?: (url: string) => void;
+  sessionId?: string | null;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [autoCollapse, setAutoCollapse] = useState(
@@ -918,6 +945,7 @@ export const TimelinePhaseBlock = memo(function TimelinePhaseBlock({
           findActiveOccurrence={findActiveOccurrence}
           messageContent={messageContent}
           onOpenExternalLink={onOpenExternalLink}
+          sessionId={sessionId}
         />
       ) : errorExcerpt.rows.length > 0 ? (
         <div
@@ -933,6 +961,7 @@ export const TimelinePhaseBlock = memo(function TimelinePhaseBlock({
             findActiveOccurrence={findActiveOccurrence}
             messageContent={messageContent}
             onOpenExternalLink={onOpenExternalLink}
+            sessionId={sessionId}
           />
           {errorExcerpt.overflow > 0 ? (
             <button

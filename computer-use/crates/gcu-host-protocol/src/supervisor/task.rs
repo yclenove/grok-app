@@ -7,7 +7,9 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::messages::{Empty, SessionId, SessionKind, SessionOpen, SessionOpened};
+use crate::messages::{
+    Empty, Image, ScreenshotGet, SessionId, SessionKind, SessionOpen, SessionOpened,
+};
 use crate::server::{HostCallbacks, RPC_TIMEOUT};
 
 use super::{
@@ -208,6 +210,30 @@ impl<L: Launch> Control<L> {
             .await
             .map_err(Error::Handshake)?;
         Ok(())
+    }
+
+    /// Read one redacted image the engine already delivered for this session.
+    ///
+    /// The engine rejects an id owned by another session. Five-second RPC
+    /// budget. Missing peer is [`Error::Disconnected`]. Blocking: the RPC
+    /// wait only. Cancellation: dropping the returned future does not cancel
+    /// the engine read.
+    pub async fn screenshot(&self, session_id: &str, id: &str) -> Result<Image, Error> {
+        let peer = self
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.peer())
+            .ok_or(Error::Disconnected)?;
+        peer.call(
+            "engine.screenshot.get",
+            &ScreenshotGet {
+                session_id: session_id.to_owned(),
+                id: id.to_owned(),
+            },
+            RPC_TIMEOUT,
+        )
+        .await
+        .map_err(Error::Handshake)
     }
 
     async fn start(&mut self, now_ms: u64) -> Result<(), Error> {

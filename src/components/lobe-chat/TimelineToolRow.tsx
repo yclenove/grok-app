@@ -35,6 +35,8 @@ import {
 } from "@/components/icons";
 import { ToolBucketIcon } from "./TimelinePhaseBlock";
 import { ToolExpandBody } from "./ToolExpandBody";
+import { ComputerUseToolCard } from "@/components/computer-use/ComputerUseToolCard";
+import { isComputerUseTool } from "@/lib/computer-use/events";
 
 export function toolSegmentIsRunning(seg: MessageToolSegment): boolean {
   if (seg.streaming) return true;
@@ -71,11 +73,13 @@ export const TimelineToolRow = memo(function TimelineToolRow({
   autoCollapse: autoCollapseProp,
   defaultExpanded,
   locale,
+  sessionId = null,
 }: {
   tool: MessageToolSegment;
   autoCollapse?: boolean;
   defaultExpanded?: boolean;
   locale?: Locale;
+  sessionId?: string | null;
 }) {
   const tr = useMemo(() => createT(locale ?? "en"), [locale]);
   const failed = toolSegmentFailed(tool);
@@ -149,6 +153,17 @@ export const TimelineToolRow = memo(function TimelineToolRow({
     [showBody, tool, failed],
   );
 
+  if (isComputerUseTool(tool)) {
+    return (
+      <ComputerUseToolCard
+        tool={tool}
+        sessionId={sessionId}
+        locale={locale}
+        isLast
+      />
+    );
+  }
+
   return (
     <div
       className={
@@ -202,10 +217,12 @@ export function TimelineToolGroup({
   tools,
   locale,
   autoCollapse: autoCollapseProp,
+  sessionId = null,
 }: {
   tools: MessageToolSegment[];
   locale: Locale;
   autoCollapse?: boolean;
+  sessionId?: string | null;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [autoCollapse, setAutoCollapse] = useState(
@@ -342,6 +359,7 @@ export function TimelineToolGroup({
               tool={t}
               autoCollapse={autoCollapse}
               locale={locale}
+              sessionId={sessionId}
             />
           ))}
         </div>

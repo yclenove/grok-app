@@ -2,6 +2,7 @@
 
 pub(crate) mod approval;
 pub(crate) mod commands;
+mod events;
 mod gateway;
 mod host_server;
 pub(crate) mod inject;
@@ -35,6 +36,7 @@ struct Inner {
 pub struct ComputerUseHost {
     inner: Mutex<Inner>,
     office: Office,
+    shots: events::Shots,
 }
 
 impl ComputerUseHost {
@@ -48,6 +50,7 @@ impl ComputerUseHost {
                 book: TokenBook::new(),
             }),
             office,
+            shots: events::Shots::open(),
         }
     }
 
@@ -81,13 +84,24 @@ impl ComputerUseHost {
         let mut inner = self.inner.lock().await;
         if !enabled {
             self.office.deny_pending();
+            let ids = inner.book.live_ids();
             gateway::revoke_all_locked(&mut inner).await;
+            drop(inner);
+            let shots = self.shots.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                for id in ids {
+                    shots.drop_session(&id);
+                }
+            })
+            .await;
+            inner = self.inner.lock().await;
         }
         if enabled && inner.control.is_none() {
             let mut control = supervisor::open_control(
                 inner.external.clone(),
                 inner.dev_grant,
                 self.office.clone(),
+                self.shots.gallery(),
             )?;
             if inner.stop_latched {
                 control.handle(Signal::UserStop, now_ms()).await?;

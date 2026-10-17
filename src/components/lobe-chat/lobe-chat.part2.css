@@ -720,3 +720,80 @@
   border-top: 1px solid color-mix(in srgb, var(--chat-border, #888) 28%, transparent);
 }
 /* Error state: no loud chrome — only red step dots / title count */
+
+/* Computer Use tool card — same step rail, text badge, loopback thumbnail. */
+.grok-act__step.cu-tool {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+  min-height: min-content;
+  align-items: flex-start;
+}
+.cu-tool__main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  padding: 6px 0 8px;
+}
+.cu-tool__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cu-tool__target,
+.cu-tool__note {
+  margin: 0;
+  color: var(--chat-text-2, #9ca3af);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cu-tool__duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--chat-text-2, #9ca3af);
+  font-size: 12px;
+}
+.cu-tool.is-error .cu-tool__badge {
+  color: var(--chat-danger, #c44);
+  border-color: color-mix(in srgb, var(--chat-danger, #c44) 45%, transparent);
+}
+.cu-tool.is-warning .cu-tool__badge {
+  color: var(--chat-warning, #c90);
+  border-color: color-mix(in srgb, var(--chat-warning, #c90) 45%, transparent);
+}
+.cu-tool__expand {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.cu-tool__thumb {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 160px;
+  padding: 0;
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.cu-tool__thumb img {
+  display: block;
+  max-width: 160px;
+  max-height: 96px;
+  border-radius: 5px;
+}
+.cu-tool__raw {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--chat-text-2, #9ca3af);
+}
