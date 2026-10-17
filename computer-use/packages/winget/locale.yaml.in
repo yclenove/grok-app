@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: RongleCat.GrokComputerUse
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: RongleCat
+PackageName: Grok Computer Use
+License: MIT
+LicenseUrl: https://github.com/@REPOSITORY@/blob/cu-v@VERSION@/LICENSE
+ShortDescription: Native computer use MCP server for desktop assistants.
+PackageUrl: https://github.com/@REPOSITORY@
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

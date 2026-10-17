@@ -1,0 +1,26 @@
+# Merged into the staged gcu-cli Cargo.toml by prepare.py, never the source tree.
+[package.metadata.deb]
+name = "grok-computer-use"
+maintainer = "Grok Computer Use maintainers"
+copyright = "Grok Computer Use contributors"
+license-file = ["@LICENSE@", "0"]
+extended-description = "Native computer use MCP server. Requires an interactive desktop and explicit user authorization. No runtime is bundled."
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+  ["@BINARY@", "usr/bin/gcu", "755"],
+  ["@README@", "usr/share/doc/grok-computer-use/README.md", "644"],
+  ["@LICENSE@", "usr/share/doc/grok-computer-use/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "grok-computer-use"
+license = "MIT"
+summary = "Native computer use MCP server"
+assets = [
+  { source = "@BINARY@", dest = "/usr/bin/gcu", mode = "755" },
+  { source = "@README@", dest = "/usr/share/doc/grok-computer-use/README.md", mode = "644", doc = true },
+  { source = "@LICENSE@", dest = "/usr/share/licenses/grok-computer-use/LICENSE", mode = "644", doc = true },
+]
+auto-req = "auto"
