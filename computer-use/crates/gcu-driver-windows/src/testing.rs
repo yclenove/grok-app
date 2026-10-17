@@ -175,7 +175,12 @@ impl WinApi for FakeWinApi {
             block.wait();
         }
         let state = self.state()?;
-        std::thread::park_timeout(state.enum_delay);
+        // `park_timeout` may return early on a spurious wakeup, which would let a
+        // "stalled" enumeration finish inside the budget the caller is testing.
+        let until = std::time::Instant::now() + state.enum_delay;
+        while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+            std::thread::park_timeout(left);
+        }
         Ok(state.windows)
     }
     fn process_path(&self, pid: u32) -> Result<String> {
