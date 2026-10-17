@@ -255,7 +255,6 @@ impl gcu_host_protocol::server::HostCallbacks for Inner {
 
 #[test]
 fn observe_forwards_stop_state_and_notifications_to_the_inner_callbacks() {
-    use gcu_host_protocol::server::HostCallbacks;
     let temp = Temp::new();
     let wrapped = gcu_host_protocol::events::observe(std::sync::Arc::new(Inner), temp.gallery());
     // A Host latch that the wrapper hid would let a new engine start unstopped.
