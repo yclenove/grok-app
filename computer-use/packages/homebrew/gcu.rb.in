@@ -1,0 +1,32 @@
+class Gcu < Formula
+  desc "Grok Computer Use native MCP server"
+  homepage "https://github.com/@REPOSITORY@"
+  version "@VERSION@"
+  license "MIT"
+@PLATFORMS@
+  def install
+    if OS.mac?
+      # Keep the CLI and helper executable byte-identical for audit-token authentication.
+      libexec.install "Grok Computer Use.app"
+      bin.install_symlink libexec/"Grok Computer Use.app/Contents/MacOS/gcu" => "gcu"
+    else
+      bin.install "gcu"
+    end
+    prefix.install "release.json"
+  end
+
+  def caveats
+    if OS.mac?
+      <<~EOS
+        Register the bundled helper before first use:
+          open -Ra "#{libexec}/Grok Computer Use.app"
+        Without Developer ID signing this build is ad-hoc signed and not notarized.
+        Recheck system permissions after each update. Authorize the helper app.
+      EOS
+    end
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/gcu version")
+  end
+end
