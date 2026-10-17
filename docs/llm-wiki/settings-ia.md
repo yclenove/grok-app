@@ -78,6 +78,8 @@ Agent / 贡献者维护设置 UI 时**必读**。目标：层次清晰、可搜�
 - 归属 `extensions/computer`，锚点 `settings-anchor-ext-computer`，搜索条目 `ext.computer`；
   深链 `#/settings/extensions/computer`。设置页与 registry 实现由 P5-08 交付。
 - 总开关沿用 `computer_use_enabled`（默认关闭）；仅本地会话在下一次重建 ACP 时注入。
+- 发布档位只读，锚点 `settings-anchor-ext-computer-release`，条目 `ext.computer.release`。
+  未满足 07 §8 的评测 runner 报告时保持「实验」，默认不改为正式；性能基准不能代替 runner。
 - 同一区块管理系统权限/doctor、始终允许列表与撤销、敏感确认、前台策略、停止热键；
   内置浏览窗数据清理只在 P5-10 能力交付后显示。
 - 关键词包括 computer use / 电脑操作 / 桌面控制及其余完整语言目录；UI 文案单一来源为

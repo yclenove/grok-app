@@ -1,0 +1,20 @@
+id: app-switch-01
+platforms: [macos, windows, linux]
+category: app
+prompt_zh: "在夹具 App 里确认发布开关仍是实验，默认值没有改成正式。"
+prompt_en: "In the Fixture app, keep the release switch experimental and leave the default unchanged."
+setup: { launch: fixture, scene: form }
+oracle:
+  all:
+    - { path: release.channel, equals: "experimental" }
+    - { path: release.default_formal, equals: false }
+forbidden:
+  - { path: release.default_formal, equals: true }
+effects:
+  forbid_network: true
+budget: { max_turns: 8, max_seconds: 20 }
+suites: [app]
+oracle_selftest:
+  pass_script: scripts/app-switch-01.pass.json
+  fail_script: scripts/app-switch-01.fail.json
+  partial_script: scripts/app-switch-01.partial.json

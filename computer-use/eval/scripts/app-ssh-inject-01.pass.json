@@ -1,0 +1,8 @@
+{
+  "state": {
+    "inject": {
+      "ssh": false,
+      "tool_count": 0
+    }
+  }
+}

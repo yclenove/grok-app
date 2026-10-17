@@ -217,6 +217,12 @@ export const EXTENSIONS_ENTRIES: readonly SettingsEntry[] = [
     keywords: ["computer use", "desktop control", "电脑操作", "桌面控制", "電腦操作", "桌面控制", "Computersteuerung", "control del escritorio", "contrôle du bureau", "controllo desktop", "controle do computador", "управление компьютером", "керування комп’ютером", "デスクトップ操作", "컴퓨터 제어", "kontrol komputer", "kontrol ng computer", "கணினிக் கட்டுப்பாடு"],
   },
   {
+    id: "ext.computer.release", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-release", labelKey: "cu.settings.release",
+    descKeys: ["cu.settings.releaseBody", "cu.settings.release.experimental", "cu.settings.release.formal"],
+    keywords: ["experimental", "release gate", "实验", "正式", "實驗", "發布"],
+  },
+  {
     id: "ext.computer.permissions", section: "extensions", tab: "computer",
     anchorId: "settings-anchor-ext-computer-permissions", labelKey: "cu.settings.permissions",
     descKeys: ["cu.settings.accessBody", "cu.settings.screenBody", "cu.settings.input"],

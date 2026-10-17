@@ -13,10 +13,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod access;
+#[path = "../../../bench/mod.rs"]
+pub mod budget;
 mod exec;
 mod metrics;
 mod oracle;
 mod prep;
+mod release;
 mod report;
 mod runner;
 mod tasks;
@@ -25,6 +28,12 @@ mod yaml;
 pub use metrics::{compare_trials, percentile, summarize, CategoryRate, PairRow, Summary, Trial};
 pub use oracle::{
     judge, prove_oracle, EffectCheck, Judgment, OracleSpec, PathCheck, Verdict, World,
+};
+pub use release::{
+    absent_report, judge_release, parse_release_evidence, write_release_report, EvidenceSource,
+    LayerStatus, PlatformRates, ReleaseChannel, ReleaseDecision, ReleaseEvidence, ReleaseTier,
+    COMPATIBILITY_FLOOR, NATIVE_PREVIEW_BP, OVERALL_MAC_BP, OVERALL_OTHER_BP, SECURITY_ITEMS,
+    SECURITY_PREVIEW,
 };
 pub use report::{escape_html, render_html, trials_from_summary, write_reports, ReportPaths};
 pub use runner::{

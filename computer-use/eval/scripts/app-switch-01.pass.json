@@ -1,0 +1,8 @@
+{
+  "state": {
+    "release": {
+      "channel": "experimental",
+      "default_formal": false
+    }
+  }
+}

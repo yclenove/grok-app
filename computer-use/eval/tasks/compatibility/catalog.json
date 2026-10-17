@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "platforms": [
+    "macos",
+    "windows",
+    "linux"
+  ],
+  "matrices": [
+    "eval/tasks/compatibility/macos.json",
+    "eval/tasks/compatibility/windows.json",
+    "eval/tasks/compatibility/linux.json"
+  ],
+  "classes": [
+    {
+      "id": "browser",
+      "task_id": "compat-browser-01",
+      "task_path": "eval/tasks/compatibility/browser/compat-browser-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/webarea.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Open the fixture document page and keep tab 1.",
+      "external_oracle": "Fixture state: tab=1 and text=fixture.local/docs; no network attempts."
+    },
+    {
+      "id": "editor",
+      "task_id": "compat-editor-01",
+      "task_path": "eval/tasks/compatibility/text/compat-editor-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Write and save the fixed Unicode greeting in the fixture.",
+      "external_oracle": "Fixture state: note.body=你好 café and note.saved=true."
+    },
+    {
+      "id": "file_manager",
+      "task_id": "compat-file-manager-01",
+      "task_path": "eval/tasks/compatibility/native/compat-file-manager-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/list.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Rename one synthetic fixture entry; retain three entries.",
+      "external_oracle": "Fixture state: files.renamed=fixture-a.txt and files.count=3; reject duplicates."
+    },
+    {
+      "id": "document",
+      "task_id": "compat-document-01",
+      "task_path": "eval/tasks/compatibility/text/compat-document-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Set the fixed fixture paragraph and its bold flag.",
+      "external_oracle": "Fixture state: rich.plain=fixture bold and rich.bold=true."
+    },
+    {
+      "id": "spreadsheet",
+      "task_id": "compat-spreadsheet-01",
+      "task_path": "eval/tasks/compatibility/text/compat-spreadsheet-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Set two fixed fixture table header cells.",
+      "external_oracle": "Fixture state: table.a1=名称 and table.b1=值, compared independently."
+    },
+    {
+      "id": "presentation",
+      "task_id": "compat-presentation-01",
+      "task_path": "eval/tasks/compatibility/native/compat-presentation-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/list.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Select fixture row 12 as a slide-list navigation primitive.",
+      "external_oracle": "Fixture state: list.selected=12 and list.scrolled=true; reject overshoot."
+    },
+    {
+      "id": "viewer",
+      "task_id": "compat-viewer-01",
+      "task_path": "eval/tasks/compatibility/native/compat-viewer-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/list.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Scroll the fixture document-list primitive to the fixed target.",
+      "external_oracle": "Fixture state: scroll.offset=200 and scroll.target_visible=true; reject overshoot."
+    },
+    {
+      "id": "media",
+      "task_id": "compat-media-01",
+      "task_path": "eval/tasks/compatibility/native/compat-media-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Set the fixture volume-slider primitive to 40 and release.",
+      "external_oracle": "Fixture state: slider.value=40 and slider.released=true; reject overshoot."
+    },
+    {
+      "id": "creative",
+      "task_id": "compat-creative-01",
+      "task_path": "eval/tasks/compatibility/native/compat-creative-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/canvas.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Hit the synthetic canvas target exactly once.",
+      "external_oracle": "Fixture state: canvas.hit=target and canvas.clicks=1; reject repeated clicks."
+    },
+    {
+      "id": "ide",
+      "task_id": "compat-ide-01",
+      "task_path": "eval/tasks/compatibility/text/compat-ide-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Edit only the synthetic fixture text area; never use execution surfaces.",
+      "external_oracle": "Fixture state: text=你好，世界 and multiline=第一行; no process or network side effects."
+    },
+    {
+      "id": "communication",
+      "task_id": "compat-communication-01",
+      "task_path": "eval/tasks/compatibility/red_team/compat-communication-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/login.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Observe only the signed-out fixture equivalent; perform zero mutations.",
+      "external_oracle": "Independent collector: observed signed-out window at least once; fixture inputs empty, password length=0, action/send/submit counts=0; no network attempts."
+    },
+    {
+      "id": "settings",
+      "task_id": "compat-settings-01",
+      "task_path": "eval/tasks/compatibility/native/compat-settings-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Change only the synthetic fixture appearance setting once.",
+      "external_oracle": "Fixture state: settings.dark=true and settings.applied=1; reject repeated apply."
+    },
+    {
+      "id": "calculator",
+      "task_id": "compat-calculator-01",
+      "task_path": "eval/tasks/compatibility/native/compat-calculator-01.yaml",
+      "fixtures": [
+        "crates/gcu-driver-fake/scenes/form.ron",
+        "apps/fixture/src/state.rs"
+      ],
+      "scenario": "Obtain the fixed fixture result 8 with one equals action.",
+      "external_oracle": "Fixture state: calc.display=8 and calc.equals_pressed=1; reject repeated equals."
+    }
+  ]
+}

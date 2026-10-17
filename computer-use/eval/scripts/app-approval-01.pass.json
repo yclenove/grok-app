@@ -1,0 +1,10 @@
+{
+  "state": {
+    "approval": {
+      "decision": "deny"
+    },
+    "action": {
+      "ran": false
+    }
+  }
+}

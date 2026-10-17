@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "Disponible uniquement dans l’app de bureau.",
   "cu.settings.refresh": "Actualiser",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "Contrôlez les apps locales avec votre accord.",
+  "cu.settings.release": "Publication",
+  "cu.settings.release.experimental": "Expérimental",
+  "cu.settings.release.formal": "Standard",
+  "cu.settings.releaseBody": "Reste expérimental tant que le seuil d'évaluation n'est pas atteint."
 }
