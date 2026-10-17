@@ -32,11 +32,57 @@ An unmarked callback may include unrelated input; the marked row with
 | RelativePair +1 / -1 | Visible movement/hover possible; acceleration and clipping may prevent exact restoration |
 | XButtonPair | May navigate, activate a window, or trigger a global shortcut |
 
-Product defaults try only zero move, zero wheel, then zero horizontal wheel.
+Product defaults try zero move, zero wheel, zero horizontal wheel, then
+**absolute same position**. Each completed send without a matching injected
+callback advances to the next kind; pending sends never start another dispatch.
+The fourth kind sends **one absolute mouse move** to the current physical cursor
+pixel with ABSOLUTE, VIRTUALDESK and NOCOALESCE. It can trigger hover processing.
+It is attempted at most once in each startup/lease proof cycle, after the first
+three kinds failed to produce a tagged injected callback. A successful fourth
+proof starts a fresh cycle with all three zero candidates again; no callback means
+no absolute retry. A working zero kind remains preferred.
+
+`ABSOLUTE_PROBE_IDLE_MS = 2000` is an independent **fourth-send gate**, not a
+source of physical activity history or Stop lease renewal. Before **any** probe
+input (mouse or keyboard), the sender samples GetLastInputInfo/GetTickCount64
+once on the interactive Default desktop. At least 2000ms without system input
+sets the shared probe-idle marker, including before PhysicalClock's first proof.
+Unknown/read failure, future input ticks, noninteractive desktop or any 32-bit
+tick rollover leaves it denied. GetLastInputInfo includes injected input, so
+injection **before this initial sample** conservatively denies the fourth probe.
+After sampling, probes' own injected callbacks never reset the marker. Any real
+physical keyboard or mouse callback (neither injected nor our tag) immediately
+clears it, even if a concurrent initial read reports idle. Cleared/denied state
+cannot be set again by this listener attempt; a new listener must reassess it.
+
+The same marker only permits sending the fourth candidate, at most once per
+startup/lease proof cycle. Its preservation across probe injections allows the
+next cycle's sends, but **each renewal still needs fresh tagged injected callbacks
+from both hooks**. Missing callbacks expire the original 100ms lease regardless
+of the marker. PhysicalClock's history, dual-hook requirement, latch and lease
+bounds remain unchanged. The listener never waits 2000ms, retries a refused
+absolute send, extends hook_proofs' 1000ms budget, or substitutes idle for a hook
+callback. Physical activity during cursor queries cancels the fourth send;
+activity during dispatch invalidates its proof even if the final pixel is equal.
+
+Before dispatch, the sender enters per-monitor DPI awareness, reads physical
+cursor pixels and virtual-desktop bounds (including negative monitor origins),
+and maps the current pixel's center into 0..65535. Unrepresentable desktop bounds
+refuse. After dispatch it reads the physical cursor again. A difference records
+`cursor changed during probe`: that proof is invalid, and **no retry, compensation
+move or subsequent keyboard input** runs. An unreadable post-position also fails
+closed. Matching injected callbacks remain tentative until SendInput acceptance
+and this check succeed; per-attempt mouse tags reject late earlier callbacks.
+Idle checks and post-position checks cannot eliminate the race with concurrent
+physical movement, including movement back to the original pixel between samples.
+They do not establish that the move had no hover side effects.
+
 Doctor reports `mouse hook liveness could not be proven (attempted N probe kinds)`
 when proof is missing; foreground remains Unavailable. The count measures actual
 submitted kinds, not the number of accepted SendInput records. Release/default
-builds never select motion/buttons from a diagnostic result.
+builds use this fixed order and never select relative movement/buttons from a
+diagnostic result. Doctor also always discloses the absolute move and hover effect,
+the idle threshold and fail-closed behavior, including when monitoring is healthy.
 
 Only builds with **both** `test-worker-faults` and debug assertions accept
 `GCU_HOOK_MOUSE_PROBE` (`zero_move`, `zero_wheel`, `zero_hwheel`,
@@ -47,8 +93,22 @@ callback, environment Skip is forbidden and that probe kind is used by the real
 listener. Unmarked-only/stripped-flag evidence never replaces the listener's
 mandatory tagged injected callback: if the real proof still fails, the cases fail.
 Paired probes check the actual requested count; a partial XDOWN attempts XUP cleanup.
-Invalid debug selection fails closed. Stop leases, startup bounds, and latch
+Invalid debug selection fails closed. Default builds and release builds (even with
+the feature) reject any GCU_HOOK_MOUSE_PROBE value. RelativePair and XButtonPair
+record construction is excluded from product builds. Stop leases, startup bounds, and latch
 semantics are unchanged.
+
+### Physical-mouse result (2026-10-17, PR #90)
+
+The physical-mouse Windows matrix accepted zero_move / zero_wheel / zero_hwheel
+SendInput records, but none reached WH_MOUSE_LL. AbsoluteSamePosition and
+RelativePair reached the hook with LLMHF_INJECTED and preserved dwExtraInfo.
+This is why the fourth product candidate is necessary. The physical mouse was
+also moving during that run: its before/after positions do **not** establish net
+probe displacement or absence of side effects. RelativePair remains diagnostic
+only; that result does not authorize diagnostic-based selection in product builds.
+The new guarded product path and its native renewal behavior are **not_run**;
+the older matrix is not evidence that the new gate permits startup or renewal.
 
 `mouse_matrix::decide` permits environment Skip only after all 12 unique variants
 complete SendInput with sent==requested, Win32=0, no dispatch error, and at least

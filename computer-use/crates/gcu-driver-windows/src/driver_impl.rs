@@ -436,6 +436,7 @@ impl WindowsDriver {
             !i.starts_with("user_activity_guard:")
                 && !i.starts_with("stop_hotkey:")
                 && !i.starts_with("stop_listener_native:")
+                && !i.starts_with("mouse_hook_probe:")
         });
         if let Some(guard) = &self.safety {
             guard.doctor_issues(issues);

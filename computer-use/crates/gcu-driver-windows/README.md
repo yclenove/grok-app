@@ -518,10 +518,49 @@ monitoring starts a conservative idle interval at zero. `WH_KEYBOARD_LL` / `WH_M
 only and discard injected input, including lower-integrity injections and our own SendInput. No
 text/key payload is stored. Hook proofs and message-pump leases expire after 100ms. Failure returns
 `None`, discards input history and disables foreground; it never reports an old idle timestamp. Two
-tagged injected callbacks (F24 **up only**, zero move/wheel/horizontal-wheel candidates) prove both
-hook chains; SendInput success alone is insufficient. Defaults never move or click. Replacement
+tagged injected callbacks (F24 **up only**, mouse probes below) prove both
+hook chains; SendInput success alone is insufficient. Replacement
 hooks install before old hooks retire each second; missing mouse proof disables foreground.
 No documented LL-hook liveness query exists; neither pump heartbeats nor registration prove delivery.
+
+The fixed product mouse order is **zero_move → zero_wheel → zero_hwheel →
+absolute_same_position**. The fourth candidate sends one absolute movement to the
+current physical cursor pixel using VIRTUALDESK and NOCOALESCE; **hover handlers
+may run**. Physical-mouse evidence in PR #90 showed all three zero candidates
+accepted but absent from WH_MOUSE_LL, while the tagged injected absolute candidate
+arrived. Each proof cycle tries the fourth kind at most once, only after the three
+zero candidates lack a tagged injected callback. RelativePair and XButtonPair stay
+outside product builds. GCU_HOOK_MOUSE_PROBE is rejected unless both
+test-worker-faults and debug assertions are enabled; diagnostics cannot change a
+release/default build's order.
+
+The fourth send requires **ABSOLUTE_PROBE_IDLE_MS = 2000ms** of system input idle,
+read through GetLastInputInfo/GetTickCount64 on the interactive Default desktop.
+The sender samples this clock **once before any mouse or keyboard probe input**,
+including before PhysicalClock's first dual-hook proof. Unknown/failed reads,
+future ticks, 32-bit tick rollover or a noninteractive desktop deny the fourth
+send. GetLastInputInfo includes injected inputs before that sample. Afterward,
+the shared probe-idle marker survives probes' own injections, including the next
+lease proof cycle. A real mouse/keyboard callback (neither injected nor our tag)
+immediately clears it; neither a later idle read nor another probe can rearm it
+in this listener attempt. A new listener must sample again.
+
+The marker only authorizes the fourth send. It supplies no physical history or
+Stop lease: each renewal still needs fresh tagged injected callbacks from both
+hooks. Missing callbacks fail closed under the original **100ms lease**, even
+while the marker is set. There is no wait for 2000ms and no extension of the
+**1000ms hook_proofs startup stage**. PhysicalClock's conservative idle interval
+still starts at zero only after fresh dual-hook proof.
+
+The sender reads physical cursor pixels and virtual desktop metrics in a temporary
+per-monitor DPI context and maps the current pixel's center into 0..65535, including
+negative monitor origins. It rechecks physical position after sending. A difference
+records **cursor changed during probe**, invalidates even a tagged injected
+callback, and stops without retry, compensating movement or additional input.
+Unreadable positions also fail closed. The query/send race with the user's mouse
+cannot be eliminated, and equal samples cannot rule out movement away and back.
+Doctor discloses this probe and its hover effect. See [diagnostics](diagnostics.md)
+for the physical result's limits; no net-displacement conclusion is claimed.
 
 `RegisterHotKey` defaults to Ctrl+Alt+Shift+Backspace; `HotkeyConfig` accepts a trusted configurable
 virtual key/modifier chord. Conflicts fail closed, with metadata in the existing `DoctorReport`. The
@@ -547,6 +586,9 @@ Portable tests inject flags directly; SendInput cannot simulate physical hardwar
 
 ```sh
 rcargo test --locked -p gcu-driver-windows --test clipboard --test stop --features test-worker-faults
+rcargo test --locked -p gcu-driver-windows --test hook_probe
+rcargo test --locked -p gcu-driver-windows --test hook_probe --features test-worker-faults
+rcargo test --locked --release -p gcu-driver-windows --test hook_probe --features test-worker-faults
 rcargo clippy --locked -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 rcargo --sh 'CROSS=1 bash scripts/verify.sh'
 ```
@@ -558,6 +600,20 @@ test serially. For the document test, open one blank Notepad document and focus 
 provider exposing a named, nonpassword editor and exact UIA focus. The test must report Clipboard
 and verify the full text from the subsequent UIA read; an unsupported provider fails rather than
 silently accepting Unicode.
+
+For the guarded product probe test, use a physical mouse, normal Default desktop,
+and disposable apps. Keep the mouse/keyboard still throughout (the test waits
+2500ms before starting). It tests default startup, exact cursor equality and real
+renewal beyond 100ms; no matrix/override can stand in for proof. An initial system-idle gate
+refusal is a failure with doctor evidence, never a Skip.
+Record Windows build, monitor layout/DPI and doctor output. New native status:
+**not_run** (no interactive Windows desktop in this sandbox).
+
+```powershell
+$env:GCU_DESKTOP = '1'
+Remove-Item Env:GCU_HOOK_MOUSE_PROBE -ErrorAction SilentlyContinue
+cargo test --locked -p gcu-driver-windows --test hook_probe native_product_probe_chain_proves_both_hooks_without_cursor_change -- --ignored --test-threads=1
+```
 
 ```powershell
 cargo build --locked -p gcu-cli

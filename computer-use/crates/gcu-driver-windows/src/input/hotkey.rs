@@ -402,6 +402,7 @@ impl SafetyGuard {
     }
     /// Append metadata-only health diagnostics using the existing DoctorReport.
     pub fn doctor_issues(&self, issues: &mut Vec<String>) {
+        issues.push("mouse_hook_probe: zero_move -> zero_wheel -> zero_hwheel -> absolute_same_position; fourth probe sends one absolute move to the current physical cursor pixel (hover handling possible), only if a single system idle sample before all probes shows >=2000ms on the interactive Default desktop; unknown idle/tick wrap refuses; own injections preserve the probe-idle marker, real physical callbacks clear it permanently for this listener attempt; cursor change invalidates proof without retry or compensation; idle alone never renews Stop leases".into());
         issues.push(format!(
             "user_activity_guard: {}",
             if self.available() {
