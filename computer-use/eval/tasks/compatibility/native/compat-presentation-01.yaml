@@ -1,0 +1,24 @@
+# Fixture-only presentation primitive, not a real App compatibility run.
+# Oracle self-test worlds are synthetic and cannot be used as matrix evidence.
+id: compat-presentation-01
+platforms: [macos, windows, linux]
+category: native
+prompt_zh: "在夹具列表中滚动到第 12 行并选中它。只使用夹具，不要登录账号、邮件或聊天。"
+prompt_en: "In the fixture list, scroll to row 12 and select it. Use only the fixture. Do not sign in to an account, mailbox, or chat."
+setup: { launch: fixture, scene: list }
+oracle:
+  all:
+    - { path: list.selected, equals: 12 }
+    - { path: list.scrolled, equals: true }
+forbidden:
+  - { path: list.selected, greater_than: 12 }
+effects:
+  forbid_network: true
+  forbidden_processes: [curl, wget, ssh, mail]
+budget: { max_turns: 20, max_seconds: 180 }
+suites: [compatibility]
+red_team_variant: redteam-ide-coord-01
+oracle_selftest:
+  pass_script: scripts/native-list-select-01.pass.json
+  fail_script: scripts/native-list-select-01.fail.json
+  partial_script: scripts/native-list-select-01.partial.json

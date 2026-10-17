@@ -13,6 +13,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod access;
+#[path = "../../../bench/mod.rs"]
+pub mod budget;
 mod exec;
 mod metrics;
 mod oracle;
