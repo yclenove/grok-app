@@ -76,6 +76,159 @@ async fn budget_deadline_cancels_pending_read_before_dropping_future() {
 }
 
 #[tokio::test]
+async fn budget_pending_read_with_fresh_stable_samples_returns_tree_stable() {
+    let rig = Rig::new(Subscription::Quiet).await;
+    let task = rig.start(SettleConfig::default(), 300);
+    pump().await;
+    // A slow second read finishes at 200ms, before the event check at 270ms.
+    rig.driver.delay_reads(80);
+    rig.advance(120).await;
+    rig.advance(80).await;
+    assert!(
+        !task.is_finished(),
+        "unchanged samples need the full horizon"
+    );
+    // This candidate never completes, so its value must not become evidence.
+    rig.driver.replace(changed(&rig.before));
+    rig.driver.stall();
+    rig.advance(70).await;
+    assert_eq!(rig.driver.read_times(), vec![0, 120, 270]);
+    assert!(!rig.driver.cancelled_before_drop());
+    rig.advance(30).await;
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.settle.reason, SettleReason::TreeStable);
+    assert_eq!(report.settle.ms, 300);
+    assert!(!report.timed_out());
+    assert!(!report.observed_change);
+    assert_eq!(
+        report
+            .effect(&rig.before, &rig.before, Some(false))
+            .unwrap(),
+        gcu_protocol::result::Effect::NoVisibleChange
+    );
+    assert_eq!(
+        report.effect(&rig.before, &rig.before, None).unwrap(),
+        gcu_protocol::result::Effect::NotChecked
+    );
+    assert!(rig.driver.cancelled_before_drop());
+    assert_eq!(rig.driver.subscriptions(), 0);
+}
+
+#[tokio::test]
+async fn budget_pending_read_with_stale_stable_samples_remains_not_checked() {
+    let rig = Rig::new(Subscription::Quiet).await;
+    let task = rig.start(SettleConfig::default(), 351);
+    pump().await;
+    rig.driver.delay_reads(80);
+    rig.advance(120).await;
+    rig.advance(80).await;
+    rig.driver.stall();
+    rig.advance(70).await;
+    assert_eq!(rig.driver.read_times(), vec![0, 120, 270]);
+    // The last completed stable sample is 151ms old, beyond the 150ms interval.
+    rig.advance(81).await;
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.settle.reason, SettleReason::Budget);
+    assert_eq!(report.settle.ms, 351);
+    assert!(report.timed_out());
+    assert_eq!(
+        report
+            .effect(&rig.before, &rig.before, Some(false))
+            .unwrap(),
+        gcu_protocol::result::Effect::NotChecked
+    );
+    assert!(rig.driver.cancelled_before_drop());
+    assert_eq!(rig.driver.subscriptions(), 0);
+}
+
+#[tokio::test]
+async fn budget_pending_read_with_queued_event_invalidates_fresh_samples() {
+    let rig = Rig::new(Subscription::Quiet).await;
+    let task = rig.start(SettleConfig::default(), 300);
+    pump().await;
+    rig.driver.delay_reads(80);
+    rig.advance(120).await;
+    rig.advance(80).await;
+    rig.driver.stall();
+    rig.advance(70).await;
+    assert_eq!(rig.driver.read_times(), vec![0, 120, 270]);
+    rig.driver.emit(gcu_core::driver::UiEvent::Changed);
+    rig.advance(30).await;
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.settle.reason, SettleReason::Budget);
+    assert_eq!(
+        report
+            .effect(&rig.before, &rig.before, Some(false))
+            .unwrap(),
+        gcu_protocol::result::Effect::NotChecked
+    );
+    assert!(rig.driver.cancelled_before_drop());
+    assert_eq!(rig.driver.subscriptions(), 0);
+}
+
+#[tokio::test]
+async fn budget_pending_read_retains_observed_reverted_change() {
+    let rig = Rig::new(Subscription::Quiet).await;
+    rig.driver.replace(changed(&rig.before));
+    let task = rig.start(SettleConfig::default(), 340);
+    pump().await;
+    rig.driver.replace(rig.before.clone());
+    rig.driver.delay_reads(80);
+    rig.advance(120).await;
+    rig.advance(80).await;
+    rig.driver.stall();
+    rig.advance(120).await;
+    assert_eq!(rig.driver.read_times(), vec![0, 120, 320]);
+    rig.advance(20).await;
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.settle.reason, SettleReason::Budget);
+    assert!(report.observed_change);
+    assert_eq!(
+        report
+            .effect(&rig.before, &rig.before, Some(false))
+            .unwrap(),
+        gcu_protocol::result::Effect::Changed
+    );
+    assert!(rig.driver.cancelled_before_drop());
+    assert_eq!(rig.driver.subscriptions(), 0);
+}
+
+#[tokio::test]
+async fn budget_pending_read_with_expired_native_deadline_remains_not_checked() {
+    let rig = Rig::new(Subscription::Quiet).await;
+    let task = rig.start_with_opts(
+        SettleConfig {
+            event_quiet: Duration::from_millis(250),
+            ..Default::default()
+        },
+        320,
+        gcu_core::driver::TreeOpts {
+            timeout: Duration::from_millis(60),
+            ..Default::default()
+        },
+    );
+    pump().await;
+    rig.driver.delay_reads(40);
+    rig.advance(150).await;
+    rig.advance(40).await;
+    rig.driver.stall();
+    rig.advance(60).await;
+    assert_eq!(rig.driver.read_times(), vec![0, 150, 250]);
+    // Simulate a loaded executor missing the 310ms native deadline. The last
+    // sample is still fresh at 320ms, but a real read timeout forbids stability.
+    rig.advance(70).await;
+    let report = task.await.unwrap().unwrap();
+    assert_eq!(report.settle.reason, SettleReason::Budget);
+    assert_eq!(
+        report
+            .effect(&rig.before, &rig.before, Some(false))
+            .unwrap(),
+        gcu_protocol::result::Effect::NotChecked
+    );
+    assert!(rig.driver.cancelled_before_drop());
+}
+
+#[tokio::test]
 async fn stop_during_read_cancels_releases_and_preserves_latch() {
     let rig = Rig::new(Subscription::Quiet).await;
     rig.driver.stall();

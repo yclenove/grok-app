@@ -95,6 +95,7 @@ pub struct ProbeDriver {
     clock: Arc<ManualClock>,
     raw: Mutex<RawTree>,
     stalled: AtomicBool,
+    read_delay_ms: AtomicU64,
     times: Mutex<Vec<u64>>,
     timeouts: Mutex<Vec<Duration>>,
     cancelled: Arc<AtomicBool>,
@@ -110,6 +111,9 @@ impl ProbeDriver {
     }
     pub fn stall(&self) {
         self.stalled.store(true, Ordering::SeqCst);
+    }
+    pub fn delay_reads(&self, ms: u64) {
+        self.read_delay_ms.store(ms, Ordering::SeqCst);
     }
     pub fn read_times(&self) -> Vec<u64> {
         self.times.lock().unwrap().clone()
@@ -173,12 +177,16 @@ impl Driver for ProbeDriver {
             .unwrap()
             .push(self.clock.now().as_millis() as u64);
         self.timeouts.lock().unwrap().push(opts.timeout);
+        let _drop = ReadDrop {
+            cancel: cancel.clone(),
+            observed: self.cancelled.clone(),
+        };
         if self.stalled.load(Ordering::SeqCst) {
-            let _drop = ReadDrop {
-                cancel: cancel.clone(),
-                observed: self.cancelled.clone(),
-            };
             std::future::pending::<()>().await;
+        }
+        let delay = Duration::from_millis(self.read_delay_ms.load(Ordering::SeqCst));
+        if !delay.is_zero() {
+            self.clock.wait_until(self.clock.now() + delay).await;
         }
         Ok(self.raw.lock().unwrap().clone())
     }
@@ -246,6 +254,7 @@ impl Rig {
             clock: clock.clone(),
             raw: Mutex::new(before.clone()),
             stalled: AtomicBool::new(false),
+            read_delay_ms: AtomicU64::new(0),
             times: Mutex::new(Vec::new()),
             timeouts: Mutex::new(Vec::new()),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -272,6 +281,14 @@ impl Rig {
         config: SettleConfig,
         budget: u64,
     ) -> tokio::task::JoinHandle<std::result::Result<SettleReport, gcu_protocol::ErrorCode>> {
+        self.start_with_opts(config, budget, TreeOpts::default())
+    }
+    pub fn start_with_opts(
+        &self,
+        config: SettleConfig,
+        budget: u64,
+        tree_opts: TreeOpts,
+    ) -> tokio::task::JoinHandle<std::result::Result<SettleReport, gcu_protocol::ErrorCode>> {
         let engine = SettleEngine::new(config, self.clock.clone());
         let (driver, session, window, before) = (
             self.driver.clone(),
@@ -285,7 +302,7 @@ impl Rig {
                     driver: driver.as_ref(),
                     session: &session,
                     window: &window,
-                    tree_opts: &TreeOpts::default(),
+                    tree_opts: &tree_opts,
                     events: driver.subscribe(&window),
                     before: &before,
                     budget: Duration::from_millis(budget),
