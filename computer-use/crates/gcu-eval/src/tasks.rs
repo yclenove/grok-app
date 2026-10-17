@@ -20,7 +20,7 @@ pub struct Task {
     pub id: String,
     /// `macos`, `windows`, and/or `linux`.
     pub platforms: Vec<String>,
-    /// `native`, `browser`, `dialog`, `cross_app`, `text`, or `red_team`.
+    /// `native`, `browser`, `dialog`, `cross_app`, `text`, `red_team`, or `app`.
     pub category: String,
     /// Chinese instruction. Reports must not inline this text.
     pub prompt_zh: String,
@@ -100,7 +100,7 @@ fn parse_task(text: &str, eval_root: &Path, file: &Path) -> Result<Task, Error> 
     let category = require_str(map, "category")?;
     if !matches!(
         category.as_str(),
-        "native" | "browser" | "dialog" | "cross_app" | "text" | "red_team"
+        "native" | "browser" | "dialog" | "cross_app" | "text" | "red_team" | "app"
     ) {
         return Err(Error::msg(format!("{id}: unknown category {category}")));
     }

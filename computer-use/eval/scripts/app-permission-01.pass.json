@@ -1,0 +1,10 @@
+{
+  "state": {
+    "permission": {
+      "status": "missing"
+    },
+    "action": {
+      "ran": false
+    }
+  }
+}

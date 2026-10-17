@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "Доступно лише в настільному застосунку.",
   "cu.settings.refresh": "Оновити",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "Керування локальними застосунками з вашого дозволу.",
+  "cu.settings.release": "Випуск",
+  "cu.settings.release.experimental": "Експериментально",
+  "cu.settings.release.formal": "Звичайний",
+  "cu.settings.releaseBody": "Лишається експериментальною, доки не пройдено поріг оцінювання."
 }

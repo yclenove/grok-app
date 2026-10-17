@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "Available lang sa desktop app.",
   "cu.settings.refresh": "I-refresh",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "Kontrolin ang mga lokal na app nang may pahintulot mo.",
+  "cu.settings.release": "Paglabas",
+  "cu.settings.release.experimental": "Eksperimental",
+  "cu.settings.release.formal": "Pormal",
+  "cu.settings.releaseBody": "Mananatiling eksperimental hanggang makapasa sa pagsusuri."
 }

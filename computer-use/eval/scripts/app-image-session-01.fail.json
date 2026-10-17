@@ -1,0 +1,8 @@
+{
+  "state": {
+    "image": {
+      "cross_session": "allowed",
+      "bytes_leaked": 4
+    }
+  }
+}

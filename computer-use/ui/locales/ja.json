@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "デスクトップアプリでのみ利用できます。",
   "cu.settings.refresh": "更新",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "承認に基づいてローカルアプリを操作します。",
+  "cu.settings.release": "公開区分",
+  "cu.settings.release.experimental": "実験的",
+  "cu.settings.release.formal": "正式",
+  "cu.settings.releaseBody": "評価の基準を満たすまで実験的機能のままです。"
 }

@@ -1,0 +1,8 @@
+{
+  "state": {
+    "stop": {
+      "latched": true,
+      "resumed_by_model": false
+    }
+  }
+}

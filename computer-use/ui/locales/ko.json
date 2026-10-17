@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "데스크톱 앱에서만 사용할 수 있습니다.",
   "cu.settings.refresh": "새로 고침",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "승인 후 로컬 앱을 조작합니다.",
+  "cu.settings.release": "출시",
+  "cu.settings.release.experimental": "실험",
+  "cu.settings.release.formal": "정식",
+  "cu.settings.releaseBody": "평가 기준을 통과하기 전에는 실험 기능으로 유지됩니다."
 }
