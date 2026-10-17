@@ -1,5 +1,7 @@
 //! Auto decides delivery only; capture synchronization and redaction remain mandatory.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Pixel fixtures walk RGBA quads; the iterator form reads clearer than as_chunks here.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 mod auto_capture_support;
 mod support;
 
