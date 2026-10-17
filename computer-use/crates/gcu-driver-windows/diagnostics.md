@@ -71,6 +71,38 @@ A replacement input backend (e.g. Raw Input) would need its own physical/injecte
 classification, loss detection, desktop coverage and equivalent lease tests; it
 is not a substitute implemented by these diagnostics.
 
+### Physical-mouse result (win-test, 2026-10-17)
+
+One `live_mouse_probe_matrix` run (XBUTTON skipped, 10 rows) on the user's physical
+machine, interactive desktop, unelevated. Each row: `LLMHF_INJECTED` = flags bit 0.
+
+| Candidate | marked | injected callback | marker kept (`dwExtraInfo`) |
+| --- | --- | --- | --- |
+| ZeroWheel | yes / no | **no / no** | n/a |
+| ZeroMove | yes / no | **no / no** | n/a |
+| ZeroHWheel | yes / no | **no / no** | n/a |
+| AbsoluteSamePosition | yes / no | **yes / yes** | yes (marked row) |
+| RelativePair | yes / no | **yes / yes** (2 callbacks) | yes (marked row) |
+
+Findings:
+
+- Zero-delta wheel and zero-move injections are accepted by `SendInput`
+  (`sent == requested`, Win32 = 0) but **never reach `WH_MOUSE_LL`**. The three
+  probes the product tries by default therefore cannot prove hook liveness on a
+  physical-mouse machine: foreground would stay Unavailable there. This matches the
+  GitHub-runner result (nothing reached the hook) for the zero-effect kinds, but
+  unlike the runner, other kinds do arrive here.
+- `AbsoluteSamePosition` and `RelativePair` do arrive as injected callbacks and the
+  unique marker survives in `dwExtraInfo`, so a tagged proof is possible with them.
+- Caveat: the user's own mouse was active during the run (many non-injected
+  `WM_MOUSEMOVE` callbacks at ~2.5 ms, plus one real `WM_LBUTTONDOWN` and one
+  `WM_LBUTTONUP`), and the cursor moved hundreds of pixels between rows. The
+  injected/marker evidence is per event and holds; any claim that a probe leaves the
+  cursor exactly where it was is **not** supported by this run. Repeat hands-off to
+  measure net cursor displacement before adopting a probe.
+- No product code changed. Choosing a side-effecting probe for release builds is a
+  safety-model decision (hover side effects, concurrent-move race) and is left open.
+
 ## Background activation attribution
 
 C16 runs a bare UIA Invoke control **inside the contract process and run** on the
