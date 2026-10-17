@@ -43,6 +43,8 @@ pub(super) async fn prepare(
 
 /// Revoke one session. A session this host never opened is a no-op.
 pub(super) async fn revoke(host: &ComputerUseHost, session_id: &str) {
+    // Session close denies a pending card even when this host never issued a token.
+    host.office().close_session(session_id);
     let mut inner = host.inner.lock().await;
     if inner.book.current(session_id).is_none() {
         return;

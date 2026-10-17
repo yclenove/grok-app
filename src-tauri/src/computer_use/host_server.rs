@@ -1,16 +1,11 @@
-//! Production Host callbacks until the approval card replaces them.
-//!
-//! Policy loads return the baseline snapshot. Approvals deny. Confirmation is
-//! false. Overlay, handoff, events, and health return an empty object.
+//! Production Host callbacks. Approvals wait on the shared office.
 
 use std::sync::Arc;
 
-use gcu_host_protocol::{
-    server::HostCallbacks,
-    supervisor::{baseline_policy, closed_callbacks},
-};
+use gcu_host_protocol::approval::{host_callbacks, Office};
+use gcu_host_protocol::server::HostCallbacks;
 
-/// Callbacks for a supervised engine that has no approval UI yet.
-pub fn production_callbacks() -> Arc<dyn HostCallbacks> {
-    closed_callbacks(baseline_policy())
+/// Callbacks for a supervised engine. The office is the one the UI command uses.
+pub fn production_callbacks(office: Office) -> Arc<dyn HostCallbacks> {
+    host_callbacks(office)
 }

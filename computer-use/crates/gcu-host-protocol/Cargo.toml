@@ -20,6 +20,9 @@ hmac = "0.13"
 sha2.workspace = true
 rand = "0.10"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

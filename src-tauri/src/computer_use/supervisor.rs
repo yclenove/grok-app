@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gcu_host_protocol::approval::Office;
 use gcu_host_protocol::supervisor::{
     admit, content_sha256, ensure_engine_file, Admission, Control, EngineChoice, EngineFacts,
     Error, HostBuild, LaunchRequest, OsLaunch, Reject, ReleaseIdentity,
@@ -62,6 +63,7 @@ pub fn decide(
 pub fn open_control(
     external: Option<PathBuf>,
     dev_grant: bool,
+    office: Office,
 ) -> Result<Control<OsLaunch>, Error> {
     let mode = host_build();
     let identity = expected_identity();
@@ -83,7 +85,7 @@ pub fn open_control(
     let facts = probe(&chosen, &identity, dev_grant && external_path)?;
     let path = decide(mode, &identity, &choice, &facts)?;
     Ok(Control::new(
-        OsLaunch::callbacks(host_server::production_callbacks()),
+        OsLaunch::callbacks(host_server::production_callbacks(office)),
         LaunchRequest::new(path, false),
         Admission {
             mode,

@@ -4,9 +4,9 @@
 //! new `// ── Domain ──` section rather than appending at a random spot.
 
 use crate::{
-    cli_worktrees, commands, desktop_notify, git_pr_hub, leader, mirror, os_theme, pet_window,
-    remote_im, serve, session_api, ssh_remote, system_fonts, theme_editor_window, tray, updater,
-    voice_host, wallpaper_grok_album, wallpaper_remote_commands,
+    cli_worktrees, commands, computer_use, desktop_notify, git_pr_hub, leader, mirror, os_theme,
+    pet_window, remote_im, serve, session_api, ssh_remote, system_fonts, theme_editor_window, tray,
+    updater, voice_host, wallpaper_grok_album, wallpaper_remote_commands,
 };
 
 /// Single invoke handler consumed by `Builder::invoke_handler` in `run()`.
@@ -521,5 +521,7 @@ pub fn app_invoke_handler(
         pet_window::pet_push_tasks,
         pet_window::pet_get_tasks,
         pet_window::pet_set_hit_chrome,
+        // ── Computer Use ──
+        computer_use::commands::cu_approval_decide,
     ]
 }

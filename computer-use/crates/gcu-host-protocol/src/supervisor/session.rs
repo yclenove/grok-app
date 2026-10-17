@@ -113,6 +113,9 @@ pub struct EngineSession {
     stop: Peer,
     child: Child,
     callbacks: tokio::task::JoinHandle<()>,
+    /// Same object passed to the RPC task. Drop denies pending approvals even
+    /// when abort skips the task's own `disconnected` call.
+    hooks: Arc<dyn HostCallbacks>,
     shutdown_requested: bool,
 }
 
@@ -212,6 +215,7 @@ impl Drop for EngineSession {
     fn drop(&mut self) {
         self.peer.close();
         self.stop.close();
+        self.hooks.disconnected();
         self.callbacks.abort();
         let _ = self.child.kill();
     }
@@ -277,12 +281,14 @@ where
         .await
         .map_err(Error::Handshake)?;
     let peer = server.peer();
-    let task = tokio::spawn(server.run(callbacks));
+    callbacks.attached(expected.clone(), peer.clone());
+    let task = tokio::spawn(server.run(Arc::clone(&callbacks)));
     config.channel = Channel::Stop;
     let stop = match connect_stop(stop_host, &config, &expected, &secret).await {
         Ok(stop) => stop,
         Err(error) => {
             task.abort();
+            callbacks.disconnected();
             return Err(error);
         }
     };
@@ -290,6 +296,7 @@ where
         Ok(child) => child,
         Err(error) => {
             task.abort();
+            callbacks.disconnected();
             return Err(error);
         }
     };
@@ -298,6 +305,7 @@ where
         stop,
         child,
         callbacks: task,
+        hooks: callbacks,
         shutdown_requested: false,
     })
 }
