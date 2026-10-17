@@ -7,6 +7,7 @@ pub mod auth;
 pub mod codec;
 pub mod events;
 pub mod inject;
+pub mod lifecycle;
 pub mod messages;
 pub mod overlay;
 pub mod server;

@@ -45,6 +45,7 @@ impl SessionManager {
         session_id: &str,
         reason: &str,
     ) {
+        crate::computer_use::lifecycle::session_closed(app, session_id).await;
         self.invalidate_spawn_flags_inner(Some(app), session_id, reason)
             .await;
     }
@@ -1396,7 +1397,7 @@ impl SessionManager {
     /// Kill live + background + parked ACP for this App session so the next
     /// connect is `session/new` under the new cwd.
     pub async fn drop_session_agent(&self, app: &AppHandle, session_id: &str) {
-        crate::computer_use::inject::revoke_session(app, session_id).await;
+        crate::computer_use::lifecycle::session_closed(app, session_id).await;
         let (live_acp, live_process_id) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {

@@ -14,6 +14,100 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod router_support;
+
+#[tokio::test]
+async fn queued_call_next_turn_reconnect_and_engine_restart_stay_stopped_until_user_resume() {
+    use gcu_core::action::{ActionRouter, ToolCall};
+    use router_support::{click, Harness};
+    let h = Harness::new(true, true);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let unblock = Arc::new(tokio::sync::Notify::new());
+    let holder = tokio::spawn({
+        let session = h.session.clone();
+        let entered = entered.clone();
+        let unblock = unblock.clone();
+        async move {
+            session
+                .enqueue(async move {
+                    entered.notify_one();
+                    unblock.notified().await;
+                })
+                .await
+                .unwrap();
+        }
+    });
+    entered.notified().await;
+    // Poll once while the queue is held, proving the call arrived before Stop.
+    let mut queued = Box::pin(h.execute(click(3)));
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        assert!(queued.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    h.activity.request_stop();
+    h.session.turn_ended().await;
+    unblock.notify_one();
+    holder.await.unwrap();
+    assert_eq!(queued.await.error.unwrap().code, ErrorCode::StoppedByUser);
+    h.session.begin_turn().unwrap();
+    assert_eq!(
+        h.execute(click(3)).await.error.unwrap().code,
+        ErrorCode::StoppedByUser
+    );
+    h.session.session_closed().await;
+    let reconnected = Session::open("reconnected", h.activity.clone(), h.router.input_release());
+    assert_eq!(
+        h.router
+            .execute(
+                &reconnected,
+                ToolCall::new("reconnect", "fake.form", click(3))
+            )
+            .await
+            .error
+            .unwrap()
+            .code,
+        ErrorCode::StoppedByUser
+    );
+    let restarted = ActionRouter::new(
+        h.driver.clone(),
+        h.approvals.clone(),
+        h.policy.clone(),
+        h.events.clone(),
+        WindowLocks::new(),
+    );
+    let next = Session::open(
+        "engine-restart",
+        h.activity.clone(),
+        restarted.input_release(),
+    );
+    assert_eq!(
+        restarted
+            .execute(&next, ToolCall::new("restart", "fake.form", click(3)))
+            .await
+            .error
+            .unwrap()
+            .code,
+        ErrorCode::StoppedByUser
+    );
+    assert_eq!(h.driver.perform_calls(), 0);
+    h.activity.clear_stop_by_user();
+    next.begin_turn().unwrap();
+    restarted
+        .observe(
+            &next,
+            serde_json::from_value(serde_json::json!({"app":"fake.form"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let allowed = restarted
+        .execute(&next, ToolCall::new("user-resumed", "fake.form", click(3)))
+        .await;
+    assert!(allowed.error.is_none());
+    assert_eq!(h.driver.perform_calls(), 1);
+}
+
 struct CountingRelease {
     calls: AtomicUsize,
 }

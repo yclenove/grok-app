@@ -3,7 +3,7 @@
  * Thumbnails come from the redacted shot ledger, never from model text.
  */
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   IconChevronRight,
   IconClick,
@@ -17,7 +17,7 @@ import {
   type ImageViewerApi,
 } from "@/components/ImageViewerContext";
 import { createT, type Locale, type MessageKey } from "@/i18n";
-import { loadComputerUseShot } from "@/lib/api/computerUseShot";
+import { listenComputerUseSessionClosed, loadComputerUseShot } from "@/lib/api/computerUseShot";
 import {
   previewUrl,
   readComputerUseCall,
@@ -125,8 +125,29 @@ export function ComputerUseToolCard({
   );
   const [open, setOpen] = useState(false);
   const [, setMediaTick] = useState(0);
+  const shotRevision = useRef(0);
+  const previewOwner = useRef(Symbol());
 
   useEffect(() => onMediaEndpointChange(() => setMediaTick((tick) => tick + 1)), []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenComputerUseSessionClosed((closed) => {
+      if (disposed || closed !== sessionId) return;
+      shotRevision.current += 1;
+      book.dropSession(closed);
+      closeOwnedPreview(viewer, previewOwner.current);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(() => { /* Host teardown: the backend has already revoked paths. */ });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      closeOwnedPreview(viewer, previewOwner.current);
+    };
+  }, [book, sessionId, viewer]);
 
   useEffect(() => {
     const id = call?.screenshotId;
@@ -135,8 +156,9 @@ export function ComputerUseToolCard({
     if (current === "foreign") return;
     if (typeof current !== "string" && current.full) return;
     let cancel = false;
+    const revision = shotRevision.current;
     void loadShot(sessionId, id).then((result) => {
-      if (cancel) return;
+      if (cancel || revision !== shotRevision.current) return;
       if (typeof result === "string") {
         book.noteFault(sessionId, id, result);
         return;
@@ -239,7 +261,10 @@ export function ComputerUseToolCard({
             className="cu-tool__thumb"
             data-testid="cu-tool-thumb"
             aria-label={tr("tool.enlarge")}
-            onClick={() => viewer.open([{ src: shotPath, alt: tr("tool.enlarge") }])}
+            onClick={() => {
+              previewOwners.set(viewer, previewOwner.current);
+              viewer.open([{ src: shotPath, alt: tr("tool.enlarge") }]);
+            }}
           >
             <img src={preview} alt="" />
           </button>
@@ -258,4 +283,12 @@ export function ComputerUseToolCard({
       </div>
     </div>
   );
+}
+
+const previewOwners = new WeakMap<ImageViewerApi, symbol>();
+
+function closeOwnedPreview(viewer: ImageViewerApi, owner: symbol): void {
+  if (previewOwners.get(viewer) !== owner) return;
+  previewOwners.delete(viewer);
+  viewer.close();
 }

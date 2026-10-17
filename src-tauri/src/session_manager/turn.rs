@@ -68,7 +68,15 @@ impl SessionManager {
                 connect_gave_up_reason(false)
             ));
         };
-        if let Some(target) = session_id.as_deref() {
+        let prompt_target = session_id.clone().or_else(|| self.current_context_ids().1);
+        if let Some(target) = prompt_target.as_deref() {
+            // Ready UI sends can skip connect. Retire a stale MCP catalog so
+            // the existing no-live-agent retry rebuilds it before any prompt.
+            if crate::computer_use::lifecycle::needs_reconnect(&app, target)
+                && !self.session_is_busy(target)
+            {
+                self.drop_session_agent(&app, target).await;
+            }
             match self.ensure_promptable_session(&app, target) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -499,6 +507,7 @@ impl SessionManager {
         let mgr = Arc::clone(self);
         let app2 = app.clone();
         let turn_sid = app_sid.clone();
+        let computer_turn = crate::computer_use::lifecycle::begin_turn(&app, &app_sid);
         tokio::spawn(async move {
             // Explicit session id: on a shared process the CLI's “recently
             // bound” id may belong to another App session — prompts must
@@ -510,6 +519,7 @@ impl SessionManager {
                     "chat has no agent session id (reconnect)",
                 )),
             };
+            crate::computer_use::lifecycle::turn_ended(&app2, computer_turn).await;
             match outcome {
                 Err(e) => {
                     // Route by session id: this chat may have been demoted to

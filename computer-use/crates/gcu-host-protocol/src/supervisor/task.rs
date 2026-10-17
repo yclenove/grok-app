@@ -57,6 +57,7 @@ pub trait Launch: Send {
 /// Production launcher. No `--driver fake` and no approval grants.
 pub struct OsLaunch {
     callbacks: Arc<dyn HostCallbacks>,
+    lifecycle: Option<crate::lifecycle::Lifecycle>,
 }
 
 impl OsLaunch {
@@ -67,14 +68,31 @@ impl OsLaunch {
 
     /// Replace callbacks when the App approval card is attached.
     pub fn callbacks(callbacks: Arc<dyn HostCallbacks>) -> Self {
-        Self { callbacks }
+        Self {
+            callbacks,
+            lifecycle: None,
+        }
+    }
+
+    /// Wrap each new engine connection with its own lifecycle generation.
+    pub fn managed(
+        callbacks: Arc<dyn HostCallbacks>,
+        lifecycle: crate::lifecycle::Lifecycle,
+    ) -> Self {
+        Self {
+            callbacks,
+            lifecycle: Some(lifecycle),
+        }
     }
 }
 
 impl Launch for OsLaunch {
     fn spawn<'a>(&'a mut self, request: &'a LaunchRequest) -> SpawnFuture<'a> {
         let request = request.clone();
-        let callbacks = Arc::clone(&self.callbacks);
+        let callbacks = match &self.lifecycle {
+            Some(lifecycle) => lifecycle.observe(Arc::clone(&self.callbacks)),
+            None => Arc::clone(&self.callbacks),
+        };
         Box::pin(async move {
             let session = EngineSession::spawn(&request, callbacks).await?;
             Ok(Box::new(session) as Box<dyn EngineProcess>)

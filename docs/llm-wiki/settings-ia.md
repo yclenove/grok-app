@@ -73,6 +73,20 @@ Agent / 贡献者维护设置 UI 时**必读**。目标：层次清晰、可搜�
 
 ## 新增设置 — 强制清单
 
+### Computer Use（扩展）
+
+- 归属 `extensions/computer`，锚点 `settings-anchor-ext-computer`，搜索条目 `ext.computer`；
+  深链 `#/settings/extensions/computer`。设置页与 registry 实现由 P5-08 交付。
+- 总开关沿用 `computer_use_enabled`（默认关闭）；仅本地会话在下一次重建 ACP 时注入。
+- 同一区块管理系统权限/doctor、始终允许列表与撤销、敏感确认、前台策略、停止热键；
+  内置浏览窗数据清理只在 P5-10 能力交付后显示。
+- 关键词包括 computer use / 电脑操作 / 桌面控制及其余完整语言目录；UI 文案单一来源为
+  `computer-use/ui/locales/*.json`，经 `xtask ui export-i18n` 导出，不手改生成 catalog。
+- 关闭功能立即 Stop、拒绝审批并撤销端点/会话图片；重新开启不能解除持久 Stop。
+  授权与生命周期规则见 [computer-use.md](computer-use.md)。
+
+### 通用清单
+
 每次加用户可见设置项：
 
 1. **UI** 落在正确 section/tab，控件带稳定 `id={anchorId}`。  

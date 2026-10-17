@@ -15,8 +15,20 @@ import {
 import { setMediaEndpoint } from "@/lib/imageSrc";
 import type { MessageToolSegment } from "@/lib/session";
 
+const { closedHandlers } = vi.hoisted(() => ({
+  closedHandlers: new Set<(sessionId: string) => void>(),
+}));
+vi.mock("@/lib/api/computerUseShot", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/computerUseShot")>()),
+  listenComputerUseSessionClosed: async (handler: (sessionId: string) => void) => {
+    closedHandlers.add(handler);
+    return () => { closedHandlers.delete(handler); };
+  },
+}));
+
 afterEach(() => {
   cleanup();
+  closedHandlers.clear();
   setMediaEndpoint(null);
 });
 
@@ -62,6 +74,75 @@ function shot(sessionId: string, id = "i_1"): AdmittedShot {
 }
 
 describe("ComputerUseToolCard", () => {
+  it("clears closed-session images and the open preview while other chats retain theirs", async () => {
+    setMediaEndpoint({ baseUrl: "http://127.0.0.1:9", token: "tok" });
+    const book = new ShotBook();
+    book.admit(shot("sess-a"));
+    book.admit(shot("sess-b", "other"));
+    const imageViewer = viewer();
+    render(<ComputerUseToolCard
+      book={book} sessionId="sess-a" viewer={imageViewer}
+      loadShot={async () => shot("sess-a")}
+      tool={tool({ output: payload(clickDone, { screenshot: { id: "i_1" } }) })}
+    />);
+    fireEvent.click(await screen.findByTestId("cu-tool-thumb"));
+    await act(async () => {
+      for (const handler of closedHandlers) handler("sess-a");
+    });
+    expect(screen.queryByTestId("cu-tool-thumb")).toBeNull();
+    expect(imageViewer.close).toHaveBeenCalledOnce();
+    expect(book.resolve("sess-a", "i_1")).toBe("missing");
+    expect(book.resolve("sess-b", "other")).not.toBe("missing");
+  });
+
+  it("does not readmit an image response that arrives after session close", async () => {
+    setMediaEndpoint({ baseUrl: "http://127.0.0.1:9", token: "tok" });
+    const book = new ShotBook();
+    let finish: ((value: AdmittedShot) => void) | undefined;
+    const pending = new Promise<AdmittedShot>((resolve) => { finish = resolve; });
+    render(<ComputerUseToolCard
+      book={book} sessionId="sess-a" loadShot={() => pending}
+      tool={tool({ output: payload(clickDone, { screenshot: { id: "i_1" } }) })}
+    />);
+    await act(async () => {
+      for (const handler of closedHandlers) handler("sess-a");
+      finish?.(shot("sess-a"));
+      await pending;
+    });
+    expect(screen.queryByTestId("cu-tool-thumb")).toBeNull();
+    expect(book.resolve("sess-a", "i_1")).toBe("missing");
+  });
+
+  it("keeps another chat's current preview open when an earlier preview owner closes", async () => {
+    setMediaEndpoint({ baseUrl: "http://127.0.0.1:9", token: "tok" });
+    const book = new ShotBook();
+    book.admit(shot("sess-a"));
+    book.admit(shot("sess-b", "other"));
+    const imageViewer = viewer();
+    render(<>
+      <ComputerUseToolCard
+        book={book} sessionId="sess-a" viewer={imageViewer}
+        tool={tool({ output: payload(clickDone, { screenshot: { id: "i_1" } }) })}
+      />
+      <ComputerUseToolCard
+        book={book} sessionId="sess-b" viewer={imageViewer}
+        tool={tool({ output: payload(clickDone, { screenshot: { id: "other" } }) })}
+      />
+    </>);
+    const thumbs = screen.getAllByTestId("cu-tool-thumb");
+    fireEvent.click(thumbs[0]);
+    fireEvent.click(thumbs[1]);
+    await act(async () => {
+      for (const handler of closedHandlers) handler("sess-a");
+    });
+    expect(imageViewer.close).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("cu-tool-thumb")).toHaveLength(1);
+    await act(async () => {
+      for (const handler of closedHandlers) handler("sess-b");
+    });
+    expect(imageViewer.close).toHaveBeenCalledOnce();
+  });
+
   it("ignores a bare tool name without the action result shape", () => {
     expect(isComputerUseTool({ title: "click", status: "completed" })).toBe(false);
     expect(isComputerUseTool(tool({ status: "pending" }))).toBe(true);
