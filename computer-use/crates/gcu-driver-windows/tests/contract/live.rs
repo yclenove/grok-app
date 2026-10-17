@@ -63,8 +63,12 @@ impl Fixture {
                 e.to_string()
             })?;
         let fixture = Self { child, dir, state };
+        // Process start, eframe and wgpu initialisation are fixture setup, not the behaviour
+        // under test; a loaded runner has taken longer than the 5s used for observed effects.
         fixture
-            .wait("initial fixture JSON", |v| v["counter"].as_u64().is_some())
+            .wait_within(Duration::from_secs(30), "initial fixture JSON", |v| {
+                v["counter"].as_u64().is_some()
+            })
             .await?;
         Ok(fixture)
     }
@@ -76,9 +80,18 @@ impl Fixture {
         label: &str,
         accept: impl Fn(&Value) -> bool,
     ) -> Result<Value, String> {
+        self.wait_within(Duration::from_secs(5), label, accept)
+            .await
+    }
+    pub async fn wait_within(
+        &self,
+        budget: Duration,
+        label: &str,
+        accept: impl Fn(&Value) -> bool,
+    ) -> Result<Value, String> {
         poll(
             &mut DesktopClock::default(),
-            Duration::from_secs(5),
+            budget,
             label,
             || self.read(),
             accept,
