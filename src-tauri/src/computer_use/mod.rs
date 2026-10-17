@@ -220,7 +220,7 @@ pub fn install(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let host = app.state::<ComputerUseHost>();
-        let _ = host.set_enabled(false).await;
+        let _ = host.set_enabled(host.office().enabled()).await;
         let _ = host.phase().await;
         host.poll_forever().await;
     });

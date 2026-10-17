@@ -929,3 +929,8 @@
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* Computer Use reuses the settings card spacing inside the extensions tab. */
+.settings-computer-use > .settings-card + .settings-card {
+  margin-top: 14px;
+}

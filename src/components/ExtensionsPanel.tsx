@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ComputerUseSection } from "@/components/settings/ComputerUseSection";
 import * as api from "@/lib/api";
 import { createT, intlLocale, type Locale, type MessageKey } from "@/i18n";
 import { ExtensionsPanelSkillModals } from "@/components/ExtensionsPanelSkillModals";
@@ -164,6 +165,7 @@ export type ExtensionsTabId =
   | "hooks"
   | "rules"
   | "commands"
+  | "computer"
   /** @deprecated Deep-link only; resolves to plugins. */
   | "market";
 
@@ -1774,7 +1776,7 @@ export function ExtensionsPanel({
 
   return (
     <div className="ext-panel ext-ref-shell" data-testid="extensions-panel">
-      <p className="settings-page__lead">{tr("ext.lead")}</p>
+      {tab !== "computer" && <p className="settings-page__lead">{tr("ext.lead")}</p>}
 
       {onTabChange ? (
         <div
@@ -1792,6 +1794,7 @@ export function ExtensionsPanel({
                 ["commands", "ext.commands.title", null] as const,
                 ["agents", "ext.agents.title", null] as const,
                 ["hooks", "ext.hooks.title", null] as const,
+                ["computer", "cu.settings.title", null] as const,
               ] as const
             ).map(([id, key, count]) => (
               <button
@@ -1878,13 +1881,15 @@ export function ExtensionsPanel({
         </div>
       ) : null}
 
-      {pathHint && (
+      {tab === "computer" && <ComputerUseSection locale={locale} />}
+
+      {tab !== "computer" && pathHint && (
         <p className="ext-alert ext-alert--warn" role="status">
           {pathHint}
         </p>
       )}
 
-      {actionError && (
+      {tab !== "computer" && actionError && (
         <div className="ext-alert ext-alert--error" role="alert">
           <div className="ext-alert__title">
             {actionErrorSource === "mcp"
@@ -1905,7 +1910,7 @@ export function ExtensionsPanel({
         </div>
       )}
 
-      {bannerError && (
+      {tab !== "computer" && bannerError && (
         <div
           className={
             "ext-alert" + (cliMissing ? " ext-alert--error" : " ext-alert--warn")

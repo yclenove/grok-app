@@ -56,6 +56,7 @@ export type SettingsTabId =
   | "commands"
   | "agents"
   | "hooks"
+  | "computer"
   | "market"
   // runtime
   | "cli"

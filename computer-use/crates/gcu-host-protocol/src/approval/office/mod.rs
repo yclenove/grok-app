@@ -14,6 +14,9 @@ use crate::supervisor::baseline_policy;
 
 mod display;
 mod sensitive;
+pub(super) mod settings;
+pub use settings::Approval;
+use settings::{restore, snapshot, Grant, Snapshot};
 
 use super::disk::{read_policy, write_policy};
 use super::{
@@ -31,6 +34,7 @@ struct Pending {
     policy_version: u64,
     lane: Lane,
     publishing: Option<u64>,
+    display: Option<Grant>,
     /// Session close or disconnect won while a publish was in flight.
     void: bool,
     tx: Option<oneshot::Sender<Outcome>>,
@@ -44,7 +48,9 @@ struct Inner {
     hook: Option<Hook>,
     pending: HashMap<u64, Pending>,
     consumed: HashSet<u64>,
-    rollback: Option<Policy>,
+    rollback: Option<Snapshot>,
+    grants: Vec<Grant>,
+    enabled: bool,
     events: Option<mpsc::UnboundedSender<Notice>>,
 }
 
@@ -52,6 +58,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct Office {
     inner: Arc<Mutex<Inner>>,
+    edits: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Waiter returned by a bind. Dropping it releases the request.
@@ -73,10 +80,16 @@ impl Office {
         let policy = path
             .as_ref()
             .and_then(|path| read_policy(path))
-            .unwrap_or_else(baseline_policy);
+            .unwrap_or_else(|| Snapshot {
+                policy: baseline_policy(),
+                grants: Vec::new(),
+                computer_use_enabled: false,
+            });
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                policy,
+                policy: policy.policy,
+                grants: policy.grants,
+                enabled: policy.computer_use_enabled,
                 disk: path,
                 engine: None,
                 peer: None,
@@ -86,6 +99,7 @@ impl Office {
                 rollback: None,
                 events: None,
             })),
+            edits: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -155,6 +169,7 @@ impl Office {
                 policy_version: card.policy_version,
                 lane: Lane::App,
                 publishing: None,
+                display: Some(settings::grant(request)),
                 void: false,
                 tx: Some(tx),
             },
@@ -185,6 +200,7 @@ impl Office {
     /// Cancellation: this method waits on the publisher; it does not time out
     /// itself. The publisher uses the ordinary five-second RPC budget.
     pub async fn decide(&self, claim: Claim) -> Result<(), Fault> {
+        let _edit = self.edits.try_lock().map_err(|_| Fault::Replay)?;
         let prepared = {
             let mut inner = lock(&self.inner);
             prepare(&mut inner, &claim)?
@@ -287,10 +303,10 @@ impl Office {
             let mut inner = lock(&self.inner);
             let next = if inner.policy.version == version {
                 inner.rollback.take().map(|mut old| {
-                    old.version = version.saturating_add(1);
+                    old.policy.version = version.saturating_add(1);
                     let _ = store(&inner.disk, &old);
-                    let next = old.version;
-                    inner.policy = old;
+                    let next = old.policy.version;
+                    restore(&mut inner, old);
                     next
                 })
             } else {
@@ -402,15 +418,25 @@ fn begin_always(inner: &mut Inner, request_id: u64) -> Result<Prepared, Fault> {
     else {
         return Err(Fault::Absent);
     };
-    let old = inner.policy.clone();
-    let version = old.version.checked_add(1).ok_or(Fault::Failed)?;
+    let old = snapshot(inner);
+    let version = old.policy.version.checked_add(1).ok_or(Fault::Failed)?;
     let mut next = old.clone();
-    next.version = version;
-    display::push_identity(&mut next, &image);
+    next.policy.version = version;
+    display::push_identity(&mut next.policy, &image);
+    if let Some(mut grant) = inner
+        .pending
+        .get(&request_id)
+        .and_then(|p| p.display.clone())
+    {
+        grant.granted_ms = Some(super::host::wall_ms());
+        next.grants
+            .retain(|g| !display::same_identity(&g.identity, &grant.identity));
+        next.grants.push(grant);
+    }
     if !store(&inner.disk, &next) {
         return Err(Fault::Failed);
     }
-    inner.policy = next;
+    restore(inner, next);
     inner.rollback = Some(old);
     if let Some(pending) = inner.pending.get_mut(&request_id) {
         pending.publishing = Some(version);
@@ -429,7 +455,7 @@ fn rollback(inner: &mut Inner, version: u64) {
         return;
     };
     if store(&inner.disk, &old) {
-        inner.policy = old;
+        restore(inner, old);
     }
 }
 
@@ -499,7 +525,7 @@ fn deny_all(inner: &mut Inner, settled: Settled) {
     }
 }
 
-fn store(path: &Option<PathBuf>, policy: &Policy) -> bool {
+fn store(path: &Option<PathBuf>, policy: &Snapshot) -> bool {
     match path {
         Some(path) => write_policy(path, policy),
         None => true,

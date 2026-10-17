@@ -347,7 +347,10 @@ async fn decide_always_writes_0600_policy_and_reloads_it() {
         .unwrap();
     assert_eq!(wait.recv().await, Outcome::Decision(Decision::Always));
     let raw = std::fs::read(&path).unwrap();
-    let loaded: Policy = serde_json::from_slice(&raw).unwrap();
+    let loaded: Policy = serde_json::from_value(
+        serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["policy"].clone(),
+    )
+    .unwrap();
     assert_eq!(loaded.version, 2);
     assert_eq!(loaded.always.len(), 1);
     #[cfg(unix)]

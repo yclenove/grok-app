@@ -112,7 +112,7 @@ fn to_json(value: &impl serde::Serialize) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|_| RpcError::new(-32603, "approval response"))
 }
 
-fn wall_ms() -> u64 {
+pub(crate) fn wall_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))

@@ -279,7 +279,7 @@ export async function ensureOpenaiPluginsMarketplace(
  */
 export function resolveExtensionsTabId(
   tab: string | null | undefined,
-): "plugins" | "skills" | "mcp" | "agents" | "hooks" | "rules" | "commands" {
+): "plugins" | "skills" | "mcp" | "agents" | "hooks" | "rules" | "commands" | "computer" {
   const t = (tab ?? "").trim().toLowerCase();
   if (t === "market" || t === "apps" || !t) return "plugins";
   if (
@@ -288,7 +288,8 @@ export function resolveExtensionsTabId(
     t === "agents" ||
     t === "hooks" ||
     t === "rules" ||
-    t === "commands"
+    t === "commands" ||
+    t === "computer"
   ) {
     return t;
   }

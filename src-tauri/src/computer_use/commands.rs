@@ -88,3 +88,142 @@ fn trusted_control(window: &WebviewWindow) -> Result<(), String> {
         Err("untrusted".into())
     }
 }
+
+/// User-editable settings; grants have a separate read/revoke surface.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    enabled: bool,
+    confirmation: gcu_host_protocol::messages::ConfirmationLevel,
+    foreground: gcu_host_protocol::messages::ForegroundPolicy,
+    hotkey: String,
+}
+
+/// Read the current switch and policy. No native probe or file IO.
+#[tauri::command]
+pub async fn cu_settings_get(host: State<'_, ComputerUseHost>) -> Result<SettingsView, String> {
+    let policy = host.office().policy();
+    Ok(SettingsView {
+        enabled: host.status().await.enabled,
+        confirmation: policy.sensitive_action_confirmation,
+        foreground: policy.allow_foreground,
+        hotkey: policy.stop_hotkey,
+    })
+}
+
+/// Apply the switch, then persist on a blocking worker. Never clears Stop.
+#[tauri::command]
+pub async fn cu_settings_enabled(
+    host: State<'_, ComputerUseHost>,
+    enabled: bool,
+) -> Result<(), String> {
+    let previous = host.office().enabled();
+    if !enabled {
+        host.user_stop().await.map_err(|_| "failed".to_owned())?;
+    }
+    host.set_enabled(enabled)
+        .await
+        .map_err(|_| "failed".to_owned())?;
+    let office = host.office();
+    let saved = tauri::async_runtime::spawn_blocking(move || office.save_enabled(enabled))
+        .await
+        .unwrap_or(Err(gcu_host_protocol::approval::Fault::Failed));
+    if saved.is_err() {
+        let _ = host.set_enabled(previous).await;
+    }
+    saved.map_err(fault_code)
+}
+
+/// Persist only the supported policy choices and await the engine reload.
+#[tauri::command]
+pub async fn cu_settings_policy(
+    host: State<'_, ComputerUseHost>,
+    confirmation: gcu_host_protocol::messages::ConfirmationLevel,
+    foreground: gcu_host_protocol::messages::ForegroundPolicy,
+) -> Result<(), String> {
+    host.office()
+        .set_preferences(confirmation, foreground)
+        .await
+        .map_err(fault_code)
+}
+
+/// List persistent approvals without issuing a grant or probing native apps.
+#[tauri::command]
+pub fn cu_approvals_list(
+    host: State<'_, ComputerUseHost>,
+) -> Vec<gcu_host_protocol::approval::Approval> {
+    host.office().approvals()
+}
+
+/// Remove one exact stored image and await the engine reload.
+#[tauri::command]
+pub async fn cu_approvals_revoke(
+    host: State<'_, ComputerUseHost>,
+    id: String,
+) -> Result<(), String> {
+    host.office().revoke(&id).await.map_err(fault_code)
+}
+
+/// Probe an enabled engine over the authenticated Host protocol (five seconds).
+#[tauri::command]
+pub async fn cu_doctor(
+    host: State<'_, ComputerUseHost>,
+) -> Result<gcu_host_protocol::messages::DoctorReport, String> {
+    // Wake an idle engine without opening a model session or issuing a token.
+    if !host.status().await.enabled {
+        return Err("disabled".into());
+    }
+    host.set_sessions(1)
+        .await
+        .map_err(|_| "failed".to_owned())?;
+    let report = host.office().doctor().await;
+    let count = host.inner.lock().await.book.live_count();
+    let _ = host.set_sessions(count).await;
+    report.map_err(fault_code)
+}
+
+/// Only fixed OS settings destinations can be opened; never accepts a URL/path.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPermission {
+    /// macOS Accessibility.
+    Accessibility,
+    /// macOS Screen Recording.
+    ScreenRecording,
+    /// Optional macOS Input Monitoring.
+    InputMonitoring,
+}
+
+/// Open a fixed macOS permission pane. Five-second wait; cancellation kills open.
+#[tauri::command]
+pub async fn cu_open_system_settings(kind: SystemPermission) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let pane = match kind {
+            SystemPermission::Accessibility => "Privacy_Accessibility",
+            SystemPermission::ScreenRecording => "Privacy_ScreenCapture",
+            SystemPermission::InputMonitoring => "Privacy_ListenEvent",
+        };
+        let mut child = tokio::process::Command::new("/usr/bin/open")
+            .arg(format!(
+                "x-apple.systempreferences:com.apple.preference.security?{pane}"
+            ))
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| "failed".to_owned())?;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .map_err(|_| "failed".to_owned())?
+            .map_err(|_| "failed".to_owned())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("failed".into())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = kind;
+        Err("unavailable".into())
+    }
+}
