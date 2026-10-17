@@ -9,8 +9,8 @@ use crate::{
     session::Session,
 };
 use gcu_host_api::{
-    AppIdentity, AppInfo, ApprovalDecision, ConfirmationLevel, ForegroundPolicy, ImageRef,
-    PolicyConfig, SignatureState,
+    AppIdentity, AppInfo, ApprovalDecision, ConfirmationLevel, ForegroundPolicy, HandoffReason,
+    ImageRef, PolicyConfig, SignatureState,
 };
 use gcu_protocol::ErrorCode;
 use std::{sync::atomic::Ordering, time::Duration};
@@ -90,7 +90,19 @@ impl ActionRouter {
                     {
                         return Err(ErrorCode::CapabilityUnavailable);
                     }
-                    let crop = approval_crop(fresh, intent)?;
+                    let crop = match approval_crop(fresh, intent) {
+                        Ok(crop) => crop,
+                        Err(ErrorCode::HandoffRequired) => {
+                            self.take_over(
+                                session,
+                                &app,
+                                HandoffReason::Other("sensitive area could not be located".into()),
+                            )
+                            .await?;
+                            return Err(ErrorCode::HandoffRequired);
+                        }
+                        Err(code) => return Err(code),
+                    };
                     let started = tokio::time::Instant::now();
                     let answer = self
                         .wait(
@@ -117,7 +129,10 @@ impl ActionRouter {
                     }
                 }
                 PolicyDecision::Refuse(code, _) => return Err(code),
-                PolicyDecision::Handoff(_) => return Err(ErrorCode::HandoffRequired),
+                PolicyDecision::Handoff(reason) => {
+                    self.take_over(session, &app, reason).await?;
+                    return Err(ErrorCode::HandoffRequired);
+                }
             }
         }
         Err(ErrorCode::ApprovalDenied)
@@ -196,6 +211,18 @@ impl ActionRouter {
             policy_version: self.policy_version.load(Ordering::Acquire),
         }
     }
+    async fn take_over(
+        &self,
+        session: &Session,
+        app: &AppInfo,
+        reason: HandoffReason,
+    ) -> Result<(), ErrorCode> {
+        self.wait(
+            session,
+            session.request_handoff(self.approvals.as_ref(), app, reason),
+        )
+        .await?
+    }
     pub(crate) async fn recheck(
         &self,
         session: &Session,
@@ -260,7 +287,10 @@ impl ActionRouter {
         ) {
             PolicyDecision::Allow { .. } => Ok(current),
             PolicyDecision::Refuse(code, _) => Err(code),
-            PolicyDecision::Handoff(_) => Err(ErrorCode::HandoffRequired),
+            PolicyDecision::Handoff(reason) => {
+                self.take_over(session, &app, reason).await?;
+                Err(ErrorCode::HandoffRequired)
+            }
             _ => Err(ErrorCode::ApprovalDenied),
         }
     }

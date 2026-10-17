@@ -41,6 +41,8 @@ import { ComposerRemoteMenu } from "@/components/ComposerRemoteMenu";
 import { ComposerWorktreeMenu } from "@/components/ComposerWorktreeMenu";
 import { AskUserBar } from "@/components/AskUserBar";
 import { ComputerUseApprovalSlot } from "@/components/computer-use/ComputerUseApprovalCard";
+import { ComputerUseActionConfirmSlot } from "@/components/computer-use/ComputerUseActionConfirmCard";
+import { ComputerUseHandoffSlot } from "@/components/computer-use/ComputerUseHandoffCard";
 import { PermissionCountdown } from "@/components/PermissionCountdown";
 import { SuperGrokMark } from "@/components/SuperGrokMark";
 import { IconFileDiff, IconGitBranch } from "@/components/icons";
@@ -513,6 +515,8 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
               />
             ) : null}
             <ComputerUseApprovalSlot sessionId={session.sessionId} locale={locale} />
+            <ComputerUseActionConfirmSlot sessionId={session.sessionId} locale={locale} />
+            <ComputerUseHandoffSlot sessionId={session.sessionId} locale={locale} />
             {perm ? (
               <div
                 ref={permBarRef}

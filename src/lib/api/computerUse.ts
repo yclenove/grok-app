@@ -2,6 +2,14 @@
 
 import { invoke, isDesktopHost } from "./host";
 import type { Card, Claim } from "@/lib/computer-use/approvalDesk";
+import type {
+  ConfirmCard,
+  ConfirmClaim,
+  ConfirmEnd,
+  HandoffCard,
+  HandoffClaim,
+  HandoffEnd,
+} from "@/lib/computer-use/confirmState";
 
 type PendingNotice = { kind: "pending"; card: Card };
 type SettledNotice = {
@@ -29,6 +37,63 @@ export function listenComputerUseSettled(
 ): Promise<() => void> {
   return listenDesktop<SettledNotice>("cu://approval-settled", (payload) => {
     if (payload.kind === "settled") handler(payload.requestId);
+  });
+}
+
+type ConfirmPendingNotice = { kind: "confirmPending"; card: ConfirmCard };
+type ConfirmSettledNotice = {
+  kind: "confirmSettled";
+  requestId: number;
+  sessionId: string;
+  end: ConfirmEnd;
+};
+type HandoffPendingNotice = { kind: "handoffPending"; card: HandoffCard };
+type HandoffSettledNotice = {
+  kind: "handoffSettled";
+  requestId: number;
+  sessionId: string;
+  end: HandoffEnd;
+};
+
+export async function cuConfirmDecide(claim: ConfirmClaim): Promise<ConfirmEnd> {
+  if (!isDesktopHost()) throw new Error("failed");
+  return invoke<ConfirmEnd>("cu_confirm_decide", { body: claim });
+}
+
+export async function cuHandoffDecide(claim: HandoffClaim): Promise<HandoffEnd> {
+  if (!isDesktopHost()) throw new Error("failed");
+  return invoke<HandoffEnd>("cu_handoff_decide", { body: claim });
+}
+
+export function listenComputerUseConfirm(
+  handler: (card: ConfirmCard) => void,
+): Promise<() => void> {
+  return listenDesktop<ConfirmPendingNotice>("cu://confirm", (payload) => {
+    if (payload.kind === "confirmPending") handler(payload.card);
+  });
+}
+
+export function listenComputerUseConfirmSettled(
+  handler: (requestId: number, end: ConfirmEnd) => void,
+): Promise<() => void> {
+  return listenDesktop<ConfirmSettledNotice>("cu://confirm-settled", (payload) => {
+    if (payload.kind === "confirmSettled") handler(payload.requestId, payload.end);
+  });
+}
+
+export function listenComputerUseHandoff(
+  handler: (card: HandoffCard) => void,
+): Promise<() => void> {
+  return listenDesktop<HandoffPendingNotice>("cu://handoff", (payload) => {
+    if (payload.kind === "handoffPending") handler(payload.card);
+  });
+}
+
+export function listenComputerUseHandoffSettled(
+  handler: (requestId: number, end: HandoffEnd) => void,
+): Promise<() => void> {
+  return listenDesktop<HandoffSettledNotice>("cu://handoff-settled", (payload) => {
+    if (payload.kind === "handoffSettled") handler(payload.requestId, payload.end);
   });
 }
 
