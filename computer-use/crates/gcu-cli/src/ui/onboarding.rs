@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 
 use crate::exit::Failure;
-use crate::helper::auth::launch_command;
+use crate::helper::auth::{launch_command, launch_command_at, own_app_path};
 
 /// How the helper should continue after the onboarding window returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,7 +266,11 @@ pub fn perform_restart(
     pid: u32,
     host: &mut dyn RestartHost,
 ) -> Result<(), RestartError> {
-    let argv = launch_command(bundle).ok_or(RestartError::BadBundle)?;
+    let by_bundle = launch_command(bundle).ok_or(RestartError::BadBundle)?;
+    // Relaunch this exact app: a bundle id may resolve to another registered copy.
+    let argv = own_app_path()
+        .and_then(|app| launch_command_at(&app))
+        .unwrap_or(by_bundle);
     if pid == 0 {
         return Err(RestartError::BadPid);
     }
@@ -286,26 +290,39 @@ pub fn perform_restart(
 /// Shell script that `exec`s `argv` only after `pid` has exited.
 ///
 /// The script exits 1 if the pid is still alive after about five seconds, so a
-/// failed exit cannot start a second helper. `argv` must be shell-safe
-/// (`[A-Za-z0-9._-]`). Blocking: none. Timeout: none. Cancellation: none.
+/// failed exit cannot start a second helper. Each `argv` entry is POSIX-quoted;
+/// empty entries and control characters are refused. Blocking: none. Timeout: none. Cancellation: none.
 pub fn relaunch_waiter(pid: u32, argv: &[String]) -> Result<String, RestartError> {
     if pid == 0 {
         return Err(RestartError::BadPid);
     }
-    if argv.is_empty() || argv.iter().any(|arg| !shell_safe(arg)) {
+    if argv.is_empty()
+        || argv
+            .iter()
+            .any(|arg| arg.is_empty() || arg.chars().any(char::is_control))
+    {
         return Err(RestartError::LaunchFailed);
     }
-    let joined = argv.join(" ");
+    let joined = argv
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     Ok(format!(
         "i=0; while [ \"$i\" -lt 50 ]; do if ! kill -0 {pid} 2>/dev/null; then exec {joined}; fi; i=$((i+1)); sleep 0.1; done; exit 1"
     ))
 }
 
-fn shell_safe(arg: &str) -> bool {
-    !arg.is_empty()
+/// POSIX single-quote `arg`; safe for any text without control characters.
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
         && arg
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 /// Apply one IPC token. Unknown tokens have no side effects.

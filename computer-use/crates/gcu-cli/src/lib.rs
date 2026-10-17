@@ -34,7 +34,14 @@ mod worker;
 /// except the nonfatal turn-ended hook. Payloads, credentials and panic details
 /// are never printed.
 pub fn cli_main() {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    // macOS "Quit & Reopen" (after a Screen Recording grant) and a double click start the
+    // bundle with no arguments. Inside the helper app that means "run the helper".
+    #[cfg(target_os = "macos")]
+    if args.is_empty() && helper::auth::own_app_path().is_some() {
+        args.push("agent".into());
+    }
     if args.first().is_some_and(|arg| arg == "turn-ended") {
         turn_ended::entry(args.into_iter().skip(1).collect());
     }
@@ -66,7 +73,8 @@ pub fn cli_main() {
     }));
     let result = std::panic::catch_unwind(|| {
         args::approval_mode()?;
-        let cli = args::Cli::parse();
+        let argv0 = std::env::args_os().next().unwrap_or_default();
+        let cli = args::Cli::parse_from(std::iter::once(argv0).chain(args.iter().cloned()));
         let _ = tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_ansi(false)
