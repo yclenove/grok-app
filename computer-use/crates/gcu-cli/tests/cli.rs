@@ -135,7 +135,8 @@ fn auto_and_native_fail_closed_without_a_driver_document() {
             stderr.contains("not compiled")
                 || stderr.contains("not assembled")
                 || stderr.contains("only with --driver fake")
-                || stderr.contains("No safe native route"),
+                || stderr.contains("No safe native route")
+                || stderr.contains("does not assemble a native driver"),
             "{stderr}"
         );
     }
