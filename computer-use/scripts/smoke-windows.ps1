@@ -218,6 +218,10 @@ try {
         throw "not_run: $reason"
     }
     $env:GCU_DESKTOP = '1'
+    # These native test binaries run outside cargo, so .cargo/config.toml does not
+    # apply. Debug builds of the async dispatch path need close to 2 MiB of stack,
+    # the default for a libtest thread; give them headroom like cargo test does.
+    $env:RUST_MIN_STACK = '8388608'
     $env:GCU_WORKER_EXE = $WorkerExe
     $env:GCU_NATIVE_TRACE_DIR = Join-Path $OutputDir 'native'
     New-Item -ItemType Directory -Force -Path $env:GCU_NATIVE_TRACE_DIR | Out-Null
