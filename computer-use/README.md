@@ -11,7 +11,7 @@ This page matches the `gcu` command and the release packager in this tree. A cle
 | Command | What it does in this build |
 |---|---|
 | `gcu version`, `gcu install`, `gcu uninstall`, `gcu approvals` | Work without a desktop driver. |
-| `gcu mcp` on macOS, without `--driver` | Forwards stdio to `Grok Computer Use.app`. The helper loads the macOS driver. That driver starts Stop-latched. A live desktop through this helper is **未验证**. |
+| `gcu mcp` on macOS, without `--driver` | Forwards stdio to `Grok Computer Use.app`. The helper shares the Host Stop latch. A live desktop, helper TCC, the physical hotkey, the App subprocess chain, and a real `gcu resume` are **未验证**. |
 | `gcu`, with no subcommand, on macOS | Asks Launch Services to start the helper (`open -g -j -b <bundle id> --args agent`). |
 | `gcu doctor`, `gcu call`, and `gcu mcp` on Linux and Windows | Omitting `--driver` selects `auto`. `auto` and `native` exit 2 when that route is not compiled, and they do not fall back to fake. `--driver fake` is the explicit offline driver. |
 | `gcu` with no subcommand, on Linux and Windows | Exits 2 with that same message. It does not print doctor. |
@@ -19,7 +19,7 @@ This page matches the `gcu` command and the release packager in this tree. A cle
 | `gcu engine` | Private channels for the Grok App host. Not the way to attach a CLI client. |
 | `gcu agent` | The helper process. Launch Services must start it. A shell does not receive the helper's permission grant. |
 
-`--driver` is `auto` (the default), `native`, or `fake`. `auto` and `native` exit 2 on this binary because the native route is not assembled; they do not fall back to fake, widen input, or elevate. `--scene` is valid only with `--driver fake`. Omitted fake uses `form`. The fake desktop does not send operating-system input. A release binary also needs `GCU_ALLOW_FAKE=1`. A debug build does not. Scenes: `form`, `chat`, `list`, `modal`, `webarea`, `canvas`, `ide`, `login`, `terminal`, `web_terminal`, `submit_unknown`.
+`--driver` is `auto` (the default), `native`, or `fake`. They do not fall back to fake, widen input, or elevate. On Linux and Windows, `auto` and `native` exit 2. On macOS, `gcu mcp` forwards to the helper, `gcu engine` assembles a driver only inside an authenticated App subprocess and only claims that TCC chain for macOS 27 arm64, and `gcu call`, `gcu doctor`, and HTTP MCP exit 2 and point at the helper or the App. `--scene` is valid only with `--driver fake`. Omitted fake uses `form`. The fake desktop does not send operating-system input. A release binary also needs `GCU_ALLOW_FAKE=1`. A debug build does not. Scenes: `form`, `chat`, `list`, `modal`, `webarea`, `canvas`, `ide`, `login`, `terminal`, `web_terminal`, `submit_unknown`.
 
 There is no `gcu batch`, `gcu script`, or `gcu approvals revoke-all`.
 
@@ -270,7 +270,7 @@ Built-in Stop chords, when that driver is actually running:
 
 For an in-process server, including `--driver fake`, SIGINT and SIGTERM latch Stop and release held input. `gcu mcp` on macOS without `--driver` only forwards stdio. This guide does not claim that Ctrl+C in that proxy latches the helper.
 
-The macOS helper's driver constructor starts Stop-latched, and the helper does not attach the Host latch to that driver. Treat live actions through the helper as **未验证**, and do not expect `gcu resume` to clear that constructor latch.
+The macOS helper shares the Host Stop latch. It does not start a private already-stopped latch. Live helper actions, helper-only TCC, the App subprocess chain, the physical hotkey, and a real `gcu resume` are **未验证**. macOS 14, macOS 15, and Intel are not claimed. The configured hotkey string is still not passed into the driver.
 
 `gcu-overlay` draws a Stop control and can exclude itself from capture on macOS and Windows. It is not linked into this `gcu` binary. Its real GUI is **未验证**. `GCU_OVERLAY=0` would hide that UI only. It is not a switch in this binary.
 
@@ -291,7 +291,7 @@ Driver libraries and the `gcu` command are not the same thing. The table is what
 
 | Capability | macOS | Windows | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
-| Real driver in `gcu mcp` | Helper proxy. Live use **未验证**. Starts Stop-latched. | Not assembled. `auto` and `native` exit 2 and do not fall back to fake. | Not linked into `gcu`. `auto` and `native` exit 2 and do not fall back to fake. | Same as X11 for the CLI. |
+| Real driver in `gcu mcp` | Helper proxy. The helper shares the Host Stop latch. Live use, TCC, and `gcu resume` **未验证**. | Not assembled. `auto` and `native` exit 2 and do not fall back to fake. | Not linked into `gcu`. `auto` and `native` exit 2 and do not fall back to fake. | Same as X11 for the CLI. |
 | Accessibility tree | AX. Mini, macOS 27, arm64: live contract 26 passed, 4 skipped, 0 failed. First read can be a short incomplete tree. macOS 14/15 and Intel **未验证**. | UIA on the `windows-2022` runner: contract 15 passed, 15 skipped, 0 failed. First read can be incomplete. Physical desktop **未验证**. | AT-SPI on Xvfb CI: 23 passed, 6 skipped, 0 failed. Physical desktop **未验证**. | Detection and portal code exist. Real compositor **未验证**. |
 | Window screenshot | ScreenCaptureKit, including a covered window, on that Mini for the driver tests. Packaged helper **未验证**. | WGC, then PrintWindow. Occluded windows and 150% DPI **未验证**. | XComposite on Xvfb passed. No composite and covered: refused. | Portal ScreenCast. Real portal **未验证**. |
 | Background actions | Partial. AppKit can receive a background click on macOS 27. Chromium does not ([ADR 0006](docs/adr/0006-macos-tcc-helper.md)). | Partial. UIA Invoke can activate the window. A native button uses a non-activating click. | AT-SPI where the interface exists. XTEST is not used when Stop cannot be grabbed. | Portal input only with a reliable Stop. No full-desktop fallback. **未验证** live. |
@@ -351,7 +351,7 @@ Session secrets are not placed in the environment or in `argv`. Do not scrape ch
 | `Launch Services did not start the computer-use helper` | `open -Ra` the absolute `.app` path first. `open -b` cannot start an app Launch Services does not know. |
 | `The computer-use helper runs only on macOS` | `gcu agent` was started on another system. |
 | Approvals file cannot be read | The file is missing its owner-only mode, is a symlink, or is corrupt. Fix or delete that one file. Do not chmod your home directory. |
-| The model keeps receiving `stopped_by_user` | Stop is still latched. `gcu turn-ended` will not clear it. Resume from a TTY with `gcu resume`. The macOS helper's own initial latch is a separate limit, above. |
+| The model keeps receiving `stopped_by_user` | Stop is still latched. `gcu turn-ended` will not clear it. Resume from a TTY with `gcu resume`. A real macOS helper resume is **未验证**. |
 | `gcu install` says it will edit `~/.grok` | It will. A project-scoped Grok install still writes the Stop hook there. Pass `--yes` only when you mean that. |
 
 ## Uninstall
