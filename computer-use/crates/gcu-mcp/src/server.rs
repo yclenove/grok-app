@@ -49,6 +49,8 @@ pub struct ServerConfig {
     pub profile: Profile,
     /// App session that may see `browser_navigate`. None keeps the static catalog.
     pub browser_session: Option<String>,
+    /// Same sentence doctor prints. Empty leaves instructions unchanged.
+    pub route_note: String,
     /// Real script runner. `None` keeps `computer_script` unregistered.
     pub script: Option<Arc<dyn ScriptRunner>>,
 }
@@ -58,6 +60,7 @@ impl std::fmt::Debug for ServerConfig {
             .debug_struct("ServerConfig")
             .field("profile", &self.profile)
             .field("browser_session", &self.browser_session.is_some())
+            .field("route_note", &self.route_note)
             .field("script", &self.script.is_some())
             .finish()
     }
@@ -302,6 +305,7 @@ impl ServerHandler for Server {
         .with_instructions(instructions::instructions(
             self.0.driver.platform(),
             self.0.config.profile,
+            &self.0.config.route_note,
         ))
     }
     async fn list_tools(

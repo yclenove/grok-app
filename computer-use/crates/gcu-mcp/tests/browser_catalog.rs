@@ -79,6 +79,7 @@ fn harness(profile: Profile, session: Option<&str>) -> Harness {
             profile,
             browser_session: session.map(str::to_owned),
             script: None,
+            route_note: String::new(),
         },
     )
 }

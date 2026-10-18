@@ -39,6 +39,7 @@ async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
             ServerConfig {
                 profile,
                 browser_session: None,
+                route_note: String::new(),
                 script: None,
             },
         );

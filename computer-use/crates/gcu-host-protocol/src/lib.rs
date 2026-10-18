@@ -14,6 +14,7 @@ pub mod messages;
 pub mod overlay;
 pub mod panel;
 pub mod server;
+pub mod stop_reason;
 pub mod supervisor;
 #[cfg(all(feature = "testing", unix))]
 pub mod testing;

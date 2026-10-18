@@ -1,8 +1,11 @@
-# Fake CLI
+# Driver selection
 
-The CLI currently assembles only the offline fake driver. Omitting `--driver`
-returns exit 2 and identifies real driver assembly as P4. A release binary also
-requires `GCU_ALLOW_FAKE=1` for fake use. No operating-system input is delivered.
+Omitting `--driver` selects `auto`. `auto` and `native` exit 2 when that route
+is not compiled into this binary. They do not fall back to fake, do not switch
+to a wider input route, and do not elevate. `--driver fake` is the explicit
+offline driver. A release binary also requires `GCU_ALLOW_FAKE=1` for fake use.
+`--scene` is valid only with `--driver fake`. No operating-system input is
+delivered by fake.
 
 ```sh
 gcu version
