@@ -105,7 +105,7 @@ pub(super) fn requirement_argv(path: &Path, requirement: &str) -> Vec<OsString> 
 }
 
 /// Args for display. Parsed only after verification has succeeded.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(super) fn display_argv(path: &Path) -> Vec<OsString> {
     vec![OsString::from("-dvvv"), path.as_os_str().to_os_string()]
 }
