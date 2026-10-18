@@ -205,6 +205,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    browser_session: None,
                     route_note: disclosure.note(),
                     script: crate::script_worker::runner(),
                 },
@@ -244,6 +245,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    browser_session: None,
                     route_note: disclosure.note(),
                     script: crate::script_worker::runner(),
                 },

@@ -545,6 +545,13 @@ pub fn app_invoke_handler(
         computer_use::commands::cu_approvals_revoke,
         computer_use::commands::cu_doctor,
         computer_use::commands::cu_open_system_settings,
+        computer_use::browser::cu_browser_open,
+        computer_use::browser::cu_browser_state,
+        computer_use::browser::cu_browser_navigate,
+        computer_use::browser::cu_browser_back,
+        computer_use::browser::cu_browser_forward,
+        computer_use::browser::cu_browser_reload,
+        computer_use::browser::cu_browser_clear,
     ]);
     move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
         let label = invoke.message.webview_ref().label();

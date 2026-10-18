@@ -82,6 +82,7 @@ pub fn execution_decisions(
         grants: &grants,
         policy_version: 1,
         closed: false,
+        browser: None,
     };
     [
         Tool::Click,

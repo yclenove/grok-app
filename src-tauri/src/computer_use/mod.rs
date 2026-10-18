@@ -1,6 +1,7 @@
 //! Computer Use host. The engine is a child process, not a linked driver.
 
 pub(crate) mod approval;
+pub(crate) mod browser;
 pub(crate) mod commands;
 mod events;
 mod gateway;

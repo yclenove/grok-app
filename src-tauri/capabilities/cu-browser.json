@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "cu-browser",
+  "description": "Closed built-in browser chrome. No content webview and no permissions.",
+  "windows": ["cu-browser-chrome"],
+  "permissions": []
+}

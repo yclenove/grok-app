@@ -37,6 +37,7 @@
 //! the stop latch and the idle clock once. Approval waits live on the session.
 
 mod approval;
+mod browser;
 /// Clipboard exposure classification shared by native drivers.
 pub mod clipboard;
 mod guard;
@@ -235,6 +236,11 @@ pub struct PolicyCtx<'a> {
     pub policy_version: u64,
     /// The session has closed. Closed sessions refuse.
     pub closed: bool,
+    /// Verified built-in browser window. Production passes None.
+    ///
+    /// A title, webview label, or page name is not this fact. The action router
+    /// does not set it, because drivers do not supply a window generation.
+    pub browser: Option<&'a gcu_protocol::builtin_browser::VerifiedWindow>,
 }
 
 /// How far a driver may go when the decision is allow.
@@ -404,6 +410,10 @@ impl PolicyEngine {
                 kind: DenyKind::Builtin(DenyCategory::SecurityPrompt),
                 ..
             } => Some(PolicyDecision::Handoff(HandoffReason::SystemPrompt)),
+            IdentityVerdict::Denied {
+                kind: DenyKind::Builtin(DenyCategory::GrokSelf),
+                ..
+            } if browser::exception_applies(ctx) => None,
             IdentityVerdict::Denied { .. } => Some(refuse(
                 ErrorCode::AppDenied,
                 "the application is on the denylist",
