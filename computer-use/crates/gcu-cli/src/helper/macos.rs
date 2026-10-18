@@ -297,28 +297,76 @@ pub(crate) async fn run_agent(
     fake: bool,
     mode: Option<String>,
 ) -> Result<u8, Failure> {
-    let driver = if fake {
-        Arc::new(fake_driver(scene)?) as Arc<dyn Driver>
-    } else {
-        Arc::new(
-            gcu_driver_macos::MacosDriver::new()
-                .await
-                .map_err(|_| Failure::internal("Cannot start the macOS driver"))?,
-        ) as Arc<dyn Driver>
-    };
     let audit: Arc<dyn AuditSource> =
         Arc::new(MacAudit::load().await.map_err(super::helper_failure)?);
     let uid = current_uid();
-    let host = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
-            crate::host::LocalHost::new(crate::config::load()?, mode)
-        }),
-    )
-    .await
-    .map_err(|_| Failure::internal("Host configuration IO timed out"))?
-    .map_err(|_| Failure::internal("Host configuration failed"))?
-    .map_err(|_| Failure::internal("Cannot load host configuration"))?;
+    let (host, idle_ms) = load_host(mode).await?;
+    let registry = Arc::new(SessionRegistry::new());
+    let (driver, control) = if fake {
+        (Arc::new(fake_driver(scene)?) as Arc<dyn Driver>, None)
+    } else {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let latch = Arc::new(crate::host::macos_wire::ActivityLatch::new(
+            host.activity.clone(),
+            tx,
+        ));
+        let native = Arc::new(
+            gcu_driver_macos::MacosDriver::with_stop_latch(
+                latch,
+                gcu_driver_macos::input::hotkey::HotkeyConfig::default(),
+                idle_ms,
+            )
+            .await
+            .map_err(|_| Failure::internal("Cannot start the macOS driver"))?,
+        );
+        host.activity
+            .set_physical(Arc::new(crate::host::macos_wire::MacosActivity::new(
+                &native,
+            )));
+        let driver = Arc::clone(&native) as Arc<dyn Driver>;
+        let connection = gcu_mcp::Connection::open_host_only(
+            Arc::clone(&driver),
+            host.host.clone(),
+            gcu_mcp::ServerConfig::default(),
+        )
+        .await
+        .map_err(|_| Failure::internal("Cannot open helper control"))?;
+        let control_session = connection.session();
+        let control = crate::resume::Control::start_with_lifecycle(
+            Arc::clone(&control_session),
+            host.activity.clone(),
+            connection.lifecycle(),
+        )
+        .await?;
+        let release_driver = Arc::clone(&driver);
+        let release_activity = host.activity.clone();
+        let release_registry = Arc::clone(&registry);
+        let release = tokio::spawn(async move {
+            let mut rx = rx;
+            while rx.recv().await.is_some() {
+                let releasing = Arc::clone(&release_driver);
+                let release_task = tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(500),
+                        releasing.release_all_input(),
+                    )
+                    .await;
+                });
+                let mut sessions = release_registry.sessions();
+                sessions.push(Arc::clone(&control_session));
+                for session in sessions {
+                    tokio::spawn(async move {
+                        session.handle_stop().await;
+                    });
+                }
+                let persisting = release_activity.clone();
+                let persist = tokio::task::spawn_blocking(move || persisting.persist_stop());
+                let _ = release_task.await;
+                let _ = tokio::time::timeout(Duration::from_secs(5), persist).await;
+            }
+        });
+        (driver, Some((control, connection, release)))
+    };
     let running = start_listener(ListenConfig {
         path: socket_path(uid),
         audit,
@@ -326,19 +374,40 @@ pub(crate) async fn run_agent(
         uid,
         host: host.host,
         driver,
-        registry: Arc::new(SessionRegistry::new()),
+        registry,
         handshake_timeout: HANDSHAKE_TIMEOUT,
         idle_limit: IDLE_LIMIT,
     })
     .await
     .map_err(super::helper_failure)?;
-    match running.done.await {
+    let result = match running.done.await {
         Ok(ListenStop::Idle | ListenStop::Shutdown | ListenStop::Stopped) => Ok(0),
         Ok(ListenStop::Replaced) => Err(Failure::arguments(
             "Computer-use helper socket was replaced",
         )),
         Ok(ListenStop::Failed) | Err(_) => Err(Failure::internal("Computer-use helper failed")),
+    };
+    if let Some((control, connection, release)) = control {
+        release.abort();
+        drop(control);
+        drop(connection);
     }
+    result
+}
+
+async fn load_host(mode: Option<String>) -> Result<(crate::host::LocalHost, u64), Failure> {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            let config = crate::config::load()?;
+            let idle_ms = config.user_idle_ms;
+            crate::host::LocalHost::new(config, mode).map(|host| (host, idle_ms))
+        }),
+    )
+    .await
+    .map_err(|_| Failure::internal("Host configuration IO timed out"))?
+    .map_err(|_| Failure::internal("Host configuration failed"))?
+    .map_err(|_| Failure::internal("Cannot load host configuration"))
 }
 
 pub(crate) async fn run_stdio_proxy(

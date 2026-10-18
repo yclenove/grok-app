@@ -2,6 +2,7 @@
 pub(crate) mod activity;
 pub(crate) mod approval;
 pub(crate) mod dialog;
+pub(crate) mod macos_wire;
 pub(crate) mod page;
 pub(crate) mod policy_store;
 

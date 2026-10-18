@@ -74,6 +74,12 @@ impl StopMirror {
                 .clear();
         }
     }
+    /// Global latch only. A single-session Stop does not count.
+    ///
+    /// Nonblocking. Does not clear the latch.
+    pub fn globally_stopped(&self) -> bool {
+        self.0.all.load(Ordering::SeqCst)
+    }
     /// Check the Host mirror; reads never consume it. Nonblocking.
     pub fn stopped(&self, session: &str) -> bool {
         self.0
@@ -112,12 +118,14 @@ mod tests {
     #[test]
     fn stop_scope_and_fresh_user_events_preserve_host_latch() {
         let stop = StopMirror::new(true);
+        assert!(stop.globally_stopped());
         assert!(stop.stopped("new"));
         assert!(!stop.resume_by_user(None, 0, [1; 32]));
         assert!(!stop.resume_by_user(None, 1, [0; 32]));
         assert!(stop.resume_by_user(Some("a"), 1, [1; 32]));
         assert!(!stop.stopped("a"));
         assert!(stop.stopped("b"));
+        assert!(stop.globally_stopped());
         stop.latch(Some("a"));
         assert!(stop.stopped("a"));
         assert!(!stop.resume_by_user(None, 1, [2; 32]));

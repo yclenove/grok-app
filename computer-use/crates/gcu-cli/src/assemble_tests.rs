@@ -147,8 +147,52 @@ fn macos_auto_routes_follow_the_entry_and_fake_stays_explicit() {
         decide(query(DriverKind::Auto, None, Entry::Bare, os)),
         Plan::Onboarding { .. }
     ));
-    match decide(query(DriverKind::Native, None, Entry::InProcess, os)) {
-        Plan::Refuse { message } => assert!(message.contains("helper or the App")),
+    for request in [DriverKind::Auto, DriverKind::Native] {
+        match decide(query(request, None, Entry::InProcess, os)) {
+            Plan::Refuse { message } => {
+                assert_eq!(message, crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL);
+                assert_eq!(crate::exit::Failure::arguments(message).code, 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    for request in [DriverKind::Auto, DriverKind::Native] {
+        match decide(query(request, None, Entry::Engine, os)) {
+            Plan::MacosEngine { disclosure } => {
+                assert!(
+                    disclosure.native_disabled.contains("macOS"),
+                    "{disclosure:?}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let mut enabled = query(DriverKind::Auto, None, Entry::Engine, os);
+    enabled.features = Features {
+        native_windows: true,
+        native_x11: true,
+        native_wayland: true,
+    };
+    assert!(matches!(decide(enabled), Plan::MacosEngine { .. }));
+    let mut terminal = query(DriverKind::Native, None, Entry::InProcess, os);
+    terminal.features = enabled.features;
+    match decide(terminal) {
+        Plan::Refuse { message } => {
+            assert_eq!(message, crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL)
+        }
+        other => panic!("{other:?}"),
+    }
+    match decide(query(DriverKind::Fake, None, Entry::Engine, os)) {
+        Plan::Fake { disclosure, .. } => assert_eq!(disclosure.selected, "fake"),
+        other => panic!("{other:?}"),
+    }
+    match decide(query(
+        DriverKind::Auto,
+        None,
+        Entry::Engine,
+        OsKind::Windows,
+    )) {
+        Plan::Refuse { message } => assert!(message.contains("native-windows"), "{message}"),
         other => panic!("{other:?}"),
     }
     match decide(query(DriverKind::Fake, None, Entry::McpStdio, os)) {

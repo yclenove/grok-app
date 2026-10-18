@@ -90,6 +90,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             port: None,
             ..
         }) => Entry::McpStdio,
+        Some(Command::Engine { .. }) => Entry::Engine,
         _ => Entry::InProcess,
     };
     let plan = assemble::decide(assemble::production(&cli.driver, entry));
@@ -116,6 +117,25 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         }
         Plan::HelperAgent { .. } => {
             return Err(Failure::internal("Agent selection is handled earlier"))
+        }
+        Plan::MacosEngine { .. } => {
+            let Some(Command::Engine {
+                host_fd,
+                host_socket,
+                host_token_fd,
+                stop_fd,
+            }) = cli.command
+            else {
+                return Err(Failure::internal("macOS engine selection requires engine"));
+            };
+            return crate::engine::run_macos(
+                crate::host::macos_wire::engine_route_note(),
+                host_fd,
+                host_socket,
+                host_token_fd,
+                stop_fd,
+            )
+            .await;
         }
         Plan::Refuse { message } => return Err(Failure::arguments(message)),
         Plan::Fake { scene, disclosure } => (scene, disclosure),
@@ -343,7 +363,7 @@ async fn dispatch_agent(cli: &Cli) -> Result<u8, Failure> {
         Plan::Fake { scene, .. } => crate::helper::run_agent(&scene, true).await,
         Plan::HelperAgent { .. } => crate::helper::run_agent("form", false).await,
         Plan::Refuse { message } => Err(Failure::arguments(message)),
-        Plan::HelperProxy { .. } | Plan::Onboarding { .. } => {
+        Plan::HelperProxy { .. } | Plan::Onboarding { .. } | Plan::MacosEngine { .. } => {
             Err(Failure::internal("Agent selection is invalid"))
         }
     }

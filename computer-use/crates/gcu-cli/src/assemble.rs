@@ -16,7 +16,9 @@ pub(crate) enum Entry {
     McpStdio,
     /// No subcommand.
     Bare,
-    /// `call`, `doctor`, `engine`, and HTTP MCP.
+    /// `gcu engine`. Native assembly happens only after App authentication.
+    Engine,
+    /// `call`, `doctor`, and HTTP MCP.
     InProcess,
 }
 
@@ -95,7 +97,8 @@ impl Disclosure {
     }
 }
 
-/// Selection result. Only [`Plan::Fake`] may construct a driver.
+/// Selection result. [`Plan::Fake`] constructs the offline driver.
+/// [`Plan::MacosEngine`] constructs a macOS driver only after App authentication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Plan {
     /// Offline driver after the fake gate.
@@ -117,6 +120,11 @@ pub(crate) enum Plan {
     },
     /// macOS with no subcommand keeps onboarding.
     Onboarding {
+        /// Shared disclosure.
+        disclosure: Disclosure,
+    },
+    /// macOS `engine` auto/native. The process still has to prove the App chain.
+    MacosEngine {
         /// Shared disclosure.
         disclosure: Disclosure,
     },
@@ -192,9 +200,9 @@ pub(crate) fn decide(query: Query<'_>) -> Plan {
             Entry::McpStdio => Plan::HelperProxy { disclosure },
             Entry::Agent => Plan::HelperAgent { disclosure },
             Entry::Bare => Plan::Onboarding { disclosure },
+            Entry::Engine => Plan::MacosEngine { disclosure },
             Entry::InProcess => Plan::Refuse {
-                message: "This entry does not assemble a native driver; use the helper or the App"
-                    .into(),
+                message: crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL.into(),
             },
         };
     }
@@ -217,9 +225,7 @@ pub(crate) fn reject_unused_scene(args: &DriverArgs) -> Result<(), Failure> {
 fn native_disabled(os: OsKind, features: Features) -> String {
     match os {
         OsKind::Windows => block("native-windows", features.native_windows),
-        OsKind::Macos => {
-            "macOS native assembly is not enabled in this build; use the helper or the App".into()
-        }
+        OsKind::Macos => "the terminal does not use native permissions; use the helper or the App. App TCC responsibility is not claimed except macOS 27 arm64".into(),
         OsKind::Linux {
             session: SessionKind::X11,
         } => block("native-x11", features.native_x11),
