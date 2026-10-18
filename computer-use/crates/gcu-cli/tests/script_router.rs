@@ -1,5 +1,5 @@
 //! `computer_script` uses the same router entry as a single tool and batch.
-#![cfg(feature = "script")]
+#![cfg(all(feature = "script", unix))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gcu_core::{
@@ -14,7 +14,6 @@ use gcu_host_api::{
 };
 use gcu_protocol::ComputerScriptParams;
 use gcu_script::{Frame, ScriptStatus};
-#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
     process::{Command, Stdio},

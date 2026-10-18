@@ -4,7 +4,7 @@ Checklist row from `docs/plans/computer-use-v2/07-quality-gates.md` §7:
 
 > 脚本沙箱：无 `eval` 外逃、无 IO/网络/进程/环境；受限 worker 经窄 RPC，JS/宿主/并发/队列/输出限额生效，独立 watchdog 与取消生效。
 
-This file records test names. It is not the release signature. The orchestrator signs the row.
+This file records test names and the review result.
 
 Other §7 rows (image denylist, approval bypass, gateway binding, clipboard, hotkeys, prompt injection, private API, supply chain) are not this card.
 
@@ -15,7 +15,7 @@ Other §7 rows (image denylist, approval bypass, gateway binding, clipboard, hot
 - Test: `manifest_disables_forbidden_rquickjs_features`.
 - Context intrinsics are JSON, Promise, and Eval. Eval is on only so the host can compile user source with the async-function constructor. QuickJS rejects that constructor when Eval is absent (`eval is not supported`). Lockdown then deletes `eval` and `Function` and replaces both constructors with a throwing trap before the user function runs.
 - User source is a string value passed to `AsyncFunction`, never concatenated into host source. Regular expressions are not an intrinsic.
-- `globalThis` receives `cu` and `emit`. `eval`, `Function`, and host names are deleted and replaced with a non-configurable undefined. `Function.prototype.constructor` and the async-function constructor are replaced with a throwing trap.
+- `globalThis` receives `cu` and `emit`. `eval`, `Function`, and host names are deleted and replaced with a non-configurable undefined. `Function.prototype.constructor` and the async-function, generator-function and async-generator-function constructors are replaced with a throwing trap (the generator variants were found open by the controller's review and are now covered by `prototype_constructor_escape_is_rejected`).
 - Tests: `unexposed_globals_are_absent_in_user_script`, `prototype_constructor_escape_is_rejected`, `wrapper_breakout_does_not_run_as_host_code`, `fresh_runtime_drops_previous_globals`.
 
 ## Limits
@@ -37,7 +37,7 @@ Other §7 rows (image denylist, approval bypass, gateway binding, clipboard, hot
 
 - A thread that does not enter QuickJS fires within 500ms of the deadline.
 - Production parent calls `Child::kill` (SIGKILL on Unix). It does not signal pid 0.
-- Unix launcher sets `RLIMIT_AS` to 128MB in the forked child. Windows job objects are not this card.
+- Unix launcher sets `RLIMIT_AS` to 128MB in the forked child. Windows job objects are not this card, so on non-Unix targets no runner is installed and `computer_script` stays unexposed (fail closed) until a job-object cap lands.
 - Tests: `watchdog_kill_runs_within_500ms_of_deadline`, `watchdog_kills_sleep_within_500ms_of_deadline`, `cancel_flag_stops_infinite_loop`, `cancel_during_host_call_unblocks_without_replay`.
 - Process start under the address cap: `script_worker_process_returns_under_address_limit`.
 
@@ -52,3 +52,12 @@ Other §7 rows (image denylist, approval bypass, gateway binding, clipboard, hot
 
 - `cargo +nightly fuzz run script_rpc -- -max_total_time=60`
 - Real-device apps, Windows job object, and the gcu-eval soak row for `computer_script` (left `not_run`).
+
+## Review and signature (orchestrator, 2026-10-17)
+
+Basis: the user's blanket approval of 2026-10-17 to start this card and sign its checklist row after review. I read the runtime, bindings, limits, RPC, watchdog and launcher code and re-ran the checks on the build host.
+
+- Found and fixed in review: the generator-function and async-generator-function constructors were still reachable and could compile source text. `LOCKDOWN` now traps all four constructors and `prototype_constructor_escape_is_rejected` covers them (it failed before the fix).
+- Found and fixed in review: with the `script` feature on a non-Unix target the worker would have run with no memory cap. No runner is installed there until a job-object cap exists (fail closed).
+- Signed for: Unix targets (Linux, macOS) with the `script` feature. The row is **not** signed for Windows.
+- Open before any release that ships the `script` feature: run the nightly `script_rpc` fuzz target (not run here), add the Windows job object, and measure on real devices.

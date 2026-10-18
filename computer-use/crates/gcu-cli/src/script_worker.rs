@@ -20,11 +20,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Installed only when this binary was built with the script feature.
+/// Installed only when this binary was built with the script feature on Unix.
 pub(crate) fn runner() -> Option<Arc<dyn gcu_mcp::ScriptRunner>> {
     #[cfg(feature = "script")]
     {
-        Some(Arc::new(ProcessRunner))
+        // The 128MB worker cap is `RLIMIT_AS`. Without a Windows job object the
+        // cap does not exist, so no runner is installed there (fail closed).
+        if cfg!(unix) {
+            Some(Arc::new(ProcessRunner))
+        } else {
+            None
+        }
     }
     #[cfg(not(feature = "script"))]
     {

@@ -21,6 +21,8 @@ pub(crate) const LOCKDOWN: &str = r#"
   }
   lock(Function);
   lock(Object.getPrototypeOf(async function () {}).constructor);
+  lock(Object.getPrototypeOf(function* () {}).constructor);
+  lock(Object.getPrototypeOf(async function* () {}).constructor);
   var names = ["eval", "Function", "process", "require", "os", "std", "fs", "Deno", "fetch", "setTimeout", "setInterval", "setImmediate", "queueMicrotask"];
   for (var i = 0; i < names.length; i++) {
     try { delete globalThis[names[i]]; } catch (e) {}

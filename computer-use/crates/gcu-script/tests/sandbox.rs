@@ -146,13 +146,16 @@ fn prototype_constructor_escape_is_rejected() {
         attempt("ctor", function () { (function(){}).constructor("return this")(); });
         attempt("fn", function () { Function("return 1")(); });
         attempt("obj", function () { ({}).constructor.constructor("return this")(); });
+        attempt("gen", function () { Object.getPrototypeOf(function* () {}).constructor("yield 1")(); });
+        attempt("agen", function () { Object.getPrototypeOf(async function* () {}).constructor("yield 1")(); });
+        attempt("async", function () { Object.getPrototypeOf(async function () {}).constructor("return 1")(); });
         return hits.join(",");
         "#,
         Duration::from_secs(2),
         |_| Reply::clear(None),
     );
     assert_eq!(report.status, ScriptStatus::Done, "{report:?}");
-    assert_eq!(report.output, "\"no,no,no\"");
+    assert_eq!(report.output, "\"no,no,no,no,no,no\"");
     assert_eq!(report.driver_calls, 0);
 }
 
