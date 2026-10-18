@@ -2,7 +2,9 @@
 //!
 //! Release mode requires the bundled path and the identity compiled into this
 //! App. Developer mode may use another path only with a separate grant, and
-//! that path must not present the release identity. Production launches do not
+//! that path must not present the release identity. On macOS, signature display
+//! fields are copied only after `codesign --verify` succeeds; release Developer
+//! ID also requires the Apple team requirement. Production launches do not
 //! pass `--driver fake`.
 
 use std::path::{Path, PathBuf};
@@ -159,7 +161,35 @@ fn probe(
     dev_authorized: bool,
 ) -> Result<EngineFacts, Error> {
     let sha = content_sha256(path)?;
-    let signed = codesign_of(path);
+    Ok(facts_with_probe(
+        path,
+        &sha,
+        dev_authorized,
+        identity,
+        host_build(),
+        &platform_probe(),
+    ))
+}
+
+fn facts_with_probe<P: super::codesign::SignatureProbe>(
+    path: &Path,
+    sha: &str,
+    dev_authorized: bool,
+    identity: &ReleaseIdentity,
+    mode: HostBuild,
+    probe: &P,
+) -> EngineFacts {
+    let signed = super::codesign::trusted_facts(path, identity, mode, probe);
+    apply_signature_facts(path, sha, dev_authorized, identity, signed)
+}
+
+fn apply_signature_facts(
+    path: &Path,
+    sha: &str,
+    dev_authorized: bool,
+    identity: &ReleaseIdentity,
+    signed: gcu_host_protocol::supervisor::CodesignFacts,
+) -> EngineFacts {
     let mut facts = EngineFacts::content(path, sha);
     facts.dev_authorized = dev_authorized;
     if signed.team_id.is_some() || matches!(identity, ReleaseIdentity::MacDeveloperId { .. }) {
@@ -169,36 +199,17 @@ fn probe(
             facts.build_id = signed.cdhash;
         }
     }
-    Ok(facts)
+    facts
 }
 
 #[cfg(target_os = "macos")]
-fn codesign_of(path: &Path) -> gcu_host_protocol::supervisor::CodesignFacts {
-    let output = std::process::Command::new("/usr/bin/codesign")
-        .args(["-dvvv"])
-        .arg(path)
-        .output();
-    match output {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            gcu_host_protocol::supervisor::parse_codesign_display(&text)
-        }
-        Err(_) => empty_codesign(),
-    }
+fn platform_probe() -> super::codesign::OsProbe {
+    super::codesign::OsProbe
 }
 
 #[cfg(not(target_os = "macos"))]
-fn codesign_of(_path: &Path) -> gcu_host_protocol::supervisor::CodesignFacts {
-    empty_codesign()
-}
-
-fn empty_codesign() -> gcu_host_protocol::supervisor::CodesignFacts {
-    gcu_host_protocol::supervisor::CodesignFacts {
-        signing_id: None,
-        team_id: None,
-        cdhash: None,
-    }
+fn platform_probe() -> super::codesign::AbsentProbe {
+    super::codesign::AbsentProbe
 }
 
 #[cfg(test)]
