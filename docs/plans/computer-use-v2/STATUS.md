@@ -125,3 +125,4 @@
 
 -
 - ADR 0012 首卡（2026-10-17，统一驱动选型与停止闭环）已落地：`gcu` 省略 `--driver` 时为 auto，三个 native feature（native-windows/native-x11/native-wayland）全部默认关闭，auto/native 在未装配的平台 fail-closed（退出 2，不退回 fake、不提权）；Host 把引擎**非正常断线**锁存为全局持久 Stop（`stop-reason` 标记文件只用于展示原因，不改变结论）。真实平台驱动的装配仍待 ADR 0012 后续阶段卡（Windows/X11/Wayland/macOS helper/DomChannel 生产连接/文档），真机项 not_run；Windows 一项另依赖 ADR 0013 的实现。
+- ADR 0012 A2（2026-10-18，Linux X11 装配）：gcu-cli 在 Linux target 依赖 `gcu-driver-linux`（check-deps 通过），新增默认关闭的 `native-x11` 装配路径：Host Stop latch 实际绑定到 X11 监听器（替换 latch 时重绑监听器/HotkeyManager）、活动源接入；AT-SPI 缺失/断线时 native 未就绪并关闭坐标输入（不退回 fake）；AT-SPI 应用发现补 pid 与镜像身份（路径+SHA-256，不使用 desktop id）；XTEST 前台输入经 Router 前台策略与活动守卫。FakeX 只证明虚拟路径；**not_run**：物理 X11 上 Stop ≤100ms/≤500ms、XGrabKey 冲突/丢失、XI2 区分物理与注入输入（对应 ignored 测试已列）。Wayland 属后续阶段卡。
