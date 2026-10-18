@@ -4,6 +4,7 @@ use crate::{
     files::{blocking, SessionFiles},
     instructions, params,
     result::{self, Results},
+    script::ScriptRunner,
     Profile, ServeError,
 };
 use gcu_core::{
@@ -42,12 +43,24 @@ pub struct Host {
     pub activity: Arc<dyn UserActivity>,
 }
 /// Per-connection exposure settings. Driver/Host selection belongs to the caller.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ServerConfig {
     /// Tools visible to the client. Every profile filters IMPLEMENTED_TOOLS.
     pub profile: Profile,
     /// App session that may see `browser_navigate`. None keeps the static catalog.
     pub browser_session: Option<String>,
+    /// Real script runner. `None` keeps `computer_script` unregistered.
+    pub script: Option<Arc<dyn ScriptRunner>>,
+}
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("profile", &self.profile)
+            .field("browser_session", &self.browser_session.is_some())
+            .field("script", &self.script.is_some())
+            .finish()
+    }
 }
 #[derive(Clone)]
 pub(crate) struct Server(Arc<Inner>);
@@ -140,7 +153,9 @@ impl Server {
                 ..Default::default()
             },
         };
-        let tools = catalog::tools(config.profile).map_err(|_| ServeError::Protocol)?;
+        let script_ready = cfg!(feature = "script") && config.script.is_some();
+        let tools =
+            catalog::tools(config.profile, script_ready).map_err(|_| ServeError::Protocol)?;
         let lifecycle = crate::lifecycle::Lifecycle::new(session.clone());
         Ok(Self(Arc::new(Inner {
             driver,
@@ -228,6 +243,17 @@ impl Server {
                 let params: ComputerBatchParams = params::parse(arguments)?;
                 let report = this.router.run_batch(&this.session, &id, params).await;
                 Ok(this.results.batch(report).await)
+            }
+            "computer_script" => {
+                let params: ComputerScriptParams = params::parse(arguments)?;
+                params
+                    .validate()
+                    .map_err(|err| Box::new(params::invalid(err.0)))?;
+                let Some(runner) = this.config.script.clone() else {
+                    return Err(Box::new(result::error(ErrorCode::CapabilityUnavailable)));
+                };
+                let body = runner.run(&this.router, &this.session, &id, params).await;
+                Ok(this.results.script(&body.output, body.error).await)
             }
             "capabilities" => {
                 let _: CapabilitiesParams = params::parse(arguments)?;

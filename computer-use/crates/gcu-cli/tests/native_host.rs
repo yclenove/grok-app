@@ -559,3 +559,13 @@ fn cli_native_browser_launch_and_extension_client_are_registered() {
         assert_eq!(report["noop"], true);
     }
 }
+
+#[test]
+fn embedded_identity_is_the_maintainer_key_and_stays_pinned() {
+    let identity = ExtensionIdentity::embedded().expect("manifest carries the public key");
+    assert_eq!(identity.id(), "jgpkhdjlddaoopklipcnpcjcpiancmff");
+    assert_eq!(
+        identity.origin(),
+        "chrome-extension://jgpkhdjlddaoopklipcnpcjcpiancmff/"
+    );
+}

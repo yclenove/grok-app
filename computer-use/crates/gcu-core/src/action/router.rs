@@ -107,68 +107,81 @@ impl ActionRouter {
         params: GetAppStateParams,
     ) -> Result<ActionState, Box<ToolError>> {
         session
-            .enqueue(async {
-                self.check_boundary(session)
-                    .await
-                    .map_err(|code| Box::new(error(code)))?;
-                let win = self
-                    .resolve(session, &params.app, params.window.as_deref())
-                    .await
-                    .map_err(|code| Box::new(error(code)))?;
-                let _window = self
-                    .locks
-                    .acquire(&window_lock_key(&win))
-                    .await
-                    .map_err(|e| Box::new(error(e.code())))?;
-                let mut opts = self.tree_opts.clone();
-                opts.text_limit = match params.text_limit {
-                    gcu_protocol::tools::TextLimit::Characters(n) => Some(n as usize),
-                    _ => None,
-                };
-                opts.max_tree_nodes = params.max_tree_nodes.clamp(1, 5000) as usize;
-                let fresh = self
-                    .read_with_mode(session, &win, params.include_screenshot, &opts)
-                    .await
-                    .map_err(|code| Box::new(error(code)))?;
-                let mut intent = ActionIntent::new(Tool::GetAppState);
-                intent.parameters = fresh.signature.clone();
-                intent.reason = params.reason.map(gcu_host_api::ModelReason::new);
-                let _approved = self
-                    .authorize(session, &mut intent, &fresh)
-                    .await
-                    .map_err(|code| Box::new(error(code)))?;
-                self.check_boundary(session)
-                    .await
-                    .map_err(|code| Box::new(error(code)))?;
-                let cancel = Cancel::default();
-                let current = self
-                    .native(
-                        session,
-                        &cancel,
-                        false,
-                        self.driver.resolve_app(&AppQuery(win.app.info.id.clone())),
-                    )
-                    .await
-                    .map_err(|e| Box::new(error(e.error_code())))?;
-                if current != win.app {
-                    return Err(Box::new(error(ErrorCode::StaleElement)));
-                }
-                // Read after the authorization wait, rather than releasing pre-approval
-                // contents that might now be obsolete.
-                let fresh = self
-                    .read_with_mode(session, &win, params.include_screenshot, &opts)
-                    .await
-                    .map_err(|code| Box::new(error(code)))?;
-                let attach = self.observation_attachment(
-                    session,
-                    &fresh,
-                    params.include_screenshot,
-                    opts.text_limit,
-                );
-                self.publish_with_limit(session, fresh, attach, opts.text_limit)
-            })
+            .enqueue(self.observe_enqueued(session, params))
             .await
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?
+    }
+
+    /// Observe while the caller already holds the session queue.
+    ///
+    /// Script and batch hold that queue. A nested [`Self::observe`] would deadlock.
+    /// Authorization, Stop, and the 5s native ceiling match [`Self::observe`].
+    ///
+    /// Blocking: window-lock wait caps at 5s, then native and approval waits.
+    /// Timeout: native calls cap at 5s. Cancellation: Stop, session close, or drop.
+    pub async fn observe_enqueued(
+        &self,
+        session: &Session,
+        params: GetAppStateParams,
+    ) -> Result<ActionState, Box<ToolError>> {
+        self.check_boundary(session)
+            .await
+            .map_err(|code| Box::new(error(code)))?;
+        let win = self
+            .resolve(session, &params.app, params.window.as_deref())
+            .await
+            .map_err(|code| Box::new(error(code)))?;
+        let _window = self
+            .locks
+            .acquire(&window_lock_key(&win))
+            .await
+            .map_err(|e| Box::new(error(e.code())))?;
+        let mut opts = self.tree_opts.clone();
+        opts.text_limit = match params.text_limit {
+            gcu_protocol::tools::TextLimit::Characters(n) => Some(n as usize),
+            _ => None,
+        };
+        opts.max_tree_nodes = params.max_tree_nodes.clamp(1, 5000) as usize;
+        let fresh = self
+            .read_with_mode(session, &win, params.include_screenshot, &opts)
+            .await
+            .map_err(|code| Box::new(error(code)))?;
+        let mut intent = ActionIntent::new(Tool::GetAppState);
+        intent.parameters = fresh.signature.clone();
+        intent.reason = params.reason.map(gcu_host_api::ModelReason::new);
+        let _approved = self
+            .authorize(session, &mut intent, &fresh)
+            .await
+            .map_err(|code| Box::new(error(code)))?;
+        self.check_boundary(session)
+            .await
+            .map_err(|code| Box::new(error(code)))?;
+        let cancel = Cancel::default();
+        let current = self
+            .native(
+                session,
+                &cancel,
+                false,
+                self.driver.resolve_app(&AppQuery(win.app.info.id.clone())),
+            )
+            .await
+            .map_err(|e| Box::new(error(e.error_code())))?;
+        if current != win.app {
+            return Err(Box::new(error(ErrorCode::StaleElement)));
+        }
+        // Read after the authorization wait, rather than releasing pre-approval
+        // contents that might now be obsolete.
+        let fresh = self
+            .read_with_mode(session, &win, params.include_screenshot, &opts)
+            .await
+            .map_err(|code| Box::new(error(code)))?;
+        let attach = self.observation_attachment(
+            session,
+            &fresh,
+            params.include_screenshot,
+            opts.text_limit,
+        );
+        self.publish_with_limit(session, fresh, attach, opts.text_limit)
     }
     /// Execute once: exact-handle/coordinate gates, policy and cancellable approval,
     /// revalidate, perform, bounded settle, then a fresh state/diff. `wait_for` does
@@ -200,7 +213,7 @@ impl ActionRouter {
     /// Blocking: window-lock waits cap at 5s, then native and approval waits.
     /// Timeout: native calls cap at 5s; `wait_for` may use its own horizon.
     /// Cancellation: Stop, session close, turn end, or dropping the future.
-    pub(crate) async fn execute_enqueued(&self, session: &Session, call: ToolCall) -> ToolOutcome {
+    pub async fn execute_enqueued(&self, session: &Session, call: ToolCall) -> ToolOutcome {
         let start = Instant::now();
         let initial = result(&call);
         let mut out = match self.check_boundary(session).await {

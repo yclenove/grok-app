@@ -24,6 +24,7 @@ mod private;
 mod proxy;
 pub mod resume;
 mod runtime;
+mod script_worker;
 mod turn_ended;
 pub mod ui;
 mod worker;

@@ -1,6 +1,6 @@
 //! Thread-affine low-level hooks; global hotkey has its own message pump.
 use crate::input::{
-    hook_probe::{self, Cursor, Desktop, MouseProbe, MouseProof, PROBE_TAG},
+    hook_probe::{self, Cursor, Desktop, MouseProbe, MouseProof},
     hooks::HookEvent,
     hotkey::{
         GuardEvents, HotkeyConfig, SafetyApi, SafetyPump, HOTKEY_STARTUP_TIMEOUT,
@@ -162,9 +162,9 @@ fn callback(event: HookEvent, tag: usize) {
                     HookEvent::Mouse(flags) => context.last_mouse_flags = Some(flags),
                 }
                 let tagged = match event {
-                    HookEvent::Keyboard(flags) if tag == PROBE_TAG => {
+                    HookEvent::Keyboard(flags) if context.mouse_proof.tagged(tag) => {
                         context.keyboard_probe_flags = Some(flags);
-                        if event.injected() {
+                        if event.injected() && context.mouse_proof.current_tag() == Some(tag) {
                             context.keyboard = Some(now);
                         }
                         true
@@ -220,21 +220,8 @@ impl SafetyPump for Pump {
         // that thread to service the injected low-level callback. One bounded
         // sender lets this thread keep pumping throughout native dispatch.
         self.probe.poll()?;
-        self.confirm_probes()?;
 
         Ok(())
-    }
-}
-impl Pump {
-    fn confirm_probes(&self) -> Result<(), String> {
-        CONTEXT.with(|slot| {
-            if let Some(context) = slot.borrow().as_ref() {
-                context
-                    .events
-                    .confirm_hook_proofs(context.keyboard, context.mouse_proof.proven())?;
-            }
-            Ok(())
-        })
     }
 }
 impl Drop for Pump {

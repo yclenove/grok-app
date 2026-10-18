@@ -60,7 +60,7 @@ leaves the config unchanged.
 gcu install chrome-extension --dry-run
 gcu install chrome-extension --home /absolute/disposable/home --gcu /absolute/path/gcu
 gcu uninstall chrome-extension --home /absolute/disposable/home
-gcu native-host 'chrome-extension://__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__/'
+gcu native-host 'chrome-extension://jgpkhdjlddaoopklipcnpcjcpiancmff/'
 ```
 
 The last command documents the browser entry syntax; that explicit placeholder

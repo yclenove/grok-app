@@ -10,6 +10,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     if matches!(cli.command, Some(Command::Worker)) {
         return crate::worker::run().await;
     }
+    if matches!(cli.command, Some(Command::ScriptWorker)) {
+        return crate::script_worker::run().await;
+    }
     if matches!(cli.command, Some(Command::Agent)) {
         if cli.driver.driver.is_some() {
             args::require_fake(&cli.driver)?;
@@ -179,6 +182,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
                     browser_session: None,
+                    script: crate::script_worker::runner(),
                 },
             )
             .await?;
@@ -217,6 +221,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
                     browser_session: None,
+                    script: crate::script_worker::runner(),
                 },
             )
             .await?;

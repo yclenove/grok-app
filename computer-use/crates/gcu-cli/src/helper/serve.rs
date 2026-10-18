@@ -138,6 +138,7 @@ async fn serve_mode(
         ServerConfig {
             profile: profile.into(),
             browser_session: None,
+            script: crate::script_worker::runner(),
         },
     )
     .await

@@ -5,6 +5,7 @@
   "description": "__MSG_description__",
   "version": "0.1.0",
   "default_locale": "en",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnNsm+/mRnaW/WDcUhUcWbdesWhrtF7yFQQjPSsUs7xrvbOGGfpUDkor0Y39F6vxOW48bVfa5Mn3px7Ry+qZZkexuiWM6J3qNouYweorCv3IQqpzCVpZiWut389fzSormAUP81OcczzKledwmQzStcKNwLghnM0+AP0X0e26Au3d8II6rPmuEiXAoMZYVs49NlIgl9zJcy25zn8TKNXPg4SbslC6S2s057zWTQRLkufOR8OeAsFZyfDkh/sJknDOVPjTePgvuU7eYs99bGl5+ygP6LMkCzNjYAB0FhCwC3+uNgvWtHpbJ0CmiYNckdEQzqPhDcJqPK9Ib3wq3jSHp4QIDAQAB",
   "permissions": ["activeTab", "scripting", "webNavigation", "nativeMessaging"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "__MSG_share__" },

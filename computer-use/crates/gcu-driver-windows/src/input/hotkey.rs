@@ -21,6 +21,9 @@ pub(crate) const STARTUP_STEP_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const HOTKEY_STARTUP_TIMEOUT: Duration = Duration::from_millis(500);
 
 mod fake;
+mod lease;
+#[cfg(test)]
+mod lease_tests;
 #[cfg(test)]
 mod startup;
 pub use fake::FakeSafetyApi;
@@ -74,8 +77,9 @@ impl HotkeyConfig {
 }
 /// Thread-affine Win32 resource owner. Drop unregisters hooks/hotkey on that thread.
 pub trait SafetyPump {
-    /// Pump messages, prove hook health, check the desktop, periodically replace
-    /// hooks. May block in FFI; the independent watchdog revokes its health lease.
+    /// Pump messages, check the desktop and periodically replace hooks; prove
+    /// callbacks during the initial cycle or an action window. May block in FFI;
+    /// the independent watchdog revokes transport health.
     fn poll(&mut self, reinstall: bool) -> std::result::Result<(), String>;
 }
 /// All hooks, hotkey and desktop FFI live behind this injectable boundary.
@@ -96,6 +100,12 @@ pub struct GuardEvents {
     local_stop: AtomicBool,
     failed: AtomicBool,
     armed: AtomicBool,
+    setup_complete: AtomicBool,
+    window: Mutex<lease::Window>,
+    changed: tokio::sync::Notify,
+    serial: Arc<tokio::sync::Mutex<()>>,
+    probe_pending: Mutex<Option<Instant>>,
+    proof_request: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     reason: Mutex<Option<String>>,
     startup: Mutex<BTreeMap<&'static str, (u64, String)>>,
     startup_started: Instant,
@@ -115,11 +125,12 @@ impl GuardEvents {
         if let (Some(keyboard), Some(mouse)) = (keyboard, mouse) {
             let at = keyboard.min(mouse);
             if self.time.now().saturating_duration_since(at) > watchdog::HEARTBEAT_TIMEOUT {
-                if self.armed.load(Ordering::Acquire) {
+                if self.injecting() {
                     return Err("low-level hook probe expired (possibly silently removed)".into());
                 }
             } else {
                 self.clock.confirm(at);
+                self.changed.notify_one();
             }
         }
         Ok(())
@@ -128,7 +139,7 @@ impl GuardEvents {
     /// The FFI-free watchdog enforces this even while the native thread is stuck.
     pub fn startup_step(&self, stage: &'static str, limit: Duration) {
         self.check_startup_deadline();
-        if !self.armed.load(Ordering::Acquire) {
+        if !self.setup_complete.load(Ordering::Acquire) {
             *self.startup_step.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((stage, self.time.now(), limit));
         }
@@ -183,20 +194,23 @@ impl GuardEvents {
             self.hotkey_heartbeat.beat();
         }
     }
-    /// True only while both hook proofs and the hotkey pump are fresh.
-    pub fn available(&self) -> bool {
+    /// Responsive listener and independent hotkey pumps, without a mouse lease.
+    pub fn transport_healthy(&self) -> bool {
         self.check_startup_deadline();
-        let available = !self.failed.load(Ordering::Acquire)
+        !self.failed.load(Ordering::Acquire)
             && self.heartbeat.alive()
             && self.hotkey_heartbeat.alive()
-            && self.clock.available();
+    }
+    /// True only while transport and a dual-hook injected lease are fresh.
+    pub fn available(&self) -> bool {
+        let available = self.transport_healthy() && self.clock.available();
         if available {
             self.armed.store(true, Ordering::Release);
         }
         available
     }
     fn check_startup_deadline(&self) {
-        if !self.armed.load(Ordering::Acquire) && !self.failed.load(Ordering::Acquire) {
+        if !self.setup_complete.load(Ordering::Acquire) && !self.failed.load(Ordering::Acquire) {
             let now = self.time.now();
             let step = *self.startup_step.lock().unwrap_or_else(|p| p.into_inner());
             let expired =
@@ -213,8 +227,26 @@ impl GuardEvents {
         }
     }
     pub(super) fn check_health(&self) {
-        if !self.available() && self.armed.load(Ordering::Acquire) {
+        let transport = self.transport_healthy();
+        // Arming still requires both actual hook proofs, never pump heartbeats.
+        if transport && self.clock.available() {
+            self.armed.store(true, Ordering::Release);
+        }
+        if !transport
+            && (self.armed.load(Ordering::Acquire) || self.setup_complete.load(Ordering::Acquire))
+        {
             self.fail("listener heartbeat expired (hook/message pump/FFI unavailable)");
+        } else if self.injecting() && !self.clock.available() {
+            self.fail("low-level hook probe expired during foreground injection");
+        }
+        let pending = *self.probe_pending.lock().unwrap_or_else(|p| p.into_inner());
+        let limit = if self.armed.load(Ordering::Acquire) {
+            watchdog::HEARTBEAT_TIMEOUT
+        } else {
+            STARTUP_STEP_TIMEOUT
+        };
+        if pending.is_some_and(|at| self.time.now().saturating_duration_since(at) > limit) {
+            self.fail("hook probe SendInput/FFI timed out");
         }
     }
     /// Fail closed. Also stop an in-flight child independently of its RPC queue.
@@ -223,6 +255,7 @@ impl GuardEvents {
             let reason = reason.into();
             *self.reason.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
             self.clock.disable();
+            self.changed.notify_one();
             self.heartbeat.invalidate();
             self.hotkey_heartbeat.invalidate();
             if self.armed.load(Ordering::Acquire) {
@@ -232,9 +265,13 @@ impl GuardEvents {
             tracing::warn!(target: "gcu_windows_timing", stage = "stop_listener", phase = "failed", reason = %reason);
         }
     }
+    pub(crate) fn stopped(&self) -> bool {
+        self.local_stop.load(Ordering::SeqCst) || self.latch.is_stopped()
+    }
     /// The first operation is an atomic local latch, before any Host/worker work.
     pub fn request_stop(&self) {
         self.local_stop.store(true, Ordering::SeqCst);
+        self.changed.notify_one();
         let signal = self
             .signal
             .lock()
@@ -251,8 +288,8 @@ impl GuardEvents {
 }
 /// Owns bounded parent monitoring threads and an FFI-free health watchdog.
 /// Drop signals exit without joining a possibly stuck native call. A stuck pump
-/// is never replaced with unbounded new threads. Start waits at most three seconds;
-/// foreground remains disabled until both hook proofs and hotkey are healthy.
+/// is never replaced with unbounded new threads. Start waits at most three seconds
+/// for transport readiness. Action input separately requires fresh dual-hook proof.
 pub struct SafetyGuard {
     events: Arc<GuardEvents>,
     close: Arc<AtomicBool>,
@@ -307,7 +344,10 @@ impl SafetyGuard {
                             break;
                         }
                         monitored.heartbeat();
-                        if monitored.available() {
+                        // Hook installation/desktop checks and both pumps have
+                        // completed. Missing mouse callbacks alone are not failure.
+                        if monitored.transport_healthy() {
+                            monitored.setup_complete.store(true, Ordering::Release);
                             if let Some(ready) = ready.take() {
                                 let _ = ready.send(());
                             }
@@ -346,6 +386,12 @@ impl SafetyGuard {
             local_stop: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             armed: AtomicBool::new(false),
+            setup_complete: AtomicBool::new(false),
+            window: Mutex::default(),
+            changed: tokio::sync::Notify::new(),
+            serial: Arc::default(),
+            probe_pending: Mutex::default(),
+            proof_request: Mutex::default(),
             reason: Mutex::default(),
             startup: Mutex::default(),
             startup_started,
@@ -380,20 +426,48 @@ impl SafetyGuard {
     pub fn disable(&self, reason: impl Into<String>) {
         self.events.fail(reason);
     }
-    /// No activity/Stop consumer can mistake stale pump health for availability.
+    /// Whether transport permits requesting a foreground proof. Stop is separate.
+    pub fn transport_healthy(&self) -> bool {
+        self.events.check_health();
+        self.events.transport_healthy()
+    }
+    /// Activity is trustworthy only with live transport and a physical callback.
+    pub fn activity_available(&self) -> bool {
+        self.ms_since_physical_input().is_some()
+    }
+    /// Read physical activity without letting an expired injected lease hide it.
+    pub fn ms_since_physical_input(&self) -> Option<u64> {
+        self.transport_healthy()
+            .then(|| self.events.clock.ms_since_physical_input())
+            .flatten()
+    }
+    /// Fresh injected proof; pump heartbeats alone cannot satisfy it.
     pub fn available(&self) -> bool {
+        self.events.check_health();
         self.events.available()
     }
     /// Includes both the Host-persisted latch and an immediate local latch.
     pub fn is_stopped(&self) -> bool {
-        self.events.local_stop.load(Ordering::SeqCst) || self.events.latch.is_stopped()
+        self.events.stopped()
     }
     /// Validate a mutation before queueing and again before input acknowledgement.
     pub fn check(&self, foreground: bool) -> Result<()> {
-        if foreground && !self.available() {
-            return Err(DriverError::CapabilityUnavailable);
-        }
         if self.is_stopped() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        if foreground && !self.transport_healthy() {
+            return if self.is_stopped() {
+                Err(DriverError::Cancelled {
+                    maybe_executed: false,
+                })
+            } else {
+                Err(DriverError::CapabilityUnavailable)
+            };
+        }
+        if foreground && self.events.injecting() && !self.available() {
+            self.events.check_health();
             return Err(DriverError::Cancelled {
                 maybe_executed: false,
             });
@@ -402,18 +476,26 @@ impl SafetyGuard {
     }
     /// Append metadata-only health diagnostics using the existing DoctorReport.
     pub fn doctor_issues(&self, issues: &mut Vec<String>) {
-        issues.push("mouse_hook_probe: zero_move -> zero_wheel -> zero_hwheel -> absolute_same_position; fourth probe sends one absolute move to the current physical cursor pixel (hover handling possible), only if a single system idle sample before all probes shows >=2000ms on the interactive Default desktop; unknown idle/tick wrap refuses; own injections preserve the probe-idle marker, real physical callbacks clear it permanently for this listener attempt; cursor change invalidates proof without retry or compensation; idle alone never renews Stop leases".into());
+        issues.push("mouse_hook_probe: zero_move -> zero_wheel -> zero_hwheel -> absolute_same_position; same-position absolute moves can trigger hover; single system idle sample before all probes requires >=2000ms only for the initial unsolicited cycle; foreground actions bypass that gate; no repeated probes outside an action window; cursor change invalidates proof without retry or compensation; idle/physical callbacks never renew the injection lease".into());
         issues.push(format!(
             "user_activity_guard: {}",
-            if self.available() {
+            if self.activity_available() {
                 "available"
             } else {
                 "unavailable"
             }
         ));
         issues.push(format!(
-            "stop_hotkey: {}{}",
+            "injection_lease: {}",
             if self.available() {
+                "fresh"
+            } else {
+                "not fresh (foreground action requires proof)"
+            }
+        ));
+        issues.push(format!(
+            "stop_hotkey: {}{}",
+            if self.transport_healthy() {
                 "available"
             } else {
                 "unavailable"

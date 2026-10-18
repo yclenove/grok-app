@@ -7,7 +7,7 @@ use gcu_host_protocol::{
     server::{Incoming, Peer, RPC_TIMEOUT},
     transport, Error,
 };
-use gcu_mcp::host::{RemoteHost, RemoteSession, StopMirror, UnavailableActivity};
+use gcu_mcp::host::{PhysicalActivity, RemoteHost, RemoteSession, StopMirror, UnavailableActivity};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::{
@@ -47,6 +47,27 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
+    // Compatibility for the existing fake-only assembly, which deliberately
+    // stays outside the native entry card. No platform clock is attached here.
+    run_with_activity(
+        driver,
+        Arc::new(UnavailableActivity),
+        host_fd,
+        socket,
+        token_fd,
+        stop_fd,
+    )
+    .await
+}
+
+pub(crate) async fn run_with_activity(
+    driver: Arc<dyn Driver>,
+    activity: Arc<dyn PhysicalActivity>,
+    host_fd: Option<usize>,
+    socket: Option<PathBuf>,
+    token_fd: Option<usize>,
+    stop_fd: usize,
+) -> Result<u8, Failure> {
     let (stream, bootstrap) = if let Some(fd) = host_fd {
         let mut stream = transport::inherited(fd)?;
         let bootstrap = Bootstrap::read(&mut stream).await?;
@@ -78,8 +99,7 @@ pub(crate) async fn run(
     .await
     .map_err(|_| Error::Timeout)?
     .map_err(|_| Error::Authentication)??;
-    let mut capabilities = driver.capabilities().clone();
-    capabilities.user_activity_guard = false;
+    let capabilities = activity_capabilities(driver.as_ref(), activity.as_ref());
     config.capabilities = Some(capabilities);
     // Registration is deliberately before any driver work or approval request.
     let (peer, incoming, authenticated) =
@@ -105,16 +125,15 @@ pub(crate) async fn run(
         sessions.clone(),
         driver.clone(),
     ));
-    let remote =
-        match RemoteHost::new(peer.clone(), stop.clone(), Arc::new(UnavailableActivity)).await {
-            Ok(remote) => remote,
-            Err(e) => {
-                stop_task.abort();
-                stop_peer.close();
-                peer.close();
-                return Err(e.into());
-            }
-        };
+    let remote = match RemoteHost::new(peer.clone(), stop.clone(), activity).await {
+        Ok(remote) => remote,
+        Err(e) => {
+            stop_task.abort();
+            stop_peer.close();
+            peer.close();
+            return Err(e.into());
+        }
+    };
     let result = rpc(
         peer.clone(),
         incoming,
@@ -134,6 +153,26 @@ pub(crate) async fn run(
     }
     result.map(|_| 0).map_err(Failure::from)
 }
+fn activity_capabilities(
+    driver: &dyn Driver,
+    activity: &dyn PhysicalActivity,
+) -> gcu_protocol::Capabilities {
+    let mut capabilities = driver.capabilities().clone();
+    capabilities.user_activity_guard &= activity.ms_since_physical_input().is_some();
+    capabilities
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    #[test]
+    fn engine_without_clock_keeps_activity_unavailable() {
+        let driver = gcu_driver_fake::FakeDriver::contract_fixture().unwrap();
+        assert_eq!(UnavailableActivity.ms_since_physical_input(), None);
+        assert!(!activity_capabilities(&driver, &UnavailableActivity).user_activity_guard);
+    }
+}
+
 async fn control(
     peer: Peer,
     mut incoming: Incoming,
