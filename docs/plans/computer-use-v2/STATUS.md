@@ -124,3 +124,4 @@
 ## 阶段记录
 
 -
+- ADR 0012 首卡（2026-10-17，统一驱动选型与停止闭环）已落地：`gcu` 省略 `--driver` 时为 auto，三个 native feature（native-windows/native-x11/native-wayland）全部默认关闭，auto/native 在未装配的平台 fail-closed（退出 2，不退回 fake、不提权）；Host 把引擎**非正常断线**锁存为全局持久 Stop（`stop-reason` 标记文件只用于展示原因，不改变结论）。真实平台驱动的装配仍待 ADR 0012 后续阶段卡（Windows/X11/Wayland/macOS helper/DomChannel 生产连接/文档），真机项 not_run；Windows 一项另依赖 ADR 0013 的实现。
