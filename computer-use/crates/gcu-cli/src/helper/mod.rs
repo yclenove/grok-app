@@ -22,14 +22,6 @@ mod serve;
 use crate::exit::Failure;
 pub use error::HelperError;
 
-/// Whether `gcu mcp` over stdio should proxy to the helper.
-///
-/// True only for a real macOS driver. Fake and non-macOS sessions stay in
-/// process. Blocking: none. Timeout: none. Cancellation: none.
-pub(crate) fn proxies_mcp(real_driver: bool) -> bool {
-    cfg!(target_os = "macos") && real_driver
-}
-
 /// Run `gcu agent`.
 ///
 /// On macOS this binds the helper socket and serves admitted peers until idle
@@ -51,7 +43,7 @@ pub(crate) async fn run_agent(scene: &str, fake: bool) -> Result<u8, Failure> {
 
 /// Forward stdio MCP to the helper.
 ///
-/// macOS only. The caller has already decided [`proxies_mcp`] is true. Up to
+/// macOS only. Selection already chose the helper proxy. Up to
 /// three attach attempts are made. A replaced helper is asked to exit and
 /// launched again with `open`. Blocking calls cap at five seconds. Dropping
 /// the future closes the socket.

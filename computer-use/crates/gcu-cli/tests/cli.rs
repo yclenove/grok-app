@@ -94,10 +94,55 @@ fn version_and_doctor_report_honest_fake_metadata() {
         .clone();
     let v: Value = serde_json::from_slice(&o).unwrap();
     assert_eq!(v["driver"], "fake");
+    assert_eq!(v["route"], "fake");
+    assert!(
+        v["native_disabled"]
+            .as_str()
+            .unwrap()
+            .contains("not compiled")
+            || v["native_disabled"]
+                .as_str()
+                .unwrap()
+                .contains("not assembled")
+            || v["native_disabled"]
+                .as_str()
+                .unwrap()
+                .contains("No safe native route")
+            || v["native_disabled"].as_str().unwrap().contains("macOS")
+    );
     assert!(v["permissions"]["note"].as_str().unwrap().contains("fake"));
     assert!(v["capabilities"]["observe"]["tree"].as_bool().unwrap());
     assert!(v["recent_calls"].as_array().unwrap().is_empty());
     assert_eq!(v["logging"]["destination"], "stderr");
+}
+
+#[test]
+fn auto_and_native_fail_closed_without_a_driver_document() {
+    let h = TempDir::new().unwrap();
+    for args in [
+        vec!["doctor"],
+        vec!["doctor", "--driver", "native"],
+        vec!["doctor", "--driver", "auto", "--scene", "form"],
+        vec!["--driver", "native"],
+        vec!["version", "--scene", "form"],
+    ] {
+        let asserted = command(&h).args(args).assert().code(2);
+        let output = asserted.get_output();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stdout.contains("\"driver\""), "{stdout}");
+        assert!(
+            stderr.contains("not compiled")
+                || stderr.contains("not assembled")
+                || stderr.contains("only with --driver fake")
+                || stderr.contains("No safe native route"),
+            "{stderr}"
+        );
+    }
+    command(&h)
+        .args(["version", "--driver", "fake"])
+        .assert()
+        .success();
 }
 
 #[test]

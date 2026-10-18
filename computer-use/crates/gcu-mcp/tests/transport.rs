@@ -36,7 +36,10 @@ async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
         let mut h = Harness::configured(
             FakeDriver::from_scene("form").unwrap(),
             &[],
-            ServerConfig { profile },
+            ServerConfig {
+                profile,
+                route_note: String::new(),
+            },
         );
         let init = h.initialize(false).await;
         assert!(init["instructions"].as_str().unwrap().chars().count() <= 1200);

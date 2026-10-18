@@ -14,20 +14,8 @@ pub(crate) fn runtime_root() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 pub(crate) fn state_dir() -> Result<PathBuf, Failure> {
-    #[cfg(windows)]
-    let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let root =
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let root = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")));
-    let dir = root
-        .ok_or_else(|| Failure::arguments("Cannot resolve persistent state directory"))?
-        .join("grok-computer-use");
-    #[cfg(any(windows, target_os = "macos"))]
-    let dir = dir.join("state");
+    let dir = gcu_host_protocol::stop_reason::state_dir()
+        .ok_or_else(|| Failure::arguments("Cannot resolve persistent state directory"))?;
     let parent = dir
         .parent()
         .ok_or_else(|| Failure::arguments("Invalid state directory"))?;

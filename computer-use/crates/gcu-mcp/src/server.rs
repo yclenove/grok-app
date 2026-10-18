@@ -46,6 +46,8 @@ pub struct Host {
 pub struct ServerConfig {
     /// Tools visible to the client. Every profile filters IMPLEMENTED_TOOLS.
     pub profile: Profile,
+    /// Same sentence doctor prints. Empty leaves instructions unchanged.
+    pub route_note: String,
 }
 #[derive(Clone)]
 pub(crate) struct Server(Arc<Inner>);
@@ -260,6 +262,7 @@ impl ServerHandler for Server {
             .with_instructions(instructions::instructions(
                 self.0.driver.platform(),
                 self.0.config.profile,
+                &self.0.config.route_note,
             ))
     }
     async fn list_tools(

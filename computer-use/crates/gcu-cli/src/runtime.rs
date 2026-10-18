@@ -1,20 +1,19 @@
-//! Process orchestration. No real driver is silently substituted with fake.
+//! Process orchestration. Driver choice comes only from [`crate::assemble`].
 use crate::{
     args::{self, Cli, Command, Transport},
+    assemble::{self, Entry, Plan},
     exit::Failure,
     host::LocalHost,
 };
 use std::sync::Arc;
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
+    assemble::reject_unused_scene(&cli.driver)?;
     if matches!(cli.command, Some(Command::Worker)) {
         return crate::worker::run().await;
     }
     if matches!(cli.command, Some(Command::Agent)) {
-        if cli.driver.driver.is_some() {
-            args::require_fake(&cli.driver)?;
-        }
-        return crate::helper::run_agent(&cli.driver.scene, cli.driver.driver.is_some()).await;
+        return dispatch_agent(&cli).await;
     }
     if let Some(Command::TurnEnded { session, payload }) = cli.command.as_ref() {
         let mut args = Vec::new();
@@ -79,30 +78,47 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         }
         _ => (),
     }
-    if let Some(Command::Mcp {
-        transport: Transport::Stdio,
-        connect: None,
-        profile,
-        turn_idle_secs,
-        token_fd: None,
-        port: None,
-    }) = cli.command.as_ref()
-    {
-        if crate::helper::proxies_mcp(cli.driver.driver.is_none()) {
+    let entry = match &cli.command {
+        None => Entry::Bare,
+        Some(Command::Mcp {
+            transport: Transport::Stdio,
+            connect: None,
+            token_fd: None,
+            port: None,
+            ..
+        }) => Entry::McpStdio,
+        _ => Entry::InProcess,
+    };
+    let plan = assemble::decide(assemble::production(&cli.driver, entry));
+    let (scene, disclosure) = match plan {
+        Plan::HelperProxy { .. } => {
+            let Some(Command::Mcp {
+                profile,
+                turn_idle_secs,
+                ..
+            }) = &cli.command
+            else {
+                return Err(Failure::internal("Helper proxy requires mcp"));
+            };
             return crate::helper::run_stdio_proxy((*profile).into(), *turn_idle_secs).await;
         }
-    }
-    // No subcommand on macOS starts the helper. `open` does not return the
-    // helper's status, so an already-permitted helper does not print doctor here.
-    // The helper probes its own TCC. `--driver fake` still falls through.
-    #[cfg(target_os = "macos")]
-    if cli.command.is_none() && cli.driver.driver.is_none() {
-        crate::helper::launch_for_onboarding().await?;
-        return Ok(0);
-    }
-    args::require_fake(&cli.driver)?;
+        Plan::Onboarding { .. } => {
+            #[cfg(target_os = "macos")]
+            {
+                crate::helper::launch_for_onboarding().await?;
+                return Ok(0);
+            }
+            #[cfg(not(target_os = "macos"))]
+            return Err(Failure::internal("Onboarding is only available on macOS"));
+        }
+        Plan::HelperAgent { .. } => {
+            return Err(Failure::internal("Agent selection is handled earlier"))
+        }
+        Plan::Refuse { message } => return Err(Failure::arguments(message)),
+        Plan::Fake { scene, disclosure } => (scene, disclosure),
+    };
     let driver = Arc::new(
-        gcu_driver_fake::FakeDriver::from_scene(&cli.driver.scene)
+        gcu_driver_fake::FakeDriver::from_scene(&scene)
             .and_then(|d| {
                 d.with_image_digest([0x47; 32]).map_err(|_| {
                     gcu_driver_fake::scene::SceneError::Invalid("fake identity unavailable")
@@ -132,7 +148,16 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         stop_fd,
     }) = cli.command
     {
-        return crate::engine::run(driver, host_fd, host_socket, host_token_fd, stop_fd).await;
+        return crate::engine::run(
+            driver,
+            Arc::new(gcu_mcp::host::UnavailableActivity),
+            disclosure.note(),
+            host_fd,
+            host_socket,
+            host_token_fd,
+            stop_fd,
+        )
+        .await;
     }
     let host = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -178,6 +203,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    route_note: disclosure.note(),
                 },
             )
             .await?;
@@ -215,6 +241,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    route_note: disclosure.note(),
                 },
             )
             .await?;
@@ -281,8 +308,10 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             write_oracle(&driver).await?;
             result.map(|_| 0).map_err(Failure::from)
         }
-        Some(Command::Doctor { json }) => crate::doctor::run(driver.as_ref(), &host, json).await,
-        None => crate::doctor::run(driver.as_ref(), &host, false).await,
+        Some(Command::Doctor { json }) => {
+            crate::doctor::run(driver.as_ref(), &host, &disclosure, json).await
+        }
+        None => crate::doctor::run(driver.as_ref(), &host, &disclosure, false).await,
         _ => Err(Failure::internal("Invalid CLI dispatch")),
     }
 }
@@ -302,4 +331,16 @@ async fn write_oracle(driver: &gcu_driver_fake::FakeDriver) -> Result<(), Failur
     }
     let _ = driver;
     Ok(())
+}
+
+async fn dispatch_agent(cli: &Cli) -> Result<u8, Failure> {
+    let plan = assemble::decide(assemble::production(&cli.driver, Entry::Agent));
+    match plan {
+        Plan::Fake { scene, .. } => crate::helper::run_agent(&scene, true).await,
+        Plan::HelperAgent { .. } => crate::helper::run_agent("form", false).await,
+        Plan::Refuse { message } => Err(Failure::arguments(message)),
+        Plan::HelperProxy { .. } | Plan::Onboarding { .. } => {
+            Err(Failure::internal("Agent selection is invalid"))
+        }
+    }
 }

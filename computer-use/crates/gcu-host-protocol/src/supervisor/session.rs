@@ -105,6 +105,19 @@ pub trait EngineProcess: Send + Sync {
     fn peer(&self) -> Option<Peer> {
         None
     }
+    /// Whether the independent control connection is still up.
+    ///
+    /// The default is true so a test double that only models process exit stays
+    /// on the crash path. A real session reports the stop peer.
+    fn control_connected(&self) -> bool {
+        true
+    }
+    /// Whether this host already asked the child to leave.
+    ///
+    /// Clean shutdown and kill set this. An abnormal control loss does not.
+    fn shutdown_requested(&self) -> bool {
+        false
+    }
 }
 
 /// A connected engine. Drop kills the child and does not wait.
@@ -208,6 +221,12 @@ impl EngineProcess for EngineSession {
 
     fn peer(&self) -> Option<Peer> {
         Some(self.peer.clone())
+    }
+    fn control_connected(&self) -> bool {
+        self.stop.connected()
+    }
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown_requested
     }
 }
 

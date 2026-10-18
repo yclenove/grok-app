@@ -11,15 +11,23 @@ pub(crate) struct Cli {
 }
 #[derive(Args)]
 pub(crate) struct DriverArgs {
-    /// Only the offline fake driver is assembled in this build.
+    /// `auto` (default when omitted), `native`, or offline `fake`.
+    ///
+    /// `auto` and `native` fail closed when that route is not compiled.
+    /// They never fall back to fake.
     #[arg(long, global = true, value_enum)]
     pub driver: Option<DriverKind>,
-    /// Built-in offline desktop scene.
-    #[arg(long, global = true, default_value = "form")]
-    pub scene: String,
+    /// Offline scene. Valid only with `--driver fake`. Omitted fake uses `form`.
+    #[arg(long, global = true)]
+    pub scene: Option<String>,
 }
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum DriverKind {
+    /// Select the compiled native route for this OS and entry.
+    Auto,
+    /// Require the native route. Unsupported builds fail closed.
+    Native,
+    /// Offline memory desktop. Debug, or release with `GCU_ALLOW_FAKE=1`.
     Fake,
 }
 
@@ -307,17 +315,4 @@ pub(crate) fn approval_mode() -> Result<Option<String>, crate::exit::Failure> {
             Ok(Some(value))
         }
     }
-}
-pub(crate) fn require_fake(args: &DriverArgs) -> Result<(), crate::exit::Failure> {
-    if args.driver.is_none() {
-        return Err(crate::exit::Failure::arguments("Real driver assembly is not implemented; P4. Explicit --driver fake is required for offline use."));
-    }
-    if !cfg!(debug_assertions)
-        && std::env::var_os("GCU_ALLOW_FAKE").as_deref() != Some(std::ffi::OsStr::new("1"))
-    {
-        return Err(crate::exit::Failure::arguments(
-            "Fake driver requires a debug build or GCU_ALLOW_FAKE=1",
-        ));
-    }
-    Ok(())
 }
