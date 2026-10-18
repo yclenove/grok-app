@@ -31,10 +31,8 @@ not demonstrate that DOM observation or control is operational. See the
    directory. Use a build with the maintainer-approved public identity; an
    arbitrary unpacked extension ID cannot replace it. Do not generate a key or
    override the native allowlist as a workaround.
-3. Verify the browser's extension ID against
-   `__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__`, which the maintainer must fill
-   with the ID derived from the approved manifest `key`. Both the extension and
-   gcu embed that public key. No developer account or extension-private signing
+3. Verify the browser's extension ID is `jgpkhdjlddaoopklipcnpcjcpiancmff`. Both the extension and gcu embed
+   the matching public key. No developer account or extension-private signing
    key is needed by an end user.
 4. Preview and install the local native messaging host from a terminal:
 

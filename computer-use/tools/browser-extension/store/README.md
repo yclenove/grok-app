@@ -22,7 +22,7 @@ publishing. Never generate or commit a private key as part of this kit.
 
 | Required input | Placeholder | Maintainer action |
 | --- | --- | --- |
-| Fixed extension identity | `__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__` | Supply the approved public manifest `key` through the identity release process; derive the ID from that key and verify `chrome.runtime.id` and native `allowed_origins` match it in each browser. Rebuild gcu and the extension together. No runtime ID override is supported. |
+| Fixed extension identity | `jgpkhdjlddaoopklipcnpcjcpiancmff` (from the manifest `key`, set 2026-10-17) | Verify `chrome.runtime.id` and native `allowed_origins` match it in each browser. If a store assigns a different ID for the published item, that is a new identity: change the key (or adopt the store key) through a deliberate release and rebuild gcu and the extension together. No runtime ID override is supported. |
 | Chrome developer account | `__MAINTAINER_CHROME_WEB_STORE_DEVELOPER_ACCOUNT__` | Use the project-controlled account and handle registration/fees outside this task. |
 | Edge developer account | `__MAINTAINER_EDGE_ADD_ONS_DEVELOPER_ACCOUNT__` | Use the project-controlled Partner Center account outside this task. |
 | Chrome listing URL | `__MAINTAINER_CHROME_WEB_STORE_LISTING_URL__` | Insert the actual public URL only when it exists. A listing identifier is not the native host identity. |
@@ -37,7 +37,7 @@ publishing. Never generate or commit a private key as part of this kit.
 | Edge screenshots | `__MAINTAINER_EDGE_ADD_ONS_SCREENSHOTS__` | Capture the actual release in Edge using synthetic content; meet the current store dimensions. |
 | Store graphics | `__MAINTAINER_STORE_ICONS_AND_PROMOTIONAL_ASSETS__` | Provide approved icons/graphics required by the current forms; do not invent branded assets or reviewer evidence. |
 
-- [ ] Resolve every placeholder above and in the materials; verify both browser identities against the approved public key. The checked-in manifest currently has no `key`, so installation and native startup fail closed.
+- [ ] Resolve every placeholder above and in the materials; verify both browser identities against the approved public key.
 - [ ] Verify the release's trusted native session/window binding, full ActionRouter dispatch and Stop lifecycle end to end. The current `gcu native-host` executable acknowledges consent only; core DOM fusion alone does not enable that entry's dispatch. Do not publish claims of working DOM control until the release actually wires and validates this path.
 - [ ] Build the extension with the existing [build command](../README.md#build-and-checks). Package only the generated `dist/` extension files, not this submission kit, tests, private keys or development files.
 - [ ] Review the [permission inventory](permissions.md) against the generated manifest. Run the native host and packaged-manifest tests below; any permission change requires a new justification and privacy review.

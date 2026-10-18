@@ -52,7 +52,7 @@ badge indicates browser consent, not that a task succeeded or dispatch is ready.
 - [Install](../../../docs/browser-extension.md#install), [share](../../../docs/browser-extension.md#share), [revoke](../../../docs/browser-extension.md#revoke), [uninstall](../../../docs/browser-extension.md#uninstall).
 
 Developer account: `__MAINTAINER_CHROME_WEB_STORE_DEVELOPER_ACCOUNT__`.
-Fixed native identity: `__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__`.
+Fixed native identity: `jgpkhdjlddaoopklipcnpcjcpiancmff`.
 Listing URL: `__MAINTAINER_CHROME_WEB_STORE_LISTING_URL__`.
 Support URL: `__MAINTAINER_SUPPORT_URL__`.
 Screenshots: `__MAINTAINER_CHROME_WEB_STORE_SCREENSHOTS__`.
