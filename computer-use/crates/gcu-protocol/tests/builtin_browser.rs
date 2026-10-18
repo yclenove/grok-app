@@ -526,16 +526,16 @@ fn conditional_tool_stays_out_of_the_default_catalog() {
 
 #[test]
 fn profile_path_must_be_the_fixed_directory() {
-    let app = std::path::Path::new("/tmp/app-data");
-    let profile = profile_dir(app);
-    assert!(is_exact_profile(app, &profile));
+    // An absolute path on every platform; "/tmp/..." has no drive on Windows.
+    let root = std::env::temp_dir();
+    assert!(root.is_absolute());
+    let app = root.join("app-data");
+    let profile = profile_dir(&app);
+    assert!(is_exact_profile(&app, &profile));
+    assert!(!is_exact_profile(&app, &app.join("other")));
     assert!(!is_exact_profile(
-        app,
-        std::path::Path::new("/tmp/app-data/other")
-    ));
-    assert!(!is_exact_profile(
-        app,
-        std::path::Path::new("/tmp/elsewhere/cu-browser-profile")
+        &app,
+        &root.join("elsewhere").join("cu-browser-profile")
     ));
     assert!(!is_exact_profile(
         std::path::Path::new("relative"),
