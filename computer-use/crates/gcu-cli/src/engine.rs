@@ -60,6 +60,12 @@ pub(crate) enum ConnectInput<'a> {
     Given(&'a dyn Driver, &'a dyn PhysicalActivity),
     /// Conservative capabilities. The macOS driver is attached after connect.
     Macos,
+    /// Conservative capabilities. The Windows worker starts after connect.
+    ///
+    /// Other builds keep the variant so the handshake match type-checks.
+    /// Only the Windows `native-windows` route constructs it.
+    #[cfg_attr(not(all(windows, feature = "native-windows")), allow(dead_code))]
+    Windows,
 }
 
 pub(crate) async fn run(
@@ -70,9 +76,8 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    // Fake, and every engine that is neither macOS nor Linux X11, stays unwired
-    // to a platform clock. Linux X11 calls [`connect_engine`], binds the Host
-    // latch, then [`serve_engine`].
+    // Fake stays on UnavailableActivity. Linux X11 and Windows native bind the
+    // Host latch after connect, then pass their clock to [`serve_engine`].
     run_prepared(
         Prepared::Given {
             driver,
@@ -156,9 +161,9 @@ async fn run_prepared(
 
 /// Handshake state. Capabilities are snapshotted before a platform bind replaces the driver.
 pub(crate) struct EngineSession {
-    peer: Peer,
+    pub(crate) peer: Peer,
     incoming: Incoming,
-    stop_peer: Peer,
+    pub(crate) stop_peer: Peer,
     stop_incoming: Incoming,
     /// Host Stop mirror from the authenticated handshake.
     pub(crate) stop: StopMirror,
@@ -221,6 +226,7 @@ pub(crate) async fn connect_engine(
     let capabilities = match input {
         ConnectInput::Given(driver, activity) => activity_capabilities(driver, activity),
         ConnectInput::Macos => crate::host::macos_wire::conservative_handshake(),
+        ConnectInput::Windows => crate::native_windows::conservative_handshake(),
     };
     config.capabilities = Some(capabilities);
     // Registration is deliberately before any driver work or approval request.

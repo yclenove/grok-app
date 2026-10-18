@@ -9,6 +9,20 @@ only that measured evidence may permit the listener-dependent environment Skips
 below. The standalone JSON artifact is diagnostic only and cannot grant a Skip.
 Use only the disposable fixture desktop: the matrix includes movement and XBUTTON.
 
+## Product assembly (`native-windows`, default off)
+
+`gcu-cli` selects this route only when the `native-windows` feature is compiled
+and `--driver` is omitted/`auto` or `native`. Startup reads the process token,
+refuses High/System, UIAccess, a secure desktop, or a non-interactive session,
+then calls `WindowsDriver::monitored`. That is the Worker path: parent hooks,
+hotkey, up-only release, job object, and the worker handshake. It does not fall
+back to `InProcess` or to the fake driver. Session 0 and the portable fake
+listener prove the refusal and the Host latch only.
+
+Physical mouse/keyboard, fourth-probe startup and renewal, UAC, hook loss,
+hotkey conflict, Stop while input is held, a stuck worker, DPI, and system-app
+smoke remain **not_run**. A hosted runner skip does not replace them.
+
 ## Mouse hook delivery
 
 `unsafe_mouse_probe::live_mouse_probe_matrix` installs its own WH_MOUSE_LL and

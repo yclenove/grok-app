@@ -11,10 +11,11 @@ path = "src/main.rs"
 
 [features]
 eval-autoapprove = []
-# Delivery switches. Default off. `native-x11` assembles the Linux X11 route
-# when this feature is enabled. Enabling it does not turn the feature on by
-# default, fall back to fake, widen input, or elevate. Windows and Wayland
-# stay unassembled.
+# Delivery switches. Default off. Enabling one does not turn it on by default,
+# fall back to fake, widen input, or elevate. `native-x11` assembles Linux X11.
+# `native-windows` assembles the Windows Worker route. Wayland stays unassembled.
+# The Windows crate is already a direct dependency: the activity adapter and
+# portable tests use it on every host. This feature does not add another edge.
 native-windows = []
 native-x11 = ["dep:gcu-driver-linux"]
 native-wayland = []

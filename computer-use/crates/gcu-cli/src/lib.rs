@@ -21,6 +21,7 @@ mod host;
 pub mod install;
 mod install_cmd;
 pub mod native_host;
+mod native_windows;
 #[cfg(all(feature = "native-x11", target_os = "linux"))]
 mod native_x11;
 mod private;
