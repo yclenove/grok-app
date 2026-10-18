@@ -182,7 +182,8 @@ pub struct ScreenshotGet {
 }
 
 /// In-memory safe image, never a path.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+// Debug is metadata only and never formats `bytes`.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Image {
     /// Encoded media type.
@@ -193,6 +194,16 @@ pub struct Image {
     pub height: u32,
     /// Redacted bytes; JSON byte array.
     pub bytes: Vec<u8>,
+}
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Image")
+            .field("mime", &self.mime)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("byte_count", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// Wire projection of the existing core doctor fields.

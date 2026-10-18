@@ -10,6 +10,7 @@ pub mod codec;
 pub mod events;
 pub mod inject;
 pub mod lifecycle;
+pub mod log_policy;
 pub mod messages;
 pub mod overlay;
 pub mod panel;

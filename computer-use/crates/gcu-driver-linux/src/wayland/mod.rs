@@ -3,6 +3,7 @@
 pub mod assembly;
 pub mod capabilities;
 pub mod capture;
+mod debug_fmt;
 pub mod doctor;
 pub mod ei;
 pub mod gnome;

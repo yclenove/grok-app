@@ -102,6 +102,7 @@ mod journal_throttle;
 
 mod leader;
 
+mod log_retention;
 mod logging;
 
 mod managed_setup;

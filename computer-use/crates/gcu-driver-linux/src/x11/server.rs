@@ -31,7 +31,9 @@ pub struct XRootGeometry {
 }
 
 /// Uncompressed 32-bit RGBA image buffer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Debug is metadata only and never formats `data`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RawImage {
     /// Width in pixels.
     pub width: u32,
@@ -39,6 +41,15 @@ pub struct RawImage {
     pub height: u32,
     /// RGBA8 pixel data (`width * height * 4` bytes).
     pub data: Vec<u8>,
+}
+impl std::fmt::Debug for RawImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("byte_count", &self.data.len())
+            .finish()
+    }
 }
 
 /// Errors originating from X11 protocol operations.

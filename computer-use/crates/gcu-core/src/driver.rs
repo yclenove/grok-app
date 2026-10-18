@@ -93,7 +93,9 @@ impl Default for CaptureOpts {
     }
 }
 /// Encoded window capture, using the same physical-pixel origin as node frames.
-#[derive(Debug, Clone)]
+///
+/// Debug is metadata only. Raw bytes are never formatted.
+#[derive(Clone)]
 pub struct Capture {
     /// Encoded image bytes.
     pub bytes: Vec<u8>,
@@ -105,6 +107,17 @@ pub struct Capture {
     pub mime: String,
     /// Geometry sampled for this capture.
     pub geometry: Geometry,
+}
+impl std::fmt::Debug for Capture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Capture")
+            .field("byte_count", &self.bytes.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("mime", &self.mime)
+            .field("geometry", &self.geometry)
+            .finish()
+    }
 }
 /// Permission/dependency probe with no account access or automatic grants.
 #[derive(Debug, Clone)]

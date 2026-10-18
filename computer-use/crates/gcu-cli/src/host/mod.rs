@@ -134,25 +134,35 @@ struct Events(Mutex<VecDeque<serde_json::Value>>);
 impl Events {
     fn load(&self, path: &std::path::Path) -> Result<(), Failure> {
         let metadata = match std::fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(Failure::arguments("Cannot inspect call summaries")),
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(retention_failure(
+                    path,
+                    &error,
+                    "Cannot inspect call summaries",
+                ))
+            }
         };
-        private::check_file(path)?;
-        if metadata.len() > 8192
-            || metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_none_or(|age| age.as_secs() > 7 * 86400)
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Failure::arguments("Cannot inspect call summaries"));
+        }
+        if file_expired(&metadata)
+            .map_err(|error| retention_failure(path, &error, "Cannot inspect call summaries"))?
         {
+            return remove_summary(path);
+        }
+        private::check_file(path)?;
+        if metadata.len() > 8192 {
             return Ok(());
         }
-        let source =
-            std::fs::read(path).map_err(|_| Failure::arguments("Cannot read call summaries"))?;
+        let source = std::fs::read(path)
+            .map_err(|error| retention_failure(path, &error, "Cannot read call summaries"))?;
         let entries: Vec<Summary> = serde_json::from_slice(&source)
             .map_err(|_| Failure::arguments("Invalid metadata-only call summaries"))?;
-        let mut recent = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let now = timestamp_ms();
+        let mut kept = Vec::new();
+        let mut dropped = 0usize;
         for entry in entries
             .into_iter()
             .rev()
@@ -161,17 +171,68 @@ impl Events {
             .into_iter()
             .rev()
         {
-            let now = timestamp_ms();
-            if entry.timestamp_ms > now || now.saturating_sub(entry.timestamp_ms) > 7 * 86400 * 1000
-            {
+            if entry.timestamp_ms > now || now.saturating_sub(entry.timestamp_ms) > retention_ms() {
+                dropped += 1;
                 continue;
             }
+            kept.push(entry);
+        }
+        if dropped > 0 {
+            if kept.is_empty() {
+                remove_summary(path)?;
+            } else {
+                let body = serde_json::to_vec(&kept)
+                    .map_err(|_| Failure::arguments("Cannot save metadata-only call summaries"))?;
+                private::write_secret(path, &body).map_err(|error| {
+                    retention_failure(path, &error, "Cannot save metadata-only call summaries")
+                })?;
+            }
+        }
+        let mut recent = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        for entry in kept {
             recent.push_back(serde_json::json!({"tool":entry.tool,"outcome":entry.outcome,"duration_ms":entry.duration_ms,"timestamp_ms":entry.timestamp_ms}));
         }
         Ok(())
     }
 }
-#[derive(serde::Deserialize)]
+
+fn retention_ms() -> u64 {
+    gcu_host_protocol::log_policy::RETENTION
+        .as_secs()
+        .saturating_mul(1000)
+}
+
+fn file_expired(metadata: &std::fs::Metadata) -> std::io::Result<bool> {
+    let modified = metadata.modified()?;
+    Ok(modified
+        .elapsed()
+        .map(|age| age > gcu_host_protocol::log_policy::RETENTION)
+        .unwrap_or(false))
+}
+
+fn remove_summary(path: &std::path::Path) -> Result<(), Failure> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(retention_failure(
+            path,
+            &error,
+            "Cannot delete expired call summaries",
+        )),
+    }
+}
+
+fn retention_failure(path: &std::path::Path, error: &std::io::Error, message: &str) -> Failure {
+    tracing::warn!(
+        category = "retention",
+        location = %path.display(),
+        io_kind = ?error.kind(),
+        "call summary retention failed"
+    );
+    Failure::arguments(message)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct Summary {
     tool: gcu_protocol::ToolName,
@@ -321,5 +382,92 @@ mod tests {
         activity.persist_stop().ok().unwrap();
         assert!(activity.latched_stop());
         assert!(directory.path().join("stopped").exists());
+    }
+
+    fn summary(tool: &str, timestamp_ms: u64) -> String {
+        format!(
+            r#"[{{"tool":"{tool}","outcome":"done","duration_ms":1,"timestamp_ms":{timestamp_ms}}}]"#
+        )
+    }
+
+    fn write_summary(path: &std::path::Path, body: &str) {
+        private::write_secret(path, body.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn expired_recent_calls_file_is_unlinked() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("recent-calls.json");
+        write_summary(&path, &summary("click", timestamp_ms()));
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(
+                    gcu_host_protocol::log_policy::RETENTION + std::time::Duration::from_secs(60),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        drop(file);
+        Events::default()
+            .load(&path)
+            .map_err(|error| error.message)
+            .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_recent_call_entries_are_removed_from_disk() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("recent-calls.json");
+        let fresh = timestamp_ms();
+        write_summary(
+            &path,
+            &format!(
+                "[{},{}]",
+                summary("click", 1)
+                    .trim_start_matches('[')
+                    .trim_end_matches(']'),
+                summary("scroll", fresh)
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+            ),
+        );
+        let events = Events::default();
+        events.load(&path).map_err(|error| error.message).unwrap();
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!(!kept.contains("click"));
+        assert!(kept.contains("scroll"));
+        let loaded = events.0.lock().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0]["tool"], "scroll");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_calls_delete_failure_is_returned() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("recent-calls.json");
+        write_summary(&path, &summary("click", timestamp_ms()));
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(
+                    gcu_host_protocol::log_policy::RETENTION + std::time::Duration::from_secs(60),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        drop(file);
+        let mut permissions = std::fs::metadata(directory.path()).unwrap().permissions();
+        permissions.set_mode(0o555);
+        std::fs::set_permissions(directory.path(), permissions).unwrap();
+        let result = Events::default().load(&path);
+        let mut restore = std::fs::metadata(directory.path()).unwrap().permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(directory.path(), restore).unwrap();
+        assert!(result.is_err());
+        assert!(path.exists());
     }
 }

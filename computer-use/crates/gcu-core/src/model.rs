@@ -179,7 +179,9 @@ bitflags::bitflags! {
 }
 
 /// Portable node value. Password values must be redacted by the observation layer.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Debug never includes text contents.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeValue {
     /// Editable or static text.
@@ -198,6 +200,24 @@ pub enum NodeValue {
         max: f64,
     },
 }
+impl fmt::Debug for NodeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => f
+                .debug_struct("Text")
+                .field("chars", &text.chars().count())
+                .finish(),
+            Self::Number(value) => f.debug_tuple("Number").field(value).finish(),
+            Self::Bool(value) => f.debug_tuple("Bool").field(value).finish(),
+            Self::Range { value, min, max } => f
+                .debug_struct("Range")
+                .field("value", value)
+                .field("min", min)
+                .field("max", max)
+                .finish(),
+        }
+    }
+}
 
 /// Unicode-scalar range, translated into native units by each driver.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,7 +229,9 @@ pub struct TextRange {
 }
 
 /// Optional text details; long text is bounded by TreeOpts.text_limit.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// Debug reports lengths only. The extended text is never formatted.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TextExtras {
     /// Selected character range.
     pub selected: Option<TextRange>,
@@ -217,6 +239,18 @@ pub struct TextExtras {
     pub visible: Option<TextRange>,
     /// Extended text, when exposed by the native API.
     pub text: Option<String>,
+}
+impl fmt::Debug for TextExtras {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextExtras")
+            .field("selected", &self.selected)
+            .field("visible", &self.visible)
+            .field(
+                "text_chars",
+                &self.text.as_ref().map(|text| text.chars().count()),
+            )
+            .finish()
+    }
 }
 
 /// Process-local opaque handle. Never serialized or logged with its payload.
