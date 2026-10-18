@@ -4,7 +4,7 @@ import { createT, loadLocaleCatalog, resolveLocale, type Locale } from "@/i18n";
 import { emptyOverlay, overlayControl, sampleCursor, watchOverlay, type ControlAction, type OverlayFrame } from "@/lib/computer-use/overlay";
 import "./computer-use-overlay.css";
 
-function stoppedCopy(reason: OverlayFrame["stop_reason"]): string {
+function stoppedCopy(reason: OverlayFrame["stop_reason"]) {
   if (reason === "hotkey") return "computerUse.overlay.stoppedHotkey";
   if (reason === "panel") return "computerUse.overlay.stoppedPanel";
   if (reason === "internal_error") return "computerUse.overlay.stoppedInternal";
