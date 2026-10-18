@@ -7,9 +7,14 @@
 //! Blocking: reads procfs. Timeout: none; the reads are local and bounded by
 //! the files' small size. Cancellation: none.
 
-use super::proof::{build_id, LaunchSnapshot};
+#[cfg(target_os = "linux")]
+use super::proof::build_id;
+use super::proof::LaunchSnapshot;
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::Read;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 /// Why the current process could not be recorded. No path is included.
