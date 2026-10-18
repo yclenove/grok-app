@@ -77,10 +77,11 @@ impl ActionRouter {
             .native(session, &cancel, false, self.driver.window_geometry(win))
             .await
             .map_err(|e| e.error_code())?;
-        let before = signature(&raw)?;
-        let mut tree = Pipeline::default().run(raw.clone(), opts);
-        let quality = TreeQuality::assess(&raw, &tree);
-        let mut image = None;
+        // Screenshot identity is the accessibility tree. DOM fusion runs after
+        // that compare so a DOM-only change cannot mark the capture stale, and
+        // before redaction so shared password fields are still masked.
+        let ax_signature = signature(&raw)?;
+        let mut capture = None;
         let captured_at;
         // Auto captures speculatively to detect visual changes that the tree
         // cannot express. Only a synchronized, redacted image can reach policy
@@ -89,7 +90,7 @@ impl ActionRouter {
             if raw.incomplete.is_some() {
                 return Err(ErrorCode::HandoffRequired);
             }
-            let capture = self
+            let shot = self
                 .native(
                     session,
                     &cancel,
@@ -111,32 +112,49 @@ impl ActionRouter {
             if after.incomplete.is_some() {
                 return Err(ErrorCode::HandoffRequired);
             }
-            if before != signature(&after)? {
+            if ax_signature != signature(&after)? {
                 return Err(ErrorCode::StaleScreenshot);
             }
             let current = self
                 .native(session, &cancel, false, self.driver.window_geometry(win))
                 .await
                 .map_err(|e| e.error_code())?;
-            if geometry != current || capture.geometry != geometry {
+            if geometry != current || shot.geometry != geometry {
                 return Err(ErrorCode::StaleGeometry);
             }
-            let version = digest(before.as_bytes());
-            tree.state_version = Some(version);
-            tree.observed_at = Some(captured_at);
-            image = Some(
-                redact::apply(&tree, CapturedFrame::new(capture, version, captured_at)).map_err(
+            capture = Some(shot);
+        } else {
+            captured_at = self.epoch.elapsed();
+        }
+        if let Some(hub) = self.browser.clone() {
+            let aligned = self
+                .native(session, &cancel, false, async {
+                    Ok(hub.align(session.id(), win, raw).await)
+                })
+                .await
+                .map_err(|e| e.error_code())?;
+            raw = aligned;
+        }
+        if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
+            return Err(ErrorCode::HandoffRequired);
+        }
+        let merged_signature = signature(&raw)?;
+        let mut tree = Pipeline::default().run(raw.clone(), opts);
+        let quality = TreeQuality::assess(&raw, &tree);
+        let version = digest(merged_signature.as_bytes());
+        tree.state_version = Some(version);
+        tree.observed_at = Some(captured_at);
+        let image = match capture {
+            Some(shot) => Some(
+                redact::apply(&tree, CapturedFrame::new(shot, version, captured_at)).map_err(
                     |e| match e {
                         redact::RedactionError::Stale => ErrorCode::StaleScreenshot,
                         _ => ErrorCode::HandoffRequired,
                     },
                 )?,
-            );
-        } else {
-            captured_at = self.epoch.elapsed();
-            tree.state_version = Some(digest(before.as_bytes()));
-            tree.observed_at = Some(captured_at);
-        }
+            ),
+            None => None,
+        };
         let windows = self
             .native(
                 session,
@@ -171,7 +189,7 @@ impl ActionRouter {
             info,
             raw,
             tree,
-            signature: before,
+            signature: merged_signature,
             image,
             quality,
         })

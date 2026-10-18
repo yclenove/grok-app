@@ -3,6 +3,10 @@
 //! Checks are synchronous. They do not block, time out, cancel, or echo the
 //! text they reject. Scheme and host checks strip whitespace, bidi marks,
 //! BOM, zero-width characters, and soft hyphens, then case-fold.
+//!
+//! Dangerous text covers schemes, metadata hosts, loopback, link-local, and
+//! private (RFC1918) addresses. This blocks only gcu's own input. It does not
+//! claim to stop a browser from redirecting on its own or navigating in-page.
 
 use super::text::fold;
 use super::{ActionIntent, Tool};
@@ -34,7 +38,8 @@ pub(crate) enum InputBlock {
     InvalidKey,
     /// The chord is on the hard blacklist.
     BlacklistedChord,
-    /// The text uses a dangerous scheme or a metadata host.
+    /// The text uses a dangerous scheme, a metadata host, or a loopback,
+    /// link-local, or private address.
     DangerousInput,
     /// The focused or targeted field is an address bar.
     AddressBar,
@@ -156,9 +161,19 @@ pub(crate) fn dangerous_text(raw: &str) -> bool {
     if super::text::phrase_in(&cleaned, "metadata.google.internal") {
         return true;
     }
-    cleaned
+    if cleaned
         .split(|c: char| !matches!(c, '0'..='9' | 'a'..='f' | 'x' | '.' | ':'))
-        .any(|token| metadata_host(strip_port(token.trim_matches(|c| c == '[' || c == ']'))))
+        .any(|token| metadata_host(host_token(token)))
+    {
+        return true;
+    }
+    cleaned
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != ':')
+        .any(|token| blocked_host(host_token(token)))
+}
+
+fn host_token(token: &str) -> &str {
+    strip_port(token.trim_matches(|c| c == '[' || c == ']'))
 }
 
 fn strip_port(host: &str) -> &str {
@@ -241,6 +256,30 @@ fn is_metadata_ip(value: u32) -> bool {
     const AWS: u32 = (169 << 24) | (254 << 16) | (170 << 8) | 2;
     const ALIBABA: u32 = (100 << 24) | (100 << 16) | (100 << 8) | 200;
     value == LINK_LOCAL || value == AWS || value == ALIBABA
+}
+
+fn blocked_host(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    let host = host.strip_prefix("::ffff:").unwrap_or(host);
+    host == "localhost"
+        || host == "localhost.localdomain"
+        || host == "::1"
+        || host == "0:0:0:0:0:0:0:1"
+        || intranet_ip(host)
+}
+
+fn intranet_ip(host: &str) -> bool {
+    let Some(value) = ipv4_value(host) else {
+        return false;
+    };
+    let [a, b, _, _] = value.to_be_bytes();
+    a == 127
+        || a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 169 && b == 254)
 }
 
 fn ipv4_value(host: &str) -> Option<u32> {
@@ -364,6 +403,31 @@ mod tests {
         assert!(dangerous_text("http://169.254.169.254:80/latest"));
         assert!(!dangerous_text(" \u{200b} "));
         assert!(!dangerous_text("1.2.3"));
+        for sample in [
+            "http://127.0.0.1/",
+            "http://localhost/x",
+            "http://localhost.localdomain/",
+            "http://10.1.2.3/",
+            "http://192.168.0.1/",
+            "http://172.16.0.1/",
+            "http://169.254.1.1/",
+            "::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "0:0:0:0:0:0:0:1",
+        ] {
+            assert!(dangerous_text(sample), "{sample}");
+        }
+        for sample in [
+            "1.2.3.4",
+            "8.8.8.8",
+            "172.15.0.1",
+            "172.32.0.1",
+            "10",
+            "notlocalhost",
+        ] {
+            assert!(!dangerous_text(sample), "{sample}");
+        }
         assert!(matches!(classify_chord("super+l"), ChordClass::Blacklisted));
         assert!(matches!(classify_chord("meta+l"), ChordClass::Blacklisted));
         assert!(matches!(

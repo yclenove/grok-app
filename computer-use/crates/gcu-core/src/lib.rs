@@ -37,3 +37,5 @@ pub mod snapshot;
 pub mod action;
 /// `computer_batch`: preflight every step, then one router attempt each.
 pub mod batch;
+/// Shared-tab DOM fusion. Unaligned reads and actions stay on declared L0.
+pub mod browser;
