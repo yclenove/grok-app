@@ -26,6 +26,18 @@ pub fn validate_arguments(name: &str, value: Value) -> Result<(), Box<ToolError>
         | "drag" => action(name, value, String::new()).map(|_| ()),
         "press_key" => check!(PressKeyParams),
         "wait_for" => action(name, value, String::new()).map(|_| ()),
+        "computer_script" => {
+            #[cfg(feature = "script")]
+            {
+                let params: ComputerScriptParams = parse(value)?;
+                params.validate().map_err(|err| Box::new(invalid(err.0)))
+            }
+            #[cfg(not(feature = "script"))]
+            {
+                let _ = value;
+                Err(Box::new(invalid("Tool is not implemented in this build.")))
+            }
+        }
         "computer_batch" => {
             let params: ComputerBatchParams = parse(value)?;
             params.validate().map_err(|err| {
