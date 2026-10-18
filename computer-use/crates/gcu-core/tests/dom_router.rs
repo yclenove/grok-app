@@ -378,7 +378,7 @@ async fn unshared_tab_keeps_l0_tree_and_l0_action() {
     assert!(text.contains("Documentation"));
     assert!(!text.contains("Dom Only"));
     let comment = index_of(&text, "Comment");
-    let blocked = rig.execute(set(comment, "http://localhost/x")).await;
+    let blocked = rig.execute(set(comment, "http://169.254.169.254/x")).await;
     assert_eq!(code(&blocked), ErrorCode::KeyBlocked);
     assert_eq!(rig.driver.perform_calls(), 0);
     assert_eq!(rig.dom.performs(), 0);
@@ -447,7 +447,7 @@ async fn focused_address_bar_blocks_text_with_dom_channel_present() {
 }
 
 #[tokio::test]
-async fn dangerous_schemes_and_metadata_and_private_hosts_block_dom_input() {
+async fn dangerous_schemes_and_metadata_hosts_block_dom_input() {
     let rig = Rig::page(ConfirmationLevel::Off);
     rig.bind_matched().await;
     let text = rig.observe().await.text;
@@ -458,12 +458,6 @@ async fn dangerous_schemes_and_metadata_and_private_hosts_block_dom_input() {
         "file:///etc/passwd",
         "http://169.254.169.254/latest",
         "http://metadata.google.internal/",
-        "http://127.0.0.1/",
-        "http://localhost/x",
-        "http://10.1.2.3/",
-        "http://192.168.0.1/",
-        "http://172.16.0.1/",
-        "::1",
     ] {
         assert_eq!(
             code(&rig.execute(set(comment, input)).await),
@@ -481,7 +475,7 @@ async fn dangerous_schemes_and_metadata_and_private_hosts_block_dom_input() {
     let blocked = l0
         .execute(set(
             index_of(&l0_text, "Comment"),
-            "http://localhost/secret",
+            "http://169.254.169.254/secret",
         ))
         .await;
     assert_eq!(code(&blocked), ErrorCode::KeyBlocked);

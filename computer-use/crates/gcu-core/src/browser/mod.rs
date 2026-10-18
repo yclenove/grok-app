@@ -8,9 +8,8 @@
 //!
 //! This layer does not read cookies or storage, does not add a driver or Host
 //! method, and does not raise the 5s native ceiling. gcu blocks its own input
-//! (address bar, dangerous schemes, metadata hosts, loopback, and private
-//! networks). It does not claim to stop the browser's own redirects or in-page
-//! navigations.
+//! (address bar, dangerous schemes, and metadata hosts). It does not claim to
+//! stop the browser's own redirects or in-page navigations.
 
 mod merge;
 mod router;

@@ -17,9 +17,7 @@
 //!    denylist hits refuse, even when an always grant exists. Appended ids
 //!    cannot remove built-ins.
 //! 5. Chord blacklist, unparseable keys, address-bar input, dangerous schemes,
-//!    metadata hosts, loopback, link-local, and private addresses. These win
-//!    over surface classification. gcu blocks only its own input; it does not
-//!    claim to stop a browser redirect or an in-page navigation.
+//!    and metadata hosts. These win over surface classification.
 //! 6. Execution surface. Remote title/URL hits are observation only. Known
 //!    terminal, REPL, debugger, and task targets refuse every mutating path.
 //!    An unclassifiable mutating target hands off.
