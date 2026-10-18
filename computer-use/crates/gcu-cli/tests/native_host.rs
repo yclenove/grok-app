@@ -9,6 +9,9 @@ use gcu_cli::native_host::{
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, io, path::Path};
 
+#[path = "native_host_support/store.rs"]
+mod store;
+
 fn identity() -> ExtensionIdentity {
     // Public test bytes, never a production identity or a Chrome signing key.
     ExtensionIdentity::from_manifest(r#"{"key":"AQIDBA=="}"#).unwrap()
