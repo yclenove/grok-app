@@ -18,6 +18,12 @@ pub async fn run(
             super::super::unsafe_mouse_probe::decision()?,
         );
     }
+    if requires_foreground(id) {
+        if let Some(skip) = silent_mouse_environment(super::super::unsafe_mouse_probe::decision()?)
+        {
+            return skip;
+        }
+    }
     let result = run_case(id, driver, fixture, win).await;
     // ADR 0013: the foreground capability stays open while only the mouse proof
     // is missing, and the action-time proof refuses instead. Judge that refusal
