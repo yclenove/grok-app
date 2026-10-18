@@ -38,7 +38,7 @@ rcargo test -p gcu-cli --features script --test script_router
 
 缺口及影响（本卡不修改实现或放宽门禁）：
 
-- **G1 — 持久身份约束。** 代码已按 03 §7.2 收紧：`AppIdentity::grant_eq` 要求路径、内容哈希、cdhash、证书、发布者/Team、产品、build；缺证据不匹配；只含窄字段的旧记录不升级、不放行（见 `computer-use/docs/adr/0014-persistent-grant-identity.md`）。路线 A `allows` 与路线 B `persistent_grant_matches` 调用同一函数。同 Team ID 的 macOS cdhash 变化、Windows 同发布者换路径/哈希、Linux 同路径换哈希都重新授权。驱动单测和本机逻辑测试仍不是真机产品链验收，该项真机 not_run。应用更新后「始终允许」需要重新批准。
+- **G1 — 持久身份约束。** 代码已按 03 §7.2 收紧：`AppIdentity::grant_eq` 要求路径、内容哈希、cdhash、证书、发布者/Team、产品、build；缺证据不匹配；只含窄字段的旧记录不升级、不放行（见 `computer-use/docs/adr/0015-persistent-grant-identity.md`）。路线 A `allows` 与路线 B `persistent_grant_matches` 调用同一函数。同 Team ID 的 macOS cdhash 变化、Windows 同发布者换路径/哈希、Linux 同路径换哈希都重新授权。驱动单测和本机逻辑测试仍不是真机产品链验收，该项真机 not_run。应用更新后「始终允许」需要重新批准。
 - **G2 — 原生装配和停止原因。** `computer-use/crates/gcu-cli/src/runtime.rs` 的普通执行入口仍 require_fake；helper/engine/native DOM 的完整准入、Host latch、物理活动及热键断线持久 Stop 见 ADR 0012/0013 的范围与未完成项。已批准的停止原因枚举文件在本基线未找到 writer/reader；不是现存持久证据。FileLatch 和 policy 的路径防替换、权限失败处理也需专门验证。
 - **G3 — 权限。** `computer-use/crates/gcu-mcp/src/files.rs`、`computer-use/crates/gcu-host-protocol/src/events.rs`、`computer-use/crates/gcu-host-protocol/src/approval/disk.rs`、`computer-use/crates/gcu-host-protocol/src/overlay/safety.rs` 没有显式 Windows owner-only DACL。图库/策略目录 Unix chmod 错误被忽略；OpenOptions 的 mode 不会收紧已有文件，也不解决固定 tmp/检查后替换竞态。不能只凭继承权限声称 0700/0600/DACL 已成立。
 - **G4 — 清理。** 图库删除/淘汰忽略 IO 错误，无启动时扫描全部孤儿目录；MCP TempDir 只能保证正常关闭/Drop，强杀后的遗留未验。CLI keep 后的副本由后续 CLI 调用按一小时淘汰，无硬定时器和单独到期清理测试；授权撤销不等同于已有图片立即物理删除。journal 删除也忽略 remove_dir_all 失败。`src/hooks/useComputerUseSensitive.ts` 的 settled 回调只更新 phase，cards/crop 无会话结束淘汰或容量/TTL 上限，切聊天继续持有。详见 D3–D6/D15。
