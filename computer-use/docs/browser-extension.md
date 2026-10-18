@@ -1,25 +1,29 @@
 # Browser DOM extension
 
-The optional Grok Computer Use MV3 extension adds DOM observations and semantic
-actions for a tab you explicitly share with local gcu. It uses your existing
-Chrome or Microsoft Edge browser; it does not install a browser runtime. DOM
-actions support clicks, field-value changes, scrolling and option selection,
-subject to the same App/action approvals and Stop as other Computer Use routes.
+Browser L0 accessibility works without an extension where the selected native
+driver exposes it, subject to the same App/action approvals and Stop. **The
+optional MV3 extension does not currently provide production L2 DOM observations
+or actions on any platform.** It uses an existing Chrome or Microsoft Edge;
+no browser runtime is bundled. DOM representation/action code and tests exist,
+but no production DomChannel is connected.
 
 This is a pre-publication guide. The checked-in manifest carries the maintainer
 public key. Its derived extension ID is `jgpkhdjlddaoopklipcnpcjcpiancmff`.
 Registration and startup refuse a missing key, a placeholder key, or any other
 origin. The native-host executable acknowledges sharing only. L2 stays closed:
-no reviewed platform can prove which OS window contains the shared top document,
-and DOM dispatch is not connected. A share badge alone does not demonstrate that
-DOM observation or control is operational. See [proof](#proof) and the
+A4a found no reproducible shared top-document → OS-window proof on Windows,
+X11, Wayland or macOS; A4b is therefore blocked and DOM dispatch is not connected.
+ADR 0014 is **Proposed**, not an accepted binding mechanism or a delivery
+commitment; its text is not present in this checkout. A share badge alone does
+not demonstrate that DOM observation or control is operational. See [proof](#proof) and the
 [maintainer release checklist](../tools/browser-extension/store/README.md#maintainer-inputs-and-release-checklist).
 
 <a id="install"></a>
 ## Install
 
-1. Obtain the maintainer's matching gcu and extension release. The extension
-   requires Chromium's document-ID APIs (Chrome minimum 106); Edge support must be
+1. These are existing registration/developer-load steps for review, not an
+   operational L2 installation. Obtain a matching gcu and extension build.
+   The extension requires Chromium's document-ID APIs (Chrome minimum 106); Edge support must be
    verified for the actual release. Only per-user native host registration is
    supported on macOS, Windows and Linux. Other Chromium variants are not
    registered by this installer.
@@ -48,9 +52,10 @@ DOM observation or control is operational. See [proof](#proof) and the
    settings. Keep the gcu executable at the registered absolute path. If it moves,
    preview/register the new release again. Repeating installation is idempotent.
    See [CLI registration paths and flags](cli.md#native-host--chrome-extension).
-5. Pin the extension's toolbar action using the browser's extensions menu. Start
-   your compatible local Computer Use session and authorize the browser when
-   prompted. Extension installation does not grant gcu access to browser content.
+5. Pin the extension's toolbar action using the browser's extensions menu.
+   This allows consent/revocation UI checks; it does not connect a DOM session.
+   Use the already declared L0 route for browser Computer Use and authorize the
+   browser separately when prompted. Extension installation grants no App access.
 
 For fixture testing, `--home /absolute/disposable/home --gcu /absolute/path/gcu`
 selects a disposable registration root and executable. Do not use real accounts
@@ -66,10 +71,10 @@ or personal browser data for release/reviewer tests.
    a `●` badge marks browser consent. There is no popup, pairing code or automatic
    grant for other tabs. Each tab requires its own click; a share remains bound to
    its exact document rather than following whichever tab has focus later.
-3. Request an observation in the compatible gcu session. DOM content is read only
-   after sharing and an authorized request; sharing by itself does not read the
-   tree or execute an action. Normal App/action approvals still apply. If gcu is
-   stopped, sharing cannot resume it; use the trusted user Stop/recovery controls.
+3. The current native entry acknowledges consent only; there is no production
+   DOM observation/action request to try. Sharing by itself reads no tree and
+   executes no action. Normal App/action approvals still apply to L0. If gcu
+   is stopped, sharing cannot resume it; use trusted user recovery controls.
 
 If the action shows `!` / **This tab cannot be shared**, injection failed or the
 page is unsupported. Connection/identity failures can instead clear the dot and
@@ -132,7 +137,10 @@ results or persistent App approvals. Manage those through their own controls.
 ## Proof of identity and window mapping
 
 A4a records whether a native-host connection may use L2. It does not open a
-production DOM channel. The rules below are what the private broker enforces.
+production DOM channel. The rules below describe the private proof validator
+when supplied with process/window evidence, not a connected production broker.
+The current consent-only `native-host` entry checks the fixed origin and framed
+protocol; it does not invoke that full OS launch-chain validator.
 Refusal leaves the browser on its already declared L0 accessibility route. A
 refusal is not approval of that L0 action, and a DOM mutation that already
 started is `unknown` rather than a second attempt.
@@ -147,7 +155,7 @@ Identity:
   `gcu install chrome-extension` replaces `allowed_origins` with the embedded
   origin and nothing else. A missing key, the placeholder key, a different key,
   or a different origin fails closed.
-- The parent process must be that platform's Chrome or Edge executable, and the
+- The proof validator requires the parent to be that platform's Chrome or Edge executable, and the
   argv must be the native-messaging launch (`native-host` plus the origin, or
   the origin alone). On Windows only, a single `--parent-window=<hwnd>` suffix
   is accepted as the foreground window at launch. Any other parent, including a
@@ -172,10 +180,12 @@ Top document to OS window, reviewed without a live browser attached:
 | macOS | Chrome, Edge | Parent image only. No CGWindowID is passed. Extension window ids are not OS window ids. | L2 unavailable. Fall back to declared L0. |
 
 A single visible window, a matching HWND, or a high title/geometry score does
-not identify the document. Enabling L2 needs a reproducible binding that is not
-one of those substitutes. If that binding requires a new Host or ACP field, it
-needs its own ADR. This card does not add one, and it does not admit the
-production DOM channel.
+not identify the document. No supported binding was established by A4a.
+ADR 0014 remains Proposed;
+this guide neither adopts a mechanism nor promises delivery. A change of
+Host/ACP trust boundaries requires an accepted ADR and fresh evidence before
+any platform can admit the production DOM channel. The existing [ADR 0012](adr/0012-real-driver-assembly.md)
+records that requirement; it does not enable L2.
 
 These checks were not run on a real browser. Xvfb, fake drivers, and in-process
 fixtures do not fill the gap:
@@ -201,21 +211,24 @@ The extension requests only the four permissions in the
 [complete permission inventory](../tools/browser-extension/store/permissions.md).
 It does not read cookies, browser/page storage or the clipboard, and it does not
 capture screenshots. Password-field values are masked without being read;
-hidden-input values are omitted. Shared DOM can still contain private page text,
-ordinary form values and offscreen content. Share only what you intend the
-session to process.
+hidden-input values are omitted. The tested DOM representation can contain
+private page text,
+ordinary form values and offscreen content; no production gcu session currently
+receives it through L2. Share only what you intend the session to process.
 
-Shared-tab data travels only through native messaging to local gcu. The extension
-does not upload data or send telemetry. Your selected MCP client/model may handle
+The existing extension transport is native messaging to local gcu, currently
+consent-only at the native entry. The extension does not upload data or send
+telemetry. Your selected MCP client/model may handle
 tool results remotely under its own settings and policies. The extension keeps
 shares and DOM handles in memory, without persistent browser storage. Read the
 [policy text](../tools/browser-extension/store/privacy-policy.md) and
 [data use disclosure](../tools/browser-extension/store/data-use.md). The published
 policy location is pending: `__MAINTAINER_PRIVACY_POLICY_URL__`.
 
-L2 merges DOM into a browser window only when the authenticated extension,
-shared document and accessibility web-area frame/fingerprint align. When absent
-or mismatched, the browser uses its declared L0 accessibility capabilities.
+The core fusion code is tested with fake DomChannel implementations: it merges
+DOM only when extension, shared document and web-area frame/fingerprint align.
+These checks cannot establish the missing production document/window binding,
+so they do not enable L2. When absent or mismatched, the browser uses its declared L0 accessibility capabilities.
 Readable same-origin frames and open shadow roots are supported; cross-origin or
 transformed frames, opaque custom elements, closed shadow roots, canvas and
 execution interfaces can limit observation or require user takeover. Execution
