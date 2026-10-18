@@ -412,8 +412,8 @@ its platform capabilities permit; no extension is needed. The optional extension
 has fixed ID `jgpkhdjlddaoopklipcnpcjcpiancmff`, but **L2 DOM fusion/actions are
 closed on every platform**. A4a could not prove the shared top document's mapping
 to an OS window; A4b is blocked and no production DomChannel is attached.
-ADR 0014 is Proposed, not an accepted mechanism or delivery commitment; its text
-is absent from this checkout. See the [A4a proof and existing Chrome/Edge install steps](docs/browser-extension.md#proof).
+ADR 0014 is accepted only for feasibility validation of a binding carrier; it is
+not a working mechanism or a delivery commitment. See the [A4a proof and existing Chrome/Edge install steps](docs/browser-extension.md#proof).
 A share badge is browser consent only, not working DOM control, App approval or
 Stop recovery. L0 does not prevent browser-internal redirects.
 

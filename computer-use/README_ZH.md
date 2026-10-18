@@ -387,8 +387,7 @@ gcu resume --session /path/to/gcu-control-directory
 所选 native 驱动在平台能力允许时提供 L0 浏览器无障碍路线，不需要扩展。
 可选扩展的固定 ID 为 `jgpkhdjlddaoopklipcnpcjcpiancmff`，但**所有平台 L2 DOM
 融合/动作均关闭**。A4a 无法证明共享顶层文档与 OS 窗口的映射；A4b 被阻塞，
-没有挂接生产 DomChannel。ADR 0014 仅为 Proposed，不代表已接受的机制或交付承诺，
-本检出没有其正文。见 [A4a 证明与既有 Chrome/Edge 安装步骤](docs/browser-extension.md#proof)。
+没有挂接生产 DomChannel。ADR 0014 仅被接受用于载体可行性验证，不是已可用的机制，也不是交付承诺。见 [A4a 证明与既有 Chrome/Edge 安装步骤](docs/browser-extension.md#proof)。
 共享徽章仅表示浏览器同意，不代表 DOM 控制可用、应用已授权或 Stop 已恢复。
 L0 不能阻止浏览器内部重定向。
 
