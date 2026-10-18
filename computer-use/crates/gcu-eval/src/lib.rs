@@ -22,6 +22,7 @@ mod prep;
 mod release;
 mod report;
 mod runner;
+pub mod soak;
 mod tasks;
 mod yaml;
 
