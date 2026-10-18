@@ -31,13 +31,14 @@ remote scripts, evaluation and network connections.
 
 ## Fixed identity and installation
 
-**Maintainer key required.** No signing key has been provided. The extension
-manifest intentionally has no `key`; the public-key placeholder is
-`__MAINTAINER_BASE64_DER_PUBLIC_KEY__`, and the manifest templates' origin ID is
-`__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__`. These are explicit placeholders,
-not usable IDs. A maintainer must generate/retain the extension signing key and
-put its base64 DER public key in `manifest.json`'s `key` field. Keep the private key
-out of this repository. Rebuild both gcu and the extension after setting the key.
+**Fixed identity.** The manifest carries the maintainer's base64 DER public `key`
+(2026-10-17); its derived ID is `jgpkhdjlddaoopklipcnpcjcpiancmff`. The matching private key is held by the
+maintainer outside this repository and must never be committed. Changing the key
+changes the ID, the native allowlist and every installed registration, so a new key
+needs a deliberate release. The host manifest templates keep the placeholder
+`__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__`; `gcu install chrome-extension`
+replaces it with exactly the embedded identity. Rebuild both gcu and the extension
+after any key change.
 
 Both sides derive Chrome's ID from the first 16 SHA-256 bytes of the decoded key,
 encoding each nibble as a–p. The adapter checks that ID against `chrome.runtime.id`.

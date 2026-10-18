@@ -51,7 +51,7 @@ success.
 - [Install](../../../docs/browser-extension.md#install), [share](../../../docs/browser-extension.md#share), [revoke](../../../docs/browser-extension.md#revoke), [uninstall](../../../docs/browser-extension.md#uninstall).
 
 Developer account: `__MAINTAINER_EDGE_ADD_ONS_DEVELOPER_ACCOUNT__`.
-Fixed native identity: `__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__`.
+Fixed native identity: `jgpkhdjlddaoopklipcnpcjcpiancmff`.
 Listing URL: `__MAINTAINER_EDGE_ADD_ONS_LISTING_URL__`.
 Support URL: `__MAINTAINER_SUPPORT_URL__`.
 Screenshots: `__MAINTAINER_EDGE_ADD_ONS_SCREENSHOTS__`.
