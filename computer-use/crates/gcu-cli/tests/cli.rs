@@ -126,6 +126,12 @@ fn auto_and_native_fail_closed_without_a_driver_document() {
         vec!["--driver", "native"],
         vec!["version", "--scene", "form"],
     ] {
+        // With no subcommand macOS starts the helper through Launch Services
+        // (onboarding), which a CI runner cannot do. That entry is not a driver
+        // selection refusal; the selection rule is covered by assemble tests.
+        if cfg!(target_os = "macos") && args == ["--driver", "native"] {
+            continue;
+        }
         let asserted = command(&h).args(args).assert().code(2);
         let output = asserted.get_output();
         let stdout = String::from_utf8_lossy(&output.stdout);
