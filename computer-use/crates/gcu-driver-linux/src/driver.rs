@@ -32,6 +32,8 @@ use std::{
 mod bind;
 #[path = "driver_portal.rs"]
 mod portal;
+#[path = "driver_wayland.rs"]
+mod wayland_bind;
 
 /// Concrete Linux computer-use driver backed by AT-SPI and X11.
 pub struct LinuxDriver {
@@ -56,6 +58,8 @@ pub struct LinuxDriver {
     _listener_handle: Option<tokio::task::JoinHandle<()>>,
     env: LinuxEnvironment,
     portal_info: PortalInfo,
+    bound_capture: Option<Arc<crate::wayland::assembly::ProvenCapture>>,
+    wayland_stop: Option<Arc<crate::wayland::input_control::StopControl>>,
 }
 
 impl LinuxDriver {
@@ -135,6 +139,8 @@ impl LinuxDriver {
             _listener_handle,
             env,
             portal_info,
+            bound_capture: None,
+            wayland_stop: None,
         };
         driver.recompute_capabilities();
         driver
@@ -172,6 +178,7 @@ impl LinuxDriver {
         self.caps_no_hotkey = c3;
         self.caps_none = c4;
         bind::degrade_without_resident_tree(self);
+        wayland_bind::apply_capture_capability(self);
     }
 
     /// Create a test driver backed by an in-memory `FakeSource`.
@@ -329,58 +336,7 @@ impl Driver for LinuxDriver {
     }
 
     async fn doctor(&self) -> DoctorReport {
-        let atspi_ready = self.fake_source.is_some()
-            || self
-                .connection
-                .as_ref()
-                .is_some_and(|connection| !connection.is_closed());
-        if let Some(input) = self.portal_input.as_ref().filter(|i| i.available()) {
-            return crate::wayland::doctor::build_doctor_report(
-                &self.env,
-                input.environment_capabilities(),
-                &self.portal_info,
-                atspi_ready,
-                None,
-            );
-        }
-        let has_x = self.x_server.is_some();
-        let composite = if self.fake_source.is_some() && !has_x {
-            true
-        } else {
-            self.x_server
-                .as_ref()
-                .and_then(|x| x.is_composite_available().ok())
-                .unwrap_or(false)
-        };
-        let xtest = if self.fake_source.is_some() && !has_x {
-            true
-        } else {
-            self.x_server
-                .as_ref()
-                .and_then(|x| x.is_xtest_available().ok())
-                .unwrap_or(false)
-        };
-        let mut report = crate::wayland::doctor::run_driver_doctor(
-            &self.env,
-            &self.portal_info,
-            self.capabilities(),
-            composite,
-            xtest,
-            self.hotkey_manager.is_available() && !self.stop_latch.is_stopped(),
-            self.activity_clock.is_available(),
-            self.stop_latch.is_stopped(),
-            atspi_ready,
-            self.hotkey_manager.last_error().as_deref(),
-            has_x,
-        );
-        if self.fake_source.is_none() && !atspi_ready && !self.env.session_type.is_wayland() {
-            report.issues.push(
-                "Coordinate input is not a fallback; native X11 is not ready without a resident AT-SPI connection"
-                    .into(),
-            );
-            report.ready = false;
-        }
-        report
+        wayland_bind::doctor(self).await
     }
 
     fn discovery_status(&self) -> DiscoveryStatus {
@@ -430,9 +386,12 @@ impl Driver for LinuxDriver {
                         pid: app.and_then(|a| a.info.pid),
                     })
                     .collect();
-                return Ok(self.align_and_record(x.as_ref(), &cands));
+                return Ok(wayland_bind::paint_frames(
+                    self,
+                    self.align_and_record(x.as_ref(), &cands),
+                ));
             }
-            return Ok(base);
+            return Ok(wayland_bind::paint_frames(self, base));
         }
 
         let conn = self
@@ -443,10 +402,10 @@ impl Driver for LinuxDriver {
             })?;
 
         let candidates = crate::atspi::list_atspi_candidate_windows(conn, app).await?;
-        if let Some(ref x) = self.x_server {
-            Ok(self.align_and_record(x.as_ref(), &candidates))
+        let windows = if let Some(ref x) = self.x_server {
+            self.align_and_record(x.as_ref(), &candidates)
         } else {
-            Ok(candidates
+            candidates
                 .into_iter()
                 .map(|c| WindowInfo {
                     id: c.path,
@@ -455,8 +414,9 @@ impl Driver for LinuxDriver {
                     scale: 1.0,
                     on_current_desktop: Some(true),
                 })
-                .collect())
-        }
+                .collect()
+        };
+        Ok(wayland_bind::paint_frames(self, windows))
     }
 
     async fn key_window(&self, app: &AppRef) -> Result<WindowInfo> {
@@ -519,10 +479,10 @@ impl Driver for LinuxDriver {
         &self,
         win: &WindowRef,
         _opts: &CaptureOpts,
-        _cancel: &Cancel,
+        cancel: &Cancel,
     ) -> Result<Capture> {
         if self.is_native_wayland_window(win) {
-            return Err(DriverError::CapabilityUnavailable);
+            return wayland_bind::capture_native(self, win, cancel).await;
         }
         let x = self
             .x_server
@@ -533,6 +493,9 @@ impl Driver for LinuxDriver {
     }
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
+        if let Some(geometry) = wayland_bind::bound_geometry(self, win) {
+            return Ok(geometry);
+        }
         if let Some(ref x) = self.x_server {
             if let Ok(id) = self.resolve_xid(win) {
                 if let Ok(geom) = x.window_geometry(id) {
@@ -587,6 +550,9 @@ impl Drop for LinuxDriver {
     fn drop(&mut self) {
         if let Some(input) = &self.portal_input {
             input.shutdown();
+        }
+        if let Some(bound) = self.bound_capture.take() {
+            wayland_bind::retire_on_drop(&bound);
         }
         if let Some(h) = self._listener_handle.as_ref() {
             h.abort();

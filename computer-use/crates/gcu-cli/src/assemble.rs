@@ -1,8 +1,9 @@
 //! Single driver selection. Runtime, engine, and helper do not guess.
 //!
 //! `auto` and `native` fail closed unless the platform route is assembled.
-//! Linux X11 is assembled only when `native-x11` is compiled. Windows is
-//! assembled only when `native-windows` is compiled. This build never
+//! Linux X11 is assembled only when `native-x11` is compiled. Linux Wayland is
+//! assembled only when `native-wayland` is compiled. Windows is assembled only
+//! when `native-windows` is compiled. This build never
 //! substitutes fake, never widens the input route, and never elevates. The
 //! features stay off unless a binary enables them.
 
@@ -101,6 +102,7 @@ impl Disclosure {
 
 /// Selection result. [`Plan::Fake`] constructs the offline driver.
 /// [`Plan::NativeX11`] may construct the Linux X11 driver.
+/// [`Plan::NativeWayland`] may construct the Linux Wayland driver.
 /// [`Plan::NativeWindows`] may construct the Windows worker driver.
 /// [`Plan::MacosEngine`] constructs a macOS driver only after App authentication.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,7 +141,12 @@ pub(crate) enum Plan {
     },
     /// In-process Linux X11 driver. The listener is bound to the Host latch later.
     NativeX11 {
-        /// Shared disclosure. Wayland stays disabled.
+        /// Shared disclosure. Wayland is not selected on this session.
+        disclosure: Disclosure,
+    },
+    /// In-process Linux Wayland driver. A portal probe is not Stop registration.
+    NativeWayland {
+        /// Shared disclosure. X11 is not selected on this session.
         disclosure: Disclosure,
     },
     /// Windows Worker driver. The Host latch is installed before `monitored`.
@@ -250,7 +257,29 @@ pub(crate) fn decide(query: Query<'_>) -> Plan {
                 selected: "native",
                 native_disabled: format!(
                     "selected native-x11; {}",
-                    block("native-wayland", query.features.native_wayland)
+                    unselected_wayland(query.features.native_wayland)
+                ),
+            },
+        };
+    }
+    if matches!(
+        query.os,
+        OsKind::Linux {
+            session: SessionKind::Wayland { .. }
+        }
+    ) && query.features.native_wayland
+    {
+        if query.entry == Entry::Agent {
+            return Plan::Refuse {
+                message: "Linux native Wayland does not use the macOS helper agent entry".into(),
+            };
+        }
+        return Plan::NativeWayland {
+            disclosure: Disclosure {
+                selected: "native",
+                native_disabled: format!(
+                    "selected native-wayland; {}",
+                    unselected_x11(query.features.native_x11)
                 ),
             },
         };
@@ -287,7 +316,7 @@ fn native_disabled(os: OsKind, features: Features) -> String {
             if features.native_x11 {
                 format!(
                     "native-x11 is compiled; this command did not select it. {}",
-                    block("native-wayland", features.native_wayland)
+                    unselected_wayland(features.native_wayland)
                 )
             } else {
                 block("native-x11", false)
@@ -295,13 +324,25 @@ fn native_disabled(os: OsKind, features: Features) -> String {
         }
         OsKind::Linux {
             session: SessionKind::Wayland { display: true },
-        } => format!(
-            "Wayland is active, so the X11 route is not selected; {}",
-            block("native-wayland", features.native_wayland)
-        ),
+        } => {
+            if features.native_wayland {
+                "native-wayland is compiled; this command did not select it. Wayland is active, so the X11 route is not selected".into()
+            } else {
+                format!(
+                    "Wayland is active, so the X11 route is not selected; {}",
+                    block("native-wayland", false)
+                )
+            }
+        }
         OsKind::Linux {
             session: SessionKind::Wayland { display: false },
-        } => block("native-wayland", features.native_wayland),
+        } => {
+            if features.native_wayland {
+                "native-wayland is compiled; this command did not select it".into()
+            } else {
+                block("native-wayland", false)
+            }
+        }
         OsKind::Linux {
             session: SessionKind::Headless,
         } => "No safe native route is available for this display session".into(),
@@ -313,6 +354,22 @@ fn block(feature: &str, compiled: bool) -> String {
         format!("{feature} is compiled but the platform route is not assembled")
     } else {
         format!("{feature} is not compiled into this build")
+    }
+}
+
+fn unselected_wayland(compiled: bool) -> String {
+    if compiled {
+        "native-wayland is not selected on an X11 session".into()
+    } else {
+        "native-wayland is not compiled into this build".into()
+    }
+}
+
+fn unselected_x11(compiled: bool) -> String {
+    if compiled {
+        "native-x11 is not selected on a Wayland session".into()
+    } else {
+        "native-x11 is not compiled into this build".into()
     }
 }
 

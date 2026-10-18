@@ -57,6 +57,21 @@ fn omitted_auto_and_native_fail_closed_for_every_feature_switch() {
                     assert!(!disclosure.native_disabled.contains("not assembled"));
                     continue;
                 }
+                if compiled && feature == "native-wayland" {
+                    let Plan::NativeWayland { disclosure } = plan else {
+                        panic!("expected native wayland, got {plan:?}");
+                    };
+                    assert_eq!(disclosure.selected, "native");
+                    assert!(
+                        disclosure
+                            .native_disabled
+                            .contains("selected native-wayland"),
+                        "{}",
+                        disclosure.native_disabled
+                    );
+                    assert!(!disclosure.native_disabled.contains("not assembled"));
+                    continue;
+                }
                 if compiled && feature == "native-windows" {
                     let Plan::NativeWindows { disclosure } = plan else {
                         panic!("expected native windows, got {plan:?}");
@@ -188,6 +203,18 @@ fn wayland_with_display_does_not_select_x11_even_when_x11_is_compiled() {
     assert!(message.contains("X11 route is not selected"), "{message}");
     assert!(message.contains("native-wayland"), "{message}");
     assert!(!message.contains("native-x11 is compiled but"), "{message}");
+
+    q.features.native_wayland = true;
+    match decide(q) {
+        Plan::NativeWayland { disclosure } => {
+            assert!(disclosure
+                .native_disabled
+                .contains("selected native-wayland"));
+            assert!(!disclosure.native_disabled.contains("not assembled"));
+            assert!(!matches!(decide(q), Plan::NativeX11 { .. }));
+        }
+        other => panic!("display did not keep Wayland selected: {other:?}"),
+    }
 }
 
 #[test]

@@ -56,7 +56,7 @@ enum Prepared {
 
 /// Handshake input. The macOS arm has no driver until [`connect_engine`] returns.
 pub(crate) enum ConnectInput<'a> {
-    /// Snapshot this driver. Fake, and Linux X11 before the Host latch is installed.
+    /// Snapshot this driver. Fake, and Linux X11 or Wayland before the Host latch is installed.
     Given(&'a dyn Driver, &'a dyn PhysicalActivity),
     /// Conservative capabilities. The macOS driver is attached after connect.
     Macos,
@@ -76,8 +76,9 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    // Fake stays on UnavailableActivity. Linux X11 and Windows native bind the
-    // Host latch after connect, then pass their clock to [`serve_engine`].
+    // Fake stays on UnavailableActivity. Linux X11, Linux Wayland, and Windows
+    // native bind the Host latch after connect, then pass their clock to
+    // [`serve_engine`].
     run_prepared(
         Prepared::Given {
             driver,

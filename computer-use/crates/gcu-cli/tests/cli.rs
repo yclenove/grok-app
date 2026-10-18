@@ -92,7 +92,12 @@ fn arguments_unsupported_modes_exit_two() {
         {
             continue;
         }
-        command(&h).args(args).assert().code(2);
+        command(&h)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .args(args)
+            .assert()
+            .code(2);
     }
 }
 
@@ -260,6 +265,40 @@ fn native_x11_product_entry_reports_selection_and_does_not_fake_a_side_effect() 
     let disabled = value["native_disabled"].as_str().unwrap();
     assert!(disabled.contains("did not select"), "{disabled}");
     assert!(disabled.contains("native-x11"), "{disabled}");
+    assert!(!disabled.contains("not assembled"), "{disabled}");
+}
+
+#[cfg(all(feature = "native-wayland", target_os = "linux"))]
+#[test]
+fn native_wayland_product_entry_reports_selection_and_does_not_fake_a_side_effect() {
+    let h = TempDir::new().unwrap();
+    let asserted = command(&h)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["call", "list_apps", "--driver", "native", "--args", "{}"])
+        .assert()
+        .code(2);
+    let output = asserted.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stderr.contains("No safe native route"), "{stderr}");
+    assert!(!stdout.contains("fake.form"), "{stdout}");
+
+    let doctor = command(&h)
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("DISPLAY", ":1")
+        .args(["doctor", "--driver", "fake", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&doctor).unwrap();
+    assert_eq!(value["driver"], "fake");
+    let disabled = value["native_disabled"].as_str().unwrap();
+    assert!(disabled.contains("did not select"), "{disabled}");
+    assert!(disabled.contains("native-wayland"), "{disabled}");
+    assert!(disabled.contains("X11 route is not selected"), "{disabled}");
     assert!(!disabled.contains("not assembled"), "{disabled}");
 }
 
