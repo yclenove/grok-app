@@ -5,15 +5,27 @@
 //! connection. This is a browser boundary, not authentication against arbitrary
 //! programs running as the same user or a compromised browser. There is no HTTP
 //! endpoint, persistent capability, session selection or approval RPC here.
+//! The proof gate records launch evidence and refuses L2; `serve` does not call it.
 
 pub mod codec;
+mod gate;
 mod identity;
 pub mod install;
+mod proof;
+mod record;
 #[cfg(windows)]
 mod unsafe_registry;
 mod wire;
 
+pub use gate::{BrokerGate, CancelKind, LaunchInput, ProofOutcome, UncertainMutation};
 pub use identity::ExtensionIdentity;
+pub use proof::{
+    build_id, check_launch, mapping_verdict, select_engine, select_session, CheckedLaunch,
+    EngineEndpoint, ExpectedBuild, L2Decision, L2Refusal, LaunchSnapshot, MapClaim, MappingVerdict,
+    OsWindow, ProofBrowser, ProofPlatform, SessionCandidate, SharedDocument, UnprovenReason,
+    REAL_MACHINE_EVIDENCE,
+};
+pub use record::{record_current, RecordFault};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 pub use wire::Scope;

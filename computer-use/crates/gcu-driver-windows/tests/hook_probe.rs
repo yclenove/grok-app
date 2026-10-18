@@ -540,7 +540,11 @@ async fn native_product_probe_chain_proves_both_hooks_without_cursor_change() {
         }
     })
     .await
-    .expect("one initial tagged dual-hook proof required");
+    .unwrap_or_else(|_| {
+        let mut issues = Vec::new();
+        guard.doctor_issues(&mut issues);
+        panic!("one initial tagged dual-hook proof required: {issues:?}");
+    });
     let mut after = POINT::default();
     // SAFETY: bounded writable physical POINT; never compensate a difference.
     unsafe { GetPhysicalCursorPos(&mut after) }.unwrap();
