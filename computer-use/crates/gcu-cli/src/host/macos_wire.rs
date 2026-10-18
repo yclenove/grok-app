@@ -5,9 +5,7 @@
 //! Activity `None` is unavailable, never an idle guess.
 
 use super::Activity;
-#[cfg(target_os = "macos")]
 use crate::exit::Failure;
-#[cfg(target_os = "macos")]
 use gcu_core::driver::Driver;
 use gcu_driver_macos::input::hotkey::StopLatch;
 use gcu_host_api::UserActivity;
@@ -166,6 +164,33 @@ impl StopLatch for MirrorLatch {
         let _ = self
             .notify
             .try_send(gcu_host_protocol::stop_reason::StopReason::Hotkey);
+    }
+}
+
+/// Load the idle policy and attach the macOS driver after App authentication.
+///
+/// Other targets refuse. The caller closes the engine peers when this fails.
+pub(crate) async fn engine_after_auth(
+    stop: gcu_mcp::host::StopMirror,
+    notify: tokio::sync::mpsc::Sender<gcu_host_protocol::stop_reason::StopReason>,
+) -> Result<(Arc<dyn Driver>, Arc<dyn PhysicalActivity>), Failure> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (stop, notify);
+        Err(Failure::arguments(TERMINAL_NATIVE_REFUSAL))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let loaded = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(crate::config::load),
+        )
+        .await;
+        let idle_ms = match loaded {
+            Ok(Ok(Ok(policy))) => policy.user_idle_ms,
+            _ => return Err(Failure::internal("Host configuration failed")),
+        };
+        attach_engine(stop, notify, idle_ms).await
     }
 }
 

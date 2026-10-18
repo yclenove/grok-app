@@ -2119,6 +2119,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "gcu-core",
  "gcu-driver-fake",
+ "gcu-driver-linux",
  "gcu-driver-macos",
  "gcu-driver-windows",
  "gcu-host-api",

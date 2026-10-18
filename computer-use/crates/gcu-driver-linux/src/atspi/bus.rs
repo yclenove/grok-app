@@ -26,6 +26,11 @@ pub struct AtspiBus {
     connection: zbus::Connection,
 }
 
+/// A usable process id. Zero is the kernel idle task and never an application.
+pub(crate) fn positive_pid(pid: u32) -> Option<u32> {
+    (pid > 0).then_some(pid)
+}
+
 fn bus_dest(dest: &str) -> Result<zbus::names::OwnedBusName, DriverError> {
     dest.to_string()
         .try_into()
@@ -52,6 +57,30 @@ impl AtspiBus {
     /// Access the underlying D-Bus connection.
     pub fn connection(&self) -> &zbus::Connection {
         &self.connection
+    }
+
+    /// Process id of the connection that owns `node`, from the bus daemon.
+    ///
+    /// `org.a11y.atspi.Application.Id` is an id the registry assigns, not a
+    /// process id, so it is never used here. Failures and a zero id return
+    /// `None`; callers must not invent a pid.
+    pub async fn application_pid(&self, node: &AtspiNodeRef) -> Option<u32> {
+        let dest = bus_dest(&node.destination).ok()?;
+        let dbus = tokio::time::timeout(
+            DBUS_CALL_TIMEOUT,
+            zbus::fdo::DBusProxy::new(&self.connection),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let pid = tokio::time::timeout(
+            DBUS_CALL_TIMEOUT,
+            dbus.get_connection_unix_process_id(zbus::names::BusName::from(dest)),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        positive_pid(pid)
     }
 
     async fn accessible_proxy(
@@ -392,5 +421,16 @@ impl AtspiSource for AtspiBus {
 
     fn handle(&self, node: &Self::Node) -> NativeHandle {
         NativeHandle::new(Arc::new(node.clone()))
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::positive_pid;
+
+    #[test]
+    fn a_zero_pid_is_not_an_application() {
+        assert_eq!(positive_pid(0), None);
+        assert_eq!(positive_pid(4242), Some(4242));
     }
 }

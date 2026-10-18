@@ -1,7 +1,9 @@
 //! In-memory mock X11 server for platform-independent testing.
 
-use crate::x11::server::{crop_into, RawImage, XError, XRootGeometry, XServer, XWindowGeometry};
-use std::collections::{HashMap, HashSet};
+use crate::x11::server::{
+    crop_into, RawImage, XError, XEventKind, XRootGeometry, XServer, XWindowGeometry,
+};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 /// In-memory mock window for [`FakeX`].
@@ -70,6 +72,7 @@ pub struct FakeX {
     conflicting_keys: Mutex<HashSet<(u8, u16)>>,
     xi_devices: Mutex<Vec<crate::x11::activity::DeviceInfo>>,
     xi2_available: Mutex<bool>,
+    incoming: Mutex<VecDeque<XEventKind>>,
 }
 
 impl FakeX {
@@ -96,7 +99,13 @@ impl FakeX {
             conflicting_keys: Mutex::new(HashSet::new()),
             xi_devices: Mutex::new(Vec::new()),
             xi2_available: Mutex::new(true),
+            incoming: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Queue one event for the next [`XServer::poll_event`] call.
+    pub fn push_event(&self, event: XEventKind) {
+        lock_m(&self.incoming).push_back(event);
     }
 
     /// Register a mock window.
@@ -556,5 +565,9 @@ impl XServer for FakeX {
         };
         grabbed.remove(&(keycode, modifiers));
         Ok(())
+    }
+
+    fn poll_event(&self) -> Result<Option<XEventKind>, XError> {
+        Ok(lock_m(&self.incoming).pop_front())
     }
 }

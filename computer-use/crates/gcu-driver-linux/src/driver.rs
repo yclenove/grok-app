@@ -28,6 +28,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[path = "driver_bind.rs"]
+mod bind;
 #[path = "driver_portal.rs"]
 mod portal;
 
@@ -69,7 +71,7 @@ impl LinuxDriver {
         let x: Option<Arc<dyn XServer>> = RealX::connect()
             .ok()
             .map(|x| Arc::new(x) as Arc<dyn XServer>);
-        Ok(Self::new_internal(Some(conn), Some(sub), x))
+        Ok(Self::new_internal(Some(conn), Some(sub), x, true))
     }
 
     /// Create a driver from an existing D-Bus connection.
@@ -79,13 +81,14 @@ impl LinuxDriver {
         let x: Option<Arc<dyn XServer>> = RealX::connect()
             .ok()
             .map(|x| Arc::new(x) as Arc<dyn XServer>);
-        Self::new_internal(Some(connection), Some(sub), x)
+        Self::new_internal(Some(connection), Some(sub), x, true)
     }
 
     fn new_internal(
         conn: Option<zbus::Connection>,
         sub: Option<Arc<dyn AtspiEventSubscriber>>,
         x: Option<Arc<dyn XServer>>,
+        bind_listener: bool,
     ) -> Self {
         let env = detect_environment(&SystemEnv);
         let portal_info = PortalInfo::default();
@@ -96,9 +99,19 @@ impl LinuxDriver {
         ));
         let ledger = Arc::new(InputLedger::new());
         let clock: Arc<dyn ActivityClock> = Arc::new(SharedActivityClock::new(false));
-        let _listener_handle = x.as_ref().and_then(|s| {
-            attach_x11_listener(s.clone(), &hotkey_manager, &stop_latch, &ledger, &clock)
-        });
+        let _listener_handle = if bind_listener {
+            x.as_ref().and_then(|server| {
+                attach_x11_listener(
+                    server.clone(),
+                    &hotkey_manager,
+                    &stop_latch,
+                    &ledger,
+                    &clock,
+                )
+            })
+        } else {
+            None
+        };
 
         let mut driver = Self {
             portal_input: None,
@@ -158,6 +171,7 @@ impl LinuxDriver {
         self.caps_no_guard = c2;
         self.caps_no_hotkey = c3;
         self.caps_none = c4;
+        bind::degrade_without_resident_tree(self);
     }
 
     /// Create a test driver backed by an in-memory `FakeSource`.
@@ -167,7 +181,7 @@ impl LinuxDriver {
         apps: Vec<AppInfo>,
         windows: Vec<(String, WindowInfo)>,
     ) -> Self {
-        let mut d = Self::new_internal(None, None, None);
+        let mut d = Self::new_internal(None, None, None, false);
         d.env = LinuxEnvironment::pure_x11_test();
         d.hotkey_manager.set_available(true);
         d.activity_clock = Arc::new(SharedActivityClock::new(true));
@@ -207,27 +221,6 @@ impl LinuxDriver {
         }
         self.env.session_type.is_wayland()
             && (win.id.starts_with('/') || win.id.starts_with("wayland"))
-    }
-
-    /// Override the activity clock.
-    pub fn with_activity_clock(mut self, clock: Arc<dyn ActivityClock>) -> Self {
-        self.activity_clock = clock;
-        self.recompute_capabilities();
-        self
-    }
-
-    /// Override the stop latch.
-    pub fn with_stop_latch(mut self, latch: Arc<dyn StopLatch>) -> Self {
-        self.stop_latch = latch;
-        self.recompute_capabilities();
-        self
-    }
-
-    /// Override the hotkey manager.
-    pub fn with_hotkey_manager(mut self, mgr: Arc<HotkeyManager>) -> Self {
-        self.hotkey_manager = mgr;
-        self.recompute_capabilities();
-        self
     }
 
     /// Access the activity clock.
@@ -336,13 +329,11 @@ impl Driver for LinuxDriver {
     }
 
     async fn doctor(&self) -> DoctorReport {
-        let atspi_ready = if self.fake_source.is_some() {
-            true
-        } else if let Some(ref conn) = self.connection {
-            !conn.is_closed()
-        } else {
-            connect_atspi().await.is_ok()
-        };
+        let atspi_ready = self.fake_source.is_some()
+            || self
+                .connection
+                .as_ref()
+                .is_some_and(|connection| !connection.is_closed());
         if let Some(input) = self.portal_input.as_ref().filter(|i| i.available()) {
             return crate::wayland::doctor::build_doctor_report(
                 &self.env,
@@ -369,7 +360,7 @@ impl Driver for LinuxDriver {
                 .and_then(|x| x.is_xtest_available().ok())
                 .unwrap_or(false)
         };
-        crate::wayland::doctor::run_driver_doctor(
+        let mut report = crate::wayland::doctor::run_driver_doctor(
             &self.env,
             &self.portal_info,
             self.capabilities(),
@@ -381,7 +372,15 @@ impl Driver for LinuxDriver {
             atspi_ready,
             self.hotkey_manager.last_error().as_deref(),
             has_x,
-        )
+        );
+        if self.fake_source.is_none() && !atspi_ready && !self.env.session_type.is_wayland() {
+            report.issues.push(
+                "Coordinate input is not a fallback; native X11 is not ready without a resident AT-SPI connection"
+                    .into(),
+            );
+            report.ready = false;
+        }
+        report
     }
 
     fn discovery_status(&self) -> DiscoveryStatus {

@@ -54,6 +54,14 @@ enum Prepared {
     Macos,
 }
 
+/// Handshake input. The macOS arm has no driver until [`connect_engine`] returns.
+pub(crate) enum ConnectInput<'a> {
+    /// Snapshot this driver. Fake, and Linux X11 before the Host latch is installed.
+    Given(&'a dyn Driver, &'a dyn PhysicalActivity),
+    /// Conservative capabilities. The macOS driver is attached after connect.
+    Macos,
+}
+
 pub(crate) async fn run(
     driver: Arc<dyn Driver>,
     route_note: String,
@@ -62,7 +70,9 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    // Explicit fake, and every non-macOS engine, stays unwired to a platform clock.
+    // Fake, and every engine that is neither macOS nor Linux X11, stays unwired
+    // to a platform clock. Linux X11 calls [`connect_engine`], binds the Host
+    // latch, then [`serve_engine`].
     run_prepared(
         Prepared::Given {
             driver,
@@ -115,6 +125,57 @@ async fn run_prepared(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
+    let input = match &prepared {
+        Prepared::Given { driver, activity } => {
+            ConnectInput::Given(driver.as_ref(), activity.as_ref())
+        }
+        Prepared::Macos => ConnectInput::Macos,
+    };
+    let session = connect_engine(input, host_fd, socket, token_fd, stop_fd).await?;
+    // macOS builds its driver here, after both channels have authenticated.
+    let (driver, activity) = match prepared {
+        Prepared::Given { driver, activity } => (driver, activity),
+        Prepared::Macos => {
+            match crate::host::macos_wire::engine_after_auth(
+                session.stop.clone(),
+                session.local_stop.clone(),
+            )
+            .await
+            {
+                Ok(wired) => wired,
+                Err(error) => {
+                    session.peer.close();
+                    session.stop_peer.close();
+                    return Err(error);
+                }
+            }
+        }
+    };
+    serve_engine(driver, activity, route_note, session).await
+}
+
+/// Handshake state. Capabilities are snapshotted before a platform bind replaces the driver.
+pub(crate) struct EngineSession {
+    peer: Peer,
+    incoming: Incoming,
+    stop_peer: Peer,
+    stop_incoming: Incoming,
+    /// Host Stop mirror from the authenticated handshake.
+    pub(crate) stop: StopMirror,
+    /// Buffers one local Stop until the control task is running.
+    pub(crate) local_stop: tokio::sync::mpsc::Sender<gcu_host_protocol::stop_reason::StopReason>,
+    local_stop_rx: tokio::sync::mpsc::Receiver<gcu_host_protocol::stop_reason::StopReason>,
+    sessions: Sessions,
+}
+
+/// Authenticate both channels and snapshot capabilities before any Host latch is installed.
+pub(crate) async fn connect_engine(
+    input: ConnectInput<'_>,
+    host_fd: Option<usize>,
+    socket: Option<PathBuf>,
+    token_fd: Option<usize>,
+    stop_fd: usize,
+) -> Result<EngineSession, Failure> {
     let (stream, bootstrap) = if let Some(fd) = host_fd {
         let mut stream = transport::inherited(fd)?;
         let bootstrap = Bootstrap::read(&mut stream).await?;
@@ -146,7 +207,7 @@ async fn run_prepared(
     .await
     .map_err(|_| Error::Timeout)?
     .map_err(|_| Error::Authentication)??;
-    if matches!(prepared, Prepared::Macos)
+    if matches!(input, ConnectInput::Macos)
         && crate::host::macos_wire::engine_assembly_allowed(
             true,
             crate::host::macos_wire::TccEvidence::current(),
@@ -157,11 +218,9 @@ async fn run_prepared(
             crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
         ));
     }
-    let capabilities = match &prepared {
-        Prepared::Given { driver, activity } => {
-            activity_capabilities(driver.as_ref(), activity.as_ref())
-        }
-        Prepared::Macos => crate::host::macos_wire::conservative_handshake(),
+    let capabilities = match input {
+        ConnectInput::Given(driver, activity) => activity_capabilities(driver, activity),
+        ConnectInput::Macos => crate::host::macos_wire::conservative_handshake(),
     };
     config.capabilities = Some(capabilities);
     // Registration is deliberately before any driver work or approval request.
@@ -183,49 +242,35 @@ async fn run_prepared(
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
     // The sender stays alive so a dropped channel is not a local Stop.
     let (local_stop, local_stop_rx) = tokio::sync::mpsc::channel(1);
-    let (driver, activity) = match prepared {
-        Prepared::Given { driver, activity } => (driver, activity),
-        Prepared::Macos => {
-            #[cfg(not(target_os = "macos"))]
-            {
-                peer.close();
-                stop_peer.close();
-                return Err(Failure::arguments(
-                    crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
-                ));
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let loaded = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    tokio::task::spawn_blocking(crate::config::load),
-                )
-                .await;
-                let idle_ms = match loaded {
-                    Ok(Ok(Ok(policy))) => policy.user_idle_ms,
-                    _ => {
-                        peer.close();
-                        stop_peer.close();
-                        return Err(Failure::internal("Host configuration failed"));
-                    }
-                };
-                match crate::host::macos_wire::attach_engine(
-                    stop.clone(),
-                    local_stop.clone(),
-                    idle_ms,
-                )
-                .await
-                {
-                    Ok(wired) => wired,
-                    Err(error) => {
-                        peer.close();
-                        stop_peer.close();
-                        return Err(error);
-                    }
-                }
-            }
-        }
-    };
+    Ok(EngineSession {
+        peer,
+        incoming,
+        stop_peer,
+        stop_incoming,
+        stop,
+        local_stop,
+        local_stop_rx,
+        sessions,
+    })
+}
+
+/// Serve RPC with the driver that already holds the Host latch.
+pub(crate) async fn serve_engine(
+    driver: Arc<dyn Driver>,
+    activity: Arc<dyn PhysicalActivity>,
+    route_note: String,
+    session: EngineSession,
+) -> Result<u8, Failure> {
+    let EngineSession {
+        peer,
+        incoming,
+        stop_peer,
+        stop_incoming,
+        stop,
+        local_stop,
+        local_stop_rx,
+        sessions,
+    } = session;
     let marker_dir = gcu_host_protocol::stop_reason::state_dir();
     let stop_task = tokio::spawn(control(
         stop_peer.clone(),

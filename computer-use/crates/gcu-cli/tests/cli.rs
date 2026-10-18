@@ -114,6 +114,10 @@ fn version_and_doctor_report_honest_fake_metadata() {
                 .unwrap()
                 .contains("No safe native route")
             || v["native_disabled"].as_str().unwrap().contains("macOS")
+            || v["native_disabled"]
+                .as_str()
+                .unwrap()
+                .contains("did not select")
     );
     assert!(v["permissions"]["note"].as_str().unwrap().contains("fake"));
     assert!(v["capabilities"]["observe"]["tree"].as_bool().unwrap());
@@ -137,7 +141,12 @@ fn auto_and_native_fail_closed_without_a_driver_document() {
         if cfg!(target_os = "macos") && args == ["--driver", "native"] {
             continue;
         }
-        let asserted = command(&h).args(args).assert().code(2);
+        let asserted = command(&h)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .args(args)
+            .assert()
+            .code(2);
         let output = asserted.get_output();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -155,6 +164,39 @@ fn auto_and_native_fail_closed_without_a_driver_document() {
         .args(["version", "--driver", "fake"])
         .assert()
         .success();
+}
+
+#[cfg(all(feature = "native-x11", target_os = "linux"))]
+#[test]
+fn native_x11_product_entry_reports_selection_and_does_not_fake_a_side_effect() {
+    let h = TempDir::new().unwrap();
+    let asserted = command(&h)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["call", "list_apps", "--driver", "native", "--args", "{}"])
+        .assert()
+        .code(2);
+    let output = asserted.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stderr.contains("No safe native route"), "{stderr}");
+    assert!(!stdout.contains("fake.form"), "{stdout}");
+
+    let doctor = command(&h)
+        .env("DISPLAY", ":9")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["doctor", "--driver", "fake", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&doctor).unwrap();
+    assert_eq!(value["driver"], "fake");
+    let disabled = value["native_disabled"].as_str().unwrap();
+    assert!(disabled.contains("did not select"), "{disabled}");
+    assert!(disabled.contains("native-x11"), "{disabled}");
+    assert!(!disabled.contains("not assembled"), "{disabled}");
 }
 
 #[test]

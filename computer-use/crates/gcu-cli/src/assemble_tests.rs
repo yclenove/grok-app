@@ -42,8 +42,23 @@ fn omitted_auto_and_native_fail_closed_for_every_feature_switch() {
                     native_x11: compiled && feature == "native-x11",
                     native_wayland: compiled && feature == "native-wayland",
                 };
-                let Plan::Refuse { message } = decide(q) else {
-                    panic!("driver was selected");
+                let plan = decide(q);
+                if compiled && feature == "native-x11" {
+                    let Plan::NativeX11 { disclosure } = plan else {
+                        panic!("expected native x11, got {plan:?}");
+                    };
+                    assert_eq!(disclosure.selected, "native");
+                    assert!(
+                        disclosure.native_disabled.contains("selected native-x11"),
+                        "{}",
+                        disclosure.native_disabled
+                    );
+                    assert!(disclosure.native_disabled.contains("native-wayland"));
+                    assert!(!disclosure.native_disabled.contains("not assembled"));
+                    continue;
+                }
+                let Plan::Refuse { message } = plan else {
+                    panic!("driver was selected: {plan:?}");
                 };
                 assert!(message.contains(feature), "{message}");
                 if compiled {
@@ -53,6 +68,41 @@ fn omitted_auto_and_native_fail_closed_for_every_feature_switch() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn linux_x11_agent_does_not_assemble_in_process() {
+    let mut q = query(DriverKind::Auto, None, Entry::Agent, linux_x11());
+    q.features.native_x11 = true;
+    match decide(q) {
+        Plan::Refuse { message } => {
+            assert!(message.contains("helper agent"), "{message}");
+        }
+        other => panic!("selected {other:?}"),
+    }
+    for entry in [Entry::Bare, Entry::McpStdio] {
+        let mut selected = query(DriverKind::Native, None, entry, linux_x11());
+        selected.features.native_x11 = true;
+        assert!(
+            matches!(decide(selected), Plan::NativeX11 { .. }),
+            "{entry:?}"
+        );
+    }
+}
+
+#[test]
+fn fake_on_compiled_x11_does_not_claim_the_route_is_unassembled() {
+    let mut q = query(DriverKind::Fake, None, Entry::InProcess, linux_x11());
+    q.features.native_x11 = true;
+    match decide(q) {
+        Plan::Fake { disclosure, .. } => {
+            assert_eq!(disclosure.selected, "fake");
+            assert!(disclosure.native_disabled.contains("did not select"));
+            assert!(disclosure.native_disabled.contains("native-x11"));
+            assert!(!disclosure.native_disabled.contains("not assembled"));
+        }
+        other => panic!("{other:?}"),
     }
 }
 

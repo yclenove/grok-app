@@ -292,7 +292,7 @@ impl HotkeyManager {
 pub fn spawn_x11_listener(
     x: Arc<dyn XServer>,
     hotkey_mgr: Arc<HotkeyManager>,
-    _stop_latch: Arc<dyn StopLatch>,
+    stop_latch: Arc<dyn StopLatch>,
     ledger: Arc<InputLedger>,
     clock: Arc<dyn crate::x11::activity::ActivityClock>,
     filter: Arc<crate::x11::activity::DeviceFilter>,
@@ -304,9 +304,11 @@ pub fn spawn_x11_listener(
             watchdog.record_heartbeat();
             match x.poll_event() {
                 Ok(Some(crate::x11::server::XEventKind::KeyPress(kc, state))) => {
-                    hotkey_mgr
-                        .handle_key_press(kc, state, &ledger, x.as_ref())
-                        .await;
+                    // The task owns the latch it was spawned with. The manager's
+                    // field can still name a latch that assembly has replaced.
+                    if hotkey_mgr.matches_key_press(kc, state) {
+                        handle_hotkey_trigger(stop_latch.as_ref(), &ledger, x.as_ref()).await;
+                    }
                 }
                 Ok(Some(crate::x11::server::XEventKind::RawDeviceInput(dev_id, src_id))) => {
                     filter.process_event_with_source(dev_id, src_id, clock.as_ref());
