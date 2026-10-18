@@ -43,6 +43,7 @@ pub struct ActionRouter {
     pub(crate) settle_engine: SettleEngine,
     pub(crate) auto_capture: AutoCapturePolicy,
     pub(crate) wait_engine: crate::wait::WaitEngine,
+    pub(crate) browser: Option<std::sync::Arc<crate::browser::Hub>>,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -70,6 +71,7 @@ impl ActionRouter {
             settle_engine: SettleEngine::default(),
             auto_capture: AutoCapturePolicy::default(),
             wait_engine: crate::wait::WaitEngine::default(),
+            browser: None,
         }
     }
     /// Inject settling configuration and monotonic time before sharing the router.
@@ -343,14 +345,8 @@ impl ActionRouter {
         }
         let events = self.driver.subscribe(&win);
         let cancel = Cancel::default();
-        let delivery = self
-            .native(
-                session,
-                &cancel,
-                true,
-                self.driver.perform(&plan.request, &cancel),
-            )
-            .await;
+        let delivery =
+            crate::browser::dispatch(self, session, &cancel, &plan.request, &before.raw).await;
         match delivery {
             Err(e) => {
                 if e.maybe_executed()
