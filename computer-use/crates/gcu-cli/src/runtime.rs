@@ -118,6 +118,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             return Err(Failure::internal("Agent selection is handled earlier"))
         }
         Plan::Refuse { message } => return Err(Failure::arguments(message)),
+        Plan::NativeX11 { disclosure } => {
+            return dispatch_native_x11(cli, disclosure, mode).await;
+        }
         Plan::Fake { scene, disclosure } => (scene, disclosure),
     };
     let driver = Arc::new(
@@ -161,13 +164,30 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         )
         .await;
     }
-    let host = tokio::time::timeout(
+    let host = open_local_host(mode).await?;
+    let oracle = driver.clone();
+    dispatch_bound(cli, driver, disclosure, host, Some(oracle)).await
+}
+
+/// Load the local Host. Disk IO stays inside the five-second cap.
+pub(crate) async fn open_local_host(mode: Option<String>) -> Result<LocalHost, Failure> {
+    tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio::task::spawn_blocking(move || LocalHost::new(crate::config::load()?, mode)),
     )
     .await
     .map_err(|_| Failure::internal("Host configuration IO timed out"))?
-    .map_err(|_| Failure::internal("Host configuration failed"))??;
+    .map_err(|_| Failure::internal("Host configuration failed"))?
+}
+
+/// Run doctor, call, or MCP on a driver whose Host latch is already bound.
+pub(crate) async fn dispatch_bound(
+    cli: Cli,
+    driver: Arc<dyn gcu_core::driver::Driver>,
+    disclosure: assemble::Disclosure,
+    host: LocalHost,
+    oracle: Option<Arc<gcu_driver_fake::FakeDriver>>,
+) -> Result<u8, Failure> {
     crate::private::work(|| {
         crate::call::cleanup_artifacts();
         Ok(())
@@ -183,7 +203,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             .await?;
             let result = crate::call::run(connection, &tool, &args, json).await;
             host.save_summaries().await?;
-            write_oracle(&driver).await?;
+            if let Some(fake) = oracle.as_ref() {
+                write_oracle(fake).await?;
+            }
             result
         }
         Some(Command::Mcp {
@@ -309,7 +331,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
             stop_task.abort();
             drop(control);
             host.save_summaries().await?;
-            write_oracle(&driver).await?;
+            if let Some(fake) = oracle.as_ref() {
+                write_oracle(fake).await?;
+            }
             result.map(|_| 0).map_err(Failure::from)
         }
         Some(Command::Doctor { json }) => {
@@ -343,8 +367,26 @@ async fn dispatch_agent(cli: &Cli) -> Result<u8, Failure> {
         Plan::Fake { scene, .. } => crate::helper::run_agent(&scene, true).await,
         Plan::HelperAgent { .. } => crate::helper::run_agent("form", false).await,
         Plan::Refuse { message } => Err(Failure::arguments(message)),
-        Plan::HelperProxy { .. } | Plan::Onboarding { .. } => {
-            Err(Failure::internal("Agent selection is invalid"))
-        }
+        Plan::HelperProxy { .. } | Plan::Onboarding { .. } | Plan::NativeX11 { .. } => Err(
+            Failure::arguments("Linux native X11 does not use the macOS helper agent entry"),
+        ),
+    }
+}
+
+async fn dispatch_native_x11(
+    cli: Cli,
+    disclosure: assemble::Disclosure,
+    mode: Option<String>,
+) -> Result<u8, Failure> {
+    #[cfg(all(feature = "native-x11", target_os = "linux"))]
+    {
+        crate::native_x11::dispatch(cli, disclosure, mode).await
+    }
+    #[cfg(not(all(feature = "native-x11", target_os = "linux")))]
+    {
+        let _ = (cli, disclosure, mode);
+        Err(Failure::internal(
+            "native-x11 was selected without its compiled route",
+        ))
     }
 }

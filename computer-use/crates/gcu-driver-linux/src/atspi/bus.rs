@@ -54,6 +54,29 @@ impl AtspiBus {
         &self.connection
     }
 
+    /// Process id published as `org.a11y.atspi.Application.Id`, when positive.
+    ///
+    /// Failures and a missing interface return `None`. Callers must not invent a pid.
+    pub async fn application_pid(&self, node: &AtspiNodeRef) -> Option<u32> {
+        let dest = bus_dest(&node.destination).ok()?;
+        let path = obj_path(&node.path).ok()?;
+        let built = atspi::proxy::application::ApplicationProxy::builder(&self.connection)
+            .destination(dest)
+            .ok()?
+            .path(path)
+            .ok()?
+            .build();
+        let proxy = tokio::time::timeout(DBUS_CALL_TIMEOUT, built)
+            .await
+            .ok()?
+            .ok()?;
+        let id = tokio::time::timeout(DBUS_CALL_TIMEOUT, proxy.id())
+            .await
+            .ok()?
+            .ok()?;
+        u32::try_from(id).ok().filter(|pid| *pid > 0)
+    }
+
     async fn accessible_proxy(
         &self,
         node: &AtspiNodeRef,

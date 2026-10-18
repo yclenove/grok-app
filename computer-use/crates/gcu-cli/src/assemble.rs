@@ -1,8 +1,9 @@
 //! Single driver selection. Runtime, engine, and helper do not guess.
 //!
-//! `auto` and `native` fail closed unless a later platform card assembles that
-//! route. This build never substitutes fake, never widens the input route, and
-//! never elevates. Native features are delivery switches and stay off here.
+//! `auto` and `native` fail closed unless the platform route is assembled.
+//! Linux X11 is assembled only when `native-x11` is compiled. This build never
+//! substitutes fake, never widens the input route, and never elevates. The
+//! feature stays off unless a binary enables it.
 
 use crate::args::{DriverArgs, DriverKind};
 use crate::exit::Failure;
@@ -95,7 +96,7 @@ impl Disclosure {
     }
 }
 
-/// Selection result. Only [`Plan::Fake`] may construct a driver.
+/// Selection result. [`Plan::Fake`] and [`Plan::NativeX11`] may construct a driver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Plan {
     /// Offline driver after the fake gate.
@@ -124,6 +125,11 @@ pub(crate) enum Plan {
     Refuse {
         /// Stable parameter error.
         message: String,
+    },
+    /// In-process Linux X11 driver. The listener is bound to the Host latch later.
+    NativeX11 {
+        /// Shared disclosure. Wayland stays disabled.
+        disclosure: Disclosure,
     },
 }
 
@@ -198,6 +204,28 @@ pub(crate) fn decide(query: Query<'_>) -> Plan {
             },
         };
     }
+    if matches!(
+        query.os,
+        OsKind::Linux {
+            session: SessionKind::X11
+        }
+    ) && query.features.native_x11
+    {
+        if query.entry == Entry::Agent {
+            return Plan::Refuse {
+                message: "Linux native X11 does not use the macOS helper agent entry".into(),
+            };
+        }
+        return Plan::NativeX11 {
+            disclosure: Disclosure {
+                selected: "native",
+                native_disabled: format!(
+                    "selected native-x11; {}",
+                    block("native-wayland", query.features.native_wayland)
+                ),
+            },
+        };
+    }
     Plan::Refuse {
         message: native_disabled(query.os, query.features),
     }
@@ -222,7 +250,16 @@ fn native_disabled(os: OsKind, features: Features) -> String {
         }
         OsKind::Linux {
             session: SessionKind::X11,
-        } => block("native-x11", features.native_x11),
+        } => {
+            if features.native_x11 {
+                format!(
+                    "native-x11 is compiled; this command did not select it. {}",
+                    block("native-wayland", features.native_wayland)
+                )
+            } else {
+                block("native-x11", false)
+            }
+        }
         OsKind::Linux {
             session: SessionKind::Wayland { display: true },
         } => format!(

@@ -48,8 +48,8 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    // Compatibility for the existing fake-only assembly, which deliberately
-    // stays outside the native entry card. No platform clock is attached here.
+    // Fake assembly attaches no platform clock. Linux X11 calls
+    // [`connect_engine`], binds the Host latch, then [`serve_engine`].
     run_with_activity(
         driver,
         Arc::new(UnavailableActivity),
@@ -71,6 +71,41 @@ pub(crate) async fn run_with_activity(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
+    let session = connect_engine(
+        driver.as_ref(),
+        activity.as_ref(),
+        host_fd,
+        socket,
+        token_fd,
+        stop_fd,
+    )
+    .await?;
+    serve_engine(driver, activity, route_note, session).await
+}
+
+/// Handshake state. Capabilities are snapshotted before a platform bind replaces the driver.
+pub(crate) struct EngineSession {
+    peer: Peer,
+    incoming: Incoming,
+    stop_peer: Peer,
+    stop_incoming: Incoming,
+    /// Host Stop mirror from the authenticated handshake.
+    pub(crate) stop: StopMirror,
+    /// Buffers one local Stop until the control task is running.
+    pub(crate) local_stop: tokio::sync::mpsc::Sender<gcu_host_protocol::stop_reason::StopReason>,
+    local_stop_rx: tokio::sync::mpsc::Receiver<gcu_host_protocol::stop_reason::StopReason>,
+    sessions: Sessions,
+}
+
+/// Authenticate both channels and snapshot capabilities before any Host latch is installed.
+pub(crate) async fn connect_engine(
+    driver: &dyn Driver,
+    activity: &dyn PhysicalActivity,
+    host_fd: Option<usize>,
+    socket: Option<PathBuf>,
+    token_fd: Option<usize>,
+    stop_fd: usize,
+) -> Result<EngineSession, Failure> {
     let (stream, bootstrap) = if let Some(fd) = host_fd {
         let mut stream = transport::inherited(fd)?;
         let bootstrap = Bootstrap::read(&mut stream).await?;
@@ -102,7 +137,7 @@ pub(crate) async fn run_with_activity(
     .await
     .map_err(|_| Error::Timeout)?
     .map_err(|_| Error::Authentication)??;
-    let capabilities = activity_capabilities(driver.as_ref(), activity.as_ref());
+    let capabilities = activity_capabilities(driver, activity);
     config.capabilities = Some(capabilities);
     // Registration is deliberately before any driver work or approval request.
     let (peer, incoming, authenticated) =
@@ -123,6 +158,35 @@ pub(crate) async fn run_with_activity(
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
     // The sender stays alive so a dropped channel is not a local Stop.
     let (local_stop, local_stop_rx) = tokio::sync::mpsc::channel(1);
+    Ok(EngineSession {
+        peer,
+        incoming,
+        stop_peer,
+        stop_incoming,
+        stop,
+        local_stop,
+        local_stop_rx,
+        sessions,
+    })
+}
+
+/// Serve RPC with the driver that already holds the Host latch.
+pub(crate) async fn serve_engine(
+    driver: Arc<dyn Driver>,
+    activity: Arc<dyn PhysicalActivity>,
+    route_note: String,
+    session: EngineSession,
+) -> Result<u8, Failure> {
+    let EngineSession {
+        peer,
+        incoming,
+        stop_peer,
+        stop_incoming,
+        stop,
+        local_stop,
+        local_stop_rx,
+        sessions,
+    } = session;
     let marker_dir = gcu_host_protocol::stop_reason::state_dir();
     let stop_task = tokio::spawn(control(
         stop_peer.clone(),

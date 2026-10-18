@@ -11,10 +11,12 @@ path = "src/main.rs"
 
 [features]
 eval-autoapprove = []
-# Delivery switches for later platform cards. Default off. Enabling one does
-# not assemble a driver, fall back to fake, widen input, or elevate.
+# Delivery switches. Default off. `native-x11` assembles the Linux X11 route
+# when this feature is enabled. Enabling it does not turn the feature on by
+# default, fall back to fake, widen input, or elevate. Windows and Wayland
+# stay unassembled.
 native-windows = []
-native-x11 = []
+native-x11 = ["dep:gcu-driver-linux"]
 native-wayland = []
 # Darwin cc is required to compile this (objc2-exception-helper). Linux cross
 # builds leave it off. macOS CI must pass `--features macos-webview`.
@@ -67,6 +69,9 @@ security-framework-sys = "2.17"
 # which this Linux build host cannot provide. Do not enable that feature.
 tao = { version = "0.37", default-features = false, features = ["rwh_06"], optional = true }
 wry = { version = "0.57", default-features = false, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gcu-driver-linux = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
