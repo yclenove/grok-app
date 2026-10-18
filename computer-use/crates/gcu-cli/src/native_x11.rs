@@ -43,8 +43,7 @@ async fn run_engine(
 ) -> Result<u8, Failure> {
     let driver = LinuxDriver::open_x11_unbound().await;
     let session = crate::engine::connect_engine(
-        &driver,
-        &gcu_mcp::host::UnavailableActivity,
+        crate::engine::ConnectInput::Given(&driver, &gcu_mcp::host::UnavailableActivity),
         host_fd,
         socket,
         token_fd,

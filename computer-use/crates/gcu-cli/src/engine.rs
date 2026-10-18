@@ -40,6 +40,28 @@ async fn lookup(sessions: &Sessions, id: &str) -> Result<Arc<Entry>, w::RpcError
         .ok_or_else(|| w::RpcError::new(-32004, "unknown session"))
 }
 
+enum Prepared {
+    /// Driver and activity already chosen. Fake stays on this path.
+    Given {
+        driver: Arc<dyn Driver>,
+        activity: Arc<dyn PhysicalActivity>,
+    },
+    /// macOS App subprocess. The driver is built only after authentication.
+    ///
+    /// Linux builds keep the variant so the refusal path type-checks, and
+    /// never construct it: `run_macos` returns before `run_prepared`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Macos,
+}
+
+/// Handshake input. The macOS arm has no driver until [`connect_engine`] returns.
+pub(crate) enum ConnectInput<'a> {
+    /// Snapshot this driver. Fake, and Linux X11 before the Host latch is installed.
+    Given(&'a dyn Driver, &'a dyn PhysicalActivity),
+    /// Conservative capabilities. The macOS driver is attached after connect.
+    Macos,
+}
+
 pub(crate) async fn run(
     driver: Arc<dyn Driver>,
     route_note: String,
@@ -48,11 +70,14 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    // Fake assembly attaches no platform clock. Linux X11 calls
-    // [`connect_engine`], binds the Host latch, then [`serve_engine`].
-    run_with_activity(
-        driver,
-        Arc::new(UnavailableActivity),
+    // Fake, and every engine that is neither macOS nor Linux X11, stays unwired
+    // to a platform clock. Linux X11 calls [`connect_engine`], binds the Host
+    // latch, then [`serve_engine`].
+    run_prepared(
+        Prepared::Given {
+            driver,
+            activity: Arc::new(UnavailableActivity),
+        },
         route_note,
         host_fd,
         socket,
@@ -62,24 +87,70 @@ pub(crate) async fn run(
     .await
 }
 
-pub(crate) async fn run_with_activity(
-    driver: Arc<dyn Driver>,
-    activity: Arc<dyn PhysicalActivity>,
+/// Authenticated macOS engine. Refuses before any native driver when the
+/// App TCC chain is not the measured macOS 27 arm64 case.
+pub(crate) async fn run_macos(
     route_note: String,
     host_fd: Option<usize>,
     socket: Option<PathBuf>,
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    let session = connect_engine(
-        driver.as_ref(),
-        activity.as_ref(),
-        host_fd,
-        socket,
-        token_fd,
-        stop_fd,
-    )
-    .await?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (route_note, host_fd, socket, token_fd, stop_fd);
+        Err(Failure::arguments(
+            crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        run_prepared(
+            Prepared::Macos,
+            route_note,
+            host_fd,
+            socket,
+            token_fd,
+            stop_fd,
+        )
+        .await
+    }
+}
+
+async fn run_prepared(
+    prepared: Prepared,
+    route_note: String,
+    host_fd: Option<usize>,
+    socket: Option<PathBuf>,
+    token_fd: Option<usize>,
+    stop_fd: usize,
+) -> Result<u8, Failure> {
+    let input = match &prepared {
+        Prepared::Given { driver, activity } => {
+            ConnectInput::Given(driver.as_ref(), activity.as_ref())
+        }
+        Prepared::Macos => ConnectInput::Macos,
+    };
+    let session = connect_engine(input, host_fd, socket, token_fd, stop_fd).await?;
+    // macOS builds its driver here, after both channels have authenticated.
+    let (driver, activity) = match prepared {
+        Prepared::Given { driver, activity } => (driver, activity),
+        Prepared::Macos => {
+            match crate::host::macos_wire::engine_after_auth(
+                session.stop.clone(),
+                session.local_stop.clone(),
+            )
+            .await
+            {
+                Ok(wired) => wired,
+                Err(error) => {
+                    session.peer.close();
+                    session.stop_peer.close();
+                    return Err(error);
+                }
+            }
+        }
+    };
     serve_engine(driver, activity, route_note, session).await
 }
 
@@ -99,8 +170,7 @@ pub(crate) struct EngineSession {
 
 /// Authenticate both channels and snapshot capabilities before any Host latch is installed.
 pub(crate) async fn connect_engine(
-    driver: &dyn Driver,
-    activity: &dyn PhysicalActivity,
+    input: ConnectInput<'_>,
     host_fd: Option<usize>,
     socket: Option<PathBuf>,
     token_fd: Option<usize>,
@@ -137,7 +207,21 @@ pub(crate) async fn connect_engine(
     .await
     .map_err(|_| Error::Timeout)?
     .map_err(|_| Error::Authentication)??;
-    let capabilities = activity_capabilities(driver, activity);
+    if matches!(input, ConnectInput::Macos)
+        && crate::host::macos_wire::engine_assembly_allowed(
+            true,
+            crate::host::macos_wire::TccEvidence::current(),
+        )
+        .is_err()
+    {
+        return Err(Failure::arguments(
+            crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
+        ));
+    }
+    let capabilities = match input {
+        ConnectInput::Given(driver, activity) => activity_capabilities(driver, activity),
+        ConnectInput::Macos => crate::host::macos_wire::conservative_handshake(),
+    };
     config.capabilities = Some(capabilities);
     // Registration is deliberately before any driver work or approval request.
     let (peer, incoming, authenticated) =

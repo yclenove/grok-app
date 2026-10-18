@@ -77,6 +77,11 @@ fn arguments_unsupported_modes_exit_two() {
         ],
         vec!["doctor", "--driver", "fake", "--scene", "missing"],
     ] {
+        // `gcu mcp` without `--driver fake` proxies the helper. Launch Services
+        // and TCC are not_run and must not start the user's app from this test.
+        if cfg!(target_os = "macos") && args.as_slice() == ["mcp"] {
+            continue;
+        }
         command(&h).args(args).assert().code(2);
     }
 }
