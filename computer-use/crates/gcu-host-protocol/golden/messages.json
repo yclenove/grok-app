@@ -124,6 +124,211 @@
     "title": "Envelope"
   },
   "methods": {
+    "engine.browser.sync": {
+      "notification": false,
+      "params": {
+        "$defs": {
+          "BrowserKind": {
+            "description": "The only browser kind L1 accepts.",
+            "oneOf": [
+              {
+                "const": "builtin_browser",
+                "description": "Native window owned by the App, not a page-created view.",
+                "type": "string"
+              }
+            ]
+          },
+          "BrowserWindow": {
+            "additionalProperties": false,
+            "description": "One verified browser window. Page title, label, and window name are not fields.",
+            "properties": {
+              "document_revision": {
+                "description": "Document generation. Image rows must match it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "epoch": {
+                "description": "Engine epoch that produced this window.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "generation": {
+                "description": "Rust or platform generation. Empty is unproven.",
+                "type": "string"
+              },
+              "geometry": {
+                "$ref": "#/$defs/Geometry",
+                "description": "Content rectangle inside the native window."
+              },
+              "instance_id": {
+                "description": "Rust-generated id, 32 to 128 characters from `[A-Za-z0-9_-]`.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/BrowserKind",
+                "description": "Must be the built-in browser."
+              },
+              "pid": {
+                "description": "Non-zero process id.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "platform": {
+                "$ref": "#/$defs/OsPlatform",
+                "description": "OS that would have to prove network limits."
+              },
+              "session_id": {
+                "description": "Owning App session.",
+                "type": "string"
+              },
+              "started": {
+                "description": "Process start token. Zero is unproven.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "description": "Native window id from the platform driver.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "epoch",
+              "document_revision",
+              "started",
+              "pid",
+              "platform",
+              "kind",
+              "instance_id",
+              "session_id",
+              "window_id",
+              "generation",
+              "geometry"
+            ],
+            "type": "object"
+          },
+          "Geometry": {
+            "additionalProperties": false,
+            "description": "Window-relative physical pixels. The rectangle must sit inside the window.",
+            "properties": {
+              "height": {
+                "description": "Height, finite and positive.",
+                "format": "double",
+                "type": "number"
+              },
+              "scale": {
+                "description": "Display scale, finite and positive.",
+                "format": "double",
+                "type": "number"
+              },
+              "width": {
+                "description": "Width, finite and positive.",
+                "format": "double",
+                "type": "number"
+              },
+              "window_height": {
+                "description": "Owner window height in physical pixels.",
+                "format": "double",
+                "type": "number"
+              },
+              "window_width": {
+                "description": "Owner window width in physical pixels.",
+                "format": "double",
+                "type": "number"
+              },
+              "x": {
+                "description": "Left edge, finite and at least zero.",
+                "format": "double",
+                "type": "number"
+              },
+              "y": {
+                "description": "Top edge, finite and at least zero.",
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height",
+              "scale",
+              "window_width",
+              "window_height"
+            ],
+            "type": "object"
+          },
+          "OsPlatform": {
+            "description": "OS named on a binding. A string outside this set does not deserialize.",
+            "oneOf": [
+              {
+                "const": "macos",
+                "description": "macOS.",
+                "type": "string"
+              },
+              {
+                "const": "windows",
+                "description": "Windows.",
+                "type": "string"
+              },
+              {
+                "const": "linux",
+                "description": "Linux.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "`engine.browser.sync` parameters. `browser: null` clears the map.",
+        "properties": {
+          "browser": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BrowserWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Full binding, or null to remove every window."
+          },
+          "revision": {
+            "description": "Strictly the previous accepted revision plus one.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "BrowserSync",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Ack for [`BrowserSync`]. The revision must echo the request.",
+        "properties": {
+          "revision": {
+            "description": "Revision that was accepted.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "BrowserAck",
+        "type": "object"
+      }
+    },
     "engine.policy.changed": {
       "notification": false,
       "params": {
@@ -1452,6 +1657,77 @@
           "decision"
         ],
         "title": "AppDecision",
+        "type": "object"
+      }
+    },
+    "host.browser.navigate": {
+      "notification": false,
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "`host.browser.navigate` parameters. The engine fills every field except the model's URL.",
+        "properties": {
+          "document_revision": {
+            "description": "Document generation the engine observed. A mismatch is stale.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "instance_id": {
+            "description": "Binding instance the engine selected.",
+            "type": "string"
+          },
+          "policy_version": {
+            "description": "Policy generation the engine observed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "description": "Binding revision the engine observed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "description": "Owning App session.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Absolute URL, checked again before any native handoff.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "instance_id",
+          "revision",
+          "document_revision",
+          "policy_version",
+          "session_id"
+        ],
+        "title": "BrowserNavigate",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Successful navigate result. `dispatched: false` is not a success.",
+        "properties": {
+          "dispatched": {
+            "description": "True only after the URL was handed to native navigation.",
+            "type": "boolean"
+          },
+          "instance_id": {
+            "description": "Instance that received it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dispatched",
+          "instance_id"
+        ],
+        "title": "BrowserNavigated",
         "type": "object"
       }
     },

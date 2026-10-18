@@ -35,6 +35,10 @@ pub(crate) fn golden(directory: &Path, update: bool) -> Result<()> {
             canonical_json(&gcu_protocol::tools_list_json())?,
         ),
         (
+            "tools-browser.json",
+            canonical_json(&gcu_protocol::browser_conditional_catalog_json())?,
+        ),
+        (
             "errors.json",
             canonical_json(&gcu_protocol::error::errors_json())?,
         ),
@@ -134,5 +138,11 @@ pub(crate) fn run_budget() -> Result<()> {
     let report = budget_report(&gcu_protocol::tools_list_json(), TOOL_CATALOG_BYTES)?;
     enforce_budget(&report)?;
     println!("PASS: default tool catalog byte budget");
+    let conditional = budget_report(
+        &gcu_protocol::browser_conditional_catalog_json(),
+        TOOL_CATALOG_BYTES,
+    )?;
+    enforce_budget(&conditional)?;
+    println!("PASS: conditional browser catalog byte budget");
     Ok(())
 }

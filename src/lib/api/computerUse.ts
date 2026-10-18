@@ -115,6 +115,7 @@ function settingsInvoke<T>(command: string, args?: Record<string, unknown>): Pro
 }
 export const cuSettingsGet = () => settingsInvoke<Settings>("cu_settings_get");
 export const cuSettingsEnabled = (enabled: boolean) => settingsInvoke<void>("cu_settings_enabled", { enabled });
+export const cuBrowserClear = () => settingsInvoke<void>("cu_browser_clear");
 export const cuSettingsPolicy = (confirmation: Confirmation, foreground: Foreground) => settingsInvoke<void>("cu_settings_policy", { confirmation, foreground });
 export const cuApprovalsList = () => settingsInvoke<Approval[]>("cu_approvals_list");
 export const cuApprovalsRevoke = (id: string) => settingsInvoke<void>("cu_approvals_revoke", { id });

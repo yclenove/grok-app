@@ -18,6 +18,38 @@ pub async fn run(
             super::super::unsafe_mouse_probe::decision()?,
         );
     }
+    if requires_foreground(id) {
+        if let Some(skip) = silent_mouse_environment(super::super::unsafe_mouse_probe::decision()?)
+        {
+            return skip;
+        }
+    }
+    let result = run_case(id, driver, fixture, win).await;
+    // ADR 0013: the foreground capability stays open while only the mouse proof
+    // is missing, and the action-time proof refuses instead. Judge that refusal
+    // with the same measured-environment decision: it may Skip only when the
+    // same-process mouse matrix saw no callbacks at all, and fails whenever a
+    // working probe exists.
+    if requires_foreground(id) {
+        if let Err(error) = &result {
+            if error.contains("capability unavailable") {
+                let report = driver.doctor().await;
+                return foreground_unavailable(
+                    &report.issues,
+                    super::super::unsafe_mouse_probe::decision()?,
+                );
+            }
+        }
+    }
+    result
+}
+
+async fn run_case(
+    id: &str,
+    driver: &WindowsDriver,
+    fixture: &Fixture,
+    win: &WindowRef,
+) -> CaseResult {
     match id {
         "C01" => {
             require(driver.list_apps().await.map_err(|e| e.to_string())?.iter().any(|a| a.pid == Some(fixture.pid())), "fixture absent from list_apps")?;

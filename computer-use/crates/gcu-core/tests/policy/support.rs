@@ -63,6 +63,7 @@ pub(crate) fn eval(
             grants,
             policy_version: 7,
             closed,
+            browser: None,
         },
         intent,
     )

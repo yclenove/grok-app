@@ -163,6 +163,13 @@ pub fn classify(
     }
 }
 
+pub(crate) fn extra_denies(identity: &AppIdentity, extra: &[String]) -> bool {
+    extra.iter().any(|appended| {
+        let id = appended.trim();
+        !id.is_empty() && id_matches(id, identity)
+    })
+}
+
 fn rule_matches(rule: &DenyRule, identity: &AppIdentity) -> bool {
     hash_matches(rule.sha256, identity.sha256) || id_matches(&rule.id, identity)
 }

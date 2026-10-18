@@ -14,7 +14,7 @@ pub struct Version {
     pub minor: u16,
 }
 /// Current protocol generation.
-pub const VERSION: Version = Version { major: 1, minor: 0 };
+pub const VERSION: Version = Version { major: 1, minor: 1 };
 /// Strict JSON-RPC request or notification. IDs are nonzero monotonic integers.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -291,81 +291,38 @@ pub struct Method {
     pub name: &'static str,
     /// True for engine-to-Host fire-and-forget notifications.
     pub notification: bool,
+    /// Lowest negotiated minor that may dispatch this method.
+    pub min_minor: u16,
 }
-/// Exhaustive architecture §15.3 method table.
+const fn method(name: &'static str, notification: bool, min_minor: u16) -> Method {
+    Method {
+        name,
+        notification,
+        min_minor,
+    }
+}
+/// Exhaustive method table. Browser methods require minor 1 and a request id.
 pub const METHODS: &[Method] = &[
-    Method {
-        name: "host.approval.requestApp",
-        notification: false,
-    },
-    Method {
-        name: "host.approval.confirmAction",
-        notification: false,
-    },
-    Method {
-        name: "host.approval.handoff",
-        notification: false,
-    },
-    Method {
-        name: "host.policy.load",
-        notification: false,
-    },
-    Method {
-        name: "host.overlay.show",
-        notification: true,
-    },
-    Method {
-        name: "host.overlay.status",
-        notification: true,
-    },
-    Method {
-        name: "host.overlay.hide",
-        notification: true,
-    },
-    Method {
-        name: "host.event.emit",
-        notification: true,
-    },
-    Method {
-        name: "host.engine.health",
-        notification: true,
-    },
-    Method {
-        name: "engine.session.open",
-        notification: false,
-    },
-    Method {
-        name: "engine.session.turnEnded",
-        notification: false,
-    },
-    Method {
-        name: "engine.session.close",
-        notification: false,
-    },
-    Method {
-        name: "engine.session.stop",
-        notification: false,
-    },
-    Method {
-        name: "engine.session.resume",
-        notification: false,
-    },
-    Method {
-        name: "engine.policy.changed",
-        notification: false,
-    },
-    Method {
-        name: "engine.system.doctor",
-        notification: false,
-    },
-    Method {
-        name: "engine.screenshot.get",
-        notification: false,
-    },
-    Method {
-        name: "engine.system.shutdown",
-        notification: false,
-    },
+    method("host.approval.requestApp", false, 0),
+    method("host.approval.confirmAction", false, 0),
+    method("host.approval.handoff", false, 0),
+    method("host.policy.load", false, 0),
+    method("host.overlay.show", true, 0),
+    method("host.overlay.status", true, 0),
+    method("host.overlay.hide", true, 0),
+    method("host.event.emit", true, 0),
+    method("host.engine.health", true, 0),
+    method("engine.session.open", false, 0),
+    method("engine.session.turnEnded", false, 0),
+    method("engine.session.close", false, 0),
+    method("engine.session.stop", false, 0),
+    method("engine.session.resume", false, 0),
+    method("engine.policy.changed", false, 0),
+    method("engine.system.doctor", false, 0),
+    method("engine.screenshot.get", false, 0),
+    method("engine.system.shutdown", false, 0),
+    method("engine.browser.sync", false, 1),
+    method("host.browser.navigate", false, 1),
 ];
 /// Generate schemas from the exact Rust wire types. Pure and nonblocking.
 pub fn schemas() -> Value {
@@ -390,6 +347,8 @@ pub fn schemas() -> Value {
             "engine.system.doctor": { "params": schemars::schema_for!(Empty), "result": schemars::schema_for!(DoctorReport), "notification": false },
             "engine.screenshot.get": { "params": schemars::schema_for!(ScreenshotGet), "result": schemars::schema_for!(Image), "notification": false },
             "engine.system.shutdown": { "params": schemars::schema_for!(Empty), "result": schemars::schema_for!(Empty), "notification": false },
+            "engine.browser.sync": { "params": schemars::schema_for!(gcu_protocol::builtin_browser::BrowserSync), "result": schemars::schema_for!(gcu_protocol::builtin_browser::BrowserAck), "notification": false },
+            "host.browser.navigate": { "params": schemars::schema_for!(gcu_protocol::builtin_browser::BrowserNavigate), "result": schemars::schema_for!(gcu_protocol::builtin_browser::BrowserNavigated), "notification": false },
         }
     })
 }
@@ -454,6 +413,26 @@ pub fn validate_params(request: &Request) -> Result<(), Error> {
         "engine.system.shutdown" => serde_json::from_value::<Empty>(request.params.clone())
             .map(|_| ())
             .map_err(|_| Error::Invalid),
+        "engine.browser.sync" => crate::browser::sync_params(&request.params),
+        "host.browser.navigate" => crate::browser::navigate_params(&request.params),
         _ => Err(Error::Invalid),
     }
+}
+
+/// Direction, channel, minor, and id gate. Pure. Browser methods need an id.
+pub fn inbound_permitted(is_host: bool, stop_channel: bool, minor: u16, request: &Request) -> bool {
+    let direction = if is_host { "host." } else { "engine." };
+    let control = matches!(
+        request.method.as_str(),
+        "engine.session.stop" | "engine.session.resume"
+    );
+    METHODS.iter().any(|method| {
+        method.name == request.method
+            && request.method.starts_with(direction)
+            && (!method.notification || request.id.is_none())
+            && (method.notification || request.id.is_some() || !is_host)
+            && control == stop_channel
+            && minor >= method.min_minor
+            && (method.min_minor == 0 || request.id.is_some())
+    })
 }

@@ -66,6 +66,20 @@ pub fn foreground_unavailable(
     }
 }
 
+/// The same-process mouse matrix saw no callback of any kind: this environment
+/// cannot deliver the paired hook callbacks an action-time proof needs, so a
+/// foreground case would only wait out the proof budget and refuse. Skipping up
+/// front is what an unavailable capability used to do. A matrix with any
+/// working probe returns None and the case runs and is judged normally.
+pub fn silent_mouse_environment(matrix: &super::mouse_matrix::Decision) -> Option<CaseResult> {
+    match matrix {
+        super::mouse_matrix::Decision::NoCallbacks(summary) => Some(Ok(Outcome::Skip(format!(
+            "measured mouse environment limitation: {summary}; foreground proof cannot be delivered"
+        )))),
+        super::mouse_matrix::Decision::Run { .. } => None,
+    }
+}
+
 pub fn uipi_fixture(pid: Option<&str>, unavailable: Option<&str>) -> Result<u32, Outcome> {
     if let Some(pid) = pid.and_then(|s| s.parse::<u32>().ok()).filter(|p| *p != 0) {
         return Ok(pid);
