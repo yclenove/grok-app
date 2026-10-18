@@ -125,3 +125,4 @@
 
 -
 - ADR 0012 首卡（2026-10-17，统一驱动选型与停止闭环）已落地：`gcu` 省略 `--driver` 时为 auto，三个 native feature（native-windows/native-x11/native-wayland）全部默认关闭，auto/native 在未装配的平台 fail-closed（退出 2，不退回 fake、不提权）；Host 把引擎**非正常断线**锁存为全局持久 Stop（`stop-reason` 标记文件只用于展示原因，不改变结论）。真实平台驱动的装配仍待 ADR 0012 后续阶段卡（Windows/X11/Wayland/macOS helper/DomChannel 生产连接/文档），真机项 not_run；Windows 一项另依赖 ADR 0013 的实现。
+- ADR 0012 A0-M（2026-10-18，macOS helper 接线）：helper 的真实驱动改用 `MacosDriver::with_stop_latch`，注入 Host 持久 Stop 与真实活动源（`ActivityLatch`/`MacosActivity`），Stop 时独立释放输入并持久化；已认证的 macOS 27 arm64 App engine 与 helper 共用同一 Host Stop/活动，其余系统版本/TCC 责任链缺证据一律拒绝；`call`、`doctor`、HTTP MCP 的 auto/native 仍拒绝（退出 2，指引 helper/App），`mcp` stdio 继续代理 helper。native feature 仍默认关。Linux 与 Mac mini（非 GUI）测试通过；**not_run**：helper 独占 TCC、App 子进程责任链、撤销/错误 PID/安全提示、签名与 Dev 隔离、物理热键、macOS 14/15 与 Intel、真实 `gcu resume`。
