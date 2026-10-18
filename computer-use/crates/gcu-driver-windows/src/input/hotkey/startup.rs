@@ -58,7 +58,7 @@ fn start(api: Arc<Api>) -> tokio::task::JoinHandle<Arc<SafetyGuard>> {
         Arc::new(Unstopped),
     ))
 }
-struct Unstopped;
+pub(super) struct Unstopped;
 impl StopLatch for Unstopped {
     fn is_stopped(&self) -> bool {
         false
@@ -104,26 +104,27 @@ async fn stuck_startup_retains_pending_call_and_late_completion_never_revives_he
 }
 
 #[derive(Default)]
-struct ManualTime(Mutex<Option<Instant>>);
+pub(super) struct ManualTime(Mutex<Option<Instant>>);
 impl MonotonicTime for ManualTime {
     fn now(&self) -> Instant {
         *self.0.lock().unwrap().get_or_insert_with(Instant::now)
     }
 }
 impl ManualTime {
-    fn advance(&self, elapsed: Duration) {
+    pub(super) fn advance(&self, elapsed: Duration) {
         let at = self.now() + elapsed;
         *self.0.lock().unwrap() = Some(at);
     }
 }
 
 #[test]
-fn keyboard_proof_without_mouse_callback_expires_even_when_both_pumps_respond() {
+fn keyboard_proof_without_mouse_callback_cannot_arm_with_healthy_transport() {
     let time = Arc::new(ManualTime::default());
     let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
     guard
         .events
         .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    guard.events.setup_complete.store(true, Ordering::Release);
     for _ in 0..50 {
         guard
             .events
@@ -135,9 +136,11 @@ fn keyboard_proof_without_mouse_callback_expires_even_when_both_pumps_respond() 
         time.advance(Duration::from_millis(20));
     }
     guard.events.check_health();
-    assert!(guard.events.failed.load(Ordering::Acquire));
+    assert!(!guard.events.failed.load(Ordering::Acquire));
+    assert!(!guard.events.armed.load(Ordering::Acquire));
+    assert!(!guard.is_stopped());
     assert!(!guard.activity_clock().available());
-    assert_eq!(guard.check(true), Err(DriverError::CapabilityUnavailable));
+    assert_eq!(guard.check(true), Ok(())); // Proof admission is still closed.
 }
 
 #[test]
@@ -256,18 +259,9 @@ fn absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs() 
         .confirm_hook_proofs(Some(time.now()), proof.proven())
         .unwrap();
     assert!(guard.available());
-    assert_eq!(guard.activity_clock().ms_since_physical_input(), Some(0));
-    // A new proof cycle still tries all three zero probes before one absolute.
-    for mode in [
-        MouseProbe::ZeroMove,
-        MouseProbe::ZeroWheel,
-        MouseProbe::ZeroHWheel,
-    ] {
-        assert_eq!(proof.next().unwrap().mode, mode);
-        proof
-            .complete(dispatch(&mut Api, mode, proof.idle()).map(|_| ()))
-            .unwrap();
-    }
+    assert_eq!(guard.activity_clock().ms_since_physical_input(), None);
+    // A successful absolute probe is pinned for action-window renewals: the
+    // silent zero kinds must not consume the next 100ms budget.
     assert_eq!(proof.next().unwrap().mode, MouseProbe::AbsoluteSamePosition);
     proof
         .complete(dispatch(&mut Api, MouseProbe::AbsoluteSamePosition, proof.idle()).map(|_| ()))
@@ -277,7 +271,7 @@ fn absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs() 
     assert!(guard
         .events
         .confirm_hook_proofs(Some(time.now()), proof.proven())
-        .is_err());
+        .is_ok());
     guard.events.check_health();
     assert!(!guard.available());
     assert_eq!(guard.activity_clock().ms_since_physical_input(), None);
@@ -316,7 +310,7 @@ fn startup_probe_taking_226ms_succeeds_without_relaxing_armed_health_deadline() 
     assert!(guard
         .events
         .confirm_hook_proofs(Some(first_keyboard), Some(time.now()))
-        .is_err());
+        .is_ok());
     guard.events.check_health();
     assert!(!guard.available());
     assert!(guard.is_stopped());

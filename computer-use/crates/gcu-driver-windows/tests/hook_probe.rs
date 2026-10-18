@@ -111,7 +111,7 @@ fn first_three_silent_fourth_tagged_injected_and_verified_proves_mouse() {
         .unwrap();
     assert_eq!(proof.proven(), Some(at));
     assert_eq!(fake.sends.len(), 4);
-    assert_eq!(proof.next().unwrap().mode, MouseProbe::ZeroMove);
+    assert_eq!(proof.next().unwrap().mode, MouseProbe::AbsoluteSamePosition);
 }
 
 #[test]
@@ -372,7 +372,8 @@ fn initially_idle_allows_renewal_dispatch_but_only_new_hook_callback_renews_proo
     proof
         .complete(dispatch(&mut fake, request.mode, proof.idle()).map(|_| ()))
         .unwrap();
-    let next = fourth_without_new_proof(&mut proof, &mut fake);
+    let next = proof.next().unwrap();
+    assert_eq!(next.mode, MouseProbe::AbsoluteSamePosition);
     proof
         .complete(dispatch(&mut fake, next.mode, proof.idle()).map(|_| ()))
         .unwrap();
@@ -385,26 +386,11 @@ fn initially_idle_allows_renewal_dispatch_but_only_new_hook_callback_renews_proo
         proof.next().is_none(),
         "one absolute attempt per lease proof"
     );
-    assert_eq!(fake.sends.len(), 8);
+    assert_eq!(fake.sends.len(), 5);
     assert_eq!(
         fake.recent_reads, 1,
         "own probes never reset the idle marker"
     );
-}
-
-fn fourth_without_new_proof(proof: &mut MouseProof, fake: &mut Fake) -> ProbeRequest {
-    let old = proof.proven();
-    for _ in 0..3 {
-        let request = proof.next().unwrap();
-        assert_ne!(request.mode, MouseProbe::AbsoluteSamePosition);
-        proof
-            .complete(dispatch(fake, request.mode, proof.idle()).map(|_| ()))
-            .unwrap();
-        assert_eq!(proof.proven(), old);
-    }
-    let request = proof.next().unwrap();
-    assert_eq!(request.mode, MouseProbe::AbsoluteSamePosition);
-    request
 }
 
 #[test]
@@ -514,7 +500,13 @@ async fn native_product_probe_chain_proves_both_hooks_without_cursor_change() {
         RealSafetyApi,
     };
     use std::{sync::Arc, time::Duration};
-    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetPhysicalCursorPos};
+    use windows::Win32::{
+        Foundation::POINT,
+        UI::{
+            Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+            WindowsAndMessaging::GetPhysicalCursorPos,
+        },
+    };
     struct Latch;
     impl StopLatch for Latch {
         fn is_stopped(&self) -> bool {
@@ -538,6 +530,17 @@ async fn native_product_probe_chain_proves_both_hooks_without_cursor_change() {
         Arc::new(Latch),
     )
     .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !guard.available() {
+            assert!(
+                guard.transport_healthy(),
+                "transport failed during initial proof"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("one initial tagged dual-hook proof required");
     let mut after = POINT::default();
     // SAFETY: bounded writable physical POINT; never compensate a difference.
     unsafe { GetPhysicalCursorPos(&mut after) }.unwrap();
@@ -548,8 +551,104 @@ async fn native_product_probe_chain_proves_both_hooks_without_cursor_change() {
         "real tagged dual-hook proof required: {issues:?}"
     );
     assert_eq!((before.x, before.y), (after.x, after.y));
-    // Idle samples cannot keep a listener healthy without fresh hook callbacks.
+    let mut idle_before = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: read-only bounded session clock on this disposable desktop.
+    assert!(unsafe { GetLastInputInfo(&mut idle_before) }.as_bool());
+    // No foreground call: system input time must stay unchanged (idle gets older).
     tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut idle_after = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: initialized output; this query submits no input.
+    assert!(unsafe { GetLastInputInfo(&mut idle_after) }.as_bool());
+    assert_eq!(
+        idle_before.dwTime, idle_after.dwTime,
+        "idle listener submitted input"
+    );
     guard.doctor_issues(&mut issues);
-    assert!(guard.available(), "real renewal proof required: {issues:?}");
+    assert!(
+        !guard.available(),
+        "idle injection lease must expire: {issues:?}"
+    );
+    assert!(guard.transport_healthy());
+    assert!(!guard.is_stopped(), "missing idle proof cannot latch Stop");
+}
+
+#[test]
+fn action_proof_after_physical_callback_bypasses_idle_gate_without_permanent_failure() {
+    let mut proof = MouseProof::new(None);
+    let mut fake = Fake::default();
+    let request = fourth(&mut proof, &mut fake);
+    proof.idle().observe(false, false);
+    assert!(proof
+        .complete(dispatch(&mut fake, request.mode, proof.idle()).map(|_| ()))
+        .is_err());
+    proof.begin_cycle(true);
+    fake.reads = 0;
+    let recent_reads = fake.recent_reads;
+    // The next requested action gets a fresh finite round, even after the
+    // initial unsolicited absolute probe was denied by real physical activity.
+    let mut request = proof.next().unwrap();
+    for _ in 0..3 {
+        proof
+            .complete(dispatch_for_action(&mut fake, request.mode, proof.idle()).map(|_| ()))
+            .unwrap();
+        request = proof.next().unwrap();
+    }
+    assert_eq!(request.mode, MouseProbe::AbsoluteSamePosition);
+    proof.callback(request.tag, 1, Instant::now());
+    proof
+        .complete(dispatch_for_action(&mut fake, request.mode, proof.idle()).map(|_| ()))
+        .unwrap();
+    assert!(proof.proven().is_some());
+    assert_eq!(
+        fake.recent_reads, recent_reads,
+        "action proofs never resample system idle"
+    );
+    proof.begin_cycle(true);
+    assert_eq!(
+        proof.next().unwrap().mode,
+        MouseProbe::AbsoluteSamePosition,
+        "known working absolute kind is pinned across action windows"
+    );
+}
+
+#[test]
+fn action_absolute_cursor_change_refuses_once_without_compensation_or_retry() {
+    let mut proof = MouseProof::new(Some(MouseProbe::AbsoluteSamePosition));
+    proof.begin_cycle(true);
+    let mut fake = Fake {
+        after: Ok(Cursor { x: -99, y: 100 }),
+        ..Fake::default()
+    };
+    let request = proof.next().unwrap();
+    proof.callback(request.tag, 1, Instant::now());
+    assert!(proof
+        .complete(dispatch_for_action(&mut fake, request.mode, proof.idle()).map(|_| ()))
+        .is_err());
+    assert_eq!(proof.proven(), None);
+    assert!(proof.next().is_none());
+    assert_eq!(fake.sends.len(), 1, "no retry, no compensating movement");
+}
+
+#[test]
+fn preferred_zero_missing_callback_waits_without_retry_or_absolute_fallback() {
+    let mut proof = MouseProof::new(None);
+    let initial = proof.next().unwrap();
+    proof.callback(initial.tag, 1, Instant::now());
+    proof.complete(Ok(())).unwrap();
+    proof.begin_cycle(true);
+    let next = proof.next().unwrap();
+    assert_eq!(next.mode, MouseProbe::ZeroMove);
+    proof.complete(Ok(())).unwrap();
+    assert_eq!(proof.proven(), None);
+    for _ in 0..10 {
+        assert!(proof.next().is_none());
+    }
+    proof.begin_cycle(true);
+    assert_eq!(proof.next().unwrap().mode, MouseProbe::ZeroMove);
 }

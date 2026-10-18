@@ -33,37 +33,49 @@ An unmarked callback may include unrelated input; the marked row with
 | XButtonPair | May navigate, activate a window, or trigger a global shortcut |
 
 Product defaults try zero move, zero wheel, zero horizontal wheel, then
-**absolute same position**. Each completed send without a matching injected
-callback advances to the next kind; pending sends never start another dispatch.
-The fourth kind sends **one absolute mouse move** to the current physical cursor
-pixel with ABSOLUTE, VIRTUALDESK and NOCOALESCE. It can trigger hover processing.
-It is attempted at most once in each startup/lease proof cycle, after the first
-three kinds failed to produce a tagged injected callback. A successful fourth
-proof starts a fresh cycle with all three zero candidates again; no callback means
-no absolute retry. A working zero kind remains preferred.
+**absolute same position**. An accepted send without a tagged injected callback
+advances to the next kind; a pending send never starts another dispatch. A working
+kind, including the absolute kind, stays preferred across action windows. Once a
+zero kind works, no absolute move is used. RelativePair and XButtonPair remain
+excluded from product builds.
 
-`ABSOLUTE_PROBE_IDLE_MS = 2000` is an independent **fourth-send gate**, not a
-source of physical activity history or Stop lease renewal. Before **any** probe
-input (mouse or keyboard), the sender samples GetLastInputInfo/GetTickCount64
-once on the interactive Default desktop. At least 2000ms without system input
-sets the shared probe-idle marker, including before PhysicalClock's first proof.
-Unknown/read failure, future input ticks, noninteractive desktop or any 32-bit
-tick rollover leaves it denied. GetLastInputInfo includes injected input, so
-injection **before this initial sample** conservatively denies the fourth probe.
-After sampling, probes' own injected callbacks never reset the marker. Any real
-physical keyboard or mouse callback (neither injected nor our tag) immediately
-clears it, even if a concurrent initial read reports idle. Cleared/denied state
-cannot be set again by this listener attempt; a new listener must reassess it.
+Under [ADR 0013 B](../../docs/adr/0013-windows-stop-guard-liveness-lease.md),
+installation may run one initial proof cycle; it never renews that cycle while
+idle. A foreground `perform` requests at most one new preparation cycle when the
+injected lease is not fresh, **after the common live target gate** and before
+action packet construction or mutation RPC. A probe is input, so window/process
+identity, engine/target integrity, permissions, UIAccess and secure/virtual desktop
+checks must succeed before its dispatch. The worker parent uses the existing
+read-only Geometry and ListWindows RPCs, matches only the original stamped ID and
+requires `on_current_desktop == Some(true)`; the child rechecks before action input.
+Preflight, preparation and mutation share the original 4750ms Driver deadline.
+Proof failure returns CapabilityUnavailable
+with no action input and no Stop latch. Inner checks cannot request another cycle.
+During an admitted action, the working kind renews the dual-hook lease directly;
+missing callbacks still fail closed at the unchanged 100ms boundary, synchronously
+latching Stop and signalling independent release. Recovery and action completion
+precede discarding the lease, including on abandonment. No timer was lengthened.
 
-The same marker only permits sending the fourth candidate, at most once per
-startup/lease proof cycle. Its preservation across probe injections allows the
-next cycle's sends, but **each renewal still needs fresh tagged injected callbacks
-from both hooks**. Missing callbacks expire the original 100ms lease regardless
-of the marker. PhysicalClock's history, dual-hook requirement, latch and lease
-bounds remain unchanged. The listener never waits 2000ms, retries a refused
-absolute send, extends hook_proofs' 1000ms budget, or substitutes idle for a hook
-callback. Physical activity during cursor queries cancels the fourth send;
-activity during dispatch invalidates its proof even if the final pixel is equal.
+`ABSOLUTE_PROBE_IDLE_MS = 2000` gates only the initial unsolicited absolute send.
+Its single GetLastInputInfo/GetTickCount64 sample precedes any initial probe input;
+unknown input time, future ticks, wrap or physical callbacks deny that attempt.
+A requested foreground action bypasses this initial gate. Denial or cursor failure
+belongs to one proof cycle, so physical input cannot permanently reject a later
+action's proof. System idle samples and physical callbacks never confirm/renew an
+injected lease. No repeat probes run outside an action window, so the idle listener
+does not keep resetting the system input clock.
+
+Physical activity covers the listener generation from its first successful dual
+proof until disable/failure; 1s hook replacement and idle lease expiry preserve
+that history. Confirmations never manufacture physical activity. Before the first
+proof, without a physical callback, or after revocation, age is None. Only real,
+non-injected, untagged callbacks write activity age. Late callbacks/confirmations
+cannot revive a disabled listener. Foreground capability reflects transport health;
+it does not authorize injection without the action proof. Doctor reports three
+separate facts: `stop_hotkey` transport, `injection_lease`, `user_activity_guard`.
+The last remains unavailable until a trusted physical callback exists; a fresh
+pump is never reported as a proven hook. Stop and thread-failure latches remain
+user-only to resume.
 
 Before dispatch, the sender enters per-monitor DPI awareness, reads physical
 cursor pixels and virtual-desktop bounds (including negative monitor origins),
@@ -78,7 +90,7 @@ physical movement, including movement back to the original pixel between samples
 They do not establish that the move had no hover side effects.
 
 Doctor reports `mouse hook liveness could not be proven (attempted N probe kinds)`
-when proof is missing; foreground remains Unavailable. The count measures actual
+when proof is missing; action input remains gated even with healthy transport. The count measures actual
 submitted kinds, not the number of accepted SendInput records. Release/default
 builds use this fixed order and never select relative movement/buttons from a
 diagnostic result. Doctor also always discloses the absolute move and hover effect,
@@ -256,7 +268,7 @@ physical mouse on the interactive Default desktop and record these results:
   variant must run these cases; missing proof remains a product failure.
 - Verify physical mouse movement/clicks and keyboard activity reset the idle guard;
   injected events do not. Exercise hook replacement, silent loss, desktop/UAC
-  transitions, and idle-time proof renewal with the original lease limits.
+  transitions, and action-window proof renewal with the original lease limits.
 - Verify Stop during a held key, click/drag and blocked worker: latch <=100ms,
   release <=500ms, kill blocked worker <=5s; queued actions stay stopped and
   reconnect/restart cannot resume. Exercise real hotkey conflict and trusted resume.
@@ -287,8 +299,9 @@ win-test 物理桌面、交互式 Default 桌面、未提权，运行被忽略�
 启动前测试自己先睡 2500ms。进程约 2.95s 结束，唯一失败断言在该测试的第二次
 `guard.available()`（源文件第 554 行，消息 `real renewal proof required`）。
 完整控制台输出在编排机 `/tmp/cu2-orch/hook_probe_run1.txt`，Windows 侧副本为
-`D:\cu2\hook_probe_out.txt`。本次不改产品代码。设计结论见
-`computer-use/docs/adr/0013-windows-stop-guard-liveness-lease.md`（提议，未实现）。
+`D:\cu2\hook_probe_out.txt`。以下为方案 B 实现前的原始结果。设计结论见
+`computer-use/docs/adr/0013-windows-stop-guard-liveness-lease.md`（已接受）；下方新验证项
+不以这次历史结果代替。
 
 实测顺序：
 
@@ -314,3 +327,72 @@ win-test 物理桌面、交互式 Default 桌面、未提权，运行被忽略�
 这次失败说明，第一次绝对移动把守卫武装起来之后，空闲并不能把租约维持过
 250ms；守卫按 fail-closed 锁存了 Stop。快照里没有第二次绝对移动的派发行。
 光标相等只覆盖启动那一次，不覆盖这 250ms。锁屏计时器和 hover 都没有测。
+
+## ADR 0013 B acceptance coverage and pending native checks
+
+Portable deterministic coverage (ManualTime/FakeSafetyApi, no Win32):
+
+| Behavior | Test |
+| --- | --- |
+| Old silent-zero chain misses the lease before a 4–5-pump absolute proof completes | `legacy_zero_chain_absolute_callback_four_or_five_pumps_late_expires_before_confirmation` |
+| Idle mouse lease expires with healthy pumps; activity survives, no disable/Stop | `idle_mouse_lease_expired_with_fresh_pumps_keeps_transport_and_activity` |
+| No new pair means no foreground action packets; one preparation per call | `foreground_perform_missing_new_pair_refuses_without_action_input_or_latch`, `foreground_perform_expired_lease_proves_once_before_packet_assembly` |
+| Live target errors precede capability/proof checks, with zero proof dispatch or action input | `action_proof_invalid_live_target_preserves_error_without_probe_or_input`, `input_backend_invalid_live_target_preserves_error_before_injection_lease_check` |
+| Other/unknown virtual desktop and missing worker window refuse before proof | `action_proof_other_or_unknown_virtual_desktop_refuses_without_probe`, `worker_action_proof_missing_live_window_returns_window_gone_without_probe_or_mutation` (worker feature) |
+| In-flight expiry at 100ms + 1 synchronously latches and releases held input | `foreground_inflight_missing_mouse_proof_latches_and_releases_held_input` |
+| Physical callbacks update age without confirming; next action can prove | `physical_callback_during_action_updates_activity_without_renewing_lease`, `action_proof_after_physical_callback_bypasses_idle_gate_without_permanent_failure` |
+| Keyboard alone and initial idle/cursor checks cannot arm or renew | `foreground_preparation_without_new_dual_callbacks_never_admits_injection`, `keyboard_only_renewal_inflight_cannot_extend_mouse_lease`, existing `absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs` |
+| Cursor change refuses before injection, latches/releases during injection, never compensates | `invalid_cursor_proof_before_injection_refuses_without_stop_and_next_action_can_prove`, `invalid_cursor_proof_during_injection_latches_and_signals_release`, `action_absolute_cursor_change_refuses_once_without_compensation_or_retry` |
+
+`startup.rs` and
+`fake_listener_ignores_runtime_elapsed_time_during_input_settle` now expect None
+immediately after confirm without a physical event, replacing Some(0). The
+TargetedEvent/settle assertions are preserved. Tests that expire the shared clock
+without refreshing either pump still latch Stop, including
+`controlled_heartbeat_expiry_latches_stop_at_the_production_boundary`.
+
+The live-target regression assertions in `hwnd_reuse_returns_window_gone_without_substitution`,
+`common_integrity_gate_precedes_every_input_action_variant`,
+`elevated_engine_after_startup_refuses_discovery_and_input`,
+`missing_permission_fails_closed_without_native_input`, and
+`every_input_and_observation_route_enforces_live_target_gate` are unchanged.
+The held-input lease-expiry test pauses after the actual left down (event 1),
+asserts a pending ledger up, then requires independent left-up delivery within
+500ms while the action future remains unpolled. Event 0 is a Move and holds no
+input, so pausing there cannot verify release.
+
+Prior orchestrator validation of `rcargo test -p gcu-driver-windows --locked --no-fail-fast`
+reported these five error-priority failures and the held-input release assertion
+failure. The source corrections and new regressions still require a rerun;
+the prior failing run is not passing evidence for this version.
+
+Verification commands (post-fix build/test commands **not_run** in this sandbox):
+`rcargo test -p gcu-driver-windows`, `wcargo test -p gcu-driver-windows`,
+`rcargo test -p gcu-cli`,
+`rcargo clippy -p gcu-driver-windows -p gcu-cli --all-targets -- -D warnings`,
+`rcargo clippy -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings`.
+The worker fault/recovery suite also requires `--features test-worker-faults`.
+
+All native items below remain **not_run**. The product-chain test retains
+`#[ignore]`; other native tests keep their existing ignores/desktop opt-in gates.
+Use an unattended, disposable, unelevated physical-mouse Default desktop:
+
+- Rerun `native_product_probe_chain_proves_both_hooks_without_cursor_change`:
+  one initial tagged pair, identical physical cursor, then 250ms without a
+  foreground call; injected lease expires, transport survives, Stop stays false,
+  and GetLastInputInfo.dwTime stays unchanged as system idle ages.
+- Measure one same-position absolute move: physical cursor before/after,
+  WM_MOUSEMOVE/tooltip/hover effects, and GetLastInputInfo.dwTime. Equal cursor
+  coordinates alone do not pass this check.
+- Move the physical mouse while idle. Through the Host/PhysicalActivity adapter,
+  require Some(age) and policy `user_active` within 3000ms with no Stop latch;
+  after that threshold require a successful new proof before action input.
+  The 0012 product entry remains disabled; this task provides the read-only
+  adapter seam without changing require_fake or the default unavailable source.
+  `engine::run_with_activity` accepts the source; `engine::run` keeps the unwired
+  caller compatible by explicitly passing UnavailableActivity.
+- Remove the mouse hook during a held input: latch <=100ms, emit release <=500ms;
+  retain hotkey-conflict, UAC/secure-desktop and blocked-worker <=5s checks.
+- Verify screen saver/lock is not delayed only with explicit consent to adjust
+  timeouts on the disposable desktop. Otherwise record GetLastInputInfo only;
+  actual screen-saver/lock timing stays unverified.
