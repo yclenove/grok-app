@@ -1,5 +1,9 @@
 # Computer Use v2 DOM extension
 
+See the [user guide](../../docs/browser-extension.md) for installation, sharing,
+revocation and removal, and the [store submission kit](store/README.md) for
+maintainer publication prerequisites, permissions and privacy disclosures.
+
 This MV3 extension shares only the tab whose browser toolbar icon the user
 clicks. A second click revokes sharing. The localized tooltip changes between
 share/revoke; a dot marks a shared tab and an exclamation mark marks injection
@@ -164,7 +168,7 @@ From the repository root, using existing dependencies (no new runtime/dependenci
 ```sh
 node computer-use/tools/browser-extension/build.mjs
 pnpm exec tsc --noEmit -p computer-use/tools/browser-extension/tsconfig.json
-pnpm exec vitest run computer-use/tools/browser-extension/tests/dom.test.ts computer-use/tools/browser-extension/tests/native.test.ts
+pnpm exec vitest run computer-use/tools/browser-extension/tests/dom.test.ts computer-use/tools/browser-extension/tests/native.test.ts computer-use/tools/browser-extension/tests/store.test.ts
 ```
 
 The build emits a self-contained ES module worker, an IIFE content script,
