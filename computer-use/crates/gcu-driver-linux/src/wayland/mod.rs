@@ -1,5 +1,6 @@
 //! Wayland environment detection, compositor classification, and portal probing.
 
+pub mod assembly;
 pub mod capabilities;
 pub mod capture;
 pub mod doctor;

@@ -12,12 +12,12 @@ path = "src/main.rs"
 [features]
 eval-autoapprove = []
 # Delivery switches. Default off. `native-x11` assembles the Linux X11 route
-# when this feature is enabled. Enabling it does not turn the feature on by
-# default, fall back to fake, widen input, or elevate. Windows and Wayland
-# stay unassembled.
+# when enabled. `native-wayland` assembles the Linux Wayland route when
+# enabled. Enabling either does not turn that feature on by default, fall
+# back to fake, widen input, or elevate. `native-windows` stays unassembled.
 native-windows = []
 native-x11 = ["dep:gcu-driver-linux"]
-native-wayland = []
+native-wayland = ["dep:gcu-driver-linux"]
 # Darwin cc is required to compile this (objc2-exception-helper). Linux cross
 # builds leave it off. macOS CI must pass `--features macos-webview`.
 # Do not enable wry's `os-webview` feature: that pulls WebKitGTK.

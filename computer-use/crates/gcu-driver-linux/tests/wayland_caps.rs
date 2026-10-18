@@ -293,7 +293,7 @@ fn test_environment_capabilities_matrix_per_target() {
         CapabilityStatus::Available
     );
 
-    // 3. Native Wayland: screenshot and foreground/targeted input unavailable prior to P7-02/03
+    // 3. Native Wayland static table: ScreenCast interface present is not a proven source.
     let caps_native = build_environment_capabilities(
         &env_wayland,
         TargetEnvironment::NativeWayland,
