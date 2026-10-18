@@ -178,6 +178,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    browser_session: None,
                 },
             )
             .await?;
@@ -215,6 +216,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    browser_session: None,
                 },
             )
             .await?;

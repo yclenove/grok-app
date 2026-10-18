@@ -13,6 +13,7 @@ mod call;
 mod config;
 mod doctor;
 mod engine;
+mod engine_browser;
 pub mod exit;
 pub mod helper;
 mod host;

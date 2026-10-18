@@ -46,6 +46,12 @@ async fn dispatch(office: Office, request: Request) -> Result<Value, RpcError> {
         | "host.overlay.hide"
         | "host.event.emit"
         | "host.engine.health" => to_json(&crate::messages::Empty {}),
+        "host.browser.navigate" => {
+            match gcu_protocol::builtin_browser::navigate_response(request.params) {
+                Ok(value) => Ok(value),
+                Err((code, message)) => Err(RpcError::new(code, message)),
+            }
+        }
         _ => Err(RpcError::new(-32601, "method unavailable")),
     }
 }

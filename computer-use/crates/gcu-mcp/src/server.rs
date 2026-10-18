@@ -46,6 +46,8 @@ pub struct Host {
 pub struct ServerConfig {
     /// Tools visible to the client. Every profile filters IMPLEMENTED_TOOLS.
     pub profile: Profile,
+    /// App session that may see `browser_navigate`. None keeps the static catalog.
+    pub browser_session: Option<String>,
 }
 #[derive(Clone)]
 pub(crate) struct Server(Arc<Inner>);
@@ -62,6 +64,8 @@ struct Inner {
     delivery: tokio::sync::Mutex<()>,
     calls: AtomicU64,
     lifecycle: crate::lifecycle::Lifecycle,
+    /// MCP connection id. Browser notifications keep one peer per connection.
+    connection: u64,
 }
 /// Maximum concurrently running tool calls per session.
 const SLOTS: usize = 32;
@@ -116,8 +120,9 @@ impl Server {
             host.events,
             LOCKS.get_or_init(WindowLocks::new).clone(),
         );
+        let connection = NEXT.fetch_add(1, Ordering::Relaxed);
         let session = Arc::new(Session::open(
-            format!("mcp-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+            format!("mcp-{connection}"),
             host.activity,
             router.input_release(),
         ));
@@ -149,6 +154,7 @@ impl Server {
             delivery: tokio::sync::Mutex::new(()),
             calls: AtomicU64::new(1),
             lifecycle,
+            connection,
         })))
     }
     pub(crate) async fn call_result(
@@ -170,6 +176,11 @@ impl Server {
         arguments: Value,
     ) -> Result<rmcp::model::CallToolResult, Box<ToolError>> {
         let this = &self.0;
+        if name == crate::browser_tool::NAME {
+            let stopped =
+                this.session.activity().latched_stop() || this.session.activity().stop_requested();
+            return crate::browser_tool::call(&this.config, stopped, arguments).await;
+        }
         if !this.tools.iter().any(|tool| tool.name == name) {
             let mut error = result::error(ErrorCode::CapabilityUnavailable);
             error.message =
@@ -252,22 +263,30 @@ impl Server {
 }
 impl ServerHandler for Server {
     fn get_info(&self) -> McpConfig {
-        McpConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                "grok-computer-use",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(instructions::instructions(
-                self.0.driver.platform(),
-                self.0.config.profile,
-            ))
+        McpConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            "grok-computer-use",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(instructions::instructions(
+            self.0.driver.platform(),
+            self.0.config.profile,
+        ))
     }
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.0.tools.clone()))
+        let mut tools = self.0.tools.clone();
+        crate::browser_tool::augment(&self.0.config, &mut tools);
+        crate::browser_tool::observe(&self.0.config, self.0.connection, _context.peer);
+        Ok(ListToolsResult::with_all_items(tools))
     }
     async fn call_tool(
         &self,
@@ -283,6 +302,7 @@ impl ServerHandler for Server {
                 .into());
         };
         let arguments = Value::Object(request.arguments.unwrap_or_default());
+        crate::browser_tool::observe(&self.0.config, self.0.connection, context.peer.clone());
         Ok(elicitation::REQUEST_PEER
             .scope(context.peer, self.call_result(&request.name, arguments))
             .await

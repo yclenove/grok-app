@@ -166,6 +166,7 @@ impl ActionRouter {
                 grants: &session.grants(),
                 policy_version: approved.binding.policy_version,
                 closed: session.is_closed(),
+                browser: None,
             },
             intent,
         )
