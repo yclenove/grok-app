@@ -2,6 +2,7 @@
 
 pub(crate) mod approval;
 pub(crate) mod browser;
+mod codesign;
 pub(crate) mod commands;
 mod events;
 mod gateway;
