@@ -15,6 +15,7 @@ vi.mock("@/lib/api/host", () => ({ isDesktopHost: () => true }));
 vi.mock("@/lib/api/computerUse", () => ({
   cuSettingsGet: vi.fn(), cuSettingsEnabled: vi.fn(), cuSettingsPolicy: vi.fn(),
   cuApprovalsList: vi.fn(), cuApprovalsRevoke: vi.fn(), cuDoctor: vi.fn(), cuOpenSystemSettings: vi.fn(),
+  cuBrowserClear: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("@/lib/api/system", () => ({ prepareForAppUpdate: vi.fn() }));
@@ -31,6 +32,7 @@ beforeEach(() => {
   vi.mocked(api.cuSettingsPolicy).mockResolvedValue();
   vi.mocked(api.cuApprovalsRevoke).mockResolvedValue();
   vi.mocked(api.cuOpenSystemSettings).mockResolvedValue();
+  vi.mocked(api.cuBrowserClear).mockResolvedValue();
 });
 afterEach(cleanup);
 
