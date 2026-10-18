@@ -20,6 +20,7 @@ native-wayland = []
 # builds leave it off. macOS CI must pass `--features macos-webview`.
 # Do not enable wry's `os-webview` feature: that pulls WebKitGTK.
 macos-webview = ["dep:tao", "dep:wry"]
+script = ["gcu-mcp/script", "dep:gcu-script"]
 
 [dependencies]
 anyhow.workspace = true
@@ -34,6 +35,7 @@ gcu-host-api.workspace = true
 gcu-host-protocol.workspace = true
 gcu-mcp.workspace = true
 gcu-protocol.workspace = true
+gcu-script = { workspace = true, optional = true }
 rand = "0.10"
 rmcp = { version = "3.5", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }

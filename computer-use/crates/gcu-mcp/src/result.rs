@@ -108,6 +108,22 @@ impl Results {
     pub async fn failure(&self, error: ToolError) -> CallToolResult {
         self.build(None, Some(error), json!({})).await
     }
+    pub async fn script(&self, output: &str, error: Option<ToolError>) -> CallToolResult {
+        let failed = error.is_some();
+        let mut text = error
+            .as_ref()
+            .map(|item| format!("error: {}: {}\n", item.code, item.message))
+            .unwrap_or_default();
+        text.push_str(prefix(output, 2_000));
+        let data = json!({
+            "output": prefix(output, 2_000),
+            "error": error,
+        });
+        match self.finish(text, data, Vec::new(), failed).await {
+            Ok(result) => result,
+            Err(_) => self.io_error(),
+        }
+    }
     pub async fn discovery(&self, data: Value) -> CallToolResult {
         // Discovery belongs in text; avoid repeating app/window lists in the
         // structured suffix. Long lists get a session-private file too.

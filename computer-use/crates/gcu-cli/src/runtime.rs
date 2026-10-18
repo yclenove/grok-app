@@ -12,6 +12,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     if matches!(cli.command, Some(Command::Worker)) {
         return crate::worker::run().await;
     }
+    if matches!(cli.command, Some(Command::ScriptWorker)) {
+        return crate::script_worker::run().await;
+    }
     if matches!(cli.command, Some(Command::Agent)) {
         return dispatch_agent(&cli).await;
     }
@@ -150,7 +153,6 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     {
         return crate::engine::run(
             driver,
-            Arc::new(gcu_mcp::host::UnavailableActivity),
             disclosure.note(),
             host_fd,
             host_socket,
@@ -204,6 +206,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
                     route_note: disclosure.note(),
+                    script: crate::script_worker::runner(),
                 },
             )
             .await?;
@@ -242,6 +245,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
                     route_note: disclosure.note(),
+                    script: crate::script_worker::runner(),
                 },
             )
             .await?;

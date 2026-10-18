@@ -44,6 +44,9 @@ pub(crate) enum Command {
     /// Private native worker; framed stdin/stdout, never an MCP tool.
     #[command(hide = true)]
     Worker,
+    /// Sandboxed script worker. Narrow frames on stdin/stdout, never an MCP tool.
+    #[command(hide = true, name = "script-worker")]
+    ScriptWorker,
     /// Serve MCP over stdio or authenticated loopback HTTP; proxy an engine endpoint.
     Mcp {
         #[arg(long, value_enum, default_value = "stdio")]

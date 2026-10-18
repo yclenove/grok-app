@@ -1,6 +1,8 @@
 //! Portable safety contracts. No SendInput pretends to be physical hardware.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
+#[path = "stop/preflight.rs"]
+mod preflight;
 #[path = "stop/timing.rs"]
 mod timing;
 use gcu_core::{driver::*, model::WindowPoint};
@@ -47,7 +49,7 @@ fn injected_keyboard_mouse_events_do_not_refresh_physical_clock() {
     ] {
         assert!(!clock.event(event, at + Duration::from_millis(20)));
     }
-    assert_eq!(clock.ms_since_at(at + Duration::from_millis(50)), Some(50));
+    assert_eq!(clock.ms_since_at(at + Duration::from_millis(50)), None);
     for event in [HookEvent::Keyboard(0), HookEvent::Mouse(0)] {
         assert!(clock.event(event, at + Duration::from_millis(60)));
         assert_eq!(clock.ms_since_at(at + Duration::from_millis(70)), Some(10));
@@ -67,7 +69,7 @@ fn hook_loss_or_stale_heartbeat_returns_none_and_restarts_idle_interval() {
     clock.invalidate();
     assert_eq!(clock.ms_since_at(at), None);
     clock.confirm(at + Duration::from_secs(10));
-    assert_eq!(clock.ms_since_at(at + Duration::from_secs(10)), Some(0));
+    assert_eq!(clock.ms_since_at(at + Duration::from_secs(10)), None);
 }
 
 #[test]
@@ -82,7 +84,7 @@ fn doctor_discloses_absolute_mouse_probe_idle_gate_and_hover_effect() {
             && issue.contains("hover")
             && issue.contains("2000ms")
             && issue.contains("single system idle sample before all probes")
-            && issue.contains("real physical callbacks clear it permanently")
+            && issue.contains("no repeated probes outside an action window")
             && issue.contains("without retry or compensation")));
 }
 
@@ -147,6 +149,10 @@ async fn listener_failures_disable_foreground_and_doctor_reports_unavailable() {
         let driver = driver
             .with_input(Arc::new(InputBackend::new(Arc::new(FakeInput::default()))))
             .with_safety(guard.clone());
+        assert!(!driver.capabilities().user_activity_guard);
+        guard
+            .activity_clock()
+            .event(HookEvent::Mouse(0), Instant::now());
         assert!(driver.capabilities().user_activity_guard);
         api.fail_poll(failure);
         api.poll();
@@ -186,7 +192,7 @@ async fn stop_bypasses_stalled_ffi_and_reconnected_guard_keeps_host_latch() {
 }
 
 #[tokio::test]
-async fn silent_hook_removal_returns_none_even_with_responsive_message_pump() {
+async fn silent_hook_removal_while_idle_disables_lease_without_latching_stop() {
     let api = Arc::new(FakeSafetyApi::default());
     let latch = Arc::new(Latch::default());
     let guard = api.start(Default::default(), latch.clone());
@@ -196,7 +202,9 @@ async fn silent_hook_removal_returns_none_even_with_responsive_message_pump() {
         api.poll(); // Both pumps still respond, but the hooks cannot prove health.
     }
     api.advance(Duration::from_millis(1));
-    assert!(latch.is_stopped());
+    api.poll();
+    assert!(!latch.is_stopped());
+    assert!(guard.transport_healthy());
     assert_eq!(guard.activity_clock().ms_since_physical_input(), None);
     assert!(!guard.available());
 }

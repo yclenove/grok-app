@@ -76,6 +76,30 @@ fn drag(win: &WindowRef) -> DriverAction {
 }
 
 #[tokio::test]
+async fn worker_action_proof_missing_live_window_returns_window_gone_without_probe_or_mutation() {
+    let f = Fixture::new();
+    let release = Arc::new(FakeInput::default());
+    let api = FakeSafetyApi::default();
+    let guard = api.start(Default::default(), Arc::new(Latch::default()));
+    let driver = WindowsDriver::isolated_with_releaser(f.config("input_normal"), release.clone())
+        .await
+        .unwrap()
+        .with_safety(guard.clone());
+    let mut win = window(&driver).await;
+    win.id.push_str("-gone");
+    api.remove_hooks();
+    guard.activity_clock().invalidate();
+    assert_eq!(
+        driver.perform(&drag(&win), &Cancel::default()).await,
+        Err(DriverError::WindowGone)
+    );
+    assert_eq!(api.proof_requests(), 0);
+    assert!(!f.0.join("calls").exists(), "no mutation RPC before proof");
+    assert!(release.state().sent.is_empty());
+    assert!(!guard.is_stopped());
+}
+
+#[tokio::test]
 async fn hotkey_during_native_ffi_stall_latches_releases_and_kills_within_budgets() {
     let f = Fixture::new();
     let release = Arc::new(FakeInput::default());
@@ -145,7 +169,7 @@ async fn hotkey_during_native_ffi_stall_latches_releases_and_kills_within_budget
     );
     assert_eq!(
         restarted.capabilities().delivery.foreground,
-        ForegroundCapability::Unavailable
+        ForegroundCapability::Policy
     );
     // Only this simulated trusted Host event restores delivery. Driver has no clear.
     latch.0.store(false, Ordering::SeqCst);

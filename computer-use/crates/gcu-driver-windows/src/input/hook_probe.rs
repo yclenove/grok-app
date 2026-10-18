@@ -64,7 +64,7 @@ impl RecentInput {
 
 /// Permission for the fourth send only, independent of all Stop/physical clocks.
 /// Sample once before any probe input. Own injections cannot refresh or revoke
-/// it; physical input permanently revokes this listener's proof attempt.
+/// it; physical input revokes only the unsolicited initial attempt.
 #[derive(Default)]
 pub(crate) struct ProbeIdle(AtomicU8);
 impl ProbeIdle {
@@ -125,11 +125,29 @@ pub(crate) fn dispatch(
     mode: MouseProbe,
     idle: &ProbeIdle,
 ) -> Result<Dispatch, String> {
-    idle.sample(api);
+    dispatch_inner(api, mode, idle, false)
+}
+
+pub(crate) fn dispatch_for_action(
+    api: &mut impl MouseProbeApi,
+    mode: MouseProbe,
+    idle: &ProbeIdle,
+) -> Result<Dispatch, String> {
+    dispatch_inner(api, mode, idle, true)
+}
+fn dispatch_inner(
+    api: &mut impl MouseProbeApi,
+    mode: MouseProbe,
+    idle: &ProbeIdle,
+    action: bool,
+) -> Result<Dispatch, String> {
+    if !action {
+        idle.sample(api);
+    }
     if mode != MouseProbe::AbsoluteSamePosition {
         return api.send(mode, None);
     }
-    if !idle.allowed() {
+    if !action && !idle.allowed() {
         return Err("absolute mouse probe not sent: initial input idle unknown/below 2000ms, tick wrap, or physical input during probes".into());
     }
     let before = api.cursor()?;
@@ -138,7 +156,7 @@ pub(crate) fn dispatch(
         normalize(before.x, desktop.left, desktop.width)?,
         normalize(before.y, desktop.top, desktop.height)?,
     );
-    if !idle.allowed() {
+    if !action && !idle.allowed() {
         return Err("absolute mouse probe not sent: physical input during cursor queries".into());
     }
     let result = api.send(mode, Some(absolute))?;
@@ -146,7 +164,7 @@ pub(crate) fn dispatch(
     if api.cursor()? != before {
         return Err("cursor changed during probe".into());
     }
-    if !idle.allowed() {
+    if !action && !idle.allowed() {
         return Err("physical input during absolute mouse probe".into());
     }
     Ok(result)
@@ -171,6 +189,7 @@ pub(crate) struct MouseProof {
     active: Option<Attempt>,
     proven: Option<Instant>,
     failed: bool,
+    action: bool,
 }
 impl MouseProof {
     pub(crate) fn new(override_mode: Option<MouseProbe>) -> Self {
@@ -183,7 +202,22 @@ impl MouseProof {
             active: None,
             proven: None,
             failed: false,
+            action: false,
         }
+    }
+    /// A refusal invalidates this cycle, never the listener's next action.
+    pub(crate) fn begin_cycle(&mut self, action: bool) {
+        self.action = action;
+        self.index = 0;
+        self.active = None;
+        self.proven = None;
+        self.failed = false;
+    }
+    pub(crate) fn tagged(&self, tag: usize) -> bool {
+        (PROBE_TAG..=self.serial).contains(&tag)
+    }
+    pub(crate) fn current_tag(&self) -> Option<usize> {
+        self.active.as_ref().map(|a| a.request.tag)
     }
     pub(crate) fn idle(&self) -> &Arc<ProbeIdle> {
         &self.idle
@@ -197,12 +231,14 @@ impl MouseProof {
                 return None;
             }
             if active.callback.is_some() {
-                self.preferred = (active.request.mode != MouseProbe::AbsoluteSamePosition)
-                    .then_some(active.request.mode);
+                self.preferred = Some(active.request.mode);
                 self.index = 0;
-            } else if active.request.mode == MouseProbe::AbsoluteSamePosition {
-                // One absolute attempt per proof cycle. Wait for its callback or
-                // the unchanged startup/100ms lease deadline; never replay it.
+            } else if self.preferred.is_some()
+                || self.override_mode.is_some()
+                || active.request.mode == MouseProbe::AbsoluteSamePosition
+            {
+                // One attempt with the known working kind per proof cycle.
+                // Missing delivery waits for failure/deadline, never retries.
                 return None;
             }
         }
@@ -230,18 +266,22 @@ impl MouseProof {
         Some(request)
     }
     pub(crate) fn callback(&mut self, tag: usize, flags: u32, at: Instant) -> bool {
-        let tagged = (PROBE_TAG..=self.serial).contains(&tag);
+        let tagged = self.tagged(tag);
         self.idle.observe(flags & 3 != 0, tagged);
         let Some(active) = self.active.as_mut().filter(|a| a.request.tag == tag) else {
             return tagged;
         };
-        if active.request.mode == MouseProbe::AbsoluteSamePosition && !self.idle.allowed() {
+        if !self.action
+            && active.request.mode == MouseProbe::AbsoluteSamePosition
+            && !self.idle.allowed()
+        {
             self.failed = true;
             self.proven = None;
         }
         if flags & 3 != 0 && !self.failed {
             active.callback = Some(at);
             if active.complete {
+                self.preferred = Some(active.request.mode);
                 self.proven = Some(at);
             }
         }
@@ -249,10 +289,11 @@ impl MouseProof {
     }
     pub(crate) fn complete(&mut self, result: Result<(), String>) -> Result<(), String> {
         let result = result.and_then(|()| {
-            if self
-                .active
-                .as_ref()
-                .is_some_and(|a| a.request.mode == MouseProbe::AbsoluteSamePosition)
+            if !self.action
+                && self
+                    .active
+                    .as_ref()
+                    .is_some_and(|a| a.request.mode == MouseProbe::AbsoluteSamePosition)
                 && !self.idle.allowed()
             {
                 Err("absolute mouse probe invalidated by physical input or unknown idle".into())
@@ -268,6 +309,7 @@ impl MouseProof {
         if let Some(active) = &mut self.active {
             active.complete = true;
             if let Some(at) = active.callback {
+                self.preferred = Some(active.request.mode);
                 self.proven = Some(at);
             }
         }

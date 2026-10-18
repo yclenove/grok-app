@@ -1,4 +1,4 @@
-//! Physical input clock. Health is a lease, never an old last-input fallback.
+//! Independent injected-proof lease and physical activity coverage.
 use super::watchdog::{MonotonicTime, SystemTime, HEARTBEAT_TIMEOUT};
 use std::{
     sync::{
@@ -27,12 +27,12 @@ impl HookEvent {
 }
 #[derive(Default)]
 struct State {
+    covered: bool,
     confirmed: Option<Instant>,
     physical: Option<Instant>,
 }
-/// Monotonic physical-input clock with a bounded hook/message-pump health lease.
-/// First healthy observation starts an idle interval conservatively at zero;
-/// losing health discards history. No GetLastInputInfo (injected input included).
+/// Physical activity covers this listener generation, independently of the
+/// 100ms injection lease. Only non-injected callbacks create activity history.
 pub struct PhysicalClock {
     state: Mutex<State>,
     disabled: AtomicBool,
@@ -54,13 +54,18 @@ impl PhysicalClock {
     /// Confirm both hooks on the current interactive desktop at this instant.
     pub fn confirm(&self, at: Instant) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if !state
-            .confirmed
-            .is_some_and(|last| at.saturating_duration_since(last) <= HEARTBEAT_TIMEOUT)
-        {
-            state.physical = Some(at);
+        if self.disabled.load(Ordering::Acquire) {
+            return;
         }
+        state.covered = true;
         state.confirmed = Some(at);
+    }
+    /// Discard an action's lease without discarding physical activity coverage.
+    pub(crate) fn discard_lease(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .confirmed = None;
     }
     /// Clear history when a hook, desktop or message pump becomes unavailable.
     pub fn invalidate(&self) {
@@ -76,20 +81,16 @@ impl PhysicalClock {
         if event.injected() {
             return false;
         }
-        self.state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .physical = Some(at);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.covered && !self.disabled.load(Ordering::Acquire) {
+            state.physical = Some(at);
+        }
         true
     }
     /// Read against an injected monotonic instant for deterministic tests.
     pub fn ms_since_at(&self, at: Instant) -> Option<u64> {
-        if self.disabled.load(Ordering::Acquire) {
-            return None;
-        }
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let confirmed = state.confirmed?;
-        if at.saturating_duration_since(confirmed) > HEARTBEAT_TIMEOUT {
+        if self.disabled.load(Ordering::Acquire) {
             return None;
         }
         Some(
@@ -99,12 +100,17 @@ impl PhysicalClock {
                 .unwrap_or(u64::MAX),
         )
     }
-    /// Host activity adapter input. Unhealthy listeners always return None.
+    /// Listener-generation activity history; disabled listeners return None.
+    /// Host consumers use SafetyGuard's accessor to check transport as well.
     pub fn ms_since_physical_input(&self) -> Option<u64> {
         self.ms_since_at(self.time.now())
     }
-    /// Whether both hooks and the message pump are currently confirmed healthy.
+    /// Whether the last dual-hook injected proof is within the 100ms lease.
     pub fn available(&self) -> bool {
-        self.ms_since_physical_input().is_some()
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        !self.disabled.load(Ordering::Acquire)
+            && state.confirmed.is_some_and(|at| {
+                self.time.now().saturating_duration_since(at) <= HEARTBEAT_TIMEOUT
+            })
     }
 }

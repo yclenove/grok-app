@@ -26,6 +26,7 @@ struct FakeState {
     poll: Mutex<Option<&'static str>>,
     stall: AtomicBool,
     replacements: AtomicUsize,
+    proofs: AtomicUsize,
     replaced: Mutex<Option<Instant>>,
     hooks_removed: AtomicBool,
     registered: Mutex<Option<HotkeyConfig>>,
@@ -36,6 +37,21 @@ impl FakeSafetyApi {
     pub fn start(&self, config: HotkeyConfig, latch: Arc<dyn StopLatch>) -> Arc<SafetyGuard> {
         let guard = SafetyGuard::new(latch, self.0.time.clone());
         *self.0.events.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&guard.events);
+        let api = self.clone();
+        *guard
+            .events
+            .proof_request
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(move || {
+            api.0.proofs.fetch_add(1, Ordering::AcqRel);
+            if api.0.hooks_removed.load(Ordering::Acquire) {
+                if let Some(events) = api.events() {
+                    events.refuse_proof("missing fake hook callbacks".into());
+                }
+            } else {
+                api.poll();
+            }
+        }));
         if config.validate().is_err() {
             guard.disable("invalid Stop hotkey configuration");
         } else if let Some(reason) = *self.0.open.lock().unwrap_or_else(|p| p.into_inner()) {
@@ -80,10 +96,14 @@ impl FakeSafetyApi {
             *replaced = Some(at);
         }
         if !self.0.hooks_removed.load(Ordering::Acquire) {
-            events.clock.confirm(at);
+            if let Err(reason) = events.confirm_hook_proofs(Some(at), Some(at)) {
+                events.fail(reason);
+                return;
+            }
         }
         events.heartbeat();
         events.hotkey_heartbeat();
+        events.setup_complete.store(true, Ordering::Release);
         events.check_health();
     }
     /// Simulate silent OS hook removal while the message pump still responds.
@@ -115,6 +135,10 @@ impl FakeSafetyApi {
         if let Some(events) = self.events() {
             events.request_stop();
         }
+    }
+    /// Number of action preparation cycles (inner checks never request one).
+    pub fn proof_requests(&self) -> usize {
+        self.0.proofs.load(Ordering::Acquire)
     }
     /// Number of periodic hook replacements.
     pub fn replacements(&self) -> usize {

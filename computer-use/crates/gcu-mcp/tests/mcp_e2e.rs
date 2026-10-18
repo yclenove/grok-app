@@ -255,3 +255,77 @@ async fn wait_for_text_present_returns_state_without_input() {
     assert_eq!(h.driver.oracle().await.unwrap().text["text"], "");
     h.close().await;
 }
+
+#[cfg(feature = "script")]
+struct ListAppsRunner;
+
+#[cfg(feature = "script")]
+impl gcu_mcp::ScriptRunner for ListAppsRunner {
+    fn run<'a>(
+        &'a self,
+        router: &'a gcu_core::action::ActionRouter,
+        session: &'a gcu_core::session::Session,
+        _call_id: &'a str,
+        _params: gcu_protocol::ComputerScriptParams,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gcu_mcp::ScriptBody> + Send + 'a>> {
+        Box::pin(async move {
+            match router.list_apps(session).await {
+                Ok(apps) => gcu_mcp::ScriptBody {
+                    output: apps.len().to_string(),
+                    error: None,
+                },
+                Err(error) => gcu_mcp::ScriptBody {
+                    output: String::new(),
+                    error: Some(*error),
+                },
+            }
+        })
+    }
+}
+
+#[cfg(feature = "script")]
+#[tokio::test]
+async fn full_profile_with_runner_reaches_router_for_computer_script() {
+    use gcu_mcp::{Profile, ServerConfig};
+    use std::sync::Arc;
+    let runner = Arc::new(ListAppsRunner);
+    let mut full = Harness::configured(
+        FakeDriver::from_scene("form").unwrap(),
+        &[],
+        ServerConfig {
+            profile: Profile::Full,
+            route_note: String::new(),
+            script: Some(runner.clone()),
+        },
+    );
+    full.initialize(false).await;
+    let listed = full.request("tools/list", json!({})).await;
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 16);
+    assert!(tools.iter().any(|tool| tool["name"] == "computer_script"));
+    let called = full
+        .call("computer_script", json!({"code":"return 1;"}))
+        .await;
+    assert_ne!(
+        called["structuredContent"]["error"]["code"],
+        "capability_unavailable"
+    );
+    assert!(text(&called).contains('1'), "{called}");
+    full.close().await;
+
+    let mut plain = Harness::configured(
+        FakeDriver::from_scene("form").unwrap(),
+        &[],
+        ServerConfig {
+            profile: Profile::Default,
+            route_note: String::new(),
+            script: Some(runner),
+        },
+    );
+    plain.initialize(false).await;
+    let listed = plain.request("tools/list", json!({})).await;
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 15);
+    assert!(tools.iter().all(|tool| tool["name"] != "computer_script"));
+    plain.close().await;
+}
