@@ -13,13 +13,13 @@ This page matches the `gcu` command and the release packager in this tree. A cle
 | `gcu version`, `gcu install`, `gcu uninstall`, `gcu approvals` | Work without a desktop driver. |
 | `gcu mcp` on macOS, without `--driver` | Forwards stdio to `Grok Computer Use.app`. The helper loads the macOS driver. That driver starts Stop-latched. A live desktop through this helper is **未验证**. |
 | `gcu`, with no subcommand, on macOS | Asks Launch Services to start the helper (`open -g -j -b <bundle id> --args agent`). |
-| `gcu doctor`, `gcu call`, and `gcu mcp` on Linux and Windows | Require `--driver fake`. Omitting `--driver` exits 2: `Real driver assembly is not implemented; P4. Explicit --driver fake is required for offline use.` |
+| `gcu doctor`, `gcu call`, and `gcu mcp` on Linux and Windows | Omitting `--driver` selects `auto`. `auto` and `native` exit 2 when that route is not compiled, and they do not fall back to fake. `--driver fake` is the explicit offline driver. |
 | `gcu` with no subcommand, on Linux and Windows | Exits 2 with that same message. It does not print doctor. |
 | `gcu doctor` and `gcu call` on macOS | Same rule. They do not talk to the helper. |
 | `gcu engine` | Private channels for the Grok App host. Not the way to attach a CLI client. |
 | `gcu agent` | The helper process. Launch Services must start it. A shell does not receive the helper's permission grant. |
 
-`--driver` accepts only `fake`. The fake desktop does not send operating-system input. A release binary also needs `GCU_ALLOW_FAKE=1`. A debug build does not. Scenes: `form` (default), `chat`, `list`, `modal`, `webarea`, `canvas`, `ide`, `login`, `terminal`, `web_terminal`, `submit_unknown`.
+`--driver` is `auto` (the default), `native`, or `fake`. `auto` and `native` exit 2 on this binary because the native route is not assembled; they do not fall back to fake, widen input, or elevate. `--scene` is valid only with `--driver fake`. Omitted fake uses `form`. The fake desktop does not send operating-system input. A release binary also needs `GCU_ALLOW_FAKE=1`. A debug build does not. Scenes: `form`, `chat`, `list`, `modal`, `webarea`, `canvas`, `ide`, `login`, `terminal`, `web_terminal`, `submit_unknown`.
 
 There is no `gcu batch`, `gcu script`, or `gcu approvals revoke-all`.
 
@@ -181,7 +181,7 @@ gcu uninstall --client claude --yes
 
 Clients: `grok`, `codex`, `claude`, `antigravity`, `gemini`, `opencode`, `cursor`, `vscode`. `--scope` is `user` (default) or `project`. Pass the client as the positional argument or as `--client`. `--dry-run` prints a diff and writes nothing. `--json` prints one object. Repeating install does not duplicate the entry. Uninstall removes only `grok-computer-use` and hooks this installer owns.
 
-On Linux and Windows the installed command is `gcu mcp` with no `--driver`. That process exits 2 until a real driver is assembled. The installer does not add `--driver fake`. On macOS the same command is the helper proxy described above.
+On Linux and Windows the installed command is `gcu mcp` with no `--driver`, which selects `auto` and exits 2 while the native route is not compiled. It does not fall back to fake. The installer does not add `--driver fake`. On macOS the same command is the helper proxy described above.
 
 Any real change under the Grok directory asks on a terminal:
 
@@ -291,7 +291,7 @@ Driver libraries and the `gcu` command are not the same thing. The table is what
 
 | Capability | macOS | Windows | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
-| Real driver in `gcu mcp` | Helper proxy. Live use **未验证**. Starts Stop-latched. | Not assembled. Exit 2 without `--driver fake`. | Not linked into `gcu`. Exit 2 without `--driver fake`. | Same as X11 for the CLI. |
+| Real driver in `gcu mcp` | Helper proxy. Live use **未验证**. Starts Stop-latched. | Not assembled. `auto` and `native` exit 2 and do not fall back to fake. | Not linked into `gcu`. `auto` and `native` exit 2 and do not fall back to fake. | Same as X11 for the CLI. |
 | Accessibility tree | AX. Mini, macOS 27, arm64: live contract 26 passed, 4 skipped, 0 failed. First read can be a short incomplete tree. macOS 14/15 and Intel **未验证**. | UIA on the `windows-2022` runner: contract 15 passed, 15 skipped, 0 failed. First read can be incomplete. Physical desktop **未验证**. | AT-SPI on Xvfb CI: 23 passed, 6 skipped, 0 failed. Physical desktop **未验证**. | Detection and portal code exist. Real compositor **未验证**. |
 | Window screenshot | ScreenCaptureKit, including a covered window, on that Mini for the driver tests. Packaged helper **未验证**. | WGC, then PrintWindow. Occluded windows and 150% DPI **未验证**. | XComposite on Xvfb passed. No composite and covered: refused. | Portal ScreenCast. Real portal **未验证**. |
 | Background actions | Partial. AppKit can receive a background click on macOS 27. Chromium does not ([ADR 0006](docs/adr/0006-macos-tcc-helper.md)). | Partial. UIA Invoke can activate the window. A native button uses a non-activating click. | AT-SPI where the interface exists. XTEST is not used when Stop cannot be grabbed. | Portal input only with a reliable Stop. No full-desktop fallback. **未验证** live. |
@@ -335,7 +335,7 @@ Session secrets are not placed in the environment or in `argv`. Do not scrape ch
 
 | What you see | What it means |
 |---|---|
-| `Real driver assembly is not implemented; P4. Explicit --driver fake is required for offline use.` | `gcu doctor` and `gcu call` on every OS. On Linux and Windows, also `gcu` with no subcommand and `gcu mcp`. Pass `--driver fake`. A release binary also needs `GCU_ALLOW_FAKE=1`. |
+| `native-x11 is not compiled into this build` (or `native-windows` / `native-wayland`) | Omitting `--driver` selects `auto`. `auto` and `native` exit 2 when that route is not compiled. They do not fall back to fake. `--driver fake` is the explicit offline driver. A release binary also needs `GCU_ALLOW_FAKE=1`. `--scene` is valid only with `--driver fake`. |
 | `Fake driver requires a debug build or GCU_ALLOW_FAKE=1` | The binary is a release build. |
 | `GCU_APPROVAL is forbidden in release or non eval-autoapprove builds` | Unset `GCU_APPROVAL`. Release builds have no auto-approve switch. |
 | Gatekeeper says the app is damaged or from an unidentified developer | Ad-hoc build. Use the unsigned-package steps. Do not disable Gatekeeper. |
@@ -391,7 +391,7 @@ Session secrets are not placed in the environment or in `argv`. Do not scrape ch
 
 ## Commands
 
-Global flags, accepted by the subcommands that clap parses: `--driver fake`, `--scene <name>` (default `form`).
+Global flags, accepted by the subcommands that clap parses: `--driver auto|native|fake` (default `auto`), `--scene <name>` (only with `fake`; omitted fake uses `form`).
 
 ```sh
 gcu version

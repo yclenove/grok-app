@@ -5,4 +5,4 @@ mod session;
 mod stop;
 pub use remote::RemoteHost;
 pub use session::RemoteSession;
-pub use stop::{PhysicalActivity, StopMirror, UnavailableActivity};
+pub use stop::{PhysicalActivity, StopMirror, UnavailableActivity, UserActivityAdapter};

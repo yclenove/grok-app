@@ -47,6 +47,8 @@ pub struct Host {
 pub struct ServerConfig {
     /// Tools visible to the client. Every profile filters IMPLEMENTED_TOOLS.
     pub profile: Profile,
+    /// Same sentence doctor prints. Empty leaves instructions unchanged.
+    pub route_note: String,
     /// Real script runner. `None` keeps `computer_script` unregistered.
     pub script: Option<Arc<dyn ScriptRunner>>,
 }
@@ -55,6 +57,7 @@ impl std::fmt::Debug for ServerConfig {
         formatter
             .debug_struct("ServerConfig")
             .field("profile", &self.profile)
+            .field("route_note", &self.route_note)
             .field("script", &self.script.is_some())
             .finish()
     }
@@ -286,6 +289,7 @@ impl ServerHandler for Server {
                 self.0.driver.platform(),
                 self.0.config.profile,
                 &self.0.tools,
+                &self.0.config.route_note,
             ))
     }
     async fn list_tools(

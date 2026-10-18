@@ -6,6 +6,7 @@
 //! pass `--driver fake`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gcu_host_protocol::approval::Office;
 use gcu_host_protocol::events::Gallery;
@@ -89,7 +90,8 @@ pub fn open_control(
     };
     let facts = probe(&chosen, &identity, dev_grant && external_path)?;
     let path = decide(mode, &identity, &choice, &facts)?;
-    Ok(Control::new(
+    let safety = overlay.safety.clone();
+    let mut control = Control::new(
         OsLaunch::managed(
             host_server::production_callbacks(office, gallery, panel, overlay),
             lifecycle,
@@ -101,7 +103,18 @@ pub fn open_control(
             choice,
             facts,
         },
-    ))
+    );
+    control.set_disconnect_hooks(
+        Arc::new(move || {
+            let safety = safety.clone();
+            Box::pin(async move {
+                safety.latch();
+                safety.persist().await.is_ok()
+            })
+        }),
+        Arc::new(gcu_host_protocol::stop_reason::read_default),
+    );
+    Ok(control)
 }
 
 fn bundled_engine() -> Result<PathBuf, Reject> {

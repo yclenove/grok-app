@@ -2,7 +2,12 @@ use crate::Profile;
 use gcu_core::driver::Platform;
 use rmcp::model::Tool;
 
-pub(crate) fn instructions(platform: Platform, profile: Profile, tools: &[Tool]) -> String {
+pub(crate) fn instructions(
+    platform: Platform,
+    profile: Profile,
+    tools: &[Tool],
+    route_note: &str,
+) -> String {
     let platform = match platform {
         Platform::Linux => "Linux",
         Platform::Macos => "macOS",
@@ -19,6 +24,10 @@ pub(crate) fn instructions(platform: Platform, profile: Profile, tools: &[Tool])
     }
     if has("computer_script") {
         text.push_str(" `computer_script` appears only in full with the script feature and an assembled Unix runner; API: cu.d.ts.");
+    }
+    if !route_note.is_empty() {
+        text.push(' ');
+        text.push_str(route_note);
     }
     text
 }

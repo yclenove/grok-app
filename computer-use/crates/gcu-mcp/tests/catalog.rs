@@ -78,6 +78,7 @@ fn harness(profile: Profile, runner: bool, browser_window: bool) -> Harness {
         ServerConfig {
             profile,
             script: runner.then(|| Arc::new(Runner) as Arc<dyn ScriptRunner>),
+            route_note: String::new(),
         },
     )
 }

@@ -48,6 +48,12 @@ pub struct Status {
 pub type SpawnFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Box<dyn EngineProcess>, Error>> + Send + 'a>>;
 
+/// Persists the global Stop bit. `true` means the write finished.
+pub type PersistStop = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
+/// Reads the display-only marker. Absence is not a resume.
+pub type ReadStopReason = Arc<dyn Fn() -> Option<crate::stop_reason::StopReason> + Send + Sync>;
+
 /// Starts one admitted engine. Tests supply a fake; the App uses [`OsLaunch`].
 pub trait Launch: Send {
     /// Handshake one child. The future must kill that child if it is dropped.
@@ -107,6 +113,10 @@ pub struct Control<L: Launch> {
     request: LaunchRequest,
     admission: Admission,
     engine: Option<Box<dyn EngineProcess>>,
+    delivery_blocked: bool,
+    stop_display: Option<crate::stop_reason::StopReason>,
+    persist: Option<PersistStop>,
+    reason: Option<ReadStopReason>,
 }
 
 impl<L: Launch> Control<L> {
@@ -118,7 +128,27 @@ impl<L: Launch> Control<L> {
             request,
             admission,
             engine: None,
+            delivery_blocked: false,
+            stop_display: None,
+            persist: None,
+            reason: None,
         }
+    }
+
+    /// Hooks for an abnormal control loss. The marker reader never authorizes Stop.
+    pub fn set_disconnect_hooks(&mut self, persist: PersistStop, reason: ReadStopReason) {
+        self.persist = Some(persist);
+        self.reason = Some(reason);
+    }
+
+    /// Display-only reason from the last abnormal disconnect. `None` is not a resume.
+    pub fn stop_display(&self) -> Option<crate::stop_reason::StopReason> {
+        self.stop_display
+    }
+
+    /// True until the persistent Stop bit has been written. Spawn stays refused.
+    pub fn delivery_blocked(&self) -> bool {
+        self.delivery_blocked
     }
 
     /// Replace the binary used on the next spawn. Does not touch a live child.
@@ -139,6 +169,15 @@ impl<L: Launch> Control<L> {
 
     /// Apply one signal and perform at most the spawn it asks for.
     pub async fn handle(&mut self, signal: Signal, now_ms: u64) -> Result<(), Error> {
+        self.finish_persist().await;
+        if self.delivery_blocked
+            && matches!(
+                signal,
+                Signal::SetEnabled(true) | Signal::UserResume | Signal::Sessions(_)
+            )
+        {
+            return Err(Error::NotDurable);
+        }
         if matches!(signal, Signal::SetEnabled(true)) && self.state.phase == Phase::Tripped {
             return Err(Error::Tripped);
         }
@@ -148,6 +187,42 @@ impl<L: Launch> Control<L> {
 
     /// Observe an exit, then apply the idle clock.
     pub async fn poll(&mut self, now_ms: u64) -> Result<(), Error> {
+        self.finish_persist().await;
+        self.observe_engine(now_ms).await?;
+        let step = self.state.apply(Signal::Tick, now_ms);
+        self.act(step, now_ms).await
+    }
+
+    async fn finish_persist(&mut self) {
+        if !self.delivery_blocked {
+            return;
+        }
+        let Some(hook) = self.persist.clone() else {
+            return;
+        };
+        if hook().await {
+            self.delivery_blocked = false;
+        }
+    }
+
+    async fn observe_engine(&mut self, now_ms: u64) -> Result<(), Error> {
+        let abnormal = self
+            .engine
+            .as_ref()
+            .is_some_and(|engine| !engine.shutdown_requested() && !engine.control_connected());
+        if abnormal {
+            let _ = self.state.apply(Signal::UserStop, now_ms);
+            self.delivery_blocked = true;
+            self.stop_display = self.reason.as_ref().and_then(|read| read());
+            self.finish_persist().await;
+            if let Some(mut engine) = self.engine.take() {
+                engine.kill();
+            }
+            let step = self
+                .state
+                .apply(Signal::ChildExited { clean: true }, now_ms);
+            return self.act(step, now_ms).await;
+        }
         if let Some(engine) = self.engine.as_mut() {
             let exit = engine.poll_exit();
             if !matches!(exit, super::PollExit::Running) {
@@ -161,8 +236,7 @@ impl<L: Launch> Control<L> {
                 self.act(step, now_ms).await?;
             }
         }
-        let step = self.state.apply(Signal::Tick, now_ms);
-        self.act(step, now_ms).await
+        Ok(())
     }
 
     async fn act(&mut self, mut step: Step, now_ms: u64) -> Result<(), Error> {
@@ -191,6 +265,9 @@ impl<L: Launch> Control<L> {
     ///
     /// Five-second RPC budget. Missing peer is [`Error::Disconnected`].
     pub async fn open_local_endpoint(&self, session_id: &str) -> Result<SessionOpened, Error> {
+        if self.delivery_blocked {
+            return Err(Error::NotDurable);
+        }
         let peer = self
             .engine
             .as_ref()
@@ -255,6 +332,9 @@ impl<L: Launch> Control<L> {
     }
 
     async fn start(&mut self, now_ms: u64) -> Result<(), Error> {
+        if self.delivery_blocked {
+            return Err(Error::NotDurable);
+        }
         if let Err(reject) = admit(
             self.admission.mode,
             &self.admission.expected,
