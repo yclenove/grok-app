@@ -4,6 +4,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 pub mod approval;
 pub mod auth;
+mod convert;
+pub use convert::persistent_grant_matches;
 mod browser;
 pub use browser::clear_profile;
 pub mod codec;

@@ -32,6 +32,7 @@ fn request() -> RequestApp {
                 sha256: Some([7; 32]),
                 signature: Signature::Unsigned,
                 image_path: "/fixture/editor".into(),
+                proof: Default::default(),
             },
             icon: None,
         },

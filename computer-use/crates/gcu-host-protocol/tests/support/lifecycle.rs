@@ -128,6 +128,7 @@ impl Fixture {
                     publisher: None,
                     sha256: Some([7; 32]),
                     signature: Signature::Valid,
+                    proof: Default::default(),
                 },
             },
             reason: None,

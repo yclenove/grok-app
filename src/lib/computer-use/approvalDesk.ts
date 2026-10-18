@@ -4,6 +4,16 @@ export type Act = "turn" | "session" | "always" | "deny" | "timeout";
 
 export type Fault = "absent" | "identity" | "replay" | "failed" | "stale";
 
+/** Snake-case facts inside `proof`. They match the stored grant, not the card's camelCase. */
+export type GrantProof = {
+  cdhash?: string | null;
+  certificate_sha256?: string | null;
+  product?: string | null;
+  build?: string | null;
+  file_dev?: number | null;
+  file_inode?: number | null;
+};
+
 export type ImageBinding = {
   platform: "macos" | "windows" | "linux";
   key: string;
@@ -13,6 +23,8 @@ export type ImageBinding = {
   signature: "valid" | "invalid" | "unsigned" | "unknown";
   imagePath: string;
   pid: number | null;
+  /** Absent and empty are the same. A changed code hash is a different image. */
+  proof?: GrantProof | null;
 };
 
 export type Card = {
@@ -155,6 +167,26 @@ function sameImage(left: ImageBinding, right: ImageBinding): boolean {
     left.sha256Hex === right.sha256Hex &&
     left.signature === right.signature &&
     left.imagePath === right.imagePath &&
-    left.pid === right.pid
+    left.pid === right.pid &&
+    sameProof(left.proof, right.proof)
+  );
+}
+
+function blank(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const text = value.trim();
+  return text === "" ? null : text;
+}
+
+function sameProof(left: GrantProof | null | undefined, right: GrantProof | null | undefined): boolean {
+  const a = left ?? {};
+  const b = right ?? {};
+  return (
+    blank(a.cdhash) === blank(b.cdhash) &&
+    blank(a.certificate_sha256) === blank(b.certificate_sha256) &&
+    blank(a.product) === blank(b.product) &&
+    blank(a.build) === blank(b.build) &&
+    (a.file_dev ?? null) === (b.file_dev ?? null) &&
+    (a.file_inode ?? null) === (b.file_inode ?? null)
   );
 }

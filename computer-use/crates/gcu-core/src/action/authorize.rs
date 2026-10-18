@@ -320,23 +320,26 @@ pub(crate) fn host_app(
         }
         Some(bytes)
     });
+    let mut identity = AppIdentity {
+        platform: match platform {
+            crate::driver::Platform::Macos => gcu_host_api::Platform::Macos,
+            crate::driver::Platform::Windows => gcu_host_api::Platform::Windows,
+            crate::driver::Platform::Linux => gcu_host_api::Platform::Linux,
+        },
+        key: id.id.clone(),
+        team_id: id.team_id.clone(),
+        publisher: id.publisher.clone(),
+        sha256,
+        signature: SignatureState::Unknown,
+        image_path: path.clone(),
+        proof: gcu_host_api::GrantProof::default(),
+    };
+    super::provenance::apply_driver_provenance(&mut identity);
     Ok(AppInfo {
         name: info.name.clone(),
         pid: info.pid,
         icon: None,
-        identity: AppIdentity {
-            platform: match platform {
-                crate::driver::Platform::Macos => gcu_host_api::Platform::Macos,
-                crate::driver::Platform::Windows => gcu_host_api::Platform::Windows,
-                crate::driver::Platform::Linux => gcu_host_api::Platform::Linux,
-            },
-            key: id.id.clone(),
-            team_id: id.team_id.clone(),
-            publisher: id.publisher.clone(),
-            sha256,
-            signature: SignatureState::Unknown,
-            image_path: path.clone(),
-        },
+        identity,
     })
 }
 pub(super) fn policy_window(fresh: &Fresh) -> PolicyWindow {

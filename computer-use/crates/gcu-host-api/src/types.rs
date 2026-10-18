@@ -48,20 +48,16 @@ pub enum SignatureState {
 ///
 /// Do not use that map to look up grants. Authorization uses
 /// [`AppIdentity::grant_eq`], which is a different relation: two identities
-/// can grant-match and still hash apart. [`crate::PolicyStore::always_allowed`]
-/// scans with `grant_eq`.
+/// can grant-match and still hash apart when only hex case differs.
+/// [`crate::PolicyStore::always_allowed`] scans with `grant_eq`.
 ///
 /// # Grant equality
 ///
-/// - macOS [`SignatureState::Valid`] with a team id matches the same bundle id
-///   and team id. Image path, content digest, and publisher are ignored, so a
-///   moved or updated bundle keeps the grant.
-/// - Windows [`SignatureState::Valid`] with a publisher matches the same `key`
-///   and publisher. Image path, content digest, and team id are ignored.
-/// - Every other identity matches only with structural [`Eq`]. That includes
-///   `Invalid`, `Unsigned`, `Unknown`, Linux, and a `Valid` identity that is
-///   missing the team id or publisher it would otherwise bind. Unsigned grants
-///   therefore bind path and digest.
+/// Architecture §7.2: a path change, content or code-directory hash change,
+/// certificate fingerprint change, publisher or Team change, or product/build
+/// change invalidates the grant. `Invalid` and `Unknown` never match. A field
+/// the platform key requires, when missing on either side, does not match.
+/// Old records that omit that evidence are not treated as the new key.
 ///
 /// A `Valid` grant never matches `Invalid`, `Unsigned`, or `Unknown`.
 #[derive(Debug, Clone, Eq)]
@@ -80,46 +76,42 @@ pub struct AppIdentity {
     pub signature: SignatureState,
     /// Canonical path of the executable image.
     pub image_path: String,
+    /// Code hash, certificate, product, build, and Linux file identity.
+    pub proof: GrantProof,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SignedBinding<'a> {
-    Macos { key: &'a str, team_id: &'a str },
-    Windows { key: &'a str, publisher: &'a str },
+/// Evidence §7.2 adds beside the path and content hash.
+///
+/// Empty means the Host did not capture that fact. Persistent matching then
+/// fails closed for any component the platform key requires.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct GrantProof {
+    /// macOS code-directory hash, lowercase or mixed-case hex.
+    pub cdhash: Option<String>,
+    /// SHA-256 of the signing certificate. A subject string is not this.
+    pub certificate_sha256: Option<String>,
+    /// OS product name. Not the window title.
+    pub product: Option<String>,
+    /// macOS `CFBundleVersion`. Windows uses the content hash as the build digest.
+    pub build: Option<String>,
+    /// Linux device id of the executable. Absent on other platforms.
+    pub file_dev: Option<u64>,
+    /// Linux inode of the executable. Absent on other platforms.
+    pub file_inode: Option<u64>,
 }
 
 impl AppIdentity {
-    fn signed_binding(&self) -> Option<SignedBinding<'_>> {
-        match self.platform {
-            Platform::Macos if self.signature == SignatureState::Valid => {
-                self.team_id.as_deref().map(|team_id| SignedBinding::Macos {
-                    key: self.key.as_str(),
-                    team_id,
-                })
-            }
-            Platform::Windows if self.signature == SignatureState::Valid => self
-                .publisher
-                .as_deref()
-                .map(|publisher| SignedBinding::Windows {
-                    key: self.key.as_str(),
-                    publisher,
-                }),
-            Platform::Macos | Platform::Windows | Platform::Linux => None,
-        }
-    }
-
     /// Whether `other` satisfies the same persistent grant as `self`.
     ///
-    /// See the type-level docs for the platform rules. This is not [`Eq`].
+    /// See the type-level docs. This is not [`Eq`]: hex case is normalized,
+    /// and a missing required fact does not match. An app update that changes
+    /// path, hash, cdhash, certificate, product, or build needs a new approval.
+    ///
     /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: pure;
     /// the value is not locked.
     #[must_use]
     pub fn grant_eq(&self, other: &Self) -> bool {
-        match (self.signed_binding(), other.signed_binding()) {
-            (Some(left), Some(right)) => left == right,
-            (None, None) => self == other,
-            (Some(_), None) | (None, Some(_)) => false,
-        }
+        crate::grant::persistent_eq(self, other)
     }
 }
 
@@ -132,6 +124,7 @@ impl PartialEq for AppIdentity {
             && self.sha256 == other.sha256
             && self.signature == other.signature
             && self.image_path == other.image_path
+            && self.proof == other.proof
     }
 }
 
@@ -144,6 +137,7 @@ impl Hash for AppIdentity {
         self.sha256.hash(state);
         self.signature.hash(state);
         self.image_path.hash(state);
+        self.proof.hash(state);
     }
 }
 

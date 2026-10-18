@@ -301,7 +301,7 @@ An app is allowed at one of four levels. Timeout is not a fifth level. The wait 
 |---|---|---|
 | This turn (`turn`) | Until the turn ends. Grok's Stop hook sends `end_turn`. Codex uses `notify`. With no hook, an idle 45 seconds ends the turn. | No. |
 | This session (`session`) | Until the MCP session closes. | No. |
-| Always allow (`always`) | Until you revoke it. | Yes, in `approvals.json`, mode `0600`. |
+| Always allow (`always`) | Until you revoke it. An update that changes the path, content hash, code hash, certificate, product, or build requires approval again. | Yes, in `approvals.json`, mode `0600`. |
 | Deny (`deny`) | This request only. | No. |
 
 The client is asked first, inside the tool call, when it offers form elicitation. The choices are `turn`, `session`, `always`, and `deny`. An `always` answer from elicitation is not stored. Cancel, including a headless client that cancels immediately, is not approval. The local dialog then asks. That dialog is what writes `approvals.json` after you pick Always.

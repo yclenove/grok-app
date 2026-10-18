@@ -29,6 +29,36 @@ impl FakeDriver {
         }
         Ok(self)
     }
+
+    /// Attach Linux device and inode evidence on every fixture identity.
+    ///
+    /// The publisher string is the driver provenance object. Persistent grants
+    /// fail closed without it. Test-only; not a real `stat`.
+    /// Synchronous try-lock; returns a definite-no-effect Timeout if the desktop
+    /// is locked. No IO/waits.
+    pub fn with_linux_file_id(self, dev: u64, inode: u64) -> Result<Self> {
+        {
+            let mut world =
+                self.world
+                    .try_lock()
+                    .map_err(|_| gcu_core::driver::DriverError::Timeout {
+                        maybe_executed: false,
+                    })?;
+            let publisher = format!(r#"{{"dev":{dev},"inode":{inode}}}"#);
+            for app in &mut world.apps {
+                if let Some(identity) = &mut app.info.identity {
+                    identity.publisher = Some(publisher.clone());
+                }
+            }
+            for window in &mut world.windows {
+                if let Some(identity) = &mut window.reference.app.info.identity {
+                    identity.publisher = Some(publisher.clone());
+                }
+            }
+        }
+        Ok(self)
+    }
+
     /// Queue a fault consumed only by perform, so router reads cannot eat a
     /// mutation timeout/crash. Bounded memory lock; no OS IO or cancellation.
     pub async fn inject_action(&self, fault: Fault) -> Result<()> {

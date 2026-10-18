@@ -19,7 +19,7 @@ pub use office::{Approval, Office, Wait};
 pub use text::sanitize_plain;
 
 use crate::auth::ProcessInstance;
-use crate::messages::{Decision, Platform, Risk, Signature};
+use crate::messages::{Decision, GrantProof, Platform, Risk, Signature};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -85,6 +85,9 @@ pub struct ImageBinding {
     pub image_path: String,
     /// Running process. A reused pid with a new image does not match.
     pub pid: Option<u32>,
+    /// §7.2 facts. Absent on a card that has not echoed them yet.
+    #[serde(default, skip_serializing_if = "GrantProof::is_empty")]
+    pub proof: GrantProof,
 }
 
 /// What the user presented. Every field must match the bound request.
