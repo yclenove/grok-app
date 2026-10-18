@@ -114,7 +114,7 @@ fn panic_record(location: &str, payload: &(dyn std::any::Any + Send)) -> String 
     gcu_host_protocol::log_policy::error_record(location, category)
 }
 
-/// Install a panic hook that sync-writes category and location only.
+/// Install a panic hook that sync-writes category, location and frames only.
 ///
 /// The previous hook is not called: the default hook prints the panic message.
 /// Non-blocking `tracing-appender` can lose the final lines on `abort()`.
@@ -125,8 +125,11 @@ fn install_panic_hook(log_dir: PathBuf) {
             None => "unknown".to_string(),
         };
         let line = format!("{}\n", panic_record(&location, info.payload()));
+        // Frames carry symbol names and addresses, never panic arguments.
+        let bt = std::backtrace::Backtrace::force_capture();
+        let with_frames = format!("{line}{bt}\n");
         let limits = crate::log_retention::production_limits();
-        if crate::log_retention::try_append(&log_dir, "panic.log", &line, &limits).is_err() {
+        if crate::log_retention::try_append(&log_dir, "panic.log", &with_frames, &limits).is_err() {
             crate::log_retention::warn_once("panic_log", &log_dir.display().to_string());
         }
         let day = chrono::Local::now().format("%Y-%m-%d");
