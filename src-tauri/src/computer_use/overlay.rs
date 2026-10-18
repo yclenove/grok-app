@@ -40,6 +40,8 @@ pub struct Frame {
     cursor: Option<Cursor>,
     revision: u64,
     response_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
 }
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -61,6 +63,7 @@ impl Overlay {
                 cursor: None,
                 revision: 0,
                 response_ms: gcu_host_protocol::overlay::RESPONSE_MS,
+                stop_reason: None,
             })),
         };
         let owner = overlay.clone();
@@ -146,6 +149,10 @@ impl Overlay {
     pub fn disconnected(&self) {
         lock(&self.desk).disconnect();
     }
+    /// Display-only token. Unknown values are not stored. Does not latch Stop.
+    pub fn set_stop_reason(&self, reason: Option<gcu_host_protocol::stop_reason::StopReason>) {
+        lock(&self.frame).stop_reason = reason.map(|reason| reason.token().to_owned());
+    }
     pub fn frame(&self) -> Frame {
         lock(&self.frame).clone()
     }
@@ -157,7 +164,11 @@ impl Overlay {
         };
         if snapshot.phase == Phase::Hidden {
             hide(app);
-            lock(&self.frame).phase = Phase::Hidden;
+            let mut frame = lock(&self.frame);
+            frame.phase = Phase::Hidden;
+            if !self.safety.stopped() {
+                frame.stop_reason = None;
+            }
             return Ok(());
         }
         let monitors = app
@@ -191,6 +202,9 @@ impl Overlay {
                 y: at.y,
                 kind: target.kind,
             });
+        if !self.safety.stopped() {
+            frame.stop_reason = None;
+        }
         frame.revision = frame.revision.wrapping_add(1);
         drop(frame);
         let draw = ensure(app, DRAW, true)?;

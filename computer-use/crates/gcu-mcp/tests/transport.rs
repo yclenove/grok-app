@@ -38,6 +38,7 @@ async fn profiles_advertise_only_executable_tools_and_enforce_exposure() {
             &[],
             ServerConfig {
                 profile,
+                route_note: String::new(),
                 script: None,
             },
         );

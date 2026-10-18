@@ -13,13 +13,13 @@
 | `gcu version`、`gcu install`、`gcu uninstall`、`gcu approvals` | 不需要桌面驱动。 |
 | macOS 上不带 `--driver` 的 `gcu mcp` | 把 stdio 转到 `Grok Computer Use.app`。helper 会加载 macOS 驱动。该驱动启动时 Stop 已经锁存。经这个 helper 操作真实桌面 **未验证**。 |
 | macOS 上不带子命令的 `gcu` | 让 Launch Services 启动 helper（`open -g -j -b <bundle id> --args agent`）。 |
-| Linux 和 Windows 上的 `gcu doctor`、`gcu call`、`gcu mcp` | 必须带 `--driver fake`。省略 `--driver` 以退出码 2 结束，原文是 `Real driver assembly is not implemented; P4. Explicit --driver fake is required for offline use.` |
+| Linux 和 Windows 上的 `gcu doctor`、`gcu call`、`gcu mcp` | 省略 `--driver` 即选择 `auto`。该路线未编入时，`auto` 和 `native` 以退出码 2 结束，并且不会退回 fake。`--driver fake` 仍是显式的离线驱动。 |
 | Linux 和 Windows 上不带子命令的 `gcu` | 以退出码 2 结束，原文相同。它不会打印 doctor。 |
 | macOS 上的 `gcu doctor` 和 `gcu call` | 同样规则。它们不连接 helper。 |
 | `gcu engine` | 给 Grok App 宿主用的私有通道。不是接入 CLI 客户端的方式。 |
 | `gcu agent` | helper 进程。必须由 Launch Services 启动。从 shell 执行拿不到 helper 的权限授予。 |
 
-`--driver` 只接受 `fake`。离线桌面不会向操作系统发送输入。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。调试构建不需要。场景：`form`（默认）、`chat`、`list`、`modal`、`webarea`、`canvas`、`ide`、`login`、`terminal`、`web_terminal`、`submit_unknown`。
+`--driver` 可以是 `auto`（默认）、`native` 或 `fake`。本二进制没有装配原生路线，所以 `auto` 和 `native` 以退出码 2 结束；它们不会退回 fake，不会换更宽的输入路线，也不会提权。`--scene` 只对 `--driver fake` 有效。省略场景时 fake 使用 `form`。离线桌面不会向操作系统发送输入。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。调试构建不需要。场景：`form`、`chat`、`list`、`modal`、`webarea`、`canvas`、`ide`、`login`、`terminal`、`web_terminal`、`submit_unknown`。
 
 没有 `gcu batch`、`gcu script`，也没有 `gcu approvals revoke-all`。
 
@@ -181,7 +181,7 @@ gcu uninstall --client claude --yes
 
 客户端：`grok`、`codex`、`claude`、`antigravity`、`gemini`、`opencode`、`cursor`、`vscode`。`--scope` 是 `user`（默认）或 `project`。客户端可以写在位置参数上，也可以写 `--client`。`--dry-run` 只打印差异，不写文件。`--json` 打印一个对象。重复安装不会复制条目。卸载只去掉 `grok-computer-use` 和本安装器拥有的钩子。
 
-在 Linux 和 Windows 上，装进去的命令是不带 `--driver` 的 `gcu mcp`。在真实驱动接上之前，该进程以退出码 2 结束。安装器不会加上 `--driver fake`。在 macOS 上，同一条命令就是上面的 helper 代理。
+在 Linux 和 Windows 上，装进去的命令是不带 `--driver` 的 `gcu mcp`，也就是 `auto`。原生路线未编入时，该进程以退出码 2 结束，并且不会退回 fake。安装器不会加上 `--driver fake`。在 macOS 上，同一条命令就是上面的 helper 代理。
 
 对 Grok 目录的真实修改会在终端上询问：
 
@@ -291,7 +291,7 @@ gcu resume --session /path/to/gcu-control-directory
 
 | 能力 | macOS | Windows | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
-| `gcu mcp` 里的真实驱动 | helper 代理。真实使用 **未验证**。启动时 Stop 已锁存。 | 未装配。没有 `--driver fake` 就退出码 2。 | 没有链进 `gcu`。没有 `--driver fake` 就退出码 2。 | 对 CLI 来说与 X11 相同。 |
+| `gcu mcp` 里的真实驱动 | helper 代理。真实使用 **未验证**。启动时 Stop 已锁存。 | 未装配。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 没有链进 `gcu`。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 对 CLI 来说与 X11 相同。 |
 | 无障碍树 | AX。Mini、macOS 27、arm64：真机契约 26 通过、4 跳过、0 失败。第一次读取可能是很短的不完整树。macOS 14/15 和 Intel **未验证**。 | UIA，在 `windows-2022` 运行器上：契约 15 通过、15 跳过、0 失败。第一次读取可能不完整。物理桌面 **未验证**。 | AT-SPI，Xvfb CI：23 通过、6 跳过、0 失败。物理桌面 **未验证**。 | 有环境探测和 portal 代码。真实合成器 **未验证**。 |
 | 窗口截图 | 那台 Mini 的驱动测试里，ScreenCaptureKit 能截被挡住的窗口。打包后的 helper **未验证**。 | WGC，然后 PrintWindow。被挡住的窗口和 150% DPI **未验证**。 | Xvfb 上的 XComposite 通过。没有复合且被挡住：拒绝。 | portal ScreenCast。真实 portal **未验证**。 |
 | 后台动作 | 部分可用。macOS 27 上 AppKit 能收到后台点击。Chromium 不能（[ADR 0006](docs/adr/0006-macos-tcc-helper.md)）。 | 部分可用。UIA Invoke 可能激活窗口。原生按钮用不激活前台的点击。 | 有对应接口时用 AT-SPI。抓不到 Stop 时不用 XTEST。 | 只有可靠 Stop 时才用 portal 输入。没有全桌面退路。真实会话 **未验证**。 |
@@ -315,7 +315,7 @@ gcu resume --session /path/to/gcu-control-directory
 
 | 你看到的 | 含义 |
 |---|---|
-| `Real driver assembly is not implemented; P4. Explicit --driver fake is required for offline use.` | 各系统上的 `gcu doctor` 和 `gcu call` 都会这样。Linux 和 Windows 上，不带子命令的 `gcu` 和 `gcu mcp` 也会这样。请加上 `--driver fake`。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。 |
+| `native-x11 is not compiled into this build`（或 `native-windows` / `native-wayland`） | 省略 `--driver` 即选择 `auto`。该路线未编入时，`auto` 和 `native` 以退出码 2 结束，并且不会退回 fake。`--driver fake` 是显式的离线驱动。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。`--scene` 只对 `--driver fake` 有效。 |
 | `Fake driver requires a debug build or GCU_ALLOW_FAKE=1` | 这是发行二进制。 |
 | `GCU_APPROVAL is forbidden in release or non eval-autoapprove builds` | 去掉 `GCU_APPROVAL`。发行构建没有自动批准开关。 |
 | Gatekeeper 说应用已损坏或来自身份不明的开发者 | ad-hoc 构建。按未签名包的步骤做。不要关闭 Gatekeeper。 |
@@ -371,7 +371,7 @@ gcu resume --session /path/to/gcu-control-directory
 
 ## 命令
 
-由 clap 解析的子命令都接受全局参数：`--driver fake`，`--scene <name>`（默认 `form`）。
+由 clap 解析的子命令都接受全局参数：`--driver auto|native|fake`（默认 `auto`），`--scene <name>`（只对 fake 有效；省略时 fake 使用 `form`）。
 
 ```sh
 gcu version
