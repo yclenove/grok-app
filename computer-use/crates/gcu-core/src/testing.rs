@@ -5,9 +5,26 @@
 use crate::{driver::*, model::*};
 use async_trait::async_trait;
 use gcu_protocol::capabilities::Capabilities;
+use std::future::Future;
 
 /// Test-only Host assembly for driver contracts; keeps Host dependencies in core.
 pub mod host;
+
+/// Drive `work` on a fresh current-thread runtime.
+///
+/// Blocking: this thread until `work` completes. Timeout: none; the future
+/// bounds its own waits. Cancellation: cancel inside `work`. Dropping is not
+/// available once this call has started.
+///
+/// # Errors
+/// Returns an error when the test runtime cannot be created.
+pub fn block_on<T>(work: impl Future<Output = T>) -> Result<T, &'static str> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "cannot start test runtime")?;
+    Ok(runtime.block_on(work))
+}
 
 /// Portable hooks implemented by memory and native fixture adapters.
 #[async_trait]

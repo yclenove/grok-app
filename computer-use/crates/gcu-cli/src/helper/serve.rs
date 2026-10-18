@@ -137,6 +137,7 @@ async fn serve_mode(
         ctx.host.clone(),
         ServerConfig {
             profile: profile.into(),
+            script: crate::script_worker::runner(),
         },
     )
     .await
