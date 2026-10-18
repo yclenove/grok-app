@@ -1,0 +1,15 @@
+{
+  "state": {
+    "find": {
+      "query": "夹具"
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

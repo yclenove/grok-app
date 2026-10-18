@@ -1,10 +1,9 @@
 //! Schema golden files and exact UTF-8 catalog byte-budget enforcement.
 
+use crate::budgets::TOOL_CATALOG_BYTES;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{fs, path::Path};
-
-const LIMIT: usize = 14000;
 
 fn sort_keys(value: &Value) -> Value {
     match value {
@@ -132,7 +131,7 @@ pub(crate) fn enforce_budget(report: &BudgetReport) -> Result<()> {
 }
 
 pub(crate) fn run_budget() -> Result<()> {
-    let report = budget_report(&gcu_protocol::tools_list_json(), LIMIT)?;
+    let report = budget_report(&gcu_protocol::tools_list_json(), TOOL_CATALOG_BYTES)?;
     enforce_budget(&report)?;
     println!("PASS: default tool catalog byte budget");
     Ok(())

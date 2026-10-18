@@ -2,16 +2,18 @@
 //! Native waits are bounded and cancellable; uncertain mutations are never replayed.
 mod authorize;
 mod discovery;
+mod expect;
 mod failure;
 /// Snapshot, geometry, and exact-handle preflight gates.
 pub mod gate;
 /// Bounded metadata-only action history.
 pub mod ledger;
-mod observe;
+pub(crate) mod observe;
 mod route;
 /// Policy-aware portable action executor.
 pub mod router;
 mod settle;
+mod wait;
 
 use crate::{driver::PointerRoute, redact::RedactedImage, snapshot::SnapshotStore};
 use gcu_protocol::{result::ActionResult, tools::BatchStep, AppState, ToolError, WindowInfo};
@@ -32,7 +34,8 @@ pub struct ToolCall {
     pub app: String,
     /// Exact window ID; omission resolves the key window once only.
     pub window: Option<String>,
-    /// Protocol action payload. Wait/expect belong to the later batch executor.
+    /// Protocol action payload. `wait_for` is executed by [`ActionRouter::wait_for`].
+    /// `expect` is executed by the batch path on this same router, with no input.
     pub action: BatchStep,
     /// Explicit route ceiling. TargetedOnly never falls back to foreground.
     #[serde(skip)]

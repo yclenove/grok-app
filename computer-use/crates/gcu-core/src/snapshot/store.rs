@@ -412,7 +412,7 @@ impl SnapshotStore {
         }
     }
 }
-fn sanitize(tree: &mut ProcessedTree) {
+pub(crate) fn sanitize(tree: &mut ProcessedTree) {
     let sensitive: HashSet<_> = tree
         .sensitive_regions
         .iter()

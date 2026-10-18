@@ -70,6 +70,22 @@ fn hook_loss_or_stale_heartbeat_returns_none_and_restarts_idle_interval() {
     assert_eq!(clock.ms_since_at(at + Duration::from_secs(10)), Some(0));
 }
 
+#[test]
+fn doctor_discloses_absolute_mouse_probe_idle_gate_and_hover_effect() {
+    let guard = FakeSafetyApi::default().start(Default::default(), Arc::new(Latch::default()));
+    let mut issues = Vec::new();
+    guard.doctor_issues(&mut issues);
+    assert!(issues
+        .iter()
+        .any(|issue| issue.starts_with("mouse_hook_probe:")
+            && issue.contains("absolute_same_position")
+            && issue.contains("hover")
+            && issue.contains("2000ms")
+            && issue.contains("single system idle sample before all probes")
+            && issue.contains("real physical callbacks clear it permanently")
+            && issue.contains("without retry or compensation")));
+}
+
 fn click(win: &WindowRef, route: PointerRoute) -> DriverAction {
     DriverAction::PointerClick {
         win: win.clone(),

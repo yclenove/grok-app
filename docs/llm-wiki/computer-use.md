@@ -7,6 +7,7 @@
 ## 入口与交付边界
 
 - 设置入口：扩展 › Computer Use；设置键 `computer_use_enabled`，默认关闭。
+- 发布档位只读。没有满足 07 §8 的 gcu-eval runner 报告时保持实验，默认不改为正式；性能基准不能代替 runner。
 - 设置深链 `#/settings/extensions/computer`；登记见 [settings-ia.md](settings-ia.md)。
 - 聊天流使用 App 授权卡、敏感确认卡、交接卡与工具调用卡；覆盖窗提供停止和用户恢复。
 - 仅启用的本地会话可注入。SSH、Remote IM、定时任务、official-aux 均不注入。

@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "Доступно только в настольном приложении.",
   "cu.settings.refresh": "Обновить",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "Управление локальными приложениями с вашего разрешения.",
+  "cu.settings.release": "Выпуск",
+  "cu.settings.release.experimental": "Экспериментально",
+  "cu.settings.release.formal": "Обычный",
+  "cu.settings.releaseBody": "Остаётся экспериментальной, пока не пройден порог оценки."
 }

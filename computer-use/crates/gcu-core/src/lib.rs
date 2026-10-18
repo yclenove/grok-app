@@ -10,17 +10,23 @@ pub mod driver;
 pub mod fingerprint;
 /// Raw accessibility model, without platform bindings.
 pub mod model;
+/// Tree-quality assessment and safe screenshot attachment policy.
+pub mod observe;
 /// Authorization, denylist, sensitive-action, and input policy.
 pub mod policy;
 /// Bounded text and redacted structured observations.
 pub mod render;
 /// Session lifecycle, serial calls, window locks, and the stop latch.
 pub mod session;
+/// Event/poll settling with injectable time, bounded cancellation and effect evidence.
+pub mod settle;
 /// Shared driver contract suite; enabled only for test consumers.
 #[cfg(feature = "testing")]
 pub mod testing;
 /// Pure accessibility tree transforms and stable snapshot-local indices.
 pub mod tree;
+/// Bounded `wait_for` observation. No input delivery.
+pub mod wait;
 
 /// Mandatory screenshot redaction and safe image derivatives.
 pub mod redact;
@@ -29,3 +35,7 @@ pub mod snapshot;
 
 /// Single-attempt action routing, snapshot gates, and bounded session ledger.
 pub mod action;
+/// `computer_batch`: preflight every step, then one router attempt each.
+pub mod batch;
+/// Shared-tab DOM fusion. Unaligned reads and actions stay on declared L0.
+pub mod browser;

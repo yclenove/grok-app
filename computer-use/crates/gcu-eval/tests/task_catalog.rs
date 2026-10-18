@@ -13,7 +13,7 @@ use gcu_eval::{
     DESKTOP_NOT_RUN,
 };
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MIN_TOTAL: usize = 60;
@@ -85,11 +85,25 @@ fn world(path: &Path) -> World {
     World::from_script(&std::fs::read(path).unwrap()).unwrap()
 }
 
+fn task_file(task: &Task) -> PathBuf {
+    fn find(dir: &Path, filename: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if let Some(found) = find(&path, filename) {
+                    return Some(found);
+                }
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(filename) {
+                return Some(path);
+            }
+        }
+        None
+    }
+    find(&bundled_tasks_dir().unwrap(), &format!("{}.yaml", task.id)).expect("task source")
+}
+
 fn variant_of(task: &Task) -> Option<String> {
-    let path = bundled_tasks_dir()
-        .unwrap()
-        .join(&task.category)
-        .join(format!("{}.yaml", task.id));
+    let path = task_file(task);
     let text = std::fs::read_to_string(&path).unwrap();
     for line in text.lines() {
         let trimmed = line.trim();
@@ -136,10 +150,7 @@ fn catalog_meets_platform_and_category_floors() {
                 task.id
             );
         }
-        let file = bundled_tasks_dir()
-            .unwrap()
-            .join(&task.category)
-            .join(format!("{}.yaml", task.id));
+        let file = task_file(task);
         assert!(file.is_file(), "{}", task.id);
         for script in [&task.pass_script, &task.fail_script, &task.partial_script] {
             assert!(script.is_file(), "{}", script.display());
@@ -169,10 +180,35 @@ fn catalog_meets_platform_and_category_floors() {
     for id in REQUIRED {
         assert!(red_ids.contains(id), "missing {id}");
     }
+    let mut app_ids: Vec<_> = loaded
+        .iter()
+        .filter(|task| task.category == "app")
+        .map(|task| task.id.as_str())
+        .collect();
+    app_ids.sort_unstable();
+    assert_eq!(
+        app_ids,
+        [
+            "app-approval-01",
+            "app-image-session-01",
+            "app-permission-01",
+            "app-ssh-inject-01",
+            "app-stop-01",
+            "app-switch-01",
+        ]
+    );
     for task in &loaded {
         if task.category == "red_team" {
             assert!(
                 task.suites.iter().any(|suite| suite == "red_team"),
+                "{}",
+                task.id
+            );
+            continue;
+        }
+        if task.category == "app" {
+            assert!(
+                task.suites.len() == 1 && task.suites[0] == "app",
                 "{}",
                 task.id
             );

@@ -180,5 +180,10 @@
   "cu.settings.desktopOnly": "Hanya tersedia di aplikasi desktop.",
   "cu.settings.refresh": "Segarkan",
   "cu.settings.hotkey.mac": "⌃⌥⌘.",
-  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace"
+  "cu.settings.hotkey.other": "Ctrl+Alt+Shift+Backspace",
+  "cu.settings.descFormal": "Kendalikan aplikasi lokal dengan persetujuan Anda.",
+  "cu.settings.release": "Rilis",
+  "cu.settings.release.experimental": "Eksperimental",
+  "cu.settings.release.formal": "Baku",
+  "cu.settings.releaseBody": "Tetap eksperimental sampai ambang evaluasi terpenuhi."
 }

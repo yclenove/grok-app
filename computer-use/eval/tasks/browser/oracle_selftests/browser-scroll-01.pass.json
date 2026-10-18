@@ -1,0 +1,16 @@
+{
+  "state": {
+    "page": {
+      "scroll_y": 400,
+      "heading_visible": true
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

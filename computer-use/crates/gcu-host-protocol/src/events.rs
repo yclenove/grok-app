@@ -475,7 +475,14 @@ fn write_private(path: &Path, bytes: &[u8]) -> bool {
         Ok(file) => file,
         Err(_) => return false,
     };
-    file.write_all(bytes).is_ok() && file.sync_all().is_ok()
+    if file.write_all(bytes).is_err() {
+        return false;
+    }
+    // Best effort only: these are redacted display derivatives, not records. macOS
+    // fsync (F_FULLFSYNC) fails on some volumes (seen intermittently on CI runners)
+    // and must not make an otherwise complete write look rejected.
+    let _ = file.sync_all();
+    true
 }
 
 fn replaced_len(state: &State, id: &str, role: Role) -> usize {

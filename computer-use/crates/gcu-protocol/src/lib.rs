@@ -88,7 +88,7 @@ pub fn tools_list_json() -> Value {
         tool::<ListAppsParams>(ToolName::ListApps, "List running and recently used apps."),
         tool::<ListWindowsParams>(ToolName::ListWindows, "List windows, optionally filtered by app."),
         tool::<LaunchAppParams>(ToolName::LaunchApp, "Launch an authorized app."),
-        tool::<GetAppStateParams>(ToolName::GetAppState, "Read an authorized window's tree and screenshot. App accepts name, ID, or path; window defaults to key window."),
+        tool::<GetAppStateParams>(ToolName::GetAppState, "Read an authorized window's tree and safe screenshot. App accepts name, ID, or path; window defaults to key window. include_screenshot: true (default), false, or auto by tree quality."),
         tool::<ClickParams>(ToolName::Click, "Click an element or a point in the latest screenshot."),
         tool::<PerformSecondaryActionParams>(ToolName::PerformSecondaryAction, "Perform an element's advertised secondary action."),
         tool::<SetValueParams>(ToolName::SetValue, "Replace a settable element's value."),

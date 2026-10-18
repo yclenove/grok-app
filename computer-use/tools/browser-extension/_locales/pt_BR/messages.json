@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Compartilhe uma aba para solicitações DOM autorizadas do Computer Use."
+  },
+  "share": {
+    "message": "Compartilhar esta aba"
+  },
+  "revoke": {
+    "message": "Parar de compartilhar esta aba"
+  },
+  "unavailable": {
+    "message": "Não é possível compartilhar esta aba"
+  }
+}

@@ -155,6 +155,8 @@ impl ActionRouter {
             root: None,
             incomplete: None,
         };
+        let tree = Pipeline::default().run(raw.clone(), &self.tree_opts);
+        let quality = crate::observe::TreeQuality::assess(&raw, &tree);
         let fresh = Fresh {
             win: WindowRef {
                 app: app.clone(),
@@ -172,7 +174,8 @@ impl ActionRouter {
                 scale: 1.,
                 on_current_desktop: None,
             },
-            tree: Pipeline::default().run(raw.clone(), &self.tree_opts),
+            tree,
+            quality,
             raw,
             image: None,
             signature: format!("{:?}", app),

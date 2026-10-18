@@ -1,65 +1,105 @@
+//! Router adapter: settle once, compare complete evidence, publish safe state.
 use super::{
-    observe::{digest, signature},
-    router::ActionRouter,
+    gate::Gate,
+    observe::Fresh,
+    router::{outcome, ActionRouter},
+    ToolCall, ToolOutcome,
 };
 use crate::{
-    driver::{BoxStream, Cancel, UiEvent, WindowRef},
+    driver::{BoxStream, UiEvent},
+    observe::CaptureEvidence,
     session::Session,
+    settle::SettleRequest,
 };
 use gcu_protocol::{
-    result::{Settle, SettleReason},
-    ErrorCode,
+    result::{ActionResult, Delivery, Effect},
+    tools::BatchStep,
 };
-use std::{future::poll_fn, time::Duration};
-use tokio::time::Instant;
+use std::time::Duration;
 
 impl ActionRouter {
-    pub(crate) async fn settle(
+    pub(super) async fn settle_and_publish(
         &self,
         session: &Session,
-        win: &WindowRef,
-        mut events: Option<BoxStream<'static, UiEvent>>,
-        budget: Duration,
-    ) -> Result<Settle, ErrorCode> {
-        let start = Instant::now();
-        let deadline = start + budget;
-        let mut quiet = start + Duration::from_millis(120);
-        let mut poll = start;
-        let mut previous = None;
-        let cancel = Cancel::default();
-        loop {
-            self.check_boundary(session).await?;
-            let reason = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(deadline) => Some(SettleReason::Budget),
-                event = async { match &mut events { Some(stream) => poll_fn(|cx| stream.as_mut().poll_next(cx)).await, None => std::future::pending().await } } => {
-                    match event { Some(UiEvent::WindowGone) => return Err(ErrorCode::WindowGone), Some(_) => quiet = Instant::now() + Duration::from_millis(120), None => events = None }
-                    None
-                }
-                _ = tokio::time::sleep_until(quiet), if events.is_some() => Some(SettleReason::EventQuiet),
-                _ = tokio::time::sleep_until(poll) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    let raw = tokio::time::timeout(remaining, self.native(session, &cancel, false, self.driver.snapshot_tree(win, &self.tree_opts, &cancel))).await;
-                    match raw {
-                        Err(_) => Some(SettleReason::Budget),
-                        Ok(Err(e)) => return Err(e.error_code()),
-                        Ok(Ok(raw)) => {
-                            let hash = digest(signature(&raw)?.as_bytes());
-                            let stable = previous == Some(hash);
-                            previous = Some(hash);
-                            poll = Instant::now() + Duration::from_millis(150);
-                            stable.then_some(SettleReason::TreeStable)
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(10)) => None,
-            };
-            if let Some(reason) = reason {
-                return Ok(Settle {
-                    ms: start.elapsed().as_millis() as u64,
-                    reason,
-                });
-            }
+        call: &ToolCall,
+        gate: &Gate,
+        mut action: ActionResult,
+        before: Fresh,
+        events: Option<BoxStream<'static, UiEvent>>,
+    ) -> ToolOutcome {
+        let win = &before.win;
+        let config = self.settle_engine.config();
+        let budget = call.settle_budget_ms.map(Duration::from_millis).unwrap_or(
+            if matches!(call.action, BatchStep::TypeText(_)) {
+                config.text_budget
+            } else {
+                config.action_budget
+            },
+        );
+        let report = match self
+            .settle_engine
+            .wait(SettleRequest {
+                driver: self.driver.as_ref(),
+                session,
+                window: win,
+                tree_opts: &self.tree_opts,
+                events,
+                before: &before.raw,
+                budget,
+            })
+            .await
+        {
+            Ok(report) => report,
+            Err(code) => return self.failure(session, action, code, win).await,
+        };
+        action.settle = report.settle.clone();
+        let after = match self
+            .read(
+                session,
+                win,
+                self.driver.capabilities().observe.screenshot,
+                &self.tree_opts,
+            )
+            .await
+        {
+            Ok(fresh) => fresh,
+            Err(code) => return self.failure(session, action, code, win).await,
+        };
+        let pixels = before
+            .image
+            .as_ref()
+            .zip(after.image.as_ref())
+            .map(|(a, b)| a.geometry() != b.geometry() || a.pixels() != b.pixels());
+        action.effect = match report.effect(&before.raw, &after.raw, pixels) {
+            Ok(effect) => effect,
+            Err(code) => return self.failure(session, action, code, win).await,
+        };
+        if action.effect == Effect::NoVisibleChange {
+            action.notes.push(
+                "No visible change after delivery; the action may not have taken effect.".into(),
+            );
+        }
+        if action.delivery != Delivery::Foreground {
+            action
+                .notes
+                .push("Delivered without foreground activation.".into());
+        }
+        let attach = self.auto_capture.action(
+            &after.quality,
+            CaptureEvidence {
+                action_used_coordinates: !gate.points.is_empty(),
+                diff_is_empty: self.rendered_diff_is_empty(
+                    session,
+                    &after,
+                    self.tree_opts.text_limit,
+                ),
+                pixels_changed: pixels,
+                explicit: call.attach_image,
+            },
+        );
+        match self.publish(session, after, attach) {
+            Ok(state) => outcome(action, None, Some(state)),
+            Err(error) => outcome(action, Some(*error), None),
         }
     }
 }

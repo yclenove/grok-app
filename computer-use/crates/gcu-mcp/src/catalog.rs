@@ -1,7 +1,7 @@
 use gcu_protocol::ToolName;
 use rmcp::model::Tool;
 /// Executable default tools. P6 adds tools only after their executors ship.
-pub const IMPLEMENTED_TOOLS: [ToolName; 13] = [
+pub const IMPLEMENTED_TOOLS: [ToolName; 15] = [
     ToolName::ListApps,
     ToolName::ListWindows,
     ToolName::LaunchApp,
@@ -14,6 +14,8 @@ pub const IMPLEMENTED_TOOLS: [ToolName; 13] = [
     ToolName::PressKey,
     ToolName::Scroll,
     ToolName::Drag,
+    ToolName::WaitFor,
+    ToolName::ComputerBatch,
     ToolName::Capabilities,
 ];
 /// Tool exposure profile, always intersected with actual implementations.
@@ -36,7 +38,15 @@ pub(crate) fn tools(profile: Profile) -> Result<Vec<Tool>, serde_json::Error> {
             let name = tool["name"].as_str().unwrap_or("");
             IMPLEMENTED_TOOLS.iter().any(|t| t.as_str() == name)
                 && (!matches!(profile, Profile::Minimal)
-                    || !["launch_app", "select_text", "drag", "capabilities"].contains(&name))
+                    || ![
+                        "launch_app",
+                        "select_text",
+                        "drag",
+                        "capabilities",
+                        "wait_for",
+                        "computer_batch",
+                    ]
+                    .contains(&name))
         })
         .map(|tool| serde_json::from_value(tool.clone()))
         .collect()

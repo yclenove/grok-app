@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Поделитесь одной вкладкой для разрешённых DOM-запросов Computer Use."
+  },
+  "share": {
+    "message": "Поделиться этой вкладкой"
+  },
+  "revoke": {
+    "message": "Прекратить доступ к этой вкладке"
+  },
+  "unavailable": {
+    "message": "Нельзя предоставить доступ к этой вкладке"
+  }
+}

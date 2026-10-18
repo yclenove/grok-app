@@ -13,6 +13,12 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+### Added
+- Computer Use stays experimental until its release gate passes. The switch does not become a finished feature by default.
+
+**中文 · 新增**
+- 电脑操作在发布门槛通过前保持实验。开关不会默认变成正式功能。
+
 ## [0.2.40] - 2026-10-04
 
 > **Highlight:** Linux ARM64 and Apple Silicon installers are on this GitHub Release.

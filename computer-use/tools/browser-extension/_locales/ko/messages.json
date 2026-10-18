@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "승인된 Computer Use DOM 요청을 위해 탭 하나를 공유합니다."
+  },
+  "share": {
+    "message": "이 탭 공유"
+  },
+  "revoke": {
+    "message": "이 탭 공유 중지"
+  },
+  "unavailable": {
+    "message": "이 탭을 공유할 수 없습니다"
+  }
+}

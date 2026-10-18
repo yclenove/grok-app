@@ -136,7 +136,8 @@ async fn concurrent_session_calls_are_serial_and_return_ordered_diffs() {
 }
 /// Settle time the fake injects; the budgeted call must end long before it.
 const SLOW_SETTLE: Duration = Duration::from_millis(5000);
-#[tokio::test]
+// RuntimeClock and FakeDriver share Tokio time, including delayed effects.
+#[tokio::test(start_paused = true)]
 async fn no_events_uses_tree_polling_and_budget_is_hard() {
     let h = Harness::driver(FakeDriver::from_scene("form").unwrap().with_events(false));
     h.observe().await;
@@ -159,7 +160,7 @@ async fn no_events_uses_tree_polling_and_budget_is_hard() {
         out.action.settle.ms
     );
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn quiet_events_settle_and_semantic_output_omits_image() {
     let h = Harness::new(true, true);
     h.observe().await;
@@ -193,7 +194,7 @@ async fn explicit_image_and_coordinate_success_only_return_safe_images() {
         .image
         .is_some());
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn unchanged_effect_is_reported_without_claiming_business_success() {
     let h = Harness::new(true, true);
     h.observe().await;

@@ -2,8 +2,13 @@
 
 #![deny(missing_docs)]
 
+mod bench;
+#[path = "../../bench/budgets.rs"]
+mod budgets;
 mod bundle;
 mod deps;
+mod release;
+mod sbom;
 mod schema;
 mod ui;
 
@@ -27,10 +32,13 @@ fn main() -> Result<()> {
             _ => bail!("usage: cargo xtask golden <--check|--update>"),
         },
         Some("budget") if args.next().is_none() => schema::run_budget(),
+        Some("bench-check") => bench::run(args.map(std::ffi::OsString::from)),
+        Some("release") => release::run(args),
+        Some("sbom") if args.next().is_none() => sbom::run(),
         Some("bundle-macos") => bundle::run(args),
         Some("ui") => ui::run(args),
         _ => bail!(
-            "usage: cargo xtask <check-deps|golden <--check|--update>|budget|bundle-macos [--release] [--binary PATH] [--output DIR]|ui <embed|export-i18n|check>>"
+            "usage: cargo xtask <check-deps|golden <--check|--update>|budget|bench-check [--reports DIR]|sbom|release <--dry-run|--stage|--collect>|bundle-macos [--release] [--binary PATH] [--output DIR]|ui <embed|export-i18n|check>>"
         ),
     }
 }

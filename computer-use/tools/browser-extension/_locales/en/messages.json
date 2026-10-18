@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Share one tab for authorized Computer Use DOM requests."
+  },
+  "share": {
+    "message": "Share this tab"
+  },
+  "revoke": {
+    "message": "Stop sharing this tab"
+  },
+  "unavailable": {
+    "message": "This tab cannot be shared"
+  }
+}

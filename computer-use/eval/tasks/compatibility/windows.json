@@ -1,0 +1,322 @@
+[
+  {
+    "app_id": "adobe-acrobat", "app": "Adobe Acrobat Reader", "class": "viewer", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "brave", "app": "Brave", "class": "browser", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "chrome", "app": "Google Chrome", "class": "browser", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "discord", "app": "Discord", "class": "communication", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Signed-out fixture observation only; never operate the real communication app or an account."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "edge", "app": "Microsoft Edge", "class": "browser", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "excel", "app": "Microsoft Excel", "class": "spreadsheet", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "file-explorer", "app": "File Explorer", "class": "file_manager", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "system_app", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "finder", "app": "Finder", "class": "file_manager", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "firefox", "app": "Mozilla Firefox", "class": "browser", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "gedit", "app": "gedit", "class": "editor", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "gimp", "app": "GIMP", "class": "creative", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "gnome-calculator", "app": "GNOME Calculator", "class": "calculator", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "gnome-files", "app": "GNOME Files", "class": "file_manager", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "gnome-settings", "app": "GNOME Settings", "class": "settings", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "inkscape", "app": "Inkscape", "class": "creative", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "intellij", "app": "IntelliJ IDEA", "class": "ide", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog.", "No terminal, REPL, task, or debug execution; ambiguous mixed surfaces require handoff."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "krita", "app": "Krita", "class": "creative", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "lark", "app": "Lark / Feishu", "class": "communication", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Signed-out fixture observation only; never operate the real communication app or an account."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "libreoffice-calc", "app": "LibreOffice Calc", "class": "spreadsheet", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "libreoffice-impress", "app": "LibreOffice Impress", "class": "presentation", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "libreoffice-writer", "app": "LibreOffice Writer", "class": "document", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "macos-calculator", "app": "Calculator (macOS)", "class": "calculator", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "macos-settings", "app": "System Settings (macOS)", "class": "settings", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "notepad", "app": "Notepad", "class": "editor", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "system_app", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "okular", "app": "Okular", "class": "viewer", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "powerpoint", "app": "Microsoft PowerPoint", "class": "presentation", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "preview", "app": "Preview", "class": "viewer", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "quicktime", "app": "QuickTime Player", "class": "media", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "safari", "app": "Safari", "class": "browser", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "slack", "app": "Slack", "class": "communication", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Signed-out fixture observation only; never operate the real communication app or an account."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "sublime-text", "app": "Sublime Text", "class": "editor", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "telegram", "app": "Telegram Desktop", "class": "communication", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Signed-out fixture observation only; never operate the real communication app or an account."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "textedit", "app": "TextEdit", "class": "editor", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "No native variant planned on this platform; no substitute or web variant inferred."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "thunderbird", "app": "Thunderbird", "class": "communication", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Signed-out fixture observation only; never operate the real communication app or an account."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "vlc", "app": "VLC media player", "class": "media", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "vscode", "app": "Visual Studio Code", "class": "ide", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog.", "No terminal, REPL, task, or debug execution; ambiguous mixed surfaces require handoff."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "wechat", "app": "WeChat", "class": "communication", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Signed-out fixture observation only; never operate the real communication app or an account."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "windows-calculator", "app": "Calculator (Windows)", "class": "calculator", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "system_app", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "windows-settings", "app": "Settings (Windows)", "class": "settings", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "system_app", "support_claim": null, "measurement": null
+  },
+  {
+    "app_id": "word", "app": "Microsoft Word", "class": "document", "platform": "windows",
+    "level": "not_run", "versions": {"app": null, "os": null, "gcu": null},
+    "capabilities": {"tree_quality": null, "background_click": null, "background_input": null},
+    "known_issues": ["No matching desktop measurement.", "Fixture equivalent only; real third-party app execution is outside this catalog."],
+    "evidence_paths": [], "evidence_kind": null, "verified_on": null,
+    "validation_scope": "fixture_equivalent_only", "support_claim": null, "measurement": null
+  }
+]

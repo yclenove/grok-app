@@ -8,8 +8,9 @@
 use anyhow::Context;
 use clap::Parser;
 use gcu_eval::{
-    block_on, bundled_tasks_dir, compare_trials, host_platform, load_tasks, parse_approval,
-    run_tasks, trials_from_summary, write_reports, RunConfig, RunStatus, SuiteReport,
+    block_on, bundled_tasks_dir, compare_trials, host_platform, judge_release, load_tasks,
+    parse_approval, parse_release_evidence, run_tasks, trials_from_summary, write_release_report,
+    write_reports, RunConfig, RunStatus, SuiteReport,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -51,9 +52,24 @@ struct Cli {
     /// Compare two summary JSON files and exit.
     #[arg(long, num_args = 2, value_names = ["A", "B"])]
     compare: Option<Vec<PathBuf>>,
+    /// Validate the fixed browser L0/L2 experiment; never run a local fake A/B.
+    #[arg(long, conflicts_with_all = ["compare", "release_gate", "soak_hours", "tasks"])]
+    ab: bool,
+    /// Read a native browser A/B bundle index; absent collectors are not_run.
+    #[arg(long, requires = "ab")]
+    ab_report: Option<PathBuf>,
     /// Exit 0 when tasks fail. Invalid oracles still fail the process.
     #[arg(long)]
     allow_fail: bool,
+    /// Judge a section 8 evidence file and skip the task run.
+    #[arg(long)]
+    release_gate: Option<PathBuf>,
+    /// Opt in to core soak validation for N hours. No implicit long run.
+    #[arg(long, conflicts_with_all = ["compare", "release_gate"])]
+    soak_hours: Option<u64>,
+    /// Validate a raw soak report bundle; native adapters are supplied separately.
+    #[arg(long, requires = "soak_hours", conflicts_with_all = ["compare", "release_gate"])]
+    soak_report: Option<PathBuf>,
     /// Ask the child for CU auto-approval. Only an eval-autoapprove debug build accepts this.
     #[arg(long)]
     auto_approve: bool,
@@ -80,8 +96,20 @@ fn dispatch() -> Result<u8, Stop> {
             "auto-approve requires an eval-autoapprove debug build".into(),
         ));
     }
+    if cli.ab {
+        return browser_ab(&cli);
+    }
+    if cli.suite == "browser" {
+        return Err(Stop::Usage("browser suite requires --ab".into()));
+    }
     if let Some(paths) = &cli.compare {
         return compare(paths);
+    }
+    if let Some(path) = &cli.release_gate {
+        return release_gate(path, cli.out.as_deref());
+    }
+    if let Some(hours) = cli.soak_hours {
+        return soak(&cli, hours);
     }
     let run_local = match cli.env.as_str() {
         "local" => true,
@@ -128,6 +156,144 @@ fn dispatch() -> Result<u8, Stop> {
         write_reports(dir, &report).map_err(|err| Stop::Run(err.into()))?;
     }
     Ok(exit_code(&report, cli.allow_fail))
+}
+
+fn browser_ab(cli: &Cli) -> Result<u8, Stop> {
+    use gcu_eval::browser::{
+        not_run_report, parse_report, validate_report, write_report, FileArtifacts,
+        ValidationStatus,
+    };
+    if cli.suite != "browser" {
+        return Err(Stop::Usage("--ab requires --suite browser".into()));
+    }
+    let dir = bundled_tasks_dir()
+        .ok_or_else(|| Stop::Usage("fixed browser task catalog unavailable".into()))?;
+    let tasks = load_tasks(&dir).map_err(|error| Stop::Run(error.into()))?;
+    let report = if let Some(path) = &cli.ab_report {
+        let bytes = std::fs::read(path)
+            .map_err(|_| Stop::Usage("could not read browser A/B report".into()))?;
+        parse_report(&bytes).map_err(|error| Stop::Run(error.into()))?
+    } else {
+        not_run_report()
+    };
+    let root = cli
+        .ab_report
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let validation = validate_report(&report, &tasks, &FileArtifacts::new(root))
+        .map_err(|error| Stop::Run(error.into()))?;
+    println!(
+        "browser_ab {} recommend_l2={} default={}",
+        validation.status.as_str(),
+        validation.recommend_l2,
+        validation.default_level.as_str()
+    );
+    for reason in &validation.reasons {
+        println!("gate {reason}");
+    }
+    for violation in &validation.violations {
+        println!("violation {violation}");
+    }
+    for pair in &validation.pairs {
+        println!(
+            "{} pairs={} p={:.4} significant={} diff={:.4}",
+            pair.task_id, pair.pairs, pair.p_value, pair.significant, pair.mean_diff
+        );
+    }
+    if let Some(dir) = &cli.out {
+        write_report(dir, &report, &validation).map_err(|error| Stop::Run(error.into()))?;
+    }
+    Ok(u8::from(
+        validation.status == ValidationStatus::NotRun || !validation.violations.is_empty(),
+    ))
+}
+
+fn soak(cli: &Cli, hours: u64) -> Result<u8, Stop> {
+    use gcu_eval::soak::{
+        not_run_report, parse_report, validate_report, write_report, FileArtifacts, SoakConfig,
+        SoakPlatform, Status,
+    };
+    if cli.suite != "core" {
+        return Err(Stop::Usage("soak requires --suite core".into()));
+    }
+    let platform = match cli.platform.as_str() {
+        "host" => match host_platform() {
+            "macos" => SoakPlatform::Macos,
+            "windows" => SoakPlatform::Windows,
+            _ => SoakPlatform::LinuxX11,
+        },
+        "macos" => SoakPlatform::Macos,
+        "windows" => SoakPlatform::Windows,
+        "linux" | "linux-x11" => SoakPlatform::LinuxX11,
+        _ => return Err(Stop::Usage("unsupported soak platform".into())),
+    };
+    let config = SoakConfig::core(platform, hours);
+    config
+        .duration_ms()
+        .map_err(|error| Stop::Usage(error.to_string()))?;
+    let report = if let Some(path) = &cli.soak_report {
+        let bytes =
+            std::fs::read(path).map_err(|_| Stop::Usage("could not read soak report".into()))?;
+        let report = parse_report(&bytes).map_err(|error| Stop::Run(error.into()))?;
+        if report.config.platform != platform {
+            return Err(Stop::Usage(
+                "soak report platform does not match --platform".into(),
+            ));
+        }
+        report
+    } else {
+        not_run_report(
+            config,
+            "matching one-shot desktop soak adapters and native platform artifact unavailable",
+        )
+    };
+    let root = cli
+        .soak_report
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let checked = validate_report(&report, hours, &FileArtifacts::new(root))
+        .map_err(|error| Stop::Run(error.into()))?;
+    println!(
+        "soak {} resource_gate={} tasks={} crash_restarts={} stop_restarts={}",
+        checked.status.as_str(),
+        checked.resource_gate.as_str(),
+        checked.counts.completed_tasks,
+        checked.counts.crash_restarts,
+        checked.counts.stop_restarts
+    );
+    for issue in &checked.issues {
+        println!("fail {issue}");
+    }
+    for reason in &checked.not_run {
+        println!("not_run {reason}");
+    }
+    if let Some(dir) = &cli.out {
+        write_report(dir, &report).map_err(|error| Stop::Run(error.into()))?;
+    }
+    Ok(u8::from(checked.status != Status::Pass))
+}
+
+fn release_gate(path: &std::path::Path, out: Option<&std::path::Path>) -> Result<u8, Stop> {
+    let bytes =
+        std::fs::read(path).map_err(|err| Stop::Usage(format!("read release gate: {err}")))?;
+    let evidence = parse_release_evidence(&bytes).map_err(|err| Stop::Run(err.into()))?;
+    let decision = judge_release(&evidence);
+    println!(
+        "release tier={} channel={} promote={} default_formal={}",
+        decision.tier.as_str(),
+        decision.channel.as_str(),
+        decision.promote,
+        decision.default_formal
+    );
+    for reason in &decision.reasons {
+        println!("gate {reason}");
+    }
+    if let Some(dir) = out {
+        write_release_report(dir, &decision).map_err(|err| Stop::Run(err.into()))?;
+    }
+    Ok(0)
 }
 
 fn compare(paths: &[PathBuf]) -> Result<u8, Stop> {

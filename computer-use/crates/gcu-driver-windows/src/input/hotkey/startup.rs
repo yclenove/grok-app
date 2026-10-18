@@ -142,7 +142,7 @@ fn keyboard_proof_without_mouse_callback_expires_even_when_both_pumps_respond() 
 
 #[test]
 fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
-    use crate::input::hook_probe::{mode_at, MouseProbe};
+    use crate::input::hook_probe::{MouseProbe, MouseProof};
     struct MouseApi;
     impl MouseApi {
         fn dispatch(&self, mode: MouseProbe, at: Instant) -> Option<Instant> {
@@ -155,6 +155,7 @@ fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
     guard
         .events
         .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    let mut proof = MouseProof::new(None);
     for (elapsed, expected) in [
         (0, MouseProbe::ZeroMove),
         (250, MouseProbe::ZeroWheel),
@@ -162,7 +163,8 @@ fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
     ] {
         *time.0.lock().unwrap() =
             Some(guard.events.startup_started + Duration::from_millis(elapsed));
-        let mode = mode_at(Duration::from_millis(elapsed));
+        let request = proof.next().unwrap();
+        let mode = request.mode;
         assert_eq!(
             mode.requested(),
             1,
@@ -170,9 +172,13 @@ fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
         );
         assert_eq!(mode, expected);
         let mouse = MouseApi.dispatch(mode, time.now());
+        if let Some(at) = mouse {
+            proof.callback(request.tag, 1, at);
+        }
+        proof.complete(Ok(())).unwrap();
         guard
             .events
-            .confirm_hook_proofs(Some(time.now()), mouse)
+            .confirm_hook_proofs(Some(time.now()), proof.proven())
             .unwrap();
         guard.events.heartbeat();
         guard.events.hotkey_heartbeat();
@@ -181,6 +187,100 @@ fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
     time.advance(watchdog::HEARTBEAT_TIMEOUT + Duration::from_millis(1));
     guard.events.check_health();
     assert!(!guard.available());
+    assert!(guard.is_stopped());
+}
+
+#[test]
+fn absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs() {
+    use crate::input::hook_probe::{
+        dispatch, Cursor, Desktop, Dispatch, MouseProbe, MouseProbeApi, MouseProof, RecentInput,
+    };
+    struct Api;
+    impl MouseProbeApi for Api {
+        fn recent_input(&mut self) -> std::result::Result<RecentInput, String> {
+            Ok(RecentInput { now: 5000, last: 0 })
+        }
+        fn cursor(&mut self) -> std::result::Result<Cursor, String> {
+            Ok(Cursor { x: 100, y: 100 })
+        }
+        fn desktop(&mut self) -> std::result::Result<Desktop, String> {
+            Ok(Desktop {
+                left: 0,
+                top: 0,
+                width: 1920,
+                height: 1080,
+            })
+        }
+        fn send(
+            &mut self,
+            _: MouseProbe,
+            _: Option<(i32, i32)>,
+        ) -> std::result::Result<Dispatch, String> {
+            Ok((1, 0, 0))
+        }
+    }
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(Unstopped), time.clone());
+    guard
+        .events
+        .startup_step("hook_proofs", STARTUP_STEP_TIMEOUT);
+    let mut proof = MouseProof::new(None);
+    for _ in 0..3 {
+        let request = proof.next().unwrap();
+        proof
+            .complete(dispatch(&mut Api, request.mode, proof.idle()).map(|_| ()))
+            .unwrap();
+    }
+    let absolute = proof.next().unwrap();
+    assert_eq!(absolute.mode, MouseProbe::AbsoluteSamePosition);
+    // Simulated successful idle/cursor checks cannot confer a lease themselves.
+    proof
+        .complete(dispatch(&mut Api, absolute.mode, proof.idle()).map(|_| ()))
+        .unwrap();
+    assert!(proof.idle().allowed());
+    guard
+        .events
+        .confirm_hook_proofs(Some(time.now()), proof.proven())
+        .unwrap();
+    guard.events.heartbeat();
+    guard.events.hotkey_heartbeat();
+    assert!(!guard.available());
+    proof.callback(absolute.tag, 1, time.now());
+    guard
+        .events
+        .confirm_hook_proofs(None, proof.proven())
+        .unwrap();
+    assert!(!guard.available(), "mouse proof alone cannot arm the guard");
+    guard
+        .events
+        .confirm_hook_proofs(Some(time.now()), proof.proven())
+        .unwrap();
+    assert!(guard.available());
+    assert_eq!(guard.activity_clock().ms_since_physical_input(), Some(0));
+    // A new proof cycle still tries all three zero probes before one absolute.
+    for mode in [
+        MouseProbe::ZeroMove,
+        MouseProbe::ZeroWheel,
+        MouseProbe::ZeroHWheel,
+    ] {
+        assert_eq!(proof.next().unwrap().mode, mode);
+        proof
+            .complete(dispatch(&mut Api, mode, proof.idle()).map(|_| ()))
+            .unwrap();
+    }
+    assert_eq!(proof.next().unwrap().mode, MouseProbe::AbsoluteSamePosition);
+    proof
+        .complete(dispatch(&mut Api, MouseProbe::AbsoluteSamePosition, proof.idle()).map(|_| ()))
+        .unwrap();
+    assert!(proof.idle().allowed()); // Still idle, but no new mouse callback.
+    time.advance(watchdog::HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+    assert!(guard
+        .events
+        .confirm_hook_proofs(Some(time.now()), proof.proven())
+        .is_err());
+    guard.events.check_health();
+    assert!(!guard.available());
+    assert_eq!(guard.activity_clock().ms_since_physical_input(), None);
     assert!(guard.is_stopped());
 }
 

@@ -1,6 +1,6 @@
 //! Thread-affine low-level hooks; global hotkey has its own message pump.
 use crate::input::{
-    hook_probe::{mode_at, MouseProbe},
+    hook_probe::{self, Cursor, Desktop, MouseProbe, MouseProof, PROBE_TAG},
     hooks::HookEvent,
     hotkey::{
         GuardEvents, HotkeyConfig, SafetyApi, SafetyPump, HOTKEY_STARTUP_TIMEOUT,
@@ -24,13 +24,12 @@ use windows::Win32::{
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 const HOTKEY_ID: i32 = 0x4732;
-const PROBE_TAG: usize = 0x47435532;
 mod mouse;
 mod probe;
 struct Context {
     events: Arc<GuardEvents>,
     keyboard: Option<Instant>,
-    mouse: Option<Instant>,
+    mouse_proof: MouseProof,
     keyboard_probe_flags: Option<u32>,
     mouse_probe_flags: Option<u32>,
     last_keyboard_flags: Option<u32>,
@@ -48,6 +47,8 @@ impl SafetyApi for RealSafetyApi {
         events: Arc<GuardEvents>,
     ) -> Result<Box<dyn SafetyPump>, String> {
         events.startup_step("hook_desktop", STARTUP_STEP_TIMEOUT);
+        let override_mode =
+            hook_probe::configured_mode(std::env::var_os("GCU_HOOK_MOUSE_PROBE").as_deref())?;
         events.startup_progress("hook_desktop", "OpenInputDesktop pending");
         interactive_desktop()?;
         events.startup_progress("hook_desktop", "Default desktop verified");
@@ -55,18 +56,20 @@ impl SafetyApi for RealSafetyApi {
         let hooks = Hooks::install(Some(&events))?;
         events.startup_progress("hook_install", "keyboard and mouse installed; Win32=0");
         let pump_events = events.clone();
+        let mouse_proof = MouseProof::new(override_mode);
+        let idle = mouse_proof.idle().clone();
         CONTEXT.with(|slot| {
             *slot.borrow_mut() = Some(Context {
                 events,
                 keyboard: None,
-                mouse: None,
+                mouse_proof,
                 keyboard_probe_flags: None,
                 mouse_probe_flags: None,
                 last_keyboard_flags: None,
                 last_mouse_flags: None,
             })
         });
-        let probe = probe::Sender::start(pump_events.clone())?;
+        let probe = probe::Sender::start(pump_events.clone(), idle)?;
         Ok(Box::new(Pump {
             hooks,
             _hotkey: hotkey,
@@ -158,21 +161,29 @@ fn callback(event: HookEvent, tag: usize) {
                     HookEvent::Keyboard(flags) => context.last_keyboard_flags = Some(flags),
                     HookEvent::Mouse(flags) => context.last_mouse_flags = Some(flags),
                 }
-                if tag == PROBE_TAG {
-                    match event {
-                        HookEvent::Keyboard(flags) => context.keyboard_probe_flags = Some(flags),
-                        HookEvent::Mouse(flags) => context.mouse_probe_flags = Some(flags),
+                let tagged = match event {
+                    HookEvent::Keyboard(flags) if tag == PROBE_TAG => {
+                        context.keyboard_probe_flags = Some(flags);
+                        if event.injected() {
+                            context.keyboard = Some(now);
+                        }
+                        true
                     }
-                }
-                if event.injected() && tag == PROBE_TAG {
-                    match event {
-                        HookEvent::Keyboard(_) => context.keyboard = Some(now),
-                        HookEvent::Mouse(_) => context.mouse = Some(now),
+                    HookEvent::Mouse(flags) => {
+                        let tagged = context.mouse_proof.callback(tag, flags, now);
+                        if tagged {
+                            context.mouse_probe_flags = Some(flags);
+                        }
+                        tagged
                     }
-                }
+                    _ => false,
+                };
+                // Only real device input revokes the independent fourth-send
+                // gate; this never confirms or renews PhysicalClock's lease.
+                context.mouse_proof.idle().observe(event.injected(), tagged);
                 // A tagged synthetic probe is never physical activity, even if
                 // an upstream filter unexpectedly strips its injected flag.
-                if tag != PROBE_TAG {
+                if !tagged {
                     context.events.clock().event(event, now);
                 }
             }
@@ -220,7 +231,7 @@ impl Pump {
             if let Some(context) = slot.borrow().as_ref() {
                 context
                     .events
-                    .confirm_hook_proofs(context.keyboard, context.mouse)?;
+                    .confirm_hook_proofs(context.keyboard, context.mouse_proof.proven())?;
             }
             Ok(())
         })

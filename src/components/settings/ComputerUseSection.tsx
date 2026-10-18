@@ -14,10 +14,23 @@ import {
   type PermissionKind,
 } from "@/lib/computer-use/settings";
 import { sanitizePlain } from "@/lib/computer-use/approvalDesk";
+import {
+  channelFor,
+  shippedReleaseEvidence,
+  type ReleaseEvidence,
+} from "@/lib/computer-use/releaseGate";
 
 /** Settings → Extensions → Computer Use. State stays inside the domain module. */
-export function ComputerUseSection({ locale }: { locale: Locale }) {
+export function ComputerUseSection({
+  locale,
+  evidence = shippedReleaseEvidence(),
+}: {
+  locale: Locale;
+  /** Section 8 report. The shipped default is no report, which stays experimental. */
+  evidence?: ReleaseEvidence | null;
+}) {
   const t = useMemo(() => createT(locale), [locale]);
+  const channel = channelFor(evidence);
   const s = useComputerUseSettings();
   const [revoking, setRevoking] = useState<Approval | null>(null);
   const [restartNeeded, setRestartNeeded] = useState(false);
@@ -96,7 +109,9 @@ export function ComputerUseSection({ locale }: { locale: Locale }) {
 
   return (
     <div className="settings-computer-use">
-      <p className="settings-page__lead">{t("cu.settings.desc")}</p>
+      <p className="settings-page__lead">
+        {t(channel === "formal" ? "cu.settings.descFormal" : "cu.settings.desc")}
+      </p>
       {!s.desktop && <p className="settings-row__hint" role="status">{t("cu.settings.desktopOnly")}</p>}
       {s.saveError && !revoking && (
         <div className="settings-row__hint is-danger" role="alert">{t("cu.settings.saveError")}</div>
@@ -116,6 +131,18 @@ export function ComputerUseSection({ locale }: { locale: Locale }) {
         </div>
         {s.settings.loading && <div className="settings-row" role="status">{t("cu.settings.loading")}</div>}
         {s.settings.error && error(() => void s.settings.refresh())}
+      </section>
+
+      <section className="settings-card" id="settings-anchor-ext-computer-release" aria-label={t("cu.settings.release")}>
+        <div className="settings-row">
+          <div className="settings-row__text">
+            <div className="settings-row__label">{t("cu.settings.release")}</div>
+            <div className="settings-row__desc">{t("cu.settings.releaseBody")}</div>
+          </div>
+          <span role="status">
+            {t(channel === "formal" ? "cu.settings.release.formal" : "cu.settings.release.experimental")}
+          </span>
+        </div>
       </section>
 
       <section className="settings-card" id="settings-anchor-ext-computer-permissions" aria-label={t("cu.settings.permissions")}>

@@ -7,13 +7,16 @@ use crate::{
     driver::{Cancel, CaptureOpts, TreeOpts, WindowRef},
     fingerprint::refresh_tree,
     model::{Fingerprint, Geometry, RawNode, RawTree},
+    observe::{CaptureEvidence, TreeQuality},
     redact::{self, CapturedFrame, RedactedImage},
     render::RenderOpts,
     session::Session,
-    snapshot::{ElementIndex, WindowKey},
+    snapshot::{ElementIndex, RenderedState, WindowKey},
     tree::{Pipeline, ProcessedTree},
 };
-use gcu_protocol::{types::ScreenshotInfo, AppState, ErrorCode, ToolError, WindowInfo};
+use gcu_protocol::{
+    tools::ScreenshotMode, types::ScreenshotInfo, AppState, ErrorCode, ToolError, WindowInfo,
+};
 use serde_json::{json, Value};
 
 pub(crate) struct Fresh {
@@ -23,6 +26,7 @@ pub(crate) struct Fresh {
     pub tree: ProcessedTree,
     pub signature: String,
     pub image: Option<RedactedImage>,
+    pub quality: TreeQuality,
 }
 impl Fresh {
     pub fn geometry(&self) -> Geometry {
@@ -46,6 +50,16 @@ impl ActionRouter {
         screenshot: bool,
         opts: &TreeOpts,
     ) -> Result<Fresh, ErrorCode> {
+        self.read_with_mode(session, win, ScreenshotMode::Explicit(screenshot), opts)
+            .await
+    }
+    pub(crate) async fn read_with_mode(
+        &self,
+        session: &Session,
+        win: &WindowRef,
+        mode: ScreenshotMode,
+        opts: &TreeOpts,
+    ) -> Result<Fresh, ErrorCode> {
         let cancel = Cancel::default();
         let mut raw = self
             .native(
@@ -63,15 +77,20 @@ impl ActionRouter {
             .native(session, &cancel, false, self.driver.window_geometry(win))
             .await
             .map_err(|e| e.error_code())?;
-        let before = signature(&raw)?;
-        let mut tree = Pipeline::default().run(raw.clone(), opts);
-        let mut image = None;
+        // Screenshot identity is the accessibility tree. DOM fusion runs after
+        // that compare so a DOM-only change cannot mark the capture stale, and
+        // before redaction so shared password fields are still masked.
+        let ax_signature = signature(&raw)?;
+        let mut capture = None;
         let captured_at;
-        if screenshot {
+        // Auto captures speculatively to detect visual changes that the tree
+        // cannot express. Only a synchronized, redacted image can reach policy
+        // comparison or delivery; an omitted image never enters SnapshotStore.
+        if mode != ScreenshotMode::Explicit(false) {
             if raw.incomplete.is_some() {
                 return Err(ErrorCode::HandoffRequired);
             }
-            let capture = self
+            let shot = self
                 .native(
                     session,
                     &cancel,
@@ -93,32 +112,49 @@ impl ActionRouter {
             if after.incomplete.is_some() {
                 return Err(ErrorCode::HandoffRequired);
             }
-            if before != signature(&after)? {
+            if ax_signature != signature(&after)? {
                 return Err(ErrorCode::StaleScreenshot);
             }
             let current = self
                 .native(session, &cancel, false, self.driver.window_geometry(win))
                 .await
                 .map_err(|e| e.error_code())?;
-            if geometry != current || capture.geometry != geometry {
+            if geometry != current || shot.geometry != geometry {
                 return Err(ErrorCode::StaleGeometry);
             }
-            let version = digest(before.as_bytes());
-            tree.state_version = Some(version);
-            tree.observed_at = Some(captured_at);
-            image = Some(
-                redact::apply(&tree, CapturedFrame::new(capture, version, captured_at)).map_err(
+            capture = Some(shot);
+        } else {
+            captured_at = self.epoch.elapsed();
+        }
+        if let Some(hub) = self.browser.clone() {
+            let aligned = self
+                .native(session, &cancel, false, async {
+                    Ok(hub.align(session.id(), win, raw).await)
+                })
+                .await
+                .map_err(|e| e.error_code())?;
+            raw = aligned;
+        }
+        if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
+            return Err(ErrorCode::HandoffRequired);
+        }
+        let merged_signature = signature(&raw)?;
+        let mut tree = Pipeline::default().run(raw.clone(), opts);
+        let quality = TreeQuality::assess(&raw, &tree);
+        let version = digest(merged_signature.as_bytes());
+        tree.state_version = Some(version);
+        tree.observed_at = Some(captured_at);
+        let image = match capture {
+            Some(shot) => Some(
+                redact::apply(&tree, CapturedFrame::new(shot, version, captured_at)).map_err(
                     |e| match e {
                         redact::RedactionError::Stale => ErrorCode::StaleScreenshot,
                         _ => ErrorCode::HandoffRequired,
                     },
                 )?,
-            );
-        } else {
-            captured_at = self.epoch.elapsed();
-            tree.state_version = Some(digest(before.as_bytes()));
-            tree.observed_at = Some(captured_at);
-        }
+            ),
+            None => None,
+        };
         let windows = self
             .native(
                 session,
@@ -153,9 +189,56 @@ impl ActionRouter {
             info,
             raw,
             tree,
-            signature: before,
+            signature: merged_signature,
             image,
+            quality,
         })
+    }
+    pub(crate) fn rendered_diff_is_empty(
+        &self,
+        session: &Session,
+        fresh: &Fresh,
+        text_limit: Option<usize>,
+    ) -> bool {
+        let mut opts = RenderOpts::new(fresh.win.app.info.clone(), fresh.info.clone());
+        opts.text_limit = text_limit;
+        // Match SnapshotStore's delivered baseline, including secret-bearing
+        // labels/identifiers removed after Pipeline's password-value redaction.
+        let mut tree = fresh.tree.clone();
+        crate::snapshot::sanitize(&mut tree);
+        let current = RenderedState::from_tree(&tree, &opts);
+        lock(&session.actions)
+            .snapshots
+            .latest(&fresh.key())
+            .is_some_and(|previous| previous.rendered() == &current)
+    }
+    pub(crate) fn observation_attachment(
+        &self,
+        session: &Session,
+        fresh: &Fresh,
+        mode: ScreenshotMode,
+        text_limit: Option<usize>,
+    ) -> bool {
+        if let ScreenshotMode::Explicit(attach) = mode {
+            return attach;
+        }
+        let diff_is_empty = self.rendered_diff_is_empty(session, fresh, text_limit);
+        let pixels_changed = lock(&session.actions)
+            .snapshots
+            .latest_with_screenshot(&fresh.key())
+            .and_then(|previous| previous.screenshot())
+            .zip(fresh.image.as_ref())
+            .map(|(before, after)| {
+                before.geometry() != after.geometry() || before.pixels() != after.pixels()
+            });
+        self.auto_capture.observation(
+            &fresh.quality,
+            CaptureEvidence {
+                diff_is_empty,
+                pixels_changed,
+                ..CaptureEvidence::default()
+            },
+        )
     }
     pub(crate) fn publish(
         &self,

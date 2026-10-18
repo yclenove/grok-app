@@ -159,6 +159,15 @@ pub(crate) fn run(initial: PermissionSnapshot) -> Result<AgentStart, Failure> {
         let script = status_script(locale, &model.view());
         let _ = webview.evaluate_script(&script);
     });
+    // The caller parks this thread in Tokio next (serve) or exits (restart), so no
+    // AppKit event loop will run again. Hide and release the window now and give
+    // AppKit one turn to apply it; otherwise a dead window stays on screen with an
+    // I-beam cursor that ignores clicks and Esc (seen on macOS 27 after the user
+    // granted a permission and the window auto-closed).
+    window.set_visible(false);
+    drop(webview);
+    event_loop.run_return(|_, _, control| *control = ControlFlow::Exit);
+    drop(window);
     Ok(outcome)
 }
 

@@ -1,0 +1,17 @@
+{
+  "name": {
+    "message": "Grok Computer Use"
+  },
+  "description": {
+    "message": "Comparte una pestaña para solicitudes DOM autorizadas de Computer Use."
+  },
+  "share": {
+    "message": "Compartir esta pestaña"
+  },
+  "revoke": {
+    "message": "Dejar de compartir esta pestaña"
+  },
+  "unavailable": {
+    "message": "No se puede compartir esta pestaña"
+  }
+}

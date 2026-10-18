@@ -5,16 +5,18 @@ use super::{
 };
 use crate::{
     driver::{self, AppQuery, Cancel, Driver, DriverError, TreeOpts, WindowRef},
-    model::{Role, WindowPoint},
+    model::WindowPoint,
+    observe::AutoCapturePolicy,
     policy::{ActionIntent, Tool},
     session::{InputRelease, Session, WindowLocks},
+    settle::SettleEngine,
     snapshot::WindowKey,
 };
 use async_trait::async_trait;
 use gcu_host_api::{ApprovalProvider, CuEvent, EventSink, PolicyStore, SessionCtx};
 use gcu_protocol::{
     result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason},
-    tools::{BatchStep, GetAppStateParams},
+    tools::{ComputerBatchParams, GetAppStateParams},
     ErrorCode, ToolError,
 };
 use std::{
@@ -34,10 +36,14 @@ pub struct ActionRouter {
     pub(crate) approvals: Arc<dyn ApprovalProvider>,
     pub(crate) policy: Arc<dyn PolicyStore>,
     events: Arc<dyn EventSink>,
-    pub(super) locks: WindowLocks,
+    pub(crate) locks: WindowLocks,
     pub(crate) policy_version: AtomicU64,
     pub(crate) epoch: Instant,
     pub(crate) tree_opts: TreeOpts,
+    pub(crate) settle_engine: SettleEngine,
+    pub(crate) auto_capture: AutoCapturePolicy,
+    pub(crate) wait_engine: crate::wait::WaitEngine,
+    pub(crate) browser: Option<std::sync::Arc<crate::browser::Hub>>,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -62,7 +68,24 @@ impl ActionRouter {
             policy_version: AtomicU64::new(1),
             epoch: Instant::now(),
             tree_opts,
+            settle_engine: SettleEngine::default(),
+            auto_capture: AutoCapturePolicy::default(),
+            wait_engine: crate::wait::WaitEngine::default(),
+            browser: None,
         }
+    }
+    /// Inject settling configuration and monotonic time before sharing the router.
+    /// In-memory construction only; no waits, IO, timeout or cancellation.
+    pub fn with_settle_engine(mut self, engine: SettleEngine) -> Self {
+        self.wait_engine = crate::wait::WaitEngine::new(engine.clock());
+        self.settle_engine = engine;
+        self
+    }
+    /// Supply evaluated screenshot-quality boundaries before sharing the router.
+    /// In-memory construction only; no IO, waits, timeout or cancellation.
+    pub fn with_auto_capture_policy(mut self, policy: AutoCapturePolicy) -> Self {
+        self.auto_capture = policy;
+        self
     }
     /// Input-release adapter for Session::open. Native release is bounded by the
     /// Session stop channel, independently of action/approval queues.
@@ -104,7 +127,7 @@ impl ActionRouter {
                 };
                 opts.max_tree_nodes = params.max_tree_nodes.clamp(1, 5000) as usize;
                 let fresh = self
-                    .read(session, &win, params.include_screenshot, &opts)
+                    .read_with_mode(session, &win, params.include_screenshot, &opts)
                     .await
                     .map_err(|code| Box::new(error(code)))?;
                 let mut intent = ActionIntent::new(Tool::GetAppState);
@@ -133,29 +156,84 @@ impl ActionRouter {
                 // Read after the authorization wait, rather than releasing pre-approval
                 // contents that might now be obsolete.
                 let fresh = self
-                    .read(session, &win, params.include_screenshot, &opts)
+                    .read_with_mode(session, &win, params.include_screenshot, &opts)
                     .await
                     .map_err(|code| Box::new(error(code)))?;
-                self.publish_with_limit(session, fresh, params.include_screenshot, opts.text_limit)
+                let attach = self.observation_attachment(
+                    session,
+                    &fresh,
+                    params.include_screenshot,
+                    opts.text_limit,
+                );
+                self.publish_with_limit(session, fresh, attach, opts.text_limit)
             })
             .await
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?
     }
     /// Execute once: exact-handle/coordinate gates, policy and cancellable approval,
-    /// revalidate, perform, bounded settle, then a fresh state/diff. Unknown is never
-    /// retried. Session queue waits have no deadline; window-lock waits cap at 5s.
-    /// Native waits cap at 5s; settle defaults to 800ms (type_text 1500ms). Stop is
-    /// checked at every boundary and polled every 10ms while awaiting native/Host work.
+    /// revalidate, perform, bounded settle, then a fresh state/diff. `wait_for` does
+    /// not perform input; its horizon is at most 30s while each snapshot stays within
+    /// the 5s native ceiling. Unknown is never retried. Session queue waits have no
+    /// deadline; window-lock waits cap at 5s. Native waits cap at 5s; settle defaults
+    /// to 800ms (type_text 1500ms). Stop is checked at every boundary and polled every
+    /// 10ms while awaiting native/Host work.
     pub async fn execute(&self, session: &Session, call: ToolCall) -> ToolOutcome {
         let start = Instant::now();
         let initial = result(&call);
         let mut out = match self.check_boundary(session).await {
             Err(code) => outcome(initial, Some(error(code)), None),
-            Ok(()) => match session.enqueue(self.execute_queued(session, &call)).await {
+            Ok(()) => match session.enqueue(self.dispatch_queued(session, &call)).await {
                 Ok(out) => out,
                 Err(_) => outcome(initial, Some(error(ErrorCode::ApprovalDenied)), None),
             },
         };
+        self.finish(session, &call.call_id, &mut out, start);
+        out
+    }
+
+    /// Run one step that is already inside the session queue.
+    ///
+    /// `computer_batch` holds that queue for the whole batch. Calling [`Self::execute`]
+    /// again would deadlock. Authorization, gates, sensitive confirmation, Stop, and
+    /// the unknown-outcome rule are unchanged. Duration includes only this step.
+    ///
+    /// Blocking: window-lock waits cap at 5s, then native and approval waits.
+    /// Timeout: native calls cap at 5s; `wait_for` may use its own horizon.
+    /// Cancellation: Stop, session close, turn end, or dropping the future.
+    pub(crate) async fn execute_enqueued(&self, session: &Session, call: ToolCall) -> ToolOutcome {
+        let start = Instant::now();
+        let initial = result(&call);
+        let mut out = match self.check_boundary(session).await {
+            Err(code) => outcome(initial, Some(error(code)), None),
+            Ok(()) => self.dispatch_queued(session, &call).await,
+        };
+        self.finish(session, &call.call_id, &mut out, start);
+        out
+    }
+
+    /// Preflight `params`, then run each step through this router.
+    ///
+    /// A preflight failure does not enqueue and does not deliver input. Otherwise the
+    /// batch enqueues once. Each step uses the same approval, gate, confirm, Stop, and
+    /// stale paths as a single call. The batch wall clock is 60s on the settle clock.
+    /// Each native call still uses the 5s ceiling and [`crate::driver::DRIVER_DEADLINE`].
+    /// Those constants are not raised. An in-flight step may finish after 60s; later
+    /// steps do not start. Unknown outcomes are not replayed. Nested batches cannot be
+    /// represented.
+    ///
+    /// Blocking: the session queue has no deadline. Timeout: 60s total on the settle
+    /// clock, and 5s for each native call. Cancellation: Stop, session close, or
+    /// dropping the future.
+    pub async fn run_batch(
+        &self,
+        session: &Session,
+        call_id: &str,
+        params: ComputerBatchParams,
+    ) -> crate::batch::BatchReport {
+        crate::batch::run(self, session, call_id, params).await
+    }
+
+    fn finish(&self, session: &Session, call_id: &str, out: &mut ToolOutcome, start: Instant) {
         out.action.duration_ms = start.elapsed().as_millis() as u64;
         if let Some(state) = &mut out.state {
             state.state.action = Some(out.action.clone());
@@ -168,7 +246,7 @@ impl ActionRouter {
         if !session.is_closed() {
             lock(&session.actions)
                 .ledger
-                .record(&call.call_id, &out.action, self.epoch.elapsed());
+                .record(call_id, &out.action, self.epoch.elapsed());
             self.events.emit(
                 &SessionCtx {
                     session_id: session.id().into(),
@@ -194,9 +272,8 @@ impl ActionRouter {
                 },
             );
         }
-        out
     }
-    async fn execute_queued(&self, session: &Session, call: &ToolCall) -> ToolOutcome {
+    pub(crate) async fn execute_queued(&self, session: &Session, call: &ToolCall) -> ToolOutcome {
         let mut action = result(call);
         let win = match self
             .resolve(session, &call.app, call.window.as_deref())
@@ -268,14 +345,8 @@ impl ActionRouter {
         }
         let events = self.driver.subscribe(&win);
         let cancel = Cancel::default();
-        let delivery = self
-            .native(
-                session,
-                &cancel,
-                true,
-                self.driver.perform(&plan.request, &cancel),
-            )
-            .await;
+        let delivery =
+            crate::browser::dispatch(self, session, &cancel, &plan.request, &before.raw).await;
         match delivery {
             Err(e) => {
                 if e.maybe_executed()
@@ -310,73 +381,8 @@ impl ActionRouter {
                 action.outcome = Outcome::Done;
             }
         }
-        let budget = call
-            .settle_budget_ms
-            .unwrap_or(if matches!(call.action, BatchStep::TypeText(_)) {
-                1500
-            } else {
-                800
-            })
-            .min(1500);
-        match self
-            .settle(session, &win, events, Duration::from_millis(budget))
+        self.settle_and_publish(session, call, &gate, action, before, events)
             .await
-        {
-            Ok(settle) => action.settle = settle,
-            Err(code) => return self.failure(session, action, code, &win).await,
-        }
-        let after = match self
-            .read(
-                session,
-                &win,
-                self.driver.capabilities().observe.screenshot,
-                &self.tree_opts,
-            )
-            .await
-        {
-            Ok(f) => f,
-            Err(code) => return self.failure(session, action, code, &win).await,
-        };
-        let before_opts =
-            crate::render::RenderOpts::new(before.win.app.info.clone(), before.info.clone());
-        let after_opts =
-            crate::render::RenderOpts::new(after.win.app.info.clone(), after.info.clone());
-        let tree_changed = crate::render::render_text(&before.tree, &before_opts)
-            != crate::render::render_text(&after.tree, &after_opts);
-        let pixels_changed = before
-            .image
-            .as_ref()
-            .zip(after.image.as_ref())
-            .is_some_and(|(a, b)| a.geometry() != b.geometry() || a.pixels() != b.pixels());
-        action.effect = if tree_changed || pixels_changed {
-            Effect::Changed
-        } else {
-            Effect::NoVisibleChange
-        };
-        if action.effect == Effect::NoVisibleChange {
-            action.notes.push(
-                "No visible change after delivery; the action may not have taken effect.".into(),
-            );
-        }
-        if action.delivery != Delivery::Foreground {
-            action
-                .notes
-                .push("Delivered without foreground activation.".into());
-        }
-        let canvas = after.raw.root.is_none()
-            || after
-                .tree
-                .nodes()
-                .iter()
-                .any(|(_, n)| n.node.role == Role::Canvas);
-        let attach = !gate.points.is_empty()
-            || canvas
-            || (!tree_changed && pixels_changed)
-            || call.attach_image;
-        match self.publish(session, after, attach) {
-            Ok(state) => outcome(action, None, Some(state)),
-            Err(e) => outcome(action, Some(*e), None),
-        }
     }
     pub(crate) async fn check_boundary(&self, session: &Session) -> Result<(), ErrorCode> {
         if session.is_stopped() || session.activity().stop_requested() {
@@ -461,7 +467,7 @@ impl ActionRouter {
         cancel_on_drop.0 = None;
         result
     }
-    async fn resolve(
+    pub(crate) async fn resolve(
         &self,
         session: &Session,
         app: &str,
@@ -540,7 +546,7 @@ pub(crate) fn error(code: ErrorCode) -> ToolError {
         state: None,
     }
 }
-fn result(call: &ToolCall) -> ActionResult {
+pub(crate) fn result(call: &ToolCall) -> ActionResult {
     ActionResult {
         tool: route::tool(&call.action),
         target: None,
@@ -568,7 +574,7 @@ pub(crate) fn outcome(
         windows: Vec::new(),
     }
 }
-fn window_lock_key(win: &WindowRef) -> String {
+pub(crate) fn window_lock_key(win: &WindowRef) -> String {
     format!("{}:{}:{}", win.app.info.id.len(), win.app.info.id, win.id)
 }
 fn wire_delivery(d: driver::Delivery) -> Delivery {

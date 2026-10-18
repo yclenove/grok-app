@@ -14,7 +14,9 @@ use windows::Win32::{
 #[allow(dead_code)]
 #[path = "../../src/input/hook_probe.rs"]
 mod policy;
+use policy as hook_probe;
 use policy::MouseProbe;
+use policy::{Cursor, Desktop};
 #[path = "../../src/input/ffi/safety/mouse.rs"]
 mod mouse;
 

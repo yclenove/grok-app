@@ -1,12 +1,54 @@
-//! Win32 records shared with the CI-only probe matrix. Never selects a fallback.
-use super::MouseProbe;
+//! Physical-pixel Win32 records shared with the disposable probe matrix.
+use super::{Cursor, Desktop, MouseProbe};
 use windows::Win32::{
     Foundation::POINT,
     UI::{HiDpi::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-pub(super) fn inputs(mode: MouseProbe, tag: usize) -> Result<Vec<INPUT>, String> {
-    let record = |dx, dy, data, flags| INPUT {
+pub(super) struct Dpi(DPI_AWARENESS_CONTEXT);
+impl Dpi {
+    pub(super) fn enter() -> Result<Self, String> {
+        // SAFETY: only this sender thread changes; Drop restores every exit path.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            Err("physical DPI context unavailable".into())
+        } else {
+            Ok(Self(previous))
+        }
+    }
+}
+impl Drop for Dpi {
+    fn drop(&mut self) {
+        // SAFETY: restore the successfully saved, same-thread DPI context.
+        unsafe {
+            SetThreadDpiAwarenessContext(self.0);
+        }
+    }
+}
+pub(super) fn cursor() -> Result<Cursor, String> {
+    let mut point = POINT::default();
+    // SAFETY: initialized writable POINT; physical pixels independent of app DPI.
+    unsafe { GetPhysicalCursorPos(&mut point) }
+        .map_err(|e| format!("GetPhysicalCursorPos: {e}"))?;
+    Ok(Cursor {
+        x: point.x,
+        y: point.y,
+    })
+}
+pub(super) fn desktop() -> Desktop {
+    // SAFETY: scalar read-only metrics in the caller's per-monitor-aware context.
+    unsafe {
+        Desktop {
+            left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            width: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            height: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        }
+    }
+}
+fn record(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS, tag: usize) -> INPUT {
+    INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
@@ -18,74 +60,65 @@ pub(super) fn inputs(mode: MouseProbe, tag: usize) -> Result<Vec<INPUT>, String>
                 ..Default::default()
             },
         },
-    };
+    }
+}
+pub(super) fn absolute(tag: usize, at: (i32, i32)) -> Vec<INPUT> {
+    vec![record(
+        at.0,
+        at.1,
+        0,
+        MOUSEEVENTF_ABSOLUTE
+            | MOUSEEVENTF_VIRTUALDESK
+            | MOUSEEVENTF_MOVE
+            | MOUSEEVENTF_MOVE_NOCOALESCE,
+        tag,
+    )]
+}
+pub(super) fn inputs(mode: MouseProbe, tag: usize) -> Result<Vec<INPUT>, String> {
     Ok(match mode {
         MouseProbe::ZeroMove => vec![record(
             0,
             0,
             0,
             MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+            tag,
         )],
-        MouseProbe::ZeroWheel => vec![record(0, 0, 0, MOUSEEVENTF_WHEEL)],
-        MouseProbe::ZeroHWheel => vec![record(0, 0, 0, MOUSEEVENTF_HWHEEL)],
+        MouseProbe::ZeroWheel => vec![record(0, 0, 0, MOUSEEVENTF_WHEEL, tag)],
+        MouseProbe::ZeroHWheel => vec![record(0, 0, 0, MOUSEEVENTF_HWHEEL, tag)],
+        // The product uses dispatch()'s idle and post-cursor checks. This direct
+        // constructor is used only by the opt-in diagnostic matrix.
+        #[cfg(any(test, all(feature = "test-worker-faults", debug_assertions)))]
         MouseProbe::AbsoluteSamePosition => {
-            // SAFETY: change only this sender thread; restore on every exit path.
-            let previous =
-                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-            if previous.0.is_null() {
-                return Err("physical DPI context unavailable".into());
-            }
-            struct Dpi(DPI_AWARENESS_CONTEXT);
-            impl Drop for Dpi {
-                fn drop(&mut self) {
-                    // SAFETY: restore this thread's successfully saved DPI context.
-                    unsafe {
-                        SetThreadDpiAwarenessContext(self.0);
-                    }
-                }
-            }
-            let _dpi = Dpi(previous);
-            let mut point = POINT::default();
-            // SAFETY: scalar read-only desktop queries and bounded writable POINT.
-            let (left, top, width, height) = unsafe {
-                GetPhysicalCursorPos(&mut point)
-                    .map_err(|e| format!("GetPhysicalCursorPos: {e}"))?;
+            let _dpi = Dpi::enter()?;
+            let point = cursor()?;
+            let bounds = desktop();
+            absolute(
+                tag,
                 (
-                    GetSystemMetrics(SM_XVIRTUALSCREEN),
-                    GetSystemMetrics(SM_YVIRTUALSCREEN),
-                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
-                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
-                )
-            };
-            // Target the middle of the current physical pixel's normalized bin.
-            // Concurrent physical input can still race this query and be undone;
-            // this candidate therefore requires an explicit debug/CI opt-in.
-            let normalize = |position: i32, origin: i32, size: i32| {
-                let offset = i64::from(position) - i64::from(origin);
-                if size <= 0 || offset < 0 || offset >= i64::from(size) {
-                    return Err("cursor outside virtual desktop".to_string());
-                }
-                Ok(((offset * 65536 + 32768) / i64::from(size)).min(65535) as i32)
-            };
-            vec![record(
-                normalize(point.x, left, width)?,
-                normalize(point.y, top, height)?,
-                0,
-                MOUSEEVENTF_ABSOLUTE
-                    | MOUSEEVENTF_VIRTUALDESK
-                    | MOUSEEVENTF_MOVE
-                    | MOUSEEVENTF_MOVE_NOCOALESCE,
-            )]
+                    super::hook_probe::normalize(point.x, bounds.left, bounds.width)?,
+                    super::hook_probe::normalize(point.y, bounds.top, bounds.height)?,
+                ),
+            )
         }
-        // Relative acceleration/clipping can prevent exact restoration. CI only.
+        #[cfg(not(any(test, all(feature = "test-worker-faults", debug_assertions))))]
+        MouseProbe::AbsoluteSamePosition => {
+            return Err("absolute mouse probe requires guarded dispatch".into());
+        }
+        #[cfg(any(test, all(feature = "test-worker-faults", debug_assertions)))]
         MouseProbe::RelativePair => vec![
-            record(1, 0, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE),
-            record(-1, 0, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE),
+            record(1, 0, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE, tag),
+            record(
+                -1,
+                0,
+                0,
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+                tag,
+            ),
         ],
-        // May trigger application navigation, activation or a global shortcut.
+        #[cfg(any(test, all(feature = "test-worker-faults", debug_assertions)))]
         MouseProbe::XButtonPair => vec![
-            record(0, 0, 1, MOUSEEVENTF_XDOWN),
-            record(0, 0, 1, MOUSEEVENTF_XUP),
+            record(0, 0, 1, MOUSEEVENTF_XDOWN, tag),
+            record(0, 0, 1, MOUSEEVENTF_XUP, tag),
         ],
     })
 }
