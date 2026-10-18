@@ -13,7 +13,19 @@ async fn authorization_scopes_follow_turn_session_and_trusted_host_persistence()
         ApprovalDecision::Session,
         ApprovalDecision::Always,
     ] {
-        let mut h = Harness::new("form", &[decision, ApprovalDecision::Deny]);
+        // An Unknown fixture has no content hash or Linux dev/inode, so Always
+        // must not stick. The file id plus the harness digest is a complete key.
+        let mut h = if decision == ApprovalDecision::Always {
+            Harness::driver(
+                gcu_driver_fake::FakeDriver::from_scene("form")
+                    .unwrap()
+                    .with_linux_file_id(1, 2)
+                    .unwrap(),
+                &[decision, ApprovalDecision::Deny],
+            )
+        } else {
+            Harness::new("form", &[decision, ApprovalDecision::Deny])
+        };
         h.initialize(false).await;
         let first = h.observe().await;
         assert_ne!(first["isError"], true, "{decision:?}: {first}");
@@ -172,6 +184,7 @@ fn elicitation_meta_strips_bidirectional_controls_from_model_reason() {
             sha256: None,
             signature: SignatureState::Unknown,
             image_path: "/fixtures/form".into(),
+            proof: gcu_host_api::GrantProof::default(),
         },
     };
     let reason = ModelReason::new("\u{202E}<pay>\nnow");

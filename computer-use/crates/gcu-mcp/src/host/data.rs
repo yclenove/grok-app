@@ -19,6 +19,14 @@ pub(super) fn identity(id: &api::AppIdentity) -> wire::Identity {
             api::SignatureState::Unknown => wire::Signature::Unknown,
         },
         image_path: id.image_path.clone(),
+        proof: wire::GrantProof {
+            cdhash: id.proof.cdhash.clone(),
+            certificate_sha256: id.proof.certificate_sha256.clone(),
+            product: id.proof.product.clone(),
+            build: id.proof.build.clone(),
+            file_dev: id.proof.file_dev,
+            file_inode: id.proof.file_inode,
+        },
     }
 }
 fn api_identity(id: wire::Identity) -> api::AppIdentity {
@@ -39,6 +47,14 @@ fn api_identity(id: wire::Identity) -> api::AppIdentity {
             wire::Signature::Unknown => api::SignatureState::Unknown,
         },
         image_path: id.image_path,
+        proof: api::GrantProof {
+            cdhash: id.proof.cdhash,
+            certificate_sha256: id.proof.certificate_sha256,
+            product: id.proof.product,
+            build: id.proof.build,
+            file_dev: id.proof.file_dev,
+            file_inode: id.proof.file_inode,
+        },
     }
 }
 pub(super) fn image(image: &api::ImageRef) -> wire::Image {

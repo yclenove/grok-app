@@ -49,6 +49,7 @@ fn app() -> App {
             sha256: Some(digest()),
             signature: Signature::Valid,
             image_path: "/usr/bin/editor".to_owned(),
+            proof: Default::default(),
         },
         icon: None,
     }

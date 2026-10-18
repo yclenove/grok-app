@@ -258,7 +258,10 @@ pub enum RouteLimit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalRequest {
     /// App the card names.
-    pub app: AppInfo,
+    ///
+    /// Boxed so [`PolicyDecision`] stays within clippy's variant-size limit
+    /// after the persistent-grant proof fields.
+    pub app: Box<AppInfo>,
     /// Coarse risk.
     pub risk: Risk,
     /// Model-provided reason, when present.
@@ -372,7 +375,7 @@ impl PolicyEngine {
         let binding = binding_of(ctx, intent);
         if intent.tool.needs_auth() && ctx.grants.covers(ctx.config, ctx.app).is_none() {
             return PolicyDecision::NeedApproval(ApprovalRequest {
-                app: ctx.app.clone(),
+                app: Box::new(ctx.app.clone()),
                 risk: risk_level,
                 reason: intent.reason.clone(),
                 binding,

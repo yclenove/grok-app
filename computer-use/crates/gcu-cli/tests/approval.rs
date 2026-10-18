@@ -7,8 +7,8 @@ use gcu_cli::approval::{
     DialogCopy, HookRequest, StoreFault,
 };
 use gcu_host_api::{
-    AppIdentity, AppInfo, ApprovalDecision, Cancel, HandoffReason, ImageRef, Platform, Risk,
-    SignatureState,
+    AppIdentity, AppInfo, ApprovalDecision, Cancel, GrantProof, HandoffReason, ImageRef, Platform,
+    Risk, SignatureState,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,11 @@ fn sample(name: &str, signature: SignatureState) -> AppInfo {
             sha256: Some([0xab; 32]),
             signature,
             image_path: "/usr/bin/demo".into(),
+            proof: GrantProof {
+                file_dev: Some(1),
+                file_inode: Some(2),
+                ..GrantProof::default()
+            },
         },
         icon: Some(ImageRef::from_bytes("image/png", 1, 1, vec![1, 2, 3])),
     }
@@ -315,6 +320,8 @@ fn grant_file_round_trip_revoke_and_corrupt_fail_closed() {
     );
     assert!(!revoke(&path, "linux:missing").unwrap());
 
+    // A valid signature used to match the publisher alone and ignore path/hash.
+    // The record below also omits the certificate, so it does not authorize.
     let windows = AppIdentity {
         platform: Platform::Windows,
         key: r"C:\App.exe".into(),
@@ -323,6 +330,7 @@ fn grant_file_round_trip_revoke_and_corrupt_fail_closed() {
         sha256: None,
         signature: SignatureState::Valid,
         image_path: r"D:\moved.exe".into(),
+        proof: GrantProof::default(),
     };
     let other = AppIdentity {
         image_path: r"E:\other.exe".into(),
@@ -331,7 +339,8 @@ fn grant_file_round_trip_revoke_and_corrupt_fail_closed() {
     };
     let win_path = dir.path().join("windows.json");
     grant(&win_path, &windows).unwrap();
-    assert!(allows(&win_path, &other));
+    assert!(!allows(&win_path, &windows));
+    assert!(!allows(&win_path, &other));
     assert!(storage_key(&windows).contains(r"C:\App.exe"));
 
     grant(&path, &app.identity).unwrap();
@@ -518,4 +527,198 @@ fn approval_environment_gate_matches_the_build() {
         .assert()
         .success();
     assert!(!state_file(&home).exists());
+}
+
+fn wire(id: &AppIdentity) -> gcu_host_protocol::messages::Identity {
+    use gcu_host_protocol::messages::{GrantProof, Identity, Platform as WirePlatform, Signature};
+    Identity {
+        platform: match id.platform {
+            Platform::Macos => WirePlatform::Macos,
+            Platform::Windows => WirePlatform::Windows,
+            Platform::Linux => WirePlatform::Linux,
+        },
+        key: id.key.clone(),
+        team_id: id.team_id.clone(),
+        publisher: id.publisher.clone(),
+        sha256: id.sha256,
+        signature: match id.signature {
+            SignatureState::Valid => Signature::Valid,
+            SignatureState::Invalid => Signature::Invalid,
+            SignatureState::Unsigned => Signature::Unsigned,
+            SignatureState::Unknown => Signature::Unknown,
+        },
+        image_path: id.image_path.clone(),
+        proof: GrantProof {
+            cdhash: id.proof.cdhash.clone(),
+            certificate_sha256: id.proof.certificate_sha256.clone(),
+            product: id.proof.product.clone(),
+            build: id.proof.build.clone(),
+            file_dev: id.proof.file_dev,
+            file_inode: id.proof.file_inode,
+        },
+    }
+}
+
+fn wire_allows(saved: &AppIdentity, current: &AppIdentity) -> bool {
+    let matched = gcu_host_protocol::persistent_grant_matches(&wire(saved), &wire(current));
+    assert_eq!(saved.grant_eq(current), matched);
+    matched
+}
+
+fn complete_mac() -> AppIdentity {
+    AppIdentity {
+        platform: Platform::Macos,
+        key: "com.example.notes".into(),
+        team_id: Some("TEAM123456".into()),
+        publisher: Some("Example".into()),
+        sha256: Some([0x11; 32]),
+        signature: SignatureState::Valid,
+        image_path: "/Applications/Notes.app/Contents/MacOS/Notes".into(),
+        proof: GrantProof {
+            cdhash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            certificate_sha256: Some("22".repeat(32)),
+            product: Some("Notes".into()),
+            build: Some("100".into()),
+            ..GrantProof::default()
+        },
+    }
+}
+
+fn replace_owner_bytes(path: &Path, body: &[u8], seed: &AppIdentity) {
+    grant(path, seed).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+    use std::io::Write;
+    file.write_all(body).unwrap();
+}
+
+fn complete_windows() -> AppIdentity {
+    AppIdentity {
+        platform: Platform::Windows,
+        key: r"C:\Program Files\Notes\Notes.exe".into(),
+        team_id: None,
+        publisher: Some("CN=Publisher".into()),
+        sha256: Some([0x22; 32]),
+        signature: SignatureState::Valid,
+        image_path: r"C:\Program Files\Notes\Notes.exe".into(),
+        proof: GrantProof {
+            certificate_sha256: Some("33".repeat(32)),
+            product: Some("Notes".into()),
+            ..GrantProof::default()
+        },
+    }
+}
+
+#[test]
+fn persistent_grant_reauth_agrees_on_the_file_and_the_host_wire() {
+    let dir = TempDir::new().unwrap();
+    let mac = complete_mac();
+    let mac_path = dir.path().join("mac.json");
+    grant(&mac_path, &mac).unwrap();
+    assert!(allows(&mac_path, &mac));
+    assert!(wire_allows(&mac, &mac));
+
+    let mut rebuilt = mac.clone();
+    rebuilt.proof.cdhash = Some("ff".repeat(20));
+    assert!(!allows(&mac_path, &rebuilt));
+    assert!(!wire_allows(&mac, &rebuilt));
+
+    let mut other_cert = mac.clone();
+    other_cert.proof.certificate_sha256 = Some("99".repeat(32));
+    assert_eq!(mac.publisher, other_cert.publisher);
+    assert!(!allows(&mac_path, &other_cert));
+    assert!(!wire_allows(&mac, &other_cert));
+
+    let mut missing_hash = mac.clone();
+    missing_hash.sha256 = None;
+    assert!(!allows(&mac_path, &missing_hash));
+    assert!(!wire_allows(&mac, &missing_hash));
+
+    let windows = complete_windows();
+    let win_path = dir.path().join("win.json");
+    grant(&win_path, &windows).unwrap();
+    assert!(allows(&win_path, &windows));
+    let mut moved = windows.clone();
+    moved.image_path = r"D:\Notes\Notes.exe".into();
+    moved.key = moved.image_path.clone();
+    moved.sha256 = Some([0x66; 32]);
+    assert!(!allows(&win_path, &moved));
+    assert!(!wire_allows(&windows, &moved));
+
+    let linux = sample("Demo", SignatureState::Unsigned).identity;
+    let linux_path = dir.path().join("linux.json");
+    grant(&linux_path, &linux).unwrap();
+    assert!(allows(&linux_path, &linux));
+    assert!(wire_allows(&linux, &linux));
+    let mut rehashed = linux.clone();
+    rehashed.sha256 = Some([0x99; 32]);
+    assert!(!allows(&linux_path, &rehashed));
+    assert!(!wire_allows(&linux, &rehashed));
+}
+
+#[test]
+fn legacy_narrow_record_loads_but_does_not_authorize_until_a_new_grant() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("approvals.json");
+    let hash = "11".repeat(32);
+    let body = format!(
+        r#"{{
+              "macos:com.example.notes": {{
+                "decision": "always",
+                "granted_at": "2020-01-01T00:00:00Z",
+                "identity": {{
+                  "team_id": "TEAM123456",
+                  "publisher": "Example",
+                  "path_hash": "{hash}",
+                  "platform": "macos",
+                  "key": "com.example.notes",
+                  "signature": "valid",
+                  "image_path": "/Applications/Notes.app/Contents/MacOS/Notes"
+                }}
+              }}
+            }}"#
+    );
+    // `grant` creates the owner-only file. Replacing the bytes keeps that mode.
+    replace_owner_bytes(&path, body.as_bytes(), &complete_mac());
+    let listed = list_text(&path, "en").unwrap();
+    assert!(listed.contains("macos:com.example.notes"), "{listed}");
+    let mut legacy = complete_mac();
+    legacy.proof = GrantProof::default();
+    assert!(!allows(&path, &legacy));
+    assert!(!allows(&path, &complete_mac()));
+    assert!(!wire_allows(&legacy, &legacy));
+    grant(&path, &complete_mac()).unwrap();
+    assert!(allows(&path, &complete_mac()));
+    assert!(!allows(&path, &legacy));
+    assert!(revoke(&path, "macos:com.example.notes").unwrap());
+}
+
+#[test]
+fn malformed_proof_field_is_corrupt_and_left_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("approvals.json");
+    let app = sample("Demo", SignatureState::Unsigned);
+    let body = br#"{
+      "linux:demo.app": {
+        "decision": "always",
+        "granted_at": "2020-01-01T00:00:00Z",
+        "identity": {
+          "platform": "linux",
+          "key": "demo.app",
+          "signature": "unsigned",
+          "image_path": "/usr/bin/demo",
+          "file_dev": "nope"
+        }
+      }
+    }"#;
+    replace_owner_bytes(&path, body, &app.identity);
+    assert!(!allows(&path, &app.identity));
+    assert_eq!(
+        grant(&path, &app.identity).unwrap_err(),
+        StoreFault::Corrupt
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), body);
 }

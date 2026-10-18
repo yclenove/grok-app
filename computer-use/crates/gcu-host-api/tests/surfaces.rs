@@ -3,8 +3,8 @@
 
 use gcu_host_api::testing::{MemoryPolicyStore, NoopOverlay, RecordingEventSink};
 use gcu_host_api::{
-    AppIdentity, CursorKind, EventSink, ImageRef, OverlayProvider, Platform, PolicyConfig,
-    PolicyStore, ScreenPoint, SessionCtx, SignatureState, StatusText, WindowInfo,
+    AppIdentity, CursorKind, EventSink, GrantProof, ImageRef, OverlayProvider, Platform,
+    PolicyConfig, PolicyStore, ScreenPoint, SessionCtx, SignatureState, StatusText, WindowInfo,
 };
 use gcu_protocol::result::Outcome;
 use gcu_protocol::ToolName;
@@ -20,10 +20,17 @@ fn macos_signed() -> AppIdentity {
         platform: Platform::Macos,
         key: "com.example.notes".into(),
         team_id: Some("TEAM123456".into()),
-        publisher: None,
+        publisher: Some("Example Publisher".into()),
         sha256: Some([0x11; 32]),
         signature: SignatureState::Valid,
         image_path: "/Applications/Notes.app/Contents/MacOS/Notes".into(),
+        proof: GrantProof {
+            cdhash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            certificate_sha256: Some("22".repeat(32)),
+            product: Some("Notes".into()),
+            build: Some("100".into()),
+            ..GrantProof::default()
+        },
     }
 }
 
@@ -36,6 +43,11 @@ fn linux_app() -> AppIdentity {
         sha256: Some([0x33; 32]),
         signature: SignatureState::Unsigned,
         image_path: "/usr/bin/notes".into(),
+        proof: GrantProof {
+            file_dev: Some(1),
+            file_inode: Some(2),
+            ..GrantProof::default()
+        },
     }
 }
 
@@ -52,14 +64,19 @@ fn memory_policy_always_allowed_uses_grant_eq() {
     assert!(!store.always_allowed(&granted));
     store.insert_always(granted.clone());
     store.insert_always(granted.clone());
+    assert_eq!(store.load().always.len(), 1);
+    assert!(store.always_allowed(&granted));
     let mut moved = granted.clone();
     moved.image_path = "/Applications/Moved.app/Contents/MacOS/Notes".into();
     moved.sha256 = Some([0x55; 32]);
-    assert!(store.always_allowed(&moved));
-    assert_eq!(store.load().always.len(), 1);
-    assert_ne!(store.load().always[0].image_path, moved.image_path);
+    assert!(!store.always_allowed(&moved));
+    assert_eq!(store.load().always[0].image_path, granted.image_path);
 
-    store.remove_always(&moved);
+    let mut folded = granted.clone();
+    folded.proof.cdhash = granted.proof.cdhash.as_deref().map(str::to_ascii_uppercase);
+    assert_ne!(granted, folded);
+    assert!(store.always_allowed(&folded));
+    store.remove_always(&folded);
     assert!(!store.always_allowed(&granted));
     assert!(store.load().always.is_empty());
 }

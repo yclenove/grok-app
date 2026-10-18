@@ -16,6 +16,7 @@ impl ImageBinding {
             signature: app.identity.signature,
             image_path: app.identity.image_path.clone(),
             pid: app.pid,
+            proof: app.identity.proof.clone(),
         }
     }
 
@@ -28,6 +29,7 @@ impl ImageBinding {
             sha256: self.sha256_hex.as_deref().and_then(hex_decode_32),
             signature: self.signature,
             image_path: self.image_path.clone(),
+            proof: self.proof.clone(),
         }
     }
 }

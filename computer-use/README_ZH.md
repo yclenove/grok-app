@@ -283,7 +283,7 @@ gcu will modify files under ~/.grok (MCP config and the Stop hook). Continue? [y
 |---|---|---|
 | 本轮（`turn`） | 到本轮结束。Grok 的 Stop 钩子发送 `end_turn`。Codex 使用 `notify`。没有钩子时，空闲 45 秒结束本轮。 | 否。 |
 | 本会话（`session`） | 到 MCP 会话关闭。 | 否。 |
-| 始终允许（`always`） | 到你撤销。 | 是，写在 `approvals.json`，模式 `0600`。 |
+| 始终允许（`always`） | 到你撤销。路径、内容哈希、代码哈希、证书、产品或 build 有变化时，要重新批准。 | 是，写在 `approvals.json`，模式 `0600`。 |
 | 拒绝（`deny`） | 仅这一次请求。 | 否。 |
 
 客户端如果提供表单 elicitation，会先在工具调用里询问。选项是 `turn`、`session`、`always`、`deny`。elicitation 里的 `always` 不会被保存。取消不是批准，无头客户端立刻取消也一样。然后本地对话框再问。你在那个对话框里选择始终允许之后，才会写入 `approvals.json`。

@@ -29,6 +29,46 @@ pub enum Signature {
     Unknown,
 }
 
+/// Code hash, certificate, product, build, and Linux file identity.
+///
+/// Absent or empty on a legacy record. Persistent matching does not treat
+/// that omission as a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct GrantProof {
+    /// macOS code-directory hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdhash: Option<String>,
+    /// SHA-256 of the signing certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_sha256: Option<String>,
+    /// OS product name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// macOS bundle version. Windows build identity is the content hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// Linux device id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_dev: Option<u64>,
+    /// Linux inode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_inode: Option<u64>,
+}
+
+impl GrantProof {
+    /// True when every fact is absent.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cdhash.is_none()
+            && self.certificate_sha256.is_none()
+            && self.product.is_none()
+            && self.build.is_none()
+            && self.file_dev.is_none()
+            && self.file_inode.is_none()
+    }
+}
+
 /// OS-verified authorization identity; model names never establish identity.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +87,9 @@ pub struct Identity {
     pub signature: Signature,
     /// Canonical executable path.
     pub image_path: String,
+    /// Extra §7.2 facts. Missing on records written before this key.
+    #[serde(default, skip_serializing_if = "GrantProof::is_empty")]
+    pub proof: GrantProof,
 }
 
 /// Application approval context.
