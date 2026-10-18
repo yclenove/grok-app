@@ -57,6 +57,7 @@ fn golden_check_tampered_file_fails_without_rewriting() {
     golden(&temp.0, true).unwrap();
     for file in [
         "tools.json",
+        "tools-browser.json",
         "errors.json",
         "profiles/minimal.json",
         "profiles/default.json",

@@ -1,6 +1,7 @@
 //! Native discovery/actions; smoke-windows.ps1 supplies independent app oracles.
 use super::harness::{
-    attempt, foreground_unavailable, poll_async, progress, DesktopClock, Outcome,
+    attempt, foreground_unavailable, poll_async, progress, silent_mouse_environment, DesktopClock,
+    Outcome,
 };
 use super::live::{self, unsafe_desktop};
 use gcu_core::{
@@ -135,6 +136,14 @@ async fn actions(driver: &WindowsDriver, scenario: Scenario) -> Result<Outcome, 
         == gcu_protocol::capabilities::ForegroundCapability::Unavailable
     {
         return skip_foreground(&driver.doctor().await.issues);
+    }
+    if let Some(skip) = silent_mouse_environment(super::unsafe_mouse_probe::decision()?) {
+        return skip.map(|outcome| match outcome {
+            Outcome::Skip(reason) => Outcome::Skip(format!(
+                "{discovery}; foreground input only skipped; {reason}"
+            )),
+            other => other,
+        });
     }
     if let Err(error) = activate(driver, &win).await {
         // ADR 0013: the foreground capability stays open while only the mouse

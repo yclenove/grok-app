@@ -183,6 +183,23 @@ fn webview_identity_overlay_and_browser_cannot_read_media_approve_or_emit_events
         "cu-overlay-controls",
         "cu_approval_decide"
     ));
+    for command in [
+        "cu_browser_state",
+        "cu_browser_navigate",
+        "cu_browser_back",
+        "cu_browser_forward",
+        "cu_browser_reload",
+    ] {
+        assert!(command_allowed("cu-browser-chrome", command), "{command}");
+        assert!(!command_allowed("cu-browser-content", command), "{command}");
+        assert!(!command_allowed("cu-browser", command), "{command}");
+    }
+    assert!(!command_allowed("cu-browser-chrome", "cu_approval_decide"));
+    assert!(!command_allowed("cu-browser-chrome", "cu_resume"));
+    assert!(!command_allowed(
+        "cu-browser-content",
+        "media_server_endpoint"
+    ));
 }
 
 #[test]

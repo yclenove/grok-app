@@ -317,7 +317,7 @@ async fn rpc(
         let answer = tokio::select! {biased;
             _=peer.disconnected()=>return Ok(()),
             _=stop_peer.disconnected()=>return Err(Error::Disconnected),
-            answer=dispatch(&request, driver.clone(), host.clone(), &sessions, route_note)=>answer,
+            answer=dispatch(&request, driver.clone(), host.clone(), &sessions, &peer, route_note)=>answer,
         };
         let success = answer.is_ok();
         if shutdown && success {
@@ -332,6 +332,7 @@ async fn dispatch(
     driver: Arc<dyn Driver>,
     host: Arc<RemoteHost>,
     sessions: &Sessions,
+    peer: &Peer,
     route_note: &str,
 ) -> Result<Value, w::RpcError> {
     match request.method.as_str() {
@@ -379,8 +380,14 @@ async fn dispatch(
                 .remove(&p.session_id)
                 .ok_or_else(|| w::RpcError::new(-32004, "unknown session"))?;
             entry.remote.lock().await.close().await.map_err(internal)?;
+            if let Err(gcu_protocol::builtin_browser::ApplyFault::Saturated) =
+                gcu_mcp::browser_tool::clear_owner(&p.session_id).await
+            {
+                peer.close();
+            }
             encode(w::Empty {})
         }
+        "engine.browser.sync" => crate::engine_browser::sync(request, peer).await,
         "engine.policy.changed" => {
             let p: w::PolicyChanged = parse(request.params.clone())?;
             host.policy_changed(p.version).await.map_err(internal)?;
@@ -404,6 +411,14 @@ async fn dispatch(
         }
         "engine.screenshot.get" => {
             let p: w::ScreenshotGet = parse(request.params.clone())?;
+            if gcu_protocol::builtin_browser::with_shared(|book| {
+                book.image_blocked(&p.session_id, &p.id)
+            }) {
+                return Err(w::RpcError::new(
+                    -32004,
+                    "image unavailable in this session",
+                ));
+            }
             let entry = lookup(sessions, &p.session_id).await?;
             let remote = entry.remote.lock().await;
             let image = remote

@@ -18,6 +18,12 @@ pub(super) struct Window {
 }
 type Recovery = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
+/// How long one action-time proof may wait for the paired hook callbacks. The
+/// startup step budget is the same one second. Longer would only make a machine
+/// that cannot prove the mouse hook (a runner without a pointer stack) spend the
+/// whole driver deadline on every foreground action before refusing.
+pub(crate) const FOREGROUND_PROOF_BUDGET: Duration = Duration::from_millis(1000);
+
 impl GuardEvents {
     pub(crate) fn injecting(&self) -> bool {
         self.window.lock().unwrap_or_else(|p| p.into_inner()).phase == Phase::Injecting
@@ -88,6 +94,7 @@ impl SafetyGuard {
                 DriverError::CapabilityUnavailable
             });
         }
+        let proof_deadline = deadline.min(tokio::time::Instant::now() + FOREGROUND_PROOF_BUDGET);
         let generation = {
             let mut window = self.events.window.lock().unwrap_or_else(|p| p.into_inner());
             window.generation = window.generation.wrapping_add(1);
@@ -145,7 +152,7 @@ impl SafetyGuard {
             }
             tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(DriverError::Cancelled { maybe_executed: false }),
-                result = tokio::time::timeout_at(deadline, changed) => {
+                result = tokio::time::timeout_at(proof_deadline, changed) => {
                     if result.is_err() { return Err(DriverError::CapabilityUnavailable); }
                 }
             }

@@ -32,6 +32,7 @@ struct Inner {
     outgoing: mpsc::Sender<Outbound>,
     closed: watch::Sender<bool>,
     state: Mutex<State>,
+    minor: u16,
 }
 struct Outbound {
     value: Envelope,
@@ -66,6 +67,7 @@ impl Peer {
         let (outgoing, mut output) = mpsc::channel(QUEUE_LIMIT);
         let (input, incoming) = mpsc::channel(QUEUE_LIMIT);
         let (closed, _) = watch::channel(false);
+        let minor = authenticated.version.minor;
         let this = Self(Arc::new(Inner {
             outgoing,
             closed,
@@ -73,6 +75,7 @@ impl Peer {
                 next: 1,
                 pending: HashMap::new(),
             }),
+            minor,
         }));
         let (mut reader, mut writer) = tokio::io::split(stream);
         let write_peer = this.clone();
@@ -114,18 +117,12 @@ impl Peer {
                             }
                             last_id = id;
                         }
-                        let method = METHODS.iter().find(|m| m.name == request.method);
-                        let direction = if is_host { "host." } else { "engine." };
-                        let control = matches!(
-                            request.method.as_str(),
-                            "engine.session.stop" | "engine.session.resume"
+                        let permitted = inbound_permitted(
+                            is_host,
+                            channel == crate::auth::Channel::Stop,
+                            read_peer.0.minor,
+                            &request,
                         );
-                        let permitted = method.is_some_and(|m| {
-                            request.method.starts_with(direction)
-                                && (!m.notification || request.id.is_none())
-                                && (m.notification || request.id.is_some() || !is_host)
-                                && (control == (channel == crate::auth::Channel::Stop))
-                        });
                         if !permitted {
                             read_peer.respond(
                                 &request,
@@ -159,6 +156,10 @@ impl Peer {
             read_peer.close();
         });
         Ok((this, Incoming(incoming), authenticated))
+    }
+    /// Negotiated minor version. Browser methods require at least 1.
+    pub fn protocol_minor(&self) -> u16 {
+        self.0.minor
     }
     /// Whether the authenticated stream remains connected. Nonblocking.
     pub fn connected(&self) -> bool {

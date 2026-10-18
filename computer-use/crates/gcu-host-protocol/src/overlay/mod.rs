@@ -181,10 +181,12 @@ pub fn prepare_surface<S: Surface>(surface: &mut S, cursor: bool) -> Result<(), 
 /// Local overlay command boundary, using the actual Rust webview label.
 /// All commands from the remote browser are rejected. Memory-only, no waits.
 pub fn command_allowed(label: &str, command: &str) -> bool {
+    if gcu_protocol::builtin_browser::rejects_command(label, command) {
+        return false;
+    }
     match label {
         "cu-overlay" => command == "cu_overlay_snapshot",
         "cu-overlay-controls" => matches!(command, "cu_overlay_snapshot" | "cu_stop" | "cu_resume"),
-        "cu-browser" => false,
         _ => true,
     }
 }

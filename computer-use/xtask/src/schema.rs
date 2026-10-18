@@ -35,6 +35,10 @@ pub(crate) fn golden(directory: &Path, update: bool) -> Result<()> {
             canonical_json(&gcu_protocol::tools_list_json())?,
         ),
         (
+            "tools-browser.json".to_owned(),
+            canonical_json(&gcu_protocol::browser_conditional_catalog_json())?,
+        ),
+        (
             "errors.json".to_owned(),
             canonical_json(&gcu_protocol::error::errors_json())?,
         ),
@@ -152,5 +156,11 @@ pub(crate) fn run_budget() -> Result<()> {
         enforce_budget(&report).with_context(|| format!("{name} profile exceeds byte budget"))?;
     }
     println!("PASS: all tool profiles fit the unchanged byte budget");
+    let conditional = budget_report(
+        &gcu_protocol::browser_conditional_catalog_json(),
+        TOOL_CATALOG_BYTES,
+    )?;
+    enforce_budget(&conditional)?;
+    println!("PASS: conditional browser catalog byte budget");
     Ok(())
 }

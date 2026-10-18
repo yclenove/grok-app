@@ -32,6 +32,8 @@ struct State {
     turns: HashMap<String, [u8; 32]>,
     reconnect: HashSet<String>,
     closed: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    browser_revision: u64,
+    browser_synced_epoch: u64,
 }
 struct Inner {
     state: Mutex<State>,
@@ -54,6 +56,8 @@ impl Lifecycle {
                 turns: HashMap::new(),
                 reconnect: HashSet::new(),
                 closed: None,
+                browser_revision: 0,
+                browser_synced_epoch: 0,
             }),
             gate: tokio::sync::Mutex::new(()),
             office,
@@ -153,15 +157,57 @@ impl Lifecycle {
         tokio::task::spawn_blocking(move || gallery.open_session(&id))
             .await
             .map_err(|_| Error::Disconnected)?;
-        let mut state = lock(&self.0.state);
-        if state.epoch != epoch || !peer.connected() {
-            return Err(Error::Disconnected);
-        }
-        let issued = Issued::from(&opened);
-        state.book.issue(session, issued.clone());
-        state.reconnect.remove(session);
-        guard.0 = None;
+        let issued = {
+            let mut state = lock(&self.0.state);
+            if state.epoch != epoch || !peer.connected() {
+                return Err(Error::Disconnected);
+            }
+            let issued = Issued::from(&opened);
+            state.book.issue(session, issued.clone());
+            state.reconnect.remove(session);
+            guard.0 = None;
+            issued
+        };
+        self.sync_browser(&peer, epoch).await?;
         Ok(issued)
+    }
+
+    /// Send one empty browser map per connection. Failure closes the peer.
+    async fn sync_browser(&self, peer: &Peer, epoch: u64) -> Result<(), Error> {
+        if peer.protocol_minor() < 1 {
+            return Ok(());
+        }
+        let revision = {
+            let mut state = lock(&self.0.state);
+            if state.browser_synced_epoch == epoch {
+                return Ok(());
+            }
+            state.browser_revision = state.browser_revision.saturating_add(1);
+            state.browser_revision
+        };
+        let ack = peer
+            .call::<_, gcu_protocol::builtin_browser::BrowserAck>(
+                "engine.browser.sync",
+                &gcu_protocol::builtin_browser::BrowserSync {
+                    revision,
+                    browser: None,
+                },
+                RPC_TIMEOUT,
+            )
+            .await;
+        match ack {
+            Ok(ack) if ack.revision == revision && peer.connected() => {
+                let mut state = lock(&self.0.state);
+                if state.epoch == epoch {
+                    state.browser_synced_epoch = epoch;
+                }
+                Ok(())
+            }
+            _ => {
+                peer.close();
+                Err(Error::Disconnected)
+            }
+        }
     }
 
     /// Capture before dispatching one ACP prompt. No IO; absent CU is a no-op.
@@ -373,6 +419,8 @@ impl HostCallbacks for Callbacks {
             previous.close();
         }
         state.epoch = state.epoch.wrapping_add(1);
+        state.browser_revision = 0;
+        state.browser_synced_epoch = 0;
         *lock(&self.epoch) = state.epoch;
         state.peer = Some(peer.clone());
         self.inner.attached(engine, peer);

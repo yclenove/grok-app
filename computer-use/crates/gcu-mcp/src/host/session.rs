@@ -23,6 +23,8 @@ impl RemoteSession {
             return Err(ServeError::Protocol);
         }
         let host = host.for_session(id);
+        let mut config = config;
+        config.browser_session = Some(id.to_owned());
         let connection = Connection::open_host_only(driver, host.host(), config).await?;
         let endpoint = HttpEndpoint::start_remote(connection, host.peer.clone()).await?;
         Ok(Self {

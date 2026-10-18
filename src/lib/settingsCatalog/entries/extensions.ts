@@ -251,4 +251,10 @@ export const EXTENSIONS_ENTRIES: readonly SettingsEntry[] = [
     anchorId: "settings-anchor-ext-computer-hotkey", labelKey: "cu.settings.hotkey",
     descKeys: ["cu.settings.hotkeyBody"], keywords: ["hotkey", "stop", "shortcut", "停止热键", "停止快速鍵"],
   },
+  {
+    id: "ext.computer.browser", section: "extensions", tab: "computer",
+    anchorId: "settings-anchor-ext-computer-browser", labelKey: "cu.settings.clearBrowser",
+    descKeys: ["cu.settings.clearBrowserBody"],
+    keywords: ["browser", "clear data", "清除浏览数据", "清除瀏覽資料"],
+  },
 ];

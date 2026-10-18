@@ -1,6 +1,7 @@
 //! ADR 0013: only an action window requires the 100ms injected lease.
-use super::{startup::ManualTime, *};
+use super::{lease::FOREGROUND_PROOF_BUDGET, startup::ManualTime, *};
 use crate::input::{hooks::HookEvent, watchdog::HEARTBEAT_TIMEOUT};
+use gcu_core::driver::Cancel;
 
 fn healthy() -> (Arc<ManualTime>, Arc<SafetyGuard>) {
     let time = Arc::new(ManualTime::default());
@@ -267,4 +268,22 @@ fn keyboard_only_renewal_inflight_cannot_extend_mouse_lease() {
     guard.events.check_health();
     assert!(guard.is_stopped());
     assert!(!guard.available());
+}
+
+#[tokio::test(start_paused = true)]
+async fn foreground_proof_without_callbacks_gives_up_within_the_proof_budget() {
+    let (time, guard) = healthy();
+    time.advance(HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+    beat(&guard);
+    assert!(!guard.available());
+    let start = tokio::time::Instant::now();
+    let deadline = start + Duration::from_millis(4750);
+    let outcome = guard.begin_foreground(&Cancel::default(), deadline).await;
+    assert!(matches!(outcome, Err(DriverError::CapabilityUnavailable)));
+    assert!(
+        start.elapsed() <= FOREGROUND_PROOF_BUDGET + Duration::from_millis(1),
+        "a proof that never sees callbacks must not spend the driver deadline"
+    );
+    assert!(!guard.is_stopped());
+    assert!(guard.transport_healthy());
 }
