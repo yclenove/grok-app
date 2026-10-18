@@ -116,25 +116,37 @@ async fn actions(driver: &WindowsDriver, scenario: Scenario) -> Result<Outcome, 
     }
     // Discovery is a real assertion on every desktop. Only the remaining
     // foreground actions may Skip, using precisely the contract's decision.
-    if driver.capabilities().delivery.foreground
-        == gcu_protocol::capabilities::ForegroundCapability::Unavailable
-    {
-        let doctor = driver.doctor().await;
-        let discovery = if has_editor {
-            "exact executable/window/UIA editor discovery passed"
-        } else {
-            "exact executable/window discovery passed"
-        };
-        return foreground_unavailable(&doctor.issues, super::unsafe_mouse_probe::decision()?).map(
-            |outcome| match outcome {
+    let discovery = if has_editor {
+        "exact executable/window/UIA editor discovery passed"
+    } else {
+        "exact executable/window discovery passed"
+    };
+    let skip_foreground = |issues: &[String]| {
+        foreground_unavailable(issues, super::unsafe_mouse_probe::decision()?).map(|outcome| {
+            match outcome {
                 Outcome::Skip(reason) => Outcome::Skip(format!(
                     "{discovery}; foreground input only skipped; {reason}"
                 )),
                 other => other,
-            },
-        );
+            }
+        })
+    };
+    if driver.capabilities().delivery.foreground
+        == gcu_protocol::capabilities::ForegroundCapability::Unavailable
+    {
+        return skip_foreground(&driver.doctor().await.issues);
     }
-    activate(driver, &win).await?;
+    if let Err(error) = activate(driver, &win).await {
+        // ADR 0013: the foreground capability stays open while only the mouse
+        // proof is missing, and the action-time proof refuses instead. That
+        // refusal gets the same measured-environment decision: it may Skip only
+        // when the same-process mouse matrix saw no callbacks at all, and is a
+        // failure whenever a working probe exists.
+        if error.ends_with("capability unavailable") {
+            return skip_foreground(&driver.doctor().await.issues);
+        }
+        return Err(error);
+    }
     match scenario {
         Scenario::Notepad => {
             let field = ready_editor(driver, &win).await?;
