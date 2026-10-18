@@ -82,6 +82,16 @@ fn arguments_unsupported_modes_exit_two() {
         if cfg!(target_os = "macos") && args.as_slice() == ["mcp"] {
             continue;
         }
+        // Compiled Windows native is a real route. Session 0 must fail closed
+        // in the dedicated test, not as an argument error.
+        if cfg!(all(feature = "native-windows", windows))
+            && matches!(
+                args.as_slice(),
+                ["mcp"] | ["call", "list_apps"] | ["doctor"]
+            )
+        {
+            continue;
+        }
         command(&h)
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
@@ -146,6 +156,14 @@ fn auto_and_native_fail_closed_without_a_driver_document() {
         if cfg!(target_os = "macos") && args == ["--driver", "native"] {
             continue;
         }
+        if cfg!(all(feature = "native-windows", windows))
+            && matches!(
+                args.as_slice(),
+                ["doctor"] | ["doctor", "--driver", "native"] | ["--driver", "native"]
+            )
+        {
+            continue;
+        }
         let asserted = command(&h)
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
@@ -169,6 +187,52 @@ fn auto_and_native_fail_closed_without_a_driver_document() {
         .args(["version", "--driver", "fake"])
         .assert()
         .success();
+}
+
+#[cfg(all(feature = "native-windows", windows))]
+#[test]
+fn native_windows_product_entry_reports_selection_and_refuses_without_a_desktop() {
+    let h = TempDir::new().unwrap();
+    let doctor = command(&h)
+        .args(["doctor", "--driver", "fake", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&doctor).unwrap();
+    assert_eq!(value["driver"], "fake");
+    assert_eq!(value["route"], "fake");
+    let disabled = value["native_disabled"].as_str().unwrap();
+    assert!(disabled.contains("did not select"), "{disabled}");
+    assert!(disabled.contains("native-windows"), "{disabled}");
+    assert!(!disabled.contains("not assembled"), "{disabled}");
+
+    for args in [
+        &["doctor", "--driver", "native", "--json"][..],
+        &["call", "list_apps", "--driver", "native", "--args", "{}"][..],
+        &["--driver", "native"][..],
+    ] {
+        let asserted = command(&h).args(args).assert().failure();
+        let output = asserted.get_output();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(output.status.code(), Some(0), "{stderr}");
+        assert!(
+            stderr.contains("elevation required")
+                || stderr.contains("secure desktop active")
+                || stderr.contains("permission missing")
+                || stderr.contains("native driver failure")
+                || stderr.contains("driver crashed")
+                || stderr.contains("capability unavailable")
+                || stderr.contains("Windows security precheck"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("not compiled"), "{stderr}");
+        assert!(!stderr.contains("not assembled"), "{stderr}");
+        assert!(!stdout.contains("\"driver\": \"fake\""), "{stdout}");
+        assert!(!stdout.contains("fake.form"), "{stdout}");
+    }
 }
 
 #[cfg(all(feature = "native-x11", target_os = "linux"))]

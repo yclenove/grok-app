@@ -2,7 +2,8 @@
 //!
 //! `auto` and `native` fail closed unless the platform route is assembled.
 //! Linux X11 is assembled only when `native-x11` is compiled. Linux Wayland is
-//! assembled only when `native-wayland` is compiled. This build never
+//! assembled only when `native-wayland` is compiled. Windows is assembled only
+//! when `native-windows` is compiled. This build never
 //! substitutes fake, never widens the input route, and never elevates. The
 //! features stay off unless a binary enables them.
 
@@ -102,6 +103,7 @@ impl Disclosure {
 /// Selection result. [`Plan::Fake`] constructs the offline driver.
 /// [`Plan::NativeX11`] may construct the Linux X11 driver.
 /// [`Plan::NativeWayland`] may construct the Linux Wayland driver.
+/// [`Plan::NativeWindows`] may construct the Windows worker driver.
 /// [`Plan::MacosEngine`] constructs a macOS driver only after App authentication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Plan {
@@ -145,6 +147,11 @@ pub(crate) enum Plan {
     /// In-process Linux Wayland driver. A portal probe is not Stop registration.
     NativeWayland {
         /// Shared disclosure. X11 is not selected on this session.
+        disclosure: Disclosure,
+    },
+    /// Windows Worker driver. The Host latch is installed before `monitored`.
+    NativeWindows {
+        /// Shared disclosure.
         disclosure: Disclosure,
     },
 }
@@ -220,6 +227,19 @@ pub(crate) fn decide(query: Query<'_>) -> Plan {
             },
         };
     }
+    if query.os == OsKind::Windows && query.features.native_windows {
+        if query.entry == Entry::Agent {
+            return Plan::Refuse {
+                message: "Windows native does not use the macOS helper agent entry".into(),
+            };
+        }
+        return Plan::NativeWindows {
+            disclosure: Disclosure {
+                selected: "native",
+                native_disabled: "selected native-windows".into(),
+            },
+        };
+    }
     if matches!(
         query.os,
         OsKind::Linux {
@@ -282,7 +302,13 @@ pub(crate) fn reject_unused_scene(args: &DriverArgs) -> Result<(), Failure> {
 
 fn native_disabled(os: OsKind, features: Features) -> String {
     match os {
-        OsKind::Windows => block("native-windows", features.native_windows),
+        OsKind::Windows => {
+            if features.native_windows {
+                "native-windows is compiled; this command did not select it".into()
+            } else {
+                block("native-windows", false)
+            }
+        }
         OsKind::Macos => "the terminal does not use native permissions; use the helper or the App. App TCC responsibility is not claimed except macOS 27 arm64".into(),
         OsKind::Linux {
             session: SessionKind::X11,

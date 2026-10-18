@@ -144,6 +144,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         Plan::NativeWayland { disclosure } => {
             return dispatch_native_wayland(cli, disclosure, mode).await;
         }
+        Plan::NativeWindows { disclosure } => {
+            return dispatch_native_windows(cli, disclosure, mode).await;
+        }
         Plan::Fake { scene, disclosure } => (scene, disclosure),
     };
     let driver = Arc::new(
@@ -401,6 +404,27 @@ async fn dispatch_agent(cli: &Cli) -> Result<u8, Failure> {
         Plan::NativeWayland { .. } => Err(Failure::arguments(
             "Linux native Wayland does not use the macOS helper agent entry",
         )),
+        Plan::NativeWindows { .. } => Err(Failure::arguments(
+            "Windows native does not use the macOS helper agent entry",
+        )),
+    }
+}
+
+async fn dispatch_native_windows(
+    cli: Cli,
+    disclosure: assemble::Disclosure,
+    mode: Option<String>,
+) -> Result<u8, Failure> {
+    #[cfg(all(feature = "native-windows", windows))]
+    {
+        crate::native_windows::dispatch(cli, disclosure, mode).await
+    }
+    #[cfg(not(all(feature = "native-windows", windows)))]
+    {
+        let _ = (cli, disclosure, mode);
+        Err(Failure::internal(
+            "native-windows was selected without its compiled route",
+        ))
     }
 }
 
