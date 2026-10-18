@@ -23,8 +23,10 @@
 //! 15.8.1 with an ad-hoc signed file; see the `requirement_syntax_*` test).
 //! No shell is involved, and the path is its own argument.
 
+#[cfg(any(target_os = "macos", test))]
 use std::ffi::OsString;
 use std::path::Path;
+#[cfg(any(target_os = "macos", test))]
 use std::time::Duration;
 
 use gcu_host_protocol::supervisor::{
@@ -33,14 +35,18 @@ use gcu_host_protocol::supervisor::{
 
 /// Bound for one `codesign` child. Three checks (verify, requirement, display)
 /// can therefore take at most 15 seconds. Each overrun kills that child.
+#[cfg(any(target_os = "macos", test))]
 pub(super) const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Retained combined stdout and stderr. Extra bytes are discarded so a full
 /// pipe cannot stall the child past the deadline, and a truncated display is
 /// not parsed.
+#[cfg(target_os = "macos")]
 const OUTPUT_CAP: usize = 64 * 1024;
 
 /// Metadata categories only. Paths and command output are not part of this error.
+// `Failed` and `TimedOut` come only from the live macOS probe.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProbeError {
     /// The child exited non-zero, or its output was truncated.
@@ -82,6 +88,7 @@ pub(super) fn developer_id_requirement(team_id: &str) -> Option<String> {
 }
 
 /// Args for a validity check. The path is always the last element.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn verify_argv(path: &Path) -> Vec<OsString> {
     let mut args = verify_body(path);
     args.push(path.as_os_str().to_os_string());
@@ -89,6 +96,7 @@ pub(super) fn verify_argv(path: &Path) -> Vec<OsString> {
 }
 
 /// Args for a release team check. `-R=...` is a single element; the path follows it.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn requirement_argv(path: &Path, requirement: &str) -> Vec<OsString> {
     let mut args = verify_body(path);
     args.push(OsString::from(format!("-R={requirement}")));
@@ -97,10 +105,12 @@ pub(super) fn requirement_argv(path: &Path, requirement: &str) -> Vec<OsString> 
 }
 
 /// Args for display. Parsed only after verification has succeeded.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn display_argv(path: &Path) -> Vec<OsString> {
     vec![OsString::from("-dvvv"), path.as_os_str().to_os_string()]
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn verify_body(path: &Path) -> Vec<OsString> {
     let mut args = vec![OsString::from("--verify"), OsString::from("--strict")];
     if path.is_dir() {
