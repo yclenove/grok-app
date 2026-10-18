@@ -9,6 +9,7 @@ pub mod gate;
 /// Bounded metadata-only action history.
 pub mod ledger;
 pub(crate) mod observe;
+mod provenance;
 mod route;
 /// Policy-aware portable action executor.
 pub mod router;

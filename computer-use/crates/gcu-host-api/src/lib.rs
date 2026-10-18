@@ -19,6 +19,7 @@
 pub mod activity;
 pub mod approval;
 pub mod events;
+mod grant;
 pub mod overlay;
 pub mod policy;
 pub mod types;
@@ -34,8 +35,8 @@ pub use policy::{
     ConfirmationLevel, ForegroundPolicy, PolicyConfig, PolicyStore, DEFAULT_APPROVAL_TIMEOUT_SECS,
 };
 pub use types::{
-    ActionSummary, AppIdentity, AppInfo, ImageRef, ModelReason, Platform, Risk, ScreenPoint,
-    SessionCtx, SignatureState, WindowInfo,
+    ActionSummary, AppIdentity, AppInfo, GrantProof, ImageRef, ModelReason, Platform, Risk,
+    ScreenPoint, SessionCtx, SignatureState, WindowInfo,
 };
 
 pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

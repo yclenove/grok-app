@@ -159,7 +159,7 @@ fn is_sha256_hex(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gcu_host_protocol::messages::{Platform, Signature};
+    use gcu_host_protocol::messages::{GrantProof, Platform, Signature};
 
     fn body(hex: Option<&str>, act: Act) -> DecisionBody {
         DecisionBody {
@@ -174,6 +174,7 @@ mod tests {
                 signature: Signature::Valid,
                 image_path: "/usr/bin/editor".to_owned(),
                 pid: Some(77),
+                proof: GrantProof::default(),
             },
             engine_pid: 41,
             engine_started: 9001,

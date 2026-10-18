@@ -29,6 +29,7 @@ fn notes() -> AppInfo {
             sha256: Some([0x11; 32]),
             signature: SignatureState::Valid,
             image_path: "/Applications/Notes.app/Contents/MacOS/Notes".into(),
+            proof: gcu_host_api::GrantProof::default(),
         },
         icon: Some(icon),
     }

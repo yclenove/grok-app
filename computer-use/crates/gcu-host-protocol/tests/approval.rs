@@ -50,6 +50,7 @@ fn request_for(session: &str, key: &str, path: &str) -> RequestApp {
                 sha256: Some(digest()),
                 signature: Signature::Valid,
                 image_path: path.to_owned(),
+                proof: Default::default(),
             },
             icon: None,
         },
@@ -382,6 +383,7 @@ async fn decide_always_bumps_version_when_the_identity_is_already_stored() {
         sha256: Some(digest()),
         signature: Signature::Valid,
         image_path: "/usr/bin/editor".to_owned(),
+        proof: Default::default(),
     });
     let path = write_policy("already", &policy);
     let seen = Arc::new(Mutex::new(Vec::new()));

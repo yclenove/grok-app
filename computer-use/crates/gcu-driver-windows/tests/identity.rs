@@ -64,7 +64,9 @@ fn identity_unsigned_replacement_requires_reauthorization() {
     api.image("editor", image);
     let new = identity_for_path(&api, "editor").unwrap();
     assert!(needs_reauth(&old, &new));
-    assert_eq!(old.app_identity().publisher, None);
+    let publisher = old.app_identity().publisher.expect("unsigned state");
+    assert!(publisher.contains("\"state\":\"Unsigned\""), "{publisher}");
+    assert!(publisher.contains("\"subject\":null"), "{publisher}");
 }
 
 #[test]

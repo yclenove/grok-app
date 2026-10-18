@@ -111,8 +111,21 @@ fn always_grant_follows_platform_identity_and_can_be_disabled() {
     );
     assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
 
+    // A moved path used to stay Allow because a valid team matched the bundle
+    // alone. §7.2 requires the path, hash, cdhash, and certificate too.
     let mac = macos_notes();
     config.always = vec![mac.identity.clone()];
+    let same = eval(
+        &mac,
+        &config,
+        &GrantTable::default(),
+        &activity,
+        None,
+        None,
+        &state,
+        false,
+    );
+    assert!(matches!(same, PolicyDecision::Allow { .. }));
     let mut moved = mac.clone();
     moved.identity.image_path = "/tmp/Notes".into();
     moved.identity.sha256 = Some([0x55; 32]);
@@ -126,7 +139,33 @@ fn always_grant_follows_platform_identity_and_can_be_disabled() {
         &state,
         false,
     );
-    assert!(matches!(decision, PolicyDecision::Allow { .. }));
+    assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
+    let mut rebuilt = mac.clone();
+    rebuilt.identity.proof.cdhash = Some("ff".repeat(20));
+    let decision = eval(
+        &rebuilt,
+        &config,
+        &GrantTable::default(),
+        &activity,
+        None,
+        None,
+        &state,
+        false,
+    );
+    assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
+    rebuilt = mac.clone();
+    rebuilt.identity.proof.certificate_sha256 = Some("99".repeat(32));
+    let decision = eval(
+        &rebuilt,
+        &config,
+        &GrantTable::default(),
+        &activity,
+        None,
+        None,
+        &state,
+        false,
+    );
+    assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
     moved.identity.team_id = Some("OTHERTEAM".into());
     let decision = eval(
         &moved,
@@ -140,11 +179,50 @@ fn always_grant_follows_platform_identity_and_can_be_disabled() {
     );
     assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
 
+    // A narrow record cannot prove the missing facts, so it is not upgraded.
+    let mut legacy = mac.identity.clone();
+    legacy.proof = GrantProof::default();
+    config.always = vec![legacy.clone()];
+    let decision = eval(
+        &mac,
+        &config,
+        &GrantTable::default(),
+        &activity,
+        None,
+        None,
+        &state,
+        false,
+    );
+    assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
+    let decision = eval(
+        &app("Legacy", legacy),
+        &config,
+        &GrantTable::default(),
+        &activity,
+        None,
+        None,
+        &state,
+        false,
+    );
+    assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
+
     let windows = windows_notes();
     config.always = vec![windows.identity.clone()];
+    let same = eval(
+        &windows,
+        &config,
+        &GrantTable::default(),
+        &activity,
+        None,
+        None,
+        &state,
+        false,
+    );
+    assert!(matches!(same, PolicyDecision::Allow { .. }));
     let mut updated = windows.clone();
     updated.identity.sha256 = Some([0x66; 32]);
     updated.identity.image_path = "D:\\Notes\\Notes.exe".into();
+    updated.identity.key = updated.identity.image_path.clone();
     let decision = eval(
         &updated,
         &config,
@@ -155,7 +233,7 @@ fn always_grant_follows_platform_identity_and_can_be_disabled() {
         &state,
         false,
     );
-    assert!(matches!(decision, PolicyDecision::Allow { .. }));
+    assert!(matches!(decision, PolicyDecision::NeedApproval(_)));
     updated.identity.publisher = Some("CN=Other".into());
     let decision = eval(
         &updated,

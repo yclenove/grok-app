@@ -2,11 +2,10 @@
 //!
 //! The engine stores turn and session grants only. [`gcu_host_api::ApprovalDecision::Always`]
 //! is not stored: the Host writes it into [`gcu_host_api::PolicyConfig::always`].
-//! Always-allow follows architecture §7.2. Linux has no device and inode fields on
-//! [`gcu_host_api::AppIdentity`], so the file identity is the canonical image path
-//! plus SHA-256. A missing digest does not satisfy an always grant. Replacing the
-//! image requires a new grant. macOS matches a valid team id. Windows matches a
-//! valid publisher.
+//! Always-allow follows architecture §7.2 through [`AppIdentity::grant_eq`]. A
+//! path, content hash, cdhash, certificate, publisher, team, product, or build
+//! change needs a new grant. A missing required fact does not match. Linux also
+//! requires the device id and inode carried on the grant proof.
 //!
 //! Turn and session grants also require the same process id and structural identity.
 //! Each use re-checks that pair. `always_allow_enabled == false` ignores stored
@@ -23,7 +22,7 @@
 
 use gcu_host_api::{
     ActionSummary, AppIdentity, AppInfo, ApprovalDecision, ApprovalProvider, Cancel, ImageRef,
-    ModelReason, Platform, Risk, SessionCtx,
+    ModelReason, Risk, SessionCtx,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -130,23 +129,13 @@ fn instance_ok(grant: &HeldGrant, app: &AppInfo) -> bool {
 
 /// Whether `current` still satisfies a Host always-grant of `granted`.
 ///
-/// macOS and Windows use [`AppIdentity::grant_eq`]. Linux requires that match
-/// and a non-empty canonical path with the same SHA-256. A `None` digest does
-/// not bind a Linux image.
+/// This is [`AppIdentity::grant_eq`]. Path, hash, cdhash, certificate, publisher,
+/// team, product, and build are not widened. A missing required fact does not match.
 ///
 /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: pure.
 #[must_use]
 pub fn always_identity_ok(granted: &AppIdentity, current: &AppIdentity) -> bool {
-    if !granted.grant_eq(current) {
-        return false;
-    }
-    if granted.platform != Platform::Linux {
-        return true;
-    }
-    !granted.image_path.is_empty()
-        && granted.image_path == current.image_path
-        && granted.sha256.is_some()
-        && granted.sha256 == current.sha256
+    granted.grant_eq(current)
 }
 
 /// Why a previously approved action must not be delivered.

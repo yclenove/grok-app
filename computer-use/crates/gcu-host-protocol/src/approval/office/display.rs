@@ -48,7 +48,15 @@ pub(super) fn push_identity(policy: &mut Policy, image: &ImageBinding) {
     policy.always.push(identity);
 }
 
+/// Storage dedup only. Authorization uses [`crate::persistent_grant_matches`].
+///
+/// Observation equality keeps one copy of an identical legacy row. That row
+/// still does not authorize, because a missing proof does not grant-match.
 pub(super) fn same_identity(saved: &Identity, identity: &Identity) -> bool {
+    crate::persistent_grant_matches(saved, identity) || observation_eq(saved, identity)
+}
+
+fn observation_eq(saved: &Identity, identity: &Identity) -> bool {
     saved.platform == identity.platform
         && saved.key == identity.key
         && saved.team_id == identity.team_id
@@ -56,4 +64,5 @@ pub(super) fn same_identity(saved: &Identity, identity: &Identity) -> bool {
         && saved.sha256 == identity.sha256
         && saved.signature == identity.signature
         && saved.image_path == identity.image_path
+        && saved.proof == identity.proof
 }

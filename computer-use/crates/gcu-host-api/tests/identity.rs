@@ -1,6 +1,6 @@
 //! Structural equality, hashing, and architecture §7.2 grant matching.
 
-use gcu_host_api::{AppIdentity, Platform, SignatureState};
+use gcu_host_api::{AppIdentity, GrantProof, Platform, SignatureState};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -20,6 +20,13 @@ fn macos_signed() -> AppIdentity {
         sha256: Some([0x11; 32]),
         signature: SignatureState::Valid,
         image_path: "/Applications/Notes.app/Contents/MacOS/Notes".into(),
+        proof: GrantProof {
+            cdhash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            certificate_sha256: Some("22".repeat(32)),
+            product: Some("Notes".into()),
+            build: Some("100".into()),
+            ..GrantProof::default()
+        },
     }
 }
 
@@ -32,6 +39,11 @@ fn windows_signed() -> AppIdentity {
         sha256: Some([0x22; 32]),
         signature: SignatureState::Valid,
         image_path: "C:\\Program Files\\Notes\\Notes.exe".into(),
+        proof: GrantProof {
+            certificate_sha256: Some("33".repeat(32)),
+            product: Some("Notes".into()),
+            ..GrantProof::default()
+        },
     }
 }
 
@@ -44,6 +56,11 @@ fn linux_app() -> AppIdentity {
         sha256: Some([0x33; 32]),
         signature: SignatureState::Unsigned,
         image_path: "/usr/bin/notes".into(),
+        proof: GrantProof {
+            file_dev: Some(1),
+            file_inode: Some(2),
+            ..GrantProof::default()
+        },
     }
 }
 
@@ -146,6 +163,16 @@ fn app_identity_any_field_change_is_not_equal() {
                 ..base.clone()
             },
         ),
+        (
+            "cdhash",
+            AppIdentity {
+                proof: GrantProof {
+                    cdhash: Some("ff".repeat(20)),
+                    ..base.proof.clone()
+                },
+                ..base.clone()
+            },
+        ),
     ];
     let mut set = HashSet::new();
     set.insert(base.clone());
@@ -156,17 +183,33 @@ fn app_identity_any_field_change_is_not_equal() {
     }
 }
 
+// The old test name said a signed macOS grant ignores path and digest.
+// §7.2 forbids that wide match, so a path, hash, cdhash, or certificate change
+// asks again. A legacy row that omits the proof does not match, even itself.
 #[test]
-fn app_identity_grant_eq_signed_macos_ignores_path_and_digest() {
+fn app_identity_grant_eq_signed_macos_binds_path_hash_cdhash_and_certificate() {
     let granted = macos_signed();
+    assert!(granted.grant_eq(&macos_signed()));
+
     let mut updated = granted.clone();
     updated.image_path = "/Applications/Moved.app/Contents/MacOS/Notes".into();
-    updated.sha256 = None;
-    updated.publisher = None;
-    assert_ne!(granted, updated);
-    assert_ne!(hash_of(&granted), hash_of(&updated));
-    assert!(granted.grant_eq(&updated));
-    assert!(updated.grant_eq(&granted));
+    updated.sha256 = Some([0x55; 32]);
+    assert!(!granted.grant_eq(&updated));
+
+    let mut other_cdhash = granted.clone();
+    other_cdhash.proof.cdhash = Some("ff".repeat(20));
+    assert_eq!(granted.team_id, other_cdhash.team_id);
+    assert!(!granted.grant_eq(&other_cdhash));
+
+    let mut other_cert = granted.clone();
+    other_cert.proof.certificate_sha256 = Some("99".repeat(32));
+    assert_eq!(granted.publisher, other_cert.publisher);
+    assert!(!granted.grant_eq(&other_cert));
+
+    let mut legacy = granted.clone();
+    legacy.proof = GrantProof::default();
+    assert!(!legacy.grant_eq(&legacy));
+    assert!(!granted.grant_eq(&legacy));
 
     let mut other_team = granted.clone();
     other_team.team_id = Some("OTHERTEAM1".into());
@@ -192,36 +235,39 @@ fn app_identity_grant_eq_signed_macos_ignores_path_and_digest() {
     let mut missing_team = granted.clone();
     missing_team.team_id = None;
     assert!(!granted.grant_eq(&missing_team));
-    let mut moved_unsigned_style = missing_team.clone();
-    moved_unsigned_style.image_path = "/Applications/Moved.app/Contents/MacOS/Notes".into();
-    assert!(!missing_team.grant_eq(&moved_unsigned_style));
 }
 
+// The old test allowed a new path and digest when the publisher subject matched.
+// §7.2 requires the path, content hash, and certificate as well.
 #[test]
-fn app_identity_grant_eq_signed_windows_binds_publisher_and_exact_key() {
+fn app_identity_grant_eq_signed_windows_binds_path_hash_publisher_and_certificate() {
     let granted = windows_signed();
+    assert!(granted.grant_eq(&windows_signed()));
+
     let mut updated = granted.clone();
     updated.sha256 = Some([0x99; 32]);
     updated.image_path = "D:\\Notes\\Notes.exe".into();
-    updated.team_id = Some("IGNORED".into());
-    assert_ne!(granted, updated);
-    assert!(granted.grant_eq(&updated));
+    updated.key = updated.image_path.clone();
+    assert!(!granted.grant_eq(&updated));
 
     let mut other_publisher = granted.clone();
     other_publisher.publisher = Some("CN=Other".into());
     assert!(!granted.grant_eq(&other_publisher));
 
+    let mut other_cert = granted.clone();
+    other_cert.proof.certificate_sha256 = Some("99".repeat(32));
+    assert_eq!(granted.publisher, other_cert.publisher);
+    assert!(!granted.grant_eq(&other_cert));
+
     let mut lower_key = granted.clone();
     lower_key.key = "c:\\program files\\notes\\notes.exe".into();
+    lower_key.image_path = lower_key.key.clone();
     assert_ne!(granted, lower_key);
     assert!(!granted.grant_eq(&lower_key));
 
     let mut missing_publisher = granted.clone();
     missing_publisher.publisher = None;
     assert!(!granted.grant_eq(&missing_publisher));
-    let mut rehashed = missing_publisher.clone();
-    rehashed.sha256 = Some([0x01; 32]);
-    assert!(!missing_publisher.grant_eq(&rehashed));
 }
 
 #[test]
@@ -240,15 +286,26 @@ fn app_identity_grant_eq_unsigned_linux_binds_path_and_digest() {
     let mut other_desktop = granted.clone();
     other_desktop.key = "org.example.Other.desktop".into();
     assert!(!granted.grant_eq(&other_desktop));
+
+    let mut missing_inode = granted.clone();
+    missing_inode.proof.file_inode = None;
+    assert!(!granted.grant_eq(&missing_inode));
+    assert!(!missing_inode.grant_eq(&missing_inode));
 }
 
 #[test]
 fn app_identity_hash_set_does_not_answer_grant_eq() {
     let granted = macos_signed();
-    let mut updated = granted.clone();
-    updated.image_path = "/Applications/Moved.app/Contents/MacOS/Notes".into();
+    let mut moved = granted.clone();
+    moved.image_path = "/Applications/Moved.app/Contents/MacOS/Notes".into();
     let mut set = HashSet::new();
     set.insert(granted.clone());
-    assert!(!set.contains(&updated));
-    assert!(set.iter().any(|stored| stored.grant_eq(&updated)));
+    assert!(!set.contains(&moved));
+    assert!(!set.iter().any(|stored| stored.grant_eq(&moved)));
+
+    let mut folded = granted.clone();
+    folded.proof.cdhash = granted.proof.cdhash.as_deref().map(str::to_ascii_uppercase);
+    assert_ne!(granted, folded);
+    assert!(!set.contains(&folded));
+    assert!(granted.grant_eq(&folded));
 }

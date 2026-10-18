@@ -374,6 +374,7 @@ mod tests {
             sha256: sha,
             signature: SignatureState::Unsigned,
             image_path: image.into(),
+            proof: gcu_host_api::GrantProof::default(),
         }
     }
 
@@ -449,6 +450,7 @@ mod tests {
             sha256: None,
             signature: SignatureState::Unsigned,
             image_path: "C:\\Notes\\Notes.exe".into(),
+            proof: gcu_host_api::GrantProof::default(),
         };
         let foreign = classify(
             &table,
