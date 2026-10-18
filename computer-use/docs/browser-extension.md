@@ -13,8 +13,8 @@ Registration and startup refuse a missing key, a placeholder key, or any other
 origin. The native-host executable acknowledges sharing only. L2 stays closed:
 A4a found no reproducible shared top-document → OS-window proof on Windows,
 X11, Wayland or macOS; A4b is therefore blocked and DOM dispatch is not connected.
-ADR 0014 is **Proposed**, not an accepted binding mechanism or a delivery
-commitment; its text is not present in this checkout. A share badge alone does
+ADR 0014 is accepted **only for feasibility validation** of a binding carrier. It
+is not a working binding mechanism or a delivery commitment. A share badge alone does
 not demonstrate that DOM observation or control is operational. See [proof](#proof) and the
 [maintainer release checklist](../tools/browser-extension/store/README.md#maintainer-inputs-and-release-checklist).
 
@@ -181,7 +181,7 @@ Top document to OS window, reviewed without a live browser attached:
 
 A single visible window, a matching HWND, or a high title/geometry score does
 not identify the document. No supported binding was established by A4a.
-ADR 0014 remains Proposed;
+ADR 0014 covers feasibility validation only;
 this guide neither adopts a mechanism nor promises delivery. A change of
 Host/ACP trust boundaries requires an accepted ADR and fresh evidence before
 any platform can admit the production DOM channel. The existing [ADR 0012](adr/0012-real-driver-assembly.md)

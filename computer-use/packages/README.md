@@ -55,8 +55,8 @@ desktop is refused. No InProcess fallback or elevation is attempted.
 The extension's fixed ID is `jgpkhdjlddaoopklipcnpcjcpiancmff`. Browser L0 remains
 available where the selected native driver's capabilities permit. **L2 DOM
 fusion/actions are disabled everywhere**: A4a lacks a trustworthy shared top
-document → OS window mapping, so A4b is blocked. ADR 0014 is only Proposed (text
-absent from this checkout), not a delivery commitment. Existing Chrome/Edge
+document → OS window mapping, so A4b is blocked. ADR 0014 is accepted only for feasibility
+validation, not a delivery commitment. Existing Chrome/Edge
 registration/developer-load steps are in the [extension guide](https://github.com/yclenove/grok-app/blob/main/computer-use/docs/browser-extension.md#install);
 there is no published store listing or verified browser integration claim.
 
