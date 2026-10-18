@@ -1,6 +1,6 @@
 //! Persistent always-grants. The engine reads them; only this Host writes them.
 use crate::private;
-use gcu_host_api::{AppIdentity, Platform, PolicyConfig, PolicyStore, SignatureState};
+use gcu_host_api::{AppIdentity, GrantProof, Platform, PolicyConfig, PolicyStore, SignatureState};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -61,7 +61,13 @@ impl HostPolicy {
 
     pub(crate) fn remember(&self, identity: &AppIdentity) {
         let mut config = lock(&self.inner);
-        if !config.always.iter().any(|grant| grant.grant_eq(identity)) {
+        // Dedup is not authorization. An identical observation is stored once.
+        // Only grant_eq may allow a later call.
+        if !config
+            .always
+            .iter()
+            .any(|grant| grant.grant_eq(identity) || grant == identity)
+        {
             config.always.push(identity.clone());
         }
     }
@@ -100,6 +106,9 @@ pub fn allows(path: &Path, identity: &AppIdentity) -> bool {
 }
 
 /// Write one always-grant. Corrupt and unsafe files are not replaced.
+///
+/// A JSON object whose proof field has the wrong type is corrupt. It is not
+/// parsed as a partial grant and it is not overwritten.
 pub fn grant(path: &Path, identity: &AppIdentity) -> Result<(), StoreFault> {
     let mut map = match classify(path) {
         Class::Missing => Map::new(),
@@ -107,6 +116,7 @@ pub fn grant(path: &Path, identity: &AppIdentity) -> Result<(), StoreFault> {
         Class::Corrupt => return Err(StoreFault::Corrupt),
         Class::Unsafe => return Err(StoreFault::Unsafe),
     };
+    parse_map(&map)?;
     map.insert(storage_key(identity), record(identity));
     write_map(path, &map)
 }
@@ -119,6 +129,7 @@ pub fn revoke(path: &Path, key: &str) -> Result<bool, StoreFault> {
         Class::Corrupt => return Err(StoreFault::Corrupt),
         Class::Unsafe => return Err(StoreFault::Unsafe),
     };
+    parse_map(&map)?;
     if map.remove(key).is_none() {
         return Ok(false);
     }
@@ -258,6 +269,18 @@ fn parse_entry(raw_key: &str, value: &Value) -> Result<AppIdentity, StoreFault> 
         sha256: path_hash(ident)?,
         signature,
         image_path: required_string(ident, "image_path")?,
+        proof: parse_proof(ident)?,
+    })
+}
+
+fn parse_proof(ident: &Map<String, Value>) -> Result<GrantProof, StoreFault> {
+    Ok(GrantProof {
+        cdhash: opt_string(ident, "cdhash")?,
+        certificate_sha256: opt_string(ident, "certificate_sha256")?,
+        product: opt_string(ident, "product")?,
+        build: opt_string(ident, "build")?,
+        file_dev: opt_u64(ident, "file_dev")?,
+        file_inode: opt_u64(ident, "file_inode")?,
     })
 }
 
@@ -275,6 +298,14 @@ fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, Sto
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or(StoreFault::Corrupt)
+}
+
+fn opt_u64(object: &Map<String, Value>, key: &str) -> Result<Option<u64>, StoreFault> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number.as_u64().map(Some).ok_or(StoreFault::Corrupt),
+        Some(_) => Err(StoreFault::Corrupt),
+    }
 }
 
 fn path_hash(object: &Map<String, Value>) -> Result<Option<[u8; 32]>, StoreFault> {
@@ -297,6 +328,12 @@ fn record(identity: &AppIdentity) -> Value {
             "key": identity.key,
             "signature": signature_name(identity.signature),
             "image_path": identity.image_path,
+            "cdhash": identity.proof.cdhash,
+            "certificate_sha256": identity.proof.certificate_sha256,
+            "product": identity.proof.product,
+            "build": identity.proof.build,
+            "file_dev": identity.proof.file_dev,
+            "file_inode": identity.proof.file_inode,
         }
     })
 }

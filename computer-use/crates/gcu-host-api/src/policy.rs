@@ -122,10 +122,10 @@ pub trait PolicyStore: Send + Sync {
 
     /// Whether `id` satisfies a stored persistent grant.
     ///
-    /// Comparison is [`AppIdentity::grant_eq`]. A signed macOS grant follows
-    /// bundle id and team id across path and digest changes. An unsigned,
-    /// invalid, or unknown identity must match the stored observation. A
-    /// `Valid` grant does not match another signature state.
+    /// Comparison is [`AppIdentity::grant_eq`]. Path, content hash, code hash,
+    /// certificate, publisher, team, and product/build are not widened. A
+    /// missing fact does not match. A `Valid` grant does not match another
+    /// signature state.
     ///
     /// This does not consult [`PolicyConfig::always_allow_enabled`].
     ///

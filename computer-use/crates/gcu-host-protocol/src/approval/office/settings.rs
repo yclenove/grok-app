@@ -75,8 +75,8 @@ fn safe_icon(icon: &Image) -> bool {
 }
 
 fn identity_id(identity: &Identity) -> String {
-    // Identity has only infallibly serializable fields. Hash the full identity,
-    // including build digest; a replaced app cannot revoke a different row.
+    // Hash the full identity JSON, including proof. An empty proof is omitted,
+    // so a legacy row keeps its revoke id. A row that gained proof is a different id.
     let bytes = serde_json::to_vec(identity).unwrap_or_default();
     super::super::hex_encode(&Sha256::digest(bytes))
 }

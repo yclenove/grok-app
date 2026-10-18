@@ -9,6 +9,7 @@
 pub mod builtin_browser;
 pub mod capabilities;
 pub mod error;
+pub mod grant;
 pub mod keys;
 pub mod result;
 pub mod tools;

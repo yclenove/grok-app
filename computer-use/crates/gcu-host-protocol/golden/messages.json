@@ -968,6 +968,59 @@
             ],
             "type": "object"
           },
+          "GrantProof": {
+            "additionalProperties": false,
+            "description": "Code hash, certificate, product, build, and Linux file identity.\n\nAbsent or empty on a legacy record. Persistent matching does not treat\nthat omission as a wildcard.",
+            "properties": {
+              "build": {
+                "description": "macOS bundle version. Windows build identity is the content hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cdhash": {
+                "description": "macOS code-directory hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "certificate_sha256": {
+                "description": "SHA-256 of the signing certificate.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "file_dev": {
+                "description": "Linux device id.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "file_inode": {
+                "description": "Linux inode.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "product": {
+                "description": "OS product name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
           "Identity": {
             "additionalProperties": false,
             "description": "OS-verified authorization identity; model names never establish identity.",
@@ -983,6 +1036,10 @@
               "platform": {
                 "$ref": "#/$defs/Platform",
                 "description": "Verifying platform."
+              },
+              "proof": {
+                "$ref": "#/$defs/GrantProof",
+                "description": "Extra §7.2 facts. Missing on records written before this key."
               },
               "publisher": {
                 "description": "Verified Windows publisher.",
@@ -1207,6 +1264,59 @@
             ],
             "type": "object"
           },
+          "GrantProof": {
+            "additionalProperties": false,
+            "description": "Code hash, certificate, product, build, and Linux file identity.\n\nAbsent or empty on a legacy record. Persistent matching does not treat\nthat omission as a wildcard.",
+            "properties": {
+              "build": {
+                "description": "macOS bundle version. Windows build identity is the content hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cdhash": {
+                "description": "macOS code-directory hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "certificate_sha256": {
+                "description": "SHA-256 of the signing certificate.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "file_dev": {
+                "description": "Linux device id.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "file_inode": {
+                "description": "Linux inode.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "product": {
+                "description": "OS product name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
           "Identity": {
             "additionalProperties": false,
             "description": "OS-verified authorization identity; model names never establish identity.",
@@ -1222,6 +1332,10 @@
               "platform": {
                 "$ref": "#/$defs/Platform",
                 "description": "Verifying platform."
+              },
+              "proof": {
+                "$ref": "#/$defs/GrantProof",
+                "description": "Extra §7.2 facts. Missing on records written before this key."
               },
               "publisher": {
                 "description": "Verified Windows publisher.",
@@ -1426,6 +1540,59 @@
             ],
             "type": "object"
           },
+          "GrantProof": {
+            "additionalProperties": false,
+            "description": "Code hash, certificate, product, build, and Linux file identity.\n\nAbsent or empty on a legacy record. Persistent matching does not treat\nthat omission as a wildcard.",
+            "properties": {
+              "build": {
+                "description": "macOS bundle version. Windows build identity is the content hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cdhash": {
+                "description": "macOS code-directory hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "certificate_sha256": {
+                "description": "SHA-256 of the signing certificate.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "file_dev": {
+                "description": "Linux device id.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "file_inode": {
+                "description": "Linux inode.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "product": {
+                "description": "OS product name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
           "Identity": {
             "additionalProperties": false,
             "description": "OS-verified authorization identity; model names never establish identity.",
@@ -1441,6 +1608,10 @@
               "platform": {
                 "$ref": "#/$defs/Platform",
                 "description": "Verifying platform."
+              },
+              "proof": {
+                "$ref": "#/$defs/GrantProof",
+                "description": "Extra §7.2 facts. Missing on records written before this key."
               },
               "publisher": {
                 "description": "Verified Windows publisher.",
@@ -2213,6 +2384,59 @@
               }
             ]
           },
+          "GrantProof": {
+            "additionalProperties": false,
+            "description": "Code hash, certificate, product, build, and Linux file identity.\n\nAbsent or empty on a legacy record. Persistent matching does not treat\nthat omission as a wildcard.",
+            "properties": {
+              "build": {
+                "description": "macOS bundle version. Windows build identity is the content hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cdhash": {
+                "description": "macOS code-directory hash.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "certificate_sha256": {
+                "description": "SHA-256 of the signing certificate.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "file_dev": {
+                "description": "Linux device id.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "file_inode": {
+                "description": "Linux inode.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "product": {
+                "description": "OS product name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
           "Identity": {
             "additionalProperties": false,
             "description": "OS-verified authorization identity; model names never establish identity.",
@@ -2228,6 +2452,10 @@
               "platform": {
                 "$ref": "#/$defs/Platform",
                 "description": "Verifying platform."
+              },
+              "proof": {
+                "$ref": "#/$defs/GrantProof",
+                "description": "Extra §7.2 facts. Missing on records written before this key."
               },
               "publisher": {
                 "description": "Verified Windows publisher.",

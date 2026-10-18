@@ -173,6 +173,27 @@ describe("ComputerUseApprovalCard", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
   });
 
+  it("shows an alert when the code hash changes and does not call the transport", async () => {
+    const transport = vi.fn(async (_claim: Claim) => {});
+    const card = sample();
+    card.image.proof = { cdhash: "0123456789abcdef0123456789abcdef01234567" };
+    const { ref } = renderCard(card, transport);
+    const forged = {
+      ...claimFor(card, "turn"),
+      image: {
+        ...card.image,
+        proof: { cdhash: "ffffffffffffffffffffffffffffffffffffffff" },
+      },
+    };
+    await act(async () => {
+      await ref.current?.submit(forged);
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This decision does not match the checked app.",
+    );
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("ignores a second decision while the first is still saving", async () => {
     let resolve: (() => void) | undefined;
     const transport = vi.fn(

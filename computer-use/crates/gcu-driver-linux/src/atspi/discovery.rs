@@ -11,15 +11,21 @@ use std::time::{Duration, Instant};
 
 /// Map a verified image identity onto the protocol authorization key.
 ///
-/// `desktop_id` stays discovery-only and is not copied. A missing inspect
-/// must stay `None` rather than inventing a hash.
+/// `desktop_id` stays discovery-only and is not copied. `publisher` carries
+/// the device id and inode. A missing inspect must stay `None` rather than
+/// inventing a hash.
 pub fn protocol_identity(identity: &crate::identity::AppIdentity) -> ProtocolIdentity {
     let path = identity.exe_path.to_string_lossy().into_owned();
+    let publisher = serde_json::json!({
+        "dev": identity.dev,
+        "inode": identity.inode,
+    })
+    .to_string();
     ProtocolIdentity {
         id: path.clone(),
         executable: Some(path),
         team_id: None,
-        publisher: None,
+        publisher: Some(publisher),
         code_hash: Some(identity.sha256.clone()),
     }
 }
@@ -181,6 +187,10 @@ mod tests {
         assert_eq!(wire.code_hash.as_deref(), Some(identity.sha256.as_str()));
         assert!(!wire.id.contains("desktop"));
         assert!(wire.team_id.is_none());
-        assert!(wire.publisher.is_none());
+        let publisher: serde_json::Value =
+            serde_json::from_str(wire.publisher.as_deref().expect("file identity")).unwrap();
+        assert_eq!(publisher["dev"].as_u64(), Some(1));
+        assert_eq!(publisher["inode"].as_u64(), Some(2));
+        assert!(!publisher.to_string().contains("desktop"));
     }
 }

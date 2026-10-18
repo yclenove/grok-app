@@ -381,6 +381,7 @@ mod sockets {
                 sha256: None,
                 signature: SignatureState::Valid,
                 image_path: "/Applications/Notes.app".to_string(),
+                proof: gcu_host_api::GrantProof::default(),
             },
             icon: None,
         }

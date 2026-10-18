@@ -115,23 +115,18 @@ impl WindowsIdentity {
     /// not just the display subject. Invalid signatures cannot retain signed grants.
     /// `code_hash` always binds the executable bytes, including signed builds.
     pub fn app_identity(&self) -> AppIdentity {
-        let publisher =
-            if self.signature.state == SignatureState::Unsigned && !self.writable_load_path {
-                None
-            } else {
-                // JSON is an unambiguous string representation within the existing
-                // protocol field; same-subject certificates cannot collide by delimiter.
-                Some(
-                    serde_json::json!({
-                        "state": self.signature.state,
-                        "subject": self.signature.publisher,
-                        "certificate_sha256": self.signature.certificate_sha256,
-                        "product": self.signature.product,
-                        "writable_load_path": self.writable_load_path,
-                    })
-                    .to_string(),
-                )
-            };
+        // Always include state. Omitting the blob for an unsigned image made
+        // the engine keep Unknown, which cannot satisfy a persistent grant.
+        let publisher = Some(
+            serde_json::json!({
+                "state": self.signature.state,
+                "subject": self.signature.publisher,
+                "certificate_sha256": self.signature.certificate_sha256,
+                "product": self.signature.product,
+                "writable_load_path": self.writable_load_path,
+            })
+            .to_string(),
+        );
         AppIdentity {
             id: self.path.clone(),
             executable: Some(self.path.clone()),

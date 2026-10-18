@@ -12,7 +12,7 @@ pub(crate) use gcu_driver_fake::FakeDriver;
 pub(crate) use gcu_host_api::testing::{FakeUserActivity, ScriptedApprovals};
 pub(crate) use gcu_host_api::{
     ActionSummary, AppIdentity, AppInfo, ApprovalDecision, ConfirmationLevel, ForegroundPolicy,
-    HandoffReason, Platform, PolicyConfig, Risk, SignatureState,
+    GrantProof, HandoffReason, Platform, PolicyConfig, Risk, SignatureState,
 };
 pub(crate) use std::sync::Arc;
 pub(crate) use std::time::{Duration, Instant};
@@ -86,6 +86,29 @@ pub(crate) fn identity(
         sha256,
         signature,
         image_path: image.into(),
+        proof: proof(platform),
+    }
+}
+
+fn proof(platform: Platform) -> GrantProof {
+    match platform {
+        Platform::Macos => GrantProof {
+            cdhash: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            certificate_sha256: Some("ab".repeat(32)),
+            product: Some("Notes".into()),
+            build: Some("100".into()),
+            ..GrantProof::default()
+        },
+        Platform::Windows => GrantProof {
+            certificate_sha256: Some("cd".repeat(32)),
+            product: Some("Notes".into()),
+            ..GrantProof::default()
+        },
+        Platform::Linux => GrantProof {
+            file_dev: Some(8),
+            file_inode: Some(9),
+            ..GrantProof::default()
+        },
     }
 }
 
@@ -123,7 +146,7 @@ pub(crate) fn macos_notes() -> AppInfo {
             Some([0x11; 32]),
             SignatureState::Valid,
             Some("TEAM123456"),
-            None,
+            Some("Example Publisher"),
         ),
     )
 }

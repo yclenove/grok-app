@@ -70,6 +70,7 @@ pub fn execution_decisions(
             sha256: Some([1; 32]),
             team_id: None,
             publisher: None,
+            proof: gcu_host_api::GrantProof::default(),
         },
     };
     let ctx = PolicyCtx {
