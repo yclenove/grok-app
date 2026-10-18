@@ -278,3 +278,39 @@ cannot arm the guard. These tests are required even when native cases Skip; they
 are not claimed as physical-device evidence. `tests/actions/press_routes` covers
 virtual Invoke/Legacy delivery, exact revalidation, Partial/doctor disclosure,
 explicit TargetedOnly refusal and partial-dispatch cleanup without semantic fallback.
+
+## 2026-10-17 第 4 探针真机结果
+
+win-test 物理桌面、交互式 Default 桌面、未提权，运行被忽略的产品链测试
+`native_product_probe_chain_proves_both_hooks_without_cursor_change`
+（`tests/hook_probe.rs`，`#[ignore]`，会在第四探针发一次同位置绝对移动）。
+启动前测试自己先睡 2500ms。进程约 2.95s 结束，唯一失败断言在该测试的第二次
+`guard.available()`（源文件第 554 行，消息 `real renewal proof required`）。
+完整控制台输出在编排机 `/tmp/cu2-orch/hook_probe_run1.txt`，Windows 侧副本为
+`D:\cu2\hook_probe_out.txt`。本次不改产品代码。设计结论见
+`computer-use/docs/adr/0013-windows-stop-guard-liveness-lease.md`（提议，未实现）。
+
+实测顺序：
+
+1. 四次鼠标探针之后，第 4 种 `AbsoluteSamePosition` 证明成功。doctor 在第一次
+   `available()` 时为 `user_activity_guard: available`、`stop_hotkey: available`。
+   启动前后 `GetPhysicalCursorPos` 相等，第一个断言通过。
+2. 原生快照（`armed` 之后不再更新，因此这是第一次证明的记录）：
+   `mouse_hook_proof` 184ms，“tagged injected callback (attempted 4 probe kinds)”；
+   `hook_SendInput` 184ms，`mode: AbsoluteSamePosition`，`dispatched: true`，
+   `keyboard_seen=true`，`mouse_seen=true`，`keyboard_probe_flags=Some(144)`，
+   `mouse_probe_flags=Some(1)`，`last_*` 与探针 flags 相同，
+   `attempted_mouse_probe_kinds=4`。键盘 144 = `LLKHF_UP | LLKHF_INJECTED`
+   （F24 抬起）。鼠标 1 = `LLMHF_INJECTED`。
+   `hook_mouse_dispatch` 144ms：`sent=1/1`，Win32=0，`elapsed_ms=19`。
+   `hook_keyboard_dispatch` 164ms：`sent=1/1`，Win32=0，`elapsed_ms=20`。
+   `hook_install`、`hotkey_register`、`hook_desktop`（Default）均为成功。
+3. 测试再空闲 250ms。第二次 doctor 为 `user_activity_guard: unavailable`、
+   `stop_hotkey: unavailable (listener heartbeat expired (hook/message pump/FFI unavailable))`，
+   并有 `Stop latched; trusted Host resume required`。断言失败。
+
+和同日矩阵合在一起读：零位移三种 `SendInput` 被接受但不到达 `WH_MOUSE_LL`，
+只有同位置绝对移动（以及诊断用的 `RelativePair`）能产生带标记的鼠标回调。
+这次失败说明，第一次绝对移动把守卫武装起来之后，空闲并不能把租约维持过
+250ms；守卫按 fail-closed 锁存了 Stop。快照里没有第二次绝对移动的派发行。
+光标相等只覆盖启动那一次，不覆盖这 250ms。锁屏计时器和 hover 都没有测。
