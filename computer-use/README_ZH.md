@@ -8,24 +8,59 @@
 
 ## 这个构建实际能跑什么
 
-| 命令 | 本构建里的行为 |
-|---|---|
-| `gcu version`、`gcu install`、`gcu uninstall`、`gcu approvals` | 不需要桌面驱动。 |
-| macOS 上不带 `--driver` 的 `gcu mcp` | 把 stdio 转到 `Grok Computer Use.app`。helper 与 Host 共用 Stop 锁存。真实桌面、helper 的 TCC、物理热键、App 子进程责任链，以及真实的 `gcu resume` **未验证**。 |
-| macOS 上不带子命令的 `gcu` | 让 Launch Services 启动 helper（`open -g -j -b <bundle id> --args agent`）。 |
-| Linux 和 Windows 上的 `gcu doctor`、`gcu call`、`gcu mcp` | 省略 `--driver` 即选择 `auto`。该路线未编入时，`auto` 和 `native` 以退出码 2 结束，并且不会退回 fake。`--driver fake` 仍是显式的离线驱动。 |
-| Linux 和 Windows 上不带子命令的 `gcu` | 以退出码 2 结束，原文相同。它不会打印 doctor。 |
-| macOS 上的 `gcu doctor` 和 `gcu call` | 同样规则。它们不连接 helper。 |
-| `gcu engine` | 给 Grok App 宿主用的私有通道。不是接入 CLI 客户端的方式。 |
-| `gcu agent` | helper 进程。必须由 Launch Services 启动。从 shell 执行拿不到 helper 的权限授予。 |
+> **升级提示：**省略 `--driver` 现在表示 `auto`。既有客户端登记的 `gcu mcp`
+> 在升级到包含对应 native 后端的构建后，可能首次接触真实桌面。
+> 重连前请核对平台、系统权限和应用授权。安装器既不加 `fake`，也不加自动审批。
+> Grok App 的 Computer Use 设置仍默认关闭。
 
-`--driver` 可以是 `auto`（默认）、`native` 或 `fake`。它们不会退回 fake，不会换更宽的输入路线，也不会提权。在 Linux 和 Windows 上，`auto` 和 `native` 以退出码 2 结束。在 macOS 上，`gcu mcp` 转给 helper；`gcu engine` 只在已认证的 App 子进程里装配驱动，并且只对 macOS 27 arm64 声称那条 TCC 责任链；`gcu call`、`gcu doctor` 和 HTTP MCP 以退出码 2 结束，并指向 helper 或 App。`--scene` 只对 `--driver fake` 有效。省略场景时 fake 使用 `form`。离线桌面不会向操作系统发送输入。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。调试构建不需要。场景：`form`、`chat`、`list`、`modal`、`webarea`、`canvas`、`ide`、`login`、`terminal`、`web_terminal`、`submit_unknown`。
+`--driver auto|native|fake` 通过 [`assemble.rs`](crates/gcu-cli/src/assemble.rs)
+选型。默认 `auto` 按 OS、入口、已编入 feature 和显示会话选择；`native`
+要求同一条真实路线并遵守相同检查。两者绝不回退 fake、不提权、不借终端权限、
+不静默扩大输入路线。Linux 的非空 `WAYLAND_DISPLAY` 优先，即使同时有 `DISPLAY`
+也选 Wayland；仅有 `DISPLAY` 时选 X11；两者都没有则无安全 native 路线。
+
+| 命令 / 平台 | 实际装配与边界 |
+|---|---|
+| `gcu version`、安装/卸载、approvals、resume、turn-ended、`mcp --connect` | 不创建桌面驱动；最后一项代理已存在的认证端点。 |
+| macOS 路线 A：auto/native 的 `gcu mcp` stdio | 代理 Launch Services 启动的 `Grok Computer Use.app`。AX/SCK/输入共用 LocalHost Stop 锁存与活动源。仅 helper 的 TCC、端到端动作及恢复仍为 **not_run**。 |
+| macOS：无子命令 / `gcu agent` | 无子命令启动 helper/onboarding；`agent` 是 helper 入口，不能从 shell 借用其 TCC。 |
+| macOS：auto/native 的 `doctor`、`call`、自建 HTTP MCP | 退出 2：`This entry does not assemble a native driver; use the helper or the App`。不代理 helper；仍可显式用 fake。 |
+| Windows：`mcp`、`call`、`doctor`、无子命令 | `native-windows` 装配带 Host Stop/活动源的 monitored Worker 驱动；无子命令运行 doctor。未编入该 feature 时 auto/native 退出 2，只能显式离线 fake。 |
+| Linux X11：同上入口 | `native-x11` 装配带 Host Stop/活动源的 AT-SPI + X11；无子命令运行 doctor。未编入该 feature 时 auto/native 退出 2，只能显式离线 fake。 |
+| Linux Wayland：同上入口 | `native-wayland` 装配探测与 Host 锁存/活动适配。驱动已有经证明的单窗口采集/输入挂接，但 CLI 不发起 portal 同意，也不挂接这些会话；不声称原生 Wayland 截图/输入可用。未编入时只能显式离线 fake。 |
+| 路线 B：`gcu engine` | 由 App 托管的已认证 Host/Stop 通道。Windows/Linux 需对应 feature；macOS 只准入 macOS 27 arm64 的 App 子进程链，其余版本/Intel 拒绝。完整产品 TCC 验证为 **not_run**。不是客户端安装命令。 |
+
+三个 CLI feature `native-windows`、`native-x11`、`native-wayland` **默认关闭**。
+当前[发行工作流](../.github/workflows/release-computer-use.yml)未开启它们：
+Windows/Linux 产物的**桌面执行仍为 fake-only**，auto/native 拒绝而不是运行 fake。
+Linux 独立的 `gcu-driver-linux/pipewire` feature 不会开启 native 装配。
+A0/A0-M/A1/A2/A3 平台装配卡已合并，不代表满足[发行门槛](../docs/plans/computer-use-v2/07-quality-gates.md#8-发布门槛)。
+
+不支持的入口或缺少 feature 时退出 2 并说明原因。装配后，`gcu doctor --json`
+报告 `driver`、`route`、`native_disabled`、`ready`、`issues` 及驱动能力；
+`ready=false` 退出 3。`native_disabled` 字段也会承载 `selected native-windows`
+这样的选择说明。实际限制以 `issues` 和能力为准：通用的 `permissions.status` /
+`private_apis.status` 仍为 `not_applicable`，不能证明权限已授予。
+MCP initialize instructions 包含路线说明，`capabilities` 描述所选驱动能力。
+Windows 装配失败可能先于 doctor 报告退出；错误不等于成功诊断。
+macOS native 使用 helper/App 诊断；`doctor --driver fake` 只诊断离线驱动。
+运行时缺权限/能力可返回 `permission_missing`、`capability_unavailable`、
+`elevation_required` 或 `handoff_required`，都不触发 fake 回退。
+
+`--scene` 只对 `--driver fake` 有效，auto/native 带场景退出 2。
+省略场景时 fake 用 `form`。fake 只运行内存桌面，不发送 OS 输入；
+发行二进制还须 `GCU_ALLOW_FAKE=1`，该变量不授予真实权限或审批。
+场景：`form`、`chat`、`list`、`modal`、`webarea`、`canvas`、`ide`、`login`、
+`terminal`、`web_terminal`、`submit_unknown`。
+fake 夹具身份带测试映像摘要，不授权真实应用。两条路线共用 CLI `approvals.json`，
+并非分开的授权文件；fake 记录不迁移为真实身份。快照/图片属于当前连接。
+切换驱动或清理 fake 数据不清除真实 Stop。没有 `GCU_DRIVER` 覆盖开关。
 
 没有 `gcu batch`、`gcu script`，也没有 `gcu approvals revoke-all`。
 
 ## 安装
 
-发行工作流里的目标：macOS 14 及以上的 arm64 与 x64，Windows 10 1903 及以上的 x64，Linux glibc 的 x64 与 arm64。Linux 二进制在 Ubuntu 22.04 上构建。musl 和 Alpine 不是目标。Windows arm64 不是发行目标。
+发行工作流里的构建目标（不代表桌面验收矩阵）：macOS 14 及以上的 arm64 与 x64，Windows 10 1903 及以上的 x64，Linux glibc 的 x64 与 arm64。Linux 二进制在 Ubuntu 22.04 上构建。musl 和 Alpine 不是目标。Windows arm64 不是发行目标。
 
 按机器选择压缩包：
 
@@ -149,9 +184,9 @@ open '/absolute/path/Grok Computer Use.app'
 
 焦点在“Not now”（现在不要）。Escape 关闭窗口。Enter 不会打开设置，也不会重启 helper。“Open Settings”打开对应的“隐私与安全性”面板。允许屏幕录制之后，卡片会显示“Allowed — restart the helper”。使用“Restart helper”。重启失败时窗口保持打开，并说明 helper 没有重启。
 
-在 Mac 上实际点这个窗口 **未验证**。系统提示是否写着 helper 而不是终端，也 **未验证**。
+onboarding 修复曾在 macOS 27 Mini 上验证。完整打包 helper 独占 TCC 路径、撤销/错误 PID/安全提示矩阵、签名/Dev 隔离，以及系统退出 helper 后的自动重拉仍为 **not_run**。路线 B 使用 App 子进程责任链，只准入 macOS 27 arm64；完整 App 产品路径为 **not_run**，不声称 macOS 14/15/Intel 可用。物理活动守卫需要输入监控权限；缺失或监听失效会禁用依赖输入。驱动的 `macos-private-spi` 默认开启，但仍有运行时探测，不能使 Chromium 后台点击可用。
 
-`list_apps` 不需要这两项权限。列出窗口、启动应用和执行动作需要。缺少授予时返回 `permission_missing`（`gcu call` 的退出码是 3）。SecurityAgent、CoreAuthenticationUI 或 UserNotificationCenter 拥有的可见安全提示会被拒绝。
+`list_apps` 不需要这两项权限。列出窗口、启动应用和执行动作需要。缺授权返回 `permission_missing`；终端 native `gcu call` 仍不支持。SecurityAgent、CoreAuthenticationUI 或 UserNotificationCenter 拥有的可见安全提示会被拒绝。
 
 ### Windows
 
@@ -159,15 +194,47 @@ open '/absolute/path/Grok Computer Use.app'
 
 目标的完整性更高时返回 `elevation_required`，说明是 “The target has a higher integrity level.”。这包括提权后的安装程序，以及 `gcu` 为 Medium、设置窗口为 High 的情况。驱动不会提权，也不会申请 UIAccess。UIPI 不会被绕过。安全桌面（UAC、登录、锁屏）会被拒绝。
 
-GitHub 的 `windows-2022` 运行器上，测试用的是受限令牌。那里没有证明前台鼠标能送达，所以前台保持不可用。带物理鼠标的普通交互桌面 **未验证**。
+`native-windows` 使用 monitored Worker 内的 UIA 与 WGC → PrintWindow，
+父进程持有钩子、热键、输入释放和 Job 清理，绝不切到 InProcess。
+引擎自身 High/System、UIAccess，以及非交互/安全桌面在 Worker 启动前拒绝。
+UIA Invoke 可能激活窗口，后台能力只是 partial，不承诺无打扰。
+
+前台输入遵循 [ADR 0013](docs/adr/0013-windows-stop-guard-liveness-lease.md)
+的 Stop 守卫租约。空闲时不持续续鼠标证明，仅注入租约过期不会锁存 Stop。
+策略/活动检查通过后，动作必须在注入前证明双钩子；注入期间续 100 ms 租约，
+证明丢失即锁存并释放输入。消息泵心跳不是钩子证明。
+物理鼠标机器上，零移动/零滚轮/零水平滚轮之后的第四探针是同位置绝对移动，
+**可能触发悬停**；光标变了即作废，不补偿、不重试。
+doctor 空闲时可能没有新鲜注入租约，其输出不授予前台权限。
+
+托管 `windows-2022` runner 未证明鼠标钩子投递，相关前台测试跳过。
+派工记录仅报告 **1 次**物理 `hook_probe` 通过，不代表所有产品路径验收。
+STATUS 中 A1 的物理键鼠集成、动作期间续租、UAC/钩子丢失、热键冲突、
+按住输入时的 Stop 时限、卡死 Worker、DPI、系统 App 冒烟仍为 **not_run**。
+旧探针失败结果属于历史记录，不能作为新租约行为的证据。
 
 ### Linux
 
 纯 X11 用 AT-SPI 读树和做动作，用 X 服务器管窗口和截图。被挡住的窗口只有在复合管理器能提供该窗口像素时才截。否则驱动拒绝截图，不会交回别的窗口的内容。
 
-完整的 Wayland 说明见 [docs/wayland.md](docs/wayland.md#zh)。Wayland 使用 xdg-desktop-portal 的 ScreenCast 和 RemoteDesktop。你在 portal 对话框里批准。只截你选中的来源。来源未知或合成器未知时不出图，也没有静默的全桌面退路。恢复令牌仅所有者可读写，24 小时后过期，来源变化即拒绝。原生 Wayland 没有全局覆盖层。XWayland 不被当作能证明全局 Stop 热键的场合，因此那条路径不启用覆盖层。
+X11 装配需要 `native-x11`、正常工作的 AT-SPI 无障碍总线和 X server；
+XI2 观察物理活动，XGrabKey 登记 Stop，XTEST 是受策略/活动/Stop 门禁约束的前台输入。
+缺 AT-SPI 时 native 未就绪，不能改成截图加坐标绕过。
+AccessKit 夹具缺 EditableText；真实 GTK/Qt 兼容性为 **not_run**。
 
-真实的 GNOME、KDE 或 wlroots 桌面会话 **未验证**。可移植的 Wayland 测试已通过。无头 GNOME 作业没有跑。
+[Wayland 指南](docs/wayland.md)（[中文](docs/wayland.md#zh)）区分装配和真实 portal 授予。
+`native-wayland` 选择路线；真实 PipeWire 帧还需 `gcu-driver-linux/pipewire`
+和兼容系统库。A3 增加经证明的单窗口采集/几何及限定范围的 reis 挂接 API，
+没有增加 CLI 自动同意流程，当前 CLI 只探测。
+GNOME/KDE/wlroots 的同意、帧、输入映射、撤销、到期和 Stop 均为 **not_run**；
+other/unknown 合成器不能启用这条经证明的路线。
+AT-SPI 文本/语义操作仍受身份和审批约束。
+XWayland 只能用精确解析的 X 窗口，不能借 XTEST 控制原生 Wayland。
+不提供整桌面采集/输入回退，也没有 Wayland 胶囊。
+由获授权调用方创建会话时，restore token 仅所有者可读，绑定来源/窗口/进程/授权，
+有效期不超过 24 小时且不长于授权。输入需要范围证明及健康的已注册 Stop；
+已挂接 Stop 监听丢失会撤销绑定采集并保留 Stop 锁存。
+portal 接口存在不等于同意或 Stop 注册成功。
 
 ## 接入客户端
 
@@ -181,7 +248,7 @@ gcu uninstall --client claude --yes
 
 客户端：`grok`、`codex`、`claude`、`antigravity`、`gemini`、`opencode`、`cursor`、`vscode`。`--scope` 是 `user`（默认）或 `project`。客户端可以写在位置参数上，也可以写 `--client`。`--dry-run` 只打印差异，不写文件。`--json` 打印一个对象。重复安装不会复制条目。卸载只去掉 `grok-computer-use` 和本安装器拥有的钩子。
 
-在 Linux 和 Windows 上，装进去的命令是不带 `--driver` 的 `gcu mcp`，也就是 `auto`。原生路线未编入时，该进程以退出码 2 结束，并且不会退回 fake。安装器不会加上 `--driver fake`。在 macOS 上，同一条命令就是上面的 helper 代理。
+安装的 `gcu mcp` 选择 `auto`：包含对应后端的构建可接触真实桌面；当前 Windows/Linux 发行工作流产物缺 native 装配 feature，因而退出 2。没有 fake 回退。安装器不加 `--driver fake`，也不加自动审批。macOS 使用上面的 helper 代理。重连旧安装前请重读升级提示。
 
 对 Grok 目录的真实修改会在终端上询问：
 
@@ -259,6 +326,20 @@ gcu approvals revoke KEY
 
 Stop 会锁存。模型的下一轮、重新连接和新进程都不会清掉它。标记文件是上面那个状态目录里的 `stopped`。恢复不是 MCP 工具。
 
+路线 B 将引擎控制连接的非正常断开（包括崩溃）视为**全局持久 Stop**。
+本地停止断线前，引擎尝试在 CLI 状态目录写入 `stop-reason`（`hotkey`、`panel`
+或 `internal_error`）。App 只用于展示原因：文件缺失、伪造或删除都不能恢复或放宽 Stop。
+正常显式 shutdown/空闲退出，以及 Windows 内部 Worker 重启不触发这类断线 Stop，
+也不清除旧锁存。恢复必须是新的可信用户动作；模型续轮、重连或重启都不恢复，
+也不重放未完成动作。
+
+安全上限仍为 ≤100 ms 锁存 Stop、≤500 ms 发输入释放、≤5 s 结束阻塞原生调用或杀 Worker。
+驱动期限为 4750 ms，留出清理时间。这些是要求的预算，不是本次新增的物理时限实测；
+缺桌面测量的项仍为 **not_run**。审批独立等待 120 秒，不能阻塞 Stop。
+
+轮次结束清本轮授权并释放输入；会话关闭撤 token、会话授权、订阅、worker 及已挂接的
+portal 资源/图片。Always 授权和 Stop 保留；数据删除限制见下文。
+
 驱动真的在跑时，内置 Stop 组合键是：
 
 | 系统 | 组合键 | 演示情况 |
@@ -266,7 +347,7 @@ Stop 会锁存。模型的下一轮、重新连接和新进程都不会清掉它
 | macOS | Control+Option+Command+. | 物理按键 **未验证**。 |
 | Windows | Ctrl+Alt+Shift+Backspace | 托管运行器跳过了热键。物理按键 **未验证**。 |
 | Linux X11 | Ctrl+Alt+Shift+Backspace | Xvfb 上的抓键测试通过。物理按键 **未验证**。 |
-| 原生 Wayland | 没有被证明的全局热键 | 依赖它的输入保持关闭。真实会话 **未验证**。 |
+| 原生 Wayland | 有 GlobalShortcuts 注册 API；没有真机证明的注册 | 注册与范围证明前依赖输入保持关闭。真实会话 **not_run**。 |
 
 进程内服务器（含 `--driver fake`）收到 SIGINT 和 SIGTERM 时会锁存 Stop 并松开按住的输入。macOS 上不带 `--driver` 的 `gcu mcp` 只转发 stdio。本文不声称那个代理进程里的 Ctrl+C 会锁存 helper。
 
@@ -291,23 +372,55 @@ gcu resume --session /path/to/gcu-control-directory
 
 | 能力 | macOS | Windows | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
-| `gcu mcp` 里的真实驱动 | helper 代理。helper 与 Host 共用 Stop 锁存。真实使用、TCC 和 `gcu resume` **未验证**。 | 未装配。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 没有链进 `gcu`。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 对 CLI 来说与 X11 相同。 |
+| `gcu mcp` 里的真实驱动 | 路线 A helper 共用 Host Stop/活动；路线 B engine 只准入 macOS 27 arm64。完整 TCC/产品路径 **not_run**。 | 默认关闭的 `native-windows` 后已装配，仅 monitored Worker；当前发行工作流未开启。 | 默认关闭的 `native-x11` 后已装配 AT-SPI + X11、Host 锁存/活动；当前发行工作流未开启。 | 默认关闭的 `native-wayland` 探测/Host 适配；驱动有来源证明挂接 API，CLI 不启动同意；真实 portal **not_run**。 |
 | 无障碍树 | AX。Mini、macOS 27、arm64：真机契约 26 通过、4 跳过、0 失败。第一次读取可能是很短的不完整树。macOS 14/15 和 Intel **未验证**。 | UIA，在 `windows-2022` 运行器上：契约 15 通过、15 跳过、0 失败。第一次读取可能不完整。物理桌面 **未验证**。 | AT-SPI，Xvfb CI：23 通过、6 跳过、0 失败。物理桌面 **未验证**。 | 有环境探测和 portal 代码。真实合成器 **未验证**。 |
 | 窗口截图 | 那台 Mini 的驱动测试里，ScreenCaptureKit 能截被挡住的窗口。打包后的 helper **未验证**。 | WGC，然后 PrintWindow。被挡住的窗口和 150% DPI **未验证**。 | Xvfb 上的 XComposite 通过。没有复合且被挡住：拒绝。 | portal ScreenCast。真实 portal **未验证**。 |
 | 后台动作 | 部分可用。macOS 27 上 AppKit 能收到后台点击。Chromium 不能（[ADR 0006](docs/adr/0006-macos-tcc-helper.md)）。 | 部分可用。UIA Invoke 可能激活窗口。原生按钮用不激活前台的点击。 | 有对应接口时用 AT-SPI。抓不到 Stop 时不用 XTEST。 | 只有可靠 Stop 时才用 portal 输入。没有全桌面退路。真实会话 **未验证**。 |
-| 前台键入和指向 | 受策略约束。物理空闲检测 **未验证**。 | 托管运行器上不可用：合成鼠标没有到达钩子。物理鼠标 **未验证**。 | 热键抓取成功时，Xvfb 上的 XTEST 可用。物理设备 **未验证**。 | **未验证**。 |
+| 前台键入和指向 | 受策略约束。物理空闲检测 **未验证**。 | ADR 0013 动作门控 Stop 租约；第四探针可能悬停。仅报告 1 次物理 hook_probe 通过，完整 A1 检查 **not_run**；托管 runner 前台不可用。 | 热键抓取成功时，Xvfb 上的 XTEST 可用。物理设备 **未验证**。 | **未验证**。 |
 | Stop 热键 | 见 Stop 一节。 | 见 Stop 一节。 | Xvfb 测试通过。 | 不声称可用。 |
 | 覆盖层不进截图 | 实现在 `gcu-overlay`，不在这个二进制里。macOS 真机契约跳过了这项。真实界面 **未验证**。 | 已实现，不在这个二进制里。真实界面 **未验证**。 | X11 驱动在截图租约期间藏起覆盖层窗口。真实界面 **未验证**。 | 声明为不可用。 |
 
 更多说明：[macOS 驱动笔记](crates/gcu-driver-macos/README.md)、[Windows 驱动笔记](crates/gcu-driver-windows/README.md)、[Windows 运行器诊断](crates/gcu-driver-windows/diagnostics.md)、[覆盖层笔记](crates/gcu-overlay/README.md)。
 
+## 浏览器扩展
+
+所选 native 驱动在平台能力允许时提供 L0 浏览器无障碍路线，不需要扩展。
+可选扩展的固定 ID 为 `jgpkhdjlddaoopklipcnpcjcpiancmff`，但**所有平台 L2 DOM
+融合/动作均关闭**。A4a 无法证明共享顶层文档与 OS 窗口的映射；A4b 被阻塞，
+没有挂接生产 DomChannel。ADR 0014 仅为 Proposed，不代表已接受的机制或交付承诺，
+本检出没有其正文。见 [A4a 证明与既有 Chrome/Edge 安装步骤](docs/browser-extension.md#proof)。
+共享徽章仅表示浏览器同意，不代表 DOM 控制可用、应用已授权或 Stop 已恢复。
+L0 不能阻止浏览器内部重定向。
+
 ## 隐私
+
+`get_app_state.include_screenshot` 接受 `true`、`false` 或 `"auto"`
+（[ADR 0011](docs/adr/0011-auto-screenshot-policy.md)）。默认仍为 `true`；
+既有布尔调用行为与序列化形状不变。auto 评估可用交互节点、弹窗内控件及原始 canvas
+角色占比。`gcu_core::observe::QualityThresholds.min_interactive_nodes` 和
+`canvas_role_ratio` 均**待评测校准**，默认 `None`，没有编造生产阈值。
+评测可通过 `ActionRouter::with_auto_capture_policy` 注入边界，不是新配置键。
+没有交互节点边界时 auto 保守保留图片；校准后充分的树可能省图，canvas/稀疏树、
+文本 diff 为空而安全像素变化仍请求图片。动作结果也会为坐标动作或显式请求附图。
+
+auto 仍先采集并脱敏再决定交付，以发现文本树没有表达的像素变化。
+省略的采集不替换上次已交付模型的图片。不完整原生树、未知敏感区域、树/采集或
+几何不一致仍按既有路线拒图。不声称采集延迟改善；只有同任务评测证明成功率不降后
+才能更改默认值。
 
 截图在交给模型、对话框或 `gcu call` 之前先脱敏。敏感区域涂成不透明灰色，并向外扩 4 像素。敏感区域无法定位，或树不完整时，不返回图像。文本树仍可以返回。未脱敏的画面不会为模型写出去。
 
-不带 `--json` 的 `gcu call` 把这些安全图像复制到 `$XDG_RUNTIME_DIR` 或临时目录下的私有 `gcu-call-*` 目录。目录模式 `0700`，文件模式 `0600`（Windows 为仅所有者的 ACL）。下一个 `gcu` 进程会删掉超过一小时的这类目录。你也可以更早删掉。`--json` 打印 MCP 结果。MCP 会话拥有的文件，包括溢出文本和截图，在连接关闭时删除。
+不带 `--json` 的 `gcu call` 把这些安全图像复制到 `$XDG_RUNTIME_DIR` 或临时目录下的私有 `gcu-call-*` 目录。目录模式 `0700`，文件模式 `0600`（Windows 为仅所有者的 ACL）。后续走到产物清理的 CLI 调用会尝试删除超过一小时的目录；没有到期定时器。你也可以更早删掉。`--json` 打印 MCP 结果。正常 MCP 连接关闭/Drop 会删除其临时溢出文本和截图。强杀和删除失败可能留文件；Windows MCP 图片 DACL 验证仍未闭环。
 
-日志只到标准错误。没有日志文件。`doctor` 最多保留上一个已结束进程的 20 条元数据：工具名、结果、耗时、时间戳。没有键入的文本、目标标签或图像字节。超过七天的记录丢弃。路径是状态目录里的 `recent-calls.json`。
+日志只到标准错误。没有日志文件。`doctor` 最多保留上一个已结束进程的 20 条元数据：工具名、结果、耗时、时间戳。没有键入的文本、目标标签或图像字节。读取时过滤超过七天的记录，不会自动删除旧文件。路径是状态目录里的 `recent-calls.json`。
+
+这些 CLI 规则不会擦除 App 聊天历史、审批卡副本或客户端/模型提供方已存结果。
+撤销授权阻止后续访问，不等于物理擦除既有观察。
+App journal/图片清理、Windows 文件 ACL、签名授权匹配和正式引擎验签仍有
+[security.md](docs/security.md) 与[数据清单](docs/data-inventory.md)列出的缺口。
+两份文档是注明基线的审计，其装配描述早于平台卡，须结合当前代码与 STATUS 阅读。
+`GCU_LOG_PAYLOADS` 当前没有载荷日志实现，不能据此承诺全秘密清洗或 App 日志
+7 天 / 5×5 MB 保留保证。剪贴板历史/同步可在条件恢复后仍保留粘贴文本，gcu 无法删除外部副本。
 
 会话密钥不放进环境变量，也不放进 `argv`。不要去刮子进程的环境。恐慌时打印 `Internal panic; operation was not replayed`，不含载荷。
 
@@ -324,7 +437,7 @@ gcu resume --session /path/to/gcu-control-directory
 | 允许屏幕录制之后仍然失败 | 重启 helper。macOS 只把这项授予应用于之后启动的进程。辅助功能立即生效。 |
 | 第一次看 egui / AccessKit 窗口时树很短，而且没有截图 | 树是懒发布的，并被标成不完整。在 macOS 27 Mini 上，夹具大约 588 毫秒后从 7 个节点长到 54 个。不完整的树不出图。再读一次可能就完整了。Windows UIA 上也见过同样的懒首次读取。 |
 | `SetValue` 返回不可设置 | Linux 上的 AccessKit 文本框没有实现可编辑文本；macOS 上的 egui 文本框可能报告成功但文字没变。驱动会把值读回来核对。改用 `type_text`。在 Linux 上这需要前台策略。真实的 GTK 和 Qt 应用 **未验证**。 |
-| `elevation_required` | Windows 目标的完整性高于 `gcu`，或者它是 UIAccess。`gcu` 不会提权。把目标以非提权方式运行，或自己完成这一步。 |
+| `elevation_required` | Windows 目标完整性高于 `gcu`，或引擎自身具有被禁止的 High/System 完整性或 UIAccess。`gcu` 不会提权。把目标以非提权方式运行，或自己完成这一步。 |
 | Windows 运行器上前台动作不可用 | 托管运行器的受限令牌从未把合成鼠标送到低级钩子。这是那个环境的结果，不是对有物理鼠标的电脑的承诺。 |
 | macOS 上 Chromium 忽略后台点击 | 在 macOS 27 上测得。驱动不会改走前台点击来掩盖这一点。 |
 | `Computer-use helper rejected the connection` | CLI 和 helper 不是同一份已签名字节，或者套接字不属于这个用户。请登记包含这份 `gcu` 的应用。 |
@@ -365,9 +478,9 @@ gcu resume --session /path/to/gcu-control-directory
 4. 操作系统授予要自己撤。`gcu` 不会撤它们。
 
    - macOS：“系统设置 → 隐私与安全性 → 辅助功能”和“屏幕录制”。去掉 `Grok Computer Use` 或 `Grok Computer Use (Dev)`。
-   - Linux portal：在桌面设置里去掉 ScreenCast / RemoteDesktop 权限。Wayland 驱动若保存恢复令牌，目录是 `${XDG_DATA_HOME:-~/.local/share}/grok-computer-use/wayland-restore`（目录模式 `0700`，文件模式 `0600`）。这个 `gcu` 二进制没有链入 Linux 驱动，所以不会创建该目录。
+   - Linux portal：在桌面设置里去掉 ScreenCast / RemoteDesktop 权限。Wayland 驱动若保存恢复令牌，目录是 `${XDG_DATA_HOME:-~/.local/share}/grok-computer-use/wayland-restore`（目录模式 `0700`，文件模式 `0600`）。默认发行路线不打开 portal；自定义 native 构建仅在获授权调用方挂接经证明的会话时创建 token。删除本地 token 不等于撤销桌面 portal 授予。
 
-5. 如果还想清掉残留：`config.toml`、`approvals.json`、`stopped`、`recent-calls.json`、上面的 Wayland `wayland-restore` 目录，以及 `gcu-call-*` / `gcu-control-*` 目录。路径见“授权”和“Stop 与恢复”。
+5. 如果还想清掉残留：`config.toml`、`approvals.json`、`stop-reason`、`recent-calls.json`、上面的 Wayland `wayland-restore` 目录，以及 `gcu-call-*` / `gcu-control-*` 目录。路径见“授权”和“Stop 与恢复”。删除保留数据前停止全部进程；删除 `stopped` 不是受支持的恢复方式。App 的策略/历史/Stop 另存，见数据清单。
 
 ## 命令
 
@@ -389,7 +502,7 @@ gcu resume --session <gcu-control-directory>
 gcu turn-ended --help
 ```
 
-`gcu mcp` 的默认值是 `--transport stdio`、`--profile default`（`default`、`minimal` 或 `full`），以及 `--turn-idle-secs 45`（至少为 1）。HTTP 必须带 `--token-fd`。`--port` 默认是临时端口。`--connect` 是 stdio 代理，也需要 `--token-fd`。[docs/cli.md](docs/cli.md) 仍写着 HTTP 未实现。二进制接受上面的参数。
+`gcu mcp` 的默认值是 `--transport stdio`、`--profile default`（`default`、`minimal` 或 `full`），以及 `--turn-idle-secs 45`（至少为 1）。HTTP 必须带 `--token-fd`。`--port` 默认是临时端口。`--connect` 是 stdio 代理，也需要 `--token-fd`。自建 native HTTP 遵守上文入口限制（macOS 不支持）。
 
 `gcu turn-ended` 在普通解析之前处理。它从标准输入读 Grok 的 Stop JSON，或接受一个 Codex notify JSON 参数。`--session` 选择一个控制目录。`--previous-notify` 先运行原来的 notify 命令并保留它的退出状态。其他错误打印一行脱敏说明并以退出码 0 结束。
 

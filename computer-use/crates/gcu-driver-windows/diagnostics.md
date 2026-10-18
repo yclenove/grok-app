@@ -387,11 +387,39 @@ Verification commands (post-fix build/test commands **not_run** in this sandbox)
 `rcargo clippy -p gcu-driver-windows --all-targets --target x86_64-pc-windows-gnu -- -D warnings`.
 The worker fault/recovery suite also requires `--features test-worker-faults`.
 
-All native items below remain **not_run**. The product-chain test retains
-`#[ignore]`; other native tests keep their existing ignores/desktop opt-in gates.
-Use an unattended, disposable, unelevated physical-mouse Default desktop:
+### 2026-10-18 product-chain rerun on win-test (physical console desktop)
 
-- Rerun `native_product_probe_chain_proves_both_hooks_without_cursor_change`:
+Build: `hook_probe` at main after the lease-B (#120) and 1s foreground proof
+budget (#123) changes, run unelevated from PowerShell on the physical console
+Default desktop with `GCU_DESKTOP=1`.
+
+- Attempt 1 failed at the post-lease assertion (`listener heartbeat expired`, see
+  the 2026-10-17 section); that was before ADR 0013 option B.
+- Attempt 2 (post-B) failed at the **initial proof** (3s timeout, no diagnostics
+  captured). The initial unsolicited cycle only sends the fourth probe after a
+  single idle sample of >=2000ms, so any physical input around the run skips it.
+  This explanation is consistent with the design but was **not** confirmed from
+  captured output; the test now prints `doctor_issues` on that timeout.
+- Attempt 3, with hands off the mouse and keyboard after Enter:
+  `native_product_probe_chain_proves_both_hooks_without_cursor_change` **passed**
+  (1 passed, 0 failed, 2.99s). That covers: one initial tagged dual-hook proof,
+  identical physical cursor before/after, `GetLastInputInfo.dwTime` unchanged
+  over the 250ms idle window, injection lease expired while transport stayed
+  healthy and Stop was **not** latched.
+
+Evidence limits: a single passing run on one machine (one physical mouse, one
+Windows build); the OS build string was not captured. It does not cover the
+foreground action-time proof (contract cases C06/C08/C09/C11/C15/C20/C22 and the
+W-HOTKEY smoke), the hover/tooltip effect of the same-position move, physical
+mouse activity adapter checks, or hook removal during held input. Those stay
+**not_run** below.
+
+The product-chain test retains `#[ignore]`; other native tests keep their
+existing ignores/desktop opt-in gates. Remaining native items, on an
+unattended, disposable, unelevated physical-mouse Default desktop:
+
+- ~~Rerun `native_product_probe_chain_proves_both_hooks_without_cursor_change`~~
+  **done 2026-10-18 (see above, one run)**; original wording:
   one initial tagged pair, identical physical cursor, then 250ms without a
   foreground call; injected lease expires, transport survives, Stop stays false,
   and GetLastInputInfo.dwTime stays unchanged as system idle ages.

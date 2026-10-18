@@ -4,28 +4,73 @@
 
 `gcu` is the command-line MCP server for Grok Computer Use. The MCP server name is `grok-computer-use`. The license is MIT. A release is one native binary per platform. It does not bundle a browser, Node, Python, or .NET. The npm package only needs Node 18 or newer to start the binary that is already installed beside it.
 
-This page matches the `gcu` command and the release packager in this tree. A clean virtual-machine install on macOS, Windows, and Linux was not run (see [STATUS P4-07](../docs/plans/computer-use-v2/STATUS.md)). **未验证** means that behavior was not demonstrated on that machine. GitHub archives and the `.deb` / `.rpm` packages bundle [packages/README.md](packages/README.md), not this file.
+This page matches the `gcu` command and the release packager in this tree. A clean virtual-machine install on macOS, Windows, and Linux was not run (see [STATUS P4-07](../docs/plans/computer-use-v2/STATUS.md)). **not_run** means that behavior was not demonstrated on that machine. GitHub archives and the `.deb` / `.rpm` packages bundle [packages/README.md](packages/README.md), not this file.
 
 ## What this build runs
 
-| Command | What it does in this build |
-|---|---|
-| `gcu version`, `gcu install`, `gcu uninstall`, `gcu approvals` | Work without a desktop driver. |
-| `gcu mcp` on macOS, without `--driver` | Forwards stdio to `Grok Computer Use.app`. The helper shares the Host Stop latch. A live desktop, helper TCC, the physical hotkey, the App subprocess chain, and a real `gcu resume` are **未验证**. |
-| `gcu`, with no subcommand, on macOS | Asks Launch Services to start the helper (`open -g -j -b <bundle id> --args agent`). |
-| `gcu doctor`, `gcu call`, and `gcu mcp` on Linux and Windows | Omitting `--driver` selects `auto`. `auto` and `native` exit 2 when that route is not compiled, and they do not fall back to fake. `--driver fake` is the explicit offline driver. |
-| `gcu` with no subcommand, on Linux and Windows | Exits 2 with that same message. It does not print doctor. |
-| `gcu doctor` and `gcu call` on macOS | Same rule. They do not talk to the helper. |
-| `gcu engine` | Private channels for the Grok App host. Not the way to attach a CLI client. |
-| `gcu agent` | The helper process. Launch Services must start it. A shell does not receive the helper's permission grant. |
+> **Upgrade notice:** omitting `--driver` now means `auto`. An existing client
+> registration running `gcu mcp` can first reach the real desktop after an upgrade
+> to a build containing its native backend. Review the platform, OS permissions
+> and App approvals before reconnecting. The installer adds neither `fake` nor
+> automatic approval. Grok App's Computer Use setting remains off by default.
 
-`--driver` is `auto` (the default), `native`, or `fake`. They do not fall back to fake, widen input, or elevate. On Linux and Windows, `auto` and `native` exit 2. On macOS, `gcu mcp` forwards to the helper, `gcu engine` assembles a driver only inside an authenticated App subprocess and only claims that TCC chain for macOS 27 arm64, and `gcu call`, `gcu doctor`, and HTTP MCP exit 2 and point at the helper or the App. `--scene` is valid only with `--driver fake`. Omitted fake uses `form`. The fake desktop does not send operating-system input. A release binary also needs `GCU_ALLOW_FAKE=1`. A debug build does not. Scenes: `form`, `chat`, `list`, `modal`, `webarea`, `canvas`, `ide`, `login`, `terminal`, `web_terminal`, `submit_unknown`.
+`--driver auto|native|fake` selects the route in
+[`assemble.rs`](crates/gcu-cli/src/assemble.rs). `auto` is the default; it chooses
+by OS, entry point, compiled features and display session. `native` requires the
+same real route and the same checks. Neither falls back to fake, elevates,
+borrows terminal permissions or silently widens input. On Linux a non-empty
+`WAYLAND_DISPLAY` selects Wayland even if `DISPLAY` also exists; `DISPLAY` alone
+selects X11. Neither variable means no safe native route.
+
+| Command / platform | Actual assembly and boundary |
+|---|---|
+| `gcu version`, install/uninstall, approvals, resume, turn-ended, `mcp --connect` | Do not construct a desktop driver; the last command proxies an existing authenticated endpoint. |
+| macOS route A: `gcu mcp` stdio with auto/native | Proxies the Launch Services helper `Grok Computer Use.app`. AX/SCK/input share the LocalHost Stop latch and activity source. Live helper-only TCC, end-to-end actions and resume remain **not_run**. |
+| macOS: no subcommand / `gcu agent` | No subcommand launches the helper/onboarding; `agent` is the helper entry, not a way to borrow its TCC from a shell. |
+| macOS: `doctor`, `call`, self-hosted HTTP MCP with auto/native | Exit 2: `This entry does not assemble a native driver; use the helper or the App`. They do not proxy the helper. Explicit fake remains available. |
+| Windows: `mcp`, `call`, `doctor`, no subcommand | `native-windows` assembles the monitored Worker driver with Host Stop/activity; no subcommand runs doctor. Without that feature, auto/native exit 2; only explicit offline fake is available. |
+| Linux X11: same entries | `native-x11` assembles AT-SPI + X11 with Host Stop/activity; no subcommand runs doctor. Without that feature, auto/native exit 2; only explicit offline fake is available. |
+| Linux Wayland: same entries | `native-wayland` assembles the probe and Host latch/activity adapters. Proven single-window capture/input attachment exists in the driver, but the CLI does not initiate portal consent or attach those sessions. No claim of usable native Wayland capture/input. Without the feature, only explicit offline fake is available. |
+| Route B: `gcu engine` | App-managed authenticated Host/Stop channels. Windows/Linux require the matching feature. macOS admits the App subprocess chain only on macOS 27 arm64; other versions/Intel are refused. Full product TCC verification is **not_run**. This is not a client installation command. |
+
+The three CLI features `native-windows`, `native-x11`, `native-wayland` are
+**off by default**. The current [release workflow](../.github/workflows/release-computer-use.yml)
+does not enable them: its Windows/Linux artifacts remain **fake-only for desktop
+execution**, with auto/native refusing rather than running fake. Linux's separate
+`gcu-driver-linux/pipewire` feature does not enable native assembly. Platform
+assembly cards A0/A0-M/A1/A2/A3 being merged does not satisfy the
+[release gates](../docs/plans/computer-use-v2/07-quality-gates.md#8-发布门槛).
+
+Unsupported entries or missing features exit 2 with the reason. Once assembled,
+`gcu doctor --json` reports `driver`, `route`, `native_disabled`, `ready`,
+`issues` and driver capabilities; `ready=false` exits 3. The `native_disabled`
+field also carries selection notes such as `selected native-windows`.
+Use `issues` and capabilities for actual restrictions: the generic
+`permissions.status`/`private_apis.status` fields still say `not_applicable` and
+are not proof of permission. MCP initialize instructions include the route note;
+`capabilities` describes the selected driver's capabilities. A Windows assembly
+failure can exit before a doctor report; errors are not successful diagnostics.
+On macOS use helper/App diagnostics for native; `doctor --driver fake` diagnoses
+only the offline driver. Missing runtime permissions/capabilities can return
+`permission_missing`, `capability_unavailable`, `elevation_required` or
+`handoff_required`; none triggers a fake fallback.
+
+`--scene` is valid only with `--driver fake`; auto/native with a scene exit 2.
+Omitted fake uses `form`. Fake runs only an in-memory desktop and sends no OS
+input; a release binary also requires `GCU_ALLOW_FAKE=1`. That variable grants
+neither real permissions nor approval. Scenes: `form`, `chat`, `list`, `modal`,
+`webarea`, `canvas`, `ide`, `login`, `terminal`, `web_terminal`, `submit_unknown`.
+Fake fixture identities carry a test image digest and do not authorize real
+apps. Both routes use the same CLI `approvals.json`, rather than separate grant
+files; fake records are not migrated to real identities. Snapshots/images belong
+to the active connection. Switching drivers or cleaning fake data does not clear
+real Stop. There is no `GCU_DRIVER` override.
 
 There is no `gcu batch`, `gcu script`, or `gcu approvals revoke-all`.
 
 ## Install
 
-Supported targets in the release workflow: macOS 14+ arm64 and x64, Windows 10 1903+ x64, Linux glibc on x64 and arm64. Linux binaries are built on Ubuntu 22.04. musl and Alpine are not targets. Windows arm64 is not a release target.
+Build targets in the release workflow (not a desktop acceptance matrix): macOS 14+ arm64 and x64, Windows 10 1903+ x64, Linux glibc on x64 and arm64. Linux binaries are built on Ubuntu 22.04. musl and Alpine are not targets. Windows arm64 is not a release target.
 
 Pick the archive that matches the machine:
 
@@ -149,9 +194,9 @@ The window title is "Allow Computer Use". It has two cards:
 
 "Not now" is focused. Escape closes the window. Enter does not open Settings and does not restart the helper. "Open Settings" opens the matching Privacy & Security pane. After you allow Screen Recording, the card says "Allowed — restart the helper". Use "Restart helper". If the restart fails, the window stays open and says the helper did not restart.
 
-Clicking through this window on a Mac is **未验证**. Whether the system prompt names the helper, rather than the terminal, is **未验证**.
+Onboarding fixes were exercised on a macOS 27 Mini. The full packaged helper-only TCC path, revoke/wrong-PID/security-prompt matrix, signed/Dev isolation, and automatic relaunch after the system quits the helper remain **not_run**. Route B uses the App subprocess responsibility chain, admitted only on macOS 27 arm64; the full App product path is **not_run**, and macOS 14/15/Intel are not claimed. Input Monitoring is needed for the physical-activity guard; missing or failed monitoring disables dependent input. `macos-private-spi` defaults on in the driver but remains runtime-probed; it does not make Chromium background clicks work.
 
-`list_apps` does not need those two permissions. Window listing, launch, and actions do. A missing grant returns `permission_missing` (exit 3 from `gcu call`). A visible security prompt owned by SecurityAgent, CoreAuthenticationUI, or UserNotificationCenter is refused.
+`list_apps` does not need those two permissions. Window listing, launch, and actions do. A missing grant returns `permission_missing`; terminal native `gcu call` remains unsupported. A visible security prompt owned by SecurityAgent, CoreAuthenticationUI, or UserNotificationCenter is refused.
 
 ### Windows
 
@@ -159,15 +204,55 @@ There is no TCC prompt. The driver reads UI Automation and refuses to raise its 
 
 A target at a higher integrity level, including an elevated installer or a Settings window at High integrity while `gcu` is Medium, returns `elevation_required`: "The target has a higher integrity level." The driver does not elevate and does not request UIAccess. UIPI is not bypassed. The secure desktop (UAC, sign-in, lock) is refused.
 
-On the GitHub `windows-2022` runner the harness used a restricted token. Foreground mouse delivery was not proven there, so foreground stays unavailable. A normal interactive desktop with a physical mouse is **未验证**.
+`native-windows` uses UIA and WGC → PrintWindow inside a monitored Worker,
+with parent-owned hooks, hotkey, input release and Job cleanup. It never switches
+to InProcess. The engine itself at High/System integrity or with UIAccess, and a
+non-interactive/secure desktop, are refused before Worker startup. UIA Invoke
+can activate a window: background operation is partial, not disturbance-free.
+
+Foreground input uses the [ADR 0013](docs/adr/0013-windows-stop-guard-liveness-lease.md)
+Stop guard lease. While idle, it does not keep renewing mouse proof and an expired
+injection lease alone does not latch Stop. After policy/activity checks, an action
+must prove both hooks before injection; during injection it renews the 100 ms
+lease, and a lost proof latches Stop/releases input. Pump heartbeat alone is not
+hook proof. On physical-mouse machines the fourth probe, after zero move/wheel/
+horizontal wheel, is an absolute move to the same position and **may trigger
+hover**. A changed cursor invalidates that proof, without correction/retry.
+Doctor can lack a fresh idle injection lease; it does not grant foreground access.
+
+The hosted `windows-2022` runner has no proven mouse-hook delivery, so its
+foreground tests skipped. The task handoff reports **one** passing physical
+`hook_probe` run; this is not acceptance of all product paths. A1 physical
+keyboard/mouse integration, action-time renewal, UAC/hook loss, hotkey conflict,
+held-input Stop timing, hung Worker, DPI and system-App smoke remain **not_run**
+in STATUS. Older failing probe results are historical, not evidence for the new
+lease behavior.
 
 ### Linux
 
 Pure X11 uses AT-SPI for the tree and actions, and the X server for windows and screenshots. An occluded window is captured only when a composite manager can provide that window's pixels. Otherwise the driver refuses the capture. It does not return another window's contents.
 
-The full Wayland guide is [docs/wayland.md](docs/wayland.md) ([中文](docs/wayland.md#zh)). Wayland uses xdg-desktop-portal ScreenCast and RemoteDesktop. You approve the portal dialog. Only the source you selected is captured. An unknown source or an unknown compositor produces no image and no silent full-desktop fallback. A restore token is stored owner-only, expires after 24 hours, and is rejected when its source changes. Native Wayland has no global overlay. XWayland is not treated as a place where a global Stop hotkey can be proved, so that path does not enable the overlay.
+X11 assembly requires `native-x11`, a working AT-SPI accessibility bus and X
+server; XI2 observes physical activity, XGrabKey registers Stop, and XTEST is
+foreground input subject to policy/activity/Stop gates. Missing AT-SPI leaves
+native not ready; it does not enable a screenshot-and-coordinate bypass. The
+AccessKit fixture lacks EditableText; real GTK/Qt compatibility is **not_run**.
 
-A real GNOME, KDE, or wlroots desktop session is **未验证**. The portable Wayland tests passed. The headless GNOME job was not run.
+The [Wayland guide](docs/wayland.md) ([中文](docs/wayland.md#zh)) distinguishes
+assembly from a live portal grant. `native-wayland` selects the route; real
+PipeWire frames additionally require `gcu-driver-linux/pipewire` and compatible
+system libraries. A3 added proven single-window capture/geometry and scoped reis
+attachment APIs, not an automatic CLI consent flow. The current CLI only probes.
+GNOME/KDE/wlroots consent, frames, input mapping, revocation, expiry and Stop are
+**not_run**; other/unknown compositors cannot enable that proven route. AT-SPI
+text/semantic operations remain subject to identity and approval. XWayland can
+use only an exactly resolved X window, never XTEST to control native Wayland.
+No desktop-wide capture/input fallback or Wayland capsule is provided.
+Restore tokens, when an authorized caller creates a session, are owner-only,
+bound to source/window/process/authorization, and last at most 24 hours and no
+longer than the grant. Input requires proven confinement and a healthy registered Stop; losing an
+attached Stop listener retires bound capture and keeps Stop latched. A portal
+interface being present is not consent or Stop registration.
 
 ## Connect a client
 
@@ -181,7 +266,7 @@ gcu uninstall --client claude --yes
 
 Clients: `grok`, `codex`, `claude`, `antigravity`, `gemini`, `opencode`, `cursor`, `vscode`. `--scope` is `user` (default) or `project`. Pass the client as the positional argument or as `--client`. `--dry-run` prints a diff and writes nothing. `--json` prints one object. Repeating install does not duplicate the entry. Uninstall removes only `grok-computer-use` and hooks this installer owns.
 
-On Linux and Windows the installed command is `gcu mcp` with no `--driver`, which selects `auto` and exits 2 while the native route is not compiled. It does not fall back to fake. The installer does not add `--driver fake`. On macOS the same command is the helper proxy described above.
+The installed `gcu mcp` selects `auto`: a build with the matching backend can reach the real desktop; current Windows/Linux release-workflow artifacts lack the native assembly features and exit 2 instead. There is no fake fallback. The installer adds neither `--driver fake` nor automatic approval. On macOS it uses the helper proxy above. Re-read the upgrade notice before reconnecting an old installation.
 
 Any real change under the Grok directory asks on a terminal:
 
@@ -259,20 +344,39 @@ A present file with an empty `stop_hotkey`, a budget or image format outside the
 
 Stop is latched. The next model turn, a reconnect, and a new process do not clear it. The marker is `stopped` in the state directory above. Resume is not an MCP tool.
 
+Route B treats an abnormal engine control disconnect as **global persistent
+Stop**, including a crash. Before a local stop disconnects, the engine attempts
+to write `stop-reason` beside CLI state (`hotkey`, `panel`, or `internal_error`).
+The App reads it only for display: missing/forged/deleted markers cannot resume
+or weaken Stop. Normal explicit shutdown/idle exit and an internal Windows
+Worker restart do not create this disconnect Stop and never clear an old latch.
+Resume requires a new trusted user action; no model turn, reconnect or restart
+resumes or replays an unfinished action.
+
+The safety limits remain ≤100 ms to latch Stop, ≤500 ms to issue input release,
+and ≤5 s to end a blocked native call or kill its Worker. The driver deadline is
+4750 ms to leave cleanup time. These are required budgets, not newly measured
+physical guarantees; missing desktop measurements remain **not_run**. Approval
+waiting has its separate 120 s deadline and must not block Stop.
+
+Turn end clears turn grants and releases input. Session close revokes tokens,
+session grants, subscriptions, workers and attached portal resources/images;
+Always grants and Stop persist. Data deletion limits are below.
+
 Built-in Stop chords, when that driver is actually running:
 
 | System | Chord | Demonstrated |
 |---|---|---|
-| macOS | Control+Option+Command+. | Physical key **未验证**. |
-| Windows | Ctrl+Alt+Shift+Backspace | The hosted runner skipped the hotkey. Physical key **未验证**. |
-| Linux X11 | Ctrl+Alt+Shift+Backspace | Xvfb grab test passed. Physical key **未验证**. |
-| Native Wayland | No proved global hotkey | Dependent input stays off. Real session **未验证**. |
+| macOS | Control+Option+Command+. | Physical key **not_run**. |
+| Windows | Ctrl+Alt+Shift+Backspace | The hosted runner skipped the hotkey. Physical key **not_run**. |
+| Linux X11 | Ctrl+Alt+Shift+Backspace | Xvfb grab test passed. Physical key **not_run**. |
+| Native Wayland | GlobalShortcuts registration API; no live proven registration | Dependent input stays off until registration and confinement are proved. Real session **not_run**. |
 
 For an in-process server, including `--driver fake`, SIGINT and SIGTERM latch Stop and release held input. `gcu mcp` on macOS without `--driver` only forwards stdio. This guide does not claim that Ctrl+C in that proxy latches the helper.
 
-The macOS helper shares the Host Stop latch. It does not start a private already-stopped latch. Live helper actions, helper-only TCC, the App subprocess chain, the physical hotkey, and a real `gcu resume` are **未验证**. macOS 14, macOS 15, and Intel are not claimed. The configured hotkey string is still not passed into the driver.
+The macOS helper shares the Host Stop latch. It does not start a private already-stopped latch. Live helper actions, helper-only TCC, the App subprocess chain, the physical hotkey, and a real `gcu resume` are **not_run**. macOS 14, macOS 15, and Intel are not claimed. The configured hotkey string is still not passed into the driver.
 
-`gcu-overlay` draws a Stop control and can exclude itself from capture on macOS and Windows. It is not linked into this `gcu` binary. Its real GUI is **未验证**. `GCU_OVERLAY=0` would hide that UI only. It is not a switch in this binary.
+`gcu-overlay` draws a Stop control and can exclude itself from capture on macOS and Windows. It is not linked into this `gcu` binary. Its real GUI is **not_run**. `GCU_OVERLAY=0` would hide that UI only. It is not a switch in this binary.
 
 To resume an in-process session, both the terminal input and output must be TTYs:
 
@@ -291,15 +395,27 @@ Driver libraries and the `gcu` command are not the same thing. The table is what
 
 | Capability | macOS | Windows | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
-| Real driver in `gcu mcp` | Helper proxy. The helper shares the Host Stop latch. Live use, TCC, and `gcu resume` **未验证**. | Not assembled. `auto` and `native` exit 2 and do not fall back to fake. | Not linked into `gcu`. `auto` and `native` exit 2 and do not fall back to fake. | Same as X11 for the CLI. |
-| Accessibility tree | AX. Mini, macOS 27, arm64: live contract 26 passed, 4 skipped, 0 failed. First read can be a short incomplete tree. macOS 14/15 and Intel **未验证**. | UIA on the `windows-2022` runner: contract 15 passed, 15 skipped, 0 failed. First read can be incomplete. Physical desktop **未验证**. | AT-SPI on Xvfb CI: 23 passed, 6 skipped, 0 failed. Physical desktop **未验证**. | Detection and portal code exist. Real compositor **未验证**. |
-| Window screenshot | ScreenCaptureKit, including a covered window, on that Mini for the driver tests. Packaged helper **未验证**. | WGC, then PrintWindow. Occluded windows and 150% DPI **未验证**. | XComposite on Xvfb passed. No composite and covered: refused. | Portal ScreenCast. Real portal **未验证**. |
-| Background actions | Partial. AppKit can receive a background click on macOS 27. Chromium does not ([ADR 0006](docs/adr/0006-macos-tcc-helper.md)). | Partial. UIA Invoke can activate the window. A native button uses a non-activating click. | AT-SPI where the interface exists. XTEST is not used when Stop cannot be grabbed. | Portal input only with a reliable Stop. No full-desktop fallback. **未验证** live. |
-| Foreground typing and pointing | Policy-gated. Physical idle detection **未验证**. | Unavailable on the hosted runner: synthetic mouse never reached the hook. Physical mouse **未验证**. | XTEST on Xvfb when the hotkey grab works. Physical devices **未验证**. | **未验证**. |
+| Real driver in `gcu mcp` | Route A helper shares Host Stop/activity. Route B engine admits macOS 27 arm64 only. Full TCC/product paths **not_run**. | Assembled behind default-off `native-windows`; monitored Worker only. Current release workflow leaves it off. | Assembled behind default-off `native-x11`; AT-SPI + X11, Host latch/activity. Current release workflow leaves it off. | Default-off `native-wayland` probe/Host adapters; driver has proven-source attachment APIs, CLI does not start consent. Live portal **not_run**. |
+| Accessibility tree | AX. Mini, macOS 27, arm64: live contract 26 passed, 4 skipped, 0 failed. First read can be a short incomplete tree. macOS 14/15 and Intel **not_run**. | UIA on the `windows-2022` runner: contract 15 passed, 15 skipped, 0 failed. First read can be incomplete. Physical desktop **not_run**. | AT-SPI on Xvfb CI: 23 passed, 6 skipped, 0 failed. Physical desktop **not_run**. | Detection and portal code exist. Real compositor **not_run**. |
+| Window screenshot | ScreenCaptureKit, including a covered window, on that Mini for the driver tests. Packaged helper **not_run**. | WGC, then PrintWindow. Occluded windows and 150% DPI **not_run**. | XComposite on Xvfb passed. No composite and covered: refused. | Portal ScreenCast. Real portal **not_run**. |
+| Background actions | Partial. AppKit can receive a background click on macOS 27. Chromium does not ([ADR 0006](docs/adr/0006-macos-tcc-helper.md)). | Partial. UIA Invoke can activate the window. A native button uses a non-activating click. | AT-SPI where the interface exists. XTEST is not used when Stop cannot be grabbed. | Portal input only with a reliable Stop. No full-desktop fallback. **not_run** live. |
+| Foreground typing and pointing | Policy-gated. Physical idle detection **not_run**. | Action-gated Stop lease (ADR 0013); fourth probe may hover. One physical hook_probe pass reported; full A1 checks **not_run**. Hosted runner foreground unavailable. | XTEST on Xvfb when the hotkey grab works. Physical devices **not_run**. | **not_run**. |
 | Stop hotkey | See the Stop section. | See the Stop section. | Xvfb test passed. | Not claimed. |
-| Overlay excluded from capture | Implemented in `gcu-overlay`, not in this binary. The live macOS contract skipped this case. Real GUI **未验证**. | Implemented, not in this binary. Real GUI **未验证**. | The X11 driver hides overlay windows during a capture lease. Real GUI **未验证**. | Declared unavailable. |
+| Overlay excluded from capture | Implemented in `gcu-overlay`, not in this binary. The live macOS contract skipped this case. Real GUI **not_run**. | Implemented, not in this binary. Real GUI **not_run**. | The X11 driver hides overlay windows during a capture lease. Real GUI **not_run**. | Declared unavailable. |
 
 More detail: [macOS driver notes](crates/gcu-driver-macos/README.md), [Windows driver notes](crates/gcu-driver-windows/README.md), [Windows runner diagnostics](crates/gcu-driver-windows/diagnostics.md), [overlay notes](crates/gcu-overlay/README.md).
+
+## Browser extension
+
+L0 browser accessibility is available through the selected native driver where
+its platform capabilities permit; no extension is needed. The optional extension
+has fixed ID `jgpkhdjlddaoopklipcnpcjcpiancmff`, but **L2 DOM fusion/actions are
+closed on every platform**. A4a could not prove the shared top document's mapping
+to an OS window; A4b is blocked and no production DomChannel is attached.
+ADR 0014 is Proposed, not an accepted mechanism or delivery commitment; its text
+is absent from this checkout. See the [A4a proof and existing Chrome/Edge install steps](docs/browser-extension.md#proof).
+A share badge is browser consent only, not working DOM control, App approval or
+Stop recovery. L0 does not prevent browser-internal redirects.
 
 ## Privacy
 
@@ -308,7 +424,7 @@ More detail: [macOS driver notes](crates/gcu-driver-macos/README.md), [Windows d
 existing boolean calls keep their behavior and serialized shape. Auto evaluates
 usable interactive nodes, controls inside popups, and the raw canvas role share.
 `gcu_core::observe::QualityThresholds.min_interactive_nodes` and
-`canvas_role_ratio` are **待评测校准**: both default to `None`, with no invented
+`canvas_role_ratio` are **pending evaluation calibration**: both default to `None`, with no invented
 production cutoff. Evaluation can inject boundaries through
 `ActionRouter::with_auto_capture_policy`; these are not new `config.toml` keys.
 Without an interactive-node boundary, auto conservatively keeps the image.
@@ -325,9 +441,20 @@ evaluation on the same tasks proves that success rate does not decrease.
 
 Screenshots are redacted before they are shown to a model, a dialog, or `gcu call`. Sensitive regions are painted opaque gray and expanded by 4 pixels. If a sensitive region cannot be located, or the tree is incomplete, no image is returned. The text tree can still be returned. The unredacted frame is not written out for the model.
 
-`gcu call` without `--json` copies those safe images into a private `gcu-call-*` directory under `$XDG_RUNTIME_DIR` or the temp directory. The directory is mode `0700` and the files are mode `0600` (an owner-only ACL on Windows). The next `gcu` process deletes directories older than one hour. You can delete them sooner. `--json` prints the MCP result. Files owned by an MCP session, including overflow text and screenshots, are removed when the connection closes.
+`gcu call` without `--json` copies those safe images into a private `gcu-call-*` directory under `$XDG_RUNTIME_DIR` or the temp directory. The directory is mode `0700` and the files are mode `0600` (an owner-only ACL on Windows). A later CLI invocation reaching artifact cleanup attempts to delete directories older than one hour; there is no expiry timer. You can delete them sooner. `--json` prints the MCP result. Normal MCP connection close/Drop removes its temporary overflow text and screenshots. Forced termination and deletion failures can leave files behind; Windows MCP image DACL verification is still open.
 
-Logs go to standard error. There is no log file. `doctor` keeps at most 20 metadata rows from the last completed process: tool name, outcome, duration, and timestamp. No typed text, target labels, or image bytes. Rows older than seven days are dropped. The path is `recent-calls.json` in the state directory.
+Logs go to standard error. There is no log file. `doctor` keeps at most 20 metadata rows from the last completed process: tool name, outcome, duration, and timestamp. No typed text, target labels, or image bytes. Rows older than seven days are filtered on load; the old file is not automatically unlinked. The path is `recent-calls.json` in the state directory.
+
+These CLI rules do not erase App chat history, approval-card copies or results
+already saved by clients/model providers. Revoking an approval blocks future
+access; it does not physically erase past observations. App journal/image cleanup,
+Windows file ACLs, signed grant matching and production engine signature
+verification have open findings in [security.md](docs/security.md) and the
+[data inventory](docs/data-inventory.md). Those documents are a dated audit; their assembly descriptions predate the
+platform cards and must be read with the current code and STATUS. `GCU_LOG_PAYLOADS` has no current
+payload-log implementation; do not infer complete secret scrubbing or a 7-day /
+5×5 MB App log guarantee. Clipboard history/sync can retain pasted text beyond
+conditional clipboard restoration; gcu cannot delete those external copies.
 
 Session secrets are not placed in the environment or in `argv`. Do not scrape child environments. A panic prints `Internal panic; operation was not replayed` and does not include the payload.
 
@@ -343,15 +470,15 @@ Session secrets are not placed in the environment or in `argv`. Do not scrape ch
 | `permission_missing` | The helper is missing Accessibility or Screen Recording, or the Linux session is missing AT-SPI / a portal grant. |
 | Screen Recording still fails after you allow it | Restart the helper. macOS applies that grant only to processes started afterward. Accessibility applies immediately. |
 | The first look at an egui / AccessKit window is a short tree, and there is no screenshot | The tree is published lazily and marked incomplete. On the macOS 27 Mini the fixture grew from 7 nodes to 54 after about 588 ms. An incomplete tree does not produce an image. A later read can be complete. The same lazy first read was seen on Windows UIA. |
-| `SetValue` returns not settable | AccessKit text fields on Linux do not implement editable text, and the egui field on macOS can report success while the text is unchanged. The driver reads the value back. Use `type_text`. On Linux that needs a foreground policy. Real GTK and Qt apps are **未验证**. |
-| `elevation_required` | The Windows target is higher integrity than `gcu`, or it is UIAccess. `gcu` will not elevate. Run the target unelevated, or do the step yourself. |
+| `SetValue` returns not settable | AccessKit text fields on Linux do not implement editable text, and the egui field on macOS can report success while the text is unchanged. The driver reads the value back. Use `type_text`. On Linux that needs a foreground policy. Real GTK and Qt apps are **not_run**. |
+| `elevation_required` | The Windows target is higher integrity than `gcu`, or the engine itself has forbidden High/System integrity or UIAccess. `gcu` will not elevate. Run the target unelevated, or do the step yourself. |
 | Foreground actions unavailable on a Windows runner | The hosted runner's restricted token never delivered a synthetic mouse to the low-level hook. That is an environment result, not a promise about a PC with a physical mouse. |
 | Chromium ignores a background click on macOS | Measured on macOS 27. The driver does not switch to a foreground click to hide that. |
 | `Computer-use helper rejected the connection` | The CLI and the helper are not the same signed bytes, or the socket is not the one this user owns. Register the app that contains this `gcu`. |
 | `Launch Services did not start the computer-use helper` | `open -Ra` the absolute `.app` path first. `open -b` cannot start an app Launch Services does not know. |
 | `The computer-use helper runs only on macOS` | `gcu agent` was started on another system. |
 | Approvals file cannot be read | The file is missing its owner-only mode, is a symlink, or is corrupt. Fix or delete that one file. Do not chmod your home directory. |
-| The model keeps receiving `stopped_by_user` | Stop is still latched. `gcu turn-ended` will not clear it. Resume from a TTY with `gcu resume`. A real macOS helper resume is **未验证**. |
+| The model keeps receiving `stopped_by_user` | Stop is still latched. `gcu turn-ended` will not clear it. Resume from a TTY with `gcu resume`. A real macOS helper resume is **not_run**. |
 | `gcu install` says it will edit `~/.grok` | It will. A project-scoped Grok install still writes the Stop hook there. Pass `--yes` only when you mean that. |
 
 ## Uninstall
@@ -385,9 +512,9 @@ Session secrets are not placed in the environment or in `argv`. Do not scrape ch
 4. Remove operating-system grants yourself. `gcu` does not revoke them.
 
    - macOS: System Settings → Privacy & Security → Accessibility and Screen Recording. Remove `Grok Computer Use` or `Grok Computer Use (Dev)`.
-   - Linux portal: remove the ScreenCast / RemoteDesktop permission in the desktop's settings. A Wayland driver that stores restore tokens uses `${XDG_DATA_HOME:-~/.local/share}/grok-computer-use/wayland-restore` (directory mode `0700`, files mode `0600`). This `gcu` binary does not link the Linux driver, so it does not create that directory.
+   - Linux portal: remove the ScreenCast / RemoteDesktop permission in the desktop's settings. A Wayland driver that stores restore tokens uses `${XDG_DATA_HOME:-~/.local/share}/grok-computer-use/wayland-restore` (directory mode `0700`, files mode `0600`). The default release route does not open a portal; custom native builds only create tokens when an authorized caller attaches a proven session. Deleting local tokens does not revoke the desktop portal grant.
 
-5. Leftover files, if you want them gone: `config.toml`, `approvals.json`, `stopped`, `recent-calls.json`, the Wayland `wayland-restore` directory above, and the `gcu-call-*` / `gcu-control-*` directories. Paths are in Approvals and in Stop and resume.
+5. Leftover files, if you want them gone: `config.toml`, `approvals.json`, `stop-reason`, `recent-calls.json`, the Wayland `wayland-restore` directory above, and the `gcu-call-*` / `gcu-control-*` directories. Paths are in Approvals and in Stop and resume. Stop all processes before deleting retained data; deleting `stopped` is not a supported resume path. The App has separate policy/history/Stop storage; see the data inventory.
 
 ## Commands
 
@@ -409,7 +536,7 @@ gcu resume --session <gcu-control-directory>
 gcu turn-ended --help
 ```
 
-`gcu mcp` defaults are `--transport stdio`, `--profile default` (`default`, `minimal`, or `full`), and `--turn-idle-secs 45` (at least 1). HTTP requires `--token-fd`. `--port` defaults to an ephemeral port. `--connect` is a stdio proxy and also needs `--token-fd`. [docs/cli.md](docs/cli.md) still says HTTP is unimplemented. The binary accepts the flags above.
+`gcu mcp` defaults are `--transport stdio`, `--profile default` (`default`, `minimal`, or `full`), and `--turn-idle-secs 45` (at least 1). HTTP requires `--token-fd`. `--port` defaults to an ephemeral port. `--connect` is a stdio proxy and also needs `--token-fd`. Self-hosted native HTTP follows the entry restrictions above (unsupported on macOS).
 
 `gcu turn-ended` is handled before ordinary parsing. It reads Grok Stop JSON on stdin, or one Codex notify JSON argument. `--session` selects one control directory. `--previous-notify` runs the previous notify command first and keeps its exit status. Other errors print a redacted line and exit 0.
 
