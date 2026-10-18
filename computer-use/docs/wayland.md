@@ -17,8 +17,15 @@ when those programs are missing, and a missing runner is not a pass
 
 The product does not claim full Wayland support.
 
-- The shipping `gcu` binary does not assemble a native driver. Omitting
-  `--driver` selects `auto`. `auto` and `native` exit 2 with a reason such as
+**Upgrade / assembly:** See [README `--driver auto` guidance](../README.md#what-this-build-runs).
+`native-wayland` assembles probing and Host Stop latch/activity adapters, but the
+CLI does not initiate portal consent or attach capture/input sessions. The feature
+is off by default and the current release workflow does not enable it. Existing
+`gcu mcp` registrations use `auto` after upgrade; review OS permissions and App
+approvals before reconnecting.
+
+- Current release artifacts omit `native-wayland`. Omitting
+  `--driver` selects `auto`. Without the feature, `auto` and `native` exit 2 with a reason such as
   `native-wayland is not compiled into this build` and do not fall back to fake
   (`computer-use/crates/gcu-cli/src/assemble.rs`). `gcu doctor --driver fake`
   reports the fake route and why native is disabled. It does not probe
@@ -27,8 +34,8 @@ The product does not claim full Wayland support.
   XWayland, and native Wayland. The accessibility bus is the reliable action
   path in [architecture §5.3](../../docs/plans/computer-use-v2/03-architecture.md#53-linux).
 - Native Wayland screenshots and pointer/keyboard input exist as library code
-  behind portal traits. `LinuxDriver::capture` still returns
-  `CapabilityUnavailable` for a native Wayland window. Pointer, drag, scroll,
+  behind portal traits. `LinuxDriver::capture` requires a proven single-window
+  capture session. Without it, capture returns `CapabilityUnavailable`. Pointer, drag, scroll,
   keys, and `type_text` on that window do the same unless a `PortalInput`
   session was attached for that exact window. The CLI never attaches one.
 - A real GNOME, KDE, or wlroots portal dialog, PipeWire frame, and libei device
@@ -76,7 +83,7 @@ promotes anything. "Portal present" means the session-bus probe saw
 | Semantic actions (Action, SetValue, SelectText, Text, Value) | available | available | available. These calls do not open a portal |
 | Targeted per-window pointer/keys | unavailable on Linux | unavailable | unavailable |
 | Screenshot in the capability table | `XComposite` + `XGetImage` when the extension exists; otherwise degraded, occluded windows fail | `XComposite` when the extension exists | available only when the portal service and `org.freedesktop.portal.ScreenCast` are both present |
-| What `LinuxDriver::capture` does | X11 capture | X11 capture when the window has an X id | `CapabilityUnavailable`. The ScreenCast pipeline is not called |
+| What `LinuxDriver::capture` does | X11 capture | X11 capture when the window has an X id | Uses a proven single-window capture session; otherwise `CapabilityUnavailable`. The CLI does not attach one |
 | Pointer and keyboard | XTEST when the global Stop chord is registered and Stop is clear | same gate; the chord itself is only partial | static table: unavailable, reason text says portal RemoteDesktop + libei integration is pending. Promotion is a separate runtime gate |
 | Global Stop | `XGrabKey` of Ctrl+Alt+Shift+Backspace when registration succeeds | partial: that grab sees the chord only while an X11 surface is active | unavailable until a GlobalShortcuts listener is registered and stays healthy. Seeing the interface is not registration |
 | User-activity guard | XInput2 on the root window when the listener is up | unavailable | unavailable in the static table |
@@ -263,9 +270,9 @@ still lists a grant in a system settings panel after the local file is gone is
 - Full Wayland support is not claimed.
 - Real portal consent, PipeWire frames, libei devices, GNOME Shell, KWin, and
   foreign-toplevel on a desktop are **not verified**.
-- When ScreenCast is on the bus, the capability struct can set
-  `observe.screenshot` true for a native Wayland target, while
-  `LinuxDriver::capture` still returns `CapabilityUnavailable`.
+- ScreenCast detection alone does not make capture usable. Without a proven
+  single-window capture session, `LinuxDriver::capture` returns
+  `CapabilityUnavailable`.
 - The ScreenCast and RemoteDesktop clients are not wired into the CLI.
 - One granted stream is required. The input path accepts only a window stream
   with both keyboard and pointer. A monitor grant is refused there.
@@ -337,9 +344,9 @@ and must go through portal consent again. That consent dialog is **not verified*
 | Topic | X11 | Wayland session |
 | --- | --- | --- |
 | Display variables | `DISPLAY` and/or `XDG_SESSION_TYPE=x11`, and no `WAYLAND_DISPLAY` | `WAYLAND_DISPLAY` or `XDG_SESSION_TYPE=wayland`. `DISPLAY` additionally means XWayland is present |
-| Window ids used for capture | X11 window id via XComposite | Native ids (`/` or `wayland` prefix) are refused by `LinuxDriver::capture`. X ids still use XComposite |
+| Window ids used for capture | X11 window id via XComposite | Native ids (`/` or `wayland` prefix) require a proven single-window capture session, which the CLI does not attach. X ids still use XComposite |
 | Screenshot permission | X11 extensions (`XComposite`, and XTEST for input) | Portal ScreenCast for the library path. User consent dialog **not verified** |
-| Input | XTEST, treated as foreground, and only while the Stop chord is registered | Library path: RemoteDesktop + `ConnectToEIS` (`reis`). No XTEST fallback. CLI path: `CapabilityUnavailable` |
+| Input | XTEST, treated as foreground, and only while the Stop chord is registered | Library path: RemoteDesktop + `ConnectToEIS` (`reis`). No XTEST fallback. CLI does not initiate consent or attach native portal input |
 | User-activity guard | XInput2 when available | Unavailable for XWayland and for native Wayland until a confined authority is attached. Desktop behavior **not verified** |
 | Stop | Root `XGrabKey`, Ctrl+Alt+Shift+Backspace | Native: GlobalShortcuts id `gcu-stop`, **not verified** on a real portal. XWayland grab is partial. Capsule button is unavailable for the whole Wayland session |
 | Overlay in screenshots | Overlay is hidden during capture. `overlay_excluded_from_capture` stays false | No overlay is created, so there is nothing to exclude |
@@ -356,7 +363,7 @@ and must go through portal consent again. That consent dialog is **not verified*
 | RemoteDesktop, EI, Stop, no XTEST fallback | `input_portal.rs`, `input.rs`, `input_control.rs`, `input_stop.rs`, `ei.rs`; [ADR 0008 reis](adr/0008-reis-portal-input.md) |
 | Identity | `windows.rs`, `gnome.rs`, `kwin.rs`, `toplevel.rs`; [GNOME README](../tools/gnome-shell/README.md); [KWin README](../tools/kwin/README.md); [ADR 0008 image hash](adr/0008-linux-image-hash-budget.md) |
 | Overlay absent on Wayland | [overlay README](../crates/gcu-overlay/README.md); `gcu-overlay/src/availability.rs` |
-| CLI native route is not assembled; fake is explicit; `gcu resume` limits | [cli.md](cli.md); [ADR 0003](adr/0003-resume-trust.md) |
+| CLI `native-wayland` probe/Host assembly; no portal consent/session attachment; explicit fake; `gcu resume` limits | [`assemble.rs`](../crates/gcu-cli/src/assemble.rs); [`native_wayland.rs`](../crates/gcu-cli/src/native_wayland.rs); [cli.md](cli.md); [ADR 0003](adr/0003-resume-trust.md) |
 | Real desktop not run | [STATUS.md](../../docs/plans/computer-use-v2/STATUS.md) rows P7-01 through P7-05; `scripts/wayland-ci.sh` |
 | Architecture contract | [§5.3](../../docs/plans/computer-use-v2/03-architecture.md#53-linux), [§7.7](../../docs/plans/computer-use-v2/03-architecture.md#77-用户活动守卫与接管), [§8](../../docs/plans/computer-use-v2/03-architecture.md#8-会话与生命周期) |
 
@@ -368,9 +375,11 @@ and must go through portal consent again. That consent dialog is **not verified*
 
 本页不声称 Wayland 全支持。
 
-- 当前发布的 `gcu` 没有装配原生驱动。省略 `--driver` 即选择 `auto`。`auto` 和 `native` 以退出码 2 结束，原因类似 `native-wayland is not compiled into this build`，并且不会退回 fake（`computer-use/crates/gcu-cli/src/assemble.rs`）。`gcu doctor --driver fake` 报告 fake 路线以及原生路线被禁用的原因，不会探测 `xdg-desktop-portal`。
+**升级 / 装配提示：**见 [README 的 `--driver auto` 说明](../README_ZH.md#这个构建实际能跑什么)。`native-wayland` 已装配探测与 Host Stop 锁存/活动适配，但 CLI 不发起 portal 同意，也不挂接采集/输入会话。该 feature 默认关闭，当前发行工作流未启用。既有 `gcu mcp` 登记升级后使用 `auto`；重连前请核对系统权限和应用授权。
+
+- 当前发行产物未启用 `native-wayland`。省略 `--driver` 即选择 `auto`。未编入该 feature 时，`auto` 和 `native` 以退出码 2 结束，原因类似 `native-wayland is not compiled into this build`，并且不会退回 fake（`computer-use/crates/gcu-cli/src/assemble.rs`）。`gcu doctor --driver fake` 报告 fake 路线以及原生路线被禁用的原因，不会探测 `xdg-desktop-portal`。
 - AT-SPI 观察和 AT-SPI 语义动作在 X11、XWayland、原生 Wayland 上都标为可用。无障碍总线是 [架构 §5.3](../../docs/plans/computer-use-v2/03-architecture.md#53-linux) 里的可靠动作路径。
-- 原生 Wayland 截图和指针/键盘在 portal trait 后面有库代码。`LinuxDriver::capture` 对原生 Wayland 窗口仍返回 `CapabilityUnavailable`。该窗口上的指针、拖拽、滚动、按键和 `type_text` 同样如此，除非已经为这一个窗口挂上了 `PortalInput`。CLI 不会挂上它。
+- 原生 Wayland 截图和指针/键盘在 portal trait 后面有库代码。`LinuxDriver::capture` 需要经证明的单窗口采集会话，没有则返回 `CapabilityUnavailable`。该窗口上的指针、拖拽、滚动、按键和 `type_text` 同样如此，除非已经为这一个窗口挂上了 `PortalInput`。CLI 不会挂上它。
 - 真实 GNOME、KDE、wlroots 上的 portal 对话框、PipeWire 帧和 libei 设备均为**未验证**。STATUS 中 P7-02、P7-03、P7-04、P7-05 的真机桌面都是 `not_run`。可移植契约行是 fake 或内存测试。
 
 ### 会话如何分类
@@ -400,7 +409,7 @@ and must go through portal consent again. That consent dialog is **not verified*
 | 语义动作（Action、SetValue、SelectText、Text、Value） | 可用 | 可用 | 可用。这些调用不开 portal |
 | 按窗口定向的指针/键盘 | Linux 上不可用 | 不可用 | 不可用 |
 | 能力表里的截图 | 有 `XComposite` 时走 `XGetImage`；否则降级，被遮挡的窗口失败 | 有扩展时走 `XComposite` | 仅当 portal 服务和 `org.freedesktop.portal.ScreenCast` 都在时标为可用 |
-| `LinuxDriver::capture` 的实际行为 | X11 采集 | 窗口有 X id 时走 X11 采集 | `CapabilityUnavailable`。不会调用 ScreenCast 管线 |
+| `LinuxDriver::capture` 的实际行为 | X11 采集 | 窗口有 X id 时走 X11 采集 | 使用经证明的单窗口采集会话，否则 `CapabilityUnavailable`。CLI 不挂接这类会话 |
 | 指针和键盘 | Stop 组合键注册成功且未锁存时走 XTEST | 同一门禁；组合键本身只是部分可用 | 静态表：不可用，原因文本写着 portal RemoteDesktop + libei 集成尚未完成。提升是另一道运行时门禁 |
 | 全局 Stop | 注册成功时用 `XGrabKey` 抓 Ctrl+Alt+Shift+Backspace | 部分可用：只有 X11 表面处于活动时才能抓到 | 在 GlobalShortcuts 监听注册成功并保持健康之前不可用。看见接口不等于注册成功 |
 | 用户活动守卫 | 监听起来时，根窗口上的 XInput2 | 不可用 | 静态表里不可用 |
@@ -501,7 +510,7 @@ portal 请求使用 `PersistMode::ExplicitlyRevoked`。本地文件删除之后�
 
 - 不声称 Wayland 全支持。
 - 真机上的 portal 同意、PipeWire 帧、libei 设备、GNOME Shell、KWin 和 foreign-toplevel 均为**未验证**。
-- 即使总线上有 ScreenCast、能力表把 `observe.screenshot` 设为 true，`LinuxDriver::capture` 仍然拒绝原生 Wayland 窗口。
+- 仅探测到 ScreenCast 不等于采集可用。没有经证明的单窗口采集会话时，`LinuxDriver::capture` 返回 `CapabilityUnavailable`。
 - ScreenCast 和 RemoteDesktop 客户端没有接到 CLI。
 - 必须恰好一个流。输入路径只接受同时带键盘和指针的窗口流。监视器授权在这条路径上被拒绝。
 - 无法证明授权窗口的全局键盘会话保持禁用（[ADR 0008 reis](adr/0008-reis-portal-input.md)）。
@@ -531,9 +540,9 @@ portal 请求使用 `PersistMode::ExplicitlyRevoked`。本地文件删除之后�
 | 主题 | X11 | Wayland 会话 |
 | --- | --- | --- |
 | 显示变量 | 有 `DISPLAY` 和/或 `XDG_SESSION_TYPE=x11`，且没有 `WAYLAND_DISPLAY` | 有 `WAYLAND_DISPLAY` 或 `XDG_SESSION_TYPE=wayland`。再有 `DISPLAY` 表示存在 XWayland |
-| 采集用的窗口 id | 经 XComposite 的 X11 窗口 id | 原生 id（`/` 或 `wayland` 前缀）被 `LinuxDriver::capture` 拒绝。X id 仍走 XComposite |
+| 采集用的窗口 id | 经 XComposite 的 X11 窗口 id | 原生 id（`/` 或 `wayland` 前缀）需要经证明的单窗口采集会话，CLI 不挂接它。X id 仍走 XComposite |
 | 截图权限 | X11 扩展（截图用 `XComposite`，输入用 XTEST） | 库路径用 portal ScreenCast。用户同意对话框**未验证** |
-| 输入 | XTEST，视为前台，且仅在 Stop 组合键已注册时 | 库路径：RemoteDesktop + `ConnectToEIS`（`reis`）。没有 XTEST 回退。CLI 路径：`CapabilityUnavailable` |
+| 输入 | XTEST，视为前台，且仅在 Stop 组合键已注册时 | 库路径：RemoteDesktop + `ConnectToEIS`（`reis`）。没有 XTEST 回退。CLI 不发起同意，也不挂接原生 portal 输入 |
 | 用户活动守卫 | XInput2 可用时启用 | XWayland 和原生 Wayland 在挂上受限权威之前不可用。桌面行为**未验证** |
 | Stop | 根窗口 `XGrabKey`，Ctrl+Alt+Shift+Backspace | 原生：GlobalShortcuts id `gcu-stop`，真实 portal 上**未验证**。XWayland 抓键只是部分可用。整个 Wayland 会话都没有胶囊按钮 |
 | 截图里的覆盖层 | 采集期间隐藏覆盖层。`overlay_excluded_from_capture` 仍为 false | 不创建覆盖层，因此没有可排除的窗口 |
@@ -550,6 +559,6 @@ portal 请求使用 `PersistMode::ExplicitlyRevoked`。本地文件删除之后�
 | RemoteDesktop、EI、Stop、无 XTEST 回退 | `input_portal.rs`、`input.rs`、`input_control.rs`、`input_stop.rs`、`ei.rs`；[ADR 0008 reis](adr/0008-reis-portal-input.md) |
 | 身份 | `windows.rs`、`gnome.rs`、`kwin.rs`、`toplevel.rs`；[GNOME README](../tools/gnome-shell/README.md)；[KWin README](../tools/kwin/README.md)；[ADR 0008 映像哈希](adr/0008-linux-image-hash-budget.md) |
 | Wayland 上没有覆盖层 | [overlay README](../crates/gcu-overlay/README.md)；`gcu-overlay/src/availability.rs` |
-| CLI 只有 fake；`gcu resume` 的限制 | [cli.md](cli.md)；[ADR 0003](adr/0003-resume-trust.md) |
+| CLI `native-wayland` 探测/Host 装配；不发起 portal 同意/会话挂接；显式 fake；`gcu resume` 的限制 | [`assemble.rs`](../crates/gcu-cli/src/assemble.rs)；[`native_wayland.rs`](../crates/gcu-cli/src/native_wayland.rs)；[cli.md](cli.md)；[ADR 0003](adr/0003-resume-trust.md) |
 | 真机未跑 | [STATUS.md](../../docs/plans/computer-use-v2/STATUS.md) 的 P7-01 至 P7-05；`scripts/wayland-ci.sh` |
 | 架构合同 | [§5.3](../../docs/plans/computer-use-v2/03-architecture.md#53-linux)、[§7.7](../../docs/plans/computer-use-v2/03-architecture.md#77-用户活动守卫与接管)、[§8](../../docs/plans/computer-use-v2/03-architecture.md#8-会话与生命周期) |
