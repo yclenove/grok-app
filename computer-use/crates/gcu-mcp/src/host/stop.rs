@@ -20,6 +20,24 @@ impl PhysicalActivity for UnavailableActivity {
         None
     }
 }
+/// Engine view of a Host [`gcu_host_api::UserActivity`].
+///
+/// Only the physical-input age is forwarded. Stop bits stay on the Host latch.
+pub struct UserActivityAdapter {
+    inner: Arc<dyn gcu_host_api::UserActivity>,
+}
+impl UserActivityAdapter {
+    /// Wrap one host activity source.
+    #[must_use]
+    pub fn new(inner: Arc<dyn gcu_host_api::UserActivity>) -> Self {
+        Self { inner }
+    }
+}
+impl PhysicalActivity for UserActivityAdapter {
+    fn ms_since_physical_input(&self) -> Option<u64> {
+        self.inner.ms_since_physical_input()
+    }
+}
 /// Engine mirror of App's persistent Stop; shared across every remote session.
 #[derive(Clone)]
 pub struct StopMirror(Arc<State>);
@@ -110,5 +128,20 @@ mod tests {
         assert!(stop.stopped("a"));
         assert!(stop.stopped("future"));
         assert!(UnavailableActivity.ms_since_physical_input().is_none());
+        let adapter = UserActivityAdapter::new(Arc::new(Clock(Some(4))));
+        assert_eq!(adapter.ms_since_physical_input(), Some(4));
+    }
+    struct Clock(Option<u64>);
+    impl gcu_host_api::UserActivity for Clock {
+        fn ms_since_physical_input(&self) -> Option<u64> {
+            self.0
+        }
+        fn stop_requested(&self) -> bool {
+            false
+        }
+        fn latched_stop(&self) -> bool {
+            false
+        }
+        fn clear_stop_by_user(&self) {}
     }
 }

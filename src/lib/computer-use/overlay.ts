@@ -9,6 +9,7 @@ export type OverlayFrame = {
   cursor: { x: number; y: number; kind: CursorKind } | null;
   revision: number;
   response_ms: number;
+  stop_reason?: "hotkey" | "panel" | "internal_error";
 };
 export type ControlAction = "stop" | "resume";
 export const emptyOverlay: OverlayFrame = {

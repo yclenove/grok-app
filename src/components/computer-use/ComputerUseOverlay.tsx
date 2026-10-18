@@ -4,6 +4,13 @@ import { createT, loadLocaleCatalog, resolveLocale, type Locale } from "@/i18n";
 import { emptyOverlay, overlayControl, sampleCursor, watchOverlay, type ControlAction, type OverlayFrame } from "@/lib/computer-use/overlay";
 import "./computer-use-overlay.css";
 
+function stoppedCopy(reason: OverlayFrame["stop_reason"]) {
+  if (reason === "hotkey") return "computerUse.overlay.stoppedHotkey";
+  if (reason === "panel") return "computerUse.overlay.stoppedPanel";
+  if (reason === "internal_error") return "computerUse.overlay.stoppedInternal";
+  return "computerUse.overlay.stopped";
+}
+
 type Props = {
   frame: OverlayFrame;
   locale: Locale;
@@ -59,7 +66,7 @@ export function ComputerUseOverlay({ frame, locale, controls = false, onControl 
   };
   return <div className="cu-overlay-capsule" data-stopped={stopped}>
     <div className="cu-overlay-copy" role="status" aria-live="polite">
-      <span>{tr(stopped ? "computerUse.overlay.stopped" : frame.phase === "foreground" ? "computerUse.overlay.foreground" : "computerUse.overlay.running")}</span>
+      <span>{tr(stopped ? stoppedCopy(frame.stop_reason) : frame.phase === "foreground" ? "computerUse.overlay.foreground" : "computerUse.overlay.running")}</span>
       {failed ? <span role="alert">{tr("computerUse.overlay.failed")}</span> : !frame.connected && stopped ? <span>{tr("computerUse.overlay.unavailable")}</span> : frame.message ? <span dir="auto">{frame.message}</span> : null}
     </div>
     <button type="button" className="btn" disabled={busy || (stopped && !frame.connected)} aria-busy={busy} onPointerDown={(e) => e.preventDefault()} onClick={(e) => void submit(e)}>

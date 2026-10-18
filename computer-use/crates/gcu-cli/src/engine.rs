@@ -42,6 +42,7 @@ async fn lookup(sessions: &Sessions, id: &str) -> Result<Arc<Entry>, w::RpcError
 
 pub(crate) async fn run(
     driver: Arc<dyn Driver>,
+    route_note: String,
     host_fd: Option<usize>,
     socket: Option<PathBuf>,
     token_fd: Option<usize>,
@@ -52,6 +53,7 @@ pub(crate) async fn run(
     run_with_activity(
         driver,
         Arc::new(UnavailableActivity),
+        route_note,
         host_fd,
         socket,
         token_fd,
@@ -63,6 +65,7 @@ pub(crate) async fn run(
 pub(crate) async fn run_with_activity(
     driver: Arc<dyn Driver>,
     activity: Arc<dyn PhysicalActivity>,
+    route_note: String,
     host_fd: Option<usize>,
     socket: Option<PathBuf>,
     token_fd: Option<usize>,
@@ -118,12 +121,17 @@ pub(crate) async fn run_with_activity(
     }
     let stop = StopMirror::new(authenticated.stopped);
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
+    // The sender stays alive so a dropped channel is not a local Stop.
+    let (local_stop, local_stop_rx) = tokio::sync::mpsc::channel(1);
+    let marker_dir = gcu_host_protocol::stop_reason::state_dir();
     let stop_task = tokio::spawn(control(
         stop_peer.clone(),
         stop_incoming,
         stop.clone(),
         sessions.clone(),
         driver.clone(),
+        local_stop_rx,
+        marker_dir,
     ));
     let remote = match RemoteHost::new(peer.clone(), stop.clone(), activity).await {
         Ok(remote) => remote,
@@ -141,12 +149,15 @@ pub(crate) async fn run_with_activity(
         driver,
         remote,
         sessions.clone(),
+        &route_note,
     )
     .await;
+    // Ordinary teardown. Not an engine-local stop, so no reason file is written.
     stop.latch(None);
     peer.close();
     stop_peer.close();
     stop_task.abort();
+    drop(local_stop);
     let entries: Vec<_> = sessions.write().await.drain().map(|(_, s)| s).collect();
     for entry in entries {
         entry.remote.lock().await.close().await?;
@@ -179,9 +190,25 @@ async fn control(
     stop: StopMirror,
     sessions: Sessions,
     driver: Arc<dyn Driver>,
+    mut local_stop: tokio::sync::mpsc::Receiver<gcu_host_protocol::stop_reason::StopReason>,
+    marker_dir: Option<PathBuf>,
 ) {
+    let mut local_open = true;
     loop {
-        let request = tokio::select! {biased;_=peer.disconnected()=>break,request=incoming.recv()=>{let Some(r)=request else {break};r}};
+        let request = tokio::select! {
+            biased;
+            _ = peer.disconnected() => break,
+            reason = local_stop.recv(), if local_open => {
+                let Some(reason) = reason else {
+                    local_open = false;
+                    continue;
+                };
+                local_stop_commit(&stop, &driver, marker_dir.as_deref(), reason).await;
+                peer.close();
+                break;
+            }
+            request = incoming.recv() => { let Some(request) = request else { break }; request }
+        };
         let answer = match request.method.as_str() {
             "engine.session.stop" => match parse::<w::Stop>(request.params.clone()) {
                 Ok(p) => {
@@ -243,6 +270,31 @@ async fn control(
     });
     peer.close();
 }
+/// Latch and release first, then write the display-only marker, then return.
+/// The caller closes the control connection. A failed write still returns.
+async fn local_stop_commit(
+    stop: &StopMirror,
+    driver: &Arc<dyn Driver>,
+    marker_dir: Option<&std::path::Path>,
+    reason: gcu_host_protocol::stop_reason::StopReason,
+) {
+    stop.latch(None);
+    let releasing = driver.clone();
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            gcu_core::session::NATIVE_CALL_TIMEOUT,
+            releasing.release_all_input(),
+        )
+        .await;
+    });
+    let Some(dir) = marker_dir.map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let write = tokio::task::spawn_blocking(move || {
+        let _ = gcu_host_protocol::stop_reason::write_marker(&dir, reason);
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(5), write).await;
+}
 async fn rpc(
     peer: Peer,
     mut incoming: Incoming,
@@ -250,6 +302,7 @@ async fn rpc(
     driver: Arc<dyn Driver>,
     host: Arc<RemoteHost>,
     sessions: Sessions,
+    route_note: &str,
 ) -> Result<(), Error> {
     let start = Instant::now();
     let mut health = tokio::time::interval(Duration::from_secs(10));
@@ -264,7 +317,7 @@ async fn rpc(
         let answer = tokio::select! {biased;
             _=peer.disconnected()=>return Ok(()),
             _=stop_peer.disconnected()=>return Err(Error::Disconnected),
-            answer=dispatch(&request, driver.clone(), host.clone(), &sessions)=>answer,
+            answer=dispatch(&request, driver.clone(), host.clone(), &sessions, route_note)=>answer,
         };
         let success = answer.is_ok();
         if shutdown && success {
@@ -279,6 +332,7 @@ async fn dispatch(
     driver: Arc<dyn Driver>,
     host: Arc<RemoteHost>,
     sessions: &Sessions,
+    route_note: &str,
 ) -> Result<Value, w::RpcError> {
     match request.method.as_str() {
         "engine.session.open" => {
@@ -334,11 +388,14 @@ async fn dispatch(
         }
         "engine.system.doctor" => {
             let _: w::Empty = parse(request.params.clone())?;
-            let r = host.doctor(
+            let mut r = host.doctor(
                 tokio::time::timeout(RPC_TIMEOUT, driver.doctor())
                     .await
                     .map_err(internal)?,
             );
+            if !route_note.is_empty() && !r.issues.iter().any(|issue| issue == route_note) {
+                r.issues.push(route_note.to_owned());
+            }
             encode(w::DoctorReport {
                 capabilities: r.capabilities,
                 ready: r.ready,

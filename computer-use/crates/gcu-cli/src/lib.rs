@@ -9,6 +9,7 @@
 
 pub mod approval;
 mod args;
+mod assemble;
 mod call;
 mod config;
 mod doctor;

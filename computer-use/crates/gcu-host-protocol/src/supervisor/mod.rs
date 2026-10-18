@@ -6,7 +6,11 @@
 //! remote clients rejected). The Unix fallback is the pinned private listener
 //! already used by the engine. Restart copies the Host stop latch into the next
 //! handshake and never clears it. Three unexpected exits in ten minutes disable
-//! the feature until the user turns it off.
+//! the feature until the user turns it off. Losing the control connection
+//! without a requested shutdown latches a persistent Stop and does not restart
+//! a delivering engine, including a crash that also drops that connection. A
+//! reason file is display-only. A test double that keeps the connection uses
+//! the crash breaker instead.
 
 mod callbacks;
 mod policy;
@@ -22,7 +26,9 @@ pub use policy::{
 };
 pub use session::{EngineProcess, EngineSession, LaunchRequest, LivePrivilege, PollExit};
 pub use state::{HostState, Phase, Signal, Step};
-pub use task::{Admission, Control, Launch, OsLaunch, SpawnFuture, Status};
+pub use task::{
+    Admission, Control, Launch, OsLaunch, PersistStop, ReadStopReason, SpawnFuture, Status,
+};
 
 /// Supervisor failures. Display text never includes paths, tokens, or proofs.
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +51,9 @@ pub enum Error {
     /// The crash breaker is open. Disable the feature to clear it.
     #[error("engine restart breaker is open")]
     Tripped,
+    /// Persistent Stop is not durable yet. Do not launch a delivering engine.
+    #[error("persistent stop is not durable")]
+    NotDurable,
     /// A path change was requested while a child is still alive.
     #[error("engine is running")]
     Busy,

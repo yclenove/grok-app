@@ -11,6 +11,11 @@ path = "src/main.rs"
 
 [features]
 eval-autoapprove = []
+# Delivery switches for later platform cards. Default off. Enabling one does
+# not assemble a driver, fall back to fake, widen input, or elevate.
+native-windows = []
+native-x11 = []
+native-wayland = []
 # Darwin cc is required to compile this (objc2-exception-helper). Linux cross
 # builds leave it off. macOS CI must pass `--features macos-webview`.
 # Do not enable wry's `os-webview` feature: that pulls WebKitGTK.
