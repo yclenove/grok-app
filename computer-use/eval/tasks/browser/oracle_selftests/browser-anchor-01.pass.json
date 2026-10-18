@@ -1,0 +1,16 @@
+{
+  "state": {
+    "page": {
+      "anchor": "section-2",
+      "url": "fixture.local/docs"
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

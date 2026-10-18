@@ -52,6 +52,12 @@ struct Cli {
     /// Compare two summary JSON files and exit.
     #[arg(long, num_args = 2, value_names = ["A", "B"])]
     compare: Option<Vec<PathBuf>>,
+    /// Validate the fixed browser L0/L2 experiment; never run a local fake A/B.
+    #[arg(long, conflicts_with_all = ["compare", "release_gate", "soak_hours", "tasks"])]
+    ab: bool,
+    /// Read a native browser A/B bundle index; absent collectors are not_run.
+    #[arg(long, requires = "ab")]
+    ab_report: Option<PathBuf>,
     /// Exit 0 when tasks fail. Invalid oracles still fail the process.
     #[arg(long)]
     allow_fail: bool,
@@ -89,6 +95,12 @@ fn dispatch() -> Result<u8, Stop> {
         return Err(Stop::Approval(
             "auto-approve requires an eval-autoapprove debug build".into(),
         ));
+    }
+    if cli.ab {
+        return browser_ab(&cli);
+    }
+    if cli.suite == "browser" {
+        return Err(Stop::Usage("browser suite requires --ab".into()));
     }
     if let Some(paths) = &cli.compare {
         return compare(paths);
@@ -144,6 +156,57 @@ fn dispatch() -> Result<u8, Stop> {
         write_reports(dir, &report).map_err(|err| Stop::Run(err.into()))?;
     }
     Ok(exit_code(&report, cli.allow_fail))
+}
+
+fn browser_ab(cli: &Cli) -> Result<u8, Stop> {
+    use gcu_eval::browser::{
+        not_run_report, parse_report, validate_report, write_report, FileArtifacts,
+        ValidationStatus,
+    };
+    if cli.suite != "browser" {
+        return Err(Stop::Usage("--ab requires --suite browser".into()));
+    }
+    let dir = bundled_tasks_dir()
+        .ok_or_else(|| Stop::Usage("fixed browser task catalog unavailable".into()))?;
+    let tasks = load_tasks(&dir).map_err(|error| Stop::Run(error.into()))?;
+    let report = if let Some(path) = &cli.ab_report {
+        let bytes = std::fs::read(path)
+            .map_err(|_| Stop::Usage("could not read browser A/B report".into()))?;
+        parse_report(&bytes).map_err(|error| Stop::Run(error.into()))?
+    } else {
+        not_run_report()
+    };
+    let root = cli
+        .ab_report
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let validation = validate_report(&report, &tasks, &FileArtifacts::new(root))
+        .map_err(|error| Stop::Run(error.into()))?;
+    println!(
+        "browser_ab {} recommend_l2={} default={}",
+        validation.status.as_str(),
+        validation.recommend_l2,
+        validation.default_level.as_str()
+    );
+    for reason in &validation.reasons {
+        println!("gate {reason}");
+    }
+    for violation in &validation.violations {
+        println!("violation {violation}");
+    }
+    for pair in &validation.pairs {
+        println!(
+            "{} pairs={} p={:.4} significant={} diff={:.4}",
+            pair.task_id, pair.pairs, pair.p_value, pair.significant, pair.mean_diff
+        );
+    }
+    if let Some(dir) = &cli.out {
+        write_report(dir, &report, &validation).map_err(|error| Stop::Run(error.into()))?;
+    }
+    Ok(u8::from(
+        validation.status == ValidationStatus::NotRun || !validation.violations.is_empty(),
+    ))
 }
 
 fn soak(cli: &Cli, hours: u64) -> Result<u8, Stop> {

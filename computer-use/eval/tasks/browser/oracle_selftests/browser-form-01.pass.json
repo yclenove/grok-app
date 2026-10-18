@@ -1,0 +1,16 @@
+{
+  "state": {
+    "web": {
+      "name": "fixture",
+      "submitted": 1
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}
