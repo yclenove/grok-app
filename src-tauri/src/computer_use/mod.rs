@@ -152,6 +152,8 @@ impl ComputerUseHost {
     /// Stop bypasses the supervisor mutex, ordinary RPC and pending approvals.
     pub async fn user_stop(&self) -> Result<(), Error> {
         self.overlay.safety.latch();
+        self.overlay
+            .set_stop_reason(Some(gcu_host_protocol::stop_reason::StopReason::Panel));
         self.office.deny_pending();
         self.panel.user_stop();
         self.overlay
@@ -221,6 +223,9 @@ impl ComputerUseHost {
                 }
                 if after == Phase::Tripped && before != Phase::Tripped {
                     self.panel.note_tripped();
+                }
+                if let Some(reason) = control.stop_display() {
+                    self.overlay.set_stop_reason(Some(reason));
                 }
             }
         }

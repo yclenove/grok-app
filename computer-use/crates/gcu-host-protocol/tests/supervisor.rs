@@ -22,6 +22,7 @@ struct Script {
     exit: PollExit,
     spawns: u32,
     last_stopped: bool,
+    control: bool,
 }
 
 struct FakeLaunch {
@@ -51,6 +52,12 @@ impl EngineProcess for FakeEngine {
     }
     fn privilege(&self) -> LivePrivilege {
         self.privilege
+    }
+    fn control_connected(&self) -> bool {
+        lock(&self.script).control
+    }
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown || self.killed
     }
 }
 
@@ -89,6 +96,7 @@ fn script() -> Arc<Mutex<Script>> {
         exit: PollExit::Running,
         spawns: 0,
         last_stopped: false,
+        control: true,
     }))
 }
 
@@ -218,6 +226,7 @@ async fn idle_sixty_seconds_without_sessions_requests_shutdown() {
     assert!(host.status().enabled);
     host.poll(IDLE_MS * 2).await.unwrap();
     assert_eq!(spawns(&script), 1);
+    assert!(!host.status().stop_latched);
 }
 
 #[tokio::test]
@@ -267,6 +276,7 @@ async fn clean_shutdown_is_not_a_crash() {
     assert_eq!(host.status().phase, Phase::Stopped);
     host.handle(Signal::SetEnabled(true), 3).await.unwrap();
     assert_eq!(host.status().phase, Phase::Running);
+    assert!(!host.status().stop_latched);
 }
 
 #[tokio::test]
@@ -559,4 +569,103 @@ async fn open_local_endpoint_without_peer_is_disconnected() {
     assert!(matches!(running, Err(Error::Disconnected)));
     let closed = host.close_endpoint("chat").await;
     assert!(matches!(closed, Err(Error::Disconnected)));
+}
+
+#[tokio::test]
+async fn abnormal_control_loss_persists_stop_and_blocks_spawn() {
+    let script = script();
+    let mut host = control(HostBuild::Dev, Arc::clone(&script));
+    let persisted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&persisted);
+    host.set_disconnect_hooks(
+        Arc::new(move || {
+            let flag = Arc::clone(&flag);
+            Box::pin(async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            })
+        }),
+        Arc::new(|| Some(gcu_host_protocol::stop_reason::StopReason::Hotkey)),
+    );
+    host.handle(Signal::SetEnabled(true), 0).await.unwrap();
+    lock(&script).control = false;
+    host.poll(1).await.unwrap();
+    assert!(host.status().stop_latched);
+    assert!(!host.delivery_blocked());
+    assert_eq!(
+        host.stop_display(),
+        Some(gcu_host_protocol::stop_reason::StopReason::Hotkey)
+    );
+    assert!(persisted.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(host.status().phase, Phase::Stopped);
+    host.poll(2).await.unwrap();
+    assert_eq!(spawns(&script), 1);
+    host.handle(Signal::SetEnabled(true), 3).await.unwrap();
+    assert!(lock(&script).last_stopped);
+    assert_eq!(spawns(&script), 2);
+}
+
+#[tokio::test]
+async fn undurable_stop_refuses_spawn_until_persist_succeeds() {
+    let script = script();
+    let mut host = control(HostBuild::Dev, Arc::clone(&script));
+    let allow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate = Arc::clone(&allow);
+    host.set_disconnect_hooks(
+        Arc::new(move || {
+            let gate = Arc::clone(&gate);
+            Box::pin(async move { gate.load(std::sync::atomic::Ordering::SeqCst) })
+        }),
+        Arc::new(|| None),
+    );
+    host.handle(Signal::SetEnabled(true), 0).await.unwrap();
+    lock(&script).control = false;
+    host.poll(1).await.unwrap();
+    assert!(host.status().stop_latched);
+    assert!(host.delivery_blocked());
+    assert_eq!(host.stop_display(), None);
+    let refused = host.handle(Signal::SetEnabled(true), 2).await.unwrap_err();
+    assert!(matches!(refused, Error::NotDurable));
+    let resumed = host.handle(Signal::UserResume, 3).await.unwrap_err();
+    assert!(matches!(resumed, Error::NotDurable));
+    assert!(host.status().stop_latched);
+    assert_eq!(spawns(&script), 1);
+    let missing = host.open_local_endpoint("chat").await;
+    assert!(matches!(missing, Err(Error::NotDurable)));
+    allow.store(true, std::sync::atomic::Ordering::SeqCst);
+    host.poll(4).await.unwrap();
+    assert!(!host.delivery_blocked());
+    assert!(host.status().stop_latched);
+    host.handle(Signal::SetEnabled(true), 5).await.unwrap();
+    assert!(lock(&script).last_stopped);
+}
+
+#[tokio::test]
+async fn missing_persist_hook_stays_blocked() {
+    let script = script();
+    let mut host = control(HostBuild::Dev, Arc::clone(&script));
+    host.handle(Signal::SetEnabled(true), 0).await.unwrap();
+    lock(&script).control = false;
+    host.poll(1).await.unwrap();
+    assert!(host.status().stop_latched);
+    assert!(host.delivery_blocked());
+    host.poll(2).await.unwrap();
+    assert_eq!(spawns(&script), 1);
+    assert!(matches!(
+        host.handle(Signal::Sessions(1), 3).await.unwrap_err(),
+        Error::NotDurable
+    ));
+}
+
+#[tokio::test]
+async fn clean_shutdown_with_control_loss_does_not_latch() {
+    let script = script();
+    let mut host = control(HostBuild::Dev, Arc::clone(&script));
+    host.handle(Signal::SetEnabled(true), 0).await.unwrap();
+    host.handle(Signal::SetEnabled(false), 1).await.unwrap();
+    lock(&script).control = false;
+    host.poll(2).await.unwrap();
+    assert!(!host.status().stop_latched);
+    assert!(!host.delivery_blocked());
+    assert_eq!(host.status().phase, Phase::Stopped);
 }

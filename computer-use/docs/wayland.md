@@ -17,10 +17,11 @@ when those programs are missing, and a missing runner is not a pass
 
 The product does not claim full Wayland support.
 
-- The shipping `gcu` binary assembles only the offline fake driver. Any other
-  driver value is rejected with exit 2 and the text `Real driver assembly is not
-  implemented` (`computer-use/crates/gcu-cli/src/args.rs`). `gcu doctor` in
-  [cli.md](cli.md) therefore reports the fake desktop. It does not probe
+- The shipping `gcu` binary does not assemble a native driver. Omitting
+  `--driver` selects `auto`. `auto` and `native` exit 2 with a reason such as
+  `native-wayland is not compiled into this build` and do not fall back to fake
+  (`computer-use/crates/gcu-cli/src/assemble.rs`). `gcu doctor --driver fake`
+  reports the fake route and why native is disabled. It does not probe
   `xdg-desktop-portal`.
 - AT-SPI observation and AT-SPI semantic actions are marked available on X11,
   XWayland, and native Wayland. The accessibility bus is the reliable action
@@ -355,7 +356,7 @@ and must go through portal consent again. That consent dialog is **not verified*
 | RemoteDesktop, EI, Stop, no XTEST fallback | `input_portal.rs`, `input.rs`, `input_control.rs`, `input_stop.rs`, `ei.rs`; [ADR 0008 reis](adr/0008-reis-portal-input.md) |
 | Identity | `windows.rs`, `gnome.rs`, `kwin.rs`, `toplevel.rs`; [GNOME README](../tools/gnome-shell/README.md); [KWin README](../tools/kwin/README.md); [ADR 0008 image hash](adr/0008-linux-image-hash-budget.md) |
 | Overlay absent on Wayland | [overlay README](../crates/gcu-overlay/README.md); `gcu-overlay/src/availability.rs` |
-| CLI is fake-only; `gcu resume` limits | [cli.md](cli.md); [ADR 0003](adr/0003-resume-trust.md) |
+| CLI native route is not assembled; fake is explicit; `gcu resume` limits | [cli.md](cli.md); [ADR 0003](adr/0003-resume-trust.md) |
 | Real desktop not run | [STATUS.md](../../docs/plans/computer-use-v2/STATUS.md) rows P7-01 through P7-05; `scripts/wayland-ci.sh` |
 | Architecture contract | [§5.3](../../docs/plans/computer-use-v2/03-architecture.md#53-linux), [§7.7](../../docs/plans/computer-use-v2/03-architecture.md#77-用户活动守卫与接管), [§8](../../docs/plans/computer-use-v2/03-architecture.md#8-会话与生命周期) |
 
@@ -367,7 +368,7 @@ and must go through portal consent again. That consent dialog is **not verified*
 
 本页不声称 Wayland 全支持。
 
-- 当前发布的 `gcu` 只组装离线 fake 驱动。其它驱动值以退出码 2 拒绝，原文是 `Real driver assembly is not implemented`（`computer-use/crates/gcu-cli/src/args.rs`）。[cli.md](cli.md) 里的 `gcu doctor` 因此只报告 fake 桌面，不会探测 `xdg-desktop-portal`。
+- 当前发布的 `gcu` 没有装配原生驱动。省略 `--driver` 即选择 `auto`。`auto` 和 `native` 以退出码 2 结束，原因类似 `native-wayland is not compiled into this build`，并且不会退回 fake（`computer-use/crates/gcu-cli/src/assemble.rs`）。`gcu doctor --driver fake` 报告 fake 路线以及原生路线被禁用的原因，不会探测 `xdg-desktop-portal`。
 - AT-SPI 观察和 AT-SPI 语义动作在 X11、XWayland、原生 Wayland 上都标为可用。无障碍总线是 [架构 §5.3](../../docs/plans/computer-use-v2/03-architecture.md#53-linux) 里的可靠动作路径。
 - 原生 Wayland 截图和指针/键盘在 portal trait 后面有库代码。`LinuxDriver::capture` 对原生 Wayland 窗口仍返回 `CapabilityUnavailable`。该窗口上的指针、拖拽、滚动、按键和 `type_text` 同样如此，除非已经为这一个窗口挂上了 `PortalInput`。CLI 不会挂上它。
 - 真实 GNOME、KDE、wlroots 上的 portal 对话框、PipeWire 帧和 libei 设备均为**未验证**。STATUS 中 P7-02、P7-03、P7-04、P7-05 的真机桌面都是 `not_run`。可移植契约行是 fake 或内存测试。
