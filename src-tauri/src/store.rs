@@ -2123,8 +2123,7 @@ pub fn delete_session(id: &str) -> Result<(), String> {
         list.retain(|s| s.id != id_for_index);
         Ok(())
     })?;
-    let dir = session_dir(id);
-    let _ = fs::remove_dir_all(dir);
+    crate::journal_cleanup::purge_session_dir(&session_dir(id));
     Ok(())
 }
 

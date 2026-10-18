@@ -54,8 +54,6 @@ fn reset_warned() {
 
 /// Create the log directory, tighten Unix permissions, and prune both families.
 pub fn enforce(dir: &Path, limits: &Limits) -> io::Result<()> {
-    fs::create_dir_all(dir).map_err(|error| fail("log_dir", dir, error))?;
-    #[cfg(unix)]
     owner_dir(dir).map_err(|error| fail("log_dir_mode", dir, error))?;
     prune(dir, "app.log", limits).map_err(|error| fail("app_log", dir, error))?;
     prune(dir, "panic.log", limits).map_err(|error| fail("panic_log", dir, error))?;
@@ -159,8 +157,6 @@ pub fn try_append(dir: &Path, name: &str, line: &str, limits: &Limits) -> io::Re
 }
 
 fn append_locked(dir: &Path, name: &str, line: &str, limits: &Limits) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    #[cfg(unix)]
     owner_dir(dir)?;
     let path = dir.join(name);
     if let Ok(metadata) = fs::metadata(&path) {
@@ -275,14 +271,12 @@ fn cap_tail(path: &Path, max_bytes: u64) -> io::Result<()> {
     let mut output = File::create(path)?;
     output.write_all(&buf)?;
     output.flush()?;
-    #[cfg(unix)]
     owner_file(path)?;
     Ok(())
 }
 
 fn open_append(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
-    #[cfg(unix)]
     owner_file(path)?;
     Ok(file)
 }
@@ -300,16 +294,12 @@ fn fail(category: &str, location: &Path, error: io::Error) -> io::Error {
     error
 }
 
-#[cfg(unix)]
 fn owner_dir(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    gcu_host_protocol::owner_only::ensure_dir(path)
 }
 
-#[cfg(unix)]
 fn owner_file(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    gcu_host_protocol::owner_only::restrict(path)
 }
 
 #[cfg(test)]

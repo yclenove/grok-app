@@ -11,9 +11,10 @@ use crate::messages::{Empty, Event, Image, Request, RpcError};
 use crate::server::{CallbackFuture, HostCallbacks, Peer};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+mod gallery_cleanup;
 
 /// Why a screenshot was not stored or not returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,7 @@ impl Gallery {
     /// Blocking: none. Timeout: none. Cancellation: none.
     #[must_use]
     pub fn open(root: PathBuf) -> Self {
+        Self::sweep_orphans(&root);
         Self {
             state: Arc::new(Mutex::new(State {
                 root,
@@ -92,6 +94,14 @@ impl Gallery {
                 closed: HashSet::new(),
             })),
         }
+    }
+
+    /// Retry closed, failed, and temporary derivative directories under `root`.
+    ///
+    /// Unmarked session directories are left in place. Blocking: a directory
+    /// scan. Timeout: none. Cancellation: none.
+    pub fn sweep_orphans(root: &Path) {
+        gallery_cleanup::sweep(root);
     }
 
     /// Write one redacted image for `session` and `id`.
@@ -121,13 +131,9 @@ impl Gallery {
         }
         let root = ensure_root(&mut state)?;
         let dir = root.join(session);
-        if is_symlink(&dir) {
+        if gallery_cleanup::ensure_private_dir(&dir).is_err() {
             return Err(Fault::Rejected);
         }
-        if std::fs::create_dir_all(&dir).is_err() {
-            return Err(Fault::Rejected);
-        }
-        private_dir(&dir);
         if !contained(&root, &dir) {
             return Err(Fault::Rejected);
         }
@@ -149,7 +155,7 @@ impl Gallery {
         if projected > MAX_SESSION {
             return Err(Fault::Rejected);
         }
-        if !write_private(&path, &image.bytes) {
+        if gallery_cleanup::write_private(&path, &image.bytes).is_err() {
             return Err(Fault::Rejected);
         }
         if !contained(&root, &path) {
@@ -255,7 +261,7 @@ fn purge_session(state: &mut State, session: &str) {
     if let Some(root) = state.root_canon.clone() {
         let dir = root.join(session);
         if removable_session_dir(&root, &dir) {
-            let _ = std::fs::remove_dir_all(&dir);
+            gallery_cleanup::purge_dir(&dir);
         }
     }
     let State { rows, order, .. } = state;
@@ -415,10 +421,9 @@ fn ensure_root(state: &mut State) -> Result<PathBuf, Fault> {
     if let Some(root) = &state.root_canon {
         return Ok(root.clone());
     }
-    if std::fs::create_dir_all(&state.root).is_err() {
+    if gallery_cleanup::ensure_private_dir(&state.root).is_err() {
         return Err(Fault::Rejected);
     }
-    private_dir(&state.root);
     match state.root.canonicalize() {
         Ok(root) => {
             state.root_canon = Some(root.clone());
@@ -450,39 +455,6 @@ fn removable_session_dir(root: &Path, dir: &Path) -> bool {
 
 fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
-}
-
-fn private_dir(path: &Path) {
-    #[cfg(unix)]
-    {
-        let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> bool {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    if file.write_all(bytes).is_err() {
-        return false;
-    }
-    // Best effort only: these are redacted display derivatives, not records. macOS
-    // fsync (F_FULLFSYNC) fails on some volumes (seen intermittently on CI runners)
-    // and must not make an otherwise complete write look rejected.
-    let _ = file.sync_all();
-    true
 }
 
 fn replaced_len(state: &State, id: &str, role: Role) -> usize {
@@ -531,10 +503,10 @@ fn trim_session(state: &mut State, session: &str, keep: &str, incoming: usize) {
 fn remove_id(state: &mut State, id: &str) {
     if let Some(row) = state.rows.remove(id) {
         if let Some(item) = row.thumb.as_ref() {
-            let _ = std::fs::remove_file(&item.path);
+            gallery_cleanup::forget_file(&item.path);
         }
         if let Some(item) = row.full.as_ref() {
-            let _ = std::fs::remove_file(&item.path);
+            gallery_cleanup::forget_file(&item.path);
         }
     }
     state.order.retain(|item| item != id);

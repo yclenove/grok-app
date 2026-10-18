@@ -21,39 +21,39 @@ pub trait LatchStore: Send + Sync + 'static {
 pub struct FileLatch(pub PathBuf);
 impl LatchStore for FileLatch {
     fn read(&self) -> std::io::Result<bool> {
-        use std::io::Read;
-        let read = || {
-            let file = std::fs::File::open(&self.0)?;
-            let mut bytes = Vec::with_capacity(9);
-            file.take(9).read_to_end(&mut bytes)?;
-            Ok::<_, std::io::Error>(bytes)
-        };
-        match read() {
+        match crate::owner_only::read_no_follow(&self.0, 32) {
             Ok(bytes) if bytes == b"stopped\n" => Ok(true),
             Ok(bytes) if bytes == b"running\n" => Ok(false),
             Ok(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid Stop latch",
             )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
         }
     }
     fn write(&self, stopped: bool) -> std::io::Result<()> {
-        use std::io::Write;
         if let Some(parent) = self.0.parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.as_os_str().is_empty() {
+                prepare_parent(parent)?;
+            }
         }
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        let bytes: &[u8] = if stopped { b"stopped\n" } else { b"running\n" };
+        crate::owner_only::atomic_write(&self.0, bytes, crate::owner_only::SyncPolicy::Required)
+    }
+}
+
+fn prepare_parent(parent: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::owner_only::ensure_dir(parent)
         }
-        let mut file = options.open(&self.0)?;
-        file.write_all(if stopped { b"stopped\n" } else { b"running\n" })?;
-        file.sync_all()
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Stop latch parent is not a real directory",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 struct State {

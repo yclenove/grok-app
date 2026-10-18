@@ -15,9 +15,14 @@ pub(crate) async fn turn_ended(app: &AppHandle, turn: Option<Turn>) {
     let (Some(host), Some(turn)) = (app.try_state::<ComputerUseHost>(), turn) else {
         return;
     };
+    let session_id = turn.session_id().to_owned();
     if let Err(error) = host.lifecycle.end_turn(turn).await {
         tracing::debug!(%error, "computer use turn end failed");
     }
+    let _ = app.emit(
+        "cu://turn-ended",
+        serde_json::json!({ "sessionId": session_id }),
+    );
 }
 
 /// Close/delete/fork/model boundaries never restore Stop. Changing chat focus

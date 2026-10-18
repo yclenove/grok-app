@@ -98,6 +98,7 @@ mod hooks;
 #[cfg(test)]
 mod integration_test;
 
+mod journal_cleanup;
 mod journal_throttle;
 
 mod leader;
@@ -289,6 +290,10 @@ pub fn run() {
     }
 
     let _ = paths::ensure_app_dirs();
+    crate::journal_cleanup::sweep();
+    gcu_host_protocol::events::Gallery::sweep_orphans(
+        &paths::app_data_root().join("computer-use").join("shots"),
+    );
 
     logging::init();
 

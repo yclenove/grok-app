@@ -97,19 +97,22 @@ pub fn with_exclusive_lock<T>(
 /// Write bytes to `path` via temp file + rename (caller must hold the lock).
 pub fn write_bytes_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        if !parent.as_os_str().is_empty() {
+            let journal = path.file_name().and_then(|name| name.to_str()) == Some("messages.json");
+            if journal {
+                gcu_host_protocol::owner_only::ensure_dir(parent)
+                    .map_err(|error| error.to_string())?;
+            } else if std::fs::symlink_metadata(parent).is_err() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+        }
     }
-    let tmp = {
-        let mut p = path.as_os_str().to_os_string();
-        p.push(".tmp");
-        PathBuf::from(p)
-    };
-    fs::write(&tmp, bytes).map_err(|e| format!("write temp: {e}"))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("rename into place: {e}")
-    })?;
-    Ok(())
+    gcu_host_protocol::owner_only::atomic_write(
+        path,
+        bytes,
+        gcu_host_protocol::owner_only::SyncPolicy::BestEffort,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Write bytes to `path` via temp file + rename under exclusive lock.

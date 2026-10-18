@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[cfg(unix)]
+#[allow(dead_code)]
+#[path = "../../../gcu-host-protocol/src/owner_unix.rs"]
+mod owner_unix;
+
 /// Maximum allowable lifetime for a Wayland portal restore token (24 hours).
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 24 * 3600;
 
@@ -198,15 +203,13 @@ impl RestoreTokenStore {
     }
 
     fn ensure_base_dir(&self) -> Result<(), RestoreError> {
-        if !self.base_dir.exists() {
+        #[cfg(unix)]
+        {
+            owner_unix::ensure_dir(&self.base_dir)?;
+        }
+        #[cfg(not(unix))]
+        {
             std::fs::create_dir_all(&self.base_dir)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&self.base_dir)?.permissions();
-                perms.set_mode(0o700);
-                std::fs::set_permissions(&self.base_dir, perms)?;
-            }
         }
         Ok(())
     }
@@ -216,26 +219,10 @@ impl RestoreTokenStore {
         self.ensure_base_dir()?;
         let path = self.sanitize_key(key)?;
         let serialized = serde_json::to_vec_pretty(record)?;
-
         #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?;
-            file.write_all(&serialized)?;
-            file.flush()?;
-        }
-
+        owner_unix::atomic_write(&path, &serialized, true)?;
         #[cfg(not(unix))]
-        {
-            std::fs::write(&path, &serialized)?;
-        }
-
+        std::fs::write(&path, &serialized)?;
         Ok(())
     }
 
@@ -249,11 +236,13 @@ impl RestoreTokenStore {
         now_secs: u64,
     ) -> Result<String, RestoreError> {
         let path = self.sanitize_key(key)?;
-        if !path.exists() {
-            return Err(RestoreError::NotFound(key.to_string()));
-        }
-
-        let content = std::fs::read(&path)?;
+        let content = read_token(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RestoreError::NotFound(key.to_string())
+            } else {
+                RestoreError::Io(error)
+            }
+        })?;
         let record: RestoreRecord = match serde_json::from_slice(&content) {
             Ok(r) => r,
             Err(e) => {
@@ -335,5 +324,16 @@ impl RestoreTokenStore {
         }
         keys.sort();
         Ok(keys)
+    }
+}
+
+fn read_token(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        owner_unix::read_no_follow(path, 64 * 1024)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::read(path)
     }
 }

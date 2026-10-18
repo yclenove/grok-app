@@ -214,6 +214,31 @@ fn persisted_file_restart_and_corruption_never_clear_stop() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn replaced_stop_latch_is_latched_not_running() {
+    let dir = std::env::temp_dir().join(format!("cu-overlay-swap-{:x}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("stop-latch");
+    let store = Arc::new(FileLatch(path.clone()));
+    store.write(false).unwrap();
+    let extra = dir.join("extra");
+    std::fs::hard_link(&path, &extra).unwrap();
+    assert!(store.read().is_err(), "an extra hard link is not running");
+    assert!(Safety::new(store).stopped());
+    std::fs::remove_file(&extra).unwrap();
+    let store = Arc::new(FileLatch(path.clone()));
+    store.write(false).unwrap();
+    let other = dir.join("other");
+    std::fs::write(&other, b"running\n").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&other, &path).unwrap();
+    let store = Arc::new(FileLatch(path));
+    assert!(store.read().is_err(), "a replaced latch is not running");
+    assert!(Safety::new(store).stopped());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn stalled_control_injected_deadline_closes_within_stop_budget() {
     let (host, engine, mut incoming) = pair(Channel::Stop).await;

@@ -108,7 +108,12 @@ fn scratch(name: &str) -> PathBuf {
 
 fn write_policy(name: &str, policy: &Policy) -> PathBuf {
     let path = scratch(name).join("policy.json");
-    std::fs::write(&path, serde_json::to_vec(policy).unwrap()).unwrap();
+    gcu_host_protocol::owner_only::atomic_write(
+        &path,
+        &serde_json::to_vec(policy).unwrap(),
+        gcu_host_protocol::owner_only::SyncPolicy::Required,
+    )
+    .unwrap();
     path
 }
 
@@ -566,7 +571,12 @@ async fn bind_reason_strips_bidi_and_keeps_identity_raw() {
 #[tokio::test]
 async fn corrupt_policy_file_opens_as_baseline_with_no_grants() {
     let path = scratch("corrupt").join("policy.json");
-    std::fs::write(&path, b"not-json").unwrap();
+    gcu_host_protocol::owner_only::atomic_write(
+        &path,
+        b"not-json",
+        gcu_host_protocol::owner_only::SyncPolicy::Required,
+    )
+    .unwrap();
     let office = Office::open(Some(path));
     assert_eq!(office.policy().version, 1);
     assert!(office.policy().always.is_empty());

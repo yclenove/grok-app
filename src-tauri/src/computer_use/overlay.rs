@@ -48,9 +48,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 impl Overlay {
     pub fn new(app: &AppHandle) -> Self {
-        let path = crate::paths::app_data_root()
-            .join("computer-use")
-            .join("stop-latch");
+        let dir = crate::paths::app_data_root().join("computer-use");
+        if let Err(error) = gcu_host_protocol::owner_only::ensure_dir(&dir) {
+            gcu_host_protocol::owner_only::warn_meta("computer_use_dir", &dir, &error);
+        }
+        let path = dir.join("stop-latch");
         let safety = Safety::new(Arc::new(FileLatch(path)));
         let overlay = Self {
             desk: Arc::new(Mutex::new(Desk::default())),

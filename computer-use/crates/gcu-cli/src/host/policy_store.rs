@@ -1,5 +1,4 @@
 //! Persistent always-grants. The engine reads them; only this Host writes them.
-use crate::private;
 use gcu_host_api::{AppIdentity, GrantProof, Platform, PolicyConfig, PolicyStore, SignatureState};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -195,28 +194,15 @@ fn load_grants(path: &Path) -> Result<Vec<AppIdentity>, StoreFault> {
 }
 
 fn classify(path: &Path) -> Class {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Class::Missing,
-        Err(_) => return Class::Unsafe,
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_BYTES {
-        return if metadata.file_type().is_symlink() || !metadata.is_file() {
-            Class::Unsafe
-        } else {
-            Class::Corrupt
-        };
-    }
-    if private::check_file(path).is_err() {
-        return Class::Unsafe;
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Class::Unsafe,
-    };
-    match serde_json::from_slice::<Value>(&bytes) {
-        Ok(Value::Object(map)) => Class::Ready(map),
-        _ => Class::Corrupt,
+    use gcu_host_protocol::owner_only;
+    match owner_only::read_no_follow(path, MAX_BYTES) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Class::Missing,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Class::Corrupt,
+        Err(_) => Class::Unsafe,
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(map)) => Class::Ready(map),
+            _ => Class::Corrupt,
+        },
     }
 }
 
@@ -339,9 +325,22 @@ fn record(identity: &AppIdentity) -> Value {
 }
 
 fn write_map(path: &Path, map: &Map<String, Value>) -> Result<(), StoreFault> {
+    use gcu_host_protocol::owner_only::{self, SyncPolicy};
     let mut body = serde_json::to_vec(map).map_err(|_| StoreFault::Io)?;
     body.push(b'\n');
-    private::write_secret(path, &body).map_err(|_| StoreFault::Io)
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            // Unix state directories are 0700. On Windows the CLI state directory
+            // stays owner-only (`OW`); do not replace that DACL with user+SYSTEM.
+            #[cfg(unix)]
+            owner_only::ensure_dir(parent).map_err(|_| StoreFault::Io)?;
+            #[cfg(not(unix))]
+            if std::fs::symlink_metadata(parent).is_err() {
+                std::fs::create_dir_all(parent).map_err(|_| StoreFault::Io)?;
+            }
+        }
+    }
+    owner_only::atomic_write(path, &body, SyncPolicy::Required).map_err(|_| StoreFault::Io)
 }
 
 fn platform_name(platform: Platform) -> &'static str {
