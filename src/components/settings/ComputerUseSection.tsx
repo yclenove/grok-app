@@ -34,6 +34,7 @@ export function ComputerUseSection({
   const s = useComputerUseSettings();
   const [revoking, setRevoking] = useState<Approval | null>(null);
   const [restartNeeded, setRestartNeeded] = useState(false);
+  const [clearState, setClearState] = useState<"idle" | "busy" | "failed" | "done">("idle");
   const cancelRef = useRef<HTMLButtonElement>(null);
   const policy = s.settings.data;
   const report = s.doctor.data;
@@ -131,6 +132,30 @@ export function ComputerUseSection({
         </div>
         {s.settings.loading && <div className="settings-row" role="status">{t("cu.settings.loading")}</div>}
         {s.settings.error && error(() => void s.settings.refresh())}
+      </section>
+
+      <section className="settings-card" id="settings-anchor-ext-computer-browser" aria-label={t("cu.settings.clearBrowser")}>
+        <div className="settings-row">
+          <div className="settings-row__text">
+            <div className="settings-row__label">{t("cu.settings.clearBrowser")}</div>
+            <div className="settings-row__desc">{t("cu.settings.clearBrowserBody")}</div>
+          </div>
+          <button
+            type="button"
+            className="btn"
+            data-testid="cu-browser-clear"
+            disabled={!s.desktop || s.busy || clearState === "busy"}
+            onClick={() => {
+              setClearState("busy");
+              void run(() => api.cuBrowserClear()).then((ok) => setClearState(ok ? "done" : "failed"));
+            }}
+          >
+            {t("cu.settings.clearBrowser")}
+          </button>
+        </div>
+        {clearState === "busy" && <p role="status">{t("cu.settings.clearBrowserBusy")}</p>}
+        {clearState === "failed" && <p className="settings-row__hint is-danger" role="alert">{t("cu.settings.clearBrowserFailed")}</p>}
+        {clearState === "done" && <p role="status">{t("cu.settings.clearBrowserDone")}</p>}
       </section>
 
       <section className="settings-card" id="settings-anchor-ext-computer-release" aria-label={t("cu.settings.release")}>
