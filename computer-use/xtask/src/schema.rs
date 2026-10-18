@@ -1,6 +1,6 @@
 //! Schema golden files and exact UTF-8 catalog byte-budget enforcement.
 
-use crate::budgets::TOOL_CATALOG_BYTES;
+use crate::{budgets::TOOL_CATALOG_BYTES, profiles};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{fs, path::Path};
@@ -29,26 +29,28 @@ pub(crate) fn canonical_json(value: &Value) -> Result<String> {
 }
 
 pub(crate) fn golden(directory: &Path, update: bool) -> Result<()> {
-    let files = [
+    let mut files = vec![
         (
-            "tools.json",
+            "tools.json".to_owned(),
             canonical_json(&gcu_protocol::tools_list_json())?,
         ),
         (
-            "tools-browser.json",
+            "tools-browser.json".to_owned(),
             canonical_json(&gcu_protocol::browser_conditional_catalog_json())?,
         ),
         (
-            "errors.json",
+            "errors.json".to_owned(),
             canonical_json(&gcu_protocol::error::errors_json())?,
         ),
     ];
-    if update {
-        fs::create_dir_all(directory).context("failed to create golden directory")?;
+    for (name, tools) in profile_catalogs() {
+        files.push((format!("profiles/{name}.json"), canonical_json(&tools)?));
     }
     for (name, expected) in files {
-        let path = directory.join(name);
+        let path = directory.join(&name);
         if update {
+            fs::create_dir_all(path.parent().context("golden path must have a parent")?)
+                .context("failed to create golden directory")?;
             fs::write(&path, expected)
                 .with_context(|| format!("failed to write {}", path.display()))?;
         } else {
@@ -61,6 +63,19 @@ pub(crate) fn golden(directory: &Path, update: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Full is the maximal executable Unix/script/runner configuration, so golden
+// files and budgets do not depend on the machine/feature building xtask. Live
+// catalogs additionally intersect this recipe with IMPLEMENTED_TOOLS.
+pub(crate) fn profile_catalogs() -> [(&'static str, Value); 3] {
+    use profiles::Profile;
+    [Profile::Minimal, Profile::Default, Profile::Full].map(|profile| {
+        (
+            profile.as_str(),
+            profiles::tools_json(profile, true, &profiles::FULL_TOOLS),
+        )
+    })
 }
 
 pub(crate) struct BudgetReport {
@@ -129,15 +144,18 @@ pub(crate) fn run_golden(update: bool) -> Result<()> {
 pub(crate) fn enforce_budget(report: &BudgetReport) -> Result<()> {
     print!("{}", report.render());
     if !report.passed() {
-        bail!("default tool catalog exceeds {} bytes", report.limit);
+        bail!("tool catalog exceeds {} bytes", report.limit);
     }
     Ok(())
 }
 
 pub(crate) fn run_budget() -> Result<()> {
-    let report = budget_report(&gcu_protocol::tools_list_json(), TOOL_CATALOG_BYTES)?;
-    enforce_budget(&report)?;
-    println!("PASS: default tool catalog byte budget");
+    for (name, tools) in profile_catalogs() {
+        println!("{name} profile:");
+        let report = budget_report(&tools, TOOL_CATALOG_BYTES)?;
+        enforce_budget(&report).with_context(|| format!("{name} profile exceeds byte budget"))?;
+    }
+    println!("PASS: all tool profiles fit the unchanged byte budget");
     let conditional = budget_report(
         &gcu_protocol::browser_conditional_catalog_json(),
         TOOL_CATALOG_BYTES,
