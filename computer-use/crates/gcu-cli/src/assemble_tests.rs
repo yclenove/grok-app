@@ -57,6 +57,22 @@ fn omitted_auto_and_native_fail_closed_for_every_feature_switch() {
                     assert!(!disclosure.native_disabled.contains("not assembled"));
                     continue;
                 }
+                if compiled && feature == "native-windows" {
+                    let Plan::NativeWindows { disclosure } = plan else {
+                        panic!("expected native windows, got {plan:?}");
+                    };
+                    assert_eq!(disclosure.selected, "native");
+                    assert!(
+                        disclosure
+                            .native_disabled
+                            .contains("selected native-windows"),
+                        "{}",
+                        disclosure.native_disabled
+                    );
+                    assert!(!disclosure.native_disabled.contains("not assembled"));
+                    assert!(!disclosure.note().contains("fake"));
+                    continue;
+                }
                 let Plan::Refuse { message } = plan else {
                     panic!("driver was selected: {plan:?}");
                 };
@@ -68,6 +84,55 @@ fn omitted_auto_and_native_fail_closed_for_every_feature_switch() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn windows_agent_does_not_assemble_and_other_entries_do() {
+    let mut agent = query(DriverKind::Auto, None, Entry::Agent, OsKind::Windows);
+    agent.features.native_windows = true;
+    match decide(agent) {
+        Plan::Refuse { message } => assert!(message.contains("helper agent"), "{message}"),
+        other => panic!("selected {other:?}"),
+    }
+    for entry in [
+        Entry::Bare,
+        Entry::McpStdio,
+        Entry::Engine,
+        Entry::InProcess,
+    ] {
+        for request in [DriverKind::Auto, DriverKind::Native] {
+            let mut selected = query(request, None, entry, OsKind::Windows);
+            selected.features.native_windows = true;
+            assert!(
+                matches!(decide(selected), Plan::NativeWindows { .. }),
+                "{request:?} {entry:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fake_on_compiled_windows_does_not_claim_the_route_is_unassembled() {
+    let mut q = query(DriverKind::Fake, None, Entry::InProcess, OsKind::Windows);
+    q.features.native_windows = true;
+    match decide(q) {
+        Plan::Fake { disclosure, .. } => {
+            assert_eq!(disclosure.selected, "fake");
+            assert!(disclosure.native_disabled.contains("did not select"));
+            assert!(disclosure.native_disabled.contains("native-windows"));
+            assert!(!disclosure.native_disabled.contains("not assembled"));
+        }
+        other => panic!("{other:?}"),
+    }
+    q.features.native_windows = false;
+    q.request = DriverKind::Native;
+    match decide(q) {
+        Plan::Refuse { message } => {
+            assert!(message.contains("not compiled"), "{message}");
+            assert!(message.contains("native-windows"), "{message}");
+        }
+        other => panic!("{other:?}"),
     }
 }
 

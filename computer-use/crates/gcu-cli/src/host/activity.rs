@@ -2,11 +2,12 @@
 use gcu_mcp::host::PhysicalActivity;
 use std::sync::{Arc, Weak};
 
-/// Reserved for the native assembly card (0012); the fake entry stays unwired.
-#[allow(dead_code)]
+/// Forwards the Windows guard clock. The fake entry does not install it.
+#[cfg_attr(not(all(windows, feature = "native-windows")), allow(dead_code))]
 pub(crate) struct WindowsActivity(Weak<gcu_driver_windows::WindowsDriver>);
 impl WindowsActivity {
-    #[allow(dead_code)]
+    /// Share the driver the product process still holds.
+    #[cfg_attr(not(all(windows, feature = "native-windows")), allow(dead_code))]
     pub(crate) fn new(driver: &Arc<gcu_driver_windows::WindowsDriver>) -> Self {
         Self(Arc::downgrade(driver))
     }
