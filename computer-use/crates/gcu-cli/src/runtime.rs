@@ -227,6 +227,7 @@ pub(crate) async fn dispatch_bound(
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    browser_session: None,
                     route_note: disclosure.note(),
                     script: crate::script_worker::runner(),
                 },
@@ -266,6 +267,7 @@ pub(crate) async fn dispatch_bound(
                 host.host.clone(),
                 gcu_mcp::ServerConfig {
                     profile: profile.into(),
+                    browser_session: None,
                     route_note: disclosure.note(),
                     script: crate::script_worker::runner(),
                 },

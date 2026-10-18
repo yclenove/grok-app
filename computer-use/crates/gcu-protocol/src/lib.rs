@@ -5,6 +5,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+/// Built-in browser gates. L1 stays closed until a platform proves network limits.
+pub mod builtin_browser;
 pub mod capabilities;
 pub mod error;
 pub mod keys;
@@ -66,6 +68,10 @@ fn compact_metadata(schema: &mut Schema) {
 }
 
 fn tool<T: JsonSchema>(name: ToolName, description: &str) -> Value {
+    tool_named::<T>(name.as_str(), description, name.is_read_only())
+}
+
+fn tool_named<T: JsonSchema>(name: &str, description: &str, read_only: bool) -> Value {
     // Draft 7 converts flattened unevaluatedProperties to additionalProperties
     // for clients with older validators. References remain local to each tool.
     let mut schema = SchemaSettings::draft07()
@@ -73,12 +79,39 @@ fn tool<T: JsonSchema>(name: ToolName, description: &str) -> Value {
         .into_root_schema_for::<T>();
     compact_metadata(&mut schema);
     json!({
-        "name": name.as_str(),
+        "name": name,
         "description": description,
         "inputSchema": schema,
-        "annotations": {"readOnlyHint": name.is_read_only(), "destructiveHint": !name.is_read_only(),
-            "idempotentHint": name.is_read_only(), "openWorldHint": true}
+        "annotations": {"readOnlyHint": read_only, "destructiveHint": !read_only,
+            "idempotentHint": read_only, "openWorldHint": true}
     })
+}
+
+/// Conditional `browser_navigate` tool. It is not part of [`tools_list_json`].
+///
+/// The default catalog byte budget is unchanged. Callers add this object only
+/// while a proven binding is visible to that session.
+pub fn browser_navigate_tool_json() -> Value {
+    tool_named::<builtin_browser::BrowserNavigateParams>(
+        "browser_navigate",
+        "Open a URL in the built-in browser.",
+        false,
+    )
+}
+
+/// Implemented tools plus [`browser_navigate_tool_json`].
+///
+/// `computer_script` stays only in [`tools_list_json`]. This catalog is the
+/// byte-budget check for a session that can see the conditional tool. It does
+/// not raise the 14000-byte limit and is not the default catalog.
+#[must_use]
+pub fn browser_conditional_catalog_json() -> Value {
+    let Value::Array(mut tools) = tools_list_json() else {
+        return Value::Array(vec![browser_navigate_tool_json()]);
+    };
+    tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("computer_script"));
+    tools.push(browser_navigate_tool_json());
+    Value::Array(tools)
 }
 
 /// Generate the sixteen-entry MCP tools/list `tools` array from parameter types.

@@ -296,8 +296,8 @@ fn bench_percentiles_use_nearest_rank_without_rounding_down() {
 
 #[test]
 fn catalog_schema_superset_covers_all_current_profiles_within_14000_bytes() {
-    // Actual profiles only remove tools from this complete schema. Measuring the
-    // superset gives a conservative upper bound without copying registration logic.
+    // The sixteen-tool superset is the default golden. Conditional browser_navigate
+    // is measured by xtask budget and is not part of this array.
     assert_eq!(TOOL_CATALOG_BYTES, 14_000);
     let tools = gcu_protocol::tools_list_json();
     assert!(serde_json::to_vec(&tools).unwrap().len() <= TOOL_CATALOG_BYTES);

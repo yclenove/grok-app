@@ -46,7 +46,7 @@ fn golden_update_then_check_passes_and_update_is_idempotent() {
 fn golden_check_tampered_file_fails_without_rewriting() {
     let temp = TempDir::new();
     golden(&temp.0, true).unwrap();
-    for file in ["tools.json", "errors.json"] {
+    for file in ["tools.json", "tools-browser.json", "errors.json"] {
         let path = temp.0.join(file);
         fs::write(&path, "{}\n").unwrap();
         assert!(golden(&temp.0, false)

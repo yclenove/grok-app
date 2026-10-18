@@ -30,6 +30,7 @@ import {
   type TimelineStore,
 } from "@/lib/computer-use/store";
 import { useComputerUseEvents } from "@/hooks/useComputerUseEvents";
+import { ComputerUseBrowser } from "@/components/computer-use/ComputerUseBrowser";
 
 type ShotLoader = (sessionId: string, id: string) => Promise<AdmittedShot | ShotFault>;
 
@@ -207,6 +208,7 @@ export function ComputerUsePanel({
           ) : null}
         </ol>
       )}
+      <ComputerUseBrowser locale={locale as Locale} />
     </section>
   );
 }

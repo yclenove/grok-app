@@ -31,6 +31,8 @@ impl RemoteHost {
         let policy: w::Policy = peer
             .call("host.policy.load", &w::Empty {}, RPC_TIMEOUT)
             .await?;
+        gcu_protocol::builtin_browser::with_shared(|book| book.note_policy(policy.version));
+        crate::browser_tool::install_remote(peer.clone());
         Ok(Arc::new(Self {
             peer,
             session_id: String::new(),
@@ -84,6 +86,7 @@ impl RemoteHost {
         if policy.version < version || policy.version <= current.0 {
             return Err(Error::Invalid);
         }
+        gcu_protocol::builtin_browser::with_shared(|book| book.note_policy(policy.version));
         *current = (policy.version, data::policy(policy));
         Ok(())
     }

@@ -77,6 +77,10 @@ impl Fixture {
                         token: Secret::random().hex(),
                     })
                     .unwrap()
+                } else if request.method == "engine.browser.sync" {
+                    serde_json::json!({
+                        "revision": request.params.get("revision").cloned().unwrap_or(serde_json::json!(0))
+                    })
                 } else {
                     serde_json::json!({})
                 };
