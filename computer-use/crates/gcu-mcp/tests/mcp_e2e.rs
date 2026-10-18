@@ -14,9 +14,9 @@ async fn initialize_catalog_matches_implemented_protocol_subset() {
     assert_eq!(init["serverInfo"]["name"], "grok-computer-use");
     let instructions = init["instructions"].as_str().unwrap();
     assert!(instructions.chars().count() <= 1200);
-    for future in ["wait_for", "computer_batch", "computer_script"] {
-        assert!(!instructions.contains(future));
-    }
+    assert!(instructions.contains("wait_for"));
+    assert!(instructions.contains("computer_batch"));
+    assert!(!instructions.contains("computer_script"));
     assert!(init["capabilities"]["tools"].is_object());
     let result = h.request("tools/list", json!({})).await;
     let registered = result["result"]["tools"].as_array().unwrap();
@@ -256,10 +256,10 @@ async fn wait_for_text_present_returns_state_without_input() {
     h.close().await;
 }
 
-#[cfg(feature = "script")]
+#[cfg(all(unix, feature = "script"))]
 struct ListAppsRunner;
 
-#[cfg(feature = "script")]
+#[cfg(all(unix, feature = "script"))]
 impl gcu_mcp::ScriptRunner for ListAppsRunner {
     fn run<'a>(
         &'a self,
@@ -283,7 +283,7 @@ impl gcu_mcp::ScriptRunner for ListAppsRunner {
     }
 }
 
-#[cfg(feature = "script")]
+#[cfg(all(unix, feature = "script"))]
 #[tokio::test]
 async fn full_profile_with_runner_reaches_router_for_computer_script() {
     use gcu_mcp::{Profile, ServerConfig};

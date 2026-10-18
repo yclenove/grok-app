@@ -285,6 +285,7 @@ impl ServerHandler for Server {
             .with_instructions(instructions::instructions(
                 self.0.driver.platform(),
                 self.0.config.profile,
+                &self.0.tools,
             ))
     }
     async fn list_tools(

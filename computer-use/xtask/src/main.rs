@@ -7,6 +7,10 @@ mod bench;
 mod budgets;
 mod bundle;
 mod deps;
+// Share the pure serving projection without linking MCP/core or enabling script
+// execution in this development tool. Golden output is feature/OS independent.
+#[path = "../../crates/gcu-mcp/src/catalog/profiles.rs"]
+mod profiles;
 mod release;
 mod sbom;
 mod schema;

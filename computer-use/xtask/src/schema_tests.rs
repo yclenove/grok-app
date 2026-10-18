@@ -1,4 +1,4 @@
-use super::schema::{budget_report, canonical_json, enforce_budget, golden};
+use super::schema::{budget_report, canonical_json, enforce_budget, golden, profile_catalogs};
 use serde_json::json;
 use std::{
     fs,
@@ -37,16 +37,31 @@ fn golden_update_then_check_passes_and_update_is_idempotent() {
     let temp = TempDir::new();
     golden(&temp.0, true).unwrap();
     golden(&temp.0, false).unwrap();
-    let tools = fs::read(temp.0.join("tools.json")).unwrap();
+    let files = [
+        "tools.json",
+        "errors.json",
+        "profiles/minimal.json",
+        "profiles/default.json",
+        "profiles/full.json",
+    ]
+    .map(|name| (name, fs::read(temp.0.join(name)).unwrap()));
     golden(&temp.0, true).unwrap();
-    assert_eq!(tools, fs::read(temp.0.join("tools.json")).unwrap());
+    for (name, expected) in files {
+        assert_eq!(expected, fs::read(temp.0.join(name)).unwrap());
+    }
 }
 
 #[test]
 fn golden_check_tampered_file_fails_without_rewriting() {
     let temp = TempDir::new();
     golden(&temp.0, true).unwrap();
-    for file in ["tools.json", "errors.json"] {
+    for file in [
+        "tools.json",
+        "errors.json",
+        "profiles/minimal.json",
+        "profiles/default.json",
+        "profiles/full.json",
+    ] {
         let path = temp.0.join(file);
         fs::write(&path, "{}\n").unwrap();
         assert!(golden(&temp.0, false)
@@ -65,12 +80,42 @@ fn golden_check_missing_file_fails() {
 }
 
 #[test]
+fn golden_check_missing_profile_fails_without_regenerating() {
+    let temp = TempDir::new();
+    golden(&temp.0, true).unwrap();
+    let path = temp.0.join("profiles/full.json");
+    fs::remove_file(&path).unwrap();
+    assert!(golden(&temp.0, false)
+        .unwrap_err()
+        .to_string()
+        .contains("profiles/full.json"));
+    assert!(!path.exists());
+}
+
+#[test]
 fn budget_default_surface_is_within_exact_utf8_limit() {
-    let tools = gcu_protocol::tools_list_json();
+    let (_, tools) = profile_catalogs()
+        .into_iter()
+        .find(|(name, _)| *name == "default")
+        .unwrap();
     let report = budget_report(&tools, 14000).unwrap();
     assert!(report.passed());
     assert_eq!(report.total, serde_json::to_vec(&tools).unwrap().len());
-    assert_eq!(report.tools.len(), 16);
+    assert_eq!(report.tools.len(), 15);
+}
+
+#[test]
+fn budget_all_profiles_including_enabled_script_fit_same_limit() {
+    for ((name, tools), count) in profile_catalogs().into_iter().zip([9, 15, 16]) {
+        let report = budget_report(&tools, 14_000).unwrap();
+        assert!(report.passed(), "{name}: {}", report.render());
+        assert_eq!(report.tools.len(), count);
+        assert!(tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["name"] != "browser_navigate"));
+    }
 }
 
 #[test]
