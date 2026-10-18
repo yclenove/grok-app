@@ -115,23 +115,47 @@ pub fn catalog_log(count: usize) -> String {
     format!("acp session open injecting mcpServers count={count}")
 }
 
-/// Redacted form of an ACP payload. Register secrets first, or pass them to [`redact`].
+/// ACP payload line. Metadata-only unless `GCU_LOG_PAYLOADS=1`, and then still scrubbed.
 pub fn acp_payload_log(payload: &Value) -> String {
-    scrub(&payload.to_string())
+    crate::log_policy::log_text("acp", &payload.to_string())
 }
 
-/// Exit text with registered secrets and bearer/`GCU_TOKEN` patterns removed.
+/// Crash record. Stderr is omitted unless payloads are enabled, and then still scrubbed.
 pub fn crash_report(head: &str, stderr: &str) -> String {
+    crash_report_enabled(crate::log_policy::payloads_enabled(), head, stderr)
+}
+
+/// Same as [`crash_report`] with an explicit flag, so tests do not race on the environment.
+///
+/// `enabled` does not skip [`scrub`]. When it is false, `stderr` is dropped and only
+/// the scrubbed head is kept as the category.
+pub fn crash_report_enabled(enabled: bool, head: &str, stderr: &str) -> String {
+    let category = one_line(&scrub(head));
+    if !enabled || stderr.is_empty() {
+        return crate::log_policy::error_record("crash", &category);
+    }
     let tail = scrub(stderr);
-    if tail.is_empty() {
-        scrub(head)
+    let capped = if tail.len() > 800 {
+        format!("…{}", &tail[tail.len() - 800..])
     } else {
-        let capped = if tail.len() > 800 {
-            format!("…{}", &tail[tail.len() - 800..])
-        } else {
-            tail
-        };
-        scrub(&format!("{head}; stderr: {capped}"))
+        tail
+    };
+    format!(
+        "{} detail={}",
+        crate::log_policy::error_record("crash", &category),
+        scrub(&capped)
+    )
+}
+
+fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(120) {
+        out.push(if ch.is_control() { ' ' } else { ch });
+    }
+    if out.is_empty() {
+        "process_exit".into()
+    } else {
+        out
     }
 }
 
@@ -150,13 +174,18 @@ pub fn remember_secret(token: &str) {
     }
 }
 
-/// Remove registered secrets, `Bearer <64 hex>`, and `GCU_TOKEN=` assignments.
+/// Remove registered secrets, bearer/`GCU_TOKEN` markers, and password/token fields.
+///
+/// This is the log redaction pipeline. `GCU_LOG_PAYLOADS` cannot turn it off.
+/// It is not a general free-text password guesser: field names and registered
+/// secrets are removed; unmarked prose is left in place when payloads are enabled.
 pub fn scrub(text: &str) -> String {
     let known = lock(&KNOWN);
     redact(text, &known)
 }
 
-/// Remove `tokens` and the bearer / `GCU_TOKEN` patterns. Does not touch the registry.
+/// Remove `tokens`, bearer/`GCU_TOKEN` markers, and password/token field values.
+/// Does not touch the registry.
 pub fn redact(text: &str, tokens: &[String]) -> String {
     let mut out = text.to_owned();
     for token in tokens {
@@ -164,7 +193,7 @@ pub fn redact(text: &str, tokens: &[String]) -> String {
             out = out.replace(token, "[redacted]");
         }
     }
-    redact_markers(&out)
+    redact_secret_fields(&redact_markers(&out))
 }
 
 /// Names of surfaces that still contain `token` or a `GCU_TOKEN` assignment.
@@ -259,6 +288,114 @@ fn gcu_token_len(text: &str) -> usize {
         .find(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\'')
         .unwrap_or(value.len());
     "GCU_TOKEN=".len() + tail
+}
+
+const SECRET_FIELDS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "authorization",
+    "api_key",
+    "password",
+    "credential",
+    "passwd",
+    "secret",
+    "apikey",
+    "token",
+];
+
+fn redact_secret_fields(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some((value_at, value_end)) = secret_field_value(bytes, index) {
+            out.push_str(&text[index..value_at]);
+            out.push_str("[redacted]");
+            index = value_end;
+            continue;
+        }
+        let ch = text[index..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn secret_field_value(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    if index > 0 && is_field_ident(bytes[index - 1]) {
+        return None;
+    }
+    let rest = &bytes[index..];
+    let mut key_len = 0;
+    for key in SECRET_FIELDS {
+        let key = key.as_bytes();
+        if rest.len() >= key.len()
+            && rest[..key.len()].eq_ignore_ascii_case(key)
+            && key.len() > key_len
+            && (rest.len() == key.len() || !is_field_ident(rest[key.len()]))
+        {
+            key_len = key.len();
+        }
+    }
+    if key_len == 0 {
+        return None;
+    }
+    let mut pos = index + key_len;
+    if pos < bytes.len() && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
+        pos += 1;
+    }
+    pos = skip_field_ws(bytes, pos);
+    if pos >= bytes.len() || (bytes[pos] != b':' && bytes[pos] != b'=') {
+        return None;
+    }
+    pos = skip_field_ws(bytes, pos + 1);
+    let (start, end) = field_value_span(bytes, pos)?;
+    if start == end {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn is_field_ident(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_field_ws(bytes: &[u8], mut pos: usize) -> usize {
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn field_value_span(bytes: &[u8], pos: usize) -> Option<(usize, usize)> {
+    if pos >= bytes.len() {
+        return None;
+    }
+    let quote = bytes[pos];
+    if quote == b'"' || quote == b'\'' {
+        let start = pos + 1;
+        let mut cursor = start;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'\\' {
+                cursor = cursor.saturating_add(2);
+                continue;
+            }
+            if bytes[cursor] == quote {
+                return Some((start, cursor));
+            }
+            cursor += 1;
+        }
+        return Some((start, bytes.len()));
+    }
+    let mut cursor = pos;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte.is_ascii_whitespace() || matches!(byte, b',' | b'}' | b'&' | b';') {
+            break;
+        }
+        cursor += 1;
+    }
+    Some((pos, cursor))
 }
 
 impl TokenBook {

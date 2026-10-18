@@ -1313,9 +1313,13 @@ impl AcpClient {
     async fn handle_line(self: Arc<Self>, line: &str) {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(e) => {
-                let shown = gcu_host_protocol::inject::scrub(&line[..line.len().min(200)]);
-                warn!("acp non-json line: {e}: {shown}");
+            Err(_) => {
+                warn!(
+                    category = "non_json",
+                    location = "acp_client::handle_line",
+                    bytes = line.len(),
+                    "acp line rejected"
+                );
                 return;
             }
         };
@@ -1330,7 +1334,14 @@ impl AcpClient {
                     pending_session = p.session_id.clone();
                     if let Some(err) = msg.get("error") {
                         let full = gcu_host_protocol::inject::scrub(&format_jsonrpc_error(err));
-                        warn!("acp ← {} id={id} error: {}", p.method, full);
+                        warn!(
+                            category = "acp_error",
+                            location = "acp_client::handle_line",
+                            method = %p.method,
+                            id,
+                            bytes = full.len(),
+                            "acp error response"
+                        );
                         let _ = p.tx.send(Err(full));
                     } else {
                         let _ =
@@ -1341,7 +1352,13 @@ impl AcpClient {
                     // real RPC error arrived later (official subscription / provider fails).
                     // Must still surface the error — do not drop as "unknown id".
                     let full = gcu_host_protocol::inject::scrub(&format_jsonrpc_error(err));
-                    warn!("acp late error response id={id} (pending already resolved): {full}");
+                    warn!(
+                        category = "acp_error",
+                        location = "acp_client::handle_line",
+                        id,
+                        bytes = full.len(),
+                        "acp late error response"
+                    );
                     let _ = self.event_tx.send((
                         None,
                         AcpEvent::Error {
@@ -2075,7 +2092,14 @@ impl AcpClient {
                     Ok(v)
                 }
                 Err(e) => {
-                    warn!("acp ← {method} id={id} error: {e}");
+                    warn!(
+                        category = "acp_error",
+                        location = "acp_client::request",
+                        method,
+                        id,
+                        bytes = e.len(),
+                        "acp error response"
+                    );
                     Err(e)
                 }
             },
@@ -2152,7 +2176,14 @@ impl AcpClient {
                             return Ok(v);
                         }
                         Ok(Err(e)) => {
-                            warn!("acp ← {method} id={id} error: {e}");
+                            warn!(
+                                category = "acp_error",
+                                location = "acp_client::request_prompt",
+                                method,
+                                id,
+                                bytes = e.len(),
+                                "acp error response"
+                            );
                             return Err(e);
                         }
                         Err(_) => {

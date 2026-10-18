@@ -175,7 +175,8 @@ pub enum HandoffAct {
 }
 
 /// Redacted crop the card may show. Missing and unlocated carry no pixels.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Debug never formats PNG bytes.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum CropView {
     /// PNG bytes that passed the redaction checks.
@@ -193,6 +194,26 @@ pub enum CropView {
     Missing,
     /// A crop arrived, but it was not a safe redacted PNG. Bytes are dropped.
     Unlocated,
+}
+impl std::fmt::Debug for CropView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Redacted {
+                mime,
+                width,
+                height,
+                bytes,
+            } => f
+                .debug_struct("Redacted")
+                .field("mime", mime)
+                .field("width", width)
+                .field("height", height)
+                .field("byte_count", &bytes.len())
+                .finish(),
+            Self::Missing => f.write_str("Missing"),
+            Self::Unlocated => f.write_str("Unlocated"),
+        }
+    }
 }
 
 /// What the user presented for one sensitive action.

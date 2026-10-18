@@ -2,10 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gcu_host_protocol::inject::{
-    acp_payload_log, catalog_log, crash_report, extra_env, fd_entry, http_entry, leak_sites,
-    omit_local_mcp_catalog, redact, session_kind, should_inject, InjectFacts, Issued, Surfaces,
-    TokenBook, SERVER_NAME,
+    acp_payload_log, catalog_log, crash_report, crash_report_enabled, extra_env, fd_entry,
+    http_entry, leak_sites, omit_local_mcp_catalog, redact, session_kind, should_inject,
+    InjectFacts, Issued, Surfaces, TokenBook, SERVER_NAME,
 };
+use gcu_host_protocol::log_policy::{format_text, payloads_enabled};
 use gcu_host_protocol::messages::SessionKind;
 
 fn facts(ssh: bool, scheduled: bool, remote_im: bool, side_channel: bool) -> InjectFacts {
@@ -185,12 +186,33 @@ fn acp_payload_log_and_crash_report_drop_registered_bearer() {
     let secret = token(0x44);
     gcu_host_protocol::inject::remember_secret(&secret);
     let entry = http_entry("http://127.0.0.1:9/mcp", &secret);
+    let body = entry.to_string();
     let log = acp_payload_log(&entry);
+    assert_eq!(log, format_text(payloads_enabled(), "acp", &body));
     assert!(!log.contains(&secret));
-    assert!(log.contains("[redacted]"));
-    let crash = crash_report("died", &format!("GCU_TOKEN={secret} tail"));
+    let shown = format_text(true, "acp", &body);
+    assert!(!shown.contains(&secret));
+    assert!(shown.contains("[redacted]"));
+    let hidden = format_text(false, "acp", &body);
+    assert!(!hidden.contains(&secret));
+    assert!(!hidden.contains("127.0.0.1"));
+    let stderr = format!("GCU_TOKEN={secret} plain-context-word");
+    let crash = crash_report("died", &stderr);
+    assert_eq!(
+        crash,
+        crash_report_enabled(payloads_enabled(), "died", &stderr)
+    );
     assert!(!crash.contains(&secret));
     assert!(!crash.contains("GCU_TOKEN="));
+    let forced = crash_report_enabled(true, "died", &stderr);
+    assert!(!forced.contains(&secret));
+    assert!(!forced.contains("GCU_TOKEN="));
+    assert!(forced.contains("plain-context-word"));
+    let off = crash_report_enabled(false, "died", &stderr);
+    assert!(!off.contains(&secret));
+    assert!(!off.contains("plain-context-word"));
+    assert!(off.contains("category="));
+    assert!(off.contains("location="));
 }
 
 #[test]

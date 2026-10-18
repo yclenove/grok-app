@@ -398,6 +398,53 @@ fn external_review_remains_unsigned_and_release_gate_is_not_waived() {
     assert!(doc.contains("不得发布"));
 }
 
+#[test]
+fn payload_flag_is_read_only_from_log_policy() {
+    if !full_tree() {
+        return;
+    }
+    let name = "GCU_LOG_PAYLOADS";
+    let needles = [
+        format!("env::var(\"{name}\")"),
+        format!("env::var_os(\"{name}\")"),
+    ];
+    let mut hits = Vec::new();
+    walk_rust(&root(), &needles, &mut hits);
+    let expected = root().join("computer-use/crates/gcu-host-protocol/src/log_policy.rs");
+    assert_eq!(hits, vec![expected]);
+}
+
+fn walk_rust(dir: &Path, needles: &[String], hits: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        let name = path.file_name().and_then(|item| item.to_str());
+        if matches!(
+            name,
+            Some("target" | "node_modules" | ".git" | "dist" | ".grok")
+        ) {
+            continue;
+        }
+        if path.is_dir() {
+            walk_rust(&path, needles, hits);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if needles.iter().any(|needle| source.contains(needle)) {
+            hits.push(path);
+        }
+    }
+}
+
 fn action_pins(workflow: &str) -> Result<usize, String> {
     let mut count = 0;
     for line in workflow.lines() {

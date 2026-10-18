@@ -59,7 +59,9 @@ impl PixelRegion {
 }
 
 /// Raw video frame delivered from a PipeWire video stream before sanitization.
-#[derive(Clone, Debug)]
+///
+/// Debug is metadata only. `rgba` bytes are never formatted.
+#[derive(Clone)]
 pub struct RawCapturedFrame {
     /// PipeWire stream node ID from which this frame was received.
     pub stream_node_id: u32,

@@ -145,7 +145,11 @@ async fn password_redaction() -> Result<(), String> {
         .root
         .as_ref()
         .and_then(|node| node.value.as_ref())
-        .map(|value| format!("{value:?}"))
+        .map(|value| match value {
+            // Debug no longer prints text, so inspect the masked value itself.
+            NodeValue::Text(text) => text.clone(),
+            other => format!("{other:?}"),
+        })
         .unwrap_or_default();
     if text.contains("super-secret") || !text.contains('•') {
         return Err(format!("password value leaked: {text}"));

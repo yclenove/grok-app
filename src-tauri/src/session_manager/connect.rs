@@ -121,9 +121,13 @@ impl SessionManager {
 
         match join.await {
             Ok(inner) => inner,
-            Err(join_err) => {
-                tracing::error!(error = %join_err, "connect task failed");
-                Err(format!("connect task failed: {join_err}"))
+            Err(_join_err) => {
+                tracing::error!(
+                    category = "connect_task",
+                    location = "session_manager::connect",
+                    "connect task failed"
+                );
+                Err("connect task failed".to_string())
             }
         }
     }
