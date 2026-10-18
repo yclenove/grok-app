@@ -76,6 +76,14 @@ fn os_major() -> u32 {
     u32::try_from(version.majorVersion).unwrap_or(0)
 }
 
+/// Product version major from `NSProcessInfo`.
+///
+/// Blocking: one AppKit/Foundation call. Timeout: none. Cancellation: none.
+/// This does not grant TCC and does not post input.
+pub fn product_major() -> u32 {
+    os_major()
+}
+
 fn location_symbol() -> Option<SetWindowLocation> {
     // SAFETY: `dlsym` of a NUL-terminated literal against the process's
     // already-loaded CoreGraphics. A null pointer means the symbol is absent

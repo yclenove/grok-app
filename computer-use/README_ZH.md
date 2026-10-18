@@ -11,7 +11,7 @@
 | 命令 | 本构建里的行为 |
 |---|---|
 | `gcu version`、`gcu install`、`gcu uninstall`、`gcu approvals` | 不需要桌面驱动。 |
-| macOS 上不带 `--driver` 的 `gcu mcp` | 把 stdio 转到 `Grok Computer Use.app`。helper 会加载 macOS 驱动。该驱动启动时 Stop 已经锁存。经这个 helper 操作真实桌面 **未验证**。 |
+| macOS 上不带 `--driver` 的 `gcu mcp` | 把 stdio 转到 `Grok Computer Use.app`。helper 与 Host 共用 Stop 锁存。真实桌面、helper 的 TCC、物理热键、App 子进程责任链，以及真实的 `gcu resume` **未验证**。 |
 | macOS 上不带子命令的 `gcu` | 让 Launch Services 启动 helper（`open -g -j -b <bundle id> --args agent`）。 |
 | Linux 和 Windows 上的 `gcu doctor`、`gcu call`、`gcu mcp` | 省略 `--driver` 即选择 `auto`。该路线未编入时，`auto` 和 `native` 以退出码 2 结束，并且不会退回 fake。`--driver fake` 仍是显式的离线驱动。 |
 | Linux 和 Windows 上不带子命令的 `gcu` | 以退出码 2 结束，原文相同。它不会打印 doctor。 |
@@ -19,7 +19,7 @@
 | `gcu engine` | 给 Grok App 宿主用的私有通道。不是接入 CLI 客户端的方式。 |
 | `gcu agent` | helper 进程。必须由 Launch Services 启动。从 shell 执行拿不到 helper 的权限授予。 |
 
-`--driver` 可以是 `auto`（默认）、`native` 或 `fake`。本二进制没有装配原生路线，所以 `auto` 和 `native` 以退出码 2 结束；它们不会退回 fake，不会换更宽的输入路线，也不会提权。`--scene` 只对 `--driver fake` 有效。省略场景时 fake 使用 `form`。离线桌面不会向操作系统发送输入。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。调试构建不需要。场景：`form`、`chat`、`list`、`modal`、`webarea`、`canvas`、`ide`、`login`、`terminal`、`web_terminal`、`submit_unknown`。
+`--driver` 可以是 `auto`（默认）、`native` 或 `fake`。它们不会退回 fake，不会换更宽的输入路线，也不会提权。在 Linux 和 Windows 上，`auto` 和 `native` 以退出码 2 结束。在 macOS 上，`gcu mcp` 转给 helper；`gcu engine` 只在已认证的 App 子进程里装配驱动，并且只对 macOS 27 arm64 声称那条 TCC 责任链；`gcu call`、`gcu doctor` 和 HTTP MCP 以退出码 2 结束，并指向 helper 或 App。`--scene` 只对 `--driver fake` 有效。省略场景时 fake 使用 `form`。离线桌面不会向操作系统发送输入。发行二进制还要设置 `GCU_ALLOW_FAKE=1`。调试构建不需要。场景：`form`、`chat`、`list`、`modal`、`webarea`、`canvas`、`ide`、`login`、`terminal`、`web_terminal`、`submit_unknown`。
 
 没有 `gcu batch`、`gcu script`，也没有 `gcu approvals revoke-all`。
 
@@ -270,7 +270,7 @@ Stop 会锁存。模型的下一轮、重新连接和新进程都不会清掉它
 
 进程内服务器（含 `--driver fake`）收到 SIGINT 和 SIGTERM 时会锁存 Stop 并松开按住的输入。macOS 上不带 `--driver` 的 `gcu mcp` 只转发 stdio。本文不声称那个代理进程里的 Ctrl+C 会锁存 helper。
 
-macOS helper 的驱动构造函数一开始就把 Stop 锁上，而且 helper 没有把 Host 的锁存接到这个驱动上。经 helper 的真实动作视为 **未验证**，不要指望 `gcu resume` 清掉这个构造时的锁。
+macOS helper 与 Host 共用 Stop 锁存，不会再自建一把启动即锁上的私有锁。经 helper 的真实动作、仅 helper 的 TCC、App 子进程责任链、物理热键，以及真实的 `gcu resume` 都是 **未验证**。不声称 macOS 14、macOS 15 和 Intel。配置文件里的热键字符串仍然没有传进驱动。
 
 `gcu-overlay` 能画 Stop 控件，并在 macOS 和 Windows 上把自己排除出截图。它没有链进这个 `gcu` 二进制。它的真实界面 **未验证**。`GCU_OVERLAY=0` 只会藏起那层界面。这个二进制里没有这个开关。
 
@@ -291,7 +291,7 @@ gcu resume --session /path/to/gcu-control-directory
 
 | 能力 | macOS | Windows | Linux X11 | Linux Wayland |
 |---|---|---|---|---|
-| `gcu mcp` 里的真实驱动 | helper 代理。真实使用 **未验证**。启动时 Stop 已锁存。 | 未装配。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 没有链进 `gcu`。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 对 CLI 来说与 X11 相同。 |
+| `gcu mcp` 里的真实驱动 | helper 代理。helper 与 Host 共用 Stop 锁存。真实使用、TCC 和 `gcu resume` **未验证**。 | 未装配。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 没有链进 `gcu`。`auto` 和 `native` 以退出码 2 结束，不会退回 fake。 | 对 CLI 来说与 X11 相同。 |
 | 无障碍树 | AX。Mini、macOS 27、arm64：真机契约 26 通过、4 跳过、0 失败。第一次读取可能是很短的不完整树。macOS 14/15 和 Intel **未验证**。 | UIA，在 `windows-2022` 运行器上：契约 15 通过、15 跳过、0 失败。第一次读取可能不完整。物理桌面 **未验证**。 | AT-SPI，Xvfb CI：23 通过、6 跳过、0 失败。物理桌面 **未验证**。 | 有环境探测和 portal 代码。真实合成器 **未验证**。 |
 | 窗口截图 | 那台 Mini 的驱动测试里，ScreenCaptureKit 能截被挡住的窗口。打包后的 helper **未验证**。 | WGC，然后 PrintWindow。被挡住的窗口和 150% DPI **未验证**。 | Xvfb 上的 XComposite 通过。没有复合且被挡住：拒绝。 | portal ScreenCast。真实 portal **未验证**。 |
 | 后台动作 | 部分可用。macOS 27 上 AppKit 能收到后台点击。Chromium 不能（[ADR 0006](docs/adr/0006-macos-tcc-helper.md)）。 | 部分可用。UIA Invoke 可能激活窗口。原生按钮用不激活前台的点击。 | 有对应接口时用 AT-SPI。抓不到 Stop 时不用 XTEST。 | 只有可靠 Stop 时才用 portal 输入。没有全桌面退路。真实会话 **未验证**。 |
@@ -331,7 +331,7 @@ gcu resume --session /path/to/gcu-control-directory
 | `Launch Services did not start the computer-use helper` | 先对 `.app` 的绝对路径执行 `open -Ra`。Launch Services 不认识的应用，`open -b` 启动不了。 |
 | `The computer-use helper runs only on macOS` | 在其他系统上启动了 `gcu agent`。 |
 | 授权文件无法读取 | 文件不是仅所有者可读写、是符号链接，或已损坏。修好或删掉这一个文件。不要改主目录的权限。 |
-| 模型一直收到 `stopped_by_user` | Stop 仍锁着。`gcu turn-ended` 不会清它。在 TTY 里用 `gcu resume` 恢复。macOS helper 自己的初始锁是上面说的另一条限制。 |
+| 模型一直收到 `stopped_by_user` | Stop 仍锁着。`gcu turn-ended` 不会清它。在 TTY 里用 `gcu resume` 恢复。真实的 macOS helper 恢复 **未验证**。 |
 | `gcu install` 说要改 `~/.grok` | 它确实会改。项目范围的 Grok 安装仍会把 Stop 钩子写到那里。只有你确实要这样时才加 `--yes`。 |
 
 ## 卸载

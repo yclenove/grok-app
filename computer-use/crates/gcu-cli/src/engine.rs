@@ -40,6 +40,20 @@ async fn lookup(sessions: &Sessions, id: &str) -> Result<Arc<Entry>, w::RpcError
         .ok_or_else(|| w::RpcError::new(-32004, "unknown session"))
 }
 
+enum Prepared {
+    /// Driver and activity already chosen. Fake stays on this path.
+    Given {
+        driver: Arc<dyn Driver>,
+        activity: Arc<dyn PhysicalActivity>,
+    },
+    /// macOS App subprocess. The driver is built only after authentication.
+    ///
+    /// Linux builds keep the variant so the refusal path type-checks, and
+    /// never construct it: `run_macos` returns before `run_prepared`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Macos,
+}
+
 pub(crate) async fn run(
     driver: Arc<dyn Driver>,
     route_note: String,
@@ -48,11 +62,12 @@ pub(crate) async fn run(
     token_fd: Option<usize>,
     stop_fd: usize,
 ) -> Result<u8, Failure> {
-    // Compatibility for the existing fake-only assembly, which deliberately
-    // stays outside the native entry card. No platform clock is attached here.
-    run_with_activity(
-        driver,
-        Arc::new(UnavailableActivity),
+    // Explicit fake, and every non-macOS engine, stays unwired to a platform clock.
+    run_prepared(
+        Prepared::Given {
+            driver,
+            activity: Arc::new(UnavailableActivity),
+        },
         route_note,
         host_fd,
         socket,
@@ -62,9 +77,38 @@ pub(crate) async fn run(
     .await
 }
 
-pub(crate) async fn run_with_activity(
-    driver: Arc<dyn Driver>,
-    activity: Arc<dyn PhysicalActivity>,
+/// Authenticated macOS engine. Refuses before any native driver when the
+/// App TCC chain is not the measured macOS 27 arm64 case.
+pub(crate) async fn run_macos(
+    route_note: String,
+    host_fd: Option<usize>,
+    socket: Option<PathBuf>,
+    token_fd: Option<usize>,
+    stop_fd: usize,
+) -> Result<u8, Failure> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (route_note, host_fd, socket, token_fd, stop_fd);
+        Err(Failure::arguments(
+            crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        run_prepared(
+            Prepared::Macos,
+            route_note,
+            host_fd,
+            socket,
+            token_fd,
+            stop_fd,
+        )
+        .await
+    }
+}
+
+async fn run_prepared(
+    prepared: Prepared,
     route_note: String,
     host_fd: Option<usize>,
     socket: Option<PathBuf>,
@@ -102,7 +146,23 @@ pub(crate) async fn run_with_activity(
     .await
     .map_err(|_| Error::Timeout)?
     .map_err(|_| Error::Authentication)??;
-    let capabilities = activity_capabilities(driver.as_ref(), activity.as_ref());
+    if matches!(prepared, Prepared::Macos)
+        && crate::host::macos_wire::engine_assembly_allowed(
+            true,
+            crate::host::macos_wire::TccEvidence::current(),
+        )
+        .is_err()
+    {
+        return Err(Failure::arguments(
+            crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
+        ));
+    }
+    let capabilities = match &prepared {
+        Prepared::Given { driver, activity } => {
+            activity_capabilities(driver.as_ref(), activity.as_ref())
+        }
+        Prepared::Macos => crate::host::macos_wire::conservative_handshake(),
+    };
     config.capabilities = Some(capabilities);
     // Registration is deliberately before any driver work or approval request.
     let (peer, incoming, authenticated) =
@@ -123,6 +183,49 @@ pub(crate) async fn run_with_activity(
     let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
     // The sender stays alive so a dropped channel is not a local Stop.
     let (local_stop, local_stop_rx) = tokio::sync::mpsc::channel(1);
+    let (driver, activity) = match prepared {
+        Prepared::Given { driver, activity } => (driver, activity),
+        Prepared::Macos => {
+            #[cfg(not(target_os = "macos"))]
+            {
+                peer.close();
+                stop_peer.close();
+                return Err(Failure::arguments(
+                    crate::host::macos_wire::TERMINAL_NATIVE_REFUSAL,
+                ));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let loaded = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tokio::task::spawn_blocking(crate::config::load),
+                )
+                .await;
+                let idle_ms = match loaded {
+                    Ok(Ok(Ok(policy))) => policy.user_idle_ms,
+                    _ => {
+                        peer.close();
+                        stop_peer.close();
+                        return Err(Failure::internal("Host configuration failed"));
+                    }
+                };
+                match crate::host::macos_wire::attach_engine(
+                    stop.clone(),
+                    local_stop.clone(),
+                    idle_ms,
+                )
+                .await
+                {
+                    Ok(wired) => wired,
+                    Err(error) => {
+                        peer.close();
+                        stop_peer.close();
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    };
     let marker_dir = gcu_host_protocol::stop_reason::state_dir();
     let stop_task = tokio::spawn(control(
         stop_peer.clone(),
