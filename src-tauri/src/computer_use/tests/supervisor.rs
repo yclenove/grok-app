@@ -407,7 +407,7 @@ fn codesign_argv_is_strict_for_a_file_and_deep_for_a_bundle() {
     let flag = req_args[2].to_string_lossy();
     assert_eq!(
         flag,
-        "-R==anchor apple generic and certificate leaf[subject.OU] = \"TEAMID1234\""
+        "-R=anchor apple generic and certificate leaf[subject.OU] = \"TEAMID1234\""
     );
     assert_eq!(
         req_args.last().map(std::ffi::OsString::as_os_str),
@@ -487,6 +487,34 @@ fn bounded_command_kills_a_child_that_exceeds_its_timeout() {
     )
     .expect_err("missing program");
     assert_eq!(error, ProbeError::Unavailable);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn requirement_syntax_is_accepted_by_real_codesign() {
+    // The release path builds `-R=<expr>`. A syntax error would also reject, so
+    // prove with a satisfiable expression that the form itself is understood.
+    let dir = std::env::temp_dir().join(format!("gcu-codesign-req-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("tiny");
+    std::fs::copy("/usr/bin/true", &bin).expect("copy a Mach-O to sign");
+    let signed = std::process::Command::new("/usr/bin/codesign")
+        .args(["-s", "-", "--force", "-i", "com.example.gcu.req"])
+        .arg(&bin)
+        .status()
+        .expect("ad-hoc codesign");
+    assert!(signed.success(), "codesign -s - failed");
+    let live = super::super::codesign::OsProbe;
+    assert_eq!(
+        live.test_requirement(&bin, "identifier \"com.example.gcu.req\""),
+        Ok(())
+    );
+    assert_eq!(
+        live.test_requirement(&bin, "identifier \"com.example.other\""),
+        Err(ProbeError::Failed)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(target_os = "macos")]

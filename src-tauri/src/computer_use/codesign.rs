@@ -16,10 +16,12 @@
 //! file is checked with `--strict` alone. That is the same validity check for
 //! the bytes that will be executed, not a weaker one.
 //!
-//! The requirement is one argv element, `-R==anchor apple generic and ...`.
-//! The value begins with `=` so codesign treats it as an expression (TN3127).
-//! A separate argument is not used: `codesign -r <text>` reads that text as a
-//! filename. No shell is involved, and the path is its own argument.
+//! The requirement is one argv element, `-R=anchor apple generic and ...`.
+//! The attached `=` form makes codesign read the rest as a requirement
+//! expression. `-R` followed by a separate bare expression is read as a
+//! filename, and `-R==expr` is a requirement syntax error (checked on macOS
+//! 15.8.1 with an ad-hoc signed file; see the `requirement_syntax_*` test).
+//! No shell is involved, and the path is its own argument.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -86,10 +88,10 @@ pub(super) fn verify_argv(path: &Path) -> Vec<OsString> {
     args
 }
 
-/// Args for a release team check. `-R==...` is a single element; the path follows it.
+/// Args for a release team check. `-R=...` is a single element; the path follows it.
 pub(super) fn requirement_argv(path: &Path, requirement: &str) -> Vec<OsString> {
     let mut args = verify_body(path);
-    args.push(OsString::from(format!("-R=={requirement}")));
+    args.push(OsString::from(format!("-R={requirement}")));
     args.push(path.as_os_str().to_os_string());
     args
 }
