@@ -1,0 +1,14 @@
+{
+  "state": {
+    "tab": 0,
+    "text": "other"
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

@@ -1,0 +1,23 @@
+{
+  "state": {
+    "share": {
+      "shared_once": true,
+      "shared": false,
+      "revoked": true,
+      "route_after_revoke": "l0",
+      "dom_calls_after_revoke": 0
+    },
+    "web": {
+      "name": "after-revoke",
+      "submitted": 1
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

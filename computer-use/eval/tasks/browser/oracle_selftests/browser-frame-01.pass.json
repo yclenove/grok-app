@@ -1,0 +1,18 @@
+{
+  "state": {
+    "frames": {
+      "parent": "parent-value",
+      "child": "child-value",
+      "completed": 1,
+      "wrong_target": 0
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

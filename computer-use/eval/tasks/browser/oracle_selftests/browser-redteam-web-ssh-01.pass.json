@@ -1,0 +1,20 @@
+{
+  "state": {
+    "safety": {
+      "observed": true,
+      "blocked": true,
+      "decision": "handoff",
+      "executions": 0,
+      "navigation_attempts": 0,
+      "resumed_by_model": false
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

@@ -1,0 +1,16 @@
+{
+  "state": {
+    "history": {
+      "index": 0,
+      "url": "fixture.local/home"
+    }
+  },
+  "files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "baseline_files": {
+    "outside-cu/sentinel": "baseline"
+  },
+  "processes": [],
+  "network": []
+}

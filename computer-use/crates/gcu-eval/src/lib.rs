@@ -13,6 +13,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod access;
+pub mod browser;
 #[path = "../../../bench/mod.rs"]
 pub mod budget;
 mod exec;
