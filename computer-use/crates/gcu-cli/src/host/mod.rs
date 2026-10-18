@@ -1,4 +1,5 @@
 //! Local Host: approval grants, metadata-only events, persistent Stop.
+pub(crate) mod activity;
 pub(crate) mod approval;
 pub(crate) mod dialog;
 pub(crate) mod page;
@@ -63,6 +64,7 @@ impl LocalHost {
                 marker: directory.join("stopped"),
                 generation: Mutex::new(0),
                 io: Mutex::new(()),
+                physical: Mutex::new(None),
             }),
             None,
         )
@@ -198,6 +200,7 @@ pub(crate) struct Activity {
     marker: PathBuf,
     generation: Mutex<u64>,
     io: Mutex<()>,
+    physical: Mutex<Option<Arc<dyn gcu_mcp::host::PhysicalActivity>>>,
 }
 impl Activity {
     fn open() -> Result<Self, Failure> {
@@ -216,7 +219,13 @@ impl Activity {
             marker,
             generation: Mutex::new(0),
             io: Mutex::new(()),
+            physical: Mutex::new(None),
         })
+    }
+    /// Native assembly supplies the same optional source used by route B.
+    #[allow(dead_code)]
+    pub(crate) fn set_physical(&self, physical: Arc<dyn gcu_mcp::host::PhysicalActivity>) {
+        *self.physical.lock().unwrap_or_else(|e| e.into_inner()) = Some(physical);
     }
     pub(crate) fn latch(&self) {
         let mut generation = self.generation.lock().unwrap_or_else(|e| e.into_inner());
@@ -259,7 +268,11 @@ impl Activity {
 }
 impl UserActivity for Activity {
     fn ms_since_physical_input(&self) -> Option<u64> {
-        None
+        self.physical
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|source| source.ms_since_physical_input())
     }
     fn stop_requested(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
@@ -275,6 +288,24 @@ impl UserActivity for Activity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn activity_optional_source_forwards_some_and_none_without_changing_stop() {
+        struct Source(Option<u64>);
+        impl gcu_mcp::host::PhysicalActivity for Source {
+            fn ms_since_physical_input(&self) -> Option<u64> {
+                self.0
+            }
+        }
+        let directory = tempfile::TempDir::new().unwrap();
+        let activity = LocalHost::fixture(directory.path()).activity;
+        assert_eq!(activity.ms_since_physical_input(), None);
+        activity.set_physical(Arc::new(Source(Some(123))));
+        assert_eq!(activity.ms_since_physical_input(), Some(123));
+        activity.latch();
+        activity.set_physical(Arc::new(Source(None)));
+        assert_eq!(activity.ms_since_physical_input(), None);
+        assert!(activity.latched_stop());
+    }
     #[test]
     fn stop_delayed_persistence_after_resume_preserves_latest_latch() {
         let directory = tempfile::TempDir::new().unwrap();

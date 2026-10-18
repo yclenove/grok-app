@@ -141,7 +141,7 @@ impl InputBackend {
                 .unwrap_or_else(|p| p.into_inner())
                 .upgrade();
             if let Some(guard) = &safety {
-                guard.check(plan.foreground)?;
+                guard.check(false)?;
             }
             let target = self
                 .api
@@ -155,6 +155,12 @@ impl InputBackend {
                 return Err(DriverError::CapabilityUnavailable);
             }
             self.api.validate(target.clone(), foreground).await?;
+            if let Some(guard) = &safety {
+                guard.check(foreground)?;
+                if foreground {
+                    guard.check_injection()?;
+                }
+            }
             let mut packets = plan.packets;
             if let Some(chord) = plan.chord {
                 let character = match chord.key {
@@ -171,6 +177,9 @@ impl InputBackend {
                 Some(self.api.sample(target.clone()).await?)
             };
             if foreground {
+                if let Some(guard) = &safety {
+                    guard.check_injection()?;
+                }
                 foreground::activate(self.api.as_ref(), &target, &context).await?;
                 if let Some(focus) = plan.focus {
                     self.api
@@ -215,7 +224,7 @@ impl InputBackend {
                     focus,
                     text,
                     context: context.clone(),
-                    safety,
+                    safety: safety.clone(),
                 }
                 .run()
                 .await?;
@@ -228,6 +237,11 @@ impl InputBackend {
                     foreground::verify(self.api.as_ref(), &target).await?;
                 }
                 context.check()?;
+                if foreground {
+                    if let Some(guard) = &safety {
+                        guard.check_injection()?;
+                    }
+                }
                 if let Some(tracker) = &self.tracker {
                     tracker
                         .prepare(target.clone(), packet.clone(), delivery)

@@ -16,7 +16,7 @@ use std::time::Duration;
 /// bounded by the Driver contract (shorter than the ten-second transport ceiling).
 /// Subscriptions are unavailable; core uses its existing polling fallback.
 pub struct WorkerDriver {
-    supervisor: Supervisor,
+    supervisor: std::sync::Arc<Supervisor>,
     indexing: std::sync::atomic::AtomicBool,
     safety: Option<std::sync::Arc<crate::input::hotkey::SafetyGuard>>,
     safety_caps: std::sync::OnceLock<[Capabilities; 8]>,
@@ -32,7 +32,9 @@ impl WorkerDriver {
         release: std::sync::Arc<dyn crate::input::api::InputReleaser>,
     ) -> Result<Self> {
         Ok(Self {
-            supervisor: Supervisor::start_with_releaser(config, release).await?,
+            supervisor: std::sync::Arc::new(
+                Supervisor::start_with_releaser(config, release).await?,
+            ),
             indexing: std::sync::atomic::AtomicBool::new(true),
             safety: None,
             safety_caps: std::sync::OnceLock::new(),
@@ -54,6 +56,119 @@ impl WorkerDriver {
     /// Terminate/reap the native process without entering its call queue.
     pub async fn shutdown(&self) -> Result<()> {
         self.supervisor.shutdown().await
+    }
+    /// Preserve the outer WindowsDriver's original deadline through preparation.
+    pub(crate) async fn perform_until(
+        &self,
+        request: &DriverAction,
+        cancel: &Cancel,
+        deadline: tokio::time::Instant,
+    ) -> Result<Delivery> {
+        let foreground = crate::input::watchdog::foreground(request);
+        if let Some(guard) = &self.safety {
+            guard.check(false)?;
+        }
+        let action = Action::encode(request)?;
+        if foreground {
+            // The parent proof itself injects input. Use existing read-only RPCs
+            // to validate the exact live target before permitting that proof;
+            // the child still repeats its gate immediately before action input.
+            self.preflight_foreground(action.window(), cancel, deadline)
+                .await?;
+        }
+        let mut lease = if foreground {
+            Some(
+                self.safety
+                    .as_ref()
+                    .ok_or(DriverError::CapabilityUnavailable)?
+                    .begin_foreground(cancel, deadline)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(lease) = &mut lease {
+            let supervisor = self.supervisor.clone();
+            lease.recover_with(move || {
+                Box::pin(async move { supervisor.release_all_input().await })
+            });
+        }
+        let result = async {
+            // Mutation RPC cannot begin until the target gate and proof succeed.
+            match self
+                .rpc(
+                    Request::Perform(action),
+                    (if foreground {
+                        deadline - Duration::from_millis(400)
+                    } else {
+                        deadline
+                    })
+                    .saturating_duration_since(tokio::time::Instant::now()),
+                    cancel,
+                )
+                .await?
+            {
+                Reply::Delivery(value) => Ok(value.into()),
+                _ => Err(invalid()),
+            }
+        }
+        .await;
+        if let Some(lease) = lease {
+            if result.is_err() {
+                self.supervisor.release_all_input().await;
+            }
+            // A successful child reply follows its InputBackend's up-only cleanup.
+            lease.finish();
+            if result.is_ok() && self.safety.as_ref().is_some_and(|s| s.is_stopped()) {
+                return Err(DriverError::Cancelled {
+                    maybe_executed: true,
+                });
+            }
+        }
+        result
+    }
+    async fn preflight_foreground(
+        &self,
+        window: &Window,
+        cancel: &Cancel,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        // Geometry performs the common engine/token, HWND/process identity,
+        // UIAccess, image provenance and secure-desktop gate. It cannot activate
+        // or inject. Preserve these errors before checking foreground capability.
+        match self
+            .rpc(
+                Request::Geometry(window.clone()),
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                cancel,
+            )
+            .await?
+        {
+            Reply::Geometry(_) => (),
+            _ => return Err(invalid()),
+        }
+        // Foreground additionally requires a positively identified current
+        // virtual desktop. Match only the original stamped ID, never a substitute.
+        match self
+            .rpc(
+                Request::ListWindows(Some(window.app.clone())),
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                cancel,
+            )
+            .await?
+        {
+            Reply::Windows(windows) => {
+                let current = windows
+                    .iter()
+                    .find(|w| w.id == window.id)
+                    .ok_or(DriverError::WindowGone)?;
+                if current.on_current_desktop != Some(true) {
+                    return Err(DriverError::CapabilityUnavailable);
+                }
+                Ok(())
+            }
+            _ => Err(invalid()),
+        }
     }
     async fn rpc(&self, request: Request, timeout: Duration, cancel: &Cancel) -> Result<Reply> {
         // Include the whole bounded transport call in parent diagnostics. A
@@ -95,14 +210,8 @@ impl Driver for WorkerDriver {
         Platform::Windows
     }
     fn capabilities(&self) -> &Capabilities {
-        let guard = self
-            .safety
-            .as_ref()
-            .is_some_and(|s| s.activity_clock().available());
-        let stop = self
-            .safety
-            .as_ref()
-            .is_some_and(|s| s.available() && !s.is_stopped());
+        let guard = self.safety.as_ref().is_some_and(|s| s.activity_available());
+        let stop = self.safety.as_ref().is_some_and(|s| s.transport_healthy());
         &self
             .safety_caps
             .get_or_init(|| crate::input::watchdog::capabilities(&self.supervisor.capabilities))
@@ -282,23 +391,12 @@ impl Driver for WorkerDriver {
         }
     }
     async fn perform(&self, request: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
-        let foreground = crate::input::watchdog::foreground(request);
-        match &self.safety {
-            Some(guard) => guard.check(foreground)?,
-            None if foreground => return Err(DriverError::CapabilityUnavailable),
-            None => (),
-        }
-        match self
-            .rpc(
-                Request::Perform(Action::encode(request)?),
-                DRIVER_DEADLINE,
-                cancel,
-            )
-            .await?
-        {
-            Reply::Delivery(value) => Ok(value.into()),
-            _ => Err(invalid()),
-        }
+        self.perform_until(
+            request,
+            cancel,
+            tokio::time::Instant::now() + DRIVER_DEADLINE,
+        )
+        .await
     }
     fn subscribe(&self, _: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
         None

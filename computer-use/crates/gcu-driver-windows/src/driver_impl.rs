@@ -10,15 +10,8 @@ impl Driver for WindowsDriver {
         if self.child {
             return &self.caps;
         }
-        let guard = self
-            .safety
-            .as_ref()
-            .is_some_and(|s| s.activity_clock().available());
-        let stop = self
-            .safety
-            .as_ref()
-            .is_some_and(|s| s.available() && !s.is_stopped())
-            && !self.diagnostic;
+        let guard = self.safety.as_ref().is_some_and(|s| s.activity_available());
+        let stop = self.safety.as_ref().is_some_and(|s| s.transport_healthy()) && !self.diagnostic;
         let overlay = self.overlay.as_ref().is_some_and(|o| o.available());
         &self
             .safety_caps
@@ -351,33 +344,69 @@ impl Driver for WindowsDriver {
             })?
     }
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        let deadline = tokio::time::Instant::now() + DRIVER_DEADLINE;
         self.check_safety(false)?;
         if let Some(worker) = &self.isolated {
-            self.check_safety(crate::input::watchdog::foreground(req))?;
-            return worker.perform(req, cancel).await;
+            // The WorkerDriver owns the sole parent proof window and deadline.
+            return worker.perform_until(req, cancel, deadline).await;
         }
-        let deadline = tokio::time::Instant::now() + DRIVER_DEADLINE;
+        let foreground = crate::input::watchdog::foreground(req);
+        // A proof can submit absolute mouse input. Preserve the common live
+        // target gate and its error priority before any capability/proof check.
         let request = req.clone();
         let window = self
-            .call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
-                let (win, foreground) = action_window(&request)?;
-                s.observation_window(win, foreground)
-            })
+            .call(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                Some(cancel),
+                false,
+                move |s| {
+                    let (win, foreground) = action_window(&request)?;
+                    s.observation_window(win, foreground)
+                },
+            )
             .await?;
-        self.check_safety(crate::input::watchdog::foreground(req))?;
-        if crate::uia::actions::target(req).is_none() {
-            return self
-                .input
+        self.check_safety(foreground)?;
+        let mut lease = if foreground && !self.child {
+            Some(
+                self.safety
+                    .as_ref()
+                    .ok_or(DriverError::CapabilityUnavailable)?
+                    .begin_foreground(cancel, deadline)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let (Some(lease), Some(input)) = (&mut lease, &self.input) {
+            let input = input.clone();
+            lease.recover_with(move || Box::pin(async move { input.release_all().await }));
+        }
+        let operation = async {
+            self.check_safety(foreground)?;
+            if crate::uia::actions::target(req).is_none() {
+                return self
+                    .input
+                    .as_ref()
+                    .ok_or(DriverError::CapabilityUnavailable)?
+                    .perform(window, req, cancel, deadline)
+                    .await;
+            }
+            self.observer
                 .as_ref()
                 .ok_or(DriverError::CapabilityUnavailable)?
-                .perform(window, req, cancel, deadline)
-                .await;
+                .perform(window.hwnd, req, cancel, deadline)
+                .await
+        };
+        let result = operation.await;
+        if let Some(lease) = lease {
+            lease.finish();
+            if result.is_ok() && self.safety.as_ref().is_some_and(|s| s.is_stopped()) {
+                return Err(DriverError::Cancelled {
+                    maybe_executed: true,
+                });
+            }
         }
-        self.observer
-            .as_ref()
-            .ok_or(DriverError::CapabilityUnavailable)?
-            .perform(window.hwnd, req, cancel, deadline)
-            .await
+        result
     }
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
         if let Some(worker) = &self.isolated {
@@ -435,6 +464,7 @@ impl WindowsDriver {
         issues.retain(|i| {
             !i.starts_with("user_activity_guard:")
                 && !i.starts_with("stop_hotkey:")
+                && !i.starts_with("injection_lease:")
                 && !i.starts_with("stop_listener_native:")
                 && !i.starts_with("mouse_hook_probe:")
         });
@@ -443,6 +473,7 @@ impl WindowsDriver {
         } else {
             issues.extend([
                 "user_activity_guard: unavailable".into(),
+                "injection_lease: not fresh (no listener)".into(),
                 "stop_hotkey: unavailable (trusted Host not attached; foreground disabled)".into(),
             ]);
         }

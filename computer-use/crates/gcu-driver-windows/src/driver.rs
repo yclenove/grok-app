@@ -242,6 +242,11 @@ impl WindowsDriver {
         self.safety_caps = std::sync::OnceLock::new();
         self
     }
+    /// Read-only Host activity source. No IO, proof dispatch or Stop mutation;
+    /// unavailable transport or a listener without physical history returns None.
+    pub fn ms_since_physical_input(&self) -> Option<u64> {
+        self.safety.as_ref()?.ms_since_physical_input()
+    }
     /// Attach an exact display-affinity probe; failure stays visible in capabilities.
     pub fn with_overlay_exclusion(
         mut self,

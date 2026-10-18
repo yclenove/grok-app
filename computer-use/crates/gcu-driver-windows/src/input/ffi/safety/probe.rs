@@ -5,34 +5,49 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 
 #[derive(Debug)]
 struct Report {
+    generation: u64,
     keyboard: Dispatch,
     mouse: Result<Dispatch, String>,
     mode: MouseProbe,
     dispatched: bool,
 }
+struct Job {
+    request: ProbeRequest,
+    generation: u64,
+    action: bool,
+}
 pub(super) struct Sender {
-    request: mpsc::SyncSender<ProbeRequest>,
+    request: mpsc::SyncSender<Job>,
     reply: mpsc::Receiver<Report>,
     pending: bool,
     report: Option<Report>,
+    generation: u64,
+    initial_finished: bool,
     attempted: std::collections::BTreeSet<MouseProbe>,
 }
 impl Sender {
     pub(super) fn start(events: Arc<GuardEvents>, idle: Arc<ProbeIdle>) -> Result<Self, String> {
         events.startup_step("hook_probe_sender", STARTUP_STEP_TIMEOUT);
-        let (request, receive) = mpsc::sync_channel::<ProbeRequest>(1);
+        let (request, receive) = mpsc::sync_channel::<Job>(1);
         let (reply, result) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("gcu-hook-probes".into())
             .spawn(move || {
-                while let Ok(request) = receive.recv() {
+                while let Ok(job) = receive.recv() {
+                    let request = job.request;
                     let mut api = NativeMouse {
                         events: &events,
                         tag: request.tag,
                         dpi: None,
                         dispatched: false,
+                        generation: job.generation,
+                        action: job.action,
                     };
-                    let mouse = hook_probe::dispatch(&mut api, request.mode, &idle);
+                    let mouse = if job.action {
+                        hook_probe::dispatch_for_action(&mut api, request.mode, &idle)
+                    } else {
+                        hook_probe::dispatch(&mut api, request.mode, &idle)
+                    };
                     let dispatched = api.dispatched;
                     // A refused or changed-cursor probe never submits extra input.
                     // The initial idle sample preceded all probe input, including
@@ -40,6 +55,7 @@ impl Sender {
                     let keyboard = if mouse
                         .as_ref()
                         .is_ok_and(|r| r.0 == request.mode.requested())
+                        && api.authorized()
                     {
                         send(
                             &events,
@@ -50,7 +66,7 @@ impl Sender {
                                     ki: KEYBDINPUT {
                                         wVk: VK_F24,
                                         dwFlags: KEYEVENTF_KEYUP,
-                                        dwExtraInfo: PROBE_TAG,
+                                        dwExtraInfo: request.tag,
                                         ..Default::default()
                                     },
                                 },
@@ -61,6 +77,7 @@ impl Sender {
                     };
                     if reply
                         .send(Report {
+                            generation: job.generation,
                             keyboard,
                             mouse,
                             mode: request.mode,
@@ -79,12 +96,19 @@ impl Sender {
             pending: false,
             report: None,
             attempted: Default::default(),
+            generation: 0,
+            initial_finished: false,
         })
     }
     pub(super) fn poll(&mut self) -> Result<(), String> {
         match self.reply.try_recv() {
             Ok(report) => {
                 self.pending = false;
+                CONTEXT.with(|slot| {
+                    if let Some(context) = slot.borrow().as_ref() {
+                        context.events.probe_dispatch(false);
+                    }
+                });
                 if report.dispatched {
                     self.attempted.insert(report.mode);
                 }
@@ -97,10 +121,16 @@ impl Sender {
                         "SendInput(hook probes): {report:?}; UIPI may suppress errors"
                     )),
                 };
+                let generation = report.generation;
                 self.report = Some(report);
                 CONTEXT.with(|slot| {
                     if let Some(context) = slot.borrow_mut().as_mut() {
-                        context.mouse_proof.complete(success)?;
+                        if context.events.probe_window().0 == generation {
+                            if let Err(reason) = context.mouse_proof.complete(success) {
+                                context.events.refuse_proof(reason);
+                                self.initial_finished = true;
+                            }
+                        }
                     }
                     Ok::<_, String>(())
                 })?;
@@ -110,7 +140,20 @@ impl Sender {
         }
         CONTEXT.with(|slot| {
             if let Some(context) = slot.borrow_mut().as_mut() {
+                let (generation, action) = context.events.probe_window();
+                if self.generation != generation && !self.pending {
+                    self.generation = generation;
+                    context.mouse_proof.begin_cycle(true);
+                    context.keyboard = None;
+                }
                 let mouse = context.mouse_proof.proven();
+                // Do not confirm completions from an abandoned/previous window.
+                if generation == self.generation && (action || generation == 0) {
+                    context.events.confirm_hook_proofs(context.keyboard, mouse)?;
+                    if context.events.available() && !action {
+                        self.initial_finished = true;
+                    }
+                }
                 context.events.startup_progress("mouse_hook_proof", format!(
                     "{} (attempted {} probe kinds)",
                     if mouse.is_some() { "mouse hook liveness proven by tagged injected callback" }
@@ -122,11 +165,19 @@ impl Sender {
                     context.keyboard_probe_flags, context.mouse_probe_flags,
                     context.last_keyboard_flags, context.last_mouse_flags, self.attempted.len(),
                 ));
-                if !self.pending {
+                let preparing_with_mouse = action && !context.events.injecting()
+                    && context.mouse_proof.proven().is_some();
+                if !self.pending && context.events.probes_permitted() && (action || (generation == 0 && !self.initial_finished))
+                    && !preparing_with_mouse
+                {
                     if let Some(request) = context.mouse_proof.next() {
-                        self.request.try_send(request)
+                        context.keyboard = None;
+                        context.events.probe_dispatch(true);
+                        self.request.try_send(Job { request, generation, action })
                             .map_err(|e| format!("hook probe submission: {e}"))?;
                         self.pending = true;
+                    } else if !action {
+                        self.initial_finished = true;
                     }
                 }
             }
@@ -140,6 +191,14 @@ struct NativeMouse<'a> {
     tag: usize,
     dpi: Option<mouse::Dpi>,
     dispatched: bool,
+    generation: u64,
+    action: bool,
+}
+impl NativeMouse<'_> {
+    fn authorized(&self) -> bool {
+        let (generation, active) = self.events.probe_window();
+        generation == self.generation && (!self.action || active) && self.events.probes_permitted()
+    }
 }
 impl MouseProbeApi for NativeMouse<'_> {
     fn recent_input(&mut self) -> Result<RecentInput, String> {
@@ -169,6 +228,9 @@ impl MouseProbeApi for NativeMouse<'_> {
         Ok(mouse::desktop())
     }
     fn send(&mut self, mode: MouseProbe, absolute: Option<(i32, i32)>) -> Result<Dispatch, String> {
+        if !self.authorized() {
+            return Err("probe window ended before dispatch".into());
+        }
         let inputs = match absolute {
             Some(at) => mouse::absolute(self.tag, at),
             None => mouse::inputs(mode, self.tag)?,
