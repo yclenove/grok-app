@@ -6,11 +6,13 @@ Chrome or Microsoft Edge browser; it does not install a browser runtime. DOM
 actions support clicks, field-value changes, scrolling and option selection,
 subject to the same App/action approvals and Stop as other Computer Use routes.
 
-This is a pre-publication guide. The checked-in manifest has no fixed public
-`key`, so native registration/startup refuses to proceed. The current native-host
-executable acknowledges sharing only; its trusted session/window binding and DOM
-dispatch must be assembled and verified in the release. A share badge alone does
-not demonstrate that DOM observation or control is operational. See the
+This is a pre-publication guide. The checked-in manifest carries the maintainer
+public key. Its derived extension ID is `jgpkhdjlddaoopklipcnpcjcpiancmff`.
+Registration and startup refuse a missing key, a placeholder key, or any other
+origin. The native-host executable acknowledges sharing only. L2 stays closed:
+no reviewed platform can prove which OS window contains the shared top document,
+and DOM dispatch is not connected. A share badge alone does not demonstrate that
+DOM observation or control is operational. See [proof](#proof) and the
 [maintainer release checklist](../tools/browser-extension/store/README.md#maintainer-inputs-and-release-checklist).
 
 <a id="install"></a>
@@ -125,6 +127,73 @@ controls for those copies.
 
 Neither operation deletes gcu sessions, other client configuration, downstream
 results or persistent App approvals. Manage those through their own controls.
+
+<a id="proof"></a>
+## Proof of identity and window mapping
+
+A4a records whether a native-host connection may use L2. It does not open a
+production DOM channel. The rules below are what the private broker enforces.
+Refusal leaves the browser on its already declared L0 accessibility route. A
+refusal is not approval of that L0 action, and a DOM mutation that already
+started is `unknown` rather than a second attempt.
+
+Identity:
+
+- The only extension ID is the one derived from the public `key` in the
+  extension manifest that is compiled into gcu: `jgpkhdjlddaoopklipcnpcjcpiancmff`.
+  The origin is `chrome-extension://jgpkhdjlddaoopklipcnpcjcpiancmff/`.
+- Host manifest templates keep the placeholder origin
+  `chrome-extension://__MAINTAINER_EXTENSION_ID_FROM_MANIFEST_KEY__/`.
+  `gcu install chrome-extension` replaces `allowed_origins` with the embedded
+  origin and nothing else. A missing key, the placeholder key, a different key,
+  or a different origin fails closed.
+- The parent process must be that platform's Chrome or Edge executable, and the
+  argv must be the native-messaging launch (`native-host` plus the origin, or
+  the origin alone). On Windows only, a single `--parent-window=<hwnd>` suffix
+  is accepted as the foreground window at launch. Any other parent, including a
+  local relay, fails closed. The gcu image path and build id must be the
+  expected build. Same-user control of the browser itself is outside this check.
+
+Session binding:
+
+- L2 would require exactly one listening engine and exactly one authorized local
+  session for that engine and epoch. Several engines, several authorized
+  sessions, or a session for a different window are refused. Title similarity
+  and geometry similarity are ignored. There is no UI here to pick among
+  sessions, so those cases stay off L2.
+
+Top document to OS window, reviewed without a live browser attached:
+
+| Platform | Browser | What native messaging actually provides | Verdict |
+|---|---|---|---|
+| Windows | Chrome, Edge | Parent image, plus `--parent-window` as the foreground HWND at the moment the host starts. Extension `tabId` / `windowId` are not HWNDs. One host connection is not one tab. | L2 unavailable. Fall back to declared L0. |
+| Linux X11 | Chrome, Edge | Parent image only. No XID is passed. `_NET_WM_PID` names the browser process, which owns every window. | L2 unavailable. Fall back to declared L0. |
+| Linux Wayland | Chrome, Edge | Parent image only. No authenticated toplevel handle is passed. | L2 unavailable. Fall back to declared L0. |
+| macOS | Chrome, Edge | Parent image only. No CGWindowID is passed. Extension window ids are not OS window ids. | L2 unavailable. Fall back to declared L0. |
+
+A single visible window, a matching HWND, or a high title/geometry score does
+not identify the document. Enabling L2 needs a reproducible binding that is not
+one of those substitutes. If that binding requires a new Host or ACP field, it
+needs its own ADR. This card does not add one, and it does not admit the
+production DOM channel.
+
+These checks were not run on a real browser. Xvfb, fake drivers, and in-process
+fixtures do not fill the gap:
+
+| Evidence | Status |
+|---|---|
+| Linux X11 Chrome native-messaging launch chain | not_run |
+| Linux X11 Edge native-messaging launch chain | not_run |
+| Linux Wayland Chrome native-messaging launch chain | not_run |
+| Linux Wayland Edge native-messaging launch chain | not_run |
+| Windows Chrome native-messaging launch chain | not_run |
+| Windows Edge native-messaging launch chain | not_run |
+| macOS Chrome native-messaging launch chain | not_run |
+| macOS Edge native-messaging launch chain | not_run |
+| Linux X11 top document to X11 window | not_run |
+| Linux Wayland top document to Wayland window | not_run |
+| Windows top document to HWND | not_run |
+| macOS top document to OS window | not_run |
 
 ## Privacy, permissions and capability limits
 
