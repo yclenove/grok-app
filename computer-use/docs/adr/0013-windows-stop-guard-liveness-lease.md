@@ -1,9 +1,9 @@
 # 0013 Windows Stop 守卫在物理鼠标机器上的活性租约
 
-状态：Accepted（2026-10-17 用户批准方案 B：开放问题 1a、2a、3a；实现按下方真机验证与测试策略逐项验收）
+状态：Accepted（2026-10-17 用户批准方案 B：开放问题 1a、2a、3a；实现按下方真机验证与测试策略逐项验收）。同日增补「前台门控与活动判定的接线」；1a/2a/3a 不重开。
 日期：2026-10-17
 
-本文件只记录设计。不改接口、不改实现、不放宽 Stop 时限、不取消 fail-closed、不让空闲采样续租。
+本文件只记录设计。不改 `Driver` trait、不改协议、不在本文件里写实现、不放宽 Stop 时限、不取消 fail-closed、不让空闲采样续租。
 
 ## 背景（事实 + 代码证据）
 
@@ -78,12 +78,12 @@
 
 B 的边界：
 
-1. 没有前台注入在途时，不要求 100ms 鼠标证明。`available()` 对前台为假，`check(foreground)` 仍是 `CapabilityUnavailable`。仅因鼠标证明缺失不得 `request_stop()`，也不得 `clock.disable()`。`RegisterHotKey` 线程心跳、安全桌面、FFI 卡死、热键注册失败仍按现在的 100ms / 启动预算 fail-closed 并锁存。
+1. 没有前台注入在途时，不要求 100ms 鼠标证明。仅因鼠标证明缺失不得 `request_stop()`，也不得 `clock.disable()`。`RegisterHotKey` 线程心跳、安全桌面、FFI 卡死、热键注册失败仍按现在的 100ms / 启动预算 fail-closed 并锁存。鼠标租约缺失不得再使 core 在 `perform` 之前拒绝前台；原「`available()` / `check(foreground)` 在证明前即 `CapabilityUnavailable`」由文末增补替换，安全结果不替换。
 2. 放行一次前台注入之前，先取得一对新的带标记注入回调。本机零位移不送达时，这一对里的鼠标侧是一次 `AbsoluteSamePosition`（仍做光标复读；坐标变了就作废，不补偿、不重试）。证明失败则不注入、不锁存，调用方可以在用户重新空闲后重试。
 3. 从前台注入开始，到 `release_all_input` 且动作结束，鼠标证明必须保持不超过 100ms。已经知道零位移不送达时，动作期间的续租直接用能送达的那种，不再把三次无效探针花进预算。错过则走现有 `fail`：锁存、释放，时限不变。
 4. 物理回调仍只更新活动时刻，不续租。它不得再把 `ProbeIdle` 打成永久拒绝，也不得把 `MouseProof` 打成终身 `failed`。2000ms 空闲采样只约束“用户没有请求动作时的那次意外绝对移动”。用户正在被注入、或刚刚请求了前台动作时，续租用的绝对移动不再受这道永久门限制。
 5. 动作结束并释放后，丢掉注入租约，不锁存。下一次前台动作重新证明。用户已经按下的 Stop、以及热键线程死亡造成的锁存，监听不得自行清除。
-6. doctor 在空闲时如实报告用户活动守卫不可用。不把泵心跳显示成钩子已证明。
+6. doctor 不得把泵心跳显示成钩子已证明。空闲且没有可信活动观测时，用户活动守卫报告不可用；已有可信物理回调时可以报告可用，但须另写一行说明注入租约未新鲜。见文末增补。
 
 零位移一旦在某台机器上产生带标记回调，`preferred` 仍钉住它，动作用该种续租，不再发绝对移动。`RelativePair` 和 `XButtonPair` 继续排除在产品构建之外。
 
@@ -162,7 +162,7 @@ B 的边界：
 实现（另卡，不在本 ADR）时，确定时钟单测用现有 `ManualTime`，不碰 Win32。至少这些用例，名字沿用 `<行为>_<条件>_<期望>`：
 
 - 零位移 `SendInput` 成功但无鼠标回调，绝对移动的回调比旧证明晚 4 到 5 个 20ms 泵：现有状态机在新 `proven` 写入前 `available()` 变假、`is_stopped()` 为真、`disable` 后迟到回调不能再武装。这把本次真机失败收成单测。
-- 空闲超过 100ms、热键心跳仍新鲜、鼠标证明缺失：前台 `check` 为 `CapabilityUnavailable`，`is_stopped()` 为假，时钟未被 `disable`。
+- 空闲超过 100ms、热键心跳仍新鲜、鼠标证明缺失：不锁存、不 `disable`。传输检查不在证明前返回 `CapabilityUnavailable`（原断言由文末增补替换）；尚未取得新证明时不得发出动作本身的注入。
 - 没有新的一对回调就不得开始前台注入。
 - 动作在途时把时钟拨过 100ms 且没有新鼠标回调：同步锁存，并走现有释放路径。断言不得出现新的、更长的定时器。
 - 物理回调更新活动年龄，不移动 `confirmed`，不把下一次动作证明永久拒绝。
@@ -194,3 +194,120 @@ B 的边界：
 - 实测表明同位置绝对移动既不改变 `GetLastInputInfo`，也不产生 hover：A 的空闲钟和 hover 代价要改写。`ProbeIdle` 与 100ms 预算问题仍在，不因此改推 A。
 - Raw Input 的 spike 若能在不把注入记成用户活动的前提下，用 ≤100ms 的丢失检测替换 LL 钩子证明：另写 ADR 取代本决定，并修改 03 §5.2 的点名机制。在那之前 D2 不是退路。
 - 实现若需要把 `HEARTBEAT_TIMEOUT`、Stop 锁存或释放时限改大：停止实现，本决定不授权该改动。
+
+## 增补：前台门控与活动判定的接线
+
+日期：2026-10-17
+
+本增补只补已接受方案 B 的跨 crate 接线。不新增探针种类，不把 `TargetedOnly` 升级成前台，不改 `Driver` trait，不改协议。开放问题 2a 的「前台关闭」是安全结果：没有新的一对钩子回调，就不得发出动作本身的注入，doctor 也不得把泵心跳说成钩子已证明。它不是 `ForegroundCapability::Unavailable` 这个枚举值。沿用该枚举值会让已接受的「动作前证明」不可达。
+
+### 核实
+
+两条都成立，而且第二条比「只改 Windows 钟的返回值」更远。
+
+1. 前台请求到不了 `perform`。`WindowsDriver::capabilities` 与 `WorkerDriver::capabilities` 的前台位要求 `SafetyGuard::available()`。`available()` 要求泵心跳、热键心跳和 `PhysicalClock::available()`。后者就是 `ms_since_physical_input().is_some()`，而 `ms_since_at` 在 `disabled`、没有 `confirmed`、或 `now - confirmed > HEARTBEAT_TIMEOUT`（100ms）时返回 `None`。该位为 0 时 `watchdog::capabilities` 把 `delivery.foreground` 写成 `Unavailable`。`ActionRouter::execute_queued` 先调用 `route::plan`，之后才 `authorize`，再经 `browser::dispatch` 进入 `driver.perform`。`plan` 在 `intent.foreground && foreground == Unavailable` 时直接返回 `capability_unavailable`。即便有调用方绕过 `plan` 送进 `AllowForeground`，`WindowsDriver::perform`、`WorkerDriver::perform` 和 `InputBackend::perform` 仍先调用 `SafetyGuard::check(true)`，`!available()` 同样是 `CapabilityUnavailable`，并且发生在父进程把 `Perform` 交给 worker、以及 `InputBackend` 组包之前。证明写在这些检查之后就永远不会开始。
+
+   产品能力还有一个相邻事实，实现不得用它来绕过：`with_input` 把 `targeted_pointer` 和 `targeted_keys` 设为真，安全覆盖层不关掉它们。`plan` 只在对应 targeted 能力为假时才选择 `AllowForeground`。因此当前产品组合下，过期租约不会挡住定向动作；驱动对无效的 `PostMessage` 返回 `CapabilityUnavailable`，不自行升级（`input/mod.rs`）。B 的证明只挂在真正的前台请求（`AllowForeground` / `Activate`）上。本增补不改这条路由，也不为了让证明跑起来而关掉 targeted。
+
+2. `user_active` 不在驱动里。`policy/mod.rs` 第 9 条只在 `intent.foreground` 时读取 Host 的 `UserActivity::ms_since_physical_input`：`Some(elapsed)` 且 `elapsed < user_idle_ms` 才拒绝；相等的 3000ms 不拒绝；`None` 不拒绝。这发生在 `authorize`，也就是 `plan` 之后。`plan` 先拒绝的话，策略根本看不到这次请求。`DriverError` 没有 `UserActive`，`error_code()` 也不映射到协议里的 `user_active`。协议错误码已经有 `UserActive`（`ErrorCode::ALL` 共 26 个），它只应由策略发出。
+
+   过期租约不是唯一的断点。没有一笔仍落在 100ms 内的上一次确认时（包括第一次 `confirm`），`confirm` 会把 `physical` 写成证明时刻；`event()` 才是非注入回调的活动时刻，而且不调用 `confirm`。`ms_since_at` 却先看租约，租约一过期就把仍在的 `physical` 读成 `None`。与此同时，产品 Host 根本没有读这个钟：路线 B 的 `engine::run` 固定注入 `UnavailableActivity`（永远 `None`），并在握手前把 `user_activity_guard` 写成 `false`；路线 A 的 `Activity::ms_since_physical_input` 固定返回 `None`。`gcu-mcp` 的 `PhysicalActivity` 是引擎侧注入点。ADR 0004 已决定 Host 协议不承载活动 RPC。`WindowsDriver::safety` 是 `pub(crate)`，`engine::run` 只有 `Arc<dyn Driver>`，外面拿不到 `SafetyGuard::activity_clock()`。所以只改 `gcu-driver-windows` 不能让「空闲时用户碰鼠标 → `user_active`」在策略层成立。
+
+### 决定
+
+采用下面的接线，不采用新增 trait 方法。三个谓词分开，不再共用一个 `available()`：
+
+| 谓词 | 为真的条件 | 用途 |
+|---|---|---|
+| 传输健康 | 未 `fail`、泵心跳与热键心跳都在 100ms 内、非诊断、已附守卫。不含鼠标租约，也不含 Stop 锁存 | `delivery.foreground = Policy`。为假则仍是 `Unavailable`，前台请求在 `plan` 就被拒绝，并且不发证明。已锁存时位可以仍是 `Policy`，由策略第 1 条和 `perform` 第 1 步返回 `stopped_by_user`，避免把 Stop 报成能力缺失 |
+| 注入租约 | 最近一次成功的双钩子 `confirm` 距现在 ≤100ms | 只允许「正在注入」继续。空闲过期不 `fail`、不锁存、不 `disable` |
+| 活动可信 | 见下一节 | `user_activity_guard` 与 Host 活动年龄。与 100ms 租约无关 |
+
+`armed` 仍只在传输健康且双钩子证明第一次同时成立时置上，不改成「只看泵心跳」。之后空闲掉鼠标租约不清除 `armed`。看门狗不得再因 `armed && 租约过期` 调用 `fail`。传输死亡且已经 `armed` 仍走现有 `fail`（未武装的启动失败不因此变成用户 Stop）。
+
+前台 `perform`（父进程、拥有 `SafetyGuard` 的那一次；worker RPC 和 `InputBackend` 组包之前）按这个顺序，且同一次调用里证明最多发一轮：
+
+1. 已锁存：现有 `Cancelled`，零注入。
+2. 传输不健康：现有 `CapabilityUnavailable` 或现有 `fail` 锁存。不发证明。
+3. 租约不新鲜：跑已接受的那一轮证明（零位移仍不送达时，鼠标侧是动作窗口内的一次 `AbsoluteSamePosition`，光标变化作废、不补偿）。时间算在本次 `perform` 已经开始的 `DRIVER_DEADLINE`（4750ms）里，不新开计时器，也不把外层 5s 重新起算。租约已经新鲜则跳过，避免外层 `perform` 和内层 `check` 各发一次。
+4. 证明失败或光标变化：`CapabilityUnavailable`，`maybe_executed == false`，不 `request_stop`，不 `disable`。调用方可以在用户再次空闲后重试。
+5. 证明成功后才允许动作本身的 `SendInput` / 激活。从这一刻到 `release_all_input` 且动作结束，续租规则与错过则 `fail` 的规则仍是决定第 3 点。结束后丢掉注入租约，不因租约变旧而锁存。
+
+`doctor` 分成三行，不能再由一个 `available()` 生成：传输/热键、注入租约是否新鲜、活动回答是否可信。泵心跳不得写成钩子已证明。没有可信观测时 `user_activity_guard` 为假；覆盖区间内已有物理回调时可以为真，同时写明租约未新鲜。
+
+活动年龄接到已有缝上，不新增 `Driver` 方法：
+
+- `WindowsDriver` 增加只读访问器，没有守卫时返回 `None`。`PhysicalClock` 仍留在 Windows crate。
+- `gcu-cli` 用一个只转发 `ms_since_physical_input` 的适配器实现已有的 `PhysicalActivity`。Windows crate 不依赖 `gcu-mcp`。
+- 路线 B：`engine::run` 增加 `Arc<dyn PhysicalActivity>` 参数。组装点在仍持有具体 `WindowsDriver` 时传入该钟。未接线的调用点继续传 `UnavailableActivity`。只有传入了这个钟，握手才采用驱动自己的 `user_activity_guard`；fake 与未接线引擎继续强制 `false`。
+- 路线 A：`Activity` 的 Stop 锁存与持久化不变，只把活动年龄委托给同一个可选来源；未接线时仍返回 `None`。
+- 0012 尚未把真实驱动接进产品入口。本增补不打开该入口，不改 `require_fake`。接线类型和访问器随 B 的实现落地，由测试直接调用；产品进程在 0012 的组装卡传入该钟之前，行为与今天一样是 `None`。
+
+`policy`、`route::plan`、`Driver` trait、fake 驱动都不改。策略第 9 条的比较保持原样。
+
+### 活动年龄
+
+`confirmed` 只由成功的双钩子 `confirm` 写入，并且 `confirm` 不得再写 `physical`。现在「确认落在 100ms 窗之外就把 `physical` 设成证明时刻」会把我们自己的探针记成刚刚发生的用户输入；解耦之后这行删除。`physical` 只由非注入、非探针标记的 `event()` 写入。
+
+覆盖区间是「这一代监听」，不是 100ms 租约。一代从第一次成功 `confirm` 开始，到 `disable` / `fail` 结束。1s 换钩不结束这一代，也不清 `physical`：换钩不是证明，但换钩前已经见到的物理回调仍然是用户输入。`disable` 之后的 `confirm` 或 `event` 都不能复活读取；现有 `disabled` 短路保持。
+
+| 读取 | 含义 | 谁消费 |
+|---|---|---|
+| `None` | 不能为年龄作保。从未成功证明、已 `disable`/`fail`、这一代还没有非注入回调，都是 `None`。第一次 `confirm` 之前的回调不入库 | 策略不发出 `user_active`。这不是「用户在空闲」，也不是注入许可 |
+| `Some(ms)` | 覆盖区间内最后一次非注入回调距现在 `ms`。租约已过期也可以是 `Some`。`ms` 可以大于 100，也可以 ≥ `user_idle_ms` | `ms < user_idle_ms` 且请求是前台：策略返回已有的 `user_active`，`perform` 不会被调用，因此不会为了这次拒绝去发绝对移动。`ms ≥ user_idle_ms` 只表示「上次可信输入已经旧了」 |
+
+钩子死了不得被当成空闲而放行。静默摘钩不会再有回调：年龄变大之后策略可能放行，但前台 `perform` 仍必须先取得新证明；证明失败则零动作注入、不锁存。热键线程、泵或 FFI 死亡走传输谓词：`foreground` 回到 `Unavailable`，`plan` 拒绝，活动读取为 `None`，并按现有路径锁存。两条路都不会在钩子已死时发出前台注入。`None` 单独不能打开注入。
+
+因此「租约已过期，但钩子确有物理回调」时：覆盖未关、未 `disable`，读取是 `Some(回调年龄)`。前台意图在 3000ms 内得到 `user_active`。这不要求租约仍在 100ms 内，也不要求为了回答活动问题去发探针。
+
+### 不新增错误，不改时限
+
+不新增 `DriverError` 变体。证明失败与传输不可用都用现有 `CapabilityUnavailable`（`maybe_executed == false`）。用户抢输入只用策略已有的 `ErrorCode::UserActive`。不改 `gcu-protocol` 的错误码、`golden/errors.json`、`golden/tools.json`，也不动工具目录的 14000 字节预算。
+
+`HEARTBEAT_TIMEOUT` 仍是 100ms。Stop 仍是 ≤100ms 锁存、≤500ms 发出释放。`NATIVE_TIMEOUT` 仍是 5s，`DRIVER_DEADLINE` 仍是 4750ms。证明和续租都不得另设更长的定时器。
+
+### 与 0002、fake 和其它平台
+
+0002 的做法是：新的 `DriverError` 变体或带默认实现的 trait 方法，旧驱动不用改行为。本增补不使用它。不增加 `prepare_foreground` 或任何默认方法，fake、macOS、Linux 的源文件不改。macOS 自己的 `ActivityMonitor` 在监听错过 100ms 时返回 `None`，那是另一套钟，不在本卡把两套语义并成一个。
+
+若以后确实要给 `Driver` 加方法，必须像 0002 的 `discovery_status` 那样有默认实现，并且另写 ADR。本决定不授权。
+
+### 备选
+
+**(a) 能力位只反映传输，证明放在 `perform` 入口。** 这就是上面的决定。`plan` 和策略都不用改：传输健康时前台位保持 `Policy`，`plan` 能生成前台意图，策略先看到活动年龄，通过之后 `perform` 才证明。用户正在活动时不会为了拒绝去发绝对移动。
+
+**(b) `Driver::prepare_foreground`，默认 `Ok`，core 在授权通过之后、路由之前调用。** 不选。实际顺序是 `plan` 先于 `authorize`，并且拒绝就发生在 `plan`。默认方法若放在授权之后，调用点仍然到不了。若为了保住 `Unavailable` 而把方法挪到 `plan` 之前，证明会跑在 `user_active` 之前，空闲用户一碰鼠标也会吃到动作窗口里的绝对移动。无论放在哪里，只要 core 继续把 `Unavailable` 当成「平台没有前台」，Windows 就必须不再用这个值表示「只是鼠标租约旧了」；否则 trait 方法是死的。默认 `Ok` 也保护不了 fake：保护来自「core 不新增调用」，而不是来自一个到不了的默认实现。
+
+**(c) 给 `ForegroundCapability` 加第三个状态，或让 core 忽略 `Unavailable`。** 不选。前者改协议枚举和 golden；后者会让真正没有前台的平台（诊断构建、未附守卫、macOS 无能力）也进入 `perform`。
+
+**(d) 新的 `DriverError::UserActive`，或 Host 活动 RPC。** 不选。协议码已经存在，并且必须由策略在注入前发出。0004 禁止活动 RPC。驱动在 `perform` 里返回活动错误时，绝对移动已经有机会发出。
+
+不采用：放宽 Stop 的 100ms / 500ms / 5s；取消 fail-closed；让空闲采样、光标复读或过期租约本身续租；加长 100ms；把 `RelativePair` 或 `XButtonPair` 放进证明。
+
+### 测试
+
+Windows 继续用现有 `ManualTime` / `FakeSafetyApi`，不碰 Win32。除上文「真机验证与测试策略」已列、且未被本增补改写的用例外：
+
+- 只有 `confirm`、没有任何 `event`：活动读取为 `None`。这替换 `hotkey/startup.rs` 里紧跟成功 `confirm_hook_proofs` 的 `Some(0)`，也替换 `tests/stop/timing.rs` 里 `fake_listener_ignores_runtime_elapsed_time_during_input_settle` 对 `Some(0)` 的断言。后一个测试里 fake `poll` 仍会 `confirm` 并刷新心跳，传输和注入租约可以仍为真；变的只是活动年龄。定向投递本身的断言不动。
+- `tests/stop/timing.rs` 的 `controlled_heartbeat_expiry_latches_stop_at_the_production_boundary` 与 `startup.rs` 末尾那种「把共享钟拨过 100ms 且不再 `heartbeat`」仍然锁存：泵心跳一起过期。不要把它们改写成鼠标租约用例。
+- 新用例：拨钟之后重新 `beat` 泵和热键，只让 `confirmed` 超过 100ms。不 `fail`、不锁存、不 `disable`。覆盖已打开且有物理 `event` 时，读取仍是 `Some`，可以大于 100ms。
+- `disable` 之后，迟到的 `event` 与 `confirm` 都读成 `None`。第一次 `confirm` 之前的 `event` 也是 `None`。
+- 前台 `perform` 在租约过期时先证明，再组包。证明错误：`CapabilityUnavailable`、`maybe_executed == false`、`is_stopped() == false`。同一次 `perform` 内第二处 `check` 不得再发一轮绝对移动。
+- 传输不健康的前台请求：不发证明。动作在途时把注入租约拨过 100ms 且没有新的鼠标回调：仍走现有 `fail`，锁存并释放。不得出现新的更长定时器。
+
+core 没有新调用点。不给 fake 加方法，也不新增「fake 统计 `prepare_foreground` 被调用」的路由测试。策略合同保持 `user_activity_blocks_only_the_foreground_path`：前台且 `Some(0)` 为 `user_active`，后台放行，`Some(3000)` 放行，`None` 放行。`gcu-cli` 只测适配器转发 `Some` / `None`，以及未传入钟时引擎仍是 `UnavailableActivity`。不在本卡启用真实 Windows 入口。
+
+真机项不增不减。空闲时移动鼠标后的 `user_active` 仍以 Host 读到的 `Some` 为准，不能用驱动内部的 `physical` 字段代替策略结果。
+
+### 批准
+
+不需要用户再批。没有新的注入行为：绝对移动仍只出现在已经批准的动作窗口，并且排在 `user_active` 拒绝之后；动作窗口外仍不发重复探针。没有新的 trait 方法，因此也不需要按 0002 另批一次接口。本增补是已接受 1a/2a/3a 的接线修正。若要维持「鼠标租约一过期就把 `foreground` 写成 `Unavailable`，并在证明前 `check` 拒绝」，动作前证明和 `user_active` 都不可达，只能回到 D3，而不是改走 A、C 或加长租约。
+
+### 实现时改动的范围
+
+只在实现卡里改这些位置：`gcu-driver-windows` 的 `input/hooks.rs`、`input/hotkey.rs`、`driver.rs`（访问器）、`driver_impl.rs`、`worker/driver.rs`，以及上列测试；`gcu-cli` 的 `engine.rs`、`host/mod.rs` 和一个活动适配器。不改 `gcu-core`、`gcu-protocol`、`gcu-host-protocol`、fake、macOS、Linux，也不改 `STATUS.md`。
+
+### 本增补的退出条件
+
+- 实现发现不修改 `route::plan` 或 `Driver` trait 就无法把前台请求送进 `perform`：停止，不要临时加 trait 方法。
+- 实现发现必须新增协议错误、Host 活动消息，或放宽任一期限：停止。本增补不授权。
