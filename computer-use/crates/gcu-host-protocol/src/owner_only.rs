@@ -224,13 +224,24 @@ pub fn dacl_allows_only_user_and_system(sddl: &str, user_sid: &str) -> bool {
         if !rights.eq_ignore_ascii_case("FA") && !rights.eq_ignore_ascii_case("0x1F01FF") {
             return false;
         }
-        if sid.eq_ignore_ascii_case(user_sid) || sid.eq_ignore_ascii_case("OW") {
+        if is_user(sid, user_sid) || sid.eq_ignore_ascii_case("OW") {
             saw_owner = true;
         } else if !is_system(sid) {
             return false;
         }
     }
     saw_owner
+}
+
+/// Whether trustee `sid` (as SDDL prints it) is the caller. SDDL prints the
+/// built-in Administrator account (RID 500, the account GitHub's `runneradmin`
+/// uses) with the alias `LA` instead of its full SID, so that alias matches only
+/// when the caller itself is a `S-1-5-21-…-500` SID.
+fn is_user(sid: &str, user_sid: &str) -> bool {
+    sid.eq_ignore_ascii_case(user_sid)
+        || (sid.eq_ignore_ascii_case("LA")
+            && user_sid.starts_with("S-1-5-21-")
+            && user_sid.ends_with("-500"))
 }
 
 fn is_system(sid: &str) -> bool {
@@ -326,6 +337,20 @@ mod tests {
         assert!(!dacl_allows_only_user_and_system(
             &format!("D:P(A;;FA;;;{sid})(A;;FA;;;WD)"),
             sid
+        ));
+        // SDDL prints the RID-500 account as LA; it is the caller only when the caller is RID 500.
+        let admin = "S-1-5-21-1-2-3-500";
+        assert!(dacl_allows_only_user_and_system(
+            "D:PAI(A;;FA;;;LA)(A;;FA;;;SY)",
+            admin
+        ));
+        assert!(!dacl_allows_only_user_and_system(
+            "D:PAI(A;;FA;;;LA)(A;;FA;;;SY)",
+            sid
+        ));
+        assert!(!dacl_allows_only_user_and_system(
+            "D:PAI(A;;FA;;;LG)(A;;FA;;;SY)",
+            "S-1-5-21-1-2-3-501"
         ));
         assert!(!dacl_allows_only_user_and_system("D:(A;;FA;;;OW)", sid));
         assert!(!dacl_allows_only_user_and_system("D:P(A;ID;FA;;;OW)", sid));
