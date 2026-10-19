@@ -218,7 +218,10 @@ pub fn dacl_allows_only_user_and_system(sddl: &str, user_sid: &str) -> bool {
         let Some(sid) = parts.next() else {
             return false;
         };
-        if parts.next().is_some() || kind != "A" || !ace_flags.is_empty() {
+        // `OICI` is the inheritance a directory carries so that its existing and
+        // future children are owner-only too. `ID` (inherited from elsewhere) is not allowed.
+        let inherit_ok = matches!(ace_flags, "" | "OICI" | "CIOI");
+        if parts.next().is_some() || kind != "A" || !inherit_ok {
             return false;
         }
         if !rights.eq_ignore_ascii_case("FA") && !rights.eq_ignore_ascii_case("0x1F01FF") {
@@ -352,6 +355,14 @@ mod tests {
             "D:PAI(A;;FA;;;LG)(A;;FA;;;SY)",
             "S-1-5-21-1-2-3-501"
         ));
+        assert!(dacl_allows_only_user_and_system(
+            &format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)"),
+            sid
+        ));
+        assert!(!dacl_allows_only_user_and_system(
+            &format!("D:P(A;OICIID;FA;;;{sid})(A;;FA;;;SY)"),
+            sid
+        ));
         assert!(!dacl_allows_only_user_and_system("D:(A;;FA;;;OW)", sid));
         assert!(!dacl_allows_only_user_and_system("D:P(A;ID;FA;;;OW)", sid));
         assert!(!dacl_allows_only_user_and_system("D:P(A;;FR;;;OW)", sid));
@@ -457,6 +468,23 @@ mod tests {
         assert!(live.is_dir());
         drop(lock);
         let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tightening_a_directory_keeps_existing_children_readable() {
+        // Regression: a protected, non-inheritable directory DACL made Windows strip
+        // the inherited ACEs of files already inside, leaving them unreadable.
+        let dir = scratch();
+        let old = dir.join("app.log.old");
+        fs::write(&old, b"before").unwrap();
+        ensure_dir(&dir).unwrap();
+        assert_eq!(fs::read(&old).unwrap(), b"before");
+        fs::remove_file(&old).unwrap();
+        let fresh = dir.join("app.log.new");
+        fs::write(&fresh, b"after").unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), b"after");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]

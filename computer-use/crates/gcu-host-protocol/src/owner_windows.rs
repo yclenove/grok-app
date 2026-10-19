@@ -72,7 +72,7 @@ pub(crate) fn restrict(path: &Path) -> io::Result<()> {
             "owner-only path is a reparse point or extra link",
         ));
     }
-    set_dacl(path)?;
+    set_dacl(path, meta.is_dir())?;
     verify_dacl(path)
 }
 
@@ -289,7 +289,7 @@ fn lock_file(dir: &Path) -> io::Result<File> {
         .create(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(&path)?;
-    set_dacl(&path)?;
+    set_dacl(&path, false)?;
     Ok(file)
 }
 
@@ -385,9 +385,16 @@ fn reject_reparse(path: &Path) -> io::Result<()> {
     }
 }
 
-fn set_dacl(path: &Path) -> io::Result<()> {
+/// A directory's ACEs are inheritable (`OICI`). Windows re-propagates a changed
+/// DACL to existing children: with non-inheritable ACEs it strips every
+/// inherited ACE from files already in the directory (such as logs written
+/// before the directory was tightened) and leaves them unreadable. With
+/// `OICI` those children end up owner-only too. Files get an explicit,
+/// protected, non-inheritable DACL.
+fn set_dacl(path: &Path, directory: bool) -> io::Result<()> {
     let sid = user_sid()?;
-    let sddl = format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)");
+    let flags = if directory { "OICI" } else { "" };
+    let sddl = format!("D:P(A;{flags};FA;;;{sid})(A;{flags};FA;;;SY)");
     let descriptor = descriptor_from(&sddl)?;
     let mut acl: *mut ACL = std::ptr::null_mut();
     let mut present = windows::core::BOOL::default();
