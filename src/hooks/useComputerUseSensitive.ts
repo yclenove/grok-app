@@ -1,6 +1,6 @@
 /** Session-scoped confirm and handoff cards. Switching chats does not drop them. */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   listenComputerUseConfirm,
   listenComputerUseConfirmSettled,
@@ -8,7 +8,12 @@ import {
   listenComputerUseHandoffSettled,
 } from "@/lib/api/computerUse";
 import {
+  listenComputerUseSessionClosed,
+  listenComputerUseTurnEnded,
+} from "@/lib/api/computerUseShot";
+import {
   bindSensitive,
+  evictSensitive,
   type ConfirmCard,
   type ConfirmEnd,
   type ConfirmPhase,
@@ -16,20 +21,43 @@ import {
   type HandoffEnd,
   type HandoffPhase,
 } from "@/lib/computer-use/confirmState";
+import { sharedTimeline } from "@/lib/computer-use/store";
 
-function useLiveCards<T extends { requestId: number }, P extends string>(
+function useLiveCards<T extends { requestId: number; sessionId: string }, P extends string>(
   listenPending: (handler: (card: T) => void) => Promise<() => void>,
   listenSettled: (handler: (requestId: number, end: P) => void) => Promise<() => void>,
 ) {
   const [cards, setCards] = useState<T[]>([]);
   const [phases, setPhases] = useState<Record<number, P>>({});
+  const sessions = useRef(new Map<number, string>());
+  const stopped = useRef(sharedTimeline.view("").stopped);
+
+  const evict = useCallback((sessionId: string | null) => {
+    const drop = new Set<number>();
+    for (const [id, sid] of sessions.current) {
+      if (sessionId === null || sid === sessionId) {
+        drop.add(id);
+        sessions.current.delete(id);
+      }
+    }
+    setCards((current) =>
+      evictSensitive(current, sessionId === null ? { all: true } : { sessionId }),
+    );
+    setPhases((current) => {
+      if (drop.size === 0) return current;
+      const next = { ...current };
+      for (const id of drop) delete next[id];
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let stop = false;
     const unlisten: Array<() => void> = [];
     void (async () => {
       const stopPending = await listenPending((card) => {
-        if (stop) return;
+        if (stop || stopped.current) return;
+        sessions.current.set(card.requestId, card.sessionId);
         setCards((current) => bindSensitive(current, card));
         setPhases((current) =>
           current[card.requestId] ? current : { ...current, [card.requestId]: "pending" as P },
@@ -43,18 +71,32 @@ function useLiveCards<T extends { requestId: number }, P extends string>(
           return { ...current, [requestId]: end };
         });
       });
+      const stopClosed = await listenComputerUseSessionClosed((sessionId) => {
+        if (!stop) evict(sessionId);
+      });
+      const stopTurn = await listenComputerUseTurnEnded((sessionId) => {
+        if (!stop) evict(sessionId);
+      });
       if (stop) {
         stopPending();
         stopSettled();
+        stopClosed();
+        stopTurn();
         return;
       }
-      unlisten.push(stopPending, stopSettled);
+      unlisten.push(stopPending, stopSettled, stopClosed, stopTurn);
     })();
+    const unsubscribe = sharedTimeline.subscribe(() => {
+      const now = sharedTimeline.view("").stopped;
+      stopped.current = now;
+      if (now) evict(null);
+    });
     return () => {
       stop = true;
+      unsubscribe();
       for (const fn of unlisten) fn();
     };
-  }, [listenPending, listenSettled]);
+  }, [listenPending, listenSettled, evict]);
 
   const setPhase = useCallback((requestId: number, phase: P) => {
     setPhases((current) => {

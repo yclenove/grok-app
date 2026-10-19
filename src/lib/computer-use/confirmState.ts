@@ -182,6 +182,16 @@ export function bindSensitive<T extends { requestId: number }>(cards: T[], card:
   return [...cards, card];
 }
 
+/** Drop sensitive cards for one session, or every card when `all` is set. */
+export function evictSensitive<T extends { sessionId: string }>(
+  cards: T[],
+  scope: { sessionId?: string; all?: boolean },
+): T[] {
+  if (scope.all) return [];
+  if (!scope.sessionId) return cards;
+  return cards.filter((card) => card.sessionId !== scope.sessionId);
+}
+
 export function cardsForSession<T extends { sessionId: string }>(cards: T[], sessionId: string): T[] {
   return cards.filter((card) => card.sessionId === sessionId);
 }

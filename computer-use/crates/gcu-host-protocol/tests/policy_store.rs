@@ -180,7 +180,12 @@ async fn legacy_policy_retains_identity_without_invented_name_or_time() {
     let mut policy = gcu_host_protocol::supervisor::baseline_policy();
     policy.always.push(request().app.identity);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    gcu_host_protocol::owner_only::atomic_write(
+        &path,
+        &serde_json::to_vec(&policy).unwrap(),
+        gcu_host_protocol::owner_only::SyncPolicy::Required,
+    )
+    .unwrap();
     let office = Office::open(Some(path.clone()));
     assert_eq!(office.approvals()[0].name, "editor");
     assert_eq!(office.approvals()[0].granted_ms, None);
@@ -222,7 +227,12 @@ async fn policy_edit_invalidates_pending_card_before_it_can_restore_revoked_auth
 fn corrupt_file_defaults_off_and_grants_nothing() {
     let path = path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, b"invalid").unwrap();
+    gcu_host_protocol::owner_only::atomic_write(
+        &path,
+        b"invalid",
+        gcu_host_protocol::owner_only::SyncPolicy::Required,
+    )
+    .unwrap();
     let office = Office::open(Some(path.clone()));
     assert!(!office.enabled());
     assert!(office.approvals().is_empty());

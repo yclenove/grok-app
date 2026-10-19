@@ -24,6 +24,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 x11rb = { version = "0.13", features = ["composite", "xtest", "xinput"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 xkbcommon = "0.9"
 reis = { version = "0.7", features = ["tokio"] }

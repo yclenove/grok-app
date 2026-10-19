@@ -25,6 +25,14 @@ pub struct Turn {
     nonce: [u8; 32],
 }
 
+impl Turn {
+    /// Session this turn belongs to. Used to drop sensitive UI state.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session
+    }
+}
+
 struct State {
     epoch: u64,
     peer: Option<Peer>,

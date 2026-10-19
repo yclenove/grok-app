@@ -30,6 +30,30 @@ export async function listenComputerUseSessionClosed(
   return () => { closedHandlers.delete(handler); };
 }
 
+const turnHandlers = new Set<(sessionId: string) => void>();
+let turnListener: Promise<() => void> | null = null;
+
+export async function listenComputerUseTurnEnded(
+  handler: (sessionId: string) => void,
+): Promise<() => void> {
+  if (!isDesktopHost()) return () => {};
+  turnHandlers.add(handler);
+  turnListener ??= listen<{ sessionId: string }>("cu://turn-ended", (event) => {
+    if (typeof event.sessionId !== "string") return;
+    for (const callback of turnHandlers) callback(event.sessionId);
+  }).catch((error: unknown) => {
+    turnListener = null;
+    throw error;
+  });
+  try {
+    await turnListener;
+  } catch (error) {
+    turnHandlers.delete(handler);
+    throw error;
+  }
+  return () => { turnHandlers.delete(handler); };
+}
+
 export async function loadComputerUseShot(
   sessionId: string,
   id: string,

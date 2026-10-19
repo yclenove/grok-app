@@ -33,7 +33,11 @@ fn dirs_fallback() -> PathBuf {
 pub fn ensure_app_dirs() -> std::io::Result<PathBuf> {
     let root = app_data_root();
     std::fs::create_dir_all(root.join("projects"))?;
-    std::fs::create_dir_all(root.join("sessions"))?;
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions)?;
+    if let Err(error) = gcu_host_protocol::owner_only::ensure_dir(&sessions) {
+        gcu_host_protocol::owner_only::warn_meta("session_dir", &sessions, &error);
+    }
     std::fs::create_dir_all(root.join("logs"))?;
     // Agent profile (config.toml / optional auth) when session_data_mode=independent.
     std::fs::create_dir_all(root.join("agent-home"))?;

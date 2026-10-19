@@ -105,9 +105,16 @@ fn output_sync(
                     path.to_string_lossy().as_ref(),
                 );
             }
-            // One-shot artifact lease: retained for inspection, removed by the
-            // next CLI invocation after one hour (or manually by the user).
-            let _ = dir.keep();
+            // One-shot artifact lease: the expiry stamp is one hour from now.
+            // The next CLI invocation deletes it even if the directory mtime moved.
+            write_expiry(dir.path())
+                .map_err(|_| Failure::internal("Cannot stamp screenshot lease"))?;
+            // `TempDir::keep` disables deletion and returns the path. It does not
+            // return an IO error; a missing directory still fails the one-shot call.
+            let kept = dir.keep();
+            if !kept.is_dir() {
+                return Err(Failure::internal("Cannot retain screenshot lease"));
+            }
         }
         writeln!(out, "{text}").map_err(|_| Failure::internal("Cannot write tool text"))?;
     }
@@ -115,24 +122,202 @@ fn output_sync(
         .map_err(|_| Failure::internal("Cannot flush tool output"))?;
     Ok(code)
 }
+const KEEP_LEASE_SECS: u64 = 3600;
+
+fn write_expiry(dir: &std::path::Path) -> std::io::Result<()> {
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .saturating_add(std::time::Duration::from_secs(KEEP_LEASE_SECS))
+        .as_secs();
+    write_deadline(dir, deadline)
+}
+
+fn write_deadline(dir: &std::path::Path, deadline: u64) -> std::io::Result<()> {
+    use gcu_host_protocol::owner_only::{self, SyncPolicy};
+    let body = format!("{deadline}\n");
+    owner_only::atomic_write(&dir.join("expiry"), body.as_bytes(), SyncPolicy::Required)
+}
+
 pub(crate) fn cleanup_artifacts() {
-    let Ok(entries) = std::fs::read_dir(private::runtime_root()) else {
-        return;
+    cleanup_root(&private::runtime_root(), std::time::SystemTime::now());
+}
+
+fn cleanup_root(root: &std::path::Path, now: std::time::SystemTime) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn_lease(root, &error);
+            return;
+        }
     };
-    for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with("gcu-call-")
-            || private::check_dir(&entry.path()).is_err()
-        {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn_lease(root, &error);
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("gcu-call-") {
             continue;
         }
-        let expired = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| m.elapsed().ok())
-            .is_some_and(|age| age.as_secs() > 3600);
-        if expired && std::fs::remove_dir_all(entry.path()).is_err() {
-            tracing::warn!("Expired screenshot lease could not be removed");
+        let path = entry.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) => {
+                warn_lease(&path, &error);
+                continue;
+            }
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            warn_lease(
+                &path,
+                &std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "screenshot lease is not a real directory",
+                ),
+            );
+            continue;
         }
+        if private::check_dir(&path).is_err() {
+            warn_lease(
+                &path,
+                &std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "screenshot lease permissions are unsafe",
+                ),
+            );
+            continue;
+        }
+        let expired = match lease_expired(&path, &meta, now) {
+            Ok(expired) => expired,
+            Err(error) => {
+                warn_lease(&path, &error);
+                continue;
+            }
+        };
+        if !expired {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                continue;
+            }
+            warn_lease(&path, &error);
+            // A partial delete can unlink the stamp and leave the directory.
+            // Restore an already-due stamp so the next start retries.
+            if let Err(stamp) = write_deadline(&path, 1) {
+                if stamp.kind() != std::io::ErrorKind::NotFound {
+                    warn_lease(&path, &stamp);
+                }
+            }
+        }
+    }
+}
+
+fn lease_expired(
+    path: &std::path::Path,
+    meta: &std::fs::Metadata,
+    now: std::time::SystemTime,
+) -> std::io::Result<bool> {
+    use gcu_host_protocol::owner_only;
+    match owner_only::read_no_follow(&path.join("expiry"), 64) {
+        Ok(bytes) => Ok(stamp_expired(&bytes, now)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(aged_out(meta, now)),
+        Err(error) => Err(error),
+    }
+}
+
+fn stamp_expired(bytes: &[u8], now: std::time::SystemTime) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return true;
+    };
+    let Ok(deadline) = text.trim().parse::<u64>() else {
+        return true;
+    };
+    let Ok(elapsed) = now.duration_since(std::time::UNIX_EPOCH) else {
+        return true;
+    };
+    elapsed.as_secs() >= deadline
+}
+
+fn aged_out(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age.as_secs() > KEEP_LEASE_SECS)
+}
+
+fn warn_lease(path: &std::path::Path, error: &std::io::Error) {
+    gcu_host_protocol::owner_only::warn_meta("keep_lease", path, error);
+    #[cfg(test)]
+    {
+        warned_leases()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.display().to_string());
+    }
+}
+
+#[cfg(test)]
+fn warned_leases() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use gcu_host_protocol::owner_only::{self, SyncPolicy};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::SystemTime;
+
+    fn scratch() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gcu-lease-{}-{:x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn keep_lease_expires_on_the_stamp_even_if_mtime_is_fresh() {
+        let root = scratch();
+        let dir = root.join("gcu-call-stamped");
+        owner_only::ensure_dir(&dir).unwrap();
+        std::fs::write(dir.join("shot.png"), b"png").unwrap();
+        owner_only::atomic_write(&dir.join("expiry"), b"1\n", SyncPolicy::Required).unwrap();
+        cleanup_root(&root, SystemTime::now());
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn keep_lease_delete_failure_warns_and_retries() {
+        let root = scratch();
+        let dir = root.join("gcu-call-stuck");
+        owner_only::ensure_dir(&dir).unwrap();
+        let nest = dir.join("nest");
+        std::fs::create_dir(&nest).unwrap();
+        std::fs::write(nest.join("shot.png"), b"png").unwrap();
+        std::fs::set_permissions(&nest, std::fs::Permissions::from_mode(0o000)).unwrap();
+        owner_only::atomic_write(&dir.join("expiry"), b"1\n", SyncPolicy::Required).unwrap();
+        let now = SystemTime::now();
+        cleanup_root(&root, now);
+        assert!(dir.exists());
+        assert!(warned_leases()
+            .lock()
+            .unwrap()
+            .contains(&dir.display().to_string()));
+        std::fs::set_permissions(&nest, std::fs::Permissions::from_mode(0o700)).unwrap();
+        cleanup_root(&root, now);
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

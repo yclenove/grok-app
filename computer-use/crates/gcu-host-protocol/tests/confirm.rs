@@ -149,7 +149,12 @@ fn scratch(name: &str) -> PathBuf {
 
 fn write_policy(name: &str, policy: &Policy) -> PathBuf {
     let path = scratch(name).join("policy.json");
-    std::fs::write(&path, serde_json::to_vec(policy).unwrap()).unwrap();
+    gcu_host_protocol::owner_only::atomic_write(
+        &path,
+        &serde_json::to_vec(policy).unwrap(),
+        gcu_host_protocol::owner_only::SyncPolicy::Required,
+    )
+    .unwrap();
     path
 }
 

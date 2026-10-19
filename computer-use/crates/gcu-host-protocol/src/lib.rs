@@ -15,6 +15,16 @@ pub mod lifecycle;
 pub mod log_policy;
 pub mod messages;
 pub mod overlay;
+pub mod owner_only;
+// `#[path]` stays beside `lib.rs`. rustfmt looks for `owner_only/imp.rs` when the
+// attribute is on a child of `owner_only.rs`. The Unix file is also included by
+// `gcu-driver-linux`, which cannot depend on this crate.
+#[cfg(unix)]
+#[path = "owner_unix.rs"]
+mod owner_unix_imp;
+#[cfg(windows)]
+#[path = "owner_windows.rs"]
+mod owner_windows_imp;
 pub mod panel;
 pub mod server;
 pub mod stop_reason;

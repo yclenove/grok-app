@@ -3,6 +3,7 @@ import {
   DEFAULT_CONFIRM_ACT,
   bindSensitive,
   cardsForSession,
+  evictSensitive,
   confirmClaimFor,
   handoffContinuation,
   redactedCropSrc,
@@ -92,5 +93,9 @@ describe("confirmState", () => {
     expect(reduceHandoff("submitting", { type: "resolve", end: "handled" })).toBe("handled");
     expect(reduceHandoff("handled", { type: "submit" })).toBe("handled");
     expect(reduceHandoff("pending", { type: "settled", end: "closed" })).toBe("closed");
+    const kept = evictSensitive(cards, { sessionId: "alpha" });
+    expect(kept.map((item) => item.sessionId)).toEqual(["beta"]);
+    expect(evictSensitive(cards, { all: true })).toEqual([]);
+    expect(evictSensitive(cards, {}).map((item) => item.requestId)).toEqual([7, 8]);
   });
 });

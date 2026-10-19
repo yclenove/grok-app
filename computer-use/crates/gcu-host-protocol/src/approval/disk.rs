@@ -1,13 +1,15 @@
 //! Atomic policy file. A failed write leaves the previous file in place.
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::office::settings::Snapshot;
 use crate::messages::Policy;
+use crate::owner_only::{self, SyncPolicy};
 
-/// Read a policy snapshot. Corrupt or missing files return None (fail closed).
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Read a policy snapshot. Missing, replaced, or unreadable files return None.
 pub fn read_policy(path: &Path) -> Option<Snapshot> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = owner_only::read_no_follow(path, MAX_BYTES).ok()?;
     serde_json::from_slice(&bytes).ok().or_else(|| {
         serde_json::from_slice::<Policy>(&bytes)
             .ok()
@@ -19,57 +21,76 @@ pub fn read_policy(path: &Path) -> Option<Snapshot> {
     })
 }
 
-/// Replace `path` with `policy`. Parent directories are created. Returns false
-/// on any IO or serialization failure. Nonblocking aside from the write itself;
-/// callers are already off the approval wait.
+/// Replace `path` with `policy`. The parent directory is owner-only. Returns
+/// false on any IO or serialization failure. An existing symlink is not replaced.
+/// Nonblocking aside from the write itself; callers are already off the approval wait.
 pub fn write_policy(path: &Path, policy: &Snapshot) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    if parent.as_os_str().is_empty() || std::fs::create_dir_all(parent).is_err() {
+    if parent.as_os_str().is_empty() || owner_only::ensure_dir(parent).is_err() {
         return false;
     }
-    #[cfg(unix)]
-    {
-        let _ =
-            std::fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    }
-    let bytes = match serde_json::to_vec(policy) {
-        Ok(bytes) => bytes,
-        Err(_) => return false,
+    let Ok(bytes) = serde_json::to_vec(policy) else {
+        return false;
     };
-    let tmp = temp_path(path);
-    if !write_private(&tmp, &bytes) {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    true
+    owner_only::atomic_write(path, &bytes, SyncPolicy::Required).is_ok()
 }
 
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    name.push(".tmp");
-    path.with_file_name(name)
-}
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::messages::{ConfirmationLevel, ForegroundPolicy, Policy};
+    use std::fs;
 
-fn write_private(path: &Path, bytes: &[u8]) -> bool {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    fn scratch() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gcu-policy-{}-{:x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    file.write_all(bytes).is_ok() && file.sync_all().is_ok()
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            policy: Policy {
+                version: 1,
+                always_allow_enabled: false,
+                sensitive_action_confirmation: ConfirmationLevel::Standard,
+                timeout_secs: 120,
+                allow_foreground: ForegroundPolicy::Ask,
+                macos_private_spi: false,
+                user_idle_ms: 3000,
+                stop_hotkey: "default".into(),
+                max_tree_nodes: 1200,
+                max_image_edge: 1568,
+                image_format: "png".into(),
+                extra_denied_apps: Vec::new(),
+                always: Vec::new(),
+            },
+            grants: Vec::new(),
+            computer_use_enabled: false,
+        }
+    }
+
+    #[test]
+    fn policy_symlink_is_not_loaded_or_replaced() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch();
+        let target = dir.join("real.json");
+        fs::write(&target, b"{\"keep\":true}").unwrap();
+        let link = dir.join("policy.json");
+        symlink(&target, &link).unwrap();
+        assert!(read_policy(&link).is_none());
+        assert!(!write_policy(&link, &snapshot()));
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"{\"keep\":true}");
+        assert!(!dir.join("policy.json.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
