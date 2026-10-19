@@ -36,6 +36,9 @@ describe("store material and packaged permission contract", () => {
       expect(bundle).not.toContain("fixture-relay");
       expect(bundle).not.toContain("page_relays_marker_unique_wrong_window");
       expect(bundle).not.toContain("privateActionShim");
+      expect(bundle).not.toContain("t04-model-nonce-");
+      expect(bundle).not.toContain("ReferenceBinding");
+      expect(bundle).not.toContain("EffectOracle");
     }
   });
 });
