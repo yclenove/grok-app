@@ -283,3 +283,51 @@ K0–K6 即使都成功也只回答载体问题，不满足生产准入。下列
    当前代码未提供 C4 独立清理；如果实验/后续审查证实无法兑现，按 D3 退出，不启动生产实现。
 
 没有证书/runner/原生来源证据的组合继续 not_run；本记录不要求放宽接口、权限或安全边界。
+
+## 5. 实测结果（2026-10-19，Windows × Chrome 的一次运行，K1–K4 的一部分）
+
+以下只记录执行者回报的事实，是**一台机器、一个浏览器、一次运行**的观察，不外推到其他平台、
+浏览器、版本或语言。执行者是用户委托的 Grok 代理（用户在场）；总控没有在现场复核，也没有拿到
+截图，原始字段为执行者文字回报。
+
+**环境。** 主机名 `seven`（即 win-test，账号 `claudetest`），Windows 11 家庭版 10.0.26200，
+Chrome 155.0.8059.84，显示缩放 100%，中文界面。一次性 profile，加载 `D:\cu2\m0\ext`
+（ID `jgpkhdjlddaoopklipcnpcjcpiancmff`）。窗口 1：A、A2、`chrome://extensions`；窗口 2：B。
+
+**与操作清单的偏离（必须计入证据强度）。**
+1. 读取没有手工使用 `inspect.exe`，而是由代理直接调用 Windows UI Automation API 读取同一套属性。
+2. K1+K2 的脚本不是粘贴进 DevTools Console，而是通过 CDP 挂到该扩展的 service worker 执行同一段代码。
+   CDP 挂接本身可能影响 worker 的休眠/终止行为，因此**本次运行对 K5（休眠/强杀后的残留）没有任何证据价值**。
+3. 没有记录工具栏按钮所属顶层窗口的 HWND/PID，也没有读取窗口 2 的扩展按钮。
+
+**K2（写入与隔离）。** nonce=`7170dc89804efee508303d77ae2ca87b2b11211f8c9a11ab9281c053ce34039e`；
+`getTitle` 回读：A=true，A2=true，B=true（接口层的 tab 作用域隔离，与上一次手工运行一致）。
+
+**UIA 读取（标签 A 选中时，窗口 1 的扩展工具栏按钮）。**
+
+| 字段 | 回报值 |
+|---|---|
+| Name | `共享此标签页 [gcu:<完整 64 位 nonce>]`，其后换行再加一行 `想要访问此网站` |
+| HelpText | 空 |
+| ControlType | `ControlType.Button` |
+| AutomationId | `view_1009` |
+| 父级链 | Button ← Pane ← ToolBar ← Pane… ← Window `about:blank - Google Chrome`；在工具栏内，不在 Document/网页区 |
+
+- 完整 64 位 nonce **出现在 Name 里，不在 HelpText 里**（HelpText 为空）。
+- 选中 A2：Name 回到 `共享此标签页` + 换行 + `想要访问此网站`，nonce 消失；选回 A：完整 nonce 再次出现。
+- K4 清除（`setTitle` 写回默认值，回读 true）：按钮 Name 恢复为 `共享此标签页` + 换行 + `想要访问此网站`，nonce 消失。
+
+**对 ADR 的含义（仅限这次观察）。**
+- 在 Windows × Chrome 155 上，action 的按-tab 标题**确实出现在浏览器 chrome 的工具栏按钮的 UIA Name 里**，且随选中标签切换、
+  随清除恢复，不在页面 WebArea 内。这支持 C4 作为“页面无法读取的非页面载体”这一前提，但只是前提之一。
+- Name 是**组合字符串**：除标题外 Chrome 还追加了 `想要访问此网站`（与 activeTab 的访问状态有关，成因未确认，
+  且可能随语言、权限状态、Chrome 版本而变）。因此未来匹配不能用“Name 等于某串”，只能按已核验的结构解析，
+  再精确比较完整 nonce；这与 ADR §3 的“完整 nonce 精确匹配、不做模糊归一化”并不冲突，但需要明确的解析规则与测试。
+- HelpText 为空：不能依赖 HelpText。
+
+**仍然是 not_run / 未证明（本次运行没有改变它们）。**
+- K3：拖窗、跨窗口、关闭/替换/重载、最小化/遮挡/全屏、未固定图标、竖向标签页。
+- **K5：worker 休眠/被杀后的残留与恢复时限**——D3 的决定性证据，仍然没有；本次运行还因 CDP 挂接而不可用于推断。
+- T04 最后投递竞态、T02/T03 的真实双窗口恶意页面实验、冷/热 UIA 树完整性、读取延迟与更新延迟（≥200ms 三次独立读取）。
+- 顶层窗口归属：需要同时记录按钮所属窗口的 HWND/PID，并证明它与扩展端的 browser-window/tab 一一对应（本次未记录）。
+- 窗口 2（B）的按钮是否保持基线；Edge；macOS；Linux；其他语言/版本；管理员 vs 标准账号。
