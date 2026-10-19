@@ -93,8 +93,15 @@ pub fn hold_dir_lock(dir: &Path) -> io::Result<OwnerLock> {
 /// Delete failures are warned once and left for the next call. Symlinks are not followed.
 /// Blocking: a directory scan. Timeout: none.
 pub fn reap_unlocked_children(parent: &Path, prefix: &str, keep: &Path) -> io::Result<()> {
-    imp::reap_unlocked_children(parent, prefix, keep)
+    imp::reap_unlocked_children(parent, prefix, keep, ORPHAN_GRACE)
 }
+
+/// A directory touched more recently than this is never reaped. A new session
+/// creates its directory before it can take the lock, so without a grace period
+/// a concurrent scan (another process, or another session in this one) could
+/// delete a live directory in that window. A genuine orphan is older than this
+/// by the time of the next start.
+pub(crate) const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Metadata warning, once per category and path. The OS error kind is included.
 /// File bytes are not.
@@ -277,7 +284,12 @@ mod imp {
     pub(crate) fn hold_dir_lock(_: &Path) -> io::Result<DirLock> {
         Err(unsupported())
     }
-    pub(crate) fn reap_unlocked_children(_: &Path, _: &str, _: &Path) -> io::Result<()> {
+    pub(crate) fn reap_unlocked_children(
+        _: &Path,
+        _: &str,
+        _: &Path,
+        _: std::time::Duration,
+    ) -> io::Result<()> {
         Err(unsupported())
     }
 }
@@ -411,7 +423,11 @@ mod tests {
         let live = parent.join("gcu-session-live");
         fs::create_dir(&live).unwrap();
         let lock = hold_dir_lock(&live).unwrap();
+        // A just-created directory is inside the grace period and survives.
         reap_unlocked_children(&parent, "gcu-session-", &live).unwrap();
+        assert!(orphan.exists(), "a fresh directory is not reaped");
+        imp::reap_unlocked_children(&parent, "gcu-session-", &live, std::time::Duration::ZERO)
+            .unwrap();
         assert!(!orphan.exists());
         assert!(live.is_dir());
         drop(lock);

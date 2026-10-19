@@ -178,7 +178,12 @@ pub(crate) fn hold_dir_lock(dir: &Path) -> io::Result<DirLock> {
     Ok(DirLock { file })
 }
 
-pub(crate) fn reap_unlocked_children(parent: &Path, prefix: &str, keep: &Path) -> io::Result<()> {
+pub(crate) fn reap_unlocked_children(
+    parent: &Path,
+    prefix: &str,
+    keep: &Path,
+    grace: std::time::Duration,
+) -> io::Result<()> {
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -221,6 +226,9 @@ pub(crate) fn reap_unlocked_children(parent: &Path, prefix: &str, keep: &Path) -
                     &io::Error::new(io::ErrorKind::PermissionDenied, "symlink"),
                 );
             }
+            continue;
+        }
+        if recently_touched(&meta, grace) {
             continue;
         }
         match lock_file(&path).and_then(|file| lock_exclusive(&file, false).map(|_| file)) {
@@ -594,4 +602,12 @@ fn unique_temp(path: &Path) -> io::Result<PathBuf> {
 fn wide(path: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+/// Whether `meta` was modified within `grace`. An unreadable time counts as recent.
+fn recently_touched(meta: &fs::Metadata, grace: std::time::Duration) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_none_or(|age| age < grace)
 }

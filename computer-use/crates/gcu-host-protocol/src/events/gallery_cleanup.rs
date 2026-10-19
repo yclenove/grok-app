@@ -114,7 +114,7 @@ fn remove_tree(path: &Path) {
         return;
     }
     let result = if meta.is_dir() {
-        std::fs::remove_dir_all(path)
+        remove_dir_marker_last(path)
     } else {
         std::fs::remove_file(path)
     };
@@ -123,6 +123,41 @@ fn remove_tree(path: &Path) {
             owner_only::warn_meta("gallery_delete", path, &error);
         }
     }
+}
+
+/// Delete everything except the `.closed` marker, then the marker, then the
+/// directory. `remove_dir_all` deletes in directory order, so on some file
+/// systems it can drop the marker before it reaches an entry it cannot delete;
+/// the next sweep would then no longer know the directory is closed.
+fn remove_dir_marker_last(dir: &Path) -> io::Result<()> {
+    let mut first_error = None;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() == CLOSED {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        let removed = if kind.is_dir() && !kind.is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(error) = removed {
+            if error.kind() != io::ErrorKind::NotFound && first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    match std::fs::remove_file(dir.join(CLOSED)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::remove_dir(dir)
 }
 
 fn remember_retry(dir: &Path) {
