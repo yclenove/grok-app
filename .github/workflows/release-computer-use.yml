@@ -86,6 +86,10 @@ jobs:
         run: |
           # Same PipeWire PPA handling as computer-use.yml: the stock jammy libpipewire is
           # too old for libspa. Retry the flaky PPA, then fail early with a clear message.
+          # Pinned on purpose (security.md G7): a third-party PPA must not change the build
+          # silently. When the PPA drops this version the install below fails; bump it after
+          # re-checking `apt-cache policy libpipewire-0.3-dev` and the amd64/arm64 indexes.
+          PIPEWIRE_PPA_VERSION='1.0.7-3~ubuntu22.04'
           sudo add-apt-repository -y -n ppa:pipewire-debian/pipewire-upstream
           for attempt in 1 2 3 4; do
             sudo apt-get update -o Acquire::Retries=5 || true
@@ -100,8 +104,11 @@ jobs:
             exit 1
           fi
           for attempt in 1 2 3; do
-            sudo apt-get install -y -o Acquire::Retries=6 libxkbcommon-dev libpipewire-0.3-dev rpm && break
-            [ "$attempt" = 3 ] && exit 1
+            sudo apt-get install -y -o Acquire::Retries=6 libxkbcommon-dev rpm "libpipewire-0.3-0=$PIPEWIRE_PPA_VERSION" "libpipewire-0.3-dev=$PIPEWIRE_PPA_VERSION" "libspa-0.2-dev=$PIPEWIRE_PPA_VERSION" && break
+            if [ "$attempt" = 3 ]; then
+              echo "::error::pinned PipeWire $PIPEWIRE_PPA_VERSION could not be installed; the PPA may have dropped it (security.md G7)"
+              exit 1
+            fi
             echo "apt install failed (attempt $attempt); retrying"
             sleep 30
           done
