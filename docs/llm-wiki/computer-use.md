@@ -52,8 +52,8 @@
   fake doctor 不探测真实桌面，macOS native 终端 doctor 不代理 helper。
 - 浏览器 L0 在所选 native 平台声明能力内可用，不需扩展。固定扩展 ID 为
   `jgpkhdjlddaoopklipcnpcjcpiancmff`；A4a 无法证明共享顶层文档 ↔ OS 窗口，
-  因此 **A4b 被阻塞、所有平台 L2 DOM 融合/动作关闭**。ADR 0014 仅用于载体可行性验证，
-  不当作已规划交付。见[既有安装步骤与 A4a 证明](../../computer-use/docs/browser-extension.md#proof)。
+  因此 **A4b 被阻塞、所有平台 L2 DOM 融合/动作关闭**。ADR 0014（挑战标记绑定）已于 2026-10-19 退出，
+  没有规划中的绑定机制。见[既有安装步骤与 A4a 证明](../../computer-use/docs/browser-extension.md#proof)。
 
 ## 架构
 
