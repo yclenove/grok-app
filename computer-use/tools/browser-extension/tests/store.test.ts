@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = new URL("../", import.meta.url);
@@ -22,6 +22,20 @@ describe("store material and packaged permission contract", () => {
     expect([...built.permissions].sort()).toEqual(documented.sort());
     for (const field of ["host_permissions", "optional_host_permissions", "optional_permissions", "content_scripts"]) {
       expect(built[field] ?? []).toEqual([]);
+    }
+  });
+
+  it("test_fixtures_never_enter_extension_package", () => {
+    expect(readdirSync(new URL("dist/", root)).sort()).toEqual([
+      "_locales", "background.js", "content.js", "manifest.json",
+    ]);
+    const files = readdirSync(new URL("dist/", root), { recursive: true, encoding: "utf8" });
+    expect(files.some(path => /(?:tests|fixtures|\.test\.)/.test(path))).toBe(false);
+    for (const entry of ["background", "content"]) {
+      const bundle = read(`dist/${entry}.js`);
+      expect(bundle).not.toContain("fixture-relay");
+      expect(bundle).not.toContain("page_relays_marker_unique_wrong_window");
+      expect(bundle).not.toContain("privateActionShim");
     }
   });
 });
