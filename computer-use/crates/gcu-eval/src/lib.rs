@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod ab;
 mod access;
 pub mod browser;
 #[path = "../../../bench/mod.rs"]
@@ -41,7 +42,8 @@ pub use report::{escape_html, render_html, trials_from_summary, write_reports, R
 pub use runner::{
     block_on, bundled_tasks_dir, child_env_keys, host_platform, parse_approval, path_under_configs,
     run_tasks, user_config_dirs, ApprovalMode, DesktopProvider, EnvProvider, LocalTempProvider,
-    Provision, RunConfig, RunStatus, SuiteReport, TaskMetrics, TaskOutcome, DESKTOP_NOT_RUN,
+    Provision, RoundsSource, RunConfig, RunStatus, SuiteReport, TaskMetrics, TaskOutcome,
+    DESKTOP_NOT_RUN,
 };
 pub use tasks::{load_tasks, Task};
 

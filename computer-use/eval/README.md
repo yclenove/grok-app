@@ -64,3 +64,20 @@ cargo run -p gcu-eval -- --suite core
 ```
 
 `--env desktop` does not start the local provider. Reports are written only when `--out` is set, and they omit prompts and fixture payloads.
+
+## Core efficiency A/B
+
+Group A uses the existing `gcu mcp --profile minimal` surface: nine single-step tools, no batch, and no script. The harness records the client policy `include_screenshot: true` and `diff: full_each_step` (end the turn between actions, so each delivery stays full). Group B uses `--profile full`, `include_screenshot: "auto"`, and `diff: within_turn`, and it requests batch and script only through that profile. Script stays unregistered unless the existing Unix `script` feature and runner are already present. This command does not add a Host or ACP method, does not relax a safety check, and does not change the screenshot schema default.
+
+```bash
+cargo run -p gcu-eval -- --suite core --ab
+cargo run -p gcu-eval -- --suite core --ab --ab-report path/to/report.json --out path/to/review
+```
+
+Without `--grok`, or with `--env desktop`, every core task is `not_run` on both arms for three repeats. That is not a pass: the process prints `core_ab rollback` and exits 1. `--suite browser --ab` is a different experiment and still exits 1 when no collector bundle is present. `--ab` with any other suite is a usage error (exit 2). `--ab` conflicts with `--compare`, `--release-gate`, `--soak-hours`, and `--tasks`.
+
+Success is the external oracle. A client that says it finished does not count as success. Round trips come from the transcript `turns` field when that field is present, and otherwise from the runner tool-log count of computer-use invocations. Input and output tokens are transcript fields. A missing field is `unavailable`. Tool-result bytes are a separate observation and are never stored as tokens.
+
+The decision passes only when B's success rate is at least A's, the median round-trip drop is at least 30 percent, the median input-token drop is at least 30 percent, and red-team violations are zero. A missing token makes the token gate `not_evaluable`, which is not a pass. Any failed or non-evaluable gate concludes "roll back the current defaults" and the report states the reason. `applies_defaults` is always false: the process does not edit product settings.
+
+`--out` writes `<date>-<platform>-<model>.json` and `.md`. A synthetic report adds the prefix `synthetic-`. `eval/reports/synthetic-1970-01-01-linux-none.json` and the matching `.md` are a synthetic shell, not a measured run, and the decision is rollback. Reports omit screenshots, cache totals, and environment accounting. A real model run is a separate decision and needs a one-shot desktop with no user-directory mount and no credentials. The ordinary `--suite core` command without `--ab` still exits 0 when every row is `not_run`.
