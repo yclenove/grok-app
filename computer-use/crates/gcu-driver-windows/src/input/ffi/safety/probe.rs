@@ -42,6 +42,8 @@ impl Sender {
                         dispatched: false,
                         generation: job.generation,
                         action: job.action,
+                        coalesced: false,
+                        packet: None,
                     };
                     let mouse = if job.action {
                         hook_probe::dispatch_for_action(&mut api, request.mode, &idle)
@@ -52,7 +54,9 @@ impl Sender {
                     // A refused or changed-cursor probe never submits extra input.
                     // The initial idle sample preceded all probe input, including
                     // our key-up. Subsequent own injections preserve that marker.
-                    let keyboard = if mouse
+                    let keyboard = if api.coalesced {
+                        api.keyboard_dispatch()
+                    } else if mouse
                         .as_ref()
                         .is_ok_and(|r| r.0 == request.mode.requested())
                         && api.authorized()
@@ -60,17 +64,8 @@ impl Sender {
                         send(
                             &events,
                             "hook_keyboard_dispatch",
-                            &[INPUT {
-                                r#type: INPUT_KEYBOARD,
-                                Anonymous: INPUT_0 {
-                                    ki: KEYBDINPUT {
-                                        wVk: VK_F24,
-                                        dwFlags: KEYEVENTF_KEYUP,
-                                        dwExtraInfo: request.tag,
-                                        ..Default::default()
-                                    },
-                                },
-                            }],
+                            &[keyboard_up(request.tag)],
+                            "keyup",
                         )
                     } else {
                         (0, 0, 0)
@@ -150,14 +145,19 @@ impl Sender {
                 let (generation, action, floor) = context.events.admission_window();
                 adopt(self, context, generation, floor);
                 let mouse = context.mouse_proof.proven();
+                let keyboard = hook_probe::keyboard_stamp_for_mouse(
+                    context.mouse_proof.proven_tag(),
+                    context.keyboard,
+                );
                 // Stored stamps belong to self.generation. A retired cycle is not a removal.
+                // A keyboard stamp from the next attempt is not paired with the previous mouse.
                 if self.generation >= floor
                     && generation == self.generation
                     && (action || generation == 0)
                 {
                     context.events.confirm_hook_proofs(
                         self.generation,
-                        context.keyboard,
+                        keyboard,
                         mouse,
                     )?;
                     if context.events.available() && !action {
@@ -175,13 +175,29 @@ impl Sender {
                     context.keyboard_probe_flags, context.mouse_probe_flags,
                     context.last_keyboard_flags, context.last_mouse_flags, self.attempted.len(),
                 ));
-                let preparing_with_mouse = action && !context.events.injecting()
-                    && context.mouse_proof.proven().is_some();
-                if !self.pending && context.events.probes_permitted() && (action || (generation == 0 && !self.initial_finished))
-                    && !preparing_with_mouse
-                {
+                let dispatch = if action {
+                    crate::input::hotkey::should_dispatch_action_probe(
+                        self.pending,
+                        mouse.is_some(),
+                        context.events.injecting(),
+                    )
+                } else {
+                    !self.pending && generation == 0 && !self.initial_finished
+                };
+                if dispatch && context.events.probes_permitted() {
                     if let Some(request) = context.mouse_proof.next() {
                         context.keyboard = None;
+                        if action && mouse.is_some() {
+                            let age_ms = context
+                                .events
+                                .clock()
+                                .lease_age()
+                                .map(|age| age.as_millis())
+                                .unwrap_or(0);
+                            context
+                                .events
+                                .probe_trace("hook_probe_renew", format!("lease_age_ms={age_ms}"));
+                        }
                         context.events.probe_dispatch(true);
                         self.request.try_send(Job { request, generation, action })
                             .map_err(|e| format!("hook probe submission: {e}"))?;
@@ -203,6 +219,9 @@ struct NativeMouse<'a> {
     dispatched: bool,
     generation: u64,
     action: bool,
+    /// Action probes carry the F24 key-up in the same SendInput as the mouse.
+    coalesced: bool,
+    packet: Option<(Dispatch, u32)>,
 }
 fn adopt(sender: &mut Sender, context: &mut Context, generation: u64, floor: u64) {
     if sender.pending || (sender.generation == generation && sender.generation >= floor) {
@@ -215,7 +234,27 @@ fn adopt(sender: &mut Sender, context: &mut Context, generation: u64, floor: u64
     context.mouse_proof.begin_cycle(true);
     context.keyboard = None;
 }
+fn keyboard_up(tag: usize) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_F24,
+                dwFlags: KEYEVENTF_KEYUP,
+                dwExtraInfo: tag,
+                ..Default::default()
+            },
+        },
+    }
+}
 impl NativeMouse<'_> {
+    fn keyboard_dispatch(&self) -> Dispatch {
+        let Some((result, mouse_count)) = self.packet else {
+            return (0, 0, 0);
+        };
+        let sent = u32::from(result.0 > mouse_count);
+        (sent, result.1, result.2)
+    }
     fn authorized(&self) -> bool {
         let (generation, active, floor) = self.events.admission_window();
         generation == self.generation
@@ -255,23 +294,44 @@ impl MouseProbeApi for NativeMouse<'_> {
         if !self.authorized() {
             return Err("probe window ended before dispatch".into());
         }
-        let inputs = match absolute {
+        let mut inputs = match absolute {
             Some(at) => mouse::absolute(self.tag, at),
             None => mouse::inputs(mode, self.tag)?,
         };
+        let mouse_count = inputs.len() as u32;
+        // One packet: the hook pump delivers both callbacks before SendInput
+        // returns, instead of sleeping another POLL_INTERVAL between them.
+        if self.action && mouse_count == 1 && self.authorized() {
+            inputs.push(keyboard_up(self.tag));
+            self.coalesced = true;
+        }
         self.dispatched = true;
-        let result = send(self.events, "hook_mouse_dispatch", &inputs);
+        let packet = if self.coalesced {
+            "mouse+keyup"
+        } else {
+            "mouse"
+        };
+        let result = send(self.events, "hook_mouse_dispatch", &inputs, packet);
+        self.packet = Some((result, mouse_count));
+        let result = (result.0.min(mouse_count), result.1, result.2);
         #[cfg(any(test, all(feature = "test-worker-faults", debug_assertions)))]
         if mode == MouseProbe::XButtonPair && result.0 == 1 {
             // Partial debug-only XDOWN needs exactly one matching XUP.
-            if send(self.events, "hook_mouse_partial_release", &inputs[1..]).0 != 1 {
+            if send(
+                self.events,
+                "hook_mouse_partial_release",
+                &inputs[1..],
+                "release",
+            )
+            .0 != 1
+            {
                 return Err("partial mouse probe button release failed".into());
             }
         }
         Ok(result)
     }
 }
-fn send(events: &GuardEvents, stage: &'static str, inputs: &[INPUT]) -> Dispatch {
+fn send(events: &GuardEvents, stage: &'static str, inputs: &[INPUT], packet: &str) -> Dispatch {
     events.startup_progress(stage, "SendInput pending; Win32 result unobserved");
     let started = Instant::now();
     // SAFETY: initialized up/zero/checked absolute or opted-in debug records.
@@ -286,6 +346,14 @@ fn send(events: &GuardEvents, stage: &'static str, inputs: &[INPUT]) -> Dispatch
         stage,
         format!(
             "sent={sent}/{}; Win32={code}; elapsed_ms={elapsed}; UIPI cause not inferred",
+            inputs.len()
+        ),
+    );
+    // Visible after arm. Counts and duration only; no coordinates or key payload.
+    events.probe_trace(
+        stage,
+        format!(
+            "call_ms={elapsed}; sent={sent}/{}; packet={packet}",
             inputs.len()
         ),
     );

@@ -2,6 +2,8 @@
 pub(crate) mod clipboard;
 mod native;
 mod safety;
+#[cfg(windows)]
+pub(crate) use safety::wait_for_messages;
 mod sample;
 use super::{api::*, ledger::InputLedger};
 use crate::{

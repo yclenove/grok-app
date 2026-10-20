@@ -1,6 +1,7 @@
 //! Controlled listener fixture; never spawns threads or consults wall time.
 use super::*;
 use std::sync::{atomic::AtomicUsize, Weak};
+use std::time::Duration;
 
 struct ManualTime(Mutex<Instant>);
 impl Default for ManualTime {
@@ -30,6 +31,17 @@ struct FakeState {
     replaced: Mutex<Option<Instant>>,
     hooks_removed: AtomicBool,
     registered: Mutex<Option<HotkeyConfig>>,
+    /// Mouse callback delay, then keyboard delay after that. `None` confirms both at `now`.
+    latency: Mutex<Option<(Duration, Duration)>>,
+    probes: Mutex<ProbeRuntime>,
+}
+#[derive(Default)]
+struct ProbeRuntime {
+    /// Callback instants for the in-flight pair. Keyboard is strictly after mouse.
+    inflight: Option<(Instant, Instant)>,
+    /// Pair finished on an earlier poll. Applied on the next poll, matching a
+    /// report that arrives after the hook has already been observed.
+    queued: Option<(Instant, Instant)>,
 }
 impl FakeSafetyApi {
     /// Start one controlled listener with the same health checks and Stop
@@ -95,7 +107,11 @@ impl FakeSafetyApi {
             self.0.replacements.fetch_add(1, Ordering::AcqRel);
             *replaced = Some(at);
         }
-        if !self.0.hooks_removed.load(Ordering::Acquire) {
+        if let Some((mouse, keyboard)) = *self.0.latency.lock().unwrap_or_else(|p| p.into_inner()) {
+            if events.action_open() {
+                self.poll_serial(&events, at, mouse, keyboard);
+            }
+        } else if !self.0.hooks_removed.load(Ordering::Acquire) {
             let cycle = events.foreground_cycle();
             if let Err(reason) = events.confirm_hook_proofs(cycle, Some(at), Some(at)) {
                 events.fail(reason);
@@ -135,6 +151,52 @@ impl FakeSafetyApi {
     pub fn trigger(&self) {
         if let Some(events) = self.events() {
             events.request_stop();
+        }
+    }
+    /// Serial probe callbacks for one action window. Zero keeps the instant pair.
+    /// The keyboard callback is `mouse + keyboard` after the probe is submitted.
+    pub fn set_serial_probe_delay(&self, mouse: Duration, keyboard: Duration) {
+        *self.0.latency.lock().unwrap_or_else(|p| p.into_inner()) = Some((mouse, keyboard));
+    }
+    fn poll_serial(&self, events: &GuardEvents, now: Instant, mouse: Duration, keyboard: Duration) {
+        if self.0.hooks_removed.load(Ordering::Acquire) {
+            return;
+        }
+        let apply = {
+            let mut probes = self.0.probes.lock().unwrap_or_else(|p| p.into_inner());
+            let apply = probes.queued.take();
+            if let Some((mouse_due, keyboard_due)) = probes.inflight {
+                if now >= keyboard_due {
+                    probes.queued = Some((mouse_due, keyboard_due));
+                    probes.inflight = None;
+                }
+            }
+            apply
+        };
+        if let Some((mouse_at, keyboard_at)) = apply {
+            let cycle = events.foreground_cycle();
+            if let Err(reason) =
+                events.confirm_hook_proofs(cycle, Some(keyboard_at), Some(mouse_at))
+            {
+                events.fail(reason);
+                return;
+            }
+        }
+        let pending = {
+            let probes = self.0.probes.lock().unwrap_or_else(|p| p.into_inner());
+            probes.inflight.is_some() || probes.queued.is_some()
+        };
+        if events.action_open()
+            && super::should_dispatch_action_probe(
+                pending,
+                events.clock().available(),
+                events.injecting(),
+            )
+        {
+            let mut probes = self.0.probes.lock().unwrap_or_else(|p| p.into_inner());
+            if probes.inflight.is_none() && probes.queued.is_none() {
+                probes.inflight = Some((now + mouse, now + mouse + keyboard));
+            }
         }
     }
     /// Number of action preparation cycles (inner checks never request one).

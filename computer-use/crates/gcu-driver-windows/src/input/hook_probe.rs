@@ -188,6 +188,7 @@ pub(crate) struct MouseProof {
     serial: usize,
     active: Option<Attempt>,
     proven: Option<Instant>,
+    proven_tag: Option<usize>,
     failed: bool,
     action: bool,
 }
@@ -201,6 +202,7 @@ impl MouseProof {
             serial: PROBE_TAG,
             active: None,
             proven: None,
+            proven_tag: None,
             failed: false,
             action: false,
         }
@@ -211,6 +213,7 @@ impl MouseProof {
         self.index = 0;
         self.active = None;
         self.proven = None;
+        self.proven_tag = None;
         self.failed = false;
     }
     pub(crate) fn tagged(&self, tag: usize) -> bool {
@@ -277,12 +280,15 @@ impl MouseProof {
         {
             self.failed = true;
             self.proven = None;
+            self.proven_tag = None;
         }
         if flags & 3 != 0 && !self.failed {
+            let tag = active.request.tag;
             active.callback = Some(at);
             if active.complete {
                 self.preferred = Some(active.request.mode);
                 self.proven = Some(at);
+                self.proven_tag = Some(tag);
             }
         }
         true // Tagged callbacks with stripped flags are never physical activity.
@@ -304,13 +310,16 @@ impl MouseProof {
         if result.is_err() {
             self.failed = true;
             self.proven = None;
+            self.proven_tag = None;
         }
         result?;
         if let Some(active) = &mut self.active {
             active.complete = true;
             if let Some(at) = active.callback {
+                let tag = active.request.tag;
                 self.preferred = Some(active.request.mode);
                 self.proven = Some(at);
+                self.proven_tag = Some(tag);
             }
         }
         Ok(())
@@ -318,6 +327,20 @@ impl MouseProof {
     pub(crate) fn proven(&self) -> Option<Instant> {
         self.proven
     }
+    pub(crate) fn proven_tag(&self) -> Option<usize> {
+        self.proven_tag
+    }
+}
+
+/// Keyboard stamp that belongs to the same attempt as `mouse_tag`.
+/// A newer key-up paired with the previous mouse `proven` is not a lease and
+/// not hook removal. The caller leaves that keyboard out of `confirm`.
+pub(crate) fn keyboard_stamp_for_mouse(
+    mouse_tag: Option<usize>,
+    keyboard: Option<(usize, Instant)>,
+) -> Option<Instant> {
+    let (tag, at) = keyboard?;
+    (mouse_tag == Some(tag)).then_some(at)
 }
 
 pub(crate) fn configured_mode(mode: Option<&OsStr>) -> Result<Option<MouseProbe>, String> {
@@ -340,5 +363,19 @@ pub(crate) fn configured_mode(mode: Option<&OsStr>) -> Result<Option<MouseProbe>
     {
         let _ = mode;
         Err("GCU_HOOK_MOUSE_PROBE requires test-worker-faults and debug assertions; foreground disabled".into())
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::keyboard_stamp_for_mouse;
+    use std::time::Instant;
+
+    #[test]
+    fn cross_attempt_keyboard_is_not_part_of_the_mouse_pair() {
+        let at = Instant::now();
+        assert_eq!(keyboard_stamp_for_mouse(Some(1), Some((2, at))), None);
+        assert_eq!(keyboard_stamp_for_mouse(None, Some((2, at))), None);
+        assert_eq!(keyboard_stamp_for_mouse(Some(2), Some((2, at))), Some(at));
     }
 }
