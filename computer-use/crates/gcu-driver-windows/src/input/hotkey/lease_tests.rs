@@ -287,3 +287,70 @@ async fn foreground_proof_without_callbacks_gives_up_within_the_proof_budget() {
     assert!(!guard.is_stopped());
     assert!(guard.transport_healthy());
 }
+
+#[test]
+fn stale_action_proof_during_injection_latches_stop() {
+    let (time, guard) = healthy();
+    let proven = time.now();
+    guard.events.window.lock().unwrap().phase = lease::Phase::Injecting;
+    time.advance(HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+    beat(&guard);
+    let error = guard
+        .events
+        .confirm_hook_proofs(Some(proven), Some(proven))
+        .expect_err("a stale action-period pair is hook removal");
+    assert!(error.contains("possibly silently removed"), "{error}");
+    guard.events.fail(error);
+    assert!(guard.is_stopped());
+    assert!(!guard.available());
+    assert!(guard.events.failed.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn removed_hooks_during_injection_latches_stop() {
+    let api = FakeSafetyApi::default();
+    let guard = api.start(Default::default(), Arc::new(startup::Unstopped));
+    assert!(guard.available());
+    let lease = guard
+        .begin_foreground(
+            &Cancel::default(),
+            tokio::time::Instant::now() + gcu_core::driver::DRIVER_DEADLINE,
+        )
+        .await
+        .expect("fresh transport can enter an action window");
+    assert!(guard.events.injecting());
+    api.remove_hooks();
+    api.advance(HEARTBEAT_TIMEOUT);
+    assert!(
+        !guard.is_stopped(),
+        "exactly HEARTBEAT_TIMEOUT is still inside the lease"
+    );
+    guard.events.heartbeat();
+    guard.events.hotkey_heartbeat();
+    api.advance(Duration::from_millis(1));
+    assert!(guard.is_stopped());
+    assert!(!guard.available());
+    let reason = guard.events.reason.lock().unwrap().clone().unwrap();
+    assert!(reason.contains("during foreground injection"), "{reason}");
+    drop(lease);
+}
+
+#[test]
+fn missing_injection_renewal_latches_at_the_heartbeat_timeout() {
+    let (time, guard) = healthy();
+    guard.events.window.lock().unwrap().phase = lease::Phase::Injecting;
+    time.advance(HEARTBEAT_TIMEOUT);
+    beat(&guard);
+    guard.events.check_health();
+    assert!(
+        !guard.is_stopped(),
+        "exactly HEARTBEAT_TIMEOUT is still inside the lease"
+    );
+    time.advance(Duration::from_millis(1));
+    beat(&guard);
+    guard.events.check_health();
+    assert!(guard.is_stopped());
+    let reason = guard.events.reason.lock().unwrap().clone().unwrap();
+    assert!(reason.contains("during foreground injection"), "{reason}");
+    assert!(!reason.contains("possibly silently removed"), "{reason}");
+}
