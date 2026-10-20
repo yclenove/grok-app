@@ -554,3 +554,37 @@ is not to be raised; the work item (WL2) is to make renewal fit the budget.
 Unchanged and still unexplained: C04 (pixel at grid (7,5): expected [132,140,123], got
 [248,248,248]) and C19 (`fixture HWND PID changed`). Foreground contract cases C06–C22 remain **not_run**
 as evidence of correct behaviour.
+
+## 2026-10-20 re-run after the WL2 fix (same machine, `claudetest`): the lease cascade is gone
+
+`contract-report-20261020-204834.json`, binaries from main `55d0528c` (WL1 + WL2).
+Result: **13 passed, 8 skipped, 1 not_run, 8 failed** (previous run: 6 / 7 / 1 / 16).
+
+| Result | Cases |
+|---|---|
+| passed | C01, C03, C05, C07, C10, C12, C14, C16-BUTTON, C17, C18, C19, C21, C24 |
+| skipped (harness reasons) | C02, C13, C16, C20, C23, C25, C26, C27 |
+| not_run | W-UIPI (needs `GCU_ELEVATED_PID`; no UAC automation) |
+| failed | C04 (pixel at grid (7,5): expected [132,140,123], got [248,248,248]); C06 (`grid pixel coordinate: timeout`, `grid_hit` null); C08 (`Unicode bytes and newline: timeout`); C09 and W-HOTKEY (`external focused_widget: timeout`); C11 (`third popup item missing`); C15 (`drop target: timeout`); C22 (`counter focus click: timeout`) |
+
+What changed (facts from the trace): the `low-level hook probe expired` error and the Stop latch
+no longer appear. The metadata probe trace shows renewals with `lease_age_ms` of about 11–31
+(the lease is 100), `call_ms = 0`, `sent=2/2`, `packet=mouse+keyup`, one round roughly every 30 ms.
+This is the first physical-hardware evidence that the early-renewal change keeps the Stop lease alive
+through a foreground action.
+
+What remains: every failing case needs a real foreground pointer or keyboard effect. The actions ran
+(Stop did not latch) but the fixture's oracle did not observe the expected effect within the timeout.
+In the failing oracle snapshots the fixture's `key_events` array is dominated by `F24 pressed=false`
+entries, one about every 33 ms: the renewal probes' F24 key-ups.
+
+Hypotheses (unverified; two independent analyses are running):
+- H1: the continuous same-position absolute mouse move of the renewal probe can race with the action's
+  own pointer input and drag the cursor back to a stale position;
+- H2: the F24 key-ups fill the fixture's key-event buffer and hide real key events (C08/C09/W-HOTKEY);
+- H3: display layout (a monitor left of the primary; other sessions read the cursor at x = -40) explains
+  C04 and perhaps coordinate-dependent cases;
+- H4: the fixture window did not hold foreground focus.
+
+Foreground contract cases other than the passing ones above remain **not_run** as evidence of
+correct behaviour; C04 and C19-era display questions are not resolved.
