@@ -10,6 +10,8 @@ pub mod foreground;
 mod hook_probe;
 pub mod hooks;
 pub mod hotkey;
+#[cfg(test)]
+mod injection;
 pub mod ledger;
 pub mod messages;
 mod plan;
