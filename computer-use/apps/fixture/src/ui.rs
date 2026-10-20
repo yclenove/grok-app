@@ -448,8 +448,16 @@ impl FixtureApp {
             let total_w = cell_w * CANVAS_GRID_COLS as f32;
             let total_h = cell_h * CANVAS_GRID_ROWS as f32;
 
-            let (canvas_rect, canvas_res) =
-                ui.allocate_exact_size(egui::vec2(total_w, total_h), egui::Sense::click());
+            // `columns` is cross-justified, so `allocate_exact_size` paints 320×240
+            // but AccessKit publishes `Response::rect` at the full column width
+            // (~402). C04 samples that frame; Linux clicks 40px cells from its
+            // origin. `allocate_rect` keeps the node, the paint, and the hit
+            // target on the same 8×40 by 6×40 rectangle.
+            let canvas_res = ui.allocate_rect(
+                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(total_w, total_h)),
+                egui::Sense::click(),
+            );
+            let canvas_rect = canvas_res.rect;
 
             // Single accessible widget info: Image role, no sub-nodes.
             canvas_res.widget_info(|| {
