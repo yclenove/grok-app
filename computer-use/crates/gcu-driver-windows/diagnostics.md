@@ -492,26 +492,37 @@ maintainer's run; the output text was read by the orchestrator, not re-run.
 | failed, `unresolved Stop listener failure … foreground=unavailable` | C08, C09, C11, C15, C20, C22, W-HOTKEY |
 | failed, other | C04 (pixel at grid (7,5): expected [132,140,123], got [248,248,248]); C19 (`fixture HWND PID changed`) |
 
-**What the trace shows (facts):**
-- Startup: the initial unsolicited absolute-move probe was **not sent**: `initial input idle
-  unknown/below 2000ms` (the run started right after typing the command). By design this does not
-  latch Stop; the foreground action-time proof is supposed to run instead.
-- The first foreground action (C06) reports `hook_SendInput = 8041 ms`, `hook_keyboard_dispatch =
-  8041 ms`, `hook_mouse_dispatch = 8021 ms` and ends `operation cancelled (maybe_executed=true)`.
-- Later cases' doctor lines carry `Stop latched; trusted Host resume required`, so the remaining
-  foreground cases failed closed after that latch. (The case ordering and the latch are consistent;
-  we have not isolated the exact moment of the latch.)
+**What the trace shows (facts, corrected after reading the full trace and a `SendInput` timing):**
+- The `native_parent_timings` values such as `hook_SendInput = 8041` are **timestamps in
+  milliseconds since listener startup, not durations**. The trace line for each probe says
+  `SendInput … elapsed_ms=20`. An earlier version of this note called this "an 8 s SendInput
+  stall"; that reading was wrong. A plain `SendInput` timing script on the same account
+  (no hook of ours installed) gave median 0 ms, max 2 ms (mouse) and 0 ms (key), so no
+  third-party input hook slows `SendInput` here.
+- At startup the initial unsolicited absolute-move probe was **not sent** (`initial input
+  idle unknown/below 2000ms`, the run started right after typing the command). It was dispatched
+  later, at t = 8.000 s (mouse) and 8.021 s (keyboard), i.e. exactly when the first foreground
+  action C06 began (`rpc_perform` starts at about t = 8.041 s).
+- Immediately afterwards the trace reports `stop_listener failed: low-level hook probe expired
+  (possibly silently removed)`, the worker is killed, `rpc_perform` ends `operation cancelled
+  (maybe_executed=true)`, and later doctor lines carry `Stop latched; trusted Host resume
+  required`. The remaining foreground cases then fail closed.
+- The matching code path: `GuardEvents::confirm_hook_proofs` returns that error when the
+  keyboard/mouse callback pair is older than `HEARTBEAT_TIMEOUT` (100 ms, measured from the
+  **older** of the two) while `injecting()` is true. Mouse and keyboard probes are sent
+  sequentially about 20 ms apart, and the pair here landed as an action started.
 
-**What is not established (hypotheses, not findings):**
-- Why a `SendInput` probe took ~8 s. One candidate: other software on this machine installs
-  low-level input hooks at Medium integrity (an IME, a PC-manager tool, desktop automation agents
-  were running in the same session); with an elevated test they are skipped by UIPI, with a
-  Medium test they take part in the hook chain. This is unverified. `D:\cu2\hw\sendinput-latency.ps1`
-  (a plain `SendInput` timing without any hook of ours) is staged to test it.
-- Whether C04 is a display-layout effect (the cursor reads at x = -40, so a monitor sits left of the
-  primary) or a capture bug.
+**Working hypothesis (unverified, to be reproduced in a deterministic test):** a late initial
+probe pair overlapping the start of the first foreground action is judged stale during injection,
+which is treated as a possibly removed hook and latches Stop. If that is right, the false positive
+comes from the interaction between the idle-gated initial cycle and the action-time proof, not
+from the machine. The 100 ms lease constant is not to be changed to make this pass.
 
-**What it means for the product (only what the data supports):** on a machine where `SendInput`
-stalls for seconds, the foreground proof times out and the driver fails closed (Stop latched). That
-is the designed safe behaviour, but it makes foreground control unavailable on such machines, and
-the foreground contract cases C06–C22 remain **not_run** as evidence of correct behaviour.
+**Also unexplained:** C04 (pixel at grid (7,5): expected [132,140,123], got [248,248,248]; the
+cursor reads at x = -40 in the other session, so a monitor sits left of the primary) and C19
+(`fixture HWND PID changed`).
+
+**What it means (only what the data supports):** this is the first foreground action ever run on
+physical hardware with the Stop guard active, and it failed closed in its first second. Until the
+cause is reproduced and resolved, the foreground contract cases C06–C22 remain **not_run** as
+evidence of correct behaviour, and Windows foreground control must not be described as working.
