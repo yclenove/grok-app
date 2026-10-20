@@ -275,6 +275,102 @@ fn modal_open_and_close_preserve_canvas_pixels_and_childless_accessibility_node(
     }
 }
 
+/// Justified columns must not publish a wider `grid_canvas` than the 8×40 by 6×40 paint.
+///
+/// Windows C04 samples `(col + 0.25) * frame.w / 8`. Linux C06 clicks at `40px` cells
+/// from the same origin. Both agree only when the accessible frame is the painted grid.
+#[test]
+fn wide_column_grid_accessible_bounds_match_painted_cells() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = gcu_fixture::ui::FixtureApp::default();
+    // Same inner size as the fixture window. Three columns are then wider than 320.
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 860.));
+    let mut output = None;
+    for i in 0..4 {
+        output = Some(frame(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(i as f64),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        ));
+    }
+    let output = output.expect("layout frame");
+    let update = output.platform_output.accesskit_update.as_ref().unwrap();
+    let canvas = &update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("grid_canvas"))
+        .expect("grid_canvas")
+        .1;
+    assert_eq!(canvas.role(), accesskit::Role::Image);
+    assert!(canvas.children().is_empty());
+    let bounds = canvas.bounds().unwrap();
+    let width = bounds.x1 - bounds.x0;
+    let height = bounds.y1 - bounds.y0;
+    assert_eq!(
+        (width, height),
+        (320.0, 240.0),
+        "accessible grid {bounds:?} is not the painted 8×40 by 6×40 cells"
+    );
+    for (col, row) in [(0i32, 0i32), (2, 3), (7, 5)] {
+        let point = egui::pos2(
+            (bounds.x0 + (f64::from(col) + 0.25) * width / 8.0) as f32,
+            (bounds.y0 + (f64::from(row) + 0.25) * height / 6.0) as f32,
+        );
+        assert!(
+            bounds.x0 <= f64::from(point.x) && f64::from(point.x) < bounds.x1,
+            "C04 sample {point:?} fell outside accessible grid {bounds:?}"
+        );
+        assert_eq!(
+            flat_paint_at(&ctx, output.clone(), point),
+            Some(grid_cell_color(col, row)),
+            "grid ({col},{row}) at {point:?}"
+        );
+    }
+    let hit = egui::pos2(
+        (bounds.x0 + (7.0 + 0.25) * width / 8.0) as f32,
+        (bounds.y0 + (5.0 + 0.25) * height / 6.0) as f32,
+    );
+    // Press and release in one frame. A gap above egui's 0.8s click limit is not a click.
+    let _ = frame(
+        &ctx,
+        egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(4.0),
+            events: vec![
+                egui::Event::PointerMoved(hit),
+                egui::Event::PointerButton {
+                    pos: hit,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: hit,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        },
+        |ui| app.render(ui),
+    );
+    assert_eq!(app.state.grid_hit, Some((7, 5)));
+}
+
+fn grid_cell_color(col: i32, row: i32) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        ((col * 31 + 45) % 180 + 50) as u8,
+        ((row * 41 + 65) % 180 + 50) as u8,
+        (((col + row) * 29 + 85) % 180 + 50) as u8,
+    )
+}
+
 fn flat_paint_at(
     ctx: &egui::Context,
     output: egui::FullOutput,
