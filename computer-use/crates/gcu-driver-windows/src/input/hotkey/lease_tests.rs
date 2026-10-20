@@ -109,9 +109,10 @@ async fn foreground_preparation_without_new_dual_callbacks_never_admits_injectio
     })
     .await;
     assert!(!guard.events.injecting());
+    let cycle = guard.events.foreground_cycle();
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), None)
+        .confirm_hook_proofs(cycle, Some(time.now()), None)
         .unwrap();
     std::future::poll_fn(|cx| {
         assert!(operation.as_mut().poll(cx).is_pending());
@@ -121,7 +122,7 @@ async fn foreground_preparation_without_new_dual_callbacks_never_admits_injectio
     assert!(!guard.events.injecting(), "keyboard alone cannot arm/renew");
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), Some(time.now()))
+        .confirm_hook_proofs(cycle, Some(time.now()), Some(time.now()))
         .unwrap();
     let lease = operation.await.unwrap();
     assert!(guard.events.injecting());
@@ -147,7 +148,7 @@ fn legacy_zero_chain_absolute_callback_four_or_five_pumps_late_expires_before_co
             beat(&guard);
             guard
                 .events
-                .confirm_hook_proofs(Some(time.now()), None)
+                .confirm_hook_proofs(0, Some(time.now()), None)
                 .unwrap();
             guard.events.check_health();
         }
@@ -161,7 +162,7 @@ fn legacy_zero_chain_absolute_callback_four_or_five_pumps_late_expires_before_co
         );
         guard
             .events
-            .confirm_hook_proofs(Some(time.now()), Some(tentative_mouse))
+            .confirm_hook_proofs(0, Some(time.now()), Some(tentative_mouse))
             .unwrap();
         assert!(
             !guard.available(),
@@ -199,9 +200,10 @@ async fn invalid_cursor_proof_before_injection_refuses_without_stop_and_next_act
             assert!(!guard.events.failed.load(Ordering::Acquire));
             guard.events.clock.event(HookEvent::Mouse(0), time.now());
         } else {
+            let cycle = guard.events.foreground_cycle();
             guard
                 .events
-                .confirm_hook_proofs(Some(time.now()), Some(time.now()))
+                .confirm_hook_proofs(cycle, Some(time.now()), Some(time.now()))
                 .unwrap();
             operation.await.unwrap().finish();
         }
@@ -256,14 +258,14 @@ fn keyboard_only_renewal_inflight_cannot_extend_mouse_lease() {
     beat(&guard);
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), Some(mouse))
+        .confirm_hook_proofs(0, Some(time.now()), Some(mouse))
         .unwrap();
     assert!(guard.available());
     time.advance(Duration::from_millis(1));
     beat(&guard);
     assert!(guard
         .events
-        .confirm_hook_proofs(Some(time.now()), Some(mouse))
+        .confirm_hook_proofs(0, Some(time.now()), Some(mouse))
         .is_err());
     guard.events.check_health();
     assert!(guard.is_stopped());
@@ -292,12 +294,17 @@ async fn foreground_proof_without_callbacks_gives_up_within_the_proof_budget() {
 fn stale_action_proof_during_injection_latches_stop() {
     let (time, guard) = healthy();
     let proven = time.now();
-    guard.events.window.lock().unwrap().phase = lease::Phase::Injecting;
+    {
+        let mut window = guard.events.window.lock().unwrap();
+        window.phase = lease::Phase::Injecting;
+        window.generation = 1;
+        window.proof_floor = 1;
+    }
     time.advance(HEARTBEAT_TIMEOUT + Duration::from_millis(1));
     beat(&guard);
     let error = guard
         .events
-        .confirm_hook_proofs(Some(proven), Some(proven))
+        .confirm_hook_proofs(1, Some(proven), Some(proven))
         .expect_err("a stale action-period pair is hook removal");
     assert!(error.contains("possibly silently removed"), "{error}");
     guard.events.fail(error);
@@ -353,4 +360,73 @@ fn missing_injection_renewal_latches_at_the_heartbeat_timeout() {
     let reason = guard.events.reason.lock().unwrap().clone().unwrap();
     assert!(reason.contains("during foreground injection"), "{reason}");
     assert!(!reason.contains("possibly silently removed"), "{reason}");
+}
+
+#[tokio::test]
+async fn late_initial_probe_pair_overlapping_first_foreground_does_not_latch_stop() {
+    use std::{future::Future, task::Poll};
+    let time = Arc::new(ManualTime::default());
+    let guard = SafetyGuard::new(Arc::new(startup::Unstopped), time.clone());
+    // The 8s idle wait is not a startup-stage failure. Pumps stay healthy.
+    guard.events.setup_complete.store(true, Ordering::Release);
+    beat(&guard);
+    let initial_keyboard = time.now();
+    time.advance(Duration::from_secs(8));
+    beat(&guard);
+    guard
+        .events
+        .confirm_hook_proofs(0, Some(time.now()), Some(time.now()))
+        .unwrap();
+    beat(&guard);
+    assert!(guard.available());
+    let cancel = Cancel::default();
+    let operation = guard.begin_foreground(
+        &cancel,
+        tokio::time::Instant::now() + gcu_core::driver::DRIVER_DEADLINE,
+    );
+    tokio::pin!(operation);
+    let admitted = std::future::poll_fn(|cx| Poll::Ready(operation.as_mut().poll(cx))).await;
+    assert!(
+        matches!(admitted, Poll::Pending),
+        "initial cycle must not admit injection"
+    );
+    assert!(!guard.events.injecting());
+    assert!(!guard.is_stopped());
+    assert!(
+        !guard.available(),
+        "initial lease is discarded at begin_foreground"
+    );
+    let initial = guard
+        .events
+        .confirm_hook_proofs(0, Some(initial_keyboard), Some(time.now()));
+    assert!(initial.is_ok(), "{initial:?}");
+    assert!(!guard.available(), "retired cycle must not renew the lease");
+    assert!(!guard.is_stopped());
+    let cycle = guard.events.foreground_cycle();
+    guard
+        .events
+        .confirm_hook_proofs(cycle, Some(time.now()), Some(time.now()))
+        .unwrap();
+    let ready = std::future::poll_fn(|cx| Poll::Ready(operation.as_mut().poll(cx))).await;
+    let lease = match ready {
+        Poll::Ready(Ok(lease)) => lease,
+        Poll::Ready(Err(error)) => panic!("action-cycle proof must admit: {error}"),
+        Poll::Pending => panic!("action-cycle proof must admit"),
+    };
+    assert!(guard.events.injecting() && guard.available() && !guard.is_stopped());
+    // After Injecting. The same pair while still Proving would be Ok without the floor.
+    let overlap = guard
+        .events
+        .confirm_hook_proofs(0, Some(initial_keyboard), Some(time.now()));
+    if let Err(reason) = overlap.clone() {
+        guard.events.fail(reason);
+    }
+    assert!(overlap.is_ok(), "{overlap:?}");
+    assert!(!guard.is_stopped());
+    assert!(!guard.events.failed.load(Ordering::Acquire));
+    assert!(guard.available(), "action lease survives the retired pair");
+    lease.finish();
+    assert!(!guard.events.injecting());
+    assert!(!guard.is_stopped());
+    assert!(!guard.available());
 }

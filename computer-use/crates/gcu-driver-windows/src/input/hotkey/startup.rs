@@ -128,7 +128,7 @@ fn keyboard_proof_without_mouse_callback_cannot_arm_with_healthy_transport() {
     for _ in 0..50 {
         guard
             .events
-            .confirm_hook_proofs(Some(time.now()), None)
+            .confirm_hook_proofs(0, Some(time.now()), None)
             .unwrap();
         guard.events.heartbeat();
         guard.events.hotkey_heartbeat();
@@ -181,7 +181,7 @@ fn switching_probe_kind_arms_only_after_a_fresh_injected_mouse_callback() {
         proof.complete(Ok(())).unwrap();
         guard
             .events
-            .confirm_hook_proofs(Some(time.now()), proof.proven())
+            .confirm_hook_proofs(0, Some(time.now()), proof.proven())
             .unwrap();
         guard.events.heartbeat();
         guard.events.hotkey_heartbeat();
@@ -243,7 +243,7 @@ fn absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs() 
     assert!(proof.idle().allowed());
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), proof.proven())
+        .confirm_hook_proofs(0, Some(time.now()), proof.proven())
         .unwrap();
     guard.events.heartbeat();
     guard.events.hotkey_heartbeat();
@@ -251,12 +251,12 @@ fn absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs() 
     proof.callback(absolute.tag, 1, time.now());
     guard
         .events
-        .confirm_hook_proofs(None, proof.proven())
+        .confirm_hook_proofs(0, None, proof.proven())
         .unwrap();
     assert!(!guard.available(), "mouse proof alone cannot arm the guard");
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), proof.proven())
+        .confirm_hook_proofs(0, Some(time.now()), proof.proven())
         .unwrap();
     assert!(guard.available());
     assert_eq!(guard.activity_clock().ms_since_physical_input(), None);
@@ -270,7 +270,7 @@ fn absolute_idle_gate_cannot_arm_or_renew_stop_without_fresh_dual_hook_proofs() 
     time.advance(watchdog::HEARTBEAT_TIMEOUT + Duration::from_millis(1));
     assert!(guard
         .events
-        .confirm_hook_proofs(Some(time.now()), proof.proven())
+        .confirm_hook_proofs(0, Some(time.now()), proof.proven())
         .is_ok());
     guard.events.check_health();
     assert!(!guard.available());
@@ -294,14 +294,14 @@ fn startup_probe_taking_226ms_succeeds_without_relaxing_armed_health_deadline() 
     // proof must not arm, nor permanently fail a listener still in setup.
     guard
         .events
-        .confirm_hook_proofs(Some(first_keyboard), Some(time.now()))
+        .confirm_hook_proofs(0, Some(first_keyboard), Some(time.now()))
         .unwrap();
     guard.events.heartbeat();
     guard.events.hotkey_heartbeat();
     assert!(!guard.available());
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), Some(time.now()))
+        .confirm_hook_proofs(0, Some(time.now()), Some(time.now()))
         .unwrap();
     guard.events.heartbeat();
     guard.events.hotkey_heartbeat();
@@ -309,7 +309,7 @@ fn startup_probe_taking_226ms_succeeds_without_relaxing_armed_health_deadline() 
     time.advance(watchdog::HEARTBEAT_TIMEOUT + Duration::from_millis(1));
     assert!(guard
         .events
-        .confirm_hook_proofs(Some(first_keyboard), Some(time.now()))
+        .confirm_hook_proofs(0, Some(first_keyboard), Some(time.now()))
         .is_ok());
     guard.events.check_health();
     assert!(!guard.available());
@@ -379,7 +379,7 @@ fn late_startup_proofs_cannot_beat_the_next_watchdog_poll_or_reset_a_stage() {
         .startup_step("late_stage", STARTUP_STEP_TIMEOUT);
     guard
         .events
-        .confirm_hook_proofs(Some(time.now()), Some(time.now()))
+        .confirm_hook_proofs(0, Some(time.now()), Some(time.now()))
         .unwrap();
     guard.events.heartbeat();
     guard.events.hotkey_heartbeat();

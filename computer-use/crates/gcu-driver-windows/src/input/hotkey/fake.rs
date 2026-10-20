@@ -96,7 +96,8 @@ impl FakeSafetyApi {
             *replaced = Some(at);
         }
         if !self.0.hooks_removed.load(Ordering::Acquire) {
-            if let Err(reason) = events.confirm_hook_proofs(Some(at), Some(at)) {
+            let cycle = events.foreground_cycle();
+            if let Err(reason) = events.confirm_hook_proofs(cycle, Some(at), Some(at)) {
                 events.fail(reason);
                 return;
             }
