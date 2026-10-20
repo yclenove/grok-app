@@ -438,3 +438,39 @@ unattended, disposable, unelevated physical-mouse Default desktop:
 - Verify screen saver/lock is not delayed only with explicit consent to adjust
   timeouts on the disposable desktop. Otherwise record GetLastInputInfo only;
   actual screen-saver/lock timing stays unverified.
+
+## 2026-10-20 physical-console contract runs on win-test: not valid product evidence
+
+Two attempts to run the live contract table (`live::live_contract_table_c01_to_c27`, plus the
+mouse-probe and background-probe diagnostics) on the win-test physical console produced **no
+product result**. Both are environment limits, recorded here so nobody reads them as passes or
+as driver failures.
+
+Machine: Windows 11 Home 10.0.26200, 100% scaling, two pointer devices (HID mouse). The console
+user is the built-in **Administrator (RID 500)**, whose token is High integrity even without
+"Run as administrator" (no UAC filtering for the built-in account on Home).
+
+1. **Direct run** (`contract.exe`, unelevated by intent but actually High): all 30 rows
+   `not_run`, reason `elevation required`. This is the driver refusing an elevated engine, as
+   designed; the fixture, worker and hooks were set up before the refusal.
+2. **Run through the repo's de-elevating launcher** (`smoke-windows.ps1 -Suite Contract
+   -NativeDiagnostics`, child at Medium integrity on `WinSta0\Default`): all 30 rows
+   `not_run`, reason `fixture discovery: timeout … permission missing: process token query`
+   (139 attempts over 30s; the window list had 147 entries but resolving the fixture process
+   failed). Smoke scenarios: `scenario not reached`. In the same child, **all 12 mouse probes**
+   (6 kinds × marked/unmarked) reported `sent == requested`, `win32 = 0` and **no hook
+   callback**, with the cursor unchanged. The most likely cause is UIPI: the foreground
+   window was High-integrity (the Administrator console), so injected input from the Medium
+   child was silently dropped. That is a hypothesis, not a measurement.
+
+What this does and does not show:
+- It does **not** show a driver or contract failure: no case reached its assertions.
+- It does **not** change the earlier results (hook_probe product chain passed once on this
+  machine on 2026-10-18).
+- These runs say nothing about the foreground contract cases C06/C08/C09/C11/C15/C20/C22 or
+  W-HOTKEY; they remain **not_run**.
+
+To obtain valid evidence the console must be a **standard, unelevated user** (for example
+`claudetest`, logged in at the console) with no High-integrity window in front, running the
+contract binary directly. The staged binaries and `run-live-std.ps1` live in `D:\cu2\hw`
+on win-test (not in the repository).
