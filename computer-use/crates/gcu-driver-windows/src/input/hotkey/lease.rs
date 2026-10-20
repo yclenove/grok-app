@@ -15,6 +15,8 @@ pub(super) struct Window {
     pub generation: u64,
     pub phase: Phase,
     pub refused: bool,
+    /// Callbacks from an older probe cycle are not a lease and not a fault.
+    pub proof_floor: u64,
 }
 type Recovery = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
@@ -27,6 +29,29 @@ pub(crate) const FOREGROUND_PROOF_BUDGET: Duration = Duration::from_millis(1000)
 impl GuardEvents {
     pub(crate) fn injecting(&self) -> bool {
         self.window.lock().unwrap_or_else(|p| p.into_inner()).phase == Phase::Injecting
+    }
+    pub(crate) fn foreground_cycle(&self) -> u64 {
+        self.window
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .generation
+    }
+    pub(crate) fn accepted_cycle(&self) -> u64 {
+        self.window
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .proof_floor
+    }
+    /// Generation, whether that generation may probe, and the retired-cycle floor.
+    /// One lock: the floor and the generation move together.
+    #[cfg(windows)]
+    pub(crate) fn admission_window(&self) -> (u64, bool, u64) {
+        let window = self.window.lock().unwrap_or_else(|p| p.into_inner());
+        let action = window.phase != Phase::Idle
+            && !window.refused
+            && !self.stopped()
+            && !self.failed.load(Ordering::Acquire);
+        (window.generation, action, window.proof_floor)
     }
     #[cfg(windows)]
     pub(crate) fn probes_permitted(&self) -> bool {
@@ -100,8 +125,11 @@ impl SafetyGuard {
             window.generation = window.generation.wrapping_add(1);
             window.phase = Phase::Proving;
             window.refused = false;
+            // The idle-gated cycle cannot admit or fault this action.
+            window.proof_floor = window.generation;
             window.generation
         };
+        self.events.clock.discard_lease();
         let lease = ForegroundLease {
             guard: self.clone(),
             generation,

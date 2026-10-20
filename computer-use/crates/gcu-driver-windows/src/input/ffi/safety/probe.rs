@@ -125,7 +125,11 @@ impl Sender {
                 self.report = Some(report);
                 CONTEXT.with(|slot| {
                     if let Some(context) = slot.borrow_mut().as_mut() {
-                        if context.events.probe_window().0 == generation {
+                        let floor = context.events.accepted_cycle();
+                        // A late initial report must not complete or refuse the action window.
+                        if generation < floor {
+                            self.initial_finished = true;
+                        } else if context.events.probe_window().0 == generation {
                             if let Err(reason) = context.mouse_proof.complete(success) {
                                 context.events.refuse_proof(reason);
                                 self.initial_finished = true;
@@ -140,16 +144,22 @@ impl Sender {
         }
         CONTEXT.with(|slot| {
             if let Some(context) = slot.borrow_mut().as_mut() {
-                let (generation, action) = context.events.probe_window();
-                if self.generation != generation && !self.pending {
-                    self.generation = generation;
-                    context.mouse_proof.begin_cycle(true);
-                    context.keyboard = None;
-                }
+                let (generation, _, floor) = context.events.admission_window();
+                adopt(self, context, generation, floor);
+                // The first read can precede begin_foreground. Adopt the generation it raised.
+                let (generation, action, floor) = context.events.admission_window();
+                adopt(self, context, generation, floor);
                 let mouse = context.mouse_proof.proven();
-                // Do not confirm completions from an abandoned/previous window.
-                if generation == self.generation && (action || generation == 0) {
-                    context.events.confirm_hook_proofs(context.keyboard, mouse)?;
+                // Stored stamps belong to self.generation. A retired cycle is not a removal.
+                if self.generation >= floor
+                    && generation == self.generation
+                    && (action || generation == 0)
+                {
+                    context.events.confirm_hook_proofs(
+                        self.generation,
+                        context.keyboard,
+                        mouse,
+                    )?;
                     if context.events.available() && !action {
                         self.initial_finished = true;
                     }
@@ -194,10 +204,24 @@ struct NativeMouse<'a> {
     generation: u64,
     action: bool,
 }
+fn adopt(sender: &mut Sender, context: &mut Context, generation: u64, floor: u64) {
+    if sender.pending || (sender.generation == generation && sender.generation >= floor) {
+        return;
+    }
+    if sender.generation < floor {
+        sender.initial_finished = true;
+    }
+    sender.generation = generation;
+    context.mouse_proof.begin_cycle(true);
+    context.keyboard = None;
+}
 impl NativeMouse<'_> {
     fn authorized(&self) -> bool {
-        let (generation, active) = self.events.probe_window();
-        generation == self.generation && (!self.action || active) && self.events.probes_permitted()
+        let (generation, active, floor) = self.events.admission_window();
+        generation == self.generation
+            && self.generation >= floor
+            && (!self.action || active)
+            && self.events.probes_permitted()
     }
 }
 impl MouseProbeApi for NativeMouse<'_> {

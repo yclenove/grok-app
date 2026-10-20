@@ -114,14 +114,19 @@ pub struct GuardEvents {
     signal: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl GuardEvents {
-    /// Accept only a fresh pair of tagged injected hook callbacks. A slow first
-    /// setup probe may be replaced within the startup budget; once armed, the
-    /// same 100ms proof lease applies throughout all input actions.
+    /// Accept a fresh pair from `cycle`. An older cycle, including the initial
+    /// idle-gated probe, neither renews the lease nor reports hook removal.
+    /// A slow first setup probe may still be replaced within the startup budget.
+    /// Once that same cycle is inside an injection, the 100ms bound is unchanged.
     pub fn confirm_hook_proofs(
         &self,
+        cycle: u64,
         keyboard: Option<Instant>,
         mouse: Option<Instant>,
     ) -> std::result::Result<(), String> {
+        if cycle < self.accepted_cycle() {
+            return Ok(());
+        }
         if let (Some(keyboard), Some(mouse)) = (keyboard, mouse) {
             let at = keyboard.min(mouse);
             if self.time.now().saturating_duration_since(at) > watchdog::HEARTBEAT_TIMEOUT {
