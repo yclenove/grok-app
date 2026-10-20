@@ -467,6 +467,7 @@ impl WindowsDriver {
                 && !i.starts_with("injection_lease:")
                 && !i.starts_with("stop_listener_native:")
                 && !i.starts_with("mouse_hook_probe:")
+                && !i.starts_with("hook_probe_trace:")
         });
         if let Some(guard) = &self.safety {
             guard.doctor_issues(issues);

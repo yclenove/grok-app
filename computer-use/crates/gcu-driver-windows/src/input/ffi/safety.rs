@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use windows::Win32::{
     Foundation::{
@@ -28,7 +28,8 @@ mod mouse;
 mod probe;
 struct Context {
     events: Arc<GuardEvents>,
-    keyboard: Option<Instant>,
+    /// Attempt tag plus the callback instant. A newer tag is not the mouse pair.
+    keyboard: Option<(usize, Instant)>,
     mouse_proof: MouseProof,
     keyboard_probe_flags: Option<u32>,
     mouse_probe_flags: Option<u32>,
@@ -165,7 +166,7 @@ fn callback(event: HookEvent, tag: usize) {
                     HookEvent::Keyboard(flags) if context.mouse_proof.tagged(tag) => {
                         context.keyboard_probe_flags = Some(flags);
                         if event.injected() && context.mouse_proof.current_tag() == Some(tag) {
-                            context.keyboard = Some(now);
+                            context.keyboard = Some((tag, now));
                         }
                         true
                     }
@@ -294,6 +295,17 @@ impl HotkeyThread {
 impl Drop for HotkeyThread {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+/// Block until a message is queued or `timeout` elapses. Replaces a blind
+/// sleep on the hook thread: `SendInput` posts the low-level hook message and
+/// otherwise waits out `POLL_INTERVAL`. The timeout stays that same cap.
+pub(crate) fn wait_for_messages(timeout: Duration) {
+    let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(20);
+    // SAFETY: no kernel handles. Wakes this thread for a queued input message,
+    // or when the idle poll cap elapses. Does not extend the 100ms lease.
+    unsafe {
+        let _ = MsgWaitForMultipleObjects(None, false, milliseconds, QS_ALLINPUT);
     }
 }
 fn pump_messages(hotkey: bool, events: Option<&GuardEvents>) -> Result<(), String> {

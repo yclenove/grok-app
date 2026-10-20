@@ -430,3 +430,158 @@ async fn late_initial_probe_pair_overlapping_first_foreground_does_not_latch_sto
     assert!(!guard.is_stopped());
     assert!(!guard.available());
 }
+
+/// Drive `begin_foreground` with the fake's serial probe delay.
+/// The first poll only submits. Mouse and keyboard callbacks are one poll apart,
+/// and the pair is reported on the poll after the keyboard callback.
+async fn admit_serial_pair(
+    api: &FakeSafetyApi,
+    guard: &Arc<SafetyGuard>,
+) -> lease::ForegroundLease {
+    use std::{future::Future, task::Poll};
+    let cancel = Cancel::default();
+    let operation = guard.begin_foreground(
+        &cancel,
+        tokio::time::Instant::now() + gcu_core::driver::DRIVER_DEADLINE,
+    );
+    tokio::pin!(operation);
+    for _ in 0..16 {
+        let polled = std::future::poll_fn(|cx| Poll::Ready(operation.as_mut().poll(cx))).await;
+        match polled {
+            Poll::Ready(Ok(lease)) => return lease,
+            Poll::Ready(Err(error)) => panic!("serial action proof must admit: {error}"),
+            Poll::Pending => {
+                api.advance(Duration::from_millis(20));
+                api.poll();
+            }
+        }
+    }
+    panic!("serial probe pair did not admit");
+}
+
+#[test]
+fn confirmed_pair_dispatches_before_injection_is_visible() {
+    assert!(should_dispatch_action_probe(false, true, false));
+    assert!(should_dispatch_action_probe(false, false, false));
+    assert!(should_dispatch_action_probe(false, true, true));
+    assert!(!should_dispatch_action_probe(true, true, true));
+}
+
+#[tokio::test]
+async fn serial_20ms_probe_pair_survives_a_70ms_injection() {
+    let api = FakeSafetyApi::default();
+    let guard = api.start(Default::default(), Arc::new(startup::Unstopped));
+    assert!(guard.available());
+    api.set_serial_probe_delay(Duration::from_millis(20), Duration::from_millis(20));
+    let lease = admit_serial_pair(&api, &guard).await;
+    let age = guard.events.clock().lease_age().expect("admitted pair");
+    assert!(
+        (Duration::from_millis(20)..=Duration::from_millis(50)).contains(&age),
+        "admission anchor is the earlier callback, not the poll instant: {age:?}"
+    );
+    assert!(guard.events.injecting() && !guard.is_stopped());
+    let mut elapsed = Duration::ZERO;
+    for step in 1..=4 {
+        api.advance(Duration::from_millis(20));
+        assert!(
+            !guard.is_stopped(),
+            "step {step} before poll: {:?}",
+            guard.events.reason.lock().unwrap().clone()
+        );
+        api.poll();
+        assert!(
+            !guard.is_stopped(),
+            "step {step} after poll: {:?}",
+            guard.events.reason.lock().unwrap().clone()
+        );
+        elapsed += Duration::from_millis(20);
+    }
+    assert!(elapsed >= Duration::from_millis(70));
+    assert!(
+        guard.available(),
+        "a renewal pair must have moved the anchor"
+    );
+    assert!(guard.events.injecting());
+    drop(lease);
+}
+
+#[tokio::test]
+async fn delayed_serial_probes_still_latch_when_hooks_are_removed() {
+    let api = FakeSafetyApi::default();
+    let guard = api.start(Default::default(), Arc::new(startup::Unstopped));
+    api.set_serial_probe_delay(Duration::from_millis(20), Duration::from_millis(20));
+    let lease = admit_serial_pair(&api, &guard).await;
+    let age = guard.events.clock().lease_age().expect("admitted pair");
+    api.remove_hooks();
+    api.poll();
+    assert_eq!(
+        guard.events.clock().lease_age(),
+        Some(age),
+        "a removed hook must not apply or refresh the in-flight pair"
+    );
+    assert!(!guard.is_stopped());
+    api.advance(HEARTBEAT_TIMEOUT);
+    assert!(guard.is_stopped());
+    assert!(!guard.available());
+    let reason = guard.events.reason.lock().unwrap().clone().unwrap();
+    assert!(reason.contains("during foreground injection"), "{reason}");
+    assert!(!reason.contains("possibly silently removed"), "{reason}");
+    drop(lease);
+}
+
+#[test]
+fn cross_attempt_pair_would_be_removal_if_confirmed_so_it_is_not_a_pair() {
+    let (time, guard) = healthy();
+    let mouse = time.now();
+    {
+        let mut window = guard.events.window.lock().unwrap();
+        window.phase = lease::Phase::Injecting;
+        window.generation = 1;
+        window.proof_floor = 1;
+    }
+    time.advance(Duration::from_millis(110));
+    beat(&guard);
+    let keyboard = time.now();
+    let error = guard
+        .events
+        .confirm_hook_proofs(1, Some(keyboard), Some(mouse))
+        .expect_err("an old mouse plus a later keyboard is past the heartbeat");
+    assert!(error.contains("possibly silently removed"), "{error}");
+    assert!(
+        !guard.is_stopped(),
+        "confirm's error must not latch until the listener calls fail"
+    );
+    assert_eq!(
+        super::super::hook_probe::keyboard_stamp_for_mouse(Some(1), Some((2, keyboard))),
+        None,
+        "a different attempt tag is not the mouse pair"
+    );
+    guard
+        .events
+        .confirm_hook_proofs(1, None, Some(mouse))
+        .expect("omitting the foreign keyboard is not hook removal");
+    assert!(!guard.is_stopped());
+    assert!(!guard.events.failed.load(Ordering::Acquire));
+}
+
+#[test]
+fn probe_trace_records_after_arm_without_payload() {
+    let (_time, guard) = healthy();
+    guard.events.probe_trace(
+        "hook_mouse_dispatch",
+        "call_ms=2; sent=2/2; packet=mouse+keyup",
+    );
+    let mut issues = Vec::new();
+    guard.doctor_issues(&mut issues);
+    let line = issues
+        .iter()
+        .find(|issue| issue.starts_with("hook_probe_trace:"))
+        .expect("doctor keeps the latest probe trace");
+    assert!(line.contains("hook_mouse_dispatch"));
+    assert!(line.contains("call_ms=2"));
+    assert!(line.contains("packet=mouse+keyup"));
+    assert!(!line.contains("vk") && !line.contains("coord"));
+    assert!(issues
+        .iter()
+        .any(|issue| { issue.starts_with("injection_lease: fresh") && issue.contains("age_ms=") }));
+}

@@ -27,6 +27,7 @@ mod lease_tests;
 #[cfg(test)]
 mod startup;
 pub use fake::FakeSafetyApi;
+pub(crate) use lease::should_dispatch_action_probe;
 
 /// Trusted Host owns and persists this latch. Implementations must be nonblocking;
 /// persistence happens on the Host's independent control task. Driver creation,
@@ -108,6 +109,7 @@ pub struct GuardEvents {
     proof_request: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     reason: Mutex<Option<String>>,
     startup: Mutex<BTreeMap<&'static str, (u64, String)>>,
+    probe_trace: Mutex<Option<String>>,
     startup_started: Instant,
     startup_step: Mutex<Option<(&'static str, Instant, Duration)>>,
     time: Arc<dyn MonotonicTime>,
@@ -175,6 +177,37 @@ impl GuardEvents {
         // Never hold the diagnostic lock across a potentially blocking writer.
         if changed {
             tracing::info!(target: "gcu_windows_timing", stage, phase = "startup", elapsed_ms, reason = %detail);
+        }
+    }
+    /// Action window is open. Portable; the native pump uses the same phase.
+    pub(crate) fn action_open(&self) -> bool {
+        let window = self.window.lock().unwrap_or_else(|p| p.into_inner());
+        window.phase != lease::Phase::Idle
+            && !window.refused
+            && !self.stopped()
+            && !self.failed.load(Ordering::Acquire)
+    }
+    /// Metadata-only probe timing. Still recorded after arm, unlike
+    /// `startup_progress`. No key, coordinate, or text payload.
+    pub fn probe_trace(&self, stage: &'static str, detail: impl Into<String>) {
+        let detail = detail.into();
+        let elapsed_ms = self
+            .time
+            .now()
+            .saturating_duration_since(self.startup_started)
+            .as_millis() as u64;
+        let line = format!("{stage} {elapsed_ms} {detail}");
+        let changed = {
+            let mut slot = self.probe_trace.lock().unwrap_or_else(|p| p.into_inner());
+            if slot.as_deref() == Some(line.as_str()) {
+                false
+            } else {
+                *slot = Some(line);
+                true
+            }
+        };
+        if changed {
+            tracing::info!(target: "gcu_windows_timing", stage, phase = "probe", elapsed_ms, reason = %detail);
         }
     }
     fn startup_snapshot(&self) -> String {
@@ -357,6 +390,11 @@ impl SafetyGuard {
                                 let _ = ready.send(());
                             }
                         }
+                        // Wake when a hook message is queued. Idle still caps at
+                        // POLL_INTERVAL, so the 100ms lease is unchanged.
+                        #[cfg(windows)]
+                        super::ffi::wait_for_messages(POLL_INTERVAL);
+                        #[cfg(not(windows))]
                         std::thread::sleep(POLL_INTERVAL);
                     }
                 }));
@@ -399,6 +437,7 @@ impl SafetyGuard {
             proof_request: Mutex::default(),
             reason: Mutex::default(),
             startup: Mutex::default(),
+            probe_trace: Mutex::default(),
             startup_started,
             startup_step: Mutex::default(),
             time,
@@ -490,14 +529,29 @@ impl SafetyGuard {
                 "unavailable"
             }
         ));
+        let age = self
+            .events
+            .clock
+            .lease_age()
+            .map(|age| format!("; age_ms={}", age.as_millis()))
+            .unwrap_or_default();
         issues.push(format!(
-            "injection_lease: {}",
+            "injection_lease: {}{age}",
             if self.available() {
                 "fresh"
             } else {
                 "not fresh (foreground action requires proof)"
             }
         ));
+        if let Some(line) = self
+            .events
+            .probe_trace
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            issues.push(format!("hook_probe_trace: {line}"));
+        }
         issues.push(format!(
             "stop_hotkey: {}{}",
             if self.transport_healthy() {

@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Flags copied from a low-level hook; no pointer or payload leaves the callback.
@@ -104,6 +104,14 @@ impl PhysicalClock {
     /// Host consumers use SafetyGuard's accessor to check transport as well.
     pub fn ms_since_physical_input(&self) -> Option<u64> {
         self.ms_since_at(self.time.now())
+    }
+    /// Age of the injected lease anchor. `None` when no pair has been confirmed.
+    /// This does not apply the 100ms bound and does not disable the clock.
+    pub(crate) fn lease_age(&self) -> Option<Duration> {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state
+            .confirmed
+            .map(|at| self.time.now().saturating_duration_since(at))
     }
     /// Whether the last dual-hook injected proof is within the 100ms lease.
     pub fn available(&self) -> bool {

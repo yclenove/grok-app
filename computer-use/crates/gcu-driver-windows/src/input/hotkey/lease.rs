@@ -239,3 +239,22 @@ impl Drop for ForegroundLease {
         }
     }
 }
+
+/// Submit another action probe when none is in flight.
+///
+/// `pair_ready && !injecting` used to wait for a later poll. A serial 20ms+20ms
+/// pair then confirms after the 100ms anchor. The confirming poll dispatches
+/// the next pair instead. Pending work is never doubled. The caller still
+/// confirms only one attempt's two stamps, and only while the earlier stamp
+/// is inside the heartbeat. Lives here so the portable fake can run it on
+/// hosts that do not compile the Windows probe module.
+pub(crate) fn should_dispatch_action_probe(
+    probe_pending: bool,
+    pair_ready: bool,
+    injecting: bool,
+) -> bool {
+    match (probe_pending, pair_ready, injecting) {
+        (true, _, _) => false,
+        (false, _, _) => true,
+    }
+}
