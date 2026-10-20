@@ -474,3 +474,44 @@ To obtain valid evidence the console must be a **standard, unelevated user** (fo
 `claudetest`, logged in at the console) with no High-integrity window in front, running the
 contract binary directly. The staged binaries and `run-live-std.ps1` live in `D:\cu2\hw`
 on win-test (not in the repository).
+
+## 2026-10-20 standard-user console run on win-test (first valid desktop evidence)
+
+Same machine (Windows 11 Home 10.0.26200, 100% scaling), logged in at the console as the
+standard user `claudetest` (Medium integrity, unelevated), `contract.exe` run directly with
+`GCU_DESKTOP=1` (`live::live_contract_table_c01_to_c27`, report `contract-report-20261020-135643.json`).
+Result: **6 passed, 7 skipped, 1 not_run, 16 failed** (process exit 101). Reported by the
+maintainer's run; the output text was read by the orchestrator, not re-run.
+
+| Result | Cases |
+|---|---|
+| passed | C01, C03, C05, C17, C21, C24 |
+| skipped (reasons are the harness's own) | C02, C13, C16, C23, C25, C26, C27 |
+| not_run | W-UIPI (needs `GCU_ELEVATED_PID`; no UAC automation) |
+| failed, `operation cancelled` | C06, C07, C10, C12, C14, C16-BUTTON, C18 |
+| failed, `unresolved Stop listener failure … foreground=unavailable` | C08, C09, C11, C15, C20, C22, W-HOTKEY |
+| failed, other | C04 (pixel at grid (7,5): expected [132,140,123], got [248,248,248]); C19 (`fixture HWND PID changed`) |
+
+**What the trace shows (facts):**
+- Startup: the initial unsolicited absolute-move probe was **not sent**: `initial input idle
+  unknown/below 2000ms` (the run started right after typing the command). By design this does not
+  latch Stop; the foreground action-time proof is supposed to run instead.
+- The first foreground action (C06) reports `hook_SendInput = 8041 ms`, `hook_keyboard_dispatch =
+  8041 ms`, `hook_mouse_dispatch = 8021 ms` and ends `operation cancelled (maybe_executed=true)`.
+- Later cases' doctor lines carry `Stop latched; trusted Host resume required`, so the remaining
+  foreground cases failed closed after that latch. (The case ordering and the latch are consistent;
+  we have not isolated the exact moment of the latch.)
+
+**What is not established (hypotheses, not findings):**
+- Why a `SendInput` probe took ~8 s. One candidate: other software on this machine installs
+  low-level input hooks at Medium integrity (an IME, a PC-manager tool, desktop automation agents
+  were running in the same session); with an elevated test they are skipped by UIPI, with a
+  Medium test they take part in the hook chain. This is unverified. `D:\cu2\hw\sendinput-latency.ps1`
+  (a plain `SendInput` timing without any hook of ours) is staged to test it.
+- Whether C04 is a display-layout effect (the cursor reads at x = -40, so a monitor sits left of the
+  primary) or a capture bug.
+
+**What it means for the product (only what the data supports):** on a machine where `SendInput`
+stalls for seconds, the foreground proof times out and the driver fails closed (Stop latched). That
+is the designed safe behaviour, but it makes foreground control unavailable on such machines, and
+the foreground contract cases C06–C22 remain **not_run** as evidence of correct behaviour.
