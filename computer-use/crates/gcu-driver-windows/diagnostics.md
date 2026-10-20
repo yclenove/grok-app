@@ -438,3 +438,91 @@ unattended, disposable, unelevated physical-mouse Default desktop:
 - Verify screen saver/lock is not delayed only with explicit consent to adjust
   timeouts on the disposable desktop. Otherwise record GetLastInputInfo only;
   actual screen-saver/lock timing stays unverified.
+
+## 2026-10-20 physical-console contract runs on win-test: not valid product evidence
+
+Two attempts to run the live contract table (`live::live_contract_table_c01_to_c27`, plus the
+mouse-probe and background-probe diagnostics) on the win-test physical console produced **no
+product result**. Both are environment limits, recorded here so nobody reads them as passes or
+as driver failures.
+
+Machine: Windows 11 Home 10.0.26200, 100% scaling, two pointer devices (HID mouse). The console
+user is the built-in **Administrator (RID 500)**, whose token is High integrity even without
+"Run as administrator" (no UAC filtering for the built-in account on Home).
+
+1. **Direct run** (`contract.exe`, unelevated by intent but actually High): all 30 rows
+   `not_run`, reason `elevation required`. This is the driver refusing an elevated engine, as
+   designed; the fixture, worker and hooks were set up before the refusal.
+2. **Run through the repo's de-elevating launcher** (`smoke-windows.ps1 -Suite Contract
+   -NativeDiagnostics`, child at Medium integrity on `WinSta0\Default`): all 30 rows
+   `not_run`, reason `fixture discovery: timeout … permission missing: process token query`
+   (139 attempts over 30s; the window list had 147 entries but resolving the fixture process
+   failed). Smoke scenarios: `scenario not reached`. In the same child, **all 12 mouse probes**
+   (6 kinds × marked/unmarked) reported `sent == requested`, `win32 = 0` and **no hook
+   callback**, with the cursor unchanged. The most likely cause is UIPI: the foreground
+   window was High-integrity (the Administrator console), so injected input from the Medium
+   child was silently dropped. That is a hypothesis, not a measurement.
+
+What this does and does not show:
+- It does **not** show a driver or contract failure: no case reached its assertions.
+- It does **not** change the earlier results (hook_probe product chain passed once on this
+  machine on 2026-10-18).
+- These runs say nothing about the foreground contract cases C06/C08/C09/C11/C15/C20/C22 or
+  W-HOTKEY; they remain **not_run**.
+
+To obtain valid evidence the console must be a **standard, unelevated user** (for example
+`claudetest`, logged in at the console) with no High-integrity window in front, running the
+contract binary directly. The staged binaries and `run-live-std.ps1` live in `D:\cu2\hw`
+on win-test (not in the repository).
+
+## 2026-10-20 standard-user console run on win-test (first valid desktop evidence)
+
+Same machine (Windows 11 Home 10.0.26200, 100% scaling), logged in at the console as the
+standard user `claudetest` (Medium integrity, unelevated), `contract.exe` run directly with
+`GCU_DESKTOP=1` (`live::live_contract_table_c01_to_c27`, report `contract-report-20261020-135643.json`).
+Result: **6 passed, 7 skipped, 1 not_run, 16 failed** (process exit 101). Reported by the
+maintainer's run; the output text was read by the orchestrator, not re-run.
+
+| Result | Cases |
+|---|---|
+| passed | C01, C03, C05, C17, C21, C24 |
+| skipped (reasons are the harness's own) | C02, C13, C16, C23, C25, C26, C27 |
+| not_run | W-UIPI (needs `GCU_ELEVATED_PID`; no UAC automation) |
+| failed, `operation cancelled` | C06, C07, C10, C12, C14, C16-BUTTON, C18 |
+| failed, `unresolved Stop listener failure … foreground=unavailable` | C08, C09, C11, C15, C20, C22, W-HOTKEY |
+| failed, other | C04 (pixel at grid (7,5): expected [132,140,123], got [248,248,248]); C19 (`fixture HWND PID changed`) |
+
+**What the trace shows (facts, corrected after reading the full trace and a `SendInput` timing):**
+- The `native_parent_timings` values such as `hook_SendInput = 8041` are **timestamps in
+  milliseconds since listener startup, not durations**. The trace line for each probe says
+  `SendInput … elapsed_ms=20`. An earlier version of this note called this "an 8 s SendInput
+  stall"; that reading was wrong. A plain `SendInput` timing script on the same account
+  (no hook of ours installed) gave median 0 ms, max 2 ms (mouse) and 0 ms (key), so no
+  third-party input hook slows `SendInput` here.
+- At startup the initial unsolicited absolute-move probe was **not sent** (`initial input
+  idle unknown/below 2000ms`, the run started right after typing the command). It was dispatched
+  later, at t = 8.000 s (mouse) and 8.021 s (keyboard), i.e. exactly when the first foreground
+  action C06 began (`rpc_perform` starts at about t = 8.041 s).
+- Immediately afterwards the trace reports `stop_listener failed: low-level hook probe expired
+  (possibly silently removed)`, the worker is killed, `rpc_perform` ends `operation cancelled
+  (maybe_executed=true)`, and later doctor lines carry `Stop latched; trusted Host resume
+  required`. The remaining foreground cases then fail closed.
+- The matching code path: `GuardEvents::confirm_hook_proofs` returns that error when the
+  keyboard/mouse callback pair is older than `HEARTBEAT_TIMEOUT` (100 ms, measured from the
+  **older** of the two) while `injecting()` is true. Mouse and keyboard probes are sent
+  sequentially about 20 ms apart, and the pair here landed as an action started.
+
+**Working hypothesis (unverified, to be reproduced in a deterministic test):** a late initial
+probe pair overlapping the start of the first foreground action is judged stale during injection,
+which is treated as a possibly removed hook and latches Stop. If that is right, the false positive
+comes from the interaction between the idle-gated initial cycle and the action-time proof, not
+from the machine. The 100 ms lease constant is not to be changed to make this pass.
+
+**Also unexplained:** C04 (pixel at grid (7,5): expected [132,140,123], got [248,248,248]; the
+cursor reads at x = -40 in the other session, so a monitor sits left of the primary) and C19
+(`fixture HWND PID changed`).
+
+**What it means (only what the data supports):** this is the first foreground action ever run on
+physical hardware with the Stop guard active, and it failed closed in its first second. Until the
+cause is reproduced and resolved, the foreground contract cases C06–C22 remain **not_run** as
+evidence of correct behaviour, and Windows foreground control must not be described as working.
