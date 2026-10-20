@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "suite": "core",
+  "synthetic": true,
+  "provenance": "synthetic",
+  "platform": "linux",
+  "model": "none",
+  "date": "1970-01-01",
+  "effort": "unspecified",
+  "machine": "unspecified",
+  "seed": 1818341383,
+  "rounds_source_note": "Round trips use the client transcript turns field when it is present. Otherwise the count is the runner tool-log tally of computer-use invocations. Missing token fields stay unavailable and are never filled from tool-result bytes.",
+  "arms": {
+    "A": {
+      "profile": "minimal",
+      "screenshot": "true",
+      "diff": "full_each_step",
+      "batch": false,
+      "script_requested": false
+    },
+    "B": {
+      "profile": "full",
+      "screenshot": "auto",
+      "diff": "within_turn",
+      "batch": true,
+      "script_requested": true
+    }
+  },
+  "trials": []
+}

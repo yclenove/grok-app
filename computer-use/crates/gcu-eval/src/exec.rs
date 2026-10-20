@@ -24,7 +24,7 @@ pub(crate) async fn execute(
     outcome.grok_home = env.grok_home.display().to_string();
     outcome.always_approve = true;
     outcome.web_search_disabled = true;
-    if let Err(err) = write_config(env, cfg.gcu_bin.as_deref(), &task.scene) {
+    if let Err(err) = write_config(env, cfg, &task.scene) {
         outcome.status = RunStatus::Invalid;
         outcome.reason = err.to_string();
         return outcome;
@@ -102,12 +102,21 @@ pub(crate) async fn execute(
     let disabled = std::mem::take(&mut outcome.violations);
     outcome.violations = judgment.violations;
     outcome.violations.extend(disabled);
-    outcome.metrics.tokens_in = note.tokens_in;
-    outcome.metrics.tokens_out = note.tokens_out;
+    outcome.metrics.tokens_in = note.tokens_in.unwrap_or(0);
+    outcome.metrics.tokens_in_reported = note.tokens_in.is_some();
+    outcome.metrics.tokens_out = note.tokens_out.unwrap_or(0);
+    outcome.metrics.tokens_out_reported = note.tokens_out.is_some();
     outcome.metrics.images = note.images;
     outcome.metrics.image_bytes = note.image_bytes;
     outcome.metrics.extra_approvals = note.extra_approvals;
     outcome.metrics.steps = note.turns.unwrap_or(outcome.metrics.tool_calls);
+    outcome.metrics.rounds_source = if note.turns.is_some() {
+        crate::RoundsSource::TranscriptTurns
+    } else if outcome.metrics.tool_calls > 0 {
+        crate::RoundsSource::ToolCalls
+    } else {
+        crate::RoundsSource::Unset
+    };
     outcome.metrics.false_success = note.claimed_done && judgment.verdict != Verdict::Pass;
     outcome.status = status_of(timed_out, exit_code, &judgment.verdict, &outcome.violations);
     outcome
@@ -225,16 +234,38 @@ fn child_env(
     map
 }
 
-fn write_config(env: &Environment, gcu: Option<&Path>, scene: &str) -> Result<(), Error> {
+fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), Error> {
     let command = toml_quote(
-        &gcu.map(|path| path.display().to_string())
+        &cfg.gcu_bin
+            .as_ref()
+            .map(|path| path.display().to_string())
             .unwrap_or_default(),
     );
     let scene = toml_quote(scene);
     let disabled = DISABLED.join("\", \"");
-    let body = format!(
-        "[mcp_servers.grok-computer-use]\ncommand = {command}\nargs = [\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}]\nenabled = true\n\n[eval]\ndisabled_tools = [\"{disabled}\"]\n"
+    let profile = cfg
+        .mcp_profile
+        .as_ref()
+        .map(|value| format!(", \"--profile\", {}", toml_quote(value)))
+        .unwrap_or_default();
+    let mut body = format!(
+        "[mcp_servers.grok-computer-use]\ncommand = {command}\nargs = [\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}{profile}]\nenabled = true\n\n[eval]\ndisabled_tools = [\"{disabled}\"]\n"
     );
+    if let Some(arm) = &cfg.arm_label {
+        body.push_str(&format!("arm = {}\n", toml_quote(arm)));
+    }
+    if let Some(shot) = &cfg.arm_screenshot {
+        body.push_str(&format!("screenshot = {}\n", toml_quote(shot)));
+    }
+    if let Some(diff) = &cfg.arm_diff {
+        body.push_str(&format!("diff = {}\n", toml_quote(diff)));
+    }
+    if let Some(batch) = cfg.arm_batch {
+        body.push_str(&format!("batch = {batch}\n"));
+    }
+    if let Some(script) = cfg.arm_script {
+        body.push_str(&format!("script = {script}\n"));
+    }
     std::fs::write(env.grok_home.join("config.toml"), body)
         .map_err(|err| Error::msg(format!("config: {err}")))
 }
@@ -311,8 +342,8 @@ fn read_side(path: &Path) -> (Vec<String>, Vec<String>) {
 
 struct Note {
     claimed_done: bool,
-    tokens_in: u64,
-    tokens_out: u64,
+    tokens_in: Option<u64>,
+    tokens_out: Option<u64>,
     images: u32,
     image_bytes: u64,
     extra_approvals: u64,
@@ -326,8 +357,8 @@ fn read_note(path: &Path) -> Note {
     let Some(value) = value else {
         return Note {
             claimed_done: false,
-            tokens_in: 0,
-            tokens_out: 0,
+            tokens_in: None,
+            tokens_out: None,
             images: 0,
             image_bytes: 0,
             extra_approvals: 0,
@@ -339,8 +370,8 @@ fn read_note(path: &Path) -> Note {
             .get("claimed_done")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
-        tokens_in: num(&value, "tokens_in"),
-        tokens_out: num(&value, "tokens_out"),
+        tokens_in: opt_num(&value, "tokens_in"),
+        tokens_out: opt_num(&value, "tokens_out"),
         images: u32::try_from(num(&value, "images")).unwrap_or(0),
         image_bytes: num(&value, "image_bytes"),
         extra_approvals: num(&value, "extra_approvals"),
@@ -349,13 +380,20 @@ fn read_note(path: &Path) -> Note {
 }
 
 fn num(value: &serde_json::Value, key: &str) -> u64 {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
+    opt_num(value, key).unwrap_or(0)
 }
 
-fn read_calls(path: &Path) -> Vec<(String, String)> {
+fn opt_num(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(serde_json::Value::as_u64)
+}
+
+struct LoggedCall {
+    name: String,
+    result: String,
+    result_bytes: u64,
+}
+
+fn read_calls(path: &Path) -> Vec<LoggedCall> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut calls = Vec::new();
     for line in text.lines() {
@@ -369,20 +407,44 @@ fn read_calls(path: &Path) -> Vec<(String, String)> {
             .get("result")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("ok");
-        calls.push((name.to_string(), result.to_string()));
+        calls.push(LoggedCall {
+            name: name.to_string(),
+            result: result.to_string(),
+            result_bytes: result_bytes(&value),
+        });
     }
     calls
 }
 
-fn fill_calls(outcome: &mut TaskOutcome, calls: &[(String, String)]) {
+fn result_bytes(value: &serde_json::Value) -> u64 {
+    if let Some(bytes) = value
+        .get("result_bytes")
+        .and_then(serde_json::Value::as_u64)
+    {
+        return bytes;
+    }
+    value
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| u64::try_from(text.len()).ok())
+        .unwrap_or(0)
+}
+
+fn fill_calls(outcome: &mut TaskOutcome, calls: &[LoggedCall]) {
     let mut previous = String::new();
-    for (name, result) in calls {
+    for call in calls {
+        let name = &call.name;
+        let result = &call.result;
         outcome.gcu_invocations.push(name.clone());
         if name == "mcp" {
             continue;
         }
         outcome.tool_names.push(name.clone());
         outcome.metrics.tool_calls += 1;
+        outcome.metrics.tool_result_bytes = outcome
+            .metrics
+            .tool_result_bytes
+            .saturating_add(call.result_bytes);
         if name == &previous {
             outcome.metrics.redundant_calls += 1;
         }

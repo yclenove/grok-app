@@ -70,6 +70,12 @@ fn run() -> Result<ExitCode, String> {
             write_transcript(true)?;
             Ok(ExitCode::SUCCESS)
         }
+        "omit_tokens" => {
+            write_pass_state()?;
+            invoke_suite()?;
+            write_transcript_body(true, false)?;
+            Ok(ExitCode::SUCCESS)
+        }
         _ => {
             write_pass_state()?;
             invoke_suite()?;
@@ -121,16 +127,22 @@ fn write_state(bytes: &[u8]) -> Result<(), String> {
 }
 
 fn write_transcript(claimed_done: bool) -> Result<(), String> {
+    write_transcript_body(claimed_done, true)
+}
+
+fn write_transcript_body(claimed_done: bool, tokens: bool) -> Result<(), String> {
     let home = std::env::var("GROK_HOME").map_err(|err| err.to_string())?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "claimed_done": claimed_done,
-        "tokens_in": 12,
-        "tokens_out": 4,
         "images": 0,
         "image_bytes": 0,
         "extra_approvals": 0,
         "turns": 2
     });
+    if tokens {
+        body["tokens_in"] = serde_json::json!(12);
+        body["tokens_out"] = serde_json::json!(4);
+    }
     let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
     std::fs::write(Path::new(&home).join("transcript.json"), bytes).map_err(|err| err.to_string())
 }
@@ -168,6 +180,7 @@ fn write_probe() -> Result<(), String> {
     let argv: Vec<String> = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    let config = config_text();
     let body = serde_json::json!({
         "argv": argv,
         "env_keys": keys,
@@ -175,6 +188,12 @@ fn write_probe() -> Result<(), String> {
         "home": env_text("HOME"),
         "path": env_text("PATH"),
         "approval": env_text("GCU_APPROVAL"),
+        "mcp_profile": flag_value(&config, "--profile"),
+        "arm": quoted_assign(&config, "arm"),
+        "screenshot": quoted_assign(&config, "screenshot"),
+        "diff": quoted_assign(&config, "diff"),
+        "batch": bool_assign(&config, "batch"),
+        "script": bool_assign(&config, "script"),
     });
     let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
     std::fs::write(path, bytes).map_err(|err| err.to_string())
@@ -182,4 +201,61 @@ fn write_probe() -> Result<(), String> {
 
 fn env_text(key: &str) -> String {
     std::env::var(key).unwrap_or_default()
+}
+
+fn config_text() -> String {
+    let Ok(home) = std::env::var("GROK_HOME") else {
+        return String::new();
+    };
+    std::fs::read_to_string(Path::new(&home).join("config.toml")).unwrap_or_default()
+}
+
+fn flag_value(text: &str, flag: &str) -> String {
+    let needle = format!("\"{flag}\", \"");
+    let Some(start) = text.find(&needle) else {
+        return String::new();
+    };
+    take_quoted(&text[start + needle.len()..])
+}
+
+fn quoted_assign(text: &str, key: &str) -> String {
+    let needle = format!("\n{key} = \"");
+    let Some(start) = text.find(&needle) else {
+        return String::new();
+    };
+    take_quoted(&text[start + needle.len()..])
+}
+
+fn take_quoted(rest: &str) -> String {
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in rest.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn bool_assign(text: &str, key: &str) -> Option<bool> {
+    let needle = format!("\n{key} = ");
+    let start = text.find(&needle)? + needle.len();
+    let rest = text[start..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }

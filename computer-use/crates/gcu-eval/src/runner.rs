@@ -71,11 +71,27 @@ impl RunStatus {
     }
 }
 
+/// Where a round-trip count came from. `Unset` means the count is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundsSource {
+    /// The transcript did not report turns and the tool log had no calls.
+    #[default]
+    Unset,
+    /// Client transcript field `turns`.
+    TranscriptTurns,
+    /// Computer-use invocations in the evaluation tool log.
+    ToolCalls,
+}
+
 /// Counts recorded for one task. Arguments and prompts are not stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TaskMetrics {
     /// Model turns, or tool calls when the transcript has no turn count.
     pub steps: u64,
+    /// Which observation filled `steps`. Missing stays [`RoundsSource::Unset`].
+    #[serde(default)]
+    pub rounds_source: RoundsSource,
     /// Computer-use and unknown tool calls.
     pub tool_calls: u64,
     /// Later call in a consecutive pair with the same tool name.
@@ -84,10 +100,21 @@ pub struct TaskMetrics {
     pub unknown_calls: u64,
     /// Wall time from spawn through exit or kill.
     pub duration_ms: u64,
-    /// Input tokens reported by the client transcript.
+    /// Input tokens reported by the client transcript. Zero is a real zero only
+    /// when `tokens_in_reported` is set; a missing field stays zero and unreported.
     pub tokens_in: u64,
+    /// True when the transcript contained `tokens_in`. Never inferred from bytes.
+    #[serde(default)]
+    pub tokens_in_reported: bool,
     /// Output tokens reported by the client transcript.
     pub tokens_out: u64,
+    /// True when the transcript contained `tokens_out`.
+    #[serde(default)]
+    pub tokens_out_reported: bool,
+    /// UTF-8 length of logged tool results, or an explicit `result_bytes` field.
+    /// This is not a token count.
+    #[serde(default)]
+    pub tool_result_bytes: u64,
     /// Images the client reported.
     pub images: u32,
     /// Image bytes the client reported.
@@ -197,6 +224,19 @@ pub struct RunConfig {
     pub include_desktop: bool,
     /// When false, tasks are `not_run` instead of using the local temp provider.
     pub run_local: bool,
+    /// Existing `gcu mcp --profile` value written into the isolated client config.
+    /// `None` omits the flag and leaves the server default.
+    pub mcp_profile: Option<String>,
+    /// Eval-only arm label stored beside the MCP entry. Not a server switch.
+    pub arm_label: Option<String>,
+    /// Client screenshot policy recorded for the arm: `true` or `auto`.
+    pub arm_screenshot: Option<String>,
+    /// Client diff policy recorded for the arm. Not a new server flag.
+    pub arm_diff: Option<String>,
+    /// Whether the arm requests `computer_batch` through the profile.
+    pub arm_batch: Option<bool>,
+    /// Whether the arm requests `computer_script` through the full profile.
+    pub arm_script: Option<bool>,
 }
 
 impl Default for RunConfig {
@@ -216,6 +256,12 @@ impl Default for RunConfig {
             auto_approve: false,
             include_desktop: true,
             run_local: true,
+            mcp_profile: None,
+            arm_label: None,
+            arm_screenshot: None,
+            arm_diff: None,
+            arm_batch: None,
+            arm_script: None,
         }
     }
 }

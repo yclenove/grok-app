@@ -97,7 +97,13 @@ fn dispatch() -> Result<u8, Stop> {
         ));
     }
     if cli.ab {
-        return browser_ab(&cli);
+        return match cli.suite.as_str() {
+            "browser" => browser_ab(&cli),
+            "core" => core_ab(&cli),
+            _ => Err(Stop::Usage(
+                "--ab supports --suite core or --suite browser".into(),
+            )),
+        };
     }
     if cli.suite == "browser" {
         return Err(Stop::Usage("browser suite requires --ab".into()));
@@ -127,13 +133,7 @@ fn dispatch() -> Result<u8, Stop> {
         .ok_or_else(|| Stop::Usage("task directory not found; pass --tasks".into()))?;
     let mut tasks = load_tasks(&tasks_dir).map_err(|err| Stop::Run(err.into()))?;
     tasks.retain(|task| task.suites.iter().any(|suite| suite == &cli.suite));
-    let platform = if cli.platform == "host" {
-        host_platform().to_string()
-    } else if matches!(cli.platform.as_str(), "linux" | "macos" | "windows") {
-        cli.platform.clone()
-    } else {
-        return Err(Stop::Usage(format!("unknown platform {}", cli.platform)));
-    };
+    let platform = platform_label(&cli)?;
     let cfg = RunConfig {
         grok_bin: cli.grok.clone(),
         gcu_bin: cli.gcu.clone(),
@@ -156,6 +156,109 @@ fn dispatch() -> Result<u8, Stop> {
         write_reports(dir, &report).map_err(|err| Stop::Run(err.into()))?;
     }
     Ok(exit_code(&report, cli.allow_fail))
+}
+
+fn platform_label(cli: &Cli) -> Result<String, Stop> {
+    if cli.platform == "host" {
+        Ok(host_platform().to_string())
+    } else if matches!(cli.platform.as_str(), "linux" | "macos" | "windows") {
+        Ok(cli.platform.clone())
+    } else {
+        Err(Stop::Usage(format!("unknown platform {}", cli.platform)))
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+fn core_tasks() -> Result<Vec<gcu_eval::Task>, Stop> {
+    let dir = bundled_tasks_dir()
+        .ok_or_else(|| Stop::Usage("bundled core task directory not found".into()))?;
+    let mut tasks = load_tasks(&dir).map_err(|err| Stop::Run(err.into()))?;
+    tasks.retain(|task| task.suites.iter().any(|suite| suite == "core"));
+    if tasks.is_empty() {
+        return Err(Stop::Usage("core suite is empty".into()));
+    }
+    Ok(tasks)
+}
+
+fn core_ab(cli: &Cli) -> Result<u8, Stop> {
+    use gcu_eval::ab::{
+        decide, format_utc_date, not_run_report, parse_report, run_ab, write_reports, Conclusion,
+        ReportId,
+    };
+    let platform = platform_label(cli)?;
+    let id = ReportId {
+        platform,
+        model: cli.model.clone(),
+        date: format_utc_date(unix_now()),
+        effort: "unspecified".into(),
+        machine: "unspecified".into(),
+    };
+    let report = if let Some(path) = &cli.ab_report {
+        let bytes = std::fs::read(path)
+            .map_err(|_| Stop::Usage("could not read core A/B report".into()))?;
+        parse_report(&bytes).map_err(|err| Stop::Run(err.into()))?
+    } else {
+        let run_local = match cli.env.as_str() {
+            "local" => true,
+            "desktop" => false,
+            other => {
+                return Err(Stop::Usage(format!(
+                    "unknown --env {other}; expected local or desktop"
+                )));
+            }
+        };
+        let tasks = core_tasks()?;
+        if cli.grok.is_none() || !run_local {
+            not_run_report(&tasks, &id)
+        } else {
+            let cfg = RunConfig {
+                grok_bin: cli.grok.clone(),
+                gcu_bin: cli.gcu.clone(),
+                model: cli.model.clone(),
+                platform: id.platform.clone(),
+                suite: "core".into(),
+                timeout: cli.timeout_ms.map(Duration::from_millis),
+                behavior: cli.behavior.clone(),
+                auto_approve: cli.auto_approve,
+                include_desktop: false,
+                run_local: true,
+                ..RunConfig::default()
+            };
+            block_on(run_ab(&tasks, &cfg, &id)).map_err(|err| Stop::Run(err.into()))?
+        }
+    };
+    let decision = decide(&report).map_err(|err| Stop::Run(err.into()))?;
+    println!(
+        "core_ab {} success={} rounds={} tokens={} red_team={}",
+        decision.conclusion.as_str(),
+        decision.success.as_str(),
+        decision.rounds.as_str(),
+        decision.tokens_in.as_str(),
+        decision.red_team.as_str()
+    );
+    for reason in &decision.reasons {
+        println!("gate {reason}");
+    }
+    for trial in &report.trials {
+        if trial.status == RunStatus::NotRun {
+            println!(
+                "not_run {} {} {}",
+                trial.task_id,
+                trial.arm.as_str(),
+                trial.repeat
+            );
+        }
+    }
+    if let Some(dir) = &cli.out {
+        write_reports(dir, &report).map_err(|err| Stop::Run(err.into()))?;
+    }
+    Ok(u8::from(decision.conclusion != Conclusion::RecommendB))
 }
 
 fn browser_ab(cli: &Cli) -> Result<u8, Stop> {

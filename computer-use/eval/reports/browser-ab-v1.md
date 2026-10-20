@@ -21,8 +21,10 @@ client, fake driver or resident job. With no matching desktop/browser collector
 bundle it immediately prints `browser_ab not_run ... default=l0` and exits 1.
 This includes passing `--grok`/`--gcu` fake clients: they are never started.
 No native collection adapter is delivered by this card. Ordinary browser-suite
-invocation requires `--ab`; `--ab` requires `--suite browser` and conflicts with
-generic comparison, soak, release-gate and custom-task-directory options.
+invocation requires `--ab`. `--suite browser --ab` stays this path. `--ab` with
+`--suite core` (the default suite) is the core efficiency experiment and does
+not launch a browser. `--ab` conflicts with generic comparison, soak,
+release-gate and custom-task-directory options.
 Do not run real browsers on build8. Real collection needs no user-home mounts,
 no real accounts/credentials, and disabled shell/file/network model tools;
 isolated `GROK_HOME` alone is insufficient. CU auto-approval remains restricted
