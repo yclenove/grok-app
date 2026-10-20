@@ -526,3 +526,31 @@ cursor reads at x = -40 in the other session, so a monitor sits left of the prim
 physical hardware with the Stop guard active, and it failed closed in its first second. Until the
 cause is reproduced and resolved, the foreground contract cases C06–C22 remain **not_run** as
 evidence of correct behaviour, and Windows foreground control must not be described as working.
+
+## 2026-10-20 re-run after the WL1 fix (same machine, `claudetest`): identical outcome
+
+`contract-report-20261020-172403.json`, binaries built from main `879bb8a5` (WL1 merged).
+Result: **6 passed, 7 skipped, 1 not_run, 16 failed**, the same split and the same cases as the
+run before the fix (`…135643`). So the WL1 change did not resolve what happens on this hardware;
+it fixes a different, simulated path (late initial probe pair overlapping the first action).
+
+What the new trace shows for the first foreground action C06 (times are ms since listener startup):
+
+| t (ms) | event |
+|---|---|
+| 7530 | mouse probe `SendInput` starts (takes 20 ms) |
+| 7550 | keyboard probe `SendInput` starts (takes 20 ms) |
+| 7571 | `rpc_perform` starts |
+| ≈7640 | `stop_listener failed: low-level hook probe expired (possibly silently removed)`; worker killed; action ends `operation cancelled (maybe_executed=true)` (`rpc_perform` lasted 72 ms) |
+
+Reading (hypothesis, not yet reproduced deterministically): the action-time proof pair takes about
+40 ms to produce on this hardware (two serial `SendInput` calls of ~20 ms each; the standalone
+`SendInput` timing gave 0 ms without hooks and the mouse-probe matrix 2–5 ms with them, so the
+product path being ~20 ms per probe is itself unexplained). The lease is measured from the older
+stamp of the pair, so by the time the injection has run ~70 ms the 100 ms lease is gone and no
+renewal has arrived. The guard then fails closed and latches Stop, as designed. The 100 ms constant
+is not to be raised; the work item (WL2) is to make renewal fit the budget.
+
+Unchanged and still unexplained: C04 (pixel at grid (7,5): expected [132,140,123], got
+[248,248,248]) and C19 (`fixture HWND PID changed`). Foreground contract cases C06–C22 remain **not_run**
+as evidence of correct behaviour.
