@@ -297,6 +297,27 @@ pub(super) fn inject(inputs: &[INPUT]) -> Result<()> {
     if inputs.is_empty() {
         return Ok(());
     }
+    // Pointer packets share a gate with the heartbeat probe's cursor sample and publish, so a
+    // stale same-position probe move cannot land between this move and a coordinate-less button.
+    // Keyboard and Unicode packets are not gated (long packets must not starve the heartbeat).
+    if inputs.iter().any(|input| input.r#type == INPUT_MOUSE) {
+        return crate::input::hook_probe::with_injection_gate(|| send_input(inputs)).unwrap_or(
+            Err(DriverError::Native {
+                message: "pointer input gate busy; nothing was sent".into(),
+                maybe_executed: false,
+            }),
+        );
+    }
+    send_input(inputs)
+}
+/// Release path (Stop, cleanup): never waits on the gate.
+pub(super) fn inject_release(inputs: &[INPUT]) -> Result<()> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    send_input(inputs)
+}
+fn send_input(inputs: &[INPUT]) -> Result<()> {
     // SAFETY: owned initialized INPUT records, exact cbSize. SendInput is a
     // nonblocking insertion; partial insertion is unknown and never replayed.
     let count = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };

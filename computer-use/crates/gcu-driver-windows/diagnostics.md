@@ -611,4 +611,44 @@ held), then continue unchanged. Background (message) delivery and scroll are unc
 failure was observed for them. Stop-guard semantics and constants are untouched.
 
 Status: unit tests cover the sequence, the dwell and the in-frame offset. Real-hardware effect on the
-contract table (C06, C09, C11, C15, C22, W-HOTKEY) is **not yet measured**.
+contract table was measured afterwards (`contract-out-20261021-191155.txt`): 14 passed / 8 skipped / 1 not_run /
+7 failed, **no improvement**. This experiment explained a scripted-input phenomenon but not the contract
+failures; see the next section for the cause.
+
+## 2026-10-21: the heartbeat probe pulled the cursor back (root cause of the physical pointer failures)
+
+Method: `live::live_click_probe` (ignored, standard user at the console) drives the real driver's foreground
+click from six start positions and records (a) a 2 ms cursor timeline, (b) every low-level mouse event seen by an
+independent `WH_MOUSE_LL` hook in the test process, (c) a control `SendInput` from the test process using the
+driver's own normalization, (d) the worker token (`gcu.exe`: Medium integrity, unrestricted, session 2).
+
+Facts:
+- The control `SendInput` moved the cursor to the target (within 1 px). The worker token matches the fixture's.
+  Neither UIPI nor the normalization formula explains the failures.
+- The driver's own `Move` events were delivered (`flags=0x1` injected, correct coordinates, including the 1 px
+  approach point from the previous experiment). Within the same millisecond an event tagged with the probe
+  `extra` value moved the cursor back to the **old** position. The coordinate-less button down/up were then
+  delivered at the old position: for example, (-2460,100) on the desktop (which made the desktop foreground),
+  or a blank part of the fixture (no event, `event_log` empty, counter unchanged).
+- Cause: the heartbeat probe runs in the host process and reads the cursor, then publishes an absolute move to
+  the position it read. When the action's move lands between the read and the publish, the probe overwrites it.
+  The earlier WL3 gate (a `static Mutex`) could not work: the probe lives in the host, the action's `SendInput`
+  lives in the isolated worker, and a process-local mutex is invisible to the other process.
+
+Change: the pointer gate is a named kernel mutex (`Local\gcu-pointer-gate-<host pid>`; the worker learns the host
+pid from `GCU_HOST_PID`). The probe's read, publish and unchanged-cursor check run inside it, and so does the
+worker's `SendInput` for packets that contain mouse input. The wait is bounded (40 ms, far below the 100 ms
+lease); on timeout the action is refused with nothing sent, or the probe cycle is refused (fail closed).
+Keyboard and Unicode packets are not gated, and the Stop release path never waits on it. No constant changed
+(100 ms heartbeat, 4750 ms, 5 s); proof acceptance is unchanged.
+
+Result with the fix (win-test, `claudetest`):
+- Probe: cursor reached the target and the counter increased from all six starts (`probe-out-20261021-222920.txt`).
+- Contract table (`contract-out-20261021-223157.txt`): **18 passed / 8 skipped / 1 not_run / 3 failed**
+  (before: 14 / 8 / 1 / 7). C06, C09, C11 and C15 now pass. No `listener heartbeat expired`, no
+  `low-level hook probe expired`, no gate-busy refusals, Stop did not latch.
+- Still failing: C08 (Unicode and newline: a different path, F24 key-ups can split surrogate pairs and the
+  newline is not delivered), C22 (`timeout effect at most once`, counter 1), W-HOTKEY (`hotkey failure route:
+  Err(WindowGone)`). They are not explained by this change and remain open.
+- One probe click was recorded by the fixture with source `keyboard` instead of `mouse` (counter still
+  increased); the reason is unknown.

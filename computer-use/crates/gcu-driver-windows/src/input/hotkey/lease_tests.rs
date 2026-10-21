@@ -291,6 +291,78 @@ async fn foreground_proof_without_callbacks_gives_up_within_the_proof_budget() {
 }
 
 #[test]
+fn heartbeat_still_latches_while_injection_gate_is_held() {
+    let (time, guard) = healthy();
+    guard.events.window.lock().unwrap().phase = lease::Phase::Injecting;
+    crate::input::hook_probe::with_injection_gate(|| {
+        time.advance(HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+        beat(&guard);
+        guard.events.check_health();
+    })
+    .unwrap();
+    assert!(
+        guard.is_stopped(),
+        "the gate must not extend the 100ms lease"
+    );
+    let reason = guard.events.reason.lock().unwrap().clone().unwrap();
+    assert!(reason.contains("during foreground injection"), "{reason}");
+    assert!(!reason.contains("possibly silently removed"), "{reason}");
+}
+
+#[test]
+fn stale_proof_still_latches_while_injection_gate_is_held() {
+    let (time, guard) = healthy();
+    let proven = time.now();
+    {
+        let mut window = guard.events.window.lock().unwrap();
+        window.phase = lease::Phase::Injecting;
+        window.generation = 1;
+        window.proof_floor = 1;
+    }
+    crate::input::hook_probe::with_injection_gate(|| {
+        time.advance(HEARTBEAT_TIMEOUT + Duration::from_millis(1));
+        beat(&guard);
+        let error = guard
+            .events
+            .confirm_hook_proofs(1, Some(proven), Some(proven))
+            .expect_err("a stale pair is still hook removal under the gate");
+        assert!(error.contains("possibly silently removed"), "{error}");
+        guard.events.fail(error);
+    })
+    .unwrap();
+    assert!(guard.is_stopped());
+    assert!(guard.events.failed.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn removed_hooks_still_latch_while_injection_gate_is_held() {
+    let api = FakeSafetyApi::default();
+    let guard = api.start(Default::default(), Arc::new(startup::Unstopped));
+    let lease = guard
+        .begin_foreground(
+            &Cancel::default(),
+            tokio::time::Instant::now() + gcu_core::driver::DRIVER_DEADLINE,
+        )
+        .await
+        .expect("fresh transport can enter an action window");
+    crate::input::hook_probe::with_injection_gate(|| {
+        api.remove_hooks();
+        api.advance(HEARTBEAT_TIMEOUT);
+        assert!(
+            !guard.is_stopped(),
+            "exactly 100ms is still inside the lease"
+        );
+        guard.events.heartbeat();
+        guard.events.hotkey_heartbeat();
+        api.advance(Duration::from_millis(1));
+    })
+    .unwrap();
+    assert!(guard.is_stopped(), "removed hooks still latch");
+    assert!(!guard.available());
+    drop(lease);
+}
+
+#[test]
 fn stale_action_proof_during_injection_latches_stop() {
     let (time, guard) = healthy();
     let proven = time.now();

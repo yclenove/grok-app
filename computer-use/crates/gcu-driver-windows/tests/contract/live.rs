@@ -25,6 +25,8 @@ mod safety;
 mod unsafe_activation;
 #[path = "unsafe_background_probe.rs"]
 mod unsafe_background_probe;
+#[path = "unsafe_click_probe.rs"]
+mod unsafe_click_probe;
 #[path = "unsafe_desktop.rs"]
 pub mod unsafe_desktop;
 #[path = "unsafe_foreground.rs"]
@@ -435,4 +437,115 @@ async fn live_contract_table_c01_to_c27() {
         "native contract failures; first cause: {:?}",
         report.first_failure()
     );
+}
+
+/// Measurement only (no verdict): drives the real driver's foreground click and records where the pointer
+/// went, which window sat under it, and whether the fixture counted the click. Run with
+/// `--exact live::live_click_probe` from the standard-user console session.
+#[tokio::test]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only"]
+async fn live_click_probe() {
+    require(
+        std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+        "explicit GCU_DESKTOP=1 required",
+    )
+    .unwrap();
+    let mut fixture = Fixture::start().await.unwrap();
+    let driver = driver().await.unwrap();
+    let win = window(&driver, &fixture).await.unwrap();
+    ready_fixture(&driver, &win, &fixture).await.unwrap();
+    let geometry = driver.window_geometry(&win).await.unwrap();
+    let button = node(&driver, &win, "counter_button").await.unwrap();
+    let at = center(&button).unwrap();
+    let frame = geometry.frame;
+    let target = (
+        (frame.x + at.x).round() as i32,
+        (frame.y + at.y).round() as i32,
+    );
+    progress(format!(
+        "PROBE geometry: frame=({},{} {}x{}) scale={} button_center_in_window=({:.1},{:.1}) expected_screen={:?} fixture_pid={}",
+        frame.x, frame.y, frame.w, frame.h, geometry.scale, at.x, at.y, target, fixture.pid()
+    ));
+    let (left, top) = (frame.x as i32, frame.y as i32);
+    let hooklog = unsafe_click_probe::HookLog::start();
+    progress(format!(
+        "PROBE control (parent process SendInput, driver's formula) to {target:?}: {}",
+        unsafe_click_probe::control_move(target.0, target.1)
+    ));
+    let inspect = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(r"D:\cu2\hw\worker-inspect.ps1")
+        .output();
+    progress(format!(
+        "PROBE worker inspect: {}",
+        inspect
+            .map(|o| String::from_utf8_lossy(&o.stdout).replace('\n', " | "))
+            .unwrap_or_else(|e| e.to_string())
+    ));
+    let starts: Vec<(&str, Option<(i32, i32)>)> = vec![
+        ("A as-is", None),
+        ("B far left monitor", Some((-2460, 100))),
+        ("C title bar left part", Some((left + 120, top + 12))),
+        (
+            "D below window",
+            Some((left + 300, top + frame.h as i32 + 60)),
+        ),
+        (
+            "E inside window blank",
+            Some((left + frame.w as i32 - 120, top + frame.h as i32 - 120)),
+        ),
+        ("F as-is again", None),
+    ];
+    for (name, start) in starts {
+        if let Some((x, y)) = start {
+            unsafe_click_probe::set_cursor(x, y);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let before = unsafe_click_probe::cursor();
+        let counter_before = fixture.read().map(|v| v["counter"].clone());
+        let _ = hooklog.take();
+        let sampler = unsafe_click_probe::Sampler::start();
+        let result = click(&driver, &win, at).await;
+        let timeline = sampler.finish();
+        let seen = hooklog.take();
+        progress(format!(
+            "PROBE {name} mouse events seen by an independent LL hook ({}): {:?}",
+            seen.len(),
+            {
+                // Keep every untagged event; keep tagged heartbeat events only when the position changes.
+                let mut last_pt = String::new();
+                let mut kept = Vec::new();
+                for e in &seen {
+                    let pt = e
+                        .split("pt=")
+                        .nth(1)
+                        .and_then(|r| r.split(' ').next())
+                        .unwrap_or_default()
+                        .to_string();
+                    let tagged = e.contains("extra=1195573");
+                    if !tagged || pt != last_pt {
+                        kept.push(e.as_str());
+                    }
+                    last_pt = pt;
+                }
+                kept.truncate(60);
+                kept
+            }
+        ));
+        let after = unsafe_click_probe::cursor();
+        let under = unsafe_click_probe::under_cursor();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let state = fixture.read();
+        progress(format!(
+            "PROBE {name} cursor timeline (ms,x,y): {timeline:?}"
+        ));
+        progress(format!(
+            "PROBE {name}: result={result:?} cursor {before:?} -> {after:?} (expected {target:?}) under_cursor=[{under}] fg={:?} counter {counter_before:?} -> {:?} events={}",
+            unsafe_foreground::current(),
+            state.as_ref().map(|v| v["counter"].clone()),
+            state.as_ref().map(|v| v["event_log"].to_string()).unwrap_or_default()
+        ));
+    }
+    progress("PROBE DONE");
+    let _ = fixture.stop().await;
 }
