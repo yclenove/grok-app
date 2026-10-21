@@ -185,7 +185,6 @@ pub(super) fn post(target: &Target, event: Event) -> Result<()> {
 }
 pub(super) fn inputs(events: &[Event]) -> Result<Vec<INPUT>> {
     let mut inputs = Vec::new();
-    let mut pending_lf = false;
     for event in events {
         let input = match *event {
             Event::Move(p, _) => {
@@ -250,30 +249,16 @@ pub(super) fn inputs(events: &[Event]) -> Result<Vec<INPUT>> {
                     KEYBD_EVENT_FLAGS(0)
                 },
             ),
-            Event::Unicode(unit, down) => {
-                match crate::input::messages::foreground_send_unit(unit, down, &mut pending_lf) {
-                    Some(crate::input::messages::ForegroundSend::Enter(down)) => keyboard(
-                        0x0d,
-                        0,
-                        if down {
-                            KEYBD_EVENT_FLAGS(0)
-                        } else {
-                            KEYEVENTF_KEYUP
-                        },
-                    ),
-                    Some(crate::input::messages::ForegroundSend::Unicode(unit, down)) => keyboard(
-                        0,
-                        unit,
-                        KEYEVENTF_UNICODE
-                            | if down {
-                                KEYBD_EVENT_FLAGS(0)
-                            } else {
-                                KEYEVENTF_KEYUP
-                            },
-                    ),
-                    None => continue,
-                }
-            }
+            Event::Unicode(unit, down) => keyboard(
+                0,
+                unit,
+                KEYEVENTF_UNICODE
+                    | if down {
+                        KEYBD_EVENT_FLAGS(0)
+                    } else {
+                        KEYEVENTF_KEYUP
+                    },
+            ),
         };
         inputs.push(input);
     }
@@ -312,20 +297,15 @@ pub(super) fn inject(inputs: &[INPUT]) -> Result<()> {
     if inputs.is_empty() {
         return Ok(());
     }
-    // The probe thread blocks here until this packet returns, so its F24 and
-    // absolute move cannot split a surrogate pair or a button down/up.
-    crate::input::hook_probe::with_injection_gate(|| {
-        // SAFETY: owned initialized INPUT records, exact cbSize. SendInput is a
-        // nonblocking insertion; partial insertion is unknown and never replayed.
-        // The low-level hook runs on another thread and does not take this gate.
-        let count = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
-        if count as usize == inputs.len() {
-            Ok(())
-        } else {
-            Err(DriverError::Native {
-                message: "SendInput inserted an incomplete packet".into(),
-                maybe_executed: count != 0,
-            })
-        }
-    })
+    // SAFETY: owned initialized INPUT records, exact cbSize. SendInput is a
+    // nonblocking insertion; partial insertion is unknown and never replayed.
+    let count = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if count as usize == inputs.len() {
+        Ok(())
+    } else {
+        Err(DriverError::Native {
+            message: "SendInput inserted an incomplete packet".into(),
+            maybe_executed: count != 0,
+        })
+    }
 }

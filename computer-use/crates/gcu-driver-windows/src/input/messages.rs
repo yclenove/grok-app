@@ -25,49 +25,6 @@ pub fn ineffective_class(class: &str) -> bool {
     .iter()
     .any(|c| class.eq_ignore_ascii_case(c))
 }
-/// One foreground key the Windows adapter can put in a `SendInput` packet.
-#[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ForegroundSend {
-    /// BMP or surrogate unit via `KEYEVENTF_UNICODE`.
-    Unicode(u16, bool),
-    /// Enter. U+000A/U+000D are not delivered as text to the focused widget.
-    Enter(bool),
-}
-
-/// Map a planned Unicode unit onto foreground `SendInput`.
-///
-/// A line feed in the same packet as a preceding CR is the second half of
-/// CRLF and does not become a second Enter. Any other unit clears that
-/// pending collapse. Surrogate halves stay Unicode so a probe cannot be
-/// required to retarget them.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn foreground_send_unit(
-    unit: u16,
-    down: bool,
-    pending_lf: &mut bool,
-) -> Option<ForegroundSend> {
-    match unit {
-        13 => {
-            if down {
-                *pending_lf = true;
-            }
-            Some(ForegroundSend::Enter(down))
-        }
-        10 if *pending_lf => {
-            if !down {
-                *pending_lf = false;
-            }
-            None
-        }
-        10 => Some(ForegroundSend::Enter(down)),
-        _ => {
-            *pending_lf = false;
-            Some(ForegroundSend::Unicode(unit, down))
-        }
-    }
-}
-
 /// Preserve Unicode scalars and CRLF across packet boundaries; never split a surrogate pair.
 pub fn text_chunks(text: &str) -> Result<Vec<Vec<Event>>> {
     if text.encode_utf16().count() > TEXT_MAX_UNITS {
@@ -209,59 +166,4 @@ pub fn drag_events(path: &[WindowPoint]) -> Result<Vec<Event>> {
         false,
     ));
     Ok(events)
-}
-
-#[cfg(test)]
-mod foreground_send_tests {
-    use super::{foreground_send_unit, text_chunks, ForegroundSend};
-    use crate::input::api::Event;
-
-    fn sent(text: &str) -> Vec<ForegroundSend> {
-        let mut pending = false;
-        let mut out = Vec::new();
-        for packet in text_chunks(text).unwrap() {
-            for event in packet {
-                let Event::Unicode(unit, down) = event else {
-                    continue;
-                };
-                if let Some(item) = foreground_send_unit(unit, down, &mut pending) {
-                    out.push(item);
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn newline_and_crlf_are_one_enter_and_emoji_stays_unicode() {
-        assert_eq!(
-            sent("a\nb"),
-            vec![
-                ForegroundSend::Unicode(u16::from(b'a'), true),
-                ForegroundSend::Unicode(u16::from(b'a'), false),
-                ForegroundSend::Enter(true),
-                ForegroundSend::Enter(false),
-                ForegroundSend::Unicode(u16::from(b'b'), true),
-                ForegroundSend::Unicode(u16::from(b'b'), false),
-            ]
-        );
-        assert_eq!(
-            sent("\r\n"),
-            vec![ForegroundSend::Enter(true), ForegroundSend::Enter(false)]
-        );
-        let woman = '👩';
-        let mut units = [0u16; 2];
-        let encoded = woman.encode_utf16(&mut units);
-        assert_eq!(encoded.len(), 2);
-        let got = sent(&woman.to_string());
-        assert_eq!(
-            got,
-            vec![
-                ForegroundSend::Unicode(encoded[0], true),
-                ForegroundSend::Unicode(encoded[0], false),
-                ForegroundSend::Unicode(encoded[1], true),
-                ForegroundSend::Unicode(encoded[1], false),
-            ]
-        );
-    }
 }
