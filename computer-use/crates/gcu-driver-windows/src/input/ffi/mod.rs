@@ -374,7 +374,7 @@ async fn release_ledger(ledger: Arc<InputLedger>) {
         let _dpi = crate::ffi::DpiContext::new();
         ledger.release(|target, event, delivery| {
             if delivery == Delivery::Foreground {
-                native::inject(&native::inputs(&[event])?)
+                native::inject_release(&native::inputs(&[event])?)
             } else {
                 native::post(target, event)
             }
