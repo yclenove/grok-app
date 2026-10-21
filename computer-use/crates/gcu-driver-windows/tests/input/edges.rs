@@ -139,11 +139,15 @@ async fn drag_interpolation_releases_at_endpoint() {
             }
         })
         .collect();
-    assert_eq!(moves.len(), 11);
-    assert!(moves.windows(2).all(|p| (p[1].x - p[0].x).abs() <= 10.));
+    // One approach move one pixel off the start, then the start and ten interpolated moves.
+    assert_eq!(moves.len(), 12);
+    assert!((moves[0].x - moves[1].x).abs() <= 1. && (moves[0].y - moves[1].y).abs() <= 1.);
+    assert!(moves[1..]
+        .windows(2)
+        .all(|p| (p[1].x - p[0].x).abs() <= 10.));
     assert_eq!(
         state.sent.len(),
-        13,
+        14,
         "no spurious cleanup after acknowledged drag up"
     );
     assert_eq!(

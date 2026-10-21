@@ -588,3 +588,27 @@ Hypotheses (unverified; two independent analyses are running):
 
 Foreground contract cases other than the passing ones above remain **not_run** as evidence of
 correct behaviour; C04 and C19-era display questions are not resolved.
+
+## 2026-10-21: foreground pointer input entering the window from outside (click-matrix2/3/4)
+
+Driver-independent `SendInput` experiments on win-test as `claudetest` (virtual screen x=-2560, w=6000,
+two monitors) against the real egui fixture, counting clicks through the fixture's external state file:
+
+- With the pointer already inside the fixture window, `Move | 40 ms | Down+Up` registers every click.
+- After the pointer visited the title bar, another monitor, or the area below the window, a single
+  absolute move back onto the button followed by two clicks registered **0 of 2**; waiting 300 ms and
+  clicking again in place did not help. UIA `Invoke` kept working, and the foreground and
+  window-under-cursor were the fixture, so the app was alive.
+- A gradual in-window move (11 steps, 15 ms apart) restored clicks.
+- click-matrix4 (both exits: other monitor, below window). Still 0/2: one absolute move, the same
+  absolute move repeated after 50 ms, absolute move then relative ±1 px, `SetCursorPos`,
+  `SetCursorPos` then an absolute move. Registered 2/2: an absolute move to a neighbouring pixel
+  (+1, +1), 30 ms, then the absolute move to the target; the same with a +40 px neighbour.
+
+Change: foreground `PointerClick` and `PointerDrag` now send an approach move one pixel from the first
+target point (pointing into the window), dwell 30 ms (`plan::APPROACH_DWELL`, after the packet, no lock
+held), then continue unchanged. Background (message) delivery and scroll are unchanged because no
+failure was observed for them. Stop-guard semantics and constants are untouched.
+
+Status: unit tests cover the sequence, the dwell and the in-frame offset. Real-hardware effect on the
+contract table (C06, C09, C11, C15, C22, W-HOTKEY) is **not yet measured**.
