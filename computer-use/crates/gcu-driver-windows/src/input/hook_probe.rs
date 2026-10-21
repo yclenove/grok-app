@@ -12,39 +12,6 @@ pub(crate) const ABSOLUTE_PROBE_IDLE_MS: u64 = 2000;
 pub(crate) const PROBE_TAG: usize = 0x47435532;
 pub(crate) type Dispatch = (u32, u32, u128);
 
-/// Serializes action `SendInput` with a probe's cursor sample and publish.
-/// Not reentrant. Not a lease, and not held across an await. The low-level
-/// hook runs on the listener thread and must not call this.
-static INJECTION_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-#[cfg(test)]
-thread_local! {
-    static INJECTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn gate_held() -> bool {
-    INJECTION_DEPTH.with(|depth| depth.get() > 0)
-}
-
-pub(crate) fn with_injection_gate<R>(body: impl FnOnce() -> R) -> R {
-    let _guard = INJECTION_GATE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    #[cfg(test)]
-    struct Reset;
-    #[cfg(test)]
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            INJECTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-    #[cfg(test)]
-    INJECTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
-    #[cfg(test)]
-    let _reset = Reset;
-    body()
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MouseProbe {
     ZeroMove,
@@ -158,8 +125,7 @@ pub(crate) fn dispatch(
     mode: MouseProbe,
     idle: &ProbeIdle,
 ) -> Result<Dispatch, String> {
-    // Same gate as action packets. Not held across the caller's poll/await.
-    with_injection_gate(|| dispatch_inner(api, mode, idle, false))
+    dispatch_inner(api, mode, idle, false)
 }
 
 pub(crate) fn dispatch_for_action(
@@ -167,10 +133,7 @@ pub(crate) fn dispatch_for_action(
     mode: MouseProbe,
     idle: &ProbeIdle,
 ) -> Result<Dispatch, String> {
-    // Cursor sample, absolute publish, and the unchanged-cursor check stay one
-    // section with action SendInput. A later click has no coordinates of its
-    // own, so a stale absolute move between the move and the button misses.
-    with_injection_gate(|| dispatch_inner(api, mode, idle, true))
+    dispatch_inner(api, mode, idle, true)
 }
 fn dispatch_inner(
     api: &mut impl MouseProbeApi,
