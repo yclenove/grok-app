@@ -190,20 +190,13 @@ pub async fn worker_timeout(
     fixture: &Fixture,
     primary_win: &WindowRef,
 ) -> CaseResult {
-    // Focus the real counter through one explicit native click. Its setup effect
-    // is accounted for before the timeout attempt; the action under test is Return.
-    let setup_count = fixture.read()?["counter"]
-        .as_u64()
-        .ok_or("counter missing")?;
-    click(
-        primary,
-        primary_win,
-        center(&node(primary, primary_win, "counter_button").await?)?,
-    )
-    .await?;
-    fixture
-        .wait("counter focus click", |v| v["counter"] == setup_count + 1)
-        .await?;
+    // Focus the name field through one explicit native click (its focus is externally observable
+    // through `focused_widget`). The action under test is one Tab, whose effect is observable exactly
+    // once: focus moves from the name field to the next field. Real hardware (2026-10-21/22): Return
+    // on the egui counter button and a plain letter key produced no observable effect (the button
+    // does not keep keyboard focus after a click; the letter key reached the fixture as a key event
+    // but not as text), so neither can prove "at most once".
+    super::cases::focus(primary, fixture, primary_win, "name_field").await?;
     // The High CI parent stages every executable in a Medium-readable directory.
     // Keep Cargo's artifact as the default for direct native test invocations.
     let adversary = std::env::var_os("GCU_CONTRACT_WORKER_EXE")
@@ -229,14 +222,13 @@ pub async fn worker_timeout(
     let win = window(&driver, fixture).await?;
     let (router, session) = router(driver.clone());
     observe(&router, &session, &win, false).await?;
-    let before = fixture.read()?["counter"].as_u64().unwrap();
     let out = router
         .execute(
             &session,
             ToolCall::new(
                 "worker-timeout",
                 win.app.info.id,
-                serde_json::from_value(json!({"press_key":{"key":"Return"}})).unwrap(),
+                serde_json::from_value(json!({"press_key":{"key":"Tab"}})).unwrap(),
             ),
         )
         .await;
@@ -247,7 +239,7 @@ pub async fn worker_timeout(
     require(out.state.is_some(), "unknown must include fresh state")?;
     fixture
         .wait("timeout effect at most once", |v| {
-            v["counter"] == before + 1
+            v["focused_widget"] == "multiline_field"
         })
         .await?;
     // The fresh-state read has waited for a new ready worker. No cold-start
@@ -257,9 +249,12 @@ pub async fn worker_timeout(
         calls.lines().collect::<Vec<_>>() == ["mutation"],
         format!("worker replayed: {calls:?}"),
     )?;
+    // A replayed Tab would land in the now-focused multiline field and insert a tab character.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after = fixture.read()?;
     require(
-        fixture.read()?["counter"] == before + 1,
-        "worker replay changed counter",
+        after["focused_widget"] == "multiline_field" && after["multiline"] == "",
+        format!("worker replay changed the second field; last oracle={after}"),
     )?;
     driver.release_all_input().await;
     Ok(Outcome::Passed)
@@ -371,11 +366,14 @@ pub async fn hotkey_conflict(
             == gcu_protocol::capabilities::ForegroundCapability::Unavailable,
         "hotkey conflict left foreground enabled",
     )?;
+    // A window reference belongs to the driver (and worker) that resolved it; resolve it again so the
+    // refusal under test is the revoked foreground route and not a stale reference.
+    let blocked_win = window(&blocked, fixture).await?;
     let before = fixture.read()?;
     let out = blocked
         .perform(
             &DriverAction::TypeText {
-                win: win.clone(),
+                win: blocked_win,
                 focus: None,
                 text: "MUST-NOT-ARRIVE".into(),
                 route: KeyRoute::AllowForeground,

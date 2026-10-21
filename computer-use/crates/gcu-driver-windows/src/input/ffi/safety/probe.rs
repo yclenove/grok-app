@@ -20,6 +20,10 @@ pub(super) struct Sender {
     request: mpsc::SyncSender<Job>,
     reply: mpsc::Receiver<Report>,
     pending: bool,
+    /// When the in-flight job was submitted, to trace a sender that does not come back.
+    pending_since: Option<Instant>,
+    last_pending_trace: Option<Instant>,
+    last_decision_trace: Option<Instant>,
     report: Option<Report>,
     generation: u64,
     initial_finished: bool,
@@ -45,11 +49,19 @@ impl Sender {
                         coalesced: false,
                         packet: None,
                     };
+                    let began = Instant::now();
                     let mouse = if job.action {
                         hook_probe::dispatch_for_action(&mut api, request.mode, &idle)
                     } else {
                         hook_probe::dispatch(&mut api, request.mode, &idle)
                     };
+                    // Metadata only: a long cycle (gate wait + SendInput + hook callbacks) is the
+                    // other way a lease can lapse while dispatches look regular.
+                    let cycle = began.elapsed();
+                    if cycle > std::time::Duration::from_millis(25) {
+                        events
+                            .probe_trace("probe_cycle", format!("cycle_ms={}", cycle.as_millis()));
+                    }
                     let dispatched = api.dispatched;
                     // A refused or changed-cursor probe never submits extra input.
                     // The initial idle sample preceded all probe input, including
@@ -89,6 +101,9 @@ impl Sender {
             request,
             reply: result,
             pending: false,
+            pending_since: None,
+            last_pending_trace: None,
+            last_decision_trace: None,
             report: None,
             attempted: Default::default(),
             generation: 0,
@@ -99,9 +114,17 @@ impl Sender {
         match self.reply.try_recv() {
             Ok(report) => {
                 self.pending = false;
+                self.pending_since = None;
+                self.last_pending_trace = None;
                 CONTEXT.with(|slot| {
                     if let Some(context) = slot.borrow().as_ref() {
                         context.events.probe_dispatch(false);
+                        // Metadata only: why a probe cycle was refused (no coordinates or payload).
+                        if let Err(reason) = &report.mouse {
+                            context
+                                .events
+                                .probe_trace("hook_probe_refused", reason.clone());
+                        }
                     }
                 });
                 if report.dispatched {
@@ -116,6 +139,16 @@ impl Sender {
                         "SendInput(hook probes): {report:?}; UIPI may suppress errors"
                     )),
                 };
+                if let (Ok(_), Err(reason)) = (&report.mouse, &success) {
+                    CONTEXT.with(|slot| {
+                        if let Some(context) = slot.borrow().as_ref() {
+                            context.events.probe_trace(
+                                "hook_probe_refused",
+                                reason.chars().take(200).collect::<String>(),
+                            );
+                        }
+                    });
+                }
                 let generation = report.generation;
                 self.report = Some(report);
                 CONTEXT.with(|slot| {
@@ -134,7 +167,27 @@ impl Sender {
                     Ok::<_, String>(())
                 })?;
             }
-            Err(mpsc::TryRecvError::Empty) => (),
+            Err(mpsc::TryRecvError::Empty) => {
+                // Metadata only: a job that has not come back is the signature of a stuck SendInput.
+                if let Some(since) = self.pending_since {
+                    let waited = since.elapsed();
+                    if waited > std::time::Duration::from_millis(30)
+                        && self
+                            .last_pending_trace
+                            .is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(30))
+                    {
+                        self.last_pending_trace = Some(Instant::now());
+                        CONTEXT.with(|slot| {
+                            if let Some(context) = slot.borrow().as_ref() {
+                                context.events.probe_trace(
+                                    "probe_pending_long",
+                                    format!("pending_ms={}", waited.as_millis()),
+                                );
+                            }
+                        });
+                    }
+                }
+            }
             Err(mpsc::TryRecvError::Disconnected) => return Err("hook probe sender exited".into()),
         }
         CONTEXT.with(|slot| {
@@ -184,6 +237,24 @@ impl Sender {
                 } else {
                     !self.pending && generation == 0 && !self.initial_finished
                 };
+                // Metadata only: why no new probe is going out while an injection is in flight.
+                if context.events.injecting()
+                    && !self.pending
+                    && (!action || !dispatch || !context.events.probes_permitted())
+                    && self
+                        .last_decision_trace
+                        .is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(20))
+                {
+                    self.last_decision_trace = Some(Instant::now());
+                    context.events.probe_trace(
+                        "probe_not_dispatched",
+                        format!(
+                            "action={action}; dispatch={dispatch}; permitted={}; mouse_proven={}",
+                            context.events.probes_permitted(),
+                            mouse.is_some()
+                        ),
+                    );
+                }
                 if dispatch && context.events.probes_permitted() {
                     if let Some(request) = context.mouse_proof.next() {
                         context.keyboard = None;
@@ -202,8 +273,17 @@ impl Sender {
                         self.request.try_send(Job { request, generation, action })
                             .map_err(|e| format!("hook probe submission: {e}"))?;
                         self.pending = true;
+                        self.pending_since = Some(Instant::now());
                     } else if !action {
                         self.initial_finished = true;
+                    } else if self
+                        .last_decision_trace
+                        .is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(20))
+                    {
+                        self.last_decision_trace = Some(Instant::now());
+                        context
+                            .events
+                            .probe_trace("probe_next_none", context.mouse_proof.debug_state());
                     }
                 }
             }
