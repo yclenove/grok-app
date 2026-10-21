@@ -178,9 +178,10 @@ async fn foreground_inflight_missing_mouse_proof_latches_and_releases_held_input
     let api = FakeSafetyApi::default();
     let guard = api.start(Default::default(), Arc::new(Latch::default()));
     let input = Arc::new(FakeInput::default());
-    // Event 0 is only Move. Pause after event 1 (left down), while its up is
-    // still pending, so the independent release path has a real held input.
-    input.update(|s| s.send_pause = Some((1, Duration::from_secs(1))));
+    // Events 0 and 1 are the approach and target Moves. Pause after event 2 (left
+    // down), while its up is still pending, so the independent release path has a
+    // real held input.
+    input.update(|s| s.send_pause = Some((2, Duration::from_secs(1))));
     let backend = Arc::new(InputBackend::new(input.clone()));
     let driver = driver
         .with_input(backend.clone())

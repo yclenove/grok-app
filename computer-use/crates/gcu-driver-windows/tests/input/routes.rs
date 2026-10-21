@@ -137,3 +137,63 @@ async fn common_integrity_gate_precedes_every_input_action_variant() {
     assert!(input.state().sent.is_empty());
     assert_eq!(input.state().activations, 0);
 }
+
+/// Hardware finding (click-matrix4, 2026-10-21): egui/winit drops a click when the first in-window
+/// pointer move lands on the target after the pointer arrived from outside the window. A first
+/// move one pixel away, a short dwell, then the target move restores clicks.
+#[tokio::test]
+async fn foreground_click_enters_the_window_with_an_offset_move_and_dwell() {
+    let (api, driver, win) = fixture().await;
+    assert_eq!(
+        driver
+            .perform(
+                &click(&win, PointerRoute::AllowForeground),
+                &Cancel::default()
+            )
+            .await,
+        Ok(Delivery::Foreground)
+    );
+    let sent = api.state().sent;
+    let moves: Vec<_> = sent
+        .iter()
+        .filter_map(|s| match s.event {
+            Event::Move(p, false) => Some((p, s.at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moves.len(), 2, "approach move then target move");
+    let (approach, first) = moves[0];
+    let (target, second) = moves[1];
+    assert_eq!(
+        (approach.x - target.x)
+            .abs()
+            .max((approach.y - target.y).abs()),
+        1.,
+        "approach is exactly one pixel from the target"
+    );
+    assert!(
+        second - first >= std::time::Duration::from_millis(30),
+        "dwell between approach and target: {:?}",
+        second - first
+    );
+    assert!(matches!(sent[0].event, Event::Move(..)));
+    assert!(matches!(sent[1].event, Event::Move(..)));
+    assert!(matches!(sent[2].event, Event::Button(_, true, p, _) if p == target));
+    assert!(matches!(sent[3].event, Event::Button(_, false, p, _) if p == target));
+}
+#[tokio::test]
+async fn targeted_click_and_scroll_keep_their_single_move() {
+    let (api, driver, win) = fixture().await;
+    driver
+        .perform(&click(&win, PointerRoute::TargetedOnly), &Cancel::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        api.state()
+            .sent
+            .iter()
+            .filter(|s| matches!(s.event, Event::Move(..)))
+            .count(),
+        1
+    );
+}

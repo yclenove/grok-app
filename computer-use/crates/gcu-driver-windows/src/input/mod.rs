@@ -162,6 +162,7 @@ impl InputBackend {
                 }
             }
             let mut packets = plan.packets;
+            let dwell_after = plan.dwell_after;
             if let Some(chord) = plan.chord {
                 let character = match chord.key {
                     gcu_protocol::keys::Key::Character(c) => {
@@ -230,7 +231,7 @@ impl InputBackend {
                 .await?;
                 packets.clear();
             }
-            for packet in packets {
+            for (index, packet) in packets.into_iter().enumerate() {
                 context.check()?;
                 self.api.validate(target.clone(), foreground).await?;
                 if foreground {
@@ -267,6 +268,9 @@ impl InputBackend {
                 }
                 result?;
                 tokio::task::yield_now().await;
+                if dwell_after == Some(index) {
+                    tokio::time::sleep(plan::APPROACH_DWELL).await;
+                }
             }
             if let Some(before) = before {
                 let effect = self

@@ -18,6 +18,8 @@ pub struct Sent {
     pub delivery: Delivery,
     /// Ledger had recorded a release before this down was sent.
     pub recorded_before_down: bool,
+    /// Tokio clock reading when the event was recorded.
+    pub at: tokio::time::Instant,
 }
 /// Scriptable fake state. Failures/cancellation can be injected at exact events.
 #[derive(Clone)]
@@ -214,6 +216,7 @@ impl InputApi for FakeInput {
                     event,
                     delivery,
                     recorded_before_down: recorded,
+                    at: tokio::time::Instant::now(),
                 });
                 if let Some((at, c)) = &s.cancel_at {
                     if *at == n {
@@ -263,6 +266,7 @@ impl InputApi for FakeInput {
                 event,
                 delivery,
                 recorded_before_down: false,
+                at: tokio::time::Instant::now(),
             });
             if s.release_error {
                 s.release_error = false;
