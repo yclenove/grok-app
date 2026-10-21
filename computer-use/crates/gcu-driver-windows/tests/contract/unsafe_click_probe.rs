@@ -211,3 +211,116 @@ impl Drop for HookLog {
         }
     }
 }
+
+static KEYS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+unsafe extern "system" fn key_log(
+    code: i32,
+    wp: windows::Win32::Foundation::WPARAM,
+    lp: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    if code == HC_ACTION as i32 && lp.0 != 0 {
+        // SAFETY: Windows supplies KBDLLHOOKSTRUCT for HC_ACTION; read-only during this call.
+        let s = unsafe { &*(lp.0 as *const KBDLLHOOKSTRUCT) };
+        let down = matches!(wp.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        let entry = if s.vkCode == 0x87 {
+            format!("F24{}", if down { "v" } else { "^" })
+        } else if s.vkCode == 0xE7 {
+            // VK_PACKET: the UTF-16 unit rides in scanCode.
+            format!("U+{:04X}{}", s.scanCode, if down { "v" } else { "^" })
+        } else {
+            format!("vk{:02X}{}", s.vkCode, if down { "v" } else { "^" })
+        };
+        if let Ok(mut log) = KEYS.lock() {
+            if log.len() < 800 {
+                log.push(entry);
+            }
+        }
+    }
+    // SAFETY: forward the unchanged borrowed arguments; this log never suppresses input.
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+/// Logs every low-level keyboard event (injected ones included) system-wide while alive.
+pub struct KeyLog {
+    thread: u32,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+impl KeyLog {
+    pub fn start() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            // SAFETY: this thread owns the hook and its message loop; unhooked before exit.
+            unsafe {
+                let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_log), None, 0).ok();
+                let _ = tx.send(GetCurrentThreadId());
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+                if let Some(h) = hook {
+                    let _ = UnhookWindowsHookEx(h);
+                }
+            }
+        });
+        Self {
+            thread: rx.recv().unwrap_or(0),
+            join: Some(join),
+        }
+    }
+    pub fn take(&self) -> String {
+        KEYS.lock()
+            .map(|mut l| std::mem::take(&mut *l).join(" "))
+            .unwrap_or_default()
+    }
+}
+impl Drop for KeyLog {
+    fn drop(&mut self) {
+        // SAFETY: posts WM_QUIT to the hook thread only.
+        unsafe {
+            let _ =
+                PostThreadMessageW(self.thread, WM_QUIT, Default::default(), Default::default());
+        }
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+/// One keyboard step for the surrogate experiment: (virtual key, UTF-16 unit, key-up).
+pub type KeyStep = (u16, u16, bool);
+/// Sends the steps with one `SendInput` call per group; `pause_ms` separates groups.
+pub fn send_key_groups(groups: &[&[KeyStep]], pause_ms: u64) -> String {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, VIRTUAL_KEY,
+    };
+    let mut report = Vec::new();
+    for group in groups {
+        let inputs: Vec<INPUT> = group
+            .iter()
+            .map(|&(vk, unit, up)| {
+                let mut flags = KEYBD_EVENT_FLAGS(0);
+                if vk == 0 {
+                    flags |= KEYEVENTF_UNICODE;
+                }
+                if up {
+                    flags |= KEYEVENTF_KEYUP;
+                }
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(vk),
+                            wScan: unit,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                }
+            })
+            .collect();
+        // SAFETY: owned initialized INPUT records with exact cbSize.
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        report.push(format!("{sent}/{}", inputs.len()));
+        std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+    }
+    report.join(",")
+}

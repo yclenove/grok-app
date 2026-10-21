@@ -35,16 +35,24 @@ mod gate {
             System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         },
     };
+    /// `0` means no mutex is held (debug-only experiment switch).
     pub(super) struct Held(isize);
     impl Drop for Held {
         fn drop(&mut self) {
-            // SAFETY: releases the mutex this thread acquired in `acquire`.
-            unsafe {
-                let _ = ReleaseMutex(HANDLE(self.0 as *mut _));
+            if self.0 != 0 {
+                // SAFETY: releases the mutex this thread acquired in `acquire`.
+                unsafe {
+                    let _ = ReleaseMutex(HANDLE(self.0 as *mut _));
+                }
             }
         }
     }
     pub(super) fn acquire(wait: Duration) -> Result<Held, super::GateBusy> {
+        // Debug/test workers only: lets the real-hardware stress test compare gate on and off.
+        #[cfg(all(feature = "test-worker-faults", debug_assertions))]
+        if std::env::var_os("GCU_POINTER_GATE_OFF").is_some() {
+            return Ok(Held(0));
+        }
         static HANDLE_BITS: OnceLock<isize> = OnceLock::new();
         let bits = *HANDLE_BITS.get_or_init(|| {
             let host = std::env::var("GCU_HOST_PID")
@@ -120,7 +128,13 @@ pub(crate) fn with_injection_gate_for<R>(
     wait: std::time::Duration,
     body: impl FnOnce() -> R,
 ) -> Result<R, GateBusy> {
+    let started = Instant::now();
     let _held = gate::acquire(wait)?;
+    // Metadata only. A long wait is the first thing to rule out when a lease lapses near a gate.
+    let waited = started.elapsed();
+    if waited > std::time::Duration::from_millis(3) {
+        tracing::info!(target: "gcu_windows_timing", stage = "pointer_gate_wait", wait_ms = waited.as_millis() as u64);
+    }
     #[cfg(test)]
     struct Reset;
     #[cfg(test)]
@@ -323,6 +337,8 @@ pub(crate) struct MouseProof {
     proven_tag: Option<usize>,
     failed: bool,
     action: bool,
+    /// Last tagged callback seen (tag, flags), for diagnostics only.
+    last_seen: Option<(usize, u32)>,
 }
 impl MouseProof {
     pub(crate) fn new(override_mode: Option<MouseProbe>) -> Self {
@@ -337,7 +353,20 @@ impl MouseProof {
             proven_tag: None,
             failed: false,
             action: false,
+            last_seen: None,
         }
+    }
+    /// Metadata only: why `next` may offer nothing.
+    pub(crate) fn debug_state(&self) -> String {
+        format!(
+            "failed={}; active_tag={:?}; complete={:?}; callback={:?}; mode={:?}; last_seen={:?}",
+            self.failed,
+            self.active.as_ref().map(|a| a.request.tag),
+            self.active.as_ref().map(|a| a.complete),
+            self.active.as_ref().map(|a| a.callback.is_some()),
+            self.active.as_ref().map(|a| a.request.mode),
+            self.last_seen
+        )
     }
     /// A refusal invalidates this cycle, never the listener's next action.
     pub(crate) fn begin_cycle(&mut self, action: bool) {
@@ -402,6 +431,9 @@ impl MouseProof {
     }
     pub(crate) fn callback(&mut self, tag: usize, flags: u32, at: Instant) -> bool {
         let tagged = self.tagged(tag);
+        if tagged {
+            self.last_seen = Some((tag, flags));
+        }
         self.idle.observe(flags & 3 != 0, tagged);
         let Some(active) = self.active.as_mut().filter(|a| a.request.tag == tag) else {
             return tagged;

@@ -157,6 +157,12 @@ pub fn worker_config() -> Result<WorkerConfig, String> {
             .environment
             .push(("GCU_NATIVE_TRACE_DIR".into(), directory));
     }
+    // Experiment switch for the pointer-gate stress test (debug workers only).
+    if let Some(value) = std::env::var_os("GCU_POINTER_GATE_OFF") {
+        config
+            .environment
+            .push(("GCU_POINTER_GATE_OFF".into(), value));
+    }
     Ok(config)
 }
 pub async fn window(driver: &WindowsDriver, fixture: &Fixture) -> Result<WindowRef, String> {
@@ -548,4 +554,208 @@ async fn live_click_probe() {
     }
     progress("PROBE DONE");
     let _ = fixture.stop().await;
+}
+
+/// Measurement only (no verdict): types short strings through the real driver into the multiline field and
+/// records the raw keyboard stream seen by an independent WH_KEYBOARD_LL hook next to the field text the
+/// fixture ended up with. Run with `--exact live::live_text_probe` from the standard-user console session.
+#[tokio::test]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only"]
+async fn live_text_probe() {
+    require(
+        std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+        "explicit GCU_DESKTOP=1 required",
+    )
+    .unwrap();
+    let mut fixture = Fixture::start().await.unwrap();
+    let driver = driver().await.unwrap();
+    let win = window(&driver, &fixture).await.unwrap();
+    ready_fixture(&driver, &win, &fixture).await.unwrap();
+    cases::focus(&driver, &fixture, &win, "multiline_field")
+        .await
+        .unwrap();
+    let keylog = unsafe_click_probe::KeyLog::start();
+    for sample in [
+        "abc",
+        "中文",
+        "😀",
+        "👩\u{200d}💻",
+        "a\nb",
+        "a\r\nb",
+        "x😀y",
+    ] {
+        let _ = keylog.take();
+        let before = fixture.read().map(|v| v["multiline"].to_string());
+        let result = perform(
+            &driver,
+            DriverAction::TypeText {
+                win: win.clone(),
+                focus: None,
+                text: sample.to_string(),
+                route: KeyRoute::AllowForeground,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let keys = keylog.take();
+        let after = fixture.read().map(|v| v["multiline"].to_string());
+        progress(format!(
+            "TEXT PROBE {sample:?} units={:?}: result={result:?} multiline {before:?} -> {after:?}",
+            sample.encode_utf16().collect::<Vec<_>>()
+        ));
+        progress(format!("TEXT PROBE {sample:?} keyboard stream: {keys}"));
+    }
+    progress("TEXT PROBE DONE");
+    let _ = fixture.stop().await;
+}
+
+/// Measurement only (no verdict): which keyboard event order makes the fixture's text field accept a
+/// surrogate pair and a newline. Sends directly from the test process into the multiline field.
+#[tokio::test]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only"]
+async fn live_surrogate_probe() {
+    use unsafe_click_probe::{send_key_groups, KeyStep};
+    require(
+        std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+        "explicit GCU_DESKTOP=1 required",
+    )
+    .unwrap();
+    let mut fixture = Fixture::start().await.unwrap();
+    let driver = driver().await.unwrap();
+    let win = window(&driver, &fixture).await.unwrap();
+    ready_fixture(&driver, &win, &fixture).await.unwrap();
+    cases::focus(&driver, &fixture, &win, "multiline_field")
+        .await
+        .unwrap();
+    let (h, l) = (0xD83Du16, 0xDE00u16);
+    let u = |unit: u16, up: bool| -> KeyStep { (0, unit, up) };
+    let cases: Vec<(&str, Vec<Vec<KeyStep>>, u64)> = vec![
+        (
+            "A H-dn H-up L-dn L-up (current driver order), one call",
+            vec![vec![u(h, false), u(h, true), u(l, false), u(l, true)]],
+            0,
+        ),
+        (
+            "B H-dn L-dn H-up L-up, one call",
+            vec![vec![u(h, false), u(l, false), u(h, true), u(l, true)]],
+            0,
+        ),
+        (
+            "C H-dn L-dn L-up H-up, one call",
+            vec![vec![u(h, false), u(l, false), u(l, true), u(h, true)]],
+            0,
+        ),
+        (
+            "D H-dn L-dn in one call, then L-up H-up in another after 50 ms",
+            vec![vec![u(h, false), u(l, false)], vec![u(l, true), u(h, true)]],
+            50,
+        ),
+        (
+            "E H-dn, 30 ms, L-dn L-up H-up",
+            vec![vec![u(h, false)], vec![u(l, false), u(l, true), u(h, true)]],
+            30,
+        ),
+        (
+            "F H-dn only then L-dn only, ups after (four calls)",
+            vec![
+                vec![u(h, false)],
+                vec![u(l, false)],
+                vec![u(h, true)],
+                vec![u(l, true)],
+            ],
+            20,
+        ),
+        (
+            "G Enter as VK_RETURN between a and b",
+            vec![
+                vec![u(0x61, false), u(0x61, true)],
+                vec![(0x0D, 0, false), (0x0D, 0, true)],
+                vec![u(0x62, false), u(0x62, true)],
+            ],
+            30,
+        ),
+    ];
+    for (name, groups, pause) in cases {
+        cases::clear_for_probe(&driver, &fixture, &win)
+            .await
+            .unwrap();
+        let slices: Vec<&[KeyStep]> = groups.iter().map(|g| g.as_slice()).collect();
+        let report = send_key_groups(&slices, pause);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let after = fixture.read().map(|v| v["multiline"].to_string());
+        progress(format!(
+            "SURROGATE PROBE {name}: sent={report} multiline -> {after:?}"
+        ));
+    }
+    progress("SURROGATE PROBE DONE");
+    let _ = fixture.stop().await;
+}
+
+/// Measurement only (no verdict): repeats the C15 drag with one long-lived driver and Stop guard, recording
+/// every iteration. `GCU_POINTER_GATE_OFF=1` (debug builds) disables the pointer gate in host and worker so
+/// the flake rate can be compared. `GCU_STRESS_N` sets the iteration count (default 12).
+#[tokio::test]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only"]
+async fn live_drag_stress() {
+    require(
+        std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+        "explicit GCU_DESKTOP=1 required",
+    )
+    .unwrap();
+    let gate = if std::env::var_os("GCU_POINTER_GATE_OFF").is_some() {
+        "off"
+    } else {
+        "on"
+    };
+    let n: usize = std::env::var("GCU_STRESS_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12);
+    let driver = driver().await.unwrap();
+    let (mut ok, mut failed) = (0, 0);
+    for i in 0..n {
+        let mut fixture = Fixture::start().await.unwrap();
+        let attempt = async {
+            let win = window(&driver, &fixture).await?;
+            ready_fixture(&driver, &win, &fixture).await?;
+            let start = center(&node(&driver, &win, "drag_source").await?)?;
+            let end = center(&node(&driver, &win, "drop_target").await?)?;
+            perform(
+                &driver,
+                DriverAction::PointerDrag {
+                    win: win.clone(),
+                    path: vec![start, end],
+                    route: PointerRoute::AllowForeground,
+                },
+            )
+            .await?;
+            fixture
+                .wait("drop target", |v| v["drop_ok"] == true)
+                .await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        let foreground = driver.capabilities().delivery.foreground;
+        match &attempt {
+            Ok(()) => ok += 1,
+            Err(_) => failed += 1,
+        }
+        progress(format!(
+            "STRESS gate={gate} i={i}: {} foreground_capability={foreground:?}",
+            match &attempt {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("FAIL {}", &e[..e.len().min(160)]),
+            }
+        ));
+        let _ = fixture.stop().await;
+        if attempt.is_err() && format!("{foreground:?}").contains("Unavailable") {
+            progress(format!(
+                "STRESS gate={gate}: Stop guard unavailable after iteration {i}; stopping"
+            ));
+            break;
+        }
+    }
+    progress(format!(
+        "STRESS gate={gate} DONE ok={ok} failed={failed} of {n}"
+    ));
 }

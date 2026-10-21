@@ -652,3 +652,41 @@ Result with the fix (win-test, `claudetest`):
   Err(WindowGone)`). They are not explained by this change and remain open.
 - One probe click was recorded by the fixture with source `keyboard` instead of `mouse` (counter still
   increased); the reason is unknown.
+
+## 2026-10-22: C08, C22 and W-HOTKEY, and an open Stop-latch defect during drags
+
+Run through a one-time interactive scheduled task (`schtasks`, `claudetest`, console session; the task must run at
+Normal priority, the scheduler default is BelowNormal and made the 100 ms Stop deadlines fail in one run).
+
+C08 (Unicode and newline), measured with `live::live_text_probe` and `live::live_surrogate_probe`:
+- A newline sent as a Unicode unit (`U+000A`, VK_PACKET) reached no text field; a real Enter key (`VK_RETURN`)
+  produced `a\nb`. Foreground `\n` and `\r\n` are now one Enter key press (`messages::foreground_send_unit`,
+  applied in `native::inputs`).
+- Supplementary-plane characters (emoji) never reached the egui/winit fixture's text field, in all six event
+  orders tried (high down/up then low down/up; both down then both up; interleaved; separate calls with pauses).
+  The keyboard stream seen by an independent `WH_KEYBOARD_LL` hook was correct. It is a provider limitation of
+  this fixture; C08 therefore verifies BMP text, a zero-width joiner and a newline and reports the emoji part as a
+  provider skip.
+
+C22: the premise that the egui counter button keeps keyboard focus after a click was wrong (Return and a plain
+letter key reached the fixture as key events but produced no counter or text change). The case now focuses the
+name field and presses Tab, whose effect (focus moves to the multiline field) is observable once.
+
+W-HOTKEY: the case passed a window reference resolved by one driver to a second driver with its own worker, which
+answers `WindowGone`. It now resolves the window again with the second driver.
+
+Pointer gate follow-up: after sending a move the driver waits (at most 15 ms, still inside the gate) for the cursor
+to reach the target. Without it the probe's unchanged-cursor check could see the driver's own move land late and
+latch Stop with `cursor changed during probe`; that reason no longer appears.
+
+**Open defect (not fixed): Stop latches about once per 45 drags.** `live::live_drag_stress` repeats the C15 drag with
+one long-lived driver and guard. With the gate on, 24 of about 1,080 drags ended with the guard unavailable
+(`low-level hook probe expired during foreground injection`, lease age 101-124 ms); with the gate off the guard
+never latched in 16 drags but 13 of them failed to drop (the original bug). At the failure the proof state is
+`complete=true, callback=false, mode=AbsoluteSamePosition`: the last probe's `SendInput` returned 2/2 but its tagged
+mouse callback never reached the hook, and by design (one attempt per proof cycle, never retry) the lease lapses
+about 100 ms later. Ruled out with traces: gate waits, a stalled listener thread (`pump_poll_gap`), a slow probe
+cycle, a probe job that does not return, a refused cycle, and probe burst cadence (a 20 ms minimum spacing made no
+difference and was removed). Not known: why Windows sometimes does not report that event to the hook.
+A bounded in-lease retry of a missing probe would likely remove most latches while still requiring real tagged
+callbacks from both hooks, but it changes the guard's "never retry" rule and needs the user's approval.

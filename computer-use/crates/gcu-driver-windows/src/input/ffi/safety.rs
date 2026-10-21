@@ -76,6 +76,7 @@ impl SafetyApi for RealSafetyApi {
             _hotkey: hotkey,
             events: pump_events,
             first_probe: true,
+            last_poll: None,
             probe,
         }))
     }
@@ -197,9 +198,19 @@ struct Pump {
     events: Arc<GuardEvents>,
     first_probe: bool,
     probe: probe::Sender,
+    /// When the previous `poll` started, to trace a stalled listener (metadata only).
+    last_poll: Option<Instant>,
 }
 impl SafetyPump for Pump {
     fn poll(&mut self, reinstall: bool) -> Result<(), String> {
+        let started = Instant::now();
+        if let Some(previous) = self.last_poll.replace(started) {
+            let gap = started.saturating_duration_since(previous);
+            if gap > Duration::from_millis(40) {
+                self.events
+                    .probe_trace("pump_poll_gap", format!("gap_ms={}", gap.as_millis()));
+            }
+        }
         interactive_desktop()?;
         if reinstall {
             // Install replacements before retiring old hooks: no unmonitored gap.

@@ -275,7 +275,11 @@ impl GuardEvents {
         {
             self.fail("listener heartbeat expired (hook/message pump/FFI unavailable)");
         } else if self.injecting() && !self.clock.available() {
-            self.fail("low-level hook probe expired during foreground injection");
+            // Metadata only: the anchor age shows whether the lease lapsed or was never confirmed.
+            self.fail(format!(
+                "low-level hook probe expired during foreground injection (lease_age_ms={:?})",
+                self.clock.lease_age().map(|age| age.as_millis())
+            ));
         }
         let pending = *self.probe_pending.lock().unwrap_or_else(|p| p.into_inner());
         let limit = if self.armed.load(Ordering::Acquire) {

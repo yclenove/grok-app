@@ -185,6 +185,7 @@ pub(super) fn post(target: &Target, event: Event) -> Result<()> {
 }
 pub(super) fn inputs(events: &[Event]) -> Result<Vec<INPUT>> {
     let mut inputs = Vec::new();
+    let mut pending_lf = false;
     for event in events {
         let input = match *event {
             Event::Move(p, _) => {
@@ -249,16 +250,30 @@ pub(super) fn inputs(events: &[Event]) -> Result<Vec<INPUT>> {
                     KEYBD_EVENT_FLAGS(0)
                 },
             ),
-            Event::Unicode(unit, down) => keyboard(
-                0,
-                unit,
-                KEYEVENTF_UNICODE
-                    | if down {
-                        KEYBD_EVENT_FLAGS(0)
-                    } else {
-                        KEYEVENTF_KEYUP
-                    },
-            ),
+            Event::Unicode(unit, down) => {
+                match crate::input::messages::foreground_send_unit(unit, down, &mut pending_lf) {
+                    Some(crate::input::messages::ForegroundSend::Enter(down)) => keyboard(
+                        0x0d,
+                        0,
+                        if down {
+                            KEYBD_EVENT_FLAGS(0)
+                        } else {
+                            KEYEVENTF_KEYUP
+                        },
+                    ),
+                    Some(crate::input::messages::ForegroundSend::Unicode(unit, down)) => keyboard(
+                        0,
+                        unit,
+                        KEYEVENTF_UNICODE
+                            | if down {
+                                KEYBD_EVENT_FLAGS(0)
+                            } else {
+                                KEYEVENTF_KEYUP
+                            },
+                    ),
+                    None => continue,
+                }
+            }
         };
         inputs.push(input);
     }
@@ -301,14 +316,73 @@ pub(super) fn inject(inputs: &[INPUT]) -> Result<()> {
     // stale same-position probe move cannot land between this move and a coordinate-less button.
     // Keyboard and Unicode packets are not gated (long packets must not starve the heartbeat).
     if inputs.iter().any(|input| input.r#type == INPUT_MOUSE) {
-        return crate::input::hook_probe::with_injection_gate(|| send_input(inputs)).unwrap_or(
-            Err(DriverError::Native {
-                message: "pointer input gate busy; nothing was sent".into(),
-                maybe_executed: false,
-            }),
-        );
+        return crate::input::hook_probe::with_injection_gate(|| {
+            send_input(inputs)?;
+            // Windows applies an injected move to the cursor a moment after `SendInput` returns.
+            // Without this wait the probe's unchanged-cursor check, which runs as soon as the gate
+            // opens, sees the driver's own move land and reads it as someone else moving the mouse
+            // (a deliberate fail-closed Stop latch). Real hardware, 2026-10-22: `cursor changed
+            // during probe` latched Stop in about one drag in ten.
+            if let Some(target) = last_absolute_target(inputs) {
+                settle_cursor(target);
+            }
+            Ok(())
+        })
+        .unwrap_or(Err(DriverError::Native {
+            message: "pointer input gate busy; nothing was sent".into(),
+            maybe_executed: false,
+        }));
     }
     send_input(inputs)
+}
+/// Longest the gate is held waiting for the cursor to arrive. Well below the probe's 40ms gate wait.
+const CURSOR_SETTLE: std::time::Duration = std::time::Duration::from_millis(15);
+/// Screen pixel of the last absolute move in the packet (inverse of the normalization in `inputs`).
+fn last_absolute_target(inputs: &[INPUT]) -> Option<(i32, i32)> {
+    let flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    let last = inputs.iter().rev().find_map(|input| {
+        if input.r#type != INPUT_MOUSE {
+            return None;
+        }
+        // SAFETY: the record is a mouse record (checked above).
+        let mi = unsafe { input.Anonymous.mi };
+        (mi.dwFlags & flags == flags).then_some((mi.dx, mi.dy))
+    })?;
+    // SAFETY: these four metrics are nonblocking integer queries.
+    let (x, y, w, h) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if w <= 1 || h <= 1 {
+        return None;
+    }
+    Some((
+        x + (f64::from(last.0) * f64::from(w - 1) / 65535.).round() as i32,
+        y + (f64::from(last.1) * f64::from(h - 1) / 65535.).round() as i32,
+    ))
+}
+/// True when the cursor is at the target pixel, allowing for the rounding of the 0..65535 mapping.
+fn cursor_at(actual: (i32, i32), target: (i32, i32)) -> bool {
+    (actual.0 - target.0).abs() <= 2 && (actual.1 - target.1).abs() <= 2
+}
+fn settle_cursor(target: (i32, i32)) {
+    let deadline = std::time::Instant::now() + CURSOR_SETTLE;
+    loop {
+        let mut point = POINT::default();
+        // SAFETY: bounded local output; read-only cursor query.
+        let known = unsafe { GetPhysicalCursorPos(&mut point) }.is_ok();
+        if known && cursor_at((point.x, point.y), target) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
 }
 /// Release path (Stop, cleanup): never waits on the gate.
 pub(super) fn inject_release(inputs: &[INPUT]) -> Result<()> {
@@ -328,5 +402,98 @@ fn send_input(inputs: &[INPUT]) -> Result<()> {
             message: "SendInput inserted an incomplete packet".into(),
             maybe_executed: count != 0,
         })
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::input::api::Event;
+
+    /// (virtual key, scan/unit, is_unicode, is_key_up) for each keyboard record.
+    fn keys(events: &[Event]) -> Vec<(u16, u16, bool, bool)> {
+        inputs(events)
+            .unwrap()
+            .iter()
+            .map(|input| {
+                // SAFETY: every record built from these events is a keyboard record.
+                let ki = unsafe { input.Anonymous.ki };
+                (
+                    ki.wVk.0,
+                    ki.wScan,
+                    ki.dwFlags.contains(KEYEVENTF_UNICODE),
+                    ki.dwFlags.contains(KEYEVENTF_KEYUP),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cursor_arrival_tolerates_the_normalization_rounding_only() {
+        assert!(cursor_at((431, 607), (431, 608)));
+        assert!(cursor_at((433, 610), (431, 608)));
+        assert!(!cursor_at((434, 608), (431, 608)));
+        assert!(!cursor_at((-2460, 100), (431, 608)));
+    }
+
+    #[test]
+    fn the_settle_target_is_the_last_absolute_move_in_the_packet() {
+        let events = [
+            Event::Move(gcu_core::model::WindowPoint { x: 100., y: 100. }, false),
+            Event::Button(
+                Button::Left,
+                true,
+                gcu_core::model::WindowPoint { x: 100., y: 100. },
+                false,
+            ),
+        ];
+        let target = last_absolute_target(&inputs(&events).unwrap()).expect("a move is present");
+        assert!(cursor_at(target, (100, 100)), "{target:?}");
+        let buttons = [Event::Button(
+            Button::Left,
+            false,
+            gcu_core::model::WindowPoint { x: 0., y: 0. },
+            false,
+        )];
+        assert_eq!(last_absolute_target(&inputs(&buttons).unwrap()), None);
+    }
+
+    #[test]
+    fn foreground_newline_is_an_enter_key_and_crlf_is_one_enter() {
+        // Real hardware (2026-10-21): U+000A sent as VK_PACKET reached no text field; Enter does.
+        let lf = [Event::Unicode(10, true), Event::Unicode(10, false)];
+        assert_eq!(
+            keys(&lf),
+            vec![(0x0d, 0, false, false), (0x0d, 0, false, true)]
+        );
+        let crlf = [
+            Event::Unicode(13, true),
+            Event::Unicode(13, false),
+            Event::Unicode(10, true),
+            Event::Unicode(10, false),
+        ];
+        assert_eq!(
+            keys(&crlf),
+            vec![(0x0d, 0, false, false), (0x0d, 0, false, true)]
+        );
+    }
+
+    #[test]
+    fn other_units_stay_unicode_including_surrogate_halves() {
+        let text = [
+            Event::Unicode(0x4e2d, true),
+            Event::Unicode(0x4e2d, false),
+            Event::Unicode(0xd83d, true),
+            Event::Unicode(0xd83d, false),
+        ];
+        assert_eq!(
+            keys(&text),
+            vec![
+                (0, 0x4e2d, true, false),
+                (0, 0x4e2d, true, true),
+                (0, 0xd83d, true, false),
+                (0, 0xd83d, true, true),
+            ]
+        );
     }
 }

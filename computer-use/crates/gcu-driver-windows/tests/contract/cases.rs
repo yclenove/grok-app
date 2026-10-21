@@ -106,9 +106,13 @@ async fn run_case(
         "C08" => {
             focus(driver, fixture, win, "multiline_field").await?;
             clear(driver, fixture, win, "multiline").await?;
-            let input = "中文 👩‍💻\nsecond line";
+            // BMP text, a zero-width joiner and a newline (a real Enter key). Supplementary-plane
+            // characters are not part of this assertion: on win-test (2026-10-21) the egui/winit fixture
+            // dropped them for every order of the two surrogate key events (`live_surrogate_probe`).
+            let input = "中文 \u{200d}\nsecond line";
             text(driver, win, input).await?;
             fixture.wait("Unicode bytes and newline", |v| v["multiline"].as_str() == Some(input)).await?;
+            return Ok(Outcome::Skip("provider: egui/winit ignores supplementary-plane characters (emoji) sent as VK_PACKET surrogate pairs in all six measured event orders; BMP Unicode, a zero-width joiner and newline (Enter key) are verified".into()));
         }
         "C09" => {
             focus(driver, fixture, win, "name_field").await?;
@@ -178,6 +182,13 @@ pub async fn focus(
         .wait("external focused_widget", |v| v["focused_widget"] == id)
         .await?;
     Ok(())
+}
+pub async fn clear_for_probe(
+    driver: &WindowsDriver,
+    fixture: &Fixture,
+    win: &WindowRef,
+) -> Result<(), String> {
+    clear(driver, fixture, win, "multiline").await
 }
 async fn clear(
     driver: &WindowsDriver,
