@@ -759,3 +759,35 @@ async fn live_drag_stress() {
         "STRESS gate={gate} DONE ok={ok} failed={failed} of {n}"
     ));
 }
+
+/// Samples on-monitor pixels and prints landing error against the requested pixel
+/// and against the floor-model inverse. Inconclusive traces stay out of the histogram.
+/// Every conclusive landing must equal the requested pixel; the first 20 misses are
+/// in the report and this test fails. Does not change `CURSOR_ARRIVAL_TOLERANCE_PX`.
+/// Run with `GCU_DESKTOP=1` and `--exact live::live_move_landing_probe --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; fails unless conclusive landings match the requested pixel; do not change CURSOR_ARRIVAL_TOLERANCE_PX"]
+async fn live_move_landing_probe() {
+    require(
+        std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+        "explicit GCU_DESKTOP=1 required",
+    )
+    .unwrap();
+    let report = unsafe_click_probe::landing_histogram().unwrap();
+    assert_eq!(
+        report.sent_ok, report.planned,
+        "every planned move must be sent\n{}",
+        report.text
+    );
+    assert!(
+        report.accepted(),
+        "conclusive landings are below 95% of planned and the 400-target floor\n{}",
+        report.text
+    );
+    assert_eq!(
+        report.max_requested, 0,
+        "conclusive landing error against the requested pixel must be 0; first misses are marked requested_miss\n{}",
+        report.text
+    );
+    progress(report.text);
+}

@@ -50,8 +50,6 @@ impl Process {
             }
         }
         command.envs(config.environment.iter().cloned());
-        // Names the host-and-worker pointer gate (see `input::hook_probe`); not a secret.
-        command.env("GCU_HOST_PID", std::process::id().to_string());
         // The disposable native harness opts in to full provider timing. Write
         // child stderr directly to a per-worker file: a slow PowerShell console
         // must not stall COM calls and manufacture two-second tree timeouts.

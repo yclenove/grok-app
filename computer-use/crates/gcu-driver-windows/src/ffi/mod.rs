@@ -159,6 +159,9 @@ impl WinApi for RealWinApi {
     fn enter_thread(&self) -> Result<Box<dyn std::any::Any>> {
         Ok(Box::new(Com::new()?))
     }
+    fn generation_property(&self) -> &[u16] {
+        &self.property
+    }
     fn engine_security(&self) -> Result<ProcessSecurity> {
         // SAFETY: no arguments or handles, returns the current process ID.
         security::security(unsafe { GetCurrentProcessId() })

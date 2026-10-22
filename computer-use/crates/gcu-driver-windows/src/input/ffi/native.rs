@@ -5,21 +5,70 @@ use crate::{
     uia::patterns::ActionContext,
 };
 use gcu_core::driver::{Button, DriverError, Result};
-use windows::Win32::{
-    Foundation::{LPARAM, POINT, WPARAM},
-    Graphics::Gdi::ScreenToClient,
-    System::Threading::{AttachThreadInput, GetCurrentThreadId},
-    UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+use windows::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::{LPARAM, POINT, RECT, WPARAM},
+        Graphics::Gdi::ScreenToClient,
+        System::Threading::{AttachThreadInput, GetCurrentThreadId},
+        UI::{HiDpi::GetDpiForWindow, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    },
 };
 
-pub(super) fn class(window: u64) -> Result<String> {
+pub(super) fn class_units(window: u64) -> Result<Vec<u16>> {
     let mut buffer = [0u16; 256];
     // SAFETY: fixed writable UTF-16 output, borrowed HWND, nonblocking metadata.
     let n = unsafe { GetClassNameW(hwnd(window), &mut buffer) };
-    if n == 0 {
+    if n <= 0 {
         return Err(DriverError::WindowGone);
     }
-    Ok(String::from_utf16_lossy(&buffer[..n as usize]))
+    Ok(buffer[..n as usize].to_vec())
+}
+pub(super) fn class(window: u64) -> Result<String> {
+    Ok(String::from_utf16_lossy(&class_units(window)?))
+}
+/// `GetClassNameW` against units captured before the gate. Does not allocate.
+pub(super) fn class_matches(window: u64, expected: &[u16]) -> bool {
+    if expected.is_empty() || expected.len() >= 256 {
+        return false;
+    }
+    let mut buffer = [0u16; 256];
+    // SAFETY: fixed writable UTF-16 output, borrowed HWND, nonblocking metadata.
+    let n = unsafe { GetClassNameW(hwnd(window), &mut buffer) };
+    n > 0 && buffer[..n as usize] == *expected
+}
+pub(super) fn frame_px(window: u64) -> Result<crate::input::admission::FramePx> {
+    let mut rect = RECT::default();
+    // SAFETY: writable RECT and a borrowed HWND. Same call enumeration uses for `frame`.
+    unsafe { GetWindowRect(hwnd(window), &mut rect) }.map_err(|_| failure())?;
+    Ok(crate::input::admission::FramePx {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    })
+}
+pub(super) fn iconic(window: u64) -> bool {
+    // SAFETY: numeric HWND; nonblocking minimized query.
+    unsafe { IsIconic(hwnd(window)).as_bool() }
+}
+pub(super) fn dpi_of(window: u64) -> u32 {
+    // SAFETY: numeric HWND; returns a DPI integer and no borrowed output.
+    unsafe { GetDpiForWindow(hwnd(window)) }
+}
+/// Generation marker from `GetPropW`. `None` when the name is not NUL-terminated or the property is absent.
+pub(super) fn generation(window: u64, property: &[u16]) -> Option<u64> {
+    if property.last() != Some(&0) {
+        return None;
+    }
+    // SAFETY: the name is NUL-terminated and borrowed for this call. GetPropW reads the
+    // window property list; it does not send a message to the window procedure.
+    let marker = unsafe { GetPropW(hwnd(window), PCWSTR(property.as_ptr())) };
+    if marker.is_invalid() {
+        None
+    } else {
+        Some(marker.0 as usize as u64)
+    }
 }
 pub(super) fn activate(window: u64, context: &ActionContext) -> Result<()> {
     // SAFETY: thread IDs from live windows. Attachment guard always detaches,
@@ -209,8 +258,8 @@ pub(super) fn inputs(events: &[Event]) -> Result<Vec<INPUT>> {
                     return Err(DriverError::OutOfBounds);
                 }
                 mouse(
-                    ((p.x - f64::from(x)) * 65535. / f64::from(w - 1)).round() as i32,
-                    ((p.y - f64::from(y)) * 65535. / f64::from(h - 1)).round() as i32,
+                    crate::input::pointer_settle::normalize_axis(p.x, x, w),
+                    crate::input::pointer_settle::normalize_axis(p.y, y, h),
                     0,
                     MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 )
@@ -308,32 +357,34 @@ fn keyboard(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
         },
     }
 }
-pub(super) fn inject(inputs: &[INPUT]) -> Result<()> {
+/// Insert an already-admitted packet. The caller holds the pointer gate for mouse input and
+/// has already run the bounded admission check. `inject_release` does not come through here.
+pub(super) fn deliver(inputs: &[INPUT]) -> Result<()> {
     if inputs.is_empty() {
         return Ok(());
     }
-    // Pointer packets share a gate with the heartbeat probe's cursor sample and publish, so a
-    // stale same-position probe move cannot land between this move and a coordinate-less button.
-    // Keyboard and Unicode packets are not gated (long packets must not starve the heartbeat).
     if inputs.iter().any(|input| input.r#type == INPUT_MOUSE) {
-        return crate::input::hook_probe::with_injection_gate(|| {
-            send_input(inputs)?;
-            // Windows applies an injected move to the cursor a moment after `SendInput` returns.
-            // Without this wait the probe's unchanged-cursor check, which runs as soon as the gate
-            // opens, sees the driver's own move land and reads it as someone else moving the mouse
-            // (a deliberate fail-closed Stop latch). Real hardware, 2026-10-22: `cursor changed
-            // during probe` latched Stop in about one drag in ten.
-            if let Some(target) = last_absolute_target(inputs) {
-                settle_cursor(target);
-            }
-            Ok(())
-        })
-        .unwrap_or(Err(DriverError::Native {
-            message: "pointer input gate busy; nothing was sent".into(),
-            maybe_executed: false,
-        }));
+        dispatch_pointer(inputs)
+    } else {
+        send_input(inputs)
     }
-    send_input(inputs)
+}
+fn dispatch_pointer(inputs: &[INPUT]) -> Result<()> {
+    send_input(inputs)?;
+    // Windows applies an injected move to the cursor a moment after `SendInput` returns.
+    // Without this wait the probe's unchanged-cursor check, which runs as soon as the gate
+    // opens, sees the driver's own move land and reads it as someone else moving the mouse
+    // (a deliberate fail-closed Stop latch). Real hardware, 2026-10-22: `cursor changed
+    // during probe` latched Stop in about one drag in ten.
+    if let Some(target) = last_absolute_target(inputs) {
+        // The move is already in the input stream. Timeout or an unreadable cursor must not
+        // look like success: the caller stops later button and drag packets, and the ledger
+        // keeps this packet because `maybe_executed` is set.
+        if let Some(error) = crate::input::pointer_settle::failure(settle_cursor(target)) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 /// Longest the gate is held waiting for the cursor to arrive. Well below the probe's 40ms gate wait.
 const CURSOR_SETTLE: std::time::Duration = std::time::Duration::from_millis(15);
@@ -361,25 +412,27 @@ fn last_absolute_target(inputs: &[INPUT]) -> Option<(i32, i32)> {
         return None;
     }
     Some((
-        x + (f64::from(last.0) * f64::from(w - 1) / 65535.).round() as i32,
-        y + (f64::from(last.1) * f64::from(h - 1) / 65535.).round() as i32,
+        crate::input::pointer_settle::denormalize_axis(last.0, x, w),
+        crate::input::pointer_settle::denormalize_axis(last.1, y, h),
     ))
 }
-/// True when the cursor is at the target pixel, allowing for the rounding of the 0..65535 mapping.
-fn cursor_at(actual: (i32, i32), target: (i32, i32)) -> bool {
-    (actual.0 - target.0).abs() <= 2 && (actual.1 - target.1).abs() <= 2
-}
-fn settle_cursor(target: (i32, i32)) {
+fn settle_cursor(target: (i32, i32)) -> crate::input::pointer_settle::Settle {
     let deadline = std::time::Instant::now() + CURSOR_SETTLE;
+    let mut progress = crate::input::pointer_settle::SettleProgress::pending();
     loop {
         let mut point = POINT::default();
         // SAFETY: bounded local output; read-only cursor query.
-        let known = unsafe { GetPhysicalCursorPos(&mut point) }.is_ok();
-        if known && cursor_at((point.x, point.y), target) {
-            return;
+        let sample = if unsafe { GetPhysicalCursorPos(&mut point) }.is_ok() {
+            Ok((point.x, point.y))
+        } else {
+            Err(())
+        };
+        progress = crate::input::pointer_settle::fold_sample(progress, sample, target);
+        if let crate::input::pointer_settle::SettleProgress::Done(done) = progress {
+            return done;
         }
         if std::time::Instant::now() >= deadline {
-            return;
+            return progress.finish();
         }
         std::thread::sleep(std::time::Duration::from_micros(500));
     }
@@ -429,14 +482,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_arrival_tolerates_the_normalization_rounding_only() {
-        assert!(cursor_at((431, 607), (431, 608)));
-        assert!(cursor_at((433, 610), (431, 608)));
-        assert!(!cursor_at((434, 608), (431, 608)));
-        assert!(!cursor_at((-2460, 100), (431, 608)));
-    }
-
-    #[test]
     fn the_settle_target_is_the_last_absolute_move_in_the_packet() {
         let events = [
             Event::Move(gcu_core::model::WindowPoint { x: 100., y: 100. }, false),
@@ -448,7 +493,16 @@ mod tests {
             ),
         ];
         let target = last_absolute_target(&inputs(&events).unwrap()).expect("a move is present");
-        assert!(cursor_at(target, (100, 100)), "{target:?}");
+        // Arrival is the inverse of the normalization formula, not the requested pixel.
+        // Round-trip may differ from (100, 100); a one-pixel neighbor is not arrived.
+        assert!(
+            crate::input::pointer_settle::cursor_arrived(target, target),
+            "{target:?}"
+        );
+        assert!(
+            !crate::input::pointer_settle::cursor_arrived((target.0 + 1, target.1), target),
+            "{target:?}"
+        );
         let buttons = [Event::Button(
             Button::Left,
             false,

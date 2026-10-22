@@ -642,6 +642,10 @@ lease); on timeout the action is refused with nothing sent, or the probe cycle i
 Keyboard and Unicode packets are not gated, and the Stop release path never waits on it. No constant changed
 (100 ms heartbeat, 4750 ms, 5 s); proof acceptance is unchanged.
 
+Follow-up (2026-10-22, second round): the mutex name is now the single session name `Local\gcu-pointer-gate-v1`
+(one cursor per desktop; `GCU_HOST_PID` is gone). See the 2026-10-22 second-round section of
+`computer-use/docs/adr/0013-addendum-cross-process-pointer-gate.md`.
+
 Result with the fix (win-test, `claudetest`):
 - Probe: cursor reached the target and the counter increased from all six starts (`probe-out-20261021-222920.txt`).
 - Contract table (`contract-out-20261021-223157.txt`): **18 passed / 8 skipped / 1 not_run / 3 failed**

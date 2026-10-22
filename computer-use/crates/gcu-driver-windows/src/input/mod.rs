@@ -1,4 +1,6 @@
 //! Windows targeted messages and explicitly permitted foreground input.
+#[cfg(any(windows, test))]
+mod admission;
 pub mod api;
 pub mod clipboard;
 pub mod fake;
@@ -15,6 +17,8 @@ mod injection;
 pub mod ledger;
 pub mod messages;
 mod plan;
+#[cfg(any(windows, test))]
+mod pointer_settle;
 pub mod text;
 pub mod watchdog;
 use crate::{api::NativeWindow, uia::patterns::ActionContext};
@@ -23,6 +27,40 @@ use api::{InputApi, Target};
 pub use ffi::{NativeRelease, RealInput, RealSafetyApi};
 use gcu_core::driver::*;
 use std::sync::{Arc, Mutex};
+
+/// Same-thread guard for the production named pointer mutex on Windows.
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[doc(hidden)]
+pub use hook_probe::PointerGateGuard;
+
+/// Acquire the production pointer gate. Windows integration tests use this to prove the
+/// named mutex. It does not send input. Unit tests must not treat their stand-in as this object.
+/// A `CreateMutexW` failure names the Win32 code; contention does not.
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[doc(hidden)]
+pub fn pointer_gate_enter_for_test(
+    wait: std::time::Duration,
+) -> std::result::Result<PointerGateGuard, String> {
+    hook_probe::enter_pointer_gate_for_test(wait)
+}
+
+/// Bind the pointer-gate mutex name before the first `CreateMutexW`.
+///
+/// The production constant stays `Local\gcu-pointer-gate-v1`. The name-conflict
+/// integration test injects a private name so it does not collide with another process.
+/// Fails when the name is already bound or an override was already set.
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[doc(hidden)]
+pub fn set_pointer_gate_name_for_test(name: &'static str) -> std::result::Result<(), &'static str> {
+    hook_probe::set_pointer_gate_name_for_test(name)
+}
+
+/// The production mutex name. Reading it does not create the kernel object.
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[doc(hidden)]
+pub fn pointer_gate_production_name_for_test() -> &'static str {
+    hook_probe::pointer_gate_production_name_for_test()
+}
 
 /// Post-delivery evidence. No visible change never authorizes replay or escalation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
