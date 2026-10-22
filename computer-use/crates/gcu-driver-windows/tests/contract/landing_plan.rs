@@ -95,25 +95,74 @@ impl Lcg {
     }
 }
 
+/// Floor model matching `pointer_settle::normalize_axis` for an integer pixel.
+/// `P` is clamped to `[0, extent - 1]`; `norm = ceil(P * 65536 / extent)`.
 pub fn normalize_axis(pixel: i32, origin: i32, extent: i32) -> i32 {
+    if extent <= 1 {
+        return 0;
+    }
+    let offset = i64::from(pixel) - i64::from(origin);
+    let p = u64::try_from(offset.clamp(0, i64::from(extent) - 1)).unwrap_or(0);
+    let extent = u64::try_from(extent).unwrap_or(1);
+    let norm = (p * 65536).div_ceil(extent);
+    i32::try_from(norm.min(65535)).unwrap_or(0)
+}
+
+/// `origin + floor(norm * extent / 65536)`, matching `pointer_settle::denormalize_axis`.
+pub fn denormalize_axis(norm: i32, origin: i32, extent: i32) -> i32 {
+    if extent <= 0 {
+        return origin;
+    }
+    let norm = i64::from(norm).clamp(0, 65535);
+    let landed = i64::from(origin) + norm * i64::from(extent) / 65536;
+    i32::try_from(landed).unwrap_or(if landed > 0 { i32::MAX } else { i32::MIN })
+}
+
+/// Retired round model, `round(offset * 65535 / (extent - 1))`.
+fn legacy_normalize_axis(pixel: i32, origin: i32, extent: i32) -> i32 {
     ((f64::from(pixel) - f64::from(origin)) * 65535. / f64::from(extent - 1)).round() as i32
 }
-pub fn denormalize_axis(norm: i32, origin: i32, extent: i32) -> i32 {
+
+fn legacy_denormalize_axis(norm: i32, origin: i32, extent: i32) -> i32 {
     origin + (f64::from(norm) * f64::from(extent - 1) / 65535.).round() as i32
 }
-fn bin_axis(norm: i32, origin: i32, extent: i32) -> i32 {
-    origin + (i64::from(norm) * i64::from(extent) / 65536) as i32
-}
+
+/// Offsets where the retired round model and the floor model do not name the same pixel.
+/// Same-bin norm choices are not included: Windows lands on that pixel either way.
 pub fn disagreement_offsets(extent: i32) -> Vec<i32> {
     if extent <= 1 {
         return Vec::new();
     }
     (0..extent)
         .filter(|offset| {
-            let norm = normalize_axis(*offset, 0, extent);
-            denormalize_axis(norm, 0, extent) != bin_axis(norm, 0, extent)
+            let legacy_norm = legacy_normalize_axis(*offset, 0, extent);
+            let floor_norm = normalize_axis(*offset, 0, extent);
+            let legacy_pixel = legacy_denormalize_axis(legacy_norm, 0, extent);
+            let floor_pixel = denormalize_axis(floor_norm, 0, extent);
+            let legacy_windows = denormalize_axis(legacy_norm, 0, extent);
+            legacy_pixel != floor_pixel || legacy_windows != floor_pixel
         })
         .collect()
+}
+
+/// Conclusive traces whose stable landing is not the requested pixel, in sample order.
+pub fn requested_miss_indices(traces: &[MoveTrace], limit: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (index, trace) in traces.iter().enumerate() {
+        if out.len() == limit {
+            break;
+        }
+        if trace.verdict.is_err() {
+            continue;
+        }
+        let Some((x, y)) = trace.stable else {
+            continue;
+        };
+        if x != trace.requested.0 || y != trace.requested.1 {
+            out.push(index);
+        }
+    }
+    out
 }
 
 pub fn on_monitor(monitors: &[MonitorRect], x: i32, y: i32) -> bool {
@@ -655,6 +704,32 @@ mod tests {
     fn arrival_budget_is_the_production_15ms_window() {
         assert_eq!(ARRIVAL_BUDGET, Duration::from_millis(15));
         assert_eq!(TAIL_SAMPLES, 2);
+    }
+
+    #[test]
+    fn floor_model_round_trips_and_reports_requested_misses() {
+        // win-test 2026-10-23: request -2553 on origin -2560, extent 6000.
+        assert_eq!(normalize_axis(-2553, -2560, 6000), 77);
+        assert_eq!(denormalize_axis(77, -2560, 6000), -2553);
+        assert_eq!(normalize_axis(720, 0, 1440), 32768);
+        assert_eq!(denormalize_axis(32768, 0, 1440), 720);
+        assert_eq!(disagreement_offsets(1920), vec![1, 2, 3, 8, 9, 16, 23]);
+        assert_eq!(disagreement_offsets(2560), vec![2, 4, 7, 9, 12, 17, 22, 27]);
+        assert_eq!(disagreement_offsets(1440), vec![2, 4, 6, 8, 10]);
+        assert_eq!(disagreement_offsets(1080), vec![2, 3, 6]);
+        let live = disagreement_offsets(6000);
+        assert_eq!((live.len(), live.first().copied()), (72, Some(7)));
+        assert_eq!(disagreement_offsets(7680).len(), 110);
+        assert_eq!(disagreement_offsets(3440).len(), 25);
+        let pair = |pos: (i32, i32)| vec![sample_at(500, pos), sample_at(49_000, pos)];
+        let hit = MoveTrace::capture((10, 10), (1, 1), (0, 0), Duration::ZERO, pair((10, 10)));
+        let miss = MoveTrace::capture((10, 10), (1, 1), (0, 0), Duration::ZERO, pair((9, 10)));
+        let parked = trace_of((1, 1), pair((1, 1)), (10, 10));
+        assert_eq!(
+            requested_miss_indices(&[hit, miss, parked.clone()], 20),
+            vec![1]
+        );
+        assert!(requested_miss_indices(&[parked], 20).is_empty());
     }
 
     #[test]

@@ -116,8 +116,8 @@ pub fn control_move(x: i32, y: i32) -> String {
             GetSystemMetrics(SM_CXVIRTUALSCREEN),
             GetSystemMetrics(SM_CYVIRTUALSCREEN),
         );
-        let nx = (f64::from(x - vx) * 65535. / f64::from(vw - 1)).round() as i32;
-        let ny = (f64::from(y - vy) * 65535. / f64::from(vh - 1)).round() as i32;
+        let nx = crate::landing_plan::normalize_axis(x, vx, vw);
+        let ny = crate::landing_plan::normalize_axis(y, vy, vh);
         let input = INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {

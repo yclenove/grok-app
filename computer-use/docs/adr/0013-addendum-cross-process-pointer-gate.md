@@ -86,3 +86,32 @@ win-test 标准用户 `claudetest`，真实驱动的前台点击，独立 `WH_MO
 - **N2。** 每次移动保留请求像素、归一化坐标、park 位置、时间原点、全部采样和终点。生产 15ms 预算内第一次离开 park 单独记录，不当作稳定落点。稳定落点是观察窗口尾部连续 2 个采样，且与最后一个采样相等。停在 park、尾部不一致、或尾部读不完整的轨迹是 inconclusive：单独计数，不进成功落点，也不进误差直方图。非零误差留在直方图里。打印逆映射误差最大的 20 条完整轨迹。结论性落点必须不少于计划数的 95%，并且不少于 400；显示器并集不足 400 像素时，下限改为实际计划数。
 - **N3。** 目标和 park 只取活动显示器矩形的并集，不取虚拟桌面外接矩形。空隙里的点不进入成功或误差统计。量化分歧像素若落在空隙中线上，改用包含该轴坐标的显示器里的另一轴坐标；该轴上没有任何显示器时，不把它算作必须覆盖的落点。采集期间显示器矩形或 DPI 变化则丢弃这一轮并重采一次，再次变化则失败。
 - **DPI。** 探针只调用 `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，与 worker 的 `DpiContext` 一样。不调用 `SetProcessDpiAwarenessContext`。
+
+## 2026-10-23 第五轮：绝对移动归一化改为 floor 模型
+
+本节闭合第二轮「Windows 舍入尚未用真机确认、直方图出来之前不得合并」的保留。不改 100ms 心跳、`INJECTION_GATE_WAIT` 40ms、到位等待 15ms、`CURSOR_ARRIVAL_TOLERANCE_PX` 0、`DRIVER_DEADLINE` 4750ms、5s 上限，不放宽 fail-closed。M4 / M5 仍是上文未修缺口。
+
+win-test，`live::live_move_landing_probe`（`GCU_DESKTOP=1`，2026-10-23）。虚拟桌面 (-2560,0)-(3440,1440)，宽 6000、高 1440，两块显示器 96 DPI。计划 400，发送 400，结论性 400。相对请求像素与相对当时 round 反算的直方图相同：dx 为 -1×74、0×326；dy 为 -1×5、0×395；没有 |误差|>1。例：请求 (-2553,720)、旧 norm x=76，终点 (-2554,720)；请求 (-2552,720)、旧 norm 87，终点 (-2553,720)。宽度 6000 上旧 norm 的 floor 箱比请求少 1 像素的偏移有 72 个（探针打印的 live disagreement x）；74/400（18.5%）是这些偏移被采到的次数。高度 1440 的 5 个偏移是 [2, 4, 6, 8, 10]，与 dy 的 5 次 -1 一致。
+
+Windows 对 `MOUSEEVENTF_ABSOLUTE|VIRTUALDESK` 的映射是 `pixel = origin + floor(norm * extent / 65536)`，与 `hook_probe::normalize` 的 bin 一致。旧公式 `round((pixel-origin)*65535/(extent-1))` 配 `round(norm*(extent-1)/65535)` 自己能往返，但在上述 X 目标上 Windows 落在请求的前一像素。容差 0 时这些移动的 15ms 到位会超时：后续按钮和拖拽不发送，`maybe_executed` 仍为 true。这是可用性故障，不是把容差改成非 0 的理由。
+
+决定：
+
+- `normalize_axis`：`P = round(pixel-origin)` 夹到 `[0, extent-1]`，`norm = ceil(P * 65536 / extent)`（整数除法，结果夹到 0..=65535）。宽于 65536 像素的轴无法为每个像素命名，饱和后若光标不到该像素，到位超时仍失败关闭。
+- `denormalize_axis`：`origin + floor(norm * extent / 65536)`（整数除法）。`inputs()` 与 `last_absolute_target` 仍只用这两个函数。到位仍是容差 0 的 `cursor_arrived(actual, denormalized target)`。
+- 探针的发送和逆映射改为同一 floor 模型。分歧像素是旧 round 模型与新 floor 模型落点不同的偏移（同一 bin 里只是代表值不同的像素不算）。1920/2560/3840/7680 的列表因此与第四轮相同；6000 为 72 个，1440 为上面 5 个。直方图和完整轨迹仍打印。结论性轨迹相对请求像素的误差必须全为 0，否则 `live_move_landing_probe` 失败，报告里的 `requested_miss` 是前 20 条。
+- 同位置探针仍发 bin 中点 `(low+high)/2`，动作路径发最小 norm `low`。两者的 floor 箱相同，中点不是 `inputs()` 发出的坐标。探针保持自己的模型。
+
+验证命令（真机探针本轮 not_run，由维护者复跑）：
+
+- `rcargo --sh 'cargo fmt --all --check'`
+- `rcargo --sh 'cargo check --workspace --locked -q'`
+- `rcargo --sh 'cargo run --locked -q -p xtask -- check-deps'`
+- `rcargo clippy --workspace --all-targets -- -D warnings`
+- `rcargo test -p gcu-driver-windows -p gcu-cli --no-fail-fast`
+- `wcargo clippy -p gcu-driver-windows -p gcu-cli --all-targets -- -D warnings`
+- `wcargo clippy -p gcu-driver-windows --all-targets --features test-support -- -D warnings`
+- `wcargo test -p gcu-driver-windows --lib --test pointer_gate --test hook_probe --features test-support`
+- `mcargo test -p gcu-driver-windows -p gcu-cli`
+
+本轮上述命令均已通过。`live_move_landing_probe` 未在 win-test 上复跑（not_run）。

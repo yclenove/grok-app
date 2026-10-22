@@ -2,19 +2,20 @@
 // Included from `unsafe_click_probe.rs`. Target selection and tail stability live in
 // `landing_plan` so they can be tested without a desktop. `GetSystemMetrics`,
 // `GetPhysicalCursorPos`, and `MONITORINFOF_PRIMARY` come from that module's glob import.
-use std::time::{Duration, Instant};
 use super::super::landing_plan::{
     self, CursorSample, Desktop, Inconclusive, MonitorRect, MoveTrace,
 };
+use std::time::{Duration, Instant};
 use windows::Win32::{
     Foundation::LPARAM,
     Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
     UI::{
         HiDpi::{
             AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext,
-            SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
-            DPI_AWARENESS_CONTEXT_UNAWARE, DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED, MDT_EFFECTIVE_DPI,
+            SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, DPI_AWARENESS_CONTEXT_UNAWARE,
+            DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED, MDT_EFFECTIVE_DPI,
         },
         Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
@@ -31,6 +32,8 @@ pub struct LandingReport {
     pub sent_ok: u32,
     pub conclusive: u32,
     pub screen_small: bool,
+    /// Largest absolute error of a conclusive landing against the requested pixel.
+    pub max_requested: i32,
     pub text: String,
 }
 impl LandingReport {
@@ -71,7 +74,10 @@ impl Drop for ThreadDpi {
 
 fn dpi_label(context: DPI_AWARENESS_CONTEXT) -> &'static str {
     let pairs = [
-        (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, "PER_MONITOR_AWARE_V2"),
+        (
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            "PER_MONITOR_AWARE_V2",
+        ),
         (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, "PER_MONITOR_AWARE"),
         (DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, "SYSTEM_AWARE"),
         (DPI_AWARENESS_CONTEXT_UNAWARE, "UNAWARE"),
@@ -91,7 +97,8 @@ fn enter_pmv2() -> Result<(String, ThreadDpi), String> {
     // Do not call `SetProcessDpiAwarenessContext`: that changes the process default
     // for later threads, and the worker does not do it.
     // SAFETY: changes only this thread. A null return means the set did not take effect.
-    let previous = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let previous =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     if previous.0.is_null() {
         return Err("SetThreadDpiAwarenessContext failed; process DPI was not changed".into());
     }
@@ -100,7 +107,9 @@ fn enter_pmv2() -> Result<(String, ThreadDpi), String> {
     let current = unsafe { GetThreadDpiAwarenessContext() };
     let label = dpi_label(current);
     if label != "PER_MONITOR_AWARE_V2" {
-        return Err(format!("thread DPI is {label}; process DPI was not changed"));
+        return Err(format!(
+            "thread DPI is {label}; process DPI was not changed"
+        ));
     }
     Ok((format!("thread={label}; process_dpi_unchanged"), guard))
 }
@@ -144,9 +153,8 @@ unsafe extern "system" fn collect_monitor(
         let mut dpi_x = 0u32;
         let mut dpi_y = 0u32;
         // SAFETY: writable dpi slots. The monitor handle is valid for this callback.
-        let dpi_ok = unsafe {
-            GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok()
-        };
+        let dpi_ok =
+            unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() };
         if !dpi_ok {
             dpi_x = 0;
             dpi_y = 0;
@@ -183,7 +191,10 @@ fn monitors() -> Result<Vec<LiveMonitor>, String> {
     if list.is_empty() {
         return Err("EnumDisplayMonitors returned no monitors".into());
     }
-    if list.iter().any(|monitor| monitor.dpi_x == 0 || monitor.dpi_y == 0) {
+    if list
+        .iter()
+        .any(|monitor| monitor.dpi_x == 0 || monitor.dpi_y == 0)
+    {
         return Err("GetDpiForMonitor failed".into());
     }
     list.sort_by_key(|monitor| {
@@ -209,7 +220,9 @@ fn capture_topology() -> Result<Topology, String> {
 fn ensure(baseline: &Topology) -> Result<(), ProbeFail> {
     match capture_topology() {
         Ok(now) if now == *baseline => Ok(()),
-        Ok(now) => Err(ProbeFail::Topology(format!("before {baseline:?}\nafter {now:?}"))),
+        Ok(now) => Err(ProbeFail::Topology(format!(
+            "before {baseline:?}\nafter {now:?}"
+        ))),
         Err(message) => Err(ProbeFail::Other(message)),
     }
 }
@@ -270,7 +283,11 @@ fn far_enough(a: (i32, i32), b: (i32, i32)) -> bool {
 }
 
 fn park(target: (i32, i32), topology: &Topology) -> Result<(i32, i32), String> {
-    let rects: Vec<MonitorRect> = topology.monitors.iter().map(|monitor| monitor.rect).collect();
+    let rects: Vec<MonitorRect> = topology
+        .monitors
+        .iter()
+        .map(|monitor| monitor.rect)
+        .collect();
     let corner = landing_plan::park_corner(target, &rects)?;
     send_absolute(corner.0, corner.1, &topology.desktop)?;
     let samples = sample_cursor(OBSERVE);
@@ -334,9 +351,9 @@ fn unreachable(desktop: &Desktop, monitors: &[LiveMonitor]) -> (Vec<i32>, Vec<i3
         .into_iter()
         .map(|offset| desktop.origin_x + offset)
         .filter(|pixel| {
-            !rects.iter().any(|rect| {
-                rect.bottom > rect.top && *pixel >= rect.left && *pixel < rect.right
-            })
+            !rects
+                .iter()
+                .any(|rect| rect.bottom > rect.top && *pixel >= rect.left && *pixel < rect.right)
         })
         .collect();
     let y = landing_plan::disagreement_offsets(desktop.height)
@@ -359,7 +376,7 @@ fn report_text(
     sent_ok: u32,
     send_fail: u32,
     traces: &[MoveTrace],
-) -> (String, u32) {
+) -> (String, u32, i32) {
     let (conclusive, no_departure, unstable, incomplete) = counts(traces);
     let hist = landing_plan::histograms(traces, &topology.desktop);
     let mut arrivals = Vec::new();
@@ -392,9 +409,19 @@ fn report_text(
             landing_plan::format_trace(&traces[*index])
         ));
     }
+    let mut misses = String::new();
+    for (rank, index) in landing_plan::requested_miss_indices(traces, 20)
+        .iter()
+        .enumerate()
+    {
+        misses.push_str(&format!(
+            "requested_miss[{rank}] {}\n",
+            landing_plan::format_trace(&traces[*index])
+        ));
+    }
     let desktop = &topology.desktop;
     let text = format!(
-        "landing probe planned={planned} sent_ok={sent_ok} send_fail={send_fail} conclusive={conclusive} inconclusive no_departure={no_departure} unstable={unstable} incomplete={incomplete} screen_small={plan_small}\nacceptance requires conclusive >= 95% of planned and >= 400 (or the actual count when the monitor union is smaller)\n{dpi}\nvirtual=({},{},{},{})\n{topology_text}reference disagreements {}\nlive disagreement x={live_x:?}\nlive disagreement y={live_y:?}\nunreachable disagreement x={gap_x:?}\nunreachable disagreement y={gap_y:?}\n{}\nvs_requested dx [{}]\nvs_requested dy [{}]\nvs_inverse dx [{}]\nvs_inverse dy [{}]\nmax_abs requested={} inverse={}\n{top}",
+        "landing probe planned={planned} sent_ok={sent_ok} send_fail={send_fail} conclusive={conclusive} inconclusive no_departure={no_departure} unstable={unstable} incomplete={incomplete} screen_small={plan_small}\nacceptance requires conclusive >= 95% of planned and >= 400 (or the actual count when the monitor union is smaller)\n{dpi}\nvirtual=({},{},{},{})\n{topology_text}reference disagreements {}\nlive disagreement x={live_x:?}\nlive disagreement y={live_y:?}\nunreachable disagreement x={gap_x:?}\nunreachable disagreement y={gap_y:?}\n{}\nvs_requested dx [{}]\nvs_requested dy [{}]\nvs_inverse dx [{}]\nvs_inverse dy [{}]\nmax_abs requested={} inverse={}\n{misses}{top}",
         desktop.origin_x,
         desktop.origin_y,
         desktop.width,
@@ -408,12 +435,16 @@ fn report_text(
         hist.max_requested,
         hist.max_inverse,
     );
-    (text, conclusive)
+    (text, conclusive, hist.max_requested)
 }
 
 fn collect(dpi: &str) -> Result<LandingReport, ProbeFail> {
     let baseline = capture_topology().map_err(ProbeFail::Other)?;
-    let rects: Vec<MonitorRect> = baseline.monitors.iter().map(|monitor| monitor.rect).collect();
+    let rects: Vec<MonitorRect> = baseline
+        .monitors
+        .iter()
+        .map(|monitor| monitor.rect)
+        .collect();
     let plan = landing_plan::build_targets(&baseline.desktop, &rects).map_err(ProbeFail::Other)?;
     let planned = u32::try_from(plan.points.len()).unwrap_or(u32::MAX);
     let mut traces = Vec::new();
@@ -429,8 +460,16 @@ fn collect(dpi: &str) -> Result<LandingReport, ProbeFail> {
             return Err(tag_move(error, index));
         }
         let normalized = (
-            landing_plan::normalize_axis(target.0, baseline.desktop.origin_x, baseline.desktop.width),
-            landing_plan::normalize_axis(target.1, baseline.desktop.origin_y, baseline.desktop.height),
+            landing_plan::normalize_axis(
+                target.0,
+                baseline.desktop.origin_x,
+                baseline.desktop.width,
+            ),
+            landing_plan::normalize_axis(
+                target.1,
+                baseline.desktop.origin_y,
+                baseline.desktop.height,
+            ),
         );
         let origin = probe_start.elapsed();
         if send_absolute(target.0, target.1, &baseline.desktop).is_err() {
@@ -446,7 +485,7 @@ fn collect(dpi: &str) -> Result<LandingReport, ProbeFail> {
             return Err(tag_move(error, index));
         }
     }
-    let (text, conclusive) = report_text(
+    let (text, conclusive, max_requested) = report_text(
         dpi,
         &baseline,
         plan.screen_small,
@@ -460,6 +499,7 @@ fn collect(dpi: &str) -> Result<LandingReport, ProbeFail> {
         sent_ok,
         conclusive,
         screen_small: plan.screen_small,
+        max_requested,
         text,
     })
 }

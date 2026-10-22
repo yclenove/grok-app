@@ -194,8 +194,12 @@ pub(crate) fn normalize(position: i32, origin: i32, size: i32) -> Result<i32, St
     if !(1..=65536).contains(&size) || offset < 0 || offset >= i64::from(size) {
         return Err("cursor outside representable physical virtual desktop".into());
     }
-    // Center of the integer bin that maps back to this physical pixel. Ceil the
-    // lower bound so even a 65535/65536-pixel desktop never rounds a pixel left.
+    // Same floor bins as `pointer_settle::normalize_axis`: Windows maps
+    // `MOUSEEVENTF_ABSOLUTE` with `offset = floor(norm * size / 65536)`.
+    // `low` is that function's minimum norm, `ceil(offset * 65536 / size)`.
+    // This probe publishes the bin midpoint so a same-position sample stays on
+    // this pixel. The action path publishes `low`. Both denormalize to this pixel.
+    // The midpoint is not the coordinate `inputs()` sends.
     let offset = offset as u64;
     let size = size as u64;
     let low = (offset * 65536).div_ceil(size);
