@@ -1,145 +1,13 @@
-// Pointer-gate acquire order and the host/worker name.
+// Pointer-gate acquire order.
 // Included from `hook_probe.rs` so the `#[path]` policy tests compile the same items.
 // The std gate below is the test double: same-thread reentry matches a Win32 mutex, and each
 // test can share one instance across threads. It is not the kernel object. The named mutex is
 // `cfg(all(windows, not(test)))` and is what `tests/pointer_gate.rs` calls.
-use std::{
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
-#[cfg(windows)]
-use std::marker::PhantomData;
+// One desktop has one cursor, so every host and worker in the session opens this one name.
+use std::time::{Duration, Instant};
 
-pub(super) const HOST_PID_ENV: &str = "GCU_HOST_PID";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GateRole {
-    Host,
-    Worker,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum WorkerHostPidError {
-    Missing,
-    Invalid,
-}
-
-impl WorkerHostPidError {
-    pub(super) fn message(self) -> &'static str {
-        match self {
-            Self::Missing => {
-                "worker refused to start: GCU_HOST_PID is missing; the pointer gate would not match the host"
-            }
-            Self::Invalid => {
-                "worker refused to start: GCU_HOST_PID is invalid; the pointer gate would not match the host"
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum Bound {
-    Worker(u32),
-    Refused,
-}
-
-/// Read `GCU_HOST_PID` through `read`. Tests pass a closure; production passes `std::env::var`.
-pub(super) fn inherited_host_pid(read: impl Fn(&str) -> Option<String>) -> Option<String> {
-    read(HOST_PID_ENV)
-}
-
-pub(super) fn parse_worker_host_pid(value: Option<&str>) -> Result<u32, WorkerHostPidError> {
-    let Some(raw) = value.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Err(WorkerHostPidError::Missing);
-    };
-    match raw.parse::<u32>() {
-        Ok(pid) if pid != 0 => Ok(pid),
-        _ => Err(WorkerHostPidError::Invalid),
-    }
-}
-
-/// Host always uses `own_pid` and ignores `inherited`. Worker uses only a validated parent pid.
-pub(super) fn gate_pid(
-    role: GateRole,
-    own_pid: u32,
-    inherited: Option<&str>,
-) -> Result<u32, WorkerHostPidError> {
-    match role {
-        GateRole::Host => Ok(own_pid),
-        GateRole::Worker => parse_worker_host_pid(inherited),
-    }
-}
-
-pub(super) fn pointer_gate_name(pid: u32) -> String {
-    format!("Local\\gcu-pointer-gate-{pid}")
-}
-
-/// Install a worker binding. A missing or invalid value refuses the slot so a later acquire
-/// cannot fall back to this process's pid. The same pid may be installed twice.
-pub(super) fn install_worker_pid(
-    slot: &OnceLock<Bound>,
-    value: Option<&str>,
-) -> Result<u32, WorkerHostPidError> {
-    match parse_worker_host_pid(value) {
-        Ok(pid) => match slot.set(Bound::Worker(pid)) {
-            Ok(()) => Ok(pid),
-            Err(_) => match slot.get() {
-                Some(Bound::Worker(existing)) if *existing == pid => Ok(pid),
-                _ => Err(WorkerHostPidError::Invalid),
-            },
-        },
-        Err(error) => {
-            let _ = slot.set(Bound::Refused);
-            Err(error)
-        }
-    }
-}
-
-pub(super) fn owner_from_binding(
-    bound: Option<&Bound>,
-    own_pid: u32,
-) -> Result<u32, super::GateBusy> {
-    match bound {
-        Some(Bound::Worker(pid)) => Ok(*pid),
-        Some(Bound::Refused) => Err(super::GateBusy),
-        // Host role: `inherited` is ignored. Unbound means this process.
-        None => match gate_pid(GateRole::Host, own_pid, None) {
-            Ok(pid) => Ok(pid),
-            Err(_) => Err(super::GateBusy),
-        },
-    }
-}
-
-#[cfg(all(windows, not(test)))]
-static BOUND: OnceLock<Bound> = OnceLock::new();
-
-#[cfg(all(windows, not(test)))]
-pub(super) fn bind_from_process_env() -> gcu_core::driver::Result<()> {
-    let value = inherited_host_pid(|key| std::env::var(key).ok());
-    // Same parser the tests drive. Own pid is not a fallback: `gate_pid(Worker)` never reads it.
-    // A failure must refuse the slot before return, or a later acquire would use this process.
-    if gate_pid(GateRole::Worker, std::process::id(), value.as_deref()).is_err() {
-        let _ = BOUND.set(Bound::Refused);
-    }
-    install_worker_pid(&BOUND, value.as_deref())
-        .map(|_| ())
-        .map_err(|error| gcu_core::driver::DriverError::Native {
-            message: error.message().to_string(),
-            maybe_executed: false,
-        })
-}
-
-#[cfg(windows)]
-pub(super) fn owner_pid_for_test() -> Result<u32, super::GateBusy> {
-    #[cfg(not(test))]
-    {
-        owner_from_binding(BOUND.get(), std::process::id())
-    }
-    #[cfg(test)]
-    {
-        Ok(std::process::id())
-    }
-}
+/// Session-wide pointer gate. Not per process: two hosts must not move one cursor at once.
+pub(super) const POINTER_GATE_NAME: &str = "Local\\gcu-pointer-gate-v1";
 
 fn log_wait(started: Instant) {
     let waited = started.elapsed();
@@ -168,17 +36,25 @@ pub(crate) fn with_admitted_gate<E, R>(
     {
         let started = Instant::now();
         let held = acquire(wait)?;
-        log_wait(started);
         let outcome = admit().and_then(|()| body());
         drop(held);
+        // After release. A tracing sink must not run while this thread owns the mutex.
+        log_wait(started);
         Ok(outcome)
     }
 }
 
 #[cfg(all(windows, not(test)))]
 mod win32 {
-    use super::{owner_from_binding, pointer_gate_name, BOUND};
-    use std::{marker::PhantomData, sync::OnceLock, time::Duration};
+    use super::POINTER_GATE_NAME;
+    use std::{
+        marker::PhantomData,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            OnceLock,
+        },
+        time::Duration,
+    };
     use windows::{
         core::PCWSTR,
         Win32::{
@@ -186,6 +62,12 @@ mod win32 {
             System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         },
     };
+
+    struct Created {
+        bits: isize,
+        /// Win32 code when `bits` is 0. Never 0: a zero code would look like a silent success.
+        error: u32,
+    }
 
     pub(super) struct Held {
         bits: isize,
@@ -201,6 +83,49 @@ mod win32 {
             }
         }
     }
+
+    static CREATED: OnceLock<Created> = OnceLock::new();
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+
+    fn created() -> &'static Created {
+        CREATED.get_or_init(|| {
+            let name: Vec<u16> = POINTER_GATE_NAME.encode_utf16().chain([0]).collect();
+            // SAFETY: NUL-terminated name that outlives the call; the handle lives for the process.
+            match unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) } {
+                Ok(handle) => Created {
+                    bits: handle.0 as isize,
+                    error: 0,
+                },
+                Err(error) => {
+                    let code = error.code().0 as u32;
+                    Created {
+                        bits: 0,
+                        error: if code == 0 { u32::MAX } else { code },
+                    }
+                }
+            }
+        })
+    }
+
+    pub(super) fn create_error_code() -> Option<u32> {
+        CREATED
+            .get()
+            .and_then(|created| (created.bits == 0 && created.error != 0).then_some(created.error))
+    }
+
+    fn log_create_failure_once(code: u32) {
+        if LOGGED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // Outside the mutex: creation failed, so this thread does not own it.
+        tracing::warn!(
+            target: "gcu_windows_timing",
+            stage = "pointer_gate_create",
+            win32 = code,
+            "pointer gate mutex could not be created"
+        );
+    }
+
     pub(super) fn acquire(wait: Duration) -> Result<Held, super::super::GateBusy> {
         // Debug/test workers only: lets the real-hardware stress test compare gate on and off.
         #[cfg(all(feature = "test-worker-faults", debug_assertions))]
@@ -210,20 +135,12 @@ mod win32 {
                 _thread: PhantomData,
             });
         }
-        static HANDLE_BITS: OnceLock<isize> = OnceLock::new();
-        let bits = *HANDLE_BITS.get_or_init(|| {
-            let Ok(host) = owner_from_binding(BOUND.get(), std::process::id()) else {
-                return 0;
-            };
-            let name: Vec<u16> = pointer_gate_name(host).encode_utf16().chain([0]).collect();
-            // SAFETY: NUL-terminated name that outlives the call; the handle lives for the process.
-            unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-                .map(|handle| handle.0 as isize)
-                .unwrap_or(0)
-        });
-        if bits == 0 {
+        let created = created();
+        if created.bits == 0 {
+            log_create_failure_once(created.error);
             return Err(super::super::GateBusy);
         }
+        let bits = created.bits;
         let millis = u32::try_from(wait.as_millis()).unwrap_or(40);
         // SAFETY: waits on the process-lifetime mutex handle. WAIT_ABANDONED grants this thread
         // ownership after the previous owner died; it is not a new proof and not a failure.
@@ -240,15 +157,33 @@ mod win32 {
 }
 
 #[cfg(all(windows, not(test)))]
+pub(super) fn create_error_code() -> Option<u32> {
+    win32::create_error_code()
+}
+
+/// Busy message for a refused pointer packet. A failed `CreateMutexW` keeps its Win32 code.
+pub(super) fn refusal_message() -> String {
+    #[cfg(all(windows, not(test)))]
+    if let Some(code) = create_error_code() {
+        return format!("pointer gate unavailable (Win32 {code:08x}); nothing was sent");
+    }
+    "pointer input gate busy; nothing was sent".into()
+}
+
+#[cfg(all(windows, not(test)))]
 use win32::acquire;
+
+#[cfg(all(windows, not(test), feature = "test-support"))]
+use std::marker::PhantomData;
 
 /// Same-thread guard for the production named mutex.
 ///
 /// Drop releases it on the acquiring thread. Forgetting the guard and ending that
 /// thread abandons the mutex; the next wait is granted ownership (`WAIT_ABANDONED`).
 /// Not an input permission and not a lease. Integration tests use this; unit tests
-/// do not pretend it is the kernel object.
-#[cfg(all(windows, not(test)))]
+/// do not pretend it is the kernel object. Absent from production builds that do not
+/// enable `test-support`.
+#[cfg(all(windows, not(test), feature = "test-support"))]
 pub struct PointerGateGuard {
     // Unread on purpose: dropping the field releases the mutex on this thread.
     #[allow(dead_code)]
@@ -256,12 +191,14 @@ pub struct PointerGateGuard {
     _thread: PhantomData<*const ()>,
 }
 
-#[cfg(all(windows, not(test)))]
-pub(super) fn enter_for_test(wait: Duration) -> Result<PointerGateGuard, super::GateBusy> {
-    acquire(wait).map(|held| PointerGateGuard {
-        held,
-        _thread: PhantomData,
-    })
+#[cfg(all(windows, not(test), feature = "test-support"))]
+pub(super) fn enter_for_test(wait: Duration) -> Result<PointerGateGuard, String> {
+    acquire(wait)
+        .map(|held| PointerGateGuard {
+            held,
+            _thread: PhantomData,
+        })
+        .map_err(|_| refusal_message())
 }
 
 #[cfg(test)]
@@ -306,11 +243,15 @@ mod shared {
         }
         pub(crate) fn held_by_current(&self) -> bool {
             let state = self.lock();
-            state.owner.as_ref().is_some_and(|owner| {
-                owner.thread == std::thread::current().id() && owner.depth > 0
-            })
+            state
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.thread == std::thread::current().id() && owner.depth > 0)
         }
-        pub(crate) fn acquire(self: &Arc<Self>, wait: Duration) -> Result<SharedHeld, super::super::GateBusy> {
+        pub(crate) fn acquire(
+            self: &Arc<Self>,
+            wait: Duration,
+        ) -> Result<SharedHeld, super::super::GateBusy> {
             let mut state = self.lock();
             let me = std::thread::current().id();
             if let Some(owner) = state.owner.as_mut() {
@@ -322,7 +263,10 @@ mod shared {
                     });
                 }
             } else {
-                state.owner = Some(Owner { thread: me, depth: 1 });
+                state.owner = Some(Owner {
+                    thread: me,
+                    depth: 1,
+                });
                 return Ok(SharedHeld {
                     gate: Arc::clone(self),
                     _thread: PhantomData,
@@ -345,7 +289,10 @@ mod shared {
                 };
                 state = guard;
                 if state.owner.is_none() {
-                    state.owner = Some(Owner { thread: me, depth: 1 });
+                    state.owner = Some(Owner {
+                        thread: me,
+                        depth: 1,
+                    });
                     break Ok(());
                 }
                 if timeout.timed_out() && Instant::now() >= deadline {
@@ -359,7 +306,9 @@ mod shared {
             })
         }
         fn lock(&self) -> MutexGuard<'_, State> {
-            self.state.lock().unwrap_or_else(|poison| poison.into_inner())
+            self.state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
         }
         fn release_current(&self) {
             let mut state = self.lock();
@@ -396,17 +345,16 @@ mod shared {
     ) -> Result<Result<R, E>, super::super::GateBusy> {
         let started = Instant::now();
         let held = gate.acquire(wait)?;
-        log_wait(started);
         let outcome = admit().and_then(|()| body());
         drop(held);
+        // After release, matching the production path. The test double must not log while held.
+        log_wait(started);
         Ok(outcome)
     }
 }
 
 #[cfg(test)]
 pub(crate) use shared::{with_admitted_gate_on, SharedGate};
-#[cfg(all(windows, test))]
-use shared::SharedHeld;
 
 #[cfg(test)]
 thread_local! {
@@ -432,101 +380,20 @@ pub(crate) fn with_shared_gate<R>(gate: std::sync::Arc<SharedGate>, body: impl F
     })
 }
 
-/// Test build of the gate guard. The Windows integration test links the non-test
-/// library and therefore uses the named mutex, not this value.
-#[cfg(all(windows, test))]
-pub struct PointerGateGuard {
-    // Unread on purpose: dropping the field releases the stand-in gate.
-    #[allow(dead_code)]
-    held: SharedHeld,
-    _thread: PhantomData<*const ()>,
-}
-
-#[cfg(all(windows, test))]
-pub(super) fn enter_for_test(wait: Duration) -> Result<PointerGateGuard, super::GateBusy> {
-    current_gate()
-        .acquire(wait)
-        .map(|held| PointerGateGuard {
-            held,
-            _thread: PhantomData,
-        })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        gate_pid, inherited_host_pid, install_worker_pid, owner_from_binding, pointer_gate_name,
-        Bound, GateRole, WorkerHostPidError,
-    };
-    use std::sync::OnceLock;
+    use super::{refusal_message, POINTER_GATE_NAME};
 
     #[test]
-    fn host_role_ignores_inherited_gcu_host_pid() {
-        for inherited in [None, Some(""), Some("0"), Some("999"), Some("nope")] {
-            let read = inherited_host_pid(|_| inherited.map(str::to_string));
-            assert_eq!(gate_pid(GateRole::Host, 42, read.as_deref()), Ok(42));
-        }
-        assert_eq!(pointer_gate_name(42), "Local\\gcu-pointer-gate-42");
+    fn the_pointer_gate_name_is_one_per_session() {
+        assert_eq!(POINTER_GATE_NAME, "Local\\gcu-pointer-gate-v1");
     }
 
     #[test]
-    fn worker_role_rejects_a_missing_or_invalid_host_pid() {
-        assert!(WorkerHostPidError::Missing.message().contains("missing"));
-        assert!(WorkerHostPidError::Invalid.message().contains("invalid"));
+    fn a_contended_gate_names_busy_without_a_win32_code() {
         assert_eq!(
-            gate_pid(GateRole::Worker, 7, None),
-            Err(WorkerHostPidError::Missing)
+            refusal_message(),
+            "pointer input gate busy; nothing was sent"
         );
-        assert_eq!(
-            gate_pid(GateRole::Worker, 7, Some("")),
-            Err(WorkerHostPidError::Missing)
-        );
-        assert_eq!(
-            gate_pid(GateRole::Worker, 7, Some("0")),
-            Err(WorkerHostPidError::Invalid)
-        );
-        assert_eq!(
-            gate_pid(GateRole::Worker, 7, Some("nope")),
-            Err(WorkerHostPidError::Invalid)
-        );
-        assert_eq!(
-            gate_pid(GateRole::Worker, 7, Some("-1")),
-            Err(WorkerHostPidError::Invalid)
-        );
-    }
-
-    #[test]
-    fn worker_role_uses_the_validated_host_pid() {
-        let value = inherited_host_pid(|key| {
-            assert_eq!(key, "GCU_HOST_PID");
-            Some("101".into())
-        });
-        assert_eq!(gate_pid(GateRole::Worker, 7, value.as_deref()), Ok(101));
-        assert_eq!(pointer_gate_name(101), "Local\\gcu-pointer-gate-101");
-    }
-
-    #[test]
-    fn worker_bind_is_idempotent_and_a_bad_value_refuses_the_slot() {
-        let slot = OnceLock::new();
-        assert_eq!(install_worker_pid(&slot, Some("42")), Ok(42));
-        assert_eq!(install_worker_pid(&slot, Some("42")), Ok(42));
-        assert_eq!(
-            install_worker_pid(&slot, Some("7")),
-            Err(WorkerHostPidError::Invalid)
-        );
-        assert!(matches!(slot.get(), Some(Bound::Worker(42))));
-        let refused = OnceLock::new();
-        assert_eq!(
-            install_worker_pid(&refused, None),
-            Err(WorkerHostPidError::Missing)
-        );
-        assert!(matches!(refused.get(), Some(Bound::Refused)));
-        assert_eq!(
-            install_worker_pid(&refused, Some("42")),
-            Err(WorkerHostPidError::Invalid)
-        );
-        assert_eq!(owner_from_binding(None, 9), Ok(9));
-        assert_eq!(owner_from_binding(Some(&Bound::Worker(4)), 9), Ok(4));
-        assert!(owner_from_binding(Some(&Bound::Refused), 9).is_err());
     }
 }

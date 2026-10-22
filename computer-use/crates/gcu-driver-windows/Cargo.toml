@@ -7,6 +7,12 @@ publish.workspace = true
 
 [features]
 test-worker-faults = ["tokio/io-std"]
+# Public pointer-gate test helpers. Off in production builds. Integration tests opt in.
+test-support = []
+
+[[test]]
+name = "pointer_gate"
+required-features = ["test-support"]
 
 [[bin]]
 name = "gcu-test-worker"
@@ -57,7 +63,7 @@ insta = { version = "1", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dev-dependencies]
-windows = { version = "0.62", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [lints]
 workspace = true

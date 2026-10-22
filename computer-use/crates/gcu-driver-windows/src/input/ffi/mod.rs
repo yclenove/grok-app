@@ -77,45 +77,40 @@ fn failure() -> DriverError {
         maybe_executed: false,
     }
 }
-/// Admission failed before `SendInput`. Nothing in this packet was inserted, so the ledger
-/// must roll it back even if an earlier `begin` had already raised the uncertainty bit.
-fn not_executed(error: DriverError) -> DriverError {
-    match error {
-        DriverError::Timeout { .. } => DriverError::Timeout {
-            maybe_executed: false,
-        },
-        DriverError::Cancelled { .. } => DriverError::Cancelled {
-            maybe_executed: false,
-        },
-        DriverError::Crashed { .. } => DriverError::Crashed {
-            maybe_executed: false,
-        },
-        DriverError::Native { message, .. } => DriverError::Native {
-            message,
-            maybe_executed: false,
-        },
-        DriverError::NotSettable { .. } => DriverError::NotSettable {
-            maybe_executed: false,
-        },
-        other => other,
-    }
+/// Identity and `INPUT` records built before the ledger and the pointer gate.
+struct PreparedSend {
+    identity: super::admission::ExpectedIdentity,
+    inputs: Vec<INPUT>,
 }
-fn recheck_admission(
-    state: &State,
-    request: &crate::uia::worker::Request,
-    target: &Target,
-) -> Result<()> {
-    if let Err(error) = request.check() {
-        return Err(not_executed(error));
+/// Scalar reads allowed inside the pointer gate. No enumeration, COM, or log write.
+struct WinScalar;
+impl super::admission::ScalarAdmission for WinScalar {
+    fn foreground(&self) -> u64 {
+        // SAFETY: nonblocking foreground read; no borrowed output.
+        id(unsafe { GetForegroundWindow() })
     }
-    // SAFETY: nonblocking foreground read immediately before SendInput, after the pointer-gate wait.
-    if unsafe { GetForegroundWindow() } != hwnd(target.window.hwnd) {
-        return Err(DriverError::CapabilityUnavailable);
+    fn is_window(&self, window: u64) -> bool {
+        // SAFETY: borrowed numeric HWND; nonblocking liveness query.
+        unsafe { IsWindow(Some(hwnd(window))).as_bool() }
     }
-    state.validate(target, true).map_err(not_executed)
+    fn root(&self, window: u64) -> u64 {
+        // SAFETY: borrowed numeric HWND; returns another HWND, no allocation.
+        id(unsafe { GetAncestor(hwnd(window), GA_ROOT) })
+    }
+    fn thread_process(&self, window: u64) -> (u32, u32) {
+        let mut pid = 0;
+        // SAFETY: borrowed numeric HWND and a writable pid slot. No memory from the target.
+        let tid = unsafe { GetWindowThreadProcessId(hwnd(window), Some(&mut pid)) };
+        (tid, pid)
+    }
+    fn class_matches(&self, window: u64, class: &str) -> bool {
+        native::class(window).ok().as_deref() == Some(class)
+    }
 }
 impl State {
-    fn validate(&self, target: &Target, foreground: bool) -> Result<()> {
+    /// Blocking checks (enumeration, the security gate, COM). Returns the child thread and
+    /// process ids this call already handed to `WinGate`, for the later scalar re-read.
+    fn validate(&self, target: &Target, foreground: bool) -> Result<(u32, u32)> {
         let current = self
             .api
             .enum_windows()?
@@ -138,13 +133,16 @@ impl State {
         let mut pid = 0;
         // SAFETY: borrowed numeric HWNDs and writable PID; no memory references
         // to a target process. The child must still belong to the exact root.
-        unsafe {
+        let tid = unsafe {
             if !IsWindow(Some(hwnd(target.hwnd))).as_bool()
                 || GetAncestor(hwnd(target.hwnd), GA_ROOT) != hwnd(current.hwnd)
             {
                 return Err(DriverError::WindowGone);
             }
-            GetWindowThreadProcessId(hwnd(target.hwnd), Some(&mut pid));
+            GetWindowThreadProcessId(hwnd(target.hwnd), Some(&mut pid))
+        };
+        if tid == 0 {
+            return Err(DriverError::WindowGone);
         }
         crate::gate::WinGate.check(
             self.api.as_ref(),
@@ -155,7 +153,7 @@ impl State {
         if native::class(target.hwnd)? != target.class {
             return Err(DriverError::StaleElement);
         }
-        Ok(())
+        Ok((tid, pid))
     }
     fn resolve(
         &self,
@@ -328,7 +326,7 @@ impl InputApi for RealInput {
         self.worker
             .call(move |s, r| {
                 r.check()?;
-                s.validate(&target, foreground)
+                s.validate(&target, foreground).map(|_| ())
             })
             .await
     }
@@ -369,27 +367,52 @@ impl InputApi for RealInput {
     ) -> Result<()> {
         self.worker
             .call_action(context.clone(), move |s, r| {
-                r.check()?;
-                s.validate(&target, delivery == Delivery::Foreground)?;
-                if delivery == Delivery::Foreground {
-                    // SAFETY: nonblocking foreground probe before taking the ledger. Cancel,
-                    // deadline, foreground, and validate run again immediately before SendInput.
-                    if unsafe { GetForegroundWindow() } != hwnd(target.window.hwnd) {
-                        return Err(DriverError::CapabilityUnavailable);
-                    }
-                    let inputs = native::inputs(&events)?;
-                    ledger.dispatch_packet(&target, &events, delivery, &context, || {
-                        native::inject(&inputs, || recheck_admission(s, r, &target))
-                    })
-                } else {
+                if delivery != Delivery::Foreground {
                     for event in events {
                         r.check()?;
                         ledger.dispatch(&target, event, delivery, &context, |_| {
                             native::post(&target, event)
                         })?;
                     }
-                    Ok(())
+                    return Ok(());
                 }
+                // Enumeration, the security gate, and COM finish in `prepare`, before the ledger
+                // and the pointer gate. The gate then only re-reads cancellation, the deadline,
+                // the foreground window, and scalar identity.
+                let pointer = super::admission::packet_is_pointer(&events);
+                super::admission::prepare_then_dispatch(
+                    || {
+                        r.check()?;
+                        let (tid, pid) = s.validate(&target, true)?;
+                        let inputs = native::inputs(&events)?;
+                        Ok(PreparedSend {
+                            identity: super::admission::ExpectedIdentity {
+                                root: target.window.hwnd,
+                                hwnd: target.hwnd,
+                                class: target.class.clone(),
+                                pid,
+                                tid,
+                            },
+                            inputs,
+                        })
+                    },
+                    super::admission::Dispatch {
+                        ledger: ledger.as_ref(),
+                        target: &target,
+                        events: &events,
+                        delivery,
+                        context: &context,
+                        pointer,
+                    },
+                    |prepared| {
+                        super::admission::bounded_admit(
+                            || r.check(),
+                            &prepared.identity,
+                            &WinScalar,
+                        )
+                    },
+                    |prepared| native::deliver(&prepared.inputs),
+                )
             })
             .await
     }

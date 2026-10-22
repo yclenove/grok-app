@@ -759,3 +759,19 @@ async fn live_drag_stress() {
         "STRESS gate={gate} DONE ok={ok} failed={failed} of {n}"
     ));
 }
+
+/// Measurement only. Sends `MOVE|ABSOLUTE|VIRTUALDESK` to at least 200 pixels, including the
+/// virtual-desktop edges, and prints landing error against the requested pixel and against the
+/// inverse of the driver's normalization. Does not decide the arrival tolerance.
+/// Run with `--exact live::live_move_landing_probe --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only; do not merge until this histogram confirms inverse error is 0"]
+async fn live_move_landing_probe() {
+    require(
+        std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
+        "explicit GCU_DESKTOP=1 required",
+    )
+    .unwrap();
+    let report = unsafe_click_probe::landing_histogram().unwrap();
+    progress(report);
+}

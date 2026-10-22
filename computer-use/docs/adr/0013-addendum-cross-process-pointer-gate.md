@@ -54,3 +54,12 @@ win-test 标准用户 `claudetest`，真实驱动的前台点击，独立 `WH_MO
 - **R2 闸名。** host 忽略 `GCU_HOST_PID`，闸名始终用本进程 pid。worker 在 `serve_with_input` 入口读一次该变量，校验后写入进程内 `OnceLock`；缺失、无法解析或为 0 则拒绝启动，不退回 worker 自己的 pid。闸模块只读这个绑定，不再在取闸时读环境。父进程仍在拉起 worker 时覆盖该变量（决定第 1 条的身份规则由此落地）。
 - **R3 到位结果。** `settle_cursor` 返回到位、超时或读不到位置。超时或读失败时 `inject` 返回 `DriverError::Native { maybe_executed: true }`，不把移动说成成功；调用方停止后续依赖到位的按钮和拖拽包。容差仍是 ±2 物理像素：0..65535 归一化实测会偏 1px。`approach_point` 本身只离开目标 1px，所以光标还停在接近点上也会被判为到位。这是为了不拒绝真实的舍入到达而保留的取舍，不把容差改小。超时和读失败仍然是失败。
 - **R6 测试。** 单元测试的闸与 Win32 一样同线程可重入，互斥用两个线程共享同一实例证明，测试之间不共用那把实例。这不是内核互斥体。命名互斥体只由 `tests/pointer_gate.rs` 在 Windows 上链接非 `cfg(test)` 的库来调用：两线程互斥，以及 `WAIT_ABANDONED` 算作取得。无桌面的其他目标编过该文件也不构成这项覆盖。
+
+## 2026-10-22 第二轮：会话级闸名、闸外校验、精确到位（N1 / R3 / R4）
+
+独立审查第二轮（`docs/plans/computer-use-v2/reviews/2026-10-22-pointer-gate-fix-review-r2.md`）结论是 MERGE-AFTER-FIXES。本节取代决定第 1 条的 pid 闸名、上文 R2 的 pid 绑定，以及 R3 的 ±2 容差。不改 100ms 心跳、`INJECTION_GATE_WAIT` 40ms、到位等待 15ms、`DRIVER_DEADLINE` 4750ms、5s 上限，不放宽 fail-closed。
+
+- **闸名（R4 / N2）。** 一个会话（桌面）只有一个光标，所以闸是会话级单一名字 `Local\gcu-pointer-gate-v1`，host 与 worker 共用，不再带 pid。`GCU_HOST_PID`、worker 绑定，以及句柄 `OnceLock` 与绑定 `OnceLock` 分离的路径全部删除。N2 的“绑定与句柄不一致”和 R2 的两把闸因此消失。同用户的其他进程占住这个名字时，取闸失败是 `GateBusy`（fail-closed）：拒绝发送，不是授权。这是拒绝服务，不是放行。不再用 pid，是因为 pid 会让同一桌面上的两个 host 各拿一把闸，而光标只有一个。`WAIT_ABANDONED` 仍视为取得所有权，不是新的证明。`CreateMutexW` 失败不再把句柄缓存成 0 后沉默：保留 Win32 错误码，在闸外首次失败时记录一次诊断（`gcu_windows_timing` / `pointer_gate_create`），之后仍然 fail-closed，错误信息带该错误码。不重试创建。
+- **闸内工作（N1 / R1）。** 枚举窗口、安全校验和 COM（`State::validate`）在取账本和取闸之前做完。闸内的准入只做有界标量检查：取消与期限、`GetForegroundWindow()` 对比目标顶层窗口，以及 `IsWindow`、根窗口、进程/线程 id、类名。闸内不枚举、不调用 COM、不写日志。计时日志在释放闸之后。键盘包不取闸，但在 `SendInput` 前做同一次有界检查。复查失败不带本包的 `maybe_executed`，账本回滚这一包；更早的按下仍保留。
+- **到位（R3）。** 目标像素是 `inputs()` 同一归一化公式的精确反算，容差常量 `CURSOR_ARRIVAL_TOLERANCE_PX` 默认 0。旧的 ±2 会把 1px 的接近点当成已到达并提前开闸。Windows 把归一化坐标舍入到像素的方式尚未用真机数据确认。在 `live::live_move_landing_probe`（忽略，需 `GCU_DESKTOP=1`）打出落点直方图之前，**不得合并**。未确认前不得把容差改成非 0 来掩盖超时。
+- **R5 仍未做。** 证明过期相对 100ms 锁存的缺口还在：看门狗轮询约 20ms，恰好 100ms 仍算租约内，观察到过期大约在 120ms，再加上调度抖动。本次不改 100ms，也不把这个窗口说成已经合上。

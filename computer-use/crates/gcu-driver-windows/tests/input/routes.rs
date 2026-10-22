@@ -88,6 +88,51 @@ async fn uncertain_move_does_not_send_the_following_button() {
     assert_eq!(sent.len(), 1, "only the uncertain move is inserted");
 }
 #[tokio::test]
+async fn drag_settle_failure_releases_the_held_button_at_the_down_point() {
+    let (api, driver, win) = fixture().await;
+    api.update(|s| {
+        // Foreground drag (10,10) -> (20,10): approach, start move, button down, one
+        // interpolated move, button up. Index 3 is the interpolated move, after the down.
+        s.fail_at = Some(3);
+        s.send_error = DriverError::Native {
+            message: "pointer move was sent but the cursor did not arrive".into(),
+            maybe_executed: true,
+        };
+    });
+    let error = driver
+        .perform(
+            &DriverAction::PointerDrag {
+                win,
+                path: vec![
+                    WindowPoint { x: 10., y: 10. },
+                    WindowPoint { x: 20., y: 10. },
+                ],
+                route: PointerRoute::AllowForeground,
+            },
+            &Cancel::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.maybe_executed());
+    assert_eq!(error.error_code(), gcu_protocol::ErrorCode::DriverError);
+    let sent = api.state().sent;
+    let downs: Vec<_> = sent
+        .iter()
+        .filter(|sent| matches!(sent.event, Event::Button(_, true, ..)))
+        .collect();
+    let ups: Vec<_> = sent
+        .iter()
+        .filter(|sent| matches!(sent.event, Event::Button(_, false, ..)))
+        .collect();
+    assert_eq!(downs.len(), 1, "the down was inserted before settle failed");
+    assert_eq!(ups.len(), 1, "cleanup must release that button");
+    assert_eq!(
+        ups[0].event,
+        Event::Button(Button::Left, false, WindowPoint { x: 10., y: 10. }, false),
+        "the release stays at the down, not the planned endpoint"
+    );
+}
+#[tokio::test]
 async fn exact_focus_routes_only_focus_after_foreground_permission() {
     for route in [KeyRoute::TargetedOnly, KeyRoute::AllowForeground] {
         let (api, driver, win) = fixture().await;

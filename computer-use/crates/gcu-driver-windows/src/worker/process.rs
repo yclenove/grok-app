@@ -50,9 +50,6 @@ impl Process {
             }
         }
         command.envs(config.environment.iter().cloned());
-        // Parent pid for the worker's pointer gate. The worker reads it once and refuses
-        // to start if it is missing or invalid. The host ignores this variable. Not a secret.
-        command.env("GCU_HOST_PID", std::process::id().to_string());
         // The disposable native harness opts in to full provider timing. Write
         // child stderr directly to a per-worker file: a slow PowerShell console
         // must not stall COM calls and manufacture two-second tree timeouts.

@@ -209,8 +209,8 @@ pub(super) fn inputs(events: &[Event]) -> Result<Vec<INPUT>> {
                     return Err(DriverError::OutOfBounds);
                 }
                 mouse(
-                    ((p.x - f64::from(x)) * 65535. / f64::from(w - 1)).round() as i32,
-                    ((p.y - f64::from(y)) * 65535. / f64::from(h - 1)).round() as i32,
+                    crate::input::pointer_settle::normalize_axis(p.x, x, w),
+                    crate::input::pointer_settle::normalize_axis(p.y, y, h),
                     0,
                     MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 )
@@ -308,31 +308,17 @@ fn keyboard(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
         },
     }
 }
-pub(super) fn inject(inputs: &[INPUT], admit: impl FnOnce() -> Result<()>) -> Result<()> {
+/// Insert an already-admitted packet. The caller holds the pointer gate for mouse input and
+/// has already run the bounded admission check. `inject_release` does not come through here.
+pub(super) fn deliver(inputs: &[INPUT]) -> Result<()> {
     if inputs.is_empty() {
         return Ok(());
     }
-    // Pointer packets share a gate with the heartbeat probe's cursor sample and publish, so a
-    // stale same-position probe move cannot land between this move and a coordinate-less button.
-    // Keyboard and Unicode packets are not gated (long packets must not starve the heartbeat).
-    // `admit` runs only after the gate is held and immediately before `SendInput`. A refusal
-    // has not inserted input, so it carries no `maybe_executed` and the ledger rolls the packet
-    // back. `inject_release` does not come through here.
     if inputs.iter().any(|input| input.r#type == INPUT_MOUSE) {
-        return match crate::input::hook_probe::with_admitted_gate(
-            crate::input::hook_probe::INJECTION_GATE_WAIT,
-            admit,
-            || dispatch_pointer(inputs),
-        ) {
-            Err(crate::input::hook_probe::GateBusy) => Err(DriverError::Native {
-                message: "pointer input gate busy; nothing was sent".into(),
-                maybe_executed: false,
-            }),
-            Ok(result) => result,
-        };
+        dispatch_pointer(inputs)
+    } else {
+        send_input(inputs)
     }
-    admit()?;
-    send_input(inputs)
 }
 fn dispatch_pointer(inputs: &[INPUT]) -> Result<()> {
     send_input(inputs)?;
@@ -377,8 +363,8 @@ fn last_absolute_target(inputs: &[INPUT]) -> Option<(i32, i32)> {
         return None;
     }
     Some((
-        x + (f64::from(last.0) * f64::from(w - 1) / 65535.).round() as i32,
-        y + (f64::from(last.1) * f64::from(h - 1) / 65535.).round() as i32,
+        crate::input::pointer_settle::denormalize_axis(last.0, x, w),
+        crate::input::pointer_settle::denormalize_axis(last.1, y, h),
     ))
 }
 fn settle_cursor(target: (i32, i32)) -> crate::input::pointer_settle::Settle {
@@ -458,8 +444,14 @@ mod tests {
             ),
         ];
         let target = last_absolute_target(&inputs(&events).unwrap()).expect("a move is present");
+        // Arrival is the inverse of the normalization formula, not the requested pixel.
+        // Round-trip may differ from (100, 100); a one-pixel neighbor is not arrived.
         assert!(
-            crate::input::pointer_settle::cursor_arrived(target, (100, 100)),
+            crate::input::pointer_settle::cursor_arrived(target, target),
+            "{target:?}"
+        );
+        assert!(
+            !crate::input::pointer_settle::cursor_arrived((target.0 + 1, target.1), target),
             "{target:?}"
         );
         let buttons = [Event::Button(

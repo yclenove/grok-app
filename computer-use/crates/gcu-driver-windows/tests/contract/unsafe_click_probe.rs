@@ -140,6 +140,133 @@ pub fn control_move(x: i32, y: i32) -> String {
     }
 }
 
+/// Same axis math as `pointer_settle::normalize_axis` / `denormalize_axis`.
+fn normalize_axis(pixel: i32, origin: i32, extent: i32) -> i32 {
+    ((f64::from(pixel) - f64::from(origin)) * 65535. / f64::from(extent - 1)).round() as i32
+}
+fn denormalize_axis(norm: i32, origin: i32, extent: i32) -> i32 {
+    origin + (f64::from(norm) * f64::from(extent - 1) / 65535.).round() as i32
+}
+
+fn bump(hist: &mut [u32; 17], delta: i32) {
+    let index = (delta + 8).clamp(0, 16) as usize;
+    hist[index] += 1;
+}
+
+fn format_hist(hist: &[u32; 17]) -> String {
+    let mut parts = Vec::new();
+    for (index, count) in hist.iter().enumerate() {
+        let label = match index {
+            0 => "<=-8".to_string(),
+            16 => ">=8".to_string(),
+            n => format!("{}", n as i32 - 8),
+        };
+        parts.push(format!("{label}:{count}"));
+    }
+    parts.join(" ")
+}
+
+/// `MOVE|ABSOLUTE|VIRTUALDESK` to at least 200 pixels, including the virtual-desktop edges.
+/// Measurement only: the histogram is the result, not a pass/fail on the delta.
+pub fn landing_histogram() -> Result<String, String> {
+    use windows::Win32::{
+        Foundation::POINT,
+        UI::{
+            Input::KeyboardAndMouse::{
+                SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+                MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+            },
+            WindowsAndMessaging::{
+                GetPhysicalCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            },
+        },
+    };
+    // SAFETY: nonblocking metric queries. No input is sent until the grid is built.
+    let (origin_x, origin_y, width, height) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if width <= 1 || height <= 1 {
+        return Err(format!("virtual desktop is not usable: {width}x{height}"));
+    }
+    let mut targets = Vec::new();
+    for row in 0..13 {
+        for col in 0..16 {
+            targets.push((
+                origin_x + (col * (width - 1)) / 15,
+                origin_y + (row * (height - 1)) / 12,
+            ));
+        }
+    }
+    if targets.len() < 200 {
+        return Err(format!("grid has only {} targets", targets.len()));
+    }
+    let mut requested_dx = [0u32; 17];
+    let mut requested_dy = [0u32; 17];
+    let mut inverse_dx = [0u32; 17];
+    let mut inverse_dy = [0u32; 17];
+    let mut sent_ok = 0u32;
+    let mut send_fail = 0u32;
+    let mut unreadable = 0u32;
+    let mut max_requested = 0i32;
+    let mut max_inverse = 0i32;
+    for (x, y) in targets {
+        let nx = normalize_axis(x, origin_x, width);
+        let ny = normalize_axis(y, origin_y, height);
+        let ix = denormalize_axis(nx, origin_x, width);
+        let iy = denormalize_axis(ny, origin_y, height);
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: nx,
+                    dy: ny,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: one owned INPUT record with exact cbSize. This moves the real cursor.
+        let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        if sent != 1 {
+            send_fail += 1;
+            continue;
+        }
+        sent_ok += 1;
+        let mut point = POINT::default();
+        // SAFETY: bounded local output; read-only physical cursor query.
+        if unsafe { GetPhysicalCursorPos(&mut point) }.is_err() {
+            unreadable += 1;
+            continue;
+        }
+        let rdx = point.x - x;
+        let rdy = point.y - y;
+        let idx = point.x - ix;
+        let idy = point.y - iy;
+        bump(&mut requested_dx, rdx);
+        bump(&mut requested_dy, rdy);
+        bump(&mut inverse_dx, idx);
+        bump(&mut inverse_dy, idy);
+        max_requested = max_requested.max(rdx.abs()).max(rdy.abs());
+        max_inverse = max_inverse.max(idx.abs()).max(idy.abs());
+    }
+    Ok(format!(
+        "landing probe targets=208 sent_ok={sent_ok} send_fail={send_fail} unreadable={unreadable} metrics=({origin_x},{origin_y},{width},{height})\nvs_requested dx [{}]\nvs_requested dy [{}]\nvs_inverse dx [{}]\nvs_inverse dy [{}]\nmax_abs requested={max_requested} inverse={max_inverse}",
+        format_hist(&requested_dx),
+        format_hist(&requested_dy),
+        format_hist(&inverse_dx),
+        format_hist(&inverse_dy),
+    ))
+}
+
 static EVENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 unsafe extern "system" fn mouse_log(

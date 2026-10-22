@@ -36,19 +36,27 @@ impl SettleProgress {
     }
 }
 
-/// Arrival tolerance for an absolute move.
+/// How far a sampled cursor may sit from the inverse pixel and still count as arrived.
 ///
-/// The 0..65535 virtual-desktop normalization has been measured to land one
-/// physical pixel off the requested point, so exact equality is too tight.
-/// ±2 covers that rounding on both axes.
-///
-/// `plan::approach_point` stands only one pixel away from the target. A cursor
-/// still sitting on that approach point is therefore inside this tolerance and
-/// counts as arrived even when the final move has not been applied. Shrinking
-/// the tolerance would reject real rounded arrivals. Timeout and unreadable
-/// samples stay failures; this false arrival is the accepted tradeoff.
+/// Default is 0: the cursor must hit the pixel `denormalize_axis` produces from the same
+/// normalization `inputs()` sends. Windows' rounding of that normalized value onto a physical
+/// pixel is not confirmed. `live::live_move_landing_probe` records it. Do not merge, and do not
+/// raise this constant, until that histogram shows the inverse error.
+pub(crate) const CURSOR_ARRIVAL_TOLERANCE_PX: i32 = 0;
+
+/// `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK` axis, matching `native::inputs`.
+pub(crate) fn normalize_axis(pixel: f64, origin: i32, extent: i32) -> i32 {
+    ((pixel - f64::from(origin)) * 65535. / f64::from(extent - 1)).round() as i32
+}
+
+/// Inverse of `normalize_axis`. This is the pixel arrival compares against, not the request.
+pub(crate) fn denormalize_axis(norm: i32, origin: i32, extent: i32) -> i32 {
+    origin + (f64::from(norm) * f64::from(extent - 1) / 65535.).round() as i32
+}
+
 pub(crate) fn cursor_arrived(actual: (i32, i32), target: (i32, i32)) -> bool {
-    (actual.0 - target.0).abs() <= 2 && (actual.1 - target.1).abs() <= 2
+    (actual.0 - target.0).abs() <= CURSOR_ARRIVAL_TOLERANCE_PX
+        && (actual.1 - target.1).abs() <= CURSOR_ARRIVAL_TOLERANCE_PX
 }
 
 pub(crate) fn fold_sample(
@@ -104,28 +112,29 @@ mod tests {
     }
 
     #[test]
-    fn cursor_arrival_tolerates_two_pixels_of_normalization_rounding() {
-        assert!(cursor_arrived((431, 607), (431, 608)));
-        assert!(cursor_arrived((433, 610), (431, 608)));
-        assert!(!cursor_arrived((434, 608), (431, 608)));
-        assert!(!cursor_arrived((-2460, 100), (431, 608)));
+    fn denormalize_is_the_inverse_rounding_of_normalize_axis() {
+        let origin = -1920;
+        let extent = 3840;
+        let norm = normalize_axis(100.0, origin, extent);
+        let back = denormalize_axis(norm, origin, extent);
+        assert!(cursor_arrived((back, back), (back, back)));
+        assert!(!cursor_arrived((back + 1, back), (back, back)));
+        assert_eq!(CURSOR_ARRIVAL_TOLERANCE_PX, 0);
     }
 
     #[test]
-    fn one_pixel_approach_counts_as_arrived_and_farther_samples_do_not() {
-        // approach_point steps one physical pixel. Measured normalization error
-        // is also one pixel, so ±2 treats the unmoved approach point as arrived.
+    fn a_delayed_neighbor_does_not_count_as_arrived() {
+        // approach_point steps one physical pixel. That old position must not open the gate.
         let target: (i32, i32) = (100, 100);
         let approach: (i32, i32) = (101, 101);
-        assert_eq!((approach.0 - target.0).abs(), 1);
-        assert_eq!((approach.1 - target.1).abs(), 1);
-        assert!(cursor_arrived(approach, target));
+        assert!(!cursor_arrived(approach, target));
+        assert!(!cursor_arrived((100, 101), target));
+        assert_eq!(settle_samples(&[Ok(approach)], target), Settle::TimedOut);
         assert_eq!(
-            settle_samples(&[Ok(approach)], target),
+            settle_samples(&[Ok(approach), Ok(target)], target),
             Settle::Arrived,
-            "a cursor still on the one-pixel approach is inside the rounding tolerance"
+            "the target sample after the old neighbor is the arrival"
         );
-        assert!(!cursor_arrived((103, 100), target));
         assert_eq!(
             settle_samples(&[Ok((40, 50)), Err(()), Ok((40, 50))], target),
             Settle::TimedOut
@@ -133,10 +142,6 @@ mod tests {
         assert_eq!(
             settle_samples(&[Err(()), Err(())], target),
             Settle::Unreadable
-        );
-        assert_eq!(
-            settle_samples(&[Err(()), Ok((100, 101))], target),
-            Settle::Arrived
         );
     }
 
@@ -146,6 +151,8 @@ mod tests {
         let unread = failure(Settle::Unreadable).expect("an unread cursor is not success");
         assert!(timeout.maybe_executed());
         assert!(unread.maybe_executed());
+        assert_eq!(timeout.error_code(), gcu_protocol::ErrorCode::DriverError);
+        assert_eq!(unread.error_code(), gcu_protocol::ErrorCode::DriverError);
         assert!(failure(Settle::Arrived).is_none());
         match timeout {
             DriverError::Native {

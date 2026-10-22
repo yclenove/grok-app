@@ -22,10 +22,10 @@ pub(crate) struct GateBusy;
 /// unchanged-cursor check. Real hardware (2026-10-21, independent WH_MOUSE_LL log): the probe
 /// sampled the old cursor, the action moved, then the probe published the old position and a
 /// coordinate-less button landed there. The probe runs in the host process and the action's
-/// `SendInput` in the isolated worker, so the production gate is a named kernel mutex. The host
-/// names it with its own pid and ignores `GCU_HOST_PID`. The worker names it with the parent pid
-/// installed at startup. Not reentrant across threads (a Win32 mutex is reentrant on the owning
-/// thread), not a lease, never held across an await, and the low-level hooks never take it.
+/// `SendInput` in the isolated worker, so the production gate is one named kernel mutex,
+/// `Local\gcu-pointer-gate-v1`, shared by every host and worker in the session. Not reentrant
+/// across threads (a Win32 mutex is reentrant on the owning thread), not a lease, never held
+/// across an await, and the low-level hooks never take it.
 mod gate {
     include!("hook_probe/gate.rs");
 }
@@ -33,39 +33,27 @@ mod gate {
 // re-exports are unused in that crate.
 #[allow(unused_imports)]
 pub(crate) use gate::with_admitted_gate;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "test-support", not(test)))]
 #[allow(unused_imports)]
 pub use gate::PointerGateGuard;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use gate::{with_admitted_gate_on, with_shared_gate, SharedGate};
+#[allow(dead_code)]
+pub(crate) fn gate_refusal_message() -> String {
+    gate::refusal_message()
+}
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn gate_held() -> bool {
     gate::current_gate().held_by_current()
 }
-#[allow(dead_code)]
-pub(super) fn bind_worker_pointer_gate_from_env() -> gcu_core::driver::Result<()> {
-    #[cfg(all(windows, not(test)))]
-    {
-        gate::bind_from_process_env()
-    }
-    #[cfg(not(all(windows, not(test))))]
-    {
-        Ok(())
-    }
-}
-#[cfg(windows)]
+#[cfg(all(windows, feature = "test-support", not(test)))]
 #[allow(dead_code)]
 pub(super) fn enter_pointer_gate_for_test(
     wait: std::time::Duration,
-) -> Result<PointerGateGuard, GateBusy> {
+) -> Result<PointerGateGuard, String> {
     gate::enter_for_test(wait)
-}
-#[cfg(windows)]
-#[allow(dead_code)]
-pub(super) fn pointer_gate_owner_pid_for_test() -> Result<u32, GateBusy> {
-    gate::owner_pid_for_test()
 }
 pub(crate) fn with_injection_gate_for<R>(
     wait: std::time::Duration,
@@ -194,13 +182,28 @@ pub(crate) fn normalize(position: i32, origin: i32, size: i32) -> Result<i32, St
     Ok(((low + high) / 2) as i32)
 }
 
+fn probe_gate_busy() -> String {
+    #[cfg(all(windows, not(test)))]
+    {
+        let mut message = String::from("probe not sent: pointer input in flight");
+        if let Some(code) = gate::create_error_code() {
+            message.push_str(&format!(" (Win32 {code:#x})"));
+        }
+        message
+    }
+    #[cfg(not(all(windows, not(test))))]
+    {
+        String::from("probe not sent: pointer input in flight")
+    }
+}
+
 pub(crate) fn dispatch(
     api: &mut impl MouseProbeApi,
     mode: MouseProbe,
     idle: &ProbeIdle,
 ) -> Result<Dispatch, String> {
     with_injection_gate(|| dispatch_inner(api, mode, idle, false))
-        .unwrap_or_else(|GateBusy| Err("probe not sent: pointer input in flight".into()))
+        .unwrap_or_else(|GateBusy| Err(probe_gate_busy()))
 }
 
 pub(crate) fn dispatch_for_action(
@@ -212,7 +215,7 @@ pub(crate) fn dispatch_for_action(
     // action's pointer SendInput, so a stale same-position move cannot land between a move and
     // a coordinate-less button.
     with_injection_gate(|| dispatch_inner(api, mode, idle, true))
-        .unwrap_or_else(|GateBusy| Err("probe not sent: pointer input in flight".into()))
+        .unwrap_or_else(|GateBusy| Err(probe_gate_busy()))
 }
 fn dispatch_inner(
     api: &mut impl MouseProbeApi,

@@ -1,4 +1,6 @@
 //! Windows targeted messages and explicitly permitted foreground input.
+#[cfg(any(windows, test))]
+mod admission;
 pub mod api;
 pub mod clipboard;
 pub mod fake;
@@ -26,39 +28,20 @@ pub use ffi::{NativeRelease, RealInput, RealSafetyApi};
 use gcu_core::driver::*;
 use std::sync::{Arc, Mutex};
 
-/// Worker startup. Missing, unparseable, or zero `GCU_HOST_PID` refuses initialization.
-/// The host process never calls this and names the pointer gate with its own pid.
-pub(crate) fn bind_worker_pointer_gate_from_env() -> Result<()> {
-    #[cfg(any(windows, test))]
-    {
-        hook_probe::bind_worker_pointer_gate_from_env()
-    }
-    #[cfg(not(any(windows, test)))]
-    {
-        Ok(())
-    }
-}
-
 /// Same-thread guard for the production named pointer mutex on Windows.
-#[cfg(windows)]
+#[cfg(all(windows, feature = "test-support", not(test)))]
 #[doc(hidden)]
 pub use hook_probe::PointerGateGuard;
 
 /// Acquire the production pointer gate. Windows integration tests use this to prove the
 /// named mutex. It does not send input. Unit tests must not treat their stand-in as this object.
-#[cfg(windows)]
+/// A `CreateMutexW` failure names the Win32 code; contention does not.
+#[cfg(all(windows, feature = "test-support", not(test)))]
 #[doc(hidden)]
 pub fn pointer_gate_enter_for_test(
     wait: std::time::Duration,
-) -> std::result::Result<PointerGateGuard, &'static str> {
-    hook_probe::enter_pointer_gate_for_test(wait).map_err(|_| "pointer gate busy")
-}
-
-/// Pid the production gate will use. Unbound means this process (the host role).
-#[cfg(windows)]
-#[doc(hidden)]
-pub fn pointer_gate_owner_pid_for_test() -> std::result::Result<u32, &'static str> {
-    hook_probe::pointer_gate_owner_pid_for_test().map_err(|_| "pointer gate refused")
+) -> std::result::Result<PointerGateGuard, String> {
+    hook_probe::enter_pointer_gate_for_test(wait)
 }
 
 /// Post-delivery evidence. No visible change never authorizes replay or escalation.
