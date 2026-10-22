@@ -8,6 +8,8 @@ mod discovery;
 mod harness;
 #[path = "contract/invoke_target.rs"]
 mod invoke_target;
+#[path = "contract/landing_plan.rs"]
+mod landing_plan;
 #[cfg(windows)]
 #[path = "contract/live.rs"]
 mod live;

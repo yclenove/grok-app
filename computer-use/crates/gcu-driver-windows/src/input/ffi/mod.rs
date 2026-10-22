@@ -138,6 +138,22 @@ fn same_frame(frame: super::admission::FramePx, recorded: &gcu_protocol::Rect) -
         && recorded.w == f64::from(frame.right - frame.left)
         && recorded.h == f64::from(frame.bottom - frame.top)
 }
+fn expected_identity(target: &Target, snap: Snapshot) -> super::admission::ExpectedIdentity {
+    super::admission::ExpectedIdentity {
+        root: target.window.hwnd,
+        hwnd: target.hwnd,
+        class_units: snap.class_units,
+        pid: snap.pid,
+        tid: snap.tid,
+        frame: snap.frame,
+        minimized: snap.minimized,
+        root_pid: snap.root_pid,
+        root_class_units: snap.root_class_units,
+        created: snap.created,
+        generation_property: snap.generation_property,
+        dpi: snap.dpi,
+    }
+}
 fn scale_of(dpi: u32) -> f64 {
     if dpi == 0 {
         1.0
@@ -449,8 +465,10 @@ impl InputApi for RealInput {
         self.worker
             .call_action(context.clone(), move |s, r| {
                 if delivery != Delivery::Foreground {
-                    // Full stamp, security, and recipient validation on this native thread,
-                    // outside the ledger. Targeted delivery does not take the pointer gate.
+                    // One full stamp, security, and recipient validation for this packet,
+                    // outside the ledger and the gate. Each post then rechecks scalar identity
+                    // and does not require the foreground window. This branch does not take the gate.
+                    let live = WinScalar;
                     return super::admission::dispatch_targeted(
                         super::admission::TargetedSend {
                             ledger: ledger.as_ref(),
@@ -460,7 +478,11 @@ impl InputApi for RealInput {
                             context: &context,
                         },
                         || r.check(),
-                        || s.validate(&target, false).map(|_| ()),
+                        || {
+                            r.check()?;
+                            Ok(expected_identity(&target, s.validate(&target, false)?))
+                        },
+                        &live,
                         |event| native::post(&target, event),
                     );
                 }
@@ -474,20 +496,7 @@ impl InputApi for RealInput {
                         let snap = s.validate(&target, true)?;
                         let inputs = native::inputs(&events)?;
                         Ok(PreparedSend {
-                            identity: super::admission::ExpectedIdentity {
-                                root: target.window.hwnd,
-                                hwnd: target.hwnd,
-                                class_units: snap.class_units,
-                                pid: snap.pid,
-                                tid: snap.tid,
-                                frame: snap.frame,
-                                minimized: snap.minimized,
-                                root_pid: snap.root_pid,
-                                root_class_units: snap.root_class_units,
-                                created: snap.created,
-                                generation_property: snap.generation_property,
-                                dpi: snap.dpi,
-                            },
+                            identity: expected_identity(&target, snap),
                             inputs,
                         })
                     },

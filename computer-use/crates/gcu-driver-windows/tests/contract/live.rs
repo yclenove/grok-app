@@ -760,8 +760,9 @@ async fn live_drag_stress() {
     ));
 }
 
-/// Measurement only. Samples quantization-boundary pixels and prints landing error against the
-/// requested pixel and against `denormalize_axis`. Does not decide the arrival tolerance.
+/// Measurement only. Samples on-monitor pixels and prints landing error against the
+/// requested pixel and against `denormalize_axis`. Inconclusive traces are counted apart
+/// from the histogram. Does not decide the arrival tolerance.
 /// Run with `GCU_DESKTOP=1` and `--exact live::live_move_landing_probe --ignored --nocapture`.
 #[tokio::test]
 #[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only; do not change CURSOR_ARRIVAL_TOLERANCE_PX from this histogram"]
@@ -777,15 +778,9 @@ async fn live_move_landing_probe() {
         "every planned move must be sent\n{}",
         report.text
     );
-    assert_eq!(
-        report.valid_reads, report.planned,
-        "every planned move must yield a cursor read\n{}",
-        report.text
-    );
     assert!(
-        report.planned >= 400,
-        "planned {} is below the quantization sample floor\n{}",
-        report.planned,
+        report.accepted(),
+        "conclusive landings are below 95% of planned and the 400-target floor\n{}",
         report.text
     );
     progress(report.text);

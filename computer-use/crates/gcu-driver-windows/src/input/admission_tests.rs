@@ -530,11 +530,109 @@ fn unchanged_frame_and_stamp_still_insert() {
     }
 }
 
-fn targeted(events: &[Event], alive: &AtomicBool, posts: &AtomicUsize) -> Result<()> {
+/// Counts full packet validations. Scalar rechecks increment `admits` instead.
+struct ValidateCount {
+    full: AtomicUsize,
+    admits: AtomicUsize,
+}
+impl ValidateCount {
+    fn new() -> Self {
+        Self {
+            full: AtomicUsize::new(0),
+            admits: AtomicUsize::new(0),
+        }
+    }
+    fn record_full(&self) {
+        self.full.fetch_add(1, Ordering::SeqCst);
+    }
+    fn full(&self) -> usize {
+        self.full.load(Ordering::SeqCst)
+    }
+    fn admits(&self) -> usize {
+        self.admits.load(Ordering::SeqCst)
+    }
+}
+
+/// Counts one admission in `is_window`, which each scalar recheck calls once.
+struct CountingLive<'a> {
+    inner: &'a Live,
+    count: &'a ValidateCount,
+    /// `Some(k)` replaces the generation marker on the k-th recheck, before that post.
+    replace_at: Option<usize>,
+}
+impl ScalarAdmission for CountingLive<'_> {
+    fn foreground(&self) -> u64 {
+        self.inner.foreground()
+    }
+    fn is_window(&self, hwnd: u64) -> bool {
+        let n = self.count.admits.fetch_add(1, Ordering::SeqCst);
+        if self.replace_at == Some(n) {
+            let next = self.inner.created.load(Ordering::SeqCst).wrapping_add(1);
+            self.inner.created.store(next, Ordering::SeqCst);
+        }
+        self.inner.is_window(hwnd)
+    }
+    fn root(&self, hwnd: u64) -> u64 {
+        self.inner.root(hwnd)
+    }
+    fn thread_process(&self, hwnd: u64) -> (u32, u32) {
+        self.inner.thread_process(hwnd)
+    }
+    fn class_matches(&self, hwnd: u64, class: &[u16]) -> bool {
+        self.inner.class_matches(hwnd, class)
+    }
+    fn frame(&self, hwnd: u64) -> Option<FramePx> {
+        self.inner.frame(hwnd)
+    }
+    fn iconic(&self, hwnd: u64) -> bool {
+        self.inner.iconic(hwnd)
+    }
+    fn generation(&self, hwnd: u64, property: &[u16]) -> Option<u64> {
+        self.inner.generation(hwnd, property)
+    }
+    fn dpi(&self, hwnd: u64) -> u32 {
+        self.inner.dpi(hwnd)
+    }
+}
+
+struct TargetedRan {
+    error: Result<()>,
+    posts: usize,
+    full_validates: usize,
+    admits: usize,
+    ledger_empty: bool,
+}
+
+fn unicode_events(units: usize) -> Vec<Event> {
+    let mut events = Vec::with_capacity(units * 2);
+    for _ in 0..units {
+        events.push(Event::Unicode(0x61, true));
+        events.push(Event::Unicode(0x61, false));
+    }
+    events
+}
+
+fn run_targeted(
+    events: &[Event],
+    replace_at: Option<usize>,
+    prepare_ok: bool,
+    foreground: u64,
+) -> TargetedRan {
     let target = target();
+    let expected = identity(&target);
+    let live = Live::matching(&expected);
+    live.foreground.store(foreground, Ordering::SeqCst);
+    let count = ValidateCount::new();
+    let posted_before_prepare = AtomicBool::new(false);
     let ledger = InputLedger::default();
     let context = ActionContext::new(&Cancel::default());
-    dispatch_targeted(
+    let posts = AtomicUsize::new(0);
+    let counting = CountingLive {
+        inner: &live,
+        count: &count,
+        replace_at,
+    };
+    let error = dispatch_targeted(
         TargetedSend {
             ledger: &ledger,
             target: &target,
@@ -544,81 +642,109 @@ fn targeted(events: &[Event], alive: &AtomicBool, posts: &AtomicUsize) -> Result
         },
         || Ok(()),
         || {
-            if alive.load(Ordering::SeqCst) {
-                Ok(())
+            assert!(
+                !posted_before_prepare.load(Ordering::SeqCst),
+                "full validate must finish before any post"
+            );
+            count.record_full();
+            if prepare_ok {
+                Ok(expected.clone())
             } else {
                 Err(DriverError::WindowGone)
             }
         },
+        &counting,
         |_| {
+            posted_before_prepare.store(true, Ordering::SeqCst);
             posts.fetch_add(1, Ordering::SeqCst);
             Ok(())
         },
-    )
+    );
+    TargetedRan {
+        error,
+        posts: posts.load(Ordering::SeqCst),
+        full_validates: count.full(),
+        admits: count.admits(),
+        ledger_empty: ledger.is_empty(),
+    }
 }
 
 #[test]
 fn targeted_post_refuses_when_the_window_is_replaced_after_caller_validation() {
-    let alive = AtomicBool::new(true);
-    let posts = AtomicUsize::new(0);
-    let caller = if alive.load(Ordering::SeqCst) {
+    let seen = AtomicBool::new(true);
+    let caller = if seen.load(Ordering::SeqCst) {
         Ok(())
     } else {
         Err(DriverError::WindowGone)
     };
     caller.expect("caller validation still sees the window");
-    alive.store(false, Ordering::SeqCst);
+    seen.store(false, Ordering::SeqCst);
     let events = [
         Event::Key(0x41, true, false, false),
         Event::Unicode(0x4e2d, true),
     ];
-    let error = targeted(&events, &alive, &posts).expect_err("replaced window");
-    assert_eq!(error, DriverError::WindowGone);
-    assert_eq!(posts.load(Ordering::SeqCst), 0, "PostMessage must not run");
+    let ran = run_targeted(&events, None, false, 8);
+    assert_eq!(ran.error, Err(DriverError::WindowGone));
+    assert_eq!(ran.posts, 0, "PostMessage must not run");
+    assert_eq!(ran.full_validates, 1);
+    assert_eq!(ran.admits, 0, "a failed packet validation does not post");
+    assert!(ran.ledger_empty);
 }
 
 #[test]
 fn targeted_post_sends_when_the_window_still_matches() {
-    let alive = AtomicBool::new(true);
-    let posts = AtomicUsize::new(0);
     let events = [Event::Key(0x41, true, false, false)];
-    targeted(&events, &alive, &posts).expect("matching window posts");
-    assert_eq!(posts.load(Ordering::SeqCst), 1);
+    let ran = run_targeted(&events, None, true, 8);
+    assert!(ran.error.is_ok());
+    assert_eq!(ran.posts, 1);
+    assert_eq!(ran.full_validates, 1);
+    assert_eq!(ran.admits, 1);
 }
 
 #[test]
 fn targeted_post_stops_when_the_window_disappears_before_the_next_event() {
-    let target = target();
-    let ledger = InputLedger::default();
-    let context = ActionContext::new(&Cancel::default());
-    let posts = AtomicUsize::new(0);
-    let step = AtomicUsize::new(0);
     let events = [
         Event::Key(0x41, true, false, false),
         Event::Key(0x41, false, false, false),
     ];
-    let error = dispatch_targeted(
-        TargetedSend {
-            ledger: &ledger,
-            target: &target,
-            events: &events,
-            delivery: Delivery::TargetedEvent,
-            context: &context,
-        },
-        || Ok(()),
-        || {
-            if step.fetch_add(1, Ordering::SeqCst) == 0 {
-                Ok(())
-            } else {
-                Err(DriverError::WindowGone)
-            }
-        },
-        |_| {
-            posts.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        },
-    )
-    .expect_err("second event");
-    assert_eq!(error, DriverError::WindowGone);
-    assert_eq!(posts.load(Ordering::SeqCst), 1);
+    let ran = run_targeted(&events, Some(1), true, 8);
+    assert_eq!(ran.error, Err(DriverError::WindowGone));
+    assert_eq!(ran.posts, 1);
+    assert_eq!(ran.full_validates, 1);
+    assert_eq!(ran.admits, 2);
+}
+
+#[test]
+fn targeted_text_packet_calls_full_validate_once() {
+    let units = crate::input::messages::TEXT_CHUNK_UNITS;
+    let events = unicode_events(units);
+    assert_eq!(events.len(), units * 2, "each unit is a down and an up");
+    // Foreground is a different window. Targeted delivery must still post.
+    let ran = run_targeted(&events, None, true, 1);
+    assert!(ran.error.is_ok(), "{:?}", ran.error);
+    assert_eq!(ran.posts, events.len());
+    assert_eq!(
+        ran.full_validates, 1,
+        "N events in one packet call full validate once"
+    );
+    assert_eq!(
+        ran.admits,
+        events.len(),
+        "each post still rechecks identity"
+    );
+}
+
+#[test]
+fn targeted_replacement_before_event_k_does_not_post_that_event_or_later() {
+    let events = unicode_events(16);
+    for k in [0usize, 1, 7] {
+        let ran = run_targeted(&events, Some(k), true, 8);
+        assert_eq!(ran.full_validates, 1, "k={k}");
+        assert_eq!(ran.posts, k, "k={k}");
+        assert_eq!(ran.admits, k + 1, "k={k}");
+        assert_eq!(ran.error, Err(DriverError::WindowGone), "k={k}");
+        if k == 0 {
+            assert!(ran.ledger_empty, "the refused first event is not reserved");
+        }
+    }
 }

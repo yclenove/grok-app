@@ -3,6 +3,9 @@
 //! `bounded_admit` is the only check that runs inside the gate, immediately before insertion.
 //! It is cancellation, deadline, foreground, and scalar window identity: no enumeration, no COM,
 //! and no log write. Keyboard packets skip the gate and use the same check beside `SendInput`.
+//!
+//! A targeted packet validates once, outside the ledger and the gate, then rechecks that same
+//! scalar identity before every post. The recheck does not require the foreground window.
 use super::{api::Event, hook_probe, ledger::InputLedger};
 use crate::uia::patterns::ActionContext;
 use gcu_core::driver::{Delivery, DriverError, Result};
@@ -134,7 +137,7 @@ impl Drop for FlushGateDiag {
     }
 }
 
-/// One non-foreground packet. Full validation runs outside the ledger, immediately before post.
+/// One non-foreground packet. Full validation runs once, outside the ledger and the gate.
 /// This branch does not take the pointer gate.
 pub(crate) struct TargetedSend<'a> {
     pub ledger: &'a InputLedger,
@@ -144,19 +147,24 @@ pub(crate) struct TargetedSend<'a> {
     pub context: &'a ActionContext,
 }
 
-/// Post each targeted event only after `validate` accepts the current window.
+/// Post each targeted event after one packet validation and a scalar recheck.
 ///
-/// `validate` is the native-thread stamp, security, and recipient check. It is not inside
-/// `InputLedger::dispatch`, and this path does not take the pointer gate. A refusal does not post.
+/// `prepare` is the native-thread stamp, security, and recipient check. It runs once for the
+/// packet, outside `InputLedger::dispatch` and outside the pointer gate. Before each post,
+/// `check` and [`scalar_identity`] run, still outside the ledger, so a refusal does not reserve
+/// the event and does not rewrite an earlier event's uncertainty. The scalar recheck does not
+/// require the foreground window. This path does not take the pointer gate.
 pub(crate) fn dispatch_targeted(
     send: TargetedSend<'_>,
     mut check: impl FnMut() -> Result<()>,
-    mut validate: impl FnMut() -> Result<()>,
+    prepare: impl FnOnce() -> Result<ExpectedIdentity>,
+    live: &impl ScalarAdmission,
     mut post: impl FnMut(Event) -> Result<()>,
 ) -> Result<()> {
+    let expected = prepare()?;
     for event in send.events.iter().copied() {
         check()?;
-        validate()?;
+        scalar_identity(&expected, live)?;
         send.ledger
             .dispatch(send.target, event, send.delivery, send.context, |_| {
                 post(event)
@@ -182,6 +190,14 @@ pub(crate) fn bounded_admit(
     if live.foreground() != expected.root {
         return Err(DriverError::CapabilityUnavailable);
     }
+    scalar_identity(expected, live)
+}
+
+/// Gate scalar recheck without the foreground comparison.
+///
+/// Targeted posts use this. Foreground admission uses it after its own foreground test.
+/// Nothing here may enumerate, start COM, open a process, or write a log.
+fn scalar_identity(expected: &ExpectedIdentity, live: &impl ScalarAdmission) -> Result<()> {
     if !live.is_window(expected.hwnd) || live.root(expected.hwnd) != expected.root {
         return Err(DriverError::WindowGone);
     }
