@@ -17,6 +17,7 @@ mod access;
 pub mod browser;
 #[path = "../../../bench/mod.rs"]
 pub mod budget;
+mod client_tools;
 mod exec;
 mod metrics;
 mod oracle;
@@ -28,6 +29,7 @@ pub mod soak;
 mod tasks;
 mod yaml;
 
+pub use client_tools::CLIENT_TOOL_PROBE_PROMPT;
 pub use metrics::{compare_trials, percentile, summarize, CategoryRate, PairRow, Summary, Trial};
 pub use oracle::{
     judge, prove_oracle, EffectCheck, Judgment, OracleSpec, PathCheck, Verdict, World,

@@ -18,6 +18,12 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
+    // Real mode asks this once before the task. Answer a clean allow-list and
+    // do not write the task state or the probe.
+    if tool_probe() {
+        println!("{{\"text\":\"todo_write, search_tool, use_tool, click, get_app_state\"}}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let behavior = std::env::var("GCU_EVAL_BEHAVIOR").unwrap_or_else(|_| "scripted".into());
     write_probe()?;
     match behavior.as_str() {
@@ -83,6 +89,16 @@ fn run() -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn tool_probe() -> bool {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == "-p" {
+            return args.next().as_deref() == Some(gcu_eval::CLIENT_TOOL_PROBE_PROMPT);
+        }
+    }
+    false
 }
 
 fn invoke_suite() -> Result<(), String> {

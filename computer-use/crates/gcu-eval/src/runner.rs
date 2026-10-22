@@ -20,17 +20,7 @@ use std::time::Duration;
 /// Why the one-shot desktop provider did not run.
 pub const DESKTOP_NOT_RUN: &str = "one-shot OS/desktop container or VM is not available; isolated GROK_HOME is not an environment boundary";
 
-pub(crate) const DISABLED: &[&str] = &[
-    "run_terminal_cmd",
-    "read_file",
-    "grep",
-    "list_dir",
-    "search_replace",
-    "web_search",
-    "web_fetch",
-    "task",
-    "shell",
-];
+pub(crate) use crate::client_tools::DISABLED;
 
 /// How a task finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +150,10 @@ pub struct TaskOutcome {
     pub always_approve: bool,
     /// The client argv included `--disable-web-search`.
     pub web_search_disabled: bool,
-    /// Shell, file, and network tools omitted from the client.
+    /// Client built-ins that count as a violation when a tool log records them.
+    ///
+    /// The real client does not read this list. Real mode restricts built-ins
+    /// with `--tools todo_write` and a process-wide preflight.
     pub disabled_tools: Vec<String>,
     /// CU approval mode passed to the child, if any.
     pub approval_mode: String,
@@ -239,8 +232,10 @@ pub struct RunConfig {
     pub arm_script: Option<bool>,
     /// Use the real `gcu` driver and a real fixture app instead of the fake driver and scene.
     ///
-    /// A real run drives whatever desktop the process runs on, with CU auto-approval. It belongs on a
-    /// machine where nobody is working, with only the fixture and a terminal open.
+    /// A real run drives whatever desktop the process runs on, with CU auto-approval and no app
+    /// allow-list. The client is started with `--tools todo_write` after a one-time tool-list
+    /// preflight. It belongs on a machine where nobody is working, with only the fixture and a
+    /// terminal open.
     pub real_driver: bool,
     /// Fixture app started once per task when `real_driver` is set. It writes `$GCU_FIXTURE_STATE`.
     pub fixture_bin: Option<PathBuf>,
@@ -458,6 +453,9 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
                 RunStatus::NotRun,
                 "real driver needs a fixture binary",
             );
+        }
+        if let Some(Err(reason)) = crate::client_tools::cached_preflight() {
+            return skipped(task, cfg, RunStatus::NotRun, &reason);
         }
     } else if !scene_ready(&task.scene).await {
         return skipped(task, cfg, RunStatus::Invalid, "fake scene is not available");

@@ -33,8 +33,17 @@ pub(crate) async fn execute(
     let baseline = snapshot(&watch);
     let approval = child_approval(task, cfg);
     outcome.approval_mode = approval.unwrap_or("").to_string();
-    let args = grok_args(task, cfg);
     let env_map = child_env(task, cfg, env, approval);
+    if cfg.real_driver {
+        let checked = Instant::now();
+        if let Err(reason) = crate::client_tools::preflight_once(grok, &env.work, &env_map).await {
+            outcome.status = RunStatus::NotRun;
+            outcome.reason = reason;
+            outcome.metrics.duration_ms = elapsed_ms(checked);
+            return outcome;
+        }
+    }
+    let args = grok_args(task, cfg);
     let started = Instant::now();
     let mut command = tokio::process::Command::new(grok);
     command
@@ -186,7 +195,7 @@ fn child_approval(task: &Task, cfg: &RunConfig) -> Option<&'static str> {
 }
 
 fn grok_args(task: &Task, cfg: &RunConfig) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-p".into(),
         task.prompt_en.clone(),
         "--always-approve".into(),
@@ -199,7 +208,14 @@ fn grok_args(task: &Task, cfg: &RunConfig) -> Vec<String> {
         "--verbatim".into(),
         "--output-format".into(),
         "json".into(),
-    ]
+    ];
+    // The real client ignores `[eval] disabled_tools`. An empty `--tools` value
+    // does not restrict it, so the allow-list is the single built-in `todo_write`.
+    if cfg.real_driver {
+        args.push("--tools".into());
+        args.push("todo_write".into());
+    }
+    args
 }
 
 fn child_env(
@@ -301,6 +317,8 @@ fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), E
     } else {
         format!("[\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}{profile}]")
     };
+    // `[eval] disabled_tools` is not read by the real client. Real mode locks
+    // built-ins with `--tools todo_write` and the process-wide preflight.
     let mut body = format!(
         "[mcp_servers.grok-computer-use]\ncommand = {command}\nargs = {server_args}\nenabled = true\n\n[eval]\ndisabled_tools = [\"{disabled}\"]\n"
     );
@@ -693,5 +711,121 @@ mod tests {
     #[test]
     fn unparseable_output_writes_no_transcript() {
         assert!(transcript_for("not json").is_none());
+    }
+
+    fn sample_task() -> Task {
+        Task {
+            id: "native-form-01".into(),
+            platforms: vec!["linux".into()],
+            category: "native".into(),
+            prompt_zh: "x".into(),
+            prompt_en: "fill the form".into(),
+            launch: "fixture".into(),
+            scene: "form".into(),
+            oracle: crate::oracle::OracleSpec {
+                all: Vec::new(),
+                forbidden: Vec::new(),
+                effects: Vec::new(),
+            },
+            pass_script: std::path::PathBuf::from("pass.json"),
+            fail_script: std::path::PathBuf::from("fail.json"),
+            partial_script: std::path::PathBuf::from("partial.json"),
+            suites: vec!["core".into()],
+            max_turns: 4,
+            max_seconds: 20,
+        }
+    }
+
+    fn fake_grok_args() -> Vec<String> {
+        vec![
+            "-p".into(),
+            "fill the form".into(),
+            "--always-approve".into(),
+            "--model".into(),
+            "fake".into(),
+            "--max-turns".into(),
+            "4".into(),
+            "--disable-web-search".into(),
+            "--no-plan".into(),
+            "--verbatim".into(),
+            "--output-format".into(),
+            "json".into(),
+        ]
+    }
+
+    #[test]
+    fn grok_args_fake_driver_omits_tools_allowlist() {
+        let args = grok_args(&sample_task(), &RunConfig::default());
+        assert_eq!(args, fake_grok_args());
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--tools" || arg == "todo_write"));
+    }
+
+    #[test]
+    fn grok_args_real_driver_appends_adjacent_tools_allowlist() {
+        let task = sample_task();
+        let fake = grok_args(&task, &RunConfig::default());
+        let cfg = RunConfig {
+            real_driver: true,
+            ..RunConfig::default()
+        };
+        let real = grok_args(&task, &cfg);
+        assert_eq!(&real[..fake.len()], fake.as_slice());
+        assert_eq!(
+            &real[fake.len()..],
+            ["--tools".to_string(), "todo_write".to_string()]
+        );
+        let tools = real.iter().position(|arg| arg == "--tools").unwrap();
+        assert_eq!(real[tools + 1], "todo_write");
+    }
+
+    #[test]
+    fn real_client_builtins_count_as_disabled_tools() {
+        for name in [
+            "run_terminal_command",
+            "run_terminal_cmd",
+            "read_file",
+            "write",
+            "search_replace",
+            "list_dir",
+            "grep",
+            "spawn_subagent",
+            "scheduler_create",
+            "scheduler_delete",
+            "scheduler_list",
+            "monitor",
+            "workflow",
+            "enter_plan_mode",
+            "exit_plan_mode",
+            "image_gen",
+            "image_edit",
+            "image_to_video",
+            "reference_to_video",
+            "x_user_search",
+            "x_semantic_search",
+            "x_keyword_search",
+            "x_thread_fetch",
+            "kill_command_or_subagent",
+            "get_command_or_subagent_output",
+            "ask_user_question",
+            "send_feedback",
+            "shell",
+            "bash",
+            "task",
+            "web_search",
+            "web_fetch",
+        ] {
+            assert!(matches!(class_of(name), Class::Disabled), "{name}");
+        }
+        for name in [
+            "todo_write",
+            "search_tool",
+            "use_tool",
+            "click",
+            "get_app_state",
+        ] {
+            assert!(!matches!(class_of(name), Class::Disabled), "{name}");
+        }
     }
 }
