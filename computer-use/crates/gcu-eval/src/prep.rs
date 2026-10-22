@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Deletes `root` on drop only after [`Cleanup::arm`].
+#[derive(Debug)]
 pub(crate) struct Cleanup {
     root: PathBuf,
     armed: bool,
@@ -34,6 +35,12 @@ impl Cleanup {
         if !self.armed {
             return Err(Error::msg("cleanup_failed"));
         }
+        #[cfg(debug_assertions)]
+        if fault_inject::take_removal() {
+            // Leave the tree. Drop must not erase the failure the report records.
+            self.armed = false;
+            return Err(Error::msg("cleanup_failed"));
+        }
         remove_root(&self.root)?;
         if self.root.exists() {
             return Err(Error::msg("cleanup_failed"));
@@ -49,6 +56,79 @@ impl Drop for Cleanup {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+}
+
+/// Why [`begin_env`] did not return a tree.
+#[derive(Debug)]
+pub(crate) struct BeginFault {
+    /// Safe-to-print reason.
+    pub message: String,
+    /// Root left on disk when populate failed and cleanup also failed.
+    pub leftover: Option<PathBuf>,
+}
+
+impl BeginFault {
+    fn msg(text: impl Into<String>) -> Self {
+        Self {
+            message: text.into(),
+            leftover: None,
+        }
+    }
+}
+
+impl From<BeginFault> for Error {
+    fn from(fault: BeginFault) -> Self {
+        Error::msg(fault.message)
+    }
+}
+
+impl From<Error> for BeginFault {
+    fn from(err: Error) -> Self {
+        Self::msg(err.to_string())
+    }
+}
+
+#[cfg(debug_assertions)]
+mod fault_inject {
+    use std::cell::Cell;
+
+    // Thread-local so a parallel test cannot consume another test's fault.
+    // `begin_env` runs on the caller's thread under the current-thread runtime.
+    thread_local! {
+        static FAIL_REMOVAL: Cell<bool> = const { Cell::new(false) };
+        static FAIL_POPULATE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn fail_next_removal() {
+        FAIL_REMOVAL.with(|flag| flag.set(true));
+    }
+
+    pub(crate) fn fail_next_populate() {
+        FAIL_POPULATE.with(|flag| flag.set(true));
+    }
+
+    pub(crate) fn take_removal() -> bool {
+        FAIL_REMOVAL.with(|flag| flag.replace(false))
+    }
+
+    pub(crate) fn take_populate() -> bool {
+        FAIL_POPULATE.with(|flag| flag.replace(false))
+    }
+}
+
+/// The next cleanup of an armed root fails and leaves the tree in place.
+///
+/// Debug builds only. The flag is thread-local and consumed once. Drop will
+/// not delete that tree.
+#[cfg(debug_assertions)]
+pub fn testing_fail_next_removal() {
+    fault_inject::fail_next_removal();
+}
+
+/// The next `populate` fails. Pair with [`testing_fail_next_removal`] to keep the root.
+#[cfg(debug_assertions)]
+pub fn testing_fail_next_populate() {
+    fault_inject::fail_next_populate();
 }
 
 /// Downgrade a finished row when deleting its tree failed.
@@ -69,6 +149,7 @@ pub(crate) fn apply_cleanup_failure(status: &mut RunStatus, reason: &mut String)
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct HeldEnv {
     pub env: Environment,
     guard: Cleanup,
@@ -84,29 +165,36 @@ impl HeldEnv {
     }
 }
 
-/// Create a fresh tree. The returned guard is armed only after the root exists.
-pub(crate) fn begin_env() -> Result<HeldEnv, Error> {
-    let root = fresh_root()?;
+/// Create a fresh tree under the process temp directory.
+pub(crate) fn begin_env() -> Result<HeldEnv, BeginFault> {
+    begin_env_under(&std::env::temp_dir())
+}
+
+/// Create a fresh tree under `parent`.
+///
+/// On Unix the root is created with mode `0700`. A parent that others can write,
+/// and that is not sticky, is refused. Windows real mode is refused by the
+/// runner; this function does not pretend a Windows directory is owner-only.
+pub(crate) fn begin_env_under(parent: &Path) -> Result<HeldEnv, BeginFault> {
+    reject_unsafe_parent(parent)?;
+    let root = fresh_root_in(parent)?;
     if crate::access::canonical_under_configs(&root, &crate::access::user_config_dirs())? {
-        return Err(Error::msg(
+        return Err(BeginFault::msg(
             "refusing to provision inside a user config directory",
         ));
     }
     let mut guard = Cleanup::standby(root.clone());
     reject_existing(&root)?;
-    std::fs::create_dir(&root).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::msg("temp root already exists")
-        } else {
-            Error::msg(format!("temp root: {err}"))
-        }
-    })?;
+    create_private_dir(&root)?;
     guard.arm();
-    if let Err(err) = lock_dir(&root).and_then(|()| populate(&root)) {
+    if let Err(err) = populate(&root) {
         if guard.remove().is_err() {
-            return Err(Error::msg(format!("cleanup_failed; {err}")));
+            return Err(BeginFault {
+                message: format!("cleanup_failed; {err}"),
+                leftover: Some(root),
+            });
         }
-        return Err(err);
+        return Err(BeginFault::msg(err.to_string()));
     }
     Ok(HeldEnv {
         env: layout(&root),
@@ -114,7 +202,7 @@ pub(crate) fn begin_env() -> Result<HeldEnv, Error> {
     })
 }
 
-fn fresh_root() -> Result<PathBuf, Error> {
+fn fresh_root_in(parent: &Path) -> Result<PathBuf, Error> {
     let mut bytes = [0u8; 16];
     random_bytes(&mut bytes)?;
     let mut name = String::from("gcu-ev-");
@@ -122,7 +210,61 @@ fn fresh_root() -> Result<PathBuf, Error> {
         name.push(hex(byte >> 4));
         name.push(hex(byte & 0x0f));
     }
-    Ok(std::env::temp_dir().join(name))
+    Ok(parent.join(name))
+}
+
+fn reject_unsafe_parent(parent: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(parent)
+            .map_err(|err| Error::msg(format!("temp parent: {err}")))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(Error::msg("temp parent is not a real directory"));
+        }
+        let mode = meta.mode();
+        let writable_by_others = mode & 0o022 != 0;
+        let sticky = mode & 0o1000 != 0;
+        if writable_by_others && !sticky {
+            return Err(Error::msg(
+                "refusing a temp parent that others can write and that is not sticky",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
+}
+
+fn create_private_dir(path: &Path) -> Result<(), Error> {
+    reject_existing(path).map_err(|_| Error::msg("refusing a pre-existing startup path"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::msg("refusing a pre-existing startup path")
+                } else {
+                    Error::msg(format!("mkdir: {err}"))
+                }
+            })?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::msg("refusing a pre-existing startup path")
+            } else {
+                Error::msg(format!("mkdir: {err}"))
+            }
+        })?;
+    }
+    Ok(())
 }
 
 fn hex(nibble: u8) -> char {
@@ -169,26 +311,25 @@ fn layout(root: &Path) -> Environment {
 }
 
 fn populate(root: &Path) -> Result<(), Error> {
+    #[cfg(debug_assertions)]
+    if fault_inject::take_populate() {
+        let _ = std::fs::write(root.join("leftover"), b"x");
+        return Err(Error::msg("populate_failed"));
+    }
     let env = layout(root);
     for dir in [&env.home, &env.grok_home, &env.work, &env.shim_dir] {
         make_dir(dir)?;
     }
     write_new(&env.state_path, b"{}\n")?;
     write_new(&env.side_log, b"")?;
+    // An empty tool log is a measured zero. A missing file stays unknown.
+    write_new(&env.tool_log, b"")?;
     write_shims(&env.shim_dir)?;
     Ok(())
 }
 
 fn make_dir(path: &Path) -> Result<(), Error> {
-    reject_existing(path).map_err(|_| Error::msg("refusing a pre-existing startup path"))?;
-    std::fs::create_dir(path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::msg("refusing a pre-existing startup path")
-        } else {
-            Error::msg(format!("mkdir: {err}"))
-        }
-    })?;
-    lock_dir(path)
+    create_private_dir(path)
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
@@ -209,20 +350,6 @@ pub(crate) fn remove_root(path: &Path) -> Result<bool, Error> {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(err) => Err(Error::msg(format!("destroy: {err}"))),
-    }
-}
-
-pub(crate) fn lock_dir(path: &Path) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|err| Error::msg(format!("chmod: {err}")))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
     }
 }
 
@@ -264,70 +391,11 @@ pub(crate) fn write_shim(dir: &Path, name: &str) -> Result<(), Error> {
     }
 }
 
-/// Copy the evaluation login into a task's temporary `GROK_HOME`.
-///
-/// Symlinks are refused. A seed whose canonical path is under `~/.grok`,
-/// `~/.codex`, `~/.gemini`, or `~/.claude` is refused. The file contents are
-/// not logged. Only `auth.json` is taken from `seed`.
-pub(crate) fn seed_auth(seed: &Path, grok_home: &Path) -> Result<(), Error> {
-    seed_auth_in(seed, grok_home, &crate::access::user_config_dirs())
-}
-
-pub(crate) fn seed_auth_in(
-    seed: &Path,
-    grok_home: &Path,
-    configs: &[PathBuf],
-) -> Result<(), Error> {
-    if symlink_path(seed)? {
-        return Err(Error::msg("refusing a symlink auth seed"));
-    }
-    let from = seed.join("auth.json");
-    if symlink_path(&from)? {
-        return Err(Error::msg("refusing a symlink auth seed"));
-    }
-    let meta =
-        std::fs::symlink_metadata(&from).map_err(|_| Error::msg("auth seed has no auth.json"))?;
-    if !meta.is_file() {
-        return Err(Error::msg("auth seed has no auth.json"));
-    }
-    let seed_canon =
-        std::fs::canonicalize(seed).map_err(|_| Error::msg("auth seed has no auth.json"))?;
-    let file_canon =
-        std::fs::canonicalize(&from).map_err(|_| Error::msg("auth seed has no auth.json"))?;
-    if crate::access::canonical_under_configs(&seed_canon, configs)?
-        || crate::access::canonical_under_configs(&file_canon, configs)?
-    {
-        return Err(Error::msg(
-            "refusing an auth seed under a personal config directory",
-        ));
-    }
-    let bytes = std::fs::read(&from).map_err(|_| Error::msg("could not copy the auth seed"))?;
-    let to = grok_home.join("auth.json");
-    if std::fs::symlink_metadata(&to).is_ok() {
-        return Err(Error::msg("could not copy the auth seed"));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&to)
-        .map_err(|_| Error::msg("could not copy the auth seed"))?;
-    file.write_all(&bytes)
-        .map_err(|_| Error::msg("could not copy the auth seed"))?;
-    Ok(())
-}
-
-fn symlink_path(path: &Path) -> Result<bool, Error> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => Ok(meta.file_type().is_symlink()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(Error::msg("auth seed has no auth.json")),
-    }
-}
+#[path = "prep_seed.rs"]
+mod seed;
+pub(crate) use seed::seed_auth;
+#[cfg(all(test, unix))]
+pub(crate) use seed::seed_auth_in;
 
 /// A fixture app started for one task and stopped when this value is dropped.
 pub(crate) struct Fixture(std::process::Child);

@@ -1,16 +1,23 @@
 //! Real-client tool allow-list check.
 //!
 //! The real grok client does not read `[eval] disabled_tools`. A real client
-//! passes `--tools todo_write` and is asked which tools it can call. The
-//! listing must be JSON whose tool names are exactly [`EXPECTED_PREFLIGHT_TOOLS`].
-//! This is a tripwire, not a proof that the client is confined. Failure reasons
-//! are canonical labels from this module. The model's other words are not kept.
+//! passes `--tools todo_write` and is asked which tools it can call. The only
+//! accepted shape is `{"tools":["..."]}` with exactly [`EXPECTED_PREFLIGHT_TOOLS`],
+//! no extra fields, and no duplicate names. This is a tripwire, not proof that
+//! the client is confined. Failure reasons are canonical labels. The model's
+//! other words are not kept.
 //!
-//! A success or failure is cached per client path, MCP profile, and model.
+//! Success and failure are cached on [`crate::runner::RunConfig`] for that run
+//! only. The key is the whole effective launch: client and `gcu` file identity,
+//! driver, profile, model, approval, and the config body. A new config does not
+//! reuse another run's result. Cloning a config shares one run's map.
 
+use crate::launch::{child_approval, client_command, config_body, ClientProgram};
+use crate::runner::RunConfig;
+use crate::tasks::Task;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Prompt sent before the first real-client task for a cache key.
@@ -37,15 +44,51 @@ pub const EXPECTED_PREFLIGHT_TOOLS: &[&str] = &[
     "use_tool",
 ];
 
-/// Preflight result for one client path, profile, and model.
-static PREFLIGHT_CACHE: Mutex<BTreeMap<PreflightKey, Result<(), String>>> =
-    Mutex::new(BTreeMap::new());
+/// Preflight results for one [`crate::runner::RunConfig`].
+///
+/// Cloning the config shares this handle. A new config starts empty. Callers
+/// outside this crate cannot insert results.
+#[derive(Clone, Debug)]
+pub struct PreflightCache {
+    inner: Arc<Mutex<BTreeMap<PreflightKey, Result<(), String>>>>,
+}
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+impl Default for PreflightCache {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
+impl PreflightCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PreflightKey, Result<(), String>>> {
+        self.inner.lock().unwrap_or_else(|err| err.into_inner())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct FileId {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_secs: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PreflightKey {
-    client: PathBuf,
+    client: FileId,
+    gcu: Option<FileId>,
+    real_driver: bool,
+    builtin_fake: bool,
+    builtin_gcu: bool,
+    attested: bool,
     profile: String,
     model: String,
+    approval: String,
+    behavior: String,
+    config_hash: u64,
 }
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -74,9 +117,6 @@ const FORBIDDEN_NEEDLES: &[&str] = &[
     "fetch",
     "plan_mode",
 ];
-
-#[cfg(test)]
-const PERMITTED_TOKENS: &[&str] = &["todo_write", "search_tool", "use_tool"];
 
 /// Client built-ins that are a violation if a tool log records a call.
 ///
@@ -120,100 +160,104 @@ pub(crate) const DISABLED: &[&str] = &[
     "x_thread_fetch",
 ];
 
-/// Dangerous client-tool names found in `text`.
-///
-/// Blank text fails closed. Tokens are split on anything other than ASCII
-/// letters, digits, and `_`, so `todo_write` stays one token and is not the
-/// `write` tool. Matching is case-insensitive. The returned names are the
-/// tokens themselves, not the surrounding sentence.
-#[cfg(test)]
-pub(crate) fn forbidden_client_tools(text: &str) -> Vec<String> {
-    if text.trim().is_empty() {
-        return vec!["empty".to_string()];
-    }
-    let mut hits = Vec::new();
-    for token in tool_tokens(text) {
-        if permitted_token(&token) {
-            continue;
-        }
-        let lower = token.to_ascii_lowercase();
-        let dangerous = FORBIDDEN_NEEDLES
-            .iter()
-            .any(|needle| lower.contains(needle));
-        if dangerous && !hits.iter().any(|hit| hit == &token) {
-            hits.push(token);
+fn file_id(path: &Path) -> FileId {
+    let meta = std::fs::symlink_metadata(path).ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Some(meta) = &meta {
+            return FileId {
+                path: path.to_path_buf(),
+                dev: meta.dev(),
+                ino: meta.ino(),
+                len: meta.len(),
+                mtime_secs: meta.mtime(),
+            };
         }
     }
-    hits
-}
-
-#[cfg(test)]
-fn permitted_token(token: &str) -> bool {
-    PERMITTED_TOKENS
-        .iter()
-        .any(|name| token.eq_ignore_ascii_case(name))
-}
-
-fn tool_tokens(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch);
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
+    #[cfg(not(unix))]
+    {
+        if let Some(meta) = &meta {
+            let mtime_secs = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+                .unwrap_or(0);
+            return FileId {
+                path: path.to_path_buf(),
+                dev: 0,
+                ino: 0,
+                len: meta.len(),
+                mtime_secs,
+            };
         }
     }
-    if !current.is_empty() {
-        tokens.push(current);
+    FileId {
+        path: path.to_path_buf(),
+        dev: 0,
+        ino: 0,
+        len: 0,
+        mtime_secs: 0,
     }
-    tokens
 }
 
-fn preflight_key(client: &Path, profile: &str, model: &str) -> PreflightKey {
+fn fnv(text: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn preflight_key(program: &ClientProgram, cfg: &RunConfig, task: &Task) -> PreflightKey {
+    let approval = child_approval(task, cfg).unwrap_or("").to_string();
     PreflightKey {
-        client: client.to_path_buf(),
-        profile: profile.to_string(),
-        model: model.to_string(),
+        client: file_id(program.identity_path()),
+        gcu: cfg.gcu_bin.as_deref().map(file_id),
+        real_driver: cfg.real_driver,
+        builtin_fake: cfg.builtin_fake,
+        builtin_gcu: cfg.builtin_gcu,
+        attested: cfg.attest_disposable_desktop,
+        profile: cfg.mcp_profile.clone().unwrap_or_default(),
+        model: cfg.model.clone(),
+        approval,
+        behavior: cfg.behavior.clone().unwrap_or_default(),
+        config_hash: fnv(&config_body(cfg, &task.scene)),
     }
 }
 
-fn lock_cache() -> std::sync::MutexGuard<'static, BTreeMap<PreflightKey, Result<(), String>>> {
-    PREFLIGHT_CACHE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-}
-
-/// Cached preflight for this client, profile, and model.
+/// Cached preflight for this launch, if this run already probed it.
 pub(crate) fn cached_preflight(
-    client: &Path,
-    profile: &str,
-    model: &str,
+    cfg: &RunConfig,
+    task: &Task,
+    program: &ClientProgram,
 ) -> Option<Result<(), String>> {
-    lock_cache()
-        .get(&preflight_key(client, profile, model))
+    cfg.preflight
+        .lock()
+        .get(&preflight_key(program, cfg, task))
         .cloned()
 }
 
-/// Run the tool-list probe unless this client, profile, and model were cached.
+/// Run the tool-list probe unless this launch was already cached in `cfg`.
 ///
-/// `env` is the map [`crate::exec`] already built for the task (isolated
-/// `HOME` / `GROK_HOME`, proxy variables, and the seeded login's directory).
-/// Blocking: up to 30 seconds, then the child process group is killed.
-/// Cancellation: the child is killed when this future is dropped.
+/// `env` is the map [`crate::exec`] already built for the task. Blocking: up
+/// to 30 seconds, then the child process group is killed. Cancellation: the
+/// child is killed when this future is dropped.
 pub(crate) async fn preflight_once(
-    grok: &Path,
+    program: &ClientProgram,
+    cfg: &RunConfig,
+    task: &Task,
     work: &Path,
     env: &BTreeMap<String, String>,
-    model: &str,
-    profile: &str,
 ) -> Result<(), String> {
-    let key = preflight_key(grok, profile, model);
-    if let Some(done) = lock_cache().get(&key).cloned() {
+    let key = preflight_key(program, cfg, task);
+    if let Some(done) = cfg.preflight.lock().get(&key).cloned() {
         return done;
     }
-    let result = run_preflight(grok, work, env, model).await;
-    lock_cache().insert(key, result.clone());
+    let result = run_preflight(program, work, env, &cfg.model).await;
+    cfg.preflight.lock().insert(key, result.clone());
     result
 }
 
@@ -239,11 +283,6 @@ fn preflight_args(model: &str) -> Vec<String> {
     ]
 }
 
-#[cfg(test)]
-fn judge_stdout(printed: &[u8]) -> Result<(), String> {
-    decide_preflight(printed, false)
-}
-
 fn decide_preflight(printed: &[u8], overflow: bool) -> Result<(), String> {
     if overflow {
         return Err("output_overflow".into());
@@ -252,12 +291,28 @@ fn decide_preflight(printed: &[u8], overflow: bool) -> Result<(), String> {
         Ok(value) => value,
         Err(_) => return Err("unparseable".into()),
     };
-    let names = match tool_names(&value) {
-        Some(names) => names,
-        None => return Err("unparseable".into()),
+    let Some(object) = value.as_object() else {
+        return Err("unexpected_shape".into());
     };
-    if names.is_empty() {
+    if object.len() != 1 || !object.contains_key("tools") {
+        return Err("unexpected_shape".into());
+    }
+    let Some(array) = object.get("tools").and_then(serde_json::Value::as_array) else {
+        return Err("unexpected_shape".into());
+    };
+    if array.is_empty() {
         return Err("empty".into());
+    }
+    let mut names = Vec::with_capacity(array.len());
+    let mut seen = BTreeSet::new();
+    for item in array {
+        let Some(name) = item.as_str() else {
+            return Err("unexpected_shape".into());
+        };
+        if !seen.insert(name.to_string()) {
+            return Err("duplicate_tool".into());
+        }
+        names.push(name.to_string());
     }
     let got: BTreeSet<&str> = names.iter().map(String::as_str).collect();
     let expected: BTreeSet<&str> = EXPECTED_PREFLIGHT_TOOLS.iter().copied().collect();
@@ -268,22 +323,6 @@ fn decide_preflight(printed: &[u8], overflow: bool) -> Result<(), String> {
         return Err(label);
     }
     Err("tool_set_mismatch".into())
-}
-
-fn tool_names(value: &serde_json::Value) -> Option<Vec<String>> {
-    if let Some(tools) = value.get("tools") {
-        let array = tools.as_array()?;
-        let mut names = Vec::with_capacity(array.len());
-        for item in array {
-            names.push(item.as_str()?.to_string());
-        }
-        return Some(names);
-    }
-    let text = value.get("text").and_then(serde_json::Value::as_str)?;
-    if text.trim().is_empty() {
-        return Some(Vec::new());
-    }
-    Some(tool_tokens(text))
 }
 
 /// Canonical `forbidden_tool:` label. The returned text never contains `names`.
@@ -314,12 +353,12 @@ fn is_expected(name: &str) -> bool {
 }
 
 async fn run_preflight(
-    grok: &Path,
+    program: &ClientProgram,
     work: &Path,
     env: &BTreeMap<String, String>,
     model: &str,
 ) -> Result<(), String> {
-    let mut command = tokio::process::Command::new(grok);
+    let mut command = client_command(program);
     command
         .args(preflight_args(model))
         .env_clear()
@@ -336,6 +375,9 @@ async fn run_preflight(
         Ok(finished) => finished,
         Err(_) => return Err("spawn_failed".into()),
     };
+    if finished.capture_incomplete {
+        return Err("capture_incomplete".into());
+    }
     if finished.timed_out {
         return Err("timeout".into());
     }
@@ -355,45 +397,61 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    const CLEAN: &str = "todo_write, search_tool, use_tool, click, get_app_state";
+    fn judge_stdout(printed: &[u8]) -> Result<(), String> {
+        decide_preflight(printed, false)
+    }
 
-    #[test]
-    fn forbidden_client_tools_allowlist_and_gcu_names_pass() {
-        assert!(forbidden_client_tools(CLEAN).is_empty());
+    fn tools(names: &[&str]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "tools": names })).unwrap()
     }
 
     #[test]
-    fn forbidden_client_tools_run_terminal_command_fails() {
+    fn preflight_accepts_only_the_tools_array_shape() {
+        let exact = tools(EXPECTED_PREFLIGHT_TOOLS);
+        assert!(judge_stdout(&exact).is_ok());
         assert_eq!(
-            forbidden_client_tools("SECRET run_terminal_command please"),
-            vec!["run_terminal_command".to_string()]
+            judge_stdout(
+                br#"{"text":"list_apps, list_windows, search_tool, todo_write, use_tool"}"#
+            )
+            .unwrap_err(),
+            "unexpected_shape"
+        );
+        assert_eq!(
+            judge_stdout(br#"{"tools":["list_apps"],"text":"list_apps"}"#).unwrap_err(),
+            "unexpected_shape"
+        );
+        assert_eq!(
+            judge_stdout(br#"{"tools":"list_apps"}"#).unwrap_err(),
+            "unexpected_shape"
+        );
+        assert_eq!(judge_stdout(br#"{"tools":[]}"#).unwrap_err(), "empty");
+        assert_eq!(judge_stdout(br"not json").unwrap_err(), "unparseable");
+        assert_eq!(
+            judge_stdout(br#"{"num_turns":1}"#).unwrap_err(),
+            "unexpected_shape"
         );
     }
 
     #[test]
-    fn forbidden_client_tools_read_file_fails() {
+    fn preflight_rejects_duplicates_and_forbidden_names_without_the_payload() {
+        let mut names: Vec<&str> = EXPECTED_PREFLIGHT_TOOLS.to_vec();
+        names.push("list_apps");
+        assert_eq!(judge_stdout(&tools(&names)).unwrap_err(), "duplicate_tool");
+        let err = judge_stdout(&tools(&["shell_SENSITIVEVALUE"])).unwrap_err();
+        assert_eq!(err, "forbidden_tool:shell");
+        assert!(!err.contains("SENSITIVEVALUE"), "{err}");
         assert_eq!(
-            forbidden_client_tools("read_file"),
-            vec!["read_file".to_string()]
+            judge_stdout(&tools(&["run_terminal_command"])).unwrap_err(),
+            "forbidden_tool:run_terminal_command"
+        );
+        assert_eq!(
+            judge_stdout(&tools(&["todo_write"])).unwrap_err(),
+            "tool_set_mismatch"
         );
     }
 
     #[test]
-    fn forbidden_client_tools_spawn_subagent_fails() {
-        assert_eq!(
-            forbidden_client_tools("spawn_subagent"),
-            vec!["spawn_subagent".to_string()]
-        );
-    }
-
-    #[test]
-    fn forbidden_client_tools_empty_text_fails() {
-        assert!(!forbidden_client_tools("").is_empty());
-        assert!(!forbidden_client_tools(" \n\t").is_empty());
-    }
-
-    #[test]
-    fn forbidden_client_tools_flags_each_required_needle() {
+    fn preflight_flags_each_required_needle() {
         for sample in [
             "terminal",
             "shell",
@@ -416,85 +474,27 @@ mod tests {
             "web_fetch",
             "enter_plan_mode",
         ] {
-            assert!(
-                !forbidden_client_tools(sample).is_empty(),
-                "{sample} must fail the preflight"
-            );
+            let err = judge_stdout(&tools(&[sample])).unwrap_err();
+            assert!(err.starts_with("forbidden_tool:"), "{sample} -> {err}");
         }
     }
 
     #[test]
-    fn judge_stdout_reports_hits_without_other_words() {
-        let err = judge_stdout(br#"{"text":"SECRET run_terminal_command please"}"#).unwrap_err();
-        assert_eq!(err, "forbidden_tool:run_terminal_command");
-        assert!(!err.contains("SECRET"), "{err}");
-    }
-
-    #[test]
-    fn judge_stdout_accepts_the_exact_allowlist() {
-        let raw = br#"{"text":"todo_write, search_tool, use_tool, list_apps, list_windows"}"#;
-        assert!(judge_stdout(raw).is_ok());
-        let tools =
-            br#"{"tools":["use_tool","list_windows","todo_write","search_tool","list_apps"]}"#;
-        assert!(judge_stdout(tools).is_ok());
-    }
-
-    #[test]
-    fn judge_stdout_rejects_empty_and_unparseable_output() {
-        assert_eq!(judge_stdout(br#"{"text":""}"#).unwrap_err(), "empty");
-        let bad = judge_stdout(br"not json").unwrap_err();
-        assert_eq!(bad, "unparseable");
-        assert!(!bad.contains("not json"), "{bad}");
-        assert_eq!(
-            judge_stdout(br#"{"num_turns":1}"#).unwrap_err(),
-            "unparseable"
-        );
-    }
-
-    #[test]
-    fn judge_stdout_shell_sensitive_value_is_a_canonical_label() {
-        let err = judge_stdout(br#"{"text":"shell_SENSITIVEVALUE"}"#).unwrap_err();
-        assert_eq!(err, "forbidden_tool:shell");
-        assert!(
-            !err.contains("SENSITIVEVALUE"),
-            "model-written token leaked into the preflight reason: {err}"
-        );
-    }
-
-    #[test]
-    fn judge_stdout_overflow_fails_even_when_the_prefix_parses() {
-        let mut body = exact_preflight_json(65_536);
+    fn preflight_overflow_fails_even_when_the_prefix_parses() {
+        let body = exact_preflight_json(65_536);
         assert!(
             judge_stdout(&body).is_ok(),
             "the capped prefix is valid JSON"
         );
-        body.push(b'x');
-        let err = decide_preflight(&body[..65_536], true).unwrap_err();
+        let err = decide_preflight(&body, true).unwrap_err();
         assert_eq!(err, "output_overflow");
     }
 
     fn exact_preflight_json(len: usize) -> Vec<u8> {
-        let names = EXPECTED_PREFLIGHT_TOOLS.join(", ");
-        let prefix = format!("{{\"text\":\"{names}");
-        let suffix = "\"}";
-        let mut body = prefix.into_bytes();
-        let target = len - suffix.len();
-        assert!(body.len() <= target, "listing does not fit in {len} bytes");
-        body.resize(target, b' ');
-        body.extend_from_slice(suffix.as_bytes());
-        assert_eq!(body.len(), len);
+        let names = serde_json::to_string(&EXPECTED_PREFLIGHT_TOOLS.to_vec()).unwrap();
+        let mut body = format!(r#"{{"tools":{names}}}"#).into_bytes();
+        assert!(body.len() <= len, "listing does not fit in {len} bytes");
+        body.resize(len, b' ');
         body
-    }
-
-    #[test]
-    fn judge_stdout_requires_the_exact_tool_set() {
-        // `ok` has no forbidden substring today and must still fail.
-        assert!(judge_stdout(br#"{"text":"ok"}"#).is_err());
-        // click and get_app_state are real gcu tools, not the discovery entry.
-        let extra = br#"{"text":"todo_write, search_tool, use_tool, click, get_app_state"}"#;
-        assert!(judge_stdout(extra).is_err());
-        // Discovery entry is list_apps and list_windows (ToolName on the minimal profile).
-        let exact = br#"{"text":"todo_write, search_tool, use_tool, list_apps, list_windows"}"#;
-        assert!(judge_stdout(exact).is_ok());
     }
 }

@@ -111,6 +111,9 @@ pub const fn child_env_keys() -> &'static [&'static str] {
         "GCU_EVAL_PROBE",
         "GCU_EVAL_BEHAVIOR",
         "GCU_EVAL_WATCH_FILE",
+        "GCU_EVAL_ATTESTED",
+        "GCU_EVAL_BUILTIN_GCU",
+        "GCU_EVAL_GCU_REEXEC",
         "GCU_BIN",
         "GCU_APPROVAL",
         "HTTP_PROXY",
@@ -141,43 +144,149 @@ pub const fn proxy_env_keys() -> &'static [&'static str] {
     ]
 }
 
-/// `~/.grok`, `~/.codex`, `~/.gemini`, and `~/.claude` for the current user.
+/// Personal config directories the harness must not seed from or provision inside.
 ///
-/// This reads `HOME` and `USERPROFILE` and does not open those directories.
+/// The list covers `HOME` and `USERPROFILE`, the OS account home from
+/// `getpwuid_r` or the Windows profile folder (not only the environment),
+/// `GROK_HOME`, `CODEX_HOME`, and `GROK_APP_HOME`, absolute `GEMINI_*` and
+/// `CLAUDE_*` values, and this app's `~/.grok-app` tree (`agent-home` and
+/// `agent-home-official`). It does not open those directories. A path check
+/// cannot prove that file bytes are an evaluation-only identity.
 #[must_use]
 pub fn user_config_dirs() -> Vec<PathBuf> {
+    config_dirs_from(
+        &std::env::vars_os().collect::<Vec<_>>(),
+        crate::ffi::os_home_dir(),
+    )
+}
+
+/// Build the exclusion list from an explicit environment and OS home.
+///
+/// `env` is `(name, value)` pairs. `os_home` is the account home, if known.
+#[must_use]
+pub fn config_dirs_from(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    os_home: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut homes = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        homes.push(PathBuf::from(home));
+    for key in ["HOME", "USERPROFILE"] {
+        if let Some(value) = env_value(env, key) {
+            homes.push(PathBuf::from(value));
+        }
     }
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        homes.push(PathBuf::from(home));
+    if let Some(home) = os_home {
+        homes.push(home);
     }
     let mut out = Vec::new();
     for home in homes {
         for name in [".grok", ".codex", ".gemini", ".claude"] {
-            out.push(home.join(name));
+            push_unique(&mut out, home.join(name));
+        }
+        let app = home.join(".grok-app");
+        push_unique(&mut out, app.join("agent-home"));
+        push_unique(&mut out, app.join("agent-home-official"));
+        push_unique(&mut out, app);
+    }
+    for key in ["GROK_HOME", "CODEX_HOME", "GROK_APP_HOME"] {
+        if let Some(value) = env_value(env, key) {
+            let path = PathBuf::from(value);
+            if key == "GROK_APP_HOME" {
+                push_unique(&mut out, path.join("agent-home"));
+                push_unique(&mut out, path.join("agent-home-official"));
+            }
+            push_unique(&mut out, path);
+        }
+    }
+    for (key, value) in env {
+        let name = key.to_string_lossy();
+        if name.starts_with("GEMINI_") || name.starts_with("CLAUDE_") {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                push_unique(&mut out, path);
+            }
         }
     }
     out
 }
 
+fn env_value(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    key: &str,
+) -> Option<std::ffi::OsString> {
+    env.iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
+}
+
+fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !path.as_os_str().is_empty() && !out.iter().any(|item| item == &path) {
+        out.push(path);
+    }
+}
+
 /// True when `path` is `configs` or a descendant of one of them.
+///
+/// macOS and Windows compare components without case. Linux does not.
 #[must_use]
 pub fn path_under_configs(path: &Path, configs: &[PathBuf]) -> bool {
-    configs.iter().any(|dir| path.starts_with(dir))
+    configs
+        .iter()
+        .any(|dir| path_within(path, dir, case_insensitive_paths()))
+}
+
+/// True on platforms whose canonical paths are not case-sensitive.
+#[must_use]
+pub const fn case_insensitive_paths() -> bool {
+    cfg!(windows) || cfg!(target_os = "macos")
+}
+
+/// True when `path` is `root` or a descendant.
+///
+/// `case_insensitive` folds ASCII case on normal and prefix components.
+/// Root components stay exact. This does not touch the filesystem. The unit
+/// test is not a live macOS or Windows filesystem proof.
+#[must_use]
+pub fn path_within(path: &Path, root: &Path, case_insensitive: bool) -> bool {
+    let path: Vec<_> = path.components().collect();
+    let root: Vec<_> = root.components().collect();
+    if root.is_empty() || path.len() < root.len() {
+        return false;
+    }
+    path.iter()
+        .zip(root.iter())
+        .all(|(left, right)| component_eq(left, right, case_insensitive))
+}
+
+fn component_eq(
+    left: &std::path::Component<'_>,
+    right: &std::path::Component<'_>,
+    case_insensitive: bool,
+) -> bool {
+    use std::path::Component;
+    match (left, right) {
+        (Component::Normal(left), Component::Normal(right)) if case_insensitive => left
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy()),
+        (Component::Prefix(left), Component::Prefix(right)) if case_insensitive => left
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy()),
+        _ => left == right,
+    }
 }
 
 /// True when the canonical form of `path` is one of `configs` or a descendant.
 ///
 /// Comparison uses canonical paths, so a symlink ancestor cannot hide a personal
 /// config directory. Missing config directories are resolved through the longest
-/// existing ancestor. This does not read directory entries.
+/// existing ancestor. macOS and Windows compare without case. This does not read
+/// directory entries. Bind mounts are not detected.
 pub(crate) fn canonical_under_configs(path: &Path, configs: &[PathBuf]) -> Result<bool, Error> {
     let path = canonical_prefix(path)?;
+    let folded = case_insensitive_paths();
     for config in configs {
         let config = canonical_prefix(config)?;
-        if path == config || path.starts_with(&config) {
+        if path_within(&path, &config, folded) {
             return Ok(true);
         }
     }
@@ -218,4 +327,84 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Error> {
         .build()
         .map_err(|err| Error::msg(format!("runtime: {err}")))?;
     Ok(runtime.block_on(future))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn path_within_folds_ascii_case_only_when_asked() {
+        let root = Path::new("/Home/User/.grok");
+        let child = Path::new("/home/user/.grok/auth.json");
+        assert!(!path_within(child, root, false));
+        assert!(path_within(child, root, true));
+        assert!(path_within(root, root, true));
+        assert!(!path_within(
+            Path::new("/home/user/.grok-extra"),
+            root,
+            true
+        ));
+        assert!(!path_within(Path::new("/tmp/other"), root, true));
+        assert!(!path_within(Path::new("/home/user"), root, true));
+    }
+
+    #[test]
+    fn config_dirs_cover_env_homes_os_home_and_absolute_overrides() {
+        let env = vec![
+            (OsString::from("HOME"), OsString::from("/envhome")),
+            (OsString::from("USERPROFILE"), OsString::from("/profile")),
+            (OsString::from("GROK_HOME"), OsString::from("/custom/grok")),
+            (
+                OsString::from("CODEX_HOME"),
+                OsString::from("/custom/codex"),
+            ),
+            (
+                OsString::from("GROK_APP_HOME"),
+                OsString::from("/custom/app"),
+            ),
+            (OsString::from("GEMINI_HOME"), OsString::from("/abs/gemini")),
+            (
+                OsString::from("CLAUDE_CONFIG_DIR"),
+                OsString::from("/abs/claude"),
+            ),
+            (
+                OsString::from("GEMINI_RELATIVE"),
+                OsString::from("relative/gemini"),
+            ),
+        ];
+        let dirs = config_dirs_from(&env, Some(PathBuf::from("/oshome")));
+        for item in [
+            "/envhome/.grok",
+            "/envhome/.codex",
+            "/envhome/.gemini",
+            "/envhome/.claude",
+            "/envhome/.grok-app",
+            "/envhome/.grok-app/agent-home",
+            "/envhome/.grok-app/agent-home-official",
+            "/profile/.grok",
+            "/profile/.grok-app/agent-home-official",
+            "/oshome/.grok",
+            "/oshome/.grok-app/agent-home",
+            "/oshome/.grok-app/agent-home-official",
+            "/custom/grok",
+            "/custom/codex",
+            "/custom/app",
+            "/custom/app/agent-home",
+            "/custom/app/agent-home-official",
+            "/abs/gemini",
+            "/abs/claude",
+        ] {
+            assert!(
+                dirs.iter().any(|path| path == Path::new(item)),
+                "{item} missing from {dirs:?}"
+            );
+        }
+        assert!(
+            !dirs.iter().any(|path| path == Path::new("relative/gemini")),
+            "a relative GEMINI_* value is not a config root: {dirs:?}"
+        );
+    }
 }

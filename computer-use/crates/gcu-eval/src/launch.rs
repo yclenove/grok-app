@@ -3,7 +3,7 @@
 //! Every real client gets the same `--tools` allow-list, cleared environment,
 //! and proxy forwarding. The eval fake agent keeps the narrower test path.
 
-use crate::boundary::client_is_real;
+use crate::boundary::{launches_real_client, INTERNAL_FAKE_AGENT};
 use crate::runner::{ApprovalMode, Environment, RunConfig};
 use crate::tasks::Task;
 use crate::Error;
@@ -38,11 +38,58 @@ pub(crate) fn grok_args(task: &Task, cfg: &RunConfig) -> Vec<String> {
     ];
     // The real client ignores `[eval] disabled_tools`. An empty `--tools` value
     // does not restrict it, so the allow-list is the single built-in `todo_write`.
-    if client_is_real(cfg.real_driver, cfg.grok_bin.as_deref()) {
+    // The built-in fake agent keeps the narrower test path. A path is never
+    // trusted because of its file name.
+    if launches_real_client(cfg) {
         args.push("--tools".into());
         args.push("todo_write".into());
     }
     args
+}
+
+/// How the runner starts the client. `Reexec` is this process, not a path the operator passed.
+pub(crate) enum ClientProgram {
+    /// Operator path or the cargo-built fake agent selected by the test slot.
+    Path(std::path::PathBuf),
+    /// `gcu-eval` re-entering as the built-in fake agent.
+    Reexec(std::path::PathBuf),
+}
+
+impl ClientProgram {
+    /// Path or executable used for logs and the preflight cache. Not a trust decision.
+    pub(crate) fn identity_path(&self) -> &std::path::Path {
+        match self {
+            Self::Path(path) | Self::Reexec(path) => path,
+        }
+    }
+}
+
+/// Resolve the client. `builtin_fake` ignores `grok_bin`.
+pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
+    if cfg.builtin_fake {
+        if let Some(path) = &cfg.builtin_fake_bin {
+            return Ok(ClientProgram::Path(path.clone()));
+        }
+        let exe = std::env::current_exe()
+            .map_err(|err| Error::msg(format!("builtin fake agent: {err}")))?;
+        return Ok(ClientProgram::Reexec(exe));
+    }
+    cfg.grok_bin
+        .clone()
+        .map(ClientProgram::Path)
+        .ok_or_else(|| Error::msg("no client binary and no model credentials"))
+}
+
+/// Command for `program`. The re-exec form adds the internal fake-agent flag.
+pub(crate) fn client_command(program: &ClientProgram) -> tokio::process::Command {
+    match program {
+        ClientProgram::Path(path) => tokio::process::Command::new(path),
+        ClientProgram::Reexec(exe) => {
+            let mut command = tokio::process::Command::new(exe);
+            command.arg(INTERNAL_FAKE_AGENT);
+            command
+        }
+    }
 }
 
 pub(crate) fn child_env(
@@ -60,7 +107,7 @@ pub(crate) fn child_env(
     map.insert("TEMP".into(), env.work.display().to_string());
     map.insert("TMP".into(), env.work.display().to_string());
     // Shims first so they shadow curl, wget, ssh, nc and mail. A real client also needs system tools.
-    let real_client = client_is_real(cfg.real_driver, cfg.grok_bin.as_deref());
+    let real_client = launches_real_client(cfg);
     let path = if real_client {
         format!("{}:{}", env.shim_dir.display(), crate::prep::system_path())
     } else {
@@ -86,13 +133,7 @@ pub(crate) fn child_env(
         "GCU_EVAL_SIDE_LOG".into(),
         env.side_log.display().to_string(),
     );
-    map.insert(
-        "GCU_BIN".into(),
-        cfg.gcu_bin
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default(),
-    );
+    insert_gcu_env(&mut map, cfg);
     if let Some(probe) = &cfg.probe {
         map.insert("GCU_EVAL_PROBE".into(), probe.display().to_string());
     }
@@ -113,6 +154,36 @@ pub(crate) fn child_env(
     map
 }
 
+/// `GCU_BIN` and the flags that tell the fake agent whether that path is trusted.
+///
+/// The built-in slot (`builtin_gcu`, or built-in fake with no `gcu_bin`) sets
+/// `GCU_EVAL_BUILTIN_GCU`. Re-exec sets `GCU_EVAL_GCU_REEXEC` and points
+/// `GCU_BIN` at this process. An operator path does not get the built-in flag.
+/// Attestation is a separate flag and does not make a path built-in.
+fn insert_gcu_env(map: &mut BTreeMap<String, String>, cfg: &RunConfig) {
+    if cfg.attest_disposable_desktop {
+        map.insert("GCU_EVAL_ATTESTED".into(), "1".into());
+    }
+    let reexec = cfg.builtin_fake && cfg.gcu_bin.is_none();
+    if cfg.builtin_gcu || reexec {
+        map.insert("GCU_EVAL_BUILTIN_GCU".into(), "1".into());
+    }
+    if reexec {
+        if let Ok(exe) = std::env::current_exe() {
+            map.insert("GCU_BIN".into(), exe.display().to_string());
+            map.insert("GCU_EVAL_GCU_REEXEC".into(), "1".into());
+        }
+        return;
+    }
+    map.insert(
+        "GCU_BIN".into(),
+        cfg.gcu_bin
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+    );
+}
+
 /// Proxy settings found through `lookup`. Empty values are dropped.
 fn proxy_pairs(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
     crate::access::proxy_env_keys()
@@ -125,7 +196,8 @@ fn proxy_pairs(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)>
         .collect()
 }
 
-pub(crate) fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), Error> {
+/// Isolated client config. The text is the preflight cache input, not a secret.
+pub(crate) fn config_body(cfg: &RunConfig, scene: &str) -> String {
     let command = toml_quote(
         &cfg.gcu_bin
             .as_ref()
@@ -165,6 +237,11 @@ pub(crate) fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> R
     if let Some(script) = cfg.arm_script {
         body.push_str(&format!("script = {script}\n"));
     }
+    body
+}
+
+pub(crate) fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), Error> {
+    let body = config_body(cfg, scene);
     let path = env.grok_home.join("config.toml");
     if std::fs::symlink_metadata(&path).is_ok() {
         return Err(Error::msg("refusing a pre-existing config.toml"));
@@ -244,11 +321,64 @@ mod tests {
 
     #[test]
     fn grok_args_fake_driver_omits_tools_allowlist() {
-        let args = grok_args(&sample_task(), &RunConfig::default());
+        let cfg = RunConfig {
+            builtin_fake: true,
+            ..RunConfig::default()
+        };
+        let args = grok_args(&sample_task(), &cfg);
         assert_eq!(args, fake_grok_args());
         assert!(!args
             .iter()
             .any(|arg| arg == "--tools" || arg == "todo_write"));
+    }
+
+    #[test]
+    fn grok_args_named_like_the_fake_agent_still_gets_the_external_allowlist() {
+        let cfg = RunConfig {
+            grok_bin: Some(std::path::PathBuf::from("/tmp/eval-fake-agent")),
+            ..RunConfig::default()
+        };
+        let args = grok_args(&sample_task(), &cfg);
+        let tools = args.iter().position(|arg| arg == "--tools").unwrap();
+        assert_eq!(args[tools + 1], "todo_write");
+    }
+
+    #[test]
+    fn child_env_does_not_mark_an_operator_gcu_as_builtin() {
+        let task = sample_task();
+        let cfg = RunConfig {
+            builtin_fake: true,
+            gcu_bin: Some(std::path::PathBuf::from("/tmp/not-the-fake-gcu")),
+            builtin_gcu: false,
+            ..RunConfig::default()
+        };
+        let env = Environment {
+            root: std::path::PathBuf::from("/tmp/root"),
+            home: std::path::PathBuf::from("/tmp/root/home"),
+            grok_home: std::path::PathBuf::from("/tmp/root/grok"),
+            work: std::path::PathBuf::from("/tmp/root/work"),
+            state_path: std::path::PathBuf::from("/tmp/root/state.json"),
+            shim_dir: std::path::PathBuf::from("/tmp/root/shims"),
+            side_log: std::path::PathBuf::from("/tmp/root/side.log"),
+            tool_log: std::path::PathBuf::from("/tmp/root/tools.log"),
+            transcript: std::path::PathBuf::from("/tmp/root/grok/transcript.json"),
+        };
+        let map = child_env(&task, &cfg, &env, None);
+        assert_eq!(
+            map.get("GCU_BIN").map(String::as_str),
+            Some("/tmp/not-the-fake-gcu")
+        );
+        assert!(!map.contains_key("GCU_EVAL_BUILTIN_GCU"));
+        assert!(!map.contains_key("GCU_EVAL_ATTESTED"));
+        let marked = RunConfig {
+            builtin_gcu: true,
+            ..cfg.clone()
+        };
+        let marked = child_env(&task, &marked, &env, None);
+        assert_eq!(
+            marked.get("GCU_EVAL_BUILTIN_GCU").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]

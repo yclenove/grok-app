@@ -177,6 +177,9 @@ pub struct AbTrial {
     pub tool_result_bytes: u64,
     /// Oracle and side-effect labels. No payloads.
     pub violations: Vec<String>,
+    /// Why a row did not run. Empty when the oracle ran.
+    #[serde(default)]
+    pub reason: String,
 }
 
 impl AbTrial {
@@ -315,6 +318,7 @@ pub fn not_run_report(tasks: &[Task], id: &ReportId) -> AbReport {
                     extra_approvals: 0,
                     tool_result_bytes: 0,
                     violations: Vec::new(),
+                    reason: "no client binary and no model credentials".into(),
                 });
             }
         }
@@ -356,23 +360,30 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
         extra_approvals: row.metrics.extra_approvals,
         tool_result_bytes: row.metrics.tool_result_bytes,
         violations: row.violations.clone(),
+        reason: row.reason.clone(),
     })
 }
 
 /// Run both arms for three repeats. Does not call a model API.
 ///
 /// Blocking: each client budget. Cancellation: the runner kills the client on
-/// timeout. Without `grok_bin`, every task is `not_run`.
+/// timeout. Without a client, every task is `not_run`. After any cleanup
+/// failure, later arms and repeats are `not_run` and are not started.
 pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport {
-    if base.grok_bin.is_none() || !base.run_local {
+    if (!base.builtin_fake && base.grok_bin.is_none()) || !base.run_local {
         return not_run_report(tasks, id);
     }
     let mut report = blank_report(id, Provenance::Runner, false);
+    let mut halted: Option<String> = None;
     for (arm_id, arm) in [
         (ArmId::A, ArmConfig::baseline()),
         (ArmId::B, ArmConfig::candidate()),
     ] {
         for repeat in 0..REPEATS {
+            if let Some(reason) = &halted {
+                push_halted(&mut report, tasks, arm_id, repeat, reason);
+                continue;
+            }
             let mut cfg = base.clone();
             apply_arm(&mut cfg, &arm, arm_id);
             cfg.repeat = repeat;
@@ -382,6 +393,12 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
                 if row.id == "desktop-oneshot" {
                     continue;
                 }
+                if row.assurance.cleanup_failed {
+                    halted = Some(format!(
+                        "cleanup_failed: remaining tasks were not started ({})",
+                        row.reason
+                    ));
+                }
                 if let Some(trial) = trial_from_outcome(&row) {
                     report.trials.push(trial);
                 }
@@ -389,4 +406,28 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
         }
     }
     report
+}
+
+fn push_halted(report: &mut AbReport, tasks: &[Task], arm: ArmId, repeat: u32, reason: &str) {
+    for task in tasks {
+        report.trials.push(AbTrial {
+            task_id: task.id.clone(),
+            category: task.category.clone(),
+            arm,
+            repeat,
+            status: RunStatus::NotRun,
+            rounds: None,
+            rounds_source: RoundsSource::Unset,
+            tokens_in: None,
+            tokens_out: None,
+            images: 0,
+            image_bytes: 0,
+            unknown_calls: 0,
+            false_success: false,
+            extra_approvals: 0,
+            tool_result_bytes: 0,
+            violations: Vec::new(),
+            reason: reason.into(),
+        });
+    }
 }

@@ -1,5 +1,5 @@
-//! Shared real-mode preflight harness. Each integration-test binary is its own
-//! process, so each one gets a fresh `OnceLock`.
+//! Shared real-mode preflight harness. The cache lives on `RunConfig`, so each
+//! `drive` call starts empty even in one process.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gcu_eval::{
@@ -24,9 +24,7 @@ pub fn drive(label: &str, listing: &str) -> Drive {
     let marker = dir.join("dispatched");
     let log = dir.join("invocations.log");
     let response = dir.join("preflight.json");
-    let mut body = serde_json::to_vec(&serde_json::json!({ "text": listing })).unwrap();
-    body.push(b'\n');
-    std::fs::write(&response, body).unwrap();
+    std::fs::write(&response, listing.as_bytes()).unwrap();
     let seed = dir.join("seed");
     std::fs::create_dir_all(&seed).unwrap();
     std::fs::write(seed.join("auth.json"), b"opaque").unwrap();

@@ -1,5 +1,4 @@
-//! Real-mode preflight failure. This binary is separate from the pass test so
-//! the process-wide `OnceLock` starts empty.
+//! Real-mode preflight failure. A forbidden name is a canonical label.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -10,7 +9,7 @@ use gcu_eval::RunStatus;
 
 #[test]
 fn preflight_failure_marks_the_task_not_run_and_does_not_dispatch() {
-    let drive = client_tools::drive("fail", "SECRET run_terminal_command please");
+    let drive = client_tools::drive("fail", r#"{"tools":["SECRET","run_terminal_command"]}"#);
     assert_eq!(drive.rows.len(), 2, "both the task and the one after it");
     for row in &drive.rows {
         assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);

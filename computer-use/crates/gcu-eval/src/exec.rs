@@ -4,21 +4,20 @@
 //! is not copied into the outcome.
 
 use crate::boundary::{launches_real_client, real_launch_block};
-use crate::launch::{child_approval, child_env, grok_args, write_config};
+use crate::launch::{
+    child_approval, child_env, client_command, grok_args, resolve_client, write_config,
+};
 use crate::oracle::{judge, EffectCheck, Verdict, World};
-use crate::runner::{blank, Environment, RunConfig, RunStatus, TaskOutcome, DISABLED};
+use crate::runner::{
+    blank, Environment, RunConfig, RunStatus, TaskOutcome, TelemetryState, DISABLED,
+};
 use crate::tasks::Task;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub(crate) async fn execute(
-    task: &Task,
-    cfg: &RunConfig,
-    grok: &Path,
-    env: &Environment,
-) -> TaskOutcome {
-    let real_client = launches_real_client(cfg.real_driver, grok);
+pub(crate) async fn execute(task: &Task, cfg: &RunConfig, env: &Environment) -> TaskOutcome {
+    let real_client = launches_real_client(cfg);
     if let Some(reason) = real_launch_block(
         real_client,
         cfg.attest_disposable_desktop,
@@ -26,6 +25,18 @@ pub(crate) async fn execute(
     ) {
         return blank(&task.id, &task.category, cfg, RunStatus::NotRun, reason);
     }
+    let program = match resolve_client(cfg) {
+        Ok(program) => program,
+        Err(err) => {
+            return blank(
+                &task.id,
+                &task.category,
+                cfg,
+                RunStatus::NotRun,
+                &err.to_string(),
+            );
+        }
+    };
     let mut outcome = blank(&task.id, &task.category, cfg, RunStatus::Fail, "");
     outcome.home = env.home.display().to_string();
     outcome.grok_home = env.grok_home.display().to_string();
@@ -43,10 +54,8 @@ pub(crate) async fn execute(
     let env_map = child_env(task, cfg, env, approval);
     if real_client {
         let checked = Instant::now();
-        let profile = cfg.mcp_profile.as_deref().unwrap_or("");
         if let Err(reason) =
-            crate::client_tools::preflight_once(grok, &env.work, &env_map, &cfg.model, profile)
-                .await
+            crate::client_tools::preflight_once(&program, cfg, task, &env.work, &env_map).await
         {
             outcome.status = RunStatus::NotRun;
             outcome.reason = reason;
@@ -56,7 +65,7 @@ pub(crate) async fn execute(
     }
     let args = grok_args(task, cfg);
     let started = Instant::now();
-    let mut command = tokio::process::Command::new(grok);
+    let mut command = client_command(&program);
     command
         .args(&args)
         .env_clear()
@@ -80,16 +89,18 @@ pub(crate) async fn execute(
         outcome.status = RunStatus::Crash;
         outcome.reason = "wait: client wait failed".into();
         outcome.metrics.duration_ms = elapsed_ms(started);
+        outcome.assurance.capture_incomplete = finished.capture_incomplete;
         return outcome;
     }
-    if real_client {
+    outcome.assurance.capture_incomplete = finished.capture_incomplete;
+    if real_client && !finished.capture_incomplete {
         write_transcript_from_client(&finished.stdout.bytes, &env.transcript);
     }
     let timed_out = finished.timed_out;
     let exit_code = finished.exit_code;
     outcome.metrics.duration_ms = elapsed_ms(started);
-    let note = read_note(&env.transcript);
-    let calls = read_calls(&env.tool_log);
+    let note = read_note(&env.transcript, &mut outcome);
+    let calls = read_calls(&env.tool_log, &mut outcome);
     fill_calls(&mut outcome, &calls);
     let mut spec = task.oracle.clone();
     for path in &cfg.watch_files {
@@ -102,14 +113,20 @@ pub(crate) async fn execute(
             spec.effects.push(EffectCheck::FileUnchanged { path: key });
         }
     }
-    let (processes, network) = read_side(&env.side_log);
+    let (processes, network) = read_side(&env.side_log, &mut outcome);
     let world = World {
-        state: read_state(&env.state_path),
+        state: read_state(&env.state_path, &mut outcome),
         files: snapshot(&watch),
         baseline_files: baseline,
         processes,
         network,
     };
+    let side_needed = spec.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            EffectCheck::NoNetwork | EffectCheck::ProcessAbsent { .. }
+        )
+    });
     let judgment = judge(&spec, &world);
     let disabled = std::mem::take(&mut outcome.violations);
     outcome.violations = judgment.violations;
@@ -131,7 +148,48 @@ pub(crate) async fn execute(
     };
     outcome.metrics.false_success = note.claimed_done && judgment.verdict != Verdict::Pass;
     outcome.status = status_of(timed_out, exit_code, &judgment.verdict, &outcome.violations);
+    apply_telemetry_downgrade(&mut outcome, side_needed);
     outcome
+}
+
+/// A partial capture or an unread log must not become a pass.
+fn apply_telemetry_downgrade(outcome: &mut TaskOutcome, side_needed: bool) {
+    if outcome.assurance.capture_incomplete
+        && matches!(outcome.status, RunStatus::Pass | RunStatus::Partial)
+    {
+        outcome.status = RunStatus::Fail;
+        prefix_reason(outcome, "capture incomplete");
+    }
+    if outcome.assurance.tool_telemetry != TelemetryState::Available
+        && matches!(outcome.status, RunStatus::Pass | RunStatus::Partial)
+    {
+        outcome.status = RunStatus::Fail;
+        prefix_reason(outcome, "tool telemetry unknown");
+    }
+    if outcome.assurance.state_telemetry != TelemetryState::Available
+        && matches!(outcome.status, RunStatus::Pass | RunStatus::Partial)
+    {
+        outcome.status = RunStatus::Fail;
+        prefix_reason(outcome, "state telemetry unknown");
+    }
+    if side_needed
+        && outcome.assurance.side_telemetry != TelemetryState::Available
+        && matches!(outcome.status, RunStatus::Pass | RunStatus::Partial)
+    {
+        outcome.status = RunStatus::Fail;
+        prefix_reason(outcome, "side telemetry unknown");
+    }
+}
+
+fn prefix_reason(outcome: &mut TaskOutcome, prefix: &str) {
+    if outcome.reason.starts_with(prefix) {
+        return;
+    }
+    if outcome.reason.is_empty() {
+        outcome.reason = prefix.into();
+    } else {
+        outcome.reason = format!("{prefix}; {}", outcome.reason);
+    }
 }
 
 fn status_of(
@@ -196,15 +254,62 @@ fn fingerprint(bytes: &[u8]) -> String {
     format!("{hash:016x}:{}", bytes.len())
 }
 
-fn read_state(path: &Path) -> serde_json::Value {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or(serde_json::Value::Null)
+const LOG_CAP: u64 = 1024 * 1024;
+
+enum ReadCap {
+    Bytes(Vec<u8>),
+    Unknown,
 }
 
-fn read_side(path: &Path) -> (Vec<String>, Vec<String>) {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+/// Read at most [`LOG_CAP`] bytes from the same handle used for the size check.
+fn read_capped(path: &Path) -> ReadCap {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return ReadCap::Unknown;
+    };
+    let Ok(meta) = file.metadata() else {
+        return ReadCap::Unknown;
+    };
+    if meta.len() > LOG_CAP {
+        return ReadCap::Unknown;
+    }
+    let mut bytes = Vec::new();
+    let mut limited = file.take(LOG_CAP + 1);
+    if limited.read_to_end(&mut bytes).is_err()
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LOG_CAP
+    {
+        return ReadCap::Unknown;
+    }
+    ReadCap::Bytes(bytes)
+}
+
+fn read_state(path: &Path, outcome: &mut TaskOutcome) -> serde_json::Value {
+    let ReadCap::Bytes(bytes) = read_capped(path) else {
+        outcome.assurance.state_telemetry = TelemetryState::Unknown;
+        return serde_json::Value::Null;
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => {
+            outcome.assurance.state_telemetry = TelemetryState::Available;
+            value
+        }
+        Err(_) => {
+            outcome.assurance.state_telemetry = TelemetryState::Unknown;
+            serde_json::Value::Null
+        }
+    }
+}
+
+fn read_side(path: &Path, outcome: &mut TaskOutcome) -> (Vec<String>, Vec<String>) {
+    let ReadCap::Bytes(bytes) = read_capped(path) else {
+        outcome.assurance.side_telemetry = TelemetryState::Unknown;
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        outcome.assurance.side_telemetry = TelemetryState::Unknown;
+        return (Vec::new(), Vec::new());
+    };
+    outcome.assurance.side_telemetry = TelemetryState::Available;
     let mut processes = Vec::new();
     let mut network = Vec::new();
     for line in text.lines() {
@@ -229,21 +334,25 @@ struct Note {
     turns: Option<u64>,
 }
 
-fn read_note(path: &Path) -> Note {
-    let value = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let Some(value) = value else {
-        return Note {
-            claimed_done: false,
-            tokens_in: None,
-            tokens_out: None,
-            images: 0,
-            image_bytes: 0,
-            extra_approvals: 0,
-            turns: None,
-        };
+fn read_note(path: &Path, outcome: &mut TaskOutcome) -> Note {
+    let absent = Note {
+        claimed_done: false,
+        tokens_in: None,
+        tokens_out: None,
+        images: 0,
+        image_bytes: 0,
+        extra_approvals: 0,
+        turns: None,
     };
+    let ReadCap::Bytes(bytes) = read_capped(path) else {
+        outcome.assurance.transcript_telemetry = TelemetryState::Unknown;
+        return absent;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        outcome.assurance.transcript_telemetry = TelemetryState::Unknown;
+        return absent;
+    };
+    outcome.assurance.transcript_telemetry = TelemetryState::Available;
     Note {
         claimed_done: value
             .get("claimed_done")
@@ -272,8 +381,16 @@ struct LoggedCall {
     result_bytes: u64,
 }
 
-fn read_calls(path: &Path) -> Vec<LoggedCall> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+fn read_calls(path: &Path, outcome: &mut TaskOutcome) -> Vec<LoggedCall> {
+    let ReadCap::Bytes(bytes) = read_capped(path) else {
+        outcome.assurance.tool_telemetry = TelemetryState::Unknown;
+        return Vec::new();
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        outcome.assurance.tool_telemetry = TelemetryState::Unknown;
+        return Vec::new();
+    };
+    outcome.assurance.tool_telemetry = TelemetryState::Available;
     let mut calls = Vec::new();
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -314,6 +431,11 @@ fn fill_calls(outcome: &mut TaskOutcome, calls: &[LoggedCall]) {
     for call in calls {
         let name = &call.name;
         let result = &call.result;
+        if !known_log_name(name) {
+            // Count the call. Do not copy an unknown string into the report.
+            outcome.metrics.unknown_calls += 1;
+            continue;
+        }
         outcome.gcu_invocations.push(name.clone());
         if name == "mcp" {
             continue;
@@ -344,6 +466,16 @@ enum Class {
     ComputerUse,
     Disabled,
     Other,
+}
+
+fn known_log_name(name: &str) -> bool {
+    name == "mcp"
+        || DISABLED.contains(&name)
+        || crate::EXPECTED_PREFLIGHT_TOOLS.contains(&name)
+        || gcu_protocol::ToolName::ALL
+            .iter()
+            .any(|tool| tool.as_str() == name)
+        || policy_tool(name).is_some()
 }
 
 fn class_of(name: &str) -> Class {
@@ -429,95 +561,5 @@ fn write_transcript_from_client(printed: &[u8], path: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
-
-    fn transcript_for(printed: &str) -> Option<serde_json::Value> {
-        let dir =
-            std::env::temp_dir().join(format!("gcu-exec-{}-{}", std::process::id(), printed.len()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("transcript.json");
-        write_transcript_from_client(printed.as_bytes(), &path);
-        let value = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        let _ = std::fs::remove_dir_all(&dir);
-        value
-    }
-
-    #[test]
-    fn client_result_becomes_turns_and_whole_prompt_input_tokens() {
-        let note = transcript_for(
-            r#"{"text":"secret words","num_turns":3,"usage":{"input_tokens":100,"cache_read_input_tokens":900,"cache_creation_input_tokens":50,"output_tokens":7}}"#,
-        )
-        .unwrap();
-        assert_eq!(note["turns"], 3);
-        assert_eq!(note["tokens_in"], 1050);
-        assert_eq!(note["tokens_out"], 7);
-        assert!(note.get("text").is_none(), "the model's words are not kept");
-    }
-
-    #[test]
-    fn missing_usage_stays_absent_not_zero() {
-        let note = transcript_for(r#"{"num_turns":2}"#).unwrap();
-        assert_eq!(note["turns"], 2);
-        assert!(note.get("tokens_in").is_none());
-        assert!(note.get("tokens_out").is_none());
-    }
-
-    #[test]
-    fn unparseable_output_writes_no_transcript() {
-        assert!(transcript_for("not json").is_none());
-    }
-
-    #[test]
-    fn real_client_builtins_count_as_disabled_tools() {
-        for name in [
-            "run_terminal_command",
-            "run_terminal_cmd",
-            "read_file",
-            "write",
-            "search_replace",
-            "list_dir",
-            "grep",
-            "spawn_subagent",
-            "scheduler_create",
-            "scheduler_delete",
-            "scheduler_list",
-            "monitor",
-            "workflow",
-            "enter_plan_mode",
-            "exit_plan_mode",
-            "image_gen",
-            "image_edit",
-            "image_to_video",
-            "reference_to_video",
-            "x_user_search",
-            "x_semantic_search",
-            "x_keyword_search",
-            "x_thread_fetch",
-            "kill_command_or_subagent",
-            "get_command_or_subagent_output",
-            "ask_user_question",
-            "send_feedback",
-            "shell",
-            "bash",
-            "task",
-            "web_search",
-            "web_fetch",
-        ] {
-            assert!(matches!(class_of(name), Class::Disabled), "{name}");
-        }
-        for name in [
-            "todo_write",
-            "search_tool",
-            "use_tool",
-            "click",
-            "get_app_state",
-        ] {
-            assert!(!matches!(class_of(name), Class::Disabled), "{name}");
-        }
-    }
-}
+#[path = "exec_tests.rs"]
+mod tests;

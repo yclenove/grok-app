@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Why the one-shot desktop provider did not run.
-pub const DESKTOP_NOT_RUN: &str = "one-shot OS/desktop container or VM is not available; isolated GROK_HOME is not an environment boundary";
+mod provider;
+pub use provider::*;
 
 pub(crate) use crate::client_tools::DISABLED;
 
@@ -161,6 +161,9 @@ pub struct TaskOutcome {
     pub home: String,
     /// `GROK_HOME` given to the child.
     pub grok_home: String,
+    /// Attestation, driver, and whether each log was actually read.
+    #[serde(default)]
+    pub assurance: Assurance,
 }
 
 impl TaskOutcome {
@@ -245,6 +248,22 @@ pub struct RunConfig {
     /// Operator attestation that this process is on a one-shot isolated desktop with egress
     /// control. Default false. An environment variable cannot set this. It is not proof.
     pub attest_disposable_desktop: bool,
+    /// Use the built-in fake agent. A path in [`RunConfig::grok_bin`] is ignored.
+    ///
+    /// The CLI sets this from `--builtin-fake` and leaves [`RunConfig::builtin_fake_bin`]
+    /// empty, so the binary re-executes itself. Tests may set `builtin_fake_bin` to the
+    /// cargo-built `eval-fake-agent`. That slot is not a filename exemption.
+    pub builtin_fake: bool,
+    /// Cargo test binary for the built-in fake agent. The CLI never sets this.
+    pub builtin_fake_bin: Option<PathBuf>,
+    /// `gcu_bin` is the built-in fake gcu, or the runner will re-exec this process as it.
+    ///
+    /// An operator path stays `false` unless the caller is the test slot. The fake agent
+    /// refuses `GCU_BIN` unless this flag or an attestation is present.
+    pub builtin_gcu: bool,
+    /// Preflight results for this run only. Cloning the config shares the map.
+    /// A new [`RunConfig`] does not see another run's successes.
+    pub preflight: crate::client_tools::PreflightCache,
 }
 
 impl Default for RunConfig {
@@ -274,90 +293,11 @@ impl Default for RunConfig {
             fixture_bin: None,
             auth_seed: None,
             attest_disposable_desktop: false,
+            builtin_fake: false,
+            builtin_fake_bin: None,
+            builtin_gcu: false,
+            preflight: crate::client_tools::PreflightCache::default(),
         }
-    }
-}
-
-/// One prepared environment. The provider must delete `root` in `destroy`.
-#[derive(Debug, Clone)]
-pub struct Environment {
-    /// Directory that contains every other path.
-    pub root: PathBuf,
-    /// `HOME` for the child. This is not the operator's home.
-    pub home: PathBuf,
-    /// Isolated `GROK_HOME`. Not `~/.grok`.
-    pub grok_home: PathBuf,
-    /// Client working directory.
-    pub work: PathBuf,
-    /// `$GCU_FIXTURE_STATE`.
-    pub state_path: PathBuf,
-    /// Directory prepended to `PATH`. It contains only side-effect shims.
-    pub shim_dir: PathBuf,
-    /// Shim and agent side-effect log.
-    pub side_log: PathBuf,
-    /// `gcu` invocation log.
-    pub tool_log: PathBuf,
-    /// Client transcript path inside `grok_home`.
-    pub transcript: PathBuf,
-}
-
-/// What [`EnvProvider::provision`] decided.
-#[derive(Debug)]
-pub enum Provision {
-    /// A directory tree the caller must destroy.
-    ///
-    /// Boxed so this variant does not inflate [`Provision`] on every target.
-    Ready(Box<Environment>),
-    /// The provider refuses to pretend this environment exists.
-    NotRun {
-        /// Safe-to-print reason.
-        reason: String,
-    },
-}
-
-/// Creates and deletes a one-shot environment.
-///
-/// `provision` may create directories and must not read user config homes.
-/// `destroy` removes everything `provision` created. Neither method waits on
-/// the agent. Timeout and cancellation are applied by [`run_tasks`], which
-/// kills the client process.
-pub trait EnvProvider {
-    /// Prepare an environment for `task`.
-    fn provision(&self, task: &Task) -> Result<Provision, Error>;
-    /// Delete `env`. True when the root is gone.
-    fn destroy(&self, env: Environment) -> Result<bool, Error>;
-}
-
-/// Temporary directory provider for tests and the fake driver.
-#[derive(Debug, Default)]
-pub struct LocalTempProvider;
-
-impl EnvProvider for LocalTempProvider {
-    fn provision(&self, _task: &Task) -> Result<Provision, Error> {
-        let mut held = crate::prep::begin_env()?;
-        // The trait caller destroys the tree. Drop must not delete it first.
-        held.disarm();
-        Ok(Provision::Ready(Box::new(held.env)))
-    }
-
-    fn destroy(&self, env: Environment) -> Result<bool, Error> {
-        crate::prep::remove_root(&env.root)
-    }
-}
-
-/// Real desktop provider. This card only records that it was not run.
-#[derive(Debug, Default)]
-pub struct DesktopProvider;
-
-impl EnvProvider for DesktopProvider {
-    fn provision(&self, _task: &Task) -> Result<Provision, Error> {
-        Ok(Provision::NotRun {
-            reason: DESKTOP_NOT_RUN.into(),
-        })
-    }
-
-    fn destroy(&self, _env: Environment) -> Result<bool, Error> {
-        Ok(true)
     }
 }
 
@@ -369,8 +309,20 @@ impl EnvProvider for DesktopProvider {
 /// client budget. Cancellation: killing the client on timeout.
 pub async fn run_tasks(tasks: &[Task], cfg: &RunConfig) -> SuiteReport {
     let mut rows = Vec::with_capacity(tasks.len() + 1);
+    let mut halted: Option<String> = None;
     for task in tasks {
-        rows.push(run_one(task, cfg).await);
+        if let Some(reason) = &halted {
+            rows.push(skipped(task, cfg, RunStatus::NotRun, reason));
+            continue;
+        }
+        let row = run_one(task, cfg).await;
+        if row.assurance.cleanup_failed {
+            halted = Some(format!(
+                "cleanup_failed: remaining tasks were not started ({})",
+                row.reason
+            ));
+        }
+        rows.push(row);
     }
     if cfg.include_desktop {
         rows.push(desktop_row(cfg));
@@ -393,17 +345,6 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
     if !cfg.run_local {
         return skipped(task, cfg, RunStatus::NotRun, DESKTOP_NOT_RUN);
     }
-    let Some(grok) = cfg.grok_bin.as_ref() else {
-        return skipped(
-            task,
-            cfg,
-            RunStatus::NotRun,
-            "no client binary and no model credentials",
-        );
-    };
-    if !grok.is_file() {
-        return skipped(task, cfg, RunStatus::NotRun, "client binary missing");
-    }
     if !task.platforms.iter().any(|item| item == &cfg.platform) {
         return skipped(
             task,
@@ -412,7 +353,28 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             "platform not listed on the task",
         );
     }
-    let real_client = crate::boundary::launches_real_client(cfg.real_driver, grok);
+    let real_client = crate::boundary::launches_real_client(cfg);
+    // Owner-only ACLs are not implemented. Real mode must not pretend a temp
+    // directory is private. Fake mode may still run and does not claim `0700`.
+    #[cfg(windows)]
+    if cfg.real_driver {
+        return skipped(
+            task,
+            cfg,
+            RunStatus::NotRun,
+            crate::boundary::WINDOWS_REAL_NOT_RUN,
+        );
+    }
+    if let Some(reason) = crate::boundary::external_backend_block(cfg) {
+        return skipped(task, cfg, RunStatus::NotRun, reason);
+    }
+    let program = match crate::launch::resolve_client(cfg) {
+        Ok(program) => program,
+        Err(err) => return skipped(task, cfg, RunStatus::NotRun, &err.to_string()),
+    };
+    if !program.identity_path().is_file() {
+        return skipped(task, cfg, RunStatus::NotRun, "client binary missing");
+    }
     if let Some(reason) = crate::boundary::real_launch_block(
         real_client,
         cfg.attest_disposable_desktop,
@@ -438,10 +400,8 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             );
         }
     }
-    let profile = cfg.mcp_profile.as_deref().unwrap_or("");
     if real_client {
-        if let Some(Err(reason)) = crate::client_tools::cached_preflight(grok, profile, &cfg.model)
-        {
+        if let Some(Err(reason)) = crate::client_tools::cached_preflight(cfg, task, &program) {
             return skipped(task, cfg, RunStatus::NotRun, &reason);
         }
     } else if !scene_ready(&task.scene).await {
@@ -449,7 +409,16 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
     }
     let mut held = match crate::prep::begin_env() {
         Ok(held) => held,
-        Err(err) => return skipped(task, cfg, RunStatus::Invalid, &err.to_string()),
+        Err(fault) => {
+            let mut row = skipped(task, cfg, RunStatus::Invalid, &fault.message);
+            if let Some(root) = fault.leftover {
+                row.env_root = Some(root);
+                row.env_destroyed = false;
+                row.assurance.cleanup_failed = true;
+                crate::prep::apply_cleanup_failure(&mut row.status, &mut row.reason);
+            }
+            return row;
+        }
     };
     // The fixture is stopped before its directory is removed.
     let mut fixture = None;
@@ -477,7 +446,7 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             None => {}
         }
     }
-    let outcome = crate::exec::execute(task, cfg, grok, &held.env).await;
+    let outcome = crate::exec::execute(task, cfg, &held.env).await;
     drop(fixture);
     finish(outcome, &mut held)
 }
@@ -488,6 +457,7 @@ fn finish(mut outcome: TaskOutcome, held: &mut crate::prep::HeldEnv) -> TaskOutc
         Ok(()) => outcome.env_destroyed = true,
         Err(_) => {
             outcome.env_destroyed = !root.exists();
+            outcome.assurance.cleanup_failed = true;
             crate::prep::apply_cleanup_failure(&mut outcome.status, &mut outcome.reason);
         }
     }
@@ -572,5 +542,6 @@ pub(crate) fn blank(
         approval_mode: String::new(),
         home: String::new(),
         grok_home: String::new(),
+        assurance: assurance_for(cfg),
     }
 }

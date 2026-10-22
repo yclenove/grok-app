@@ -73,7 +73,9 @@ fn fixture_script(dir: &Path) -> PathBuf {
 
 fn cfg(_dir: &Path, behavior: &str) -> RunConfig {
     RunConfig {
-        grok_bin: Some(agent()),
+        builtin_fake: true,
+        builtin_fake_bin: Some(agent()),
+        builtin_gcu: true,
         gcu_bin: Some(gcu()),
         platform: host_platform().into(),
         behavior: Some(behavior.into()),
@@ -86,7 +88,25 @@ fn cfg(_dir: &Path, behavior: &str) -> RunConfig {
 #[test]
 fn cli_real_driver_without_disposable_desktop_attestation_does_not_start() {
     let dir = scratch("cli-attest");
-    let marker = dir.join("started");
+    let client_marker = dir.join("client-started");
+    let fixture_marker = dir.join("fixture-started");
+    let client = dir.join("grok.sh");
+    std::fs::write(
+        &client,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", client_marker.display()),
+    )
+    .unwrap();
+    executable(&client);
+    let fixture = dir.join("fixture.sh");
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '{{}}' > \"$GCU_FIXTURE_STATE\"\nsleep 300\n",
+            fixture_marker.display()
+        ),
+    )
+    .unwrap();
+    executable(&fixture);
     let output = Command::new(eval_bin())
         .args([
             "--suite",
@@ -103,12 +123,12 @@ fn cli_real_driver_without_disposable_desktop_attestation_does_not_start() {
             "4000",
         ])
         .arg("--grok")
-        .arg(agent())
+        .arg(&client)
         .arg("--gcu")
         .arg(gcu())
         .arg("--fixture")
-        .arg(fixture_script(&dir))
-        .env("GCU_EVAL_WATCH_FILE", &marker)
+        .arg(&fixture)
+        .env("GCU_EVAL_WATCH_FILE", dir.join("parent-watch"))
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
@@ -123,6 +143,12 @@ fn cli_real_driver_without_disposable_desktop_attestation_does_not_start() {
     assert!(
         !stdout.contains("pass native-form-01"),
         "the task ran: {stdout}"
+    );
+    assert!(!client_marker.exists(), "the client was started");
+    assert!(!fixture_marker.exists(), "the fixture was started");
+    assert!(
+        !dir.join("parent-watch").exists(),
+        "the parent watch variable was treated as a launch"
     );
     let flagged = Command::new(eval_bin())
         .args([
@@ -143,7 +169,7 @@ fn cli_real_driver_without_disposable_desktop_attestation_does_not_start() {
         .arg("--gcu")
         .arg(gcu())
         .arg("--fixture")
-        .arg(fixture_script(&dir))
+        .arg(&fixture)
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
@@ -271,7 +297,7 @@ fn timeout_kills_the_client_process_group() {
 fn preflight_sensitive_token_is_absent_from_the_report() {
     let dir = scratch("sensitive");
     let response = dir.join("preflight.json");
-    std::fs::write(&response, b"{\"text\":\"shell_SENSITIVEVALUE\"}\n").unwrap();
+    std::fs::write(&response, b"{\"tools\":[\"shell_SENSITIVEVALUE\"]}\n").unwrap();
     let log = dir.join("argv.log");
     let script = dir.join("grok.sh");
     let body = format!(
@@ -335,6 +361,22 @@ exit 0
         "{}",
         row.reason
     );
+    assert!(blob.contains("attestation_provided"), "{blob}");
+    assert!(blob.contains("\"driver_mode\": \"real\""), "{blob}");
+    assert!(blob.contains("\"tool_telemetry\": \"unknown\""), "{blob}");
+    assert!(blob.contains("\"tool_calls\": null"), "{blob}");
+    assert!(
+        blob.contains("\"os_sandbox\": \"not_implemented\""),
+        "{blob}"
+    );
+    assert!(
+        blob.contains("\"lifetime_barrier\": \"not_implemented\""),
+        "{blob}"
+    );
+    assert!(
+        blob.contains("\"client_policy_pin\": \"not_implemented\""),
+        "{blob}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -342,7 +384,7 @@ exit 0
 fn attested_external_client_uses_the_real_launch_policy() {
     let dir = scratch("ext-ok");
     let log = dir.join("argv.log");
-    let script = logging_client(&dir, &log, &exact_listing());
+    let script = logging_client(&dir, &log);
     let cfg = RunConfig {
         grok_bin: Some(script),
         gcu_bin: Some(gcu()),
@@ -355,17 +397,22 @@ fn attested_external_client_uses_the_real_launch_policy() {
     };
     let report = block_on(run_tasks(&[named("native-form-01")], &cfg)).unwrap();
     let row = &report.tasks[0];
-    assert_ne!(row.status, RunStatus::NotRun, "{}", row.reason);
+    assert_eq!(row.status, RunStatus::Fail, "{}", row.reason);
     assert!(
         !row.reason.contains("attest-disposable-desktop"),
         "{}",
         row.reason
     );
     let text = std::fs::read_to_string(&log).unwrap();
-    assert!(text.contains("--tools todo_write"), "{text}");
-    assert!(text.contains("--no-plan"), "{text}");
-    assert!(text.contains("--verbatim"), "{text}");
-    assert!(text.contains("--model"), "{text}");
+    let lines: Vec<_> = text.lines().filter(|line| !line.is_empty()).collect();
+    assert!(lines.len() >= 2, "{text}");
+    for line in &lines {
+        assert!(line.contains("--tools"), "{line}");
+        assert!(line.contains("todo_write"), "{line}");
+        assert!(line.contains("--no-plan"), "{line}");
+        assert!(line.contains("--verbatim"), "{line}");
+        assert!(line.contains("--model"), "{line}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -431,16 +478,76 @@ fn preflight_cache_key_includes_model_and_profile() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn exact_listing() -> String {
-    "list_apps, list_windows, search_tool, todo_write, use_tool".into()
+#[test]
+fn preflight_cache_does_not_cross_a_fresh_run_config() {
+    let dir = scratch("cache-run");
+    let phase = dir.join("phase");
+    let log = dir.join("argv.log");
+    let script = dir.join("grok.sh");
+    let good = exact_tools_json();
+    let body = format!(
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+prompt=
+prev=
+for arg in "$@"; do
+  if [ "$prev" = "-p" ]; then
+    prompt=$arg
+  fi
+  prev=$arg
+done
+case "$prompt" in
+  *"List the exact names"*)
+    if [ -e '{}' ]; then
+      printf '%s\n' '{{"tools":["shell_SENSITIVEVALUE"]}}'
+      exit 0
+    fi
+    : > '{}'
+    printf '%s\n' '{}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{{"num_turns":1}}'
+exit 0
+"#,
+        log.display(),
+        phase.display(),
+        phase.display(),
+        good
+    );
+    std::fs::write(&script, body).unwrap();
+    executable(&script);
+    let first_cfg = real_cfg(&dir, script.clone());
+    let first = block_on(run_tasks(&[named("native-form-01")], &first_cfg)).unwrap();
+    assert_ne!(
+        first.tasks[0].status,
+        RunStatus::NotRun,
+        "{}",
+        first.tasks[0].reason
+    );
+    let cloned = block_on(run_tasks(&[named("native-form-01")], &first_cfg.clone())).unwrap();
+    assert_ne!(
+        cloned.tasks[0].status,
+        RunStatus::NotRun,
+        "a clone shares the run cache: {}",
+        cloned.tasks[0].reason
+    );
+    let fresh = real_cfg(&dir, script);
+    let second = block_on(run_tasks(&[named("native-form-01")], &fresh)).unwrap();
+    assert_eq!(second.tasks[0].status, RunStatus::NotRun);
+    assert_eq!(second.tasks[0].reason, "forbidden_tool:shell");
+    assert!(!second.tasks[0].reason.contains("SENSITIVEVALUE"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn exact_tools_json() -> String {
+    r#"{"tools":["list_apps","list_windows","search_tool","todo_write","use_tool"]}"#.into()
 }
 
 fn exact_preflight_json(len: usize) -> Vec<u8> {
-    let prefix = format!("{{\"text\":\"{}", exact_listing());
-    let suffix = "\"}";
-    let mut body = prefix.into_bytes();
-    body.resize(len - suffix.len(), b' ');
-    body.extend_from_slice(suffix.as_bytes());
+    let mut body = exact_tools_json().into_bytes();
+    assert!(body.len() <= len);
+    body.resize(len, b' ');
     body
 }
 
@@ -464,8 +571,9 @@ fn real_cfg(dir: &Path, script: PathBuf) -> RunConfig {
     }
 }
 
-fn logging_client(dir: &Path, log: &Path, listing: &str) -> PathBuf {
+fn logging_client(dir: &Path, log: &Path) -> PathBuf {
     let script = dir.join("grok.sh");
+    let listing = exact_tools_json();
     let body = format!(
         r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
@@ -479,14 +587,15 @@ for arg in "$@"; do
 done
 case "$prompt" in
   *"List the exact names"*)
-    printf '%s\n' '{{"text":"{listing}"}}'
+    printf '%s\n' '{}'
     exit 0
     ;;
 esac
 printf '%s\n' '{{"num_turns":1}}'
 exit 0
 "#,
-        log.display()
+        log.display(),
+        listing
     );
     std::fs::write(&script, body).unwrap();
     executable(&script);
@@ -511,7 +620,7 @@ exit 0
 
 fn cache_client(dir: &Path, log: &Path) -> PathBuf {
     let script = dir.join("grok.sh");
-    let listing = exact_listing();
+    let listing = exact_tools_json();
     let body = format!(
         r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
@@ -534,21 +643,22 @@ done
 case "$prompt" in
   *"List the exact names"*)
     if [ "$model" = "other" ]; then
-      printf '%s\n' '{{"text":"shell_SENSITIVEVALUE"}}'
+      printf '%s\n' '{{"tools":["shell_SENSITIVEVALUE"]}}'
       exit 0
     fi
     if grep -q '"full"' "$GROK_HOME/config.toml"; then
-      printf '%s\n' '{{"text":"shell_SENSITIVEVALUE"}}'
+      printf '%s\n' '{{"tools":["shell_SENSITIVEVALUE"]}}'
       exit 0
     fi
-    printf '%s\n' '{{"text":"{listing}"}}'
+    printf '%s\n' '{}'
     exit 0
     ;;
 esac
 printf '%s\n' '{{"num_turns":1}}'
 exit 0
 "#,
-        log.display()
+        log.display(),
+        listing
     );
     std::fs::write(&script, body).unwrap();
     executable(&script);

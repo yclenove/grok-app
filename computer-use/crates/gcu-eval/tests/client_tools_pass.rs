@@ -1,5 +1,4 @@
-//! Real-mode preflight success. This binary is separate from the failure test
-//! so the process-wide `OnceLock` starts empty.
+//! Real-mode preflight success. The allow-list is a JSON tools array.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -10,7 +9,7 @@ mod client_tools;
 fn preflight_success_dispatches_the_task() {
     // Tripwire set: discovery entry list_apps/list_windows plus the three client built-ins.
     // click and get_app_state are real gcu tools and are not part of this set.
-    let listing = "list_apps, list_windows, search_tool, todo_write, use_tool";
+    let listing = r#"{"tools":["list_apps","list_windows","search_tool","todo_write","use_tool"]}"#;
     let drive = client_tools::drive("pass", listing);
     assert_eq!(drive.rows.len(), 2, "both tasks are dispatched");
     for row in &drive.rows {

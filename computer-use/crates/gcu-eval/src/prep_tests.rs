@@ -232,9 +232,101 @@ fn cleanup_failure_turns_pass_into_fail() {
 }
 
 #[test]
+fn auth_seed_hard_link_is_refused_and_not_copied() {
+    let seed = scratch("hardseed");
+    let home = scratch("hardhome");
+    std::fs::write(seed.join("auth.json"), b"opaque-secret").unwrap();
+    std::fs::hard_link(seed.join("auth.json"), seed.join("alias.json")).unwrap();
+    let err = seed_auth(&seed, &home).unwrap_err();
+    assert!(
+        err.to_string().contains("linked") || err.to_string().contains("non-regular"),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("opaque-secret"));
+    assert!(!home.join("auth.json").exists());
+    let _ = std::fs::remove_dir_all(&seed);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn auth_seed_fifo_returns_without_blocking() {
+    let seed = scratch("fifo");
+    let home = scratch("fifohome");
+    let fifo = seed.join("auth.json");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo");
+    let started = std::time::Instant::now();
+    let err = seed_auth(&seed, &home).unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "opening the fifo blocked: {err}"
+    );
+    assert!(!home.join("auth.json").exists());
+    assert!(!err.to_string().contains("opaque"));
+    let _ = std::fs::remove_dir_all(&seed);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn auth_seed_over_the_size_cap_is_refused() {
+    let seed = scratch("bigseed");
+    let home = scratch("bighome");
+    let file = std::fs::File::create(seed.join("auth.json")).unwrap();
+    file.set_len(1024 * 1024 + 1).unwrap();
+    let err = seed_auth(&seed, &home).unwrap_err();
+    assert!(err.to_string().contains("size cap"), "{err}");
+    assert!(!home.join("auth.json").exists());
+    let _ = std::fs::remove_dir_all(&seed);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn fresh_root_is_owner_only_when_it_is_created() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = scratch("privparent");
+    let mut held = begin_env_under(&parent).unwrap();
+    let mode = std::fs::metadata(&held.env.root)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "root mode is {mode:o}");
+    let child = std::fs::metadata(&held.env.home)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(child & 0o077, 0, "home mode is {child:o}");
+    held.cleanup().unwrap();
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+#[test]
+fn world_writable_parent_without_sticky_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = scratch("openparent");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let err = begin_env_under(&parent).unwrap_err();
+    assert!(err.message.contains("not sticky"), "{}", err.message);
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+#[test]
+fn sticky_world_writable_parent_is_accepted() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = scratch("stickyparent");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    let mut held = begin_env_under(&parent).unwrap();
+    assert!(held.env.root.is_dir());
+    held.cleanup().unwrap();
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+#[test]
 fn fresh_roots_are_distinct_and_absent() {
-    let left = fresh_root().unwrap();
-    let right = fresh_root().unwrap();
+    let left = fresh_root_in(&std::env::temp_dir()).unwrap();
+    let right = fresh_root_in(&std::env::temp_dir()).unwrap();
     assert_ne!(left, right);
     assert!(!left.exists());
     assert!(!right.exists());
