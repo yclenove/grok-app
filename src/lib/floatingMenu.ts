@@ -117,8 +117,9 @@ export function computeFloatingPos(
   else placeAbove = spaceAbove >= estHeight || spaceAbove > spaceBelow;
 
   const maxHeight = Math.max(
-    120,
-    Math.min(estHeight + 80, placeAbove ? spaceAbove - gap : spaceBelow - gap),
+    0,
+    // A minimum taller than the remaining space clips the last focused option.
+    Math.min(estHeight + 80, opts.anchor === "bottom" || placeAbove ? spaceAbove - gap : spaceBelow - gap),
   );
 
   // start: panel left ↔ trigger left; end: panel right ↔ trigger right.
@@ -239,6 +240,8 @@ export interface UseFloatingMenuOptions {
   /** Optional extra roots that count as "inside" (e.g. trigger wrapper). */
   roots?: Array<RefObject<HTMLElement | null>>;
   onClose: () => void;
+  /** False when the caller owns Escape through a topmost focus scope. */
+  closeOnEscape?: boolean;
   placement?: FloatingPlacement;
   /** Horizontal align relative to trigger (default start). */
   align?: FloatingAlign;
@@ -271,6 +274,7 @@ export function useFloatingMenu({
   panelRef,
   roots = [],
   onClose,
+  closeOnEscape = true,
   placement = "auto",
   align = "start",
   width,
@@ -365,7 +369,7 @@ export function useFloatingMenu({
           top: 0,
           bottom: Math.max(margin, vh - r.top + gap),
           placeAbove: false,
-          maxHeight: Math.max(120, r.top - gap - margin),
+          maxHeight: Math.max(0, r.top - gap - margin),
         };
       } else if (next.placeAbove || o.placement === "up") {
         /**
@@ -383,7 +387,7 @@ export function useFloatingMenu({
             placeAbove: false,
           };
         } else {
-          const maxH = Math.max(120, r.top - gap - margin);
+          const maxH = Math.max(0, r.top - gap - margin);
           next = {
             ...next,
             top: margin,
@@ -499,7 +503,7 @@ export function useFloatingMenu({
       onClose();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (closeOnEscape && e.key === "Escape") onClose();
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -507,7 +511,7 @@ export function useFloatingMenu({
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, onClose, triggerRef, panelRef, roots]);
+  }, [open, onClose, closeOnEscape, triggerRef, panelRef, roots]);
 
   /**
    * Tauri native Webviews paint above HTML. If this panel overlaps a browser

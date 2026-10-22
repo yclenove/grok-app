@@ -1,6 +1,7 @@
 /** de messages — domain: core */
 export const deCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "Die Antwort auf die Berechtigungsanfrage ist fehlgeschlagen. {error}",
   "image.loadingOriginal": "Original wird geladen…",
   "image.originalFailed": "Original konnte nicht geladen werden. Die Vorschau bleibt verfügbar.",
   "app.tagline": "MIT · Inoffiziell · Schwesterprojekt grok-go",
@@ -74,6 +75,8 @@ export const deCore = {
   "agent.streamStallBanner": "Seit rund {seconds} s kein Stream- oder Werkzeugfortschritt. Weiter warten oder diesen Vorgang beenden.",
   "agent.streamStallCancel": "Vorgang beenden",
   "agent.streamStallEndTurn": "Vorgang beenden",
+  "agent.streamStallEndAndContinue": "Beenden und fortsetzen",
+  "agent.streamStallContinueNotReady": "Der Vorgang wird noch beendet — versuchen Sie Fortsetzen gleich noch einmal.",
   "agent.streamStallKeepWaiting": "Weiter warten",
   "agent.streamStallHardEndToast": "Vorgang nach Host-Wiederherstellung geschlossen — deine Antwort blieb erhalten.",
   "agent.ghostStreamingHealed": "Die Nachricht hat den Agenten nicht erreicht. Wieder in der Eingabe — erneut senden.",

@@ -12,6 +12,7 @@ export type CoalesceStreamChunk = {
   messageId?: string | null;
   text?: string | null;
   done?: boolean | null;
+  hostFinalized?: boolean | null;
   kind?: string | null;
   thoughtPhase?: string | null;
 };
@@ -66,6 +67,7 @@ export function mergeStreamChunks(
   if (streamCoalesceKey(prev) !== streamCoalesceKey(next)) return null;
   const text = `${prev.text ?? ""}${next.text ?? ""}`;
   const done = !!(prev.done || next.done);
+  const hostFinalized = !!(prev.hostFinalized || next.hostFinalized);
   // Prefer the latest non-empty thought phase (new/open/continue).
   const thoughtPhase =
     next.thoughtPhase && next.thoughtPhase !== "none"
@@ -76,6 +78,7 @@ export function mergeStreamChunks(
     ...next,
     text,
     done,
+    hostFinalized,
     thoughtPhase: thoughtPhase ?? next.thoughtPhase ?? prev.thoughtPhase,
   };
 }
@@ -87,6 +90,36 @@ export type StreamCoalescerOptions = {
   onFlush: (chunk: CoalesceStreamChunk) => void;
 };
 
+/** Numeric-only, opt-in observations; no keys, identifiers or payloads escape. */
+export type StreamQueueDiagnostics = {
+  receivedChunks: number;
+  /** Coalesced output callbacks attempted, not the original input count. */
+  flushedChunks: number;
+  pendingKeys: number;
+  pendingTextCodeUnits: number;
+  peakPendingKeys: number;
+  peakPendingTextCodeUnits: number;
+};
+
+export type ToolQueueDiagnostics = {
+  receivedEvents: number;
+  /** Events handed to an output callback, including one that throws. */
+  flushedEvents: number;
+  pendingEvents: number;
+  peakPendingEvents: number;
+};
+
+type QueueObserver<T> = { value: T; notify: (value: T) => void };
+
+function notifyQueue<T extends object>(observer: QueueObserver<T> | null): void {
+  if (!observer) return;
+  try {
+    observer.notify({ ...observer.value });
+  } catch {
+    // Optional diagnostics must never affect batching or callback exceptions.
+  }
+}
+
 /**
  * Batches stream chunks per key. Call `push` from the Tauri event listener
  * and `dispose` on unmount / cancel.
@@ -97,6 +130,7 @@ export class StreamCoalescer {
   private pending = new Map<string, CoalesceStreamChunk>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private diagnostics: QueueObserver<StreamQueueDiagnostics> | null = null;
 
   constructor(opts: StreamCoalescerOptions) {
     this.flushMs = Math.max(8, opts.flushMs ?? STREAM_COALESCE_FLUSH_MS);
@@ -108,8 +142,59 @@ export class StreamCoalescer {
     return this.flushMs;
   }
 
+  /** One scoped observer; no counters are collected without a subscriber.
+   * Counts start at subscription, but pending includes earlier queued work.
+   * Replacing/removing an observer cannot change the queue's lifecycle.
+   */
+  observeDiagnostics(notify: (value: StreamQueueDiagnostics) => void): () => void {
+    let text = 0;
+    for (const chunk of this.pending.values()) text += (chunk.text ?? "").length;
+    const observer = { notify, value: {
+      receivedChunks: 0, flushedChunks: 0, pendingKeys: this.pending.size,
+      pendingTextCodeUnits: text, peakPendingKeys: this.pending.size,
+      peakPendingTextCodeUnits: text,
+    } };
+    this.diagnostics = observer;
+    notifyQueue(observer);
+    return () => { if (this.diagnostics === observer) this.diagnostics = null; };
+  }
+
+  private setPending(key: string, chunk: CoalesceStreamChunk): void {
+    const d = this.diagnostics?.value;
+    if (d) {
+      d.pendingTextCodeUnits += (chunk.text ?? "").length - (this.pending.get(key)?.text ?? "").length;
+    }
+    this.pending.set(key, chunk);
+    if (d) {
+      d.pendingKeys = this.pending.size;
+      d.peakPendingKeys = Math.max(d.peakPendingKeys, d.pendingKeys);
+      d.peakPendingTextCodeUnits = Math.max(d.peakPendingTextCodeUnits, d.pendingTextCodeUnits);
+    }
+  }
+
+  private deletePending(key: string): void {
+    const d = this.diagnostics?.value;
+    if (d) d.pendingTextCodeUnits -= (this.pending.get(key)?.text ?? "").length;
+    this.pending.delete(key);
+    if (d) d.pendingKeys = this.pending.size;
+  }
+
+  private flushChunk(chunk: CoalesceStreamChunk): void {
+    if (this.diagnostics) this.diagnostics.value.flushedChunks += 1;
+    this.onFlush(chunk);
+  }
+
   push(chunk: CoalesceStreamChunk): void {
     if (this.disposed) return;
+    if (this.diagnostics) this.diagnostics.value.receivedChunks += 1;
+    try {
+      this.pushAccepted(chunk);
+    } finally {
+      notifyQueue(this.diagnostics);
+    }
+  }
+
+  private pushAccepted(chunk: CoalesceStreamChunk): void {
     // Thought and assistant use different keys. A done tick must not settle
     // the bubble while the other kind is still buffered — that left CoT on
     // screen as the "final" reply until remount.
@@ -121,10 +206,10 @@ export class StreamCoalescer {
         if (k === selfKey) continue;
         if ((v.sessionId ?? "") === sid) {
           others.push(v);
-          this.pending.delete(k);
+          this.deletePending(k);
         }
       }
-      for (const v of others) this.onFlush(v);
+      for (const v of others) this.flushChunk(v);
     }
     const key = streamCoalesceKey(chunk);
     const existing = this.pending.get(key);
@@ -132,27 +217,27 @@ export class StreamCoalescer {
       const merged = mergeStreamChunks(existing, chunk);
       if (merged) {
         if (streamChunkNeedsImmediateFlush(merged)) {
-          this.pending.delete(key);
-          this.onFlush(merged);
+          this.deletePending(key);
+          this.flushChunk(merged);
           this.armOrClear();
           return;
         }
-        this.pending.set(key, merged);
+        this.setPending(key, merged);
         this.armOrClear();
         return;
       }
       // Different shape (shouldn't for same key) — flush old.
-      this.pending.delete(key);
-      this.onFlush(existing);
+      this.deletePending(key);
+      this.flushChunk(existing);
     }
 
     if (streamChunkNeedsImmediateFlush(chunk) || !(chunk.text ?? "")) {
-      this.onFlush(chunk);
+      this.flushChunk(chunk);
       this.armOrClear();
       return;
     }
 
-    this.pending.set(key, chunk);
+    this.setPending(key, chunk);
     this.armOrClear();
   }
 
@@ -164,12 +249,21 @@ export class StreamCoalescer {
     }
     const items = [...this.pending.values()];
     this.pending.clear();
-    for (const c of items) this.onFlush(c);
+    if (this.diagnostics) {
+      this.diagnostics.value.pendingKeys = 0;
+      this.diagnostics.value.pendingTextCodeUnits = 0;
+    }
+    try {
+      for (const c of items) this.flushChunk(c);
+    } finally {
+      notifyQueue(this.diagnostics);
+    }
   }
 
   dispose(): void {
     this.flushAll();
     this.disposed = true;
+    this.diagnostics = null;
   }
 
   private armOrClear(): void {
@@ -213,6 +307,7 @@ export class TimedBatchQueue<T> {
   private pending: T[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private diagnostics: QueueObserver<ToolQueueDiagnostics> | null = null;
 
   constructor(opts: TimedBatchQueueOptions<T>) {
     this.flushMs = Math.max(8, opts.flushMs ?? STREAM_COALESCE_FLUSH_MS);
@@ -220,14 +315,35 @@ export class TimedBatchQueue<T> {
     this.shouldFlushImmediate = opts.shouldFlushImmediate;
   }
 
+  /** Same late-subscription/throw semantics as StreamCoalescer diagnostics. */
+  observeDiagnostics(notify: (value: ToolQueueDiagnostics) => void): () => void {
+    const observer = { notify, value: {
+      receivedEvents: 0, flushedEvents: 0, pendingEvents: this.pending.length,
+      peakPendingEvents: this.pending.length,
+    } };
+    this.diagnostics = observer;
+    notifyQueue(observer);
+    return () => { if (this.diagnostics === observer) this.diagnostics = null; };
+  }
+
   push(item: T): void {
     if (this.disposed) return;
     this.pending.push(item);
-    if (this.shouldFlushImmediate?.(item)) {
-      this.flushAll();
-      return;
+    if (this.diagnostics) {
+      const d = this.diagnostics.value;
+      d.receivedEvents += 1;
+      d.pendingEvents = this.pending.length;
+      d.peakPendingEvents = Math.max(d.peakPendingEvents, d.pendingEvents);
     }
-    this.armOrClear();
+    try {
+      if (this.shouldFlushImmediate?.(item)) {
+        this.flushAll();
+        return;
+      }
+      this.armOrClear();
+    } finally {
+      notifyQueue(this.diagnostics);
+    }
   }
 
   flushAll(): void {
@@ -238,12 +354,21 @@ export class TimedBatchQueue<T> {
     if (this.pending.length === 0) return;
     const items = this.pending;
     this.pending = [];
-    this.onFlush(items);
+    if (this.diagnostics) {
+      this.diagnostics.value.pendingEvents = 0;
+      this.diagnostics.value.flushedEvents += items.length;
+    }
+    try {
+      this.onFlush(items);
+    } finally {
+      notifyQueue(this.diagnostics);
+    }
   }
 
   dispose(): void {
     this.flushAll();
     this.disposed = true;
+    this.diagnostics = null;
   }
 
   private armOrClear(): void {

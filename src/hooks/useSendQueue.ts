@@ -8,7 +8,8 @@ import {
   type RefObject,
 } from "react";
 import type { Attachment } from "@/lib/attachments";
-import * as api from "@/lib/api";
+import { useExternalSendQueue } from "./useExternalSendQueue";
+import { reconcileExternalQueueSnapshot } from "@/lib/externalQueueSnapshot";
 import type { SessionSnapshot, SessionState } from "@/lib/session";
 import {
   applyClearSendQueuePlan,
@@ -160,98 +161,28 @@ export function useSendQueue({
     setSendQueueByKey(next);
   }, []);
 
-  // Host session API: mid-turn external prompts join this same map so the
-  // composer strip updates immediately (drawing / tools / streaming).
-  useEffect(() => {
-    if (!acceptExternal || !api.hasHost()) return;
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    let unlistenTake: (() => void) | undefined;
-    let retryTimer: number | null = null;
-    let wakeRetry: (() => void) | null = null;
-    const onPush = (push: ExternalQueuePush) => {
-      if (cancelled) return;
+  const externalSync = useExternalSendQueue({
+    acceptExternal, sessionKey: queueSessionKey(sessionId),
+    onPush: (push: ExternalQueuePush) => {
       const r = applyExternalQueuePush(sendQueueByKeyRef.current, push);
       if (!r.added) return;
       writeMap(r.byKey);
-      if (r.dropped > 0) {
-        showToast(labels.droppedOldest(r.dropped, SEND_QUEUE_MAX), 3200);
-      }
       const preview = queuePreviewText(push.prompt ?? "", [], 48);
       const viewId = viewingSessionIdRef.current ?? sessionId;
       const same = !!viewId && viewId === (push.sessionId ?? "").trim();
-      const toast = same
-        ? labels.externalAdded?.(preview)
-        : labels.externalAddedOther?.(preview);
+      const toast = same ? labels.externalAdded?.(preview) : labels.externalAddedOther?.(preview);
       if (toast) showToast(toast, same ? 2800 : 4200);
-    };
-    const onTake = (take: ExternalQueueTake) => {
-      if (cancelled) return;
+    },
+    onTake: (take: ExternalQueueTake) => {
       const r = applyExternalQueueTake(sendQueueByKeyRef.current, take);
-      if (!r.removed) return;
-      writeMap(r.byKey);
-    };
-    const register = async () => {
-      let attempt = 0;
-      while (!cancelled) {
-        try {
-          const fn = await api.listen<ExternalQueuePush>(
-            "session://send_queue",
-            onPush,
-          );
-          const fnTake = await api.listen<ExternalQueueTake>(
-            "session://send_queue_take",
-            onTake,
-          );
-          if (cancelled) {
-            fn();
-            fnTake();
-          } else {
-            unlisten = fn;
-            unlistenTake = fnTake;
-          }
-          return;
-        } catch (e) {
-          if (cancelled) return;
-          const delayMs = Math.min(5_000, 250 * 2 ** Math.min(attempt, 4));
-          attempt += 1;
-          if (attempt === 1 || attempt % 5 === 0) {
-            console.warn(
-              "[send-queue] external listener registration failed; retrying",
-              e,
-            );
-          }
-          await new Promise<void>((resolve) => {
-            wakeRetry = resolve;
-            retryTimer = window.setTimeout(() => {
-              retryTimer = null;
-              wakeRetry = null;
-              resolve();
-            }, delayMs);
-          });
-        }
-      }
-    };
-    void register();
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) {
-        window.clearTimeout(retryTimer);
-        retryTimer = null;
-      }
-      wakeRetry?.();
-      wakeRetry = null;
-      unlisten?.();
-      unlistenTake?.();
-    };
-  }, [
-    acceptExternal,
-    labels,
-    sessionId,
-    showToast,
-    viewingSessionIdRef,
-    writeMap,
-  ]);
+      if (r.removed) writeMap(r.byKey);
+    },
+    onSnapshot: snapshot => {
+      const next = reconcileExternalQueueSnapshot(sendQueueByKeyRef.current, snapshot);
+      if (next !== sendQueueByKeyRef.current) writeMap(next);
+    },
+  });
+  const canFlushExternal = externalSync.canFlush;
 
   /** Enqueue a follow-up for the *viewed* session (ref, not stale React id). */
   const enqueue = useCallback(
@@ -372,6 +303,7 @@ export function useSendQueue({
   );
 
   const flush = useCallback(() => {
+    if (!canFlushExternal()) return;
     const live = liveHostRef.current;
     const viewId = viewingSessionIdRef.current;
     // Strict isolation: only ever claim the *viewed* session's queue.
@@ -380,7 +312,9 @@ export function useSendQueue({
     if (isSendInFlightForKey(claimKey)) return;
     if (isConnectingForKey(claimKey)) return;
     if (queueFlushHoldByKeyRef.current.has(claimKey)) return;
-    if (!getQueueForKey(sendQueueByKeyRef.current, claimKey).length) return;
+    const queue = getQueueForKey(sendQueueByKeyRef.current, claimKey);
+    if (!queue.length || queue.some(item => item.source === "external"
+      && (item.externalState === "pending" || item.externalState === "held"))) return;
 
     // Same-session busy only: wait for this chat's turn to finish.
     // Foreign busy must NOT block — executeSend demotes and spawns concurrent work.
@@ -450,6 +384,7 @@ export function useSendQueue({
     setHoldForKey,
     isSendInFlightForKey,
     isConnectingForKey,
+    canFlushExternal,
   ]);
 
   // Clear the viewed key's hold once a real turn is in progress again, and on
@@ -477,6 +412,7 @@ export function useSendQueue({
   // Auto-send next queued follow-up when *this viewed session* can take a turn.
   useEffect(() => {
     if (sessionState !== "ready" && sessionState !== "idle") return;
+    if (!canFlushExternal()) return;
     const viewId = viewingSessionIdRef.current ?? sessionId;
     const key = queueSessionKey(viewId);
     if (
@@ -490,7 +426,8 @@ export function useSendQueue({
     const viewed = getQueueForKey(sendQueueByKeyRef.current, key);
     if (!viewed.length) return;
     // Host owns `source: external` drain; GUI only displays those rows.
-    if (viewed[0]?.source === "external") return;
+    if (viewed[0]?.source === "external" || viewed.some(item => item.source === "external"
+      && (item.externalState === "pending" || item.externalState === "held"))) return;
     const live = liveHostRef.current;
     // Hold only when this same session is mid-turn on Host.
     if (shouldHoldFlushForLive(live.sessionId, live.state, viewId)) {
@@ -516,6 +453,9 @@ export function useSendQueue({
     viewedQueueKey,
     viewingSessionIdRef,
     liveHostRef,
+    canFlushExternal,
+    externalSync.ready,
+    externalSync.error,
   ]);
 
   /** Clear hold and try flush immediately (user retry). */
@@ -531,6 +471,7 @@ export function useSendQueue({
   }, [setHold]);
 
   return {
+    externalSync,
     activeQueue,
     flushHold,
     enqueue,

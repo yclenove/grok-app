@@ -1279,9 +1279,7 @@ mod tests {
         fs::write(ws.join("index.sqlite"), b"SQLite format 3\0fake").unwrap();
 
         // Point independent mode agent home at tmp via GROK_APP_HOME.
-        let _guard = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         // Safety: only for this process during test.
         std::env::set_var("GROK_APP_HOME", &tmp);
         // agent-home is under app data; memory for independent is agent-home/memory
@@ -1353,7 +1351,6 @@ mod tests {
         let _ = fs::File::create(&outside).and_then(|mut f| f.write_all(b"x"));
         assert!(delete_memory_file(&outside, "independent").is_err());
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -1443,9 +1440,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let _guard = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         std::env::set_var("GROK_APP_HOME", &tmp);
         let agent_mem = tmp.join("agent-home").join("memory");
         let slug = "demo-search-cafe0123";
@@ -1549,7 +1544,6 @@ mod tests {
             assert!(capped.truncated, "{capped:?}");
         }
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -1563,4 +1557,9 @@ mod tests {
             })
             .count()
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        list_and_delete_memory_files_in_temp,
+        search_finds_content_and_redacts_snippet,
+    );
 }

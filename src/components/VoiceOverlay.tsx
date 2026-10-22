@@ -13,7 +13,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  sessionResolvePermission,
   voiceInvokeTool,
   voicePushPcm,
   voiceStart,
@@ -59,7 +58,6 @@ import {
   transcriptEmptyKind,
   type VoiceDelegatePhase,
   type VoiceLiveErrorClass,
-  type VoicePermissionPrompt,
   type VoiceToolLoopState,
   type VoiceTranscriptLine,
 } from "@/lib/voiceOverlay";
@@ -67,6 +65,7 @@ import { mapPermissionButtons } from "@/lib/permissionOptions";
 import type { Locale, MessageKey } from "@/i18n";
 import { t } from "@/i18n";
 import { cn } from "@/lib/utils";
+import { useVoicePermissionResolution } from "@/hooks/useVoicePermissionResolution";
 
 export type VoiceOverlayProps = {
   locale: Locale;
@@ -181,10 +180,6 @@ export function VoiceOverlay({
   const [toolLoop, setToolLoop] = useState<VoiceToolLoopState>(
     initialToolLoopState,
   );
-  /** Real ACP permission for a voice-delegated session (allow/deny in overlay). */
-  const [pendingPermission, setPendingPermission] =
-    useState<VoicePermissionPrompt | null>(null);
-  const [resolvingPermission, setResolvingPermission] = useState(false);
   const stopCapture = useRef<(() => void) | null>(null);
   const started = useRef(false);
   /** Latest delegated ids for permission listener (avoid stale closure). */
@@ -257,24 +252,10 @@ export function VoiceOverlay({
   noticeClassifiedRef.current = noticeClassified;
   ttRef.current = tt;
 
-  const resolveVoicePermission = useCallback(
-    async (
-      prompt: VoicePermissionPrompt,
-      decision: "allow_once" | "allow_session" | "deny",
-      optionId: string,
-    ) => {
-      setResolvingPermission(true);
-      try {
-        await sessionResolvePermission({
-          rpcId: prompt.rpcId,
-          decision,
-          optionId,
-          scopeKey: prompt.scopeKey || undefined,
-          sessionId: prompt.sessionId,
-          options: prompt.options,
-          toolName: prompt.toolName,
-        });
-        setPendingPermission(null);
+  const { pendingPermission, setPendingPermission, resolvingPermission, resolveVoicePermission } =
+    useVoicePermissionResolution({
+      open,
+      onResolved: (prompt, decision) => {
         if (isPermissionDenyDecision(decision)) {
           const soft = softFailFromPermissionBlocked({
             toolName: prompt.toolName,
@@ -314,10 +295,12 @@ export function VoiceOverlay({
               sessionId: prompt.sessionId,
               decision,
               rpcId: prompt.rpcId,
+              requestGeneration: prompt.requestGeneration,
             },
           }),
         );
-      } catch (e) {
+      },
+      onFailure: (prompt, e) => {
         // Soft-fail resolve errors — voice stays open.
         const soft = softFailFromPermissionBlocked({
           toolName: prompt.toolName,
@@ -333,12 +316,8 @@ export function VoiceOverlay({
           }),
           true,
         );
-      } finally {
-        setResolvingPermission(false);
-      }
-    },
-    [appendLine, tt],
-  );
+      },
+    });
 
   useEffect(() => {
     if (!open) {

@@ -26,10 +26,12 @@ import {
   IconFolderPlus,
   IconList,
   IconNewChat,
+  IconHistory,
   IconScheduled,
   IconSearch,
   IconSettings,
 } from "@/components/icons";
+import { openSessionImport } from "@/lib/sessionImport/open";
 import { createT } from "@/i18n";
 import {
   isDesktopHost,
@@ -401,6 +403,16 @@ export function WorkbenchSidebar(props: WorkbenchSidebarProps) {
               <IconList size={16} />
             </span>
             {tr("sidebar.kanban")}
+          </button>
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => openSessionImport({ mode: "wizard" })}
+          >
+            <span className="nav-item__icon">
+              <IconHistory size={16} />
+            </span>
+            {tr("sidebar.importSessions")}
           </button>
           {isDesktopHost() ? (
             <button

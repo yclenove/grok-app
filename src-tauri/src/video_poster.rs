@@ -328,9 +328,8 @@ mod tests {
 
     #[test]
     fn save_client_roundtrip_under_app_home() {
-        let _lock = paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _scope = path_scope::TestScopeRestore::acquire();
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home =
             std::env::temp_dir().join(format!("grok-app-poster-home-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
@@ -358,8 +357,10 @@ mod tests {
         assert!(r2.from_cache);
         assert_eq!(r.poster_path, r2.poster_path);
 
-        std::env::remove_var("GROK_APP_HOME");
-        path_scope::refresh_from_store();
         let _ = fs::remove_dir_all(&home);
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        save_client_roundtrip_under_app_home,
+    );
 }

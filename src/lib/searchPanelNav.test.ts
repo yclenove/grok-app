@@ -26,6 +26,23 @@ describe("flattenSearchPanelItems", () => {
     ]);
   });
 
+  it("keeps importedHistory kind on session rows", () => {
+    expect(
+      flattenSearchPanelItems({
+        sessions: [
+          { id: "s1" },
+          { id: "imp:00000000-0000-4000-8000-000000000001", kind: "importedHistory" },
+        ],
+      }),
+    ).toEqual([
+      { kind: "session", id: "s1" },
+      {
+        kind: "importedHistory",
+        id: "imp:00000000-0000-4000-8000-000000000001",
+      },
+    ]);
+  });
+
   it("skips empty groups", () => {
     expect(
       flattenSearchPanelItems({

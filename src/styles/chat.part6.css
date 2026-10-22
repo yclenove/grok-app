@@ -441,6 +441,11 @@
   border-color: var(--border-focus);
 }
 
+.c-select__trigger:focus-visible {
+  outline: 2px solid var(--border-focus, #6b8cff);
+  outline-offset: 2px;
+}
+
 .c-select__trigger:disabled {
   opacity: 0.45;
 }
@@ -507,6 +512,13 @@
 
 .c-select__option {
   white-space: nowrap;
+}
+
+/* The list is portaled and scrollable: keep keyboard focus inside its clip. */
+.c-select__menu:focus-visible,
+.c-select__option:focus-visible {
+  outline: 2px solid var(--border-focus, #6b8cff);
+  outline-offset: -2px;
 }
 
 .c-select__option.is-disabled {

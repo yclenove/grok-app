@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "provenance": {
+    "kind": "synthetic",
+    "sourceCommit": "aa0d4698289bd3801d2bac07895fe7b6adbc5ce0",
+    "publicFixture": "tests/unit/store-stack-store-db.test.ts",
+    "scope": "Synthetic public wire recipe; expected values independent of the production decoder"
+  },
+  "database": {
+    "tables": [
+      "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)",
+      "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)"
+    ],
+    "metaRow": {
+      "key": "0",
+      "valueHex": "7b226167656e744964223a2273796e7468657469632d76323437222c226c6174657374526f6f74426c6f624964223a2231623733326130626531333537326665333762366166343036613361616464636363353431623230623765366435313264616666646130323463613031363265222c226e616d65223a22e59088e688902053746f726520e6a0bce5bc8fe9aa8ce694b6222c22637265617465644174223a313736373232353630303030307d",
+      "decoded": "{\"agentId\":\"synthetic-v247\",\"latestRootBlobId\":\"1b732a0be13572fe37b6af406a3aaddccc541b20b7e6d512daffda024ca0162e\",\"name\":\"合成 Store 格式验收\",\"createdAt\":1767225600000}"
+    },
+    "blobs": [
+      {
+        "label": "message-0",
+        "id": "2692f17ab66ae845acba8ab4af3cb065e3a8095c794bae43b56d859bf88fb34e",
+        "dataHex": "7b22726f6c65223a2275736572222c22636f6e74656e74223a22e794a8e688b7e4b880efbc9ae4bf9de68c81e585bce5aeb9227d"
+      },
+      {
+        "label": "message-1",
+        "id": "57ae9f88278fb9fdd6c4bda6979533f8f80f06c028aa1fbb7331fe2063e16521",
+        "dataHex": "22397b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a22e58aa9e6898be4b880efbc9ae4bf9de79599e69da5e6ba90227d"
+      },
+      {
+        "label": "message-2",
+        "id": "1653bd163bd8ac80f344d2fb4932d4531ad4aa868ea664a52624f96774b93afa",
+        "dataHex": "7b22726f6c65223a2275736572222c22636f6e74656e74223a22e794a8e688b7e4ba8cefbc9ae7bba7e7bbade5bc80e58f91227d"
+      },
+      {
+        "label": "message-3",
+        "id": "95b0c329fad9a769e03c3299494b31dc37d1f6f45a56b3d2f0b9c311881f10ca",
+        "dataHex": "22c2037b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a22e58aa9e6898be4ba8cefbc9ae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587bae995bfe8be93e587ba227d"
+      },
+      {
+        "label": "unreachable-abandoned",
+        "id": "3e4b4d7a3f552852b53aa4779fefe5d49853b664352a9009f59110dcf88a5450",
+        "dataHex": "7b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a22554e524541434841424c455f563234375f4d41524b4552227d"
+      },
+      {
+        "label": "subtree",
+        "id": "2656dccff4f8e0ea5714b8cb824e4c06dd3449130c58b6a2db6e2d54f957a969",
+        "dataHex": "0a2057ae9f88278fb9fdd6c4bda6979533f8f80f06c028aa1fbb7331fe2063e165210a201653bd163bd8ac80f344d2fb4932d4531ad4aa868ea664a52624f96774b93afa"
+      },
+      {
+        "label": "active-root",
+        "id": "1b732a0be13572fe37b6af406a3aaddccc541b20b7e6d512daffda024ca0162e",
+        "dataHex": "0a202692f17ab66ae845acba8ab4af3cb065e3a8095c794bae43b56d859bf88fb34e12202656dccff4f8e0ea5714b8cb824e4c06dd3449130c58b6a2db6e2d54f957a9690a2095b0c329fad9a769e03c3299494b31dc37d1f6f45a56b3d2f0b9c311881f10ca"
+      }
+    ]
+  },
+  "expectedMessages": [
+    {
+      "sourceLeafHash": "2692f17ab66ae845acba8ab4af3cb065e3a8095c794bae43b56d859bf88fb34e",
+      "ordinal": 0,
+      "role": "user",
+      "text": "用户一：保持兼容",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    },
+    {
+      "sourceLeafHash": "57ae9f88278fb9fdd6c4bda6979533f8f80f06c028aa1fbb7331fe2063e16521",
+      "ordinal": 1,
+      "role": "assistant",
+      "text": "助手一：保留来源",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    },
+    {
+      "sourceLeafHash": "1653bd163bd8ac80f344d2fb4932d4531ad4aa868ea664a52624f96774b93afa",
+      "ordinal": 2,
+      "role": "user",
+      "text": "用户二：继续开发",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    },
+    {
+      "sourceLeafHash": "95b0c329fad9a769e03c3299494b31dc37d1f6f45a56b3d2f0b9c311881f10ca",
+      "ordinal": 3,
+      "role": "assistant",
+      "text": "助手二：长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    }
+  ],
+  "excludedMarker": "UNREACHABLE_V247_MARKER",
+  "unreachableLeaf": "3e4b4d7a3f552852b53aa4779fefe5d49853b664352a9009f59110dcf88a5450",
+  "sidecarRequired": false,
+  "name": "cursor-store-wire-selected-root",
+  "provider": "cursor",
+  "shape": "cursor-store-merkle-v1",
+  "expected": [
+    {
+      "sourceLeafHash": "2692f17ab66ae845acba8ab4af3cb065e3a8095c794bae43b56d859bf88fb34e",
+      "ordinal": 0,
+      "role": "user",
+      "text": "用户一：保持兼容",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    },
+    {
+      "sourceLeafHash": "57ae9f88278fb9fdd6c4bda6979533f8f80f06c028aa1fbb7331fe2063e16521",
+      "ordinal": 1,
+      "role": "assistant",
+      "text": "助手一：保留来源",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    },
+    {
+      "sourceLeafHash": "1653bd163bd8ac80f344d2fb4932d4531ad4aa868ea664a52624f96774b93afa",
+      "ordinal": 2,
+      "role": "user",
+      "text": "用户二：继续开发",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    },
+    {
+      "sourceLeafHash": "95b0c329fad9a769e03c3299494b31dc37d1f6f45a56b3d2f0b9c311881f10ca",
+      "ordinal": 3,
+      "role": "assistant",
+      "text": "助手二：长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出长输出",
+      "timestamp": null,
+      "timeOrigin": "unknown"
+    }
+  ]
+}

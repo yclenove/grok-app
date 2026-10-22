@@ -305,6 +305,22 @@ describe("voice → Build tool loop (VOX-BUILD-FULL)", () => {
     expect(pending.permissionTitle).toBe("Run npm test");
   });
 
+  it("preserves both native and mirror request identity spellings", () => {
+    for (const key of ["requestGeneration", "request_generation"]) {
+      const prompt = parseVoicePermissionPrompt({ rpcId: 81, sessionId: "delegated", [key]: "original" });
+      expect(prompt?.requestGeneration).toBe("original");
+    }
+  });
+
+  it("accepts RPC zero and rejects negative, fractional or unsafe identifiers", () => {
+    expect(parseVoicePermissionPrompt({ rpcId: 0, sessionId: "chat" })?.rpcId).toBe(0);
+    expect(parseVoicePermissionPrompt({ rpc_id: 0, session_id: "chat" })?.rpcId).toBe(0);
+    expect(parseVoicePermissionPrompt({ rpcId: null, rpc_id: null, sessionId: "chat" })).toBeNull();
+    for (const rpcId of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
+      expect(parseVoicePermissionPrompt({ rpcId, sessionId: "chat" })).toBeNull();
+    }
+  });
+
   it("soft-fails permission denied and tool cancelled", () => {
     expect(
       softFailFromPermissionBlocked({

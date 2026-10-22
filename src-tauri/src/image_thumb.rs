@@ -658,10 +658,8 @@ mod tests {
 
     #[test]
     fn cache_hit_returns_source_dims_without_decoding_original() {
-        let _scope = crate::path_scope::TEST_LOCK.blocking_lock();
-        let _home = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _scope = crate::path_scope::TestScopeRestore::acquire();
+        let _home = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let dir = std::env::temp_dir().join(format!(
             "grok-img-thumb-hit-{}-{}",
             std::process::id(),
@@ -674,7 +672,6 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let app = dir.join("app");
         fs::create_dir_all(&app).unwrap();
-        let prev_home = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &app);
         let src = dir.join("big.png");
         let (src_w, src_h) = write_noisy_png_larger_than_skip(&src);
@@ -706,10 +703,6 @@ mod tests {
         assert_eq!((hit.width, hit.height), (src_w, src_h));
         assert!(hit.width > 0 && hit.height > 0);
 
-        match prev_home {
-            Some(v) => std::env::set_var("GROK_APP_HOME", v),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -727,4 +720,8 @@ mod tests {
         assert_eq!(cached_thumb_dims(&out), (32, 16));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    crate::session_migration::test_home::fixture_home_variants_contract_tests!(
+        cache_hit_returns_source_dims_without_decoding_original,
+    );
 }

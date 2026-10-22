@@ -6,11 +6,22 @@
 //! whole disk). Does not rewrite `~/.grok` or invent write powers CLI lacks.
 
 use crate::paths::workspaces_file;
-use crate::store::{self, read_json_recover, write_json};
+use crate::store;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
+
+#[path = "workspace_binding.rs"]
+mod binding;
+#[path = "workspace_store_paths.rs"]
+mod local_paths;
+#[path = "workspace_store_io.rs"]
+mod persistence;
+#[cfg(test)]
+pub(crate) use binding::resolve_session_spawn;
+pub(crate) use binding::{resolve_bound_spawn, validate_session_workspace};
+pub use local_paths::canonicalize_workspace_root;
+use local_paths::paths_equal;
 
 pub const MAX_EXTRA_ROOTS: usize = 8;
 pub const WORKSPACE_STORE_VERSION: u32 = 1;
@@ -22,6 +33,10 @@ pub fn is_bound_workspace_id(id: Option<&str>) -> bool {
     id.map(str::trim)
         .is_some_and(|s| !s.is_empty() && s != UNBOUND_WORKSPACE_ID)
 }
+
+#[cfg(test)]
+#[path = "workspace_store_tests.rs"]
+mod transaction_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -84,14 +99,8 @@ pub struct WorkspaceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceStoreFile {
-    #[serde(default = "default_store_version")]
     pub version: u32,
-    #[serde(default)]
     pub workspaces: Vec<WorkspaceRecord>,
-}
-
-fn default_store_version() -> u32 {
-    WORKSPACE_STORE_VERSION
 }
 
 impl Default for WorkspaceStoreFile {
@@ -103,76 +112,37 @@ impl Default for WorkspaceStoreFile {
     }
 }
 
-pub fn load_workspace_store() -> WorkspaceStoreFile {
-    let path = workspaces_file();
-    if !path.is_file() {
-        return WorkspaceStoreFile::default();
-    }
-    let mut file: WorkspaceStoreFile = read_json_recover(&path);
-    if file.version == 0 {
-        file.version = WORKSPACE_STORE_VERSION;
-    }
-    file
+pub fn load_workspace_store() -> Result<WorkspaceStoreFile, String> {
+    persistence::read(&workspaces_file())
 }
 
+#[cfg(test)]
 pub fn save_workspace_store(file: &WorkspaceStoreFile) -> Result<(), String> {
-    write_json(&workspaces_file(), file)
+    persistence::update(&workspaces_file(), |stored| {
+        *stored = file.clone();
+        Ok(())
+    })
 }
 
-pub fn list_workspaces() -> Vec<WorkspaceRecord> {
-    load_workspace_store().workspaces
+pub fn list_workspaces() -> Result<Vec<WorkspaceRecord>, String> {
+    Ok(load_workspace_store()?.workspaces)
 }
 
-pub fn get_workspace(id: &str) -> Option<WorkspaceRecord> {
+pub fn get_workspace(id: &str) -> Result<Option<WorkspaceRecord>, String> {
     let id = id.trim();
     if id.is_empty() {
-        return None;
+        return Ok(None);
     }
-    list_workspaces().into_iter().find(|w| w.id == id)
+    Ok(list_workspaces()?.into_iter().find(|w| w.id == id))
 }
 
-/// Canonicalize a local directory path for workspace membership.
-/// Rejects empty, relative `..` escape after canonicalize, files, and missing dirs.
-pub fn canonicalize_workspace_root(raw: &str) -> Result<(String, bool), String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("path empty".into());
-    }
-    if trimmed.contains('\0') {
-        return Err("path invalid".into());
-    }
-    let path = PathBuf::from(trimmed);
-    // Soft reject obvious `..` segments before resolve (user input hygiene).
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err("path must not contain ..".into());
-    }
-    if !path.exists() {
-        return Ok((normalize_display_path(&path), false));
-    }
-    if !path.is_dir() {
-        return Err("path is not a directory".into());
-    }
-    let canon = path
-        .canonicalize()
-        .map_err(|e| format!("canonicalize: {e}"))?;
-    if !canon.is_dir() {
-        return Err("path is not a directory".into());
-    }
-    Ok((normalize_display_path(&canon), true))
-}
-
-fn normalize_display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn paths_equal(a: &str, b: &str) -> bool {
-    a.trim()
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
+/// No migrations, trust changes, or project writes during workspace resolution.
+pub(crate) fn load_projects_snapshot() -> Result<Vec<store::Project>, String> {
+    store::load_projects_snapshot()
 }
 
 /// Build / update a workspace. Extra-root write is allowed in the record;
-/// capability / spawn profile are applied by [`apply_capability_plan`].
+/// Capability / spawn profile are resolved under the workspace transaction.
 pub fn upsert_workspace(
     id: Option<String>,
     name: String,
@@ -183,7 +153,7 @@ pub fn upsert_workspace(
     if primary_project_id.is_empty() {
         return Err("primary project required".into());
     }
-    let projects = store::load_projects();
+    let projects = load_projects_snapshot()?;
     let project = projects
         .iter()
         .find(|p| p.id == primary_project_id)
@@ -191,6 +161,7 @@ pub fn upsert_workspace(
     if project.is_ssh_remote() {
         return Err("SSH projects cannot host a multi-root workspace in MVP-0".into());
     }
+    let (project_path, project_ok) = canonicalize_workspace_root(&project.path)?;
 
     let name = {
         let n = name.trim();
@@ -214,6 +185,9 @@ pub fn upsert_workspace(
         seen.push(path.clone());
         match root.role {
             WorkspaceRootRole::Primary => {
+                if !paths_equal(&path, &project_path) {
+                    return Err("primary root must match the primary project directory".into());
+                }
                 primary_count += 1;
                 if primary_count > 1 {
                     return Err("exactly one primary root required".into());
@@ -243,7 +217,7 @@ pub fn upsert_workspace(
 
     if primary_count != 1 {
         // Default primary from project path when caller omitted it.
-        let (path, path_ok) = canonicalize_workspace_root(&project.path)?;
+        let (path, path_ok) = (project_path, project_ok);
         if seen.iter().any(|s| paths_equal(s, &path)) {
             return Err("primary root conflicts with an extra root".into());
         }
@@ -259,52 +233,54 @@ pub fn upsert_workspace(
     }
 
     let now = Utc::now();
-    let mut file = load_workspace_store();
-    let record =
-        if let Some(existing_id) = id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
-            let idx = file
-                .workspaces
-                .iter()
-                .position(|w| w.id == existing_id)
-                .ok_or_else(|| "workspace not found".to_string())?;
-            let mut record = WorkspaceRecord {
-                id: existing_id,
-                name,
-                primary_project_id,
-                roots: normalized,
-                profile_ref: None,
-                capability: WorkspaceCapability::ContextOnly,
-                capability_reason: None,
-                updated_at: now,
+    // Settings loading may write migrations and acquire the non-reentrant store
+    // mutex. Resolve it before entering the workspace transaction.
+    let mode = store::load_settings().session_data_mode;
+    persistence::update(&workspaces_file(), |file| {
+        validate_project_targets(&[(project.id.clone(), project.path.clone())])?;
+        let record =
+            if let Some(existing_id) = id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                let idx = file
+                    .workspaces
+                    .iter()
+                    .position(|w| w.id == existing_id)
+                    .ok_or_else(|| "workspace not found".to_string())?;
+                let mut record = WorkspaceRecord {
+                    id: existing_id,
+                    name,
+                    primary_project_id,
+                    roots: normalized,
+                    profile_ref: None,
+                    capability: WorkspaceCapability::ContextOnly,
+                    capability_reason: None,
+                    updated_at: now,
+                };
+                apply_capability_plan_for_mode(&mut record, &mode)?;
+                file.workspaces[idx] = record.clone();
+                record
+            } else {
+                let mut record = WorkspaceRecord {
+                    id: format!("ws_{}", Uuid::new_v4()),
+                    name,
+                    primary_project_id,
+                    roots: normalized,
+                    profile_ref: None,
+                    capability: WorkspaceCapability::ContextOnly,
+                    capability_reason: None,
+                    updated_at: now,
+                };
+                apply_capability_plan_for_mode(&mut record, &mode)?;
+                file.workspaces.insert(0, record.clone());
+                record
             };
-            apply_capability_plan(&mut record)?;
-            file.workspaces[idx] = record.clone();
-            record
-        } else {
-            let mut record = WorkspaceRecord {
-                id: format!("ws_{}", Uuid::new_v4()),
-                name,
-                primary_project_id,
-                roots: normalized,
-                profile_ref: None,
-                capability: WorkspaceCapability::ContextOnly,
-                capability_reason: None,
-                updated_at: now,
-            };
-            apply_capability_plan(&mut record)?;
-            file.workspaces.insert(0, record.clone());
-            record
-        };
-    save_workspace_store(&file)?;
-    Ok(record)
+        Ok(record)
+    })
 }
 
 /// Resolve capability from session_data_mode + sandbox plan. Downgrades extra
 /// write roots to read when the plan cannot activate write.
-pub fn apply_capability_plan(record: &mut WorkspaceRecord) -> Result<(), String> {
-    let settings = store::load_settings();
-    let plan =
-        crate::workspace_sandbox::plan_for_session_mode(&settings.session_data_mode, record)?;
+fn apply_capability_plan_for_mode(record: &mut WorkspaceRecord, mode: &str) -> Result<(), String> {
+    let plan = crate::workspace_sandbox::plan_for_session_mode(mode, record)?;
     if plan.spawn_sandbox.is_none() {
         for root in &mut record.roots {
             if root.role == WorkspaceRootRole::Extra {
@@ -320,12 +296,13 @@ pub fn apply_capability_plan(record: &mut WorkspaceRecord) -> Result<(), String>
 
 /// Recompute capability for every stored workspace (Doctor refresh).
 pub fn refresh_all_capabilities() -> Result<Vec<WorkspaceRecord>, String> {
-    let mut file = load_workspace_store();
-    for ws in &mut file.workspaces {
-        apply_capability_plan(ws)?;
-    }
-    save_workspace_store(&file)?;
-    Ok(file.workspaces)
+    let mode = store::load_settings().session_data_mode;
+    persistence::update(&workspaces_file(), |file| {
+        for ws in &mut file.workspaces {
+            apply_capability_plan_for_mode(ws, &mode)?;
+        }
+        Ok(file.workspaces.clone())
+    })
 }
 
 impl WorkspaceCapability {
@@ -342,14 +319,14 @@ impl WorkspaceCapability {
 
 /// Project's default workspace: Settings `recentWorkspaceId` when it belongs
 /// to this project, otherwise the first stored workspace for the project.
-pub fn default_workspace_for_project(project_id: &str) -> Option<WorkspaceRecord> {
+pub fn default_workspace_for_project(project_id: &str) -> Result<Option<WorkspaceRecord>, String> {
     let pid = project_id.trim();
     if pid.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let list = workspaces_for_project(pid);
+    let list = workspaces_for_project(pid)?;
     if list.is_empty() {
-        return None;
+        return Ok(None);
     }
     if let Some(rid) = store::load_settings()
         .recent_workspace_id
@@ -358,10 +335,10 @@ pub fn default_workspace_for_project(project_id: &str) -> Option<WorkspaceRecord
         .filter(|s| !s.is_empty())
     {
         if let Some(ws) = list.iter().find(|w| w.id == rid) {
-            return Some(ws.clone());
+            return Ok(Some(ws.clone()));
         }
     }
-    list.into_iter().next()
+    Ok(list.into_iter().next())
 }
 
 /// New chats in a project inherit that project's workspace so extra-root
@@ -370,7 +347,7 @@ pub fn default_workspace_for_project(project_id: &str) -> Option<WorkspaceRecord
 /// `workspace_id: None` / empty = never bound → fill from the project.
 /// `workspace_id: "-"` = explicit detach → leave alone.
 pub fn bind_default_workspace_if_unbound(session_id: &str) -> Result<store::SessionMeta, String> {
-    let meta = store::load_sessions_index()
+    let meta = store::load_sessions_snapshot()?
         .into_iter()
         .find(|s| s.id == session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
@@ -387,43 +364,26 @@ pub fn bind_default_workspace_if_unbound(session_id: &str) -> Result<store::Sess
     else {
         return Ok(meta);
     };
-    let Some(ws) = default_workspace_for_project(pid) else {
+    let Some(ws) = default_workspace_for_project(pid)? else {
         return Ok(meta);
     };
-    for root in &ws.roots {
-        if root.role == WorkspaceRootRole::Extra {
-            crate::path_scope::grant_path(std::path::Path::new(&root.path));
-        }
-    }
-    store::set_session_workspace(
+    validate_primary_location(&ws)?;
+    let extra_roots: Vec<String> = ws
+        .roots
+        .iter()
+        .filter(|root| root.role == WorkspaceRootRole::Extra)
+        .map(|root| root.path.clone())
+        .collect();
+    let meta = store::set_session_workspace(
         session_id,
         Some(ws.id),
         Some(root_snapshot(&ws.roots)),
         Some(ws.capability.as_token().to_string()),
-    )
-}
-
-/// Spawn sandbox override for a bound workspace, if any.
-pub fn spawn_sandbox_for_workspace(workspace_id: &str) -> Option<String> {
-    let ws = get_workspace(workspace_id)?;
-    let settings = store::load_settings();
-    crate::workspace_sandbox::plan_for_session_mode(&settings.session_data_mode, &ws)
-        .ok()
-        .and_then(|p| p.spawn_sandbox)
-}
-
-/// Effective `--sandbox` for a session: custom multi-root profile wins over
-/// Settings / project built-ins so extra write roots survive restart (#1209).
-pub fn resolve_spawn_sandbox(
-    global: &str,
-    project_override: Option<&str>,
-    workspace_id: Option<&str>,
-) -> String {
-    let fallback = store::resolve_sandbox_profile(global, project_override);
-    workspace_id
-        .filter(|id| is_bound_workspace_id(Some(id)))
-        .and_then(spawn_sandbox_for_workspace)
-        .unwrap_or(fallback)
+    )?;
+    for root in extra_roots {
+        crate::path_scope::grant_path(std::path::Path::new(&root));
+    }
+    Ok(meta)
 }
 
 pub fn delete_workspace(id: &str) -> Result<(), String> {
@@ -431,21 +391,97 @@ pub fn delete_workspace(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("workspace id empty".into());
     }
-    let mut file = load_workspace_store();
-    let before = file.workspaces.len();
-    file.workspaces.retain(|w| w.id != id);
-    if file.workspaces.len() == before {
-        return Err("workspace not found".into());
-    }
-    save_workspace_store(&file)
+    persistence::update(&workspaces_file(), |file| {
+        if store::load_sessions_snapshot()?
+            .iter()
+            .any(|session| session.workspace_id.as_deref() == Some(id))
+        {
+            return Err("workspace still has sessions; detach it before deleting".into());
+        }
+        let before = file.workspaces.len();
+        file.workspaces.retain(|w| w.id != id);
+        if file.workspaces.len() == before {
+            return Err("workspace not found".into());
+        }
+        Ok(())
+    })
 }
 
-pub fn workspaces_for_project(project_id: &str) -> Vec<WorkspaceRecord> {
+pub fn workspaces_for_project(project_id: &str) -> Result<Vec<WorkspaceRecord>, String> {
     let pid = project_id.trim();
-    list_workspaces()
+    Ok(list_workspaces()?
         .into_iter()
         .filter(|w| w.primary_project_id == pid)
-        .collect()
+        .collect())
+}
+
+/// Immutable import copy: repeated requests reuse it, user edits are never
+/// overwritten. Extra roots carry context only; creation grants no Host paths.
+pub(crate) fn insert_imported(
+    record: WorkspaceRecord,
+    project_targets: &[(String, String)],
+) -> Result<WorkspaceRecord, String> {
+    persistence::update(&workspaces_file(), |file| {
+        validate_project_targets(project_targets)?;
+        if let Some(existing) = file.workspaces.iter().find(|row| row.id == record.id) {
+            if existing.name != record.name
+                || existing.primary_project_id != record.primary_project_id
+                || existing.roots != record.roots
+                || existing.capability != record.capability
+                || existing.profile_ref != record.profile_ref
+            {
+                return Err("MAPPING_CONFLICT: native workspace was edited; use its existing project workspace controls".into());
+            }
+            return Ok(existing.clone());
+        }
+        file.workspaces.insert(0, record.clone());
+        Ok(record)
+    })
+}
+
+/// Called while the projects lock is held. The saved target is a reviewed
+/// location, so even a valid relocation must require a fresh user review.
+fn validate_project_targets(targets: &[(String, String)]) -> Result<(), String> {
+    let projects = load_projects_snapshot()?;
+    for (id, path) in targets {
+        if !projects.iter().any(|project| {
+            &project.id == id
+                && &project.path == path
+                && !project.is_ssh_remote()
+                && !project.is_legacy_general()
+        }) {
+            return Err(
+                "MAPPING_CONFLICT: project target changed; review the workspace again".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A saved workspace cannot silently follow a moved/deleted project on bind or
+/// spawn. Source metadata remains available so the user can explicitly repair it.
+pub(crate) fn validate_primary_location(record: &WorkspaceRecord) -> Result<(), String> {
+    let projects = load_projects_snapshot()?;
+    let project = projects
+        .iter()
+        .find(|project| {
+            project.id == record.primary_project_id
+                && !project.is_ssh_remote()
+                && !project.is_legacy_general()
+        })
+        .ok_or("workspace primary project no longer exists")?;
+    let (path, available) = canonicalize_workspace_root(&project.path)?;
+    let primary: Vec<_> = record
+        .roots
+        .iter()
+        .filter(|root| root.role == WorkspaceRootRole::Primary)
+        .collect();
+    if !available || primary.len() != 1 || !paths_equal(&primary[0].path, &path) {
+        return Err(
+            "workspace primary folder changed or is unavailable; review the workspace again".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Snapshot string for SessionMeta (stable, path-order sensitive).
@@ -474,6 +510,7 @@ pub fn root_snapshot(roots: &[WorkspaceRoot]) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -488,23 +525,36 @@ mod tests {
 
     #[test]
     fn resolve_spawn_sandbox_falls_back_without_workspace() {
-        assert_eq!(resolve_spawn_sandbox("workspace", None, None), "workspace");
+        let _home = crate::session_migration::test_home::IsolatedAppHome::acquire(
+            "workspace-unbound-spawn",
+        );
+        let session = store::create_session(None, None, false).unwrap();
         assert_eq!(
-            resolve_spawn_sandbox("workspace", Some("strict"), None),
+            resolve_session_spawn("workspace", None, "shared", &session)
+                .unwrap()
+                .sandbox,
+            "workspace"
+        );
+        assert_eq!(
+            resolve_session_spawn("workspace", Some("strict"), "shared", &session)
+                .unwrap()
+                .sandbox,
             "strict"
         );
     }
 
     #[test]
     fn canonicalize_rejects_parent_segments() {
-        let err = canonicalize_workspace_root("/tmp/foo/../bar").unwrap_err();
+        let path = std::env::temp_dir().join("foo").join("..").join("bar");
+        let err = canonicalize_workspace_root(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains(".."), "{err}");
     }
 
     #[test]
     fn canonicalize_marks_missing_path_ok_false() {
-        let (path, ok) =
-            canonicalize_workspace_root("/tmp/grok-app-ws-missing-dir-should-not-exist").unwrap();
+        let missing =
+            std::env::temp_dir().join(format!("grok-app-ws-missing-dir-{}", Uuid::new_v4()));
+        let (path, ok) = canonicalize_workspace_root(missing.to_str().unwrap()).unwrap();
         assert!(!ok);
         assert!(path.contains("grok-app-ws-missing"));
     }
@@ -602,7 +652,9 @@ mod tests {
         let bound = bind_default_workspace_if_unbound(&meta.id).expect("bind");
         assert_eq!(bound.workspace_id.as_deref(), Some(ws.id.as_str()));
 
-        let sandbox = resolve_spawn_sandbox("workspace", None, bound.workspace_id.as_deref());
+        let sandbox = resolve_session_spawn("workspace", None, "independent", &bound)
+            .unwrap()
+            .sandbox;
         assert!(
             sandbox.starts_with(crate::workspace_sandbox::APP_PROFILE_PREFIX),
             "expected app-managed profile, got {sandbox}"
@@ -625,7 +677,9 @@ mod tests {
             "explicit detach must not re-inherit the project workspace"
         );
         assert_eq!(
-            resolve_spawn_sandbox("workspace", None, detached.workspace_id.as_deref()),
+            resolve_session_spawn("workspace", None, "independent", &detached)
+                .unwrap()
+                .sandbox,
             "workspace"
         );
 
@@ -639,9 +693,5 @@ mod tests {
         assert!(!is_bound_workspace_id(Some("")));
         assert!(!is_bound_workspace_id(Some(UNBOUND_WORKSPACE_ID)));
         assert!(is_bound_workspace_id(Some("ws_abc")));
-        assert_eq!(
-            resolve_spawn_sandbox("workspace", None, Some(UNBOUND_WORKSPACE_ID)),
-            "workspace"
-        );
     }
 }

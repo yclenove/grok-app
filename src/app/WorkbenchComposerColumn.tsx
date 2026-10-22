@@ -2,8 +2,10 @@
  * Composer column: welcome mark, ask-user / permission bars, context chips, portal wrap.
  * Draft/queue chrome lives in WorkbenchComposerShell.
  */
-import type { Dispatch, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject, SetStateAction } from "react";
+import { type Dispatch, type MouseEvent as ReactMouseEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { createT } from "@/i18n";
+import { WorkspaceRuntimeRecovery } from "@/components/WorkspaceRuntimeRecovery";
+import { PermissionReplyError } from "@/components/PermissionReplyError";
 import type { AccountStatus } from "@/lib/api/account";
 import type { Project, SessionRow } from "@/lib/app/sidebarModels";
 import type { ComposerAtFileEntry } from "@/components/ComposerAtPanel";
@@ -14,7 +16,6 @@ import type { PermissionPolicyId, ModelOption, EffortOption } from "@/lib/grokCa
 import type { SlashItem, SlashKindFilter, SlashKindCounts } from "@/lib/slashCatalog";
 import type { FloatingPos } from "@/lib/floatingMenu";
 import type { LiveTokenQuery } from "@/hooks/useComposerController";
-import type { ComposerQueryRange } from "@/lib/composerQuery";
 import type { VoiceGate } from "@/hooks/useVoiceDictation";
 import type { VoiceFsmState } from "@/lib/voiceDictation";
 import type { SideWorkbenchState } from "@/lib/sideWorkbench";
@@ -39,6 +40,7 @@ import * as api from "@/lib/api";
 import { ComposerProjectMenu } from "@/components/ComposerProjectMenu";
 import { ComposerRemoteMenu } from "@/components/ComposerRemoteMenu";
 import { ComposerWorktreeMenu } from "@/components/ComposerWorktreeMenu";
+import { useComposerPrMonitor } from "@/hooks/useComposerPrMonitor";
 import { AskUserBar } from "@/components/AskUserBar";
 import { PermissionCountdown } from "@/components/PermissionCountdown";
 import { SuperGrokMark } from "@/components/SuperGrokMark";
@@ -51,17 +53,13 @@ import {
   formatPermissionSummary,
   mapPermissionButtons,
 } from "@/lib/permissionOptions";
-import {
-  canClaimAskUserSettle,
-  settleAskUserDecision,
-} from "@/lib/askUser/askUserSettle";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useAskUserResolution, type AskUserResolutionContext } from "@/hooks/useAskUserResolution";
+import { type CSSProperties, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { ComposerModelMenu } from "@/components/ComposerModelMenu";
 import { WorkbenchComposerShell } from "@/app/WorkbenchComposerShell";
 import { MultiRootWorkspaceModal } from "@/components/MultiRootWorkspaceModal";
 import { useMultiRootWorkspace } from "@/hooks/useMultiRootWorkspace";
-import { isBoundWorkspaceId } from "@/lib/multiRootWorkspace";
 
 export type WorkbenchComposerColumnProps = {
   account: AccountStatus | null;
@@ -117,6 +115,7 @@ export type WorkbenchComposerColumnProps = {
   confirmRemoveWorktree: (wt: GitWorktreeEntry) => void;
   connecting: boolean;
   contextUsageDisplay: ContextUsageDisplay;
+  refreshContextInfo: () => void;
   currentModelWindow: number | null;
   customRouteActive: boolean;
   cycleAttachedChatScope: (id: string) => void;
@@ -137,7 +136,7 @@ export type WorkbenchComposerColumnProps = {
   goalMode: boolean;
   guideQueuedMessage: (item: QueuedSend) => Promise<void>;
   guidingQueueItemId: string | null;
-  handleContextWindow: (tokens: number) => Promise<void>;
+  handleContextWindow: (tokens: number) => Promise<boolean>;
   handleEffortPick: (nextEffort: string) => void;
   handleModelPick: (pick: ComposerModelPick) => Promise<void>;
   layout: LayoutPrefs;
@@ -153,7 +152,7 @@ export type WorkbenchComposerColumnProps = {
   onComposerPasteFiles: (files: File[]) => void;
   onComposerPasteMediaFallback: (opts?: { expectMedia?: boolean | undefined; } | undefined) => void;
   onSlashQueryChange: (q: { start: number; query: string; end: number; } | null) => void;
-  onAtQueryChange: (q: ComposerQueryRange | null) => void;
+  onAtQueryChange: (q: { from: number; to: number; query: string } | null) => void;
   openAsidePane: () => void;
   openQueueEdit: (item: QueuedSend) => void;
   openSession: (s: SessionRow, project?: Project | null | undefined) => Promise<void>;
@@ -163,10 +162,9 @@ export type WorkbenchComposerColumnProps = {
   openWorktreeGc: () => void;
   askUser: AskUserPayload | null;
   askUserTimeoutSec: number;
-  clearPendingGates: (sessionId?: string | null | undefined) => void;
+  askUserResolution: AskUserResolutionContext;
   perm: PermissionPayload | null;
   permBarRef: RefObject<HTMLDivElement | null>;
-  setAskUser: Dispatch<SetStateAction<AskUserPayload | null>>;
   permCountdownStartedAt: number;
   permissionTimeoutSec: number;
   phoneLayout: boolean;
@@ -240,7 +238,7 @@ export type WorkbenchComposerColumnProps = {
   slashCatalogCount: number;
   slashKindCounts: SlashKindCounts;
   slashKindFilter: SlashKindFilter;
-  stop: () => Promise<void>;
+  stop: (sessionId?: string | null) => Promise<boolean>;
   switchToWorktree: (wt: GitWorktreeEntry) => Promise<void>;
   switchToBranch: (branch: GitBranchEntry) => Promise<void>;
   toggleVoice: () => void;
@@ -284,8 +282,6 @@ type ComposerAttachLabels = {
   previewMissing: string;
   previewPending: string;
 };
-
-
 export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
   const {
     account,
@@ -318,12 +314,11 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
     openWorktreeGc,
     askUser,
     askUserTimeoutSec,
-    clearPendingGates,
+    askUserResolution,
     perm,
     permBarRef,
     permCountdownStartedAt,
     permissionTimeoutSec,
-    setAskUser,
     phoneLayout,
     projects,
     refreshCliWorktrees,
@@ -362,11 +357,18 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
     handleEffortPick,
   } = p;
   const multiRoot = useMultiRootWorkspace();
+  const openWorkspaceManager = activeProject && !activeProject.sshAlias ? () => {
+    void multiRoot.openFor({
+      projectId: activeProject.id, projectName: projectDisplayName(activeProject, tr),
+      projectPath: activeProject.path, sessionId: session.sessionId, workspaceId: null,
+    });
+  } : undefined;
   const [permBusy, setPermBusy] = useState(false);
   const [permError, setPermError] = useState<string | null>(null);
-  const askUserSettlingRpcRef = useRef<number | null>(null);
-  const askUserLiveRef = useRef(askUser);
-  askUserLiveRef.current = askUser;
+  const resolveAskUser = useAskUserResolution({ ...askUserResolution, showToast, tr });
+
+  const { prMonitor, prRows, openPrHubForNumber } =
+    useComposerPrMonitor({ activeProject, session, locale, showToast, tr });
   const previewText = displayPermissionPreview(perm?.preview);
   useEffect(() => {
     setPermBusy(false);
@@ -453,62 +455,8 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
                   pendingChip: tr("askUser.pendingChip"),
                   autoCancelCountdown: tr("askUser.autoCancelCountdown"),
                 }}
-                onSubmit={async (answers) => {
-                  if (!askUser) return;
-                  if (
-                    !canClaimAskUserSettle(
-                      askUserSettlingRpcRef.current,
-                      askUser.rpcId,
-                    )
-                  ) {
-                    return;
-                  }
-                  const payload = askUser;
-                  askUserSettlingRpcRef.current = payload.rpcId;
-                  setAskUser(null);
-                  const settled = await settleAskUserDecision({
-                    payload,
-                    decision: "accepted",
-                    answers,
-                    viewingSessionId: () => session.sessionId,
-                    currentRpcId: () => askUserLiveRef.current?.rpcId ?? null,
-                    resolve: (args) => api.sessionResolveAskUser(args),
-                  });
-                  if (settled.kind === "restore") {
-                    setAskUser(payload);
-                    showToast(String(settled.error), 4500);
-                  } else {
-                    clearPendingGates(payload.sessionId);
-                  }
-                  if (askUserSettlingRpcRef.current === payload.rpcId) {
-                    askUserSettlingRpcRef.current = null;
-                  }
-                }}
-                onCancel={async () => {
-                  if (!askUser) return;
-                  if (
-                    !canClaimAskUserSettle(
-                      askUserSettlingRpcRef.current,
-                      askUser.rpcId,
-                    )
-                  ) {
-                    return;
-                  }
-                  const payload = askUser;
-                  askUserSettlingRpcRef.current = payload.rpcId;
-                  setAskUser(null);
-                  await settleAskUserDecision({
-                    payload,
-                    decision: "cancelled",
-                    viewingSessionId: () => session.sessionId,
-                    currentRpcId: () => askUserLiveRef.current?.rpcId ?? null,
-                    resolve: (args) => api.sessionResolveAskUser(args),
-                  });
-                  clearPendingGates(payload.sessionId);
-                  if (askUserSettlingRpcRef.current === payload.rpcId) {
-                    askUserSettlingRpcRef.current = null;
-                  }
-                }}
+                onSubmit={(answers) => resolveAskUser(askUser, "accepted", answers)}
+                onCancel={() => resolveAskUser(askUser, "cancelled")}
               />
             ) : null}
             {perm ? (
@@ -548,11 +496,7 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
                 {previewText ? (
                   <pre className="perm-bar__preview">{previewText}</pre>
                 ) : null}
-                {permError ? (
-                  <p className="perm-bar__error" role="alert">
-                    {permError}
-                  </p>
-                ) : null}
+                <PermissionReplyError error={permError} responseError={perm.responseError} tr={tr} />
                 <div className="perm-bar__actions" role="group">
                   {mapPermissionButtons(
                     perm.options,
@@ -677,24 +621,7 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
                   onAdd={() => {
                     void addProjectFromPicker({ bindSession: true });
                   }}
-                  onManageWorkspace={
-                    activeProject && !activeProject.sshAlias
-                      ? () => {
-                          const rawWid = (
-                            session as { workspaceId?: string | null }
-                          ).workspaceId;
-                          void multiRoot.openFor({
-                            projectId: activeProject.id,
-                            projectName: projectDisplayName(activeProject, tr),
-                            projectPath: activeProject.path,
-                            sessionId: session.sessionId,
-                            workspaceId: isBoundWorkspaceId(rawWid)
-                              ? (rawWid ?? null)
-                              : null,
-                          });
-                        }
-                      : undefined
-                  }
+                  onManageWorkspace={openWorkspaceManager}
                 />
                 <ComposerRemoteMenu
                   t={(k, vars) => tr(k as Parameters<TFn>[0], vars)}
@@ -790,7 +717,31 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
                       cliWorktreeMissingPath: tr(
                         "composer.cliWorktreeMissingPath",
                       ),
+                      pr: tr("prMonitor.menuHead"),
+                      prEmpty: tr("prMonitor.empty"),
+                      prWatch: tr("prMonitor.watch"),
+                      prUnwatch: tr("prMonitor.unwatch"),
+                      prWatchTip: tr("prMonitor.watchTip"),
+                      prUnwatchTip: tr("prMonitor.unwatchTip"),
+                      prOpenHub: tr("prMonitor.openHub"),
+                      prChipCount: tr("prMonitor.chipCount"),
+                      prChipCountTip: tr("prMonitor.chipCountTip"),
+                      prPendingWakes: tr("prMonitor.pendingWakes"),
+                      prWatchingLabel: tr("prMonitor.watching"),
+                      prLastUpdate: tr("prMonitor.lastUpdate"),
+                      prUnavailable: tr("prMonitor.unavailable"),
                     }}
+                    prRows={prRows}
+                    prLoading={prMonitor.loading}
+                    prAvailable={prMonitor.available}
+                    prCanWatch={prMonitor.canWatch}
+                    prWatchingCount={prMonitor.watching}
+                    prPendingWakes={prMonitor.pendingCount}
+                    prLastChange={prMonitor.lastChange}
+                    prWatchError={prMonitor.watchError}
+                    onTogglePrWatch={prMonitor.toggleWatch}
+                    onPrListVisible={prMonitor.refresh}
+                    onOpenPrHub={openPrHubForNumber}
                     onSwitch={(wt) => {
                       void switchToWorktree(wt);
                     }}
@@ -990,12 +941,15 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
             </div>
             ) : null}
             <WorkbenchComposerShell {...p} />
+            <WorkspaceRuntimeRecovery locale={locale} sessionId={session.sessionId} onManage={openWorkspaceManager} />
             <MultiRootWorkspaceModal
               open={multiRoot.open}
               locale={locale}
               busy={multiRoot.busy}
               error={multiRoot.error}
               draft={multiRoot.draft}
+              workspaces={multiRoot.workspaces}
+              onSelectWorkspace={multiRoot.selectWorkspace}
               projectName={
                 multiRoot.target?.projectName ??
                 (activeProject
@@ -1021,7 +975,7 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
               onClearBinding={
                 multiRoot.target?.sessionId
                   ? () => {
-                      void multiRoot.clearBinding().then(() => multiRoot.close());
+                      void multiRoot.clearBinding().then((cleared) => { if (cleared) multiRoot.close(); });
                     }
                   : undefined
               }

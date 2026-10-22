@@ -168,7 +168,7 @@ export function PlanReviewPanel({
     setEditing(false);
     setDraft(originalBody);
     setDiscardOpen(false);
-  }, [defaultExpanded, plan.rpcId, plan.title, originalBody]);
+  }, [defaultExpanded, plan.rpcId, plan.requestGeneration, plan.toolCallId, plan.title, originalBody]);
 
   // 详情 / planFocusKey: force expand so steps+detail are visible.
   useEffect(() => {
@@ -218,7 +218,7 @@ export function PlanReviewPanel({
   };
 
   const submitDraftChanges = () => {
-    if (!onRequestChanges) return;
+    if (!onRequestChanges || plan.busy) return;
     if (!dirty) {
       onRequestChanges();
       return;
@@ -229,10 +229,9 @@ export function PlanReviewPanel({
       draft,
     });
     onRequestChanges(note);
-    leaveEditClean();
   };
 
-  const approveDisabled = dirty;
+  const approveDisabled = dirty || !!plan.busy;
   const draftErrorLabel =
     editing && dirty && !draftValidation.ok
       ? draftValidation.reason === "too_long"
@@ -248,6 +247,7 @@ export function PlanReviewPanel({
         (editing ? " plan-review--editing" : "")
       }
       data-testid="plan-review-panel"
+      aria-busy={plan.busy}
       data-plan-card
       data-plan-editing={editing ? "true" : undefined}
       data-plan-dirty={dirty ? "true" : undefined}
@@ -321,6 +321,7 @@ export function PlanReviewPanel({
               type="button"
               className="btn btn--ghost btn--sm"
               onClick={enterEdit}
+              disabled={plan.busy}
               data-testid="plan-review-edit"
             >
               {labels.edit}
@@ -331,6 +332,7 @@ export function PlanReviewPanel({
               type="button"
               className="btn btn--ghost btn--sm"
               onClick={requestCancelEdit}
+              disabled={plan.busy}
               data-testid="plan-review-cancel-edit"
             >
               {labels.cancelEdit}
@@ -342,7 +344,7 @@ export function PlanReviewPanel({
               className="btn btn--solid btn--sm"
               onClick={onApprove}
               disabled={approveDisabled}
-              title={approveDisabled ? labels.approveDirtyHint : undefined}
+              title={dirty ? labels.approveDirtyHint : undefined}
               data-testid="plan-review-approve"
             >
               {labels.approve}
@@ -353,7 +355,7 @@ export function PlanReviewPanel({
               type="button"
               className="btn btn--solid btn--sm"
               onClick={submitDraftChanges}
-              disabled={!draftValidation.ok}
+              disabled={!draftValidation.ok || plan.busy}
               data-testid="plan-review-request-with-draft"
             >
               {labels.requestWithDraft}
@@ -364,6 +366,7 @@ export function PlanReviewPanel({
               type="button"
               className="btn btn--ghost btn--sm"
               onClick={() => onRequestChanges()}
+              disabled={plan.busy}
               data-testid="plan-review-request-changes"
             >
               {labels.changes}
@@ -374,6 +377,7 @@ export function PlanReviewPanel({
               type="button"
               className="btn btn--ghost btn--sm"
               onClick={onDismiss}
+              disabled={plan.busy}
             >
               {labels.dismiss}
             </button>
@@ -433,6 +437,7 @@ export function PlanReviewPanel({
               <div className="plan-review__editor">
                 <textarea
                   className="plan-review__textarea"
+                  disabled={plan.busy}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   placeholder={labels.draftPlaceholder}

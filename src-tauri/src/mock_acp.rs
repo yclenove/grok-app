@@ -45,6 +45,17 @@ impl MockStreamHandle {
     }
 }
 
+fn next_chunk_deadline(
+    next: &mut tokio::time::Instant,
+    delay: Duration,
+) -> Option<tokio::time::Instant> {
+    if delay.is_zero() {
+        return None;
+    }
+    *next += delay;
+    Some(*next)
+}
+
 /// Split a reply into fake token-ish chunks for incremental UI rendering.
 pub fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
     let max_chars = max_chars.max(1);
@@ -88,6 +99,12 @@ pub fn spawn_fake_stream(
     let join = tokio::spawn(async move {
         let full = mock_reply_for(&prompt);
         let pieces = chunk_text(&full, 6);
+        // Pace against absolute deadlines. Sleeping for `chunk_delay` only
+        // after the callback makes Windows timer rounding plus journal/IPC
+        // work accumulate once per chunk; long deterministic streams then
+        // drift by minutes. Real providers can deliver bursts, so catching up
+        // after a slow callback is both more faithful and bounded.
+        let mut next_chunk_at = tokio::time::Instant::now();
         for (i, piece) in pieces.iter().enumerate() {
             if stop_flag.load(Ordering::SeqCst) {
                 on_chunk(StreamChunk {
@@ -106,7 +123,9 @@ pub fn spawn_fake_stream(
                 done: is_last,
             });
             if !is_last {
-                tokio::time::sleep(chunk_delay).await;
+                if let Some(deadline) = next_chunk_deadline(&mut next_chunk_at, chunk_delay) {
+                    tokio::time::sleep_until(deadline).await;
+                }
             }
         }
     });
@@ -140,6 +159,24 @@ mod tests {
     fn chunk_text_splits_incrementally() {
         let parts = chunk_text("abcdefghij", 3);
         assert_eq!(parts, vec!["abc", "def", "ghi", "j"]);
+    }
+
+    #[test]
+    fn chunk_deadlines_advance_from_the_original_cadence() {
+        let start = tokio::time::Instant::now();
+        let mut next = start;
+        assert_eq!(
+            next_chunk_deadline(&mut next, Duration::from_millis(25)),
+            Some(start + Duration::from_millis(25))
+        );
+        // A slow callback does not move the cadence origin. The next deadline
+        // remains start+50ms rather than callback-finished+25ms.
+        assert_eq!(
+            next_chunk_deadline(&mut next, Duration::from_millis(25)),
+            Some(start + Duration::from_millis(50))
+        );
+        assert_eq!(next_chunk_deadline(&mut next, Duration::ZERO), None);
+        assert_eq!(next, start + Duration::from_millis(50));
     }
 
     #[test]

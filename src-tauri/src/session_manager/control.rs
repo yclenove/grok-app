@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-use crate::acp_client::{AcpClient, AskUserOutcome, PermissionOutcome};
+use crate::acp_client::AcpClient;
 use crate::permission::PermissionPolicy;
 use crate::process_limits::{normalize_idle_minutes, normalize_max_concurrent};
 use crate::session_fsm::SessionState;
@@ -49,10 +49,8 @@ impl SessionManager {
             .await;
     }
 
-    /// Clear one session's CLI resume id and drop only that session's process.
-    ///
-    /// `app` emits when the live slot actually respawns. Unit tests pass
-    /// `None` (no `AppHandle`); the detach still runs, it just skips the event.
+    /// Clear one session's resume identity and retire only that session's idle
+    /// process. Tests pass `None`; production keeps the same state/event path.
     async fn invalidate_spawn_flags_inner(
         &self,
         app: Option<&AppHandle>,
@@ -67,228 +65,18 @@ impl SessionManager {
             if let Some(s) = guard.as_mut() {
                 if s.app_session_id == session_id {
                     s.meta.agent_session_id = None;
+                    s.meta.agent_execution = None;
                     s.needs_history_bootstrap = true;
                 }
             }
         }
         if let Some(bg) = self.background.lock().get_mut(session_id) {
             bg.meta.agent_session_id = None;
+            bg.meta.agent_execution = None;
             bg.needs_history_bootstrap = true;
         }
-        if self.is_live_session(session_id) {
-            // soft_respawn already defers when the live turn is busy.
-            if self.detach_live_for_soft_respawn(reason).await {
-                if let Some(app) = app {
-                    let _ = app.emit(
-                        "session://agent_soft_respawn",
-                        serde_json::json!({ "reason": reason }),
-                    );
-                    Self::emit_state(app, &self.snapshot());
-                }
-            }
-            return;
-        }
-        // Background mid-turn: queue like effort/policy changes. Dropping now
-        // kills an in-flight answer and removes the map entry before
-        // ProcessExited can finish journal / cancel bookkeeping (#1177 follow-up).
-        let bg_busy = self
-            .with_session_mut(session_id, |s| Self::live_session_is_busy(s))
-            .unwrap_or(false);
-        if bg_busy {
-            self.pending_soft_respawn
-                .lock()
-                .insert(session_id.to_string(), reason.to_string());
-            tracing::info!(
-                session = %session_id,
-                reason = %reason,
-                "spawn-flag invalidate deferred: background session mid-turn"
-            );
-            return;
-        }
-        self.drop_idle_agent_for_session(session_id, reason).await;
-    }
-
-    /// Drop background / parked ACP so the next connect cold-spawns.
-    pub async fn drop_idle_agent_for_session(&self, session_id: &str, reason: &str) {
-        let background = self.background.lock().remove(session_id);
-        if let Some(mut s) = background {
-            let process_id = s.process_id.clone();
-            if let Some(acp) = s.acp.take() {
-                if self.has_other_process_tenant(&process_id, session_id) {
-                    tracing::info!(
-                        session = %session_id,
-                        process = %process_id,
-                        reason = %reason,
-                        "invalidate spawn flags detached shared background ACP"
-                    );
-                } else {
-                    Self::kill_acp_bounded(&acp).await;
-                    tracing::info!(
-                        session = %session_id,
-                        reason = %reason,
-                        "dropped background agent after spawn-flag invalidate"
-                    );
-                }
-            }
-            return;
-        }
-        let parked = self.parked.lock().remove(session_id);
-        if let Some(p) = parked {
-            if !self.has_other_process_tenant(&p.process_id, session_id) {
-                Self::kill_acp_bounded(&p.acp).await;
-                tracing::info!(
-                    session = %session_id,
-                    reason = %reason,
-                    "dropped parked agent after spawn-flag invalidate"
-                );
-            }
-        }
-    }
-
-    /// Soft-respawn and tell the UI why the agent process was reloaded.
-    pub async fn soft_respawn_with_reason(&self, app: &AppHandle, reason: &str) {
-        if self.detach_live_for_soft_respawn(reason).await {
-            let _ = app.emit(
-                "session://agent_soft_respawn",
-                serde_json::json!({ "reason": reason }),
-            );
-            Self::emit_state(app, &self.snapshot());
-        }
-    }
-
-    /// Drop the live ACP so the next connect cold-spawns.
-    ///
-    /// Returns true when a process was detached and the UI should reload.
-    /// Mid-turn and already-empty slots return false (no emit).
-    async fn detach_live_for_soft_respawn(&self, reason: &str) -> bool {
-        let (acp, sid, process_id, deferred) = {
-            let mut guard = self.inner.lock();
-            if let Some(s) = guard.as_mut() {
-                if s.acp.is_none() {
-                    (None, Some(s.app_session_id.clone()), String::new(), false)
-                } else if Self::live_session_is_busy(s) {
-                    tracing::warn!(
-                        "soft_respawn deferred: live session mid-turn sid={} state={:?} reason={}",
-                        s.app_session_id,
-                        s.fsm.state(),
-                        reason
-                    );
-                    (None, Some(s.app_session_id.clone()), String::new(), true)
-                } else {
-                    let sid = s.app_session_id.clone();
-                    let process_id = s.process_id.clone();
-                    let acp = s.acp.take();
-                    // Prefer resume on next connect; bootstrap only if load fails.
-                    s.needs_history_bootstrap = false;
-                    s.fsm.soft_disconnect();
-                    // New process gets a new id on next connect.
-                    s.process_id = String::new();
-                    (acp, Some(sid), process_id, false)
-                }
-            } else {
-                (None, None, String::new(), false)
-            }
-        };
-        if let Some(sid) = sid.as_deref() {
-            if deferred {
-                self.pending_soft_respawn
-                    .lock()
-                    .insert(sid.to_string(), reason.to_string());
-                return false;
-            }
-            if acp.is_none() {
-                self.pending_soft_respawn.lock().remove(sid);
-                return false;
-            }
-        }
-        if let Some(acp) = acp {
-            let kill_allowed = sid
-                .as_deref()
-                .is_none_or(|session_id| !self.has_other_process_tenant(&process_id, session_id));
-            if kill_allowed {
-                Self::kill_acp_bounded(&acp).await;
-            } else {
-                tracing::info!(
-                    reason = %reason,
-                    "soft-respawn detached shared ACP without killing co-tenant"
-                );
-            }
-            if let Some(sid) = sid {
-                self.pending_soft_respawn.lock().remove(&sid);
-            }
-            return true;
-        }
-        false
-    }
-
-    /// If a mid-turn policy/effort/proxy change queued a respawn, run it
-    /// now that the session is idle (or drop a parked process so next
-    /// connect cold-spawns with the new flags).
-    pub async fn flush_pending_soft_respawn(&self, app: &AppHandle, session_id: &str) {
-        let reason = { self.pending_soft_respawn.lock().remove(session_id) };
-        let Some(reason) = reason else {
-            return;
-        };
-        let busy = self
-            .with_session_mut(session_id, |s| Self::live_session_is_busy(s))
-            .unwrap_or(false);
-        if busy {
-            self.pending_soft_respawn
-                .lock()
-                .insert(session_id.to_string(), reason);
-            return;
-        }
-        if self.is_live_session(session_id) {
-            self.soft_respawn_with_reason(app, &reason).await;
-            return;
-        }
-        // A background session can be idle after its turn completed. Pending
-        // respawn flags still belong to that session; leaving its old ACP in
-        // `background` lets connect promote it and silently ignore the new
-        // process-level settings.
-        let background = self.background.lock().remove(session_id);
-        if let Some(mut s) = background {
-            let process_id = s.process_id.clone();
-            if let Some(acp) = s.acp.take() {
-                if self.has_other_process_tenant(&process_id, session_id) {
-                    tracing::info!(
-                        session = %session_id,
-                        process = %process_id,
-                        reason = %reason,
-                        "pending soft-respawn detached shared background ACP without killing co-tenant"
-                    );
-                } else {
-                    Self::kill_acp_bounded(&acp).await;
-                    tracing::info!(
-                        session = %session_id,
-                        reason = %reason,
-                        "dropped background agent for pending soft-respawn"
-                    );
-                }
-            }
-            return;
-        }
-        // Parked: drop the warm entry so the next connect respawns.
-        // Take the entry first — parking_lot guards are !Send across await.
-        // Do not kill a process that still hosts a mid-turn cohabitant.
-        let parked = self.parked.lock().remove(session_id);
-        if let Some(p) = parked {
-            if !self.has_other_process_tenant(&p.process_id, session_id) {
-                Self::kill_acp_bounded(&p.acp).await;
-                tracing::info!(
-                    session = %session_id,
-                    reason = %reason,
-                    "dropped parked agent for pending soft-respawn"
-                );
-            } else {
-                tracing::info!(
-                    session = %session_id,
-                    process = %p.process_id,
-                    reason = %reason,
-                    "pending soft-respawn: removed parked entry, skip kill (mid-turn cohabitant)"
-                );
-            }
-        }
+        self.soft_respawn_for_session_core(app, session_id, reason)
+            .await;
     }
 
     /// Counts of tracked live shell / background / parked entries (alive or not).
@@ -382,14 +170,14 @@ impl SessionManager {
     /// `agent_session_id` is cleared when the data root changes (reconnect should
     /// `session/new` + bootstrap). Emits `session://agents_recycled` for UI toasts.
     pub async fn recycle_all_agents(&self, app: &AppHandle, reason: &str) {
-        // Collect pending permission/plan/ask gates *before* draining so the
-        // UI can drop stale bars that would write to a dead stdin (#524).
-        let invalidated = self.collect_pending_gate_invalidations();
         // Mid-turn hard kill (CLI upgrade, auth, provider route, …) must leave a
         // durable end-of-turn chip so the user sees *why* the turn stopped —
         // same row after reload as during the live hard end.
         self.journal_hard_end_for_busy_agents(app, reason);
         let drained = self.drain_all_agent_slots();
+        let invalidated_count = drained.invalidations.len();
+        // Reservations were captured at the actual drain, before any await.
+        Self::emit_gates_invalidated(app, reason, drained.invalidations);
         let total = drained.acps.len();
         for acp in drained.acps {
             Self::kill_acp_bounded(&acp).await;
@@ -400,22 +188,8 @@ impl SessionManager {
             drained.background_count,
             drained.parked_count,
             drained.prewarm_count,
-            invalidated.len()
+            invalidated_count
         );
-        if !invalidated.is_empty() {
-            for row in &invalidated {
-                if let Some(sid) = row.get("sessionId").and_then(|v| v.as_str()) {
-                    crate::plan_chrome::mark_gate_stale(sid);
-                }
-            }
-            let _ = app.emit(
-                "session://permissions_invalidated",
-                serde_json::json!({
-                    "reason": reason,
-                    "sessions": invalidated,
-                }),
-            );
-        }
         let _ = app.emit(
             "session://agents_recycled",
             serde_json::json!({
@@ -429,69 +203,15 @@ impl SessionManager {
         Self::emit_state(app, &self.snapshot());
     }
 
-    /// Snapshot app session ids that still hold a pending human gate so the
-    /// frontend can clear stale permission / plan / ask_user UI after kill.
-    pub(super) fn collect_pending_gate_invalidations(&self) -> Vec<serde_json::Value> {
-        let mut out = Vec::new();
-        let push = |out: &mut Vec<serde_json::Value>, s: &LiveSession| {
-            if let Some(row) = Self::pending_gate_invalidation_row(s) {
-                out.push(row);
-            }
-        };
-        if let Some(s) = self.inner.lock().as_ref() {
-            push(&mut out, s);
-        }
-        for s in self.background.lock().values() {
-            push(&mut out, s);
-        }
-        out
-    }
-
-    /// One session's pending human-gate snapshot (permission / plan / ask_user).
-    pub(super) fn pending_gate_invalidation_row(s: &LiveSession) -> Option<serde_json::Value> {
-        if s.pending_permission_rpc_id.is_none()
-            && s.pending_plan_rpc_id.is_none()
-            && s.pending_ask_user_rpc_id.is_none()
-        {
-            return None;
-        }
-        Some(serde_json::json!({
-            "sessionId": s.app_session_id,
-            "permissionRpcId": s.pending_permission_rpc_id,
-            "planRpcId": s.pending_plan_rpc_id,
-            "askUserRpcId": s.pending_ask_user_rpc_id,
-        }))
-    }
-
-    /// Clear pending human gates on a session and return the invalidation row
-    /// (if any) so UI can drop Approve / plan review / ask_user chrome.
-    pub(super) fn take_pending_gate_invalidation(s: &mut LiveSession) -> Option<serde_json::Value> {
-        let row = Self::pending_gate_invalidation_row(s)?;
-        s.pending_permission_rpc_id = None;
-        s.pending_permission_options = None;
-        s.pending_permission_tool_name = None;
-        s.pending_permission_ui = None;
-        s.pending_plan_rpc_id = None;
-        s.pending_ask_user_rpc_id = None;
-        Some(row)
-    }
-
     /// Emit `session://permissions_invalidated` for one or more sessions.
     pub(super) fn emit_gates_invalidated(
         app: &AppHandle,
         reason: &str,
-        sessions: Vec<serde_json::Value>,
+        sessions: Vec<super::human_gate_invalidation::PendingGateInvalidation>,
     ) {
-        if sessions.is_empty() {
-            return;
+        for pending in sessions {
+            pending.emit(app, reason);
         }
-        let _ = app.emit(
-            "session://permissions_invalidated",
-            serde_json::json!({
-                "reason": reason,
-                "sessions": sessions,
-            }),
-        );
     }
 
     /// Take live ACP + all background/parked/prewarm agents out of maps (no kill).
@@ -504,11 +224,15 @@ impl SessionManager {
     pub(super) fn drain_all_agent_slots(&self) -> DrainedAgents {
         let mut acps: Vec<Arc<AcpClient>> = Vec::new();
         let mut had_live_shell = false;
+        let mut invalidations = Vec::new();
 
         // Live
         {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
+                if let Some(pending) = Self::prepare_gate_invalidation(s) {
+                    invalidations.push(pending);
+                }
                 had_live_shell = true;
                 if let Some(h) = s.mock_stream.take() {
                     h.request_stop();
@@ -530,12 +254,13 @@ impl SessionManager {
                 s.tools_this_turn = 0;
                 s.pending_plan_rpc_id = None;
                 s.pending_ask_user_rpc_id = None;
+                s.human_gates = Default::default();
                 s.pending_permission_rpc_id = None;
+                s.pending_permission_reply = None;
                 s.pending_permission_options = None;
                 s.pending_permission_tool_name = None;
                 s.pending_permission_ui = None;
-                s.provider_retry_attempt = 0;
-                s.provider_retry_aborted = false;
+                Self::clear_provider_retry_memory(s);
                 // Leave AwaitingPermission / Streaming so UI busy clears after recycle.
                 if matches!(
                     s.fsm.state(),
@@ -551,8 +276,9 @@ impl SessionManager {
                 s.process_id = String::new();
                 // Old agent session lives under previous GROK_HOME — do not resume.
                 if s.meta.agent_session_id.take().is_some() {
-                    let _ = store::update_session_meta(&s.meta);
+                    let _ = store::clear_session_agent_session_id(&s.app_session_id);
                 }
+                s.meta.agent_execution = None;
                 // Connect will set bootstrap from journal when session/new runs.
                 s.needs_history_bootstrap = false;
             }
@@ -561,6 +287,13 @@ impl SessionManager {
         // Background busy streams
         let background: HashMap<String, LiveSession> = {
             let mut bg = self.background.lock();
+            // Reserve before releasing the map: a newly installed owner must
+            // always come after this drain, even if its session id is reused.
+            for s in bg.values() {
+                if let Some(pending) = Self::prepare_gate_invalidation(s) {
+                    invalidations.push(pending);
+                }
+            }
             std::mem::take(&mut *bg)
         };
         let background_count = background.len();
@@ -570,11 +303,13 @@ impl SessionManager {
             }
             Self::maybe_flush_stream_journal(&mut s, true, false);
             s.pending_permission_rpc_id = None;
+            s.pending_permission_reply = None;
             s.pending_permission_options = None;
             s.pending_permission_tool_name = None;
             s.pending_permission_ui = None;
             s.pending_plan_rpc_id = None;
             s.pending_ask_user_rpc_id = None;
+            s.human_gates = Default::default();
             s.prompt_in_flight = false;
             if let Some(acp) = s.acp.take() {
                 acps.push(acp);
@@ -607,177 +342,12 @@ impl SessionManager {
 
         DrainedAgents {
             acps,
+            invalidations,
             had_live_shell,
             background_count,
             parked_count,
             prewarm_count,
         }
-    }
-
-    /// Apply permission: Host policy + agent-home config + respawn when process flags change.
-    pub async fn apply_permission_policy(
-        &self,
-        app: &AppHandle,
-        policy_str: &str,
-    ) -> Result<(), String> {
-        let policy = PermissionPolicy::parse(policy_str);
-        let settings = store::load_settings();
-        let _ = crate::agent_prefs::sync_permission_to_agent_profile(
-            &settings.session_data_mode,
-            policy.as_str(),
-        );
-
-        let (need_respawn, live_sid) = {
-            let mut guard = self.inner.lock();
-            if let Some(s) = guard.as_mut() {
-                let prev = s.policy;
-                s.policy = policy;
-                s.meta.permission_policy = Some(policy.as_str().into());
-                let _ = store::update_session_meta(&s.meta);
-                // Any policy change can affect agent-side enforcement / --always-approve.
-                (
-                    prev != policy && s.acp.is_some(),
-                    Some(s.app_session_id.clone()),
-                )
-            } else {
-                (false, None)
-            }
-        };
-        // Background turns keep using s.policy for auto-allow (P1-19).
-        let background_respawn_ids: Vec<String> = {
-            let mut bg = self.background.lock();
-            bg.values_mut()
-                .filter_map(|s| {
-                    s.policy = policy;
-                    s.meta.permission_policy = Some(policy.as_str().into());
-                    let _ = store::update_session_meta(&s.meta);
-                    s.acp.as_ref().map(|_| s.app_session_id.clone())
-                })
-                .collect()
-        };
-        for sid in background_respawn_ids {
-            self.pending_soft_respawn
-                .lock()
-                .insert(sid, "permission_policy".into());
-        }
-        {
-            let removed: Vec<(String, ParkedAgent)> = {
-                let mut parked = self.parked.lock();
-                let stale: Vec<String> = parked
-                    .iter()
-                    .filter(|(_, p)| p.policy != policy)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                let mut removed = Vec::with_capacity(stale.len());
-                for id in stale {
-                    // Remove while holding the map lock; process ownership is
-                    // checked after the guard drops so the helper can inspect
-                    // all tenant maps without self-deadlocking.
-                    let Some(p) = parked.remove(&id) else {
-                        continue;
-                    };
-                    removed.push((id, p));
-                }
-                removed
-            };
-            for (id, p) in removed {
-                if self.has_other_process_tenant(&p.process_id, &id) {
-                    tracing::info!(
-                        session = %id,
-                        process = %p.process_id,
-                        "permission policy: removed parked entry, skip kill (co-tenant)"
-                    );
-                    continue;
-                }
-                let acp = p.acp;
-                // Kill after drop to avoid holding the map lock across await.
-                tokio::spawn(async move {
-                    SessionManager::kill_acp_bounded(&acp).await;
-                });
-            }
-        }
-        if need_respawn {
-            self.soft_respawn_with_reason(app, "permission_policy")
-                .await;
-            if let Some(sid) = live_sid {
-                self.flush_pending_soft_respawn(app, &sid).await;
-            }
-        }
-        Ok(())
-    }
-
-    /// Keep the in-memory row aligned with a provider just written to disk.
-    ///
-    /// Later `update_session_meta` calls replace the whole row. A snapshot taken
-    /// at connect time would otherwise erase `provider_id`.
-    pub fn remember_session_provider(&self, session_id: &str, provider_id: &str) {
-        let provider_id = provider_id.trim();
-        if session_id.is_empty() || provider_id.is_empty() {
-            return;
-        }
-        let owned = provider_id.to_string();
-        {
-            let mut guard = self.inner.lock();
-            if let Some(s) = guard.as_mut() {
-                if s.app_session_id == session_id {
-                    s.meta.provider_id = Some(owned.clone());
-                }
-            }
-        }
-        if let Some(s) = self.background.lock().get_mut(session_id) {
-            s.meta.provider_id = Some(owned);
-        }
-    }
-
-    /// Apply model id on the live ACP session (best-effort session/set_model).
-    ///
-    /// `session_id` is the chat the change belongs to. Only that chat gets
-    /// retuned when it owns the live slot — a draft, parked, or background
-    /// chat owns no agent here, and applying its model to the live slot used
-    /// to retune an unrelated conversation (same class as the effort scoping
-    /// fix). Other chats pick the model up from their saved prefs at connect.
-    pub async fn set_model(
-        &self,
-        model_id: String,
-        session_id: Option<&str>,
-    ) -> Result<(), String> {
-        let model_id = model_id.trim().to_string();
-        if model_id.is_empty() {
-            return Err("model id empty".into());
-        }
-        // Store composer preference; agent receives channel-resolved id.
-        // Disk is the source of truth. The live meta snapshot can predate
-        // `save_provider_on_session`, and replacing the row would wipe it.
-        let stored_provider = session_id.and_then(|id| {
-            crate::store::load_sessions_index()
-                .into_iter()
-                .find(|s| s.id == id)
-                .and_then(|s| s.provider_id)
-        });
-        let provider = stored_provider
-            .clone()
-            .unwrap_or_else(|| crate::providers::session_route_provider_id(None));
-        let agent_model = crate::providers::session_set_model_id_for(&provider, &model_id);
-        let (acp, sid) = {
-            let mut guard = self.inner.lock();
-            match guard.as_mut() {
-                Some(s) if session_id.is_some_and(|id| id == s.app_session_id) => {
-                    s.model_id = Some(model_id.clone());
-                    s.meta.model_id = Some(model_id.clone());
-                    if let Some(pid) = stored_provider.clone() {
-                        s.meta.provider_id = Some(pid);
-                    }
-                    let _ = store::update_session_meta(&s.meta);
-                    (s.acp.clone(), s.meta.agent_session_id.clone())
-                }
-                _ => (None, None),
-            }
-        };
-        // Target the live session explicitly (shared process safety).
-        if let (Some(acp), Some(sid)) = (acp, sid) {
-            acp.set_model_for(&sid, &agent_model).await?;
-        }
-        Ok(())
     }
 
     /// Apply product mode via session/set_mode; soft-respawn if agent rejects.
@@ -786,27 +356,31 @@ impl SessionManager {
         if !matches!(mode.as_str(), "agent" | "plan" | "ask") {
             return Err(format!("invalid mode: {mode}"));
         }
-        let (acp, sid) = {
+        let (acp, sid, owner) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 let same = s.product_mode.as_deref() == Some(mode.as_str());
                 s.product_mode = Some(mode.clone());
                 s.meta.mode = Some(mode.clone());
-                let _ = store::update_session_meta(&s.meta);
+                let _ = store::update_session_mode_intent(&s.app_session_id, mode.clone());
                 if same {
-                    (None, None)
+                    (None, None, None)
                 } else {
-                    (s.acp.clone(), s.meta.agent_session_id.clone())
+                    (
+                        s.acp.clone(),
+                        s.meta.agent_session_id.clone(),
+                        Some(s.app_session_id.clone()),
+                    )
                 }
             } else {
-                (None, None)
+                (None, None, None)
             }
         };
         // Target the live session explicitly (shared process safety).
-        if let (Some(acp), Some(sid)) = (acp, sid) {
+        if let (Some(acp), Some(sid), Some(owner)) = (acp, sid, owner) {
             if let Err(e) = acp.set_mode_for(&sid, &mode).await {
                 tracing::warn!("set_mode failed, soft-respawn: {e}");
-                self.soft_respawn(app).await;
+                self.soft_respawn_for_session(app, &owner, "settings").await;
             }
         }
         Ok(())
@@ -819,37 +393,67 @@ impl SessionManager {
     /// session — kills the process only when the hot path fails or the turn is
     /// busy (mid-turn swaps are deferred to the next connect injection).
     pub async fn apply_extensions_mcp_change(&self, app: &AppHandle) {
-        let (hot_sid, hot_busy, cwd) = {
+        let main_live = self.inner.lock().as_ref().is_some_and(|session| {
+            session
+                .acp
+                .as_ref()
+                .is_some_and(|client| client.has_main_runtime())
+        });
+        for owner in self.queue_main_runtime_mcp_rebinds() {
+            self.flush_pending_soft_respawn(app, &owner).await;
+        }
+        if main_live {
+            return;
+        }
+        let hot = {
             let guard = self.inner.lock();
-            match guard.as_ref() {
-                Some(s) if s.acp.as_ref().is_some_and(|c| c.is_alive()) => (
-                    s.meta.agent_session_id.clone(),
-                    Self::live_session_is_busy(s),
-                    s.project_path.clone(),
-                ),
-                _ => (None, false, None),
-            }
+            guard.as_ref().and_then(|session| {
+                let client = session.acp.as_ref()?;
+                if !client.is_alive()
+                    || client.has_main_runtime()
+                    || !client.session_mcp_policy().allows_local_import_mcp()
+                    || Self::live_session_is_busy(session)
+                {
+                    return None;
+                }
+                Some((
+                    session.app_session_id.clone(),
+                    session.meta.agent_session_id.clone()?,
+                    session.project_path.clone()?,
+                    client.clone(),
+                ))
+            })
         };
-        if let (Some(sid), false, Some(cwd)) = (hot_sid, hot_busy, cwd) {
-            let app_sid = self.inner.lock().as_ref().map(|s| s.app_session_id.clone());
+        if let Some((app_sid, sid, cwd, acp)) = hot {
+            let build_sid = app_sid.clone();
             let servers = tauri::async_runtime::spawn_blocking(move || {
-                crate::extensions::build_session_mcp_servers(Some(cwd.as_str()))
+                crate::extensions::build_session_mcp_servers(
+                    Some(cwd.as_str()),
+                    Some(build_sid.as_str()),
+                )
             })
             .await
             .unwrap_or_else(|_| serde_json::json!([]));
-            let acp = self.inner.lock().as_ref().and_then(|s| s.acp.clone());
-            if let Some(acp) = acp {
+            let current = self
+                .with_session_mut(&app_sid, |session| {
+                    !Self::live_session_is_busy(session)
+                        && session
+                            .acp
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &acp))
+                        && session.meta.agent_session_id.as_deref() == Some(sid.as_str())
+                })
+                .unwrap_or(false);
+            if current {
                 match acp.update_mcp_servers(&sid, servers).await {
                     Ok(_) => {
                         tracing::info!(
                             "extensions: MCP prefs changed — hot-swapped mcpServers on live agent sid={sid}"
                         );
-                        if let Some(asid) = app_sid {
-                            let _ = app.emit(
-                                "session://mcp_hot_updated",
-                                serde_json::json!({ "sessionId": asid }),
-                            );
-                        }
+                        let _ = app.emit(
+                            "session://mcp_hot_updated",
+                            serde_json::json!({ "sessionId": app_sid }),
+                        );
                         return;
                     }
                     Err(e) => {
@@ -859,16 +463,23 @@ impl SessionManager {
                     }
                 }
             }
+            // Discovery belongs to this captured actor, even if focus changed.
+            self.pending_soft_respawn
+                .lock()
+                .insert(app_sid.clone(), "extensions_mcp".into());
+            self.flush_pending_soft_respawn(app, &app_sid).await;
+            return;
         }
         let live = self
             .inner
             .lock()
             .as_ref()
-            .map(|s| s.acp.is_some())
-            .unwrap_or(false);
-        if live {
+            .filter(|s| s.acp.is_some())
+            .map(|s| s.app_session_id.clone());
+        if let Some(owner) = live {
             tracing::info!("extensions: MCP prefs changed — soft-respawn live agent");
-            self.soft_respawn(app).await;
+            self.soft_respawn_for_session(app, &owner, "extensions_mcp")
+                .await;
         }
     }
 
@@ -914,8 +525,9 @@ impl SessionManager {
                     s.meta.effort = Some(effort.clone());
                     if effort_changed {
                         s.meta.agent_session_id = None;
+                        s.meta.agent_execution = None;
                     }
-                    let _ = store::update_session_meta(&s.meta);
+                    let _ = store::update_runtime_session_meta(&s.meta);
                     !same && s.acp.is_some()
                 }
                 _ => false,
@@ -930,8 +542,9 @@ impl SessionManager {
                 s.meta.effort = Some(effort.clone());
                 if effort_changed {
                     s.meta.agent_session_id = None;
+                    s.meta.agent_execution = None;
                 }
-                let _ = store::update_session_meta(&s.meta);
+                let _ = store::update_runtime_session_meta(&s.meta);
                 !same && s.acp.is_some()
             } else {
                 false
@@ -962,11 +575,8 @@ impl SessionManager {
                 }
             }
         }
-        if need {
-            self.soft_respawn_with_reason(app, "effort").await;
-            if let Some(sid) = session_id {
-                self.flush_pending_soft_respawn(app, sid).await;
-            }
+        if let Some(sid) = session_id.filter(|_| need) {
+            self.soft_respawn_for_session(app, sid, "effort").await;
         }
         Ok(())
     }
@@ -990,6 +600,7 @@ impl SessionManager {
         self: &Arc<Self>,
         app: AppHandle,
         rpc_id: u64,
+        request_generation: Option<uuid::Uuid>,
         decision: String,
         option_id: Option<String>,
         scope: Option<String>,
@@ -999,156 +610,23 @@ impl SessionManager {
         // UI tool name when Host pending tool was cleared (#542).
         client_tool_name: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let target = self.resolve_target_session(session_id)?;
-        // Collect ACP + option material only — do **not** mutate FSM / allow_cache
-        // until respond_permission succeeds (failed RPC must leave gate intact).
-        let scope_to_cache = if decision == "allow_session" || decision == "allow_for_session" {
-            scope.filter(|s| !s.trim().is_empty())
-        } else {
-            None
-        };
-        let (acp, project_path, pending_options, tool_name, pending_rpc) = self
-            .with_session_mut(&target, |s| {
-                Self::touch_activity_locked(s);
-                let opts = s
-                    .pending_permission_options
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!([]));
-                let tool = s
-                    .pending_permission_tool_name
-                    .clone()
-                    .filter(|t| !t.is_empty())
-                    .or_else(|| {
-                        client_tool_name
-                            .as_ref()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                    })
-                    .unwrap_or_default();
-                (
-                    s.acp.clone(),
-                    s.project_path.clone(),
-                    opts,
-                    tool,
-                    s.pending_permission_rpc_id,
-                )
+        let resolution = self
+            .resolve_permission_core(super::permission_resolution::PermissionAnswer {
+                rpc_id,
+                request_generation,
+                decision,
+                option_id,
+                scope,
+                session_id,
+                client_options,
+                client_tool_name,
             })
-            .ok_or("no session")?;
-        // Stale / double-click / recycled Approve must not write an arbitrary
-        // rpc_id into a live process (P1-18).
-        match pending_rpc {
-            Some(id) if id == rpc_id => {}
-            Some(_) => {
-                return Err(
-                    "stale permission request — this approval no longer matches the pending gate"
-                        .into(),
-                );
-            }
-            None => {
-                return Err(
-                    "no pending permission on this chat — request expired or was cancelled".into(),
-                );
-            }
-        }
-
-        // Prefer Host-stored options; if empty, accept the UI snapshot so we
-        // can still coerce tool-scoped ids (shell allow-always-command, …).
-        let options = {
-            let host_nonempty = pending_options
-                .as_array()
-                .map(|a| !a.is_empty())
-                .unwrap_or(false);
-            if host_nonempty {
-                pending_options
-            } else if let Some(co) =
-                client_options.filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
-            {
-                co
-            } else {
-                pending_options
-            }
-        };
-
-        let Some(acp) = acp else {
-            return Err("no agent process for this chat; permission request expired".into());
-        };
-        // Dead agent after recycle/provider switch: refuse stale UI answers (#524).
-        if !acp.is_alive() {
-            return Err(
-                "agent process is no longer running; permission request expired — reopen the chat"
-                    .into(),
-            );
-        }
-        let outcome = match decision.as_str() {
-            "cancel" => PermissionOutcome::Cancelled,
-            other => {
-                // Re-pick from the ACP options list when the UI sends a
-                // generic fallback not published for this tool (e.g.
-                // `always-allow` vs shell `allow-always-command`).
-                // Otherwise CLI returns "unknown permission option" and
-                // cancels the turn (#523 / #542).
-                let wire = crate::permission::coerce_wire_option_id_for_tool(
-                    other,
-                    option_id.as_deref(),
-                    &options,
-                    &tool_name,
-                );
-                if option_id.as_deref() != Some(wire.as_str()) {
-                    tracing::info!(
-                        decision = %other,
-                        client = ?option_id,
-                        wire = %wire,
-                        tool = %tool_name,
-                        "permission optionId coerced to CLI wire id"
-                    );
-                }
-                PermissionOutcome::Selected { option_id: wire }
-            }
-        };
-        acp.respond_permission(rpc_id, outcome).await?;
-
-        // Success path only: clear pending, cache session-allow, leave AwaitingPermission.
-        let mut pending_emits = Vec::new();
-        let mut pending_persists = Vec::new();
-        let empty_run = self
-            .with_session_mut(&target, |s| {
-                if s.pending_permission_rpc_id == Some(rpc_id) {
-                    s.pending_permission_rpc_id = None;
-                    s.pending_permission_options = None;
-                    s.pending_permission_tool_name = None;
-                    s.pending_permission_ui = None;
-                }
-                if let Some(sk) = scope_to_cache {
-                    s.allow_cache.allow(sk);
-                    if crate::permission::should_widen_session_allow(s.policy) {
-                        s.allow_cache.allow_tool_family(&tool_name);
-                    }
-                }
-                if s.fsm.state() == SessionState::AwaitingPermission {
-                    let _ = s.fsm.permission_resolved_continue();
-                }
-                // Permission cleared — may finish a deferred prompt_complete (#52).
-                Self::try_finish_deferred_prompt_complete(
-                    s,
-                    Some(&mut pending_emits),
-                    Some(&mut pending_persists),
-                )
-                .flatten()
-            })
-            .flatten();
-        Self::emit_stream_payloads(&app, pending_emits);
-        Self::commit_session_persists(Some(&app), pending_persists);
-
-        // Cross-session permission audit (user decision). Soft-fail.
-        crate::audit_ledger::record_permission_resolve(
-            Some(&target),
-            project_path.as_deref(),
-            rpc_id,
-            &decision,
-        );
-        self.emit_for_session(&app, &target);
-        Self::emit_empty_run_if_any(&app, empty_run);
-        Ok(self.snapshot())
+            .await?;
+        Self::emit_stream_payloads(&app, resolution.emits);
+        Self::commit_session_persists(Some(&app), resolution.persists);
+        Self::emit_runtime(&app, &resolution.snapshot);
+        Self::emit_empty_run_if_any(&app, resolution.empty_run);
+        Ok(resolution.snapshot)
     }
 
     /// Session a gate answer applies to: explicit id, else the live focus slot.
@@ -1216,40 +694,21 @@ impl SessionManager {
         decision: String,
         feedback: Option<String>,
         rpc_id: Option<u64>,
+        request_generation: Option<uuid::Uuid>,
         session_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let target = self.resolve_target_session(session_id)?;
-        // Peek pending id without taking — only clear after a successful RPC.
-        let (acp, id) = self
-            .with_session_mut(&target, |s| {
-                Self::touch_activity_locked(s);
-                let id = rpc_id.or(s.pending_plan_rpc_id);
-                (s.acp.clone(), id)
+        let resolution = self
+            .resolve_human_gate_core(super::human_gate_resolution::HumanGateAnswer {
+                kind: super::human_gate_resolution::HumanGateKind::Plan,
+                rpc_id,
+                request_generation,
+                decision,
+                feedback,
+                answers: None,
+                session_id,
             })
-            .ok_or("no session")?;
-        let id = id.ok_or_else(|| "no pending plan approval".to_string())?;
-        let acp = acp.ok_or_else(|| "ACP client missing".to_string())?;
-        acp.respond_exit_plan_mode(id, &decision, feedback).await?;
-        let mut pending_emits = Vec::new();
-        let mut pending_persists = Vec::new();
-        let empty_run = self
-            .with_session_mut(&target, |s| {
-                if s.pending_plan_rpc_id == Some(id) || rpc_id == Some(id) {
-                    s.pending_plan_rpc_id = None;
-                }
-                Self::try_finish_deferred_prompt_complete(
-                    s,
-                    Some(&mut pending_emits),
-                    Some(&mut pending_persists),
-                )
-                .flatten()
-            })
-            .flatten();
-        Self::emit_stream_payloads(&app, pending_emits);
-        Self::commit_session_persists(Some(&app), pending_persists);
-        self.emit_for_session(&app, &target);
-        Self::emit_empty_run_if_any(&app, empty_run);
-        Ok(self.snapshot())
+            .await?;
+        Ok(self.apply_human_gate_resolution(&app, resolution))
     }
 
     /// Resolve pending `_x.ai/ask_user_question` (answers or cancel).
@@ -1262,46 +721,72 @@ impl SessionManager {
         decision: String,
         answers: Option<serde_json::Value>,
         rpc_id: Option<u64>,
+        request_generation: Option<uuid::Uuid>,
         session_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
-        let target = self.resolve_target_session(session_id)?;
-        // Peek pending id without taking — only clear after a successful RPC.
-        let (acp, id) = self
-            .with_session_mut(&target, |s| {
-                let id = rpc_id.or(s.pending_ask_user_rpc_id);
-                (s.acp.clone(), id)
+        let resolution = self
+            .resolve_human_gate_core(super::human_gate_resolution::HumanGateAnswer {
+                kind: super::human_gate_resolution::HumanGateKind::AskUser,
+                rpc_id,
+                request_generation,
+                decision,
+                feedback: None,
+                answers,
+                session_id,
             })
-            .ok_or("no session")?;
-        let id = id.ok_or_else(|| "no pending ask_user_question".to_string())?;
-        let acp = acp.ok_or_else(|| "ACP client missing".to_string())?;
-        let outcome = match decision.as_str() {
-            "accepted" | "answered" | "accept" => {
-                let answers = answers.unwrap_or_else(|| serde_json::json!({}));
-                AskUserOutcome::Accepted { answers }
-            }
-            _ => AskUserOutcome::Cancelled,
-        };
-        acp.respond_ask_user_question(id, outcome).await?;
-        let mut pending_emits = Vec::new();
-        let mut pending_persists = Vec::new();
-        let empty_run = self
-            .with_session_mut(&target, |s| {
-                if s.pending_ask_user_rpc_id == Some(id) || rpc_id == Some(id) {
-                    s.pending_ask_user_rpc_id = None;
+            .await?;
+        Ok(self.apply_human_gate_resolution(&app, resolution))
+    }
+
+    fn apply_human_gate_resolution(
+        &self,
+        app: &AppHandle,
+        resolution: super::human_gate_resolution::HumanGateResolution,
+    ) -> SessionSnapshot {
+        resolution.persist_plan_chrome();
+        Self::emit_stream_payloads(app, resolution.emits);
+        Self::commit_session_persists(Some(app), resolution.persists);
+        self.emit_for_session(app, &resolution.target);
+        Self::emit_empty_run_if_any(app, resolution.empty);
+        resolution.snapshot
+    }
+
+    /// Keep in-memory session metadata aligned with a provider route that was
+    /// committed to disk. A later whole-row runtime write must not restore the
+    /// stale provider captured when the process connected.
+    pub fn remember_session_provider(&self, session_id: &str, provider_id: &str) {
+        let provider_id = provider_id.trim();
+        if session_id.is_empty() || provider_id.is_empty() {
+            return;
+        }
+        let owned = provider_id.to_string();
+        {
+            let mut guard = self.inner.lock();
+            if let Some(session) = guard.as_mut() {
+                if session.app_session_id == session_id {
+                    session.meta.provider_id = Some(owned.clone());
                 }
-                Self::try_finish_deferred_prompt_complete(
-                    s,
-                    Some(&mut pending_emits),
-                    Some(&mut pending_persists),
-                )
-                .flatten()
-            })
-            .flatten();
-        Self::emit_stream_payloads(&app, pending_emits);
-        Self::commit_session_persists(Some(&app), pending_persists);
-        self.emit_for_session(&app, &target);
-        Self::emit_empty_run_if_any(&app, empty_run);
-        Ok(self.snapshot())
+            }
+        }
+        if let Some(session) = self.background.lock().get_mut(session_id) {
+            session.meta.provider_id = Some(owned);
+        }
+    }
+
+    /// A live gate identity is never reconstructed from persisted plan chrome.
+    pub fn pending_plan(&self, session_id: Option<String>) -> Option<UiPlanRequest> {
+        let target = self.resolve_target_session(session_id).ok()?;
+        self.with_session_mut(&target, |session| {
+            let card = session.human_gates.plan.as_ref()?;
+            let owner = session
+                .human_gates
+                .owner(super::human_gate_identity::HumanGateKind::Plan)?;
+            (session.pending_plan_rpc_id == card.rpc_id
+                && owner.matches(session)
+                && session.acp.as_ref().is_some_and(|client| client.is_alive()))
+            .then(|| card.clone())
+        })
+        .flatten()
     }
 
     /// Clear the live focus slot without aborting mid-turn work.
@@ -1406,6 +891,7 @@ impl SessionManager {
                     s.fsm.soft_disconnect();
                     s.process_id = String::new();
                     s.meta.agent_session_id = None;
+                    s.meta.agent_execution = None;
                     (acp, process_id)
                 } else {
                     (None, String::new())
@@ -1542,6 +1028,8 @@ mod recycle_tests {
         let _ = fsm.handshake_ok();
         let now = Instant::now();
         *mgr.inner.lock() = Some(LiveSession {
+            turn_open_epoch: 0,
+            workspace_context: None,
             app_session_id: "session-1".into(),
             process_id: "process-1".into(),
             meta: SessionMeta {
@@ -1573,6 +1061,7 @@ mod recycle_tests {
                 workspace_root_snapshot: None,
                 workspace_capability: None,
                 provider_id: None,
+                agent_execution: None,
             },
             fsm,
             backend: "mock_acp".into(),
@@ -1593,14 +1082,17 @@ mod recycle_tests {
             policy: PermissionPolicy::default(),
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
+            last_provider_retry: None,
             needs_history_bootstrap: false,
             pending_plan_rpc_id: None,
             pending_permission_rpc_id: None,
+            pending_permission_reply: None,
             pending_permission_options: None,
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
             pending_ask_user_ui: None,
+            human_gates: Default::default(),
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -1618,6 +1110,14 @@ mod recycle_tests {
             stream_emit_flush_gen: 0,
             last_tool_heartbeat_emit: None,
         });
+        let stored = mgr
+            .inner
+            .lock()
+            .as_ref()
+            .expect("live session")
+            .meta
+            .clone();
+        crate::store::update_session_index_row(&stored).expect("seed session row");
 
         // A model change aimed at another chat (draft, parked, background, or a
         // scheduled automation's new session before it connects) must not
@@ -1635,6 +1135,15 @@ mod recycle_tests {
         }
 
         // The chat that owns the live slot still retunes in place.
+        crate::store::save_composer_prefs(
+            None,
+            Some("session-1"),
+            Some("grok-4.7".into()),
+            None,
+            None,
+            None,
+        )
+        .expect("save model intent");
         tauri::async_runtime::block_on(mgr.set_model("grok-4.7".into(), Some("session-1")))
             .expect("live target applies");
         {
@@ -1654,6 +1163,8 @@ mod recycle_tests {
         let _ = fsm.handshake_ok();
         let now = Instant::now();
         LiveSession {
+            turn_open_epoch: 0,
+            workspace_context: None,
             app_session_id: id.into(),
             process_id: process_id.into(),
             meta: SessionMeta {
@@ -1685,6 +1196,7 @@ mod recycle_tests {
                 workspace_root_snapshot: None,
                 workspace_capability: None,
                 provider_id: Some(provider_id.into()),
+                agent_execution: None,
             },
             fsm,
             backend: "mock_acp".into(),
@@ -1705,14 +1217,17 @@ mod recycle_tests {
             policy: PermissionPolicy::default(),
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
+            last_provider_retry: None,
             needs_history_bootstrap: false,
             pending_plan_rpc_id: None,
             pending_permission_rpc_id: None,
+            pending_permission_reply: None,
             pending_permission_options: None,
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
             pending_ask_user_ui: None,
+            human_gates: Default::default(),
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -1735,8 +1250,8 @@ mod recycle_tests {
     fn seed_official_and_custom(mgr: &SessionManager, custom_is_live: bool) {
         let official = ready_session("sess-a", "proc-a", "agent-a", "official");
         let custom = ready_session("sess-b", "proc-b", "agent-b", "relay-b");
-        crate::store::save_sessions_index(&[official.meta.clone(), custom.meta.clone()])
-            .expect("seed sessions");
+        crate::store::update_session_index_row(&official.meta).expect("seed official session");
+        crate::store::update_session_index_row(&custom.meta).expect("seed custom session");
         if custom_is_live {
             *mgr.inner.lock() = Some(custom);
             mgr.background.lock().insert("sess-a".into(), official);
@@ -1868,7 +1383,7 @@ mod recycle_tests {
         let mgr = SessionManager::new();
         let mut background = ready_session("sess-a", "proc-a", "agent-a", "official");
         background.meta.provider_id = None;
-        crate::store::save_sessions_index(&[background.meta.clone()]).expect("seed");
+        crate::store::update_session_index_row(&background.meta).expect("seed");
         mgr.background.lock().insert("sess-a".into(), background);
         *mgr.prewarm.lock() = PrewarmState::Spawning {
             since: Instant::now(),

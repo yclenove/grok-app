@@ -4,6 +4,41 @@
 //! helpers. Lists Grok App sessions and continues one by id + prompt.
 //! Does not create a new chat. Does not interrupt a running turn.
 
+mod idempotency;
+#[cfg(test)]
+mod idempotency_process_tests;
+#[cfg(test)]
+mod idempotency_recovery_tests;
+#[cfg(test)]
+mod idempotency_tests;
+pub(crate) mod queue_cancel;
+mod queue_dispatch;
+#[cfg(test)]
+mod queue_dispatch_tests;
+mod queue_lease;
+#[cfg(test)]
+mod queue_lease_tests;
+#[cfg(test)]
+mod queue_outcome_tests;
+mod queue_outcomes;
+#[cfg(test)]
+mod queue_process_tests;
+pub(crate) mod queue_recovery;
+#[cfg(test)]
+mod queue_recovery_tests;
+#[cfg(test)]
+mod queue_regression_tests;
+mod queue_result;
+pub(crate) mod queue_snapshot;
+mod queue_store;
+#[cfg(test)]
+mod queue_store_tests;
+mod receipt_lease;
+pub(crate) mod receipt_review;
+#[cfg(test)]
+mod receipt_review_tests;
+mod receipt_store;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +46,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -30,20 +65,16 @@ pub const IDEMPOTENCY_FLAG: &str = "--idempotency-key";
 pub const INCLUDE_ARCHIVED_FLAG: &str = "--include-archived";
 
 const ENDPOINT_FILE: &str = "session-api.json";
-const IDEMPOTENCY_FILE: &str = "session-api-idempotency.json";
 const QUEUE_FILE: &str = "session-api-queue.json";
-const IDEMPOTENCY_CAP: usize = 200;
 const QUEUE_CAP: usize = 200;
 
 /// Bound `dispatch_turn` so HTTP/CLI never wait the connect 90s + send 90s
 /// worst case (~180s). Lock recovery is still knife-1's wall-clock abort.
 pub const DISPATCH_TURN_TIMEOUT_SECS: u64 = 15;
 /// CLI HTTP client must outlive the server dispatch budget so `--session-send`
-/// can parse `retry_later` instead of surfacing a transport timeout.
+/// can parse `unknown` instead of surfacing a transport timeout.
 pub const CLI_HTTP_TIMEOUT_SECS: u64 = DISPATCH_TURN_TIMEOUT_SECS + 5;
-const HOST_BUSY_RETRY_MESSAGE: &str = "host busy: connect in progress, retry later";
-
-static QUEUE_FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+const DISPATCH_UNKNOWN_MESSAGE: &str = "dispatch timed out; outcome unknown. Inspect the original session before any new request; do not automatically resend.";
 
 fn drain_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -57,11 +88,17 @@ pub enum TurnStatus {
     /// Current turn is still running (e.g. drawing / tools). Prompt is in the
     /// same follow-up queue the composer shows — not discarded, not interrupted.
     Queued,
+    /// Explicitly cancelled while still unclaimed; no dispatch was attempted.
+    Cancelled,
     Busy,
     NotFound,
     AppNotRunning,
-    /// Host is wedged on connect/send; caller should retry shortly. HTTP 503.
+    /// Legacy retryable response retained for compatibility. Dispatch timeouts are Unknown.
     RetryLater,
+    /// The original request may have started; never automatically dispatch it again.
+    Unknown,
+    /// A retained (session, key) is bound to a different normalized prompt.
+    IdempotencyConflict,
     Error,
 }
 
@@ -98,7 +135,7 @@ pub struct TurnResult {
     /// Set when `status == queued` so the GUI can dedup the same follow-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_item_id: Option<String>,
-    /// Prompt echoed on `queued` so an idempotent retry can re-fan the GUI event.
+    /// Prompt echoed on `queued` for authoritative outcome resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_prompt: Option<String>,
 }
@@ -156,107 +193,25 @@ pub fn emit_external_queue(app: &AppHandle, session_id: &str, prompt: &str, item
     );
 }
 
-pub fn enqueue_while_busy(app: &AppHandle, session_id: &str, prompt: &str) -> TurnResult {
+pub async fn enqueue_while_busy(app: &AppHandle, session_id: &str, prompt: &str) -> TurnResult {
     let item_id = format!("q-ext-{}", uuid::Uuid::new_v4());
-    persist_queue_item(PersistedQueueItem {
-        session_id: session_id.to_string(),
-        item_id: item_id.clone(),
-        prompt: prompt.to_string(),
-        created_at: chrono::Utc::now().timestamp_millis(),
-    });
-    if main_webview_can_drain(app) {
+    let item = queue_store::Item::new(
+        session_id,
+        &item_id,
+        prompt,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    let result = queue_dispatch::enqueue_at(&app_data_root(), item).await;
+    if result.ok && main_webview_can_drain(app) {
         emit_external_queue(app, session_id, prompt, &item_id);
     }
-    TurnResult {
-        ok: true,
-        status: TurnStatus::Queued,
-        session_id: session_id.to_string(),
-        idempotency_key: None,
-        message: Some("queued until the current turn ends".into()),
-        queue_item_id: Some(item_id),
-        queued_prompt: Some(prompt.to_string()),
-    }
+    result
 }
 
 fn main_webview_can_drain(app: &AppHandle) -> bool {
     app.get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct PersistedQueue {
-    #[serde(default)]
-    items: Vec<PersistedQueueItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedQueueItem {
-    session_id: String,
-    item_id: String,
-    prompt: String,
-    created_at: i64,
-}
-
-fn queue_path() -> PathBuf {
-    app_data_root().join(QUEUE_FILE)
-}
-
-fn load_persisted_queue_unlocked() -> PersistedQueue {
-    fs::read_to_string(queue_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<PersistedQueue>(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn save_persisted_queue_unlocked(store: &PersistedQueue) {
-    let _ = ensure_app_dirs();
-    if let Ok(body) = serde_json::to_string_pretty(store) {
-        let _ = fs::write(queue_path(), body);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(queue_path(), fs::Permissions::from_mode(0o600));
-        }
-    }
-}
-
-fn load_persisted_queue() -> PersistedQueue {
-    let _g = QUEUE_FILE_LOCK.lock();
-    load_persisted_queue_unlocked()
-}
-
-fn persist_queue_item(item: PersistedQueueItem) {
-    let _g = QUEUE_FILE_LOCK.lock();
-    let mut store = load_persisted_queue_unlocked();
-    store.items.retain(|e| e.item_id != item.item_id);
-    store.items.push(item);
-    if store.items.len() > QUEUE_CAP {
-        let drop_n = store.items.len() - QUEUE_CAP;
-        store.items.drain(0..drop_n);
-    }
-    save_persisted_queue_unlocked(&store);
-}
-
-fn take_persisted_head(session_id: &str) -> Option<PersistedQueueItem> {
-    let _g = QUEUE_FILE_LOCK.lock();
-    let mut store = load_persisted_queue_unlocked();
-    let idx = store
-        .items
-        .iter()
-        .position(|e| e.session_id == session_id)?;
-    let item = store.items.remove(idx);
-    save_persisted_queue_unlocked(&store);
-    Some(item)
-}
-
-fn requeue_persisted_front(item: PersistedQueueItem) {
-    let _g = QUEUE_FILE_LOCK.lock();
-    let mut store = load_persisted_queue_unlocked();
-    store.items.retain(|e| e.item_id != item.item_id);
-    store.items.insert(0, item);
-    save_persisted_queue_unlocked(&store);
 }
 
 pub fn emit_external_queue_take(app: &AppHandle, session_id: &str, item_id: &str) {
@@ -275,44 +230,38 @@ pub async fn drain_ready_external_queues(app: &AppHandle, mgr: &Arc<SessionManag
     let Ok(_drain) = drain_lock().try_lock() else {
         return;
     };
-    let items = load_persisted_queue().items;
+    let root = app_data_root();
+    let items = match queue_dispatch::list_at(&root).await {
+        Ok(items) => items,
+        Err(error) => {
+            tracing::warn!(%error, "external queue unavailable; preserved without dispatch");
+            return;
+        }
+    };
     let mut seen = std::collections::HashSet::<String>::new();
     for item in items {
-        if !seen.insert(item.session_id.clone()) {
+        // A pending/held head also blocks younger prompts for this session.
+        if !seen.insert(item.session_id.clone())
+            || item.delivery.is_some()
+            || mgr.session_turn_busy(&item.session_id)
+        {
             continue;
         }
-        if mgr.session_turn_busy(&item.session_id) {
-            continue;
-        }
-        let Some(head) = take_persisted_head(&item.session_id) else {
-            continue;
-        };
-        let prepared = match prepare_send(&head.session_id, &head.prompt) {
-            Ok(p) => p,
-            Err(e) => {
-                if e.status == TurnStatus::NotFound {
-                    tracing::warn!(
-                        session = %head.session_id,
-                        "external queue drain dropped (session gone)"
-                    );
-                    continue;
-                }
-                tracing::warn!(
-                    session = %head.session_id,
-                    error = ?e.message,
-                    "external queue drain skipped (prepare_send); requeued"
-                );
-                requeue_persisted_front(head);
-                continue;
+        let result = queue_dispatch::run_at(&root, &item, || async {
+            // The durable queue is a Host-origin source itself. Mark only the
+            // actual drained turn; never arm the chat while work is waiting.
+            match prepare_send(&item.session_id, &item.prompt, "external") {
+                Ok(prepared) => dispatch_turn_or_timeout(app, mgr, prepared).await,
+                Err(error) => *error,
             }
-        };
-        let result = dispatch_turn_or_timeout(app, mgr, prepared).await;
-        if result.status == TurnStatus::TurnStarted || result.status == TurnStatus::Queued {
-            emit_external_queue_take(app, &head.session_id, &head.item_id);
-        } else {
-            requeue_persisted_front(head.clone());
-            if main_webview_can_drain(app) {
-                emit_external_queue(app, &head.session_id, &head.prompt, &head.item_id);
+        })
+        .await;
+        if let Some(result) = result {
+            if result.ok && matches!(result.status, TurnStatus::TurnStarted | TurnStatus::Queued) {
+                emit_external_queue_take(app, &item.session_id, &item.item_id);
+            } else {
+                tracing::warn!(session = %item.session_id, status = ?result.status,
+                    "external queue outcome unconfirmed; payload retained without automatic redispatch");
             }
         }
     }
@@ -325,11 +274,18 @@ pub fn schedule_drain_ready_external_queues(app: AppHandle, mgr: Arc<SessionMana
     });
 }
 
-fn fanout_persisted_queue(app: &AppHandle) {
+async fn fanout_persisted_queue(app: &AppHandle) {
     if !main_webview_can_drain(app) {
         return;
     }
-    for item in load_persisted_queue().items {
+    let items = match queue_dispatch::list_at(&app_data_root()).await {
+        Ok(items) => items,
+        Err(error) => {
+            tracing::warn!(%error, "external queue unavailable; no empty-success fallback");
+            return;
+        }
+    };
+    for item in items {
         emit_external_queue(app, &item.session_id, &item.prompt, &item.item_id);
     }
 }
@@ -731,55 +687,9 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct IdempotencyStore {
-    #[serde(default)]
-    entries: Vec<IdempotencyEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct IdempotencyEntry {
-    key: String,
-    result: TurnResult,
-}
-
-fn idempotency_path() -> PathBuf {
-    app_data_root().join(IDEMPOTENCY_FILE)
-}
-
-pub fn recall_idempotency(key: &str) -> Option<TurnResult> {
-    let raw = fs::read_to_string(idempotency_path()).ok()?;
-    let store: IdempotencyStore = serde_json::from_str(&raw).ok()?;
-    store
-        .entries
-        .into_iter()
-        .find(|e| e.key == key)
-        .map(|e| e.result)
-}
-
-pub fn remember_idempotency(key: &str, result: &TurnResult) {
-    let _ = ensure_app_dirs();
-    let mut store = fs::read_to_string(idempotency_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<IdempotencyStore>(&raw).ok())
-        .unwrap_or_default();
-    store.entries.retain(|e| e.key != key);
-    store.entries.push(IdempotencyEntry {
-        key: key.to_string(),
-        result: result.clone(),
-    });
-    if store.entries.len() > IDEMPOTENCY_CAP {
-        let drop_n = store.entries.len() - IDEMPOTENCY_CAP;
-        store.entries.drain(0..drop_n);
-    }
-    if let Ok(body) = serde_json::to_string_pretty(&store) {
-        let _ = fs::write(idempotency_path(), body);
-    }
-}
-
 /// HTTP-layer errors from the CLI client.
 /// Connection-refused / DNS → app is not listening (`app_not_running`).
-/// Timeouts and 5xx-shaped transport failures → `error` (app may still be up).
+/// Timeouts and other uncertain transport failures return `unknown`, never permission to resend.
 pub fn classify_cli_transport_error(err: &str, session_id: &str) -> (TurnStatus, i32, String) {
     if cli_error_means_app_not_running(err) {
         (
@@ -791,9 +701,9 @@ pub fn classify_cli_transport_error(err: &str, session_id: &str) -> (TurnStatus,
         )
     } else {
         (
-            TurnStatus::Error,
+            TurnStatus::Unknown,
             1,
-            format!("session-api request failed ({err}) for session {session_id}"),
+            format!("session-api outcome unknown ({err}) for session {session_id}; inspect the original session before any new request; do not automatically resend"),
         )
     }
 }
@@ -826,7 +736,14 @@ pub fn classify_send_error(err: &str) -> TurnStatus {
     TurnStatus::Error
 }
 
-pub fn prepare_send(session_id: &str, prompt: &str) -> Result<PreparedSend, Box<TurnResult>> {
+/// Check a session can take a turn and build the request for it. `origin` names
+/// who asked (`pr_monitor`, `external`): an injected prompt is remembered so the
+/// transcript can show an automatic follow-up instead of the user's own words.
+pub fn prepare_send(
+    session_id: &str,
+    prompt: &str,
+    origin: &'static str,
+) -> Result<PreparedSend, Box<TurnResult>> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err(Box::new(TurnResult::fail(
@@ -887,6 +804,7 @@ pub fn prepare_send(session_id: &str, prompt: &str) -> Result<PreparedSend, Box<
         session_id: meta.id,
         project_path,
         prompt: prompt.to_string(),
+        origin,
     })
 }
 
@@ -894,6 +812,9 @@ pub struct PreparedSend {
     pub session_id: String,
     pub project_path: Option<String>,
     pub prompt: String,
+    /// Who asked for this turn (`pr_monitor`, `external`): a prompt the Host
+    /// injected is marked (`auto_wake`) instead of reading as the user's.
+    pub origin: &'static str,
 }
 
 pub async fn with_dispatch_timeout_for<F>(
@@ -906,7 +827,7 @@ where
 {
     match tokio::time::timeout(budget, fut).await {
         Ok(result) => result,
-        Err(_) => TurnResult::fail(TurnStatus::RetryLater, session_id, HOST_BUSY_RETRY_MESSAGE),
+        Err(_) => TurnResult::fail(TurnStatus::Unknown, session_id, DISPATCH_UNKNOWN_MESSAGE),
     }
 }
 
@@ -930,10 +851,13 @@ pub async fn dispatch_turn(
     req: PreparedSend,
 ) -> TurnResult {
     let sid = req.session_id.clone();
+    if let Err(e) = crate::session_migration::reject_imported_history_id(Some(&sid)) {
+        return TurnResult::fail(TurnStatus::Error, sid, e);
+    }
     // Mid-turn (drawing / tools / permission): do not connect-steal or send.
     // Push onto the same composer follow-up queue the GUI already shows.
     if mgr.session_turn_busy(&sid) {
-        return enqueue_while_busy(app, &sid, &req.prompt);
+        return enqueue_while_busy(app, &sid, &req.prompt).await;
     }
     if let Err(e) = mgr
         .connect(app.clone(), req.project_path, Some(sid.clone()), None, None)
@@ -943,22 +867,18 @@ pub async fn dispatch_turn(
     }
     // Connect can race a new turn; treat that as queue, never interrupt.
     if mgr.session_turn_busy(&sid) {
-        return enqueue_while_busy(app, &sid, &req.prompt);
+        return enqueue_while_busy(app, &sid, &req.prompt).await;
     }
     match mgr
-        .send_message(
-            app.clone(),
-            req.prompt.clone(),
-            None,
-            None,
-            Some(sid.clone()),
-        )
+        .send_injected_message(app.clone(), req.prompt.clone(), sid.clone(), req.origin)
         .await
     {
+        // Origin belongs to this future's exact turn; cancellation cannot leave
+        // a session-global arm for an intervening or later user message.
         Ok(_) => TurnResult::started(sid),
         Err(e) => {
             if classify_send_error(&e) == TurnStatus::Busy {
-                return enqueue_while_busy(app, &sid, &req.prompt);
+                return enqueue_while_busy(app, &sid, &req.prompt).await;
             }
             TurnResult::fail(classify_send_error(&e), sid, e)
         }
@@ -976,41 +896,31 @@ async fn handle_turn(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    if let Some(ref k) = key {
-        if let Some(prev) = recall_idempotency(k) {
-            if prev.status == TurnStatus::Queued {
-                if let (Some(id), Some(prompt)) = (&prev.queue_item_id, &prev.queued_prompt) {
-                    emit_external_queue(&state.app, &prev.session_id, prompt, id);
-                }
+    let (result, _replayed) = idempotency::run_at(
+        &app_data_root().join("session-api-idempotency.json"),
+        session_id,
+        &body.prompt,
+        key.as_deref(),
+        || async {
+            match prepare_send(session_id, &body.prompt, "external") {
+                Ok(prepared) => dispatch_turn_or_timeout(&state.app, &state.mgr, prepared).await,
+                Err(result) => *result,
             }
-            return (status_for(&prev.status), Json(prev));
-        }
-    }
-    let prepared = match prepare_send(session_id, &body.prompt) {
-        Ok(p) => p,
-        Err(mut r) => {
-            r.idempotency_key = key.clone();
-            if let Some(ref k) = key {
-                remember_idempotency(k, &r);
-            }
-            return (status_for(&r.status), Json(*r));
-        }
-    };
-    let mut result = dispatch_turn_or_timeout(&state.app, &state.mgr, prepared).await;
-    result.idempotency_key = key.clone();
-    if result.status != TurnStatus::RetryLater {
-        if let Some(ref k) = key {
-            remember_idempotency(k, &result);
-        }
-    }
+        },
+    )
+    .await;
+    // Snapshots reconcile the UI; replay must never emit a stale queued item.
+    let result = queue_result::resolve_at(&app_data_root(), result).await;
     (status_for(&result.status), Json(result))
 }
 
 fn status_for(s: &TurnStatus) -> StatusCode {
     match s {
-        TurnStatus::TurnStarted => StatusCode::OK,
+        TurnStatus::TurnStarted | TurnStatus::Cancelled => StatusCode::OK,
         TurnStatus::Queued => StatusCode::ACCEPTED,
-        TurnStatus::Busy => StatusCode::CONFLICT,
+        TurnStatus::Busy | TurnStatus::Unknown | TurnStatus::IdempotencyConflict => {
+            StatusCode::CONFLICT
+        }
         TurnStatus::NotFound => StatusCode::NOT_FOUND,
         TurnStatus::AppNotRunning | TurnStatus::RetryLater => StatusCode::SERVICE_UNAVAILABLE,
         TurnStatus::Error => StatusCode::BAD_REQUEST,
@@ -1066,9 +976,104 @@ async fn get_health(State(state): State<HttpState>, headers: HeaderMap) -> impl 
     Json(health_payload(&state.mgr)).into_response()
 }
 
+// ── PR monitor (the Agent's handle on this chat's watches) ──────────────────
+//
+// The branch menu is the human path to a watch; these routes are the agent path,
+// driven by the injected `pr-monitor` MCP (`pr_monitor::mcp`). All three reuse
+// the Host's own commands, so the menu and the agent can never disagree about
+// what a chat is watching.
+
+#[derive(Debug, Deserialize)]
+struct PrWatchesQuery {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrWatchBody {
+    session_id: String,
+    project_path: String,
+    pr_number: u64,
+    #[serde(default)]
+    interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrUnwatchBody {
+    session_id: String,
+    pr_number: u64,
+}
+
+fn bad_request(message: &str) -> impl IntoResponse {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "ok": false,
+            "status": "error",
+            "message": message,
+        })),
+    )
+}
+
+async fn get_pr_watches(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(q): Query<PrWatchesQuery>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let sid = q.session_id.trim();
+    if sid.is_empty() {
+        return bad_request("session_id is required").into_response();
+    }
+    let state = crate::pr_monitor::pr_monitor_state(sid.to_string()).await;
+    Json(state).into_response()
+}
+
+async fn post_pr_watch(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(body): Json<PrWatchBody>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let sid = body.session_id.trim();
+    if sid.is_empty() {
+        return bad_request("session_id is required").into_response();
+    }
+    let result = crate::pr_monitor::pr_monitor_watch(
+        state.app.clone(),
+        sid.to_string(),
+        body.project_path,
+        body.pr_number,
+        body.interval_secs,
+    )
+    .await;
+    Json(result).into_response()
+}
+
+async fn delete_pr_watch(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(body): Json<PrUnwatchBody>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let sid = body.session_id.trim();
+    if sid.is_empty() {
+        return bad_request("session_id is required").into_response();
+    }
+    let result =
+        crate::pr_monitor::pr_monitor_unwatch(state.app.clone(), sid.to_string(), body.pr_number)
+            .await;
+    Json(result).into_response()
+}
+
 pub async fn start(app: AppHandle, mgr: Arc<SessionManager>) -> Result<SessionApiHandle, String> {
     let token = random_token();
-    fanout_persisted_queue(&app);
+    fanout_persisted_queue(&app).await;
     schedule_drain_ready_external_queues(app.clone(), Arc::clone(&mgr));
     let state = HttpState {
         token: token.clone(),
@@ -1079,6 +1084,9 @@ pub async fn start(app: AppHandle, mgr: Arc<SessionManager>) -> Result<SessionAp
         .route("/v1/health", get(get_health))
         .route("/v1/sessions", get(get_sessions))
         .route("/v1/sessions/{id}/turns", post(post_turn))
+        .route("/v1/pr-monitor/watches", get(get_pr_watches))
+        .route("/v1/pr-monitor/watches", post(post_pr_watch))
+        .route("/v1/pr-monitor/watches", delete(delete_pr_watch))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1227,15 +1235,7 @@ pub fn run_cli() -> i32 {
             match http_send(&ep, &session_id, &prompt, idempotency_key.as_deref()) {
                 Ok(r) => {
                     print_turn(&r);
-                    if r.ok {
-                        0
-                    } else if r.status == TurnStatus::Busy {
-                        3
-                    } else if r.status == TurnStatus::AppNotRunning {
-                        2
-                    } else {
-                        1
-                    }
+                    turn_exit_code(&r)
                 }
                 Err(e) => {
                     let (status, code, message) = classify_cli_transport_error(&e, &session_id);
@@ -1253,6 +1253,18 @@ pub fn run_cli() -> i32 {
             eprintln!("{e}");
             1
         }
+    }
+}
+
+fn turn_exit_code(r: &TurnResult) -> i32 {
+    if r.ok {
+        0
+    } else if r.status == TurnStatus::Busy {
+        3
+    } else if r.status == TurnStatus::AppNotRunning {
+        2
+    } else {
+        1
     }
 }
 
@@ -1504,7 +1516,7 @@ mod tests {
             "error sending request for url (http://127.0.0.1:9/v1/sessions/x/turns): operation timed out"
         ));
         let (status, code, msg) = classify_cli_transport_error("operation timed out", "abc");
-        assert_eq!(status, TurnStatus::Error);
+        assert_eq!(status, TurnStatus::Unknown);
         assert_eq!(code, 1);
         assert!(!msg.to_ascii_lowercase().contains("not running"), "{msg}");
     }
@@ -1521,42 +1533,24 @@ mod tests {
     }
 
     #[test]
-    fn persist_queue_roundtrip_and_take() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "grok-app-session-api-q-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("GROK_APP_HOME", &tmp);
-        persist_queue_item(PersistedQueueItem {
-            session_id: "s1".into(),
-            item_id: "q-1".into(),
-            prompt: "hello".into(),
-            created_at: 1,
-        });
-        persist_queue_item(PersistedQueueItem {
-            session_id: "s1".into(),
-            item_id: "q-2".into(),
-            prompt: "world".into(),
-            created_at: 2,
-        });
-        let head = take_persisted_head("s1").expect("head");
-        assert_eq!(head.item_id, "q-1");
-        assert_eq!(head.prompt, "hello");
-        let rest = load_persisted_queue();
-        assert_eq!(rest.items.len(), 1);
-        assert_eq!(rest.items[0].item_id, "q-2");
-        std::env::remove_var("GROK_APP_HOME");
-        let _ = std::fs::remove_dir_all(&tmp);
+    fn persist_queue_roundtrip_and_confirmed_take() {
+        let home = queue_regression_tests::Fixture::new();
+        let first = queue_store::Item::new("s1", "q-1", "hello", 1);
+        let second = queue_store::Item::new("s1", "q-2", "world", 2);
+        queue_store::insert(&home.path(), first.clone()).unwrap();
+        queue_store::insert(&home.path(), second).unwrap();
+        let nonce = queue_store::claim(&home.path(), &first).unwrap().unwrap();
+        assert_eq!(queue_store::list(&home.path()).unwrap().len(), 2);
+        assert!(
+            queue_store::finish(&home.path(), &first, &nonce, &TurnResult::started("s1")).unwrap()
+        );
+        let rest = queue_store::list(&home.path()).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].item_id, "q-2");
     }
 
     #[tokio::test]
-    async fn dispatch_timeout_returns_retry_later() {
+    async fn dispatch_timeout_returns_unknown_without_asserting_unsent() {
         let sid = "s-timeout".to_string();
         let r = with_dispatch_timeout_for(
             std::time::Duration::from_millis(30),
@@ -1564,13 +1558,13 @@ mod tests {
             std::future::pending::<TurnResult>(),
         )
         .await;
-        assert_eq!(r.status, TurnStatus::RetryLater);
+        assert_eq!(r.status, TurnStatus::Unknown);
         assert_eq!(r.session_id, sid);
         assert!(
             r.message
                 .as_deref()
                 .unwrap_or("")
-                .contains("host busy: connect in progress"),
+                .contains("outcome unknown"),
             "{:?}",
             r.message
         );

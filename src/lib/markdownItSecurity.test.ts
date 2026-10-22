@@ -31,7 +31,36 @@ const renderPayload = `
   }));
 `;
 
+// GHSA-gfr2-rv44-r23c also affects default options. One reference definition
+// with many title lines must preserve its entire title without quadratic work.
+const renderMultilineReference = `
+  const MarkdownIt = require(process.argv[1]);
+  const title = '\\n' + 'line\\n'.repeat(200000);
+  const input = '[ref]: /target "' + title + '"\\n\\n[link][ref]\\n';
+  const expected = '<p><a href="/target" title="' + title + '">link</a></p>\\n';
+  const html = new MarkdownIt().render(input);
+  process.stdout.write(JSON.stringify({ matches: html === expected }));
+`;
+
 describe.each(parsers)("%s production parser security", (_name, parser) => {
+  it(
+    "renders a multiline reference within an isolated process budget",
+    () => {
+      const output = execFileSync(
+        process.execPath,
+        ["-e", renderMultilineReference, parser],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          maxBuffer: 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      expect(JSON.parse(output)).toEqual({ matches: true });
+    },
+    15_000,
+  );
+
   it.each(["emails", "schemes"])(
     "renders the %s payload within an isolated process budget",
     (kind) => {

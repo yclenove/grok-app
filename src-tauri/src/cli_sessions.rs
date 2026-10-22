@@ -1682,8 +1682,17 @@ pub fn reconcile_journal_from_chat_history(
     cwd_hint: Option<&str>,
     session_data_mode: &str,
 ) -> Result<u32, String> {
-    let dir = crate::paths::find_agent_session_dir(agent_session_id, cwd_hint, session_data_mode)
-        .ok_or_else(|| format!("CLI session dir not found for {agent_session_id}"))?;
+    let meta = store::load_sessions_snapshot()?
+        .into_iter()
+        .find(|row| row.id == app_session_id)
+        .ok_or("App session is unavailable")?;
+    let dir = crate::session_execution::find_session_dir(
+        &meta,
+        agent_session_id,
+        cwd_hint,
+        session_data_mode,
+    )?
+    .ok_or_else(|| format!("CLI session dir not found for {agent_session_id}"))?;
     let history = dir.join("chat_history.jsonl");
     if !history.is_file() {
         return Ok(0);
@@ -1862,7 +1871,8 @@ fn linked_reconcile_allowed(meta: &SessionMeta) -> bool {
 /// Best-effort reconcile when opening an App session that is linked to an agent.
 /// Never fails the load path — missing agent dir is normal for brand-new chats.
 pub fn try_reconcile_linked_session(app_session_id: &str) -> u32 {
-    let meta = store::load_sessions_index()
+    let meta = store::load_sessions_snapshot()
+        .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == app_session_id);
     let Some(meta) = meta else {
@@ -1874,9 +1884,14 @@ pub fn try_reconcile_linked_session(app_session_id: &str) -> u32 {
     let Some(agent_id) = meta.agent_session_id.as_deref().filter(|s| !s.is_empty()) else {
         return 0;
     };
-    let mode = store::load_settings().session_data_mode;
+    let mode = if meta.agent_execution.is_none() {
+        store::load_settings().session_data_mode
+    } else {
+        String::new()
+    };
     let cwd_hint = meta.project_id.as_deref().and_then(|pid| {
-        store::load_projects()
+        store::load_projects_snapshot()
+            .unwrap_or_default()
             .into_iter()
             .find(|p| p.id == pid)
             .map(|p| p.path)
@@ -2226,6 +2241,10 @@ pub fn delete_cli_session(
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "cli_sessions_import_tests.rs"]
+mod import_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2978,9 +2997,9 @@ mod tests {
 
     #[test]
     fn find_latest_prefers_newest_under_encoded_cwd() {
-        use crate::paths::{percent_encode_path_component, APP_HOME_ENV_LOCK};
+        use crate::paths::percent_encode_path_component;
 
-        let _guard = APP_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let app_home = std::env::temp_dir().join(format!("cli-cont-{}", Uuid::new_v4()));
         let agent_home = app_home.join("agent-home");
         let proj = "/Users/me/continue-proj";
@@ -3036,15 +3055,14 @@ mod tests {
                 .is_none()
         );
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&app_home);
     }
 
     #[test]
     fn find_latest_matches_trailing_slash_variant() {
-        use crate::paths::{percent_encode_path_component, APP_HOME_ENV_LOCK};
+        use crate::paths::percent_encode_path_component;
 
-        let _guard = APP_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let app_home = std::env::temp_dir().join(format!("cli-cont2-{}", Uuid::new_v4()));
         let agent_home = app_home.join("agent-home");
         let proj = "/Users/me/slash-proj";
@@ -3065,7 +3083,6 @@ mod tests {
             .unwrap()
             .expect("trailing slash should still match");
         assert_eq!(hit.agent_session_id, "agent-slash");
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&app_home);
     }
 
@@ -3229,4 +3246,9 @@ Total: 1
     fn linked_reconcile_allows_ordinary_linked_session() {
         assert!(linked_reconcile_allowed(&fork_meta(false, None)));
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        find_latest_prefers_newest_under_encoded_cwd,
+        find_latest_matches_trailing_slash_variant,
+    );
 }

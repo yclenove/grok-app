@@ -25,6 +25,8 @@ import {
   toggleAllowedTool,
 } from "@/lib/allowedTools";
 import { detectAppPlatform } from "@/lib/appPlatform";
+import { openSessionImport } from "@/lib/sessionImport/open";
+import { ImportedCatalogEntry } from "@/components/session-import/ImportedCatalogEntry";
 import {
   STT_PROVIDER_PRESETS,
   applySttLanguageOption,
@@ -70,6 +72,7 @@ import {
   saveComposerSendKeyPref,
   type ComposerSendKeyPref,
 } from "@/lib/composerSendKey";
+import { saveComposerEnterInsertsLive } from "@/lib/composerEnterInsertsLive";
 import { saveComposerDraftStatsPref } from "@/lib/draftStats";
 import { saveComposerSpellcheck } from "@/lib/composerSpellcheck";
 import { COMPOSER_MIN_ROWS_OPTIONS } from "@/lib/composerMinRows";
@@ -119,6 +122,8 @@ export function GeneralSection() {
     composerDraftStats,
     composerMinRows,
     composerSendKeyPref,
+    composerEnterInsertsLive,
+    setComposerEnterInsertsLive,
     composerSpellcheck,
     defaultOpenTarget = "finder",
     disableWebSearch,
@@ -403,6 +408,31 @@ export function GeneralSection() {
                       label: t("settings.composerSendKey.modEnter"),
                     },
                   ]}
+                />
+              </div>
+              <div
+                className={
+                  "settings-row" +
+                  rowHighlight("settings-anchor-composerEnterInsertsLive")
+                }
+                id="settings-anchor-composerEnterInsertsLive"
+              >
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("settings.composerEnterInsertsLive")}
+                  </div>
+                  <div className="settings-row__desc">
+                    {t("settings.composerEnterInsertsLiveDesc")}
+                  </div>
+                </div>
+                <UiCheck
+                  checked={composerEnterInsertsLive}
+                  onChange={() => {
+                    const next = !composerEnterInsertsLive;
+                    setComposerEnterInsertsLive(next);
+                    saveComposerEnterInsertsLive(next);
+                  }}
+                  ariaLabel={t("settings.composerEnterInsertsLive")}
                 />
               </div>
               <div
@@ -2255,6 +2285,34 @@ export function GeneralSection() {
 
             <h2 className="settings-page__h2">{t("settings.section.general")}</h2>
             <div className="settings-card">
+              <div
+                className={"settings-row" + rowHighlight("settings-anchor-sessionImport")}
+                id="settings-anchor-sessionImport"
+              >
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("sessionImport.settingsEntry")}
+                  </div>
+                  <div className="settings-row__desc">
+                    {t("sessionImport.settingsEntryDesc")}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => openSessionImport({ mode: "wizard" })}
+                >
+                  {t("sessionImport.entry")}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => openSessionImport({ mode: "file" })}
+                >
+                  {t("sessionImport.fileMode")}
+                </button>
+              </div>
+              <ImportedCatalogEntry tr={t} />
               <div
                 className={"settings-row" + rowHighlight("settings-anchor-language")}
                 id="settings-anchor-language"

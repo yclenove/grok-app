@@ -105,6 +105,20 @@ function deferredOriginals(count: number) {
 }
 
 describe("ImageViewer lifecycle", () => {
+  it("a stale reader owner cannot close a newer gallery or leave a pending old gallery open", async () => {
+    const view = setup();
+    const old = Symbol("old"); const fresh = Symbol("fresh");
+    act(() => view.api.open(["old.jpg"], 0, old));
+    act(() => view.api.close(old));
+    await act(async () => {});
+    expect(view.api.isOpen()).toBe(false);
+    act(() => view.api.open(["fresh.jpg"], 0, fresh));
+    await waitFor(() => expect(view.api.isOpen()).toBe(true));
+    act(() => view.api.close(old));
+    expect(view.api.isOpen()).toBe(true);
+    act(() => view.api.close(fresh));
+    expect(view.api.isOpen()).toBe(false);
+  });
   it("starts a new gallery without waiting for closed original downloads", async () => {
     const old = deferredOriginals(2);
     const view = setup();

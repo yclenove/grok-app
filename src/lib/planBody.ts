@@ -16,6 +16,8 @@ export type PlanReviewState = {
   body: string;
   entries: unknown[];
   rpcId?: number | null;
+  requestGeneration?: string | null;
+  busy?: boolean;
   toolCallId?: string | null;
 };
 

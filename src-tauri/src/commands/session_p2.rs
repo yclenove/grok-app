@@ -48,30 +48,55 @@ pub async fn session_resolve_relative_media(
 fn resolve_media_search_roots(
     session_id: &str,
 ) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
-    let meta = store::load_sessions_index()
+    let meta = store::load_sessions_snapshot()
+        .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == session_id);
     let Some(meta) = meta else {
         return (None, None);
     };
+    if let Some(receipt) = &meta.agent_execution {
+        if receipt.validate(meta.agent_session_id.as_deref()).is_err()
+            || matches!(
+                receipt.source,
+                crate::session_execution::ExecutionSource::Remote
+                    | crate::session_execution::ExecutionSource::Unavailable
+            )
+        {
+            return (None, None);
+        }
+    }
     let project_root = meta.project_id.as_ref().and_then(|pid| {
-        store::load_projects()
+        store::load_projects_snapshot()
+            .unwrap_or_default()
             .into_iter()
             .find(|p| &p.id == pid)
             .map(|p| std::path::PathBuf::from(p.path))
     });
-    let session_root = meta.agent_session_id.as_deref().and_then(|agent_sid| {
-        let settings = store::load_settings();
-        crate::paths::find_agent_session_dir(
-            agent_sid,
-            project_root
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .as_deref(),
-            &settings.session_data_mode,
-        )
-    });
-    (session_root, project_root)
+    let session_root = meta
+        .agent_session_id
+        .as_deref()
+        .map(|agent_sid| {
+            let legacy_mode = if meta.agent_execution.is_none() {
+                store::load_settings().session_data_mode
+            } else {
+                String::new()
+            };
+            crate::session_execution::find_session_dir(
+                &meta,
+                agent_sid,
+                project_root
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .as_deref(),
+                &legacy_mode,
+            )
+        })
+        .transpose();
+    match session_root {
+        Err(_) => (None, None),
+        Ok(root) => (root.flatten(), project_root),
+    }
 }
 
 fn resolve_session_media_root(session_id: &str) -> Option<String> {
@@ -79,4 +104,3 @@ fn resolve_session_media_root(session_id: &str) -> Option<String> {
         .0
         .map(|p| p.to_string_lossy().to_string())
 }
-

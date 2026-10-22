@@ -8,6 +8,7 @@ import { IconAppearance, IconArchive, IconCheck, IconChevronDown, IconChevronUp,
 import { canMoveProjectInPinGroup } from "@/lib/app/projectOrder";
 import { isGeneralProject, projectDisplayName, type Project, type SessionRow } from "@/lib/app/sidebarModels";
 import { revealInOsLabel, type AppPlatform } from "@/lib/appPlatform";
+import { openSessionImport } from "@/lib/sessionImport/open";
 import { canOfferContinueCwd } from "@/lib/continueCwd";
 import { PERMISSION_POLICIES, type PermissionPolicyId } from "@/lib/grokCatalog";
 import { PROJECT_COLOR_TOKENS, normalizeProjectColor, resolveProjectColorCss, type ProjectColorToken } from "@/lib/projectColor";
@@ -130,6 +131,12 @@ export function buildProjectContextMenuItems(
                     .projectSetPinned(proj.id, !proj.pinned)
                     .then(() => refreshProjects());
                 },
+              },
+              {
+                id: "import-here",
+                label: tr("project.importHere"),
+                icon: <IconHistory size={16} />,
+                onClick: () => openSessionImport({ projectId: proj.id }),
               },
               ...(projectReorder.enabled
                 ? [

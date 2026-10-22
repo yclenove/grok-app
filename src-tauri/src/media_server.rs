@@ -29,6 +29,9 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
+#[path = "media_server_import_images.rs"]
+mod import_images;
+
 /// Max bytes returned per Range request (keeps memory bounded — video/audio/PDF).
 const MAX_CHUNK: u64 = 2 * 1024 * 1024; // 2 MiB
 
@@ -158,6 +161,12 @@ pub async fn start() -> Result<MediaServerHandle, String> {
             get(media_get).head(media_get).options(media_options),
         )
         .route("/v1/health", get(health))
+        .route(
+            "/v1/import-image",
+            get(import_images::image_get)
+                .head(import_images::image_get)
+                .options(media_options),
+        )
         .fallback(fallback_not_found)
         .with_state(state);
 
@@ -793,7 +802,8 @@ mod tests {
             .expect("media server port");
         assert!(is_browser_safe_media_port(port));
         let url = url_for_path(&handle.endpoint(), &file.to_string_lossy());
-        let client = reqwest::Client::new();
+        // Exercise this owned loopback server, regardless of the host's proxy.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let res = client.get(&url).send().await.expect("get");
         assert_eq!(res.status(), 200);
         let bytes = res.bytes().await.unwrap();

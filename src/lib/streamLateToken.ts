@@ -1,4 +1,5 @@
 import { contentLooksLikeThought } from "./session/segments";
+import { isInjectedPromptMarker } from "./session";
 
 /**
  * Decide whether a stream text chunk may still be applied when the focused
@@ -36,7 +37,7 @@ export function shouldApplyLateStreamText(opts: {
   let lastUserIdx = -1;
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
-    if (m?.role === "user" && m.marker !== "interjection") {
+    if (m?.role === "user" && !isInjectedPromptMarker(m.marker)) {
       lastUserIdx = i;
       break;
     }
@@ -106,6 +107,8 @@ export const JOURNAL_REHYDRATE_RECONCILE = false;
 export function shouldIgnorePrematureStreamDone(opts: {
   hostLiveStreaming: boolean;
   hasRunningTool: boolean;
+  hostFinalized?: boolean;
 }): boolean {
+  if (opts.hostFinalized) return false;
   return opts.hostLiveStreaming || opts.hasRunningTool;
 }

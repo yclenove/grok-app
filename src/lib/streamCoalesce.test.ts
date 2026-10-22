@@ -22,10 +22,17 @@ describe("streamCoalesce", () => {
     );
   });
 
-  it("merges text and ORs done", () => {
+  it("merges text and preserves terminal Host finalization", () => {
     const m = mergeStreamChunks(
       { sessionId: "s", messageId: "m", kind: "assistant", text: "hel" },
-      { sessionId: "s", messageId: "m", kind: "assistant", text: "lo", done: true },
+      {
+        sessionId: "s",
+        messageId: "m",
+        kind: "assistant",
+        text: "lo",
+        done: true,
+        hostFinalized: true,
+      },
     );
     expect(m).toEqual({
       sessionId: "s",
@@ -33,6 +40,7 @@ describe("streamCoalesce", () => {
       kind: "assistant",
       text: "hello",
       done: true,
+      hostFinalized: true,
       thoughtPhase: undefined,
     });
   });

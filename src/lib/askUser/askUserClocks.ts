@@ -8,6 +8,7 @@
 import { dropGateClock } from "../gateClock";
 
 const askUserClocks = new Map<string, number>();
+const pausedClocks = new Set<string>();
 
 export function getAskUserClocks(): Map<string, number> {
   return askUserClocks;
@@ -16,13 +17,23 @@ export function getAskUserClocks(): Map<string, number> {
 /** Drop auto-cancel clocks for every AskUser request on `sessionId`. */
 export function dropAskUserClocks(sessionId: string): void {
   const prefix = `${sessionId}:`;
-  for (const key of [...askUserClocks.keys()]) {
+  for (const key of new Set([...askUserClocks.keys(), ...pausedClocks])) {
     if (key.startsWith(prefix) || key === sessionId) {
-      askUserClocks.delete(key);
+      dropAskUserClock(key);
     }
   }
 }
 
 export function dropAskUserClock(key: string): void {
   dropGateClock(askUserClocks, key);
+  pausedClocks.delete(key);
+}
+
+/** A failed reply stays retryable, without repeating an expired automatic cancel. */
+export function pauseAskUserClock(key: string): void {
+  pausedClocks.add(key);
+}
+
+export function isAskUserClockPaused(key: string): boolean {
+  return pausedClocks.has(key);
 }

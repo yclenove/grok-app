@@ -72,6 +72,42 @@ reopen/replace the current gallery nor restore selection or local-path state
 from the previous source revision. Cancellation is still sent to the matching
 Host media bridge so renderer rejection is not the only boundary.
 
+## Imported-history images
+
+Imported archive blobs have digest filenames without extensions. Resolve them
+with `session_import_image_resolve(scope, assetId)`, where scope identifies an
+exact preview lease or published import/revision. The renderer must not submit
+a filesystem path, digest or MIME override. The Host validates the scope,
+catalog, regular non-reparse blob path, byte count, digest and image format.
+
+The separate authenticated loopback route `/v1/import-image` accepts that same
+scope and asset identity and revalidates it for every request. Originals are
+complete200responses up to40MiB; thumbnails use the bounded480px JPEG decoder.
+Both use `private, no-store` and `nosniff`, with the existing token/origin rules.
+This route does not change generic video/audio/PDF Range delivery. IPC and HTTP
+share two active Host reader/decode slots, including work left by a closed UI.
+
+Human reading never widens model attachment selection or continuation grants,
+fetches remote references, or writes a renamed archive copy. Keep display order
+and image activation separate from attachment checkboxes. Scope/revision/branch
+changes discard stale resolves and close only the owning image gallery. Missing,
+unresolved, excluded, oversize, unsupported and invalid images have distinct
+localized states; loading or Stored is not a missing attachment.
+
+V814 completed the scoped synthetic Chinese Windows image/branch/job-reopen and
+same-path restart checklist on 2026-10-16; closed read-only archive/blob audit
+passed on 10-21. It fixes preview summary and omitted/empty-leaf published reads
+to follow the confirmed receipt-selected leaf, preserving the full source graph
+and existing model grants. Thumbnail and full >2MiB originals were displayed;
+viewing a preview image did not toggle the model attachment checkbox. Fixed user
+preview remains V789; V814 is not promoted. Actual vision dispatch, Cursor media,
+real-source/scaling and original-platform acceptance remain open; see
+[the handoff](../plans/2026-10-21-session-import-claude-handoff.md).
+The image catalog parser must buffer its underlying reader: serde_json's
+byte-wise Read would otherwise turn skipped multi-MiB source references into
+millions of file reads. Keep complete-tail/duplicate and authority checks.
+Do not infer desktop or large-archive acceptance from the contract or unit gates.
+
 ## Fallback
 
 `media://` custom protocol remains registered for cold-start races only. Steady-state UI should use HTTP URLs.

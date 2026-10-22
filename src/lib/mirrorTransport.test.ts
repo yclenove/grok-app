@@ -24,6 +24,13 @@ async function invokeError(cmd: string): Promise<Error & { code?: string }> {
 }
 
 describe("mirror CMD_TO_METHOD allowlist", () => {
+  it("allows the conditional plan chrome and read-only snapshot commands through the transport", async () => {
+    for (const cmd of ["session_plan_chrome_get", "session_plan_chrome_set", "session_agent_plan_snapshot"]) {
+      const err = await invokeError(cmd);
+      expect(err.code).not.toBe("UNSUPPORTED");
+      expect(String(err.message)).toContain("mirror websocket");
+    }
+  });
   it("rejects commands not on the allowlist with UNSUPPORTED", async () => {
     // Desktop-only surfaces the phone must never reach.
     for (const cmd of ["secrets_get_masked", "voice_start", "reset_app_data", "fs_read_file"]) {
@@ -35,6 +42,12 @@ describe("mirror CMD_TO_METHOD allowlist", () => {
   it("allows voice_status (voice.status) past the boundary", async () => {
     const err = await invokeError("voice_status");
     // Allowlisted → not UNSUPPORTED; it reached the transport layer.
+    expect(err.code).not.toBe("UNSUPPORTED");
+    expect(String(err.message)).toContain("mirror websocket");
+  });
+
+  it("allows session_stop_report (session.stopReport) past the boundary", async () => {
+    const err = await invokeError("session_stop_report");
     expect(err.code).not.toBe("UNSUPPORTED");
     expect(String(err.message)).toContain("mirror websocket");
   });

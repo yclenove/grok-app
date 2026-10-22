@@ -1,5 +1,19 @@
 #[tauri::command]
 pub async fn pick_directory() -> Result<Option<String>, String> {
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(preset) = std::env::var("GROK_TEST_PICK_DIRECTORY") {
+            let trimmed = preset.trim();
+            if !trimmed.is_empty() {
+                let path = std::path::PathBuf::from(trimmed);
+                if path.is_dir() {
+                    crate::path_scope::grant_path(&path);
+                    return Ok(Some(path.display().to_string()));
+                }
+                return Err("GROK_TEST_PICK_DIRECTORY is not a directory".into());
+            }
+        }
+    }
     // rfd must run off the async runtime (main-thread dialog on macOS via spawn_blocking)
     let folder = tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
@@ -44,7 +58,10 @@ pub async fn pick_attach_folder() -> Result<Option<String>, String> {
     })
     .await
     .map_err(|e| e.to_string())?;
-    Ok(folder.map(|p| { crate::path_scope::grant_path(&p); p.display().to_string() }))
+    Ok(folder.map(|p| {
+        crate::path_scope::grant_path(&p);
+        p.display().to_string()
+    }))
 }
 
 /// Save clipboard / webview File bytes into app attachments dir; return classified path.
@@ -58,11 +75,7 @@ pub async fn save_temp_attachment(
     use base64::Engine;
     let raw = bytes_base64.trim();
     // Accept data-URL prefix if present
-    let b64 = raw
-        .split(',')
-        .next_back()
-        .unwrap_or(raw)
-        .trim();
+    let b64 = raw.split(',').next_back().unwrap_or(raw).trim();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|e| format!("invalid base64: {e}"))?;
@@ -87,10 +100,7 @@ pub async fn save_temp_attachment(
             .unwrap_or_else(|| "bin".into())
     });
 
-    let safe_name = sanitize_attachment_name(
-        suggested_name.as_deref(),
-        &ext,
-    );
+    let safe_name = sanitize_attachment_name(suggested_name.as_deref(), &ext);
     let dir = crate::paths::attachments_paste_dir();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
     let file_name = format!("{stamp}-{safe_name}");
@@ -580,7 +590,9 @@ fn paths_classify_sync(paths: Vec<String>) -> Vec<PathEntry> {
 /// Prefer disk cache; extract with ffmpeg when missing. Frontend may also save a
 /// canvas capture via [`media_video_poster_save`].
 #[tauri::command]
-pub async fn media_video_poster(path: String) -> Result<crate::video_poster::VideoPosterResult, String> {
+pub async fn media_video_poster(
+    path: String,
+) -> Result<crate::video_poster::VideoPosterResult, String> {
     tokio::task::spawn_blocking(move || crate::video_poster::ensure_video_poster(&path))
         .await
         .map_err(|e| e.to_string())?

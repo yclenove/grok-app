@@ -2,9 +2,7 @@ use super::*;
 
 #[test]
 fn reset_keeps_secrets_when_requested() {
-    let _g = crate::paths::APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let tmp = std::env::temp_dir().join(format!(
         "grok-app-reset-test-{}-{}",
         std::process::id(),
@@ -22,15 +20,12 @@ fn reset_keeps_secrets_when_requested() {
     assert!(tmp.join("secrets.json").is_file());
     assert!(!tmp.join("sessions_index.json").is_file());
     assert!(tmp.join("sessions").is_dir()); // recreated empty
-    std::env::remove_var("GROK_APP_HOME");
     let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn reset_removes_skin_dirs_keeps_wallpaper_library() {
-    let _g = crate::paths::APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let tmp = std::env::temp_dir().join(format!(
         "grok-app-reset-skin-{}-{}",
         std::process::id(),
@@ -55,15 +50,13 @@ fn reset_removes_skin_dirs_keeps_wallpaper_library() {
         .join("library")
         .join("keep.jpg")
         .is_file());
-    std::env::remove_var("GROK_APP_HOME");
     let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn support_bundle_creates_zip_without_secrets() {
-    let _g = crate::paths::APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _probe = ExportProbeStub::acquire();
+    let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let tmp = std::env::temp_dir().join(format!("grok-app-bundle-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(tmp.join("logs")).unwrap();
@@ -106,9 +99,9 @@ fn support_bundle_creates_zip_without_secrets() {
         "meta must include cli probe object: {meta_body}"
     );
     assert!(!meta_body.contains("sk-secret"));
+    assert!(meta_body.contains("unit_test_stub"));
 
     let _ = fs::remove_file(&zip_path);
-    std::env::remove_var("GROK_APP_HOME");
     let _ = fs::remove_dir_all(&tmp);
 }
 
@@ -126,9 +119,8 @@ fn redact_text_scrubs_api_keys_from_doctor_payload() {
 
 #[test]
 fn support_bundle_includes_redacted_stall_timeline() {
-    let _g = crate::paths::APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _probe = ExportProbeStub::acquire();
+    let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let tmp = std::env::temp_dir().join(format!("grok-app-bundle-stall-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
@@ -181,15 +173,13 @@ fn support_bundle_includes_redacted_stall_timeline() {
     assert!(body.contains("[REDACTED]") || !body.contains("sk-stall"));
 
     let _ = fs::remove_file(&zip_path);
-    std::env::remove_var("GROK_APP_HOME");
     let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn session_bundle_includes_messages_without_secrets() {
-    let _g = crate::paths::APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _probe = ExportProbeStub::acquire();
+    let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let tmp = std::env::temp_dir().join(format!(
         "grok-app-session-bundle-test-{}",
         std::process::id()
@@ -261,6 +251,54 @@ fn session_bundle_includes_messages_without_secrets() {
         "bundle must include host forensic logs"
     );
     let _ = fs::remove_file(&zip_path);
-    std::env::remove_var("GROK_APP_HOME");
     let _ = fs::remove_dir_all(&tmp);
 }
+
+struct ExportProbeStub(Option<serde_json::Value>);
+
+#[test]
+fn execution_bundle_uses_actual_profile_not_global_decoy() {
+    use std::io::Read;
+    let fixture = crate::session_execution_tests::fixture("app_profile");
+    let _probe = ExportProbeStub::acquire();
+    let index_before = fs::read(paths::sessions_index_file()).unwrap();
+    let output = write_session_bundle(&fixture.meta.id, None).unwrap();
+    // Move only this fixture's newly created bundle into its owned tree for Drop.
+    let owned = fixture.actual.join("synthetic-export.zip");
+    fs::rename(output, &owned).unwrap();
+    let mut archive = zip::ZipArchive::new(fs::File::open(owned).unwrap()).unwrap();
+    let mut history = String::new();
+    archive
+        .by_name("agent/chat_history.jsonl")
+        .unwrap()
+        .read_to_string(&mut history)
+        .unwrap();
+    assert!(history.contains("ACTUAL_A"));
+    assert!(!history.contains("WRONG_GLOBAL_B"));
+    assert_eq!(
+        fs::read(paths::sessions_index_file()).unwrap(),
+        index_before
+    );
+}
+impl ExportProbeStub {
+    fn acquire() -> Self {
+        Self(TEST_EXPORT_CLI_PROBE.with(|probe| {
+            probe.replace(Some(serde_json::json!({
+                "found": false, "skipped": true, "reason": "unit_test_stub"
+            })))
+        }))
+    }
+}
+impl Drop for ExportProbeStub {
+    fn drop(&mut self) {
+        TEST_EXPORT_CLI_PROBE.with(|probe| probe.replace(self.0.take()));
+    }
+}
+
+crate::session_migration::test_home::fixture_home_contract_tests!(
+    reset_keeps_secrets_when_requested,
+    reset_removes_skin_dirs_keeps_wallpaper_library,
+    support_bundle_creates_zip_without_secrets,
+    support_bundle_includes_redacted_stall_timeline,
+    session_bundle_includes_messages_without_secrets,
+);

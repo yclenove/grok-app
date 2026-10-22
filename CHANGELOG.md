@@ -9,47 +9,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 CI Release body = this section only (via `scripts/changelog-for-release.py`; no repeated download/install boilerplate).  
 See `docs/llm-wiki/release.md`.
 
+Fork releases using the same version numbers have separate preserved records:
+[yclenove/grok-app, 2026-10-04](docs/releases/fork-2026-10-04.md).
+
 **What's New popup:** each bullet's **first sentence** is what users see. Keep that sentence to one short line (added / fixed / improved — no paths, no implementation, no issue piles). A second short sentence is allowed for GitHub / this file only. Do **not** rewrite already-shipped `## [X.Y.Z]` sections.
 
 ## [Unreleased]
 
-## [0.2.40] - 2026-10-04
+## [0.2.41] - 2026-10-14
 
-> **Highlight:** Linux ARM64 and Apple Silicon installers are on this GitHub Release.
+> **Highlight:** One chat can follow several pull requests, and an update continues it.
 >
-> **中文 · 亮点：** 本版 GitHub Release 含 Linux ARM64 与 Apple Silicon 安装包。
-
-### Fixed
-- Linux ARM64 AppImage, .deb, and .rpm are published. v0.2.39 lacked them (`xdg-mime` missing on the ARM runner).
-- The Apple Silicon .dmg is published. v0.2.39's macOS ARM job ran out of Node heap.
-
-**中文 · 修复**
-- Linux ARM64 的 AppImage、.deb 和 .rpm 已发布。v0.2.39 缺这三项（ARM 构建机没有 `xdg-mime`）。
-- Apple Silicon 的 .dmg 已发布。v0.2.39 的 macOS ARM 任务 Node 内存不足。
-
-## [0.2.39] - 2026-10-04
-
-> **Highlight:** Linux ARM64 installers are on GitHub Releases.
->
-> **中文 · 亮点：** GitHub Releases 提供 Linux ARM64 安装包。
+> **中文 · 亮点：** 一个对话可以盯上多条拉取请求，有更新时会自己接着写。
 
 ### Added
-- GitHub Releases include Linux ARM64 AppImage, .deb, and .rpm packages. Ubuntu 24.04+ aarch64.
-- Settings can switch the composer between Built-in and Markdown.
-
-### Fixed
-- Custom channels connect again when the channel name and the model id differ. The app tells the CLI the channel name, which is how that CLI finds the key. (#1294)
-- Sending one picture on Windows no longer shows that picture twice. The chat was counting the same file a second time. (#1284)
-- Markdown editor no longer freezes on large link-heavy documents.
+- A chat can watch several open pull requests from the branch menu. The chip shows how many are watched. (#1325)
+- The agent can watch and unwatch those pull requests itself. (#1327)
+- A pull-request update shows up as an automatic follow-up in the chat. (#1330)
 
 **中文 · 新增**
-- GitHub Releases 现提供 Linux ARM64 的 AppImage、.deb 和 .rpm。面向 Ubuntu 24.04 及以上 aarch64。
-- 设置里可以把输入框换成「内置」或「Markdown」。
+- 一个对话可以从分支菜单盯上仓库里打开的多条拉取请求。芯片会写出正在盯的数量。（#1325）
+- 代理可以自己盯上或取消盯一条拉取请求。（#1327）
+- 拉取请求有更新时，这一轮会记成自动续写。（#1330）
+
+### Fixed
+- Retry on a dropped connection continues that chat. The button sends a continue prompt once the agent is gone. (#1324)
+- Chats start again when the sandbox is on. The private agent home was handing the sandbox a linked hooks folder, which it refuses. (#1323)
+- A new chat sees skills added or removed while the app stays open. The slash list reloads with that chat, and a startup agent is not reused for it. (#1328)
+- A timed-out follow-up no longer marks your next message as automatic. That mark is cleared when the send never went out.
+- The branch menu retries the pull-request list after a failed read or a project switch. Opening the menu asks again.
+- A pull-request watch shows a poll failure and clears it when the next read works. The hint updates when the error changes or goes away.
+- A reused startup agent still gets pull-request watch tools. A chat can watch pull requests on a process that started before the chat existed.
 
 **中文 · 修复**
+- 连接中断后，点错误上的重试会接着聊。按钮向模型发送继续，把未做完的步骤接上。（#1324）
+- 打开沙箱后，对话可以重新开始。每个对话单独的代理目录以前把 hooks 做成了链接，沙箱会拒绝启动。（#1323）
+- 应用开着的时候增删技能，新建对话能看到这次变化。斜杠列表会跟着这条对话重新加载，启动时预热的代理也不会再被这条新对话沿用。（#1328）
+- 超时未发出的自动续写，不会再把你的下一条消息标成自动。那次发送没有写入记录时，下一条仍算你自己发的。
+- 分支菜单在读取失败或切换项目后，会重新读取拉取请求。再次打开菜单会再问一次。
+- 拉取请求监视会显示轮询失败，下次读成功后会清掉。错误变了或消失时，提示会跟着更新。
+- 复用启动时预热的代理，仍然带上拉取请求监视工具。对话用上一个更早启动的进程时，也可以自己盯拉取请求。
+
+## [0.2.40] - 2026-10-11
+
+> **Highlight:** The send key can join a live reply, and a Mac can answer over iMessage.
+>
+> **中文 · 亮点：** 发送键可以插入正在进行的回复，Mac 也可以通过 iMessage 回复。
+
+### Added
+- You can make the send key insert into a reply that is still running. Shift+Enter still starts a new line, and the queue button still waits.
+- Remote control can use iMessage on a Mac that is signed into Messages. Allow specific phone numbers or Apple IDs, and grant Full Disk Access.
+- Official models can use another context length when the model offers more than one.
+- The usage chip can show the CLI's own context breakdown.
+- The Tasks panel lists live subagent runs, with the counters and output the CLI reports.
+- New official chats start at 500k when the model offers that size.
+- The composer chip shows the pull request for the branch on screen.
+- A pull request update wakes that chat once.
+
+**中文 · 新增**
+- 可以让发送键直接插入正在进行的回复。Shift+Enter 仍然换行，排队按钮仍然等到回合结束。
+- 远程控制可以在已登录「信息」的 Mac 上使用 iMessage。允许名单填电话号码或 Apple ID，并授予完全磁盘访问权限。
+- 官方模型如果提供多种上下文长度，可以改用其中一种。
+- 用量条可以显示 CLI 自己算出的上下文明细。
+- 任务面板会列出正在运行的子代理，并显示 CLI 上报的计数与输出。
+- 新的官方对话在模型提供 500k 时，从 500k 开始。
+- 输入框芯片显示当前分支对应的拉取请求。
+- 拉取请求有更新时，对应的对话会被唤醒一次。
+
+### Fixed
+- File names in the @ menu stay whole, and overflow ends with an ellipsis.
+- Windows plugin sign-in no longer waits until the attempt times out.
+- A model name with brackets no longer erases the provider listed above it.
+- A chat file link cannot leave the project through a parent folder.
+- A torn account list is kept aside instead of being replaced with an empty one.
+- A renamed file shows up under its new name.
+- Closing goal mode tries again if the first clear does not go through.
+- Continue shows for the same stopped turns the status line already marks.
+- The same Windows file stays one attachment when only the slashes differ.
+- A non-text file token no longer blanks the whole chat.
+- A finished tool turn no longer looks like the app restarted.
+- Changing the context window no longer puts a new chat back on the default model.
+- A file reference can point at a directory, not only a file.
+- Rows on screen stay drawn while the chat scrolls.
+- Windows stays clickable after you drag across chat text. WebView2 155 could ignore the mouse after that drag until the app was opened again.
+- Windows Pinyin stays next to the composer, and Shift switches language again. After the composer sat idle, the candidate could jump to the top-left of the screen.
+
+**中文 · 修复**
+- @ 菜单里的文件名会完整显示，放不下时末尾才出现省略号。
+- Windows 上的插件登录不再一直等到这次尝试超时。
+- 模型名字里带方括号时，不会再清掉它上面的那个供应商。
+- 对话里的文件链接不能顺着上级目录跑出当前项目。
+- 写到一半的账号列表会被挪到旁边，而不会换成一份空列表。
+- 重命名后的文件会显示在新名字下面。
+- 关闭目标模式时，如果第一次清除没有发出去，会再试一次。
+- 继续按钮会出现在状态行已经标成可继续的回合上。
+- 同一个 Windows 文件只是斜杠不同时，仍然只算一个附件。
+- 文件路径如果不是文字，整段对话不再因此变空白。
+- 已经做完的工具回合，切换对话时不再显示成应用重启。
+- 改上下文窗口时，新开的对话不会再回到默认模型。
+- 文件引用可以指向目录，而不只是文件。
+- 滑动对话时，屏幕上的行保持已绘制。
+- 在 Windows 上拖选对话文字后，窗口仍然能点。WebView2 155 上这次拖选可能让鼠标点不动，直到重新打开应用。
+- Windows 上的拼音候选框留在输入框旁边，Shift 也能重新切换中英文。输入框空闲后再打字时，候选框会跳到屏幕左上角。
+
+## [0.2.39] - 2026-10-06
+
+> **Highlight:** Goal mode reaches the CLI, and a stalled reply can continue in the same chat.
+>
+> **中文 · 亮点：** 目标模式会交给 CLI，卡住的回复也可以在同一条对话里接着写。
+
+### Fixed
+- Goal mode keeps /goal at the start of the message the CLI receives. Earlier context stays in the objective.
+- Opening the app again no longer clears login files for chats already running.
+- Stopping a chat from the phone mirror stops the agent again.
+- File references in the Markdown composer are sent as file paths.
+- The composer editor choice stays after a restart.
+- Code in the Markdown composer keeps its backslashes.
+- A slash command replaces the one at the cursor.
+- Dictation in the Markdown composer lands at the cursor.
+- A typed link keeps the space after it.
+- Custom channels connect again when the channel name and the model id differ. The app tells the CLI the channel name, which is how that CLI finds the key. (#1294)
+- Sending one picture on Windows no longer shows that picture twice. The chat was counting the same file a second time. (#1284)
+- Chat text now uses the font you set under Appearance. Code blocks keep the code font. (#1297)
+- Official and custom chats no longer share one login file. Each running chat keeps its own copy. (#1293)
+- A stalled reply can be ended and continued in the same chat. The notice says when the model stream was cut off.
+
+**中文 · 修复**
+- 打开目标模式后，发给 CLI 的内容仍以 /goal 开头。前面的历史和引用留在目标正文里。
+- 再次打开应用时，不会清掉已经在跑的对话的登录文件。
+- 在手机镜像里点停止，会再次停住这条对话。
+- Markdown 输入框里的文件引用会按文件路径发出去。
+- 输入框编辑器的选择在重启后仍然保留。
+- Markdown 输入框里的代码会保留反斜杠。
+- 选择斜杠命令时，替换的是光标处的那一个。
+- 在 Markdown 输入框里听写，文字落在光标处。
+- 敲出来的链接会保留后面的空格。
 - 通道名称和模型 ID 不同时，自定义通道可以重新连上。应用发给 CLI 的是通道名，CLI 靠它找到密钥。（#1294）
 - 在 Windows 上发送一张图片后，不会再显示成两张。同一文件之前被算了两次。（#1284）
-- Markdown 编辑器在大量链接的文档上不再卡死。
+- 对话正文会使用外观里选的界面字体。代码块仍用代码字体。（#1297）
+- 独立模式下，官方对话和自定义对话不再共用同一份登录文件。每条正在运行的对话使用自己的副本。（#1293）
+- 输出停住时，可以结束本轮并在同一条对话里接着写。提示会说明模型流是否中途断过。
 
 ## [0.2.38] - 2026-09-30
 

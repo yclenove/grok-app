@@ -2,6 +2,7 @@
  * @vitest-environment jsdom
  */
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -236,6 +237,8 @@ describe("WallpaperSourceModal image viewer integration", () => {
     vi.mocked(api.wallpaperRemoteCancelMediaRequests).mockClear();
     vi.mocked(api.wallpaperRemoteCancelAllMediaRequests).mockClear();
 
+    // The Host request starts before the lazy lightbox chunk has mounted.
+    await act(async () => { await vi.dynamicImportSettled(); });
     fireEvent.click(await screen.findByRole("button", { name: "Close" }));
 
     await waitFor(() =>

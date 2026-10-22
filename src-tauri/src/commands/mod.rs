@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::cli_probe::{self, CliProbeResult};
-use crate::session_manager::{SessionManager, SessionSnapshot};
+use crate::session_manager::{SessionManager, SessionSnapshot, StopReport};
 use crate::store::{self, AppSettings, Project, SessionMeta};
+
+pub(crate) mod permission_preferences;
+pub(crate) mod session_spawn_options;
 
 include!("session_p1.rs");
 include!("session_p2.rs");
@@ -37,3 +40,9 @@ include!("misc_p1.rs");
 include!("misc_p2.rs");
 include!("terminal.rs");
 include!("skin.rs");
+include!("session_migration.rs");
+include!("session_import_groups.rs");
+include!("session_import_comparison.rs");
+include!("session_import_group_selection.rs");
+include!("session_import_identity_association.rs");
+include!("session_workspace_association.rs");
