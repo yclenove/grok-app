@@ -261,7 +261,24 @@ fn child_env(
     if let Some(mode) = approval {
         map.insert("GCU_APPROVAL".into(), mode.to_string());
     }
+    if cfg.real_driver {
+        for (key, value) in proxy_pairs(|key| std::env::var(key).ok()) {
+            map.insert(key, value);
+        }
+    }
     map
+}
+
+/// Proxy settings found through `lookup`. Empty values are dropped.
+fn proxy_pairs(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    crate::access::proxy_env_keys()
+        .iter()
+        .filter_map(|key| {
+            lookup(key)
+                .filter(|value| !value.is_empty())
+                .map(|value| ((*key).to_string(), value))
+        })
+        .collect()
 }
 
 fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), Error> {
@@ -654,6 +671,23 @@ mod tests {
         assert_eq!(note["turns"], 2);
         assert!(note.get("tokens_in").is_none());
         assert!(note.get("tokens_out").is_none());
+    }
+
+    #[test]
+    fn proxy_settings_are_forwarded_only_when_present_and_non_empty() {
+        let found = proxy_pairs(|key| match key {
+            "HTTPS_PROXY" => Some("http://127.0.0.1:10808".into()),
+            "NO_PROXY" => Some(String::new()),
+            "SECRET_TOKEN" => Some("never".into()),
+            _ => None,
+        });
+        assert_eq!(
+            found,
+            vec![(
+                "HTTPS_PROXY".to_string(),
+                "http://127.0.0.1:10808".to_string()
+            )]
+        );
     }
 
     #[test]

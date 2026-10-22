@@ -106,6 +106,31 @@ pub const fn child_env_keys() -> &'static [&'static str] {
         "GCU_EVAL_WATCH_FILE",
         "GCU_BIN",
         "GCU_APPROVAL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ]
+}
+
+/// Proxy settings a real client needs to reach its model endpoint. They are network configuration,
+/// not secrets, and are forwarded only by `--driver real`; a proxy URL with credentials is the
+/// operator's own choice. The fake driver never forwards them.
+#[must_use]
+pub const fn proxy_env_keys() -> &'static [&'static str] {
+    &[
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
     ]
 }
 
