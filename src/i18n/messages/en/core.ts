@@ -1,6 +1,7 @@
 /** English messages — domain: core */
 export const enCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "Permission reply failed. {error}",
   "image.loadingOriginal": "Loading original...",
   "image.originalFailed": "Could not load the original. The preview is still available.",
   "app.tagline": "MIT · Unofficial · Sister project grok-go",
@@ -74,6 +75,8 @@ export const enCore = {
   "agent.streamStallBanner": "No stream or tool progress for about {seconds}s. Keep waiting or end this turn.",
   "agent.streamStallCancel": "End turn",
   "agent.streamStallEndTurn": "End turn",
+  "agent.streamStallEndAndContinue": "End and continue",
+  "agent.streamStallContinueNotReady": "The turn is still ending — try Continue again in a moment.",
   "agent.streamStallKeepWaiting": "Keep waiting",
   "agent.streamStallHardEndToast": "Turn was closed after Host recovery — your reply was kept.",
   "agent.ghostStreamingHealed": "Message never reached the agent. Restored to the composer — send again.",

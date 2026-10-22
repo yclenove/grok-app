@@ -18,9 +18,19 @@ use crate::store;
 /// Wall-clock budget for CLI probe during diagnostic export (must not block).
 const EXPORT_CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(test)]
+thread_local! {
+    static TEST_EXPORT_CLI_PROBE: std::cell::RefCell<Option<serde_json::Value>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Best-effort CLI probe with a hard wall-clock timeout so export never stalls
 /// when `grok --version` hangs on a bad path.
 fn soft_cli_probe_for_export(manual_path: Option<&str>) -> serde_json::Value {
+    #[cfg(test)]
+    if let Some(probe) = TEST_EXPORT_CLI_PROBE.with(|probe| probe.borrow().clone()) {
+        return probe;
+    }
     let manual = manual_path.map(|s| s.to_string());
     let (tx, rx) = mpsc::channel();
     let _ = std::thread::Builder::new()
@@ -224,14 +234,14 @@ pub fn write_session_bundle(
         return Err("session id is empty".into());
     }
 
-    let meta = store::load_sessions_index()
+    let meta = store::load_sessions_snapshot()?
         .into_iter()
         .find(|s| s.id == session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
 
     let messages = store::load_messages(session_id);
     let settings = store::load_settings();
-    let projects = store::load_projects();
+    let projects = store::load_projects_snapshot()?;
     let project = meta
         .project_id
         .as_ref()
@@ -239,7 +249,14 @@ pub fn write_session_bundle(
     let project_path = project.as_ref().map(|p| p.path.clone());
 
     let agent_dir = meta.agent_session_id.as_ref().and_then(|aid| {
-        paths::find_agent_session_dir(aid, project_path.as_deref(), &settings.session_data_mode)
+        crate::session_execution::find_session_dir(
+            &meta,
+            aid,
+            project_path.as_deref(),
+            &settings.session_data_mode,
+        )
+        .ok()
+        .flatten()
     });
 
     let stamp = Utc::now().format("%Y%m%d-%H%M%S");

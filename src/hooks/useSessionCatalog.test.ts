@@ -199,4 +199,68 @@ describe("useSessionCatalog", () => {
     expect([...result.current.selectedSessionIds]).toEqual([]);
     expect(result.current.selectableSessionCount).toBe(1);
   });
+
+  it("coalesces continuation publication and retry events using authoritative native rows", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "hasHost").mockReturnValue(true);
+    let changed: ((payload: { reason: string; sessionId: string }) => void) | undefined;
+    const unlisten = vi.fn();
+    vi.spyOn(api, "listen").mockImplementation(async (event, handler) => {
+      if (event === "sessions://changed") changed = handler as typeof changed;
+      return unlisten;
+    });
+    const existing = { id: "existing", title: "Existing", projectId: null,
+      updatedAt: "2026-09-24T00:00:00Z", modelId: null };
+    const continuation = { id: "native-continuation", title: "Reviewed source name", projectId: "p1",
+      updatedAt: "2026-09-25T00:00:00Z", modelId: null };
+    vi.spyOn(api, "sessionsList").mockResolvedValue([continuation, existing]);
+    vi.spyOn(api, "trayRefresh").mockResolvedValue(undefined);
+    const connect = vi.spyOn(api, "sessionConnect");
+    const send = vi.spyOn(api, "sessionSend");
+    const { result, unmount } = setup();
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      result.current.setSessions([row(existing)]);
+      result.current.enterSessionSelectMode(existing.id);
+      for (let i = 0; i < 3; i++) changed?.({ reason: "import-continuation", sessionId: continuation.id });
+    });
+    expect(api.sessionsList).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(api.sessionsList).toHaveBeenCalledOnce();
+    expect(api.trayRefresh).toHaveBeenCalledOnce();
+    expect(result.current.sessions.map((item) => item.id)).toEqual([continuation.id, existing.id]);
+    expect(result.current.sessions[0]).toMatchObject({ title: continuation.title, projectId: "p1" });
+    expect([...result.current.selectedSessionIds]).toEqual([existing.id]);
+    expect(connect).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    unmount();
+    expect(unlisten).toHaveBeenCalledOnce();
+    changed?.({ reason: "import-continuation", sessionId: continuation.id });
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(api.sessionsList).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the visible catalog when a continuation refresh fails, then recovers", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "hasHost").mockReturnValue(true);
+    let changed: (() => void) | undefined;
+    vi.spyOn(api, "listen").mockImplementation(async (event, handler) => {
+      if (event === "sessions://changed") changed = () => handler({} as never);
+      return () => {};
+    });
+    vi.spyOn(api, "sessionsList").mockRejectedValueOnce(new Error("transient catalog read"))
+      .mockResolvedValueOnce([{ id: "native-continuation", title: "Source", projectId: null,
+        updatedAt: "2026-09-25T00:00:00Z", modelId: null }]);
+    vi.spyOn(api, "trayRefresh").mockResolvedValue(undefined);
+    const { result } = setup();
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setSessions([row({ id: "existing" })]); changed?.(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(result.current.sessions.map((item) => item.id)).toEqual(["existing"]);
+    expect(api.trayRefresh).not.toHaveBeenCalled();
+    act(() => changed?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(result.current.sessions.map((item) => item.id)).toEqual(["native-continuation"]);
+    expect(api.trayRefresh).toHaveBeenCalledOnce();
+  });
 });

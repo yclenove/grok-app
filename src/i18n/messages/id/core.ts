@@ -1,6 +1,7 @@
 /** id messages — domain: core */
 export const idCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "Jawaban atas permintaan izin gagal. {error}",
   "image.loadingOriginal": "Memuat berkas asli…",
   "image.originalFailed": "Berkas asli tidak dapat dimuat. Pratinjau tetap tersedia.",
   "app.tagline": "MIT · Tidak resmi · Proyek saudara grok-go",
@@ -74,6 +75,8 @@ export const idCore = {
   "agent.streamStallBanner": "Tidak ada aliran atau kemajuan alat selama sekitar {seconds} d. Terus tunggu atau akhiri giliran ini.",
   "agent.streamStallCancel": "Akhiri giliran",
   "agent.streamStallEndTurn": "Akhiri giliran",
+  "agent.streamStallEndAndContinue": "Akhiri dan lanjutkan",
+  "agent.streamStallContinueNotReady": "Giliran ini masih berakhir — coba Lanjutkan lagi sebentar lagi.",
   "agent.streamStallKeepWaiting": "Terus tunggu",
   "agent.streamStallHardEndToast": "Giliran ditutup setelah pemulihan Host — balasan Anda tetap disimpan.",
   "agent.ghostStreamingHealed": "Pesan tidak sampai ke agen. Dipulihkan ke composer — kirim lagi.",

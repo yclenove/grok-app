@@ -15,6 +15,8 @@ import { useSshWatch } from "@/providers/SshWatchProvider";
 import { usePetCompanion } from "@/hooks/usePetCompanion";
 import { useFloatingMenu } from "@/lib/floatingMenu";
 import { restoreSessionGate } from "@/lib/sessionGateRestore";
+import { SessionGateCache } from "@/lib/sessionGateCache";
+import { searchHitOpensImportedHistory } from "@/lib/sessionSearch";
 import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
 import {
   setStreamPerfActive,
@@ -49,7 +51,7 @@ import {
   shouldSkipHtml5AfterNative,
 } from "@/lib/fileDrop";
 import { writeOpenTargetStorage } from "@/lib/openEditorHonesty";
-import { buildContinueAgentPrompt } from "@/lib/continueInterruptedTurn";
+import { useEndAndContinue } from "@/hooks/useEndAndContinue";
 import {
   APP_CLOSE_REQUESTED_EVENT,
   loadAlwaysQuitWithoutAskingPref,
@@ -76,12 +78,15 @@ import {
 } from "@/lib/msgRailSidePref";
 import {
   dropGateClocks,
-  gateClockKey,
   resumeGateClock,
 } from "@/lib/gateClock";
 import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import { SidebarCliImportCta } from "@/components/SidebarCliImportCta";
 import { useCliCallLogImport } from "@/hooks/useCliCallLogImport";
+import { usePermissionResolution } from "@/hooks/usePermissionResolution";
+import { permissionClockKey } from "@/lib/session/permissionIdentity";
+import { restoreSessionPlan } from "@/lib/session/restoreSessionPlan";
+import { usePlanResolution } from "@/hooks/usePlanResolution";
 import {
   DEFAULT_LAYOUT,
   SIDEBAR_DEFAULT_WIDTH,
@@ -120,18 +125,13 @@ import {
 } from "@/lib/session";
 import {
   INITIAL_CONTEXT_USAGE,
-  resolveContextUsageDisplay,
   type ContextUsageState,
 } from "@/lib/contextUsage";
 import {
-  closedSessionPlan,
   emptySessionPlan,
   invalidatePlanGate,
-  planStateToStored,
-  restorePlanFromPersistence,
   type SessionPlanState,
 } from "@/lib/planSession";
-import { shouldExitComposerPlanModeAfterDecision } from "@/lib/planModePro";
 import {
   collectActivitySessions,
   countQuitBlockingSessions,
@@ -164,6 +164,7 @@ import {
   buildReliabilityCenter,
   reliabilityErrorFromDeck,
 } from "@/lib/reliabilityCenter";
+import type { StreamStallView } from "@/lib/streamStallView";
 import {
   buildGoalControlSummary,
   filterGoalOrchEvents,
@@ -259,7 +260,6 @@ import {
   mapEffortToTargetCatalog,
   pickDefaultEffort,
   pickDefaultModelId,
-  resolveContextWindow,
   type EffortOption,
   type ModelOption,
   type PermissionPolicyId,
@@ -267,7 +267,6 @@ import {
 import {
   materializeActiveModelChannel,
   resolveProviderEfforts,
-  withModelContextWindow,
 } from "@/lib/providerModelConfig";
 import {
   mapPermissionButtons,
@@ -287,12 +286,10 @@ import {
 import {
   clearPlanHistory,
   loadPlanHistory,
-  recordPlanHistory,
   PLAN_HISTORY_CHANGE_EVENT,
   PLAN_HISTORY_STORAGE_KEY,
 } from "@/lib/planHistory";
 import type { PlanHistoryEntry } from "@/lib/planHistory";
-import { planDisplayMarkdown } from "@/lib/planBody";
 
 import {
   connPillForState,
@@ -354,10 +351,8 @@ import { mapStoredMessagesToChat } from "@/lib/mapStoredMessages";
 import {
   rankAtFileHits,
   removeAtTokenFromDraft,
+  toAtFileHits,
 } from "@/lib/atFileQuery";
-import {
-  type ComposerAtFileEntry,
-} from "@/components/ComposerAtPanel";
 import {
   formatAttachErrorMessage,
   isAttachPayloadTooLarge,
@@ -371,7 +366,7 @@ import {
   applySkillAtSlash,
   isDraftEmpty,
   detectSlashRangeOnStored,
-  parseStoredContent,
+  parseStoredContent, parseStoredContentWithRefs,
   serializeForAgent,
 } from "@/lib/draftDoc";
 import {
@@ -405,6 +400,7 @@ import {
   setDraft as setComposerDraft,
 } from "@/lib/composerDraftStore";
 import { buildHandoffBrief, handoffSessionTitle } from "@/lib/sessionHandoff";
+import { ContinuationDraftBanner } from "@/components/session-import/ContinuationDraftBanner";
 import {
   clearComposerProjectDraft,
   loadComposerProjectDraft,
@@ -449,6 +445,12 @@ import {
   flattenFilteredCatalog,
   type SlashItem,
 } from "@/lib/slashCatalog";
+import { useWorkbenchContextDisplay, useWorkbenchContextActions } from "@/hooks/useWorkbenchContextWindow";
+import {
+  leftoverContextWindowArgs,
+  positiveContextWindows,
+  stripContextWindowSlashFromDraft,
+} from "@/lib/contextWindowCommand";
 import {
   leftoverWorkflowArgs,
   resolveWorkflowSlashAction,
@@ -698,6 +700,7 @@ import {
 } from "@/hooks/useSessionNavigation";
 import { useGitDirtyStatus } from "@/hooks/useGitDirtyStatus";
 import { useSessionFileChanges } from "@/hooks/useSessionFileChanges";
+import { useStreamA11yAnnouncements } from "@/hooks/useStreamA11yAnnouncements";
 import { ERROR_BANNER_SETTINGS_ROUTE, isErrorBannerDismissOnly } from "@/lib/errorBannerActions";
 import { WorkbenchSessionTree } from "@/app/WorkbenchSessionTree";
 import { WorkbenchSidebar } from "@/app/WorkbenchSidebar";
@@ -786,6 +789,7 @@ export function AppWorkbench() {
     winTaskbarOverlay,
     setWinTaskbarOverlay,
     composerSendKeyPref,
+    composerEnterInsertsLive,
     showComposerDraftStats,
     composerSpellcheck,
     sidebarDensity,
@@ -1569,7 +1573,6 @@ export function AppWorkbench() {
     () => loadPlanHistory().length > 0,
   );
   /** Request-changes note modal (optional free-form feedback). */
-  const [planReviseOpen, setPlanReviseOpen] = useState(false);
 
   // Keep plan-history empty CTA honest after archive / clear.
   useEffect(() => {
@@ -1586,7 +1589,6 @@ export function AppWorkbench() {
       window.removeEventListener("storage", onStorage);
     };
   }, []);
-  const [planReviseNote, setPlanReviseNote] = useState("");
   /**
    * Dedupe plan-complete history rows per session+toolCall cycle
    * (session://plan can emit multiple “all done” updates).
@@ -1634,8 +1636,8 @@ export function AppWorkbench() {
    * chat showed no bar and the turn blocked until the agent timed out. Entries
    * are restored on `openSession` and dropped once answered / turn resolved.
    */
-  const pendingPermBySessionRef = useRef<Map<string, PermissionPayload>>(
-    new Map(),
+  const pendingPermBySessionRef = useRef<SessionGateCache<PermissionPayload>>(
+    new SessionGateCache(),
   );
   /**
    * When each pending permission request first started its clock
@@ -1647,12 +1649,11 @@ export function AppWorkbench() {
    * request a fresh full timeout every time, so it could never expire.
    */
   const permRaisedAtRef = useRef<Map<string, number>>(new Map());
-  const pendingAskUserBySessionRef = useRef<Map<string, AskUserPayload>>(
-    new Map(),
+  const pendingAskUserBySessionRef = useRef<SessionGateCache<AskUserPayload>>(
+    new SessionGateCache(),
   );
   /** Polite SR announce for stream start/stop (not every token). */
   const [streamA11yNote, setStreamA11yNote] = useState("");
-  const wasStreamingRef = useRef(false);
   const [plan, setPlan] = useState<PlanState>(() => emptySessionPlan());
   /** Latest plan for the viewed session (mirrors `plan` for switch/cache). */
   const planRef = useRef(plan);
@@ -1663,7 +1664,7 @@ export function AppWorkbench() {
    * Live events for background sessions update this map without stealing the bar.
    * Hard-dismiss sets `userClosed` so reopen stays empty until a new plan cycle.
    */
-  const planBySessionRef = useRef(new Map<string, PlanState>());
+  const planBySessionRef = useRef(new SessionGateCache<PlanState>());
   /**
    * Drop a session's stored gates (answered, cancelled, turn ended, process dead).
    * Also clears plan review rpcId so Approve cannot target a dead reverse-RPC.
@@ -2023,13 +2024,7 @@ export function AppWorkbench() {
     onStatus: applyStatusBranch,
   });
   /** Host stream-stall prompt (I06); null when dismissed or not stalled. */
-  const [streamStall, setStreamStall] = useState<{
-    sessionId?: string;
-    stallSeconds: number;
-    tier?: string;
-    sawModelOutput?: boolean;
-    sawToolActivity?: boolean;
-  } | null>(null);
+  const [streamStall, setStreamStall] = useState<StreamStallView>(null);
 
   const {
     connecting,
@@ -2370,6 +2365,7 @@ export function AppWorkbench() {
         prefs,
         catalog,
         providers: sessionProviderChip.providersSnapshot(),
+        draft: sessionProviderChip.draftComposerRouteRef.current,
       });
       setModelId(next.modelId);
       setEffort(next.effort);
@@ -2377,9 +2373,7 @@ export function AppWorkbench() {
       setPolicy(
         isValidPolicy(prefs.permissionPolicy) ? prefs.permissionPolicy : "ask",
       );
-      if (isValidPrefsScope(prefs.scope)) {
-        setPrefsScope(prefs.scope);
-      }
+      if (isValidPrefsScope(prefs.scope)) setPrefsScope(prefs.scope);
     },
     [sessionProviderChip],
   );
@@ -2427,6 +2421,7 @@ export function AppWorkbench() {
                 source: m.source,
                 isDefault: m.isDefault,
                 contextWindow: m.contextWindow ?? null,
+                contextWindows: positiveContextWindows(m.contextWindows),
               }))
             : GROK_BUILD_MODELS;
         setAvailableModels(catalog);
@@ -2595,6 +2590,7 @@ export function AppWorkbench() {
                 isDefault: m.isDefault,
                 reasoningEfforts: efforts,
                 contextWindow: m.contextWindow ?? null,
+                contextWindows: positiveContextWindows(m.contextWindows),
               };
             })
           : GROK_BUILD_MODELS;
@@ -3297,34 +3293,10 @@ export function AppWorkbench() {
       planBySessionRef.current.set(sessionId, planRef.current);
     };
     host.plan.restoreChrome = (sessionId, stillThisOpen) => {
-      setPlan(
-        planBySessionRef.current.get(sessionId) ??
-          emptySessionPlan(trRef.current("plan.ready")),
-      );
-      void (async () => {
-        try {
-          const [chrome, agentSnap] = await Promise.all([
-            api.sessionPlanChromeGet(sessionId),
-            api.sessionAgentPlanSnapshot(sessionId),
-          ]);
-          if (!stillThisOpen()) return;
-          const mem = planBySessionRef.current.get(sessionId);
-          if (mem && mem.rpcId != null) return;
-          const restored = restorePlanFromPersistence(
-            chrome,
-            agentSnap,
-            trRef.current("plan.ready"),
-          );
-          if (!restored.visible && !restored.userClosed && !restored.body) {
-            return;
-          }
-          planBySessionRef.current.set(sessionId, restored);
-          markPlanPendingBadge(sessionId, restored);
-          if (stillThisOpen()) setPlan(restored);
-        } catch {
-          /* soft-fail restore */
-        }
-      })();
+      void restoreSessionPlan(sessionId, stillThisOpen, {
+        parked: planBySessionRef, apply: setPlan, markPending: markPlanPendingBadge,
+        readyTitle: trRef.current("plan.ready"),
+      });
     };
     host.hydrate.applyOpenResult = (sessionId, result) => {
       if (result.status === "applied") {
@@ -3378,13 +3350,13 @@ export function AppWorkbench() {
         parked: pendingPermBySessionRef,
         apply: setPerm,
         pull: api.sessionPendingPermission,
-        enabled: api.isTauri(),
+        enabled: api.isTauri() || isMirrorClient(),
       });
       restoreSessionGate(sessionId, stillThisOpen, {
         parked: pendingAskUserBySessionRef,
         apply: setAskUser,
         pull: api.sessionPendingAskUser,
-        enabled: api.isTauri(),
+        enabled: api.isTauri() || isMirrorClient(),
       });
       setTurnStartedAt(turnStartedAtBySessionRef.current.get(sessionId) ?? null);
       if (liveSessionId !== sessionId) setRetryStatus(null);
@@ -3449,6 +3421,14 @@ export function AppWorkbench() {
       setExpandedProjects((e) => ({ ...e, [p.id]: true }));
     },
     onPickSession: (hit) => {
+      if (searchHitOpensImportedHistory(hit)) {
+        void import("@/lib/sessionImport/open").then(
+          ({ openImportedHistory }) => {
+            openImportedHistory({ importId: hit.id });
+          },
+        );
+        return;
+      }
       const s = sessions.find((x) => x.id === hit.id);
       const row: SessionRow =
         s ??
@@ -3814,8 +3794,8 @@ export function AppWorkbench() {
       navSessionIds({
         sessions,
         projects,
-        // Mirror the tree's project set — sessions of space-filtered or
-        // SSH-watched projects are not rendered, so j/k must skip them too.
+        // Mirror the rendered tree: keyboard navigation must skip projects
+        // hidden by spaces or represented by the SSH watch surface.
         visibleProjects: visibleProjects.filter(
           (p) => !hideSshProjectInLocalTree(p, watchAliases),
         ),
@@ -4246,7 +4226,6 @@ export function AppWorkbench() {
       /* ignore */
     }
   };
-
   /** Persist sidebar project order (pin groups enforced on Host). */
   const projectsOrderRef = useRef(projects);
   projectsOrderRef.current = projects;
@@ -5590,6 +5569,10 @@ export function AppWorkbench() {
   }, [session.state, transcriptMeta.hasStreamingAssistant]);
   useEffect(() => {
     return () => {
+      if (composerFocusTimerRef.current) {
+        clearTimeout(composerFocusTimerRef.current);
+        composerFocusTimerRef.current = null;
+      }
       setStreamPerfActive(false);
       delete document.documentElement.dataset.streamPerf;
     };
@@ -5616,6 +5599,8 @@ export function AppWorkbench() {
     sessionGoalClear.flush(session.sessionId, session.state);
   }, [session.sessionId, session.state]);
 
+  const contextWindowSlashRef = useRef<(args: string) => void>(() => {});
+  const contextSlashRef = useRef<(announce: boolean) => void>(() => {});
   const {
     executeSend,
     send,
@@ -5670,6 +5655,12 @@ export function AppWorkbench() {
     getDraft,
     requestComposerFocus,
     openWorkflowsSettings,
+    onContextWindowSlash: (args) => {
+      contextWindowSlashRef.current(args);
+    },
+    onContextSlash: () => {
+      contextSlashRef.current(true);
+    },
     applySessionTitle,
     restartTurnClock,
     syncViewedTurnClock,
@@ -6347,7 +6338,7 @@ export function AppWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.path, activeProject?.sshAlias, skillsReloadToken]);
+  }, [activeProject?.path, activeProject?.sshAlias, skillsReloadToken, session.sessionId]);
 
   const slashCatalog = useMemo(
     () => buildSlashCatalog(skillInfos),
@@ -6553,6 +6544,7 @@ export function AppWorkbench() {
             query: q,
             mode: "name",
             limit: 40,
+            includeDirs: true,
           });
           if (gen !== atSearchGenRef.current) return;
           if (res.softFail) {
@@ -6560,15 +6552,7 @@ export function AppWorkbench() {
             setAtEntries([]);
           } else {
             setAtSoftFail(null);
-            const hits: ComposerAtFileEntry[] = rankAtFileHits(
-              (res.hits ?? []).map((h) => ({
-                path: h.path,
-                name: h.name,
-                relativePath: h.relativePath,
-                mtimeMs: h.mtimeMs,
-              })),
-              q,
-            );
+            const hits = rankAtFileHits(toAtFileHits(res.hits ?? []), q);
             setAtEntries(hits);
           }
         } catch (e) {
@@ -7074,139 +7058,13 @@ export function AppWorkbench() {
     [showToast, tr],
   );
 
-  const writePlanForViewing = useCallback((next: PlanState) => {
-    const sid = viewingSessionIdRef.current;
-    if (sid) {
-      planBySessionRef.current.set(sid, next);
-      markPlanPendingBadge(sid, next);
-      // Soft-persist plan chrome so App restart can restore body / closed flags.
-      void api.sessionPlanChromeSet(sid, planStateToStored(next)).catch(() => {
-        /* private / host soft-fail */
-      });
-    }
-    setPlan(next);
-  }, [markPlanPendingBadge]);
-
-  /** Archive a plan decision to localStorage (preview only; no secrets). */
-  const archivePlanDecision = useCallback(
-    (
-      decision: "approved" | "abandoned" | "completed",
-      snapshot: Pick<PlanState, "body" | "entries" | "title">,
-      sessionId: string | null | undefined,
-    ) => {
-      const sid = (sessionId || "").trim();
-      if (!sid) return;
-      const bodyMd = planDisplayMarkdown(snapshot.body, snapshot.entries);
-      if (!bodyMd.trim() && decision !== "abandoned" && decision !== "approved") {
-        // Completing with no body/steps is not useful to archive.
-        return;
-      }
-      const row = sessionsRef.current.find((s) => s.id === sid);
-      const sessionTitle = row?.title?.trim() || undefined;
-      const planTitle =
-        snapshot.title?.trim() &&
-        snapshot.title.trim() !== trRef.current("plan.ready")
-          ? snapshot.title.trim()
-          : undefined;
-      try {
-        recordPlanHistory({
-          sessionId: sid,
-          decision,
-          title: sessionTitle || planTitle,
-          bodyPreview: bodyMd,
-        });
-      } catch {
-        /* private mode / quota */
-      }
-    },
-    [],
-  );
-
-  const approvePlan = useCallback(async () => {
-    try {
-      const snap = planRef.current;
-      const sid = viewingSessionIdRef.current;
-      await api.sessionResolvePlan({
-        decision: "approved",
-        rpcId: plan.rpcId,
-        // Plan chrome is per-viewed-session; the gate may sit on a demoted turn.
-        sessionId: sid,
-      });
-      archivePlanDecision("approved", snap, sid);
-      writePlanForViewing({
-        ...planRef.current,
-        visible: false,
-        waiting: false,
-        rpcId: null,
-        userClosed: false,
-      });
-      // Product loop: Approve & build → agent mode so the idle plan chip
-      // does not stick after the review gate closes.
-      if (
-        shouldExitComposerPlanModeAfterDecision({
-          decision: "approved",
-          composerMode: modeRef.current,
-        })
-      ) {
-        setMode("agent");
-        setGoalMode(false);
-        void api
-          .composerPrefsSet({
-            projectId: activeProject?.id ?? null,
-            sessionId: session.sessionId ?? null,
-            mode: "agent",
-          })
-          .catch((e) => showToast(String(e), 4000));
-      }
-    } catch (e) {
-      showToast(String(e), 4500);
-    }
-  }, [
-    activeProject?.id,
-    archivePlanDecision,
-    plan.rpcId,
-    session.sessionId,
-    showToast,
-    writePlanForViewing,
-  ]);
-
-  /**
-   * Resolve pending plan review as "cancelled" (revise).
-   * `note` is optional free-form feedback; empty falls back to the default
-   * revise prompt so the agent still knows to rework the plan.
-   */
-  const requestPlanChanges = useCallback(
-    async (note?: string) => {
-      const trimmed = typeof note === "string" ? note.trim() : "";
-      const feedback = trimmed || tr("plan.reviseFeedback");
-      try {
-        await api.sessionResolvePlan({
-          decision: "cancelled",
-          feedback,
-          rpcId: plan.rpcId,
-          sessionId: viewingSessionIdRef.current,
-        });
-        writePlanForViewing({
-          ...planRef.current,
-          visible: false,
-          waiting: false,
-          rpcId: null,
-          userClosed: false,
-        });
-        setPlanReviseOpen(false);
-        setPlanReviseNote("");
-      } catch (e) {
-        showToast(String(e), 4500);
-      }
-    },
-    [plan.rpcId, showToast, writePlanForViewing],
-  );
-
-  /** Open optional revision-note modal, then call requestPlanChanges. */
-  const openRequestPlanChanges = useCallback(() => {
-    setPlanReviseNote("");
-    setPlanReviseOpen(true);
-  }, []);
+  const planResolution = usePlanResolution({
+    plan, planRef, planBySessionRef, viewingSessionIdRef, currentViewFocus,
+    setPlan, markPlanPendingBadge, sessionsRef, projectId: activeProject?.id ?? null,
+    mode, goalMode, setMode, setGoalMode, sideWorkbench, asideCollapsed: layout.asideCollapsed,
+    planOpenedAsideRef, collapseAsidePersisted, setAppDialog, showToast, tr,
+  });
+  const { approvePlan, requestPlanChanges, openRequestPlanChanges, dismissPlan, planReviseOpen } = planResolution;
 
   /** Clear local plan history after in-app confirm (no window.confirm). */
   const confirmClearPlanHistory = useCallback(() => {
@@ -7272,63 +7130,6 @@ export function AppWorkbench() {
     },
     [openSession, projects, sessions, showToast, tr],
   );
-
-  /**
-   * User closes plan chrome (top bar / resource panel).
-   * Flow: confirm → abandon pending review RPC if any → hard-close session plan
-   * so reopen stays empty until a new plan cycle (new toolCallId / new rpcId).
-   * Residual updates while still in composer plan mode stay suppressed.
-   */
-  const dismissPlan = useCallback(() => {
-    const cur = planRef.current;
-    if (!cur.visible && !cur.entries.length && !cur.body && cur.rpcId == null) {
-      return;
-    }
-    setAppDialog({
-      kind: "confirm",
-      title: tr("plan.dismissConfirmTitle"),
-      message: tr("plan.dismissConfirmMessage"),
-      confirmLabel: tr("plan.dismiss"),
-      danger: false,
-      onConfirm: async () => {
-        const latest = planRef.current;
-        const abandonedRpcId = latest.rpcId ?? null;
-        const sid = viewingSessionIdRef.current;
-        if (abandonedRpcId != null) {
-          try {
-            await api.sessionResolvePlan({
-              decision: "abandoned",
-              rpcId: abandonedRpcId,
-              sessionId: sid,
-            });
-          } catch {
-            /* clear UI anyway */
-          }
-        }
-        // Archive when user abandons review or dismisses an in-flight plan.
-        if (
-          latest.body.trim() ||
-          latest.entries.length > 0 ||
-          abandonedRpcId != null
-        ) {
-          archivePlanDecision("abandoned", latest, sid);
-        }
-        writePlanForViewing(
-          closedSessionPlan(
-            trRef.current("plan.ready"),
-            latest.toolCallId ?? null,
-            abandonedRpcId,
-          ),
-        );
-        // If we opened the resource pane for this plan, close it so the next
-        // files open is not stuck on the Plan workbench.
-        if (planOpenedAsideRef.current) {
-          planOpenedAsideRef.current = false;
-          collapseAsidePersisted();
-        }
-      },
-    });
-  }, [archivePlanDecision, tr, writePlanForViewing]);
 
   /**
    * Exit the bare “计划模式” chip (mode === "plan", no plan content yet).
@@ -7534,7 +7335,7 @@ export function AppWorkbench() {
         return;
       }
       const quotesForGuide = item.quotes ?? [];
-      const segments = parseStoredContent(item.storedDisplay);
+      const segments = parseStoredContentWithRefs(item.storedDisplay);
       const agentBody = serializeQuotesForAgent(
         quotesForGuide,
         serializeForAgent(segments, { goalMode: item.goalMode }),
@@ -8798,6 +8599,36 @@ export function AppWorkbench() {
         return;
       }
 
+      if (item.kind === "action" && item.action === "context-window") {
+        const stored = getDraft();
+        const leftover = q ? leftoverContextWindowArgs(stored, q.end) : "";
+        if (q) {
+          setDraft((d) =>
+            stripContextWindowSlashFromDraft(d, q.start, q.end),
+          );
+          requestComposerStoredCaret(q.start);
+        }
+        const fromQuery = (q?.query ?? "")
+          .replace(/^context-window\s*/i, "")
+          .trim();
+        contextWindowSlashRef.current(leftover || fromQuery);
+        return;
+      }
+
+      if (item.kind === "action" && item.action === "context") {
+        if (q) {
+          const stored = getDraft();
+          const lineEnd = stored.slice(q.end).search(/[\r\n]/);
+          const cut = lineEnd === -1 ? stored.length : q.end + lineEnd;
+          setDraft((d) =>
+            (d.slice(0, q.start) + d.slice(cut)).replace(/[ \t]+$/u, ""),
+          );
+          requestComposerStoredCaret(q.start);
+        }
+        contextSlashRef.current(true);
+        return;
+      }
+
       if (item.kind === "skill" || item.kind === "plugin") {
         const applyAtSlash =
           item.kind === "plugin" ? applyPluginAtSlash : applySkillAtSlash;
@@ -9078,77 +8909,9 @@ export function AppWorkbench() {
   const [providerBalanceError, setProviderBalanceError] = useState<
     string | null
   >(null);
-  /** Guards a one-time-per-session re-fetch of live model context windows. */
-  const refreshedModelsSidRef = useRef<string | null>(null);
-  const currentModelWindow = useMemo(
-    () =>
-      resolveContextWindow({
-        activeCustomProvider,
-        modelId,
-        models: availableModels,
-        // Prefer live agent occupancy denominator (Grok Build 1.0 → 500k).
-        agentContextWindow: contextUsage.agentContextWindow,
-      }),
-    [
-      activeCustomProvider,
-      modelId,
-      availableModels,
-      contextUsage.agentContextWindow,
-    ],
-  );
-  useEffect(() => {
-    if (
-      session.state === "ready" &&
-      session.sessionId &&
-      refreshedModelsSidRef.current !== session.sessionId
-    ) {
-      refreshedModelsSidRef.current = session.sessionId;
-      api.modelsListAvailable()
-        .then((res) => {
-          if (!res?.models?.length) return;
-          // Full merge so official live windows (500k) replace cold-start null
-          // / stale catalog values — never leave a silent 200k official default.
-          setAvailableModels((prev) => {
-            const prevById = new Map(prev.map((m) => [m.id, m]));
-            return res.models.map((m) => {
-              const prior = prevById.get(m.id);
-              return {
-                id: m.id,
-                label: m.label || m.id,
-                source: m.source,
-                isDefault: m.isDefault,
-                reasoningEfforts:
-                  m.reasoningEfforts?.length
-                    ? m.reasoningEfforts.map((e) => ({
-                        id: e.id,
-                        value: e.value,
-                        label: e.label,
-                        description: e.description,
-                        isDefault: e.isDefault,
-                      }))
-                    : prior?.reasoningEfforts,
-                contextWindow:
-                  m.contextWindow != null && m.contextWindow > 0
-                    ? m.contextWindow
-                    : (prior?.contextWindow ?? null),
-              };
-            });
-          });
-        })
-        .catch(() => {});
-    }
-  }, [session.state, session.sessionId]);
-  /** Context usage chip label/state from compact events + message estimate. */
-  const contextUsageDisplay = useMemo(
-    () =>
-      resolveContextUsageDisplay(
-        contextUsage,
-        messages,
-        locale,
-        currentModelWindow,
-      ),
-    [contextUsage, messages, locale, currentModelWindow],
-  );
+  const { currentModelWindow, contextUsageDisplay, setDraftContextWindow } =
+    useWorkbenchContextDisplay({ session, activeCustomProvider, availableModels,
+      modelId, locale, contextUsage, messages, setAvailableModels });
   const sessionSpend = useSessionSpend(session.sessionId);
   /** Full provider list for composer model menu groups. */
   const [customProviders, setCustomProviders] = useState<api.CustomProvider[]>(
@@ -9475,32 +9238,12 @@ export function AppWorkbench() {
       tr,
     ],
   );
-  const handleContextWindow = useCallback(
-    async (tokens: number) => {
-      if (!api.isTauri() || !activeCustomProvider) return;
-      try {
-        await api.providersUpsert({
-          id: activeCustomProvider.id,
-          model: activeCustomProvider.model,
-          baseUrl: activeCustomProvider.baseUrl,
-          name: activeCustomProvider.name,
-          apiBackend: activeCustomProvider.apiBackend,
-          models: withModelContextWindow(
-            activeCustomProvider.models,
-            activeCustomProvider.model,
-            tokens,
-          ),
-          efforts: activeCustomProvider.efforts,
-          setAsDefault: false,
-          contextWindow: tokens,
-        });
-        await refreshProviderRoute();
-      } catch (e) {
-        showToast(String(e), 4000);
-      }
-    },
-    [activeCustomProvider, refreshProviderRoute, showToast],
-  );
+  const { handleContextWindow, runContextWindowSlash, runContextSlash } =
+    useWorkbenchContextActions({ session, activeCustomProvider, availableModels,
+      modelId, locale, currentModelWindow, refreshProviderRoute,
+      setDraftContextWindow, setContextUsage, showToast, tr });
+  contextWindowSlashRef.current = runContextWindowSlash;
+  contextSlashRef.current = runContextSlash;
   const liveBrandKind = useMemo(
     () =>
       superGrokBrandKind(
@@ -9615,18 +9358,21 @@ export function AppWorkbench() {
     welcomeSession,
   ]);
 
-  const stop = async () => {
+  const stop = async (explicitSessionId?: string | null): Promise<boolean> => {
     const now = Date.now();
     // Composer Stop scope = current viewed chat only (not global Stop-all).
     // Preferring the Host live slot cancelled a foreign turn whenever the
     // viewed chat had been demoted to background.
+    // An explicit id (end-and-continue) stays on that chat after a switch.
     const sid =
+      explicitSessionId?.trim() ||
       resolveStopTargets({
         scope: "current",
         currentSessionId:
           viewingSessionIdRef.current || liveHostRef.current.sessionId || null,
         busySessionIds: [],
-      })[0] ?? null;
+      })[0] ||
+      null;
     const armed = armStopLatch(stopLatchRef.current, sid, now);
     stopLatchRef.current = armed;
     setStopLatch(armed);
@@ -9702,8 +9448,9 @@ export function AppWorkbench() {
         forceUnlockLocal(id, "force");
       }
     }, STOP_LATCH_MS + 50);
+    let cancelDelivered = false;
     try {
-      await api.sessionStop(sid);
+      cancelDelivered = (await api.sessionStopReport(sid)).cancelDelivered === true;
       setRetryStatus(null);
       setStreamStall(null);
       clearTurnClock(sid);
@@ -9734,6 +9481,7 @@ export function AppWorkbench() {
       const settled = settleStopLatchAfterSessionStop(stopLatchRef.current);
       stopLatchRef.current = settled;
       setStopLatch(settled);
+      return cancelDelivered;
     } catch (e) {
       // Host stop can fail ("no active session") while UI still shows thinking.
       // Always finish local unlock so Stop never leaves a dead busy shell.
@@ -9742,6 +9490,7 @@ export function AppWorkbench() {
       stopLatchRef.current = settled;
       setStopLatch(settled);
       setLocalError(String(e));
+      return false;
     }
   };
 
@@ -10913,58 +10662,16 @@ export function AppWorkbench() {
     }
   }, [goalOrchSessionEvents, showToast, tr]);
 
-  // T15: announce stream start/end once (avoid token-level noise).
-  useEffect(() => {
-    const streaming =
-      session.state === "streaming" ||
-      messages.some((m) => m.role === "assistant" && m.streaming);
-    if (streaming && !wasStreamingRef.current) {
-      setStreamA11yNote(tr("a11y.assistantStreaming"));
-    } else if (!streaming && wasStreamingRef.current) {
-      setStreamA11yNote(tr("a11y.assistantDone"));
-      const t = window.setTimeout(() => setStreamA11yNote(""), 2500);
-      wasStreamingRef.current = streaming;
-      return () => window.clearTimeout(t);
-    }
-    wasStreamingRef.current = streaming;
-  }, [session.state, messages, tr]);
+  useStreamA11yAnnouncements({
+    sessionState: session.state, sessionError: session.lastError, messages,
+    localError, tr, setNote: setStreamA11yNote,
+  });
 
   /** Same path as Deny button / Escape / optional auto-deny timeout. */
-  const resolvePermission = useCallback(
-    (
-      p: PermissionPayload,
-      decision: "allow_once" | "allow_session" | "deny",
-      optionId: string,
-    ) => {
-      return api
-        .sessionResolvePermission({
-          rpcId: p.rpcId,
-          decision,
-          optionId,
-          scopeKey: p.scopeKey,
-          // Background turns raise permissions on their own ACP child.
-          sessionId: p.sessionId,
-          // Host re-coerces wire optionIds from this list when pending is empty (#542).
-          options: p.options,
-          toolName: p.toolName,
-        })
-        .then(() => {
-          clearPendingGates(p.sessionId);
-          setPerm(null);
-        })
-        .catch((e) => {
-          const code =
-            e && typeof e === "object" && "code" in e
-              ? String((e as { code?: string }).code)
-              : "";
-          const msg =
-            code === "UNSUPPORTED" ? tr("mirror.unsupported") : String(e);
-          showToast(msg, 4000);
-          throw e instanceof Error ? e : new Error(msg);
-        });
-    },
-    [clearPendingGates, showToast, tr],
-  );
+  const resolvePermission = usePermissionResolution({
+    pendingPermBySessionRef, permRaisedAtRef, viewingSessionIdRef,
+    setPerm, showToast, tr,
+  });
 
   const denyActivePermission = useCallback(
     (p: PermissionPayload) => {
@@ -11017,7 +10724,7 @@ export function AppWorkbench() {
     // the countdown (and the auto-deny) to the full timeout each time.
     const raisedAt = resumeGateClock(
       permRaisedAtRef.current,
-      gateClockKey(perm.sessionId, perm.rpcId),
+      permissionClockKey(perm),
     );
     const t = window.setTimeout(
       () => {
@@ -11034,7 +10741,7 @@ export function AppWorkbench() {
     perm && permissionTimeoutSec > 0
       ? resumeGateClock(
           permRaisedAtRef.current,
-          gateClockKey(perm.sessionId, perm.rpcId),
+          permissionClockKey(perm),
         )
       : 0;
 
@@ -11292,7 +10999,7 @@ export function AppWorkbench() {
         showToast(tr(opts?.busyToastKey ?? "message.editBusy"));
         return;
       }
-      const segments = parseStoredContent(storedDisplay);
+      const segments = parseStoredContentWithRefs(storedDisplay);
       if (isDraftEmpty(segments) && !att.length) return;
 
       const agentBody = serializeForAgent(segments, { goalMode });
@@ -11553,28 +11260,17 @@ export function AppWorkbench() {
     ],
   );
 
-  const onThreadContinueInterrupted = useCallback(() => {
-    const sid = session.sessionId;
-    if (!sid) return;
-    if (
-      session.state === "streaming" ||
-      session.state === "awaiting_permission" ||
-      session.state === "connecting"
-    ) {
-      return;
-    }
-    void (async () => {
-      const ctx = await api.sessionInterruptContext(sid);
-      const journal = tr("endOfTurn.continuePrompt");
-      await executeSendLatestRef.current({
-        storedDisplay: journal,
-        att: [],
-        goalMode: false,
-        targetSessionId: sid,
-        agentTextOverride: buildContinueAgentPrompt(ctx),
-      });
-    })();
-  }, [session.sessionId, session.state, tr]);
+  const { endAndContinueBusy, endAndContinue, onThreadContinueInterrupted } =
+    useEndAndContinue({
+      stop,
+      sendContinue: (args) => executeSendLatestRef.current(args),
+      showToast,
+      tr,
+      readHostState: (sid) =>
+        liveMapRef.current[sid]?.state ||
+        (liveHostRef.current.sessionId === sid ? liveHostRef.current.state : null),
+      readViewedSessionId: () => session.sessionId,
+    });
 
   const onThreadAddQuote = useCallback(
     (quote: { text: string; comment: string; sourceMessageId?: string }) => {
@@ -11843,6 +11539,7 @@ export function AppWorkbench() {
     composerMenuEntriesRef,
     composerMenuOpen,
     composerSendKeyPref,
+    enterInsertsLive: composerEnterInsertsLive,
     getDraft,
     messagesRef,
     openPromptHistory,
@@ -12562,13 +12259,8 @@ export function AppWorkbench() {
             </div>
           )}
 
-          {emptyExistingSession && (
-            <div className="conn-bar" role="status">
-              <span style={{ fontSize: 12, opacity: 0.85 }}>
-                {tr("automations.emptySession")}
-              </span>
-            </div>
-          )}
+          {mainPane === "chat" && session.sessionId && <ContinuationDraftBanner
+            sessionId={session.sessionId} locale={locale} empty={emptyExistingSession} sessionState={session.state} />}
 
           <CliUpdateOfferBar
             active={appGate === "ready" && mainPane === "chat"}
@@ -12619,6 +12311,10 @@ export function AppWorkbench() {
             onThreadAddAttachmentToComposer={onThreadAddAttachmentToComposer}
             onThreadAddQuote={onThreadAddQuote}
             onThreadContinueInterrupted={onThreadContinueInterrupted}
+            endAndContinueBusy={endAndContinueBusy}
+            onStallEndAndContinue={(sid) => {
+              void endAndContinue(sid);
+            }}
             onThreadOpenError={onThreadOpenError}
             onThreadOpenModifiedPath={onThreadOpenModifiedPath}
             onThreadOpenResource={onThreadOpenResource}
@@ -12629,7 +12325,7 @@ export function AppWorkbench() {
             openReliability={openReliability}
             openRequestPlanChanges={openRequestPlanChanges}
             openSession={openSession}
-            plan={plan}
+            plan={planResolution.plan}
             projects={projects}
             regenerateLastAssistant={regenerateLastAssistant}
             requestClearLocalGoalOrchTimeline={requestClearLocalGoalOrchTimeline}
@@ -12724,6 +12420,9 @@ export function AppWorkbench() {
             confirmRemoveWorktree={confirmRemoveWorktree}
             connecting={connecting}
             contextUsageDisplay={contextUsageDisplay}
+            refreshContextInfo={() => {
+              contextSlashRef.current(false);
+            }}
             currentModelWindow={currentModelWindow}
             customRouteActive={customRouteActive}
             cycleAttachedChatScope={cycleAttachedChatScope}
@@ -12770,10 +12469,9 @@ export function AppWorkbench() {
             openWorktreeGc={openWorktreeGc}
             askUser={askUser}
             askUserTimeoutSec={askUserTimeoutSec}
-            clearPendingGates={clearPendingGates}
+            askUserResolution={{ pendingAskUserBySessionRef, viewingSessionIdRef, setAskUser }}
             perm={perm}
             permBarRef={permBarRef}
-            setAskUser={setAskUser}
             permCountdownStartedAt={permCountdownStartedAt}
             permissionTimeoutSec={permissionTimeoutSec}
             phoneLayout={phoneLayout}
@@ -12923,7 +12621,7 @@ export function AppWorkbench() {
           reviewFocusToken={reviewFocus?.token ?? 0}
           reviewPinnedPaths={reviewFocus?.pinnedPaths ?? []}
           sessionId={session.sessionId}
-          plan={plan}
+          plan={planResolution.plan}
           planFocusKey={planFocusKey}
           composerMode={mode}
           planEnabled={planEnabled}
@@ -13243,8 +12941,7 @@ export function AppWorkbench() {
         opsEntryCounts={opsEntryCounts}
         opsEntryOpen={opsEntryOpen}
         planHistoryPreview={planHistoryPreview}
-        planReviseNote={planReviseNote}
-        planReviseOpen={planReviseOpen}
+        planResolution={planResolution}
         policy={policy}
         projects={projects}
         refreshMcpModal={refreshMcpModal}
@@ -13303,8 +13000,6 @@ export function AppWorkbench() {
         setJsonSchemaDraft={setJsonSchemaDraft}
         setOpsEntryOpen={setOpsEntryOpen}
         setPlanHistoryPreview={setPlanHistoryPreview}
-        setPlanReviseNote={setPlanReviseNote}
-        setPlanReviseOpen={setPlanReviseOpen}
         setResumeForkCliSession={setResumeForkCliSession}
         setResumeRestoreConfirm={setResumeRestoreConfirm}
         setRewindConfirm={setRewindConfirm}
@@ -13345,6 +13040,7 @@ export function AppWorkbench() {
       />
 
       <WorkbenchDomainOverlays
+        onProjectsChanged={() => void refreshProjects()}
         locale={locale}
         platform={platform}
         cliVersion={cliInfo.version}
@@ -13398,7 +13094,7 @@ export function AppWorkbench() {
         settingsShortcutHint={settingsShortcutHint}
         onPickSearchSession={(row, proj) => {
           searchPalette.closePalette();
-          void openSession(row, proj);
+          return openSession(row, proj);
         }}
       />
 

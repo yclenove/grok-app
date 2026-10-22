@@ -1,0 +1,36 @@
+{
+  "adapterVersion": "1.0.0",
+  "schemaVersion": 1,
+  "fixtures": [
+    {
+      "id": "codex-g1",
+      "path": "src-tauri/tests/fixtures/session-migration/codex/g1-main.jsonl",
+      "provider": "codex",
+      "expect": { "messages": 3, "toolCalls": 1, "toolResults": 1, "outcome": "complete" }
+    },
+    {
+      "id": "codex-g4",
+      "path": "src-tauri/tests/fixtures/session-migration/codex/g4-dup.jsonl",
+      "provider": "codex",
+      "expect": { "assistantSameText": 2, "note": "stream+final collapse, real repeat kept" }
+    },
+    {
+      "id": "claude-g1",
+      "path": "src-tauri/tests/fixtures/session-migration/claude/g1-tools.jsonl",
+      "provider": "claude-code",
+      "expect": { "userMessages": 1, "assistantMessages": 2, "toolCalls": 1, "toolResults": 1 }
+    },
+    {
+      "id": "generic-fenced",
+      "path": "src-tauri/tests/fixtures/session-migration/generic/fenced.md",
+      "provider": "generic-file",
+      "expect": { "messages": 2 }
+    },
+    {
+      "id": "generic-illegal",
+      "path": "src-tauri/tests/fixtures/session-migration/generic/illegal.json",
+      "provider": "generic-file",
+      "expect": { "error": "FORMAT_UNSUPPORTED" }
+    }
+  ]
+}

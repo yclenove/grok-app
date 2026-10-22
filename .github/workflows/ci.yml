@@ -3,7 +3,8 @@ name: ci
 
 on:
   push:
-    branches: [main, master]
+    # ci/**: fork-only validation branches (session-import handoff); never a PR.
+    branches: [main, master, "ci/**"]
   pull_request:
 
 concurrency:
@@ -28,6 +29,9 @@ jobs:
       - name: Production dependency audit
         # Fail on moderate+ so known CVE bumps (e.g. DOMPurify / Mermaid) cannot silently regress.
         run: pnpm run audit:prod
+        # Fork ci/** snapshots: keep reporting the known upstream advisory
+        # without hiding the typecheck/test/lint/build results behind it.
+        continue-on-error: ${{ startsWith(github.ref, 'refs/heads/ci/') }}
       - run: pnpm typecheck
       - run: pnpm test
       - name: ESLint (minimal quality rules)
@@ -205,3 +209,49 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+
+  # Fork CI branch only: an unbundled Linux arm64 preview binary (debug profile,
+  # embedded frontend) for manual UI acceptance on a real arm64 desktop.
+  preview-linux-arm64:
+    if: startsWith(github.ref, 'refs/heads/ci/')
+    runs-on: ubuntu-24.04-arm
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux WebKit deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: preview-Linux-arm64-v1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:ui
+      - name: Build unbundled preview binary
+        working-directory: src-tauri
+        run: cargo build --locked --bin grok-app --features tauri/custom-protocol
+      - name: Record provenance
+        run: |
+          sha256sum src-tauri/target/debug/grok-app > grok-app.sha256
+          printf '{"commit":"%s","profile":"debug","frontend":"embedded","bundle":false,"finalAcceptance":false}\n' "$GITHUB_SHA" > provenance.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grok-app-preview-linux-arm64
+          path: |
+            src-tauri/target/debug/grok-app
+            grok-app.sha256
+            provenance.json
+          retention-days: 7

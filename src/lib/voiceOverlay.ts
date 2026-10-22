@@ -68,6 +68,7 @@ export type VoiceToolLoopState = {
 /** Permission prompt for a voice-delegated Build session (real ACP only). */
 export type VoicePermissionPrompt = {
   rpcId: number;
+  requestGeneration?: string | null;
   sessionId: string;
   toolCallId: string;
   toolName: string;
@@ -498,6 +499,8 @@ export function isPermissionForDelegatedSession(
 export function parseVoicePermissionPrompt(payload: {
   rpcId?: number | null;
   rpc_id?: number | null;
+  requestGeneration?: string | null;
+  request_generation?: string | null;
   sessionId?: string | null;
   session_id?: string | null;
   toolCallId?: string | null;
@@ -511,8 +514,8 @@ export function parseVoicePermissionPrompt(payload: {
   options?: unknown;
 } | null | undefined): VoicePermissionPrompt | null {
   if (!payload) return null;
-  const rpcId = Number(payload.rpcId ?? payload.rpc_id);
-  if (!Number.isFinite(rpcId) || rpcId <= 0) return null;
+  const rpcId = payload.rpcId ?? payload.rpc_id;
+  if (typeof rpcId !== "number" || !Number.isSafeInteger(rpcId) || rpcId < 0) return null;
   const sessionId = String(
     payload.sessionId ?? payload.session_id ?? "",
   ).trim();
@@ -523,6 +526,7 @@ export function parseVoicePermissionPrompt(payload: {
   const title = String(payload.title ?? "").trim() || toolName;
   return {
     rpcId,
+    requestGeneration: payload.requestGeneration ?? payload.request_generation ?? undefined,
     sessionId,
     toolCallId: String(
       payload.toolCallId ?? payload.tool_call_id ?? "",

@@ -872,6 +872,11 @@ pub fn install_commands() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    crate::session_migration::test_home::fixture_env_contract_tests!(
+        ["GROK_CLI_REQUIRE_CHECKSUM", "GROK_CLI_ALLOW_UNVERIFIED"],
+        require_checksum_policy_default_and_strict_env
+    );
+
     #[test]
     fn allowlist_accepts_official_mirrors_only() {
         assert!(is_allowed_download_url(
@@ -944,9 +949,10 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *other-file
 
     #[test]
     fn require_checksum_policy_default_and_strict_env() {
-        // Env mutation must be serialized — cargo runs unit tests in parallel.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::session_migration::test_home::TestEnvGuard::acquire(&[
+            "GROK_CLI_REQUIRE_CHECKSUM",
+            "GROK_CLI_ALLOW_UNVERIFIED",
+        ]);
 
         // Official mirrors omit sidecars; default must not block install (#227).
         std::env::remove_var("GROK_CLI_ALLOW_UNVERIFIED");
@@ -960,9 +966,6 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *other-file
         assert!(!require_published_checksum(true));
         std::env::set_var("GROK_CLI_ALLOW_UNVERIFIED", "1");
         assert!(!require_published_checksum(false));
-
-        std::env::remove_var("GROK_CLI_REQUIRE_CHECKSUM");
-        std::env::remove_var("GROK_CLI_ALLOW_UNVERIFIED");
     }
 
     #[test]

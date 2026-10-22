@@ -1,6 +1,7 @@
 /** it messages — domain: core */
 export const itCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "La risposta alla richiesta di autorizzazione non è riuscita. {error}",
   "image.loadingOriginal": "Caricamento dell’originale…",
   "image.originalFailed": "Impossibile caricare l’originale. L’anteprima è ancora disponibile.",
   "app.tagline": "MIT · Non ufficiale · Progetto gemello grok-go",
@@ -74,6 +75,8 @@ export const itCore = {
   "agent.streamStallBanner": "Nessuno stream né progresso degli strumenti da circa {seconds}s. Continua ad attendere oppure termina questo turno.",
   "agent.streamStallCancel": "Termina turno",
   "agent.streamStallEndTurn": "Termina turno",
+  "agent.streamStallEndAndContinue": "Termina e continua",
+  "agent.streamStallContinueNotReady": "Il turno si sta ancora chiudendo — riprova Continua tra un momento.",
   "agent.streamStallKeepWaiting": "Continua ad attendere",
   "agent.streamStallHardEndToast": "Turno chiuso dopo il recupero dell’Host — la tua risposta è stata conservata.",
   "agent.ghostStreamingHealed": "Il messaggio non ha raggiunto l’agente. Ripristinato nel composer — invia di nuovo.",

@@ -17,17 +17,19 @@ import { ComposerPlusPanel } from "@/components/ComposerPlusPanel";
 import { ComposerQuoteCards } from "@/components/ComposerQuoteCards";
 import { ContextUsageChip } from "@/components/ContextUsageChip";
 import { PromptHistoryPanel } from "@/components/PromptHistoryPanel";
-import { IconChevronDown, IconChevronUp, IconClock, IconClose, IconCode, IconImagine, IconMic, IconPlus, IconSkills } from "@/components/icons";
+import { ExternalQueueReviewModal } from "@/components/ExternalQueueReviewModal";
+import { useExternalQueueReview } from "@/hooks/useExternalQueueReview";
+import { SendQueueSyncNotice } from "@/components/SendQueueSyncNotice";
+import { SendQueueItemActions } from "@/components/SendQueueItemActions";
+import { IconClock, IconClose, IconCode, IconImagine, IconMic, IconPlus, IconSkills } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
-import { isImagePath, mergeAttachments, type Attachment } from "@/lib/attachments";
+import { isImagePath, mergeAttachments } from "@/lib/attachments";
 import { chatHasUpdate, loadRecentAttachIds, lookupChatStatus, lookupChatTitle } from "@/lib/chatAttach";
 import { type PermissionPolicyId } from "@/lib/grokCatalog";
 import { removeRecentPrompt } from "@/lib/recentPromptHistory";
 import { queuePreviewText, shouldEnqueueSend } from "@/lib/sendQueue";
-import { sessionGoalClear } from "@/lib/goalClear";
 import { canType } from "@/lib/session";
 import { resolveVoiceMicChrome, voiceMicLabelMessageKey } from "@/lib/voiceDictation";
-import { useCallback } from "react";
 import { createPortal } from "react-dom";
 import type { WorkbenchComposerColumnProps } from "@/app/WorkbenchComposerColumn";
 
@@ -85,6 +87,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
     composerSpellcheck,
     connecting,
     contextUsageDisplay,
+    refreshContextInfo,
     cycleAttachedChatScope,
     dragZone,
     effectiveCanSend,
@@ -175,18 +178,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
     voiceDictationAutoSend,
     voiceGate,
   } = p;
-  /**
-   * 跨档降级补进来的附件（切到内置档时引用 → 附件条）。
-   *
-   * 必须 memo：它是薄岛里那个降级 effect 的依赖，行内函数会让 effect 在父组件每次
-   * 渲染后重跑，直到 `setDraft` 落盘才停。
-   */
-  const onDemoteRefs = useCallback(
-    (converted: Attachment[]) => {
-      setAttachments((prev) => mergeAttachments(prev, converted));
-    },
-    [setAttachments],
-  );
+  const queueReview = useExternalQueueReview({ sessionId: session.sessionId, queue: sendQueue.activeQueue, sync: sendQueue.externalSync });
   return (
             <div
               ref={composerShellRef}
@@ -196,6 +188,8 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
               }
               data-session-attach=""
             >
+              <ExternalQueueReviewModal review={queueReview} tr={tr} />
+              <SendQueueSyncNotice sync={sendQueue.externalSync} tr={tr} />
               {sendQueueStrip.visible && (
                 <div
                   className="composer__queue"
@@ -217,7 +211,8 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       disabled={!sendQueueStrip.canClear}
                       onClick={requestClearSendQueue}
                     >
-                      {tr("composer.queueClear")}
+                      {tr(sendQueue.activeQueue.some((item) => item.source === "external")
+                        ? "composer.queueClearLocal" : "composer.queueClear")}
                     </button>
                   </div>
                   {sendQueueStrip.showHold ? (
@@ -236,12 +231,11 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                   ) : null}
                   <ul className="composer__queue-list">
                     {sendQueue.activeQueue.map((item, idx) => {
-                      const queueLen = sendQueue.activeQueue.length;
                       const rowBusy =
                         guidingQueueItemId === item.id ||
                         queueEditItemId !== null;
                       return (
-                      <li key={item.id} className="composer__queue-item">
+                      <li key={`${item.source ?? "composer"}:${item.id}`} className="composer__queue-item">
                         <span className="composer__queue-idx" aria-hidden>
                           {idx + 1}
                         </span>
@@ -266,83 +260,19 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                             queuePreviewLabels,
                           )}
                         </span>
-                        <div className="composer__queue-move">
-                          <button
-                            type="button"
-                            className="composer__queue-move-btn"
-                            data-testid="queue-move-up"
-                            aria-label={tr("composer.queueMoveUp")}
-                            title={tr("composer.queueMoveUp")}
-                            disabled={rowBusy || idx === 0}
-                            onClick={() =>
-                              sendQueue.moveItem(item.id, "up")
-                            }
-                          >
-                            <IconChevronUp size={12} aria-hidden />
-                          </button>
-                          <button
-                            type="button"
-                            className="composer__queue-move-btn"
-                            data-testid="queue-move-down"
-                            aria-label={tr("composer.queueMoveDown")}
-                            title={tr("composer.queueMoveDown")}
-                            disabled={rowBusy || idx >= queueLen - 1}
-                            onClick={() =>
-                              sendQueue.moveItem(item.id, "down")
-                            }
-                          >
-                            <IconChevronDown size={12} aria-hidden />
-                          </button>
-                        </div>
-                        <button
-                          type="button"
-                          className="composer__queue-edit"
-                          data-testid="queue-edit"
-                          aria-label={tr("composer.queueEdit")}
-                          title={tr("composer.queueEdit")}
-                          disabled={rowBusy}
-                          onClick={() => openQueueEdit(item)}
-                        >
-                          {tr("composer.queueEdit")}
-                        </button>
-                        <button
-                          type="button"
-                          className="composer__queue-guide"
-                          data-testid="queue-guide"
-                          aria-label={
-                            guidingQueueItemId === item.id ||
-                            guidingQueueItemId !== null
-                              ? tr("composer.queueGuiding")
-                              : canGuideQueuedMessage
-                                ? tr("composer.queueGuide")
-                                : tr("composer.queueSendNow")
-                          }
-                          title={
-                            guidingQueueItemId === item.id ||
-                            guidingQueueItemId !== null
-                              ? tr("composer.queueGuiding")
-                              : canGuideQueuedMessage
-                                ? tr("composer.queueGuide")
-                                : tr("composer.queueSendNow")
-                          }
-                          disabled={guidingQueueItemId !== null}
-                          onClick={() => void guideQueuedMessage(item)}
-                        >
-                          {guidingQueueItemId === item.id
-                            ? tr("composer.queueGuiding")
-                            : canGuideQueuedMessage
-                              ? tr("composer.queueGuide")
-                              : tr("composer.queueSendNow")}
-                        </button>
-                        <button
-                          type="button"
-                          className="composer__queue-remove"
-                          aria-label={tr("composer.queueRemove")}
-                          disabled={guidingQueueItemId === item.id}
-                          onClick={() => sendQueue.removeItem(item.id)}
-                        >
-                          <IconClose size={12} />
-                        </button>
+                        <SendQueueItemActions
+                          queue={sendQueue.activeQueue}
+                          index={idx}
+                          busy={rowBusy}
+                          guidingItemId={guidingQueueItemId}
+                          canGuide={canGuideQueuedMessage}
+                          tr={tr}
+                          onMove={sendQueue.moveItem}
+                          onEdit={openQueueEdit}
+                          onGuide={guideQueuedMessage}
+                          onRemove={sendQueue.removeItem}
+                          onReview={sendQueue.externalSync.enabled ? queueReview.open : undefined}
+                        />
                       </li>
                       );
                     })}
@@ -616,7 +546,6 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                 onPasteMediaFallback={onComposerPasteMediaFallback}
                 onSlashQueryChange={onSlashQueryChange}
                 onAtQueryChange={onAtQueryChange}
-                onDemoteRefs={onDemoteRefs}
                 onKeyDown={onComposerKeyDown}
                 onContextMenu={onComposerContextMenu}
               />
@@ -713,10 +642,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                       }}
                       onMode={(v) => {
                         setMode(v);
-                        if (v === "plan") {
-                          setGoalMode(false);
-                          sessionGoalClear.arm(session.sessionId, session.state);
-                        }
+                        if (v === "plan") setGoalMode(false);
                         void api
                           .composerPrefsSet({
                             projectId: activeProject?.id ?? null,
@@ -734,13 +660,7 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                         <button
                           type="button"
                           className="chip chip--goal"
-                          onClick={() => {
-                            setGoalMode(false);
-                            sessionGoalClear.arm(
-                              session.sessionId,
-                              session.state,
-                            );
-                          }}
+                          onClick={() => setGoalMode(false)}
                           aria-label={tr("composer.goalClear")}
                         >
                           <IconImagine size={14} />
@@ -798,7 +718,19 @@ export function WorkbenchComposerShell(p: WorkbenchComposerShellProps) {
                         window: tr("context.window"),
                         percentUsed: tr("context.percentLabel"),
                         cacheHit: tr("context.cacheHit"),
+                        systemPrompt: tr("context.systemPrompt"),
+                        messages: tr("context.messages"),
+                        overhead: tr("context.overhead"),
+                        free: tr("context.free"),
+                        alreadyCounted: tr("context.alreadyCounted"),
+                        toolDefinitions: tr("context.toolDefinitions"),
+                        toolsDetail: tr("context.toolsDetail"),
+                        autoCompact: tr("context.autoCompact"),
+                        autoCompactNow: tr("context.autoCompactNow"),
+                        stats: tr("context.stats"),
+                        summary: tr("context.summary"),
                       }}
+                      onRefreshContext={refreshContextInfo}
                       onCompact={() => {
                         setCompactNote("");
                         setShowCompactModal(true);

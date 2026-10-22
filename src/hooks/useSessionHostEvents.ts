@@ -8,18 +8,13 @@ import type { ContextUsageState } from "@/lib/contextUsage";
 import type { MessagesReducer } from "@/lib/sessionTranscriptStore";
 import type { CompactPendingBefore } from "@/hooks/useCompactDialog";
 import type { GoalOrchEvent } from "@/lib/goalOrch";
+import type { StreamStallView } from "@/lib/streamStallView";
 
 type TFn = ReturnType<typeof createT>;
-type StreamStallView = {
-  sessionId?: string;
-  stallSeconds: number;
-  tier?: string;
-  sawModelOutput?: boolean;
-  sawToolActivity?: boolean;
-} | null;
 import type { Project, SessionRow } from "@/lib/app/sidebarModels";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
 import type { SessionPlanState } from "@/lib/planSession";
+import type { SessionGateCache } from "@/lib/sessionGateCache";
 import type { StopLatchState } from "@/lib/stopLatch";
 import type { SessionFileChange } from "@/lib/sessionChanges";
 import type { ResourceOpenTarget } from "@/components/resource-viewer/types";
@@ -27,6 +22,10 @@ import type { ReliabilityStallSignal } from "@/lib/reliabilityCenter";
 import type { ProviderRetryStatus } from "@/lib/providerRetryStatusStore";
 import type { ProcessLimitEvent } from "@/lib/processBudget";
 import type { GoalOrchHostPayload } from "@/lib/goalOrch";
+import {
+  subagentStore,
+  type SubagentEventPayload,
+} from "@/lib/subagentStore";
 import * as api from "@/lib/api";
 import { registerGateAndMetaSubscriptions } from "./sessionHostGateSubscriptions";
 import { isMirrorClient } from "@/lib/mirrorTransport";
@@ -94,7 +93,6 @@ import {
   saveSessionUsageSnapshot,
   isLikelyBillingAggregateUsage,
 } from "@/lib/contextUsage";
-import { invalidatePlanGate } from "@/lib/planSession";
 import { parseProcessLimitEvent } from "@/lib/processBudget";
 import {
   DEFAULT_RELIABILITY_MAX_STALLS,
@@ -132,6 +130,7 @@ import {
   resolveChatcutHandoffFromToolEvent,
 } from "@/lib/chatcutHandoff";
 import { toolEventSuggestsSkillCatalogChange } from "@/lib/skillCatalogRefresh";
+import { useNativeSoakTelemetry } from "./useNativeSoakTelemetry";
 
 /** Mutable bag of AppWorkbench bindings used by Host event handlers. */
 export type SessionHostEventsCtx = {
@@ -169,7 +168,7 @@ export type SessionHostEventsCtx = {
   setPerm: Dispatch<SetStateAction<PermissionPayload | null>>;
   setPlan: Dispatch<SetStateAction<SessionPlanState>>;
   setPlanFocusKey: Dispatch<SetStateAction<number>>;
-  planBySessionRef: RefObject<Map<string, SessionPlanState>>;
+  planBySessionRef: RefObject<SessionGateCache<SessionPlanState>>;
   markPlanPendingBadge: (sessionId: string | null | undefined, plan: SessionPlanState) => void;
   planOpenedAsideRef: RefObject<boolean>;
   planCompletedRecordedRef: RefObject<Set<string>>;
@@ -177,8 +176,8 @@ export type SessionHostEventsCtx = {
   openAsidePaneRef: RefObject<() => void>;
   setResourceOpenTarget: Dispatch<SetStateAction<ResourceOpenTarget | null>>;
   navigateWorkbench: () => void;
-  pendingAskUserBySessionRef: RefObject<Map<string, AskUserPayload>>;
-  pendingPermBySessionRef: RefObject<Map<string, PermissionPayload>>;
+  pendingAskUserBySessionRef: RefObject<SessionGateCache<AskUserPayload>>;
+  pendingPermBySessionRef: RefObject<SessionGateCache<PermissionPayload>>;
   pendingCompactBeforeRef: RefObject<CompactPendingBefore | null>;
   clearPendingGatesRef: RefObject<(sessionId?: string | null | undefined) => void>;
   notifyPrefsRef: RefObject<{ notifyOnTurnDone: boolean; notifyOnPermission: boolean; }>;
@@ -320,6 +319,7 @@ function maybeOpenChatcutHandoffFromTool(
 }
 
 export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
+  const soakQueues = useNativeSoakTelemetry();
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
   const patchSessionMessages = ctx.patchSessionMessages;
@@ -333,6 +333,42 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
     const registrationPromises: Promise<unknown>[] = [];
+    // IPC delivery can lag behind Host retirement. Keep a small per-session
+    // identity fence so a late `streaming` state/runtime snapshot (or token)
+    // for an already-finalized message cannot resurrect that turn. Message ids
+    // are unique per assistant turn; a different id remains a valid next turn.
+    const finalizedStreamMessages = new Map<string, string[]>();
+    const streamMessageId = (value: string | null | undefined) =>
+      value?.trim() || null;
+    const rememberFinalizedStreamMessage = (
+      sessionId: string,
+      messageId: string | null | undefined,
+    ) => {
+      const id = streamMessageId(messageId);
+      if (!id) return;
+      const previous = finalizedStreamMessages.get(sessionId) ?? [];
+      finalizedStreamMessages.set(
+        sessionId,
+        [id, ...previous.filter((candidate) => candidate !== id)].slice(0, 8),
+      );
+    };
+    const isFinalizedStreamMessage = (
+      sessionId: string | null | undefined,
+      messageId: string | null | undefined,
+    ) => {
+      const id = streamMessageId(messageId);
+      return (
+        !!sessionId &&
+        !!id &&
+        finalizedStreamMessages.get(sessionId)?.includes(id) === true
+      );
+    };
+    const isStaleFinalizedBusySnapshot = (snapshot: SessionSnapshot) =>
+      isSessionLiveStreaming(snapshot.state) &&
+      isFinalizedStreamMessage(
+        snapshot.sessionId,
+        snapshot.streamingMessageId,
+      );
 
     /**
      * Registering a listener is an IPC operation in both desktop and mirror
@@ -635,6 +671,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
        track(
           listenWithRetry<SessionSnapshot>("session://state", (s) => {
             if (cancelled) return;
+            if (isStaleFinalizedBusySnapshot(s)) return;
             // Host focus slot (the process under the live cursor). Multi-session
             // busy demotions also emit session://runtime so liveMap stays honest.
             const prevLiveState = s.sessionId
@@ -795,10 +832,12 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             }
           }),
         );
-        // Background / parked multi-session runtime (does not steal liveHost focus).
+        // Session-scoped runtime also carries command results for the live chat.
+        // Keep its projection current without adopting another chat's focus.
        track(
           listenWithRetry<SessionSnapshot>("session://runtime", (s) => {
             if (cancelled || !s.sessionId) return;
+            if (isStaleFinalizedBusySnapshot(s)) return;
             const prevLiveState = c.liveMapRef.current[s.sessionId]?.state;
             let background = false;
             if (
@@ -820,6 +859,21 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                 stopLatch,
                 s.sessionId,
               );
+              if (c.liveHostRef.current.sessionId === s.sessionId) {
+                c.setLiveHost((prev) => {
+                  if (prev.sessionId !== s.sessionId) return prev;
+                  const next =
+                    heldState === s.state
+                      ? s
+                      : {
+                          ...s,
+                          state: heldState,
+                          streamingMessageId: null,
+                        };
+                  c.liveHostRef.current = next;
+                  return next;
+                });
+              }
               c.setLiveMap((prev) =>
                 projectHostIntoLiveMap(prev, {
                   sessionId: s.sessionId,
@@ -987,12 +1041,18 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
           onFlush: applyToolBatchToUi,
         });
         cleanups.push(() => toolEventCoalescer?.dispose());
+        cleanups.push(soakQueues.attachTools(toolEventCoalescer));
 
         // Batch high-frequency stream tokens before React setState (long turns).
         const applyStreamToUi = (chunk: StreamPayload) => {
           if (cancelled) return;
           // Ignore empty terminal ticks that only flip done
           if (!chunk.text && !chunk.done) return;
+          if (
+            isFinalizedStreamMessage(chunk.sessionId, chunk.messageId)
+          ) {
+            return;
+          }
           // Anti-replay vs late answer after early ready (see streamLateToken).
           // Busy/liveMap re-promotion stays gated via mayPromoteStreamingFromStreamChunk.
           const host = c.liveHostRef.current;
@@ -1012,10 +1072,16 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             shouldIgnorePrematureStreamDone({
               hostLiveStreaming: hostLive,
               hasRunningTool: !!pickRunningTurnTool(cachedForChunk),
+              hostFinalized: !!chunk.hostFinalized,
             });
           const effective: StreamPayload = ignoreDone
             ? { ...chunk, done: false }
             : chunk;
+          const authoritativeDone =
+            !!effective.done && !!chunk.hostFinalized;
+          if (authoritativeDone && chunk.sessionId) {
+            rememberFinalizedStreamMessage(chunk.sessionId, chunk.messageId);
+          }
           if (chunk.text && chunk.sessionId) {
             const msgs =
               c.messagesBySessionRef.current.get(chunk.sessionId) ?? [];
@@ -1058,23 +1124,53 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             });
           }
           if (effective.done && chunk.sessionId) {
+            const sid = chunk.sessionId;
             // Stamp unread before liveMap leaves `working` so the pet
             // done-bubble stays up (including unfocused viewing).
             if (
               shouldMarkUnreadOnTurnDone({
-                sessionId: chunk.sessionId,
+                sessionId: sid,
                 viewingSessionId: c.viewingSessionIdRef.current,
               })
             ) {
-              markSessionUnread(chunk.sessionId);
+              markSessionUnread(sid);
             }
             c.setLiveMap((prev) =>
               projectHostIntoLiveMap(prev, {
-                sessionId: chunk.sessionId!,
+                sessionId: sid,
                 state: "ready",
                 streamingMessageId: null,
               }),
             );
+            if (authoritativeDone) {
+              // `hostFinalized` is emitted only after Host retired the turn.
+              // Treat it as the terminal state fence when a delayed/dropped
+              // session://state ready would otherwise leave Stop / 思考中 stuck.
+              // A background turn may settle its map row, but must never adopt
+              // the focused Host slot or workbench session.
+              c.setLiveHost((prev) => {
+                const next = settleStoppedSessionSnapshot(prev, sid);
+                c.liveHostRef.current = next;
+                return next;
+              });
+              if (sid === c.viewingSessionIdRef.current) {
+                c.setSession((prev) =>
+                  settleStoppedSessionSnapshot(prev, sid),
+                );
+                c.setRetryStatus(null);
+                c.setStreamStall(null);
+              }
+              c.clearTurnClock(sid);
+              const stopLatch = c.stopLatchRef.current;
+              if (
+                stopLatch.phase !== "idle" &&
+                (!stopLatch.sessionId || stopLatch.sessionId === sid)
+              ) {
+                const cleared = createStopLatchState();
+                c.stopLatchRef.current = cleared;
+                c.setStopLatch(cleared);
+              }
+            }
             // liveMap is already ready here, so session://state ready→ready
             // will not schedule a heal. Lift any journal tail the late-token
             // filter or a dropped IPC batch missed.
@@ -1085,11 +1181,14 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                 streamDone: true,
               })
             ) {
-              scheduleJournalRehydrate(chunk.sessionId, 0);
+              scheduleJournalRehydrate(sid, 0);
             }
           }
           c.patchSessionMessages(chunk.sessionId, (prev) => {
-            const next = applyStreamChunk(prev, effective);
+            const applied = applyStreamChunk(prev, effective);
+            const next = authoritativeDone
+              ? settleStreamingOnHostReady(applied)
+              : applied;
             // Keep cache in sync immediately so post-turn apply sees final text.
             if (chunk.sessionId) {
               c.messagesBySessionRef.current.set(chunk.sessionId, next);
@@ -1114,12 +1213,14 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
               messageId: raw.messageId ?? "",
               text: raw.text ?? "",
               done: !!raw.done,
+              hostFinalized: !!raw.hostFinalized,
               kind: (raw.kind as StreamPayload["kind"]) || "assistant",
               thoughtPhase: raw.thoughtPhase ?? undefined,
             });
           },
         });
         cleanups.push(() => streamCoalescer?.dispose());
+        cleanups.push(soakQueues.attachStream(streamCoalescer));
        track(
           listenWithRetry<StreamPayload>("session://stream", (chunk) => {
             if (cancelled) return;
@@ -1424,6 +1525,16 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
           }),
         );
        track(
+          listenWithRetry<SubagentEventPayload>("session://subagent", (p) => {
+            if (cancelled || !p) return;
+            // CLI 1.0.x subagent_spawned / _progress / _finished. Subscribed
+            // here (app-level) rather than in the Tasks panel: that panel is
+            // mounted on demand, and telemetry arriving before the user opened
+            // it would otherwise be dropped with no way to backfill.
+            subagentStore.apply(p);
+          }),
+        );
+       track(
           listenWithRetry<GoalOrchHostPayload>("session://goal", (p) => {
             if (cancelled || !p) return;
             // CLI 0.2.117+ goal_updated — soft-fail when CLI never emits.
@@ -1559,76 +1670,12 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             },
           ),
         );
-        // #524 + plan gates: agent recycled / exited while a human gate was open —
-        // drop stale Approve (permission / plan / ask_user) so UI never writes to
-        // a dead stdin. Host payload includes planRpcId / askUserRpcId.
        track(
-          listenWithRetry<{
-            reason?: string;
-            sessions?: Array<{
-              sessionId?: string;
-              permissionRpcId?: number | null;
-              planRpcId?: number | null;
-              askUserRpcId?: number | null;
-            }>;
-          }>("session://permissions_invalidated", (p) => {
-            if (cancelled || !p) return;
-            const sessions = Array.isArray(p.sessions) ? p.sessions : [];
-            const viewing = c.viewingSessionIdRef.current;
-            const planMap = c.planBySessionRef?.current as
-              | Map<string, import("@/lib/planSession").SessionPlanState>
-              | undefined;
-
-            const dropPlanGate = (sid: string) => {
-              if (!planMap) return;
-              if (sid === viewing) {
-                c.setPlan(
-                  (prev: import("@/lib/planSession").SessionPlanState) => {
-                    const next = invalidatePlanGate(prev);
-                    planMap.set(sid, next);
-                    c.markPlanPendingBadge?.(sid, next);
-                    return next;
-                  },
-                );
-                return;
-              }
-              const base = planMap.get(sid);
-              if (!base) return;
-              const next = invalidatePlanGate(base);
-              planMap.set(sid, next);
-              c.markPlanPendingBadge?.(sid, next);
-            };
-
-            for (const row of sessions) {
-              const sid = row?.sessionId;
-              if (!sid) continue;
-              c.pendingPermBySessionRef.current.delete(sid);
-              c.pendingAskUserBySessionRef.current.delete(sid);
-              // Session listed ⇒ process/gates gone; drop plan Approve even if
-              // planRpcId was already taken in Host before emit.
-              dropPlanGate(sid);
-              c.clearPendingGatesRef.current?.(sid);
-              if (sid === viewing) {
-                c.setPerm(null);
-                c.setAskUser?.(null);
-              }
-            }
-            // Also clear any focused permission that lost its process even if
-            // the payload omitted session ids (older hosts).
-            if (!sessions.length) {
-              c.pendingPermBySessionRef.current.clear();
-              c.pendingAskUserBySessionRef.current.clear();
-              c.setPerm(null);
-              c.setAskUser?.(null);
-              if (viewing) dropPlanGate(viewing);
-            }
-          }),
-        );
-       track(
-          listenWithRetry<{ reason?: string }>(
+          listenWithRetry<{ sessionId?: string; reason?: string }>(
             "session://agent_soft_respawn",
             (p) => {
               if (cancelled || !p) return;
+              if (p.sessionId && p.sessionId !== c.viewingSessionIdRef.current) return;
               // Spawn flags / extensions changed while an agent was live.
               c.setToast(c.tr("agent.softRespawnToast"));
               window.setTimeout(() => c.setToast(null), 3600);
@@ -1711,6 +1758,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
             tier?: string;
             sawModelOutput?: boolean;
             sawToolActivity?: boolean;
+            streamInterrupted?: boolean;
           }>("session://stream_stall", (p) => {
             if (cancelled || !p) return;
             // Only prompt for the viewed session (or unknown id).
@@ -1745,6 +1793,7 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
               tier: p.tier,
               sawModelOutput: p.sawModelOutput,
               sawToolActivity: p.sawToolActivity,
+              streamInterrupted: p.streamInterrupted === true,
             });
             // Reliability center ring — title resolved at view assembly time.
             const activeStall = reliabilityStallFromEvent({
@@ -1903,5 +1952,5 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
       cleanups.forEach((u) => u());
     };
   
-  }, [patchSessionMessages, tryApplyAutomationFromSession]);
+  }, [patchSessionMessages, tryApplyAutomationFromSession, soakQueues]);
 }

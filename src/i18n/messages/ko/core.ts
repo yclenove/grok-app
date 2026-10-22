@@ -1,6 +1,7 @@
 /** ko messages — domain: core */
 export const koCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "권한 요청에 대한 응답에 실패했습니다. {error}",
   "image.loadingOriginal": "원본을 불러오는 중…",
   "image.originalFailed": "원본을 불러오지 못했습니다. 미리보기는 계속 볼 수 있습니다.",
   "app.tagline": "MIT · 비공식 · 자매 프로젝트 grok-go",
@@ -74,6 +75,8 @@ export const koCore = {
   "agent.streamStallBanner": "약 {seconds}초 동안 스트림이나 도구 진행이 없습니다. 계속 기다리거나 이 턴을 종료하세요.",
   "agent.streamStallCancel": "턴 종료",
   "agent.streamStallEndTurn": "턴 종료",
+  "agent.streamStallEndAndContinue": "종료하고 계속",
+  "agent.streamStallContinueNotReady": "이 턴이 아직 끝나는 중입니다. 잠시 후 계속을 다시 누르세요.",
   "agent.streamStallKeepWaiting": "계속 기다리기",
   "agent.streamStallHardEndToast": "Host 복구 후 턴이 닫혔습니다 — 응답은 유지되었습니다.",
   "agent.ghostStreamingHealed": "메시지가 에이전트에 도달하지 않았습니다. 작성기로 복원했습니다 — 다시 보내세요.",

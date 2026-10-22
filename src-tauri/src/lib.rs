@@ -25,6 +25,8 @@ mod agent_memory_embed;
 
 mod agent_prefs;
 
+mod agent_proc_home;
+
 mod agent_privacy;
 
 mod agent_subagent_wt_snap;
@@ -62,6 +64,10 @@ mod cli_update;
 mod cli_worktrees;
 
 mod customize_commands;
+
+/// Prompts the Host injected into a chat (wakes / external sends): remembered so
+/// the transcript can show them as automatic follow-ups, not user messages.
+mod injected_prompts;
 
 mod wsl_backend;
 
@@ -112,6 +118,8 @@ mod mirror;
 
 mod mock_acp;
 
+mod native_soak_telemetry;
+
 mod models_aux;
 
 mod models_catalog;
@@ -151,6 +159,10 @@ mod proxy;
 
 mod relay_stream_proxy;
 
+mod pr_monitor;
+
+mod pr_monitor_i18n;
+
 mod pty_host;
 
 mod remote_im;
@@ -167,6 +179,8 @@ mod session_fsm;
 
 mod session_import;
 
+mod session_migration;
+
 mod session_attach;
 
 mod session_api;
@@ -179,6 +193,10 @@ mod skill_compat;
 
 mod skill_edit;
 
+mod session_execution;
+mod session_execution_publication;
+#[cfg(test)]
+mod session_execution_tests;
 mod store;
 
 mod store_lock;
@@ -277,10 +295,75 @@ use mirror::MirrorHost;
 
 use session_manager::SessionManager;
 
+#[cfg(all(windows, debug_assertions))]
+const WEBVIEW_CDP_PORT_ENV: &str = "GROK_WEBVIEW_CDP_PORT";
+
+#[cfg(all(windows, debug_assertions))]
+fn debug_webview_cdp_args(raw_port: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw_port) = raw_port else {
+        return Ok(None);
+    };
+    if raw_port.is_empty() || raw_port.trim() != raw_port {
+        return Err(format!(
+            "{WEBVIEW_CDP_PORT_ENV} must be an integer from 1024 through 65535"
+        ));
+    }
+    let port = raw_port.parse::<u16>().map_err(|_| {
+        format!("{WEBVIEW_CDP_PORT_ENV} must be an integer from 1024 through 65535")
+    })?;
+    if port < 1024 {
+        return Err(format!(
+            "{WEBVIEW_CDP_PORT_ENV} must use a non-privileged port from 1024 through 65535"
+        ));
+    }
+
+    Ok(Some(format!(
+        "--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} \
+         --remote-allow-origins=http://127.0.0.1:{port},http://localhost:{port}"
+    )))
+}
+
+#[cfg(all(test, windows, debug_assertions))]
+mod debug_webview_cdp_tests {
+    use super::debug_webview_cdp_args;
+
+    #[test]
+    fn disabled_without_an_explicit_port() {
+        assert_eq!(debug_webview_cdp_args(None).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_or_privileged_ports() {
+        for value in ["", " 9223", "9223 ", "not-a-port", "0", "80", "65536"] {
+            assert!(
+                debug_webview_cdp_args(Some(value)).is_err(),
+                "unexpected valid CDP port: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binds_valid_ports_to_loopback_without_a_wildcard_origin() {
+        let args = debug_webview_cdp_args(Some("49152"))
+            .unwrap()
+            .expect("explicit valid port enables debug CDP");
+
+        assert!(args.contains("--remote-debugging-address=127.0.0.1"));
+        assert!(args.contains("--remote-debugging-port=49152"));
+        assert!(args.contains("http://127.0.0.1:49152"));
+        assert!(args.contains("http://localhost:49152"));
+        assert!(!args.contains("remote-allow-origins=*"));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Session list / continue-by-id CLI must not open a window or steal focus
     // via the single-instance plugin. Exit before any Tauri builder setup.
+    if session_migration::wants_import_history_mcp() {
+        std::process::exit(session_migration::run_import_history_mcp());
+    }
+
     if session_api::try_run_cli() {
         std::process::exit(session_api::run_cli());
     }
@@ -300,7 +383,7 @@ pub fn run() {
     #[cfg(windows)]
     win_shell::set_process_app_user_model_id(&context.config().identifier);
 
-    let session_mgr = Arc::new(SessionManager::new());
+    let session_mgr = SessionManager::native();
 
     let mirror_host = Arc::new(MirrorHost::from_env());
 
@@ -542,8 +625,15 @@ pub fn run() {
         })
 
         .setup(|app| {
+            // Plugin setup already exited any second process. Sweep only here,
+            // so a relaunch cannot delete the running chats' agent-proc homes.
+            agent_proc_home::sweep_orphans();
 
             crate::path_scope::refresh_from_store();
+            crate::session_migration::job_control::attach(app.handle().clone());
+            crate::session_migration::job_control::wake();
+            let _ = crate::session_migration::scan::recover_scans_on_startup();
+            let _ = crate::session_migration::engine::cleanup_preview_leases();
 
             use tauri::Manager;
 
@@ -614,11 +704,31 @@ pub fn run() {
                 os_lang = boot_os_lang,
                 html_lang = boot_html_lang
             );
-            let window = tauri::WebviewWindowBuilder::from_config(app, &main_cfg)?
+            let builder = tauri::WebviewWindowBuilder::from_config(app, &main_cfg)?
                 .visible(false)
                 .accept_first_mouse(true)
-                .initialization_script(&boot_theme_script)
-                .on_page_load(|window, payload| {
+                .initialization_script(&boot_theme_script);
+            #[cfg(all(windows, debug_assertions))]
+            let builder = {
+                let raw_port = match std::env::var(WEBVIEW_CDP_PORT_ENV) {
+                    Ok(value) => Some(value),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{WEBVIEW_CDP_PORT_ENV} must contain valid Unicode"),
+                        )
+                        .into());
+                    }
+                };
+                match debug_webview_cdp_args(raw_port.as_deref()).map_err(|message| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+                })? {
+                    Some(args) => builder.additional_browser_args(&args),
+                    None => builder,
+                }
+            };
+            let window = builder.on_page_load(|window, payload| {
                     // Cold-launch first-click / first-key dead zone: the
                     // set_focus() right after show() occasionally loses the
                     // activation race, leaving a key window whose app is still
@@ -937,6 +1047,11 @@ pub fn run() {
                 } else {
                     automation_runner::start(app.handle().clone(), mgr);
                 }
+
+                // PR monitors: poll mounted PRs while the process lives (tray
+                // included) and emit `pr-monitor://update` on real changes.
+                // Mounts are UI-driven and not persisted.
+                pr_monitor::start(app.handle().clone());
             }
 
             // LaunchAgent / helper / oneshot: open into tray so schedules fire without focus steal.

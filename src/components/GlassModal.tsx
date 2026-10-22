@@ -53,6 +53,11 @@ export type GlassModalProps = {
   /** Stop mousedown bubbling on panel (default true) */
   stopPanelPropagation?: boolean;
   /**
+   * Theme the portaled overlay. Production inherits `documentElement`.
+   * An isolated gallery frame must pass its own theme or the portal escapes it.
+   */
+  dataTheme?: string;
+  /**
    * Initial focus inside the panel. Default `"first"`.
    * Pass a getter to focus a specific control (e.g. a filter field).
    */
@@ -80,6 +85,7 @@ export function GlassModal({
   showClose = true,
   stopPanelPropagation = true,
   initialFocus = "first",
+  dataTheme,
 }: GlassModalProps) {
   const autoId = useId();
   const titleId = titleIdProp || autoId;
@@ -131,6 +137,7 @@ export function GlassModal({
     <div
       className={cx("overlay", overlayClassName)}
       role="presentation"
+      data-theme={dataTheme}
       onMouseDown={onOverlayMouseDown}
     >
       <div
@@ -139,6 +146,7 @@ export function GlassModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        data-theme={dataTheme}
         onMouseDown={onPanelMouseDown}
         onClick={(e) => e.stopPropagation()}
       >

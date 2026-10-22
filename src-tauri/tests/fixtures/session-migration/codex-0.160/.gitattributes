@@ -1,0 +1,2 @@
+# history_base.end_byte_offset is a byte count: keep these rollouts byte-exact on checkout.
+*.jsonl -text

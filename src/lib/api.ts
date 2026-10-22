@@ -9,10 +9,13 @@ export {
 } from "./api/host";
 
 export * from "./api/session";
+export * from "./api/sessionQueue";
+export * from "./api/sessionReceipts";
 export * from "./api/system";
 export * from "./api/project";
 export * from "./api/workspace";
 export * from "./api/git";
+export * from "./api/prMonitor";
 export * from "./api/fs";
 export * from "./api/settings";
 export * from "./api/extensions";
@@ -28,3 +31,4 @@ export * from "./api/ssh";
 export * from "./api/wallpaper";
 export * from "./api/pet";
 export * from "./api/skin";
+export * from "./api/sessionMigration";

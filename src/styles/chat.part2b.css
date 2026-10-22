@@ -647,3 +647,43 @@
   font-size: 12px;
   color: var(--text-secondary);
 }
+
+/* Queue verification may wrap on phone mirrors and in longer translations. */
+.composer__queue-sync {
+  flex-wrap: wrap;
+}
+
+.composer__queue-sync .composer__queue-hold-text {
+  flex: 1 1 180px;
+  overflow-wrap: anywhere;
+}
+
+.composer__queue-sync .composer__queue-hold-retry {
+  max-width: 100%;
+  text-align: start;
+}
+
+.composer__queue-host-state {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 50%;
+  overflow-wrap: anywhere;
+}
+
+/* Review uses the shared modal surface; long identities/prompts never overflow. */
+.queue-review .modal-body { min-width: 0; overflow-wrap: anywhere; }
+.queue-review__identity { display: grid; gap: 4px; margin: 0; }
+.queue-review__identity dt { color: var(--text-secondary); font-size: 12px; }
+.queue-review__identity dd { margin: 0 0 8px; overflow-wrap: anywhere; }
+.queue-review__prompt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; padding: 12px; border: 1px solid var(--border-strong); border-radius: 8px; font: inherit; }
+.queue-review__confirm { display: flex; align-items: flex-start; gap: 8px; }
+.queue-review__checkbox { appearance: none; flex: 0 0 18px; width: 18px; height: 18px; margin: 2px 0; border: 1px solid var(--text-secondary); border-radius: 4px; background: var(--bg-elevated); }
+.queue-review__checkbox:checked { background: var(--text-primary); box-shadow: inset 0 0 0 3px var(--bg-elevated); }
+.queue-review__checkbox:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3px; }
+.queue-review__checkbox:disabled { opacity: .45; }
+.queue-review .modal-actions { flex-wrap: wrap; }
+.queue-review .modal-actions .btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+
+.queue-review .modal-title { overflow-wrap: anywhere; }
+.queue-review .modal-body > * { flex-shrink: 0; }
+.queue-review__prompt { min-height: 96px; }

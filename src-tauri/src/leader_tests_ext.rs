@@ -1,6 +1,11 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::session_migration::test_home::fixture_env_contract_tests!(
+        ["GROK_LEADER_SOCKET"],
+        default_socket_respects_env
+    );
     use std::time::Duration;
 
     #[test]
@@ -49,7 +54,8 @@ mod tests {
         assert!(!info.unsupported);
         assert!(info.error.is_none());
 
-        let wrapped = r#"{"info":{"leaderPid":9,"socketPath":"/a.sock","leaderBinaryVersion":"1.0.0"}}"#;
+        let wrapped =
+            r#"{"info":{"leaderPid":9,"socketPath":"/a.sock","leaderBinaryVersion":"1.0.0"}}"#;
         let info2 = parse_leader_info_json(wrapped).unwrap();
         assert_eq!(info2.pid, Some(9));
         assert_eq!(info2.socket_path.as_deref(), Some("/a.sock"));
@@ -161,7 +167,8 @@ mod tests {
 
     #[test]
     fn default_socket_respects_env() {
-        // SAFETY: test-only env mutation; single-threaded test process.
+        let _guard =
+            crate::session_migration::test_home::TestEnvGuard::acquire(&["GROK_LEADER_SOCKET"]);
         std::env::set_var("GROK_LEADER_SOCKET", "/tmp/custom-leader.sock");
         let p = default_leader_socket_path();
         assert_eq!(p, PathBuf::from("/tmp/custom-leader.sock"));

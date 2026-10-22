@@ -9,6 +9,13 @@ use super::MirrorHost;
 use crate::session_manager::SessionManager;
 use crate::store;
 
+#[path = "permission_reply.rs"]
+mod permission_reply;
+
+#[cfg(test)]
+#[path = "plan_chrome_tests.rs"]
+mod plan_chrome_tests;
+
 /// Protocol version advertised in `mirror://hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -17,6 +24,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const WRITE_METHODS: &[&str] = &[
     "session.send",
     "session.stop",
+    "session.queueCancel",
+    "session.queueRecover",
+    "session.receiptReview",
     "session.create",
     "session.resolvePermission",
     "session.answerAskUser",
@@ -70,7 +80,12 @@ pub async fn dispatch(
     mgr: Option<&Arc<SessionManager>>,
 ) -> Result<Value, RpcError> {
     // Read-only sessions can observe but not drive the agent.
-    if host.is_read_only() && WRITE_METHODS.contains(&method) {
+    let write_method = match method {
+        "session.resolvePlan" => "session.reviewPlan",
+        "session.resolveAskUser" => "session.answerAskUser",
+        other => other,
+    };
+    if host.is_read_only() && WRITE_METHODS.contains(&write_method) {
         return Err(RpcError::unsupported("mirror is in read-only mode"));
     }
 
@@ -92,6 +107,59 @@ pub async fn dispatch(
             let _ = crate::cli_sessions::try_reconcile_linked_session(&id);
             let msgs = store::load_messages(&id);
             Ok(serde_json::to_value(msgs).map_err(|e| RpcError::host(e.to_string()))?)
+        }
+        "session.queueCancel" => {
+            let request = serde_json::from_value(
+                params
+                    .get("request")
+                    .cloned()
+                    .ok_or_else(|| RpcError::bad_params("request required"))?,
+            )
+            .map_err(|_| RpcError::bad_params("invalid queue cancellation request"))?;
+            let result = crate::session_api::queue_cancel::session_api_queue_cancel(request)
+                .await
+                .map_err(RpcError::host)?;
+            serde_json::to_value(result).map_err(|e| RpcError::host(e.to_string()))
+        }
+        "session.queueRecover" => {
+            let request = serde_json::from_value(
+                params
+                    .get("request")
+                    .cloned()
+                    .ok_or_else(|| RpcError::bad_params("request required"))?,
+            )
+            .map_err(|_| RpcError::bad_params("invalid queue recovery request"))?;
+            let result = crate::session_api::queue_recovery::session_api_queue_recover(request)
+                .await
+                .map_err(RpcError::host)?;
+            serde_json::to_value(result).map_err(|e| RpcError::host(e.to_string()))
+        }
+        "session.receiptSnapshot" => {
+            let snapshot = crate::session_api::receipt_review::session_api_receipt_snapshot()
+                .await
+                .map_err(RpcError::host)?;
+            serde_json::to_value(snapshot).map_err(|e| RpcError::host(e.to_string()))
+        }
+        "session.receiptReview" => {
+            let request = serde_json::from_value(
+                params
+                    .get("request")
+                    .cloned()
+                    .ok_or_else(|| RpcError::bad_params("request required"))?,
+            )
+            .map_err(|_| RpcError::bad_params("invalid receipt review request"))?;
+            let app = app.ok_or_else(RpcError::no_ctx)?;
+            let mgr = mgr.ok_or_else(RpcError::no_ctx)?;
+            let ack = crate::session_api::receipt_review::review_with_host(request, app, mgr)
+                .await
+                .map_err(RpcError::host)?;
+            serde_json::to_value(ack).map_err(|e| RpcError::host(e.to_string()))
+        }
+        "session.queueSnapshot" => {
+            let snapshot = crate::session_api::queue_snapshot::session_api_queue_snapshot()
+                .await
+                .map_err(RpcError::host)?;
+            serde_json::to_value(snapshot).map_err(|e| RpcError::host(e.to_string()))
         }
         "session.getState" => {
             let mgr = mgr.ok_or_else(RpcError::no_ctx)?;
@@ -289,6 +357,16 @@ pub async fn dispatch(
             let snap = mgr.stop(app, session_id).await.map_err(RpcError::host)?;
             Ok(serde_json::to_value(snap).map_err(|e| RpcError::host(e.to_string()))?)
         }
+        "session.stopReport" => {
+            let app = app.ok_or_else(RpcError::no_ctx)?.clone();
+            let mgr = mgr.ok_or_else(RpcError::no_ctx)?.clone();
+            let session_id = param_string(&params, &["sessionId", "session_id"]);
+            let report = mgr
+                .stop_report(app, session_id)
+                .await
+                .map_err(RpcError::host)?;
+            Ok(serde_json::to_value(report).map_err(|e| RpcError::host(e.to_string()))?)
+        }
 
         // ── Interactive gates (Slice 6) ──────────────────────────────────
         "session.resolvePermission" => {
@@ -296,6 +374,7 @@ pub async fn dispatch(
             let mgr = mgr.ok_or_else(RpcError::no_ctx)?.clone();
             let rpc_id = param_u64(&params, &["rpcId", "rpc_id"])
                 .ok_or_else(|| RpcError::bad_params("rpcId required"))?;
+            let request_generation = permission_reply::generation(&params)?;
             let decision = param_string(&params, &["decision"])
                 .ok_or_else(|| RpcError::bad_params("decision required"))?;
             let option_id = param_string(&params, &["optionId", "option_id"]);
@@ -306,6 +385,7 @@ pub async fn dispatch(
                 .resolve_permission(
                     app,
                     rpc_id,
+                    request_generation,
                     decision,
                     option_id,
                     scope_key,
@@ -317,19 +397,31 @@ pub async fn dispatch(
                 .map_err(RpcError::host)?;
             Ok(serde_json::to_value(snap).map_err(|e| RpcError::host(e.to_string()))?)
         }
-        "session.resolvePlan" => {
+        "session.reviewPlan" if params.get("chrome").is_some() => {
+            let session_id = param_string(&params, &["sessionId", "session_id"])
+                .ok_or_else(|| RpcError::bad_params("sessionId required"))?;
+            let chrome = serde_json::from_value(params["chrome"].clone())
+                .map_err(|_| RpcError::bad_params("invalid plan chrome"))?;
+            let revision = param_string(&params, &["expectedRevision", "expected_revision"]);
+            crate::commands::session_plan_chrome_set(session_id, chrome, revision)
+                .map_err(RpcError::host)?;
+            Ok(Value::Null)
+        }
+        "session.resolvePlan" | "session.reviewPlan" => {
             let app = app.ok_or_else(RpcError::no_ctx)?.clone();
             let mgr = mgr.ok_or_else(RpcError::no_ctx)?.clone();
             let decision = param_string(&params, &["decision"])
                 .ok_or_else(|| RpcError::bad_params("decision required"))?;
             let feedback = param_string(&params, &["feedback"]);
             let rpc_id = param_u64(&params, &["rpcId", "rpc_id"]);
+            let request_generation = permission_reply::generation(&params)?;
             let snap = mgr
                 .resolve_plan(
                     app,
                     decision,
                     feedback,
                     rpc_id,
+                    request_generation,
                     param_string(&params, &["sessionId", "session_id"]),
                 )
                 .await
@@ -343,12 +435,14 @@ pub async fn dispatch(
                 .ok_or_else(|| RpcError::bad_params("decision required"))?;
             let answers = params.get("answers").cloned().filter(|v| !v.is_null());
             let rpc_id = param_u64(&params, &["rpcId", "rpc_id"]);
+            let request_generation = permission_reply::generation(&params)?;
             let snap = mgr
                 .resolve_ask_user(
                     app,
                     decision,
                     answers,
                     rpc_id,
+                    request_generation,
                     param_string(&params, &["sessionId", "session_id"]),
                 )
                 .await
@@ -356,13 +450,43 @@ pub async fn dispatch(
             Ok(serde_json::to_value(snap).map_err(|e| RpcError::host(e.to_string()))?)
         }
 
-        // Explicitly unsupported desktop-only (never crash UI)
+        "session.pendingPlan" => {
+            let mgr = mgr.ok_or_else(RpcError::no_ctx)?;
+            let pending = mgr.pending_plan(param_string(&params, &["sessionId", "session_id"]));
+            Ok(serde_json::to_value(pending).map_err(|e| RpcError::host(e.to_string()))?)
+        }
+        "session.planChromeGet" => {
+            let session_id = param_string(&params, &["sessionId", "session_id"])
+                .ok_or_else(|| RpcError::bad_params("sessionId required"))?;
+            let chrome =
+                crate::commands::session_plan_chrome_get(session_id).map_err(RpcError::host)?;
+            serde_json::to_value(chrome).map_err(|error| RpcError::host(error.to_string()))
+        }
+        "session.agentPlanSnapshot" => {
+            let session_id = param_string(&params, &["sessionId", "session_id"])
+                .ok_or_else(|| RpcError::bad_params("sessionId required"))?;
+            let plan =
+                crate::commands::session_agent_plan_snapshot(session_id).map_err(RpcError::host)?;
+            serde_json::to_value(plan).map_err(|error| RpcError::host(error.to_string()))
+        }
         "pick_directory" | "pick_attach_files" | "pick_cli_binary" | "pick_agent_profile"
         | "path_open" | "path_reveal" | "open_in_editor" | "cli_install_latest"
         | "account_login" | "account.login" | "reset_app_data" | "fs_list_dir" | "fs_read_file" => {
             Err(RpcError::unsupported(method))
         }
+        "session.pendingAskUser" => {
+            let mgr = mgr.ok_or_else(RpcError::no_ctx)?;
+            let pending = mgr.pending_ask_user(param_string(&params, &["sessionId", "session_id"]));
+            Ok(serde_json::to_value(pending).map_err(|e| RpcError::host(e.to_string()))?)
+        }
+        "session.pendingPermission" => {
+            let mgr = mgr.ok_or_else(RpcError::no_ctx)?;
+            let pending =
+                mgr.pending_permission(param_string(&params, &["sessionId", "session_id"]));
+            Ok(serde_json::to_value(pending).map_err(|e| RpcError::host(e.to_string()))?)
+        }
 
+        // Explicitly unsupported desktop-only (never crash UI)
         _ => Err(RpcError::unsupported(method)),
     }
 }
@@ -472,4 +596,210 @@ fn param_u64(params: &Value, keys: &[&str]) -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod queue_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_mirror_observes_snapshot_without_gaining_send_permission() {
+        let home =
+            crate::session_migration::test_home::IsolatedAppHome::acquire("mirror-queue-snapshot");
+        let queue = home.path.join("session-api-queue.json");
+        let bytes = br#"{"version":2,"items":[{"sessionId":"s","itemId":"host","prompt":"private prompt","createdAt":1}]}"#;
+        std::fs::write(&queue, bytes).unwrap();
+        let host = MirrorHost::from_env();
+        host.set_read_only(true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let snapshot = dispatch("session.queueSnapshot", json!({}), &host, None, None)
+                .await
+                .unwrap();
+            assert_eq!(snapshot["version"], 1);
+            assert_eq!(snapshot["items"][0]["itemId"], "host");
+            assert_eq!(snapshot["items"][0]["state"], "queued");
+            let send = dispatch(
+                "session.send",
+                json!({"sessionId":"s","prompt":"must not send"}),
+                &host,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(send.code, "UNSUPPORTED");
+            assert_eq!(std::fs::read(&queue).unwrap(), bytes);
+            std::fs::write(&queue, b"{corrupt").unwrap();
+            let err = dispatch("session.queueSnapshot", json!({}), &host, None, None)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "HOST_ERROR");
+            assert_eq!(err.message, "SESSION_QUEUE_UNAVAILABLE");
+            assert_eq!(std::fs::read(&queue).unwrap(), b"{corrupt");
+        });
+    }
+}
+
+#[cfg(test)]
+mod queue_cancel_tests {
+    use super::*;
+    #[test]
+    fn read_only_blocks_cancel_before_mutation_and_write_mode_uses_same_transaction() {
+        let home =
+            crate::session_migration::test_home::IsolatedAppHome::acquire("mirror-queue-cancel");
+        let path = home.path.join("session-api-queue.json");
+        let bytes=br#"{"version":2,"items":[{"sessionId":"s","itemId":"q","prompt":"prompt","createdAt":1}]}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let host = MirrorHost::from_env();
+        host.set_read_only(true);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let params =
+                json!({"request":{"sessionId":"s","itemId":"q","prompt":"prompt","createdAt":1}});
+            assert_eq!(
+                dispatch("session.queueCancel", params.clone(), &host, None, None)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "UNSUPPORTED"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            host.set_read_only(false);
+            let result = dispatch("session.queueCancel", params.clone(), &host, None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                result,
+                json!({"version":1,"status":"cancelled","sessionId":"s","itemId":"q"})
+            );
+            let disk = std::fs::read(&path).unwrap();
+            assert_eq!(
+                dispatch("session.queueCancel", params, &host, None, None)
+                    .await
+                    .unwrap(),
+                result
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), disk);
+            let snapshot = dispatch("session.queueSnapshot", json!({}), &host, None, None)
+                .await
+                .unwrap();
+            assert!(snapshot["items"].as_array().unwrap().is_empty());
+        });
+    }
+}
+
+#[cfg(test)]
+mod queue_recovery_tests {
+    use super::*;
+    #[test]
+    fn read_only_rejects_recovery_before_disk_access_and_write_ack_replays_without_new_attempt() {
+        let home =
+            crate::session_migration::test_home::IsolatedAppHome::acquire("mirror-queue-recovery");
+        let path = home.path.join("session-api-queue.json");
+        let bytes=serde_json::to_vec(&json!({"version":3,"items":[{"sessionId":"s","itemId":"old","prompt":" exact prompt ","createdAt":1,"delivery":{"nonce":"c706e5fd-e817-4b0a-8141-cb6f5276e400","state":"pending","detail":"unconfirmed"}}],"outcomes":[]})).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let host = MirrorHost::from_env();
+        host.set_read_only(true);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let params=json!({"request":{"sessionId":"s","itemId":"old","prompt":" exact prompt ","createdAt":1,"decision":"retry","reviewed":true,"confirmed":true}});
+            let err=dispatch("session.queueRecover",params.clone(),&host,None,None).await.unwrap_err();
+            assert_eq!(err.code,"UNSUPPORTED");
+            assert_eq!(std::fs::read(&path).unwrap(),bytes);
+            assert!(!home.path.join("session-api-queue.dispatch-lease").exists());
+            host.set_read_only(false);
+            let mut missing=params.clone();
+            missing["request"].as_object_mut().unwrap().remove("confirmed");
+            assert_eq!(dispatch("session.queueRecover",missing,&host,None,None).await.unwrap_err().code,"BAD_PARAMS");
+            let mut unconfirmed=params.clone();unconfirmed["request"]["confirmed"]=json!(false);
+            assert_eq!(dispatch("session.queueRecover",unconfirmed,&host,None,None).await.unwrap_err().message,"SESSION_QUEUE_INVALID");
+            assert_eq!(std::fs::read(&path).unwrap(),bytes);
+            let ack=dispatch("session.queueRecover",params.clone(),&host,None,None).await.unwrap();
+            assert_eq!(ack["version"],1);assert_eq!(ack["decision"],"retry");
+            assert_eq!(ack["itemId"],"old");
+            let fresh=ack["replacementId"].as_str().unwrap();
+            assert!(fresh.starts_with("q-ext-"));assert_ne!(fresh,"old");
+            let disk=std::fs::read(&path).unwrap();
+            assert_eq!(dispatch("session.queueRecover",params.clone(),&host,None,None).await.unwrap(),ack);
+            assert_eq!(std::fs::read(&path).unwrap(),disk);
+            let snapshot=dispatch("session.queueSnapshot",json!({}),&host,None,None).await.unwrap();
+            assert_eq!(snapshot["items"].as_array().unwrap().len(),1);
+            assert_eq!(snapshot["items"][0]["itemId"],fresh);
+            assert_eq!(snapshot["items"][0]["state"],"queued");
+            let saved:Value=serde_json::from_slice(&disk).unwrap();
+            assert_eq!(saved["version"],4);
+            assert_eq!(saved["outcomes"][0]["status"],"retry_authorized");
+            let mut opposite=params;opposite["request"]["decision"]=json!("dismiss");
+            assert_eq!(dispatch("session.queueRecover",opposite,&host,None,None).await.unwrap_err().message,"SESSION_QUEUE_CHANGED");
+            assert_eq!(std::fs::read(&path).unwrap(),disk);
+        });
+    }
+}
+
+#[cfg(test)]
+mod receipt_review_tests {
+    use super::*;
+    #[test]
+    fn readonly_blocks_review_before_parse_or_disk_but_allows_private_snapshot() {
+        let home =
+            crate::session_migration::test_home::IsolatedAppHome::acquire("mirror-receipt-review");
+        let path = home.path.join("session-api-idempotency.json");
+        let bytes=br#"{"entries":[{"key":"k","result":{"ok":false,"status":"unknown","sessionId":"s"}}]}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let host = MirrorHost::from_env();
+        host.set_read_only(true);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let snapshot = dispatch("session.receiptSnapshot", json!({}), &host, None, None)
+                    .await
+                    .unwrap();
+                assert_eq!(snapshot["items"][0]["key"], "k");
+                assert_eq!(snapshot["items"][0]["canReview"], false);
+                let err = dispatch(
+                    "session.receiptReview",
+                    json!({"request":"invalid"}),
+                    &host,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(err.code, "UNSUPPORTED");
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                std::fs::write(&path, b"{corrupt").unwrap();
+                let err = dispatch("session.receiptReview", json!({}), &host, None, None)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.code, "UNSUPPORTED");
+                let err = dispatch("session.receiptSnapshot", json!({}), &host, None, None)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.message, "SESSION_RECEIPT_UNAVAILABLE");
+                host.set_read_only(false);
+                let err = dispatch(
+                    "session.receiptReview",
+                    json!({"request":{}}),
+                    &host,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(err.code, "BAD_PARAMS");
+                assert_eq!(std::fs::read(&path).unwrap(), b"{corrupt");
+            });
+    }
 }

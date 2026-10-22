@@ -79,35 +79,55 @@ mod tests {
     /// WeCom webhook mode binds TCP (real entry) — smoke with cancel.
     #[tokio::test]
     async fn wecom_webhook_start_binds_port() {
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
         let mut secrets = HashMap::new();
         secrets.insert("connect_mode".into(), "webhook".into());
-        secrets.insert("corp_id".into(), "ww".into());
-        secrets.insert("corp_secret".into(), "sec".into());
+        // Bind/cancel does not need corp credentials. Even fake credentials
+        // would start the production background check against the real API.
         secrets.insert("callback_token".into(), "cb-token".into());
-        secrets.insert("port".into(), "0".into()); // may fail bind 0 — use high port
-                                                   // pick ephemeral by binding ourselves to find free port then re-use - simpler: use 19876
-        secrets.insert("port".into(), "19876".into());
+        secrets.insert("port".into(), address.port().to_string());
         secrets.insert("callback_path".into(), "/wecom/callback".into());
         let i = inst("wecom", secrets);
         let (tx, _rx) = mpsc::channel(4);
         let (c_tx, c_rx) = watch::channel(false);
-        let h = tokio::spawn(async move { wecom::run(i, tx, c_rx).await });
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // If bind succeeded, port is listening
-        let probe = tokio::net::TcpStream::connect("127.0.0.1:19876").await;
+        drop(reservation);
+        let mut h = tokio::spawn(async move { wecom::run(i, tx, c_rx).await });
+        let probe = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(socket) = tokio::net::TcpStream::connect(address).await {
+                    return Some(socket);
+                }
+                if h.is_finished() {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let ready = matches!(&probe, Ok(Some(_)));
+        drop(probe); // Close the probe socket before cancelling the listener.
         let _ = c_tx.send(true);
-        let _ = h.await;
-        assert!(probe.is_ok(), "wecom webhook did not bind listening port");
+        let stopped = match tokio::time::timeout(Duration::from_secs(2), &mut h).await {
+            Ok(result) => result.expect("webhook worker must not panic"),
+            Err(_) => {
+                h.abort();
+                let _ = h.await;
+                panic!("webhook worker must stop after cancellation");
+            }
+        };
+        assert!(stopped.is_ok(), "owned webhook worker failed: {stopped:?}");
+        assert!(ready, "owned wecom webhook did not become ready");
     }
 
     /// WeCom webhook without callback_token must refuse to start (fail closed).
     #[tokio::test]
     async fn wecom_webhook_without_callback_token_fails_closed() {
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
         let mut secrets = HashMap::new();
         secrets.insert("connect_mode".into(), "webhook".into());
-        secrets.insert("corp_id".into(), "ww".into());
-        secrets.insert("corp_secret".into(), "sec".into());
-        secrets.insert("port".into(), "19877".into());
+        secrets.insert("port".into(), address.port().to_string());
         secrets.insert("callback_path".into(), "/wecom/callback".into());
         let i = inst("wecom", secrets);
         let (tx, _rx) = mpsc::channel(4);
@@ -115,9 +135,9 @@ mod tests {
         let res = wecom::run(i, tx, c_rx).await;
         let err = res.expect_err("missing callback_token must refuse start");
         assert!(err.contains("callback_token"), "unexpected error: {err}");
-        // Nothing should be listening on the refused port.
-        let probe = tokio::net::TcpStream::connect("127.0.0.1:19877").await;
-        assert!(probe.is_err(), "no listener expected after refusal");
+        // The occupied, test-owned address proves validation precedes bind:
+        // a connector that bound first would report a bind error instead.
+        assert_eq!(reservation.local_addr().unwrap(), address);
         let _ = c_tx.send(true);
     }
 

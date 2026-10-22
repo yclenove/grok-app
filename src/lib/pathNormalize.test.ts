@@ -6,6 +6,7 @@ import {
   isRealLocalAbsolutePath,
   isSiteRootAbsolutePath,
   isWindowsStylePath,
+  localPathIdentity,
   normalizeLocalPathToken,
   unescapeShellPath,
 } from "./pathNormalize";
@@ -61,6 +62,19 @@ describe("fused query keys never pass as local abs", () => {
 });
 
 describe("unescapeShellPath", () => {
+  it("does not throw when the token is not a string", () => {
+    expect(unescapeShellPath(null as unknown as string)).toBe("");
+    expect(unescapeShellPath(undefined as unknown as string)).toBe("");
+    expect(unescapeShellPath(12 as unknown as string)).toBe("");
+    expect(unescapeShellPath({ path: "/tmp/a.png" } as unknown as string)).toBe(
+      "",
+    );
+    expect(normalizeLocalPathToken(12 as unknown as string)).toBe("");
+    expect(isRealLocalAbsolutePath(12 as unknown as string)).toBe(false);
+    expect(isLocalMediaOpenable({} as unknown as string)).toBe(false);
+    expect(displayPathLabel(500000 as unknown as string)).toBe("");
+  });
+
   it("restores spaces and parens from shell escapes", () => {
     expect(
       unescapeShellPath(
@@ -116,6 +130,15 @@ describe("normalizeLocalPathToken", () => {
       "/Users/ronglecat/Downloads/6A5ED46119BDACC7C24DC3B6FF3CF051 (1).png",
     );
     expect(isRealLocalAbsolutePath(normalizeLocalPathToken(raw))).toBe(true);
+  });
+
+  it("collapses Windows slash styles onto one identity", () => {
+    const back = "C:\\Users\\me\\AppData\\Local\\Temp\\paste.png";
+    const fwd = "C:/Users/me/AppData/Local/Temp/paste.png";
+    expect(localPathIdentity(back)).toBe(fwd);
+    expect(localPathIdentity(fwd)).toBe(localPathIdentity(back));
+    expect(localPathIdentity("")).toBe("");
+    expect(localPathIdentity("/tmp/a.png")).toBe("/tmp/a.png");
   });
 });
 

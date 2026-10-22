@@ -14,6 +14,45 @@ use crate::provider_headers::{
 
 pub use crate::provider_headers::ProviderHeaderEntry;
 
+#[path = "providers_config_snapshot.rs"]
+mod config_snapshot;
+use config_snapshot::ConfigSnapshot;
+
+#[path = "providers_execution_home.rs"]
+mod execution_home;
+#[path = "providers_main_history.rs"]
+mod main_history;
+#[path = "providers_main_profile.rs"]
+mod main_profile;
+#[path = "providers_profile_io.rs"]
+mod profile_io;
+pub(crate) use main_history::MainHistoryRequest;
+pub(crate) use main_history::MigrationWitness;
+pub(crate) use main_profile::{MainProfileRequest, PreparedMainProfile};
+#[path = "providers_main_runtime.rs"]
+mod main_runtime;
+pub(crate) use main_runtime::{MainRuntime, MainRuntimePolicy};
+#[path = "providers_main_mcp_auth.rs"]
+mod main_mcp_auth;
+pub(crate) use main_mcp_auth::CapturedMcpServer;
+
+#[path = "providers_process_config.rs"]
+mod process_config;
+pub(crate) use process_config::ProcessConfigBinding;
+#[path = "providers_process_model.rs"]
+mod process_model;
+pub(crate) use process_model::ProcessModelBinding;
+#[path = "providers_session_selection.rs"]
+mod session_selection;
+pub(crate) use session_selection::configured_main_selection;
+pub(crate) use session_selection::validate as validate_session_selection;
+#[path = "providers_runtime_config.rs"]
+mod runtime_config;
+pub(crate) use runtime_config::{
+    compat_text, permission_text, prepare_main_runtime, sync_compat_runtime,
+    sync_permission_runtime,
+};
+
 /// One selectable request model under a custom provider channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1403,9 +1442,10 @@ pub fn custom_provider_id_for_catalog_model(catalog_id: &str) -> Option<String> 
 /// Grok Build behavior:
 /// - Generic custom route: pass the **provider section id** (e.g. `yunyi`) and
 ///   do not keep OIDC `auth.json` in GROK_HOME.
-/// - Explicit Grok Build proxy route: `AcpClient::spawn` replaces this alias
-///   with the selected real catalog model after binding the native endpoint.
-/// - Official route: pass a catalog id (`grok-4.7`); needs `auth.json`.
+/// - Explicit Grok Build proxy route: retain a matching real catalog id, or
+///   resolve its configured fallback here. Spawn and ACP model updates must
+///   receive the same real id; erasing it to an alias loses non-default choices.
+/// - Official route: pass a catalog id (`grok-4.6`); needs `auth.json`.
 /// - Official route + stale custom `app_models[].id` (#1000): map back to the
 ///   owning section id so spawn `--model` and later `session/set_model` agree.
 ///   CLI `--model` does not resolve App-only `app_models` ids; ACP set_model can,
@@ -1538,12 +1578,6 @@ pub fn composer_provider_pick(
     }
 }
 
-/// Shared-mode official warm reuse uses `GROK_HOME=~/.grok` and must not copy
-/// OIDC into agent-home. Independent mode still prepares, same as a cold spawn.
-pub fn warm_reuse_should_prepare_auth(session_data_mode: &str, process_is_custom: bool) -> bool {
-    crate::paths::needs_agent_home_spawn_prep(session_data_mode, process_is_custom)
-}
-
 /// `--model` for a process bound to `provider_id`.
 /// Custom routes spawn with the section id. Official routes spawn with a catalog id.
 pub fn spawn_model_for_provider(provider_id: &str, composer_model: &str) -> String {
@@ -1616,7 +1650,9 @@ pub fn resolve_session_set_model_id(
 
 pub fn agent_spawn_model_id(composer_model: &str) -> String {
     match active_route() {
-        ActiveRoute::Custom { id } => id,
+        ActiveRoute::Custom { id } => active_grok_build_proxy_spawn(composer_model)
+            .map(|native| native.model)
+            .unwrap_or(id),
         ActiveRoute::Official => {
             let m = composer_model.trim();
             if m.is_empty() || is_custom_provider_id(m) || m == OFFICIAL_DEFAULT_MODEL {
@@ -1639,31 +1675,34 @@ fn grok_build_proxy_spawn_from_section(
     section: &ModelSection,
     composer_model: &str,
 ) -> Option<GrokBuildProxySpawn> {
-    if normalize_provider_mode(
-        section
-            .fields
-            .get(APP_PROVIDER_MODE_KEY)
-            .map(|s| s.as_str()),
-    ) != PROVIDER_MODE_GROK_BUILD_PROXY
+    grok_build_proxy_spawn_from_fields(&section.id, &section.fields, composer_model)
+}
+
+fn grok_build_proxy_spawn_from_fields(
+    provider: &str,
+    fields: &std::collections::HashMap<String, String>,
+    composer_model: &str,
+) -> Option<GrokBuildProxySpawn> {
+    if normalize_provider_mode(fields.get(APP_PROVIDER_MODE_KEY).map(|s| s.as_str()))
+        != PROVIDER_MODE_GROK_BUILD_PROXY
     {
         return None;
     }
-    let base_url = crate::relay_stream_proxy::effective_upstream_base(&section.fields)
+    let base_url = crate::relay_stream_proxy::effective_upstream_base(fields)
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let api_key = section.fields.get("api_key")?.trim().to_string();
+    let api_key = fields.get("api_key")?.trim().to_string();
     if base_url.is_empty() || api_key.is_empty() {
         return None;
     }
-    let configured_model = section
-        .fields
+    let configured_model = fields
         .get("model")
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .unwrap_or(section.id.as_str());
+        .unwrap_or(provider);
     let models = decode_app_models(
-        section.fields.get(APP_MODELS_KEY).map(|s| s.as_str()),
+        fields.get(APP_MODELS_KEY).map(|s| s.as_str()),
         configured_model,
         configured_model,
     );
@@ -1693,36 +1732,11 @@ fn grok_build_proxy_spawn_from_text(
     grok_build_proxy_spawn_from_section(&section, composer_model)
 }
 
-/// Proxy spawn for one chat's provider. Official, and any non-proxy section,
-/// return `None` so a global proxy default cannot leak onto another chat.
-fn grok_build_proxy_spawn_for_provider_text(
-    text: &str,
-    provider_id: &str,
-    composer_model: &str,
-) -> Option<GrokBuildProxySpawn> {
-    if is_session_provider_official(provider_id) {
-        return None;
-    }
-    let section = parse_model_sections(text)
-        .into_iter()
-        .find(|s| s.id == provider_id.trim())?;
-    grok_build_proxy_spawn_from_section(&section, composer_model)
-}
-
 /// Resolve the active explicit Grok Build-compatible relay for one ACP spawn.
 /// The key is returned only to the spawn caller and must never be logged.
 pub fn active_grok_build_proxy_spawn(composer_model: &str) -> Option<GrokBuildProxySpawn> {
     let text = read_text(&agent_config_toml());
     grok_build_proxy_spawn_from_text(&text, composer_model)
-}
-
-/// Proxy env for a chat bound to `provider_id`, ignoring `[models].default`.
-pub fn session_grok_build_proxy_spawn(
-    provider_id: &str,
-    composer_model: &str,
-) -> Option<GrokBuildProxySpawn> {
-    let text = read_text(&agent_config_toml());
-    grok_build_proxy_spawn_for_provider_text(&text, provider_id, composer_model)
 }
 
 /// After official login / account switch: only the official route should
@@ -3024,6 +3038,10 @@ pub async fn query_provider_balance(
 }
 
 #[cfg(test)]
+#[path = "providers_model_route_tests.rs"]
+mod model_route_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3287,15 +3305,6 @@ mod tests {
             "app_provider_mode = \"generic\"",
         );
         assert!(grok_build_proxy_spawn_from_text(&generic, "grok-4.5").is_none());
-
-        // A chat bound to this section still resolves when it is not the global default.
-        let other_default = set_models_default(&text, "grok-4.7");
-        let spawned =
-            grok_build_proxy_spawn_for_provider_text(&other_default, "beef-relay", "grok-4.5")
-                .expect("section spawn");
-        assert_eq!(spawned.model, "grok-4.5");
-        assert!(grok_build_proxy_spawn_for_provider_text(&text, "official", "grok-4.5").is_none());
-        assert!(grok_build_proxy_spawn_from_text(&other_default, "grok-4.5").is_none());
     }
 
     #[test]
@@ -3703,12 +3712,9 @@ api_backend = \"responses\"";
 
     #[test]
     fn custom_provider_efforts_enable_cli_reasoning_effort() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home =
             std::env::temp_dir().join(format!("grok-app-provider-effort-{}", uuid::Uuid::new_v4()));
-        let previous_home = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &home);
 
         let result = upsert_custom_provider(UpsertProviderInput {
@@ -3738,10 +3744,6 @@ api_backend = \"responses\"";
         })
         .and_then(|_| std::fs::read_to_string(agent_config_toml()).map_err(|e| e.to_string()));
 
-        match previous_home {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&home);
 
         let config = result.expect("custom provider should be written");
@@ -3757,14 +3759,11 @@ api_backend = \"responses\"";
 
     #[test]
     fn list_repairs_existing_custom_provider_reasoning_support() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home = std::env::temp_dir().join(format!(
             "grok-app-provider-effort-repair-{}",
             uuid::Uuid::new_v4()
         ));
-        let previous_home = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &home);
 
         let result = (|| -> Result<String, String> {
@@ -3787,10 +3786,6 @@ app_efforts = "[{\"id\":\"xhigh\",\"name\":\"Extra high\",\"isDefault\":true}]"
             std::fs::read_to_string(path).map_err(|e| e.to_string())
         })();
 
-        match previous_home {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&home);
 
         let config = result.expect("existing provider should be repaired");
@@ -3940,14 +3935,11 @@ context_window = "1000000"
     fn spawn_model_maps_app_models_id_when_route_still_official() {
         // #1000: picker stores app_models[].id; [models].default stays official.
         // --model must receive the TOML section id, not the catalog id.
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home = std::env::temp_dir().join(format!(
             "grok-app-spawn-model-1000-{}",
             uuid::Uuid::new_v4()
         ));
-        let previous_home = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &home);
         let _ = ensure_agent_home();
 
@@ -3992,23 +3984,16 @@ context_window = "1000000"
         // Bare section id on official route still falls back to catalog (legacy).
         assert_eq!(agent_spawn_model_id("qwen38-local"), OFFICIAL_CATALOG_MODEL);
 
-        match previous_home {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn extra_headers_write_cli_inline_table() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home = std::env::temp_dir().join(format!(
             "grok-app-provider-headers-{}",
             uuid::Uuid::new_v4()
         ));
-        let previous_home = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &home);
 
         let listed = upsert_custom_provider(UpsertProviderInput {
@@ -4034,10 +4019,6 @@ context_window = "1000000"
         });
 
         let config = std::fs::read_to_string(agent_config_toml()).ok();
-        match previous_home {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&home);
 
         let listed = listed.expect("upsert");
@@ -4056,14 +4037,11 @@ context_window = "1000000"
 
     #[test]
     fn extra_headers_empty_list_clears_inline_table() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home = std::env::temp_dir().join(format!(
             "grok-app-provider-headers-clear-{}",
             uuid::Uuid::new_v4()
         ));
-        let previous_home = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &home);
 
         upsert_custom_provider(UpsertProviderInput {
@@ -4108,10 +4086,6 @@ context_window = "1000000"
             extra_headers: Some(vec![]),
         });
         let config = std::fs::read_to_string(agent_config_toml()).ok();
-        match previous_home {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&home);
 
         let listed = listed.expect("clear");
@@ -4123,130 +4097,11 @@ context_window = "1000000"
         );
     }
 
-    #[test]
-    fn explicit_provider_pick_compares_effective_ids() {
-        use SessionProviderPick::*;
-        assert_eq!(
-            session_provider_pick(false, Some("official"), Some("official")),
-            SameRoute
-        );
-        assert_eq!(
-            session_provider_pick(false, Some("relay-b"), Some("relay-b")),
-            SameRoute
-        );
-        assert_eq!(
-            session_provider_pick(false, Some("relay-b"), Some("official")),
-            RouteChanged
-        );
-        assert_eq!(
-            session_provider_pick(false, Some("official"), Some("relay-b")),
-            RouteChanged
-        );
-        assert_eq!(
-            session_provider_pick(false, Some("official"), None),
-            SameRoute
-        );
-        assert_eq!(session_provider_pick(false, None, None), SameRoute);
-    }
-
-    #[test]
-    fn ssh_pick_stays_official_and_drops_a_custom_provider() {
-        use SessionProviderPick::*;
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "grok-app-ssh-pick-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("temp home");
-        let previous = std::env::var_os("GROK_APP_HOME");
-        std::env::set_var("GROK_APP_HOME", &tmp);
-        let _ = crate::paths::ensure_app_dirs();
-
-        assert_eq!(connect_route_id(true, Some("relay-b")), "official");
-        assert_eq!(connect_route_id(true, None), "official");
-        assert_eq!(connect_route_id(false, Some("relay-b")), "relay-b");
-
-        // Official model on an SSH chat: never a route change, even if the row
-        // still has a custom id or the stored id is empty.
-        assert_eq!(
-            session_provider_pick(true, None, Some("official")),
-            SameRoute
-        );
-        assert_eq!(
-            session_provider_pick(true, Some("relay-b"), Some("official")),
-            SameRoute
-        );
-        assert_eq!(
-            session_provider_pick(true, Some(""), Some("official")),
-            SameRoute
-        );
-        let official = composer_provider_pick(true, None, Some("official"), Some("grok-4.7"));
-        assert!(!official.route_changed);
-        assert_eq!(official.provider_to_persist.as_deref(), Some("official"));
-        assert_eq!(official.set_model_id.as_deref(), Some("grok-4.7"));
-        let from_custom_row =
-            composer_provider_pick(true, Some("relay-b"), Some("official"), Some("grok-4.5"));
-        assert!(!from_custom_row.route_changed);
-        assert_eq!(from_custom_row.set_model_id.as_deref(), Some("grok-4.5"));
-
-        // Custom provider on SSH: no respawn, no persisted custom id, no set_model.
-        assert_eq!(
-            session_provider_pick(true, None, Some("relay-b")),
-            SameRoute
-        );
-        assert_eq!(
-            session_provider_pick(true, Some("official"), Some("relay-b")),
-            SameRoute
-        );
-        let custom = composer_provider_pick(true, None, Some("relay-b"), Some("deepseek-v4-flash"));
-        assert!(!custom.route_changed);
-        assert!(custom.provider_to_persist.is_none());
-        assert!(custom.set_model_id.is_none());
-        let custom_id_as_model =
-            composer_provider_pick(true, Some("official"), Some("relay-b"), Some("relay-b"));
-        assert!(custom_id_as_model.provider_to_persist.is_none());
-        assert!(custom_id_as_model.set_model_id.is_none());
-
-        // Same cells locally still respawn and still send the model on a real switch.
-        let local_switch = composer_provider_pick(
-            false,
-            Some("official"),
-            Some("relay-b"),
-            Some("deepseek-v4-flash"),
-        );
-        assert!(local_switch.route_changed);
-        assert_eq!(local_switch.provider_to_persist.as_deref(), Some("relay-b"));
-        assert!(local_switch.set_model_id.is_none());
-        let local_same =
-            composer_provider_pick(false, Some("official"), Some("official"), Some("grok-4.5"));
-        assert!(!local_same.route_changed);
-        assert_eq!(local_same.set_model_id.as_deref(), Some("grok-4.5"));
-
-        match previous {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn warm_reuse_auth_skips_only_shared_official() {
-        assert!(
-            !warm_reuse_should_prepare_auth("shared", false),
-            "shared official uses ~/.grok and must not copy OIDC into agent-home"
-        );
-        assert!(!warm_reuse_should_prepare_auth("SHARED", false));
-        assert!(warm_reuse_should_prepare_auth("shared", true));
-        // Independent mode keeps the cold-spawn prepare, including when the
-        // process is official. A conflict skip would leave session/load signed out.
-        assert!(warm_reuse_should_prepare_auth("independent", false));
-        assert!(warm_reuse_should_prepare_auth("independent", true));
-    }
+    crate::session_migration::test_home::fixture_home_variants_contract_tests!(
+        custom_provider_efforts_enable_cli_reasoning_effort,
+        list_repairs_existing_custom_provider_reasoning_support,
+        spawn_model_maps_app_models_id_when_route_still_official,
+        extra_headers_write_cli_inline_table,
+        extra_headers_empty_list_clears_inline_table,
+    );
 }

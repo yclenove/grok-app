@@ -42,10 +42,21 @@ App 启动后 Host 绑定 `127.0.0.1:0`，把 `{url, token, pid}` 写到：
 | `busy` | 409 | 保留：无法入队时的冲突（正常路径走 `queued`） |
 | `not_found` | 404 | 没有这条 App session |
 | `app_not_running` | 503 | **CLI 侧**：连不上 loopback（没有在跑的 Host）。HTTP 超时 / 5xx **不是**这个状态 |
-| `retry_later` | 503 | Host 忙于 connect（15s 内没派出去）。请稍后重试；App 仍在跑 |
+| `retry_later` | 503 | 保留的旧兼容状态；当前 dispatch 超时不返回可重发结论 |
+| `unknown` | 409 | 15s 内未确认派发结果，原请求可能已开始；检查原会话/队列，不得自动重发 |
+| `idempotency_conflict` | 409 | 同一会话和幂等键已绑定不同的归一化提示词 |
 | `error` | 400 | 空 prompt / 项目未信任 / 连接失败等；CLI 把 HTTP 超时也映射成 `error` |
 
-`idempotencyKey` 命中则回放上次结果（磁盘 cap 200）。
+`idempotencyKey` 按会话绑定归一化提示词，命中回放原结果。未知结果不自动重派；
+队列有独立持久化 claim/outcome 账本，只有确认发送或确认持久化接棒才移除原项。
+队列快照、明确取消与人工审阅恢复沿用该账本，不能恢复旧的“先取出、失败再塞回”算法。
+
+## Host 自动消息来源
+
+外部 API 和 PR monitor 的消息随单次发送携带来源，在真正写 user journal row 时
+标记 `auto_wake`，不按文本匹配，也不占用“会话的下一条消息”全局槽位。排队本身
+不标记任何消息；持久化外部队列在实际 drain 时作为 Host 来源写同一标记，保持旧队列
+格式兼容。取消、超时或拒绝不能污染插入其间或之后的手动用户消息。
 
 ## CLI（不抢焦点）
 
@@ -68,7 +79,7 @@ grok-app --session-send <session-id> --prompt "…" --idempotency-key k1
 `src-tauri/src/session_api.rs`
 
 1. `prepare_send`：会话必须已在索引里；绑定项目须 `trusted` + `path_ok`；cwd 优先 `worktree_path`。
-2. `dispatch_turn`：若 `session_turn_busy`（含绘画 / 工具 / `prompt_in_flight`）→ `enqueue_while_busy`（落盘 + 可选 GUI 事件），**不** `connect` 抢槽。空闲才 `connect` + `send_message`。HTTP 层 **15s** 超时回 `retry_later`。
+2. `dispatch_turn`：若 `session_turn_busy`（含绘画 / 工具 / `prompt_in_flight`）→ `enqueue_while_busy`（落盘 + 可选 GUI 事件），**不** `connect` 抢槽。空闲才 `connect` + send。HTTP 层 **15s** 超时回 `unknown`，不声称未发送。
 3. 发送竞态仍 `still running` / `task_already_running` → 同样入队，不回硬 `busy`。
 4. 主窗口 `useSendQueue(acceptExternal)` 把事件 merge 进现有跟进队列（`source: external`，**只展示**；Host drain 真正发送）。副窗口不听，避免双发。
 
@@ -102,7 +113,7 @@ Grok App **启动时**读系统代理，子进程继承 App 环境。命令行�
 ### 派活建议
 
 - 串行：上一轮 `turn_started` 且本轮结束后再发下一条
-- 收到超时不要立刻重试轰炸
+- 收到超时或 `unknown` 先核查原会话/队列，不能自动换键重发；不确定尝试只接受明确人工审阅后的新身份恢复
 
 ## 后续（本切片不做）
 

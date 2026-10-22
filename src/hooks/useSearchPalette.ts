@@ -4,7 +4,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT } from "@/i18n";
-import { sessionsSearch } from "@/lib/api";
+import {
+  sessionImportCatalogRebuild,
+  sessionImportCatalogRebuildCancel,
+  sessionImportCatalogRebuildStatus,
+  sessionsSearch,
+  type CatalogRebuildStatus,
+} from "@/lib/api";
 import { installDialogFocus } from "@/lib/a11yFocus";
 import {
   defaultPaletteActions,
@@ -34,6 +40,7 @@ import {
   saveSessionSearchFilterPref,
   SESSION_SEARCH_FILTER_CHANGE_EVENT,
 } from "@/lib/sessionSearchFilterPref";
+import { importErrorCode } from "@/lib/sessionImport/errorCopy";
 import {
   loadSessionSearchRankPref,
   saveSessionSearchRankPref,
@@ -80,7 +87,29 @@ export function useSearchPalette(opts: {
   );
   const [contentHits, setContentHits] = useState<SessionContentHit[]>([]);
   const [contentLoading, setContentLoading] = useState(false);
+  const [contentError, setContentError] = useState<string | null>(null);
+  const [catalogRebuild, setCatalogRebuild] =
+    useState<CatalogRebuildStatus | null>(null);
+  const [contentRevision, setContentRevision] = useState(0);
   const contentSeq = useRef(0);
+  const catalogRebuildSeq = useRef(0);
+  const catalogRebuildCancelRequested = useRef(false);
+  const catalogRebuildPoll = useRef<number | null>(null);
+
+  const stopCatalogRebuildPolling = useCallback(() => {
+    if (catalogRebuildPoll.current !== null) {
+      window.clearInterval(catalogRebuildPoll.current);
+      catalogRebuildPoll.current = null;
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      catalogRebuildSeq.current += 1;
+      stopCatalogRebuildPolling();
+    },
+    [stopCatalogRebuildPolling],
+  );
 
   const openPalette = useCallback(() => setOpen(true), []);
   const openBlank = useCallback(() => {
@@ -173,23 +202,26 @@ export function useSearchPalette(opts: {
     if (!open) {
       setContentHits([]);
       setContentLoading(false);
+      setContentError(null);
       return;
     }
     const q = query.trim();
     if (!shouldScanSessionContent(q, mode)) {
       setContentHits([]);
       setContentLoading(false);
+      setContentError(null);
       return;
     }
     setContentLoading(true);
+    setContentError(null);
     const seq = ++contentSeq.current;
     const t = window.setTimeout(() => {
       void (async () => {
         try {
-          const hits = await sessionsSearch(q, 20);
+          const response = await sessionsSearch(q, 20);
           if (contentSeq.current !== seq) return;
           setContentHits(
-            hits.map((h) => ({
+            response.hits.map((h) => ({
               id: h.id,
               title: h.title,
               projectId: h.projectId,
@@ -197,11 +229,14 @@ export function useSearchPalette(opts: {
               matchCount: h.matchCount,
               updatedAt: h.updatedAt,
               archived: h.archived,
+              kind: h.kind,
             })),
           );
+          setContentError(response.importedHistoryError);
         } catch {
           if (contentSeq.current !== seq) return;
           setContentHits([]);
+          setContentError("REQUEST_FAILED");
         } finally {
           if (contentSeq.current === seq) {
             setContentLoading(false);
@@ -215,7 +250,75 @@ export function useSearchPalette(opts: {
       contentSeq.current += 1;
       window.clearTimeout(t);
     };
-  }, [query, open, mode]);
+  }, [query, open, mode, contentRevision]);
+
+  const rebuildCatalogIndex = useCallback(async () => {
+    if (catalogRebuild?.running) return;
+    const seq = ++catalogRebuildSeq.current;
+    catalogRebuildCancelRequested.current = false;
+    setCatalogRebuild({
+      running: true,
+      phase: "checking",
+      completedRevisions: 0,
+      totalRevisions: 0,
+      report: null,
+      errorCode: null,
+    });
+    stopCatalogRebuildPolling();
+    catalogRebuildPoll.current = window.setInterval(() => {
+      void sessionImportCatalogRebuildStatus()
+        .then((status) => {
+          if (catalogRebuildSeq.current === seq) setCatalogRebuild(status);
+        })
+        .catch(() => {
+          // The command result remains authoritative; a transient status poll
+          // must not turn a still-running rebuild into a false failure.
+        });
+    }, 250);
+
+    try {
+      const report = await sessionImportCatalogRebuild();
+      if (catalogRebuildSeq.current !== seq) return;
+      setCatalogRebuild({
+        running: false,
+        phase: "complete",
+        completedRevisions: report.revisionsRebuilt,
+        totalRevisions: report.revisionsScanned,
+        report,
+        errorCode: null,
+      });
+      setContentRevision((revision) => revision + 1);
+    } catch (error) {
+      if (catalogRebuildSeq.current !== seq) return;
+      const raw = error instanceof Error ? error.message : String(error);
+      const code = importErrorCode(raw) || "REQUEST_FAILED";
+      const cancelled = catalogRebuildCancelRequested.current && code === "PLAN_STALE";
+      setCatalogRebuild({
+        running: false,
+        phase: cancelled ? "cancelled" : "failed",
+        completedRevisions: 0,
+        totalRevisions: 0,
+        report: null,
+        errorCode: cancelled ? null : code,
+      });
+    } finally {
+      if (catalogRebuildSeq.current === seq) stopCatalogRebuildPolling();
+    }
+  }, [catalogRebuild?.running, stopCatalogRebuildPolling]);
+
+  const cancelCatalogRebuild = useCallback(async () => {
+    if (!catalogRebuild?.running) return;
+    try {
+      catalogRebuildCancelRequested.current =
+        await sessionImportCatalogRebuildCancel();
+    } catch {
+      setCatalogRebuild((current) =>
+        current
+          ? { ...current, running: false, phase: "failed", errorCode: "REQUEST_FAILED" }
+          : current,
+      );
+    }
+  }, [catalogRebuild?.running]);
 
   const searchHits = useMemo(
     () =>
@@ -267,15 +370,25 @@ export function useSearchPalette(opts: {
 
   const emptyState = useMemo(
     () =>
-      resolveSessionSearchEmptyState({
-        query,
-        sessionHitCount: sessionHits.length,
-        contentLoading,
-        mode,
-        includeArchived,
-        rankMode,
-      }),
-    [query, sessionHits.length, contentLoading, mode, includeArchived, rankMode],
+      contentError
+        ? null
+        : resolveSessionSearchEmptyState({
+            query,
+            sessionHitCount: sessionHits.length,
+            contentLoading,
+            mode,
+            includeArchived,
+            rankMode,
+          }),
+    [
+      query,
+      sessionHits.length,
+      contentLoading,
+      contentError,
+      mode,
+      includeArchived,
+      rankMode,
+    ],
   );
 
   const filtersActive = useMemo(
@@ -315,7 +428,11 @@ export function useSearchPalette(opts: {
     onActivate: activateItem,
     onActivateSessionIndex: (sessionIndex) => {
       const hit = sessionHits[sessionIndex];
-      if (hit) activateItem({ kind: "session", id: hit.id });
+      if (!hit) return;
+      activateItem({
+        kind: hit.kind === "importedHistory" ? "importedHistory" : "session",
+        id: hit.id,
+      });
     },
   });
 
@@ -351,6 +468,8 @@ export function useSearchPalette(opts: {
     projects: searchHits.matchedProjects,
     sessionHits,
     contentLoading,
+    contentError,
+    catalogRebuild,
     emptyState,
     panelRef: searchPanelRef,
     openPalette,
@@ -365,5 +484,7 @@ export function useSearchPalette(opts: {
     runAction,
     pickProject,
     pickSession,
+    rebuildCatalogIndex,
+    cancelCatalogRebuild,
   };
 }

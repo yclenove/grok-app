@@ -32,6 +32,15 @@ function payload(
 }
 
 describe("AskUserBar", () => {
+  it("reopens a collapsed card for a new generation sharing the same RPC", () => {
+    const original = { ...payload([{ id: "q", question: "Continue?", options: [] }]), requestGeneration: "original" };
+    const props = { labels, onSubmit: vi.fn(), onCancel: vi.fn() };
+    const view = render(<AskUserBar {...props} payload={original} />);
+    fireEvent.click(screen.getByRole("button", { name: "Minimize" }));
+    view.rerender(<AskUserBar {...props} payload={{ ...original, requestGeneration: "next" }} />);
+    expect(screen.getByRole("heading", { name: "Continue?" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
+  });
   it("renders a composer gate, not a modal overlay", () => {
     render(
       <AskUserBar

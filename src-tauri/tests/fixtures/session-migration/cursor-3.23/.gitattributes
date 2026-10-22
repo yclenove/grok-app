@@ -1,0 +1,2 @@
+# Real vendor output: keep it byte-exact on checkout.
+*.jsonl -text

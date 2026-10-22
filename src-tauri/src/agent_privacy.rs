@@ -454,11 +454,8 @@ trace_upload = false
 
     #[test]
     fn load_and_save_roundtrip_independent() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = temp_app_home("roundtrip");
-        let prev = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &tmp);
 
         let _ = ensure_app_dirs();
@@ -498,20 +495,13 @@ trace_upload = false
         assert!(disk.contains("disable_codebase_upload = true"));
         assert!(!disk.contains("[REDACTED]"));
 
-        match prev {
-            Some(v) => std::env::set_var("GROK_APP_HOME", v),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn save_refuses_shared_mode() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = temp_app_home("shared");
-        let prev = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &tmp);
         let _ = ensure_app_dirs();
         let mut s = store::load_settings();
@@ -525,10 +515,11 @@ trace_upload = false
         .unwrap_err();
         assert!(err.contains("shared"), "{err}");
 
-        match prev {
-            Some(v) => std::env::set_var("GROK_APP_HOME", v),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    crate::session_migration::test_home::fixture_home_variants_contract_tests!(
+        load_and_save_roundtrip_independent,
+        save_refuses_shared_mode,
+    );
 }

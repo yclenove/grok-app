@@ -37,6 +37,8 @@ pub(super) enum StallTickAction {
         tier: StallTier,
         saw_model_output: bool,
         saw_tool_activity: bool,
+        /// This turn already saw a body-decode `retry_state`. Copy only.
+        stream_interrupted: bool,
     },
 }
 
@@ -94,6 +96,9 @@ pub(super) fn sanitize_error_detail(raw: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
+    /// Captured Plan decision revision; omitted from unrelated snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_chrome_revision: Option<String>,
     pub session_id: Option<String>,
     pub agent_session_id: Option<String>,
     pub state: SessionState,
@@ -103,6 +108,16 @@ pub struct SessionSnapshot {
     pub model_id: Option<String>,
     pub project_path: Option<String>,
     pub title: String,
+}
+
+/// `session_stop_report`: the usual snapshot, plus whether `session/cancel`
+/// reached the agent. Ready is already published when this returns. A cancel
+/// error keeps `Ok` and sets `cancel_delivered` false — the host does not recycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopReport {
+    pub snapshot: SessionSnapshot,
+    pub cancel_delivered: bool,
 }
 
 /// One user-prompt checkpoint for the rewind timeline UI.
@@ -126,9 +141,11 @@ pub struct RewindExecuteResult {
     pub kept_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPermissionRequest {
+    /// Host gate identity survives restore/clone; CLI ids may be reused.
+    pub(super) request_generation: uuid::Uuid,
     pub rpc_id: u64,
     pub session_id: String,
     pub tool_call_id: String,
@@ -137,6 +154,8 @@ pub struct UiPermissionRequest {
     pub preview: String,
     pub scope_key: String,
     pub options: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_error: Option<String>,
 }
 
 /// Pending `_x.ai/ask_user_question` questionnaire, shaped exactly like the
@@ -144,6 +163,7 @@ pub struct UiPermissionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAskUserRequest {
+    pub(super) request_generation: uuid::Uuid,
     pub rpc_id: u64,
     pub session_id: String,
     pub tool_call_id: Option<String>,
@@ -164,6 +184,8 @@ pub(super) struct PendingStreamEmit {
 }
 
 pub(crate) struct LiveSession {
+    pub(super) turn_open_epoch: u64,
+    pub(super) workspace_context: Option<super::workspace_context::RuntimeWorkspaceContext>,
     pub(super) app_session_id: String,
     /// Stable id for the agent process / event pump (not the App session id).
     pub(super) process_id: ProcessId,
@@ -200,6 +222,12 @@ pub(crate) struct LiveSession {
     pub(super) provider_retry_attempt: u32,
     /// Host already aborted this turn after max retries (avoid double cancel).
     pub(super) provider_retry_aborted: bool,
+    /// Latest body-decode `retry_state` this turn (`Instant`, reason).
+    ///
+    /// Sticky across later tokens and tools — a short recovery followed by
+    /// silence is the hung-stream shape. Cleared only when the turn resets.
+    /// Stall copy only; never feeds [`crate::acp_client::should_abort_provider_retry_ex`].
+    pub(super) last_provider_retry: Option<(Instant, String)>,
     /// After session/new (load failed), first prompt should carry journal history.
     pub(super) needs_history_bootstrap: bool,
     /// Pending `_x.ai/exit_plan_mode` JSON-RPC id awaiting user Approve / revise.
@@ -212,9 +240,13 @@ pub(crate) struct LiveSession {
     /// path a reload left the chat stuck "thinking" with no gate to click, and
     /// the stall watchdog deliberately skips sessions holding an ask gate.
     pub(super) pending_ask_user_ui: Option<UiAskUserRequest>,
+    pub(super) human_gates: super::human_gate_identity::HumanGateState,
     /// Pending `session/request_permission` JSON-RPC id for this session (#524).
     /// Cleared on resolve or when the owning agent process is recycled/killed.
     pub(super) pending_permission_rpc_id: Option<u64>,
+    /// One delivered reverse-RPC receipt, bounded by this pending gate's life.
+    pub(super) pending_permission_reply:
+        Option<super::permission_resolution::PermissionResponseKey>,
     /// ACP `options` list for the pending permission (used to coerce wire
     /// optionIds so UI fallbacks like `always-allow` never override a
     /// tool-scoped id such as `allow-always-command`).
@@ -283,8 +315,20 @@ pub(crate) struct PrewarmedProcess {
     #[allow(dead_code)]
     pub(super) model_id: Option<String>,
     pub(super) created_at: Instant,
+    /// Wall time of the spawn. A chat created after this must not reuse the
+    /// process: that process already scanned skills (#1328).
+    pub(super) created_wall: chrono::DateTime<chrono::Utc>,
     #[allow(dead_code)]
     pub(super) backend: String,
+}
+
+/// True when this chat was created after the prewarm process started.
+/// One second of slack covers clock rounding on the same spawn.
+pub(crate) fn prewarm_predates_session(
+    prewarm_at: chrono::DateTime<chrono::Utc>,
+    session_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    prewarm_at + chrono::Duration::seconds(1) < session_at
 }
 
 /// Prewarm slot state. A process that was detached (viewed-only session) is
@@ -301,6 +345,8 @@ pub(crate) enum PrewarmState {
 
 /// Ready agent process parked while another App session is focused (I01/I02).
 pub(crate) struct ParkedAgent {
+    pub(super) turn_open_epoch: u64,
+    pub(super) workspace_context: Option<super::workspace_context::RuntimeWorkspaceContext>,
     pub(super) process_id: ProcessId,
     pub(super) app_session_id: String,
     pub(super) meta: SessionMeta,
@@ -556,7 +602,7 @@ pub(super) fn tool_meta_str(raw: &serde_json::Value, field: &str) -> Option<Stri
 /// only on the *start* notification; the terminal `tool_call_update` is status-only
 /// (`{toolCallId, status, content, rawOutput, locations}`) — without this map
 /// the journal would record bare `tool_step|completed|tool|tool`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ToolIdentity {
     /// Machine tool name, e.g. `read_file` (from `toolName`).
     pub(super) name: String,
@@ -623,19 +669,20 @@ pub(super) fn remember_tool_identity(
     if app_sid.is_empty() || tool_call_id.is_empty() {
         return;
     }
-    let name = raw
-        .get("toolName")
-        .or_else(|| raw.get("tool_name"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let specific = |s: &str| !s.is_empty() && !s.eq_ignore_ascii_case("tool");
+    let name = ["toolName", "tool_name"]
+        .into_iter()
+        .filter_map(|key| raw.get(key).and_then(|v| v.as_str()).map(str::trim))
+        .find(|s| specific(s))
         .map(|s| s.to_string())
         // grok CLI never sends a top-level `toolName`: the machine name lives in
         // `_meta["x.ai/tool"].name` on the start notification only.
-        .or_else(|| tool_meta_str(raw, "name"))
+        .or_else(|| tool_meta_str(raw, "name").filter(|s| specific(s)))
         .unwrap_or_default();
     let t = title.trim();
+    let t = if specific(t) { t } else { "" };
     let k = kind.trim();
+    let k = if specific(k) { k } else { "" };
     let input = extract_tool_input(raw);
     let sparse = t.is_empty() && k.is_empty() && name.is_empty() && input.is_none();
     if sparse {
@@ -647,28 +694,25 @@ pub(super) fn remember_tool_identity(
     if per.len() >= 2000 && !per.contains_key(tool_call_id) {
         return;
     }
-    let existing = per.get(tool_call_id);
-    let richer = existing.is_none_or(|e| {
-        let e_sparse =
-            e.name.is_empty() && e.title.is_empty() && e.kind.is_empty() && e.input.is_none();
-        let mine_sparse = name.is_empty() && t.is_empty() && k.is_empty() && input.is_none();
-        !e_sparse
-            || mine_sparse
-            || (e.title.is_empty() && !t.is_empty())
-            || (e.kind.is_empty() && !k.is_empty())
-            || (e.name.is_empty() && !name.is_empty())
-            || (e.input.is_none() && input.is_some())
-    });
-    if richer {
-        per.insert(
-            tool_call_id.to_string(),
-            ToolIdentity {
-                name,
-                title: t.to_string(),
-                kind: k.to_string(),
-                input,
-            },
-        );
+    // A partial notification updates only the fields it actually knows. A
+    // concrete correction can still replace a prior value of the same field.
+    let identity = per.entry(tool_call_id.to_string()).or_default();
+    if !name.is_empty() {
+        identity.name = name;
+    }
+    if !t.is_empty() {
+        identity.title = t.to_string();
+    }
+    if !k.is_empty()
+        && (!k.eq_ignore_ascii_case("other")
+            || identity.kind.is_empty()
+            || identity.kind.eq_ignore_ascii_case("other")
+            || identity.kind.eq_ignore_ascii_case("tool"))
+    {
+        identity.kind = k.to_string();
+    }
+    if input.is_some() {
+        identity.input = input;
     }
 }
 
@@ -702,17 +746,18 @@ pub(super) fn resolve_tool_identity(
     } else {
         title.to_string()
     };
-    let kind_out = if k.is_empty() || k.eq_ignore_ascii_case("tool") {
-        if !id.kind.is_empty() && !id.kind.eq_ignore_ascii_case("tool") {
-            id.kind.clone()
-        } else if !id.name.is_empty() {
-            id.name.clone()
+    let kind_out =
+        if k.is_empty() || k.eq_ignore_ascii_case("tool") || k.eq_ignore_ascii_case("other") {
+            if !id.kind.is_empty() && !id.kind.eq_ignore_ascii_case("tool") {
+                id.kind.clone()
+            } else if !id.name.is_empty() {
+                id.name.clone()
+            } else {
+                kind.to_string()
+            }
         } else {
             kind.to_string()
-        }
-    } else {
-        kind.to_string()
-    };
+        };
     (title_out, kind_out, id.name.clone(), id.input.clone())
 }
 
@@ -844,33 +889,13 @@ pub(super) fn journal_host_tool_step(
         content.push_str(&d.chars().take(6_000).collect::<String>());
     }
     let mid = format!("tool-{tool_call_id}");
-    let mut msgs = store::load_messages(app_sid);
-    if let Some(slot) = msgs.iter_mut().find(|m| m.id == mid) {
-        if tool_journal_richer(&slot.content, &content) {
-            slot.content = content;
-            slot.marker = Some("tool_step".into());
-            slot.is_error = matches!(st, "failed" | "error");
-            if let Err(e) = store::save_messages(app_sid, &msgs) {
-                tracing::error!(session = %app_sid, tool = %tool_call_id, "host tool journal update failed: {e}");
-            }
-        }
-    } else {
-        if let Err(e) = store::append_message(
-            app_sid,
-            ChatMessageStored {
-                id: mid,
-                role: "tool".into(),
-                content,
-                thought: None,
-                created_at: chrono::Utc::now(),
-                is_error: matches!(st, "failed" | "error"),
-                attachments: None,
-                marker: Some("tool_step".into()),
-            },
-        ) {
-            tracing::error!(session = %app_sid, tool = %tool_call_id, "host tool journal append failed: {e}");
-        }
-    }
+    persist_completed_tool_journal_job(PendingCompletedToolJournal {
+        app_sid: app_sid.into(),
+        tool_call_id: tool_call_id.into(),
+        mid,
+        content,
+        is_error: matches!(st, "failed" | "error"),
+    });
 }
 
 /// Owned completed-tool journal RMW inputs. Clone under a session-map lock;
@@ -922,38 +947,36 @@ pub(super) fn persist_completed_tool_journal_job(job: PendingCompletedToolJourna
         content,
         is_error,
     } = job;
-    let mut msgs = store::load_messages(&app_sid);
-    if let Some(slot) = msgs.iter_mut().find(|m| m.id == mid) {
-        if tool_journal_richer(&slot.content, &content) {
-            slot.content = content;
-            slot.marker = Some("tool_step".into());
-            if let Err(e) = store::save_messages(&app_sid, &msgs) {
-                tracing::error!(
-                    session = %app_sid,
-                    tool = %tool_call_id,
-                    "tool journal update failed: {e}"
-                );
-            }
-        }
-        return;
-    }
-    if let Err(e) = store::append_message(
+    #[cfg(test)]
+    super::command_spawn_options_tests::tool_journal_consumer_tests::pause_before_commit(
         &app_sid,
-        ChatMessageStored {
-            id: mid,
+        &tool_call_id,
+    );
+    // The richer decision must see the row read under the same lock as write.
+    // No runtime-map guard is held here; this also serves Host tool upserts.
+    if let Err(e) = store::update_message(&app_sid, &mid, |existing| {
+        if existing.is_some_and(|row| !tool_journal_richer(&row.content, &content)) {
+            return None;
+        }
+        let mut next = existing.cloned().unwrap_or_else(|| ChatMessageStored {
+            id: mid.clone(),
             role: "tool".into(),
-            content,
+            content: String::new(),
             thought: None,
             created_at: chrono::Utc::now(),
             is_error,
             attachments: None,
             marker: Some("tool_step".into()),
-        },
-    ) {
+        });
+        next.content = content;
+        next.marker = Some("tool_step".into());
+        next.is_error = is_error;
+        Some(next)
+    }) {
         tracing::error!(
             session = %app_sid,
             tool = %tool_call_id,
-            "tool journal append failed: {e}"
+            "tool journal upsert failed: {e}"
         );
     }
 }
@@ -1604,7 +1627,24 @@ pub(super) fn extract_generated_media_path(raw: &serde_json::Value) -> Option<St
 ///   A `read_file` of a user-attached image is already on the user bubble;
 ///   attaching it again paints a leftover ImageUi that 403s outside the
 ///   project (`~/Documents/图片/…`).
+#[cfg(test)]
 pub(super) fn completed_tool_media_attachment(
+    raw: &serde_json::Value,
+    name: &str,
+    kind: &str,
+    title: &str,
+    project_path: Option<&str>,
+    status: &str,
+) -> Option<String> {
+    let path =
+        preview_completed_tool_media_attachment(raw, name, kind, title, project_path, status)?;
+    grant_media_attachment_path(&path);
+    Some(path)
+}
+
+/// Validate a candidate without granting it. Actual tool acceptance precedes
+/// the native media grant/IPC effect, after runtime-map guards have dropped.
+pub(super) fn preview_completed_tool_media_attachment(
     raw: &serde_json::Value,
     name: &str,
     kind: &str,
@@ -1623,19 +1663,19 @@ pub(super) fn completed_tool_media_attachment(
         None
     };
     if let Some(p) = structured.as_deref() {
-        if let Some(out) = prepare_media_attachment_path(p, project_path, true) {
+        if let Some(out) = preview_media_attachment_path(p, project_path, true) {
             return Some(out);
         }
     }
     if let Some(p) = freeform.as_deref() {
-        if let Some(out) = prepare_media_attachment_path(p, project_path, false) {
+        if let Some(out) = preview_media_attachment_path(p, project_path, false) {
             return Some(out);
         }
     }
     if capable {
         let (_, hint) = extract_tool_ui_fields(raw);
         if let Some(p) = hint.as_deref().filter(|s| !s.is_empty()) {
-            return prepare_media_attachment_path(p, project_path, false);
+            return preview_media_attachment_path(p, project_path, false);
         }
     }
     None
@@ -1650,7 +1690,24 @@ pub(super) fn completed_tool_media_attachment(
 /// - Soft (freeform / path_hint): only attach when already allowlisted or under
 ///   the session project — prevents incidental reads of `~/.codex/.../logo.png`
 ///   from becoming dead paperclip thumbs.
+#[cfg(test)]
 pub(super) fn prepare_media_attachment_path(
+    path: &str,
+    project_path: Option<&str>,
+    force_grant: bool,
+) -> Option<String> {
+    let path = preview_media_attachment_path(path, project_path, force_grant)?;
+    grant_media_attachment_path(&path);
+    Some(path)
+}
+
+pub(super) fn grant_media_attachment_path(path: &str) {
+    if is_local_media_fs_path(path) {
+        crate::path_scope::grant_path(std::path::Path::new(path));
+    }
+}
+
+fn preview_media_attachment_path(
     path: &str,
     project_path: Option<&str>,
     force_grant: bool,
@@ -1680,9 +1737,6 @@ pub(super) fn prepare_media_attachment_path(
         })
         .unwrap_or(false);
     if force_grant || allowed || under_project {
-        // Always grant so history thumbs work without relying on a later
-        // paths_classify race (live stream attach used to skip grant → paperclip).
-        crate::path_scope::grant_path(pb);
         Some(n)
     } else {
         None
@@ -1833,7 +1887,7 @@ pub(super) fn append_journal_attachment_refs(
         .filter_map(|l| {
             l.trim()
                 .strip_prefix('@')
-                .map(|p| p.trim().to_string())
+                .map(|p| journal_attachment_path_key(p.trim()))
                 .filter(|p| !p.is_empty())
         })
         .collect();
@@ -1841,7 +1895,8 @@ pub(super) fn append_journal_attachment_refs(
     let mut new_refs: Vec<String> = Vec::new();
     for a in atts {
         let path = a.path.trim();
-        if path.is_empty() || !existing.insert(path.to_string()) {
+        let key = journal_attachment_path_key(path);
+        if path.is_empty() || key.is_empty() || !existing.insert(key) {
             continue;
         }
         new_refs.push(format!("@{path}"));
@@ -1859,9 +1914,22 @@ pub(super) fn append_journal_attachment_refs(
     lines.join("\n")
 }
 
+/// `C:\…` and `C:/…` are one file. Other paths stay as written.
+fn journal_attachment_path_key(path: &str) -> String {
+    let t = path.trim();
+    let b = t.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+    {
+        t.replace('\\', "/")
+    } else {
+        t.to_string()
+    }
+}
+
 /// Result of taking agent processes out of live / background / parked / prewarm maps.
 pub(super) struct DrainedAgents {
     pub(super) acps: Vec<Arc<AcpClient>>,
+    pub(super) invalidations: Vec<super::human_gate_invalidation::PendingGateInvalidation>,
     pub(super) had_live_shell: bool,
     pub(super) background_count: usize,
     pub(super) parked_count: usize,
@@ -2037,6 +2105,14 @@ mod journal_attach_tests {
         );
         assert_eq!(out, "body\n\n@/goal keep me\n\n@/tmp/shot.png");
     }
+
+    #[test]
+    fn append_collapses_windows_slash_variants() {
+        let once = append_journal_attachment_refs("hello".into(), &[att(r"C:\Users\me\paste.png")]);
+        let twice = append_journal_attachment_refs(once.clone(), &[att("C:/Users/me/paste.png")]);
+        assert_eq!(once, twice);
+        assert_eq!(once.matches("paste.png").count(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -2110,5 +2186,21 @@ mod background_tool_journal_lock_tests {
         assert_eq!(*background.lock().get("bg-sid").unwrap(), 2);
 
         *TOOL_JOURNAL_PERSIST_TEST_HOOK.lock() = None;
+    }
+}
+
+#[cfg(test)]
+mod prewarm_skill_scan_tests {
+    use super::prewarm_predates_session;
+
+    #[test]
+    fn chat_created_after_prewarm_is_not_reused() {
+        let prewarm_at = chrono::DateTime::parse_from_rfc3339("2026-10-13T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let session_at = prewarm_at + chrono::Duration::minutes(5);
+        assert!(prewarm_predates_session(prewarm_at, session_at));
+        assert!(!prewarm_predates_session(session_at, prewarm_at));
+        assert!(!prewarm_predates_session(prewarm_at, prewarm_at));
     }
 }

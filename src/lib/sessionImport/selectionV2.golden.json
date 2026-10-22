@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "eventIds": ["e2", "e1"],
+  "pinnedEventIds": ["e1"],
+  "assetIds": ["asset-a"],
+  "fields": {
+    "messageText": true,
+    "toolCallName": true,
+    "toolCallInput": false,
+    "toolResultContent": true,
+    "compactionSummary": true,
+    "visibleReasoning": false
+  },
+  "includeSubagents": false
+}

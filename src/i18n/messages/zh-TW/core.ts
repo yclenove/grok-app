@@ -1,6 +1,7 @@
 /** Traditional Chinese messages — domain: core */
 export const zhTWCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "權限回覆失敗。{error}",
   "image.loadingOriginal": "正在載入原始檔案…",
   "image.originalFailed": "原始檔案載入失敗，仍可查看預覽。",
   "app.tagline": "MIT · 非 xAI 官方 · 姊妹專案 grok-go",
@@ -74,6 +75,8 @@ export const zhTWCore = {
   "agent.streamStallBanner": "約 {seconds} 秒無串流片段或工具活動。可繼續等待或結束本輪。",
   "agent.streamStallCancel": "結束本輪",
   "agent.streamStallEndTurn": "結束本輪",
+  "agent.streamStallEndAndContinue": "結束並繼續",
+  "agent.streamStallContinueNotReady": "本輪還在結束，請稍後再點繼續",
   "agent.streamStallKeepWaiting": "繼續等待",
   "agent.streamStallHardEndToast": "Host 已恢復收尾，本輪內容已保留。",
   "agent.ghostStreamingHealed": "訊息沒有真正送給 Agent。已恢復到輸入框，請重新發送。",

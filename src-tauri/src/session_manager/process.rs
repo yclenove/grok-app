@@ -84,6 +84,35 @@ fn process_recycle_is_blocked(process_id: &str, protected_process_ids: &HashSet<
 }
 
 impl SessionManager {
+    /// The in-process mock has no ACP child. Admit only its connected states;
+    /// other backends must still prove that their real child is alive.
+    pub(super) fn has_connected_backend(s: &LiveSession) -> bool {
+        s.acp.as_ref().is_some_and(|c| c.is_alive())
+            || (s.backend == "mock_acp"
+                && matches!(
+                    s.fsm.state(),
+                    SessionState::Ready
+                        | SessionState::Streaming
+                        | SessionState::AwaitingPermission
+                ))
+    }
+
+    /// Exact target lookup; never grant a send through an unrelated live chat.
+    pub(super) fn has_promptable_session(&self, target_sid: &str) -> bool {
+        if self
+            .inner
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.app_session_id == target_sid && Self::has_connected_backend(s))
+        {
+            return true;
+        }
+        self.background
+            .lock()
+            .get(target_sid)
+            .is_some_and(Self::has_connected_backend)
+    }
+
     pub(super) fn active_process_count(&self) -> u32 {
         let mut entries = Vec::new();
         {
@@ -151,6 +180,7 @@ impl SessionManager {
     /// parked handle kills the whole child, including a Ready live shell that
     /// has not yet become busy.
     pub(super) fn live_or_background_process_ids(&self) -> HashSet<String> {
+        let _transfer = self.runtime_transfer.lock();
         let mut out = HashSet::new();
         {
             let live = self.inner.lock();
@@ -184,6 +214,7 @@ impl SessionManager {
         if process_id.trim().is_empty() {
             return false;
         }
+        let _transfer = self.runtime_transfer.lock();
         {
             let live = self.inner.lock();
             if live.as_ref().is_some_and(|s| {
@@ -401,6 +432,33 @@ impl SessionManager {
         )
     }
 
+    /// Record a provider `retry_state` without touching stall progress.
+    ///
+    /// Body-decode failures are remembered for the rest of the turn when the
+    /// host owns it. Other reasons still update `provider_retry_attempt` but
+    /// do not set the stall hint. Does not call `touch_stream_progress_locked`.
+    pub(super) fn note_provider_retry(s: &mut LiveSession, attempt: u32, reason: &str) {
+        s.provider_retry_attempt = attempt;
+        if !Self::should_apply_provider_retry_abort(s) {
+            return;
+        }
+        if crate::acp_client::is_stream_decode_retry_reason(reason) {
+            s.last_provider_retry = Some((Instant::now(), reason.to_string()));
+        }
+    }
+
+    pub(super) fn clear_provider_retry_memory(s: &mut LiveSession) {
+        s.provider_retry_attempt = 0;
+        s.provider_retry_aborted = false;
+        s.last_provider_retry = None;
+    }
+
+    pub(super) fn stream_interrupted_this_turn(s: &LiveSession) -> bool {
+        s.last_provider_retry
+            .as_ref()
+            .is_some_and(|(_, reason)| crate::acp_client::is_stream_decode_retry_reason(reason))
+    }
+
     /// Whether connect/respawn must keep the existing agent process.
     ///
     /// Terminal FSM states (`Disconnected` / `Idle`) never preserve the process —
@@ -418,7 +476,8 @@ impl SessionManager {
     pub(super) fn release_failed_turn_markers(
         s: &mut LiveSession,
         pending_emits: Option<&mut Vec<StreamEmitPayload>>,
-    ) {
+    ) -> Option<super::human_gate_invalidation::PendingGateInvalidation> {
+        let invalidation = Self::take_pending_gate_invalidation(s);
         // Take the last coalesced tokens before dropping the buffer (P0-1 / P1-9).
         // No done flag: the error / fail_with state should win over a fake Ready.
         if let Some(out) = pending_emits {
@@ -440,14 +499,14 @@ impl SessionManager {
         s.open_tool_seen_at.clear();
         s.terminal_tool_ids.clear();
         s.deferred_prompt_complete = None;
-        s.pending_plan_rpc_id = None;
-        s.pending_ask_user_rpc_id = None;
         s.pending_stream_emit = None;
         s.journal_throttle.reset();
         s.last_stall_emit = None;
         s.stall_soft_emits = 0;
         s.saw_model_output = false;
         s.tools_this_turn = 0;
+        // Continuation sidecar I/O stays with the caller after this lock drops.
+        invalidation
     }
 
     /// Park or background the current live session so focus can move.
@@ -456,12 +515,13 @@ impl SessionManager {
     /// - Busy (FSM or open tools / deferred complete) → `background` (event pump kept).
     /// - Demoting a busy turn always succeeds (never cancel for focus).
     pub(super) fn try_park_live(&self) -> Result<(), AgentError> {
+        let _transfer = self.runtime_transfer.lock();
         let mut guard = self.inner.lock();
         let Some(s) = guard.as_mut() else {
             return Ok(());
         };
         // Nothing to park
-        if s.acp.as_ref().is_none_or(|c| !c.is_alive()) {
+        if !Self::has_connected_backend(s) {
             // Drop dead shell so connect can rebuild.
             let _ = guard.take();
             return Ok(());
@@ -476,6 +536,11 @@ impl SessionManager {
             let st = live.fsm.state();
             let tools = live.open_tool_ids.len();
             drop(guard);
+            #[cfg(test)]
+            super::command_spawn_options_tests::runtime_transfer_tests::pause_after_take(
+                &sid,
+                "live_background",
+            );
             tracing::info!(
                 "acp demote busy session to background sid={sid} state={st:?} open_tools={tools}"
             );
@@ -566,6 +631,8 @@ impl SessionManager {
                 }
                 let sandbox_profile = acp.sandbox_profile();
                 let parked = ParkedAgent {
+                    turn_open_epoch: s.turn_open_epoch,
+                    workspace_context: s.workspace_context.clone(),
                     process_id: s.process_id.clone(),
                     app_session_id: s.app_session_id.clone(),
                     meta: s.meta.clone(),
@@ -582,6 +649,11 @@ impl SessionManager {
                 };
                 let _ = guard.take();
                 drop(guard);
+                #[cfg(test)]
+                super::command_spawn_options_tests::runtime_transfer_tests::pause_after_take(
+                    &parked.app_session_id,
+                    "live_parked",
+                );
                 self.parked
                     .lock()
                     .insert(parked.app_session_id.clone(), parked);
@@ -628,9 +700,19 @@ impl SessionManager {
 
     /// If a background session finished its turn (Ready, no open tools), park warm.
     pub(super) fn promote_background_ready_to_parked(&self, app_session_id: &str) {
+        self.promote_background_ready_to_parked_matching(app_session_id, |_| true);
+    }
+
+    pub(super) fn promote_background_ready_to_parked_matching(
+        &self,
+        app_session_id: &str,
+        matches_owner: impl FnOnce(&LiveSession) -> bool,
+    ) {
+        let _transfer = self.runtime_transfer.lock();
         let mut bg = self.background.lock();
         let ready = bg.get(app_session_id).is_some_and(|s| {
-            matches!(s.fsm.state(), SessionState::Ready)
+            matches_owner(s)
+                && matches!(s.fsm.state(), SessionState::Ready)
                 && !s.prompt_in_flight
                 && s.streaming_message_id.is_none()
                 && s.open_tool_ids.is_empty()
@@ -646,11 +728,18 @@ impl SessionManager {
             return;
         };
         drop(bg);
+        #[cfg(test)]
+        super::command_spawn_options_tests::runtime_transfer_tests::pause_after_take(
+            app_session_id,
+            "background_parked",
+        );
         let Some(acp) = s.acp.take() else {
             return;
         };
         let sandbox_profile = acp.sandbox_profile();
         let parked = ParkedAgent {
+            turn_open_epoch: s.turn_open_epoch,
+            workspace_context: s.workspace_context.clone(),
             process_id: s.process_id.clone(),
             app_session_id: s.app_session_id.clone(),
             meta: s.meta.clone(),
@@ -674,9 +763,20 @@ impl SessionManager {
         );
     }
 
-    /// Promote a parked agent into the live slot (caller must have cleared live).
-    pub(super) fn unpark_to_live(&self, app_session_id: &str) -> Option<LiveSession> {
+    /// Reconstruct and synchronously publish/detach a parked owner under the
+    /// transfer lock. The callback only installs state; RPC/UI/kill follow later.
+    pub(super) fn unpark_to_live<R>(
+        &self,
+        app_session_id: &str,
+        publish: impl FnOnce(LiveSession) -> R,
+    ) -> Option<R> {
+        let _transfer = self.runtime_transfer.lock();
         let parked = self.parked.lock().remove(app_session_id)?;
+        #[cfg(test)]
+        super::command_spawn_options_tests::runtime_transfer_tests::pause_after_take(
+            app_session_id,
+            "parked_take",
+        );
         if !parked.acp.is_alive() {
             return None;
         }
@@ -685,7 +785,9 @@ impl SessionManager {
         let _ = fsm.start_connect();
         let _ = fsm.handshake_ok();
         let now = Instant::now();
-        Some(LiveSession {
+        Some(publish(LiveSession {
+            turn_open_epoch: parked.turn_open_epoch,
+            workspace_context: parked.workspace_context,
             app_session_id: parked.app_session_id,
             process_id: parked.process_id,
             meta: parked.meta,
@@ -708,14 +810,17 @@ impl SessionManager {
             policy: parked.policy,
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
+            last_provider_retry: None,
             needs_history_bootstrap: parked.needs_history_bootstrap,
             pending_plan_rpc_id: None,
             pending_permission_rpc_id: None,
+            pending_permission_reply: None,
             pending_permission_options: None,
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
             pending_ask_user_ui: None,
+            human_gates: Default::default(),
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -732,6 +837,23 @@ impl SessionManager {
             pending_stream_emit: None,
             stream_emit_flush_gen: 0,
             last_tool_heartbeat_emit: None,
+        }))
+    }
+
+    pub(super) fn promote_parked_to_live(&self, id: &str) -> bool {
+        self.unpark_to_live(id, |live| *self.inner.lock() = Some(live))
+            .is_some()
+    }
+
+    pub(super) fn promote_parked_to_background(
+        &self,
+        id: &str,
+    ) -> Option<(String, SessionSnapshot)> {
+        self.unpark_to_live(id, |live| {
+            let sid = live.app_session_id.clone();
+            let snapshot = Self::snapshot_from_live(&live);
+            self.background.lock().insert(sid.clone(), live);
+            (sid, snapshot)
         })
     }
 
@@ -744,10 +866,16 @@ impl SessionManager {
     /// inner→background — an ABBA deadlock that froze streaming ("thinking"
     /// stuck) and every session command (export, stop, state) until force-quit.
     pub(super) fn promote_background_to_live(&self, target_sid: &str) -> bool {
+        let _transfer = self.runtime_transfer.lock();
         let removed = self.background.lock().remove(target_sid);
         let Some(live) = removed else {
             return false;
         };
+        #[cfg(test)]
+        super::command_spawn_options_tests::runtime_transfer_tests::pause_after_take(
+            target_sid,
+            "background_live",
+        );
         *self.inner.lock() = Some(live);
         true
     }
@@ -767,15 +895,20 @@ impl SessionManager {
         app_session_id: &str,
         f: impl FnOnce(&mut LiveSession) -> R,
     ) -> Option<R> {
+        let transfer = self.runtime_transfer.lock();
         {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 if s.app_session_id == app_session_id {
+                    drop(transfer);
                     return Some(f(s));
                 }
             }
         }
         let mut bg = self.background.lock();
+        // The map guard now pins this owner. Let other pools move while the
+        // callback performs its existing synchronous work on this one session.
+        drop(transfer);
         bg.get_mut(app_session_id).map(f)
     }
 
@@ -824,9 +957,12 @@ impl SessionManager {
         app: &AppHandle,
         target_sid: &str,
     ) -> Result<bool, AgentError> {
-        if self.inner.lock().as_ref().is_some_and(|s| {
-            s.app_session_id == target_sid && s.acp.as_ref().is_some_and(|c| c.is_alive())
-        }) {
+        if self
+            .inner
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.app_session_id == target_sid && Self::has_connected_backend(s))
+        {
             return Ok(true);
         }
         let in_background = self.background.lock().contains_key(target_sid);
@@ -852,8 +988,7 @@ impl SessionManager {
             Self::emit_state(app, &self.snapshot());
             return Ok(true);
         }
-        if let Some(live) = self.unpark_to_live(target_sid) {
-            *self.inner.lock() = Some(live);
+        if self.promote_parked_to_live(target_sid) {
             tracing::info!("acp focus: parked → live sid={target_sid}");
             Self::emit_state(app, &self.snapshot());
             return Ok(true);
@@ -879,21 +1014,9 @@ impl SessionManager {
         app: &AppHandle,
         target_sid: &str,
     ) -> Result<bool, AgentError> {
-        // Live focus already on target with a living ACP.
-        if self.inner.lock().as_ref().is_some_and(|s| {
-            s.app_session_id == target_sid && s.acp.as_ref().is_some_and(|c| c.is_alive())
-        }) {
-            return Ok(true);
-        }
-
-        // Background: keep in place — do not demote the current live focus.
-        if self
-            .background
-            .lock()
-            .get(target_sid)
-            .is_some_and(|s| s.acp.as_ref().is_some_and(|c| c.is_alive()))
-        {
-            tracing::info!("acp promptable: background in-place sid={target_sid} (no live demote)");
+        // Existing live/background target stays in place, including the
+        // explicit in-process mock. Turn-open still enforces FSM/busy guards.
+        if self.has_promptable_session(target_sid) {
             return Ok(true);
         }
 
@@ -901,16 +1024,11 @@ impl SessionManager {
         // background so concurrent multi-window send does not steal focus.
         let live_busy_other = self.inner.lock().as_ref().is_some_and(|s| {
             s.app_session_id != target_sid
-                && s.acp.as_ref().is_some_and(|c| c.is_alive())
+                && Self::has_connected_backend(s)
                 && Self::live_session_is_busy(s)
         });
         if live_busy_other && self.parked.lock().contains_key(target_sid) {
-            if let Some(live) = self.unpark_to_live(target_sid) {
-                // unpark_to_live builds a LiveSession; place it into background
-                // so the busy live focus is not demoted.
-                let sid = live.app_session_id.clone();
-                let snap = Self::snapshot_from_live(&live);
-                self.background.lock().insert(sid.clone(), live);
+            if let Some((sid, snap)) = self.promote_parked_to_background(target_sid) {
                 tracing::info!(
                     "acp promptable: parked → background sid={sid} (live busy preserved)"
                 );
@@ -1341,6 +1459,7 @@ impl SessionManager {
     pub(super) fn snapshot_locked(inner: &Option<LiveSession>) -> SessionSnapshot {
         match inner.as_ref() {
             None => SessionSnapshot {
+                plan_chrome_revision: None,
                 session_id: None,
                 agent_session_id: None,
                 state: SessionState::Idle,
@@ -1491,6 +1610,7 @@ impl SessionManager {
 
     pub(super) fn snapshot_from_live(s: &LiveSession) -> SessionSnapshot {
         SessionSnapshot {
+            plan_chrome_revision: None,
             session_id: Some(s.app_session_id.clone()),
             agent_session_id: s.meta.agent_session_id.clone(),
             state: s.fsm.state(),
@@ -1506,6 +1626,7 @@ impl SessionManager {
     #[allow(dead_code)]
     pub(super) fn snapshot_from_parked(p: &ParkedAgent) -> SessionSnapshot {
         SessionSnapshot {
+            plan_chrome_revision: None,
             session_id: Some(p.app_session_id.clone()),
             agent_session_id: p.meta.agent_session_id.clone(),
             state: SessionState::Ready,
@@ -1554,9 +1675,10 @@ impl SessionManager {
         // Clear *all* busy markers (including deferred prompt_complete / open tools).
         // Leaving them set after fail_with left the session as Disconnected+busy,
         // so connect no-oped forever and local sends failed while Remote IM still worked.
-        Self::release_failed_turn_markers(s, Some(pending_emits));
+        let gate_invalidation = Self::release_failed_turn_markers(s, Some(pending_emits));
 
         PendingTurnBoundaryPersist {
+            gate_invalidation,
             stream_flush,
             session_id: s.app_session_id.clone(),
             message: ChatMessageStored {
@@ -1572,6 +1694,7 @@ impl SessionManager {
             meta: s.meta.clone(),
             emit_event: "session://turn_error",
             emit_payload: serde_json::json!({
+                "humanGatesInvalidated": true,
                 "sessionId": s.app_session_id,
                 "messageId": mid,
                 "code": code,

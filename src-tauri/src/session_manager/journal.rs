@@ -228,7 +228,7 @@ impl SessionManager {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 s.meta.updated_at = chrono::Utc::now();
-                let _ = store::update_session_meta(&s.meta);
+                let _ = store::update_runtime_session_meta(&s.meta);
             }
         }
         let snap = self.snapshot();

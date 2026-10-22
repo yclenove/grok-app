@@ -3,7 +3,9 @@
 
 #[cfg(test)]
 mod integration {
-    use crate::cli_probe::{cli_auth_json_present, probe_cli};
+    use crate::cli_probe::{
+        cli_auth_json_present, probe_candidates, read_version_of, test_support,
+    };
     use crate::paths::{app_data_root, ensure_app_dirs};
     use crate::store::{
         add_project, load_projects, load_settings, relocate_project, remove_project, save_settings,
@@ -28,50 +30,41 @@ mod integration {
         dir
     }
 
-    struct RestoreHome(Option<String>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(v) => std::env::set_var("GROK_APP_HOME", v),
-                None => std::env::remove_var("GROK_APP_HOME"),
-            }
-        }
-    }
-
     /// Isolate GROK_APP_HOME and serialize against store/path_scope tests.
     fn with_isolated_project_store(f: impl FnOnce()) {
-        let _home = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _home =
+            crate::session_migration::test_home::IsolatedAppHome::acquire("grok-app-itest-home");
         let _guard = PROJECTS_STORE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let home = unique_dir();
-        let prev = std::env::var("GROK_APP_HOME").ok();
-        std::env::set_var("GROK_APP_HOME", &home);
-        let _restore = RestoreHome(prev);
-        crate::paths::ensure_app_dirs().ok();
         f();
-        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn probe_cli_shape_and_local_install() {
-        let r = probe_cli(None);
-        assert!(!r.candidates_tried.is_empty(), "should try common paths");
-        // Auth flag always populated
-        let _ = r.cli_auth_present;
-        if std::path::Path::new(&format!(
-            "{}/.grok/bin/grok",
-            std::env::var("HOME").unwrap_or_default()
-        ))
-        .is_file()
-            || which::which("grok").is_ok()
-        {
-            assert!(r.found);
-            assert!(r.path.is_some());
-            assert!(r.version.is_some());
-        }
+    fn probe_cli_shape_and_synthetic_install() {
+        let root = test_support::LauncherDir::new();
+        let bin = root.path().join(".grok").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let path = test_support::version_launcher(&bin, "grok 1.0.0", false, 0);
+        let r = probe_candidates(
+            vec![path.clone()],
+            false,
+            false,
+            crate::process_util::looks_runnable,
+            read_version_of,
+            |_| (None, None),
+            || None,
+        );
+        assert_eq!(r.candidates_tried, vec![path.display().to_string()]);
+        assert!(r.found);
+        assert_eq!(r.path.as_deref(), path.to_str());
+        assert_eq!(r.version.as_deref(), Some("grok 1.0.0"));
+        assert_eq!(r.source, "common_path");
+        assert!(!r.cli_auth_present);
+        assert_eq!(r.version_supported, Some(true));
+        assert_eq!(r.meets_recommended, Some(true));
+        assert!(r.agent_path.is_none());
+        assert!(r.acp_agent_version.is_none());
     }
 
     #[test]
@@ -167,4 +160,25 @@ mod integration {
         // Just ensure helper runs; value depends on machine
         let _ = cli_auth_json_present();
     }
+
+    fn fixture_panics_restore_home() {
+        let inherited = std::env::var_os("GROK_APP_HOME");
+        let mut owned_path = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_isolated_project_store(|| {
+                owned_path = std::env::var_os("GROK_APP_HOME").map(std::path::PathBuf::from);
+                panic!("intentional fixture closure unwind");
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(std::env::var_os("GROK_APP_HOME"), inherited);
+        assert!(!owned_path.expect("fixture selected an owned home").exists());
+    }
+
+    crate::session_migration::test_home::fixture_home_variants_contract_tests!(
+        project_add_trust_remove_roundtrip,
+        project_relocate_updates_path_and_path_ok,
+        settings_default_factory_and_disk_roundtrip,
+        fixture_panics_restore_home,
+    );
 }

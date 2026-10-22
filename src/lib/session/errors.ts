@@ -175,6 +175,15 @@ export function stripErrorNoise(text: string): string {
   return s;
 }
 
+function isHandoffChangedError(
+  payload: Pick<TurnErrorPayload, "code" | "message" | "content">,
+): boolean {
+  return payload.code === "HANDOFF_CHANGED" ||
+    [payload.content, payload.message].some((raw) =>
+      /^HANDOFF_CHANGED(?::|$)/.test(stripErrorNoise(raw ?? "")),
+    );
+}
+
 /**
  * Parse a stored / live turn-error payload into a friendly chat body.
  * Prefer stable codes; never show raw MCP Connection refused walls of text.
@@ -184,6 +193,9 @@ export function formatTurnErrorBody(
   locale: Locale = "en",
   opts?: Pick<ErrorDeckResolveOpts, "activeSource">,
 ): string {
+  if (isHandoffChangedError(payload)) {
+    return t(locale, "sessionImport.err.handoffChanged");
+  }
   const rawCombined = [payload.content, payload.message, payload.code]
     .filter(Boolean)
     .join("\n");
@@ -300,6 +312,43 @@ export function formatTurnErrorBody(
   return first.length > 200 ? `${first.slice(0, 200)}…` : first;
 }
 
+const RETRY_CONTINUES_CODES = new Set([
+  "NETWORK_PROVIDER",
+  "TURN_TIMEOUT",
+  "AGENT_DISCONNECTED",
+  "CONNECT_FAILED",
+  "AGENT_CRASHED",
+]);
+
+function hostCodeFromTurnError(raw: string): string | null {
+  const matched = raw.match(/^\*\*([A-Z0-9_]+)\*\*/);
+  return matched?.[1] ?? null;
+}
+
+/**
+ * Error-row retry continues the interrupted turn.
+ * Regenerate rewinds the last user prompt. After these failures the agent
+ * rewind RPC fails and the click sends nothing (#1324).
+ * Quota, auth, sandbox, and permission stay on regenerate / their own actions.
+ */
+export function turnErrorContinuesOnRetry(
+  content: string | null | undefined,
+): boolean {
+  const raw = (content || "").trim();
+  if (!raw) return false;
+  const code = resolveErrorDeckCode(hostCodeFromTurnError(raw), raw);
+  if (RETRY_CONTINUES_CODES.has(code)) return true;
+  if (code !== "GENERIC") return false;
+  const lower = raw.toLowerCase();
+  return (
+    /\bturn_timeout\b/.test(lower) ||
+    /\bagent_disconnected\b/.test(lower) ||
+    /rpc channel closed|transport channel closed|stream disconnected|stream closed before|connection reset/.test(
+      lower,
+    )
+  );
+}
+
 export type ErrorBannerView = {
   code: string | null;
   /** Headline (deck problem). */
@@ -344,6 +393,20 @@ export function presentErrorBanner(
   locale: Locale = "en",
   opts?: Pick<ErrorDeckResolveOpts, "activeSource">,
 ): ErrorBannerView | null {
+  // This is a local pre-dispatch rejection, not a connection failure. Require
+  // review of the current handoff; never offer automatic retry/reconnect here.
+  if (isHandoffChangedError(error ?? { message: localError ?? undefined })) {
+    return {
+      code: "HANDOFF_CHANGED",
+      summary: t(locale, "sessionImport.err.handoffChanged"),
+      cause: null,
+      detail: null,
+      reconnectHint: false,
+      primary: { id: "dismiss", label: buildErrorDeck("GENERIC", locale).primary.label },
+      secondary: null,
+      deck: null,
+    };
+  }
   if (error) {
     const body = formatTurnErrorBody(
       { code: error.code, message: error.message, content: undefined },

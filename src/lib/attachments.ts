@@ -11,7 +11,9 @@ import {
   isRealLocalAbsolutePath,
   isSiteRootAbsolutePath,
   isWindowsStylePath,
+  localPathIdentity,
   normalizeLocalPathToken,
+  pathTokenText,
   unescapeShellPath,
 } from "@/lib/pathNormalize";
 
@@ -22,32 +24,27 @@ export interface Attachment {
 }
 
 /**
- * Merge new items by absolute path (dedupe).
- *
- * Windows journal rows store `C:\…` and the text scan normalizes the same
- * file to `C:/…`. Those are one file; keeping both paints two thumbnails
- * after send (#1284). An exact path still updates in place (last write wins).
+ * Merge by normalized absolute path without rewriting the stored attachment.
+ * Windows journal paths and text-extracted paths may use different separators;
+ * keep the first spelling and metadata, while exact paths still update in place.
  */
 export function mergeAttachments(
   prev: Attachment[],
   next: Attachment[],
 ): Attachment[] {
   const map = new Map<string, Attachment>();
-  const order: string[] = [];
-  const put = (a: Attachment) => {
-    if (!a.path) return;
-    const key = normalizeLocalPathToken(a.path) || a.path.trim();
+  const put = (attachment: Attachment) => {
+    const raw = pathTokenText(attachment.path).trim();
+    if (!raw) return;
+    const key = localPathIdentity(raw);
     const existing = map.get(key);
-    if (!existing) {
-      order.push(key);
-      map.set(key, a);
-      return;
+    if (!existing || existing.path === attachment.path) {
+      map.set(key, attachment);
     }
-    if (existing.path === a.path) map.set(key, a);
   };
-  for (const a of prev) put(a);
-  for (const a of next) put(a);
-  return order.map((key) => map.get(key)!);
+  for (const attachment of prev) put(attachment);
+  for (const attachment of next) put(attachment);
+  return Array.from(map.values());
 }
 
 /**
@@ -66,7 +63,7 @@ export function buildAgentPrompt(
 
 /** Basename without emoji. Shell-unescapes POSIX paths first. */
 export function pathBasename(path: string): string {
-  const norm = normalizeLocalPathToken(path) || path.replace(/\\/g, "/");
+  const norm = normalizeLocalPathToken(path) || pathTokenText(path).replace(/\\/g, "/");
   const parts = norm.split("/").filter(Boolean);
   return parts[parts.length - 1] || path;
 }
@@ -171,14 +168,15 @@ export function appendAttachmentRefsToContent(
 
   const existing = new Set(
     priorRefs
-      .map((l) => l.trim().replace(/^@/, "").trim())
+      .map((l) => localPathIdentity(l.trim().replace(/^@/, "")))
       .filter(Boolean),
   );
   const newRefs: string[] = [];
   for (const a of attachments) {
     const path = (a.path ?? "").trim();
-    if (!path || existing.has(path)) continue;
-    existing.add(path);
+    const key = localPathIdentity(path);
+    if (!path || !key || existing.has(key)) continue;
+    existing.add(key);
     newRefs.push(`@${path}`);
   }
   const refs = [...priorRefs, ...newRefs];
@@ -246,7 +244,7 @@ export function isMediaPath(path: string): boolean {
 export function isPlausibleLocalMediaAbs(path: string): boolean {
   if (!path) return false;
   if (/^https?:\/\//i.test(path)) return false;
-  const n = normalizeLocalPathToken(path) || path.trim();
+  const n = normalizeLocalPathToken(path) || pathTokenText(path).trim();
   if (!n || !isMediaPath(n)) return false;
   if (isSiteRootAbsolutePath(n)) return false;
   // Windows drive (`C:\…` / `C:/…`) — host treats as always multi-part enough.
@@ -321,7 +319,7 @@ export const RELATIVE_MEDIA_ROOTS = [
 
 /** Session-relative media folder segment from an absolute path (`images/1.jpg`, `outputs/...`). */
 export function mediaTailFromPath(abs: string): string | null {
-  const norm = normalizeLocalPathToken(abs) || abs.replace(/\\/g, "/");
+  const norm = normalizeLocalPathToken(abs) || pathTokenText(abs).replace(/\\/g, "/");
   let best: string | null = null;
   let bestIdx = -1;
   for (const folder of RELATIVE_MEDIA_ROOTS) {
@@ -357,7 +355,7 @@ export function extractMediaPathsFromContent(content: string): Attachment[] {
     if (!raw) return;
     // Reject CMS site roots before normalize invents nothing useful.
     if (isSiteRootAbsolutePath(raw)) return;
-    const path = normalizeLocalPathToken(raw) || raw.trim();
+    const path = normalizeLocalPathToken(raw) || pathTokenText(raw).trim();
     if (!path || seen.has(path) || !isMediaPath(path)) return;
     if (!isRealLocalAbsolutePath(path)) return;
     // Host-aligned multi-segment gate (drops `/replica_v2.mp4` mid-path tails).
@@ -881,17 +879,17 @@ export function filterAttachmentsNotInlined(
     extractSessionRelativeMediaRefs(content).map((r) => r.replace(/\\/g, "/")),
   );
   const absInText = new Set(
-    extractMediaPathsFromContent(content).map((a) => a.path),
+    extractMediaPathsFromContent(content).map((a) => localPathIdentity(a.path)),
   );
   const out = attachments.filter((a) => {
     // Hide unopenable false extracts (paperclip that cannot preview).
     if (!isDisplayableAttachmentPath(a.path)) return false;
     if (a.isDir || !isMediaPath(a.path)) return true;
     const name = pathBasename(a.path);
-    const norm = a.path.replace(/\\/g, "/");
+    const norm = localPathIdentity(a.path);
     const rel = mediaTailFromPath(norm);
     if (rel && rels.has(rel)) return false;
-    if (absInText.has(a.path)) return false;
+    if (absInText.has(norm)) return false;
     if (rel && content.includes(rel)) return false;
     if (rels.has(name)) return false;
     if ([...rels].some((r) => r === name || r.endsWith(`/${name}`))) {
@@ -925,8 +923,8 @@ export function filterEchoedUserAttachments(
 ): Attachment[] | undefined {
   if (!assistantAtts?.length) return assistantAtts ?? undefined;
   if (!userAtts?.length) return assistantAtts;
-  const echo = new Set(userAtts.map((a) => a.path));
-  const out = assistantAtts.filter((a) => !echo.has(a.path));
+  const echo = new Set(userAtts.map((a) => localPathIdentity(a.path)));
+  const out = assistantAtts.filter((a) => !echo.has(localPathIdentity(a.path)));
   // Nothing echoed — keep the input reference so memoized consumers
   // (AssistantMessageBody) are not busted by a fresh array per render.
   if (out.length === assistantAtts.length) return assistantAtts;

@@ -23,6 +23,7 @@ import { filSettingsMemory } from "./settings-memory";
 import { filSettingsCode } from "./settings-code";
 import { filSettingsRemoteIm } from "./settings-remoteIm";
 import { filSettingsPet } from "./settings-pet";
+import { filSessionImport } from "./session-import";
 
 import type { MessageKey } from "../en";
 
@@ -51,4 +52,5 @@ export const fil: Record<MessageKey, string> = {
   ...filSettingsCode,
   ...filSettingsRemoteIm,
   ...filSettingsPet,
+  ...filSessionImport,
 };

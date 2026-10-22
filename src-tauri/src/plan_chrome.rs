@@ -11,8 +11,14 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::paths::{find_agent_session_dir, session_dir};
-use crate::store::{load_projects, load_sessions_index, load_settings};
+use crate::paths::session_dir;
+use crate::store::load_settings;
+
+#[path = "plan_chrome_runtime.rs"]
+mod runtime;
+pub(crate) use runtime::{
+    PlanChromeClock, PlanChromeDraft, PlanChromeMutation, PreparedPlanChrome,
+};
 
 /// Cap plan body size on disk (chars) — matches product edit limits roughly.
 pub const PLAN_CHROME_BODY_MAX: usize = 200_000;
@@ -53,6 +59,32 @@ pub struct PlanChromeStored {
     pub awaiting_agent_approval: bool,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// UI-only conditional-write identity. Never serialized into plan_chrome.json.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanChromeView {
+    #[serde(flatten)]
+    pub chrome: PlanChromeStored,
+    pub chrome_revision: Option<String>,
+}
+
+pub fn load_plan_chrome_view(session_id: &str) -> Option<PlanChromeView> {
+    if session_id.trim().is_empty() {
+        return None;
+    }
+    PlanChromeClock::for_session(session_id).read_for_ui(session_id)
+}
+
+pub fn dismiss_plan_chrome(
+    session_id: &str,
+    expected_revision: Option<&str>,
+) -> Result<(), String> {
+    if session_id.trim().is_empty() {
+        return Err("empty session id".into());
+    }
+    PlanChromeClock::for_session(session_id).dismiss_from_ui(session_id, expected_revision)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -123,25 +155,8 @@ pub fn load_plan_chrome_for_ui(session_id: &str) -> Option<PlanChromeStored> {
     Some(chrome)
 }
 
-/// Persist plan chrome (best-effort; soft-fail for callers).
-pub fn save_plan_chrome(session_id: &str, chrome: &PlanChromeStored) -> Result<(), String> {
-    if session_id.trim().is_empty() {
-        return Err("empty session id".into());
-    }
-    let dir = session_dir(session_id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let mut out = chrome.clone();
-    out.body = cap_body(&out.body);
-    out.entries = cap_entries(out.entries);
-    if out.updated_at.is_empty() {
-        out.updated_at = Utc::now().to_rfc3339();
-    }
-    let path = plan_chrome_path(session_id);
-    let s = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
-    crate::store_lock::write_bytes_atomic(&path, s.as_bytes())
-}
-
-/// Upsert from a live `session://plan` event.
+/// Legacy direct test entry into the same ordered event writer.
+#[cfg(test)]
 pub fn upsert_from_plan_event(
     session_id: &str,
     entries: &Value,
@@ -149,28 +164,48 @@ pub fn upsert_from_plan_event(
     rpc_id: Option<u64>,
     tool_call_id: &Option<String>,
 ) {
-    if session_id.trim().is_empty() {
-        return;
+    if let Some(write) = PlanChromeClock::for_session(session_id).prepare(
+        session_id,
+        PlanChromeMutation::Event {
+            entries: entries.clone(),
+            body: body.clone(),
+            rpc_id,
+            tool_call_id: tool_call_id.clone(),
+            fresh_gate: rpc_id.is_some(),
+        },
+    ) {
+        let _ = write.commit();
     }
-    let mut prev = load_plan_chrome(session_id).unwrap_or_default();
+}
+
+fn merge_plan_event(
+    prev: &mut PlanChromeStored,
+    entries: &Value,
+    body: &Option<String>,
+    rpc_id: Option<u64>,
+    tool_call_id: &Option<String>,
+    fresh_gate: bool,
+) -> bool {
     if prev.user_closed {
-        // Only open a new cycle when toolCallId or rpcId changes.
+        // Every actual reverse request is a fresh generation, even when Build
+        // reuses the RPC/tool ids. Ordinary progress still respects hard-close.
         let same_rpc = rpc_id.is_some() && rpc_id == prev.closed_rpc_id;
         let same_tool = tool_call_id
             .as_ref()
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
             .is_some_and(|t| Some(t.to_string()) == prev.closed_tool_call_id);
-        if same_rpc || (tool_call_id.is_some() && same_tool && rpc_id.is_none()) {
-            return;
+        if !fresh_gate && (same_rpc || (tool_call_id.is_some() && same_tool && rpc_id.is_none())) {
+            return false;
         }
-        if rpc_id.is_none()
+        if !fresh_gate
+            && rpc_id.is_none()
             && tool_call_id
                 .as_ref()
                 .map(|t| t.trim().is_empty())
                 .unwrap_or(true)
         {
-            return;
+            return false;
         }
         prev.user_closed = false;
         prev.closed_rpc_id = None;
@@ -203,34 +238,32 @@ pub fn upsert_from_plan_event(
     prev.visible = true;
     prev.bar_dismissed = false;
     prev.updated_at = Utc::now().to_rfc3339();
-    let _ = save_plan_chrome(session_id, &prev);
+    true
 }
 
-/// Mark gate stale after process death / recycle (keep body).
+/// Test compatibility entry. Runtime invalidation reserves before dropping gates.
+#[cfg(test)]
 pub fn mark_gate_stale(session_id: &str) {
-    if session_id.trim().is_empty() {
-        return;
+    if let Some(write) = PlanChromeClock::for_session(session_id)
+        .prepare(session_id, PlanChromeMutation::Stale { plan: None })
+    {
+        let _ = write.commit();
     }
-    let mut prev = match load_plan_chrome(session_id) {
-        Some(p) => p,
-        None => return,
-    };
-    if prev.rpc_id.is_none() && !prev.gate_stale && !prev.awaiting_agent_approval {
+}
+
+fn merge_gate_stale(prev: &mut PlanChromeStored) {
+    if prev.user_closed || (prev.rpc_id.is_none() && !prev.awaiting_agent_approval && !prev.waiting)
+    {
         return;
     }
     prev.rpc_id = None;
     prev.gate_stale = true;
     prev.waiting = false;
     prev.updated_at = Utc::now().to_rfc3339();
-    let _ = save_plan_chrome(session_id, &prev);
 }
 
-/// Clear live rpc after user decision (approve / revise / abandon).
-pub fn apply_decision(session_id: &str, decision: &str, keep_body: bool) {
-    if session_id.trim().is_empty() {
-        return;
-    }
-    let mut prev = load_plan_chrome(session_id).unwrap_or_default();
+/// Called only by the prepared decision writer, never under a runtime guard.
+fn merge_plan_decision(prev: &mut PlanChromeStored, decision: &str, keep_body: bool) {
     let closed = prev.rpc_id;
     let d = decision.trim().to_ascii_lowercase();
     prev.rpc_id = None;
@@ -256,7 +289,6 @@ pub fn apply_decision(session_id: &str, decision: &str, keep_body: bool) {
         prev.waiting = true;
     }
     prev.updated_at = Utc::now().to_rfc3339();
-    let _ = save_plan_chrome(session_id, &prev);
 }
 
 fn entries_empty(v: &Value) -> bool {
@@ -273,7 +305,8 @@ pub fn load_agent_plan_snapshot(session_id: &str) -> AgentPlanSnapshot {
     if session_id.trim().is_empty() {
         return out;
     }
-    let meta = load_sessions_index()
+    let meta = crate::store::load_sessions_snapshot()
+        .unwrap_or_default()
         .into_iter()
         .find(|s| s.id == session_id);
     let Some(meta) = meta else {
@@ -285,8 +318,12 @@ pub fn load_agent_plan_snapshot(session_id: &str) -> AgentPlanSnapshot {
     };
     out.agent_session_id = Some(agent_id.clone());
 
-    let settings = load_settings();
-    let projects = load_projects();
+    let legacy_mode = if meta.agent_execution.is_none() {
+        load_settings().session_data_mode
+    } else {
+        String::new()
+    };
+    let projects = crate::store::load_projects_snapshot().unwrap_or_default();
     let project_path = meta.project_id.as_ref().and_then(|pid| {
         projects
             .iter()
@@ -294,10 +331,11 @@ pub fn load_agent_plan_snapshot(session_id: &str) -> AgentPlanSnapshot {
             .map(|p| p.path.clone())
     });
 
-    let Some(dir) = find_agent_session_dir(
+    let Ok(Some(dir)) = crate::session_execution::find_session_dir(
+        &meta,
         &agent_id,
         project_path.as_deref(),
-        &settings.session_data_mode,
+        &legacy_mode,
     ) else {
         return out;
     };
@@ -326,24 +364,6 @@ pub fn load_agent_plan_snapshot(session_id: &str) -> AgentPlanSnapshot {
         }
     }
 
-    // Soft-sync chrome flag when agent is awaiting.
-    if out.awaiting_plan_approval {
-        let mut chrome = load_plan_chrome(session_id).unwrap_or_default();
-        if let Some(ref body) = out.plan_body {
-            if chrome.body.trim().is_empty() {
-                chrome.body = body.clone();
-            }
-        }
-        chrome.awaiting_agent_approval = true;
-        chrome.gate_stale = chrome.rpc_id.is_none();
-        chrome.rpc_id = None;
-        chrome.visible =
-            !chrome.user_closed && (!chrome.body.trim().is_empty() || out.plan_body.is_some());
-        chrome.waiting = false;
-        chrome.updated_at = Utc::now().to_rfc3339();
-        let _ = save_plan_chrome(session_id, &chrome);
-    }
-
     out
 }
 
@@ -366,9 +386,7 @@ mod tests {
 
     #[test]
     fn upsert_and_mark_stale_round_trip() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-plan-chrome-test-{}",
             uuid::Uuid::new_v4()
@@ -392,7 +410,10 @@ mod tests {
         assert!(stale.rpc_id.is_none());
         assert!(stale.gate_stale);
         assert!(stale.body.contains("Plan"));
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        upsert_and_mark_stale_round_trip,
+    );
 }

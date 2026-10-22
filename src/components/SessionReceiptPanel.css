@@ -1,0 +1,7 @@
+.receipt-review__list { display: grid; gap: 8px; min-width: 0; }
+.receipt-review__row { display: grid; gap: 4px; width: 100%; min-width: 0; text-align: start; white-space: normal; overflow-wrap: anywhere; }
+.receipt-review__row code { font-size: 0.9em; white-space: normal; overflow-wrap: anywhere; }
+.receipt-review__prompt { display: grid; gap: 8px; min-width: 0; }
+.receipt-review__prompt textarea { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; resize: vertical; padding: 10px; border-radius: 8px; border: 1px solid var(--border-subtle); background: var(--bg-input); color: var(--text-primary); font: inherit; }
+.receipt-review .modal-actions { flex-wrap: wrap; }
+.receipt-review .modal-actions .btn { white-space: normal; overflow-wrap: anywhere; }

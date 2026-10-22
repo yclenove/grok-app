@@ -31,6 +31,17 @@ pub const APP_UPSTREAM_BASE_URL_KEY: &str = "app_upstream_base_url";
 static LISTEN_PORT: AtomicU16 = AtomicU16::new(0);
 static START_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[path = "relay_stream_proxy_profiles.rs"]
+mod profiles;
+pub(crate) use profiles::{
+    base_url as profile_proxy_base_url, is_legacy_proxy_url, is_profile_url,
+    provider_component as profile_provider_component, FrozenRoutes,
+};
+
+#[cfg(test)]
+#[path = "relay_stream_proxy_profile_tests.rs"]
+mod profile_tests;
+
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RELAY_STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -379,17 +390,25 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
     let method = req.method().clone();
     let uri = req.uri().clone();
     let path = uri.path();
-    let rest = path
-        .strip_prefix("/r/")
-        .ok_or_else(|| format!("expected /r/{{provider}}/… got {path}"))?;
-    let (provider_id, after_id) = rest
-        .split_once('/')
-        .ok_or_else(|| "missing provider id in path".to_string())?;
+    let (upstream_base, after_id, mut cancellation) = if path.starts_with("/p/") {
+        let Some((route, suffix)) = profiles::lookup(path) else {
+            return Ok((StatusCode::GONE, "execution relay is inactive").into_response());
+        };
+        (route.upstream, suffix, Some(route.cancellation))
+    } else {
+        let rest = path
+            .strip_prefix("/r/")
+            .ok_or_else(|| "unknown relay route".to_string())?;
+        let (provider_id, suffix) = rest
+            .split_once('/')
+            .ok_or_else(|| "missing provider id in path".to_string())?;
+        (lookup_upstream(provider_id)?, suffix, None)
+    };
+    let frozen = cancellation.is_some();
     let after_v1 = after_id
         .strip_prefix("v1/")
         .or_else(|| after_id.strip_prefix("v1"))
         .unwrap_or(after_id);
-    let upstream_base = lookup_upstream(provider_id)?;
     let upstream_base = upstream_base.trim_end_matches('/');
     let suffix = after_v1.trim_start_matches('/');
     let mut target = if suffix.is_empty() {
@@ -403,9 +422,13 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
     }
 
     let headers = filter_request_headers(req.headers());
-    let body_bytes = axum::body::to_bytes(req.into_body(), 32 * 1024 * 1024)
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
+    let body_bytes = tokio::select! {
+        biased;
+        _ = profiles::cancelled(&mut cancellation) => return Err("execution relay cancelled".into()),
+        result = axum::body::to_bytes(req.into_body(), 32 * 1024 * 1024) => {
+            result.map_err(|e| if frozen { "execution relay body could not be read".into() } else { format!("read body: {e}") })?
+        }
+    };
 
     let client = {
         // Do not install a total request deadline: a healthy SSE response may
@@ -414,9 +437,13 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
         let b = reqwest::Client::builder()
             .connect_timeout(RELAY_CONNECT_TIMEOUT)
             .read_timeout(RELAY_STREAM_IDLE_TIMEOUT);
-        crate::proxy::apply_to_reqwest(b)
-            .build()
-            .map_err(|e| e.to_string())?
+        crate::proxy::apply_to_reqwest(b).build().map_err(|e| {
+            if frozen {
+                "execution relay HTTP client is unavailable".into()
+            } else {
+                e.to_string()
+            }
+        })?
     };
     let req_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
@@ -432,7 +459,13 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
         rb = rb.body(body_bytes.to_vec());
     }
 
-    let upstream = rb.send().await.map_err(|e| format!("upstream: {e}"))?;
+    let upstream = tokio::select! {
+        biased;
+        _ = profiles::cancelled(&mut cancellation) => return Err("execution relay cancelled".into()),
+        result = rb.send() => {
+            result.map_err(|e| if frozen { "execution relay upstream request failed".into() } else { format!("upstream: {e}") })?
+        }
+    };
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let content_type = upstream
@@ -444,10 +477,13 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
     let is_event_stream = content_type.contains("text/event-stream");
 
     if !is_event_stream {
-        let bytes = upstream
-            .bytes()
-            .await
-            .map_err(|e| format!("upstream body: {e}"))?;
+        let bytes = tokio::select! {
+            biased;
+            _ = profiles::cancelled(&mut cancellation) => return Err("execution relay cancelled".into()),
+            result = upstream.bytes() => {
+                result.map_err(|e| if frozen { "execution relay upstream body failed".into() } else { format!("upstream body: {e}") })?
+            }
+        };
         return Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, content_type.as_str())
@@ -463,7 +499,13 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
         let mut utf8_pending: Vec<u8> = Vec::new();
         let mut line_buf = String::new();
         loop {
-            let item = match tokio::time::timeout(RELAY_STREAM_IDLE_TIMEOUT, stream.next()).await {
+            let read = tokio::select! {
+                biased;
+                // Do not flush a partial event after its process has exited.
+                _ = profiles::cancelled(&mut cancellation) => return,
+                read = tokio::time::timeout(RELAY_STREAM_IDLE_TIMEOUT, stream.next()) => read,
+            };
+            let item = match read {
                 Ok(item) => item,
                 Err(_) => {
                     let msg = "upstream SSE idle timeout";
@@ -487,8 +529,13 @@ async fn proxy_request(req: Request) -> Result<Response, String> {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(target: "relay_stream_proxy", "upstream stream: {e}");
-                    yield Ok::<Bytes, Infallible>(Bytes::from(format_sse_error(&format!("upstream SSE read failed: {e}"))));
+                    let message = if frozen {
+                        "execution relay upstream SSE read failed".to_string()
+                    } else {
+                        format!("upstream SSE read failed: {e}")
+                    };
+                    tracing::warn!(target: "relay_stream_proxy", "{message}");
+                    yield Ok::<Bytes, Infallible>(Bytes::from(format_sse_error(&message)));
                     break;
                 }
             }

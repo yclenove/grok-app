@@ -109,6 +109,7 @@ import {
   loadComposerSendKeyPref,
   type ComposerSendKeyPref,
 } from "@/lib/composerSendKey";
+import { loadComposerEnterInsertsLive } from "@/lib/composerEnterInsertsLive";
 import { formatShortcutHint } from "@/lib/shortcuts";
 import { SHORTCUT_REMAP_CHANGED_EVENT } from "@/lib/shortcutRemap";
 import {
@@ -506,6 +507,9 @@ export function SettingsPage({
   /** Composer Enter vs ⌘/Ctrl+Enter — localStorage only (no Host settings). */
   const [composerSendKeyPref, setComposerSendKeyPref] =
     useState<ComposerSendKeyPref>(() => loadComposerSendKeyPref());
+  const [composerEnterInsertsLive, setComposerEnterInsertsLive] = useState(
+    () => loadComposerEnterInsertsLive(),
+  );
   /** Browser spellcheck on main composer — localStorage only. */
   const [composerSpellcheck, setComposerSpellcheck] = useState(() =>
     loadComposerSpellcheck(),
@@ -516,7 +520,16 @@ export function SettingsPage({
   );
   /** Pending scroll target after search jump / deep link. */
   const pendingAnchorRef = useRef<string | null>(null);
+  /** Section and tab that owned the pending search anchor. A newer route clears it. */
+  const pendingNavRef = useRef<{
+    section: SettingsSectionId;
+    tab: SettingsTabId | null;
+    anchor: string;
+  } | null>(null);
   const [highlightAnchor, setHighlightAnchor] = useState<string | null>(null);
+  // Same section and tab do not change the scroll effect's other deps.
+  // Each new anchor request bumps this so Language still scrolls.
+  const [anchorScrollEpoch, setAnchorScrollEpoch] = useState(0);
 
   // External focus (ship → PR hub): queue scroll when prop arrives.
   // Same-tab re-entry still works because the scroll effect also depends on
@@ -525,6 +538,8 @@ export function SettingsPage({
     const a = (focusAnchorId ?? "").trim();
     if (!a) return;
     pendingAnchorRef.current = a;
+    pendingNavRef.current = null;
+    setAnchorScrollEpoch((n) => n + 1);
   }, [focusAnchorId]);
   /**
    * Phone drill-down: "index" = section list only; "detail" = one section full-width.
@@ -1045,8 +1060,12 @@ export function SettingsPage({
       nextTab?: string | null,
       anchorId?: string | null,
     ) => {
-      if (anchorId) pendingAnchorRef.current = anchorId;
       const resolved = resolveTab(id, nextTab ?? defaultTabFor(id));
+      if (anchorId) {
+        pendingAnchorRef.current = anchorId;
+        pendingNavRef.current = { section: id, tab: resolved, anchor: anchorId };
+        setAnchorScrollEpoch((n) => n + 1);
+      }
       // Optimistic: update strip/content before parent re-renders.
       if (id === section) {
         setLocalTab(resolved);
@@ -1093,24 +1112,39 @@ export function SettingsPage({
   );
 
   // Scroll + brief highlight after tab/section paint or external focus.
+  // A same-panel search does not change section or tab, so anchorScrollEpoch
+  // is the signal. A cross-panel paint can miss the first frame; retry briefly
+  // and keep the anchor if the row is still absent.
   useEffect(() => {
     const anchor = pendingAnchorRef.current;
     if (!anchor) return;
-    const timer = window.setTimeout(() => {
-      const el = document.getElementById(anchor);
+    let attempts = 0;
+    let timer = 0;
+    const tick = () => {
+      const current = pendingAnchorRef.current;
+      if (!current) return;
+      const nav = pendingNavRef.current;
+      if (nav && (nav.anchor !== current || nav.section !== section || nav.tab !== activeTab)) {
+        pendingAnchorRef.current = null;
+        pendingNavRef.current = null;
+        return;
+      }
+      const el = document.getElementById(current);
       if (!el) {
-        // Content not painted yet — keep pending for the next section/tab paint.
+        attempts += 1;
+        if (attempts < 8) timer = window.setTimeout(tick, 50);
         return;
       }
       pendingAnchorRef.current = null;
+      pendingNavRef.current = null;
       el.scrollIntoView({ block: "center", behavior: "smooth" });
-      setHighlightAnchor(anchor);
+      setHighlightAnchor(current);
       window.setTimeout(() => setHighlightAnchor(null), 1600);
       onFocusAnchorConsumed?.();
-    }, 60);
+    };
+    timer = window.setTimeout(tick, 0);
     return () => window.clearTimeout(timer);
-    // focusAnchorId: re-run when ship deep-link re-focuses the same tab.
-  }, [section, activeTab, focusAnchorId, onFocusAnchorConsumed]);
+  }, [section, activeTab, focusAnchorId, anchorScrollEpoch, onFocusAnchorConsumed]);
 
   const backToPhoneIndex = useCallback(() => {
     if (!phoneLayout) return;
@@ -1709,6 +1743,8 @@ export function SettingsPage({
     onComposerMinRows,
     composerSendKeyPref,
     setComposerSendKeyPref,
+    composerEnterInsertsLive,
+    setComposerEnterInsertsLive,
     composerSpellcheck,
     setComposerSpellcheck,
     composerDraftStats,

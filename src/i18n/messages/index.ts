@@ -75,10 +75,16 @@ export function loadLocaleCatalog(locale: Locale): Promise<void> {
   if (isLocaleCatalogReady(locale)) return Promise.resolve();
   const existing = inflight.get(locale);
   if (existing) return existing;
-  const pending = loaders[locale]().then((table) => {
-    catalogs[locale] = table;
-    inflight.delete(locale);
-  });
+  const pending = loaders[locale]().then(
+    (table) => {
+      catalogs[locale] = table;
+      inflight.delete(locale);
+    },
+    (error: unknown) => {
+      inflight.delete(locale);
+      throw error;
+    },
+  );
   inflight.set(locale, pending);
   return pending;
 }

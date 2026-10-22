@@ -21,24 +21,25 @@ static LAST_ACP_AGENT_VERSION: LazyLock<Mutex<Option<String>>> = LazyLock::new(|
 
 /// Remember a live ACP agent version banner (best-effort).
 pub fn record_acp_agent_version(raw: Option<&str>) {
+    record_agent_version_in(&LAST_ACP_AGENT_VERSION, raw);
+}
+
+fn record_agent_version_in(cache: &Mutex<Option<String>>, raw: Option<&str>) {
     let Some(s) = raw.map(str::trim).filter(|t| !t.is_empty()) else {
         return;
     };
-    if let Ok(mut g) = LAST_ACP_AGENT_VERSION.lock() {
+    if let Ok(mut g) = cache.lock() {
         *g = Some(s.to_string());
     }
 }
 
 /// Last recorded ACP agent version, if any session/probe has run this process.
 pub fn last_acp_agent_version() -> Option<String> {
-    LAST_ACP_AGENT_VERSION.lock().ok().and_then(|g| g.clone())
+    cached_agent_version(&LAST_ACP_AGENT_VERSION)
 }
 
-#[cfg(test)]
-pub fn clear_last_acp_agent_version_for_test() {
-    if let Ok(mut g) = LAST_ACP_AGENT_VERSION.lock() {
-        *g = None;
-    }
+fn cached_agent_version(cache: &Mutex<Option<String>>) -> Option<String> {
+    cache.lock().ok().and_then(|g| g.clone())
 }
 
 /// Minimum grok CLI version whose flag set `acp_client` is known to work with.
@@ -504,6 +505,14 @@ pub fn read_version_of(path: &Path) -> Option<String> {
     use std::time::SystemTime;
 
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, String)>>> = OnceLock::new();
+    // Eligibility must be checked before the mtime cache: removal or revoked
+    // execute permission cannot leave a previously probed CLI available.
+    if !is_executable(path) {
+        if let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+            cache.remove(path);
+        }
+        return None;
+    }
     let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
     if let Some(mt) = mtime {
         if let Ok(g) = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
@@ -531,6 +540,11 @@ fn read_version(path: &Path) -> Option<String> {
     use std::process::Stdio;
     use std::time::Instant;
 
+    // Missing Windows scripts can produce a shell error containing "grok".
+    // That error is not a CLI version banner and must never count as one.
+    if !is_executable(path) {
+        return None;
+    }
     let mut cmd = Command::new(path);
     cmd.arg("--version")
         .stdin(Stdio::null())
@@ -603,79 +617,80 @@ fn classify_source(path: &Path, manual_first: bool) -> String {
 }
 
 pub fn probe_cli(manual_path: Option<&str>) -> CliProbeResult {
-    let candidates = candidate_paths(manual_path);
+    probe_candidates(
+        candidate_paths(manual_path),
+        manual_path.map(|m| !m.trim().is_empty()).unwrap_or(false),
+        cli_auth_json_present(),
+        is_executable,
+        read_version,
+        probe_agent_sidecar,
+        last_acp_agent_version,
+    )
+}
+
+/// Shared selection logic. Explicit inputs let tests exercise the production
+/// algorithm without discovering or running an ambient user installation.
+pub(crate) fn probe_candidates(
+    candidates: Vec<PathBuf>,
+    manual_set: bool,
+    cli_auth_present: bool,
+    mut runnable: impl FnMut(&Path) -> bool,
+    mut version_probe: impl FnMut(&Path) -> Option<String>,
+    sidecar_probe: impl FnOnce(Option<&str>) -> (Option<String>, Option<String>),
+    acp_version: impl FnOnce() -> Option<String>,
+) -> CliProbeResult {
     let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
-    let cli_auth_present = cli_auth_json_present();
-    let manual_set = manual_path.map(|m| !m.trim().is_empty()).unwrap_or(false);
 
     // Prefer a candidate that both looks runnable AND answers --version.
-    let mut fallback: Option<(PathBuf, String)> = None;
+    let mut fallback = None;
+    let mut selected = None;
 
     for (i, path) in candidates.iter().enumerate() {
-        if !is_executable(path) {
+        if !runnable(path) {
             continue;
         }
         let source = classify_source(path, manual_set && i == 0);
-        if let Some(version) = read_version(path) {
-            let version_supported = cli_version_supported(&version);
-            let path_s = path.display().to_string();
-            return finish_probe_result(
-                true,
-                Some(path_s),
-                Some(version),
-                source,
-                tried,
-                cli_auth_present,
-                version_supported,
-            );
+        if let Some(version) = version_probe(path) {
+            selected = Some((path.clone(), source, Some(version)));
+            break;
         }
         if fallback.is_none() {
-            fallback = Some((path.clone(), source));
+            fallback = Some((path.clone(), source, None));
         }
     }
 
     // Runnable file that failed --version still counts as "found" so the user
     // can try connecting; UI can show missing version.
-    if let Some((path, source)) = fallback {
-        return finish_probe_result(
-            true,
-            Some(path.display().to_string()),
-            None,
-            source,
-            tried,
-            cli_auth_present,
-            None,
-        );
-    }
-
     finish_probe_result(
-        false,
-        None,
-        None,
-        "not_found".into(),
+        selected.or(fallback),
         tried,
         cli_auth_present,
-        None,
+        sidecar_probe,
+        acp_version,
     )
 }
 
 fn finish_probe_result(
-    found: bool,
-    path: Option<String>,
-    version: Option<String>,
-    source: String,
+    selection: Option<(PathBuf, String, Option<String>)>,
     candidates_tried: Vec<String>,
     cli_auth_present: bool,
-    version_supported: Option<bool>,
+    sidecar_probe: impl FnOnce(Option<&str>) -> (Option<String>, Option<String>),
+    acp_version: impl FnOnce() -> Option<String>,
 ) -> CliProbeResult {
+    let (path, source, version) = match selection {
+        Some((path, source, version)) => (Some(path.display().to_string()), source, version),
+        None => (None, "not_found".into(), None),
+    };
+    let found = path.is_some();
+    let version_supported = version.as_deref().and_then(cli_version_supported);
     let meets_recommended = version.as_deref().and_then(cli_meets_recommended);
     let (agent_path, agent_version) = if found {
-        probe_agent_sidecar(path.as_deref())
+        sidecar_probe(path.as_deref())
     } else {
         (None, None)
     };
     let agent_binary_skew = version_tokens_skew(version.as_deref(), agent_version.as_deref());
-    let acp_agent_version = last_acp_agent_version();
+    let acp_agent_version = acp_version();
     let acp_agent_version_skew =
         version_tokens_skew(version.as_deref(), acp_agent_version.as_deref());
     CliProbeResult {
@@ -698,183 +713,79 @@ fn finish_probe_result(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
-    #[test]
-    fn extracts_version_from_common_banners() {
-        assert_eq!(
-            extract_version_token("grok 0.2.112").as_deref(),
-            Some("0.2.112")
-        );
-        assert_eq!(
-            extract_version_token("grok-cli v0.2.112").as_deref(),
-            Some("0.2.112")
-        );
-        assert_eq!(
-            extract_version_token("grok 0.2.112 (a1b2c3d)").as_deref(),
-            Some("0.2.112")
-        );
-        assert_eq!(extract_version_token("0.2.101").as_deref(), Some("0.2.101"));
-        assert_eq!(extract_version_token("1.0").as_deref(), Some("1.0"));
-    }
+    pub(crate) struct LauncherDir(PathBuf);
 
-    #[test]
-    fn version_extraction_ignores_non_version_tokens() {
-        // A git hash or plain words must not be mistaken for a version.
-        assert_eq!(extract_version_token("grok"), None);
-        assert_eq!(extract_version_token("build a1b2c3d"), None);
-        assert_eq!(extract_version_token(""), None);
-    }
+    impl LauncherDir {
+        pub(crate) fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("grok-synthetic-cli-{}", uuid::Uuid::new_v4()));
+            Self::create(path).expect("create owned synthetic CLI directory")
+        }
 
-    #[test]
-    fn version_gate_flags_old_cli() {
-        // The exact pairing reported in the field: 0.2.101 fails, 0.2.112 passes.
-        assert_eq!(cli_version_supported("grok 0.2.101"), Some(false));
-        assert_eq!(cli_version_supported("grok 0.2.112"), Some(true));
-        assert_eq!(cli_version_supported("grok 0.2.200"), Some(true));
-        assert_eq!(cli_version_supported("grok 0.3.0"), Some(true));
-        assert_eq!(cli_version_supported("grok 1.0.0"), Some(true));
-        assert_eq!(cli_version_supported("grok 0.1.999"), Some(false));
-    }
+        pub(crate) fn create(path: PathBuf) -> std::io::Result<Self> {
+            // Acquire cleanup ownership only after exclusive creation succeeds.
+            // A collision must not remove the directory owned by somebody else.
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
 
-    #[test]
-    fn unparseable_version_is_not_treated_as_too_old() {
-        // Fail open: an unknown banner must not block a working CLI.
-        assert_eq!(cli_version_supported("grok"), None);
-        assert_eq!(cli_version_supported(""), None);
-    }
-
-    #[test]
-    fn min_version_string_matches_constant() {
-        assert_eq!(min_cli_version_str(), "0.2.112");
-    }
-
-    #[test]
-    fn recommended_line_is_1_0_0() {
-        assert_eq!(recommended_cli_version_str(), "1.0.0");
-        assert_eq!(cli_meets_recommended("grok 1.0.0"), Some(true));
-        assert_eq!(cli_meets_recommended("grok 1.0.0 (abc)"), Some(true));
-        assert_eq!(cli_meets_recommended("grok 0.2.120"), Some(false));
-        assert_eq!(cli_meets_recommended("grok 0.2.112"), Some(false));
-        assert_eq!(cli_meets_recommended("nope"), None);
-    }
-
-    #[test]
-    fn version_tokens_skew_detects_mismatch() {
-        assert!(!version_tokens_skew(None, Some("1.0.0")));
-        assert!(!version_tokens_skew(Some("grok 1.0.0"), Some("1.0.0")));
-        assert!(version_tokens_skew(
-            Some("grok 1.0.0"),
-            Some("grok 0.2.118")
-        ));
-        assert!(!version_tokens_skew(Some("grok"), Some("1.0.0")));
-    }
-
-    #[test]
-    fn acp_agent_version_cache_drives_probe_skew() {
-        clear_last_acp_agent_version_for_test();
-        assert!(last_acp_agent_version().is_none());
-        record_acp_agent_version(None);
-        assert!(last_acp_agent_version().is_none());
-        record_acp_agent_version(Some("  "));
-        assert!(last_acp_agent_version().is_none());
-        record_acp_agent_version(Some("grok 0.2.118 (deadbeef)"));
-        assert_eq!(
-            last_acp_agent_version().as_deref(),
-            Some("grok 0.2.118 (deadbeef)")
-        );
-        assert!(version_tokens_skew(
-            Some("grok 1.0.0"),
-            last_acp_agent_version().as_deref()
-        ));
-        assert!(!version_tokens_skew(
-            Some("grok 0.2.118"),
-            last_acp_agent_version().as_deref()
-        ));
-        clear_last_acp_agent_version_for_test();
-    }
-
-    #[test]
-    fn probe_returns_structure() {
-        let r = probe_cli(None);
-        assert!(!r.candidates_tried.is_empty() || r.found);
-        if r.found {
-            assert!(r.path.is_some());
-            assert!(r
-                .version
-                .as_ref()
-                .map(|v| v.contains("grok") || !v.is_empty())
-                .unwrap_or(true));
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
         }
     }
 
-    #[test]
-    fn probe_finds_local_grok_when_installed() {
-        let r = probe_cli(None);
-        // Soft if CI lacks grok.
-        let home = user_home();
-        let likely_installed = which::which("grok").is_ok()
-            || home.join(".grok/bin/grok").exists()
-            || home.join(r".grok\bin\grok").exists()
-            || home.join(r".grok\bin\grok.exe").exists()
-            || which::which("grok.exe").is_ok();
-        if likely_installed {
-            assert!(
-                r.found,
-                "expected local grok, tried {:?}",
-                r.candidates_tried
-            );
-            assert!(r.path.is_some());
+    impl Drop for LauncherDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
-    #[test]
-    fn auth_path_uses_user_home() {
-        // Just ensure we don't panic; presence is machine-dependent.
-        let _ = cli_auth_json_present();
-    }
-
-    #[test]
-    fn expand_user_path_tilde() {
-        let p = expand_user_path("~/foo/bar");
-        assert!(p.starts_with(user_home()));
+    /// Only a temporary, synthetic script is executable; never a user's CLI.
+    pub(crate) fn version_launcher(
+        root: &Path,
+        banner: &str,
+        stderr: bool,
+        exit_code: u8,
+    ) -> PathBuf {
         assert!(
-            p.ends_with(Path::new("foo").join("bar"))
-                || p.to_string_lossy().ends_with("foo/bar")
-                || p.to_string_lossy().ends_with(r"foo\bar")
+            banner
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b" .()-".contains(&byte)),
+            "synthetic banner must not contain shell syntax"
         );
-    }
-
-    #[test]
-    fn expand_user_path_empty() {
-        assert!(expand_user_path("  ").as_os_str().is_empty());
-    }
-
-    #[test]
-    fn candidates_include_platform_defaults() {
-        let c = candidate_paths(None);
-        let joined = c
-            .iter()
-            .map(|p| p.to_string_lossy().to_ascii_lowercase())
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Both platforms should consider the official bin dir.
-        assert!(
-            joined.contains(".grok") && (joined.contains("bin") || joined.contains("grok")),
-            "candidates missing official layout: {c:?}"
-        );
-    }
-
-    #[test]
-    fn manual_path_is_first_candidate() {
-        let fake = if cfg!(target_os = "windows") {
-            r"C:\custom\grok.exe"
-        } else {
-            "/custom/grok"
+        #[cfg(target_os = "windows")]
+        let (path, body) = {
+            let redirect = if stderr { " >&2" } else { "" };
+            (
+                root.join("grok.cmd"),
+                format!(
+                    "@echo off\r\nif not \"%~1\"==\"--version\" exit /b 9\r\necho {banner}{redirect}\r\nexit /b {exit_code}\r\n"
+                ),
+            )
         };
-        let c = candidate_paths(Some(fake));
-        assert!(!c.is_empty());
-        assert_eq!(c[0], PathBuf::from(fake));
+        #[cfg(not(target_os = "windows"))]
+        let (path, body) = {
+            let redirect = if stderr { " >&2" } else { "" };
+            (
+                root.join("grok"),
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 9\nprintf '%s\\n' '{banner}'{redirect}\nexit {exit_code}\n"
+                ),
+            )
+        };
+        fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        path
     }
 }
+
+#[cfg(test)]
+#[path = "cli_probe_tests.rs"]
+mod tests;

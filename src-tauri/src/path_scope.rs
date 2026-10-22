@@ -155,28 +155,49 @@ pub fn require_allowed(path: &Path) -> Result<PathBuf, String> {
 pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
+pub(crate) struct TestScopeRestore {
+    roots: Vec<PathBuf>,
+    grants: Vec<PathBuf>,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+#[cfg(test)]
+impl TestScopeRestore {
+    pub(crate) fn acquire() -> Self {
+        let lock = TEST_LOCK.blocking_lock();
+        Self {
+            roots: roots().read().clone(),
+            grants: extra_grants().read().clone(),
+            _lock: lock,
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for TestScopeRestore {
+    fn drop(&mut self) {
+        *roots().write() = std::mem::take(&mut self.roots);
+        *extra_grants().write() = std::mem::take(&mut self.grants);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn explicitly_granted_for_test(path: &Path) -> bool {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    extra_grants().read().contains(&canonical)
+}
+
+#[cfg(test)]
+#[path = "workspace_binding_tests.rs"]
+mod workspace_binding_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
-    struct RestoreHome(Option<String>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(v) => std::env::set_var("GROK_APP_HOME", v),
-                None => std::env::remove_var("GROK_APP_HOME"),
-            }
-        }
-    }
-
     fn with_isolated_roots(project: &Path, app: &Path, include_temp: bool, f: impl FnOnce()) {
-        let _g = TEST_LOCK.blocking_lock();
-        let _home = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("GROK_APP_HOME").ok();
+        let _scope = TestScopeRestore::acquire();
+        let _home = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         std::env::set_var("GROK_APP_HOME", app);
-        let _restore = RestoreHome(prev);
         let _ = fs::create_dir_all(app);
         let _ = fs::create_dir_all(project);
         let projects_file = app.join("projects.json");
@@ -200,8 +221,6 @@ mod tests {
         *roots().write() = next;
         *extra_grants().write() = Vec::new();
         f();
-        *extra_grants().write() = Vec::new();
-        *roots().write() = Vec::new();
     }
 
     #[test]
@@ -268,4 +287,28 @@ mod tests {
         assert!(!path_under_root(&foobar, &foo));
         assert!(path_under_root(Path::new("/foo/bar"), &foo));
     }
+    fn scope_cache_restores_after_unwind() {
+        // Only called by the single-test fresh child, with no competing fixtures.
+        let mut expected = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let scope = TestScopeRestore::acquire();
+            expected = Some((scope.roots.clone(), scope.grants.clone()));
+            *roots().write() = vec![PathBuf::from("fixture-only-root")];
+            *extra_grants().write() = vec![PathBuf::from("fixture-only-grant")];
+            panic!("intentional scope-cache unwind");
+        }));
+        assert!(result.is_err());
+        let _lock = TEST_LOCK.blocking_lock();
+        let (expected_roots, expected_grants) = expected.unwrap();
+        assert_eq!(*roots().read(), expected_roots);
+        assert_eq!(*extra_grants().read(), expected_grants);
+    }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        scope_cache_restores_after_unwind,
+        allows_path_under_project,
+        denies_path_outside_roots,
+        grant_path_allows_one_off,
+        prefix_does_not_match_sibling_name,
+    );
 }
