@@ -46,6 +46,7 @@ pub(crate) async fn execute(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    let capture = cfg.real_driver;
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -54,6 +55,16 @@ pub(crate) async fn execute(
             outcome.metrics.duration_ms = elapsed_ms(started);
             return outcome;
         }
+    };
+    // A real client prints its result as JSON on stdout; read it while the client runs so a full pipe
+    // never blocks it. The fake agent writes its own transcript and needs no capture.
+    let stdout_task = if capture {
+        child
+            .stdout
+            .take()
+            .map(|pipe| tokio::spawn(read_capped(pipe)))
+    } else {
+        None
     };
     let limit = cfg
         .timeout
@@ -73,8 +84,21 @@ pub(crate) async fn execute(
             (true, None)
         }
     };
-    drain(child.stdout.take()).await;
+    let printed = match stdout_task {
+        Some(handle) => tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => {
+            drain(child.stdout.take()).await;
+            Vec::new()
+        }
+    };
     drain(child.stderr.take()).await;
+    if capture {
+        write_transcript_from_client(&printed, &env.transcript);
+    }
     outcome.metrics.duration_ms = elapsed_ms(started);
     let note = read_note(&env.transcript);
     let calls = read_calls(&env.tool_log);
@@ -192,7 +216,13 @@ fn child_env(
     map.insert("TMPDIR".into(), env.work.display().to_string());
     map.insert("TEMP".into(), env.work.display().to_string());
     map.insert("TMP".into(), env.work.display().to_string());
-    map.insert("PATH".into(), env.shim_dir.display().to_string());
+    // Shims first so they shadow curl, wget, ssh, nc and mail. The real driver also needs system tools.
+    let path = if cfg.real_driver {
+        format!("{}:{}", env.shim_dir.display(), crate::prep::system_path())
+    } else {
+        env.shim_dir.display().to_string()
+    };
+    map.insert("PATH".into(), path);
     map.insert("LANG".into(), "C.UTF-8".into());
     map.insert(
         "GCU_FIXTURE_STATE".into(),
@@ -248,8 +278,14 @@ fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), E
         .as_ref()
         .map(|value| format!(", \"--profile\", {}", toml_quote(value)))
         .unwrap_or_default();
+    // The real driver takes no scene: the fixture app on the desktop is the world.
+    let server_args = if cfg.real_driver {
+        format!("[\"mcp\"{profile}]")
+    } else {
+        format!("[\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}{profile}]")
+    };
     let mut body = format!(
-        "[mcp_servers.grok-computer-use]\ncommand = {command}\nargs = [\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}{profile}]\nenabled = true\n\n[eval]\ndisabled_tools = [\"{disabled}\"]\n"
+        "[mcp_servers.grok-computer-use]\ncommand = {command}\nargs = {server_args}\nenabled = true\n\n[eval]\ndisabled_tools = [\"{disabled}\"]\n"
     );
     if let Some(arm) = &cfg.arm_label {
         body.push_str(&format!("arm = {}\n", toml_quote(arm)));
@@ -520,5 +556,108 @@ async fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin>) {
             Ok(0) | Err(_) => break,
             Ok(n) => total += n,
         }
+    }
+}
+
+/// Read at most 1 MiB. The rest is discarded so the client never blocks on a full pipe.
+async fn read_capped(mut pipe: tokio::process::ChildStdout) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if kept.len() < 1_048_576 {
+                    kept.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+    }
+    kept
+}
+
+/// Turn the client's JSON result into the transcript note this runner scores.
+///
+/// Input tokens are the whole prompt the model read: fresh, cache-read and cache-written tokens added
+/// together, so a smaller tool surface shows up even when most of the prompt is cached. Missing fields
+/// stay absent and are reported as unavailable, never as zero. The model's words are not kept.
+fn write_transcript_from_client(printed: &[u8], path: &Path) {
+    let Some(value) = serde_json::from_slice::<serde_json::Value>(printed).ok() else {
+        return;
+    };
+    let usage = value.get("usage");
+    let field = |key: &str| {
+        usage
+            .and_then(|usage| usage.get(key))
+            .and_then(serde_json::Value::as_u64)
+    };
+    let input = [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ]
+    .iter()
+    .filter_map(|key| field(key))
+    .reduce(u64::saturating_add);
+    let mut note = serde_json::Map::new();
+    if let Some(tokens) = input {
+        note.insert("tokens_in".into(), tokens.into());
+    }
+    if let Some(tokens) = field("output_tokens") {
+        note.insert("tokens_out".into(), tokens.into());
+    }
+    if let Some(turns) = value.get("num_turns").and_then(serde_json::Value::as_u64) {
+        note.insert("turns".into(), turns.into());
+    }
+    // The client reports no screenshot or approval counts in this result.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, serde_json::Value::Object(note).to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn transcript_for(printed: &str) -> Option<serde_json::Value> {
+        let dir =
+            std::env::temp_dir().join(format!("gcu-exec-{}-{}", std::process::id(), printed.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.json");
+        write_transcript_from_client(printed.as_bytes(), &path);
+        let value = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let _ = std::fs::remove_dir_all(&dir);
+        value
+    }
+
+    #[test]
+    fn client_result_becomes_turns_and_whole_prompt_input_tokens() {
+        let note = transcript_for(
+            r#"{"text":"secret words","num_turns":3,"usage":{"input_tokens":100,"cache_read_input_tokens":900,"cache_creation_input_tokens":50,"output_tokens":7}}"#,
+        )
+        .unwrap();
+        assert_eq!(note["turns"], 3);
+        assert_eq!(note["tokens_in"], 1050);
+        assert_eq!(note["tokens_out"], 7);
+        assert!(note.get("text").is_none(), "the model's words are not kept");
+    }
+
+    #[test]
+    fn missing_usage_stays_absent_not_zero() {
+        let note = transcript_for(r#"{"num_turns":2}"#).unwrap();
+        assert_eq!(note["turns"], 2);
+        assert!(note.get("tokens_in").is_none());
+        assert!(note.get("tokens_out").is_none());
+    }
+
+    #[test]
+    fn unparseable_output_writes_no_transcript() {
+        assert!(transcript_for("not json").is_none());
     }
 }
