@@ -114,6 +114,9 @@ pub struct GuardEvents {
     startup_step: Mutex<Option<(&'static str, Instant, Duration)>>,
     time: Arc<dyn MonotonicTime>,
     signal: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
+    /// Observes the failure diagnostic after revocation. Absent from release builds.
+    #[cfg(test)]
+    diagnostic_sink: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl GuardEvents {
     /// Accept a fresh pair from `cycle`. An older cycle, including the initial
@@ -304,6 +307,8 @@ impl GuardEvents {
                 self.request_stop();
             }
             // A slow diagnostic sink must never delay revocation or Stop.
+            #[cfg(test)]
+            self.enter_diagnostic_sink();
             tracing::warn!(target: "gcu_windows_timing", stage = "stop_listener", phase = "failed", reason = %reason);
         }
     }
@@ -446,6 +451,8 @@ impl SafetyGuard {
             startup_step: Mutex::default(),
             time,
             signal: Mutex::default(),
+            #[cfg(test)]
+            diagnostic_sink: Mutex::default(),
         });
         let close = Arc::new(AtomicBool::new(false));
         Arc::new(Self { events, close })

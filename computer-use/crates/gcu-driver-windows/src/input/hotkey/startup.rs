@@ -66,6 +66,28 @@ impl StopLatch for Unstopped {
     fn request_stop(&self) {}
 }
 
+impl GuardEvents {
+    /// Test seam at the failure diagnostic. Production builds do not contain it.
+    pub(super) fn enter_diagnostic_sink(&self) {
+        let sink = self
+            .diagnostic_sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(sink) = sink {
+            sink();
+        }
+    }
+
+    /// Install the test seam. `None` removes it so the guard can drop.
+    pub(super) fn set_diagnostic_sink(&self, sink: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self
+            .diagnostic_sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = sink;
+    }
+}
+
 #[tokio::test]
 async fn scheduled_setup_before_deadline_stays_disabled_until_both_proofs_arrive() {
     let (api, entered, release) = api();
@@ -396,55 +418,24 @@ fn late_startup_proofs_cannot_beat_the_next_watchdog_poll_or_reset_a_stage() {
 
 #[test]
 fn listener_failure_revokes_health_and_latches_stop_before_entering_diagnostic_sink() {
-    use std::cell::RefCell;
-    use tracing::{
-        span::{Attributes, Id, Record},
-        Event, Metadata, Subscriber,
-    };
-    type Probe = (Arc<SafetyGuard>, Arc<AtomicBool>);
-    std::thread_local! {
-        static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
-    }
-    // A process-wide sink instead of a scoped one: scoped dispatchers race with
-    // the callsite interest cache when other tests emit the same event in parallel.
-    // Only the thread that installed a probe is inspected.
-    struct Inspect;
-    impl Subscriber for Inspect {
-        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-            metadata.target() == "gcu_windows_timing"
-        }
-        fn new_span(&self, _: &Attributes<'_>) -> Id {
-            Id::from_u64(1)
-        }
-        fn record(&self, _: &Id, _: &Record<'_>) {}
-        fn record_follows_from(&self, _: &Id, _: &Id) {}
-        fn enter(&self, _: &Id) {}
-        fn exit(&self, _: &Id) {}
-        fn event(&self, _: &Event<'_>) {
-            PROBE.with(|probe| {
-                let Some((guard, inspected)) = probe.borrow().clone() else {
-                    return;
-                };
-                // These guarantees must already hold if the sink now blocks forever.
-                assert!(!guard.available());
-                assert!(!guard.activity_clock().available());
-                assert!(guard.is_stopped());
-                assert_eq!(
-                    guard.events.reason.lock().unwrap().as_deref(),
-                    Some("fault injection")
-                );
-                inspected.store(true, Ordering::Release);
-            });
-        }
-    }
-    // Err means another test already installed a global sink; this process has none.
-    tracing::subscriber::set_global_default(Inspect).expect("single global diagnostic sink");
     let api = FakeSafetyApi::default();
     let guard = api.start(Default::default(), Arc::new(Unstopped));
     assert!(guard.available());
     let inspected = Arc::new(AtomicBool::new(false));
-    PROBE.with(|probe| *probe.borrow_mut() = Some((guard.clone(), inspected.clone())));
+    let probe = guard.clone();
+    let flag = inspected.clone();
+    // Injected at the diagnostic entry. A blocking sink must already see revocation.
+    guard.events.set_diagnostic_sink(Some(Arc::new(move || {
+        assert!(!probe.available());
+        assert!(!probe.activity_clock().available());
+        assert!(probe.is_stopped());
+        assert_eq!(
+            probe.events.reason.lock().unwrap().as_deref(),
+            Some("fault injection")
+        );
+        flag.store(true, Ordering::Release);
+    })));
     guard.disable("fault injection");
-    PROBE.with(|probe| *probe.borrow_mut() = None);
+    guard.events.set_diagnostic_sink(None);
     assert!(inspected.load(Ordering::Acquire));
 }
