@@ -55,10 +55,28 @@ pub(super) fn enter_pointer_gate_for_test(
 ) -> Result<PointerGateGuard, String> {
     gate::enter_for_test(wait)
 }
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[allow(dead_code)]
+pub(super) fn set_pointer_gate_name_for_test(name: &'static str) -> Result<(), &'static str> {
+    gate::set_name_for_test(name)
+}
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[allow(dead_code)]
+pub(super) fn pointer_gate_production_name_for_test() -> &'static str {
+    gate::production_name()
+}
 pub(crate) fn with_injection_gate_for<R>(
     wait: std::time::Duration,
     body: impl FnOnce() -> R,
 ) -> Result<R, GateBusy> {
+    struct Flush;
+    impl Drop for Flush {
+        fn drop(&mut self) {
+            // The probe does not hold the input ledger. The mutex is already released.
+            gate::flush_pointer_gate_diag();
+        }
+    }
+    let _flush = Flush;
     // Admission is infallible here. Callers that must recheck use `with_admitted_gate`.
     match gate::with_admitted_gate(
         wait,
@@ -69,6 +87,9 @@ pub(crate) fn with_injection_gate_for<R>(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(never)) => match never {},
     }
+}
+pub(crate) fn flush_pointer_gate_diag() {
+    gate::flush_pointer_gate_diag();
 }
 pub(crate) fn with_injection_gate<R>(body: impl FnOnce() -> R) -> Result<R, GateBusy> {
     with_injection_gate_for(INJECTION_GATE_WAIT, body)
@@ -187,7 +208,7 @@ fn probe_gate_busy() -> String {
     {
         let mut message = String::from("probe not sent: pointer input in flight");
         if let Some(code) = gate::create_error_code() {
-            message.push_str(&format!(" (Win32 {code:#x})"));
+            message.push_str(&format!(" ({})", gate::format_stored_error(code)));
         }
         message
     }

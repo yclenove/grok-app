@@ -162,4 +162,58 @@ mod tests {
             other => panic!("expected an uncertain native error, got {other:?}"),
         }
     }
+
+    /// `floor(norm * extent / 65536)` placed back on the axis. Not what `denormalize_axis` returns.
+    fn bin_axis(norm: i32, origin: i32, extent: i32) -> i32 {
+        origin + (i64::from(norm) * i64::from(extent) / 65536) as i32
+    }
+
+    fn disagreement_offsets(extent: i32) -> Vec<i32> {
+        if extent <= 1 {
+            return Vec::new();
+        }
+        (0..extent)
+            .filter(|offset| {
+                let norm = normalize_axis(f64::from(*offset), 0, extent);
+                denormalize_axis(norm, 0, extent) != bin_axis(norm, 0, extent)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inverse_and_pixel_bin_disagree_on_known_extents() {
+        assert_eq!(disagreement_offsets(1920), vec![1, 2, 3, 8, 9, 16, 23]);
+        let norm = normalize_axis(1.0, 0, 1920);
+        assert_eq!(norm, 34);
+        assert_eq!(denormalize_axis(norm, 0, 1920), 1);
+        assert_eq!(bin_axis(norm, 0, 1920), 0);
+        assert_eq!(disagreement_offsets(2560), vec![2, 4, 7, 9, 12, 17, 22, 27]);
+        assert_eq!(
+            disagreement_offsets(3840),
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 31, 32, 33, 34, 35, 46, 47, 48, 49,
+                61, 62, 63, 76, 77, 91
+            ]
+        );
+        let wide = disagreement_offsets(7680);
+        assert_eq!(wide.len(), 110);
+        assert!(wide.contains(&100));
+        let norm = normalize_axis(100.0, 0, 7680);
+        assert_eq!(norm, 853);
+        assert_eq!(denormalize_axis(norm, 0, 7680), 100);
+        assert_eq!(bin_axis(norm, 0, 7680), 99);
+        let shifted: Vec<i32> = disagreement_offsets(3840)
+            .into_iter()
+            .map(|o| o - 1920)
+            .collect();
+        let absolute: Vec<i32> = (0..3840)
+            .filter(|offset| {
+                let pixel = -1920 + offset;
+                let norm = normalize_axis(f64::from(pixel), -1920, 3840);
+                denormalize_axis(norm, -1920, 3840) != bin_axis(norm, -1920, 3840)
+            })
+            .map(|offset| -1920 + offset)
+            .collect();
+        assert_eq!(shifted, absolute);
+    }
 }

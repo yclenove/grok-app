@@ -51,6 +51,35 @@ fn status_path(mode: &str) -> PathBuf {
     ))
 }
 
+struct ChildProc {
+    child: Option<Child>,
+}
+impl ChildProc {
+    fn spawn(mode: &str, status: &Path, piped_stdin: bool) -> Self {
+        Self {
+            child: Some(spawn_child(mode, status, piped_stdin)),
+        }
+    }
+    fn child(&mut self) -> &mut Child {
+        self.child.as_mut().expect("pointer-gate child")
+    }
+    fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.take().expect("pointer-gate child").wait()
+    }
+    fn kill_and_wait(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+impl Drop for ChildProc {
+    fn drop(&mut self) {
+        // Every panic path, including a failed assertion, reaps the child.
+        self.kill_and_wait();
+    }
+}
+
 fn spawn_child(mode: &str, status: &Path, piped_stdin: bool) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("test executable"));
     command
@@ -94,13 +123,13 @@ fn ensure_create_failure_is_diagnosable() {
         gate_off_is_unset();
         let status = status_path("conflict");
         let _ = std::fs::remove_file(&status);
-        let mut child = spawn_child("conflict", &status, false);
-        let text = wait_status(&status, &mut child);
+        let mut child = ChildProc::spawn("conflict", &status, false);
+        let text = wait_status(&status, child.child());
         let code = child.wait().expect("wait conflict child");
         assert!(code.success(), "conflict child failed: {code}; body={text}");
         assert!(
-            text.contains("Win32"),
-            "CreateMutexW failure must keep its Win32 code, got {text}"
+            text.contains("Win32") && text.contains("HRESULT"),
+            "CreateMutexW failure must keep HRESULT and Win32, got {text}"
         );
         let _ = std::fs::remove_file(&status);
     });
@@ -122,14 +151,23 @@ fn child_conflict(status: &str) {
         Win32::{Foundation::CloseHandle, System::Threading::CreateEventW},
     };
     gate_off_is_unset();
-    // Same session name as the gate. An event already owns it, so CreateMutexW must fail.
+    // A private name, injected before CreateMutexW. The production constant is not an object here,
+    // so this child does not collide with another process that owns Local\gcu-pointer-gate-v1.
+    let unique = format!(
+        "Local\\gcu-pointer-gate-conflict-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    );
+    let name: &'static str = Box::leak(unique.into_boxed_str());
+    gcu_driver_windows::input::set_pointer_gate_name_for_test(name)
+        .expect("inject the conflict name before CreateMutexW");
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
     // `HANDLE` is `Copy`; dropping it does not close the object.
-    let name: Vec<u16> = "Local\\gcu-pointer-gate-v1"
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    let event = unsafe { CreateEventW(None, true, false, PCWSTR(name.as_ptr())) }
-        .expect("reserve the pointer-gate name with an event");
+    let event = unsafe { CreateEventW(None, true, false, PCWSTR(wide.as_ptr())) }
+        .expect("reserve the injected name with an event");
     let text = match gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::ZERO) {
         Ok(guard) => {
             drop(guard);
@@ -138,8 +176,7 @@ fn child_conflict(status: &str) {
         Err(message) => message,
     };
     std::fs::write(status, &text).expect("status");
-    // SAFETY: this child created `event` and has not closed it. Closing frees the name
-    // before the process exits, so the parent can create the mutex afterwards.
+    // SAFETY: this child created `event` and has not closed it. Closing frees the injected name.
     unsafe { CloseHandle(event) }.expect("close the name reservation");
 }
 
@@ -222,13 +259,14 @@ fn named_mutex_other_process_blocks_until_it_releases_without_a_desktop() {
     gate_off_is_unset();
     let status = status_path("hold");
     let _ = std::fs::remove_file(&status);
-    let mut child = spawn_child("hold", &status, true);
-    assert_eq!(wait_status(&status, &mut child), "held");
+    let mut child = ChildProc::spawn("hold", &status, true);
+    assert_eq!(wait_status(&status, child.child()), "held");
     assert!(
         gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::ZERO).is_err(),
         "zero wait must fail while the child holds the named mutex"
     );
     child
+        .child()
         .stdin
         .take()
         .expect("piped stdin")
@@ -248,16 +286,15 @@ fn named_mutex_killed_child_grants_abandoned_ownership_without_a_desktop() {
     gate_off_is_unset();
     let status = status_path("abandon");
     let _ = std::fs::remove_file(&status);
-    let mut child = spawn_child("hold", &status, true);
-    assert_eq!(wait_status(&status, &mut child), "held");
+    let mut child = ChildProc::spawn("hold", &status, true);
+    assert_eq!(wait_status(&status, child.child()), "held");
     // Opening the mutex now caches the handle. A later wait can observe WAIT_ABANDONED.
     // If the child died first, the kernel object would vanish with its last handle.
     assert!(
         gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::ZERO).is_err(),
         "the child still holds the mutex"
     );
-    child.kill().expect("kill child");
-    let _ = child.wait();
+    child.kill_and_wait();
     let abandoned = gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::from_secs(2))
         .expect("WAIT_ABANDONED grants ownership after the child is killed");
     drop(abandoned);
@@ -291,9 +328,18 @@ fn named_mutex_same_thread_reacquires_and_inner_drop_keeps_the_outer_hold() {
         "dropping the inner guard must not release the outer hold"
     );
     drop(outer);
-    let next = gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::ZERO)
-        .expect("the outer drop releases the mutex");
-    drop(next);
+    // Same-thread reacquire would succeed even if the outer guard were still held.
+    let released = thread::spawn(|| {
+        gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::from_secs(2)).map(
+            |guard| {
+                drop(guard);
+            },
+        )
+    });
+    released
+        .join()
+        .expect("release thread")
+        .expect("another thread acquires after the outer drop");
 }
 
 #[test]
@@ -306,7 +352,24 @@ fn named_mutex_unwind_releases_the_hold_without_a_desktop() {
         panic!("drop the pointer gate on unwind");
     }));
     assert!(panicked.is_err(), "the panic must still unwind");
-    let guard = gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::ZERO)
-        .expect("unwind dropped the guard and released the mutex");
-    drop(guard);
+    let released = thread::spawn(|| {
+        gcu_driver_windows::input::pointer_gate_enter_for_test(Duration::from_secs(2)).map(
+            |guard| {
+                drop(guard);
+            },
+        )
+    });
+    released
+        .join()
+        .expect("release thread")
+        .expect("another thread acquires after unwind drops the guard");
+}
+
+#[test]
+fn production_pointer_gate_name_is_the_session_constant_without_creating_it() {
+    assert!(std::env::var_os("GCU_POINTER_GATE_CHILD").is_none());
+    assert_eq!(
+        gcu_driver_windows::input::pointer_gate_production_name_for_test(),
+        "Local\\gcu-pointer-gate-v1"
+    );
 }

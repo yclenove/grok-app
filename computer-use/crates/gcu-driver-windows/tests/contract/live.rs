@@ -760,12 +760,11 @@ async fn live_drag_stress() {
     ));
 }
 
-/// Measurement only. Sends `MOVE|ABSOLUTE|VIRTUALDESK` to at least 200 pixels, including the
-/// virtual-desktop edges, and prints landing error against the requested pixel and against the
-/// inverse of the driver's normalization. Does not decide the arrival tolerance.
-/// Run with `--exact live::live_move_landing_probe --ignored --nocapture`.
+/// Measurement only. Samples quantization-boundary pixels and prints landing error against the
+/// requested pixel and against `denormalize_axis`. Does not decide the arrival tolerance.
+/// Run with `GCU_DESKTOP=1` and `--exact live::live_move_landing_probe --ignored --nocapture`.
 #[tokio::test]
-#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only; do not merge until this histogram confirms inverse error is 0"]
+#[ignore = "not_run: disposable interactive unelevated Windows desktop required; measurement only; do not change CURSOR_ARRIVAL_TOLERANCE_PX from this histogram"]
 async fn live_move_landing_probe() {
     require(
         std::env::var("GCU_DESKTOP").as_deref() == Ok("1"),
@@ -773,5 +772,21 @@ async fn live_move_landing_probe() {
     )
     .unwrap();
     let report = unsafe_click_probe::landing_histogram().unwrap();
-    progress(report);
+    assert_eq!(
+        report.sent_ok, report.planned,
+        "every planned move must be sent\n{}",
+        report.text
+    );
+    assert_eq!(
+        report.valid_reads, report.planned,
+        "every planned move must yield a cursor read\n{}",
+        report.text
+    );
+    assert!(
+        report.planned >= 400,
+        "planned {} is below the quantization sample floor\n{}",
+        report.planned,
+        report.text
+    );
+    progress(report.text);
 }

@@ -103,14 +103,52 @@ impl super::admission::ScalarAdmission for WinScalar {
         let tid = unsafe { GetWindowThreadProcessId(hwnd(window), Some(&mut pid)) };
         (tid, pid)
     }
-    fn class_matches(&self, window: u64, class: &str) -> bool {
-        native::class(window).ok().as_deref() == Some(class)
+    fn class_matches(&self, window: u64, class: &[u16]) -> bool {
+        native::class_matches(window, class)
+    }
+    fn frame(&self, window: u64) -> Option<super::admission::FramePx> {
+        native::frame_px(window).ok()
+    }
+    fn iconic(&self, window: u64) -> bool {
+        native::iconic(window)
+    }
+    fn generation(&self, window: u64, property: &[u16]) -> Option<u64> {
+        native::generation(window, property)
+    }
+    fn dpi(&self, window: u64) -> u32 {
+        native::dpi_of(window)
+    }
+}
+/// Scalar snapshot taken at the end of `State::validate`, from the same calls the gate repeats.
+struct Snapshot {
+    tid: u32,
+    pid: u32,
+    frame: super::admission::FramePx,
+    minimized: bool,
+    root_pid: u32,
+    root_class_units: Vec<u16>,
+    class_units: Vec<u16>,
+    created: u64,
+    generation_property: Vec<u16>,
+    dpi: u32,
+}
+fn same_frame(frame: super::admission::FramePx, recorded: &gcu_protocol::Rect) -> bool {
+    recorded.x == f64::from(frame.left)
+        && recorded.y == f64::from(frame.top)
+        && recorded.w == f64::from(frame.right - frame.left)
+        && recorded.h == f64::from(frame.bottom - frame.top)
+}
+fn scale_of(dpi: u32) -> f64 {
+    if dpi == 0 {
+        1.0
+    } else {
+        f64::from(dpi) / 96.0
     }
 }
 impl State {
-    /// Blocking checks (enumeration, the security gate, COM). Returns the child thread and
-    /// process ids this call already handed to `WinGate`, for the later scalar re-read.
-    fn validate(&self, target: &Target, foreground: bool) -> Result<(u32, u32)> {
+    /// Blocking checks (enumeration, the security gate, COM). Returns the scalar snapshot
+    /// the pointer gate re-reads. `process_created` and tokens are checked here and not returned.
+    fn validate(&self, target: &Target, foreground: bool) -> Result<Snapshot> {
         let current = self
             .api
             .enum_windows()?
@@ -150,10 +188,53 @@ impl State {
             foreground,
             self.api.on_current_desktop(current.hwnd)?,
         )?;
-        if native::class(target.hwnd)? != target.class {
+        let class_units = native::class_units(target.hwnd)?;
+        if String::from_utf16_lossy(&class_units) != target.class {
             return Err(DriverError::StaleElement);
         }
-        Ok((tid, pid))
+        let root_class_units = native::class_units(current.hwnd)?;
+        if String::from_utf16_lossy(&root_class_units) != current.class {
+            return Err(DriverError::WindowGone);
+        }
+        let frame = native::frame_px(current.hwnd).map_err(|_| DriverError::WindowGone)?;
+        if !same_frame(frame, &current.frame) {
+            return Err(DriverError::InvalidRequest);
+        }
+        let minimized = native::iconic(current.hwnd);
+        if minimized || minimized != current.minimized {
+            return Err(DriverError::WindowMinimized);
+        }
+        let dpi = native::dpi_of(current.hwnd);
+        if scale_of(dpi) != current.scale {
+            return Err(DriverError::InvalidRequest);
+        }
+        let mut root_pid = 0;
+        // SAFETY: borrowed root HWND and a writable pid slot. No process handle.
+        let root_tid = unsafe { GetWindowThreadProcessId(hwnd(current.hwnd), Some(&mut root_pid)) };
+        if root_tid == 0 || root_pid != current.pid {
+            return Err(DriverError::WindowGone);
+        }
+        let generation_property = self.api.generation_property().to_vec();
+        let created = if generation_property.is_empty() {
+            current.created
+        } else {
+            match native::generation(current.hwnd, &generation_property) {
+                Some(created) if created == current.created => created,
+                _ => return Err(DriverError::WindowGone),
+            }
+        };
+        Ok(Snapshot {
+            tid,
+            pid,
+            frame,
+            minimized,
+            root_pid,
+            root_class_units,
+            class_units,
+            created,
+            generation_property,
+            dpi,
+        })
     }
     fn resolve(
         &self,
@@ -368,13 +449,20 @@ impl InputApi for RealInput {
         self.worker
             .call_action(context.clone(), move |s, r| {
                 if delivery != Delivery::Foreground {
-                    for event in events {
-                        r.check()?;
-                        ledger.dispatch(&target, event, delivery, &context, |_| {
-                            native::post(&target, event)
-                        })?;
-                    }
-                    return Ok(());
+                    // Full stamp, security, and recipient validation on this native thread,
+                    // outside the ledger. Targeted delivery does not take the pointer gate.
+                    return super::admission::dispatch_targeted(
+                        super::admission::TargetedSend {
+                            ledger: ledger.as_ref(),
+                            target: &target,
+                            events: &events,
+                            delivery,
+                            context: &context,
+                        },
+                        || r.check(),
+                        || s.validate(&target, false).map(|_| ()),
+                        |event| native::post(&target, event),
+                    );
                 }
                 // Enumeration, the security gate, and COM finish in `prepare`, before the ledger
                 // and the pointer gate. The gate then only re-reads cancellation, the deadline,
@@ -383,15 +471,22 @@ impl InputApi for RealInput {
                 super::admission::prepare_then_dispatch(
                     || {
                         r.check()?;
-                        let (tid, pid) = s.validate(&target, true)?;
+                        let snap = s.validate(&target, true)?;
                         let inputs = native::inputs(&events)?;
                         Ok(PreparedSend {
                             identity: super::admission::ExpectedIdentity {
                                 root: target.window.hwnd,
                                 hwnd: target.hwnd,
-                                class: target.class.clone(),
-                                pid,
-                                tid,
+                                class_units: snap.class_units,
+                                pid: snap.pid,
+                                tid: snap.tid,
+                                frame: snap.frame,
+                                minimized: snap.minimized,
+                                root_pid: snap.root_pid,
+                                root_class_units: snap.root_class_units,
+                                created: snap.created,
+                                generation_property: snap.generation_property,
+                                dpi: snap.dpi,
                             },
                             inputs,
                         })

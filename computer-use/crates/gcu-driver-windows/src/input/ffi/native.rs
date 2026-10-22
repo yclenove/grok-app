@@ -5,21 +5,70 @@ use crate::{
     uia::patterns::ActionContext,
 };
 use gcu_core::driver::{Button, DriverError, Result};
-use windows::Win32::{
-    Foundation::{LPARAM, POINT, WPARAM},
-    Graphics::Gdi::ScreenToClient,
-    System::Threading::{AttachThreadInput, GetCurrentThreadId},
-    UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+use windows::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::{LPARAM, POINT, RECT, WPARAM},
+        Graphics::Gdi::ScreenToClient,
+        System::Threading::{AttachThreadInput, GetCurrentThreadId},
+        UI::{HiDpi::GetDpiForWindow, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    },
 };
 
-pub(super) fn class(window: u64) -> Result<String> {
+pub(super) fn class_units(window: u64) -> Result<Vec<u16>> {
     let mut buffer = [0u16; 256];
     // SAFETY: fixed writable UTF-16 output, borrowed HWND, nonblocking metadata.
     let n = unsafe { GetClassNameW(hwnd(window), &mut buffer) };
-    if n == 0 {
+    if n <= 0 {
         return Err(DriverError::WindowGone);
     }
-    Ok(String::from_utf16_lossy(&buffer[..n as usize]))
+    Ok(buffer[..n as usize].to_vec())
+}
+pub(super) fn class(window: u64) -> Result<String> {
+    Ok(String::from_utf16_lossy(&class_units(window)?))
+}
+/// `GetClassNameW` against units captured before the gate. Does not allocate.
+pub(super) fn class_matches(window: u64, expected: &[u16]) -> bool {
+    if expected.is_empty() || expected.len() >= 256 {
+        return false;
+    }
+    let mut buffer = [0u16; 256];
+    // SAFETY: fixed writable UTF-16 output, borrowed HWND, nonblocking metadata.
+    let n = unsafe { GetClassNameW(hwnd(window), &mut buffer) };
+    n > 0 && buffer[..n as usize] == *expected
+}
+pub(super) fn frame_px(window: u64) -> Result<crate::input::admission::FramePx> {
+    let mut rect = RECT::default();
+    // SAFETY: writable RECT and a borrowed HWND. Same call enumeration uses for `frame`.
+    unsafe { GetWindowRect(hwnd(window), &mut rect) }.map_err(|_| failure())?;
+    Ok(crate::input::admission::FramePx {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    })
+}
+pub(super) fn iconic(window: u64) -> bool {
+    // SAFETY: numeric HWND; nonblocking minimized query.
+    unsafe { IsIconic(hwnd(window)).as_bool() }
+}
+pub(super) fn dpi_of(window: u64) -> u32 {
+    // SAFETY: numeric HWND; returns a DPI integer and no borrowed output.
+    unsafe { GetDpiForWindow(hwnd(window)) }
+}
+/// Generation marker from `GetPropW`. `None` when the name is not NUL-terminated or the property is absent.
+pub(super) fn generation(window: u64, property: &[u16]) -> Option<u64> {
+    if property.last() != Some(&0) {
+        return None;
+    }
+    // SAFETY: the name is NUL-terminated and borrowed for this call. GetPropW reads the
+    // window property list; it does not send a message to the window procedure.
+    let marker = unsafe { GetPropW(hwnd(window), PCWSTR(property.as_ptr())) };
+    if marker.is_invalid() {
+        None
+    } else {
+        Some(marker.0 as usize as u64)
+    }
 }
 pub(super) fn activate(window: u64, context: &ActionContext) -> Result<()> {
     // SAFETY: thread IDs from live windows. Attachment guard always detaches,

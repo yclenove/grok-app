@@ -44,6 +44,24 @@ pub fn pointer_gate_enter_for_test(
     hook_probe::enter_pointer_gate_for_test(wait)
 }
 
+/// Bind the pointer-gate mutex name before the first `CreateMutexW`.
+///
+/// The production constant stays `Local\gcu-pointer-gate-v1`. The name-conflict
+/// integration test injects a private name so it does not collide with another process.
+/// Fails when the name is already bound or an override was already set.
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[doc(hidden)]
+pub fn set_pointer_gate_name_for_test(name: &'static str) -> std::result::Result<(), &'static str> {
+    hook_probe::set_pointer_gate_name_for_test(name)
+}
+
+/// The production mutex name. Reading it does not create the kernel object.
+#[cfg(all(windows, feature = "test-support", not(test)))]
+#[doc(hidden)]
+pub fn pointer_gate_production_name_for_test() -> &'static str {
+    hook_probe::pointer_gate_production_name_for_test()
+}
+
 /// Post-delivery evidence. No visible change never authorizes replay or escalation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {

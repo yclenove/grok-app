@@ -119,6 +119,15 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo test --locked --workspace ${{ runner.os == 'macOS' && '--features gcu-cli/macos-webview' || '' }}
 
+      # pointer_gate sets required-features = test-support, so the workspace test above skips it.
+      - name: cargo clippy (Windows pointer gate)
+        if: runner.os == 'Windows'
+        run: cargo clippy --locked -p gcu-driver-windows --all-targets --features test-support -- -D warnings
+
+      - name: cargo test (Windows pointer gate)
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p gcu-driver-windows --features test-support --test pointer_gate
+
       - name: cargo run -p xtask -- check-deps
         run: cargo run --locked -p xtask -- check-deps
 

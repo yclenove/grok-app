@@ -4,18 +4,127 @@
 // test can share one instance across threads. It is not the kernel object. The named mutex is
 // `cfg(all(windows, not(test)))` and is what `tests/pointer_gate.rs` calls.
 // One desktop has one cursor, so every host and worker in the session opens this one name.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Session-wide pointer gate. Not per process: two hosts must not move one cursor at once.
 pub(super) const POINTER_GATE_NAME: &str = "Local\\gcu-pointer-gate-v1";
 
-fn log_wait(started: Instant) {
-    let waited = started.elapsed();
-    if waited > Duration::from_millis(3) {
-        tracing::info!(
+/// Stashed outside the mutex. `wait` is only `WaitForSingleObject` (or the test double's acquire),
+/// not admission, insertion, or settle. A real code of 0 is stored as `u32::MAX` so it cannot
+/// look like success.
+#[derive(Clone, Copy)]
+struct DiagNote {
+    wait: Option<Duration>,
+    release_hresult: Option<u32>,
+    wait_failed: Option<u32>,
+    create_hresult: Option<u32>,
+}
+impl DiagNote {
+    const EMPTY: Self = Self {
+        wait: None,
+        release_hresult: None,
+        wait_failed: None,
+        create_hresult: None,
+    };
+}
+thread_local! {
+    static DIAG: std::cell::Cell<DiagNote> = const { std::cell::Cell::new(DiagNote::EMPTY) };
+}
+fn with_note(update: impl FnOnce(&mut DiagNote)) {
+    DIAG.with(|cell| {
+        let mut note = cell.get();
+        update(&mut note);
+        cell.set(note);
+    });
+}
+fn note_wait(waited: Duration) {
+    with_note(|note| {
+        note.wait = Some(match note.wait {
+            Some(previous) if previous >= waited => previous,
+            _ => waited,
+        });
+    });
+}
+fn note_release(hresult: u32) {
+    with_note(|note| {
+        if note.release_hresult.is_none() {
+            note.release_hresult = Some(hresult);
+        }
+    });
+}
+fn note_wait_failed(code: u32) {
+    with_note(|note| {
+        if note.wait_failed.is_none() {
+            note.wait_failed = Some(code);
+        }
+    });
+}
+fn note_create(hresult: u32) {
+    with_note(|note| {
+        if note.create_hresult.is_none() {
+            note.create_hresult = Some(hresult);
+        }
+    });
+}
+#[cfg(all(windows, not(test), feature = "test-support"))]
+fn clear_wait_note() {
+    with_note(|note| note.wait = None);
+}
+/// `FACILITY_WIN32` (`0x8007xxxx`) down to its 16-bit Win32 code.
+fn win32_from_hresult(raw: u32) -> Option<u32> {
+    if raw & 0xFFFF_0000 == 0x8007_0000 {
+        let win32 = raw & 0xFFFF;
+        (win32 != 0).then_some(win32)
+    } else {
+        None
+    }
+}
+pub(super) fn format_stored_error(raw: u32) -> String {
+    match win32_from_hresult(raw) {
+        Some(win32) => format!("HRESULT {raw:08X}, Win32 {win32:08X}"),
+        None => format!("HRESULT {raw:08X}"),
+    }
+}
+/// Emit stashed diagnostics. The caller must not own the pointer mutex or the input ledger.
+pub(super) fn flush_pointer_gate_diag() {
+    let note = DIAG.with(|cell| {
+        let note = cell.get();
+        cell.set(DiagNote::EMPTY);
+        note
+    });
+    if let Some(raw) = note.create_hresult {
+        tracing::warn!(
             target: "gcu_windows_timing",
-            stage = "pointer_gate_wait",
-            wait_ms = waited.as_millis() as u64
+            stage = "pointer_gate_create",
+            hresult = raw,
+            win32 = win32_from_hresult(raw).unwrap_or(0),
+            "pointer gate mutex could not be created"
+        );
+    }
+    if let Some(waited) = note.wait {
+        if waited > Duration::from_millis(3) {
+            tracing::info!(
+                target: "gcu_windows_timing",
+                stage = "pointer_gate_wait",
+                wait_ms = waited.as_millis() as u64,
+            );
+        }
+    }
+    if let Some(raw) = note.release_hresult {
+        tracing::warn!(
+            target: "gcu_windows_timing",
+            stage = "pointer_gate_release",
+            hresult = raw,
+            win32 = win32_from_hresult(raw).unwrap_or(0),
+            "ReleaseMutex failed"
+        );
+    }
+    if let Some(code) = note.wait_failed {
+        tracing::warn!(
+            target: "gcu_windows_timing",
+            stage = "pointer_gate_wait_failed",
+            win32 = code,
+            "WaitForSingleObject failed"
         );
     }
 }
@@ -34,12 +143,10 @@ pub(crate) fn with_admitted_gate<E, R>(
     }
     #[cfg(not(test))]
     {
-        let started = Instant::now();
         let held = acquire(wait)?;
         let outcome = admit().and_then(|()| body());
         drop(held);
-        // After release. A tracing sink must not run while this thread owns the mutex.
-        log_wait(started);
+        // Acquire time is stashed inside `acquire`. Emit it after the ledger unlocks.
         Ok(outcome)
     }
 }
@@ -58,14 +165,14 @@ mod win32 {
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0},
+            Foundation::{GetLastError, HANDLE, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0},
             System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         },
     };
 
     struct Created {
         bits: isize,
-        /// Win32 code when `bits` is 0. Never 0: a zero code would look like a silent success.
+        /// HRESULT when `bits` is 0. Never 0: a zero code would look like a silent success.
         error: u32,
     }
 
@@ -77,8 +184,11 @@ mod win32 {
         fn drop(&mut self) {
             if self.bits != 0 {
                 // SAFETY: releases the mutex this thread acquired in `acquire`.
-                unsafe {
-                    let _ = ReleaseMutex(HANDLE(self.bits as *mut _));
+                // A failure is stashed and logged after this thread no longer owns the mutex.
+                let released = unsafe { ReleaseMutex(HANDLE(self.bits as *mut _)) };
+                if let Err(error) = released {
+                    let code = error.code().0 as u32;
+                    super::note_release(if code == 0 { u32::MAX } else { code });
                 }
             }
         }
@@ -86,10 +196,35 @@ mod win32 {
 
     static CREATED: OnceLock<Created> = OnceLock::new();
     static LOGGED: AtomicBool = AtomicBool::new(false);
+    #[cfg(feature = "test-support")]
+    static NAME_OVERRIDE: OnceLock<&'static str> = OnceLock::new();
+
+    fn gate_name() -> &'static str {
+        #[cfg(feature = "test-support")]
+        if let Some(name) = NAME_OVERRIDE.get().copied() {
+            return name;
+        }
+        POINTER_GATE_NAME
+    }
+
+    fn name_utf16() -> Vec<u16> {
+        gate_name().encode_utf16().chain([0]).collect()
+    }
+
+    /// Inject the mutex name before the first `CreateMutexW`. Production builds do not call this.
+    #[cfg(feature = "test-support")]
+    pub(super) fn set_name_for_test(name: &'static str) -> Result<(), &'static str> {
+        if CREATED.get().is_some() {
+            return Err("pointer gate name is already bound");
+        }
+        NAME_OVERRIDE
+            .set(name)
+            .map_err(|_| "pointer gate name override is already set")
+    }
 
     fn created() -> &'static Created {
         CREATED.get_or_init(|| {
-            let name: Vec<u16> = POINTER_GATE_NAME.encode_utf16().chain([0]).collect();
+            let name = name_utf16();
             // SAFETY: NUL-terminated name that outlives the call; the handle lives for the process.
             match unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) } {
                 Ok(handle) => Created {
@@ -113,17 +248,12 @@ mod win32 {
             .and_then(|created| (created.bits == 0 && created.error != 0).then_some(created.error))
     }
 
-    fn log_create_failure_once(code: u32) {
+    fn stash_create_failure_once(code: u32) {
         if LOGGED.swap(true, Ordering::Relaxed) {
             return;
         }
-        // Outside the mutex: creation failed, so this thread does not own it.
-        tracing::warn!(
-            target: "gcu_windows_timing",
-            stage = "pointer_gate_create",
-            win32 = code,
-            "pointer gate mutex could not be created"
-        );
+        // Still under the input ledger. The warn is emitted by `flush_pointer_gate_diag`.
+        super::note_create(code);
     }
 
     pub(super) fn acquire(wait: Duration) -> Result<Held, super::super::GateBusy> {
@@ -137,14 +267,27 @@ mod win32 {
         }
         let created = created();
         if created.bits == 0 {
-            log_create_failure_once(created.error);
+            stash_create_failure_once(created.error);
             return Err(super::super::GateBusy);
         }
         let bits = created.bits;
         let millis = u32::try_from(wait.as_millis()).unwrap_or(40);
         // SAFETY: waits on the process-lifetime mutex handle. WAIT_ABANDONED grants this thread
         // ownership after the previous owner died; it is not a new proof and not a failure.
+        // GetLastError is read before any other call when the wait itself fails.
+        let started = std::time::Instant::now();
         let status = unsafe { WaitForSingleObject(HANDLE(bits as *mut _), millis) };
+        let failed = if status == WAIT_FAILED {
+            let code = unsafe { GetLastError() }.0;
+            Some(if code == 0 { u32::MAX } else { code })
+        } else {
+            None
+        };
+        super::note_wait(started.elapsed());
+        if let Some(code) = failed {
+            super::note_wait_failed(code);
+            return Err(super::super::GateBusy);
+        }
         if status == WAIT_OBJECT_0 || status == WAIT_ABANDONED {
             Ok(Held {
                 bits,
@@ -161,13 +304,27 @@ pub(super) fn create_error_code() -> Option<u32> {
     win32::create_error_code()
 }
 
-/// Busy message for a refused pointer packet. A failed `CreateMutexW` keeps its Win32 code.
+/// Busy message for a refused pointer packet. A failed `CreateMutexW` keeps its HRESULT
+/// and, when the facility is Win32, the Win32 code as well.
 pub(super) fn refusal_message() -> String {
     #[cfg(all(windows, not(test)))]
     if let Some(code) = create_error_code() {
-        return format!("pointer gate unavailable (Win32 {code:08x}); nothing was sent");
+        return format!(
+            "pointer gate unavailable ({}); nothing was sent",
+            format_stored_error(code)
+        );
     }
     "pointer input gate busy; nothing was sent".into()
+}
+
+#[cfg(all(windows, not(test), feature = "test-support"))]
+pub(super) fn set_name_for_test(name: &'static str) -> Result<(), &'static str> {
+    win32::set_name_for_test(name)
+}
+
+#[cfg(all(windows, not(test), feature = "test-support"))]
+pub(super) fn production_name() -> &'static str {
+    POINTER_GATE_NAME
 }
 
 #[cfg(all(windows, not(test)))]
@@ -193,17 +350,27 @@ pub struct PointerGateGuard {
 
 #[cfg(all(windows, not(test), feature = "test-support"))]
 pub(super) fn enter_for_test(wait: Duration) -> Result<PointerGateGuard, String> {
-    acquire(wait)
-        .map(|held| PointerGateGuard {
-            held,
-            _thread: PhantomData,
-        })
-        .map_err(|_| refusal_message())
+    match acquire(wait) {
+        Ok(held) => {
+            // The guard is still held. Drop the acquire note so a later flush on this thread
+            // cannot attribute it to a different critical section.
+            clear_wait_note();
+            Ok(PointerGateGuard {
+                held,
+                _thread: PhantomData,
+            })
+        }
+        Err(_) => {
+            let message = refusal_message();
+            flush_pointer_gate_diag();
+            Err(message)
+        }
+    }
 }
 
 #[cfg(test)]
 mod shared {
-    use super::log_wait;
+    use super::note_wait;
     use std::{
         marker::PhantomData,
         sync::{
@@ -344,11 +511,12 @@ mod shared {
         body: impl FnOnce() -> Result<R, E>,
     ) -> Result<Result<R, E>, super::super::GateBusy> {
         let started = Instant::now();
-        let held = gate.acquire(wait)?;
+        let acquired = gate.acquire(wait);
+        // Acquire time only. The body and any later log stay outside this measurement.
+        note_wait(started.elapsed());
+        let held = acquired?;
         let outcome = admit().and_then(|()| body());
         drop(held);
-        // After release, matching the production path. The test double must not log while held.
-        log_wait(started);
         Ok(outcome)
     }
 }
@@ -382,7 +550,7 @@ pub(crate) fn with_shared_gate<R>(gate: std::sync::Arc<SharedGate>, body: impl F
 
 #[cfg(test)]
 mod tests {
-    use super::{refusal_message, POINTER_GATE_NAME};
+    use super::{format_stored_error, refusal_message, POINTER_GATE_NAME};
 
     #[test]
     fn the_pointer_gate_name_is_one_per_session() {
@@ -395,5 +563,14 @@ mod tests {
             refusal_message(),
             "pointer input gate busy; nothing was sent"
         );
+    }
+
+    #[test]
+    fn a_win32_hresult_is_not_labeled_as_only_a_win32_code() {
+        assert_eq!(
+            format_stored_error(0x8007_0006),
+            "HRESULT 80070006, Win32 00000006"
+        );
+        assert_eq!(format_stored_error(0x8000_4005), "HRESULT 80004005");
     }
 }

@@ -78,6 +78,13 @@ pub trait WinApi: Send + Sync + 'static {
     fn enter_thread(&self) -> Result<Box<dyn std::any::Any>> {
         Ok(Box::new(()))
     }
+    /// NUL-terminated window-generation property name, when this API stamps one.
+    ///
+    /// Empty means there is no scalar marker to re-read. The returned units must not
+    /// require enumeration, a process handle, or COM.
+    fn generation_property(&self) -> &[u16] {
+        &[]
+    }
     /// Current process security, interactive session and input-desktop state.
     fn engine_security(&self) -> Result<ProcessSecurity>;
     /// Security state of a process, including creation time.

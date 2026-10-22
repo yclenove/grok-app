@@ -7,14 +7,41 @@ use super::{api::Event, hook_probe, ledger::InputLedger};
 use crate::uia::patterns::ActionContext;
 use gcu_core::driver::{Delivery, DriverError, Result};
 
-/// Identity captured by the blocking validation. The gate re-reads the same fields and compares.
+/// `GetWindowRect` edges. The gate compares these integers to a later read of that same call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FramePx {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// Identity and mutable window state captured by the blocking validation.
+///
+/// The gate re-reads only fields that have a scalar Win32 query. `HwndStamp.process_created`
+/// needs `OpenProcess` and is not stored here. See the ADR 0013 addendum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExpectedIdentity {
     pub root: u64,
     pub hwnd: u64,
-    pub class: String,
+    /// Child class from `GetClassNameW`, UTF-16 units, no trailing NUL.
+    pub class_units: Vec<u16>,
     pub pid: u32,
     pub tid: u32,
+    /// Root rectangle from `GetWindowRect` at validate time.
+    pub frame: FramePx,
+    /// Root `IsIconic` at validate time. A successful validate records `false`.
+    pub minimized: bool,
+    /// Top-level process id from `GetWindowThreadProcessId` on the root (`HwndStamp.pid`).
+    pub root_pid: u32,
+    /// Root class from `GetClassNameW`, UTF-16 units, no trailing NUL (`HwndStamp.class`).
+    pub root_class_units: Vec<u16>,
+    /// Window-generation marker (`HwndStamp.created`), from `GetPropW` when a name exists.
+    pub created: u64,
+    /// NUL-terminated generation property. Empty means this API has no scalar marker.
+    pub generation_property: Vec<u16>,
+    /// `GetDpiForWindow` at validate time. `0` is the API's own "unknown, treat as 96" value.
+    pub dpi: u32,
 }
 
 /// Scalar Win32 reads. Implementations must not enumerate windows, start COM, or log.
@@ -24,7 +51,16 @@ pub(crate) trait ScalarAdmission {
     fn root(&self, hwnd: u64) -> u64;
     /// `(thread id, process id)` from `GetWindowThreadProcessId`.
     fn thread_process(&self, hwnd: u64) -> (u32, u32);
-    fn class_matches(&self, hwnd: u64, class: &str) -> bool;
+    /// `GetClassNameW` compared to prebuilt UTF-16 units. Must not allocate.
+    fn class_matches(&self, hwnd: u64, class: &[u16]) -> bool;
+    /// `GetWindowRect`. `None` means the rectangle could not be read.
+    fn frame(&self, hwnd: u64) -> Option<FramePx>;
+    /// `IsIconic`.
+    fn iconic(&self, hwnd: u64) -> bool;
+    /// `GetPropW` of the generation property. `None` means the marker is absent.
+    fn generation(&self, hwnd: u64, property: &[u16]) -> Option<u64>;
+    /// `GetDpiForWindow`.
+    fn dpi(&self, hwnd: u64) -> u32;
 }
 
 /// Ledger and gate parameters for one already-built packet.
@@ -59,7 +95,10 @@ pub(crate) fn prepare_then_dispatch<T>(
 ) -> Result<()> {
     let prepared = prepare()?;
     after_prepare();
-    dispatch.ledger.dispatch_packet(
+    // Drops after `dispatch_packet` returns, so the ledger mutex is already released.
+    // Also runs on unwind from the send closure.
+    let _flush_gate = FlushGateDiag;
+    let result = dispatch.ledger.dispatch_packet(
         dispatch.target,
         dispatch.events,
         dispatch.delivery,
@@ -82,10 +121,56 @@ pub(crate) fn prepare_then_dispatch<T>(
                 insert(&prepared)
             }
         },
-    )
+    );
+    // `FlushGateDiag` emits the acquire timing after this return drops the ledger guard.
+    result
+}
+
+/// Flushes pointer-gate diagnostics after the ledger guard in `dispatch_packet` has dropped.
+struct FlushGateDiag;
+impl Drop for FlushGateDiag {
+    fn drop(&mut self) {
+        super::hook_probe::flush_pointer_gate_diag();
+    }
+}
+
+/// One non-foreground packet. Full validation runs outside the ledger, immediately before post.
+/// This branch does not take the pointer gate.
+pub(crate) struct TargetedSend<'a> {
+    pub ledger: &'a InputLedger,
+    pub target: &'a super::api::Target,
+    pub events: &'a [Event],
+    pub delivery: Delivery,
+    pub context: &'a ActionContext,
+}
+
+/// Post each targeted event only after `validate` accepts the current window.
+///
+/// `validate` is the native-thread stamp, security, and recipient check. It is not inside
+/// `InputLedger::dispatch`, and this path does not take the pointer gate. A refusal does not post.
+pub(crate) fn dispatch_targeted(
+    send: TargetedSend<'_>,
+    mut check: impl FnMut() -> Result<()>,
+    mut validate: impl FnMut() -> Result<()>,
+    mut post: impl FnMut(Event) -> Result<()>,
+) -> Result<()> {
+    for event in send.events.iter().copied() {
+        check()?;
+        validate()?;
+        send.ledger
+            .dispatch(send.target, event, send.delivery, send.context, |_| {
+                post(event)
+            })?;
+    }
+    Ok(())
 }
 
 /// Last admission check. Nothing here may block on enumeration, COM, or a log sink.
+///
+/// Rechecked with scalar calls: foreground, child liveness and ancestry, child thread and
+/// process, child class, root process and class, the generation marker when its property name
+/// was captured, the root `GetWindowRect`, `IsIconic`, and `GetDpiForWindow`.
+/// `process_created`, the process token, and virtual-desktop membership stay outside.
 pub(crate) fn bounded_admit(
     check: impl FnOnce() -> Result<()>,
     expected: &ExpectedIdentity,
@@ -104,8 +189,32 @@ pub(crate) fn bounded_admit(
     if tid == 0 || tid != expected.tid || pid != expected.pid {
         return Err(DriverError::WindowGone);
     }
-    if !live.class_matches(expected.hwnd, &expected.class) {
+    if !live.class_matches(expected.hwnd, &expected.class_units) {
         return Err(DriverError::StaleElement);
+    }
+    let (root_tid, root_pid) = live.thread_process(expected.root);
+    if root_tid == 0 || root_pid != expected.root_pid {
+        return Err(DriverError::WindowGone);
+    }
+    if !live.class_matches(expected.root, &expected.root_class_units) {
+        return Err(DriverError::WindowGone);
+    }
+    if !expected.generation_property.is_empty() {
+        match live.generation(expected.root, &expected.generation_property) {
+            Some(created) if created == expected.created => {}
+            _ => return Err(DriverError::WindowGone),
+        }
+    }
+    match live.frame(expected.root) {
+        Some(frame) if frame == expected.frame => {}
+        Some(_) => return Err(DriverError::InvalidRequest),
+        None => return Err(DriverError::WindowGone),
+    }
+    if live.iconic(expected.root) != expected.minimized {
+        return Err(DriverError::WindowMinimized);
+    }
+    if live.dpi(expected.root) != expected.dpi {
+        return Err(DriverError::InvalidRequest);
     }
     Ok(())
 }
@@ -156,440 +265,5 @@ fn set_after_prepare(hook: impl FnOnce() + 'static) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::input::api::Target;
-    use gcu_core::{
-        driver::{Button, Cancel, DriverError},
-        model::WindowPoint,
-    };
-    use std::{
-        sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-            mpsc, Arc,
-        },
-        time::{Duration, Instant},
-    };
-
-    struct Heavy {
-        calls: AtomicUsize,
-        enum_calls: AtomicUsize,
-        com_calls: AtomicUsize,
-        violations: AtomicUsize,
-        sealed: AtomicBool,
-    }
-    impl Heavy {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-                enum_calls: AtomicUsize::new(0),
-                com_calls: AtomicUsize::new(0),
-                violations: AtomicUsize::new(0),
-                sealed: AtomicBool::new(false),
-            }
-        }
-        fn prepare(&self) {
-            if self.sealed.load(Ordering::SeqCst) {
-                self.violations.fetch_add(1, Ordering::SeqCst);
-            }
-            self.enum_calls.fetch_add(1, Ordering::SeqCst);
-            self.com_calls.fetch_add(1, Ordering::SeqCst);
-            self.calls.fetch_add(1, Ordering::SeqCst);
-        }
-        fn seal(&self) {
-            self.sealed.store(true, Ordering::SeqCst);
-        }
-    }
-
-    struct Live {
-        foreground: AtomicU64,
-        alive: AtomicBool,
-        root: u64,
-        pid: u32,
-        tid: u32,
-        class_ok: AtomicBool,
-    }
-    impl ScalarAdmission for Live {
-        fn foreground(&self) -> u64 {
-            self.foreground.load(Ordering::SeqCst)
-        }
-        fn is_window(&self, hwnd: u64) -> bool {
-            self.alive.load(Ordering::SeqCst) && hwnd == 9
-        }
-        fn root(&self, hwnd: u64) -> u64 {
-            let _ = hwnd;
-            self.root
-        }
-        fn thread_process(&self, _hwnd: u64) -> (u32, u32) {
-            (self.tid, self.pid)
-        }
-        fn class_matches(&self, _hwnd: u64, class: &str) -> bool {
-            self.class_ok.load(Ordering::SeqCst) && class == "Edit"
-        }
-    }
-
-    fn target() -> Target {
-        Target {
-            window: crate::testing::window(8, 7),
-            hwnd: 9,
-            class: "Edit".into(),
-            message_capable: true,
-        }
-    }
-    fn identity(target: &Target) -> ExpectedIdentity {
-        ExpectedIdentity {
-            root: target.window.hwnd,
-            hwnd: target.hwnd,
-            class: target.class.clone(),
-            pid: target.window.pid,
-            tid: 42,
-        }
-    }
-    fn button() -> Event {
-        Event::Button(Button::Left, true, WindowPoint { x: 1.0, y: 1.0 }, false)
-    }
-    enum Flip {
-        None,
-        Cancel,
-        Deadline,
-        Foreground,
-    }
-
-    struct Ran {
-        error: Result<()>,
-        inserts: usize,
-        heavy_calls: usize,
-        violations: usize,
-    }
-
-    fn run(pointer: bool, flip: Flip) -> Ran {
-        let target = target();
-        let expected = identity(&target);
-        let heavy = Arc::new(Heavy::new());
-        let live = Arc::new(Live {
-            foreground: AtomicU64::new(expected.root),
-            alive: AtomicBool::new(true),
-            root: expected.root,
-            pid: expected.pid,
-            tid: expected.tid,
-            class_ok: AtomicBool::new(true),
-        });
-        let cancel = Cancel::default();
-        let deadline = Instant::now() + Duration::from_millis(80);
-        let context = if matches!(flip, Flip::Deadline) {
-            ActionContext::until(&cancel, deadline)
-        } else {
-            ActionContext::new(&cancel)
-        };
-        let ledger = InputLedger::default();
-        let events = [button()];
-        let inserts = Arc::new(AtomicUsize::new(0));
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (go_tx, go_rx) = mpsc::channel::<()>();
-        let heavy_worker = Arc::clone(&heavy);
-        let live_worker = Arc::clone(&live);
-        let inserts_worker = Arc::clone(&inserts);
-        let worker = std::thread::spawn(move || {
-            let heavy_hook = Arc::clone(&heavy_worker);
-            set_after_prepare(move || {
-                assert_eq!(
-                    heavy_hook.calls.load(Ordering::SeqCst),
-                    1,
-                    "blocking validation must finish before the post-prepare barrier"
-                );
-                assert!(heavy_hook.enum_calls.load(Ordering::SeqCst) >= 1);
-                assert!(heavy_hook.com_calls.load(Ordering::SeqCst) >= 1);
-                heavy_hook.seal();
-                ready_tx.send(()).expect("ready");
-                go_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("test did not release the post-validation barrier");
-            });
-            let heavy_prepare = heavy_worker;
-            let live_admit = live_worker;
-            let inserts_body = inserts_worker;
-            let error = prepare_then_dispatch(
-                || {
-                    heavy_prepare.prepare();
-                    Ok(expected.clone())
-                },
-                Dispatch {
-                    ledger: &ledger,
-                    target: &target,
-                    events: &events,
-                    delivery: Delivery::Foreground,
-                    context: &context,
-                    pointer,
-                },
-                |prepared| bounded_admit(|| context.check(), prepared, live_admit.as_ref()),
-                |_prepared| {
-                    inserts_body.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            );
-            let empty = ledger.is_empty();
-            (error, empty)
-        });
-        ready_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("validation did not reach the post-prepare barrier");
-        match flip {
-            Flip::None => {}
-            Flip::Cancel => cancel.cancel(),
-            Flip::Deadline => {
-                while Instant::now() < deadline {
-                    std::thread::yield_now();
-                }
-            }
-            Flip::Foreground => {
-                live.foreground
-                    .store(expected_root_other(), Ordering::SeqCst);
-            }
-        }
-        go_tx.send(()).expect("release");
-        let (error, empty) = worker.join().expect("worker");
-        if !matches!(flip, Flip::None) {
-            assert!(
-                empty,
-                "a refused packet must not leave a new down in the ledger"
-            );
-        }
-        Ran {
-            error,
-            inserts: inserts.load(Ordering::SeqCst),
-            heavy_calls: heavy.calls.load(Ordering::SeqCst),
-            violations: heavy.violations.load(Ordering::SeqCst),
-        }
-    }
-
-    fn expected_root_other() -> u64 {
-        8 + 1
-    }
-
-    fn assert_clean(ran: &Ran) {
-        assert_eq!(ran.heavy_calls, 1, "validate runs once");
-        assert_eq!(
-            ran.violations, 0,
-            "admit must not enumerate or call COM after validation"
-        );
-    }
-
-    #[test]
-    fn pointer_packets_are_mouse_events_only() {
-        let point = WindowPoint { x: 1.0, y: 1.0 };
-        assert!(packet_is_pointer(&[Event::Move(point, false)]));
-        assert!(packet_is_pointer(&[Event::Button(
-            Button::Left,
-            true,
-            point,
-            false
-        )]));
-        assert!(packet_is_pointer(&[Event::Wheel(0, 1, point)]));
-        assert!(!packet_is_pointer(&[Event::Key(1, true, false, false)]));
-        assert!(!packet_is_pointer(&[Event::Unicode(10, true)]));
-    }
-
-    #[test]
-    fn unchanged_admission_inserts_once_for_pointer_and_keyboard() {
-        for pointer in [false, true] {
-            let ran = run(pointer, Flip::None);
-            assert!(ran.error.is_ok(), "{pointer}");
-            assert_eq!(ran.inserts, 1, "{pointer}");
-            assert_clean(&ran);
-        }
-    }
-
-    #[test]
-    fn cancel_after_validation_refuses_before_insert() {
-        for pointer in [false, true] {
-            let ran = run(pointer, Flip::Cancel);
-            assert_eq!(ran.inserts, 0, "{pointer}");
-            assert_clean(&ran);
-            assert_eq!(
-                ran.error,
-                Err(DriverError::Cancelled {
-                    maybe_executed: false
-                }),
-                "{pointer}"
-            );
-        }
-    }
-
-    #[test]
-    fn deadline_after_validation_refuses_before_insert() {
-        for pointer in [false, true] {
-            let ran = run(pointer, Flip::Deadline);
-            assert_eq!(ran.inserts, 0, "{pointer}");
-            assert_clean(&ran);
-            assert_eq!(
-                ran.error,
-                Err(DriverError::Timeout {
-                    maybe_executed: false
-                }),
-                "{pointer}"
-            );
-        }
-    }
-
-    #[test]
-    fn foreground_change_after_validation_refuses_before_insert() {
-        for pointer in [false, true] {
-            let ran = run(pointer, Flip::Foreground);
-            assert_eq!(ran.inserts, 0, "{pointer}");
-            assert_clean(&ran);
-            assert_eq!(
-                ran.error,
-                Err(DriverError::CapabilityUnavailable),
-                "{pointer}"
-            );
-        }
-    }
-
-    fn point() -> WindowPoint {
-        WindowPoint { x: 3.0, y: 4.0 }
-    }
-
-    #[test]
-    fn refusal_after_a_successful_move_keeps_earlier_uncertainty_and_rolls_back() {
-        let target = target();
-        let expected = identity(&target);
-        let cancel = Cancel::default();
-        let context = ActionContext::new(&cancel);
-        let ledger = InputLedger::default();
-        ledger
-            .dispatch_packet(
-                &target,
-                &[Event::Move(point(), false)],
-                Delivery::Foreground,
-                &context,
-                || Ok(()),
-            )
-            .unwrap();
-        assert!(context.maybe_executed());
-        assert!(ledger.is_empty());
-        cancel.cancel();
-        let live = Live {
-            foreground: AtomicU64::new(expected.root),
-            alive: AtomicBool::new(true),
-            root: expected.root,
-            pid: expected.pid,
-            tid: expected.tid,
-            class_ok: AtomicBool::new(true),
-        };
-        let events = [button()];
-        let error = prepare_then_dispatch(
-            || Ok(expected.clone()),
-            Dispatch {
-                ledger: &ledger,
-                target: &target,
-                events: &events,
-                delivery: Delivery::Foreground,
-                context: &context,
-                pointer: true,
-            },
-            |prepared| bounded_admit(|| context.check(), prepared, &live),
-            |_| Ok(()),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            DriverError::Cancelled {
-                maybe_executed: true
-            }
-        );
-        assert_eq!(error.error_code(), gcu_protocol::ErrorCode::StoppedByUser);
-        assert!(error.maybe_executed());
-        assert!(
-            ledger.is_empty(),
-            "the refused button must not stay recorded"
-        );
-    }
-
-    #[test]
-    fn refusal_while_a_button_is_held_keeps_that_button_for_release() {
-        let target = target();
-        let expected = identity(&target);
-        let cancel = Cancel::default();
-        let context = ActionContext::new(&cancel);
-        let ledger = InputLedger::default();
-        ledger
-            .dispatch_packet(&target, &[button()], Delivery::Foreground, &context, || {
-                Ok(())
-            })
-            .unwrap();
-        assert!(!ledger.is_empty());
-        cancel.cancel();
-        let live = Live {
-            foreground: AtomicU64::new(expected.root),
-            alive: AtomicBool::new(true),
-            root: expected.root,
-            pid: expected.pid,
-            tid: expected.tid,
-            class_ok: AtomicBool::new(true),
-        };
-        let events = [Event::Move(point(), true)];
-        let error = prepare_then_dispatch(
-            || Ok(expected.clone()),
-            Dispatch {
-                ledger: &ledger,
-                target: &target,
-                events: &events,
-                delivery: Delivery::Foreground,
-                context: &context,
-                pointer: true,
-            },
-            |prepared| bounded_admit(|| context.check(), prepared, &live),
-            |_| panic!("insert after a refused admission"),
-        )
-        .unwrap_err();
-        assert!(error.maybe_executed());
-        assert_eq!(error.error_code(), gcu_protocol::ErrorCode::StoppedByUser);
-        let mut released = Vec::new();
-        ledger.release(|_, event, _| {
-            released.push(event);
-            Ok(())
-        });
-        assert_eq!(
-            released,
-            vec![Event::Button(
-                Button::Left,
-                false,
-                WindowPoint { x: 1.0, y: 1.0 },
-                false
-            )]
-        );
-        assert!(ledger.is_empty());
-    }
-
-    #[test]
-    fn partial_insertion_keeps_the_down_and_reports_driver_error() {
-        let target = target();
-        let context = ActionContext::new(&Cancel::default());
-        let ledger = InputLedger::default();
-        let events = [button(), Event::Button(Button::Left, false, point(), false)];
-        let error = ledger
-            .dispatch_packet(&target, &events, Delivery::Foreground, &context, || {
-                Err(DriverError::Native {
-                    message: "SendInput inserted an incomplete packet".into(),
-                    maybe_executed: true,
-                })
-            })
-            .unwrap_err();
-        assert!(error.maybe_executed());
-        assert_eq!(error.error_code(), gcu_protocol::ErrorCode::DriverError);
-        let mut released = Vec::new();
-        ledger.release(|_, event, _| {
-            released.push(event);
-            Ok(())
-        });
-        assert_eq!(
-            released,
-            vec![Event::Button(
-                Button::Left,
-                false,
-                WindowPoint { x: 1.0, y: 1.0 },
-                false
-            )]
-        );
-    }
-}
+#[path = "admission_tests.rs"]
+mod tests;
