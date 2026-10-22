@@ -351,55 +351,58 @@ mod tests {
         assert!(!path_within(Path::new("/home/user"), root, true));
     }
 
+    /// Absolute on every platform: a bare `/x` is only rooted, not absolute, on Windows.
+    fn abs(path: &str) -> PathBuf {
+        let root = if cfg!(windows) { "C:" } else { "" };
+        PathBuf::from(format!("{root}{path}"))
+    }
+
     #[test]
     fn config_dirs_cover_env_homes_os_home_and_absolute_overrides() {
+        let os = |path: &str| abs(path).into_os_string();
         let env = vec![
-            (OsString::from("HOME"), OsString::from("/envhome")),
-            (OsString::from("USERPROFILE"), OsString::from("/profile")),
-            (OsString::from("GROK_HOME"), OsString::from("/custom/grok")),
-            (
-                OsString::from("CODEX_HOME"),
-                OsString::from("/custom/codex"),
-            ),
-            (
-                OsString::from("GROK_APP_HOME"),
-                OsString::from("/custom/app"),
-            ),
-            (OsString::from("GEMINI_HOME"), OsString::from("/abs/gemini")),
-            (
-                OsString::from("CLAUDE_CONFIG_DIR"),
-                OsString::from("/abs/claude"),
-            ),
+            (OsString::from("HOME"), os("/envhome")),
+            (OsString::from("USERPROFILE"), os("/profile")),
+            (OsString::from("GROK_HOME"), os("/custom/grok")),
+            (OsString::from("CODEX_HOME"), os("/custom/codex")),
+            (OsString::from("GROK_APP_HOME"), os("/custom/app")),
+            (OsString::from("GEMINI_HOME"), os("/abs/gemini")),
+            (OsString::from("CLAUDE_CONFIG_DIR"), os("/abs/claude")),
             (
                 OsString::from("GEMINI_RELATIVE"),
                 OsString::from("relative/gemini"),
             ),
         ];
-        let dirs = config_dirs_from(&env, Some(PathBuf::from("/oshome")));
-        for item in [
-            "/envhome/.grok",
-            "/envhome/.codex",
-            "/envhome/.gemini",
-            "/envhome/.claude",
-            "/envhome/.grok-app",
-            "/envhome/.grok-app/agent-home",
-            "/envhome/.grok-app/agent-home-official",
-            "/profile/.grok",
-            "/profile/.grok-app/agent-home-official",
-            "/oshome/.grok",
-            "/oshome/.grok-app/agent-home",
-            "/oshome/.grok-app/agent-home-official",
-            "/custom/grok",
-            "/custom/codex",
-            "/custom/app",
-            "/custom/app/agent-home",
-            "/custom/app/agent-home-official",
-            "/abs/gemini",
-            "/abs/claude",
-        ] {
+        let dirs = config_dirs_from(&env, Some(abs("/oshome")));
+        let expected = [
+            abs("/envhome").join(".grok"),
+            abs("/envhome").join(".codex"),
+            abs("/envhome").join(".gemini"),
+            abs("/envhome").join(".claude"),
+            abs("/envhome").join(".grok-app"),
+            abs("/envhome").join(".grok-app").join("agent-home"),
+            abs("/envhome")
+                .join(".grok-app")
+                .join("agent-home-official"),
+            abs("/profile").join(".grok"),
+            abs("/profile")
+                .join(".grok-app")
+                .join("agent-home-official"),
+            abs("/oshome").join(".grok"),
+            abs("/oshome").join(".grok-app").join("agent-home"),
+            abs("/oshome").join(".grok-app").join("agent-home-official"),
+            abs("/custom/grok"),
+            abs("/custom/codex"),
+            abs("/custom/app"),
+            abs("/custom/app").join("agent-home"),
+            abs("/custom/app").join("agent-home-official"),
+            abs("/abs/gemini"),
+            abs("/abs/claude"),
+        ];
+        for item in expected {
             assert!(
-                dirs.iter().any(|path| path == Path::new(item)),
-                "{item} missing from {dirs:?}"
+                dirs.iter().any(|path| path == &item),
+                "{item:?} missing from {dirs:?}"
             );
         }
         assert!(
