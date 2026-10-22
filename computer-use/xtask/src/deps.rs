@@ -147,6 +147,8 @@ const RULES: &[Rule] = &[
             "anyhow",
             "thiserror",
             "tracing",
+            // Unix only: kill the client's process group and open the auth seed with O_NOFOLLOW.
+            "libc",
         ]),
     },
     Rule {

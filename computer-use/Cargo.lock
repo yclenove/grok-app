@@ -2278,6 +2278,7 @@ dependencies = [
  "gcu-core",
  "gcu-driver-fake",
  "gcu-protocol",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

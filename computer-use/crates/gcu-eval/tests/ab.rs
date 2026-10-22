@@ -81,6 +81,7 @@ fn shell(rounds_b: u64, tokens_b: Option<u64>, status_b: RunStatus, violate: boo
                     } else {
                         Vec::new()
                     },
+                    reason: String::new(),
                 });
             }
         }
@@ -94,7 +95,9 @@ fn run_arm(task: &Task, arm: ArmId, behavior: &str, dir: &Path) -> AbTrial {
         ArmId::B => ArmConfig::candidate(),
     };
     let mut cfg = RunConfig {
-        grok_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
+        builtin_fake: true,
+        builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
+        builtin_gcu: true,
         gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
         platform: host_platform().into(),
         behavior: Some(behavior.into()),

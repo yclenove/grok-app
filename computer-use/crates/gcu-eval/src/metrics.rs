@@ -2,7 +2,7 @@
 //!
 //! Calculations are pure. They do not block, time out, or cancel.
 
-use crate::runner::{RunStatus, TaskOutcome};
+use crate::runner::{RunStatus, TaskOutcome, TelemetryState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -87,8 +87,12 @@ pub fn summarize(outcomes: &[TaskOutcome]) -> Summary {
         .count();
     let mut durations: Vec<u64> = scored.iter().map(|row| row.metrics.duration_ms).collect();
     durations.sort_unstable();
-    let calls: u64 = scored.iter().map(|row| row.metrics.tool_calls).sum();
-    let unknown: u64 = scored.iter().map(|row| row.metrics.unknown_calls).sum();
+    let measured: Vec<&&TaskOutcome> = scored
+        .iter()
+        .filter(|row| row.assurance.tool_telemetry == TelemetryState::Available)
+        .collect();
+    let calls: u64 = measured.iter().map(|row| row.metrics.tool_calls).sum();
+    let unknown: u64 = measured.iter().map(|row| row.metrics.unknown_calls).sum();
     let steps: u64 = scored.iter().map(|row| row.metrics.steps).sum();
     let mut by_category = BTreeMap::new();
     for row in &scored {
