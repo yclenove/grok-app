@@ -3,7 +3,7 @@
 //! HTML has no external resources and no hyperlinks. Prompts, fixture values,
 //! tool arguments, and file contents are not written.
 
-use crate::runner::{SuiteReport, TaskOutcome};
+use crate::runner::{SuiteReport, TaskOutcome, TelemetryState};
 use crate::Error;
 use std::path::{Path, PathBuf};
 
@@ -70,6 +70,14 @@ fn sanitize(id: &str) -> String {
         .collect()
 }
 
+fn count_field(state: TelemetryState, value: u64) -> serde_json::Value {
+    if state == TelemetryState::Available {
+        serde_json::json!(value)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
 fn task_body(task: &TaskOutcome) -> serde_json::Value {
     serde_json::json!({
         "id": task.id,
@@ -81,10 +89,18 @@ fn task_body(task: &TaskOutcome) -> serde_json::Value {
         "model": task.model,
         "duration_ms": task.metrics.duration_ms,
         "steps": task.metrics.steps,
-        "tool_calls": task.metrics.tool_calls,
+        "tool_calls": count_field(task.assurance.tool_telemetry, task.metrics.tool_calls),
         "tool_names": task.tool_names,
         "redundant_calls": task.metrics.redundant_calls,
-        "unknown_calls": task.metrics.unknown_calls,
+        "unknown_calls": count_field(task.assurance.tool_telemetry, task.metrics.unknown_calls),
+        "attestation_provided": task.assurance.attestation_provided,
+        "driver_mode": task.assurance.driver_mode,
+        "tool_telemetry": task.assurance.tool_telemetry.as_str(),
+        "side_telemetry": task.assurance.side_telemetry.as_str(),
+        "state_telemetry": task.assurance.state_telemetry.as_str(),
+        "transcript_telemetry": task.assurance.transcript_telemetry.as_str(),
+        "cleanup_failed": task.assurance.cleanup_failed,
+        "capture_incomplete": task.assurance.capture_incomplete,
         "tokens_in": task.metrics.tokens_in,
         "tokens_out": task.metrics.tokens_out,
         "images": task.metrics.images,
@@ -107,7 +123,7 @@ pub fn render_html(report: &SuiteReport) -> String {
     );
     body.push_str("<style>body{font-family:sans-serif}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px;text-align:left}</style>");
     body.push_str("</head><body><h1>gcu-eval</h1>");
-    body.push_str("<p>Isolated GROK_HOME is not an environment boundary. One-shot desktop rows stay not_run until a disposable OS container exists.</p>");
+    body.push_str("<p>Isolated GROK_HOME is not an environment boundary. One-shot desktop rows stay not_run until a disposable OS container exists. An OS sandbox, a process lifetime barrier, and client policy pinning are not_implemented and need an external boundary (ADR 0017).</p>");
     push_p(&mut body, "model", &report.model);
     push_p(&mut body, "platform", &report.platform);
     push_p(&mut body, "group", &report.group);
@@ -123,7 +139,7 @@ pub fn render_html(report: &SuiteReport) -> String {
         summary.violations,
         summary.false_success,
     ));
-    body.push_str("<table><tr><th>task</th><th>category</th><th>status</th><th>ms</th><th>tools</th><th>violations</th></tr>");
+    body.push_str("<table><tr><th>task</th><th>category</th><th>status</th><th>driver</th><th>attest</th><th>tool telemetry</th><th>ms</th><th>tools</th><th>violations</th></tr>");
     for task in &report.tasks {
         body.push_str("<tr><td>");
         body.push_str(&escape_html(&task.id));
@@ -131,6 +147,16 @@ pub fn render_html(report: &SuiteReport) -> String {
         body.push_str(&escape_html(&task.category));
         body.push_str("</td><td>");
         body.push_str(&escape_html(task.status.as_str()));
+        body.push_str("</td><td>");
+        body.push_str(&escape_html(&task.assurance.driver_mode));
+        body.push_str("</td><td>");
+        body.push_str(if task.assurance.attestation_provided {
+            "yes"
+        } else {
+            "no"
+        });
+        body.push_str("</td><td>");
+        body.push_str(task.assurance.tool_telemetry.as_str());
         body.push_str("</td><td>");
         body.push_str(&task.metrics.duration_ms.to_string());
         body.push_str("</td><td>");
@@ -171,6 +197,12 @@ fn summary_body(report: &SuiteReport) -> serde_json::Value {
         "platform": report.platform,
         "group": report.group,
         "summary": report.summary,
+        "assurance": {
+            "os_sandbox": "not_implemented",
+            "lifetime_barrier": "not_implemented",
+            "client_policy_pin": "not_implemented",
+            "note": "real mode needs an external isolation boundary (ADR 0017); a process group is not a sandbox"
+        },
         "tasks": report.tasks.iter().map(task_body).collect::<Vec<_>>(),
     })
 }

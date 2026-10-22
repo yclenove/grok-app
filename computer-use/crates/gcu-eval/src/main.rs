@@ -1,24 +1,30 @@
 //! Offline evaluation CLI.
 //!
-//! A one-shot desktop container is required for a real model. This binary never
-//! calls a model API, never reads `~/.grok`, `~/.codex`, `~/.gemini`, or
-//! `~/.claude`, and never logs into an account, IM, or mailbox. Isolated
-//! `GROK_HOME` is not an environment boundary.
+//! A one-shot desktop container is required for a real model. This binary does
+//! not call a model API and does not log into an account, IM, or mailbox. It
+//! refuses seed and temp paths under the operator's config homes, including
+//! `~/.grok`, `~/.codex`, `~/.gemini`, `~/.claude`, and `~/.grok-app`. That
+//! exclusion is not proof the process is evaluation-only. Isolated `GROK_HOME`
+//! is not an environment boundary. An OS sandbox, a lifetime barrier, and
+//! client version pinning are not implemented (ADR 0017).
 
 use anyhow::Context;
 use clap::Parser;
 use gcu_eval::{
-    block_on, bundled_tasks_dir, compare_trials, host_platform, judge_release, load_tasks,
-    parse_approval, parse_release_evidence, run_tasks, trials_from_summary, write_release_report,
-    write_reports, RunConfig, RunStatus, SuiteReport,
+    block_on, builtin_fake_agent_exit, builtin_fake_gcu_exit, bundled_tasks_dir, compare_trials,
+    host_platform, judge_release, load_tasks, parse_approval, parse_release_evidence, run_tasks,
+    trials_from_summary, write_release_report, write_reports, RunConfig, RunStatus, SuiteReport,
+    ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+mod cli_soak;
+
 #[derive(Debug, Parser)]
 #[command(name = "gcu-eval", about = "Run computer-use evaluation tasks offline")]
-struct Cli {
+pub(crate) struct Cli {
     /// Suite name stored on each task. Default `core`.
     #[arg(long, default_value = "core")]
     suite: String,
@@ -28,9 +34,13 @@ struct Cli {
     /// Model id recorded on the report. `fake` does not call a network API.
     #[arg(long, default_value = "fake")]
     model: String,
-    /// Client binary. Absent clients are `not_run`.
+    /// Client binary. Absent clients are `not_run`. Any file that exists needs
+    /// `--attest-disposable-desktop`, including one named `eval-fake-agent`.
     #[arg(long)]
     grok: Option<PathBuf>,
+    /// Run the built-in fake agent. Takes no path. Conflicts with `--grok`.
+    #[arg(long, conflicts_with = "grok")]
+    builtin_fake: bool,
     /// `gcu` binary placed in the isolated MCP config.
     #[arg(long)]
     gcu: Option<PathBuf>,
@@ -76,11 +86,17 @@ struct Cli {
     /// Scripted client behavior. Hidden; tests and the fake agent use it.
     #[arg(long, hide = true)]
     behavior: Option<String>,
-    /// `fake` (default) uses the fake driver and scripted scenes. `real` drives the real `gcu` driver
-    /// against a real fixture app on this desktop with CU auto-approval: run it only on a machine
-    /// where nobody is working and only the fixture and a terminal are open.
+    /// `fake` (default) uses the fake driver. `real` drives the real `gcu` driver and refuses to
+    /// start unless `--attest-disposable-desktop` is set.
     #[arg(long, default_value = "fake")]
     driver: String,
+    /// Attest that this process is on a one-shot isolated desktop with egress control.
+    ///
+    /// Required before a real driver or any external client. A file named
+    /// `eval-fake-agent` is external. An environment variable cannot replace this
+    /// flag. It is not a confinement proof.
+    #[arg(long)]
+    attest_disposable_desktop: bool,
     /// Fixture app started for each task when `--driver real`.
     #[arg(long)]
     fixture: Option<PathBuf>,
@@ -102,11 +118,24 @@ struct RealFlags {
 
 fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
     match cli.driver.as_str() {
-        "fake" => Ok(RealFlags {
-            real_driver: false,
-            fixture_bin: None,
-            auth_seed: None,
-        }),
+        "fake" => {
+            if cli.builtin_fake {
+                if cli.gcu.is_some() && !cli.attest_disposable_desktop {
+                    return Err(Stop::Usage(EXTERNAL_GCU_REFUSED.into()));
+                }
+            } else if let Some(grok) = &cli.grok {
+                // A missing path never starts. Any file that is actually there is external.
+                let present = std::fs::symlink_metadata(grok).is_ok();
+                if present && !cli.attest_disposable_desktop {
+                    return Err(Stop::Usage(ATTEST_REQUIRED.into()));
+                }
+            }
+            Ok(RealFlags {
+                real_driver: false,
+                fixture_bin: None,
+                auth_seed: None,
+            })
+        }
         "real" => {
             if cli.grok.is_none() || cli.gcu.is_none() || cli.fixture.is_none() {
                 return Err(Stop::Usage(
@@ -115,6 +144,9 @@ fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
             }
             if cli.env != "local" {
                 return Err(Stop::Usage("--driver real needs --env local".into()));
+            }
+            if !cli.attest_disposable_desktop {
+                return Err(Stop::Usage(format!("--driver real: {ATTEST_REQUIRED}")));
             }
             if !cli.auto_approve {
                 return Err(Stop::Usage(
@@ -139,6 +171,14 @@ fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
 }
 
 fn main() -> ExitCode {
+    if let Some(flag) = std::env::args().nth(1) {
+        if flag == INTERNAL_FAKE_AGENT {
+            return builtin_fake_agent_exit();
+        }
+        if flag == INTERNAL_FAKE_GCU {
+            return builtin_fake_gcu_exit();
+        }
+    }
     match dispatch() {
         Ok(code) => ExitCode::from(code),
         Err(stop) => {
@@ -175,7 +215,7 @@ fn dispatch() -> Result<u8, Stop> {
         return release_gate(path, cli.out.as_deref());
     }
     if let Some(hours) = cli.soak_hours {
-        return soak(&cli, hours);
+        return cli_soak::soak(&cli, hours);
     }
     let run_local = match cli.env.as_str() {
         "local" => true,
@@ -200,6 +240,9 @@ fn dispatch() -> Result<u8, Stop> {
         real_driver: real.real_driver,
         fixture_bin: real.fixture_bin,
         auth_seed: real.auth_seed,
+        attest_disposable_desktop: cli.attest_disposable_desktop,
+        builtin_fake: cli.builtin_fake,
+        builtin_gcu: cli.builtin_fake && cli.gcu.is_none(),
         grok_bin: cli.grok.clone(),
         gcu_bin: cli.gcu.clone(),
         model: cli.model.clone(),
@@ -296,13 +339,16 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
         let mut tasks = core_tasks()?;
         retain_only(&mut tasks, cli)?;
         let real = real_flags(cli)?;
-        if cli.grok.is_none() || !run_local {
+        if (!cli.builtin_fake && cli.grok.is_none()) || !run_local {
             not_run_report(&tasks, &id)
         } else {
             let cfg = RunConfig {
                 real_driver: real.real_driver,
                 fixture_bin: real.fixture_bin,
                 auth_seed: real.auth_seed,
+                attest_disposable_desktop: cli.attest_disposable_desktop,
+                builtin_fake: cli.builtin_fake,
+                builtin_gcu: cli.builtin_fake && cli.gcu.is_none(),
                 grok_bin: cli.grok.clone(),
                 gcu_bin: cli.gcu.clone(),
                 model: cli.model.clone(),
@@ -397,72 +443,6 @@ fn browser_ab(cli: &Cli) -> Result<u8, Stop> {
     ))
 }
 
-fn soak(cli: &Cli, hours: u64) -> Result<u8, Stop> {
-    use gcu_eval::soak::{
-        not_run_report, parse_report, validate_report, write_report, FileArtifacts, SoakConfig,
-        SoakPlatform, Status,
-    };
-    if cli.suite != "core" {
-        return Err(Stop::Usage("soak requires --suite core".into()));
-    }
-    let platform = match cli.platform.as_str() {
-        "host" => match host_platform() {
-            "macos" => SoakPlatform::Macos,
-            "windows" => SoakPlatform::Windows,
-            _ => SoakPlatform::LinuxX11,
-        },
-        "macos" => SoakPlatform::Macos,
-        "windows" => SoakPlatform::Windows,
-        "linux" | "linux-x11" => SoakPlatform::LinuxX11,
-        _ => return Err(Stop::Usage("unsupported soak platform".into())),
-    };
-    let config = SoakConfig::core(platform, hours);
-    config
-        .duration_ms()
-        .map_err(|error| Stop::Usage(error.to_string()))?;
-    let report = if let Some(path) = &cli.soak_report {
-        let bytes =
-            std::fs::read(path).map_err(|_| Stop::Usage("could not read soak report".into()))?;
-        let report = parse_report(&bytes).map_err(|error| Stop::Run(error.into()))?;
-        if report.config.platform != platform {
-            return Err(Stop::Usage(
-                "soak report platform does not match --platform".into(),
-            ));
-        }
-        report
-    } else {
-        not_run_report(
-            config,
-            "matching one-shot desktop soak adapters and native platform artifact unavailable",
-        )
-    };
-    let root = cli
-        .soak_report
-        .as_deref()
-        .and_then(std::path::Path::parent)
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let checked = validate_report(&report, hours, &FileArtifacts::new(root))
-        .map_err(|error| Stop::Run(error.into()))?;
-    println!(
-        "soak {} resource_gate={} tasks={} crash_restarts={} stop_restarts={}",
-        checked.status.as_str(),
-        checked.resource_gate.as_str(),
-        checked.counts.completed_tasks,
-        checked.counts.crash_restarts,
-        checked.counts.stop_restarts
-    );
-    for issue in &checked.issues {
-        println!("fail {issue}");
-    }
-    for reason in &checked.not_run {
-        println!("not_run {reason}");
-    }
-    if let Some(dir) = &cli.out {
-        write_report(dir, &report).map_err(|error| Stop::Run(error.into()))?;
-    }
-    Ok(u8::from(checked.status != Status::Pass))
-}
-
 fn release_gate(path: &std::path::Path, out: Option<&std::path::Path>) -> Result<u8, Stop> {
     let bytes =
         std::fs::read(path).map_err(|err| Stop::Usage(format!("read release gate: {err}")))?;
@@ -545,7 +525,7 @@ const fn eval_build() -> bool {
     cfg!(all(feature = "eval-autoapprove", debug_assertions))
 }
 
-enum Stop {
+pub(crate) enum Stop {
     Approval(String),
     Usage(String),
     Run(anyhow::Error),

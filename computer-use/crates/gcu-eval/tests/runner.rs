@@ -4,9 +4,9 @@
 use gcu_eval::{
     block_on, bundled_tasks_dir, child_env_keys, compare_trials, escape_html, host_platform, judge,
     load_tasks, parse_approval, path_under_configs, percentile, prove_oracle, render_html,
-    run_tasks, summarize, user_config_dirs, write_reports, ApprovalMode, DesktopProvider,
-    EffectCheck, EnvProvider, Provision, RunConfig, RunStatus, SuiteReport, Task, TaskMetrics,
-    TaskOutcome, Trial, World, DESKTOP_NOT_RUN,
+    run_tasks, summarize, user_config_dirs, write_reports, ApprovalMode, Assurance,
+    DesktopProvider, EffectCheck, EnvProvider, Provision, RunConfig, RunStatus, SuiteReport, Task,
+    TaskMetrics, TaskOutcome, Trial, World, DESKTOP_NOT_RUN,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,7 +54,9 @@ fn eval_bin() -> PathBuf {
 
 fn cfg_for(dir: &Path, behavior: &str) -> RunConfig {
     RunConfig {
-        grok_bin: Some(agent()),
+        builtin_fake: true,
+        builtin_fake_bin: Some(agent()),
+        builtin_gcu: true,
         gcu_bin: Some(gcu()),
         platform: host_platform().into(),
         behavior: Some(behavior.into()),
@@ -381,6 +383,11 @@ fn run_unknown_and_disabled_tools_are_counted() {
     let unknown = execute(named("browser-page-01"), cfg_for(&dir, "unknown"));
     assert_eq!(unknown.status, RunStatus::Pass, "{:?}", unknown.violations);
     assert!(unknown.metrics.unknown_calls >= 2);
+    let rendered = format!("{:?} {:?}", unknown.tool_names, unknown.gcu_invocations);
+    assert!(
+        !rendered.contains("SENSITIVEVALUE"),
+        "unknown tool text was copied: {rendered}"
+    );
     let disabled = execute(named("browser-page-01"), cfg_for(&dir, "disabled"));
     assert_eq!(
         disabled.status,
@@ -411,7 +418,7 @@ fn run_invalid_oracle_does_not_launch_client() {
 }
 
 #[test]
-fn run_auto_approve_sets_session_or_sensitive_deny() {
+fn run_auto_approve_sets_session_or_blanket_deny() {
     let dir = scratch("appr");
     let mut allow = cfg_for(&dir, "success");
     allow.auto_approve = true;
@@ -422,9 +429,9 @@ fn run_auto_approve_sets_session_or_sensitive_deny() {
     deny.probe = Some(dir.join("probe-red.json"));
     let red = execute(named("redteam-side-01"), deny.clone());
     assert_eq!(red.status, RunStatus::Pass, "{}", red.reason);
-    assert_eq!(red.approval_mode, ApprovalMode::DenySensitive.as_str());
+    assert_eq!(red.approval_mode, ApprovalMode::Deny.as_str());
     let probe = std::fs::read_to_string(deny.probe.unwrap()).unwrap();
-    assert_eq!(json_string(&probe, "approval"), "auto-deny-sensitive");
+    assert_eq!(json_string(&probe, "approval"), "auto-deny");
     assert!(json_strings(&probe, "env_keys")
         .iter()
         .any(|key| key == "GCU_APPROVAL"));
@@ -541,6 +548,7 @@ fn metrics_percentile_and_sign_test_match_the_plan() {
             approval_mode: String::new(),
             home: String::new(),
             grok_home: String::new(),
+            assurance: Assurance::default(),
         });
     }
     let template = rows[0].clone();
@@ -579,6 +587,7 @@ fn html_escapes_markup_and_has_no_external_resources() {
         approval_mode: String::new(),
         home: String::new(),
         grok_home: String::new(),
+        assurance: Assurance::default(),
     };
     let report = SuiteReport {
         model: row.model.clone(),
@@ -613,12 +622,13 @@ fn parse_approval_rejects_release_and_accepts_eval_modes() {
             .as_str(),
         "auto-allow-session"
     );
+    assert!(parse_approval(Some("auto-deny-sensitive"), true).is_err());
     assert_eq!(
-        parse_approval(Some("auto-deny-sensitive"), true)
+        parse_approval(Some("auto-deny"), true)
             .unwrap()
             .unwrap()
             .as_str(),
-        "auto-deny-sensitive"
+        "auto-deny"
     );
     assert!(parse_approval(Some(""), true).is_err());
     assert!(parse_approval(Some("auto-other"), true).is_err());
@@ -627,7 +637,7 @@ fn parse_approval_rejects_release_and_accepts_eval_modes() {
 #[test]
 fn cli_approval_values_exit_2_unless_eval_build() {
     let eval = cfg!(all(feature = "eval-autoapprove", debug_assertions));
-    for value in ["auto-allow-session", "auto-deny-sensitive"] {
+    for value in ["auto-allow-session", "auto-deny"] {
         let output = Command::new(eval_bin())
             .arg("--suite")
             .arg("core")
@@ -642,6 +652,17 @@ fn cli_approval_values_exit_2_unless_eval_build() {
             assert!(stderr.contains("forbidden"), "{stderr}");
         }
     }
+    let rejected = Command::new(eval_bin())
+        .arg("--suite")
+        .arg("core")
+        .env("GCU_APPROVAL", "auto-deny-sensitive")
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("Unknown")
+            || String::from_utf8_lossy(&rejected.stderr).contains("forbidden")
+    );
     let output = Command::new(eval_bin())
         .args(["--suite", "core", "--auto-approve"])
         .env_remove("GCU_APPROVAL")
@@ -693,11 +714,8 @@ fn cli_fake_suite_exits_0_and_compare_prints_significance() {
             host_platform(),
             "--env",
             "local",
-            "--grok",
+            "--builtin-fake",
         ])
-        .arg(agent())
-        .arg("--gcu")
-        .arg(gcu())
         .arg("--out")
         .arg(dir.join("out"))
         .env_remove("GCU_APPROVAL")
@@ -731,11 +749,8 @@ fn cli_fake_suite_exits_0_and_compare_prints_significance() {
             host_platform(),
             "--behavior",
             "fail",
-            "--grok",
+            "--builtin-fake",
         ])
-        .arg(agent())
-        .arg("--gcu")
-        .arg(gcu())
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
@@ -752,11 +767,8 @@ fn cli_fake_suite_exits_0_and_compare_prints_significance() {
             "--allow-fail",
             "--behavior",
             "fail",
-            "--grok",
+            "--builtin-fake",
         ])
-        .arg(agent())
-        .arg("--gcu")
-        .arg(gcu())
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
@@ -775,12 +787,14 @@ fn cli_fake_suite_exits_0_and_compare_prints_significance() {
     )
     .unwrap();
     let invalid = Command::new(eval_bin())
-        .args(["--suite", "core", "--allow-fail", "--tasks"])
+        .args([
+            "--suite",
+            "core",
+            "--allow-fail",
+            "--builtin-fake",
+            "--tasks",
+        ])
         .arg(&task_dir)
-        .arg("--grok")
-        .arg(agent())
-        .arg("--gcu")
-        .arg(gcu())
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
@@ -843,6 +857,7 @@ fn real_driver_runs_a_task_with_a_started_fixture_and_cleans_up() {
     std::fs::write(seed.join("auth.json"), b"opaque").unwrap();
     let cfg = RunConfig {
         real_driver: true,
+        attest_disposable_desktop: true,
         fixture_bin: Some(fixture_script(&dir)),
         auth_seed: Some(seed),
         ..cfg_for(&dir, "pass")
@@ -862,20 +877,38 @@ fn real_driver_without_a_fixture_or_gcu_is_not_run_not_a_silent_fake() {
     let dir = scratch("real-driver-missing");
     let no_fixture = RunConfig {
         real_driver: true,
+        attest_disposable_desktop: true,
         ..cfg_for(&dir, "pass")
     };
     let outcome = execute(named("native-form-01"), no_fixture);
     assert_eq!(outcome.status, RunStatus::NotRun);
-    assert!(outcome.reason.contains("fixture"), "{}", outcome.reason);
+    if cfg!(windows) {
+        assert!(
+            outcome.reason.contains("windows real mode"),
+            "{}",
+            outcome.reason
+        );
+    } else {
+        assert!(outcome.reason.contains("fixture"), "{}", outcome.reason);
+    }
     let no_gcu = RunConfig {
         real_driver: true,
+        attest_disposable_desktop: true,
         gcu_bin: None,
         fixture_bin: Some(dir.join("fixture.sh")),
         ..cfg_for(&dir, "pass")
     };
     let outcome = execute(named("native-form-01"), no_gcu);
     assert_eq!(outcome.status, RunStatus::NotRun);
-    assert!(outcome.reason.contains("gcu"), "{}", outcome.reason);
+    if cfg!(windows) {
+        assert!(
+            outcome.reason.contains("windows real mode"),
+            "{}",
+            outcome.reason
+        );
+    } else {
+        assert!(outcome.reason.contains("gcu"), "{}", outcome.reason);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1,20 +1,347 @@
 //! Temporary directory helpers for the local evaluation provider.
+//!
+//! The cleanup guard is installed before any directory is created. It deletes
+//! a tree only after this process exclusively created that tree. A pre-existing
+//! path, including a symlink, is refused and left in place.
 
+use crate::runner::{Environment, RunStatus};
 use crate::Error;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) struct Rm(pub(crate) PathBuf);
-impl Drop for Rm {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+/// Deletes `root` on drop only after [`Cleanup::arm`].
+#[derive(Debug)]
+pub(crate) struct Cleanup {
+    root: PathBuf,
+    armed: bool,
+}
+
+impl Cleanup {
+    /// Does not delete `root`. Arm it only after exclusive creation succeeds.
+    pub(crate) fn standby(root: PathBuf) -> Self {
+        Self { root, armed: false }
+    }
+
+    pub(crate) fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Remove an armed root. Failure stays an error for the caller to report.
+    pub(crate) fn remove(&mut self) -> Result<(), Error> {
+        if !self.armed {
+            return Err(Error::msg("cleanup_failed"));
+        }
+        #[cfg(debug_assertions)]
+        if fault_inject::take_removal() {
+            // Leave the tree. Drop must not erase the failure the report records.
+            self.armed = false;
+            return Err(Error::msg("cleanup_failed"));
+        }
+        remove_root(&self.root)?;
+        if self.root.exists() {
+            return Err(Error::msg("cleanup_failed"));
+        }
+        self.armed = false;
+        Ok(())
     }
 }
 
-pub(crate) fn unique_root() -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("gcu-ev-{}-{n}", std::process::id()))
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+/// Why [`begin_env`] did not return a tree.
+#[derive(Debug)]
+pub(crate) struct BeginFault {
+    /// Safe-to-print reason.
+    pub message: String,
+    /// Root left on disk when populate failed and cleanup also failed.
+    pub leftover: Option<PathBuf>,
+}
+
+impl BeginFault {
+    fn msg(text: impl Into<String>) -> Self {
+        Self {
+            message: text.into(),
+            leftover: None,
+        }
+    }
+}
+
+impl From<BeginFault> for Error {
+    fn from(fault: BeginFault) -> Self {
+        Error::msg(fault.message)
+    }
+}
+
+impl From<Error> for BeginFault {
+    fn from(err: Error) -> Self {
+        Self::msg(err.to_string())
+    }
+}
+
+#[cfg(debug_assertions)]
+mod fault_inject {
+    use std::cell::Cell;
+
+    // Thread-local so a parallel test cannot consume another test's fault.
+    // `begin_env` runs on the caller's thread under the current-thread runtime.
+    thread_local! {
+        static FAIL_REMOVAL: Cell<bool> = const { Cell::new(false) };
+        static FAIL_POPULATE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn fail_next_removal() {
+        FAIL_REMOVAL.with(|flag| flag.set(true));
+    }
+
+    pub(crate) fn fail_next_populate() {
+        FAIL_POPULATE.with(|flag| flag.set(true));
+    }
+
+    pub(crate) fn take_removal() -> bool {
+        FAIL_REMOVAL.with(|flag| flag.replace(false))
+    }
+
+    pub(crate) fn take_populate() -> bool {
+        FAIL_POPULATE.with(|flag| flag.replace(false))
+    }
+}
+
+/// The next cleanup of an armed root fails and leaves the tree in place.
+///
+/// Debug builds only. The flag is thread-local and consumed once. Drop will
+/// not delete that tree.
+#[cfg(debug_assertions)]
+pub fn testing_fail_next_removal() {
+    fault_inject::fail_next_removal();
+}
+
+/// The next `populate` fails. Pair with [`testing_fail_next_removal`] to keep the root.
+#[cfg(debug_assertions)]
+pub fn testing_fail_next_populate() {
+    fault_inject::fail_next_populate();
+}
+
+/// Downgrade a finished row when deleting its tree failed.
+pub(crate) fn apply_cleanup_failure(status: &mut RunStatus, reason: &mut String) {
+    if matches!(
+        *status,
+        RunStatus::Pass | RunStatus::Partial | RunStatus::NotRun
+    ) {
+        *status = RunStatus::Fail;
+    }
+    if reason.contains("cleanup_failed") {
+        return;
+    }
+    if reason.is_empty() {
+        reason.push_str("cleanup_failed");
+    } else {
+        *reason = format!("cleanup_failed; {reason}");
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HeldEnv {
+    pub env: Environment,
+    guard: Cleanup,
+}
+
+impl HeldEnv {
+    pub(crate) fn disarm(&mut self) {
+        self.guard.disarm();
+    }
+
+    pub(crate) fn cleanup(&mut self) -> Result<(), Error> {
+        self.guard.remove()
+    }
+}
+
+/// Create a fresh tree under the process temp directory.
+pub(crate) fn begin_env() -> Result<HeldEnv, BeginFault> {
+    begin_env_under(&std::env::temp_dir())
+}
+
+/// Create a fresh tree under `parent`.
+///
+/// On Unix the root is created with mode `0700`. A parent that others can write,
+/// and that is not sticky, is refused. Windows real mode is refused by the
+/// runner; this function does not pretend a Windows directory is owner-only.
+pub(crate) fn begin_env_under(parent: &Path) -> Result<HeldEnv, BeginFault> {
+    reject_unsafe_parent(parent)?;
+    let root = fresh_root_in(parent)?;
+    if crate::access::canonical_under_configs(&root, &crate::access::user_config_dirs())? {
+        return Err(BeginFault::msg(
+            "refusing to provision inside a user config directory",
+        ));
+    }
+    let mut guard = Cleanup::standby(root.clone());
+    reject_existing(&root)?;
+    create_private_dir(&root)?;
+    guard.arm();
+    if let Err(err) = populate(&root) {
+        if guard.remove().is_err() {
+            return Err(BeginFault {
+                message: format!("cleanup_failed; {err}"),
+                leftover: Some(root),
+            });
+        }
+        return Err(BeginFault::msg(err.to_string()));
+    }
+    Ok(HeldEnv {
+        env: layout(&root),
+        guard,
+    })
+}
+
+fn fresh_root_in(parent: &Path) -> Result<PathBuf, Error> {
+    let mut bytes = [0u8; 16];
+    random_bytes(&mut bytes)?;
+    let mut name = String::from("gcu-ev-");
+    for byte in bytes {
+        name.push(hex(byte >> 4));
+        name.push(hex(byte & 0x0f));
+    }
+    Ok(parent.join(name))
+}
+
+fn reject_unsafe_parent(parent: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(parent)
+            .map_err(|err| Error::msg(format!("temp parent: {err}")))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(Error::msg("temp parent is not a real directory"));
+        }
+        let mode = meta.mode();
+        let writable_by_others = mode & 0o022 != 0;
+        let sticky = mode & 0o1000 != 0;
+        if writable_by_others && !sticky {
+            return Err(Error::msg(
+                "refusing a temp parent that others can write and that is not sticky",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
+}
+
+fn create_private_dir(path: &Path) -> Result<(), Error> {
+    reject_existing(path).map_err(|_| Error::msg("refusing a pre-existing startup path"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::msg("refusing a pre-existing startup path")
+                } else {
+                    Error::msg(format!("mkdir: {err}"))
+                }
+            })?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::msg("refusing a pre-existing startup path")
+            } else {
+                Error::msg(format!("mkdir: {err}"))
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn hex(nibble: u8) -> char {
+    char::from(b"0123456789abcdef"[usize::from(nibble)])
+}
+
+#[cfg(unix)]
+fn random_bytes(buf: &mut [u8]) -> Result<(), Error> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open("/dev/urandom").map_err(|_| Error::msg("could not read randomness"))?;
+    file.read_exact(buf)
+        .map_err(|_| Error::msg("could not read randomness"))
+}
+
+#[cfg(windows)]
+fn random_bytes(buf: &mut [u8]) -> Result<(), Error> {
+    crate::ffi::random_bytes(buf)
+}
+
+fn reject_existing(path: &Path) -> Result<(), Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(Error::msg("refusing a symlink temp root"))
+        }
+        Ok(_) => Err(Error::msg("temp root already exists")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(Error::msg(format!("temp root: {err}"))),
+    }
+}
+
+fn layout(root: &Path) -> Environment {
+    Environment {
+        home: root.join("home"),
+        grok_home: root.join("grok"),
+        work: root.join("work"),
+        state_path: root.join("state.json"),
+        shim_dir: root.join("shims"),
+        side_log: root.join("side.log"),
+        tool_log: root.join("tools.log"),
+        transcript: root.join("grok").join("transcript.json"),
+        root: root.to_path_buf(),
+    }
+}
+
+fn populate(root: &Path) -> Result<(), Error> {
+    #[cfg(debug_assertions)]
+    if fault_inject::take_populate() {
+        let _ = std::fs::write(root.join("leftover"), b"x");
+        return Err(Error::msg("populate_failed"));
+    }
+    let env = layout(root);
+    for dir in [&env.home, &env.grok_home, &env.work, &env.shim_dir] {
+        make_dir(dir)?;
+    }
+    write_new(&env.state_path, b"{}\n")?;
+    // Tool and side logs stay absent until the fake backend writes a handshake.
+    // A missing or empty file is unknown, not a measured zero.
+    write_shims(&env.shim_dir)?;
+    Ok(())
+}
+
+fn make_dir(path: &Path) -> Result<(), Error> {
+    create_private_dir(path)
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(Error::msg("refusing a pre-existing startup path"));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| Error::msg("refusing a pre-existing startup path"))?;
+    file.write_all(bytes)
+        .map_err(|err| Error::msg(format!("create: {err}")))
 }
 
 pub(crate) fn remove_root(path: &Path) -> Result<bool, Error> {
@@ -22,20 +349,6 @@ pub(crate) fn remove_root(path: &Path) -> Result<bool, Error> {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(err) => Err(Error::msg(format!("destroy: {err}"))),
-    }
-}
-
-pub(crate) fn lock_dir(path: &Path) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|err| Error::msg(format!("chmod: {err}")))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
     }
 }
 
@@ -52,11 +365,10 @@ pub(crate) fn write_shim(dir: &Path, name: &str) -> Result<(), Error> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join(name);
-        let body = "#!/bin/sh\necho \"process $(basename \"$0\")\" >> \"$GCU_EVAL_SIDE_LOG\"\necho \"network $*\" >> \"$GCU_EVAL_SIDE_LOG\"\nexit 1\n";
+        let body = "#!/bin/sh\nname=${0##*/}\necho \"process $name\" >> \"$GCU_EVAL_SIDE_LOG\"\necho \"network argc=$#\" >> \"$GCU_EVAL_SIDE_LOG\"\nexit 1\n";
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
             .write(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o755)
             .open(&path)
             .map_err(|err| Error::msg(format!("shim: {err}")))?;
@@ -67,28 +379,22 @@ pub(crate) fn write_shim(dir: &Path, name: &str) -> Result<(), Error> {
     #[cfg(not(unix))]
     {
         let path = dir.join(format!("{name}.cmd"));
-        let body = "@echo off\r\necho process %~n0>>\"%GCU_EVAL_SIDE_LOG%\"\r\necho network %*>>\"%GCU_EVAL_SIDE_LOG%\"\r\nexit /b 1\r\n";
-        std::fs::write(path, body).map_err(|err| Error::msg(format!("shim: {err}")))
+        let body = "@echo off\r\necho process %~n0>>\"%GCU_EVAL_SIDE_LOG%\"\r\necho network argc>>\"%GCU_EVAL_SIDE_LOG%\"\r\nexit /b 1\r\n";
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|err| Error::msg(format!("shim: {err}")))?;
+        file.write_all(body.as_bytes())
+            .map_err(|err| Error::msg(format!("shim: {err}")))
     }
 }
 
-/// Copy the evaluation login into a task's temporary `GROK_HOME`. The file is never read here and the
-/// copy is deleted with the task directory. Only `auth.json` is taken from `seed`.
-pub(crate) fn seed_auth(seed: &Path, grok_home: &Path) -> Result<(), Error> {
-    let from = seed.join("auth.json");
-    if !from.is_file() {
-        return Err(Error::msg("auth seed has no auth.json"));
-    }
-    let to = grok_home.join("auth.json");
-    std::fs::copy(&from, &to).map_err(|_| Error::msg("could not copy the auth seed"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| Error::msg("could not restrict the auth seed copy"))?;
-    }
-    Ok(())
-}
+#[path = "prep_seed.rs"]
+mod seed;
+pub(crate) use seed::seed_auth;
+#[cfg(all(test, unix))]
+pub(crate) use seed::seed_auth_in;
 
 /// A fixture app started for one task and stopped when this value is dropped.
 pub(crate) struct Fixture(std::process::Child);
@@ -161,109 +467,5 @@ pub(crate) fn system_path() -> &'static str {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
-    use crate::runner::Environment;
-
-    fn scratch(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("gcu-prep-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn environment(root: &Path) -> Environment {
-        let make = |name: &str| {
-            let dir = root.join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            dir
-        };
-        Environment {
-            home: make("home"),
-            grok_home: make("grok"),
-            work: make("work"),
-            shim_dir: make("shims"),
-            state_path: root.join("state.json"),
-            side_log: root.join("side.log"),
-            tool_log: root.join("tools.log"),
-            transcript: root.join("grok").join("transcript.json"),
-            root: root.to_path_buf(),
-        }
-    }
-
-    #[test]
-    fn auth_seed_copies_only_the_login_file_with_owner_only_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let seed = scratch("seed");
-        std::fs::write(seed.join("auth.json"), b"opaque").unwrap();
-        std::fs::write(seed.join("config.toml"), b"must not travel").unwrap();
-        std::fs::create_dir_all(seed.join("sessions")).unwrap();
-        let home = scratch("home");
-        seed_auth(&seed, &home).unwrap();
-        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), b"opaque");
-        let mode = std::fs::metadata(home.join("auth.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
-        assert!(!home.join("config.toml").exists());
-        assert!(!home.join("sessions").exists());
-        let _ = std::fs::remove_dir_all(&seed);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn auth_seed_without_a_login_file_is_refused() {
-        let seed = scratch("noseed");
-        let home = scratch("nohome");
-        assert!(seed_auth(&seed, &home).is_err());
-        let _ = std::fs::remove_dir_all(&seed);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn fixture_is_started_with_the_state_path_and_stopped_on_drop() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = scratch("fixture");
-        let env = environment(&root);
-        let script = root.join("fixture.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf '{\"counter\":0,\"pid\":%s}' \"$$\" > \"$GCU_FIXTURE_STATE\"\nsleep 300\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let fixture = Fixture::start(&script, &env).unwrap();
-        let state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&env.state_path).unwrap()).unwrap();
-        let pid = state["pid"].as_u64().unwrap().to_string();
-        let alive = |pid: &str| {
-            std::process::Command::new("kill")
-                .args(["-0", pid])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        assert!(alive(&pid), "fixture runs while the task runs");
-        drop(fixture);
-        assert!(!alive(&pid), "fixture is stopped with the task");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_fixture_that_never_writes_state_fails_instead_of_hanging_the_run() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = scratch("silent");
-        let env = environment(&root);
-        let script = root.join("silent.sh");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // The fixture exits at once and never writes state: fail fast, do not wait out the deadline.
-        let started = std::time::Instant::now();
-        let result = Fixture::start(&script, &env);
-        assert!(result.is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-}
+#[path = "prep_tests.rs"]
+mod tests;
