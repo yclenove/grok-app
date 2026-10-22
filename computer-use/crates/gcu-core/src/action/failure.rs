@@ -1,6 +1,7 @@
 use super::{
     lock,
     router::{error, outcome, ActionRouter},
+    wire::CallError,
     ActionState, ToolOutcome,
 };
 use crate::{
@@ -17,9 +18,16 @@ impl ActionRouter {
         &self,
         session: &Session,
         action: ActionResult,
-        code: ErrorCode,
+        failure: impl Into<CallError>,
         win: &WindowRef,
     ) -> ToolOutcome {
+        let failure = failure.into();
+        let code = match failure {
+            CallError::ScopeDenied => {
+                return outcome(action, Some(failure.tool_error()), None);
+            }
+            CallError::Code(code) => code,
+        };
         let refresh = matches!(
             code,
             ErrorCode::StaleElement

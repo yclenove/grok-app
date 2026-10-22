@@ -21,6 +21,9 @@ impl ActionRouter {
     /// Existing sessions keep using L0 until a share is bound on the hub.
     #[must_use]
     pub fn with_browser(mut self, hub: Arc<Hub>) -> Self {
+        if self.fixture_scoped {
+            return self;
+        }
         self.browser = Some(hub);
         self
     }
@@ -33,6 +36,9 @@ pub(crate) async fn dispatch(
     request: &DriverAction,
     raw: &RawTree,
 ) -> driver::Result<Delivery> {
+    if router.fixture_scoped {
+        return driver_perform(router, session, cancel, request).await;
+    }
     let Some(hub) = router.browser.clone() else {
         return driver_perform(router, session, cancel, request).await;
     };

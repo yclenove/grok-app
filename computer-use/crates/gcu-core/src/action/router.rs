@@ -1,7 +1,9 @@
 //! One policy-bound attempt per tool call. No retry of uncertain or targeted input.
 use super::{
     gate::{self, Gate},
-    lock, route, ActionState, ToolCall, ToolOutcome,
+    lock, route,
+    wire::{self, CallError},
+    ActionState, ToolCall, ToolOutcome,
 };
 use crate::{
     driver::{self, AppQuery, Cancel, Driver, DriverError, TreeOpts, WindowRef},
@@ -15,7 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use gcu_host_api::{ApprovalProvider, CuEvent, EventSink, PolicyStore, SessionCtx};
 use gcu_protocol::{
-    result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason},
+    result::Outcome,
     tools::{ComputerBatchParams, GetAppStateParams},
     ErrorCode, ToolError,
 };
@@ -44,6 +46,7 @@ pub struct ActionRouter {
     pub(crate) auto_capture: AutoCapturePolicy,
     pub(crate) wait_engine: crate::wait::WaitEngine,
     pub(crate) browser: Option<std::sync::Arc<crate::browser::Hub>>,
+    pub(crate) fixture_scoped: bool,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -72,6 +75,7 @@ impl ActionRouter {
             auto_capture: AutoCapturePolicy::default(),
             wait_engine: crate::wait::WaitEngine::default(),
             browser: None,
+            fixture_scoped: false,
         }
     }
     /// Inject settling configuration and monotonic time before sharing the router.
@@ -130,7 +134,7 @@ impl ActionRouter {
         let win = self
             .resolve(session, &params.app, params.window.as_deref())
             .await
-            .map_err(|code| Box::new(error(code)))?;
+            .map_err(|err| Box::new(err.tool_error()))?;
         let _window = self
             .locks
             .acquire(&window_lock_key(&win))
@@ -145,7 +149,7 @@ impl ActionRouter {
         let fresh = self
             .read_with_mode(session, &win, params.include_screenshot, &opts)
             .await
-            .map_err(|code| Box::new(error(code)))?;
+            .map_err(|err| Box::new(err.tool_error()))?;
         let mut intent = ActionIntent::new(Tool::GetAppState);
         intent.parameters = fresh.signature.clone();
         intent.reason = params.reason.map(gcu_host_api::ModelReason::new);
@@ -165,7 +169,7 @@ impl ActionRouter {
                 self.driver.resolve_app(&AppQuery(win.app.info.id.clone())),
             )
             .await
-            .map_err(|e| Box::new(error(e.error_code())))?;
+            .map_err(|e| Box::new(CallError::from_driver(&e).tool_error()))?;
         if current != win.app {
             return Err(Box::new(error(ErrorCode::StaleElement)));
         }
@@ -174,7 +178,7 @@ impl ActionRouter {
         let fresh = self
             .read_with_mode(session, &win, params.include_screenshot, &opts)
             .await
-            .map_err(|code| Box::new(error(code)))?;
+            .map_err(|err| Box::new(err.tool_error()))?;
         let attach = self.observation_attachment(
             session,
             &fresh,
@@ -293,7 +297,7 @@ impl ActionRouter {
             .await
         {
             Ok(win) => win,
-            Err(code) => return outcome(action, Some(error(code)), None),
+            Err(err) => return outcome(action, Some(err.tool_error()), None),
         };
         let _window = match self.locks.acquire(&window_lock_key(&win)).await {
             Ok(g) => g,
@@ -308,7 +312,9 @@ impl ActionRouter {
             .native(session, &cancel, false, self.driver.window_geometry(&win))
             .await
         {
-            return self.failure(session, action, e.error_code(), &win).await;
+            return self
+                .failure(session, action, CallError::from_driver(&e), &win)
+                .await;
         }
         let mut gate = match gate::prepare(session, call, &key) {
             Ok(gate) => gate,
@@ -382,15 +388,15 @@ impl ActionRouter {
                         .notes
                         .push("Execution is uncertain; do not automatically retry.".into());
                 }
-                let code = if session.is_closed() {
-                    ErrorCode::ApprovalDenied
+                let failure = if session.is_closed() {
+                    CallError::Code(ErrorCode::ApprovalDenied)
                 } else {
-                    e.error_code()
+                    CallError::from_driver(&e)
                 };
-                return self.failure(session, action, code, &win).await;
+                return self.failure(session, action, failure, &win).await;
             }
             Ok(delivery) => {
-                action.delivery = wire_delivery(delivery);
+                action.delivery = wire::wire_delivery(delivery);
                 action.outcome = Outcome::Done;
             }
         }
@@ -485,7 +491,7 @@ impl ActionRouter {
         session: &Session,
         app: &str,
         window: Option<&str>,
-    ) -> Result<WindowRef, ErrorCode> {
+    ) -> Result<WindowRef, CallError> {
         let cancel = Cancel::default();
         let app = self
             .native(
@@ -495,13 +501,13 @@ impl ActionRouter {
                 self.driver.resolve_app(&AppQuery::from(app)),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         let id = if let Some(id) = window {
             id.into()
         } else {
             self.native(session, &cancel, false, self.driver.key_window(&app))
                 .await
-                .map_err(|e| e.error_code())?
+                .map_err(|e| CallError::from_driver(&e))?
                 .id
         };
         Ok(WindowRef { app, id })
@@ -550,51 +556,8 @@ impl Drop for CancelOnDrop {
         }
     }
 }
-pub(crate) fn error(code: ErrorCode) -> ToolError {
-    ToolError {
-        code,
-        message: code.as_str().replace('_', " "),
-        hint: "Use the attached state; obtain fresh user authorization when required.".into(),
-        retryable: false,
-        state: None,
-    }
-}
-pub(crate) fn result(call: &ToolCall) -> ActionResult {
-    ActionResult {
-        tool: route::tool(&call.action),
-        target: None,
-        delivery: Delivery::None,
-        outcome: Outcome::Refused,
-        effect: Effect::NotChecked,
-        verify: None,
-        duration_ms: 0,
-        settle: Settle {
-            ms: 0,
-            reason: SettleReason::Budget,
-        },
-        notes: Vec::new(),
-    }
-}
-pub(crate) fn outcome(
-    action: ActionResult,
-    error: Option<ToolError>,
-    state: Option<ActionState>,
-) -> ToolOutcome {
-    ToolOutcome {
-        action,
-        error,
-        state,
-        windows: Vec::new(),
-    }
-}
+pub(crate) use super::wire::{error, outcome, result};
+
 pub(crate) fn window_lock_key(win: &WindowRef) -> String {
     format!("{}:{}:{}", win.app.info.id.len(), win.app.info.id, win.id)
-}
-fn wire_delivery(d: driver::Delivery) -> Delivery {
-    match d {
-        driver::Delivery::Accessibility => Delivery::Accessibility,
-        driver::Delivery::TargetedEvent => Delivery::TargetedEvent,
-        driver::Delivery::Foreground => Delivery::Foreground,
-        driver::Delivery::Clipboard => Delivery::Clipboard,
-    }
 }

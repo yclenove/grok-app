@@ -16,6 +16,8 @@ pub mod observe;
 pub mod policy;
 /// Bounded text and redacted structured observations.
 pub mod render;
+/// Evaluation fixture scope and the closed driver wrapper.
+pub mod scope;
 /// Session lifecycle, serial calls, window locks, and the stop latch.
 pub mod session;
 /// Event/poll settling with injectable time, bounded cancellation and effect evidence.

@@ -277,6 +277,7 @@ enum ErrorDef {
     },
     SecureDesktop,
     WindowMinimized,
+    ScopeDenied,
     Native {
         message: String,
         maybe_executed: bool,

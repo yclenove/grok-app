@@ -1,3 +1,4 @@
+use super::wire::CallError;
 use super::{gate::Gate, observe::Fresh, router::ActionRouter, ToolCall};
 use crate::{
     driver::{AppQuery, Cancel},
@@ -232,7 +233,7 @@ impl ActionRouter {
         fresh: &Fresh,
         intent: &ActionIntent,
         approved: &Approved,
-    ) -> Result<Fresh, ErrorCode> {
+    ) -> Result<Fresh, CallError> {
         self.check_boundary(session).await?;
         let cancel = Cancel::default();
         let app = self
@@ -244,7 +245,7 @@ impl ActionRouter {
                     .resolve_app(&AppQuery(fresh.win.app.info.id.clone())),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         let win = crate::driver::WindowRef {
             app,
             id: fresh.win.id.clone(),
@@ -254,7 +255,7 @@ impl ActionRouter {
             .await?;
         super::gate::check(gate, &current)?;
         if self.policy.load() != approved.config {
-            return Err(ErrorCode::StaleElement);
+            return Err(CallError::Code(ErrorCode::StaleElement));
         }
         if super::lock(&session.actions)
             .snapshots
@@ -262,7 +263,7 @@ impl ActionRouter {
             .map(|s| s.id())
             != gate.snapshot_id
         {
-            return Err(ErrorCode::StaleElement);
+            return Err(CallError::Code(ErrorCode::StaleElement));
         }
         let mut current_intent = intent.clone();
         self.bind_parameters(&mut current_intent, call, &current, gate)?;
@@ -287,12 +288,12 @@ impl ActionRouter {
             approved,
         ) {
             PolicyDecision::Allow { .. } => Ok(current),
-            PolicyDecision::Refuse(code, _) => Err(code),
+            PolicyDecision::Refuse(code, _) => Err(CallError::Code(code)),
             PolicyDecision::Handoff(reason) => {
                 self.take_over(session, &app, reason).await?;
-                Err(ErrorCode::HandoffRequired)
+                Err(CallError::Code(ErrorCode::HandoffRequired))
             }
-            _ => Err(ErrorCode::ApprovalDenied),
+            _ => Err(CallError::Code(ErrorCode::ApprovalDenied)),
         }
     }
 }

@@ -4,7 +4,11 @@ use crate::{
     server::{Cleanup, Server},
     Host, ServeError, ServerConfig,
 };
-use gcu_core::{driver::Driver, session::Session};
+use gcu_core::{
+    driver::Driver,
+    scope::{InstanceEvidence, ScopeLease},
+    session::Session,
+};
 use rmcp::model::CallToolResult;
 use serde_json::Value;
 use std::sync::Arc;
@@ -39,6 +43,26 @@ impl Connection {
     ) -> Result<Self, ServeError> {
         let files = crate::files::blocking(SessionFiles::new).await?;
         let server = Server::new_with_approvals(driver, host, config, files, false)?;
+        let cleanup = Cleanup::new(server.clone());
+        Ok(Self { server, cleanup })
+    }
+    /// Open a session whose driver is wrapped in the fixture scope.
+    ///
+    /// The caller is the trusted assembler. This is not an MCP tool and it does
+    /// not install a tool that sets, renews, or widens the scope. The server
+    /// does not retain the lease. Private-file startup caps at five seconds;
+    /// dropping cancels that wait. Elicitation stays off.
+    pub async fn open_scoped<D>(
+        driver: D,
+        lease: ScopeLease,
+        host: Host,
+        config: ServerConfig,
+    ) -> Result<Self, ServeError>
+    where
+        D: Driver + InstanceEvidence + 'static,
+    {
+        let files = crate::files::blocking(SessionFiles::new).await?;
+        let server = Server::new_scoped(driver, lease, host, config, files)?;
         let cleanup = Cleanup::new(server.clone());
         Ok(Self { server, cleanup })
     }

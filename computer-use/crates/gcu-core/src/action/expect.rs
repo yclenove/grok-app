@@ -50,9 +50,9 @@ impl ActionRouter {
             .await
         {
             Ok(win) => win,
-            Err(code) => {
+            Err(err) => {
                 action.verify = Some(verify(&label, VerifyState::Unknown));
-                return outcome(action, Some(error(code)), None);
+                return outcome(action, Some(err.tool_error()), None);
             }
         };
         let _window = match self.locks.acquire(&window_lock_key(&win)).await {

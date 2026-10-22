@@ -69,6 +69,7 @@ fn every_driver_error_maps_to_a_protocol_code() {
             },
             ErrorCode::DriverError,
         ),
+        (DriverError::ScopeDenied, ErrorCode::AppDenied),
     ];
     for (error, code) in cases {
         assert_eq!(error.error_code(), code, "{error}");
@@ -84,6 +85,7 @@ fn gate_errors_prove_zero_effects() {
         },
         DriverError::SecureDesktop,
         DriverError::WindowMinimized,
+        DriverError::ScopeDenied,
     ] {
         assert!(
             !error.maybe_executed(),

@@ -153,7 +153,7 @@ mac-pro 的共享程度须 owner 说明；不能从机器别名推断。`docs/ll
 
 | 卡 | 文件与验收边界 | 拟议 owner | 估算 |
 | --- | --- | --- | --- |
-| S1 scope 类型与封闭包装 | 新 `gcu-core/src/scope/`、`driver.rs`、`action/router.rs`、`tests/fixture_scope.rs`；完整 Driver 覆盖、拒绝映射；新增方法必须显式实现，未知能力拒绝 | Codex | 2–3 |
+| S1 scope 类型与封闭包装 | 新 `gcu-core/src/scope/`、`driver.rs`、`action/router.rs`、`tests/fixture_scope.rs`；完整 Driver 覆盖、拒绝映射；新增方法必须显式实现，未知能力拒绝。已实现（PR 编号待填）。未覆盖 / not_run：S3 私有 socket/FD/pipe bootstrap、ACK、控制与数据分离、真实通道 EOF、畸形控制帧变成 MCP 调用、relay；S2/S4/S9/S10 真实 OS pid/start-time/window/AX owner、捕获遮挡、前台/拖拽命中、TCC/helper、剪贴板 host 同步、真实 Stop 热键时序；S5 敏感/前台自动放行拆分；S6 环境 provider；S7 真机矩阵；S8 多实例夹具。进程内 ScopeLease::rebind/revoke 只覆盖代次与缺失 scope，不代替私有传输。scoped 模式不装配 DOM hub，真实扩展旁路证明 not_run。gcu-eval 与 macOS/Linux 驱动内部未改。Windows worker 的 serde remote `ErrorDef` 只补了单元变体 `ScopeDenied`（镜像必须穷尽），驱动行为未改。覆盖测试：`gcu-core/tests/fixture_scope.rs`、`gcu-script/tests/fixture_scope.rs`、`gcu-mcp/tests/fixture_scope.rs`。 | Codex | 2–3 |
 | S2 首个平台身份适配 | `gcu-driver-macos/src/{api,driver,windows,real/*,ax/*,input/*}.rs`；实例/窗口/handle owner 与投递重验；缺证据路线关闭 | Grok | 2–3 |
 | S3 私有 bootstrap 与 relay | `gcu-eval/src/{prep,exec,runner}.rs`、新 `scope/relay` 模块；`gcu-cli/src/{args,runtime}.rs`；最小协议类型；fake 子进程证明控制/数据隔离与撤权 | Codex | 2–3 |
 | S4 专用 helper 与连接装配 | `gcu-cli/src/helper/{auth,client,frame,serve,macos}.rs`、`gcu-mcp/src/{server,image_cache,files}.rs`、core session 清理；最终 native 层 scope ACK、禁旁路，不复用普通 helper | Grok | 2–3 |

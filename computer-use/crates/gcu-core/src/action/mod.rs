@@ -4,6 +4,7 @@ mod authorize;
 mod discovery;
 mod expect;
 mod failure;
+mod fixture;
 /// Snapshot, geometry, and exact-handle preflight gates.
 pub mod gate;
 /// Bounded metadata-only action history.
@@ -15,6 +16,7 @@ mod route;
 pub mod router;
 mod settle;
 mod wait;
+mod wire;
 
 use crate::{driver::PointerRoute, redact::RedactedImage, snapshot::SnapshotStore};
 use gcu_protocol::{result::ActionResult, tools::BatchStep, AppState, ToolError, WindowInfo};

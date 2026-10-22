@@ -1,6 +1,7 @@
 use super::{
     lock,
     router::{error, ActionRouter},
+    wire::CallError,
     ActionState,
 };
 use crate::{
@@ -49,7 +50,7 @@ impl ActionRouter {
         win: &WindowRef,
         screenshot: bool,
         opts: &TreeOpts,
-    ) -> Result<Fresh, ErrorCode> {
+    ) -> Result<Fresh, CallError> {
         self.read_with_mode(session, win, ScreenshotMode::Explicit(screenshot), opts)
             .await
     }
@@ -59,7 +60,7 @@ impl ActionRouter {
         win: &WindowRef,
         mode: ScreenshotMode,
         opts: &TreeOpts,
-    ) -> Result<Fresh, ErrorCode> {
+    ) -> Result<Fresh, CallError> {
         let cancel = Cancel::default();
         let mut raw = self
             .native(
@@ -69,14 +70,14 @@ impl ActionRouter {
                 self.driver.snapshot_tree(win, opts, &cancel),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
         }
         let geometry = self
             .native(session, &cancel, false, self.driver.window_geometry(win))
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         // Screenshot identity is the accessibility tree. DOM fusion runs after
         // that compare so a DOM-only change cannot mark the capture stale, and
         // before redaction so shared password fields are still masked.
@@ -88,7 +89,7 @@ impl ActionRouter {
         // comparison or delivery; an omitted image never enters SnapshotStore.
         if mode != ScreenshotMode::Explicit(false) {
             if raw.incomplete.is_some() {
-                return Err(ErrorCode::HandoffRequired);
+                return Err(ErrorCode::HandoffRequired.into());
             }
             let shot = self
                 .native(
@@ -98,7 +99,7 @@ impl ActionRouter {
                     self.driver.capture(win, &CaptureOpts::default(), &cancel),
                 )
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             captured_at = self.epoch.elapsed();
             let after = self
                 .native(
@@ -108,35 +109,35 @@ impl ActionRouter {
                     self.driver.snapshot_tree(win, opts, &cancel),
                 )
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             if after.incomplete.is_some() {
-                return Err(ErrorCode::HandoffRequired);
+                return Err(ErrorCode::HandoffRequired.into());
             }
             if ax_signature != signature(&after)? {
-                return Err(ErrorCode::StaleScreenshot);
+                return Err(ErrorCode::StaleScreenshot.into());
             }
             let current = self
                 .native(session, &cancel, false, self.driver.window_geometry(win))
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             if geometry != current || shot.geometry != geometry {
-                return Err(ErrorCode::StaleGeometry);
+                return Err(ErrorCode::StaleGeometry.into());
             }
             capture = Some(shot);
         } else {
             captured_at = self.epoch.elapsed();
         }
-        if let Some(hub) = self.browser.clone() {
+        if let Some(hub) = self.browser_hub() {
             let aligned = self
                 .native(session, &cancel, false, async {
                     Ok(hub.align(session.id(), win, raw).await)
                 })
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             raw = aligned;
         }
         if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
-            return Err(ErrorCode::HandoffRequired);
+            return Err(ErrorCode::HandoffRequired.into());
         }
         let merged_signature = signature(&raw)?;
         let mut tree = Pipeline::default().run(raw.clone(), opts);
@@ -163,13 +164,13 @@ impl ActionRouter {
                 self.driver.list_windows(Some(&win.app)),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         let mut info = windows
             .into_iter()
             .find(|w| w.id == win.id)
             .ok_or(ErrorCode::WindowGone)?;
         if info.frame != geometry.frame || info.scale != geometry.scale {
-            return Err(ErrorCode::StaleGeometry);
+            return Err(ErrorCode::StaleGeometry.into());
         }
         info.frame = geometry.frame;
         let key = WindowKey {

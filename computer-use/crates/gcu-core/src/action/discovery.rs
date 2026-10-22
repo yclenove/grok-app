@@ -3,6 +3,7 @@ use super::{
     lock,
     observe::Fresh,
     router::{error, outcome},
+    wire::CallError,
     ActionRouter, ToolOutcome,
 };
 use crate::{
@@ -29,7 +30,7 @@ impl ActionRouter {
                     .map_err(|e| Box::new(error(e)))?;
                 self.native(session, &Cancel::default(), false, self.driver.list_apps())
                     .await
-                    .map_err(|e| Box::new(error(e.error_code())))
+                    .map_err(|e| Box::new(CallError::from_driver(&e).tool_error()))
             })
             .await
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?
@@ -56,7 +57,7 @@ impl ActionRouter {
                             self.driver.resolve_app(&AppQuery::from(query)),
                         )
                         .await
-                        .map_err(|e| Box::new(error(e.error_code())))?,
+                        .map_err(|e| Box::new(CallError::from_driver(&e).tool_error()))?,
                     )
                 } else {
                     None
@@ -68,7 +69,7 @@ impl ActionRouter {
                     self.driver.list_windows(app.as_ref()),
                 )
                 .await
-                .map_err(|e| Box::new(error(e.error_code())))
+                .map_err(|e| Box::new(CallError::from_driver(&e).tool_error()))
             })
             .await
             .map_err(|_| Box::new(error(ErrorCode::ApprovalDenied)))?
@@ -108,7 +109,7 @@ impl ActionRouter {
                         action.delivery = Delivery::Foreground;
                         outcome(action, None, state)
                     }
-                    Err((code, maybe)) => {
+                    Err((err, maybe)) => {
                         if maybe {
                             action.outcome = Outcome::Unknown;
                             action.delivery = Delivery::Foreground;
@@ -116,7 +117,7 @@ impl ActionRouter {
                                 .notes
                                 .push("Launch is uncertain; do not automatically retry.".into());
                         }
-                        outcome(action, Some(error(code)), None)
+                        outcome(action, Some(err.tool_error()), None)
                     }
                 }
             })
@@ -135,10 +136,10 @@ impl ActionRouter {
         &self,
         session: &Session,
         params: &LaunchAppParams,
-    ) -> Result<Option<super::ActionState>, (ErrorCode, bool)> {
+    ) -> Result<Option<super::ActionState>, (CallError, bool)> {
         self.check_boundary(session)
             .await
-            .map_err(|code| (code, false))?;
+            .map_err(|code| (CallError::from(code), false))?;
         let cancel = Cancel::default();
         let app = self
             .native(
@@ -148,7 +149,7 @@ impl ActionRouter {
                 self.driver.resolve_app(&AppQuery(params.app.clone())),
             )
             .await
-            .map_err(|e| (e.error_code(), false))?;
+            .map_err(|e| (CallError::from_driver(&e), false))?;
         // Authorization-only context: there is no window/tree to observe before
         // starting a process. It is never published as a fabricated observation.
         let raw = RawTree {
@@ -187,7 +188,7 @@ impl ActionRouter {
         let approved = self
             .authorize(session, &mut intent, &fresh)
             .await
-            .map_err(|code| (code, false))?;
+            .map_err(|code| (CallError::from(code), false))?;
         let current = self
             .native(
                 session,
@@ -196,15 +197,15 @@ impl ActionRouter {
                 self.driver.resolve_app(&AppQuery(app.info.id.clone())),
             )
             .await
-            .map_err(|e| (e.error_code(), false))?;
+            .map_err(|e| (CallError::from_driver(&e), false))?;
         if current != app
             || self.policy.load() != approved.config
             || self.policy_version.load(Ordering::Acquire) != approved.binding.policy_version
         {
-            return Err((ErrorCode::StaleElement, false));
+            return Err((CallError::Code(ErrorCode::StaleElement), false));
         }
         let host = super::authorize::host_app(&fresh, self.driver.platform())
-            .map_err(|code| (code, false))?;
+            .map_err(|code| (CallError::from(code), false))?;
         match self.evaluate(
             session,
             &intent,
@@ -216,15 +217,17 @@ impl ActionRouter {
             crate::policy::PolicyDecision::Allow {
                 route_limit: crate::policy::RouteLimit::ForegroundAllowed,
             } => {}
-            crate::policy::PolicyDecision::Refuse(code, _) => return Err((code, false)),
-            _ => return Err((ErrorCode::ApprovalDenied, false)),
+            crate::policy::PolicyDecision::Refuse(code, _) => {
+                return Err((CallError::Code(code), false))
+            }
+            _ => return Err((CallError::Code(ErrorCode::ApprovalDenied), false)),
         }
         let launched = self
             .native(session, &cancel, true, self.driver.launch_app(&app))
             .await
-            .map_err(|e| (e.error_code(), e.maybe_executed()))?;
+            .map_err(|e| (CallError::from_driver(&e), e.maybe_executed()))?;
         if launched.info.identity != app.info.identity {
-            return Err((ErrorCode::HandoffRequired, true));
+            return Err((CallError::Code(ErrorCode::HandoffRequired), true));
         }
         // An app need not create a window. A successful launch remains done.
         let window = self
@@ -246,12 +249,12 @@ impl ActionRouter {
                 win.id
             ))
             .await
-            .map_err(|e| (e.code(), true))?;
+            .map_err(|e| (CallError::from(e.code()), true))?;
         match self.read(session, &win, false, &self.tree_opts).await {
             Ok(fresh) => self
                 .publish(session, fresh, false)
                 .map(Some)
-                .map_err(|e| (e.code, true)),
+                .map_err(|e| (CallError::Code(e.code), true)),
             Err(_) => Ok(None),
         }
     }

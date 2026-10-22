@@ -7,6 +7,7 @@ use super::{
     lock,
     observe::{self, Fresh},
     router::{error, outcome, result, window_lock_key, ActionRouter},
+    wire::CallError,
     ToolCall, ToolOutcome,
 };
 use crate::{
@@ -81,7 +82,7 @@ impl ActionRouter {
             .await
         {
             Ok(win) => win,
-            Err(code) => return outcome(action, Some(error(code)), None),
+            Err(err) => return outcome(action, Some(err.tool_error()), None),
         };
         let _window = match self.locks.acquire(&window_lock_key(&win)).await {
             Ok(guard) => guard,
@@ -121,7 +122,13 @@ impl ActionRouter {
                     .failure(session, action, ErrorCode::WindowGone, &win)
                     .await;
             }
-            Err(code) => return outcome(action, Some(error(code)), None),
+            Err(code) => {
+                return outcome(
+                    action,
+                    Some(CallError::from_driver_code(code).tool_error()),
+                    None,
+                );
+            }
         };
         action.settle.ms = u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX);
         action.notes.push("No input was delivered.".into());
@@ -148,7 +155,11 @@ impl ActionRouter {
             }
             WaitPhase::Cancelled => {
                 let code = report.code.unwrap_or(ErrorCode::ApprovalDenied);
-                outcome(action, Some(error(code)), None)
+                outcome(
+                    action,
+                    Some(CallError::from_driver_code(code).tool_error()),
+                    None,
+                )
             }
             WaitPhase::Waiting => outcome(action, Some(error(ErrorCode::Internal)), None),
         }

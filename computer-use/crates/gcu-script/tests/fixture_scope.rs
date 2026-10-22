@@ -1,0 +1,53 @@
+//! Scoped `computer_script` hard-stop. The private control socket is not_run.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::sync::{atomic::AtomicBool, Arc};
+
+use gcu_core::scope::{ScopeLease, SCOPE_DENIED_MESSAGE};
+use gcu_core::testing::host::scoped_router;
+use gcu_core::testing::probe::ScopeProbe;
+use gcu_protocol::tools::ComputerScriptParams;
+use gcu_script::{run_router, ScriptStatus};
+
+#[test]
+fn script_scope_denial_stops_before_a_second_call() {
+    let probe = ScopeProbe::external_canary();
+    let lease = ScopeLease::install(ScopeProbe::allowed_scope());
+    let (router, session) = scoped_router(probe.clone(), lease);
+    let report = gcu_core::testing::block_on(run_router(
+        &router,
+        &session,
+        "scope",
+        ComputerScriptParams {
+            code: concat!(
+                "try { await cu.app(\"CANARY-EXTERNAL-C\"); } catch (e) {}\n",
+                "try { await cu.app(\"CANARY-EXTERNAL-C\"); } catch (e) {}\n",
+                "return \"after\";"
+            )
+            .into(),
+            timeout_ms: 5_000,
+        },
+        Arc::new(AtomicBool::new(false)),
+    ))
+    .unwrap();
+    assert_eq!(report.driver_calls, 1, "{report:?}");
+    assert_eq!(report.status, ScriptStatus::Stopped, "{report:?}");
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("app_denied"),
+        "{report:?}"
+    );
+    assert_eq!(
+        SCOPE_DENIED_MESSAGE,
+        "Target unavailable in this evaluation scope."
+    );
+    assert_eq!(
+        report.error_message.as_deref(),
+        Some("Target unavailable in this evaluation scope."),
+        "{report:?}"
+    );
+    assert_eq!(probe.content(), 0, "script read external content");
+    assert_eq!(probe.capture(), 0, "script captured external pixels");
+    assert_eq!(probe.perform(), 0, "script delivered input");
+    assert_eq!(probe.launch(), 0, "script launched");
+}

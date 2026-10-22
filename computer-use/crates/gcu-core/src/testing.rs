@@ -9,6 +9,8 @@ use std::future::Future;
 
 /// Test-only Host assembly for driver contracts; keeps Host dependencies in core.
 pub mod host;
+/// In-memory driver that counts content reads. Script tests use it for scope.
+pub mod probe;
 
 /// Drive `work` on a fresh current-thread runtime.
 ///

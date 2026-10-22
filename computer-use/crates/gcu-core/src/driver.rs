@@ -384,6 +384,11 @@ pub enum DriverError {
     /// The target window is minimized and was not restored.
     #[error("window minimized")]
     WindowMinimized,
+    /// The target is outside the registered evaluation scope, or proving
+    /// evidence is missing. The display text is the only sentence shown to the
+    /// model. It never includes an app, path, window list, or driver detail.
+    #[error("Target unavailable in this evaluation scope.")]
+    ScopeDenied,
     /// Native failure; message must omit payloads.
     #[error("native driver failure: {message} (maybe_executed={maybe_executed})")]
     Native {
@@ -413,6 +418,7 @@ impl DriverError {
             Self::PermissionMissing { .. } => C::PermissionMissing,
             Self::SecureDesktop => C::HandoffRequired,
             Self::WindowMinimized => C::WindowMinimized,
+            Self::ScopeDenied => C::AppDenied,
         }
     }
 
