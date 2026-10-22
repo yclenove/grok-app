@@ -9,7 +9,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
 
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
@@ -45,16 +44,6 @@ pub const OUTCOME_OK: &str = "ok";
 pub const OUTCOME_ERR: &str = "err";
 
 static WRITE_LOCK: ParkingMutex<()> = ParkingMutex::new(());
-
-/// Pending UI permission context so `resolve_permission` can log tool_name.
-#[derive(Debug, Clone)]
-struct PendingPermission {
-    tool_name: String,
-    summary: String,
-}
-
-static PENDING_PERMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), PendingPermission>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// One append-only ledger row (camelCase for the UI).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,43 +317,6 @@ pub fn build_entry(
     }
 }
 
-/// Remember a pending UI permission so resolve can attribute tool_name.
-pub fn remember_permission(session_id: &str, rpc_id: u64, tool_name: &str, summary: Option<&str>) {
-    let sid = session_id.trim();
-    if sid.is_empty() {
-        return;
-    }
-    let tool = sanitize_field(tool_name, MAX_FIELD_CHARS);
-    let sum = summary
-        .map(|s| sanitize_field(s, MAX_SUMMARY_CHARS))
-        .unwrap_or_default();
-    if let Ok(mut map) = PENDING_PERMS.lock() {
-        // Soft cap pending map so a stuck agent cannot grow unbounded.
-        if map.len() > 512 {
-            map.clear();
-        }
-        map.insert(
-            (sid.to_string(), rpc_id),
-            PendingPermission {
-                tool_name: if tool.is_empty() {
-                    "unknown".into()
-                } else {
-                    tool
-                },
-                summary: sum,
-            },
-        );
-    }
-}
-
-/// Take (and remove) a remembered permission context.
-fn take_permission(session_id: &str, rpc_id: u64) -> Option<PendingPermission> {
-    let Ok(mut map) = PENDING_PERMS.lock() else {
-        return None;
-    };
-    map.remove(&(session_id.to_string(), rpc_id))
-}
-
 /// Soft-fail append of one entry. Never panics; I/O errors are logged.
 pub fn append_entry(entry: &AuditLedgerEntry) {
     let _guard = WRITE_LOCK.lock();
@@ -548,34 +500,6 @@ pub fn record_permission(
     append_entry(&entry);
 }
 
-/// Record permission using remembered UI context for `rpc_id` when available.
-pub fn record_permission_resolve(
-    session_id: Option<&str>,
-    project_path: Option<&str>,
-    rpc_id: u64,
-    decision: &str,
-) {
-    let pending = session_id.and_then(|sid| take_permission(sid, rpc_id));
-    let (tool_name, summary) = match pending {
-        Some(p) => (
-            p.tool_name,
-            if p.summary.is_empty() {
-                None
-            } else {
-                Some(p.summary)
-            },
-        ),
-        None => ("unknown".into(), None),
-    };
-    record_permission(
-        session_id,
-        project_path,
-        &tool_name,
-        decision,
-        summary.as_deref(),
-    );
-}
-
 /// Record tool start (non-terminal status, first open). Soft-fail.
 pub fn record_tool_start(
     session_id: Option<&str>,
@@ -734,9 +658,6 @@ pub fn clear_ledger() -> Result<(), String> {
     let path = ledger_path();
     if path.is_file() {
         fs::write(&path, b"").map_err(|e| format!("clear: {e}"))?;
-    }
-    if let Ok(mut map) = PENDING_PERMS.lock() {
-        map.clear();
     }
     Ok(())
 }

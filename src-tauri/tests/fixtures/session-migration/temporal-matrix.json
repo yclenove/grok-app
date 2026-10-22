@@ -1,0 +1,942 @@
+{
+  "version": 1,
+  "provenance": {
+    "kind": "synthetic",
+    "createdOn": "2026-10-08",
+    "sourceCommit": "aa0d4698289bd3801d2bac07895fe7b6adbc5ce0",
+    "scope": "Golden input data prepared outside the measured workspace; not an executed test result."
+  },
+  "cases": [
+    {
+      "scenario": "four-source-times",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": "2026-01-01T08:00:06+08:00",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "codex-four-source-times",
+      "provider": "codex",
+      "shape": "codex-rollout-jsonl-v1",
+      "records": [
+        {
+          "type": "session_meta",
+          "payload": {
+            "id": "synthetic-codex-time",
+            "cwd": "/synthetic/project"
+          }
+        },
+        {
+          "timestamp": "2026-01-01T00:00:04Z",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "用户一：保持兼容"
+              }
+            ]
+          }
+        },
+        {
+          "timestamp": "2026-01-01T00:00:03Z",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "助手一：保留来源"
+              }
+            ]
+          }
+        },
+        {
+          "timestamp": "2026-01-01T08:00:06+08:00",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "用户二：继续开发"
+              }
+            ]
+          }
+        },
+        {
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "助手二：按顺序完成"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "four-source-times",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": "2026-01-01T08:00:06+08:00",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "claude-four-source-times",
+      "provider": "claude-code",
+      "shape": "claude-code-jsonl-v1",
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": null,
+          "timestamp": "2026-01-01T00:00:04Z",
+          "message": {
+            "role": "user",
+            "content": "用户一：保持兼容"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": "u1",
+          "timestamp": "2026-01-01T00:00:03Z",
+          "message": {
+            "role": "assistant",
+            "content": "助手一：保留来源"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u2",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": "a1",
+          "timestamp": "2026-01-01T08:00:06+08:00",
+          "message": {
+            "role": "user",
+            "content": "用户二：继续开发"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a2",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": "u2",
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "message": {
+            "role": "assistant",
+            "content": "助手二：按顺序完成"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "four-source-times",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": "2026-01-01T08:00:06+08:00",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "cursor-transcript-four-source-times",
+      "provider": "cursor",
+      "shape": "cursor-transcript-jsonl-v1",
+      "records": [
+        {
+          "id": "u1",
+          "role": "user",
+          "timestamp": "2026-01-01T00:00:04Z",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "用户一：保持兼容"
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1",
+          "role": "assistant",
+          "timestamp": "2026-01-01T00:00:03Z",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "助手一：保留来源"
+              }
+            ]
+          }
+        },
+        {
+          "id": "u2",
+          "role": "user",
+          "timestamp": "2026-01-01T08:00:06+08:00",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "用户二：继续开发"
+              }
+            ]
+          }
+        },
+        {
+          "id": "a2",
+          "role": "assistant",
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "助手二：按顺序完成"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "four-source-times",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": "2026-01-01T00:00:06.000Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "cursor-composer-four-source-times",
+      "provider": "cursor",
+      "shape": "cursor-composer-itemtable-v1",
+      "database": {
+        "filename": "state.vscdb",
+        "table": "cursorDiskKV",
+        "keyValues": [
+          {
+            "key": "composerData:synthetic-composer-time",
+            "value": {
+              "name": "合成四消息时间",
+              "fullConversationHeadersOnly": [
+                {
+                  "bubbleId": "u1"
+                },
+                {
+                  "bubbleId": "a1"
+                },
+                {
+                  "bubbleId": "u2"
+                },
+                {
+                  "bubbleId": "a2"
+                }
+              ]
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:u1",
+            "value": {
+              "type": 1,
+              "text": "用户一：保持兼容",
+              "timestamp": 1767225604000
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:a1",
+            "value": {
+              "type": 2,
+              "text": "助手一：保留来源",
+              "createdAt": "2026-01-01T00:00:03Z"
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:u2",
+            "value": {
+              "type": 1,
+              "text": "用户二：继续开发",
+              "timestamp": 1767225606000
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:a2",
+            "value": {
+              "type": 2,
+              "text": "助手二：按顺序完成",
+              "createdAt": "2025-12-31T19:00:07-05:00"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "four-source-times",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": "2026-01-01T00:00:06.000Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:07-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "cursor-legacy-four-source-times",
+      "provider": "cursor",
+      "shape": "cursor-legacy-chat-v1",
+      "database": {
+        "filename": "state.vscdb",
+        "table": "ItemTable",
+        "keyValues": [
+          {
+            "key": "noise:excluded",
+            "value": {
+              "messages": [
+                {
+                  "role": "user",
+                  "text": "不可导入的噪音"
+                }
+              ]
+            }
+          },
+          {
+            "key": "chatData:synthetic-legacy-time",
+            "value": {
+              "name": "合成旧版四消息",
+              "messages": [
+                {
+                  "role": "user",
+                  "text": "用户一：保持兼容",
+                  "timestamp": 1767225604000
+                },
+                {
+                  "role": "assistant",
+                  "text": "助手一：保留来源",
+                  "createdAt": "2026-01-01T00:00:03Z"
+                },
+                {
+                  "role": "user",
+                  "text": "用户二：继续开发",
+                  "timestamp": 1767225606000
+                },
+                {
+                  "role": "assistant",
+                  "text": "助手二：按顺序完成",
+                  "createdAt": "2025-12-31T19:00:07-05:00"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "missing-backwards-offsets",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T08:00:04+08:00",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": null,
+          "timeOrigin": "unknown"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "codex-missing-backwards-offsets",
+      "provider": "codex",
+      "shape": "codex-rollout-jsonl-v1",
+      "records": [
+        {
+          "type": "session_meta",
+          "payload": {
+            "id": "synthetic-codex-time",
+            "cwd": "/synthetic/project"
+          }
+        },
+        {
+          "timestamp": "2026-01-01T08:00:04+08:00",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "用户一：保持兼容"
+              }
+            ]
+          }
+        },
+        {
+          "timestamp": "2026-01-01T00:00:03Z",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "助手一：保留来源"
+              }
+            ]
+          }
+        },
+        {
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "用户二：继续开发"
+              }
+            ]
+          }
+        },
+        {
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "type": "response_item",
+          "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "助手二：按顺序完成"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "missing-backwards-offsets",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T08:00:04+08:00",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": null,
+          "timeOrigin": "unknown"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "claude-missing-backwards-offsets",
+      "provider": "claude-code",
+      "shape": "claude-code-jsonl-v1",
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": null,
+          "timestamp": "2026-01-01T08:00:04+08:00",
+          "message": {
+            "role": "user",
+            "content": "用户一：保持兼容"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": "u1",
+          "timestamp": "2026-01-01T00:00:03Z",
+          "message": {
+            "role": "assistant",
+            "content": "助手一：保留来源"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u2",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": "a1",
+          "message": {
+            "role": "user",
+            "content": "用户二：继续开发"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a2",
+          "sessionId": "synthetic-claude-time",
+          "parentUuid": "u2",
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "message": {
+            "role": "assistant",
+            "content": "助手二：按顺序完成"
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "missing-backwards-offsets",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T08:00:04+08:00",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": null,
+          "timeOrigin": "unknown"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "cursor-transcript-missing-backwards-offsets",
+      "provider": "cursor",
+      "shape": "cursor-transcript-jsonl-v1",
+      "records": [
+        {
+          "id": "u1",
+          "role": "user",
+          "timestamp": "2026-01-01T08:00:04+08:00",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "用户一：保持兼容"
+              }
+            ]
+          }
+        },
+        {
+          "id": "a1",
+          "role": "assistant",
+          "timestamp": "2026-01-01T00:00:03Z",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "助手一：保留来源"
+              }
+            ]
+          }
+        },
+        {
+          "id": "u2",
+          "role": "user",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "用户二：继续开发"
+              }
+            ]
+          }
+        },
+        {
+          "id": "a2",
+          "role": "assistant",
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "message": {
+            "content": [
+              {
+                "type": "text",
+                "text": "助手二：按顺序完成"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "scenario": "missing-backwards-offsets",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": null,
+          "timeOrigin": "unknown"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "cursor-composer-missing-backwards-offsets",
+      "provider": "cursor",
+      "shape": "cursor-composer-itemtable-v1",
+      "database": {
+        "filename": "state.vscdb",
+        "table": "cursorDiskKV",
+        "keyValues": [
+          {
+            "key": "composerData:synthetic-composer-time",
+            "value": {
+              "name": "合成四消息时间",
+              "fullConversationHeadersOnly": [
+                {
+                  "bubbleId": "u1"
+                },
+                {
+                  "bubbleId": "a1"
+                },
+                {
+                  "bubbleId": "u2"
+                },
+                {
+                  "bubbleId": "a2"
+                }
+              ]
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:u1",
+            "value": {
+              "type": 1,
+              "text": "用户一：保持兼容",
+              "timestamp": 1767225604000
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:a1",
+            "value": {
+              "type": 2,
+              "text": "助手一：保留来源",
+              "createdAt": "2026-01-01T00:00:03Z"
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:u2",
+            "value": {
+              "type": 1,
+              "text": "用户二：继续开发"
+            }
+          },
+          {
+            "key": "bubbleId:synthetic-composer-time:a2",
+            "value": {
+              "type": 2,
+              "text": "助手二：按顺序完成",
+              "createdAt": "2025-12-31T19:00:02-05:00"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "missing-backwards-offsets",
+      "expected": [
+        {
+          "label": "u1",
+          "role": "user",
+          "text": "用户一：保持兼容",
+          "ordinal": 0,
+          "timestamp": "2026-01-01T00:00:04.000Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "a1",
+          "role": "assistant",
+          "text": "助手一：保留来源",
+          "ordinal": 1,
+          "timestamp": "2026-01-01T00:00:03Z",
+          "timeOrigin": "source"
+        },
+        {
+          "label": "u2",
+          "role": "user",
+          "text": "用户二：继续开发",
+          "ordinal": 2,
+          "timestamp": null,
+          "timeOrigin": "unknown"
+        },
+        {
+          "label": "a2",
+          "role": "assistant",
+          "text": "助手二：按顺序完成",
+          "ordinal": 3,
+          "timestamp": "2025-12-31T19:00:02-05:00",
+          "timeOrigin": "source"
+        }
+      ],
+      "name": "cursor-legacy-missing-backwards-offsets",
+      "provider": "cursor",
+      "shape": "cursor-legacy-chat-v1",
+      "database": {
+        "filename": "state.vscdb",
+        "table": "ItemTable",
+        "keyValues": [
+          {
+            "key": "noise:excluded",
+            "value": {
+              "messages": [
+                {
+                  "role": "user",
+                  "text": "不可导入的噪音"
+                }
+              ]
+            }
+          },
+          {
+            "key": "chatData:synthetic-legacy-time",
+            "value": {
+              "name": "合成旧版四消息",
+              "messages": [
+                {
+                  "role": "user",
+                  "text": "用户一：保持兼容",
+                  "timestamp": 1767225604000
+                },
+                {
+                  "role": "assistant",
+                  "text": "助手一：保留来源",
+                  "createdAt": "2026-01-01T00:00:03Z"
+                },
+                {
+                  "role": "user",
+                  "text": "用户二：继续开发"
+                },
+                {
+                  "role": "assistant",
+                  "text": "助手二：按顺序完成",
+                  "createdAt": "2025-12-31T19:00:02-05:00"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

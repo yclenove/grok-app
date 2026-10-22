@@ -142,6 +142,23 @@ describe("shouldApplyLateStreamText", () => {
     ).toBe(false);
   });
 
+  it("accepts a Host-finalized fence even when the cached live state is late", () => {
+    expect(
+      shouldIgnorePrematureStreamDone({
+        hostLiveStreaming: true,
+        hasRunningTool: false,
+        hostFinalized: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldIgnorePrematureStreamDone({
+        hostLiveStreaming: true,
+        hasRunningTool: true,
+        hostFinalized: true,
+      }),
+    ).toBe(false);
+  });
+
   it("applies when no assistant yet (first body chunk after ready)", () => {
     expect(
       shouldApplyLateStreamText({

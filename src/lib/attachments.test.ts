@@ -44,24 +44,43 @@ describe("attachments", () => {
     expect(out.find((a) => a.path === file.path)?.name).toBe("renamed");
   });
 
-  it("collapses one Windows image stored with both slash styles (#1284)", () => {
-    const stored: Attachment = {
-      path: "C:\\Users\\me\\AppData\\Local\\Temp\\paste.png",
-      name: "paste.png",
-      isDir: false,
-    };
-    const journal =
-      "你别乱改啊，\n\n@C:\\Users\\me\\AppData\\Local\\Temp\\paste.png";
+  it.each([
+    "C:\\Users\\synthetic\\AppData\\Local\\Temp\\paste.png",
+    "C:\\Users\\synthetic\\Pictures\\壁纸\\风景.png",
+  ])("keeps one Windows image across journal path separators: %s", (path) => {
+    const stored: Attachment = { path, name: "stored.png", isDir: false };
+    const journal = `合成附件\n\n@${path}`;
     const parsed = parseAttachmentsFromContent(journal);
     const extracted = extractMediaPathsFromContent(journal);
-    expect(extracted.map((a) => a.path)).toEqual([
-      "C:/Users/me/AppData/Local/Temp/paste.png",
+    expect(extracted.map((attachment) => attachment.path)).toEqual([
+      path.replace(/\\/g, "/"),
     ]);
-    const out = mergeMessageAttachments(
-      mergeAttachments(parsed.attachments, [stored]),
-      journal,
-    );
-    expect(out).toEqual([stored]);
+    expect(
+      mergeMessageAttachments(
+        mergeAttachments(parsed.attachments, [stored]),
+        journal,
+      ),
+    ).toEqual([stored]);
+  });
+
+  it("keeps alias order and metadata while exact paths still update", () => {
+    const stored: Attachment = {
+      path: "C:\\Users\\synthetic\\Pictures\\first.png",
+      name: "chosen name",
+      isDir: false,
+    };
+    const alias = { ...stored, path: stored.path.replace(/\\/g, "/") };
+    expect(mergeAttachments([stored, dir], [alias, file])).toEqual([
+      stored,
+      dir,
+      file,
+    ]);
+    const renamed = { ...stored, name: "updated name" };
+    expect(mergeAttachments([stored, dir], [alias, renamed])).toEqual([
+      renamed,
+      dir,
+    ]);
+    expect(mergeAttachments([alias], [stored])).toEqual([alias]);
   });
 
   it("builds agent prompt with @paths", () => {
@@ -121,6 +140,41 @@ describe("attachments", () => {
     const once = appendAttachmentRefsToContent("hello\n\nworld", [file]);
     const twice = appendAttachmentRefsToContent(once, [file]);
     expect(twice).toBe(once);
+  });
+
+  it("append does not write a second Windows ref when only the slashes differ", () => {
+    const back = "C:\\Users\\me\\AppData\\Local\\Temp\\paste.png";
+    const fwd = "C:/Users/me/AppData/Local/Temp/paste.png";
+    const once = appendAttachmentRefsToContent("hello", [
+      { path: back, name: "paste.png", isDir: false },
+    ]);
+    const twice = appendAttachmentRefsToContent(once, [
+      { path: fwd, name: "paste.png", isDir: false },
+    ]);
+    expect(twice).toBe(once);
+    expect(twice.match(/paste\.png/g)).toHaveLength(1);
+  });
+
+  it("drops an assistant echo of the same Windows image", () => {
+    const user = {
+      path: "C:\\Users\\me\\paste.png",
+      name: "paste.png",
+      isDir: false,
+    };
+    const assistant = {
+      path: "C:/Users/me/paste.png",
+      name: "paste.png",
+      isDir: false,
+    };
+    expect(filterEchoedUserAttachments([assistant], [user])).toBeUndefined();
+  });
+
+  it("hides a card when the body already cites the same Windows path", () => {
+    const path = "C:\\Users\\me\\paste.png";
+    const out = filterAttachmentsNotInlined("note\n\n@C:/Users/me/paste.png", [
+      { path, name: "paste.png", isDir: false },
+    ]);
+    expect(out).toBeUndefined();
   });
 
   it("detects image and video extensions", () => {

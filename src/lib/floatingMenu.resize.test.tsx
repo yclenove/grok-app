@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 
-import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useFloatingMenu } from "./floatingMenu";
@@ -32,6 +32,37 @@ class FakeResizeObserver {
 afterEach(() => {
   FakeResizeObserver.instances = [];
   vi.unstubAllGlobals();
+});
+
+it.each(["top", "bottom"] as const)("measurement preserves the short above-space cap for %s anchoring", (anchor) => {
+  const trigger = document.createElement("button");
+  const panel = document.createElement("div");
+  trigger.getBoundingClientRect = () => ({ top: 60, bottom: 92, left: 40, right: 120, width: 80, height: 32 }) as DOMRect;
+  Object.defineProperties(panel, { offsetHeight: { value: 200 }, offsetWidth: { value: 180 } });
+  const { result } = renderHook(() => useFloatingMenu({
+    open: true, triggerRef: { current: trigger }, panelRef: { current: panel }, onClose: () => {}, placement: "up", anchor,
+  }));
+  expect(result.current.style?.maxHeight).toBe(46);
+});
+
+it.each([undefined, false])("can delegate Escape while retaining outside-click dismissal: %s", (closeOnEscape) => {
+  const onClose = vi.fn();
+  const trigger = document.createElement("button");
+  const panel = document.createElement("div");
+  const { unmount } = renderHook(() => useFloatingMenu({
+    open: true, triggerRef: { current: trigger }, panelRef: { current: panel },
+    onClose, closeOnEscape,
+  }));
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(onClose).toHaveBeenCalledTimes(closeOnEscape === false ? 0 : 1);
+  onClose.mockClear();
+  fireEvent.mouseDown(document.body);
+  expect(onClose).toHaveBeenCalledOnce();
+  unmount();
+  onClose.mockClear();
+  fireEvent.keyDown(document, { key: "Escape" });
+  fireEvent.mouseDown(document.body);
+  expect(onClose).not.toHaveBeenCalled();
 });
 
 it("remeasures a matched panel when its trigger width changes", () => {

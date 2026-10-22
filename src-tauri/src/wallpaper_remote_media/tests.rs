@@ -1,8 +1,6 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use crate::paths::APP_HOME_ENV_LOCK;
-
 use super::*;
 
 #[test]
@@ -212,9 +210,7 @@ fn probe_http_failures_have_stable_categories() {
 
 #[test]
 fn stored_remote_images_stay_in_their_source_directory() {
-    let _environment = APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let _environment = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let home = std::env::temp_dir().join(format!(
         "grok-app-remote-image-{}-{}",
         std::process::id(),
@@ -234,6 +230,9 @@ fn stored_remote_images_stay_in_their_source_directory() {
     assert!(Path::new(&saved.path).is_file());
     assert!(Path::new(&saved.path).starts_with(home.join("wallpapers").join("web")));
 
-    unsafe { std::env::remove_var("GROK_APP_HOME") };
     let _ = fs::remove_dir_all(home);
 }
+
+crate::session_migration::test_home::fixture_home_contract_tests!(
+    stored_remote_images_stay_in_their_source_directory,
+);

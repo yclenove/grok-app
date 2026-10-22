@@ -94,6 +94,8 @@ fn sample_live_for_empty_run(body: &str, thought: &str, tools: u32, mode: &str) 
     let _ = fsm.begin_stream();
     let now = Instant::now();
     LiveSession {
+        turn_open_epoch: 0,
+        workspace_context: None,
         app_session_id: "session-1".into(),
         process_id: "process-1".into(),
         meta: SessionMeta {
@@ -106,6 +108,8 @@ fn sample_live_for_empty_run(body: &str, thought: &str, tools: u32, mode: &str) 
             model_id: None,
             archived: false,
             pinned: false,
+            provider_id: None,
+            agent_execution: None,
             effort: None,
             mode: Some(mode.into()),
             permission_policy: None,
@@ -124,7 +128,6 @@ fn sample_live_for_empty_run(body: &str, thought: &str, tools: u32, mode: &str) 
             workspace_id: None,
             workspace_root_snapshot: None,
             workspace_capability: None,
-            provider_id: None,
         },
         fsm,
         backend: "mock_acp".into(),
@@ -145,14 +148,17 @@ fn sample_live_for_empty_run(body: &str, thought: &str, tools: u32, mode: &str) 
         policy: PermissionPolicy::default(),
         provider_retry_attempt: 0,
         provider_retry_aborted: false,
+        last_provider_retry: None,
         needs_history_bootstrap: false,
         pending_plan_rpc_id: None,
         pending_permission_rpc_id: None,
+        pending_permission_reply: None,
         pending_permission_options: None,
         pending_permission_tool_name: None,
         pending_permission_ui: None,
         pending_ask_user_rpc_id: None,
         pending_ask_user_ui: None,
+        human_gates: Default::default(),
         last_activity: now,
         last_stream_progress: now,
         last_stall_emit: None,
@@ -182,6 +188,7 @@ fn pending_permission_recovers_card_until_invalidated() {
     let mut s = sample_live_for_empty_run("", "", 0, "agent");
     s.pending_permission_rpc_id = Some(7);
     s.pending_permission_ui = Some(UiPermissionRequest {
+        request_generation: uuid::Uuid::new_v4(),
         rpc_id: 7,
         session_id: "session-1".into(),
         tool_call_id: "tc-1".into(),
@@ -190,6 +197,7 @@ fn pending_permission_recovers_card_until_invalidated() {
         preview: "{}".into(),
         scope_key: "shell:ls".into(),
         options: serde_json::json!([]),
+        response_error: None,
     });
     *mgr.inner.lock() = Some(s);
 
@@ -220,6 +228,7 @@ fn pending_ask_user_recovers_questionnaire_until_invalidated() {
     let mut s = sample_live_for_empty_run("", "", 0, "agent");
     s.pending_ask_user_rpc_id = Some(11);
     s.pending_ask_user_ui = Some(UiAskUserRequest {
+        request_generation: uuid::Uuid::new_v4(),
         rpc_id: 11,
         session_id: "session-1".into(),
         tool_call_id: Some("tc-9".into()),
@@ -564,3 +573,5 @@ fn empty_run_skips_when_saw_model_output_even_if_buf_cleared() {
 }
 
 include!("routing_tests_p2.rs");
+include!("turn_ownership_tests.rs");
+include!("mock_promptable_tests.rs");

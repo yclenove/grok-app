@@ -5,6 +5,7 @@
 
 import { useMemo } from "react";
 import { GlassModal } from "@/components/GlassModal";
+import { Select } from "@/components/Select";
 import { IconPlus } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import {
@@ -29,6 +30,8 @@ type Props = {
   onSave: () => void;
   onClearBinding?: () => void;
   writeCapableMode: boolean;
+  workspaces?: WorkspaceRecord[];
+  onSelectWorkspace?: (id: string) => void;
 };
 
 export function MultiRootWorkspaceModal({
@@ -46,6 +49,8 @@ export function MultiRootWorkspaceModal({
   onSave,
   onClearBinding,
   writeCapableMode,
+  workspaces = [],
+  onSelectWorkspace,
 }: Props) {
   const tr = useMemo(() => createT(locale), [locale]);
   const primary = primaryRoot(draft);
@@ -117,6 +122,23 @@ export function MultiRootWorkspaceModal({
               ? ` — ${draft.profileRef}`
               : ""}
         </p>
+      ) : null}
+      {workspaces.length > 0 && onSelectWorkspace ? (
+        <div className="field">
+          <span className="field-label">
+            {tr("sessionImport.workspace.savedList")}
+          </span>
+          <Select
+            aria-label={tr("sessionImport.workspace.savedList")}
+            disabled={busy}
+            value={draft?.id ?? ""}
+            options={workspaces.map((workspace) => ({
+              value: workspace.id,
+              label: workspace.name,
+            }))}
+            onChange={onSelectWorkspace}
+          />
+        </div>
       ) : null}
       <label className="field">
         <span className="field-label">{tr("workspace.multiRoot.name")}</span>
@@ -240,7 +262,9 @@ export function MultiRootWorkspaceModal({
       </div>
       {error ? (
         <p className="error" role="alert" style={{ marginBottom: 0 }}>
-          {error}
+          {error.includes("MAPPING_CONFLICT:")
+            ? tr("sessionImport.err.mappingConflict")
+            : error}
         </p>
       ) : null}
       <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>

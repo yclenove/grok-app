@@ -1,0 +1,140 @@
+/* Paired reading uses the same modal/material tokens, never a parallel theme. */
+.session-import__history-links {
+  margin-block: 16px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow-wrap: anywhere;
+}
+
+.session-import__history-links > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.session-import-comparison {
+  width: min(1040px, calc(100vw - 32px));
+  container-name: session-import-comparison;
+  container-type: inline-size;
+}
+
+.session-import-comparison .modal-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.session-import-comparison .modal-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.session-import__comparison-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.session-import__comparison-source,
+.session-import__comparison-event {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+  overflow-wrap: anywhere;
+}
+
+.session-import__comparison-source h3,
+.session-import__comparison-event h4,
+.session-import__comparison-rows h3 {
+  margin-top: 0;
+  font-size: 13px;
+}
+
+.session-import__comparison-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-import__comparison-versions {
+  margin-block: 16px;
+  padding-block: 12px;
+  border-block: 1px solid var(--border-subtle);
+}
+
+.session-import__comparison-versions ul,
+.session-import__comparison-rows {
+  list-style: none;
+  padding: 0;
+}
+
+.session-import__comparison-versions ul {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.session-import__comparison-versions li > button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  gap: 4px;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.session-import__comparison-versions [aria-pressed="true"] {
+  background: var(--accent-muted);
+}
+
+.session-import__comparison-rows > li {
+  margin-block: 16px;
+}
+
+.session-import__comparison-event details {
+  margin-block-start: 8px;
+  font-size: 12px;
+}
+
+.session-import__comparison-inspector {
+  margin-block: 16px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.session-import__comparison-field-text {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-import__comparison-status {
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+  overflow-wrap: anywhere;
+}
+
+.session-import__comparison-status pre {
+  white-space: pre-wrap;
+}
+
+.session-import__comparison-source > .btn--primary {
+  margin-block-start: 12px;
+}
+
+@container session-import-comparison (max-width: 719px) {
+  .session-import__comparison-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

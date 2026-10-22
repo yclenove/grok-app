@@ -23,6 +23,7 @@ import { enSettingsMemory } from "./settings-memory";
 import { enSettingsCode } from "./settings-code";
 import { enSettingsRemoteIm } from "./settings-remoteIm";
 import { enSettingsPet } from "./settings-pet";
+import { enSessionImport } from "./session-import";
 
 export const en = {
   ...enCore,
@@ -49,6 +50,7 @@ export const en = {
   ...enSettingsCode,
   ...enSettingsRemoteIm,
   ...enSettingsPet,
+  ...enSessionImport,
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -77,3 +79,4 @@ export { enSettingsMemory } from "./settings-memory";
 export { enSettingsCode } from "./settings-code";
 export { enSettingsRemoteIm } from "./settings-remoteIm";
 export { enSettingsPet } from "./settings-pet";
+export { enSessionImport } from "./session-import";

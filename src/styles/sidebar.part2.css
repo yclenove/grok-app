@@ -807,6 +807,36 @@ html[data-sidebar-density="compact"] .tree-date-group__head {
   margin-top: 10px;
 }
 
+.search-panel__error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 14px 4px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border-subtle));
+  border-radius: 6px;
+  background: var(--danger-muted);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.search-panel__error-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-panel__error-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.search-panel__error-actions .search-panel__clear-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .search-panel__section {
   padding: 10px 14px 4px;
   font-size: 11px;

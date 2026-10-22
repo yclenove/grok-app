@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { restoreSessionGate } from "./sessionGateRestore";
+import { SessionGateCache } from "./sessionGateCache";
 
 function parkedGates<T>(entries: [string, T][] = []) {
-  return { current: new Map<string, T>(entries) };
+  return { current: new SessionGateCache<T>(entries) };
 }
 
 describe("restoreSessionGate", () => {

@@ -4,13 +4,9 @@
 //! Grok Build enforces dontAsk / acceptEdits / YOLO at the agent layer (not only Host).
 //! Shared mode leaves `~/.grok/config.toml` alone — Host policy + spawn flags only.
 
-use std::fs;
 use std::path::PathBuf;
 
-use crate::agent_home_config::{
-    set_table_bool, set_table_string, update_config_toml_if_independent,
-};
-use crate::paths::{agent_home_dir, resolve_agent_grok_home};
+use crate::paths::resolve_agent_grok_home;
 use crate::permission::PermissionPolicy;
 
 /// Map App policy → `[ui] permission_mode` values used by Grok Build config.toml.
@@ -38,16 +34,10 @@ pub fn claude_default_mode(policy: &str) -> &'static str {
     }
 }
 
-/// Apply `[ui] permission_mode` + `yolo` to a TOML-ish text blob (exact key match).
-pub fn set_permission_in_toml(text: &str, permission_policy: &str) -> String {
-    let mode = ui_permission_mode(permission_policy);
-    let yolo = matches!(
-        PermissionPolicy::parse(permission_policy),
-        PermissionPolicy::AlwaysApprove
-    );
-    let mut next = set_table_string(text, "ui", "permission_mode", mode);
-    next = set_table_bool(&next, "ui", "yolo", yolo);
-    next
+/// Apply permission keys structurally; reject malformed configuration and
+/// preserve strings, inline tables and unrelated keys such as `yolo_mode`.
+pub fn set_permission_in_toml(text: &str, permission_policy: &str) -> Result<String, String> {
+    crate::providers::permission_text(text, permission_policy)
 }
 
 /// Write permission prefs into App agent-home (independent GROK_HOME only).
@@ -60,32 +50,9 @@ pub fn sync_permission_to_agent_profile(
         PermissionPolicy::parse(permission_policy),
         PermissionPolicy::AlwaysApprove
     );
-    let path = update_config_toml_if_independent(session_data_mode, |existing| {
-        set_permission_in_toml(existing, permission_policy)
-    })?;
-
-    // Belt-and-suspenders: Claude-compatible defaultMode (agent reads when present).
-    // Only touch agent-home under independent mode (same gate as config write).
-    if path.is_some() {
-        let claude_dir = agent_home_dir().join(".claude");
-        let _ = fs::create_dir_all(&claude_dir);
-        let settings = serde_json::json!({
-            "permissions": {
-                "defaultMode": claude_default_mode(permission_policy)
-            }
-        });
-        fs::write(
-            claude_dir.join("settings.json"),
-            serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".into()),
-        )
-        .map_err(|e| e.to_string())?;
-
-        if let Some(ref path) = path {
-            tracing::info!(
-                "agent_prefs: synced permission_mode={mode} yolo={yolo} → {}",
-                path.display()
-            );
-        }
+    crate::providers::sync_permission_runtime(session_data_mode, permission_policy)?;
+    if crate::agent_home_config::normalize_mode(session_data_mode) != "shared" {
+        tracing::info!("agent_prefs: synced permission_mode={mode} yolo={yolo}");
     }
     Ok(())
 }
@@ -124,11 +91,11 @@ mod tests {
 
     #[test]
     fn upserts_ui_table() {
-        let t = set_permission_in_toml("", "ask");
+        let t = set_permission_in_toml("", "ask").unwrap();
         assert!(t.contains("[ui]"));
         assert!(t.contains("permission_mode = \"default\""));
         assert!(t.contains("yolo = false"));
-        let t2 = set_permission_in_toml(&t, "always_approve");
+        let t2 = set_permission_in_toml(&t, "always_approve").unwrap();
         assert!(t2.contains("permission_mode = \"always-approve\""));
         assert!(t2.contains("yolo = true"));
         assert_eq!(t2.matches("permission_mode").count(), 1);
@@ -138,7 +105,7 @@ mod tests {
     #[test]
     fn does_not_prefix_match_yolo_mode() {
         let base = "[ui]\npermission_mode = \"default\"\nyolo_mode = false\nyolo = false\n";
-        let next = set_permission_in_toml(base, "always_approve");
+        let next = set_permission_in_toml(base, "always_approve").unwrap();
         assert!(next.contains("yolo_mode = false"), "{next}");
         assert!(next.contains("yolo = true"), "{next}");
         assert_eq!(next.matches("yolo =").count(), 1, "{next}");

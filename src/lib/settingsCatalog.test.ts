@@ -625,4 +625,23 @@ describe("settingsCatalog", () => {
       importZh.some((h) => h.entry.id === "account.callLogs"),
     ).toBe(true);
   });
+
+  it("keeps import, imported catalog, and language as separate general/app anchors", () => {
+    const tEn = createT("en");
+    const importHits = searchSettingsEntries("import records", tEn);
+    const wizard = importHits.find((hit) => hit.entry.id === "general.sessionImport");
+    expect(wizard?.entry.anchorId).toBe("settings-anchor-sessionImport");
+    const catalogHits = searchSettingsEntries("full imported history catalog", tEn);
+    expect(catalogHits.map((hit) => hit.entry.id)).toEqual(["general.importedCatalog"]);
+    expect(catalogHits[0]?.entry.anchorId).toBe("settings-anchor-importedCatalog");
+    const languageHits = searchSettingsEntries("language", tEn);
+    const language = languageHits.find((hit) => hit.entry.id === "general.language");
+    expect(language?.entry.anchorId).toBe("settings-anchor-language");
+    expect(languageHits.some((hit) => hit.entry.id === "general.importedCatalog")).toBe(false);
+    expect(languageHits.some((hit) => hit.entry.id === "general.sessionImport")).toBe(false);
+    for (const hit of [wizard, catalogHits[0], language]) {
+      expect(buildSettingsHash({ section: hit!.entry.section, tab: hit!.entry.tab })).toBe("#/settings/general/app");
+    }
+    expect(parseSettingsHash("#/settings/general/app")).toEqual({ section: "general", tab: "app" });
+  });
 });

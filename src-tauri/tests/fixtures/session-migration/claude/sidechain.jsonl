@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"claude-side","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/synth/repo","isSidechain":false,"message":{"role":"user","content":"main"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"claude-side","timestamp":"2026-01-01T00:00:01.000Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"main reply"}]}}
+{"type":"user","uuid":"s1","parentUuid":"a1","sessionId":"claude-side","timestamp":"2026-01-01T00:00:02.000Z","isSidechain":true,"message":{"role":"user","content":"side work"}}
+{"type":"assistant","uuid":"s2","parentUuid":"s1","sessionId":"claude-side","timestamp":"2026-01-01T00:00:03.000Z","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"side answer"}]}}

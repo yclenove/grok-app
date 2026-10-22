@@ -1,0 +1,4 @@
+[
+  {"role":"user","content":"a","timestamp":"2020-01-01T00:00:00Z"},
+  {"role":"assistant","content":"b","timestamp":"2020-01-01T00:00:01Z"}
+]

@@ -92,6 +92,7 @@ export function ImageViewerProvider({
   const isOpenRef = useRef(false);
   const slidesRef = useRef(slides);
   const generationRef = useRef(0);
+  const ownerRef = useRef<symbol | null>(null);
   const originalLoadsRef = useRef(new Map<string, AbortController>());
   const pendingOriginalLoadRef = useRef<(() => void) | null>(null);
   slidesRef.current = slides;
@@ -104,7 +105,9 @@ export function ImageViewerProvider({
     pendingOriginalLoadRef.current = null;
   }, []);
 
-  const close = useCallback(() => {
+  const close = useCallback((owner?: symbol) => {
+    if (owner && ownerRef.current !== owner) return;
+    ownerRef.current = null;
     generationRef.current += 1;
     abortOriginalLoads();
     isOpenRef.current = false;
@@ -123,11 +126,12 @@ export function ImageViewerProvider({
   );
 
   const openViewer = useCallback(
-    (input: ImageSlideInput[] | string[], startIndex = 0) => {
+    (input: ImageSlideInput[] | string[], startIndex = 0, owner?: symbol) => {
       const normalized: ImageSlideInput[] = input.map((item) =>
         typeof item === "string" ? { src: item } : item,
       );
       if (!normalized.length) return;
+      ownerRef.current = owner ?? null;
 
       void (async () => {
         const generation = generationRef.current + 1;

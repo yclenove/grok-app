@@ -222,9 +222,7 @@ mod tests {
 
     #[test]
     fn stable_cache_reuses_one_validated_file_and_rebuilds_damage() {
-        let _environment = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _environment = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home = test_home("reuse");
         // SAFETY: test-only mutation serialized by APP_HOME_ENV_LOCK.
         unsafe { std::env::set_var("GROK_APP_HOME", &home) };
@@ -246,15 +244,12 @@ mod tests {
         let restored = save(url, "image/png", test_png()).expect("restore deleted cache");
         assert_eq!(first.path, restored.path);
 
-        unsafe { std::env::remove_var("GROK_APP_HOME") };
         let _ = fs::remove_dir_all(home);
     }
 
     #[test]
     fn concurrent_requests_commit_one_stable_file() {
-        let _environment = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _environment = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let home = test_home("concurrent");
         // SAFETY: test-only mutation serialized by APP_HOME_ENV_LOCK.
         unsafe { std::env::set_var("GROK_APP_HOME", &home) };
@@ -287,7 +282,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(files.len(), 1);
 
-        unsafe { std::env::remove_var("GROK_APP_HOME") };
         let _ = fs::remove_dir_all(home);
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        stable_cache_reuses_one_validated_file_and_rebuilds_damage,
+        concurrent_requests_commit_one_stable_file,
+    );
 }

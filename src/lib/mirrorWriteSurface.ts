@@ -31,8 +31,8 @@ export type MirrorWriteCategory = {
  * Order is presentation order.
  */
 export const MIRROR_WRITE_CATEGORIES: readonly MirrorWriteCategory[] = [
-  { id: "send", methods: ["session.send"] },
-  { id: "stop", methods: ["session.stop"] },
+  { id: "send", methods: ["session.send", "session.queueRecover", "session.receiptReview"] },
+  { id: "stop", methods: ["session.stop", "session.queueCancel"] },
   { id: "sessions", methods: ["session.create"] },
   { id: "permissions", methods: ["session.resolvePermission"] },
   { id: "askUser", methods: ["session.answerAskUser"] },

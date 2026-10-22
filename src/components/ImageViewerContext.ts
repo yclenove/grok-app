@@ -21,8 +21,9 @@ export interface ImageSlideInput extends ImageSlideSource {
 
 export interface ImageViewerApi {
   /** Open lightbox with slides (paths or URLs). Resolves local paths async. */
-  open: (slides: ImageSlideInput[] | string[], index?: number) => void;
-  close: () => void;
+  open: (slides: ImageSlideInput[] | string[], index?: number, owner?: symbol) => void;
+  /** Supplying an owner closes only that caller's pending/open gallery. */
+  close: (owner?: symbol) => void;
   /** Synchronous layer ownership check for dialogs sharing Escape. */
   isOpen: () => boolean;
   /** Copy image at path/URL to clipboard. Returns true on success. */

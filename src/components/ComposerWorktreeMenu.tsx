@@ -1,12 +1,15 @@
 /**
  * Composer branch / worktree chip — switch linked worktrees, create, remove, GC.
- * Also lists Grok Build CLI-tracked worktrees (`grok worktree list`).
+ * Also lists Grok Build CLI-tracked worktrees (`grok worktree list`) and the
+ * repository's open pull requests: one row each with its own watch control, plus
+ * how many PRs this chat follows on the chip.
  * Lives next to the project picker on the new-session context bar.
  */
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
+  IconBell,
   IconCheck,
   IconFileDiff,
   IconFolder,
@@ -34,6 +37,12 @@ import {
   pathsEqual,
   worktreeLabel,
 } from "@/lib/gitWorktree";
+import {
+  ComposerPrListSection,
+  PR_LIST_MAX_H,
+  composerPrSection,
+} from "@/components/ComposerPrListSection";
+import type { PrListRow } from "@/lib/prMonitor";
 import type { CliWorktreeEntry, GitWorktreeEntry } from "@/lib/api";
 
 export type ComposerWorktreeMenuLabels = {
@@ -77,6 +86,26 @@ export type ComposerWorktreeMenuLabels = {
   branchesTruncated?: string;
   branchRemote?: string;
   branchElsewhere?: string;
+  /** Pull request section: every open PR of this repository. */
+  pr?: string;
+  prEmpty?: string;
+  prWatch?: string;
+  prUnwatch?: string;
+  prWatchTip?: string;
+  prUnwatchTip?: string;
+  prOpenHub?: string;
+  /** Chip segment: how many PRs this chat follows. */
+  prChipCount?: string;
+  /** Tip on the same segment. */
+  prChipCountTip?: string;
+  /** Follow-ups waiting for an idle chat. */
+  prPendingWakes?: string;
+  /** Short "watching" tag in the PR section head. */
+  prWatchingLabel?: string;
+  /** `Last update: {summary}` prefix for the change line. */
+  prLastUpdate?: string;
+  /** Shown when the host reported a poll failure for a watch. */
+  prUnavailable?: string;
 };
 
 type Props = {
@@ -133,6 +162,26 @@ type Props = {
    * Parent reuses project-bind path like git worktree switch.
    */
   onCliOpen?: (wt: CliWorktreeEntry) => void;
+  /** One row per open PR of this repository. */
+  prRows?: PrListRow[];
+  /** A repo PR read is in flight. */
+  prLoading?: boolean;
+  /** `gh`/git readability for this repository; `null` while unknown. */
+  prAvailable?: boolean | null;
+  /** This chat can mount a watch (a project and a chat id both exist). */
+  prCanWatch?: boolean;
+  /** How many PRs this chat follows. */
+  prWatchingCount?: number;
+  /** Wakes waiting for this chat to go idle. */
+  prPendingWakes?: number;
+  /** Localized summary of the most recent delivered change. */
+  prLastChange?: string | null;
+  /** Last host poll failure (shown as a soft error hint). */
+  prWatchError?: string | null;
+  onTogglePrWatch?: (prNumber: number) => void;
+  onOpenPrHub?: (prNumber: number) => void;
+  /** The branch menu opened (each open reads the repo's PRs once). */
+  onPrListVisible?: () => void;
 };
 
 const LIST_MAX_H = 200;
@@ -168,6 +217,17 @@ export function ComposerWorktreeMenu({
   onCliRefresh,
   onCliReveal,
   onCliOpen,
+  prRows = [],
+  prLoading = false,
+  prAvailable = null,
+  prCanWatch = true,
+  prWatchingCount = 0,
+  prPendingWakes = 0,
+  prLastChange = null,
+  prWatchError = null,
+  onTogglePrWatch,
+  onOpenPrHub,
+  onPrListVisible,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [branchQuery, setBranchQuery] = useState("");
@@ -176,6 +236,8 @@ export function ComposerWorktreeMenu({
   const popRef = useRef<HTMLDivElement>(null);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
+  const onPrListVisibleRef = useRef(onPrListVisible);
+  onPrListVisibleRef.current = onPrListVisible;
 
   const current =
     worktrees.find((wt) => pathsEqual(wt.path, activePath)) ?? null;
@@ -192,6 +254,20 @@ export function ComposerWorktreeMenu({
       cliWorktrees.length > 0 ||
       !!onCliRefresh);
   const showBranchesSection = !!onSwitchBranch && !!labels.branches;
+  const prSection = composerPrSection({
+    rows: prRows.length,
+    loading: prLoading,
+    available: prAvailable,
+  });
+  const prHints = [
+    prLastChange && labels.prLastUpdate ? 1 : 0,
+    prWatchError && labels.prUnavailable ? 1 : 0,
+    prPendingWakes > 0 && labels.prPendingWakes ? 1 : 0,
+  ].reduce((sum, n) => sum + n, 0);
+  // Reserve the PR section's height so first paint matches the final layout.
+  const prSectionHeight = prSection.visible
+    ? 28 + Math.min(PR_LIST_MAX_H, Math.max(prSection.rows, 1) * 36 + 8) + prHints * 18
+    : 0;
   const filteredBranches = showBranchesSection
     ? capGitBranchesForMenu(
         filterGitBranches(sortGitBranches(branches), branchQuery),
@@ -218,6 +294,7 @@ export function ComposerWorktreeMenu({
   const estHeight = Math.min(
     620,
     44 +
+      prSectionHeight +
       (showBranchesSection
         ? 28 + 40 + Math.min(BRANCH_LIST_MAX_H, branchCount * 36 + 8)
         : 0) +
@@ -261,6 +338,7 @@ export function ComposerWorktreeMenu({
       worktrees.length,
       cliWorktrees.length,
       showCliSection,
+      prSection.visible,
       filteredBranches.rows.length,
       showBranchesSection,
     ],
@@ -269,6 +347,9 @@ export function ComposerWorktreeMenu({
   useEffect(() => {
     if (!open) return;
     onOpenRef.current?.();
+    // The section stays unmounted after a failed read, so the open itself is
+    // what retries the list. One call per open, whether or not the section shows.
+    onPrListVisibleRef.current?.();
   }, [open]);
 
   useEffect(() => {
@@ -278,6 +359,17 @@ export function ComposerWorktreeMenu({
   const isContext = variant === "context";
   const tip = current?.path
     ? `${labels.worktreeTip}\n${current.path}`
+    : labels.worktreeTip;
+  // The chip says how many PRs this chat follows: a pull request belongs to the
+  // repository, so naming one of them here would claim a branch binding that
+  // does not exist.
+  const showChipWatch = isContext && prWatchingCount > 0;
+  const chipWatchTitle =
+    showChipWatch && labels.prChipCountTip
+      ? labels.prChipCountTip.replace("{count}", String(prWatchingCount))
+      : undefined;
+  const chipAria = showChipWatch
+    ? `${labels.worktreeTip} · ${chipWatchTitle ?? ""}`.trim()
     : labels.worktreeTip;
 
   return (
@@ -295,7 +387,8 @@ export function ComposerWorktreeMenu({
             isContext
               ? "composer__context-item composer__context-item--branch" +
                 (open ? " is-open" : "") +
-                (showLoading ? " is-loading" : "")
+                (showLoading ? " is-loading" : "") +
+                (showChipWatch ? " has-pr" : "")
               : "chip chip--branch" +
                 (open ? " is-open" : "") +
                 (showLoading ? " is-loading" : "")
@@ -303,7 +396,7 @@ export function ComposerWorktreeMenu({
           disabled={disabled}
           aria-haspopup="menu"
           aria-expanded={open}
-          aria-label={labels.worktreeTip}
+          aria-label={chipAria}
           onClick={() => setOpen((v) => !v)}
         >
           <IconGitBranch size={14} aria-hidden />
@@ -312,6 +405,16 @@ export function ComposerWorktreeMenu({
           >
             {branchLabel}
           </span>
+          {showChipWatch ? (
+            <span className="composer__context-pr" title={chipWatchTitle}>
+              <IconBell size={11} aria-hidden />
+              <span className="composer__context-pr-count">
+                {labels.prChipCount
+                  ? labels.prChipCount.replace("{count}", String(prWatchingCount))
+                  : String(prWatchingCount)}
+              </span>
+            </span>
+          ) : null}
         </button>
       </Tip>
       {open &&
@@ -325,6 +428,34 @@ export function ComposerWorktreeMenu({
             aria-label={labels.worktrees}
             style={popStyle as CSSProperties}
           >
+            {prSection.visible ? (
+              <ComposerPrListSection
+                rows={prRows}
+                loading={prLoading}
+                lastChange={prLastChange}
+                pendingWakes={prPendingWakes}
+                watchError={prWatchError}
+                disabled={disabled || !prCanWatch}
+                labels={{
+                  pr: labels.pr,
+                  prEmpty: labels.prEmpty,
+                  prWatch: labels.prWatch,
+                  prUnwatch: labels.prUnwatch,
+                  prWatchTip: labels.prWatchTip,
+                  prUnwatchTip: labels.prUnwatchTip,
+                  prOpenHub: labels.prOpenHub,
+                  prWatchingLabel: labels.prWatchingLabel,
+                  prLastUpdate: labels.prLastUpdate,
+                  prPendingWakes: labels.prPendingWakes,
+                  prUnavailable: labels.prUnavailable,
+                }}
+                onOpenPrHub={(prNumber) => {
+                  setOpen(false);
+                  onOpenPrHub?.(prNumber);
+                }}
+                onToggleWatch={onTogglePrWatch}
+              />
+            ) : null}
             {showBranchesSection ? (
               <div className="cwm__branches">
                 <div className="cwm__head">{labels.branches}</div>

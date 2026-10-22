@@ -14,6 +14,9 @@ pub(crate) struct StreamEmitPayload {
     pub message_id: String,
     pub text: String,
     pub done: bool,
+    /// The Host has retired this turn. Frontends may trust this fence even if
+    /// their cached `session://state` event still says Streaming.
+    pub host_finalized: bool,
     pub kind: String,
     pub thought_phase: String,
 }
@@ -143,6 +146,7 @@ pub(crate) struct PendingStreamJournalFlush {
 /// and committed only after that lock drops (shared GROK_HOME file lock +
 /// `app.emit` must not run while holding `inner` / `background`).
 pub(crate) struct PendingTurnBoundaryPersist {
+    pub(crate) gate_invalidation: Option<super::human_gate_invalidation::PendingGateInvalidation>,
     pub(crate) stream_flush: Option<PendingStreamJournalFlush>,
     pub(crate) session_id: String,
     pub(crate) message: ChatMessageStored,
@@ -155,6 +159,7 @@ pub(crate) struct PendingTurnBoundaryPersist {
 pub(crate) enum PendingSessionPersist {
     StreamJournal(Box<PendingStreamJournalFlush>),
     TurnBoundary(Box<PendingTurnBoundaryPersist>),
+    GateInvalidation(Box<super::human_gate_invalidation::PendingGateInvalidation>),
 }
 
 impl SessionManager {
@@ -529,6 +534,7 @@ impl SessionManager {
             marker: Some("turn_cancelled".into()),
         };
         Some(PendingTurnBoundaryPersist {
+            gate_invalidation: None,
             stream_flush,
             session_id: s.app_session_id.clone(),
             message,
@@ -796,6 +802,7 @@ impl SessionManager {
         tier: StallTier,
         saw_model_output: bool,
         saw_tool_activity: bool,
+        stream_interrupted: bool,
     ) {
         let _ = app.emit(
             "session://stream_stall",
@@ -807,6 +814,7 @@ impl SessionManager {
                 "tier": tier.as_str(),
                 "sawModelOutput": saw_model_output,
                 "sawToolActivity": saw_tool_activity,
+                "streamInterrupted": stream_interrupted,
             }),
         );
     }
@@ -916,7 +924,7 @@ impl SessionManager {
             );
             return;
         }
-        if let Err(e) = store::update_session_meta(&meta) {
+        if let Err(e) = store::update_runtime_session_meta(&meta) {
             tracing::warn!(
                 session = %session_id,
                 "stream session metadata update failed after journal append: {e}"
@@ -930,6 +938,13 @@ impl SessionManager {
         app: Option<&AppHandle>,
         pending: PendingTurnBoundaryPersist,
     ) {
+        if let Some(invalidation) = pending.gate_invalidation {
+            if let Some(app) = app {
+                invalidation.emit(app, "turn_failed");
+            } else {
+                invalidation.publish(|_| {});
+            }
+        }
         if let Some(flush) = pending.stream_flush {
             Self::commit_stream_journal_flush(flush);
         }
@@ -939,7 +954,7 @@ impl SessionManager {
                 "turn-boundary journal append failed: {e}"
             );
         }
-        if let Err(e) = store::update_session_meta(&pending.meta) {
+        if let Err(e) = store::update_runtime_session_meta(&pending.meta) {
             tracing::warn!(
                 session = %pending.session_id,
                 "turn-boundary metadata update failed: {e}"
@@ -963,6 +978,13 @@ impl SessionManager {
                 PendingSessionPersist::TurnBoundary(boundary) => {
                     Self::commit_turn_boundary_persist(app, *boundary);
                 }
+                PendingSessionPersist::GateInvalidation(invalidation) => {
+                    if let Some(app) = app {
+                        invalidation.emit(app, "turn_failed");
+                    } else {
+                        invalidation.publish(|_| {});
+                    }
+                }
             }
         }
     }
@@ -985,17 +1007,36 @@ impl SessionManager {
             message_id: p.message_id,
             text: p.text,
             done: p.done,
+            host_finalized: false,
             kind: Self::stream_kind_str(p.kind).to_string(),
             thought_phase: p.thought_phase,
         })
     }
 
-    /// Mark pending stream done, then take (or None). Does not emit.
+    /// Take the final coalesced tail, or synthesize a done-only terminal fence.
+    /// Does not emit.
+    ///
+    /// The final text batch may already have flushed before Host retires the
+    /// turn. Returning `None` in that case made `hostFinalized` best-effort and
+    /// left the UI dependent on a separate state event. Always emit one
+    /// authoritative fence while the turn/message identity is still present.
     pub(super) fn take_pending_stream_emit_done(s: &mut LiveSession) -> Option<StreamEmitPayload> {
         if let Some(p) = s.pending_stream_emit.as_mut() {
             p.done = true;
         }
-        Self::take_pending_stream_emit(s)
+        if let Some(mut payload) = Self::take_pending_stream_emit(s) {
+            payload.host_finalized = true;
+            return Some(payload);
+        }
+        Some(StreamEmitPayload {
+            session_id: s.app_session_id.clone(),
+            message_id: s.streaming_message_id.clone().unwrap_or_default(),
+            text: String::new(),
+            done: true,
+            host_finalized: true,
+            kind: Self::stream_kind_str(StreamKind::Assistant).to_string(),
+            thought_phase: "none".to_string(),
+        })
     }
 
     /// Fan out `session://stream` after session locks are released.
@@ -1014,6 +1055,7 @@ impl SessionManager {
                 "messageId": payload.message_id,
                 "text": payload.text,
                 "done": payload.done,
+                "hostFinalized": payload.host_finalized,
                 "kind": payload.kind,
                 "thoughtPhase": payload.thought_phase,
             }),
@@ -1101,6 +1143,7 @@ impl SessionManager {
                 message_id,
                 text,
                 done,
+                host_finalized: false,
                 kind: kind_s.to_string(),
                 thought_phase: thought_phase.to_string(),
             });
@@ -1121,74 +1164,15 @@ impl SessionManager {
     pub(super) fn schedule_stream_emit_flush(
         self: &Arc<Self>,
         app: AppHandle,
-        session_id: String,
-        gen: u64,
+        schedule: super::stream_event::StreamSchedule,
     ) {
         let mgr = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(DEFAULT_STREAM_EMIT_MS)).await;
-            mgr.flush_stream_emit_if_gen(&app, &session_id, gen);
+            if let Some(payload) = mgr.prepare_stream_flush(&schedule) {
+                Self::emit_stream_payload(&app, payload);
+            }
         });
-    }
-
-    /// Take under lock, then emit after the guard is dropped.
-    pub(super) fn flush_stream_emit_if_gen(&self, app: &AppHandle, session_id: &str, gen: u64) {
-        {
-            let mut guard = self.inner.lock();
-            if let Some(s) = guard.as_mut() {
-                if s.app_session_id == session_id && s.stream_emit_flush_gen == gen {
-                    let should = s.pending_stream_emit.as_ref().is_some_and(|p| {
-                        should_flush_stream_emit(
-                            p.first_at,
-                            p.text.len(),
-                            Instant::now(),
-                            false,
-                            DEFAULT_STREAM_EMIT_MAX_CHARS,
-                            Duration::from_millis(DEFAULT_STREAM_EMIT_MS),
-                        )
-                    });
-                    let payload = if should {
-                        Self::take_pending_stream_emit(s)
-                    } else {
-                        None
-                    };
-                    drop(guard);
-                    if let Some(p) = payload {
-                        Self::emit_stream_payload(app, p);
-                    }
-                    return;
-                }
-            }
-        }
-        let payload = {
-            let mut bg = self.background.lock();
-            if let Some(s) = bg.get_mut(session_id) {
-                if s.stream_emit_flush_gen == gen {
-                    let should = s.pending_stream_emit.as_ref().is_some_and(|p| {
-                        should_flush_stream_emit(
-                            p.first_at,
-                            p.text.len(),
-                            Instant::now(),
-                            false,
-                            DEFAULT_STREAM_EMIT_MAX_CHARS,
-                            Duration::from_millis(DEFAULT_STREAM_EMIT_MS),
-                        )
-                    });
-                    if should {
-                        Self::take_pending_stream_emit(s)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some(p) = payload {
-            Self::emit_stream_payload(app, p);
-        }
     }
 
     /// Open-tool heartbeat: re-arm stall progress + emit explicit protocol event.
@@ -1364,7 +1348,7 @@ impl SessionManager {
             tracing::error!("interjection journal append failed: {e}");
         }
         s.meta.updated_at = message.created_at;
-        if let Err(e) = store::update_session_meta(&s.meta) {
+        if let Err(e) = store::update_runtime_session_meta(&s.meta) {
             tracing::warn!("interjection meta update failed: {e}");
         }
         if turn_active {
@@ -1568,6 +1552,8 @@ mod stream_emit_lock_tests {
         let _ = fsm.begin_stream();
         let now = Instant::now();
         LiveSession {
+            turn_open_epoch: 0,
+            workspace_context: None,
             app_session_id: "stream-emit-lock".into(),
             process_id: "process-emit-lock".into(),
             meta: SessionMeta {
@@ -1580,6 +1566,8 @@ mod stream_emit_lock_tests {
                 model_id: None,
                 archived: false,
                 pinned: false,
+                provider_id: None,
+                agent_execution: None,
                 effort: None,
                 mode: None,
                 permission_policy: None,
@@ -1598,7 +1586,6 @@ mod stream_emit_lock_tests {
                 workspace_id: None,
                 workspace_root_snapshot: None,
                 workspace_capability: None,
-                provider_id: None,
             },
             fsm,
             backend: "grok_agent_stdio".into(),
@@ -1619,14 +1606,17 @@ mod stream_emit_lock_tests {
             policy: PermissionPolicy::default(),
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
+            last_provider_retry: None,
             needs_history_bootstrap: false,
             pending_plan_rpc_id: None,
             pending_permission_rpc_id: None,
+            pending_permission_reply: None,
             pending_permission_options: None,
             pending_permission_tool_name: None,
             pending_permission_ui: None,
             pending_ask_user_rpc_id: None,
             pending_ask_user_ui: None,
+            human_gates: Default::default(),
             last_activity: now,
             last_stream_progress: now,
             last_stall_emit: None,
@@ -1662,6 +1652,7 @@ mod stream_emit_lock_tests {
         assert_eq!(p.message_id, "m1");
         assert_eq!(p.text, "hello");
         assert!(!p.done);
+        assert!(!p.host_finalized);
         assert_eq!(p.kind, "assistant");
         assert_eq!(p.thought_phase, "none");
         assert!(s.pending_stream_emit.is_none());
@@ -1680,6 +1671,41 @@ mod stream_emit_lock_tests {
         });
         assert!(SessionManager::take_pending_stream_emit(&mut s).is_none());
         assert!(s.pending_stream_emit.is_none());
+    }
+
+    #[test]
+    fn final_take_marks_pending_tail_as_host_finalized() {
+        let mut s = minimal_streaming_session();
+        s.pending_stream_emit = Some(PendingStreamEmit {
+            kind: StreamKind::Assistant,
+            message_id: "m-final".into(),
+            text: "tail".into(),
+            thought_phase: "none".into(),
+            done: false,
+            first_at: Instant::now(),
+        });
+        let payload =
+            SessionManager::take_pending_stream_emit_done(&mut s).expect("terminal payload");
+        assert_eq!(payload.message_id, "m-final");
+        assert_eq!(payload.text, "tail");
+        assert!(payload.done);
+        assert!(payload.host_finalized);
+        assert!(s.pending_stream_emit.is_none());
+    }
+
+    #[test]
+    fn final_take_synthesizes_fence_after_tail_already_flushed() {
+        let mut s = minimal_streaming_session();
+        assert!(s.pending_stream_emit.is_none());
+        let payload =
+            SessionManager::take_pending_stream_emit_done(&mut s).expect("terminal fence");
+        assert_eq!(payload.session_id, "stream-emit-lock");
+        assert_eq!(payload.message_id, "msg-1");
+        assert_eq!(payload.text, "");
+        assert!(payload.done);
+        assert!(payload.host_finalized);
+        assert_eq!(payload.kind, "assistant");
+        assert_eq!(payload.thought_phase, "none");
     }
 
     #[test]

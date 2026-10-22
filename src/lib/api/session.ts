@@ -245,6 +245,19 @@ export async function sessionStop(
   );
 }
 
+/** Stop a turn and learn whether `session/cancel` reached the agent. */
+export async function sessionStopReport(
+  sessionId?: string | null,
+  opts?: { timeoutMs?: number },
+): Promise<{ snapshot: SessionSnapshot; cancelDelivered: boolean }> {
+  const budget = opts?.timeoutMs ?? SESSION_STOP_CLIENT_TIMEOUT_MS;
+  return withDeadline(
+    invoke("session_stop_report", { sessionId: sessionId ?? null }),
+    budget,
+    () => sessionStopTimeoutError(budget),
+  );
+}
+
 export async function sessionDisconnect(): Promise<SessionSnapshot> {
   return invoke("session_disconnect");
 }
@@ -261,6 +274,8 @@ export async function sessionReattach(): Promise<SessionSnapshot> {
  */
 export async function sessionResolvePermission(args: {
   rpcId: number;
+  /** Required when the pending Host card supplies an identity. */
+  requestGeneration?: string | null;
   decision: string;
   optionId?: string;
   scopeKey?: string;
@@ -272,6 +287,7 @@ export async function sessionResolvePermission(args: {
 }): Promise<SessionSnapshot> {
   return invoke("session_resolve_permission", {
     rpcId: args.rpcId,
+    requestGeneration: args.requestGeneration ?? null,
     decision: args.decision,
     optionId: args.optionId ?? null,
     scopeKey: args.scopeKey ?? null,
@@ -309,14 +325,24 @@ export async function sessionResolvePlan(args: {
   decision: "approved" | "cancelled" | "abandoned" | string;
   feedback?: string | null;
   rpcId?: number | null;
+  requestGeneration?: string | null;
   sessionId?: string | null;
 }): Promise<SessionSnapshot> {
   return invoke("session_resolve_plan", {
     decision: args.decision,
     feedback: args.feedback ?? null,
     rpcId: args.rpcId ?? null,
+    requestGeneration: args.requestGeneration ?? null,
     sessionId: args.sessionId ?? null,
   });
+}
+
+/** Current live approval; its identity is never loaded from disk. */
+export async function sessionPendingPlan(
+  sessionId: string,
+): Promise<(import("@/lib/planSession").PlanEventPayload & { sessionId: string }) | null> {
+  if (!sessionId?.trim() || (!isTauri() && !isMirrorClient())) return null;
+  return invoke("session_pending_plan", { sessionId });
 }
 
 /** Host-persisted plan chrome for an app session (survives restart). */
@@ -332,10 +358,13 @@ export async function sessionPlanChromeGet(
 export async function sessionPlanChromeSet(
   sessionId: string,
   chrome: import("@/lib/planSession").PlanChromeStored,
+  expectedRevision?: string | null,
 ): Promise<void> {
-  if (!sessionId?.trim()) return;
-  if (!isTauri() && !isMirrorClient()) return;
-  await invoke("session_plan_chrome_set", { sessionId, chrome });
+  if (!sessionId?.trim() || !expectedRevision?.trim()) {
+    throw Object.assign(new Error("Plan chrome revision required"), { code: "PLAN_CHROME_CHANGED" });
+  }
+  if (!isTauri() && !isMirrorClient()) throw Object.assign(new Error("Host unavailable"), { code: "UNSUPPORTED" });
+  await invoke("session_plan_chrome_set", { sessionId, chrome, expectedRevision });
 }
 
 /** Agent plan_mode.json + plan.md snapshot for resume UI. */
@@ -356,12 +385,14 @@ export async function sessionResolveAskUser(args: {
   decision: "accepted" | "cancelled" | string;
   answers?: Record<string, string> | null;
   rpcId?: number | null;
+  requestGeneration?: string | null;
   sessionId?: string | null;
 }): Promise<SessionSnapshot> {
   return invoke("session_resolve_ask_user", {
     decision: args.decision,
     answers: args.answers ?? null,
     rpcId: args.rpcId ?? null,
+    requestGeneration: args.requestGeneration ?? null,
     sessionId: args.sessionId ?? null,
   });
 }
@@ -371,6 +402,7 @@ export async function sessionsList() {
       id: string;
       projectId: string | null;
       title: string;
+      workspaceId?: string | null;
       updatedAt: string;
       modelId: string | null;
       /** Per-session reasoning effort when stored on meta. */
@@ -500,6 +532,12 @@ export type SessionContentSearchHit = {
   matchCount: number;
   updatedAt: string;
   archived?: boolean;
+  kind?: "session" | "importedHistory";
+};
+
+export type SessionContentSearchResponse = {
+  hits: SessionContentSearchHit[];
+  importedHistoryError: string | null;
 };
 
 /**
@@ -507,9 +545,13 @@ export type SessionContentSearchHit = {
  * Empty query returns []. Caps scan work on the host.
  */
 export async function sessionsSearch(query: string, limit = 20) {
-  if (!query.trim()) return [] as SessionContentSearchHit[];
-  if (!isTauri()) return [] as SessionContentSearchHit[];
-  return invoke<SessionContentSearchHit[]>("sessions_search", {
+  if (!query.trim()) {
+    return { hits: [], importedHistoryError: null } as SessionContentSearchResponse;
+  }
+  if (!isTauri()) {
+    return { hits: [], importedHistoryError: null } as SessionContentSearchResponse;
+  }
+  return invoke<SessionContentSearchResponse>("sessions_search", {
     query,
     limit,
   });

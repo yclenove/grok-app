@@ -212,7 +212,7 @@ describe("installDialogFocus", () => {
       initialFocus: "first",
     });
     expect(a._focus).toHaveBeenCalled();
-    expect(listeners.length).toBe(1);
+    expect(listeners.map((listener) => listener.type)).toEqual(["keydown", "focusin"]);
 
     const tab = {
       key: "Tab",
@@ -238,6 +238,7 @@ describe("installDialogFocus", () => {
 
     cleanup();
     expect(prev._focus).toHaveBeenCalled();
+    expect(document.removeEventListener).toHaveBeenCalledWith("focusin", listeners[1]!.fn, true);
   });
 
   it("skips initial focus when initialFocus is none", () => {

@@ -3484,9 +3484,7 @@ and https://pbs.twimg.com/media/HNccFG2X0AE8gQ6.jpg?format=jpg&name=small
 
     #[test]
     fn library_delete_soft_and_scoped() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = test_tmp_home("del");
         // SAFETY: test-only, mutex-serialized GROK_APP_HOME mutation.
         unsafe {
@@ -3510,17 +3508,12 @@ and https://pbs.twimg.com/media/HNccFG2X0AE8gQ6.jpg?format=jpg&name=small
         assert_eq!(err, "path_not_allowed");
         assert!(outside.exists());
 
-        unsafe {
-            std::env::remove_var("GROK_APP_HOME");
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn library_list_collects_x_and_imagine() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = test_tmp_home("list");
         unsafe {
             std::env::set_var("GROK_APP_HOME", &tmp);
@@ -3543,9 +3536,6 @@ and https://pbs.twimg.com/media/HNccFG2X0AE8gQ6.jpg?format=jpg&name=small
         assert!(sources.contains("imagine"));
         assert!(list.iter().all(|e| e.kind == "image"));
 
-        unsafe {
-            std::env::remove_var("GROK_APP_HOME");
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -3607,4 +3597,9 @@ and https://pbs.twimg.com/media/HNccFG2X0AE8gQ6.jpg?format=jpg&name=small
         );
         assert!(items[1].post_url.is_none());
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        library_delete_soft_and_scoped,
+        library_list_collects_x_and_imagine,
+    );
 }

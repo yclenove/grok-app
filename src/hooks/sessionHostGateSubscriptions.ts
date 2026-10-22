@@ -11,7 +11,6 @@ import { recordPlanHistory } from "@/lib/planHistory";
 import {
   emptySessionPlan,
   mergePlanFromEvent,
-  planStateToStored,
   type SessionPlanState,
 } from "@/lib/planSession";
 import { computePlanProgress, parsePlanEntries } from "@/lib/planStatus";
@@ -22,6 +21,7 @@ import {
   type PermissionPayload,
   type TurnErrorPayload,
 } from "@/lib/session";
+import { registerGateInvalidationSubscriptions } from "./sessionGateInvalidationSubscriptions";
 import type { SessionHostEventsCtx } from "./useSessionHostEvents";
 
 /**
@@ -43,10 +43,13 @@ export function registerGateAndMetaSubscriptions(
   },
 ) {
   const { isCancelled, track, listenWithRetry } = env;
+  registerGateInvalidationSubscriptions(c, env);
        track(
           listenWithRetry<TurnErrorPayload>("session://turn_error", (p) => {
             if (isCancelled()) return;
-            c.clearPendingGatesRef.current(p.sessionId);
+            if (!p.humanGatesInvalidated) {
+              c.clearPendingGatesRef.current(p.sessionId);
+            }
             if (p.sessionId === c.viewingSessionIdRef.current) {
               c.setRetryStatus(null);
             }
@@ -58,6 +61,13 @@ export function registerGateAndMetaSubscriptions(
        track(
           listenWithRetry<PermissionPayload>("session://permission", (p) => {
             if (isCancelled()) return;
+            const responseError = p.responseError?.trim();
+            if (responseError) {
+              c.setToast(
+                c.trRef.current("perm.replyFailed", { error: responseError }),
+              );
+              window.setTimeout(() => c.setToast(null), 4200);
+            }
             // Park it against its session so returning to that chat can answer.
             if (p.sessionId) {
               c.pendingPermBySessionRef.current.set(p.sessionId, p);
@@ -68,8 +78,10 @@ export function registerGateAndMetaSubscriptions(
               p.sessionId !== c.viewingSessionIdRef.current
             ) {
               // Multi-session stream: another chat needs approval — nudge user.
-              c.setToast(c.trRef.current("session.backgroundPermission"));
-              window.setTimeout(() => c.setToast(null), 4200);
+              if (!responseError) {
+                c.setToast(c.trRef.current("session.backgroundPermission"));
+                window.setTimeout(() => c.setToast(null), 4200);
+              }
               if (
                 shouldShowDesktopNotify(
                   "permission",
@@ -147,27 +159,13 @@ export function registerGateAndMetaSubscriptions(
             }
           }),
         );
-        // Host stop / interject auto-cancels pending questionnaires — drop the modal.
-       track(
-          listenWithRetry<{ sessionId?: string; reason?: string }>(
-            "session://ask_user_cleared",
-            (p) => {
-              if (isCancelled()) return;
-              const sid = p?.sessionId?.trim();
-              if (!sid) return;
-              c.clearPendingGatesRef.current(sid);
-              if (sid === c.viewingSessionIdRef.current) {
-                c.setAskUser(null);
-              }
-            },
-          ),
-        );
        track(
           listenWithRetry<{
             entries?: unknown[];
             body?: string | null;
             sessionId?: string;
             rpcId?: number | null;
+            requestGeneration?: string | null;
             toolCallId?: string | null;
             waiting?: boolean;
           }>("session://plan", (p) => {
@@ -244,9 +242,6 @@ export function registerGateAndMetaSubscriptions(
               c.planBySessionRef.current.set(p.sessionId, next);
               c.markPlanPendingBadge?.(p.sessionId, next);
               planJustCompleted(prev, next, p.sessionId);
-              void api
-                .sessionPlanChromeSet(p.sessionId, planStateToStored(next))
-                .catch(() => {});
               // exit_plan_mode gate on a demoted turn — nudge like permission bar.
               const becameReview =
                 next.rpcId != null &&
@@ -301,9 +296,6 @@ export function registerGateAndMetaSubscriptions(
                 c.planBySessionRef.current.set(targetSid, next);
                 c.markPlanPendingBadge?.(targetSid, next);
                 planJustCompleted(prev, next, targetSid);
-                void api
-                  .sessionPlanChromeSet(targetSid, planStateToStored(next))
-                  .catch(() => {});
               }
               return next;
             });

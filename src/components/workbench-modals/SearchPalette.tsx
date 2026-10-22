@@ -1,14 +1,23 @@
 import type { RefObject } from "react";
 import { createT, type Locale } from "@/i18n";
-import { IconClose, IconFolder, IconSearch, IconNewChat as IconSquarePen } from "@/components/icons";
+import {
+  IconClose,
+  IconFolder,
+  IconRefresh,
+  IconSearch,
+  IconStop,
+  IconNewChat as IconSquarePen,
+} from "@/components/icons";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { paletteActionIcon } from "@/app/paletteActionIcon";
+import type { CatalogRebuildStatus } from "@/lib/api";
 import {
   normalizeSessionRow,
   type Project,
   type SessionRow,
 } from "@/lib/app/sidebarModels";
 import type { PaletteActionDef } from "@/lib/paletteActions";
+import { importErrorKey } from "@/lib/sessionImport/errorCopy";
 import {
   SESSION_SEARCH_MODES,
   SESSION_SEARCH_RANK_MODES,
@@ -40,6 +49,8 @@ export function SearchPalette(props: {
   sessions: SessionRow[];
   projectsCatalog: Project[];
   contentSearchLoading: boolean;
+  contentError: string | null;
+  catalogRebuild: CatalogRebuildStatus | null;
   emptyState: SessionSearchEmptyPresentation | null;
   settingsShortcutHint: string;
   onClose: () => void;
@@ -52,8 +63,30 @@ export function SearchPalette(props: {
   onRunAction: (action: PaletteActionDef) => void;
   onPickProject: (project: SearchableProject) => void;
   onPickSession: (row: SessionRow, project: Project | null) => void;
+  onRebuildCatalog: () => void;
+  onCancelCatalogRebuild: () => void;
 }) {
   const tr = createT(props.locale);
+  const rebuild = props.catalogRebuild;
+  const schemaRepairable = props.contentError === "SCHEMA_UNSUPPORTED";
+  const rebuildProgress =
+    rebuild?.running && rebuild.totalRevisions > 0
+      ? tr("sessionImport.catalogRebuildProgress", {
+          done: rebuild.completedRevisions,
+          total: rebuild.totalRevisions,
+        })
+      : tr("sessionImport.catalogRebuilding");
+  const contentErrorCopy = rebuild?.running
+    ? rebuildProgress
+    : rebuild?.phase === "complete"
+      ? tr("sessionImport.catalogRebuildSuccess")
+      : rebuild?.phase === "cancelled"
+        ? tr("sessionImport.catalogRebuildCancelled")
+        : rebuild?.phase === "failed"
+          ? tr(importErrorKey(rebuild.errorCode ?? "REQUEST_FAILED"))
+          : schemaRepairable
+            ? tr("sessionImport.catalogRebuildRequired")
+            : tr(importErrorKey(props.contentError ?? "REQUEST_FAILED"));
   return (
     <div
       className="overlay"
@@ -246,7 +279,39 @@ export function SearchPalette(props: {
                 ? ` · ${tr("search.searchingContent")}`
                 : null}
             </div>
-            {props.emptyState ? (
+            {props.contentError ? (
+              <div
+                className="search-panel__error"
+                role="alert"
+                data-error-code={props.contentError}
+              >
+                <span className="search-panel__error-copy">{contentErrorCopy}</span>
+                {schemaRepairable && rebuild?.phase !== "complete" ? (
+                  <span className="search-panel__error-actions">
+                    {rebuild?.running ? (
+                      <button
+                        type="button"
+                        className="search-panel__clear-filters"
+                        onClick={props.onCancelCatalogRebuild}
+                      >
+                        <IconStop size={13} />
+                        {tr("sessionImport.catalogRebuildCancel")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="search-panel__clear-filters"
+                        onClick={props.onRebuildCatalog}
+                      >
+                        <IconRefresh size={13} />
+                        {tr("sessionImport.catalogRebuild")}
+                      </button>
+                    )}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            {!props.contentError && props.emptyState ? (
               <div
                 className="search-panel__empty"
                 role="status"

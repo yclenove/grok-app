@@ -6,7 +6,7 @@
  * (same numbering already shown in the row meta).
  */
 
-export type SearchPanelItemKind = "action" | "project" | "session";
+export type SearchPanelItemKind = "action" | "project" | "session" | "importedHistory";
 
 export type SearchPanelItem = {
   kind: SearchPanelItemKind;
@@ -20,12 +20,17 @@ export const SEARCH_PANEL_PAGE_SIZE = 8;
 export function flattenSearchPanelItems(input: {
   actions?: ReadonlyArray<{ id: string }>;
   projects?: ReadonlyArray<{ id: string }>;
-  sessions?: ReadonlyArray<{ id: string }>;
+  sessions?: ReadonlyArray<{ id: string; kind?: string }>;
 }): SearchPanelItem[] {
   const out: SearchPanelItem[] = [];
   for (const a of input.actions ?? []) out.push({ kind: "action", id: a.id });
   for (const p of input.projects ?? []) out.push({ kind: "project", id: p.id });
-  for (const s of input.sessions ?? []) out.push({ kind: "session", id: s.id });
+  for (const s of input.sessions ?? []) {
+    out.push({
+      kind: s.kind === "importedHistory" ? "importedHistory" : "session",
+      id: s.id,
+    });
+  }
   return out;
 }
 

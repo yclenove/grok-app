@@ -264,6 +264,19 @@ pub fn ensure_home_env_std(cmd: &mut StdCommand) {
     cmd.env("HOME", home);
 }
 
+/// Force machine-readable (uncolored) output from CLIs whose stdout we parse.
+///
+/// `gh --json` / `gh pr create` output is parsed as JSON / URL text, so an
+/// inherited `FORCE_COLOR` / `CLICOLOR_FORCE` (common when the App is launched
+/// from a colored terminal) must not wrap it in ANSI escapes. `NO_COLOR` alone
+/// loses to `FORCE_COLOR`, so the forcing vars are removed, not just overridden.
+pub fn apply_no_color_env_std(cmd: &mut StdCommand) {
+    cmd.env_remove("FORCE_COLOR");
+    cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env_remove("CLICOLOR");
+    cmd.env("NO_COLOR", "1");
+}
+
 /// Same as [`ensure_home_env_std`] for `tokio::process::Command`.
 pub fn ensure_home_env_tokio(cmd: &mut tokio::process::Command) {
     if home_env_present() {
@@ -869,12 +882,39 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[path = "process_util_home_tests.rs"]
+mod home_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn user_home_nonempty() {
         assert!(!user_home().as_os_str().is_empty());
+    }
+
+    /// Read back an env var as resolved for the child (last write wins).
+    fn child_env(cmd: &StdCommand, key: &str) -> Option<Option<String>> {
+        cmd.get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .last()
+            .map(|(_, v)| v.map(|v| v.to_string_lossy().to_string()))
+    }
+
+    #[test]
+    fn no_color_env_beats_an_inherited_force_color() {
+        let mut cmd = command("gh");
+        cmd.env("FORCE_COLOR", "1");
+        cmd.env("CLICOLOR_FORCE", "1");
+        cmd.env("CLICOLOR", "1");
+
+        apply_no_color_env_std(&mut cmd);
+
+        assert_eq!(child_env(&cmd, "NO_COLOR"), Some(Some("1".into())));
+        assert_eq!(child_env(&cmd, "FORCE_COLOR"), Some(None));
+        assert_eq!(child_env(&cmd, "CLICOLOR_FORCE"), Some(None));
+        assert_eq!(child_env(&cmd, "CLICOLOR"), Some(None));
     }
 
     #[cfg(windows)]
@@ -993,46 +1033,12 @@ mod tests {
 
     #[test]
     fn ensure_home_env_uses_userprofile_fallback_when_home_absent() {
-        // Serialise against other env-mutating tests in this crate.
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev_home = std::env::var_os("HOME");
-        let prev_profile = std::env::var_os("USERPROFILE");
-        // Simulate Windows GUI: no HOME, only USERPROFILE (Unix falls back the same way).
-        std::env::remove_var("HOME");
-        std::env::set_var("USERPROFILE", "/tmp/grok-app-win-home-sim");
-        assert!(!home_env_present());
-        let home = user_home();
-        assert_eq!(home, PathBuf::from("/tmp/grok-app-win-home-sim"));
-        // Must not panic; Command env is opaque so we only assert resolution path.
-        let mut cmd = StdCommand::new("true");
-        ensure_home_env_std(&mut cmd);
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_profile {
-            Some(v) => std::env::set_var("USERPROFILE", v),
-            None => std::env::remove_var("USERPROFILE"),
-        }
+        home_tests::check_fallback();
     }
 
     #[test]
     fn ensure_home_env_skips_when_home_already_set() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/tmp/grok-app-home-test");
-        assert!(home_env_present());
-        // Should not panic / should be a no-op path.
-        let mut cmd = StdCommand::new("true");
-        ensure_home_env_std(&mut cmd);
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+        home_tests::check_existing();
     }
 
     #[test]

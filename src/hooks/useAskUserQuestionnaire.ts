@@ -3,77 +3,103 @@
  * and the settings demo modal.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { dropAskUserClock, getAskUserClocks } from "@/lib/askUser/askUserClocks";
+import { dropAskUserClock, getAskUserClocks, isAskUserClockPaused, pauseAskUserClock } from "@/lib/askUser/askUserClocks";
+import { askUserClockKey, sameAskUserRequest } from "@/lib/askUser/askUserIdentity";
+import type { AskUserActionOutcome, AskUserActionResult } from "@/lib/askUser/askUserSettle";
 import {
   askUserBuildAnswers,
   askUserCanSubmit,
   askUserQuestionKey,
 } from "@/lib/askUser/askUserForm";
 import { askUserTimeoutRemainingSec } from "@/lib/askUser/askUserTimeout";
-import { dropGateClock, gateClockKey, resumeGateClock } from "@/lib/gateClock";
+import { resumeGateClock } from "@/lib/gateClock";
 import type { AskUserPayload, AskUserQuestionItem } from "@/lib/session";
+type Action = () => AskUserActionResult | Promise<AskUserActionResult>;
 
 export function useAskUserQuestionnaire(
   payload: AskUserPayload | null,
   timeoutSec: number,
-  onCancel: () => void | Promise<void>,
+  onCancel: Action,
 ) {
   const questions = payload?.questions ?? [];
+  const requestKey = payload ? askUserClockKey(payload) : null;
+  const payloadRef = useRef(payload);
+  payloadRef.current = payload;
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [freeText, setFreeText] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [countdownSec, setCountdownSec] = useState<number | null>(null);
-  const timedOutRef = useRef(false);
-  const busyRef = useRef(false);
-  busyRef.current = busy;
+  const claimsRef = useRef(new Set<{ payload: AskUserPayload }>());
+  const hasClaim = (request: AskUserPayload) => [...claimsRef.current].some((claim) => sameAskUserRequest(claim.payload, request));
+  const completedRef = useRef<AskUserPayload | null>(null);
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
 
   useEffect(() => {
-    if (!payload) {
-      setSelected({});
-      setFreeText({});
-      setBusy(false);
-      setCountdownSec(null);
-      timedOutRef.current = false;
-      return;
-    }
     setSelected({});
     setFreeText({});
-    setBusy(false);
-    timedOutRef.current = false;
-  }, [payload?.rpcId]);
+    setBusy(Boolean(payload && hasClaim(payload)));
+    setCountdownSec(null);
+  }, [requestKey]);
+
+  const runAction = async (action: Action): Promise<AskUserActionOutcome> => {
+    if (!payload || !sameAskUserRequest(payloadRef.current, payload) ||
+        hasClaim(payload) || sameAskUserRequest(completedRef.current, payload)) {
+      return { kind: "skipped" };
+    }
+    const claim = { payload };
+    claimsRef.current.add(claim);
+    setBusy(true);
+    setCountdownSec(null);
+    const key = askUserClockKey(payload);
+    try {
+      const outcome: AskUserActionOutcome = (await action()) ?? { kind: "delivered" };
+      if (outcome.kind === "failed") {
+        pauseAskUserClock(key);
+      } else if (outcome.kind === "delivered") {
+        dropAskUserClock(key);
+        if (sameAskUserRequest(payloadRef.current, payload)) completedRef.current = payload;
+      }
+      return outcome;
+    } catch (error) {
+      pauseAskUserClock(key);
+      return { kind: "failed", error };
+    } finally {
+      claimsRef.current.delete(claim);
+      if (sameAskUserRequest(payloadRef.current, payload)) setBusy(false);
+    }
+  };
+  const cancel = () => runAction(() => onCancelRef.current());
+  const cancelRef = useRef(cancel);
+  cancelRef.current = cancel;
 
   const open = Boolean(payload && questions.length > 0);
   useEffect(() => {
-    if (!open || !payload || !(timeoutSec > 0)) {
+    if (!open || !payload || !requestKey || busy || !(timeoutSec > 0) ||
+        isAskUserClockPaused(requestKey) || sameAskUserRequest(completedRef.current, payload)) {
       setCountdownSec(null);
       return;
     }
-    const clockKey = gateClockKey(payload.sessionId, payload.rpcId);
-    const startedAt = resumeGateClock(getAskUserClocks(), clockKey);
-    timedOutRef.current = false;
+    const startedAt = resumeGateClock(getAskUserClocks(), requestKey);
     setCountdownSec(askUserTimeoutRemainingSec(startedAt, timeoutSec));
     const tick = window.setInterval(() => {
-      setCountdownSec(
-        askUserTimeoutRemainingSec(startedAt, timeoutSec, Date.now()),
-      );
+      if (sameAskUserRequest(payloadRef.current, payload)) {
+        setCountdownSec(askUserTimeoutRemainingSec(startedAt, timeoutSec, Date.now()));
+      }
     }, 250);
     const t = window.setTimeout(
       () => {
-        if (timedOutRef.current || busyRef.current) return;
-        timedOutRef.current = true;
-        dropAskUserClock(clockKey);
-        void onCancelRef.current();
+        if (!sameAskUserRequest(payloadRef.current, payload) ||
+            hasClaim(payload) || sameAskUserRequest(completedRef.current, payload)) return;
+        void cancelRef.current();
       },
       Math.max(0, timeoutSec * 1000 - (Date.now() - startedAt)),
     );
     return () => {
       window.clearTimeout(t);
       window.clearInterval(tick);
-      setCountdownSec(null);
     };
-  }, [open, payload?.sessionId, payload?.rpcId, timeoutSec]);
+  }, [open, requestKey, timeoutSec, busy]);
 
   const canSubmit = useMemo(
     () => askUserCanSubmit(questions, selected, freeText),
@@ -116,32 +142,10 @@ export function useAskUserQuestionnaire(
     }
   };
 
-  const dropClock = () => {
-    if (!payload) return;
-    dropGateClock(
-      getAskUserClocks(),
-      gateClockKey(payload.sessionId, payload.rpcId),
-    );
-  };
-
   const submit = async (
-    onSubmit: (answers: Record<string, string>) => void | Promise<void>,
+    onSubmit: (answers: Record<string, string>) => AskUserActionResult | Promise<AskUserActionResult>,
     answers?: Record<string, string>,
-  ) => {
-    if (busy) return;
-    setBusy(true);
-    dropClock();
-    try {
-      await onSubmit(answers ?? askUserBuildAnswers(questions, selected, freeText));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const cancel = async () => {
-    dropClock();
-    await onCancel();
-  };
+  ) => runAction(() => onSubmit(answers ?? askUserBuildAnswers(questions, selected, freeText)));
 
   return {
     questions,

@@ -826,7 +826,8 @@ mod tests {
         let port = st.local_port.expect("port");
         let token = st.token.expect("token");
 
-        let client = reqwest::Client::new();
+        // Exercise this owned loopback server, regardless of the host's proxy.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let good = client
             .get(format!("http://127.0.0.1:{port}/t/{token}/api/health"))
             .send()

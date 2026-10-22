@@ -14,6 +14,7 @@ import {
   sessionSearchBadgeLabelKey,
   sessionSearchModeLabelKey,
   sessionSearchRankModeLabelKey,
+  searchHitOpensImportedHistory,
   shouldScanSessionContent,
   tokenizeSearchText,
   tokenOverlapScore,
@@ -148,6 +149,28 @@ describe("matchMessageContent", () => {
   });
 });
 
+describe("searchHitOpensImportedHistory", () => {
+  it("U06: imported catalog hits open importedHistory, native ids do not", () => {
+    expect(
+      searchHitOpensImportedHistory({
+        id: "imp:11111111-1111-4111-8111-111111111111",
+        kind: "importedHistory",
+      }),
+    ).toBe(true);
+    expect(
+      searchHitOpensImportedHistory({
+        id: "imp:11111111-1111-4111-8111-111111111111",
+      }),
+    ).toBe(true);
+    expect(
+      searchHitOpensImportedHistory({
+        id: "11111111-1111-4111-8111-111111111111",
+        kind: "session",
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("mergeSessionSearchHits", () => {
   it("keeps title hits first and attaches content snippets", () => {
     const title = [{ id: "s1", title: "Fix doctor reset", projectId: "p1" }];
@@ -176,6 +199,27 @@ describe("mergeSessionSearchHits", () => {
     expect(merged[1].matchCount).toBe(1);
     expect(sessionSearchBadge(merged[0])).toBe("both");
     expect(sessionSearchBadge(merged[1])).toBe("content");
+  });
+
+  it("U06: importedHistory content hits keep kind and id", () => {
+    const importId = "imp:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const merged = mergeSessionSearchHits(
+      "keep-compat",
+      [],
+      [
+        {
+          id: importId,
+          title: "Imported chat",
+          snippet: "keep-compat body",
+          matchCount: 1,
+          kind: "importedHistory",
+        },
+      ],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe(importId);
+    expect(merged[0].kind).toBe("importedHistory");
+    expect(searchHitOpensImportedHistory(merged[0])).toBe(true);
   });
 
   it("empty query does not append content-only rows", () => {

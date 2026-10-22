@@ -42,6 +42,7 @@ export function useQueueEditDialog(opts: {
 
   const openEdit = useCallback(
     (item: QueuedSend) => {
+      if (item.source === "external") return;
       pauseFlush();
       setEditItemId(item.id);
       setEditText(item.storedDisplay);
@@ -56,7 +57,7 @@ export function useQueueEditDialog(opts: {
   const saveEdit = useCallback(() => {
     if (!editItemId) return;
     const item = activeQueue.find((q) => q.id === editItemId);
-    if (!item) {
+    if (!item || item.source === "external") {
       closeEdit();
       return;
     }

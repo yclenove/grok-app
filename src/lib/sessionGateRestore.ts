@@ -10,9 +10,11 @@
  * keeps them symmetric.
  */
 
+import type { SessionGateCache } from "./sessionGateCache";
+
 /** Per-session cache of gates seen live, so a re-open needs no host round-trip. */
 export interface ParkedGates<T> {
-  current: Map<string, T>;
+  current: SessionGateCache<T>;
 }
 
 export interface RestoreGateOptions<T> {
@@ -31,27 +33,32 @@ export interface RestoreGateOptions<T> {
  *
  * The pull is deliberately fire-and-forget: it must never delay opening a chat.
  * `stillOpen` guards against a slow reply landing after the user moved on, and
- * a live event arriving first always wins — it re-checks `parked` before
- * committing, so a restore can never overwrite fresher state.
+ * a live event, reply or newer pull retires the original cache lease. This also
+ * catches an event followed by deletion, when the cache looks empty again.
  */
 export function restoreSessionGate<T>(
   sessionId: string,
   stillOpen: () => boolean,
   { parked, apply, pull, enabled }: RestoreGateOptions<T>,
 ): void {
-  const cached = parked.current.get(sessionId) ?? null;
+  const cache = parked.current;
+  const lease = cache.beginRestore(sessionId);
+  const cached = cache.get(sessionId) ?? null;
   apply(cached);
-  if (cached || !enabled) return;
+  if (cached || !enabled) {
+    lease.finish();
+    return;
+  }
 
   void pull(sessionId)
     .then((gate) => {
-      if (!gate || !stillOpen()) return;
-      if (parked.current.has(sessionId)) return;
-      parked.current.set(sessionId, gate);
+      if (!gate || !stillOpen() || parked.current !== cache || !lease.isCurrent()) return;
+      cache.set(sessionId, gate);
       apply(gate);
     })
     .catch(() => {
       // A failed pull is not worth surfacing: the gate simply stays unrestored,
       // exactly as before this recovery path existed.
-    });
+    })
+    .finally(lease.finish);
 }

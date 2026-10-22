@@ -596,16 +596,24 @@ fn mcp_def_to_acp_for_session(
     } else {
         None
     };
-    let cred_usable = cred.as_ref().is_some_and(|c| {
+    let rejected = def.url.as_deref().is_some_and(mcp_host_is_auth_rejected);
+    mcp_def_to_acp_with_credential(def, cred.as_ref(), now_secs, rejected)
+}
+
+/// Shared auth gate/mapper. The caller owns the credential source and rejection
+/// scope; this helper never reads global homes or performs OAuth network work.
+pub(crate) fn mcp_def_to_acp_with_credential(
+    def: &McpServerDef,
+    cred: Option<&McpCredentialEntry>,
+    now_secs: u64,
+    rejected: bool,
+) -> Option<Value> {
+    let cred_usable = cred.is_some_and(|c| {
         !c.access_token.trim().is_empty() && !mcp_credential_is_expired(c, now_secs)
     });
     // After a successful silent refresh, drop AuthRequired suppress so inject proceeds.
-    let rejected = if cred_usable {
-        false
-    } else {
-        def.url.as_deref().is_some_and(mcp_host_is_auth_rejected)
-    };
-    let decision = decide_mcp_inject_auth(def, cred.as_ref(), now_secs, rejected);
+    let rejected = if cred_usable { false } else { rejected };
+    let decision = decide_mcp_inject_auth(def, cred, now_secs, rejected);
     match decision {
         McpInjectAuthDecision::NotRemote | McpInjectAuthDecision::Usable => {}
         McpInjectAuthDecision::Missing
@@ -624,7 +632,7 @@ fn mcp_def_to_acp_for_session(
     let mut entry = mcp_def_to_acp(def)?;
     // Prefer non-expired credentials for Authorization (override stale config header).
     if mcp_def_is_remote_http(def) {
-        if let Some(c) = cred.as_ref() {
+        if let Some(c) = cred {
             if !mcp_credential_is_expired(c, now_secs) && !c.access_token.trim().is_empty() {
                 let bearer = format!("Bearer {}", c.access_token.trim());
                 if let Some(obj) = entry.as_object_mut() {
@@ -1284,8 +1292,31 @@ fn fetch_mcp_from_inspect(project_cwd: Option<&str>) -> Vec<McpServerDef> {
 ///
 /// For **session open / connect**, use [`build_session_mcp_servers_for_connect`]
 /// so MCP/OAuth failures cannot block ACP.
-pub fn build_session_mcp_servers(project_cwd: Option<&str>) -> Value {
-    build_session_mcp_servers_with_opts(project_cwd, McpInjectOptions::default())
+/// Chat id the PR-monitor MCP tools should be scoped to.
+///
+/// A process prewarmed before the chat exists stores no id. The chat that
+/// later reuses it passes its own id, and that one wins. A blank id is ignored.
+pub fn resolve_mcp_app_session_id<'a>(
+    bound: Option<&'a str>,
+    spawned_with: Option<&'a str>,
+) -> Option<&'a str> {
+    fn present(value: &str) -> Option<&str> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+    bound
+        .and_then(present)
+        .or_else(|| spawned_with.and_then(present))
+}
+
+/// Full inject (settings / hot swap). `app_session_id` scopes the per-session
+/// App MCPs, so a live agent keeps its tools across a hot MCP swap.
+pub fn build_session_mcp_servers(project_cwd: Option<&str>, app_session_id: Option<&str>) -> Value {
+    build_session_mcp_servers_with_opts(project_cwd, McpInjectOptions::default(), app_session_id)
 }
 
 /// Connect / open_session inject: config-only, no OAuth network, panic-safe.
@@ -1293,10 +1324,17 @@ pub fn build_session_mcp_servers(project_cwd: Option<&str>) -> Value {
 /// Returns `[]` on any failure so `session/new|load` always proceeds. Callers
 /// should also wrap with [`MCP_CONNECT_BUDGET`] so a stuck CLI probe cannot
 /// stall the async runtime.
-pub fn build_session_mcp_servers_for_connect(project_cwd: Option<&str>) -> Value {
+pub fn build_session_mcp_servers_for_connect(
+    project_cwd: Option<&str>,
+    app_session_id: Option<&str>,
+) -> Value {
     let start = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        build_session_mcp_servers_with_opts(project_cwd, McpInjectOptions::for_connect())
+        build_session_mcp_servers_with_opts(
+            project_cwd,
+            McpInjectOptions::for_connect(),
+            app_session_id,
+        )
     }));
     match result {
         Ok(v) => {
@@ -1319,10 +1357,62 @@ pub fn build_session_mcp_servers_for_connect(project_cwd: Option<&str>) -> Value
     }
 }
 
+/// Owned main processes use captured definitions/prefs and route policy. Do not
+/// reload the current global home or channel while opening an existing process.
+pub(crate) fn build_main_mcp_servers_for_connect(
+    servers: &[crate::providers::CapturedMcpServer],
+    prefs: &ExtensionsPrefs,
+    policy: crate::providers::MainRuntimePolicy,
+    project_cwd: Option<&str>,
+    app_session_id: Option<&str>,
+) -> Value {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let user = if policy.load_user_mcp {
+            let now = mcp_auth_now_secs();
+            Value::Array(servers.iter().filter(|server| is_enabled(&prefs.mcp, &server.definition.name)).filter_map(|server| server.to_acp(now)).collect())
+        } else {
+            json!([])
+        };
+        let mut servers = compose_main_mcp_servers(user, policy, || {
+            crate::official_aux::mcp_server_acp_entry_reason().0
+        });
+        if let Some(arr) = servers.as_array_mut() {
+            append_pr_monitor_mcp(arr, project_cwd, app_session_id);
+        }
+        servers
+    })).unwrap_or_else(|_| {
+        tracing::warn!(target: "mcp_inject", "captured main MCP build failed; injecting empty list");
+        json!([])
+    })
+}
+
+pub(crate) fn compose_main_mcp_servers(
+    user: Value,
+    policy: crate::providers::MainRuntimePolicy,
+    official_entry: impl FnOnce() -> Option<Value>,
+) -> Value {
+    let mut arr = if policy.load_user_mcp {
+        user.as_array().cloned().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    arr.retain(|entry| entry.get("name").and_then(Value::as_str) != Some("official-aux"));
+    if policy.inject_official_aux {
+        if let Some(entry) = official_entry() {
+            arr.insert(0, entry);
+        }
+    }
+    Value::Array(arr)
+}
+
 /// Shared builder used by full inject and the connect soft-fail path.
+///
+/// `app_session_id` is the chat this agent serves; per-session App MCPs (the PR
+/// monitor tools) are only injected when it is known.
 pub fn build_session_mcp_servers_with_opts(
     project_cwd: Option<&str>,
     opts: McpInjectOptions,
+    app_session_id: Option<&str>,
 ) -> Value {
     let inject = crate::official_aux::should_inject_mcp_for_main();
     let load_user = !inject || crate::official_aux::should_load_user_mcp_with_official_aux();
@@ -1375,7 +1465,28 @@ pub fn build_session_mcp_servers_with_opts(
             );
         }
     }
+
+    append_pr_monitor_mcp(&mut arr, project_cwd, app_session_id);
     Value::Array(arr)
+}
+
+fn append_pr_monitor_mcp(
+    arr: &mut Vec<Value>,
+    project_cwd: Option<&str>,
+    app_session_id: Option<&str>,
+) {
+    // The Agent's own handle on this chat's PR watches (`pr_watch` / `pr_unwatch`
+    // / `pr_watches`). App-local — no credentials — so it rides every route; it
+    // is only built when the caller knows which chat this process serves.
+    if let Some(sid) = app_session_id {
+        match crate::pr_monitor::mcp::mcp_server_acp_entry(sid, project_cwd) {
+            Some(entry) => arr.push(entry),
+            None => tracing::warn!(
+                target: "mcp_inject",
+                "pr-monitor MCP entry unavailable (node / script / endpoint) — agent cannot watch PRs"
+            ),
+        }
+    }
 }
 
 // ── Config.toml MCP upsert / remove ──────────────────────────────────────────
@@ -2124,6 +2235,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_bound_chat_wins_over_the_id_the_process_was_spawned_with() {
+        assert_eq!(
+            resolve_mcp_app_session_id(Some("chat-1"), None),
+            Some("chat-1")
+        );
+        assert_eq!(
+            resolve_mcp_app_session_id(None, Some("spawned")),
+            Some("spawned")
+        );
+        assert_eq!(
+            resolve_mcp_app_session_id(Some("chat-1"), Some("spawned")),
+            Some("chat-1")
+        );
+        assert_eq!(
+            resolve_mcp_app_session_id(Some("  "), Some("spawned")),
+            Some("spawned")
+        );
+        assert_eq!(resolve_mcp_app_session_id(Some("  "), Some("")), None);
+        assert_eq!(resolve_mcp_app_session_id(None, None), None);
+    }
+
+    #[test]
     fn default_on_when_missing() {
         let m = HashMap::new();
         assert!(is_enabled(&m, "foo"));
@@ -2328,7 +2461,7 @@ mod tests {
     #[test]
     fn connect_builder_never_panics_returns_array() {
         // Empty cwd / no config — still a JSON array, never panic.
-        let v = build_session_mcp_servers_for_connect(Some("/nonexistent/project/path"));
+        let v = build_session_mcp_servers_for_connect(Some("/nonexistent/project/path"), None);
         assert!(v.is_array(), "connect inject must always yield an array");
     }
 

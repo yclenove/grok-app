@@ -19,6 +19,10 @@ pub async fn test_connection(
     // password fields in secrets. Merge so doctor matches runtime secret_or_opt.
     let creds = merge_creds(&secrets, &options);
 
+    if channel == "imessage" {
+        return Ok(super::channels::imessage::probe_local());
+    }
+
     if creds.is_empty() {
         let has = config::list_instances()
             .into_iter()
@@ -1651,6 +1655,9 @@ mod tests {
         let token = "123456:AA-SECRET-TOKEN-VALUE";
         let url = format!("https://127.0.0.1:1/bot{token}/getMe");
         let client = reqwest::Client::builder()
+            // A local failure fixture must never consult an ambient proxy.
+            // The production client policy is deliberately unchanged.
+            .no_proxy()
             .timeout(std::time::Duration::from_millis(200))
             .build()
             .unwrap();

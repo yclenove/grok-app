@@ -20,6 +20,11 @@ export type SessionPlanState = {
   waiting: boolean;
   visible: boolean;
   rpcId: number | null;
+  /** Presentation-only reply state; excluded from persisted chrome. */
+  busy?: boolean;
+  requestGeneration?: string | null;
+  /** Host conditional-write identity; never persisted in plan_chrome.json. */
+  chromeRevision?: string | null;
   toolCallId: string | null;
   /**
    * Soft-hide top bar only (legacy). Hard dismiss clears content instead;
@@ -38,6 +43,7 @@ export type SessionPlanState = {
    * the review panel after the user confirmed close.
    */
   closedRpcId: number | null;
+  closedRequestGeneration?: string | null;
   /**
    * Host process died while a gate was open (or chrome reloaded after restart).
    * Approve is disabled until a live re-park rpcId arrives.
@@ -52,6 +58,8 @@ export type SessionPlanState = {
 
 /** Host-persisted plan chrome (camelCase wire). */
 export type PlanChromeStored = {
+  /** Present only in Host UI reads, excluded by planStateToStored. */
+  chromeRevision?: string | null;
   title?: string;
   body?: string;
   entries?: unknown;
@@ -79,6 +87,8 @@ export type AgentPlanSnapshot = {
 };
 
 export type PlanEventPayload = {
+  requestGeneration?: string | null;
+  chromeRevision?: string | null;
   entries?: unknown[];
   body?: string | null;
   rpcId?: number | null;
@@ -96,11 +106,13 @@ export function emptySessionPlan(
     waiting: true,
     visible: false,
     rpcId: null,
+    requestGeneration: null,
     toolCallId: null,
     barDismissed: false,
     userClosed: false,
     closedToolCallId: null,
     closedRpcId: null,
+    closedRequestGeneration: null,
     gateStale: false,
     awaitingAgentApproval: false,
   };
@@ -111,12 +123,14 @@ export function closedSessionPlan(
   title = "Plan ready for review",
   closedToolCallId: string | null = null,
   closedRpcId: number | null = null,
+  closedRequestGeneration: string | null = null,
 ): SessionPlanState {
   return {
     ...emptySessionPlan(title),
     userClosed: true,
     closedToolCallId,
     closedRpcId,
+    closedRequestGeneration,
     barDismissed: true,
   };
 }
@@ -137,6 +151,7 @@ export function invalidatePlanGate(prev: SessionPlanState): SessionPlanState {
   return {
     ...prev,
     rpcId: null,
+    requestGeneration: null,
     waiting: false,
     gateStale: true,
     awaitingAgentApproval: prev.awaitingAgentApproval,
@@ -176,9 +191,9 @@ export function restorePlanFromPersistence(
   const gateStale =
     !!chrome?.gateStale ||
     (awaitingAgent && !userClosed) ||
-    (!!chrome?.rpcId && !userClosed);
+    (chrome?.rpcId != null && !userClosed);
 
-  if (userClosed && !awaitingAgent) {
+  if (userClosed) {
     return {
       ...closedSessionPlan(
         readyTitle,
@@ -189,6 +204,7 @@ export function restorePlanFromPersistence(
       entries,
       gateStale: false,
       awaitingAgentApproval: false,
+      chromeRevision: chrome?.chromeRevision ?? null,
     };
   }
 
@@ -211,6 +227,7 @@ export function restorePlanFromPersistence(
     closedRpcId: null,
     gateStale: gateStale || awaitingAgent,
     awaitingAgentApproval: awaitingAgent,
+    chromeRevision: chrome?.chromeRevision ?? null,
   };
 }
 
@@ -315,6 +332,8 @@ export function shouldReopenClosedPlan(
   // New exit_plan_mode gate (must surface for approve/revise) — but not the
   // same rpc the user just abandoned on dismiss.
   if (p.rpcId != null && p.rpcId !== prev.closedRpcId) return true;
+  if (p.rpcId != null && p.requestGeneration &&
+      p.requestGeneration !== prev.closedRequestGeneration) return true;
 
   // New plan tool invocation (different toolCallId than the one we closed).
   const tid = normalizeToolCallId(p.toolCallId ?? null);
@@ -377,6 +396,10 @@ export function mergePlanFromEvent(
     waiting: rpcId == null && !prev.awaitingAgentApproval,
     visible: true,
     rpcId,
+    requestGeneration: p.rpcId != null
+      ? p.requestGeneration ?? null
+      : rpcId != null ? prev.requestGeneration ?? null : null,
+    chromeRevision: p.chromeRevision ?? null,
     toolCallId,
     barDismissed: false,
     userClosed: false,

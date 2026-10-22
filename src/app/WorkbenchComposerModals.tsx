@@ -59,7 +59,9 @@ export function WorkbenchComposerModals(props: {
         title={tr("composer.queueClearConfirmTitle")}
         body={
           queueEdit.clearPlan.confirmNeeded
-            ? tr("composer.queueClearConfirmMessage", {
+            ? tr(queueEdit.clearPlan.next.some((item) => item.source === "external")
+                ? "composer.queueClearLocalConfirmMessage"
+                : "composer.queueClearConfirmMessage", {
                 n: String(queueEdit.clearPlan.count),
               })
             : tr("composer.queueClearEmpty")

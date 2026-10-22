@@ -52,6 +52,24 @@ function renderSection(model: SettingsViewModel): string {
   );
 }
 
+describe("GeneralSection composer", () => {
+  it("shows the live-turn insert switch next to the send key", () => {
+    const html = renderSection(
+      buildModel({
+        activeTab: "composer",
+        composerMinRows: "3",
+        composerSendKeyPref: "enter",
+        composerEnterInsertsLive: false,
+        setComposerEnterInsertsLive: vi.fn(),
+        availableModels: [],
+      }),
+    );
+    expect(html).toContain("settings-anchor-composerEnterInsertsLive");
+    expect(html).toContain("settings.composerEnterInsertsLive");
+    expect(html).toContain('aria-checked="false"');
+  });
+});
+
 describe("GeneralSection voice — custom STT", () => {
   it("shows the engine selector in the voice card", () => {
     const html = renderSection(buildModel());
@@ -161,6 +179,17 @@ describe("GeneralSection voice — custom STT", () => {
       buildModel({ sttEngine: "custom", sttCustomLanguage: "en" }),
     );
     expect(html).toContain('c-select__value">settings.sttLanguage.en');
+  });
+
+  it("keeps Language after the compact catalog and before the closed CLI list", () => {
+    const html = renderSection(buildModel());
+    const catalog = html.indexOf('id="settings-anchor-importedCatalog"');
+    const language = html.indexOf('id="settings-anchor-language"');
+    const cli = html.indexOf('id="settings-anchor-cliSessions"');
+    expect(catalog).toBeGreaterThanOrEqual(0);
+    expect(language).toBeGreaterThan(catalog);
+    expect(cli).toBeGreaterThan(language);
+    expect(html).not.toContain("settings-cli-sessions--modal");
   });
 
   it("language dropdown folds the script choice into 简体/繁體", () => {

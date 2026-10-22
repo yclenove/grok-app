@@ -192,11 +192,7 @@ export function sidebarNavSessionIds<
   sessions: readonly T[];
   /** All projects — decides which sessions count as orphans. */
   projects: readonly { id: string }[];
-  /**
-   * Projects actually rendered in the tree (space-filtered, SSH-hidden
-   * projects excluded). Chats of projects the sidebar does not show are
-   * unreachable by pointer and must not be j/k targets either.
-   */
+  /** Projects actually rendered in the tree. */
   visibleProjects: readonly { id: string }[];
   projectsOpen: boolean;
   historyOpen: boolean;

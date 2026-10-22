@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"claude-g1","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/synth/repo","message":{"role":"user","content":"hello one"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"claude-g1","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"t1","name":"Read","input":{"path":"a.txt"}}]}}
+{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"claude-g1","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file ok"}]}}
+{"type":"assistant","uuid":"a2","parentUuid":"r1","sessionId":"claude-g1","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}

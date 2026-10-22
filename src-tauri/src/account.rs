@@ -377,7 +377,7 @@ fn cli_default_sessions_root() -> PathBuf {
         .join("sessions")
 }
 
-fn session_roots() -> Vec<PathBuf> {
+pub(crate) fn session_roots() -> Vec<PathBuf> {
     // Always cover: process GROK_HOME, shared CLI home, and App agent-home.
     // Independent mode must not hide `~/.grok/sessions` activity (#556).
     let mut roots = Vec::with_capacity(3);
@@ -1196,7 +1196,7 @@ pub fn local_usage(days: u32, log_limit: usize) -> (Vec<HeatmapDay>, Vec<CallLog
     local_usage_from_roots(days, log_limit, &session_roots())
 }
 
-fn local_usage_from_roots(
+pub(crate) fn local_usage_from_roots(
     days: u32,
     log_limit: usize,
     roots: &[PathBuf],

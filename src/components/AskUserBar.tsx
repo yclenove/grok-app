@@ -7,6 +7,8 @@ import { AskUserForm } from "@/components/AskUserForm";
 import { IconChevronUp, IconMinimize } from "@/components/icons";
 import { useAskUserQuestionnaire } from "@/hooks/useAskUserQuestionnaire";
 import { askUserDismissLocked } from "@/lib/askUser/askUserSettle";
+import type { AskUserActionResult } from "@/lib/askUser/askUserSettle";
+import { askUserClockKey } from "@/lib/askUser/askUserIdentity";
 import { askUserBarHeading, askUserPendingPreview } from "@/lib/askUser/askUserForm";
 import { shouldAskUserSubmitOnEnter } from "@/lib/askUser/askUserKeyboard";
 import type { AskUserPayload } from "@/lib/session";
@@ -27,8 +29,8 @@ export type AskUserBarLabels = {
 type Props = {
   payload: AskUserPayload | null;
   labels: AskUserBarLabels;
-  onSubmit: (answers: Record<string, string>) => void | Promise<void>;
-  onCancel: () => void | Promise<void>;
+  onSubmit: (answers: Record<string, string>) => AskUserActionResult | Promise<AskUserActionResult>;
+  onCancel: () => AskUserActionResult | Promise<AskUserActionResult>;
   timeoutSec?: number;
 };
 
@@ -57,6 +59,7 @@ export function AskUserBar({
     cancel,
   } = useAskUserQuestionnaire(payload, timeoutSec, onCancel);
   const [collapsed, setCollapsed] = useState(false);
+  const requestKey = payload ? askUserClockKey(payload) : null;
   const canSubmitRef = useRef(canSubmit);
   canSubmitRef.current = canSubmit;
   const busyRef = useRef(busy);
@@ -68,7 +71,7 @@ export function AskUserBar({
 
   useEffect(() => {
     setCollapsed(false);
-  }, [payload?.rpcId]);
+  }, [requestKey]);
 
   useEffect(() => {
     if (!open || collapsed) return;

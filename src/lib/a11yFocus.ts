@@ -12,22 +12,36 @@ const FOCUSABLE_SEL = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-/** Visible, enabled focus targets inside `root`. */
+function isConcealed(el: HTMLElement): boolean {
+  if (el.getAttribute("aria-hidden") === "true") return true;
+  if (el.hasAttribute("hidden") || el.hasAttribute("inert")) return true;
+  const style =
+    typeof window !== "undefined" ? window.getComputedStyle(el) : null;
+  return !!style && (style.visibility === "hidden" || style.display === "none");
+}
+
+/**
+ * Visible, enabled focus targets inside `root`.
+ * A control under a hidden, inert, or aria-hidden ancestor is not a candidate.
+ * This does not use offsetParent: that is null for valid fixed controls and
+ * for every control in jsdom.
+ */
 export function listFocusable(root: ParentNode | null | undefined): HTMLElement[] {
   if (!root || typeof (root as Element).querySelectorAll !== "function") {
     return [];
   }
-  const nodes = Array.from(
-    (root as Element).querySelectorAll<HTMLElement>(FOCUSABLE_SEL),
-  );
+  const rootEl = root as Element;
+  const nodes = Array.from(rootEl.querySelectorAll<HTMLElement>(FOCUSABLE_SEL));
   return nodes.filter((el) => {
     if (el.hasAttribute("disabled")) return false;
-    if (el.getAttribute("aria-hidden") === "true") return false;
-    // offsetParent null for display:none (except fixed); still allow fixed.
-    const style =
-      typeof window !== "undefined" ? window.getComputedStyle(el) : null;
-    if (style && (style.visibility === "hidden" || style.display === "none")) {
-      return false;
+    let node: HTMLElement | null = el;
+    while (node) {
+      if (isConcealed(node)) return false;
+      if (node === rootEl) break;
+      const parent: HTMLElement | null = node.parentElement;
+      if (!parent || parent === node) break;
+      if (typeof rootEl.contains === "function" && !rootEl.contains(parent)) break;
+      node = parent;
     }
     return true;
   });
@@ -134,13 +148,34 @@ export type InstallDialogFocusOptions = {
    * - getter — focus that element when present, else first
    */
   initialFocus?: "first" | "none" | (() => HTMLElement | null | undefined);
-  /** Restore previously focused element on cleanup (default true). */
-  restoreFocus?: boolean;
+  /** Restore on cleanup (default true); a getter can exempt deliberate Tab/outside focus moves. */
+  restoreFocus?: boolean | (() => boolean);
+  /** Override the Tab trap for a scoped popup that returns to its trigger's tab order. */
+  onTab?: (event: KeyboardEvent) => void;
 };
+
+type DialogFocusScope = {
+  getRoot: () => ParentNode | null | undefined;
+  returnFocus: HTMLElement | null;
+  lastFocused: HTMLElement | null;
+};
+
+// Dialogs can be independent portals and use different event phases. A DOM
+// propagation stop alone cannot keep older document listeners from running.
+const dialogFocusScopes = new WeakMap<Document, DialogFocusScope[]>();
+
+/** Recheck this inside delayed focus work so a newer modal keeps ownership. */
+export function isDialogFocusAllowed(target: Node): boolean {
+  const scopes = target.ownerDocument && dialogFocusScopes.get(target.ownerDocument);
+  const top = scopes?.[scopes.length - 1];
+  return !top || rootContains(top.getRoot(), target);
+}
 
 /**
  * Wire a basic dialog focus lifecycle for an open panel:
  * remember previous focus → optional initial focus → Tab trap → Escape.
+ * Only the most recently opened scope owns keyboard / initial focus. Closing
+ * a covered scope must not steal focus from the still-open panel above it.
  *
  * Returns cleanup (remove listeners + restore focus). Call from `useEffect`
  * when the dialog is open.
@@ -154,16 +189,39 @@ export function installDialogFocus(
     capture = true,
     initialFocus = "first",
     restoreFocus = true,
+    onTab,
   } = opts;
 
-  const prev =
-    typeof document !== "undefined"
-      ? (document.activeElement as HTMLElement | null)
-      : null;
+  const doc = typeof document !== "undefined" ? document : null;
+  const scopes = (doc && dialogFocusScopes.get(doc)) || [];
+  if (doc) dialogFocusScopes.set(doc, scopes);
+  // React clears refs during the mutation phase, before passive cleanup. Keep
+  // the last panel so return targets in a detached portal can still be linked.
+  let lastRoot = getRoot();
+  const currentRoot = () => {
+    const root = getRoot();
+    if (root) lastRoot = root;
+    return root;
+  };
+  const active = (doc?.activeElement as HTMLElement | null) ?? null;
+  // Async preparation may disable its trigger before this panel mounts. The
+  // browser then reports body, not the control to which closing should return.
+  // Only use the parent's remembered control when focus is actually lost.
+  const parent = scopes[scopes.length - 1];
+  const focusLost = !active || active === doc?.body || active === doc?.documentElement;
+  const scope: DialogFocusScope = {
+    getRoot: currentRoot,
+    returnFocus: focusLost ? parent?.lastFocused ?? active : active,
+    lastFocused: rootContains(currentRoot(), active) ? active : null,
+  };
+  scopes.push(scope);
+  let disposed = false;
+  const isTop = () => !disposed && scopes[scopes.length - 1] === scope;
 
   let focusTimer: number | undefined;
   if (initialFocus !== "none" && typeof window !== "undefined") {
     focusTimer = window.setTimeout(() => {
+      if (!isTop() || !currentRoot()) return;
       if (typeof initialFocus === "function") {
         const el = initialFocus();
         if (el && typeof el.focus === "function") {
@@ -171,37 +229,70 @@ export function installDialogFocus(
           return;
         }
       }
-      focusFirst(getRoot());
+      focusFirst(currentRoot());
     }, 0) as unknown as number;
   }
 
   const onKey = (e: KeyboardEvent) => {
+    if (
+      !isTop() || !currentRoot() || e.defaultPrevented ||
+      e.isComposing || e.keyCode === 229
+    ) {
+      return;
+    }
     if (e.key === "Escape" && onEscape) {
       e.preventDefault();
       e.stopPropagation();
       onEscape();
       return;
     }
-    trapTabKey(e, getRoot());
+    if (e.key === "Tab" && onTab) onTab(e);
+    else trapTabKey(e, currentRoot());
   };
 
-  if (typeof document !== "undefined") {
-    document.addEventListener("keydown", onKey, capture);
-  }
+  const onFocus = () => {
+    const focused = (doc?.activeElement as HTMLElement | null) ?? null;
+    if (isTop() && rootContains(currentRoot(), focused)) scope.lastFocused = focused;
+  };
+  doc?.addEventListener("keydown", onKey, capture);
+  doc?.addEventListener("focusin", onFocus, true);
 
   return () => {
+    if (disposed) return;
+    const wasTop = isTop();
+    disposed = true;
     if (focusTimer != null && typeof window !== "undefined") {
       window.clearTimeout(focusTimer);
     }
-    if (typeof document !== "undefined") {
-      document.removeEventListener("keydown", onKey, capture);
-    }
-    if (restoreFocus && prev && typeof prev.focus === "function") {
-      try {
-        prev.focus();
-      } catch {
-        /* ignore */
+    doc?.removeEventListener("keydown", onKey, capture);
+    doc?.removeEventListener("focusin", onFocus, true);
+    scopes.splice(scopes.indexOf(scope), 1);
+    // A parent may disappear while its child remains open (navigation / async
+    // completion). Carry the original trigger forward even if refs are gone.
+    const closingRoot = currentRoot() ?? lastRoot;
+    for (const remaining of scopes) {
+      if (rootContains(closingRoot, remaining.returnFocus)) {
+        remaining.returnFocus = scope.returnFocus;
       }
+    }
+    if (doc && scopes.length === 0) dialogFocusScopes.delete(doc);
+    if (!wasTop || !restoreFocus) return;
+
+    const remainingRoot = scopes[scopes.length - 1]?.getRoot();
+    const target = scope.returnFocus;
+    try {
+      if (typeof restoreFocus === "function" && !restoreFocus()) return;
+      if (
+        target && target.isConnected !== false &&
+        !target.hasAttribute("disabled") && typeof target.focus === "function" &&
+        (!remainingRoot || rootContains(remainingRoot, target))
+      ) {
+        target.focus();
+      } else if (remainingRoot) {
+        focusFirst(remainingRoot);
+      }
+    } catch {
+      /* A removed/invalid restore target must not break dialog cleanup. */
     }
   };
 }

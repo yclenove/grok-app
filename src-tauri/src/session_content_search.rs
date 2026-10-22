@@ -3,6 +3,7 @@
 //! Pure match/snippet helpers are unit-tested; `search_sessions` scans on-disk
 //! journals with hard caps so the palette stays responsive.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -35,6 +36,20 @@ pub struct SessionContentHit {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub archived: bool,
+    /// `session` (native journal) or `importedHistory` (catalog, `imp:` id).
+    #[serde(default = "default_hit_kind")]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContentSearchResponse {
+    pub hits: Vec<SessionContentHit>,
+    pub imported_history_error: Option<crate::session_migration::errors::ErrorCode>,
+}
+
+fn default_hit_kind() -> String {
+    "session".into()
 }
 
 /// Count matching user/assistant messages and build a snippet from the first hit.
@@ -145,14 +160,17 @@ fn ceil_char_boundary(s: &str, i: usize) -> usize {
 }
 
 /// Scan App journal sessions for `query`. Caps work; skips huge files.
-pub fn search_sessions(query: &str, limit: usize) -> Vec<SessionContentHit> {
+pub fn search_sessions(query: &str, limit: usize) -> SessionContentSearchResponse {
     let q = query.trim();
     if q.is_empty() {
-        return Vec::new();
+        return SessionContentSearchResponse {
+            hits: Vec::new(),
+            imported_history_error: None,
+        };
     }
     let limit = limit.clamp(1, 50);
     let index = store::load_sessions_index();
-    let mut hits = Vec::new();
+    let mut native_hits = Vec::new();
 
     for meta in index.into_iter().take(MAX_SESSIONS_SCAN) {
         // Match sidebar default: hide archived from content hits.
@@ -160,13 +178,187 @@ pub fn search_sessions(query: &str, limit: usize) -> Vec<SessionContentHit> {
             continue;
         }
         if let Some(hit) = scan_session(&meta, q) {
-            hits.push(hit);
-            if hits.len() >= limit {
+            native_hits.push(hit);
+            if native_hits.len() >= limit {
                 break;
             }
         }
     }
-    hits
+    // Both stores are first-class search sources. Query them independently so
+    // a full native page cannot hide imported matches or imported-store errors.
+    let (imported_hits, imported_history_error) = search_imported_history(q, limit);
+    let hits = merge_content_sources(native_hits, imported_hits, limit);
+    SessionContentSearchResponse {
+        hits,
+        imported_history_error,
+    }
+}
+
+fn merge_content_sources(
+    native_hits: Vec<SessionContentHit>,
+    imported_hits: Vec<SessionContentHit>,
+    limit: usize,
+) -> Vec<SessionContentHit> {
+    let cap = limit.clamp(1, 50);
+    let mut merged = Vec::with_capacity(cap);
+    let mut seen = HashSet::with_capacity(cap);
+    let mut native = native_hits.into_iter();
+    let mut imported = imported_hits.into_iter();
+    let mut native_done = false;
+    let mut imported_done = false;
+
+    while merged.len() < cap && !(native_done && imported_done) {
+        if !native_done {
+            match native.next() {
+                Some(hit) => {
+                    if seen.insert(hit.id.clone()) {
+                        merged.push(hit);
+                    }
+                }
+                None => native_done = true,
+            }
+        }
+        if merged.len() >= cap {
+            break;
+        }
+        if !imported_done {
+            match imported.next() {
+                Some(hit) => {
+                    if seen.insert(hit.id.clone()) {
+                        merged.push(hit);
+                    }
+                }
+                None => imported_done = true,
+            }
+        }
+    }
+    merged
+}
+
+fn search_imported_history(
+    query: &str,
+    limit: usize,
+) -> (
+    Vec<SessionContentHit>,
+    Option<crate::session_migration::errors::ErrorCode>,
+) {
+    let catalog = crate::session_migration::catalog::catalog_path();
+    match std::fs::metadata(&catalog) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return (
+                Vec::new(),
+                Some(crate::session_migration::errors::ErrorCode::HistoryAccessUnavailable),
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), None),
+        Err(_) => {
+            return (
+                Vec::new(),
+                Some(crate::session_migration::errors::ErrorCode::HistoryAccessUnavailable),
+            )
+        }
+    }
+    let conn = match crate::session_migration::catalog::open_catalog_readonly() {
+        Ok(conn) => conn,
+        Err(error) => return (Vec::new(), Some(error.code)),
+    };
+    search_imported_history_with_conn(&conn, query, limit)
+}
+
+fn imported_updated_at(entry: &crate::session_migration::catalog::CatalogEntry) -> DateTime<Utc> {
+    entry
+        .created_at
+        .parse::<DateTime<Utc>>()
+        .unwrap_or_default()
+}
+
+fn search_imported_history_with_conn(
+    conn: &rusqlite::Connection,
+    query: &str,
+    limit: usize,
+) -> (
+    Vec<SessionContentHit>,
+    Option<crate::session_migration::errors::ErrorCode>,
+) {
+    let cap = limit.clamp(1, 50);
+    let mut hits = Vec::new();
+    let mut error = None;
+    match crate::session_migration::catalog::search_imported_titles(conn, query, cap) {
+        Ok(title_hits) => {
+            for entry in title_hits {
+                if hits.len() >= cap {
+                    break;
+                }
+                if !crate::session_migration::ids::is_import_id(&entry.import_id) {
+                    continue;
+                }
+                let title = entry
+                    .alias
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(entry.title.as_str());
+                hits.push(SessionContentHit {
+                    updated_at: imported_updated_at(&entry),
+                    id: entry.import_id,
+                    title: title.to_string(),
+                    project_id: None,
+                    snippet: title.to_string(),
+                    match_count: 1,
+                    archived: false,
+                    kind: "importedHistory".into(),
+                });
+            }
+        }
+        Err(query_error) => error = Some(query_error.code),
+    }
+    if hits.len() >= cap {
+        return (hits, error);
+    }
+    let body_hits =
+        match crate::session_migration::catalog::search_imported_bodies(conn, query, cap) {
+            Ok(body_hits) => body_hits,
+            Err(query_error) => {
+                if error.is_none() {
+                    error = Some(query_error.code);
+                }
+                return (hits, error);
+            }
+        };
+    for (entry, text) in body_hits {
+        if hits.len() >= cap {
+            break;
+        }
+        if hits.iter().any(|h| h.id == entry.import_id) {
+            continue;
+        }
+        if !crate::session_migration::ids::is_import_id(&entry.import_id) {
+            continue;
+        }
+        let title = entry
+            .alias
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(entry.title.as_str());
+        let q = query.trim();
+        let snippet = text
+            .to_lowercase()
+            .find(&q.to_lowercase())
+            .map(|idx| make_snippet(&text, idx, q.len()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| title.to_string());
+        hits.push(SessionContentHit {
+            updated_at: imported_updated_at(&entry),
+            id: entry.import_id,
+            title: title.to_string(),
+            project_id: None,
+            snippet,
+            match_count: 1,
+            archived: false,
+            kind: "importedHistory".into(),
+        });
+    }
+    (hits, error)
 }
 
 fn scan_session(meta: &SessionMeta, query: &str) -> Option<SessionContentHit> {
@@ -194,6 +386,7 @@ fn scan_session(meta: &SessionMeta, query: &str) -> Option<SessionContentHit> {
         match_count,
         updated_at: meta.updated_at,
         archived: meta.archived,
+        kind: default_hit_kind(),
     })
 }
 
@@ -205,64 +398,5 @@ fn file_too_large(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_query_yields_none() {
-        let msgs = [("user", "hello world")];
-        assert!(match_messages("", msgs).is_none());
-        assert!(match_messages("   ", msgs).is_none());
-    }
-
-    #[test]
-    fn case_insensitive_substring() {
-        let msgs = [
-            ("user", "Please fix the Doctor reset button"),
-            ("assistant", "Sure, I will patch it."),
-            ("system", "doctor ignore me"),
-        ];
-        let (n, snip) = match_messages("doctor", msgs).expect("hit");
-        // system role ignored; only user matches
-        assert_eq!(n, 1);
-        assert!(snip.to_lowercase().contains("doctor"));
-    }
-
-    #[test]
-    fn counts_multiple_message_hits() {
-        let msgs = [
-            ("user", "alpha beta"),
-            ("assistant", "reply without key"),
-            ("user", "gamma beta again"),
-            ("assistant", "BETA uppercase"),
-        ];
-        let (n, _) = match_messages("beta", msgs).expect("hit");
-        assert_eq!(n, 3);
-    }
-
-    #[test]
-    fn snippet_truncates_with_ellipsis() {
-        let long_prefix = "word ".repeat(40);
-        let content = format!("{long_prefix}TARGET rest of the message body continues here");
-        let lower = content.to_lowercase();
-        let idx = lower.find("target").unwrap();
-        let snip = make_snippet(&content, idx, "TARGET".len());
-        assert!(snip.contains("TARGET"));
-        assert!(snip.starts_with('…'));
-        assert!(snip.chars().count() <= SNIPPET_MAX + 1);
-    }
-
-    #[test]
-    fn unicode_safe_snippet() {
-        let content = "你好世界测试内容 TARGET 后面还有更多中文内容用于截断";
-        let idx = content.find("TARGET").unwrap();
-        let snip = make_snippet(content, idx, 6);
-        assert!(snip.contains("TARGET"));
-        assert!(!snip.is_empty());
-    }
-
-    #[test]
-    fn search_sessions_empty_query() {
-        assert!(search_sessions("", 10).is_empty());
-    }
-}
+#[path = "session_content_search/tests.rs"]
+mod tests;

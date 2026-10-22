@@ -9,9 +9,41 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "store_composer_runtime_tests.rs"]
+mod composer_runtime_tests;
+#[path = "store_composer_selection.rs"]
+mod composer_selection;
+#[cfg(test)]
+#[path = "store_composer_selection_tests.rs"]
+mod composer_selection_tests;
+#[path = "store_import_continuation.rs"]
+pub(crate) mod import_continuation;
+#[path = "store_import_projects.rs"]
+mod import_projects;
+pub(crate) use import_projects::publication as import_publication_projects;
+#[path = "store_message_update.rs"]
+mod message_update;
+#[cfg(test)]
+#[path = "store_projects_tests.rs"]
+mod project_transaction_tests;
+#[path = "store_projects_io.rs"]
+mod projects_io;
+pub(crate) use projects_io::NewImportProject;
+#[cfg(test)]
+#[path = "store_reference_tests.rs"]
+mod reference_tests;
+#[path = "store_session_refs.rs"]
+mod session_refs;
+#[cfg(test)]
+pub(crate) use import_projects::remove_import_project;
+pub(crate) use import_projects::{ensure_import_project, EnsuredProject as ImportProjectResult};
+pub(crate) use message_update::{rollback_tail_message, update_message};
+
+#[cfg(test)]
+use crate::paths::projects_file;
 use crate::paths::{
-    automations_file, ensure_app_dirs, projects_file, session_dir, sessions_index_file,
-    settings_file,
+    automations_file, ensure_app_dirs, session_dir, sessions_index_file, settings_file,
 };
 
 /// Where composer model / effort / mode / permission choices are remembered.
@@ -187,25 +219,17 @@ fn apply_ssh_path_health(list: &mut [Project]) -> bool {
     dirty
 }
 
-fn rehome_sessions_project_id(from_id: &str, to_id: &str) {
-    if from_id == to_id {
-        return;
-    }
-    let _ = update_sessions_index(|sessions| {
-        for s in sessions {
-            if s.project_id.as_deref() == Some(from_id) {
-                s.project_id = Some(to_id.to_string());
-            }
-        }
-        Ok(())
-    });
-}
-
 /// Same OpenSSH alias + remote cwd must be one sidebar folder.
-fn dedup_ssh_projects_by_alias_path(list: &mut Vec<Project>) -> bool {
+fn dedup_ssh_projects_by_alias_path_after_health(
+    list: &mut Vec<Project>,
+) -> Vec<(String, Option<String>)> {
+    apply_ssh_path_health(list);
     use std::collections::{HashMap, HashSet};
     let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (i, p) in list.iter().enumerate() {
+        if p.is_legacy_general() {
+            continue;
+        }
         let Some(alias) = ssh_alias_of(p) else {
             continue;
         };
@@ -215,6 +239,7 @@ fn dedup_ssh_projects_by_alias_path(list: &mut Vec<Project>) -> bool {
             .push(i);
     }
     let mut drop_ids = HashSet::new();
+    let mut rehomes = Vec::new();
     for idxs in groups.values() {
         if idxs.len() < 2 {
             continue;
@@ -229,15 +254,12 @@ fn dedup_ssh_projects_by_alias_path(list: &mut Vec<Project>) -> bool {
             if i == winner {
                 continue;
             }
-            rehome_sessions_project_id(&list[i].id, &winner_id);
+            rehomes.push((list[i].id.clone(), Some(winner_id.clone())));
             drop_ids.insert(list[i].id.clone());
         }
     }
-    if drop_ids.is_empty() {
-        return false;
-    }
     list.retain(|p| !drop_ids.contains(&p.id));
-    true
+    rehomes
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +272,18 @@ pub struct SessionMeta {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub model_id: Option<String>,
+    /// Desired inference channel, not the current process's execution source.
+    /// `official` identifies the built-in route; custom values are section ids.
+    /// Missing on legacy rows means follow the configured global route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// Actual agent history source; distinct from the desired composer route.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::session_execution::deserialize_receipt"
+    )]
+    pub(crate) agent_execution: Option<crate::session_execution::ExecutionReceipt>,
     /// Archived chats stay on disk but hide from the default tree.
     #[serde(default)]
     pub archived: bool,
@@ -323,10 +357,6 @@ pub struct SessionMeta {
     /// Last known capability label (`context_only`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_capability: Option<String>,
-    /// Provider this chat was last used with. `official`, or a custom section id.
-    /// Missing on older rows → follow the global route until the user picks one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,9 +396,14 @@ pub struct AppSettings {
     /// Default “open path” target: `finder` / `explorer` / editor id (`code`, `cursor`, …).
     #[serde(default = "default_open_target")]
     pub default_open_target: String,
-    /// Remember model / effort / mode / permission at global | project | session.
+    /// Remember defaults / mode / permission at global | project | session.
+    /// Explicit model and effort choices are always stored on the chat.
     #[serde(default = "default_composer_prefs_scope")]
     pub composer_prefs_scope: String,
+    /// Composer editor id: `legacy` (built-in) or `tiptap` (Markdown). Unknown
+    /// values load as `legacy`.
+    #[serde(default = "default_composer_editor")]
+    pub composer_editor: String,
     /// **API mode.** When set (`host:port`), sessions connect to a remote ACP
     /// server over TCP instead of spawning the local `grok agent stdio` — the
     /// agent can run in WSL, a container, or on another host. Empty/unset uses
@@ -843,6 +878,19 @@ fn default_session_data_mode() -> String {
     "shared".into()
 }
 
+fn default_composer_editor() -> String {
+    "legacy".into()
+}
+
+/// Persist only the two composer editor ids. Anything else is the built-in editor.
+pub fn normalize_composer_editor(raw: &str) -> &'static str {
+    if raw.trim() == "tiptap" {
+        "tiptap"
+    } else {
+        "legacy"
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -867,6 +915,7 @@ impl Default for AppSettings {
             auth_setup_deferred: false,
             default_open_target: default_open_target(),
             composer_prefs_scope: default_composer_prefs_scope(),
+            composer_editor: default_composer_editor(),
             acp_server_addr: None,
             max_concurrent_agents: default_max_concurrent_agents(),
             agent_idle_minutes: default_agent_idle_minutes(),
@@ -995,7 +1044,7 @@ pub struct SecretsFile {
 }
 
 /// File/image card persisted with a chat message (user attach or agent image_gen).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageAttachmentStored {
     pub path: String,
@@ -1004,7 +1053,7 @@ pub struct MessageAttachmentStored {
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageStored {
     pub id: String,
@@ -1237,6 +1286,15 @@ pub fn load_settings() -> AppSettings {
     s
 }
 
+/// Connection completion already ran initialization/migrations at connect
+/// entry. Revalidation must be read-only and fail closed, not perform migrations
+/// (or substitute defaults) while holding the publication's store locks.
+pub(crate) fn load_settings_snapshot() -> Result<AppSettings, String> {
+    let value = projects_io::read_value(&settings_file(), 16 * 1024 * 1024)?
+        .ok_or("connection settings are unavailable")?;
+    serde_json::from_value(value).map_err(|error| format!("invalid connection settings: {error}"))
+}
+
 /// Product default effort for cold start / fallback (Grok Build 1.0 = high).
 pub const DEFAULT_REASONING_EFFORT: &str = "high";
 
@@ -1339,22 +1397,19 @@ fn migrate_official_effort_xhigh_rows(global_model_id: Option<&str>) {
     }) {
         tracing::warn!("effort row migration: sessions_index: {e}");
     }
-    let mut projects = load_projects();
-    let mut projects_changed = false;
-    for p in &mut projects {
-        if row_should_lift_official_high_to_xhigh(
-            p.model_id.as_deref(),
-            p.effort.as_deref(),
-            global_model_id,
-        ) {
-            p.effort = Some(DEFAULT_OFFICIAL_EFFORT.into());
-            projects_changed = true;
+    if let Err(e) = update_projects(|projects| {
+        for p in projects {
+            if row_should_lift_official_high_to_xhigh(
+                p.model_id.as_deref(),
+                p.effort.as_deref(),
+                global_model_id,
+            ) {
+                p.effort = Some(DEFAULT_OFFICIAL_EFFORT.into());
+            }
         }
-    }
-    if projects_changed {
-        if let Err(e) = save_projects(&projects) {
-            tracing::warn!("effort row migration: projects: {e}");
-        }
+        Ok(())
+    }) {
+        tracing::warn!("effort row migration: projects: {e}");
     }
 }
 
@@ -1457,24 +1512,35 @@ pub fn reorder_projects_by_ids(list: &[Project], ordered_ids: &[String]) -> Vec<
 }
 
 pub fn load_projects() -> Vec<Project> {
+    load_projects_checked().unwrap_or_else(|error| {
+        tracing::warn!("load projects: {error}");
+        Vec::new()
+    })
+}
+
+pub fn load_projects_checked() -> Result<Vec<Project>, String> {
     let _ = ensure_app_dirs();
     let _ = ensure_general_workspace_dir();
-    let mut list: Vec<Project> = read_json_recover(&projects_file());
-    // One-shot migration: drop the temporary system:general project row and
-    // rehome its sessions to orphan (`project_id = None`) under Default workspace.
-    migrate_legacy_general_project(&mut list);
-    let mut dirty = apply_ssh_path_health(&mut list);
-    dirty |= dedup_ssh_projects_by_alias_path(&mut list);
-    // Pin group first; keep manual order within each group (no last_opened sort).
-    apply_project_pin_partition(&mut list);
-    if dirty {
-        // Persist repaired ssh_alias / merged duplicates. Nested load via
-        // path_scope is a no-op once the file already has the alias.
-        if let Err(e) = save_projects(&list) {
-            tracing::warn!("repair ssh project rows: {e}");
-        }
+    projects_io::load_repaired()
+}
+
+pub(crate) fn load_projects_snapshot() -> Result<Vec<Project>, String> {
+    Ok(projects_io::Snapshot::read()?.projects)
+}
+
+/// All project mutations read under the writer lock; no stale full-list saves.
+pub(crate) fn update_projects<R>(
+    mutate: impl FnOnce(&mut Vec<Project>) -> Result<R, String>,
+) -> Result<R, String> {
+    let (result, changed) = projects_io::update(|list| {
+        let result = mutate(list)?;
+        apply_project_pin_partition(list);
+        Ok(result)
+    })?;
+    if changed {
+        crate::path_scope::refresh_from_store();
     }
-    list
+    Ok(result)
 }
 
 /// Ensure `{app_data}/workspaces/general` exists (orphan chat default cwd).
@@ -1493,39 +1559,6 @@ pub fn general_workspace_path_string() -> Result<String, String> {
         .to_string())
 }
 
-/// Remove legacy `system:general` from the projects list and clear those
-/// session bindings so chats appear under Default workspace.
-fn migrate_legacy_general_project(list: &mut Vec<Project>) {
-    let had_row = list.iter().any(|p| p.is_legacy_general());
-    if !had_row {
-        // Still rehome sessions that point at the retired id (index-only leftover).
-        rehome_general_sessions();
-        return;
-    }
-    list.retain(|p| !p.is_legacy_general());
-    // Raw write: avoid save_projects → path_scope → load_projects recursion.
-    let _ = write_json(&projects_file(), &list);
-    rehome_general_sessions();
-    crate::path_scope::refresh_from_store();
-}
-
-fn rehome_general_sessions() {
-    let _ = update_sessions_index(|sessions| {
-        for s in sessions {
-            if s.project_id.as_deref() == Some(GENERAL_PROJECT_ID) {
-                s.project_id = None;
-            }
-        }
-        Ok(())
-    });
-}
-
-pub fn save_projects(list: &[Project]) -> Result<(), String> {
-    write_json(&projects_file(), &list)?;
-    crate::path_scope::refresh_from_store();
-    Ok(())
-}
-
 pub fn add_project(path: String, trust: bool) -> Result<Project, String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_dir() {
@@ -1535,37 +1568,35 @@ pub fn add_project(path: String, trust: bool) -> Result<Project, String> {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
-    let mut list = load_projects();
-    if let Some(existing) = list.iter_mut().find(|p| p.path == path) {
-        existing.trusted = trust || existing.trusted;
-        existing.last_opened_at = Utc::now();
-        existing.path_ok = true;
-        let clone = existing.clone();
-        save_projects(&list)?;
-        return Ok(clone);
-    }
-    let p = Project {
-        id: Uuid::new_v4().to_string(),
-        name,
-        path,
-        trusted: trust,
-        last_opened_at: Utc::now(),
-        path_ok: true,
-        pinned: false,
-        system: false,
-        model_id: None,
-        effort: None,
-        mode: None,
-        permission_policy: None,
-        sandbox_profile: None,
-        color: None,
-        ssh_alias: None,
-    };
-    // New projects land at the end of the unpinned group (after pin partition).
-    list.push(p.clone());
-    apply_project_pin_partition(&mut list);
-    save_projects(&list)?;
-    Ok(p)
+    update_projects(|list| {
+        if let Some(existing) = list.iter_mut().find(|p| p.path == path) {
+            existing.trusted = trust || existing.trusted;
+            existing.last_opened_at = Utc::now();
+            existing.path_ok = true;
+            let clone = existing.clone();
+            return Ok(clone);
+        }
+        let p = Project {
+            id: Uuid::new_v4().to_string(),
+            name,
+            path,
+            trusted: trust,
+            last_opened_at: Utc::now(),
+            path_ok: true,
+            pinned: false,
+            system: false,
+            model_id: None,
+            effort: None,
+            mode: None,
+            permission_policy: None,
+            sandbox_profile: None,
+            color: None,
+            ssh_alias: None,
+        };
+        // New projects land at the end of the unpinned group (after pin partition).
+        list.push(p.clone());
+        Ok(p)
+    })
 }
 
 /// Register a remote OpenSSH folder as a project. `path` is the remote cwd.
@@ -1583,64 +1614,58 @@ pub fn add_ssh_project(alias: &str, path: String, trust: bool) -> Result<Project
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| path.clone());
     let label = format!("{alias}:{name}");
-    let mut list = load_projects();
-    if let Some(existing) = list
-        .iter_mut()
-        .find(|p| ssh_alias_of(p) == Some(alias) && p.path == path)
-    {
-        existing.trusted = trust || existing.trusted;
-        existing.last_opened_at = Utc::now();
-        existing.path_ok = true;
-        let clone = existing.clone();
-        save_projects(&list)?;
-        return Ok(clone);
-    }
-    // Same remote cwd, alias dropped (older builds) — restore instead of duplicating.
-    if let Some(existing) = list
-        .iter_mut()
-        .find(|p| p.path == path && ssh_alias_of(p).is_none())
-    {
-        existing.ssh_alias = Some(alias.to_string());
-        existing.trusted = trust || existing.trusted;
-        existing.last_opened_at = Utc::now();
-        existing.path_ok = true;
-        let clone = existing.clone();
-        save_projects(&list)?;
-        return Ok(clone);
-    }
-    let p = Project {
-        id: Uuid::new_v4().to_string(),
-        name: label,
-        path,
-        trusted: trust,
-        last_opened_at: Utc::now(),
-        path_ok: true,
-        pinned: false,
-        system: false,
-        model_id: None,
-        effort: None,
-        mode: None,
-        permission_policy: None,
-        sandbox_profile: None,
-        color: None,
-        ssh_alias: Some(alias.to_string()),
-    };
-    list.push(p.clone());
-    apply_project_pin_partition(&mut list);
-    save_projects(&list)?;
-    Ok(p)
+    update_projects(|list| {
+        if let Some(existing) = list
+            .iter_mut()
+            .find(|p| ssh_alias_of(p) == Some(alias) && p.path == path)
+        {
+            existing.trusted = trust || existing.trusted;
+            existing.last_opened_at = Utc::now();
+            existing.path_ok = true;
+            let clone = existing.clone();
+            return Ok(clone);
+        }
+        // Same remote cwd, alias dropped (older builds) — restore instead of duplicating.
+        if let Some(existing) = list
+            .iter_mut()
+            .find(|p| p.path == path && ssh_alias_of(p).is_none())
+        {
+            existing.ssh_alias = Some(alias.to_string());
+            existing.trusted = trust || existing.trusted;
+            existing.last_opened_at = Utc::now();
+            existing.path_ok = true;
+            let clone = existing.clone();
+            return Ok(clone);
+        }
+        let p = Project {
+            id: Uuid::new_v4().to_string(),
+            name: label,
+            path,
+            trusted: trust,
+            last_opened_at: Utc::now(),
+            path_ok: true,
+            pinned: false,
+            system: false,
+            model_id: None,
+            effort: None,
+            mode: None,
+            permission_policy: None,
+            sandbox_profile: None,
+            color: None,
+            ssh_alias: Some(alias.to_string()),
+        };
+        list.push(p.clone());
+        Ok(p)
+    })
 }
 
 /// Persist a user-defined sidebar project order.
 /// Pin groups are re-applied so unpinned items cannot sit above pinned ones.
 pub fn reorder_projects(ordered_ids: Vec<String>) -> Result<Vec<Project>, String> {
-    let list = load_projects();
-    if list.is_empty() {
-        return Ok(list);
-    }
-    let next = reorder_projects_by_ids(&list, &ordered_ids);
-    save_projects(&next)?;
-    Ok(next)
+    update_projects(|list| {
+        *list = reorder_projects_by_ids(list, &ordered_ids);
+        Ok(list.clone())
+    })
 }
 
 /// Remove project from the app list only — does **not** delete the disk folder
@@ -1650,9 +1675,10 @@ pub fn remove_project(id: &str) -> Result<(), String> {
         // Already retired; treat as success so old clients cannot soft-lock.
         return Ok(());
     }
-    let mut list = load_projects();
-    list.retain(|p| p.id != id);
-    save_projects(&list)
+    update_projects(|list| {
+        list.retain(|p| p.id != id);
+        Ok(())
+    })
 }
 
 /// Point a project at a new directory (folder moved / renamed on disk).
@@ -1662,20 +1688,20 @@ pub fn relocate_project(id: &str, new_path: String) -> Result<Project, String> {
     if !path_buf.is_dir() {
         return Err("path is not a directory".into());
     }
-    let mut list = load_projects();
-    if list.iter().any(|p| p.id != id && p.path == new_path) {
-        return Err("another project already uses this path".into());
-    }
-    let p = list
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    p.path = new_path;
-    p.path_ok = true;
-    p.last_opened_at = Utc::now();
-    let clone = p.clone();
-    save_projects(&list)?;
-    Ok(clone)
+    update_projects(|list| {
+        if list.iter().any(|p| p.id != id && p.path == new_path) {
+            return Err("another project already uses this path".into());
+        }
+        let p = list
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        p.path = new_path;
+        p.path_ok = true;
+        p.last_opened_at = Utc::now();
+        let clone = p.clone();
+        Ok(clone)
+    })
 }
 
 pub fn rename_project(id: &str, name: &str) -> Result<Project, String> {
@@ -1683,38 +1709,37 @@ pub fn rename_project(id: &str, name: &str) -> Result<Project, String> {
     if name.is_empty() {
         return Err("name empty".into());
     }
-    let mut list = load_projects();
-    let p = list
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    p.name = name.to_string();
-    let clone = p.clone();
-    save_projects(&list)?;
-    Ok(clone)
+    update_projects(|list| {
+        let p = list
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        p.name = name.to_string();
+        let clone = p.clone();
+        Ok(clone)
+    })
 }
 
 pub fn set_project_pinned(id: &str, pinned: bool) -> Result<Project, String> {
-    let mut list = load_projects();
-    let idx = list
-        .iter()
-        .position(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    if list[idx].pinned == pinned {
-        return Ok(list[idx].clone());
-    }
-    let mut p = list.remove(idx);
-    p.pinned = pinned;
-    // Pin → end of pinned group; unpin → end of list (unpinned group).
-    if pinned {
-        let insert_at = list.iter().filter(|x| x.pinned).count();
-        list.insert(insert_at, p.clone());
-    } else {
-        list.push(p.clone());
-    }
-    apply_project_pin_partition(&mut list);
-    save_projects(&list)?;
-    Ok(p)
+    update_projects(|list| {
+        let idx = list
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        if list[idx].pinned == pinned {
+            return Ok(list[idx].clone());
+        }
+        let mut p = list.remove(idx);
+        p.pinned = pinned;
+        // Pin → end of pinned group; unpin → end of list (unpinned group).
+        if pinned {
+            let insert_at = list.iter().filter(|x| x.pinned).count();
+            list.insert(insert_at, p.clone());
+        } else {
+            list.push(p.clone());
+        }
+        Ok(p)
+    })
 }
 
 /// Named project accent tokens (sidebar color dot).
@@ -1790,28 +1815,28 @@ pub fn set_project_color(id: &str, color: Option<String>) -> Result<Project, Str
             }
         }
     };
-    let mut list = load_projects();
-    let p = list
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    p.color = next;
-    let clone = p.clone();
-    save_projects(&list)?;
-    Ok(clone)
+    update_projects(|list| {
+        let p = list
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        p.color = next;
+        let clone = p.clone();
+        Ok(clone)
+    })
 }
 
 pub fn trust_project(id: &str) -> Result<Project, String> {
-    let mut list = load_projects();
-    let p = list
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    p.trusted = true;
-    p.last_opened_at = Utc::now();
-    let clone = p.clone();
-    save_projects(&list)?;
-    Ok(clone)
+    update_projects(|list| {
+        let p = list
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        p.trusted = true;
+        p.last_opened_at = Utc::now();
+        let clone = p.clone();
+        Ok(clone)
+    })
 }
 
 /// Set or clear a project-level permission tier (L10).
@@ -1821,34 +1846,34 @@ pub fn trust_project(id: &str) -> Result<Project, String> {
 pub fn set_project_permission_policy(id: &str, policy: Option<String>) -> Result<Project, String> {
     use crate::permission::PermissionPolicy;
 
-    let mut list = load_projects();
-    let p = list
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    if !p.trusted {
-        return Err("trust this project before setting a permission tier".into());
-    }
-
-    let next = match policy {
-        None => None,
-        Some(raw) => {
-            let t = raw.trim();
-            if t.is_empty()
-                || t.eq_ignore_ascii_case("inherit")
-                || t.eq_ignore_ascii_case("app_default")
-                || t.eq_ignore_ascii_case("default")
-            {
-                None
-            } else {
-                Some(PermissionPolicy::parse(t).as_str().to_string())
-            }
+    update_projects(|list| {
+        let p = list
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        if !p.trusted {
+            return Err("trust this project before setting a permission tier".into());
         }
-    };
-    p.permission_policy = next;
-    let clone = p.clone();
-    save_projects(&list)?;
-    Ok(clone)
+
+        let next = match policy {
+            None => None,
+            Some(raw) => {
+                let t = raw.trim();
+                if t.is_empty()
+                    || t.eq_ignore_ascii_case("inherit")
+                    || t.eq_ignore_ascii_case("app_default")
+                    || t.eq_ignore_ascii_case("default")
+                {
+                    None
+                } else {
+                    Some(PermissionPolicy::parse(t).as_str().to_string())
+                }
+            }
+        };
+        p.permission_policy = next;
+        let clone = p.clone();
+        Ok(clone)
+    })
 }
 
 /// Known OS sandbox profiles (align with `SandboxSpawnSpec` / frontend helper).
@@ -1889,37 +1914,37 @@ pub fn resolve_sandbox_profile(global: &str, project_override: Option<&str>) -> 
 /// `profile = None` / empty / `"inherit"` clears the override so Settings apply.
 /// Requires a trusted project (same gate as permission tier).
 pub fn set_project_sandbox_profile(id: &str, profile: Option<String>) -> Result<Project, String> {
-    let mut list = load_projects();
-    let p = list
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    if !p.trusted {
-        return Err("trust this project before setting a sandbox profile".into());
-    }
-
-    let next = match profile {
-        None => None,
-        Some(raw) => {
-            let t = raw.trim();
-            if t.is_empty()
-                || t.eq_ignore_ascii_case("inherit")
-                || t.eq_ignore_ascii_case("app_default")
-                || t.eq_ignore_ascii_case("default")
-            {
-                None
-            } else {
-                Some(
-                    normalize_sandbox_profile(t)
-                        .ok_or_else(|| format!("unknown sandbox profile: {t}"))?,
-                )
-            }
+    update_projects(|list| {
+        let p = list
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        if !p.trusted {
+            return Err("trust this project before setting a sandbox profile".into());
         }
-    };
-    p.sandbox_profile = next;
-    let clone = p.clone();
-    save_projects(&list)?;
-    Ok(clone)
+
+        let next = match profile {
+            None => None,
+            Some(raw) => {
+                let t = raw.trim();
+                if t.is_empty()
+                    || t.eq_ignore_ascii_case("inherit")
+                    || t.eq_ignore_ascii_case("app_default")
+                    || t.eq_ignore_ascii_case("default")
+                {
+                    None
+                } else {
+                    Some(
+                        normalize_sandbox_profile(t)
+                            .ok_or_else(|| format!("unknown sandbox profile: {t}"))?,
+                    )
+                }
+            }
+        };
+        p.sandbox_profile = next;
+        let clone = p.clone();
+        Ok(clone)
+    })
 }
 
 /// Pinned chats keep the order they were pinned (relative file order).
@@ -1942,8 +1967,11 @@ pub fn load_sessions_index() -> Vec<SessionMeta> {
     list
 }
 
-pub fn save_sessions_index(list: &[SessionMeta]) -> Result<(), String> {
-    write_json(&sessions_index_file(), &list)
+/// Read-only reference checks must not quarantine corruption as an empty list.
+pub(crate) fn load_sessions_snapshot() -> Result<Vec<SessionMeta>, String> {
+    let value = projects_io::read_value(&sessions_index_file(), 64 * 1024 * 1024)?
+        .unwrap_or_else(|| serde_json::json!([]));
+    serde_json::from_value(value).map_err(|error| format!("invalid sessions index: {error}"))
 }
 
 /// Atomically load, mutate, and persist the sessions index.
@@ -1957,13 +1985,67 @@ pub fn save_sessions_index(list: &[SessionMeta]) -> Result<(), String> {
 pub fn update_sessions_index<R>(
     mutate: impl FnOnce(&mut Vec<SessionMeta>) -> Result<R, String>,
 ) -> Result<R, String> {
+    update_sessions_index_with_read(mutate, false)
+}
+
+pub(crate) fn update_sessions_index_strict<R>(
+    mutate: impl FnOnce(&mut Vec<SessionMeta>) -> Result<R, String>,
+) -> Result<R, String> {
+    update_sessions_index_with_read(mutate, true)
+}
+
+/// The cancellation check is lock-free with respect to stores and runtime maps.
+/// Settings are additionally pinned for read-only execution-context validation.
+pub(crate) fn update_sessions_index_strict_checked<R>(
+    mutate: impl FnOnce(&mut Vec<SessionMeta>) -> Result<R, String>,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<R, String> {
+    update_sessions_index_with_check(mutate, true, Some(check))
+}
+
+fn update_sessions_index_with_read<R>(
+    mutate: impl FnOnce(&mut Vec<SessionMeta>) -> Result<R, String>,
+    strict: bool,
+) -> Result<R, String> {
+    update_sessions_index_with_check(mutate, strict, None)
+}
+
+fn update_sessions_index_with_check<R>(
+    mutate: impl FnOnce(&mut Vec<SessionMeta>) -> Result<R, String>,
+    strict: bool,
+    check: Option<&dyn Fn() -> Result<(), String>>,
+) -> Result<R, String> {
+    let check_now = || check.map_or(Ok(()), |check| check());
+    check_now()?;
     let _ = ensure_app_dirs();
     let path = sessions_index_file();
-    crate::store_lock::with_exclusive_lock(&path, || {
-        let mut list: Vec<SessionMeta> = read_json_recover(&path);
+    {
+        let mut targets = vec![
+            crate::paths::projects_file(),
+            path.clone(),
+            crate::paths::workspaces_file(),
+        ];
+        let _locks = if let Some(check) = check {
+            targets.push(settings_file());
+            crate::store_lock::lock_exclusive_many_checked(&targets, check)?
+        } else {
+            crate::store_lock::lock_exclusive_many(&targets)?
+        };
+        check_now()?;
+        let mut list: Vec<SessionMeta> = if strict {
+            load_sessions_snapshot()?
+        } else {
+            read_json_recover(&path)
+        };
+        crate::session_execution::validate_rows(&list)?;
         sort_sessions_by_pin_then_updated(&mut list);
+        let bindings = session_refs::snapshot(&list);
         let before = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
         let result = mutate(&mut list)?;
+        check_now()?;
+        crate::session_execution::validate_rows(&list)?;
+        session_refs::validate(&bindings, &list)?;
+        session_refs::record_removals(&bindings, &list)?;
         sort_sessions_by_pin_then_updated(&mut list);
         let serialized = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
         // Avoid rewriting the index for no-op migrations (load_projects calls
@@ -1971,10 +2053,14 @@ pub fn update_sessions_index<R>(
         // comparison inside the transaction boundary.
         let after = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
         if before != after {
-            crate::store_lock::write_bytes_replace(&path, serialized.as_bytes())?;
+            crate::store_lock::write_bytes_replace_checked(
+                &path,
+                serialized.as_bytes(),
+                &check_now,
+            )?;
         }
         Ok(result)
-    })
+    }
 }
 
 /// Update a session row under the index transaction boundary.
@@ -2014,44 +2100,33 @@ pub fn create_session(
     title: Option<String>,
     scheduled: bool,
 ) -> Result<SessionMeta, String> {
+    create_session_with_id(None, project_id, title, scheduled)
+}
+
+/// Pre-allocate an App session id for idempotent continuation recovery.
+pub fn create_session_with_id(
+    predetermined_id: Option<String>,
+    project_id: Option<String>,
+    title: Option<String>,
+    scheduled: bool,
+) -> Result<SessionMeta, String> {
+    if let Some(id) = predetermined_id.as_deref() {
+        crate::session_migration::reject_imported_history_id(Some(id))?;
+        let list = load_sessions_index();
+        if let Some(existing) = list.iter().find(|s| s.id == id) {
+            return Ok(existing.clone());
+        }
+    }
     // Unassigned chats stay orphan (`None`) and appear under Default workspace.
     // Agent cwd falls back to `{app_data}/workspaces/general` at connect time.
     let _ = ensure_general_workspace_dir();
     let project_id = project_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s.as_str() != GENERAL_PROJECT_ID);
-    let id = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let meta = SessionMeta {
-        id: id.clone(),
-        project_id,
-        title: title.unwrap_or_else(|| "New chat".into()),
-        agent_session_id: None,
-        created_at: now,
-        updated_at: now,
-        model_id: None,
-        archived: false,
-        pinned: false,
-        effort: None,
-        mode: None,
-        permission_policy: None,
-        json_schema: None,
-        scheduled,
-        worktree_path: None,
-        worktree_branch: None,
-        is_worktree_session: false,
-        plugin_dirs: Vec::new(),
-        extra_rules: None,
-        max_agent_turns: None,
-        system_prompt_override: None,
-        fork_agent_session: false,
-        fork_rewind_prompt_index: None,
-        no_ask_user: None,
-        workspace_id: None,
-        workspace_root_snapshot: None,
-        workspace_capability: None,
-        provider_id: None,
-    };
+    let id = predetermined_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let meta = import_continuation::new_meta(id.clone(), project_id, title, scheduled);
     update_sessions_index({
         let meta = meta.clone();
         move |list| {
@@ -2069,27 +2144,117 @@ pub fn update_session_meta(meta: &SessionMeta) -> Result<(), String> {
     update_session_index_row(meta).map(|_| ())
 }
 
-/// Whole-row replace that keeps `provider_id` and `model_id` from the current
-/// index row. Connect holds a snapshot across the handshake; a composer save
-/// in that window must survive the final write. Other handshake fields
-/// (`agent_session_id`, fork flags, effort, mode) still come from `meta`.
+/// Publish connection metadata without restoring stale composer choices,
+/// workspace bindings, project ownership, worktree ownership, or deleted rows.
 pub fn update_session_meta_preserving_composer(meta: &SessionMeta) -> Result<SessionMeta, String> {
-    let meta = meta.clone();
-    update_sessions_index(move |list| {
-        let (provider_id, model_id) = list
-            .iter()
-            .find(|s| s.id == meta.id)
-            .map(|s| (s.provider_id.clone(), s.model_id.clone()))
-            .unwrap_or_else(|| (meta.provider_id.clone(), meta.model_id.clone()));
-        let mut writing = meta.clone();
-        writing.provider_id = provider_id;
-        writing.model_id = model_id;
-        if let Some(slot) = list.iter_mut().find(|s| s.id == writing.id) {
-            *slot = writing.clone();
-        } else {
-            list.insert(0, writing.clone());
+    update_runtime_session_meta_inner(meta, true)
+}
+
+/// Runtime observations cannot restore stale bindings, composer intent or deleted chats.
+pub(crate) fn update_runtime_session_meta(meta: &SessionMeta) -> Result<(), String> {
+    update_runtime_session_meta_inner(meta, false).map(|_| ())
+}
+
+/// Undo only this turn's sidebar-recency write. A concurrent metadata change
+/// makes the result unknown and must never be overwritten by the rollback.
+pub(crate) fn rollback_session_activity_timestamp(
+    id: &str,
+    opened_at: DateTime<Utc>,
+    previous: DateTime<Utc>,
+) -> Result<(), String> {
+    let id = id.to_string();
+    update_sessions_index_strict(move |rows| {
+        let current = rows
+            .iter_mut()
+            .find(|row| row.id == id)
+            .ok_or("session not found")?;
+        if current.updated_at != opened_at {
+            return Err("session activity changed after turn open".into());
         }
-        Ok(writing)
+        current.updated_at = previous;
+        Ok(())
+    })
+}
+
+/// Retain the old merge path only for historical regression fixtures. Real
+/// connection completion uses owner/CAS-bound session_execution_publication.
+#[cfg(test)]
+pub(crate) fn update_connected_session_meta(meta: &SessionMeta) -> Result<(), String> {
+    update_runtime_session_meta_inner(meta, true).map(|_| ())
+}
+
+fn update_runtime_session_meta_inner(
+    meta: &SessionMeta,
+    connected: bool,
+) -> Result<SessionMeta, String> {
+    update_sessions_index_strict(|rows| {
+        let current = rows
+            .iter_mut()
+            .find(|row| row.id == meta.id)
+            .ok_or("session not found")?;
+        let mut next = meta.clone();
+        if !connected
+            || session_refs::Binding::from(current as &SessionMeta)
+                != session_refs::Binding::from(meta)
+            || current.worktree_path != meta.worktree_path
+        {
+            next.agent_session_id = current.agent_session_id.clone();
+        }
+        next.project_id = current.project_id.clone();
+        next.workspace_id = current.workspace_id.clone();
+        next.workspace_root_snapshot = current.workspace_root_snapshot.clone();
+        next.workspace_capability = current.workspace_capability.clone();
+        next.worktree_path = current.worktree_path.clone();
+        next.worktree_branch = current.worktree_branch.clone();
+        next.is_worktree_session = current.is_worktree_session;
+        // A connection/stream snapshot is not a composer write. In particular,
+        // retain None so passive observations do not create explicit overrides.
+        next.model_id = current.model_id.clone();
+        next.provider_id = current.provider_id.clone();
+        // Passive runtime observations cannot redirect a historical source.
+        // A new connection will publish its receipt through an owner-bound API.
+        next.agent_execution = current.agent_execution.clone();
+        if next.agent_session_id != current.agent_session_id && current.agent_execution.is_some() {
+            return Err("new agent identity requires an execution receipt".into());
+        }
+        next.effort = current.effort.clone();
+        next.mode = current.mode.clone();
+        next.permission_policy = current.permission_policy.clone();
+        next.updated_at = next.updated_at.max(current.updated_at);
+        *current = next;
+        Ok(current.clone())
+    })
+}
+
+/// Seed per-chat effort before connecting, not from a late runtime callback.
+/// Existing choices win, and an absent/deleted row is never recreated.
+pub(crate) fn remember_initial_session_effort(id: &str, effort: &str) -> Result<(), String> {
+    update_sessions_index_strict(|rows| {
+        let row = rows
+            .iter_mut()
+            .find(|row| row.id == id)
+            .ok_or("session not found")?;
+        if row
+            .effort
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            row.effort = Some(effort.to_string());
+        }
+        Ok(())
+    })
+}
+
+/// Active mode controls change one field; never persist their stale whole row.
+pub(crate) fn update_session_mode_intent(id: &str, mode: String) -> Result<(), String> {
+    update_sessions_index_strict(|rows| {
+        let row = rows
+            .iter_mut()
+            .find(|row| row.id == id)
+            .ok_or("session not found")?;
+        row.mode = Some(mode);
+        row.updated_at = Utc::now().max(row.updated_at);
+        Ok(())
     })
 }
 
@@ -2100,6 +2265,7 @@ fn clear_agent_session_id(list: &mut [SessionMeta], id: &str) -> bool {
     if session.agent_session_id.take().is_none() {
         return false;
     }
+    session.agent_execution = None;
     session.updated_at = Utc::now();
     true
 }
@@ -2109,12 +2275,7 @@ fn clear_agent_session_id(list: &mut [SessionMeta], id: &str) -> bool {
 /// `session/load` restores process-level model/effort from the old CLI journal,
 /// overriding new `--model` / `--reasoning-effort` spawn flags.
 pub fn clear_session_agent_session_id(id: &str) -> Result<bool, String> {
-    let mut list = load_sessions_index();
-    let changed = clear_agent_session_id(&mut list, id);
-    if changed {
-        save_sessions_index(&list)?;
-    }
-    Ok(changed)
+    update_sessions_index(|list| Ok(clear_agent_session_id(list, id)))
 }
 
 pub fn delete_session(id: &str) -> Result<(), String> {
@@ -2376,10 +2537,22 @@ pub fn set_session_workspace(
     workspace_root_snapshot: Option<String>,
     workspace_capability: Option<String>,
 ) -> Result<SessionMeta, String> {
+    crate::session_migration::reject_imported_history_id(Some(id))?;
     update_session_row(id, move |s| {
         s.workspace_id = workspace_id;
         s.workspace_root_snapshot = workspace_root_snapshot;
         s.workspace_capability = workspace_capability;
+        // Revalidate even an identical bind request: the workspace may have
+        // changed since the caller read it, while session metadata stayed put.
+        if let Some(id) = s
+            .workspace_id
+            .as_deref()
+            .filter(|id| crate::workspace_store::is_bound_workspace_id(Some(id)))
+        {
+            let workspace =
+                crate::workspace_store::get_workspace(id)?.ok_or("workspace not found")?;
+            crate::workspace_store::validate_session_workspace(s, &workspace)?;
+        }
         s.updated_at = Utc::now();
         Ok(s.clone())
     })
@@ -2490,8 +2663,12 @@ fn apply_session_project(
             return Ok(s.clone());
         }
         s.project_id = pid;
+        s.workspace_id = None;
+        s.workspace_root_snapshot = None;
+        s.workspace_capability = None;
         if reset_agent_identity {
             s.agent_session_id = None;
+            s.agent_execution = None;
             s.fork_agent_session = false;
             s.worktree_path = None;
             s.worktree_branch = None;
@@ -2824,6 +3001,7 @@ pub fn fork_session(
     let mut meta = create_session(source.project_id.clone(), Some(fork_title), false)?;
     // Inherit composer prefs from source so the fork feels continuous.
     meta.model_id = source.model_id.clone();
+    meta.provider_id = source.provider_id.clone();
     meta.effort = source.effort.clone();
     meta.mode = source.mode.clone();
     meta.permission_policy = source.permission_policy.clone();
@@ -2849,6 +3027,7 @@ pub fn fork_session(
     if fork_agent_session {
         if let Some(aid) = source_agent {
             meta.agent_session_id = Some(aid);
+            meta.agent_execution = source.agent_execution.clone();
             meta.fork_agent_session = true;
             meta.fork_rewind_prompt_index = through_user_prompt_index;
         }
@@ -2902,6 +3081,7 @@ pub fn clear_session_fork_after_connect_failure(id: &str) -> Result<SessionMeta,
         let pending_partial = s.fork_agent_session && s.fork_rewind_prompt_index.is_some();
         if pending_partial {
             s.agent_session_id = None;
+            s.agent_execution = None;
         }
         s.fork_agent_session = false;
         s.fork_rewind_prompt_index = None;
@@ -3207,9 +3387,9 @@ fn global_prefs(settings: &AppSettings) -> (String, String, String, String) {
 
 /// Resolve effective composer prefs for the active project/session + configured scope.
 ///
-/// Model / mode follow `composer_prefs_scope`.
-/// Permission and effort always cascade session → project → global (L10), and
-/// untrusted projects force Ask regardless of stored tiers.
+/// A selected model belongs to its chat; only inherited model defaults and mode
+/// follow `composer_prefs_scope`. Permission and effort always cascade session →
+/// project → global (L10), and untrusted projects force Ask regardless of tiers.
 pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>) -> ComposerPrefs {
     use crate::permission::effective_permission_policy;
 
@@ -3218,16 +3398,18 @@ pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>
     let (g_model, g_effort, g_mode, g_policy) = global_prefs(&settings);
 
     let sess = session_id.and_then(|id| load_sessions_index().into_iter().find(|s| s.id == id));
-    // A chat that already chose a model keeps it across restart, whatever the
-    // memory scope says. Chats that never chose one still follow the scope.
-    let session_model = sess
+    let selected_model = sess
         .as_ref()
         .and_then(|s| s.model_id.clone())
-        .filter(|x| !x.trim().is_empty());
-    let session_provider = sess
+        .filter(|model| !model.trim().is_empty());
+    let selected_provider = sess
         .as_ref()
         .and_then(|s| s.provider_id.clone())
-        .filter(|x| !x.trim().is_empty());
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    let selected_custom_provider = selected_provider
+        .as_deref()
+        .is_some_and(|id| !id.eq_ignore_ascii_case("official"));
     let proj = sess
         .as_ref()
         .and_then(|s| s.project_id.as_deref())
@@ -3244,8 +3426,8 @@ pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>
     .as_str()
     .to_string();
 
-    // Effort: always cascade session → project → global, like permission and
-    // unlike model. Reasoning effort is a per-chat decision — under the default
+    // Effort: always cascade session → project → global, like permission.
+    // Reasoning effort is a per-chat decision — under the default
     // global scope a single `settings.effort` served every chat, so raising
     // effort in a new chat silently rewrote every older chat on that model.
     // `settings.effort` now only seeds chats that never chose one.
@@ -3273,7 +3455,10 @@ pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>
         ComposerPrefsScope::Project => {
             if let Some(p) = proj {
                 ComposerPrefs {
-                    model_id: p.model_id.filter(|s| !s.is_empty()).unwrap_or(g_model),
+                    model_id: p
+                        .model_id
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or(g_model),
                     effort,
                     mode: p
                         .mode
@@ -3302,7 +3487,7 @@ pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>
             let p_model = proj
                 .as_ref()
                 .and_then(|p| p.model_id.clone())
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.trim().is_empty())
                 .unwrap_or(g_model.clone());
             let p_mode = proj
                 .as_ref()
@@ -3314,7 +3499,10 @@ pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>
 
             if let Some(s) = sess {
                 ComposerPrefs {
-                    model_id: s.model_id.filter(|x| !x.is_empty()).unwrap_or(p_model),
+                    model_id: s
+                        .model_id
+                        .filter(|x| !x.trim().is_empty())
+                        .unwrap_or(p_model),
                     effort,
                     mode: s.mode.filter(|x| !x.is_empty()).unwrap_or(p_mode),
                     permission_policy,
@@ -3335,11 +3523,15 @@ pub fn resolve_composer_prefs(project_id: Option<&str>, session_id: Option<&str>
             }
         }
     };
-    if let Some(m) = session_model {
-        prefs.model_id = m;
+    if let Some(model) = selected_model {
+        prefs.model_id = model;
     }
-    prefs.provider_id = session_provider;
-    prefs.effort = clamp_effort_for_model(&prefs.model_id, &prefs.effort);
+    prefs.provider_id = selected_provider;
+    // A relay may use an official-looking request id with a different ladder.
+    // Do not clamp its choice by the unrelated official catalog's name.
+    if !selected_custom_provider {
+        prefs.effort = clamp_effort_for_model(&prefs.model_id, &prefs.effort);
+    }
     prefs
 }
 
@@ -3365,67 +3557,43 @@ pub(crate) fn non_plan_mode(mode: &str) -> String {
     m.to_string()
 }
 
-/// Persist `model_id` on the session row.
-///
-/// Returns the value back when there is no row yet (a draft) so the caller
-/// can seed the global default. A real chat keeps the model it was given.
-fn save_provider_on_session(session_id: Option<&str>, provider_id: String) -> Result<(), String> {
-    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
-        return Ok(());
-    };
-    let sid = sid.to_string();
-    update_sessions_index(move |list| {
-        if let Some(sess) = list.iter_mut().find(|s| s.id == sid) {
-            sess.provider_id = Some(provider_id);
-            sess.updated_at = Utc::now();
-        }
-        Ok(())
-    })
-}
-
-fn save_model_on_session(
+/// Read the previous effort for the command's pending update.
+/// Reject explicit missing/corrupt targets before any settings-load migration.
+pub(crate) fn composer_effort_before_update(
+    project_id: Option<&str>,
     session_id: Option<&str>,
-    model_id: String,
-) -> Result<Option<String>, String> {
-    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
-        return Ok(Some(model_id));
-    };
-    let sid = sid.to_string();
-    update_sessions_index(move |list| {
-        let Some(sess) = list.iter_mut().find(|s| s.id == sid) else {
-            return Ok(Some(model_id));
-        };
-        sess.model_id = Some(model_id);
-        sess.updated_at = Utc::now();
-        Ok(None)
-    })
+) -> Result<String, String> {
+    if let Some(id) = session_id {
+        composer_selection::validate(id)?;
+    }
+    Ok(resolve_composer_prefs(project_id, session_id).effort)
 }
 
-/// Persist `effort` on the session row.
-///
-/// Returns the value back when there is no row to write to (draft chat that has
-/// not been created yet, or an unknown id) so the caller can seed the global
-/// default instead of dropping the choice.
-fn save_effort_on_session(
-    session_id: Option<&str>,
-    effort: String,
-) -> Result<Option<String>, String> {
-    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
-        return Ok(Some(effort));
-    };
-    let sid = sid.to_string();
-    update_sessions_index(move |list| {
-        let Some(sess) = list.iter_mut().find(|s| s.id == sid) else {
-            return Ok(Some(effort));
-        };
-        sess.effort = Some(effort);
-        sess.updated_at = Utc::now();
-        Ok(None)
-    })
-}
-
-/// Persist a partial composer prefs update at the configured scope.
+/// Persist chat-owned choices and scope-controlled defaults.
+/// Validate the target before any settings-load migration, then recheck on save.
 pub fn save_composer_prefs(
+    project_id: Option<&str>,
+    session_id: Option<&str>,
+    model_id: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+    permission_policy: Option<String>,
+) -> Result<ComposerPrefs, String> {
+    save_composer_prefs_with_route(
+        project_id,
+        session_id,
+        model_id,
+        effort,
+        mode,
+        permission_policy,
+        None,
+    )
+}
+
+/// Atomically save a chat's desired channel/request-model pair. This does not
+/// activate a global provider or certify that an existing process uses it.
+/// Draft route intent belongs to the draft owner until a real chat exists.
+pub fn save_composer_prefs_with_route(
     project_id: Option<&str>,
     session_id: Option<&str>,
     model_id: Option<String>,
@@ -3434,39 +3602,44 @@ pub fn save_composer_prefs(
     permission_policy: Option<String>,
     provider_id: Option<String>,
 ) -> Result<ComposerPrefs, String> {
-    if let Some(provider) = provider_id.clone() {
-        save_provider_on_session(session_id, provider)?;
+    if let Some(id) = session_id {
+        composer_selection::validate(id)?;
+    }
+    if let Some(provider) = provider_id.as_deref() {
+        if session_id.is_none() {
+            return Err("provider selection requires an explicit session".into());
+        }
+        // Invalid route selections must not initiate settings migrations.
+        crate::providers::validate_session_selection(provider, model_id.as_deref())?;
     }
     let settings = load_settings();
     let scope = ComposerPrefsScope::parse(&settings.composer_prefs_scope);
 
-    // Model and effort are remembered per chat. Under the global / project
-    // scope they must not land in settings, or one chat's pick rewrites every
-    // other chat. `settings.model_id` only seeds a chat that never chose.
-    // Session scope already writes the row further down.
-    let model_id = if matches!(scope, ComposerPrefsScope::Session) {
-        model_id
-    } else {
-        match model_id {
-            Some(v) => save_model_on_session(session_id, v)?,
-            None => None,
+    // Keep explicit model/effort/permission choices in one strict row transaction
+    // under every memory scope. Broader scope also remembers the permission as a
+    // default, but an active choice must replace this chat's previous override.
+    // Validate explicit ids even for mode/policy-only updates, before any default
+    // writes. No unknown row may fall through into the draft default path.
+    let (model_id, effort) = if let Some(id) = session_id {
+        let session_scope = matches!(scope, ComposerPrefsScope::Session);
+        composer_selection::save(
+            id,
+            model_id.as_deref(),
+            effort.as_deref(),
+            if session_scope { mode.as_deref() } else { None },
+            permission_policy.as_deref(),
+            provider_id.as_deref(),
+        )?;
+        if session_scope || (mode.is_none() && permission_policy.is_none()) {
+            return Ok(resolve_composer_prefs(project_id, session_id));
         }
-    };
-    // Effort is remembered per chat (see `resolve_composer_prefs`). Under the
-    // global / project scope it must not land in `settings.effort`, or raising
-    // effort in one chat rewrites every other chat that never chose its own.
-    // Session scope already writes the row further down.
-    let effort = if matches!(scope, ComposerPrefsScope::Session) {
-        effort
+        (None, None)
     } else {
-        match effort {
-            Some(v) => save_effort_on_session(session_id, v)?,
-            None => None,
-        }
+        (model_id, effort)
     };
 
     match scope {
-        ComposerPrefsScope::Global => {
+        ComposerPrefsScope::Global | ComposerPrefsScope::Session => {
             let mut s = settings;
             if let Some(v) = model_id {
                 s.model_id = Some(v);
@@ -3485,22 +3658,23 @@ pub fn save_composer_prefs(
         ComposerPrefsScope::Project => {
             let pid = project_id.filter(|s| !s.is_empty());
             if let Some(pid) = pid {
-                let mut list = load_projects();
-                if let Some(p) = list.iter_mut().find(|p| p.id == pid) {
-                    if let Some(v) = model_id.clone() {
-                        p.model_id = Some(v);
+                update_projects(|list| {
+                    if let Some(p) = list.iter_mut().find(|p| p.id == pid) {
+                        if let Some(v) = model_id.clone() {
+                            p.model_id = Some(v);
+                        }
+                        if let Some(v) = effort.clone() {
+                            p.effort = Some(v);
+                        }
+                        if let Some(v) = sticky_mode(mode.clone()) {
+                            p.mode = Some(v);
+                        }
+                        if let Some(v) = permission_policy.clone() {
+                            p.permission_policy = Some(v);
+                        }
                     }
-                    if let Some(v) = effort.clone() {
-                        p.effort = Some(v);
-                    }
-                    if let Some(v) = sticky_mode(mode.clone()) {
-                        p.mode = Some(v);
-                    }
-                    if let Some(v) = permission_policy.clone() {
-                        p.permission_policy = Some(v);
-                    }
-                    save_projects(&list)?;
-                }
+                    Ok(())
+                })?;
             }
             // Always mirror to global so orphan UIs / new projects still have a default.
             let mut s = load_settings();
@@ -3517,63 +3691,6 @@ pub fn save_composer_prefs(
                 s.permission_policy = v;
             }
             save_settings(&s)?;
-        }
-        ComposerPrefsScope::Session => {
-            let sid = session_id.filter(|s| !s.is_empty());
-            if let Some(sid) = sid {
-                let sid = sid.to_string();
-                let row_updated = update_sessions_index(|list| {
-                    let Some(sess) = list.iter_mut().find(|s| s.id == sid) else {
-                        return Ok(false);
-                    };
-                    if let Some(v) = model_id.clone() {
-                        sess.model_id = Some(v);
-                    }
-                    if let Some(v) = effort.clone() {
-                        sess.effort = Some(v);
-                    }
-                    if let Some(v) = mode.clone() {
-                        sess.mode = Some(v);
-                    }
-                    if let Some(v) = permission_policy.clone() {
-                        sess.permission_policy = Some(v);
-                    }
-                    sess.updated_at = Utc::now();
-                    Ok(true)
-                })?;
-                if !row_updated {
-                    // No session row yet — fall back to global so the chip still sticks.
-                    let mut s = load_settings();
-                    if let Some(v) = model_id {
-                        s.model_id = Some(v);
-                    }
-                    if let Some(v) = effort {
-                        s.effort = Some(v);
-                    }
-                    if let Some(v) = sticky_mode(mode) {
-                        s.mode = v;
-                    }
-                    if let Some(v) = permission_policy {
-                        s.permission_policy = v;
-                    }
-                    save_settings(&s)?;
-                }
-            } else {
-                let mut s = load_settings();
-                if let Some(v) = model_id {
-                    s.model_id = Some(v);
-                }
-                if let Some(v) = effort {
-                    s.effort = Some(v);
-                }
-                if let Some(v) = sticky_mode(mode) {
-                    s.mode = v;
-                }
-                if let Some(v) = permission_policy {
-                    s.permission_policy = v;
-                }
-                save_settings(&s)?;
-            }
         }
     }
 
@@ -4114,6 +4231,24 @@ mod tests {
     }
 
     #[test]
+    fn composer_editor_defaults_legacy_and_round_trips() {
+        let missing: AppSettings =
+            serde_json::from_str(legacy_settings_json()).expect("deserialize");
+        assert_eq!(missing.composer_editor, "legacy");
+        assert_eq!(normalize_composer_editor("tiptap"), "tiptap");
+        assert_eq!(normalize_composer_editor("nope"), "legacy");
+
+        let s = AppSettings {
+            composer_editor: "tiptap".into(),
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        assert!(json.contains("\"composerEditor\":\"tiptap\""));
+        let back: AppSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.composer_editor, "tiptap");
+    }
+
+    #[test]
     fn sandbox_profile_defaults_when_missing_from_json() {
         let s: AppSettings = serde_json::from_str(legacy_settings_json()).expect("deserialize");
         assert_eq!(s.sandbox_profile, "workspace");
@@ -4383,6 +4518,8 @@ mod tests {
             model_id: None,
             archived: false,
             pinned,
+            provider_id: None,
+            agent_execution: None,
             effort: None,
             mode: None,
             permission_policy: None,
@@ -4401,7 +4538,6 @@ mod tests {
             workspace_id: None,
             workspace_root_snapshot: None,
             workspace_capability: None,
-            provider_id: None,
         }
     }
 
@@ -4504,9 +4640,7 @@ mod tests {
     fn create_session_defaults_to_orphan() {
         // Isolated home: parallel tests share default data dir and can race
         // atomic renames into sessions_index (macOS CI flake).
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-create-orphan-{}-{}",
             std::process::id(),
@@ -4519,15 +4653,39 @@ mod tests {
         let meta = create_session(None, Some("t".into()), false).expect("create");
         assert!(meta.project_id.is_none(), "got {:?}", meta.project_id);
         let _ = delete_session(&meta.id);
-        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn native_session_create_accepts_uuid_and_rejects_import_id() {
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-u05-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("tmp home");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let _ = ensure_app_dirs();
+        let native = Uuid::new_v4().to_string();
+        let meta = create_session_with_id(Some(native.clone()), None, Some("native".into()), false)
+            .expect("native uuid must be accepted");
+        assert_eq!(meta.id, native);
+        let imp = crate::session_migration::ids::new_import_id();
+        let err = create_session_with_id(Some(imp), None, Some("import".into()), false)
+            .expect_err("imp: must not create a native session");
+        assert!(
+            err.starts_with("IMPORTED_HISTORY_READ_ONLY"),
+            "native session API must reject imp: without starting an Agent: {err}"
+        );
+        let _ = delete_session(&native);
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn fork_session_partial_stores_rewind_index() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-fork-rewind-{}-{}",
             std::process::id(),
@@ -4579,7 +4737,6 @@ mod tests {
         assert!(journal_only.agent_session_id.is_none());
         assert_eq!(load_messages(&journal_only.id).len(), 10);
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -4598,22 +4755,47 @@ mod tests {
         std::env::set_var("GROK_APP_HOME", &tmp);
         let _ = ensure_app_dirs();
 
-        let mut src = create_session(None, Some("src".into()), false).expect("create");
-        src.workspace_id = Some("ws_abc".into());
-        src.workspace_root_snapshot = Some("p:w:/a|e:w:/b".into());
-        src.workspace_capability = Some("extra_write_active".into());
-        update_session_meta(&src).expect("meta");
+        let primary = tmp.join("primary");
+        let extra = tmp.join("extra");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&extra).unwrap();
+        let mut settings = load_settings();
+        settings.session_data_mode = "independent".into();
+        save_settings(&settings).unwrap();
+        let project = add_project(primary.to_string_lossy().into_owned(), true).unwrap();
+        let workspace = crate::workspace_store::upsert_workspace(
+            None,
+            "fork fixture".into(),
+            project.id.clone(),
+            vec![
+                crate::workspace_store::WorkspaceRoot {
+                    path: primary.to_string_lossy().into_owned(),
+                    role: crate::workspace_store::WorkspaceRootRole::Primary,
+                    access: crate::workspace_store::WorkspaceRootAccess::Write,
+                    path_ok: Some(true),
+                },
+                crate::workspace_store::WorkspaceRoot {
+                    path: extra.to_string_lossy().into_owned(),
+                    role: crate::workspace_store::WorkspaceRootRole::Extra,
+                    access: crate::workspace_store::WorkspaceRootAccess::Write,
+                    path_ok: Some(true),
+                },
+            ],
+        )
+        .expect("workspace");
+        let src = create_session(Some(project.id), Some("src".into()), false).expect("create");
+        let src = set_session_workspace(
+            &src.id,
+            Some(workspace.id.clone()),
+            Some(crate::workspace_store::root_snapshot(&workspace.roots)),
+            Some(workspace.capability.as_token().into()),
+        )
+        .expect("bind workspace");
 
         let fork = fork_session(&src.id, None, None, false).expect("fork");
-        assert_eq!(fork.workspace_id.as_deref(), Some("ws_abc"));
-        assert_eq!(
-            fork.workspace_root_snapshot.as_deref(),
-            Some("p:w:/a|e:w:/b")
-        );
-        assert_eq!(
-            fork.workspace_capability.as_deref(),
-            Some("extra_write_active")
-        );
+        assert_eq!(fork.workspace_id, src.workspace_id);
+        assert_eq!(fork.workspace_root_snapshot, src.workspace_root_snapshot);
+        assert_eq!(fork.workspace_capability, src.workspace_capability);
 
         let _ = delete_session(&src.id);
         let _ = delete_session(&fork.id);
@@ -4634,9 +4816,7 @@ mod tests {
 
     #[test]
     fn retruncate_child_journal_to_cut_persists_inflated_partial_fork() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-retruncate-inflated-{}-{}",
             std::process::id(),
@@ -4668,15 +4848,12 @@ mod tests {
         assert_eq!(kept.last().map(|m| m.content.as_str()), Some("a5"));
         assert_eq!(load_messages(&src.id).len(), 16, "parent journal unchanged");
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn retruncate_child_journal_to_cut_skips_unchanged_partial_fork() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-retruncate-unchanged-{}-{}",
             std::process::id(),
@@ -4701,15 +4878,12 @@ mod tests {
         assert!(!persisted);
         assert_eq!(load_messages(&child.id).len(), 10);
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn clear_fork_oneshots_clears_rewind_index() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-fork-oneshot-{}-{}",
             std::process::id(),
@@ -4738,15 +4912,12 @@ mod tests {
         assert_eq!(cleared.fork_rewind_prompt_index, None);
         assert_eq!(cleared.agent_session_id.as_deref(), Some("agent-parent"));
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn clear_session_fork_after_connect_failure_partial_drops_agent_id() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-fork-fail-partial-{}-{}",
             std::process::id(),
@@ -4768,15 +4939,12 @@ mod tests {
         assert!(!cleared.fork_agent_session);
         assert_eq!(cleared.fork_rewind_prompt_index, None);
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn clear_session_fork_after_connect_failure_full_keeps_agent_id() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-fork-fail-full-{}-{}",
             std::process::id(),
@@ -4798,15 +4966,12 @@ mod tests {
         assert!(!cleared.fork_agent_session);
         assert_eq!(cleared.fork_rewind_prompt_index, None);
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn set_session_worktree_marks_and_clears() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-wt-meta-{}-{}",
             std::process::id(),
@@ -4832,7 +4997,6 @@ mod tests {
         assert!(!cleared.is_worktree_session);
         assert!(cleared.worktree_path.is_none());
         let _ = delete_session(&meta.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -4853,9 +5017,7 @@ mod tests {
 
     #[test]
     fn migrate_legacy_general_project_rehomes_sessions() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-migrate-general-{}-{}",
             std::process::id(),
@@ -4902,6 +5064,8 @@ mod tests {
                 model_id: None,
                 archived: false,
                 pinned: false,
+                provider_id: None,
+                agent_execution: None,
                 effort: None,
                 mode: None,
                 permission_policy: None,
@@ -4920,7 +5084,6 @@ mod tests {
                 workspace_id: None,
                 workspace_root_snapshot: None,
                 workspace_capability: None,
-                provider_id: None,
             },
         );
         write_json(&sessions_index_file(), &sessions).expect("seed sessions");
@@ -4931,7 +5094,6 @@ mod tests {
         let hit = reloaded.iter().find(|s| s.id == sid).expect("session");
         assert!(hit.project_id.is_none(), "got {:?}", hit.project_id);
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5030,9 +5192,7 @@ mod tests {
 
     #[test]
     fn set_project_pinned_moves_to_group_end() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-pin-order-{}-{}",
             std::process::id(),
@@ -5059,7 +5219,6 @@ mod tests {
         let ids2: Vec<&str> = listed2.iter().map(|p| p.id.as_str()).collect();
         // p1 unpinned → end of unpinned group.
         assert_eq!(ids2, vec!["u1", "u2", "p1"]);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5098,19 +5257,10 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .expect("a model");
-        save_composer_prefs(
-            None,
-            Some(&b.id),
-            Some("grok-4.7".into()),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("b model");
+        save_composer_prefs(None, Some(&b.id), Some("grok-4.7".into()), None, None, None)
+            .expect("b model");
 
         assert_eq!(
             resolve_composer_prefs(None, Some(&a.id)).model_id,
@@ -5149,10 +5299,15 @@ mod tests {
         fs::create_dir_all(&tmp).expect("tmp home");
         std::env::set_var("GROK_APP_HOME", &tmp);
         let _ = ensure_app_dirs();
+        fs::write(
+            crate::paths::agent_config_toml(),
+            "[model.yunyi]\nmodel = \"deepseek-v4-flash\"\nbase_url = \"https://synthetic.invalid/v1\"\napi_key = \"synthetic-not-a-credential\"\n",
+        )
+        .expect("provider fixture");
 
         let a = create_session(None, Some("a".into()), false).expect("create a");
         let b = create_session(None, Some("b".into()), false).expect("create b");
-        save_composer_prefs(
+        save_composer_prefs_with_route(
             None,
             Some(&a.id),
             Some("deepseek-v4-flash".into()),
@@ -5162,7 +5317,7 @@ mod tests {
             Some("yunyi".into()),
         )
         .expect("a provider");
-        save_composer_prefs(
+        save_composer_prefs_with_route(
             None,
             Some(&b.id),
             Some("grok-4.7".into()),
@@ -5196,7 +5351,7 @@ mod tests {
             None
         );
         // A draft pick does not write a row and does not retarget an existing chat.
-        save_composer_prefs(
+        assert!(save_composer_prefs_with_route(
             None,
             None,
             Some("grok-4.7".into()),
@@ -5205,7 +5360,7 @@ mod tests {
             None,
             Some("other".into()),
         )
-        .expect("draft");
+        .is_err());
         assert_eq!(
             resolve_composer_prefs(None, Some(&b.id))
                 .provider_id
@@ -5225,9 +5380,7 @@ mod tests {
         // Effort is a per-chat decision even when model/mode memory is global:
         // raising it in one chat used to rewrite `settings.effort` and therefore
         // every other chat that had already picked its own.
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-effort-scope-{}-{}",
             std::process::id(),
@@ -5240,26 +5393,10 @@ mod tests {
 
         let a = create_session(None, Some("a".into()), false).expect("create a");
         let b = create_session(None, Some("b".into()), false).expect("create b");
-        save_composer_prefs(
-            None,
-            Some(&a.id),
-            None,
-            Some("low".into()),
-            None,
-            None,
-            None,
-        )
-        .expect("a low");
-        save_composer_prefs(
-            None,
-            Some(&b.id),
-            None,
-            Some("max".into()),
-            None,
-            None,
-            None,
-        )
-        .expect("b max");
+        save_composer_prefs(None, Some(&a.id), None, Some("low".into()), None, None)
+            .expect("a low");
+        save_composer_prefs(None, Some(&b.id), None, Some("max".into()), None, None)
+            .expect("b max");
 
         assert_eq!(resolve_composer_prefs(None, Some(&a.id)).effort, "low");
         assert_eq!(resolve_composer_prefs(None, Some(&b.id)).effort, "max");
@@ -5268,7 +5405,6 @@ mod tests {
 
         let _ = delete_session(&a.id);
         let _ = delete_session(&b.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5276,9 +5412,7 @@ mod tests {
     fn draft_effort_seeds_global_without_touching_existing_sessions() {
         // A draft chat has no row yet, so its effort seeds the default for the
         // next chat — it must not leak into a chat that already chose one.
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-effort-draft-{}-{}",
             std::process::id(),
@@ -5297,12 +5431,10 @@ mod tests {
             Some("max".into()),
             None,
             None,
-            None,
         )
         .expect("existing max");
 
-        save_composer_prefs(None, None, None, Some("low".into()), None, None, None)
-            .expect("draft low");
+        save_composer_prefs(None, None, None, Some("low".into()), None, None).expect("draft low");
 
         assert_eq!(
             resolve_composer_prefs(None, Some(&existing.id)).effort,
@@ -5314,15 +5446,12 @@ mod tests {
         assert_eq!(resolve_composer_prefs(None, None).effort, "low");
 
         let _ = delete_session(&existing.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn sessions_index_transaction_preserves_concurrent_mutations() {
-        let _env = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-store-index-rmw-{}-{}",
             std::process::id(),
@@ -5356,15 +5485,12 @@ mod tests {
             assert!(ids.contains(&format!("concurrent-session-{n}")));
         }
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn sessions_index_mutation_error_does_not_commit_partial_changes() {
-        let _env = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-store-index-error-{}-{}",
             std::process::id(),
@@ -5395,15 +5521,12 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["original"]);
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn merged_message_save_keeps_concurrent_append_and_replace_truncates() {
-        let _env = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-store-journal-rmw-{}-{}",
             std::process::id(),
@@ -5452,15 +5575,12 @@ mod tests {
         assert_eq!(truncated.len(), 1);
         assert_eq!(truncated[0].id, "user-1");
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn journal_writes_compact_json() {
-        let _env = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-store-journal-compact-{}-{}",
             std::process::id(),
@@ -5487,7 +5607,6 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "u1");
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5564,9 +5683,7 @@ mod tests {
 
     #[test]
     fn set_session_project_keeps_agent_id_for_fork_restore() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-set-project-keep-agent-{}-{}",
             std::process::id(),
@@ -5591,15 +5708,12 @@ mod tests {
         assert!(bound.fork_agent_session);
 
         let _ = delete_session(&meta.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn move_session_to_project_clears_agent_and_worktree() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-move-session-{}-{}",
             std::process::id(),
@@ -5638,15 +5752,12 @@ mod tests {
         assert!(back.agent_session_id.is_none());
 
         let _ = delete_session(&meta.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn precheck_session_move_validates_before_any_write() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-move-precheck-{}-{}",
             std::process::id(),
@@ -5698,15 +5809,12 @@ mod tests {
         );
 
         let _ = delete_session(&meta.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn move_session_to_project_refuses_untrusted_and_missing() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-move-refuse-{}-{}",
             std::process::id(),
@@ -5742,7 +5850,6 @@ mod tests {
         );
 
         let _ = delete_session(&meta.id);
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5766,9 +5873,7 @@ mod tests {
 
     #[test]
     fn load_projects_repairs_ssh_alias_and_merges_duplicates() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-ssh-repair-{}-{}",
             std::process::id(),
@@ -5812,15 +5917,12 @@ mod tests {
             .expect("sess");
         assert_eq!(hit.project_id.as_deref(), Some(good.id.as_str()));
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn add_ssh_project_rebinds_same_path_without_alias() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-ssh-rebind-{}-{}",
             std::process::id(),
@@ -5851,63 +5953,32 @@ mod tests {
             1
         );
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn connect_writeback_keeps_provider_and_model_saved_during_handshake() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "grok-app-meta-preserve-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).expect("tmp home");
-        let previous = std::env::var_os("GROK_APP_HOME");
-        std::env::set_var("GROK_APP_HOME", &tmp);
-        let _ = ensure_app_dirs();
-
-        let mut snap = create_session(None, Some("chat".into()), false).expect("session");
-        snap.agent_session_id = Some("old-agent".into());
-        update_session_meta(&snap).expect("seed agent id");
-        save_composer_prefs(
-            None,
-            Some(&snap.id),
-            Some("deepseek-v4-flash".into()),
-            None,
-            None,
-            None,
-            Some("relay-b".into()),
-        )
-        .expect("in-flight composer save");
-
-        // Handshake still holds the entry snapshot, plus the agent id it just opened.
-        snap.agent_session_id = Some("spawned-agent".into());
-        snap.provider_id = None;
-        snap.model_id = Some("grok-4.7".into());
-        snap.effort = Some("high".into());
-        let written = update_session_meta_preserving_composer(&snap).expect("writeback");
-        assert_eq!(written.provider_id.as_deref(), Some("relay-b"));
-        assert_eq!(written.model_id.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(written.agent_session_id.as_deref(), Some("spawned-agent"));
-        assert_eq!(written.effort.as_deref(), Some("high"));
-
-        let row = load_sessions_index()
-            .into_iter()
-            .find(|s| s.id == snap.id)
-            .expect("row");
-        assert_eq!(row.provider_id.as_deref(), Some("relay-b"));
-        assert_eq!(row.model_id.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(row.agent_session_id.as_deref(), Some("spawned-agent"));
-
-        match previous {
-            Some(value) => std::env::set_var("GROK_APP_HOME", value),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
-        let _ = fs::remove_dir_all(&tmp);
-    }
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        create_session_defaults_to_orphan,
+        native_session_create_accepts_uuid_and_rejects_import_id,
+        fork_session_partial_stores_rewind_index,
+        retruncate_child_journal_to_cut_persists_inflated_partial_fork,
+        retruncate_child_journal_to_cut_skips_unchanged_partial_fork,
+        clear_fork_oneshots_clears_rewind_index,
+        clear_session_fork_after_connect_failure_partial_drops_agent_id,
+        clear_session_fork_after_connect_failure_full_keeps_agent_id,
+        set_session_worktree_marks_and_clears,
+        migrate_legacy_general_project_rehomes_sessions,
+        set_project_pinned_moves_to_group_end,
+        effort_stays_per_session_under_global_scope,
+        draft_effort_seeds_global_without_touching_existing_sessions,
+        sessions_index_transaction_preserves_concurrent_mutations,
+        sessions_index_mutation_error_does_not_commit_partial_changes,
+        merged_message_save_keeps_concurrent_append_and_replace_truncates,
+        journal_writes_compact_json,
+        set_session_project_keeps_agent_id_for_fork_restore,
+        move_session_to_project_clears_agent_and_worktree,
+        precheck_session_move_validates_before_any_write,
+        move_session_to_project_refuses_untrusted_and_missing,
+        load_projects_repairs_ssh_alias_and_merges_duplicates,
+        add_ssh_project_rebinds_same_path_without_alias,
+    );
 }

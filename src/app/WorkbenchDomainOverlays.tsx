@@ -23,6 +23,7 @@ import type {
   ExportImagePreviewPhase,
 } from "@/lib/exportSharePro";
 import type { ShareCardSkinId } from "@/lib/shareCardSkins";
+import { SessionImportWorkbenchHost } from "@/components/session-import/SessionImportWorkbenchHost";
 
 const ReliabilityCenterModal = lazy(async () => {
   const m = await import("@/components/ReliabilityCenterModal");
@@ -84,7 +85,8 @@ export type WorkbenchDomainOverlaysProps = {
   sessions: SessionRow[];
   projects: Project[];
   settingsShortcutHint: string;
-  onPickSearchSession: (row: SessionRow, project: Project | null) => void;
+  onPickSearchSession: (row: SessionRow | string, project?: Project | null) => void | Promise<void>;
+  onProjectsChanged?: () => void;
 };
 
 export function WorkbenchDomainOverlays(props: WorkbenchDomainOverlaysProps) {
@@ -178,6 +180,8 @@ export function WorkbenchDomainOverlays(props: WorkbenchDomainOverlaysProps) {
           sessions={p.sessions}
           projectsCatalog={p.projects}
           contentSearchLoading={p.searchPalette.contentLoading}
+          contentError={p.searchPalette.contentError}
+          catalogRebuild={p.searchPalette.catalogRebuild}
           emptyState={p.searchPalette.emptyState}
           settingsShortcutHint={p.settingsShortcutHint}
           onClose={p.searchPalette.closePalette}
@@ -190,8 +194,19 @@ export function WorkbenchDomainOverlays(props: WorkbenchDomainOverlaysProps) {
           onRunAction={p.searchPalette.runAction}
           onPickProject={p.searchPalette.pickProject}
           onPickSession={p.onPickSearchSession}
+          onRebuildCatalog={() => {
+            void p.searchPalette.rebuildCatalogIndex();
+          }}
+          onCancelCatalogRebuild={() => {
+            void p.searchPalette.cancelCatalogRebuild();
+          }}
         />
       )}
+      <SessionImportWorkbenchHost
+        onProjectsChanged={p.onProjectsChanged}
+        locale={p.locale}
+        onOpenSession={p.onPickSearchSession}
+      />
     </>
   );
 }

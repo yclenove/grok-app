@@ -49,7 +49,9 @@ describe("mermaidRender", () => {
     const { renderMermaidSvg } = await import("./mermaidRender");
     const svg = await renderMermaidSvg("flowchart LR\n  A-->B", "dark");
     expect(svg).toMatch(/<svg[\s>]/i);
-    expect(initializeMock).toHaveBeenCalled();
+    expect(initializeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ startOnLoad: false, securityLevel: "strict" }),
+    );
     expect(renderMock).toHaveBeenCalled();
     const call = renderMock.mock.calls[0] as unknown as [string, string];
     expect(call[1]).toContain("flowchart LR");
