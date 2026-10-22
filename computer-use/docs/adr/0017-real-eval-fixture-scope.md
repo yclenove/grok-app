@@ -1,6 +1,6 @@
 # 0017 · real-eval 的 gcu 授权绑定夹具实例
 
-状态：**Proposed** · 日期：2026-10-22 · 拟议负责人：Grok（core/native/helper）、Codex（eval/隔离验收）。
+状态：**Accepted（设计与分卡；2026-10-23 项目所有者“按建议来”，采用推荐：专用一次性 GUI VM，不在 owner 日常 mac-pro 上跑）**；实施按 §5 分卡，S2/S4 完整接线与 S6 外部边界就绪前不启用真实运行（真实模型评测仍停止）。原状态 Proposed · 日期：2026-10-22 · 拟议负责人：Grok（core/native/helper）、Codex（eval/隔离验收）。
 
 ## 给 owner 的一页决定
 
