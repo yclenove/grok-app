@@ -21,7 +21,8 @@ fn run() -> Result<ExitCode, String> {
     // Real mode asks this once before the task. Answer a clean allow-list and
     // do not write the task state or the probe.
     if tool_probe() {
-        println!("{{\"text\":\"todo_write, search_tool, use_tool, click, get_app_state\"}}");
+        let listing = gcu_eval::EXPECTED_PREFLIGHT_TOOLS.join(", ");
+        println!("{{\"text\":\"{listing}\"}}");
         return Ok(ExitCode::SUCCESS);
     }
     let behavior = std::env::var("GCU_EVAL_BEHAVIOR").unwrap_or_else(|_| "scripted".into());
@@ -80,6 +81,38 @@ fn run() -> Result<ExitCode, String> {
             write_pass_state()?;
             invoke_suite()?;
             write_transcript_body(true, false)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        // Grandchild stays in this process group. The runner must kill the
+        // group on timeout; killing only this process leaves `sleep` behind.
+        "spawn_sleeper" => {
+            let marker = std::env::var("GCU_EVAL_WATCH_FILE").map_err(|err| err.to_string())?;
+            let child = std::process::Command::new("/bin/sleep")
+                .arg("300")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|err| err.to_string())?;
+            std::fs::write(&marker, child.id().to_string()).map_err(|err| err.to_string())?;
+            std::mem::forget(child);
+            std::thread::sleep(std::time::Duration::from_secs(300));
+            Ok(ExitCode::SUCCESS)
+        }
+        // More bytes than a pipe buffer. The runner must read both streams
+        // while this process is still writing, or the write blocks forever.
+        "pipe_flood" => {
+            let chunk = vec![b'y'; 8192];
+            let mut out = std::io::stdout();
+            let mut err = std::io::stderr();
+            for _ in 0..128 {
+                out.write_all(&chunk).map_err(|err| err.to_string())?;
+                err.write_all(&chunk).map_err(|err| err.to_string())?;
+            }
+            out.flush().map_err(|err| err.to_string())?;
+            err.flush().map_err(|err| err.to_string())?;
+            write_pass_state()?;
+            write_transcript(true)?;
             Ok(ExitCode::SUCCESS)
         }
         _ => {

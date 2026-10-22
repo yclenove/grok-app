@@ -14,14 +14,18 @@
 
 pub mod ab;
 mod access;
+mod boundary;
 pub mod browser;
 #[path = "../../../bench/mod.rs"]
 pub mod budget;
 mod client_tools;
 mod exec;
+mod ffi;
+mod launch;
 mod metrics;
 mod oracle;
 mod prep;
+mod proc;
 mod release;
 mod report;
 mod runner;
@@ -29,7 +33,9 @@ pub mod soak;
 mod tasks;
 mod yaml;
 
-pub use client_tools::CLIENT_TOOL_PROBE_PROMPT;
+pub use access::GCU_ACCEPTED_APPROVAL;
+pub use boundary::{is_eval_fake_agent, ATTEST_REQUIRED};
+pub use client_tools::{CLIENT_TOOL_PROBE_PROMPT, EXPECTED_PREFLIGHT_TOOLS};
 pub use metrics::{compare_trials, percentile, summarize, CategoryRate, PairRow, Summary, Trial};
 pub use oracle::{
     judge, prove_oracle, EffectCheck, Judgment, OracleSpec, PathCheck, Verdict, World,

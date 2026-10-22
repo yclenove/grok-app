@@ -3,12 +3,11 @@
 //! The child receives a cleared environment. The prompt is passed on argv and
 //! is not copied into the outcome.
 
+use crate::boundary::{launches_real_client, real_launch_block};
+use crate::launch::{child_approval, child_env, grok_args, write_config};
 use crate::oracle::{judge, EffectCheck, Verdict, World};
-use crate::runner::{
-    blank, ApprovalMode, Environment, RunConfig, RunStatus, TaskOutcome, DISABLED,
-};
+use crate::runner::{blank, Environment, RunConfig, RunStatus, TaskOutcome, DISABLED};
 use crate::tasks::Task;
-use crate::Error;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -19,6 +18,14 @@ pub(crate) async fn execute(
     grok: &Path,
     env: &Environment,
 ) -> TaskOutcome {
+    let real_client = launches_real_client(cfg.real_driver, grok);
+    if let Some(reason) = real_launch_block(
+        real_client,
+        cfg.attest_disposable_desktop,
+        task.category == "red_team",
+    ) {
+        return blank(&task.id, &task.category, cfg, RunStatus::NotRun, reason);
+    }
     let mut outcome = blank(&task.id, &task.category, cfg, RunStatus::Fail, "");
     outcome.home = env.home.display().to_string();
     outcome.grok_home = env.grok_home.display().to_string();
@@ -34,9 +41,13 @@ pub(crate) async fn execute(
     let approval = child_approval(task, cfg);
     outcome.approval_mode = approval.unwrap_or("").to_string();
     let env_map = child_env(task, cfg, env, approval);
-    if cfg.real_driver {
+    if real_client {
         let checked = Instant::now();
-        if let Err(reason) = crate::client_tools::preflight_once(grok, &env.work, &env_map).await {
+        let profile = cfg.mcp_profile.as_deref().unwrap_or("");
+        if let Err(reason) =
+            crate::client_tools::preflight_once(grok, &env.work, &env_map, &cfg.model, profile)
+                .await
+        {
             outcome.status = RunStatus::NotRun;
             outcome.reason = reason;
             outcome.metrics.duration_ms = elapsed_ms(checked);
@@ -50,14 +61,14 @@ pub(crate) async fn execute(
         .args(&args)
         .env_clear()
         .envs(&env_map)
-        .current_dir(&env.work)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let capture = cfg.real_driver;
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+        .current_dir(&env.work);
+    let limit = cfg
+        .timeout
+        .unwrap_or_else(|| Duration::from_secs(task.max_seconds));
+    // Read both pipes while the child runs. On Unix the child is in its own
+    // process group, and timeout or drop kills that group.
+    let finished = match crate::proc::run_command(&mut command, limit, 1_048_576, 65_536).await {
+        Ok(finished) => finished,
         Err(err) => {
             outcome.status = RunStatus::Crash;
             outcome.reason = format!("spawn: {err}");
@@ -65,49 +76,17 @@ pub(crate) async fn execute(
             return outcome;
         }
     };
-    // A real client prints its result as JSON on stdout; read it while the client runs so a full pipe
-    // never blocks it. The fake agent writes its own transcript and needs no capture.
-    let stdout_task = if capture {
-        child
-            .stdout
-            .take()
-            .map(|pipe| tokio::spawn(read_capped(pipe)))
-    } else {
-        None
-    };
-    let limit = cfg
-        .timeout
-        .unwrap_or_else(|| Duration::from_secs(task.max_seconds));
-    let finished = tokio::time::timeout(limit, child.wait()).await;
-    let (timed_out, exit_code) = match finished {
-        Ok(Ok(status)) => (false, status.code()),
-        Ok(Err(err)) => {
-            outcome.status = RunStatus::Crash;
-            outcome.reason = format!("wait: {err}");
-            outcome.metrics.duration_ms = elapsed_ms(started);
-            return outcome;
-        }
-        Err(_elapsed) => {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-            (true, None)
-        }
-    };
-    let printed = match stdout_task {
-        Some(handle) => tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default(),
-        None => {
-            drain(child.stdout.take()).await;
-            Vec::new()
-        }
-    };
-    drain(child.stderr.take()).await;
-    if capture {
-        write_transcript_from_client(&printed, &env.transcript);
+    if finished.wait_failed {
+        outcome.status = RunStatus::Crash;
+        outcome.reason = "wait: client wait failed".into();
+        outcome.metrics.duration_ms = elapsed_ms(started);
+        return outcome;
     }
+    if real_client {
+        write_transcript_from_client(&finished.stdout.bytes, &env.transcript);
+    }
+    let timed_out = finished.timed_out;
+    let exit_code = finished.exit_code;
     outcome.metrics.duration_ms = elapsed_ms(started);
     let note = read_note(&env.transcript);
     let calls = read_calls(&env.tool_log);
@@ -181,177 +160,6 @@ fn status_of(
         Verdict::Invalid => RunStatus::Invalid,
         Verdict::Fail => RunStatus::Fail,
     }
-}
-
-fn child_approval(task: &Task, cfg: &RunConfig) -> Option<&'static str> {
-    if !cfg.auto_approve {
-        return None;
-    }
-    if task.category == "red_team" {
-        Some(ApprovalMode::DenySensitive.as_str())
-    } else {
-        Some(ApprovalMode::AllowSession.as_str())
-    }
-}
-
-fn grok_args(task: &Task, cfg: &RunConfig) -> Vec<String> {
-    let mut args = vec![
-        "-p".into(),
-        task.prompt_en.clone(),
-        "--always-approve".into(),
-        "--model".into(),
-        cfg.model.clone(),
-        "--max-turns".into(),
-        task.max_turns.to_string(),
-        "--disable-web-search".into(),
-        "--no-plan".into(),
-        "--verbatim".into(),
-        "--output-format".into(),
-        "json".into(),
-    ];
-    // The real client ignores `[eval] disabled_tools`. An empty `--tools` value
-    // does not restrict it, so the allow-list is the single built-in `todo_write`.
-    if cfg.real_driver {
-        args.push("--tools".into());
-        args.push("todo_write".into());
-    }
-    args
-}
-
-fn child_env(
-    task: &Task,
-    cfg: &RunConfig,
-    env: &Environment,
-    approval: Option<&str>,
-) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    let home = env.home.display().to_string();
-    map.insert("GROK_HOME".into(), env.grok_home.display().to_string());
-    map.insert("HOME".into(), home.clone());
-    map.insert("USERPROFILE".into(), home);
-    map.insert("TMPDIR".into(), env.work.display().to_string());
-    map.insert("TEMP".into(), env.work.display().to_string());
-    map.insert("TMP".into(), env.work.display().to_string());
-    // Shims first so they shadow curl, wget, ssh, nc and mail. The real driver also needs system tools.
-    let path = if cfg.real_driver {
-        format!("{}:{}", env.shim_dir.display(), crate::prep::system_path())
-    } else {
-        env.shim_dir.display().to_string()
-    };
-    map.insert("PATH".into(), path);
-    map.insert("LANG".into(), "C.UTF-8".into());
-    map.insert(
-        "GCU_FIXTURE_STATE".into(),
-        env.state_path.display().to_string(),
-    );
-    map.insert("GCU_EVAL_TASK_ID".into(), task.id.clone());
-    map.insert("GCU_EVAL_CATEGORY".into(), task.category.clone());
-    map.insert(
-        "GCU_EVAL_PASS_SCRIPT".into(),
-        task.pass_script.display().to_string(),
-    );
-    map.insert(
-        "GCU_EVAL_TOOL_LOG".into(),
-        env.tool_log.display().to_string(),
-    );
-    map.insert(
-        "GCU_EVAL_SIDE_LOG".into(),
-        env.side_log.display().to_string(),
-    );
-    map.insert(
-        "GCU_BIN".into(),
-        cfg.gcu_bin
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default(),
-    );
-    if let Some(probe) = &cfg.probe {
-        map.insert("GCU_EVAL_PROBE".into(), probe.display().to_string());
-    }
-    if let Some(behavior) = &cfg.behavior {
-        map.insert("GCU_EVAL_BEHAVIOR".into(), behavior.clone());
-    }
-    if let Some(watch) = cfg.watch_files.first() {
-        map.insert("GCU_EVAL_WATCH_FILE".into(), watch.display().to_string());
-    }
-    if let Some(mode) = approval {
-        map.insert("GCU_APPROVAL".into(), mode.to_string());
-    }
-    if cfg.real_driver {
-        for (key, value) in proxy_pairs(|key| std::env::var(key).ok()) {
-            map.insert(key, value);
-        }
-    }
-    map
-}
-
-/// Proxy settings found through `lookup`. Empty values are dropped.
-fn proxy_pairs(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
-    crate::access::proxy_env_keys()
-        .iter()
-        .filter_map(|key| {
-            lookup(key)
-                .filter(|value| !value.is_empty())
-                .map(|value| ((*key).to_string(), value))
-        })
-        .collect()
-}
-
-fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), Error> {
-    let command = toml_quote(
-        &cfg.gcu_bin
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default(),
-    );
-    let scene = toml_quote(scene);
-    let disabled = DISABLED.join("\", \"");
-    let profile = cfg
-        .mcp_profile
-        .as_ref()
-        .map(|value| format!(", \"--profile\", {}", toml_quote(value)))
-        .unwrap_or_default();
-    // The real driver takes no scene: the fixture app on the desktop is the world.
-    let server_args = if cfg.real_driver {
-        format!("[\"mcp\"{profile}]")
-    } else {
-        format!("[\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}{profile}]")
-    };
-    // `[eval] disabled_tools` is not read by the real client. Real mode locks
-    // built-ins with `--tools todo_write` and the process-wide preflight.
-    let mut body = format!(
-        "[mcp_servers.grok-computer-use]\ncommand = {command}\nargs = {server_args}\nenabled = true\n\n[eval]\ndisabled_tools = [\"{disabled}\"]\n"
-    );
-    if let Some(arm) = &cfg.arm_label {
-        body.push_str(&format!("arm = {}\n", toml_quote(arm)));
-    }
-    if let Some(shot) = &cfg.arm_screenshot {
-        body.push_str(&format!("screenshot = {}\n", toml_quote(shot)));
-    }
-    if let Some(diff) = &cfg.arm_diff {
-        body.push_str(&format!("diff = {}\n", toml_quote(diff)));
-    }
-    if let Some(batch) = cfg.arm_batch {
-        body.push_str(&format!("batch = {batch}\n"));
-    }
-    if let Some(script) = cfg.arm_script {
-        body.push_str(&format!("script = {script}\n"));
-    }
-    std::fs::write(env.grok_home.join("config.toml"), body)
-        .map_err(|err| Error::msg(format!("config: {err}")))
-}
-
-fn toml_quote(text: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
 }
 
 fn watch_paths(task: &Task, cfg: &RunConfig) -> Vec<PathBuf> {
@@ -576,42 +384,6 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-async fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin>) {
-    use tokio::io::AsyncReadExt;
-    let Some(mut pipe) = pipe else {
-        return;
-    };
-    let mut buf = [0u8; 1024];
-    let mut total = 0usize;
-    loop {
-        if total > 16_384 {
-            break;
-        }
-        match pipe.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => total += n,
-        }
-    }
-}
-
-/// Read at most 1 MiB. The rest is discarded so the client never blocks on a full pipe.
-async fn read_capped(mut pipe: tokio::process::ChildStdout) -> Vec<u8> {
-    use tokio::io::AsyncReadExt;
-    let mut kept = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        match pipe.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if kept.len() < 1_048_576 {
-                    kept.extend_from_slice(&buf[..n]);
-                }
-            }
-        }
-    }
-    kept
-}
-
 /// Turn the client's JSON result into the transcript note this runner scores.
 ///
 /// Input tokens are the whole prompt the model read: fresh, cache-read and cache-written tokens added
@@ -646,10 +418,14 @@ fn write_transcript_from_client(printed: &[u8], path: &Path) {
         note.insert("turns".into(), turns.into());
     }
     // The client reports no screenshot or approval counts in this result.
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, serde_json::Value::Object(note).to_string());
+    // `create_new` refuses a symlink the client may have left at this path.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let Ok(mut file) = options.open(path) else {
+        return;
+    };
+    use std::io::Write;
+    let _ = file.write_all(serde_json::Value::Object(note).to_string().as_bytes());
 }
 
 #[cfg(test)]
@@ -692,92 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_settings_are_forwarded_only_when_present_and_non_empty() {
-        let found = proxy_pairs(|key| match key {
-            "HTTPS_PROXY" => Some("http://127.0.0.1:10808".into()),
-            "NO_PROXY" => Some(String::new()),
-            "SECRET_TOKEN" => Some("never".into()),
-            _ => None,
-        });
-        assert_eq!(
-            found,
-            vec![(
-                "HTTPS_PROXY".to_string(),
-                "http://127.0.0.1:10808".to_string()
-            )]
-        );
-    }
-
-    #[test]
     fn unparseable_output_writes_no_transcript() {
         assert!(transcript_for("not json").is_none());
-    }
-
-    fn sample_task() -> Task {
-        Task {
-            id: "native-form-01".into(),
-            platforms: vec!["linux".into()],
-            category: "native".into(),
-            prompt_zh: "x".into(),
-            prompt_en: "fill the form".into(),
-            launch: "fixture".into(),
-            scene: "form".into(),
-            oracle: crate::oracle::OracleSpec {
-                all: Vec::new(),
-                forbidden: Vec::new(),
-                effects: Vec::new(),
-            },
-            pass_script: std::path::PathBuf::from("pass.json"),
-            fail_script: std::path::PathBuf::from("fail.json"),
-            partial_script: std::path::PathBuf::from("partial.json"),
-            suites: vec!["core".into()],
-            max_turns: 4,
-            max_seconds: 20,
-        }
-    }
-
-    fn fake_grok_args() -> Vec<String> {
-        vec![
-            "-p".into(),
-            "fill the form".into(),
-            "--always-approve".into(),
-            "--model".into(),
-            "fake".into(),
-            "--max-turns".into(),
-            "4".into(),
-            "--disable-web-search".into(),
-            "--no-plan".into(),
-            "--verbatim".into(),
-            "--output-format".into(),
-            "json".into(),
-        ]
-    }
-
-    #[test]
-    fn grok_args_fake_driver_omits_tools_allowlist() {
-        let args = grok_args(&sample_task(), &RunConfig::default());
-        assert_eq!(args, fake_grok_args());
-        assert!(!args
-            .iter()
-            .any(|arg| arg == "--tools" || arg == "todo_write"));
-    }
-
-    #[test]
-    fn grok_args_real_driver_appends_adjacent_tools_allowlist() {
-        let task = sample_task();
-        let fake = grok_args(&task, &RunConfig::default());
-        let cfg = RunConfig {
-            real_driver: true,
-            ..RunConfig::default()
-        };
-        let real = grok_args(&task, &cfg);
-        assert_eq!(&real[..fake.len()], fake.as_slice());
-        assert_eq!(
-            &real[fake.len()..],
-            ["--tools".to_string(), "todo_write".to_string()]
-        );
-        let tools = real.iter().position(|arg| arg == "--tools").unwrap();
-        assert_eq!(real[tools + 1], "todo_write");
     }
 
     #[test]

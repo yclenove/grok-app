@@ -2,17 +2,17 @@
 
 This directory holds the evaluation catalog. P9-01 demo tasks stay in the `core` suite. The P9-02 catalog adds the category floors from `07-quality-gates.md` (native 15, browser 10, dialog 8, cross_app 8, text 10, red_team 9) on macOS, Windows, and Linux. New goal tasks use the `catalog` suite. Refusal and handoff tasks use the `red_team` suite.
 
-The runner never logs into an account, IM, or mailbox, and it never reads or writes `~/.grok`, `~/.codex`, `~/.gemini`, or `~/.claude`. An isolated `GROK_HOME` is not an environment boundary. A real model run needs a one-shot OS or desktop container with no user-directory mount and no credentials. `DesktopProvider` reports `not_run` until that container exists. `LocalTempProvider` is only for unit tests and the fake driver.
+The runner never logs into an account, IM, or mailbox, and it never reads or writes `~/.grok`, `~/.codex`, `~/.gemini`, or `~/.claude`. An isolated `GROK_HOME` is not an environment boundary. Real mode must not run on an ordinary host. It needs a one-shot isolated desktop and egress control. `DesktopProvider` reports `not_run` until that container exists. `LocalTempProvider` is only for unit tests and the fake driver. `--tools` and the client-tool preflight are mitigations, not proof. Fixture-bound authorization and an OS sandbox are not implemented.
 
 `not_run` in this card:
 
 - one-shot desktop container (`desktop-oneshot`)
 - real model API (this crate never calls one; nightly skips when `GCU_EVAL_API_KEY` is empty)
 - cross-client smoke when the client binary or credentials are missing
-- a real red_team model run (`cargo run -p gcu-eval -- --suite red_team` reaches `DesktopProvider` and stays `not_run`)
+- a real red_team model run stays `not_run`: `gcu` rejects `auto-deny-sensitive`, and `auto-deny` denies every action, so there is no sensitive-only deny policy. `DesktopProvider` also stays `not_run`
 - a real app-suite run (`cargo run -p gcu-eval -- --suite app` reaches `DesktopProvider` and stays `not_run`)
 
-Automatic CU approval exists only in a debug build with the `eval-autoapprove` feature. Any other build exits with status 2 when `GCU_APPROVAL` is set. Red-team tasks use `auto-deny-sensitive`. Other tasks use `auto-allow-session`. The default suite leaves approval unset.
+Automatic CU approval exists only in a debug build with the `eval-autoapprove` feature. Any other build exits with status 2 when `GCU_APPROVAL` is set. The values `gcu` accepts are `auto-allow-turn`, `auto-allow-session`, `auto-allow-always`, and `auto-deny`. It rejects `auto-deny-sensitive`. Fake-driver red-team tasks send `auto-deny` (every action, not sensitive actions only). Other tasks use `auto-allow-session`. A real-mode red-team task is `not_run` instead of falling back to `auto-allow-session`. The default suite leaves approval unset.
 
 ## Task file
 
@@ -84,16 +84,17 @@ The decision passes only when B's success rate is at least A's, the median round
 
 ## Real driver and real model (opt-in)
 
-`--driver real` replaces the fake driver and scripted scenes with the real `gcu` driver and a real fixture app. It exists so a real model can be measured; it is not part of any default or CI path.
+`--driver real` replaces the fake driver and scripted scenes with the real `gcu` driver and a real fixture app. It exists so a real model can be measured on a one-shot isolated desktop. It is not part of any default or CI path, and it must not be run on an ordinary host.
 
 ```bash
-gcu-eval --suite core --ab --env local --driver real --auto-approve \
+# Do not run this on an ordinary host. It needs a one-shot isolated desktop and egress control.
+gcu-eval --suite core --ab --env local --driver real --attest-disposable-desktop --auto-approve \
   --grok <grok> --gcu <gcu built with eval-autoapprove> --fixture <gcu-fixture> \
   --auth-seed <dir with auth.json> --model grok-4.7 --timeout-ms 120000 \
   --only native-form-01,text-note-01,dialog-modal-01 --out <report dir>
 ```
 
-- **What it does to the machine.** It starts the fixture and lets the model drive the desktop it runs on, with CU auto-approval and no app allow-list. Real mode passes `--tools todo_write`, so built-in tools are limited to that allow-list (`todo_write`, `search_tool`, and `use_tool`). An empty `--tools` value does not limit anything, and the real client does not read the isolated config's `[eval] disabled_tools` list. Before the first task in a process, the runner asks the client to list its tools in the same isolated `HOME` / `GROK_HOME`, with the seeded login, the same `config.toml`, the same `--tools todo_write` argument, and the same proxy variables. An empty, unparseable, or dangerous listing (terminal, shell, file tools, subagents, and the other client built-ins) makes this task and every later task `not_run`. The gcu driver can still operate any window on the desktop, approvals are automatic, and there is no app allow-list. Run it only where nobody is working, with only the fixture and a terminal open and no unrelated account signed in.
+- **What it does to the machine.** Without `--attest-disposable-desktop` the process exits 2 and does not start the client. The same refusal applies when `--driver fake` is pointed at a client other than `eval-fake-agent`. With the flag, it starts the fixture and lets the model drive the desktop it runs on, with CU auto-approval and no app allow-list. That flag is an operator attestation, not a confinement proof. Real mode passes `--tools todo_write`. An empty `--tools` value does not limit anything, and the real client does not read the isolated config's `[eval] disabled_tools` list. Before a task, the runner asks the client to list its tools in the same isolated `HOME` / `GROK_HOME`, with the seeded login, the same `config.toml`, and the same behavior flags (`--model`, `--no-plan`, `--verbatim`, `--tools todo_write`). The listing must be JSON and the tool-name set must be exactly `list_apps`, `list_windows`, `search_tool`, `todo_write`, and `use_tool`. Anything else, including output past 65536 bytes, makes this task and later tasks with the same client, profile, and model `not_run`. This preflight is a tripwire, not proof. The gcu driver can still operate any window on the desktop, approvals are automatic, and there is no app allow-list. Fixture-bound authorization and an OS sandbox are not implemented.
 - **The login.** `--auth-seed` points at a directory that holds a login made for this evaluation only. Only its `auth.json` is copied, unread, into each task's temporary `GROK_HOME` and deleted with it. Make that login with `grok login --device-auth` using `HOME` and `GROK_HOME` set to a scratch directory, never the operator's own.
 - **What is scored.** The oracle reads the fixture's state file; round trips are the client's `num_turns`; input tokens add fresh, cache-read and cache-written tokens (the whole prompt the model read); the model's words are discarded. Tool-call names are not available from the real `gcu`, so `tool_calls` stays zero.
 - **Tasks that can run.** Only tasks whose oracle maps onto the single egui fixture window (for example `native-form-01`, `text-note-01`, `dialog-modal-01`). Browser and terminal scenes, and the red-team task, have no counterpart there, so the `--ab` decision cannot be a pass without them and concludes rollback.

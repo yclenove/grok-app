@@ -14,13 +14,7 @@ fn preflight_failure_marks_the_task_not_run_and_does_not_dispatch() {
     assert_eq!(drive.rows.len(), 2, "both the task and the one after it");
     for row in &drive.rows {
         assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);
-        assert!(row.reason.contains("客户端工具预检失败"), "{}", row.reason);
-        assert!(row.reason.contains("预检"), "{}", row.reason);
-        assert!(
-            row.reason.contains("run_terminal_command"),
-            "{}",
-            row.reason
-        );
+        assert_eq!(row.reason, "forbidden_tool:run_terminal_command");
         assert!(!row.reason.contains("SECRET"), "{}", row.reason);
     }
     assert!(!drive.marker.exists(), "the task prompt was not dispatched");

@@ -42,6 +42,7 @@ pub fn drive(label: &str, listing: &str) -> Drive {
         platform: host_platform().into(),
         include_desktop: false,
         real_driver: true,
+        attest_disposable_desktop: true,
         fixture_bin: Some(write_fixture(&dir)),
         auth_seed: Some(seed),
         timeout: Some(Duration::from_secs(15)),

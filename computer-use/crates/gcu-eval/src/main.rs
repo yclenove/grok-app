@@ -8,9 +8,9 @@
 use anyhow::Context;
 use clap::Parser;
 use gcu_eval::{
-    block_on, bundled_tasks_dir, compare_trials, host_platform, judge_release, load_tasks,
-    parse_approval, parse_release_evidence, run_tasks, trials_from_summary, write_release_report,
-    write_reports, RunConfig, RunStatus, SuiteReport,
+    block_on, bundled_tasks_dir, compare_trials, host_platform, is_eval_fake_agent, judge_release,
+    load_tasks, parse_approval, parse_release_evidence, run_tasks, trials_from_summary,
+    write_release_report, write_reports, RunConfig, RunStatus, SuiteReport, ATTEST_REQUIRED,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -76,11 +76,16 @@ struct Cli {
     /// Scripted client behavior. Hidden; tests and the fake agent use it.
     #[arg(long, hide = true)]
     behavior: Option<String>,
-    /// `fake` (default) uses the fake driver and scripted scenes. `real` drives the real `gcu` driver
-    /// against a real fixture app on this desktop with CU auto-approval: run it only on a machine
-    /// where nobody is working and only the fixture and a terminal are open.
+    /// `fake` (default) uses the fake driver. `real` drives the real `gcu` driver and refuses to
+    /// start unless `--attest-disposable-desktop` is set.
     #[arg(long, default_value = "fake")]
     driver: String,
+    /// Attest that this process is on a one-shot isolated desktop with egress control.
+    ///
+    /// Required before a real driver or any client other than `eval-fake-agent`. An environment
+    /// variable cannot replace this flag. It is not a confinement proof.
+    #[arg(long)]
+    attest_disposable_desktop: bool,
     /// Fixture app started for each task when `--driver real`.
     #[arg(long)]
     fixture: Option<PathBuf>,
@@ -102,11 +107,20 @@ struct RealFlags {
 
 fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
     match cli.driver.as_str() {
-        "fake" => Ok(RealFlags {
-            real_driver: false,
-            fixture_bin: None,
-            auth_seed: None,
-        }),
+        "fake" => {
+            if let Some(grok) = &cli.grok {
+                // A missing path never starts. Refuse only a client that is actually there.
+                let present = std::fs::symlink_metadata(grok).is_ok();
+                if present && !is_eval_fake_agent(grok) && !cli.attest_disposable_desktop {
+                    return Err(Stop::Usage(ATTEST_REQUIRED.into()));
+                }
+            }
+            Ok(RealFlags {
+                real_driver: false,
+                fixture_bin: None,
+                auth_seed: None,
+            })
+        }
         "real" => {
             if cli.grok.is_none() || cli.gcu.is_none() || cli.fixture.is_none() {
                 return Err(Stop::Usage(
@@ -115,6 +129,9 @@ fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
             }
             if cli.env != "local" {
                 return Err(Stop::Usage("--driver real needs --env local".into()));
+            }
+            if !cli.attest_disposable_desktop {
+                return Err(Stop::Usage(format!("--driver real: {ATTEST_REQUIRED}")));
             }
             if !cli.auto_approve {
                 return Err(Stop::Usage(
@@ -200,6 +217,7 @@ fn dispatch() -> Result<u8, Stop> {
         real_driver: real.real_driver,
         fixture_bin: real.fixture_bin,
         auth_seed: real.auth_seed,
+        attest_disposable_desktop: cli.attest_disposable_desktop,
         grok_bin: cli.grok.clone(),
         gcu_bin: cli.gcu.clone(),
         model: cli.model.clone(),
@@ -303,6 +321,7 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
                 real_driver: real.real_driver,
                 fixture_bin: real.fixture_bin,
                 auth_seed: real.auth_seed,
+                attest_disposable_desktop: cli.attest_disposable_desktop,
                 grok_bin: cli.grok.clone(),
                 gcu_bin: cli.gcu.clone(),
                 model: cli.model.clone(),

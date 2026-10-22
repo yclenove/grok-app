@@ -1,20 +1,207 @@
 //! Temporary directory helpers for the local evaluation provider.
+//!
+//! The cleanup guard is installed before any directory is created. It deletes
+//! a tree only after this process exclusively created that tree. A pre-existing
+//! path, including a symlink, is refused and left in place.
 
+use crate::runner::{Environment, RunStatus};
 use crate::Error;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) struct Rm(pub(crate) PathBuf);
-impl Drop for Rm {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+/// Deletes `root` on drop only after [`Cleanup::arm`].
+pub(crate) struct Cleanup {
+    root: PathBuf,
+    armed: bool,
+}
+
+impl Cleanup {
+    /// Does not delete `root`. Arm it only after exclusive creation succeeds.
+    pub(crate) fn standby(root: PathBuf) -> Self {
+        Self { root, armed: false }
+    }
+
+    pub(crate) fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Remove an armed root. Failure stays an error for the caller to report.
+    pub(crate) fn remove(&mut self) -> Result<(), Error> {
+        if !self.armed {
+            return Err(Error::msg("cleanup_failed"));
+        }
+        remove_root(&self.root)?;
+        if self.root.exists() {
+            return Err(Error::msg("cleanup_failed"));
+        }
+        self.armed = false;
+        Ok(())
     }
 }
 
-pub(crate) fn unique_root() -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("gcu-ev-{}-{n}", std::process::id()))
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+/// Downgrade a finished row when deleting its tree failed.
+pub(crate) fn apply_cleanup_failure(status: &mut RunStatus, reason: &mut String) {
+    if matches!(
+        *status,
+        RunStatus::Pass | RunStatus::Partial | RunStatus::NotRun
+    ) {
+        *status = RunStatus::Fail;
+    }
+    if reason.contains("cleanup_failed") {
+        return;
+    }
+    if reason.is_empty() {
+        reason.push_str("cleanup_failed");
+    } else {
+        *reason = format!("cleanup_failed; {reason}");
+    }
+}
+
+pub(crate) struct HeldEnv {
+    pub env: Environment,
+    guard: Cleanup,
+}
+
+impl HeldEnv {
+    pub(crate) fn disarm(&mut self) {
+        self.guard.disarm();
+    }
+
+    pub(crate) fn cleanup(&mut self) -> Result<(), Error> {
+        self.guard.remove()
+    }
+}
+
+/// Create a fresh tree. The returned guard is armed only after the root exists.
+pub(crate) fn begin_env() -> Result<HeldEnv, Error> {
+    let root = fresh_root()?;
+    if crate::access::canonical_under_configs(&root, &crate::access::user_config_dirs())? {
+        return Err(Error::msg(
+            "refusing to provision inside a user config directory",
+        ));
+    }
+    let mut guard = Cleanup::standby(root.clone());
+    reject_existing(&root)?;
+    std::fs::create_dir(&root).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::msg("temp root already exists")
+        } else {
+            Error::msg(format!("temp root: {err}"))
+        }
+    })?;
+    guard.arm();
+    if let Err(err) = lock_dir(&root).and_then(|()| populate(&root)) {
+        if guard.remove().is_err() {
+            return Err(Error::msg(format!("cleanup_failed; {err}")));
+        }
+        return Err(err);
+    }
+    Ok(HeldEnv {
+        env: layout(&root),
+        guard,
+    })
+}
+
+fn fresh_root() -> Result<PathBuf, Error> {
+    let mut bytes = [0u8; 16];
+    random_bytes(&mut bytes)?;
+    let mut name = String::from("gcu-ev-");
+    for byte in bytes {
+        name.push(hex(byte >> 4));
+        name.push(hex(byte & 0x0f));
+    }
+    Ok(std::env::temp_dir().join(name))
+}
+
+fn hex(nibble: u8) -> char {
+    char::from(b"0123456789abcdef"[usize::from(nibble)])
+}
+
+#[cfg(unix)]
+fn random_bytes(buf: &mut [u8]) -> Result<(), Error> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open("/dev/urandom").map_err(|_| Error::msg("could not read randomness"))?;
+    file.read_exact(buf)
+        .map_err(|_| Error::msg("could not read randomness"))
+}
+
+#[cfg(windows)]
+fn random_bytes(buf: &mut [u8]) -> Result<(), Error> {
+    crate::ffi::random_bytes(buf)
+}
+
+fn reject_existing(path: &Path) -> Result<(), Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(Error::msg("refusing a symlink temp root"))
+        }
+        Ok(_) => Err(Error::msg("temp root already exists")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(Error::msg(format!("temp root: {err}"))),
+    }
+}
+
+fn layout(root: &Path) -> Environment {
+    Environment {
+        home: root.join("home"),
+        grok_home: root.join("grok"),
+        work: root.join("work"),
+        state_path: root.join("state.json"),
+        shim_dir: root.join("shims"),
+        side_log: root.join("side.log"),
+        tool_log: root.join("tools.log"),
+        transcript: root.join("grok").join("transcript.json"),
+        root: root.to_path_buf(),
+    }
+}
+
+fn populate(root: &Path) -> Result<(), Error> {
+    let env = layout(root);
+    for dir in [&env.home, &env.grok_home, &env.work, &env.shim_dir] {
+        make_dir(dir)?;
+    }
+    write_new(&env.state_path, b"{}\n")?;
+    write_new(&env.side_log, b"")?;
+    write_shims(&env.shim_dir)?;
+    Ok(())
+}
+
+fn make_dir(path: &Path) -> Result<(), Error> {
+    reject_existing(path).map_err(|_| Error::msg("refusing a pre-existing startup path"))?;
+    std::fs::create_dir(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::msg("refusing a pre-existing startup path")
+        } else {
+            Error::msg(format!("mkdir: {err}"))
+        }
+    })?;
+    lock_dir(path)
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(Error::msg("refusing a pre-existing startup path"));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| Error::msg("refusing a pre-existing startup path"))?;
+    file.write_all(bytes)
+        .map_err(|err| Error::msg(format!("create: {err}")))
 }
 
 pub(crate) fn remove_root(path: &Path) -> Result<bool, Error> {
@@ -52,11 +239,10 @@ pub(crate) fn write_shim(dir: &Path, name: &str) -> Result<(), Error> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join(name);
-        let body = "#!/bin/sh\necho \"process $(basename \"$0\")\" >> \"$GCU_EVAL_SIDE_LOG\"\necho \"network $*\" >> \"$GCU_EVAL_SIDE_LOG\"\nexit 1\n";
+        let body = "#!/bin/sh\nname=${0##*/}\necho \"process $name\" >> \"$GCU_EVAL_SIDE_LOG\"\necho \"network argc=$#\" >> \"$GCU_EVAL_SIDE_LOG\"\nexit 1\n";
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
             .write(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o755)
             .open(&path)
             .map_err(|err| Error::msg(format!("shim: {err}")))?;
@@ -67,27 +253,80 @@ pub(crate) fn write_shim(dir: &Path, name: &str) -> Result<(), Error> {
     #[cfg(not(unix))]
     {
         let path = dir.join(format!("{name}.cmd"));
-        let body = "@echo off\r\necho process %~n0>>\"%GCU_EVAL_SIDE_LOG%\"\r\necho network %*>>\"%GCU_EVAL_SIDE_LOG%\"\r\nexit /b 1\r\n";
-        std::fs::write(path, body).map_err(|err| Error::msg(format!("shim: {err}")))
+        let body = "@echo off\r\necho process %~n0>>\"%GCU_EVAL_SIDE_LOG%\"\r\necho network argc>>\"%GCU_EVAL_SIDE_LOG%\"\r\nexit /b 1\r\n";
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|err| Error::msg(format!("shim: {err}")))?;
+        file.write_all(body.as_bytes())
+            .map_err(|err| Error::msg(format!("shim: {err}")))
     }
 }
 
-/// Copy the evaluation login into a task's temporary `GROK_HOME`. The file is never read here and the
-/// copy is deleted with the task directory. Only `auth.json` is taken from `seed`.
+/// Copy the evaluation login into a task's temporary `GROK_HOME`.
+///
+/// Symlinks are refused. A seed whose canonical path is under `~/.grok`,
+/// `~/.codex`, `~/.gemini`, or `~/.claude` is refused. The file contents are
+/// not logged. Only `auth.json` is taken from `seed`.
 pub(crate) fn seed_auth(seed: &Path, grok_home: &Path) -> Result<(), Error> {
+    seed_auth_in(seed, grok_home, &crate::access::user_config_dirs())
+}
+
+pub(crate) fn seed_auth_in(
+    seed: &Path,
+    grok_home: &Path,
+    configs: &[PathBuf],
+) -> Result<(), Error> {
+    if symlink_path(seed)? {
+        return Err(Error::msg("refusing a symlink auth seed"));
+    }
     let from = seed.join("auth.json");
-    if !from.is_file() {
+    if symlink_path(&from)? {
+        return Err(Error::msg("refusing a symlink auth seed"));
+    }
+    let meta =
+        std::fs::symlink_metadata(&from).map_err(|_| Error::msg("auth seed has no auth.json"))?;
+    if !meta.is_file() {
         return Err(Error::msg("auth seed has no auth.json"));
     }
+    let seed_canon =
+        std::fs::canonicalize(seed).map_err(|_| Error::msg("auth seed has no auth.json"))?;
+    let file_canon =
+        std::fs::canonicalize(&from).map_err(|_| Error::msg("auth seed has no auth.json"))?;
+    if crate::access::canonical_under_configs(&seed_canon, configs)?
+        || crate::access::canonical_under_configs(&file_canon, configs)?
+    {
+        return Err(Error::msg(
+            "refusing an auth seed under a personal config directory",
+        ));
+    }
+    let bytes = std::fs::read(&from).map_err(|_| Error::msg("could not copy the auth seed"))?;
     let to = grok_home.join("auth.json");
-    std::fs::copy(&from, &to).map_err(|_| Error::msg("could not copy the auth seed"))?;
+    if std::fs::symlink_metadata(&to).is_ok() {
+        return Err(Error::msg("could not copy the auth seed"));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| Error::msg("could not restrict the auth seed copy"))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options
+        .open(&to)
+        .map_err(|_| Error::msg("could not copy the auth seed"))?;
+    file.write_all(&bytes)
+        .map_err(|_| Error::msg("could not copy the auth seed"))?;
     Ok(())
+}
+
+fn symlink_path(path: &Path) -> Result<bool, Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => Ok(meta.file_type().is_symlink()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(Error::msg("auth seed has no auth.json")),
+    }
 }
 
 /// A fixture app started for one task and stopped when this value is dropped.
@@ -161,109 +400,5 @@ pub(crate) fn system_path() -> &'static str {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
-    use crate::runner::Environment;
-
-    fn scratch(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("gcu-prep-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn environment(root: &Path) -> Environment {
-        let make = |name: &str| {
-            let dir = root.join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            dir
-        };
-        Environment {
-            home: make("home"),
-            grok_home: make("grok"),
-            work: make("work"),
-            shim_dir: make("shims"),
-            state_path: root.join("state.json"),
-            side_log: root.join("side.log"),
-            tool_log: root.join("tools.log"),
-            transcript: root.join("grok").join("transcript.json"),
-            root: root.to_path_buf(),
-        }
-    }
-
-    #[test]
-    fn auth_seed_copies_only_the_login_file_with_owner_only_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let seed = scratch("seed");
-        std::fs::write(seed.join("auth.json"), b"opaque").unwrap();
-        std::fs::write(seed.join("config.toml"), b"must not travel").unwrap();
-        std::fs::create_dir_all(seed.join("sessions")).unwrap();
-        let home = scratch("home");
-        seed_auth(&seed, &home).unwrap();
-        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), b"opaque");
-        let mode = std::fs::metadata(home.join("auth.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
-        assert!(!home.join("config.toml").exists());
-        assert!(!home.join("sessions").exists());
-        let _ = std::fs::remove_dir_all(&seed);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn auth_seed_without_a_login_file_is_refused() {
-        let seed = scratch("noseed");
-        let home = scratch("nohome");
-        assert!(seed_auth(&seed, &home).is_err());
-        let _ = std::fs::remove_dir_all(&seed);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn fixture_is_started_with_the_state_path_and_stopped_on_drop() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = scratch("fixture");
-        let env = environment(&root);
-        let script = root.join("fixture.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf '{\"counter\":0,\"pid\":%s}' \"$$\" > \"$GCU_FIXTURE_STATE\"\nsleep 300\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let fixture = Fixture::start(&script, &env).unwrap();
-        let state: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&env.state_path).unwrap()).unwrap();
-        let pid = state["pid"].as_u64().unwrap().to_string();
-        let alive = |pid: &str| {
-            std::process::Command::new("kill")
-                .args(["-0", pid])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        assert!(alive(&pid), "fixture runs while the task runs");
-        drop(fixture);
-        assert!(!alive(&pid), "fixture is stopped with the task");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_fixture_that_never_writes_state_fails_instead_of_hanging_the_run() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = scratch("silent");
-        let env = environment(&root);
-        let script = root.join("silent.sh");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // The fixture exits at once and never writes state: fail fast, do not wait out the deadline.
-        let started = std::time::Instant::now();
-        let result = Fixture::start(&script, &env);
-        assert!(result.is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-}
+#[path = "prep_tests.rs"]
+mod tests;

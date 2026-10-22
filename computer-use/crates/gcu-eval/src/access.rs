@@ -5,6 +5,17 @@
 use crate::Error;
 use std::path::{Path, PathBuf};
 
+/// `GCU_APPROVAL` values `gcu` accepts on an eval-autoapprove debug build.
+///
+/// `auto-deny-sensitive` is absent: `gcu-cli` rejects it. `auto-deny` denies
+/// every approval, including ordinary ones, so it is not a sensitive-only policy.
+pub const GCU_ACCEPTED_APPROVAL: &[&str] = &[
+    "auto-allow-turn",
+    "auto-allow-session",
+    "auto-allow-always",
+    "auto-deny",
+];
+
 /// CU approval values accepted only by a debug `eval-autoapprove` build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalMode {
@@ -14,10 +25,8 @@ pub enum ApprovalMode {
     AllowSession,
     /// Allow for the session. The in-process host does not persist this.
     AllowAlways,
-    /// Deny.
+    /// Deny every approval. This is not limited to sensitive actions.
     Deny,
-    /// Deny sensitive computer-use actions. Red-team tasks use this.
-    DenySensitive,
 }
 
 impl ApprovalMode {
@@ -29,7 +38,6 @@ impl ApprovalMode {
             Self::AllowSession => "auto-allow-session",
             Self::AllowAlways => "auto-allow-always",
             Self::Deny => "auto-deny",
-            Self::DenySensitive => "auto-deny-sensitive",
         }
     }
 }
@@ -56,7 +64,6 @@ pub fn parse_approval(raw: Option<&str>, eval_build: bool) -> Result<Option<Appr
         "auto-allow-session" => ApprovalMode::AllowSession,
         "auto-allow-always" => ApprovalMode::AllowAlways,
         "auto-deny" => ApprovalMode::Deny,
-        "auto-deny-sensitive" => ApprovalMode::DenySensitive,
         _ => return Err(Error::Approval("Unknown GCU_APPROVAL mode".into())),
     };
     Ok(Some(mode))
@@ -118,8 +125,8 @@ pub const fn child_env_keys() -> &'static [&'static str] {
 }
 
 /// Proxy settings a real client needs to reach its model endpoint. They are network configuration,
-/// not secrets, and are forwarded only by `--driver real`; a proxy URL with credentials is the
-/// operator's own choice. The fake driver never forwards them.
+/// not secrets, and are forwarded only when the launch can start a real client. A proxy URL with
+/// credentials is the operator's own choice. The eval fake agent never receives them.
 #[must_use]
 pub const fn proxy_env_keys() -> &'static [&'static str] {
     &[
@@ -159,6 +166,46 @@ pub fn user_config_dirs() -> Vec<PathBuf> {
 #[must_use]
 pub fn path_under_configs(path: &Path, configs: &[PathBuf]) -> bool {
     configs.iter().any(|dir| path.starts_with(dir))
+}
+
+/// True when the canonical form of `path` is one of `configs` or a descendant.
+///
+/// Comparison uses canonical paths, so a symlink ancestor cannot hide a personal
+/// config directory. Missing config directories are resolved through the longest
+/// existing ancestor. This does not read directory entries.
+pub(crate) fn canonical_under_configs(path: &Path, configs: &[PathBuf]) -> Result<bool, Error> {
+    let path = canonical_prefix(path)?;
+    for config in configs {
+        let config = canonical_prefix(config)?;
+        if path == config || path.starts_with(&config) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn canonical_prefix(path: &Path) -> Result<PathBuf, Error> {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Ok(canon);
+    }
+    let mut suffix = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(&cursor) {
+            let mut out = canon;
+            for part in suffix.iter().rev() {
+                out.push(part);
+            }
+            return Ok(out);
+        }
+        let Some(name) = cursor.file_name().map(std::ffi::OsStr::to_os_string) else {
+            return Err(Error::msg("could not canonicalize path"));
+        };
+        suffix.push(name);
+        if !cursor.pop() {
+            return Err(Error::msg("could not canonicalize path"));
+        }
+    }
 }
 
 /// Drive `future` on a current-thread runtime.

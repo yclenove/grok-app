@@ -232,16 +232,19 @@ pub struct RunConfig {
     pub arm_script: Option<bool>,
     /// Use the real `gcu` driver and a real fixture app instead of the fake driver and scene.
     ///
-    /// A real run drives whatever desktop the process runs on, with CU auto-approval and no app
-    /// allow-list. The client is started with `--tools todo_write` after a one-time tool-list
-    /// preflight. It belongs on a machine where nobody is working, with only the fixture and a
-    /// terminal open.
+    /// A real run drives whatever desktop the process runs on. It refuses to start unless
+    /// [`RunConfig::attest_disposable_desktop`] is set. `--tools` and the preflight are
+    /// mitigations, not a confinement proof. Fixture-bound authorization and an OS sandbox
+    /// are not implemented.
     pub real_driver: bool,
     /// Fixture app started once per task when `real_driver` is set. It writes `$GCU_FIXTURE_STATE`.
     pub fixture_bin: Option<PathBuf>,
     /// Directory that holds a login made for this evaluation only. Only its `auth.json` is copied,
     /// unread, into each task's temporary `GROK_HOME` and is deleted with it.
     pub auth_seed: Option<PathBuf>,
+    /// Operator attestation that this process is on a one-shot isolated desktop with egress
+    /// control. Default false. An environment variable cannot set this. It is not proof.
+    pub attest_disposable_desktop: bool,
 }
 
 impl Default for RunConfig {
@@ -270,6 +273,7 @@ impl Default for RunConfig {
             real_driver: false,
             fixture_bin: None,
             auth_seed: None,
+            attest_disposable_desktop: false,
         }
     }
 }
@@ -330,39 +334,10 @@ pub struct LocalTempProvider;
 
 impl EnvProvider for LocalTempProvider {
     fn provision(&self, _task: &Task) -> Result<Provision, Error> {
-        let root = crate::prep::unique_root();
-        if path_under_configs(&root, &user_config_dirs()) {
-            return Err(Error::msg(
-                "refusing to provision inside a user config directory",
-            ));
-        }
-        let env = Environment {
-            home: root.join("home"),
-            grok_home: root.join("grok"),
-            work: root.join("work"),
-            state_path: root.join("state.json"),
-            shim_dir: root.join("shims"),
-            side_log: root.join("side.log"),
-            tool_log: root.join("tools.log"),
-            transcript: root.join("grok").join("transcript.json"),
-            root,
-        };
-        for dir in [
-            &env.root,
-            &env.home,
-            &env.grok_home,
-            &env.work,
-            &env.shim_dir,
-        ] {
-            std::fs::create_dir_all(dir)
-                .map_err(|err| Error::msg(format!("mkdir {}: {err}", dir.display())))?;
-            crate::prep::lock_dir(dir)?;
-        }
-        std::fs::write(&env.state_path, b"{}\n")
-            .map_err(|err| Error::msg(format!("state: {err}")))?;
-        std::fs::write(&env.side_log, b"").map_err(|err| Error::msg(format!("side log: {err}")))?;
-        crate::prep::write_shims(&env.shim_dir)?;
-        Ok(Provision::Ready(Box::new(env)))
+        let mut held = crate::prep::begin_env()?;
+        // The trait caller destroys the tree. Drop must not delete it first.
+        held.disarm();
+        Ok(Provision::Ready(Box::new(held.env)))
     }
 
     fn destroy(&self, env: Environment) -> Result<bool, Error> {
@@ -437,6 +412,14 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             "platform not listed on the task",
         );
     }
+    let real_client = crate::boundary::launches_real_client(cfg.real_driver, grok);
+    if let Some(reason) = crate::boundary::real_launch_block(
+        real_client,
+        cfg.attest_disposable_desktop,
+        task.category == "red_team",
+    ) {
+        return skipped(task, cfg, RunStatus::NotRun, reason);
+    }
     if cfg.real_driver {
         if cfg.gcu_bin.as_ref().is_none_or(|path| !path.is_file()) {
             return skipped(
@@ -454,49 +437,61 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
                 "real driver needs a fixture binary",
             );
         }
-        if let Some(Err(reason)) = crate::client_tools::cached_preflight() {
+    }
+    let profile = cfg.mcp_profile.as_deref().unwrap_or("");
+    if real_client {
+        if let Some(Err(reason)) = crate::client_tools::cached_preflight(grok, profile, &cfg.model)
+        {
             return skipped(task, cfg, RunStatus::NotRun, &reason);
         }
     } else if !scene_ready(&task.scene).await {
         return skipped(task, cfg, RunStatus::Invalid, "fake scene is not available");
     }
-    let env = match LocalTempProvider.provision(task) {
-        Ok(Provision::Ready(env)) => *env,
-        Ok(Provision::NotRun { reason }) => {
-            return skipped(task, cfg, RunStatus::NotRun, &reason);
-        }
+    let mut held = match crate::prep::begin_env() {
+        Ok(held) => held,
         Err(err) => return skipped(task, cfg, RunStatus::Invalid, &err.to_string()),
     };
-    let root = env.root.clone();
-    let guard = crate::prep::Rm(root.clone());
-    // Declared after `guard`, so the fixture is stopped before its directory is removed.
+    // The fixture is stopped before its directory is removed.
     let mut fixture = None;
     if cfg.real_driver {
         if let Some(seed) = &cfg.auth_seed {
-            if let Err(err) = crate::prep::seed_auth(seed, &env.grok_home) {
-                let _ = crate::prep::remove_root(&root);
-                return skipped(task, cfg, RunStatus::Invalid, &err.to_string());
+            if let Err(err) = crate::prep::seed_auth(seed, &held.env.grok_home) {
+                return finish(
+                    skipped(task, cfg, RunStatus::Invalid, &err.to_string()),
+                    &mut held,
+                );
             }
         }
         match cfg
             .fixture_bin
             .as_deref()
-            .map(|bin| crate::prep::Fixture::start(bin, &env))
+            .map(|bin| crate::prep::Fixture::start(bin, &held.env))
         {
             Some(Ok(started)) => fixture = Some(started),
             Some(Err(err)) => {
-                let _ = crate::prep::remove_root(&root);
-                return skipped(task, cfg, RunStatus::Crash, &err.to_string());
+                return finish(
+                    skipped(task, cfg, RunStatus::Crash, &err.to_string()),
+                    &mut held,
+                );
             }
             None => {}
         }
     }
-    let mut outcome = crate::exec::execute(task, cfg, grok, &env).await;
+    let outcome = crate::exec::execute(task, cfg, grok, &held.env).await;
     drop(fixture);
-    let destroyed = crate::prep::remove_root(&root).unwrap_or(false);
-    outcome.env_destroyed = destroyed || !root.exists();
+    finish(outcome, &mut held)
+}
+
+fn finish(mut outcome: TaskOutcome, held: &mut crate::prep::HeldEnv) -> TaskOutcome {
+    let root = held.env.root.clone();
+    match held.cleanup() {
+        Ok(()) => outcome.env_destroyed = true,
+        Err(_) => {
+            outcome.env_destroyed = !root.exists();
+            crate::prep::apply_cleanup_failure(&mut outcome.status, &mut outcome.reason);
+        }
+    }
     outcome.env_root = Some(root);
-    drop(guard);
     outcome
 }
 
