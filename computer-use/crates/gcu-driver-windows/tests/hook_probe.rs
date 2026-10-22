@@ -656,3 +656,71 @@ fn preferred_zero_missing_callback_waits_without_retry_or_absolute_fallback() {
     proof.begin_cycle(true);
     assert_eq!(proof.next().unwrap().mode, MouseProbe::ZeroMove);
 }
+
+// Real hardware (2026-10-22, repeated drags): about 2% of action windows ended with the last absolute probe
+// sent (2/2) but its tagged mouse callback never reported, and "one attempt, never retry" let the lease lapse.
+// One bounded retry of the same kind, only inside an action window, still needs a real tagged callback.
+#[test]
+fn action_absolute_missing_callback_gets_one_retry_of_the_same_kind_then_waits() {
+    let mut proof = MouseProof::new(Some(MouseProbe::AbsoluteSamePosition));
+    proof.begin_cycle(true);
+    let first = proof.next().unwrap();
+    proof.complete(Ok(())).unwrap();
+    assert_eq!(proof.proven(), None);
+    let retry = proof.next().expect("one retry after a missing callback");
+    assert_eq!(retry.mode, MouseProbe::AbsoluteSamePosition);
+    assert_ne!(retry.tag, first.tag, "the retry is a new tagged attempt");
+    proof.complete(Ok(())).unwrap();
+    assert_eq!(
+        proof.proven(),
+        None,
+        "a retry without a callback proves nothing"
+    );
+    for _ in 0..10 {
+        assert!(proof.next().is_none(), "no second retry");
+    }
+}
+
+#[test]
+fn a_retry_callback_proves_and_restores_the_retry_allowance() {
+    let mut proof = MouseProof::new(Some(MouseProbe::AbsoluteSamePosition));
+    proof.begin_cycle(true);
+    proof.next().unwrap();
+    proof.complete(Ok(())).unwrap();
+    let retry = proof.next().unwrap();
+    let at = Instant::now();
+    proof.callback(retry.tag, 1, at);
+    proof.complete(Ok(())).unwrap();
+    assert_eq!(proof.proven(), Some(at));
+    let next = proof
+        .next()
+        .expect("renewal continues after a proven retry");
+    proof.complete(Ok(())).unwrap();
+    assert!(proof.next().is_some(), "a later miss gets its own retry");
+    let _ = next;
+}
+
+#[test]
+fn a_late_callback_of_the_missed_attempt_cannot_prove_the_retry() {
+    let mut proof = MouseProof::new(Some(MouseProbe::AbsoluteSamePosition));
+    proof.begin_cycle(true);
+    let first = proof.next().unwrap();
+    proof.complete(Ok(())).unwrap();
+    let _retry = proof.next().unwrap();
+    proof.callback(first.tag, 1, Instant::now());
+    proof.complete(Ok(())).unwrap();
+    assert_eq!(proof.proven(), None);
+}
+
+// The initial (non-action) cycle keeps the old rule; that is pinned by
+// `fourth_unmarked_or_non_injected_or_missing_callback_never_proves_or_retries`.
+#[test]
+fn a_refused_action_cycle_never_retries() {
+    let mut proof = MouseProof::new(Some(MouseProbe::AbsoluteSamePosition));
+    proof.begin_cycle(true);
+    proof.next().unwrap();
+    assert!(proof
+        .complete(Err("cursor changed during probe".into()))
+        .is_err());
+    assert!(proof.next().is_none());
+}

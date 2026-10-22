@@ -339,6 +339,8 @@ pub(crate) struct MouseProof {
     action: bool,
     /// Last tagged callback seen (tag, flags), for diagnostics only.
     last_seen: Option<(usize, u32)>,
+    /// The one in-lease retry of a missing absolute callback has been used since the last proof.
+    retry_used: bool,
 }
 impl MouseProof {
     pub(crate) fn new(override_mode: Option<MouseProbe>) -> Self {
@@ -354,6 +356,7 @@ impl MouseProof {
             failed: false,
             action: false,
             last_seen: None,
+            retry_used: false,
         }
     }
     /// Metadata only: why `next` may offer nothing.
@@ -376,6 +379,7 @@ impl MouseProof {
         self.proven = None;
         self.proven_tag = None;
         self.failed = false;
+        self.retry_used = false;
     }
     pub(crate) fn tagged(&self, tag: usize) -> bool {
         (PROBE_TAG..=self.serial).contains(&tag)
@@ -390,6 +394,7 @@ impl MouseProof {
         if self.failed {
             return None;
         }
+        let mut retry = None;
         if let Some(active) = &self.active {
             if !active.complete {
                 return None;
@@ -397,6 +402,17 @@ impl MouseProof {
             if active.callback.is_some() {
                 self.preferred = Some(active.request.mode);
                 self.index = 0;
+                self.retry_used = false;
+            } else if self.action
+                && active.request.mode == MouseProbe::AbsoluteSamePosition
+                && !self.retry_used
+            {
+                // One bounded retry of the same kind, only inside an action window. The attempt
+                // reached SendInput but its tagged callback never reported (about 2% of repeated
+                // drags on real hardware). The retry proves nothing by itself: it still needs a
+                // fresh tagged injected callback from both hooks, and the 100ms lease is unchanged.
+                self.retry_used = true;
+                retry = Some(active.request.mode);
             } else if self.preferred.is_some()
                 || self.override_mode.is_some()
                 || active.request.mode == MouseProbe::AbsoluteSamePosition
@@ -412,11 +428,13 @@ impl MouseProof {
             MouseProbe::ZeroHWheel,
             MouseProbe::AbsoluteSamePosition,
         ];
-        let mode = self
-            .override_mode
+        let mode = retry
+            .or(self.override_mode)
             .or(self.preferred)
             .or_else(|| defaults.get(self.index).copied())?;
-        self.index += 1;
+        if retry.is_none() {
+            self.index += 1;
+        }
         self.serial = self.serial.checked_add(1)?;
         let request = ProbeRequest {
             mode,

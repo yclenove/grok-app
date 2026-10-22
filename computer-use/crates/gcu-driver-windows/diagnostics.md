@@ -690,3 +690,19 @@ cycle, a probe job that does not return, a refused cycle, and probe burst cadenc
 difference and was removed). Not known: why Windows sometimes does not report that event to the hook.
 A bounded in-lease retry of a missing probe would likely remove most latches while still requiring real tagged
 callbacks from both hooks, but it changes the guard's "never retry" rule and needs the user's approval.
+
+## 2026-10-22 (later): bounded in-lease retry of a missing absolute probe callback (user-approved)
+
+The user approved changing the "one attempt per proof cycle, never retry" rule for this one case. Inside an action
+window, when an absolute same-position probe was sent (`complete=true`) but its tagged mouse callback never
+reported, `MouseProof::next` offers exactly one more attempt of the same kind. The allowance returns only after a
+tagged callback is seen. The retry proves nothing by itself: it still needs a fresh tagged injected callback from
+both hooks, a late callback of the missed attempt (old tag) is ignored, the initial non-action cycle and a refused
+cycle never retry, and the 100 ms lease and the time at which missing hooks latch Stop are unchanged.
+
+Hardware (win-test, `claudetest`, one-time task, `live_drag_stress`, 40 drags per run, one long-lived guard):
+- Before: 24 Stop latches in about 1,080 drags (about 2%).
+- After: **0 latches in 400 drags** (10 runs; the dead-end `probe_next_none` state never occurred). At the old rate
+  about 9 latches were expected, so zero is about a 1-in-5,000 outcome by chance.
+- Full contract table: 20 passed / 9 skipped / 1 not_run / 0 failed, no Stop latch.
+Why Windows sometimes does not report that event to the hook is still unknown; the retry works around it.
