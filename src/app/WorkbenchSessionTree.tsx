@@ -3,7 +3,7 @@
  * Catalog paint lives here. Open/new-chat and UserMenu stay with the host.
  */
 import type { CSSProperties, Dispatch, MouseEvent, ReactNode, SetStateAction } from "react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { SidebarProjectsMoreMenu } from "@/components/SidebarProjectsMoreMenu";
 import { activeSpaceLabel } from "@/lib/projectSpaces";
 import { OverlayScroll } from "@/components/OverlayScroll";
@@ -36,16 +36,9 @@ import { projectDisplayName } from "@/lib/app/sidebarModels";
 import type { ContextMenuState } from "@/lib/app/appDialogTypes";
 import { areAllIdsSelected } from "@/lib/sessionSelect";
 import {
-  groupPinnedByWorkspaceRun,
   partitionGlobalPinned,
   sortSessionsForSidebar,
 } from "@/lib/sidebarDateGroups";
-import {
-  bumpSidebarPage,
-  clearSidebarPage,
-  sidebarVisibleCount,
-  type SidebarPageMap,
-} from "@/lib/sidebarPagination";
 import {
   hideSshProjectInLocalTree,
   isProjectFolderMissing,
@@ -58,6 +51,7 @@ import { isMirrorClient } from "@/lib/mirrorTransport";
 import type { SidebarProjectReorderApi } from "@/hooks/useSidebarProjectReorder";
 import type { ProjectSpacesState } from "@/lib/projectSpaces";
 import { SshRemoteSessionRail } from "@/components/SshRemoteSessionRail";
+import { ImportedHistoryGroup } from "@/components/session-import/ImportedHistoryGroup";
 
 type TFn = ReturnType<typeof createT>;
 
@@ -179,17 +173,6 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
   } = props;
 
   const { watchAliases } = useSshWatch();
-  // "Show more" paging for long session groups — key `proj:<id>` / `orphans`.
-  const [sessionPages, setSessionPages] = useState<SidebarPageMap>({});
-  const toggleProjectOpen = (id: string, open: boolean) => {
-    setExpandedProjects((e) => ({ ...e, [id]: !open }));
-    // Collapsing a group resets paging so a reopen starts at page one.
-    if (open) setSessionPages((m) => clearSidebarPage(m, `proj:${id}`));
-  };
-  const toggleHistoryOpen = () => {
-    setHistoryOpen((v) => !v);
-    if (historyOpen) setSessionPages((m) => clearSidebarPage(m, "orphans"));
-  };
   const treeProjects = visibleProjects.filter(
     (p) => !hideSshProjectInLocalTree(p, watchAliases),
   );
@@ -220,15 +203,6 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
     () => new Set(projects.map((p) => p.id)),
     [projects],
   );
-  const pinGroups = useMemo(
-    () => groupPinnedByWorkspaceRun(pinnedSessions, projectIdSet),
-    [pinnedSessions, projectIdSet],
-  );
-  const projectNameById = useMemo(() => {
-    const names = new Map<string, string>();
-    for (const project of projects) names.set(project.id, project.name);
-    return names;
-  }, [projects]);
   const orphanSessionIds = orphanSessions.map((s) => s.id);
   const orphanAllSelected = areAllIdsSelected(
     selectedSessionIds,
@@ -243,42 +217,26 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
             viewportClassName="sidebar__scroll-inner"
             syncTreeReveal
           >
-            {pinGroups.map((group) => (
-              <div
-                className="tree-pinned"
-                key={`${group.key}:${group.sessions[0]?.id ?? ""}`}
-              >
+            {pinnedSessions.length > 0 ? (
+              <div className="tree-pinned">
                 <div className="tree-l1">
-                  <div
-                    className="tree-l1__head"
-                    aria-label={
-                      group.projectId
-                        ? projectNameById.get(group.projectId) ||
-                          group.projectId
-                        : tr("sidebar.otherSessions")
-                    }
-                  >
+                  <div className="tree-l1__head" aria-label={tr("session.pinned")}>
                     <span className="tree-l1__icon" aria-hidden>
                       <IconPin size={14} />
                     </span>
-                    <span className="tree-l1__label">
-                      {group.projectId
-                        ? projectNameById.get(group.projectId) ||
-                          group.projectId
-                        : tr("sidebar.otherSessions")}
-                    </span>
+                    <span className="tree-l1__label">{tr("session.pinned")}</span>
                   </div>
                 </div>
                 <div className="tree-l3-list-wrap">
                   <VirtualList
                     className="tree-l3-list"
-                    items={group.sessions}
+                    items={pinnedSessions}
                     getKey={(s) => s.id}
                     rowHeight={sidebarRowMetrics.rowHeight}
                     gap={sidebarRowMetrics.gap}
                     scrollToKey={
                       session.sessionId &&
-                      group.sessions.some((x) => x.id === session.sessionId)
+                      pinnedSessions.some((x) => x.id === session.sessionId)
                         ? session.sessionId
                         : null
                     }
@@ -327,7 +285,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                   />
                 </div>
               </div>
-            ))}
+            ) : null}
             {/* L1 — Projects section */}
             <div className="tree-l1">
               <button
@@ -515,13 +473,19 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                       onClick={() => {
                         // After a completed drag, ignore the trailing click.
                         if (projectReorder.suppressNextClick()) return;
-                        toggleProjectOpen(proj.id, open);
+                        setExpandedProjects((e) => ({
+                          ...e,
+                          [proj.id]: !open,
+                        }));
                       }}
                       onContextMenu={(e) => openProjectMenu(e, proj)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          toggleProjectOpen(proj.id, open);
+                          setExpandedProjects((ex) => ({
+                            ...ex,
+                            [proj.id]: !open,
+                          }));
                         }
                       }}
                     >
@@ -671,23 +635,8 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                         )}
                         {projSessions.length > 0
                           ? (() => {
-                              const pageKey = `proj:${proj.id}`;
-                              const activeIndex = session.sessionId
-                                ? projSessions.findIndex(
-                                    (x) => x.id === session.sessionId,
-                                  )
-                                : -1;
-                              const visibleCount = sidebarVisibleCount(
-                                projSessions.length,
-                                sessionPages[pageKey] ?? 0,
-                                activeIndex,
-                              );
-                              const sortedSessions = projSessions.slice(
-                                0,
-                                visibleCount,
-                              );
+                              const sortedSessions = projSessions;
                               return (
-                                <>
                                 <VirtualList
                                   className="tree-l3-list"
                                   items={sortedSessions}
@@ -749,20 +698,6 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                                     );
                                   }}
                                 />
-                                {visibleCount < projSessions.length ? (
-                                  <button
-                                    type="button"
-                                    className="tree-l3 tree-l3--more"
-                                    onClick={() =>
-                                      setSessionPages((m) =>
-                                        bumpSidebarPage(m, pageKey),
-                                      )
-                                    }
-                                  >
-                                    {tr("sidebar.showMore")}
-                                  </button>
-                                ) : null}
-                                </>
                               );
                             })()
                           : null}
@@ -786,7 +721,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                 className="tree-l1__head"
                 data-session-drop={SESSION_DROP_ORPHAN}
                 aria-expanded={historyOpen}
-                onClick={toggleHistoryOpen}
+                onClick={() => setHistoryOpen((v) => !v)}
               >
                 <span className="tree-l1__chevron" aria-hidden>
                   {historyOpen ? (
@@ -860,20 +795,7 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
             </div>
             {orphanSessions.length > 0
               ? (() => {
-                  const orphanActiveIndex = session.sessionId
-                    ? orphanSessions.findIndex(
-                        (x) => x.id === session.sessionId,
-                      )
-                    : -1;
-                  const orphanVisibleCount = sidebarVisibleCount(
-                    orphanSessions.length,
-                    sessionPages.orphans ?? 0,
-                    orphanActiveIndex,
-                  );
-                  const sortedOrphans = orphanSessions.slice(
-                    0,
-                    orphanVisibleCount,
-                  );
+                  const sortedOrphans = orphanSessions;
                   return (
                     <SidebarTreeReveal open={historyOpen}>
                       <div className="tree-l3-list-wrap">
@@ -931,25 +853,15 @@ export function WorkbenchSessionTree(props: WorkbenchSessionTreeProps) {
                           );
                         }}
                       />
-                      {orphanVisibleCount < orphanSessions.length ? (
-                        <button
-                          type="button"
-                          className="tree-l3 tree-l3--more"
-                          onClick={() =>
-                            setSessionPages((m) =>
-                              bumpSidebarPage(m, "orphans"),
-                            )
-                          }
-                        >
-                          {tr("sidebar.showMore")}
-                        </button>
-                      ) : null}
                       </div>
                     </SidebarTreeReveal>
                   );
                 })()
               : null}
               {historyOpen && projects.length > 0 ? sidebarCliImportCta : null}
+              {historyOpen ? (
+                <ImportedHistoryGroup tr={tr} />
+              ) : null}
             </div>
           </OverlayScroll>
 

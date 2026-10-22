@@ -31,6 +31,7 @@ import { sanitizeExtraRules } from "@/lib/sessionExtraRules";
 import { normalizeMaxAgentTurns } from "@/lib/sessionMaxAgentTurns";
 import { sanitizeSystemPromptOverride } from "@/lib/sessionSystemPrompt";
 import { resolveForkCliOnConfirm } from "@/lib/sessionFork";
+import type { usePlanResolution } from "@/hooks/usePlanResolution";
 
 const AgentDashboardModal = lazy(async () => {
   const m = await import("@/components/AgentDashboardModal");
@@ -54,6 +55,7 @@ const McpStatusModal = lazy(async () => {
 });
 
 export type WorkbenchSessionModalsProps = {
+  planResolution: ReturnType<typeof usePlanResolution>;
   // Bindings are the workbench composition-root names. Typed loosely so the
   // view can move without re-stating every dialog payload here.
   [K: string]: unknown;
@@ -106,13 +108,10 @@ export function WorkbenchSessionModals(p: WorkbenchSessionModalsProps) {
     opsEntryCounts,
     opsEntryOpen,
     planHistoryPreview,
-    planReviseNote,
-    planReviseOpen,
     policy,
     projects,
     refreshMcpModal,
     requestClearSessionNoteModal,
-    requestPlanChanges,
     resumeAgentCheckbox,
     resumeRestoreBusy,
     resumeRestoreConfirm,
@@ -166,8 +165,6 @@ export function WorkbenchSessionModals(p: WorkbenchSessionModalsProps) {
     setJsonSchemaDraft,
     setOpsEntryOpen,
     setPlanHistoryPreview,
-    setPlanReviseNote,
-    setPlanReviseOpen,
     setResumeForkCliSession,
     setResumeRestoreConfirm,
     setRewindConfirm,
@@ -460,14 +457,12 @@ export function WorkbenchSessionModals(p: WorkbenchSessionModalsProps) {
 
       <PlanReviseModal
         locale={locale}
-        open={planReviseOpen}
-        note={planReviseNote}
-        onNoteChange={setPlanReviseNote}
-        onClose={() => {
-          setPlanReviseOpen(false);
-          setPlanReviseNote("");
-        }}
-        onSubmit={() => void requestPlanChanges(planReviseNote)}
+        open={p.planResolution.planReviseOpen}
+        note={p.planResolution.planReviseNote}
+        busy={p.planResolution.planReviseBusy}
+        onNoteChange={p.planResolution.setPlanReviseNote}
+        onClose={p.planResolution.closePlanRevise}
+        onSubmit={() => void p.planResolution.submitPlanRevision()}
       />
 
       <JsonSchemaModal

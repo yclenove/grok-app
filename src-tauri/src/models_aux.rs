@@ -611,11 +611,22 @@ pub fn looks_text_only_model(id_or_name: &str) -> bool {
 /// Per-model `supports_vision` wins over the channel flag so mixed catalogs
 /// (DeepSeek flash + vision-exp) do not treat every row as vision.
 pub fn custom_provider_is_text_only(p: &crate::providers::CustomProvider) -> bool {
-    let active = p
-        .models
+    custom_model_is_text_only(&p.id, &p.name, &p.model, &p.models, p.supports_vision)
+}
+
+/// Same capability policy for a process's captured fields, without reading the
+/// global provider catalog or constructing a credential-bearing provider object.
+pub(crate) fn custom_model_is_text_only(
+    id: &str,
+    name: &str,
+    model: &str,
+    models: &[crate::providers::ProviderModelEntry],
+    supports_vision: bool,
+) -> bool {
+    let active = models
         .iter()
-        .find(|m| m.id.trim() == p.model.trim())
-        .or_else(|| p.models.first());
+        .find(|m| m.id.trim() == model.trim())
+        .or_else(|| models.first());
     if let Some(m) = active {
         match m.supports_vision {
             Some(true) => return false,
@@ -623,16 +634,16 @@ pub fn custom_provider_is_text_only(p: &crate::providers::CustomProvider) -> boo
                 return !(looks_vision_model(&m.id) || looks_vision_model(&m.name));
             }
             None => {
-                if p.supports_vision || looks_vision_model(&m.id) || looks_vision_model(&m.name) {
+                if supports_vision || looks_vision_model(&m.id) || looks_vision_model(&m.name) {
                     return false;
                 }
             }
         }
     }
-    if p.supports_vision {
+    if supports_vision {
         return false;
     }
-    if looks_vision_model(&p.id) || looks_vision_model(&p.model) || looks_vision_model(&p.name) {
+    if looks_vision_model(id) || looks_vision_model(model) || looks_vision_model(name) {
         return false;
     }
     true
@@ -989,11 +1000,52 @@ Instructions:
 
     run_aux_headless(&model, &prompt, 8, std::time::Duration::from_secs(180))
 }
-struct VisionEndpoint {
-    base_url: String,
-    model: String,
-    api_key: String,
-    api_backend: String,
+pub(crate) struct VisionEndpoint {
+    pub(crate) base_url: String,
+    pub(crate) model: String,
+    pub(crate) api_key: String,
+    pub(crate) api_backend: String,
+}
+
+/// Private Host vision context. Contains an optional captured auxiliary key;
+/// it must never be logged, serialized, or returned through IPC.
+#[derive(Clone)]
+pub(crate) struct HostVisionContext {
+    text_only: bool,
+    official_aux: bool,
+    endpoint: Option<std::sync::Arc<VisionEndpoint>>,
+}
+
+impl HostVisionContext {
+    pub(crate) fn captured(
+        text_only: bool,
+        official_aux: bool,
+        endpoint: Option<std::sync::Arc<VisionEndpoint>>,
+    ) -> Self {
+        Self {
+            text_only,
+            official_aux,
+            endpoint,
+        }
+    }
+
+    /// Legacy entry only. Main profiles never call this global resolver.
+    pub(crate) fn for_current_main() -> Self {
+        let config = read_config_text();
+        let Ok(list) = list_custom_providers() else {
+            return Self::captured(false, false, None);
+        };
+        let text_only = main_is_text_only(&config, &list);
+        let endpoint = text_only
+            .then(|| resolve_vision_endpoint(&config, &list))
+            .flatten()
+            .map(std::sync::Arc::new);
+        Self::captured(text_only, text_only, endpoint)
+    }
+
+    pub(crate) fn will_run(&self, prompt: &str) -> bool {
+        self.text_only && !extract_image_at_paths(prompt).is_empty()
+    }
 }
 
 fn resolve_vision_endpoint(
@@ -1177,27 +1229,6 @@ fn extract_vision_reply(raw: &str, api_backend: &str) -> Result<String, String> 
 }
 
 /// True when Host will run side-channel vision before the main model turn
-/// (custom text-only main + image `@path` in prompt). Used for UI chip.
-///
-/// Official Grok subscription route: always false (native multimodal).
-pub fn host_vision_will_run(prompt: &str) -> bool {
-    // Hard gate: never Host-describe on official main (avoid double vision).
-    if list_custom_providers()
-        .map(|l| l.active_source == "official")
-        .unwrap_or(true)
-    {
-        return false;
-    }
-    let config = read_config_text();
-    let Ok(list) = list_custom_providers() else {
-        return false;
-    };
-    if !main_is_text_only(&config, &list) {
-        return false;
-    }
-    !extract_image_at_paths(prompt).is_empty()
-}
-
 /// Outcome of Host vision side-channel (for tool chip complete/fail).
 #[derive(Debug, Clone)]
 pub struct HostVisionPrep {
@@ -1216,7 +1247,7 @@ pub struct HostVisionPrep {
 
 /// Full pipeline for a **final** agent prompt (after history bootstrap):
 /// - text-only main → strip all image `@path` (CLI must not inject image_url)
-/// - Host describes images: **prefer official ACP**, else `grok -p`, else Amux HTTP
+/// - Host describes images: **prefer official ACP**, else the configured HTTP helper
 ///
 /// Safe to call for every send; no-op when main is multimodal.
 #[allow(dead_code)]
@@ -1233,20 +1264,17 @@ pub async fn prepare_agent_prompt_for_main_detailed(
     prompt: &str,
     progress: Option<crate::official_aux::OfficialProgressCb>,
 ) -> HostVisionPrep {
-    let config = read_config_text();
-    let list = match list_custom_providers() {
-        Ok(l) => l,
-        Err(_) => {
-            return HostVisionPrep {
-                prompt: prompt.to_string(),
-                ran: false,
-                ok: false,
-                detail: String::new(),
-                description: String::new(),
-            };
-        }
-    };
-    if !main_is_text_only(&config, &list) {
+    prepare_agent_prompt_for_context(prompt, progress, &HostVisionContext::for_current_main()).await
+}
+
+/// The same pipeline for the actual process's captured capability and helper.
+/// No global route/provider/config lookup occurs in this consumer.
+pub(crate) async fn prepare_agent_prompt_for_context(
+    prompt: &str,
+    progress: Option<crate::official_aux::OfficialProgressCb>,
+    context: &HostVisionContext,
+) -> HostVisionPrep {
+    if !context.text_only {
         return HostVisionPrep {
             prompt: prompt.to_string(),
             ran: false,
@@ -1272,7 +1300,7 @@ pub async fn prepare_agent_prompt_for_main_detailed(
     let mut blocks: Vec<String> = Vec::new();
 
     // 1) Official ACP vision (isolated GROK_HOME + auth; stream → chip) — preferred.
-    if crate::official_aux::official_aux_available() {
+    if context.official_aux && crate::official_aux::official_aux_available() {
         let paths = batch.clone();
         match crate::official_aux::vision_describe_async(&paths, None, progress).await {
             Ok(text) => {
@@ -1293,8 +1321,7 @@ pub async fn prepare_agent_prompt_for_main_detailed(
     // 2) Fallback: HTTP vision via image_description slot (Amux/Yun/…).
     if blocks.is_empty() || blocks.iter().all(|b| b.contains("failed")) {
         blocks.clear();
-        let ep = resolve_vision_endpoint(&config, &list);
-        if let Some(ref endpoint) = ep {
+        if let Some(endpoint) = &context.endpoint {
             for path in &batch {
                 match describe_image_http(endpoint, path).await {
                     Ok(desc) => {

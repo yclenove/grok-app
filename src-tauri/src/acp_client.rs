@@ -172,6 +172,58 @@ pub enum AcpEvent {
     ProcessExited {
         code: Option<i32>,
     },
+    /// Subagent lifecycle from `_x.ai/session_notification`.
+    ///
+    /// CLI 1.0.x emits `subagent_spawned` / `subagent_progress` /
+    /// `subagent_finished` on the xAI extension notification channel; before
+    /// this the client dropped them and the Tasks panel could only *guess*
+    /// parent-child links from spawn-tool stream order.
+    Subagent(SubagentUpdate),
+}
+
+/// Lifecycle phase of a CLI subagent run (`spawn_subagent` / Task tool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentPhase {
+    Spawned,
+    Progress,
+    Finished,
+}
+
+impl SubagentPhase {
+    /// Wire-stable token used in the `session://subagent` payload.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubagentPhase::Spawned => "spawned",
+            SubagentPhase::Progress => "progress",
+            SubagentPhase::Finished => "finished",
+        }
+    }
+}
+
+/// One subagent run as reported by the CLI. Every field beyond `subagent_id`
+/// is optional: the CLI omits what it does not know, and the UI must show an
+/// honest empty state rather than a fabricated value.
+///
+/// Only what the Tasks panel renders is carried. The CLI also sends
+/// `parent_session_id`, `model`, `tools_used`, `error_count`, `will_wake` and
+/// friends; the golden fixture keeps pinning that wire shape, but decoding a
+/// field nothing reads just widens the payload and the type for no one.
+#[derive(Debug, Clone)]
+pub struct SubagentUpdate {
+    pub phase: SubagentPhase,
+    pub subagent_id: String,
+    pub subagent_type: Option<String>,
+    pub description: Option<String>,
+    /// Terminal status on `subagent_finished` (`completed` / `failed` / …).
+    pub status: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub turn_count: Option<u64>,
+    pub tool_call_count: Option<u64>,
+    pub tokens_used: Option<u64>,
+    /// Denominator for the row's occupancy percentage.
+    pub context_window_tokens: Option<u64>,
+    /// Final subagent answer (only on `subagent_finished`).
+    pub output: Option<String>,
 }
 
 /// Host circuit-breaker: after this many provider retries, cancel the turn.
@@ -335,6 +387,8 @@ fn prompt_fallback_due(last_update: Option<Instant>, grace: Duration, now: Insta
 }
 
 pub struct AcpClient {
+    /// Lets interrupted frame cleanup own this exact client after its caller drops.
+    self_weak: std::sync::Weak<Self>,
     /// The spawned CLI process, or `None` in API mode (connected to a remote
     /// ACP server over TCP instead of spawning `grok agent stdio`).
     child: AsyncMutex<Option<Child>>,
@@ -352,6 +406,8 @@ pub struct AcpClient {
     pending: ParkingMutex<HashMap<u64, Pending>>,
     event_tx: mpsc::UnboundedSender<(Option<String>, AcpEvent)>,
     agent_session_id: ParkingMutex<Option<String>>,
+    /// Real RPC echoes only, never the requested-id fallback used by UI State.
+    observed_agent_models: ParkingMutex<HashMap<String, String>>,
     #[allow(dead_code)]
     cli_path: PathBuf,
     cwd: PathBuf,
@@ -370,6 +426,9 @@ pub struct AcpClient {
     last_update_unstamped: ParkingMutex<Option<Instant>>,
     /// Official side-channel: skip App MCP inject on session/new.
     empty_mcp_servers: bool,
+    /// App session (chat) this process serves: scopes the per-session MCP tools
+    /// (the PR monitor watches PRs for one chat).
+    app_session_id: Option<String>,
     /// Effective `--sandbox` profile at spawn (process-level gate for parked reuse).
     sandbox_profile: ParkingMutex<Option<String>>,
     /// Route class at spawn: custom relay (api_key, no OIDC) vs official OIDC.
@@ -379,12 +438,32 @@ pub struct AcpClient {
     /// let them be reused after auth.json was cleared → #528 re-login).
     custom_route: bool,
     /// `official` or the custom section id this process was spawned for.
+    /// Route identity is immutable for the lifetime of an ACP transport.
     route_provider_id: String,
+    /// Model routing captured for this process, without provider credentials.
+    model_binding: crate::providers::ProcessModelBinding,
+    /// Ownerless reuse needs the exact spawn config/home/transport, not a
+    /// custom-vs-official bool. None for server/SSH/official-aux transports.
+    process_config: Option<crate::providers::ProcessConfigBinding>,
+    /// Process-owned proof for a producer-verified cross-home history migration.
+    main_migration: Option<Arc<main_migration::Binding>>,
+    /// Private process-scoped MCP and vision capture for owned main profiles.
+    main_runtime: Option<Arc<crate::providers::MainRuntime>>,
     /// Agent `initialize` advertisement for rewind RPCs.
     /// `None` = unknown (try RPC); `Some(false)` = skip; `Some(true)` = call.
     rewind_supported: ParkingMutex<Option<bool>>,
     /// OpenSSH alias this process was spawned with. Remote cwd is not local.
     ssh_alias: Option<String>,
+    /// True when the child is a WSL CLI. Local Windows binaries must not be injected.
+    wsl: bool,
+    /// True when the transport is remote TCP ACP. Local binaries must not be injected.
+    tcp: bool,
+    /// Private `GROK_HOME` sealed for this process (#1293). `None` for
+    /// projected main profiles, shared official homes, aux, SSH and TCP.
+    /// Discarded in `kill` after the child has stopped.
+    proc_home: std::sync::Mutex<Option<PathBuf>>,
+    /// Per-open import-history MCP grant. Rebound on every session open.
+    import_history_grant: ParkingMutex<import_history::ImportHistoryBinding>,
 }
 
 /// Options applied at agent process start (CLI flags).
@@ -427,6 +506,8 @@ pub struct SpawnOptions {
     /// Official aux side-channel uses `agent-home-official` so credentials never
     /// mix with a custom DeepSeek main process.
     pub grok_home_override: Option<std::path::PathBuf>,
+    /// Main-generation request; auxiliary override homes keep separate semantics.
+    pub(crate) main_profile: Option<crate::providers::MainProfileRequest>,
     /// When true, `session/new` injects empty `mcpServers` (official side jobs
     /// must not re-inject the `official-aux` MCP that shells out to `grok -p`).
     pub empty_mcp_servers: bool,
@@ -436,9 +517,24 @@ pub struct SpawnOptions {
     /// When true, pass top-level `grok --trust` so headless ACP loads project
     /// instructions (AGENTS.md) and project skills for an App-trusted folder.
     pub folder_trust: bool,
+    /// App session (chat) this agent process serves. The PR-monitor MCP tools
+    /// watch PRs *for a chat*, so the injected server needs to know which one.
+    pub app_session_id: Option<String>,
 }
 
+mod import_history;
+#[cfg(test)]
+mod import_history_fixture;
+#[cfg(test)]
+mod import_history_tests;
+mod line_writer;
+mod main_migration;
+mod main_profile;
+mod spawn_command;
 mod spawn_flags;
+#[cfg(test)]
+pub(crate) mod test_transport;
+#[cfg(test)]
 use spawn_flags::apply_grok_build_proxy_env;
 pub use spawn_flags::*;
 
@@ -446,6 +542,22 @@ impl AcpClient {
     /// Effective sandbox profile this process was spawned with (reuse gate).
     pub fn sandbox_profile(&self) -> Option<String> {
         self.sandbox_profile.lock().clone()
+    }
+
+    pub fn set_import_history_grant(
+        &self,
+        grant: Option<crate::session_migration::mcp_stdio::ImportHistoryGrant>,
+    ) {
+        *self.import_history_grant.lock() = import_history::ImportHistoryBinding::new(grant);
+    }
+
+    pub fn session_mcp_policy(&self) -> crate::session_migration::mcp_stdio::SessionMcpPolicy {
+        crate::session_migration::mcp_stdio::SessionMcpPolicy {
+            ssh: self.ssh_alias.is_some(),
+            wsl: self.wsl,
+            official_aux: self.empty_mcp_servers,
+            tcp: self.tcp,
+        }
     }
 
     pub fn use_mock() -> bool {
@@ -488,7 +600,7 @@ impl AcpClient {
         cli_path: PathBuf,
         cwd: PathBuf,
         session_data_mode: &str,
-        opts: SpawnOptions,
+        mut opts: SpawnOptions,
     ) -> Result<
         (
             Arc<Self>,
@@ -501,6 +613,8 @@ impl AcpClient {
         // elsewhere (WSL/SSH/container) but speaks the identical ACP protocol.
         // Priority: TCP > SSH wrap > WSL spawn > native spawn.
         let settings_early = crate::store::load_settings();
+        main_profile::validate(&opts, &settings_early)
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
         if let Some(addr) = settings_early
             .acp_server_addr
             .as_deref()
@@ -579,40 +693,59 @@ impl AcpClient {
         //   Flags after `stdio` are rejected (`unexpected argument '--model'`).
         //   `--permission-mode` is top-level `grok` only — not under `grok agent`.
         let empty_mcp_servers = opts.empty_mcp_servers;
+        let app_session_id = opts.app_session_id.clone();
         let home_override = opts.grok_home_override.clone();
+        let prepared_profile = main_profile::prepare(&opts, &settings_early)
+            .await
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+        if let Some(profile) = &prepared_profile {
+            opts.extra_rules = profile.extra_rules(opts.extra_rules.as_deref());
+        }
+        // Route identity is process-scoped (auth material + config.toml).
+        // Main profiles carry the same explicit provider as the session row;
+        // legacy callers may omit it and follow the current global route.
+        let explicit_route = opts
+            .main_profile
+            .as_ref()
+            .map(|request| request.provider_id.trim())
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                opts.route_provider_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            })
+            .map(str::to_owned);
+        let route_provider_id = if home_override.is_some() || ssh_alias.is_some() {
+            crate::providers::SESSION_PROVIDER_OFFICIAL.to_string()
+        } else {
+            match explicit_route {
+                Some(id) if crate::providers::is_session_provider_official(&id) => {
+                    crate::providers::SESSION_PROVIDER_OFFICIAL.to_string()
+                }
+                Some(id) => id,
+                None => match crate::providers::active_route() {
+                    crate::providers::ActiveRoute::Custom { id } => id,
+                    crate::providers::ActiveRoute::Official => {
+                        crate::providers::SESSION_PROVIDER_OFFICIAL.to_string()
+                    }
+                },
+            }
+        };
         // Route class is process-scoped (auth material + config.toml). Official
         // aux override home is always OIDC-side; main home follows active_route.
         // Custom relays live only in agent-home — force that GROK_HOME even when
         // session_data_mode=shared so third-party keys work without official login (#557).
-        let explicit_route = opts
-            .route_provider_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let custom_route = if home_override.is_some() {
+        let custom_route = if let Some(profile) = &prepared_profile {
+            profile.custom
+        } else if home_override.is_some() || ssh_alias.is_some() {
             false
-        } else if let Some(ref id) = explicit_route {
-            !crate::providers::is_session_provider_official(id)
         } else {
-            matches!(
-                crate::providers::active_route(),
-                crate::providers::ActiveRoute::Custom { .. }
-            )
+            !crate::providers::is_session_provider_official(&route_provider_id)
         };
-        let route_provider_id = match explicit_route {
-            Some(id) if crate::providers::is_session_provider_official(&id) => {
-                crate::providers::SESSION_PROVIDER_OFFICIAL.to_string()
-            }
-            Some(id) => id,
-            None => match crate::providers::active_route() {
-                crate::providers::ActiveRoute::Custom { id } => id,
-                crate::providers::ActiveRoute::Official => {
-                    crate::providers::SESSION_PROVIDER_OFFICIAL.to_string()
-                }
-            },
-        };
-        let grok_home = if let Some(ref h) = home_override {
+        let grok_home = if let Some(profile) = &prepared_profile {
+            profile.home.clone()
+        } else if let Some(ref h) = home_override {
             h.clone()
         } else {
             crate::paths::resolve_inference_grok_home(session_data_mode, custom_route)
@@ -622,66 +755,20 @@ impl AcpClient {
         // Side-channel with explicit home: never touch main agent-home auth.
         let agent_home_prep = ssh_alias.is_none()
             && home_override.is_none()
+            && prepared_profile.is_none()
             && crate::paths::needs_agent_home_spawn_prep(session_data_mode, custom_route);
-        // Preference syncs write independent-only; for shared+custom force independent
-        // so agent-home receives permission / feature pins the relay process needs.
-        let prep_mode = if custom_route {
-            "independent"
+        // Serialize canonical auth/config preparation through the private-home
+        // snapshot. The child only reads the sealed copy, so the lock can be
+        // released before process creation.
+        let route_auth_guard = if agent_home_prep {
+            Some(crate::providers::route_auth_lock().lock().await)
         } else {
-            session_data_mode
-        };
-        // Hold across the auth-file write and process spawn so two chats on
-        // different providers cannot strip and restore auth.json at once.
-        let route_auth_guard = crate::providers::route_auth_lock().lock().await;
-        if agent_home_prep {
-            crate::providers::prepare_route_auth(custom_route);
-            if let Some(ref pol) = opts.permission_policy {
-                let _ = crate::agent_prefs::sync_permission_to_agent_profile(prep_mode, pol);
-            }
-        }
-
-        // Composer may hold a catalog id while the active channel is a custom
-        // provider — resolve to the route id Grok Build actually understands.
-        // Override home (official aux): pass model id through as catalog id.
-        let grok_build_proxy = if ssh_alias.is_some() || home_override.is_some() {
             None
-        } else if opts.route_provider_id.is_some() {
-            // This chat's provider only. A global proxy default must not attach
-            // to an official chat, and a proxy section must still bind when it
-            // is not `[models].default`.
-            crate::providers::session_grok_build_proxy_spawn(
-                &route_provider_id,
-                opts.model_id.as_deref().unwrap_or(""),
-            )
-        } else {
-            crate::providers::active_grok_build_proxy_spawn(opts.model_id.as_deref().unwrap_or(""))
         };
-        let spawn_model = if ssh_alias.is_some() {
-            let m = opts.model_id.as_deref().unwrap_or("").trim();
-            if m.is_empty() || crate::providers::is_custom_provider_id(m) {
-                crate::providers::OFFICIAL_CATALOG_MODEL.to_string()
-            } else {
-                m.to_string()
-            }
-        } else if let Some(ref native) = grok_build_proxy {
-            native.model.clone()
-        } else if home_override.is_some() {
-            let m = opts.model_id.as_deref().unwrap_or("").trim();
-            if m.is_empty() {
-                crate::providers::OFFICIAL_CATALOG_MODEL.to_string()
-            } else {
-                m.to_string()
-            }
-        } else if opts.route_provider_id.is_some() {
-            let m = opts.model_id.as_deref().unwrap_or("").trim();
-            if m.is_empty() || custom_route {
-                route_provider_id.clone()
-            } else {
-                m.to_string()
-            }
-        } else {
-            crate::providers::agent_spawn_model_id(opts.model_id.as_deref().unwrap_or(""))
-        };
+        if agent_home_prep {
+            // Official → sync OIDC; custom → strip auth.json (api_key only).
+            crate::providers::prepare_route_auth(custom_route);
+        }
 
         // Flag placement (CLI 0.2.x):
         //   top-level: `grok --no-auto-update --permission-mode <MODE> [--sandbox PROFILE] agent …`
@@ -689,7 +776,7 @@ impl AcpClient {
         // Skip background update checks so ACP handshakes are not delayed on launch.
         // `--sandbox` / `--permission-mode` are top-level only (not under `grok agent`);
         // also set GROK_SANDBOX so nested tools inherit the same profile.
-        let settings = crate::store::load_settings();
+        let settings = settings_early.clone();
         // Project override (via SpawnOptions) wins over global Settings.
         let sandbox_raw = opts
             .sandbox_profile
@@ -706,40 +793,24 @@ impl AcpClient {
             opts.max_agent_turns,
             settings.max_agent_turns,
         ));
-        let preferred_agent = AgentSpawnSpec::from_setting(&settings.preferred_agent);
         let agent_profile =
             crate::agents_catalog::normalize_agent_profile_path(&settings.agent_profile_path);
         let agents_json_args = agents_json_spawn_flags(&settings.agents_json);
         let subagents_enabled = settings.subagents_enabled;
-        let subagent_wt_snap = settings.subagent_worktree_snapshot_enabled;
-        let auto_wake_enabled = settings.auto_wake_enabled;
-        let two_pass_compaction = settings.two_pass_compaction_enabled;
         let memory_enabled = settings.experimental_memory;
         // SSH Wave 4 always asks for --leader. The remote script fail-opens to
         // --no-leader if `~/.grok/leader.sock` never appears.
         let use_leader = ssh_alias.is_some() || settings.use_leader;
-        let plan_enabled = settings.plan_enabled;
-        let disable_web = settings.disable_web_search;
         // Session override wins when set; else global Settings.
         let no_ask_user = resolve_no_ask_user(opts.no_ask_user, settings.no_ask_user);
         // Custom main + official-aux inject: block native Imagine tools so the
         // model cannot call image_gen/image_edit against the wrong GROK_HOME
         // (HTTP 400 Incorrect API key). Force official-aux__* instead.
-        let disallowed_tools =
-            crate::official_aux::merge_disallowed_tools_for_main(&settings.disallowed_tools);
-        let allowed_tools = settings.allowed_tools.clone();
-        let todo_gate_enabled = settings.todo_gate_enabled;
-        let todo_gate_max_fires = crate::agent_todo_gate::normalize_todo_gate_max_fires(Some(
-            settings.todo_gate_max_fires_per_prompt,
-        ));
         let compaction_mode = settings.compaction_mode.clone();
         let compaction_detail = settings.compaction_detail.clone();
-        let spawn_policy = opts.permission_policy.as_deref().unwrap_or("ask");
-        let spawn_product_mode = opts.product_mode.as_deref();
         // Headless-only in effect; still pass top-level when CLI ≥ 0.2.117 so
         // automations / future ACP paths share one policy. Soft-fail older CLIs.
         let cli_ver = version_raw.clone();
-        let bg_wait_args = background_wait_spawn_flags_from_settings(&settings, cli_ver.as_deref());
         // Soft-fail known-old CLIs: omit --sandbox / GROK_SANDBOX.
         let sandbox = if should_apply_sandbox(cli_ver.as_deref()) {
             SandboxSpawnSpec::from_setting(&sandbox_raw_owned)
@@ -749,55 +820,79 @@ impl AcpClient {
         // Soft-fail older CLIs for GROK_SUBAGENT_WORKTREE_SNAPSHOT env.
         let cli_ver = version_raw.clone();
 
-        if agent_home_prep {
-            let _ = crate::agent_subagents::sync_subagents_to_agent_profile(
-                prep_mode,
-                subagents_enabled,
-            );
-            let _ = crate::agent_memory::sync_memory_to_agent_profile(prep_mode, memory_enabled);
-            let _ = crate::agent_todo_gate::sync_todo_gate_to_agent_profile(
-                prep_mode,
-                todo_gate_enabled,
-                todo_gate_max_fires,
-            );
-            let _ = crate::agent_subagent_wt_snap::sync_subagent_wt_snap_to_agent_profile(
-                prep_mode,
-                subagent_wt_snap,
-            );
-            let _ = crate::agent_auto_wake::sync_auto_wake_to_agent_profile(
-                prep_mode,
-                auto_wake_enabled,
-            );
-            let _ = crate::agent_two_pass_compaction::sync_two_pass_compaction_to_agent_profile(
-                prep_mode,
-                two_pass_compaction,
-            );
-            // Custom + inject: PreToolUse hook blocks native Imagine (ACP ignores
-            // --disallowed-tools which is headless-only). Official route / inject
-            // off removes the managed hook file.
-            let _ = crate::official_aux::sync_native_media_block_hook_for_current(prep_mode);
-            let _ = crate::extensions::sync_user_mcp_for_official_aux_inject(prep_mode);
-            // Heal duplicate keys left by older upsert bugs (e.g. yolo vs yolo_mode).
-            // Valid configs are never rewritten. Soft-fail so spawn still attempts.
-            match crate::agent_home_config::ensure_agent_home_config_sane(prep_mode) {
-                Ok(report) if report.changed => {
-                    tracing::info!(
-                        target: "acp_client",
-                        removed = report.removed_duplicates,
-                        backup = ?report.backup_path,
-                        "agent-home config.toml healed before spawn"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        target: "acp_client",
-                        error = %e,
-                        "agent-home config.toml heal failed; spawn may AGENT_CRASHED"
-                    );
+        let inject = if let Some(profile) = &prepared_profile {
+            profile.inject
+        } else if agent_home_prep {
+            let official_available = custom_route
+                && settings.official_aux_inject
+                && crate::official_aux::official_aux_available();
+            crate::providers::prepare_main_runtime(
+                &grok_home,
+                &settings,
+                opts.permission_policy.as_deref().unwrap_or("ask"),
+                custom_route,
+                official_available,
+                &crate::extensions::load_prefs(),
+            )
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?
+        } else {
+            false
+        };
+        let disallowed_tools = crate::official_aux::merge_disallowed_tools_for_main(
+            &settings.disallowed_tools,
+            inject,
+        );
+
+        // Capture AFTER structural runtime preparation. Model resolution, native env
+        // and reuse identity must refer to the same final provider bytes.
+        let (model_binding, grok_build_proxy, process_config, main_migration, main_runtime) =
+            if let Some(profile) = prepared_profile {
+                (
+                    profile.model_binding,
+                    profile.native,
+                    profile.configuration,
+                    profile.migration.map(main_migration::Binding::new),
+                    Some(profile.runtime),
+                )
+            } else {
+                let (model, native, config) =
+                    crate::providers::ProcessModelBinding::capture_for_spawn(
+                        custom_route,
+                        ssh_alias.is_some(),
+                        home_override.is_some(),
+                        opts.model_id.as_deref().unwrap_or(""),
+                        &grok_home,
+                        &settings_early,
+                    )
+                    .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+                (model, native, config, None, None)
+            };
+        let spawn_model = model_binding.resolve(opts.model_id.as_deref().unwrap_or(""));
+
+        // agent-home is shared by independent official chats and custom chats.
+        // Seal one process-private view after all canonical writes/captures so
+        // another spawn cannot replace auth.json while nested tools read it.
+        let proc_home = if agent_home_prep {
+            match crate::agent_proc_home::create(&grok_home, custom_route) {
+                Ok(dir) => Some(dir),
+                Err(error) => {
+                    drop(route_auth_guard);
+                    return Err(AgentError::new(
+                        AgentErrorCode::ConnectFailed,
+                        format!("failed to prepare a private agent home: {error}"),
+                    ));
                 }
             }
-        }
+        } else {
+            None
+        };
+        let grok_home = proc_home.clone().unwrap_or(grok_home);
+        drop(route_auth_guard);
+        let discard_proc_home = || {
+            if let Some(ref dir) = proc_home {
+                crate::agent_proc_home::discard(dir);
+            }
+        };
 
         // Native: `grok …`; WSL: `wsl.exe [-d] --cd <linux_cwd> -- <linux_cli> …`
         // SSH: collect grok flags first, then wrap as one remote `ssh -T` script.
@@ -808,151 +903,36 @@ impl AcpClient {
             Command::new("grok")
         } else if let Some(ref w) = wsl_launch {
             let linux_cwd = crate::wsl_backend::windows_path_to_wsl(&cwd).map_err(|e| {
+                discard_proc_home();
                 AgentError::new(
                     AgentErrorCode::CliNotFound,
                     format!("WSL cwd path map failed: {e}"),
                 )
             })?;
-            crate::wsl_backend::start_wsl_tokio_command(w, &linux_cwd)
-                .map_err(|e| AgentError::new(AgentErrorCode::CliNotFound, e))?
+            crate::wsl_backend::start_wsl_tokio_command(w, &linux_cwd).map_err(|e| {
+                discard_proc_home();
+                AgentError::new(AgentErrorCode::CliNotFound, e)
+            })?
         } else {
             Command::new(&cli_path)
         };
-        cmd.arg("--no-auto-update");
-        // Folder trust: required for headless AGENTS.md / project skills load.
-        for f in folder_trust_spawn_flags(opts.folder_trust) {
-            cmd.arg(f);
-        }
-        // Compaction mode/detail (CLI 0.2.117+): always set env; flags only when
-        // the probed binary is known to accept them (soft-fail on older CLIs).
+        // Assemble the actual full command through the offline-testable shared
+        // production path. No additional config read or CLI probe occurs here.
         let pass_compaction_flags = cli_supports_compaction_flags(cli_ver.as_deref());
-        apply_compaction_to_command(
-            &mut cmd,
-            &compaction_mode,
-            &compaction_detail,
-            pass_compaction_flags,
-        );
-        // Pin CLI permission mode so agent-side enforcement matches App policy / plan.
-        for a in permission_mode_spawn_flags(spawn_policy, spawn_product_mode) {
-            cmd.arg(a);
-        }
-        if let Some(ref sb) = sandbox {
-            for a in sb.cli_args() {
-                cmd.arg(a);
-            }
-        }
-        if let Some(ref mt) = max_turns {
-            for a in mt.cli_args() {
-                cmd.arg(a);
-            }
-        }
-        for a in &bg_wait_args {
-            cmd.arg(a);
-        }
-        // Top-level `grok --json-schema <SCHEMA>` (before `agent`). Constrains
-        // model output; headless docs mention --output-format json, but ACP
-        // stdio still accepts the flag and keeps the process alive.
-        if let Some(ref schema) = opts.json_schema {
-            let s = schema.trim();
-            if !s.is_empty() {
-                cmd.arg("--json-schema");
-                cmd.arg(s);
-            }
-        }
-        // Top-level `grok --rules <RULES>` (before `agent`) — session-only
-        // system-prompt append; not accepted under `grok agent` / `stdio`.
-        for a in extra_rules_spawn_flags(opts.extra_rules.as_deref()) {
-            cmd.arg(a);
-        }
-        // Top-level `grok --system-prompt-override <PROMPT>` (before `agent`) —
-        // session-only full system prompt replacement (alias: --system-prompt).
-        // Do not log the prompt body (may contain secrets / PII).
-        for a in system_prompt_override_spawn_flags(opts.system_prompt_override.as_deref()) {
-            cmd.arg(a);
-        }
-        for f in disable_web_search_spawn_flags(disable_web) {
-            cmd.arg(f);
-        }
-        // Top-level `grok --no-ask-user` (before `agent`) — disables ask-user
-        // questionnaires for this process (CLI ≥ 0.2.117).
-        for f in no_ask_user_spawn_flags(no_ask_user) {
-            cmd.arg(f);
-        }
-        for a in allowed_tools_spawn_flags(&allowed_tools) {
-            cmd.arg(a);
-        }
-        for a in disallowed_tools_spawn_flags(&disallowed_tools) {
-            cmd.arg(a);
-        }
-        // Top-level `grok --todo-gate` (CLI 0.2.117+). Overrides remote
-        // todo_gate_enabled and the built-in default (false). Max fires is
-        // config-only (independent agent-home); no CLI flag.
-        crate::agent_todo_gate::apply_todo_gate_to_command(&mut cmd, todo_gate_enabled);
-        for f in no_plan_spawn_flags(plan_enabled) {
-            cmd.arg(f);
-        }
-        if let Some(ref agent) = preferred_agent {
-            for a in agent.cli_args() {
-                cmd.arg(a);
-            }
-        }
-        // Top-level `grok --agents <JSON>` — inline subagent defs; empty omits.
-        // Does not write into shared ~/.grok (spawn argv only).
-        if let Some(ref aa) = agents_json_args {
-            for a in aa {
-                cmd.arg(a);
-            }
-        }
-        crate::agent_subagents::apply_subagents_to_command(&mut cmd, subagents_enabled);
-        crate::agent_memory::apply_memory_to_command(&mut cmd, memory_enabled);
-        // Config-only surface (CLI 0.2.117+): env + independent agent-home key.
-        crate::agent_subagent_wt_snap::apply_subagent_wt_snap_to_command(
-            &mut cmd,
-            subagent_wt_snap,
-            cli_ver.as_deref(),
-        );
-        // Two-pass prefire compaction (CLI 0.2.117+): env + independent agent-home.
-        crate::agent_two_pass_compaction::apply_two_pass_compaction_to_command(
-            &mut cmd,
-            two_pass_compaction,
-            cli_ver.as_deref(),
-        );
-        crate::agent_auto_wake::apply_auto_wake_to_command(
-            &mut cmd,
-            auto_wake_enabled,
+        let command_spec = spawn_command::AgentCommandSpec {
+            options: &opts,
+            settings: &settings,
+            version: cli_ver.as_deref(),
+            model: &spawn_model,
+            sandbox: sandbox.as_ref(),
+            max_turns: max_turns.as_ref(),
+            disallowed_tools: &disallowed_tools,
+            ssh: ssh_alias.is_some(),
             session_data_mode,
-        );
-        cmd.arg("agent");
-        cmd.arg(leader_spawn_flag(use_leader));
-        // Agent option: `--agent-profile <PATH>` (before `stdio`). Path only —
-        // does not rewrite app agent-home or shared ~/.grok. Skip on SSH — the
-        // path is local and would not exist on the host.
-        if ssh_alias.is_none() {
-            if let Some(ref profile_path) = agent_profile {
-                cmd.arg("--agent-profile");
-                cmd.arg(profile_path);
-            }
-        }
-        if !spawn_model.is_empty() {
-            cmd.args(["--model", &spawn_model]);
-        }
-        if let Some(ref e) = opts.effort {
-            let e = e.trim();
-            // Pass any catalog/channel effort id (low/medium/high, max, …).
-            // Do not hard-allowlist only Grok 3-tier — custom channels use max etc.
-            if is_spawnable_reasoning_effort(e) {
-                cmd.args(["--reasoning-effort", e]);
-            }
-        }
-        if should_pass_always_approve(spawn_policy, spawn_product_mode) {
-            cmd.arg("--always-approve");
-        }
-        // Session-only plugins (Agent SDKs / App): process-scoped, always trusted.
-        // Does not write global Extensions or `~/.grok` install state.
-        for a in plugin_dir_spawn_flags(&opts.plugin_dirs) {
-            cmd.arg(a);
-        }
-        cmd.arg("stdio");
+            grok_home: &grok_home,
+            native: grok_build_proxy.as_ref(),
+        };
+        command_spec.apply_args(&mut cmd);
         if let Some(ref alias) = ssh_alias {
             let grok_args: Vec<String> = cmd
                 .as_std()
@@ -964,7 +944,10 @@ impl AcpClient {
                 cwd.to_string_lossy().as_ref(),
                 &grok_args,
             )
-            .map_err(|e| AgentError::new(AgentErrorCode::ConnectFailed, e))?;
+            .map_err(|e| {
+                discard_proc_home();
+                AgentError::new(AgentErrorCode::ConnectFailed, e)
+            })?;
         }
         // Local native only: process-group + no-window so Windows tree-kill
         // can reap tool/shell grandchildren. SSH/WSL keep CREATE_NO_WINDOW
@@ -988,12 +971,6 @@ impl AcpClient {
                 cmd.env("PATH", path);
             }
         }
-        if ssh_alias.is_none() {
-            cmd.env("GROK_HOME", &grok_home);
-        }
-        if let Some(ref native) = grok_build_proxy {
-            apply_grok_build_proxy_env(&mut cmd, native);
-        }
         // Do NOT set GROK_IMAGE_DESCRIPTION_MODEL / GROK_WEB_SEARCH_MODEL on the
         // main agent process: when main is DeepSeek, those envs make CLI send
         // model id `grok-4.5` to the DeepSeek base_url (400). Generic custom
@@ -1008,15 +985,10 @@ impl AcpClient {
         // via session mcpServers (official-aux / Extensions). Opt back in with
         // official_aux_with_user_mcp (Extensions MCPs), not Claude dump.
         // Grok docs: GROK_CLAUDE_MCPS_ENABLED / GROK_CURSOR_MCPS_ENABLED.
-        cmd.env("GROK_CLAUDE_MCPS_ENABLED", "false");
-        cmd.env("GROK_CURSOR_MCPS_ENABLED", "false");
+        command_spec.apply_env(&mut cmd);
         // Route agent traffic through the configured proxy (NEW-02). Windows
         // system proxy is registry-only and never reaches children as env vars.
         crate::proxy::apply_to_tokio_command(&mut cmd);
-        if let Some(ref sb) = sandbox {
-            let (k, v) = sb.env_pair();
-            cmd.env(k, v);
-        }
         // Forward selected env into the Linux process (path-translate GROK_HOME).
         if wsl_launch.is_some() {
             crate::wsl_backend::apply_wslenv(&mut cmd);
@@ -1048,7 +1020,7 @@ impl AcpClient {
         );
 
         let mut child = cmd.spawn().map_err(|e| {
-            drop(route_auth_guard);
+            discard_proc_home();
             let code = if ssh_alias.is_some() {
                 AgentErrorCode::ConnectFailed
             } else {
@@ -1065,20 +1037,21 @@ impl AcpClient {
             "acp: spawned child"
         );
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stdin on child"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stdout on child"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child"))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            discard_proc_home();
+            AgentError::new(AgentErrorCode::AgentCrashed, "no stdin on child")
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            discard_proc_home();
+            AgentError::new(AgentErrorCode::AgentCrashed, "no stdout on child")
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            discard_proc_home();
+            AgentError::new(AgentErrorCode::AgentCrashed, "no stderr on child")
+        })?;
 
-        let client = Arc::new(Self {
+        let client = Arc::new_cyclic(|client| Self {
+            self_weak: client.clone(),
             child: AsyncMutex::new(Some(child)),
             child_pid,
             owns_local_process_tree,
@@ -1087,6 +1060,7 @@ impl AcpClient {
             pending: ParkingMutex::new(HashMap::new()),
             event_tx: event_tx.clone(),
             agent_session_id: ParkingMutex::new(None),
+            observed_agent_models: ParkingMutex::new(HashMap::new()),
             cli_path,
             cwd,
             stopped: AtomicBool::new(false),
@@ -1096,11 +1070,20 @@ impl AcpClient {
             last_update_by_session: ParkingMutex::new(HashMap::new()),
             last_update_unstamped: ParkingMutex::new(None),
             empty_mcp_servers,
+            app_session_id: app_session_id.clone(),
             sandbox_profile: ParkingMutex::new(sandbox.map(|sb| sb.profile.clone())),
             custom_route,
             route_provider_id,
+            model_binding,
+            process_config,
+            main_migration,
+            main_runtime,
             rewind_supported: ParkingMutex::new(None),
             ssh_alias: ssh_alias.clone(),
+            wsl: wsl_launch.is_some(),
+            tcp: false,
+            proc_home: std::sync::Mutex::new(proc_home),
+            import_history_grant: ParkingMutex::new(Default::default()),
         });
 
         client.start_read_loop(Box::new(stdout));
@@ -1174,7 +1157,8 @@ impl AcpClient {
         let (read_half, write_half) = stream.into_split();
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let client = Arc::new(Self {
+        let client = Arc::new_cyclic(|client| Self {
+            self_weak: client.clone(),
             child: AsyncMutex::new(None),
             child_pid: None,
             owns_local_process_tree: false,
@@ -1185,6 +1169,7 @@ impl AcpClient {
             pending: ParkingMutex::new(HashMap::new()),
             event_tx,
             agent_session_id: ParkingMutex::new(None),
+            observed_agent_models: ParkingMutex::new(HashMap::new()),
             cli_path: PathBuf::from(format!("tcp://{addr}")),
             cwd,
             stopped: AtomicBool::new(false),
@@ -1195,12 +1180,21 @@ impl AcpClient {
             last_update_unstamped: ParkingMutex::new(None),
             // TCP connect path keeps default MCP inject (not official side-channel).
             empty_mcp_servers: false,
+            app_session_id: None,
             sandbox_profile: ParkingMutex::new(None),
             // Remote ACP: treat as official-class for reuse (no local auth strip).
             custom_route: false,
             route_provider_id: crate::providers::SESSION_PROVIDER_OFFICIAL.to_string(),
+            model_binding: crate::providers::ProcessModelBinding::catalog(),
+            process_config: None,
+            main_migration: None,
+            main_runtime: None,
             rewind_supported: ParkingMutex::new(None),
             ssh_alias: None,
+            wsl: false,
+            tcp: true,
+            proc_home: std::sync::Mutex::new(None),
+            import_history_grant: ParkingMutex::new(Default::default()),
         });
         client.start_read_loop(Box::new(read_half));
         Ok((client, event_rx))
@@ -1218,6 +1212,113 @@ impl AcpClient {
         } else {
             &self.route_provider_id
         }
+    }
+
+    pub(crate) fn has_main_runtime(&self) -> bool {
+        self.main_runtime.is_some()
+    }
+
+    pub(crate) fn main_vision_context(
+        &self,
+        agent: Option<&str>,
+    ) -> Option<crate::models_aux::HostVisionContext> {
+        self.main_runtime.as_ref().map(|runtime| {
+            let models = self.observed_agent_models.lock();
+            let echo = agent
+                .and_then(|agent| models.get(agent))
+                .map(String::as_str);
+            runtime.vision_context(echo)
+        })
+    }
+
+    /// Resolve against this transport's immutable route, not a new global default.
+    pub(crate) fn resolve_agent_model(&self, requested: &str) -> String {
+        self.model_binding.resolve(requested)
+    }
+
+    pub(crate) fn matches_main_selection(&self, owner: &str, provider: &str, model: &str) -> bool {
+        self.is_alive()
+            && matches!(self.execution_source(),
+                crate::session_execution::ExecutionSource::AppProfile { owner_session_id, .. }
+                    if owner_session_id == owner)
+            && self.model_binding.matches_main_selection(provider, model)
+            && self
+                .main_runtime
+                .as_ref()
+                .is_none_or(|runtime| runtime.matches_model_policy(model))
+    }
+
+    pub(crate) fn matches_process_config(
+        &self,
+        target: &crate::providers::ProcessConfigBinding,
+    ) -> bool {
+        self.process_config.as_ref() == Some(target)
+    }
+
+    pub(crate) fn execution_source(&self) -> crate::session_execution::ExecutionSource {
+        use crate::session_execution::ExecutionSource;
+        if self.ssh_alias.is_some() || self.tcp {
+            ExecutionSource::Remote
+        } else {
+            self.process_config
+                .as_ref()
+                .map(|configuration| configuration.execution_source())
+                .unwrap_or(ExecutionSource::Unavailable)
+        }
+    }
+
+    pub(crate) fn execution_receipt(
+        &self,
+        agent: &str,
+        process: &str,
+    ) -> Result<crate::session_execution::ExecutionReceipt, String> {
+        if !self.is_alive() || self.agent_session_id().as_deref() != Some(agent) {
+            return Err("opened agent no longer belongs to this transport".into());
+        }
+        let source = self.execution_source();
+        if let Some(binding) = &self.main_migration {
+            binding.validate_agent(&source, agent)?;
+        }
+        let (provider_id, model_id) = if matches!(
+            source,
+            crate::session_execution::ExecutionSource::Remote
+                | crate::session_execution::ExecutionSource::Unavailable
+        ) {
+            (None, None)
+        } else {
+            let models = self.observed_agent_models.lock();
+            self.model_binding
+                .execution_model(models.get(agent).map(String::as_str))
+        };
+        let receipt = crate::session_execution::ExecutionReceipt {
+            schema_version: 1,
+            agent_session_id: agent.into(),
+            source,
+            provider_id,
+            model_id,
+            process_id: Some(process.into()),
+        };
+        receipt.validate(Some(agent))?;
+        Ok(receipt)
+    }
+
+    fn remember_model_echo(&self, agent: &str, echoed: Option<&str>) {
+        let mut models = self.observed_agent_models.lock();
+        if let Some(model) = echoed.map(str::trim).filter(|model| !model.is_empty()) {
+            models.insert(agent.into(), model.into());
+        } else {
+            models.remove(agent);
+        }
+    }
+
+    /// Only for ownerless prewarm publication/consumption. Existing session
+    /// model RPCs stay bound to their immutable route, not a new global default.
+    pub(crate) fn prewarm_config_is_current(&self) -> bool {
+        self.is_alive()
+            && crate::providers::ProcessConfigBinding::current(&crate::store::load_settings())
+                .is_ok_and(|(custom, target)| {
+                    self.custom_route == custom && self.matches_process_config(&target)
+                })
     }
 
     /// Spawn the transport read loop over any `AsyncRead` (child stdout or the
@@ -1258,6 +1359,9 @@ impl AcpClient {
             // session during `kill()`.
             if !c.reader_alive.swap(false, Ordering::SeqCst) {
                 return;
+            }
+            if let Some(configuration) = &c.process_config {
+                configuration.cancel_frozen_routes();
             }
             // Stdout EOF normally follows child termination. Capture the
             // status when it is already available so the Host can distinguish
@@ -1662,6 +1766,7 @@ impl AcpClient {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         self.touch_last_update(sid.as_deref(), Instant::now());
+        self.observe_import_history_tools(params);
         // Multi-session routing: every update notification carries its
         // `sessionId` at params top level (Grok gateway envelope). Stamp the
         // decoded events so the SessionManager can route them to the right
@@ -1706,56 +1811,9 @@ impl AcpClient {
     }
 
     async fn write_line(&self, value: &Value) -> Result<(), String> {
-        let mut line = serde_json::to_string(value).map_err(|e| e.to_string())?;
-        line.push('\n');
-        // Bound stdin lock+write: a dead/wedged agent must not pin the Host
-        // forever (interject / cancel / prompt all go through here).
-        let write_fut = async {
-            let mut guard = self.stdin.lock().await;
-            let stdin = guard.as_mut().ok_or_else(|| "stdin closed".to_string())?;
-            stdin
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-            stdin.flush().await.map_err(|e| e.to_string())?;
-            Ok::<(), String>(())
-        };
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(STDIN_WRITE_TIMEOUT_SECS),
-            write_fut,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                // Wedged agent: free waiters, surface ProcessExited so Host ends
-                // the turn, and kill the child so the pool slot is not held as
-                // "still working" overnight.
-                self.reader_alive.store(false, Ordering::SeqCst);
-                let head = format!(
-                    "stdin write timeout after {STDIN_WRITE_TIMEOUT_SECS}s (agent may be wedged)"
-                );
-                let detail = self.format_exit_detail(&head);
-                error!("{detail}");
-                self.fail_all_pending(&detail);
-                let _ = self
-                    .event_tx
-                    .send((None, AcpEvent::ProcessExited { code: None }));
-                if tokio::time::timeout(
-                    std::time::Duration::from_secs(STDIN_WRITE_TIMEOUT_SECS),
-                    self.kill(),
-                )
-                .await
-                .is_err()
-                {
-                    tracing::warn!(
-                        secs = STDIN_WRITE_TIMEOUT_SECS,
-                        "acp kill after stdin timeout also timed out"
-                    );
-                }
-                Err(head)
-            }
-        }
+        self.write_line_tracked(value)
+            .await
+            .map_err(|failure| failure.message)
     }
 }
 
@@ -2290,7 +2348,12 @@ impl AcpClient {
         //
         // Unsigned-in official route must also skip: there is no token to
         // load, and the CLI authenticate RPC times out at 12s × 2.
-        let has_cached_token = has_cached_token_for_authenticate();
+        let profile_cached_token = self
+            .process_config
+            .as_ref()
+            .and_then(crate::providers::ProcessConfigBinding::profile_cached_token);
+        let has_cached_token = !self.custom_route
+            && profile_cached_token.unwrap_or_else(has_cached_token_for_authenticate);
         if should_authenticate_cached_token(self.custom_route, has_cached_token) {
             match self
                 .request_timeout(
@@ -2302,8 +2365,10 @@ impl AcpClient {
             {
                 Ok(_) => info!("acp authenticate cached_token ok"),
                 Err(e) => {
-                    if let Err(sync_e) = crate::account::sync_cli_auth_to_agent_home() {
-                        warn!("acp authenticate: re-sync auth before retry failed: {sync_e}");
+                    if profile_cached_token.is_none() {
+                        if let Err(sync_e) = crate::account::sync_cli_auth_to_agent_home() {
+                            warn!("acp authenticate: re-sync auth before retry failed: {sync_e}");
+                        }
                     }
                     match self
                         .request_timeout(
@@ -2314,11 +2379,11 @@ impl AcpClient {
                         .await
                     {
                         Ok(_) => {
-                            info!("acp authenticate cached_token ok after auth re-sync");
+                            info!("acp authenticate cached_token ok after retry");
                         }
                         Err(e2) => {
                             warn!(
-                                "acp authenticate soft-fail after re-sync (continuing): first={e}; retry={e2}"
+                                "acp authenticate soft-fail after retry (continuing): first={e}; retry={e2}"
                             );
                         }
                     }
@@ -2353,17 +2418,32 @@ impl AcpClient {
             .await
     }
 
+    /// [`Self::open_session_for`] using the id this process was spawned with.
+    pub async fn open_session_at(
+        &self,
+        resume_session_id: Option<&str>,
+        fork_session: bool,
+        cwd: &str,
+    ) -> Result<(String, bool), AgentError> {
+        self.open_session_for(resume_session_id, fork_session, cwd, None)
+            .await
+    }
+
     /// [`Self::open_session`] with a caller-supplied cwd.
     ///
     /// The CLI session cwd is per-session. OS sandbox write roots are **not** —
     /// they stay locked to spawn cwd for the process lifetime. Hosts must not
     /// warm-reuse a non-`off` sandboxed process onto a different project cwd
     /// (#986); cold-spawn with the target cwd instead.
-    pub async fn open_session_at(
+    ///
+    /// `bound_app_session_id` is the chat this open serves. It wins over the id
+    /// stored at spawn, which is empty for an ownerless prewarm.
+    pub async fn open_session_for(
         &self,
         resume_session_id: Option<&str>,
         fork_session: bool,
         cwd: &str,
+        bound_app_session_id: Option<&str>,
     ) -> Result<(String, bool), AgentError> {
         let cwd = cwd.to_string();
         if !crate::ssh_remote::acp_session_cwd_ok(self.ssh_alias.as_deref(), &cwd) {
@@ -2378,22 +2458,41 @@ impl AcpClient {
         // hard budget falls back to `[]` so session/new|load always proceeds.
         // Official aux side-channel uses empty inject (no nested official-aux MCP).
         // SSH: do not scan the remote path as a local project.
-        let mcp_servers = if self.empty_mcp_servers || self.ssh_alias.is_some() {
+        let mcp_servers = if self.empty_mcp_servers
+            || self.ssh_alias.is_some()
+            || self.wsl
+            || self.tcp
+        {
             if self.ssh_alias.is_some() {
                 info!("acp session open empty mcpServers (ssh remote)");
+            } else if self.wsl {
+                info!("acp session open empty mcpServers (wsl)");
+            } else if self.tcp {
+                info!("acp session open empty mcpServers (tcp remote)");
             } else {
                 info!("acp session open empty mcpServers (side-channel)");
             }
             serde_json::json!([])
         } else {
             let project_cwd = cwd.clone();
+            let main_runtime = self.main_runtime.clone();
+            let app_session_id = crate::extensions::resolve_mcp_app_session_id(
+                bound_app_session_id,
+                self.app_session_id.as_deref(),
+            )
+            .map(str::to_string);
             let budget = crate::extensions::MCP_CONNECT_BUDGET;
             let servers = match tokio::time::timeout(
                 budget,
-                tauri::async_runtime::spawn_blocking(move || {
-                    crate::extensions::build_session_mcp_servers_for_connect(Some(
-                        project_cwd.as_str(),
-                    ))
+                tauri::async_runtime::spawn_blocking(move || match main_runtime {
+                    Some(runtime) => runtime.mcp_servers_for_connect(
+                        Some(project_cwd.as_str()),
+                        app_session_id.as_deref(),
+                    ),
+                    None => crate::extensions::build_session_mcp_servers_for_connect(
+                        Some(project_cwd.as_str()),
+                        app_session_id.as_deref(),
+                    ),
                 }),
             )
             .await
@@ -2417,15 +2516,55 @@ impl AcpClient {
             info!("acp session open injecting mcpServers count={mcp_count}");
             servers
         };
+        self.open_session_with_mcp_servers(resume_session_id, fork_session, &cwd, mcp_servers)
+            .await
+    }
+
+    /// Shared wire path. Discovery stays outside so protocol tests can use
+    /// synthetic MCP entries without inspecting user configuration or auth.
+    async fn open_session_with_mcp_servers(
+        &self,
+        resume_session_id: Option<&str>,
+        fork_session: bool,
+        cwd: &str,
+        mcp_servers: Value,
+    ) -> Result<(String, bool), AgentError> {
+        let mut migration = self
+            .begin_main_migration(resume_session_id, fork_session, cwd)
+            .await
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+        self.begin_import_history_open()
+            .map_err(|e| self.map_handshake_err("import capability reset", e.into_command_err()))?;
+        let grant = self.import_history_grant.lock().grant.clone();
+        let mcp_servers = crate::session_migration::mcp_stdio::compose_session_mcp_servers(
+            mcp_servers,
+            grant.as_ref(),
+            self.session_mcp_policy(),
+        );
 
         if let Some(rid) = resume_session_id.map(str::trim).filter(|s| !s.is_empty()) {
             // CLI `--fork-session`: new agent session id with parent context.
             if fork_session {
-                if let Some((sid, model_id)) = self.try_fork_session(rid, &cwd, &mcp_servers).await
-                {
+                if let Some((sid, model_id)) = self.try_fork_session(rid, cwd, &mcp_servers).await {
+                    self.validate_main_migration_response(
+                        &migration,
+                        &sid,
+                        main_migration::Outcome::Forked,
+                    )
+                    .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+                    self.bind_import_history_session(&sid).map_err(|e| {
+                        self.map_handshake_err("import capability bind", e.into_command_err())
+                    })?;
+                    self.finish_main_migration(
+                        &mut migration,
+                        &sid,
+                        main_migration::Outcome::Forked,
+                    )
+                    .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
                     *self.agent_session_id.lock() = Some(sid.clone());
+                    self.remember_model_echo(&sid, model_id.as_deref());
                     let _ = self.event_tx.send((
-                        None,
+                        Some(sid.clone()),
                         AcpEvent::State {
                             backend: "grok_agent_stdio".into(),
                             agent_session_id: Some(sid.clone()),
@@ -2464,13 +2603,33 @@ impl AcpClient {
                             .unwrap_or(rid)
                             .to_string();
                         info!("acp session/load ok sessionId={sid}");
+                        self.validate_main_migration_response(
+                            &migration,
+                            &sid,
+                            main_migration::Outcome::Loaded,
+                        )
+                        .map_err(|message| {
+                            AgentError::new(AgentErrorCode::ConnectFailed, message)
+                        })?;
+                        self.bind_import_history_session(&sid).map_err(|e| {
+                            self.map_handshake_err("import capability bind", e.into_command_err())
+                        })?;
+                        self.finish_main_migration(
+                            &mut migration,
+                            &sid,
+                            main_migration::Outcome::Loaded,
+                        )
+                        .map_err(|message| {
+                            AgentError::new(AgentErrorCode::ConnectFailed, message)
+                        })?;
                         *self.agent_session_id.lock() = Some(sid.clone());
                         let model_id = result
                             .pointer("/models/currentModelId")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
+                        self.remember_model_echo(&sid, model_id.as_deref());
                         let _ = self.event_tx.send((
-                            None,
+                            Some(sid.clone()),
                             AcpEvent::State {
                                 backend: "grok_agent_stdio".into(),
                                 agent_session_id: Some(sid.clone()),
@@ -2514,14 +2673,22 @@ impl AcpClient {
             })?
             .to_string();
 
+        self.validate_main_migration_response(&migration, &sid, main_migration::Outcome::Fresh)
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
+        self.bind_import_history_session(&sid)
+            .map_err(|e| self.map_handshake_err("import capability bind", e.into_command_err()))?;
+        self.finish_main_migration(&mut migration, &sid, main_migration::Outcome::Fresh)
+            .map_err(|message| AgentError::new(AgentErrorCode::ConnectFailed, message))?;
         *self.agent_session_id.lock() = Some(sid.clone());
         let model_id = result
             .pointer("/models/currentModelId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        self.remember_model_echo(&sid, model_id.as_deref());
+
         let _ = self.event_tx.send((
-            None,
+            Some(sid.clone()),
             AcpEvent::State {
                 backend: "grok_agent_stdio".into(),
                 agent_session_id: Some(sid.clone()),
@@ -2632,37 +2799,68 @@ impl AcpClient {
         .await
     }
 
-    /// Switch model on the live agent session (`session/set_model`).
-    /// Switch model on the live agent session (`session/set_model`).
-    /// Uses the process's most recently bound agent session id.
-    pub async fn set_model(&self, model_id: &str) -> Result<(), String> {
-        let sid = self
-            .agent_session_id
-            .lock()
-            .clone()
-            .ok_or_else(|| "no agent session".to_string())?;
-        self.set_model_for(&sid, model_id).await
+    /// `x.ai/session/info` — the payload behind the pager `/context` view.
+    /// Live stdio registers the underscore form; older agents use the bare name.
+    pub async fn session_info(&self, session_id: &str) -> Result<Value, String> {
+        let params = json!({ "sessionId": session_id });
+        let raw = match self.request("_x.ai/session/info", params.clone()).await {
+            Ok(v) => v,
+            Err(e) if rpc_looks_like_method_not_found(&e) => {
+                self.request("x.ai/session/info", params).await?
+            }
+            Err(e) => return Err(e),
+        };
+        unwrap_session_info(raw)
     }
-
     /// Switch model on an explicit session (`session/set_model`).
     /// Shared-process multi-session: callers MUST target the session they
     /// mean — the process-level "recently bound" id may belong to another
     /// App session on the same process.
     pub async fn set_model_for(&self, session_id: &str, model_id: &str) -> Result<(), String> {
+        self.set_model_for_inner(session_id, model_id, None).await
+    }
+
+    /// Same as [`Self::set_model_for`], plus `_meta.contextWindow`.
+    /// Reasoning effort is omitted so the CLI keeps the current effort.
+    pub async fn set_context_window_for(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        context_window: u64,
+    ) -> Result<(), String> {
+        if context_window == 0 {
+            return Err("context window must be positive".into());
+        }
+        self.set_model_for_inner(session_id, model_id, Some(context_window))
+            .await
+    }
+
+    async fn set_model_for_inner(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        context_window: Option<u64>,
+    ) -> Result<(), String> {
         let model_id = model_id.trim();
         if model_id.is_empty() {
             return Err("model id empty".into());
         }
         let sid = session_id.to_string();
         // ACP SetSessionModelRequest: sessionId + modelId (+ optional meta).
+        // Absent `_meta` preserves effort and the selected window.
+        let params = match context_window {
+            Some(window) => json!({
+                "sessionId": sid,
+                "modelId": model_id,
+                "_meta": { "contextWindow": window },
+            }),
+            None => json!({
+                "sessionId": sid,
+                "modelId": model_id,
+            }),
+        };
         let result = self
-            .request(
-                "session/set_model",
-                json!({
-                    "sessionId": sid,
-                    "modelId": model_id,
-                }),
-            )
+            .request("session/set_model", params)
             .await
             .map_err(|e| format!("session/set_model: {e}"))?;
         // Best-effort: some agents echo currentModelId.
@@ -2671,8 +2869,9 @@ impl AcpClient {
             .or_else(|| result.get("modelId"))
             .and_then(|v| v.as_str())
         {
+            self.remember_model_echo(&sid, Some(mid));
             let _ = self.event_tx.send((
-                None,
+                Some(sid.clone()),
                 AcpEvent::State {
                     backend: "grok_agent_stdio".into(),
                     agent_session_id: Some(sid),
@@ -2680,8 +2879,9 @@ impl AcpClient {
                 },
             ));
         } else {
+            self.remember_model_echo(&sid, None);
             let _ = self.event_tx.send((
-                None,
+                Some(sid.clone()),
                 AcpEvent::State {
                     backend: "grok_agent_stdio".into(),
                     agent_session_id: Some(sid),
@@ -2690,17 +2890,6 @@ impl AcpClient {
             ));
         }
         Ok(())
-    }
-
-    /// Switch product session mode (`session/set_mode`). Tries candidate modeIds.
-    /// Uses the process's most recently bound agent session id.
-    pub async fn set_mode(&self, product_mode: &str) -> Result<String, String> {
-        let sid = self
-            .agent_session_id
-            .lock()
-            .clone()
-            .ok_or_else(|| "no agent session".to_string())?;
-        self.set_mode_for(&sid, product_mode).await
     }
 
     /// Switch product session mode on an explicit session (`session/set_mode`).
@@ -3013,8 +3202,18 @@ impl AcpClient {
         rpc_id: u64,
         outcome: PermissionOutcome,
     ) -> Result<(), String> {
+        self.respond_permission_tracked(rpc_id, outcome)
+            .await
+            .map_err(|failure| failure.message)
+    }
+
+    pub(crate) async fn respond_permission_tracked(
+        &self,
+        rpc_id: u64,
+        outcome: PermissionOutcome,
+    ) -> Result<(), line_writer::LineWriteFailure> {
         let msg = wire_jsonrpc_result(rpc_id, wire_permission_result(&outcome));
-        self.write_line(&msg).await
+        self.write_line_tracked(&msg).await
     }
 
     /// Reply to `_x.ai/exit_plan_mode` reverse-request.
@@ -3025,6 +3224,31 @@ impl AcpClient {
         outcome: &str,
         feedback: Option<String>,
     ) -> Result<(), String> {
+        self.respond_exit_plan_mode_tracked(rpc_id, outcome, feedback)
+            .await
+            .map_err(|failure| failure.message)
+    }
+
+    pub(crate) async fn respond_exit_plan_mode_tracked(
+        &self,
+        rpc_id: u64,
+        outcome: &str,
+        feedback: Option<String>,
+    ) -> Result<(), line_writer::LineWriteFailure> {
+        self.respond_exit_plan_mode_checked(rpc_id, outcome, feedback, || Ok(()))
+            .await
+    }
+
+    pub(crate) async fn respond_exit_plan_mode_checked<F>(
+        &self,
+        rpc_id: u64,
+        outcome: &str,
+        feedback: Option<String>,
+        check: F,
+    ) -> Result<(), line_writer::LineWriteFailure>
+    where
+        F: FnOnce() -> Result<(), String> + Send,
+    {
         let result = wire_exit_plan_mode_result(outcome, feedback);
         let outcome_s = result
             .get("outcome")
@@ -3033,7 +3257,7 @@ impl AcpClient {
             .to_string();
         let msg = wire_jsonrpc_result(rpc_id, result);
         info!("acp → exit_plan_mode reply id={rpc_id} outcome={outcome_s}");
-        self.write_line(&msg).await
+        self.write_line_tracked_checked(&msg, check).await
     }
 
     /// Reply to `_x.ai/ask_user_question` reverse-request.
@@ -3046,6 +3270,29 @@ impl AcpClient {
         rpc_id: u64,
         outcome: AskUserOutcome,
     ) -> Result<(), String> {
+        self.respond_ask_user_question_tracked(rpc_id, outcome)
+            .await
+            .map_err(|failure| failure.message)
+    }
+
+    pub(crate) async fn respond_ask_user_question_tracked(
+        &self,
+        rpc_id: u64,
+        outcome: AskUserOutcome,
+    ) -> Result<(), line_writer::LineWriteFailure> {
+        self.respond_ask_user_question_checked(rpc_id, outcome, || Ok(()))
+            .await
+    }
+
+    pub(crate) async fn respond_ask_user_question_checked<F>(
+        &self,
+        rpc_id: u64,
+        outcome: AskUserOutcome,
+        check: F,
+    ) -> Result<(), line_writer::LineWriteFailure>
+    where
+        F: FnOnce() -> Result<(), String> + Send,
+    {
         let result = wire_ask_user_result(&outcome);
         let msg = wire_jsonrpc_result(rpc_id, result.clone());
         info!(
@@ -3059,7 +3306,7 @@ impl AcpClient {
                 "cancelled"
             }
         );
-        self.write_line(&msg).await
+        self.write_line_tracked_checked(&msg, check).await
     }
 
     #[allow(dead_code)]
@@ -3083,6 +3330,12 @@ impl AcpClient {
         // alive and allowed ghost events from a remote peer after recycle.
         self.stopped.store(true, Ordering::SeqCst);
         self.reader_alive.store(false, Ordering::SeqCst);
+        if let Some(binding) = &self.main_migration {
+            binding.revoke();
+        }
+        if let Some(configuration) = &self.process_config {
+            configuration.cancel_frozen_routes();
+        }
         // `notify_waiters` only wakes tasks that are already waiting.  The
         // reader checks `reader_alive` immediately before entering `select!`,
         // so a kill racing that boundary could otherwise leave a TCP read
@@ -3125,6 +3378,14 @@ impl AcpClient {
         *self.stdin.lock().await = None;
         self.last_update_by_session.lock().clear();
         *self.last_update_unstamped.lock() = None;
+        let proc_home = self
+            .proc_home
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(dir) = proc_home {
+            crate::agent_proc_home::discard(&dir);
+        }
     }
 }
 
@@ -3208,6 +3469,57 @@ pub fn wire_session_interject_params(session_id: &str, text: &str) -> Value {
         "sessionId": session_id,
         "text": text,
     })
+}
+
+/// Pull the session-info object out of an ext-method result.
+///
+/// Grok Build wraps it as `{ "result": SessionInfoResponse, "error"?: ... }`.
+/// Some agents return the object itself, or either form as a JSON string.
+pub(crate) fn unwrap_session_info(raw: Value) -> Result<Value, String> {
+    let value = coerce_session_info_json(raw);
+    if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
+        let has_body = value.get("result").is_some_and(|r| r.is_object());
+        if !has_body {
+            return Err(session_info_error_text(err));
+        }
+    }
+    let body = value
+        .get("result")
+        .filter(|r| r.is_object())
+        .cloned()
+        .unwrap_or(value);
+    if body.get("context").is_some()
+        || body.get("sessionId").is_some()
+        || body.get("session_id").is_some()
+    {
+        return Ok(body);
+    }
+    Err("invalid session info response".into())
+}
+
+fn coerce_session_info_json(raw: Value) -> Value {
+    match raw {
+        Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
+        Value::Object(map) => {
+            if let Some(Value::String(s)) = map.get("result") {
+                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                    return parsed;
+                }
+            }
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+fn session_info_error_text(err: &Value) -> String {
+    if let Some(s) = err.as_str() {
+        return s.to_string();
+    }
+    err.get("message")
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| err.to_string())
 }
 
 /// Whether an ACP RPC error indicates the method name is unknown on this agent.
@@ -3701,6 +4013,14 @@ pub fn decode_session_update(params: &Value) -> Vec<AcpEvent> {
                 out.push(AcpEvent::ToolOpenReleased { tool_call_id });
             }
         }
+        // Subagent lifecycle. CLI 1.0.x reports these on the xAI
+        // extension notification channel with a *stable* subagent id, so the
+        // Tasks panel no longer has to infer parent links from stream order.
+        "subagent_spawned" | "subagent_progress" | "subagent_finished" => {
+            if let Some(ev) = parse_subagent_update(kind, update) {
+                out.push(ev);
+            }
+        }
         "retry_state" => {
             let attempt = update.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let max_retries = update
@@ -3861,6 +4181,78 @@ pub fn decode_session_update(params: &Value) -> Vec<AcpEvent> {
     }
 
     out
+}
+
+/// Decode one `subagent_spawned` / `subagent_progress` / `subagent_finished`
+/// notification. Returns `None` when the update carries no subagent id — an
+/// id-less row cannot be tracked or de-duplicated, so it is not surfaced.
+pub fn parse_subagent_update(kind: &str, update: &Value) -> Option<AcpEvent> {
+    let subagent_id = update
+        .get("subagent_id")
+        .or_else(|| update.get("subagentId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if subagent_id.is_empty() {
+        return None;
+    }
+    let phase = match kind {
+        "subagent_spawned" => SubagentPhase::Spawned,
+        "subagent_progress" => SubagentPhase::Progress,
+        "subagent_finished" => SubagentPhase::Finished,
+        _ => return None,
+    };
+    let str_field = |keys: &[&str]| -> Option<String> {
+        keys.iter()
+            .find_map(|k| update.get(*k))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let num_field = |keys: &[&str]| -> Option<u64> {
+        keys.iter()
+            .find_map(|k| update.get(*k))
+            .and_then(|v| v.as_u64())
+    };
+    Some(AcpEvent::Subagent(SubagentUpdate {
+        phase,
+        subagent_id,
+        subagent_type: str_field(&["subagent_type", "subagentType"]),
+        description: str_field(&["description", "summary"]),
+        status: str_field(&["status"]),
+        duration_ms: num_field(&["duration_ms", "durationMs"]),
+        // `subagent_finished` reports the counters as `turns` / `tool_calls`;
+        // `subagent_progress` uses the longer names. Accept both so a run whose
+        // progress frames were throttled away still shows its totals.
+        turn_count: num_field(&["turn_count", "turnCount", "turns"]),
+        tool_call_count: num_field(&["tool_call_count", "toolCallCount", "tool_calls"]),
+        tokens_used: num_field(&["tokens_used", "tokensUsed"]),
+        context_window_tokens: num_field(&["context_window_tokens", "contextWindowTokens"]),
+        output: str_field(&["output", "result"]),
+    }))
+}
+
+impl SubagentUpdate {
+    /// `session://subagent` payload (snake_case keys are flattened to camelCase
+    /// for the frontend). Absent values stay `null` — the UI must not invent them.
+    pub fn to_payload(&self, app_session_id: &str) -> Value {
+        json!({
+            "sessionId": app_session_id,
+            "phase": self.phase.as_str(),
+            "subagentId": self.subagent_id,
+            "subagentType": self.subagent_type,
+            "description": self.description,
+            "status": self.status,
+            "durationMs": self.duration_ms,
+            "turnCount": self.turn_count,
+            "toolCallCount": self.tool_call_count,
+            "tokensUsed": self.tokens_used,
+            "contextWindowTokens": self.context_window_tokens,
+            "output": self.output,
+        })
+    }
 }
 
 /// One choice inside an ask-user question.
@@ -5131,6 +5523,17 @@ pub fn provider_retry_abort_rpc_message(reason: &str) -> String {
     }
 }
 
+/// Mid-stream body decode failure reported by the CLI reqwest client.
+///
+/// This is a flaky SSE break, not a dead socket. The same reason often
+/// recovers and keeps editing, so it must **not** join
+/// [`is_hard_transport_retry_reason`] or fail the turn on attempt 1.
+pub fn is_stream_decode_retry_reason(reason: &str) -> bool {
+    reason
+        .to_ascii_lowercase()
+        .contains("error decoding response body")
+}
+
 /// True when the retry reason looks like a hard transport failure (not a flaky 5xx).
 pub fn is_hard_transport_retry_reason(reason: &str) -> bool {
     let r = reason.to_ascii_lowercase();
@@ -5527,6 +5930,21 @@ mod retry_tests {
         assert!(!is_hard_transport_retry_reason(
             "HTTP 503 Service Unavailable"
         ));
+    }
+
+    #[test]
+    fn stream_decode_error_is_not_a_hard_abort() {
+        let reason = "reqwest error stream: Transport error: error decoding response body";
+        assert!(is_stream_decode_retry_reason(reason));
+        assert!(is_stream_decode_retry_reason(
+            "Transport error: Error decoding response body"
+        ));
+        assert!(!is_stream_decode_retry_reason(
+            "error sending request for url"
+        ));
+        assert!(!is_hard_transport_retry_reason(reason));
+        assert!(!should_abort_provider_retry_ex(1, 15, "retrying", reason));
+        assert!(!should_abort_provider_retry_ex(3, 15, "retrying", reason));
     }
 
     #[test]
@@ -6486,6 +6904,29 @@ fn json_id_u64(v: Option<&Value>) -> Option<u64> {
 #[cfg(test)]
 mod cached_token_route_tests {
     use super::*;
+
+    #[test]
+    fn unwrap_session_info_reads_the_pager_envelope() {
+        let raw = serde_json::json!({
+            "result": {
+                "sessionId": "s1",
+                "model": "grok-4.7",
+                "context": { "used": 3300, "total": 500000 }
+            }
+        });
+        let body = unwrap_session_info(raw).unwrap();
+        assert_eq!(body["model"], "grok-4.7");
+        assert_eq!(body["context"]["total"], 500000);
+    }
+
+    #[test]
+    fn unwrap_session_info_reads_a_string_envelope_and_surfaces_errors() {
+        let raw =
+            serde_json::json!(r#"{"result":{"sessionId":"s","context":{"used":1,"total":2}}}"#);
+        assert!(unwrap_session_info(raw).is_ok());
+        let err = unwrap_session_info(serde_json::json!({ "error": "no session" })).unwrap_err();
+        assert_eq!(err, "no session");
+    }
 
     #[test]
     fn rewind_unsupported_error_matches_method_not_found() {

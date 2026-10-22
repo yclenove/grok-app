@@ -616,8 +616,11 @@ pub fn disk_usage() -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn home() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
-        let g = crate::paths::APP_HOME_ENV_LOCK.lock().unwrap();
+    fn home() -> (
+        crate::session_migration::test_home::AppHomeEnvGuard,
+        PathBuf,
+    ) {
+        let g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let dir = std::env::temp_dir().join(format!(
             "grok-skin-presets-{}-{}",
             std::process::id(),
@@ -640,7 +643,6 @@ mod tests {
             "{err}"
         );
         let _ = fs::remove_dir_all(&dir);
-        std::env::remove_var("GROK_APP_HOME");
     }
 
     #[test]
@@ -650,7 +652,6 @@ mod tests {
         assert!(index_path().is_file());
         assert!(list_presets().unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
-        std::env::remove_var("GROK_APP_HOME");
     }
 
     #[test]
@@ -684,7 +685,6 @@ mod tests {
         assert_eq!(listed[0].id, saved.id);
         assert_eq!(listed[0].name, "New");
         let _ = fs::remove_dir_all(&home_dir);
-        std::env::remove_var("GROK_APP_HOME");
     }
 
     #[test]
@@ -724,7 +724,6 @@ mod tests {
             .collect();
         assert!(leftover.is_empty(), "unexpected export zips: {leftover:?}");
         let _ = fs::remove_dir_all(&home_dir);
-        std::env::remove_var("GROK_APP_HOME");
     }
 
     #[test]
@@ -747,6 +746,13 @@ mod tests {
             "must not return raw video path: {thumb:?}"
         );
         let _ = fs::remove_dir_all(&home_dir);
-        std::env::remove_var("GROK_APP_HOME");
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        reserved_name_not_overwritten,
+        index_atomic_roundtrip,
+        replace_from_dir_keeps_id_and_updates_manifest,
+        materialize_inspects_library_dir_without_zip,
+        preset_thumb_path_skips_raw_video,
+    );
 }

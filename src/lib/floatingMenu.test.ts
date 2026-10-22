@@ -40,6 +40,29 @@ function rect(
 }
 
 describe("computeFloatingPos", () => {
+  it("does not impose a 120px floor on a short space below the trigger", () => {
+    const pos = computeFloatingPos(rect({ top: 680, left: 40, width: 80, height: 32 }), { placement: "down" });
+    expect(pos.maxHeight).toBe(42);
+    expect(pos.top + pos.maxHeight).toBe(760);
+  });
+
+  it("caps an above menu to the available space instead of its old minimum", () => {
+    const pos = computeFloatingPos(rect({ top: 60, left: 40, width: 80, height: 32 }), { placement: "up" });
+    expect(pos.maxHeight).toBe(46);
+    expect(pos.top - pos.maxHeight).toBe(8);
+  });
+
+  it("bottom anchoring budgets above the trigger regardless of placement preference", () => {
+    const pos = computeFloatingPos(rect({ top: 60, left: 40, width: 80, height: 32 }), { anchor: "bottom", placement: "down" });
+    expect(pos.maxHeight).toBe(46);
+    expect(768 - pos.bottom! - pos.maxHeight).toBe(8);
+  });
+
+  it("never creates a negative height when the trigger has no space above", () => {
+    const pos = computeFloatingPos(rect({ top: 10, left: 40, width: 80, height: 32 }), { placement: "up" });
+    expect(pos.maxHeight).toBe(0);
+  });
+
   it("prefers above when more space above", () => {
     const r = rect({ top: 600, left: 40, width: 120, height: 32 });
     const pos = computeFloatingPos(r, {

@@ -1,32 +1,23 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::APP_HOME_ENV_LOCK;
     use std::sync::Mutex;
 
     fn with_temp_home<F: FnOnce(PathBuf)>(f: F) {
-        let _env = APP_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = crate::session_migration::test_home::IsolatedAppHome::acquire("grok-audit-test");
         // Serialize tests that touch the ledger path.
         static TEST_LOCK: Mutex<()> = Mutex::new(());
         let _t = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let dir = std::env::temp_dir().join(format!(
-            "grok-audit-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("GROK_APP_HOME", &dir);
-        f(dir.clone());
-        let _ = fs::remove_dir_all(&dir);
-        std::env::remove_var("GROK_APP_HOME");
+        f(home.path.clone());
     }
 
     #[test]
     fn sanitize_redacts_and_caps() {
         let s = sanitize_field(
-            &format!("path /tmp/x sk-abcdefghijklmnopqrstuvwxyz012345 {}", "y".repeat(300)),
+            &format!(
+                "path /tmp/x sk-abcdefghijklmnopqrstuvwxyz012345 {}",
+                "y".repeat(300)
+            ),
             MAX_SUMMARY_CHARS,
         );
         assert!(!s.contains("sk-abcdefghijklmnopqrstuvwxyz012345"));
@@ -95,10 +86,15 @@ mod tests {
     }
 
     #[test]
-    fn remember_and_resolve_permission_context() {
+    fn captured_permission_context_is_recorded_without_rpc_lookup() {
         with_temp_home(|_home| {
-            remember_permission("sid", 42, "write_file", Some("notes.md"));
-            record_permission_resolve(Some("sid"), Some("/p"), 42, "deny");
+            record_permission(
+                Some("sid"),
+                Some("/p"),
+                "write_file",
+                "deny",
+                Some("notes.md"),
+            );
             let listed = list_recent(Some(5));
             assert_eq!(listed.len(), 1);
             assert_eq!(listed[0].tool_name, "write_file");
@@ -112,10 +108,7 @@ mod tests {
         assert_eq!(normalize_list_limit(None), DEFAULT_LIST_LIMIT);
         assert_eq!(normalize_list_limit(Some(0)), 1);
         assert_eq!(normalize_list_limit(Some(50)), 50);
-        assert_eq!(
-            normalize_list_limit(Some(99_999)),
-            MAX_LIST_LIMIT
-        );
+        assert_eq!(normalize_list_limit(Some(99_999)), MAX_LIST_LIMIT);
     }
 
     #[test]
@@ -288,5 +281,18 @@ mod tests {
             assert!(only_perm.contains("permission"));
             assert!(!only_perm.contains("tool_start"));
         });
+    }
+
+    #[test]
+    fn fixture_restores_inherited_home_child() {
+        crate::session_migration::test_home::run_fixture_home_contract(|| {
+            append_list_clear_roundtrip();
+        });
+    }
+    #[test]
+    fn fixture_restores_inherited_home_in_fresh_process() {
+        crate::session_migration::test_home::assert_fixture_home_contract(
+            "audit_ledger::tests::fixture_restores_inherited_home_child",
+        );
     }
 }

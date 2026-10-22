@@ -20,17 +20,44 @@
 //!   long silence re-prompts only; only the user may End turn.
 
 mod connect;
+mod connected_composer;
+mod context_control;
 mod control;
 mod events;
 mod events_bg;
+mod execution_publication;
 mod fork_trim;
+mod human_gate_event;
+mod human_gate_identity;
+mod human_gate_invalidation;
+mod human_gate_resolution;
 mod journal;
+mod main_route;
+mod main_runtime;
+mod mock_stream;
+mod model_control;
+mod permission_policy;
+mod permission_request;
+mod permission_resolution;
 mod post_turn_reconcile;
+mod prewarm_route;
 mod process;
+mod process_exit;
+mod project_sandbox;
+mod retirement;
+mod state_event;
 mod stream;
+mod stream_event;
+mod tool_event;
 mod turn;
+mod turn_event_owner;
+mod turn_open;
 mod types;
 mod watchdog;
+mod workspace_context;
+pub use human_gate_identity::UiPlanRequest;
+pub(crate) use workspace_context::RuntimeWorkspaceContext;
+pub use workspace_context::{preview_workspace_runtime, WorkspaceRuntimeReview};
 
 // Multi-session event routing (P0 shared-process load-replay safety).
 pub(crate) use stream::StreamEmitPayload;
@@ -43,17 +70,35 @@ pub(crate) use stream::{
 };
 
 #[cfg(test)]
+pub(crate) mod command_spawn_options_tests;
+#[cfg(test)]
+mod connected_composer_tests;
+#[cfg(test)]
+mod context_control_tests;
+#[cfg(test)]
+mod execution_publication_tests;
+#[cfg(test)]
 mod media_tests;
+#[cfg(test)]
+mod mock_stream_tests;
+#[cfg(test)]
+mod model_control_tests;
+#[cfg(test)]
+pub(crate) mod permission_policy_tests;
+#[cfg(test)]
+mod prewarm_route_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]
 mod stall_tests;
+#[cfg(test)]
+mod state_event_tests;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU32, AtomicU64},
-        Arc,
+        Arc, OnceLock,
     },
 };
 
@@ -65,7 +110,7 @@ use types::*;
 
 pub(crate) use types::{
     extract_tool_input, tool_journal_richer, RewindExecuteResult, RewindPointDto, SessionSnapshot,
-    UiAskUserRequest, UiPermissionRequest, TOOL_OUTPUT_MAX_PUB, TOOL_OUTPUT_SENTINEL,
+    StopReport, UiAskUserRequest, UiPermissionRequest, TOOL_OUTPUT_MAX_PUB, TOOL_OUTPUT_SENTINEL,
 };
 
 pub struct SessionManager {
@@ -76,6 +121,12 @@ pub struct SessionManager {
     pub(super) background: Mutex<HashMap<String, LiveSession>>,
     /// Warm Ready agents for other App sessions (keyed by app session id).
     pub(super) parked: Mutex<HashMap<String, ParkedAgent>>,
+    /// Serialize synchronous cross-map ownership handoff with owner lookups.
+    /// Acquire before a pool-map guard; never hold across await or user I/O.
+    pub(super) runtime_transfer: Mutex<()>,
+    /// In-flight approval receipts only; their guards remove entries on drop.
+    permission_responses: Mutex<HashSet<permission_resolution::PermissionResponseKey>>,
+    human_responses: Mutex<HashSet<human_gate_identity::HumanResponseKey>>,
     /// Process prewarmed while the user is composing a new chat (no session yet).
     pub(super) prewarm: Mutex<PrewarmState>,
     /// Generation token for cancellable prewarm tasks. A task that started
@@ -109,6 +160,9 @@ pub struct SessionManager {
     /// effort change, proxy, …). Flushed when the turn becomes idle so
     /// the next process picks up spawn flags (P0-5 / #598).
     pub(super) pending_soft_respawn: Mutex<HashMap<String, String>>,
+    /// Context window chosen on the new-chat composer, before `session/new`.
+    /// Applied on the first empty session, then cleared.
+    pub(super) pending_context_window: Mutex<Option<u64>>,
 }
 
 impl Default for SessionManager {
@@ -117,12 +171,22 @@ impl Default for SessionManager {
     }
 }
 
+static NATIVE: OnceLock<Arc<SessionManager>> = OnceLock::new();
+
 impl SessionManager {
+    /// Process-wide manager `session_send` / `lib.rs` install into Tauri state.
+    pub fn native() -> Arc<Self> {
+        NATIVE.get_or_init(|| Arc::new(Self::new())).clone()
+    }
+
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
             background: Mutex::new(HashMap::new()),
             parked: Mutex::new(HashMap::new()),
+            runtime_transfer: Mutex::new(()),
+            permission_responses: Mutex::new(HashSet::new()),
+            human_responses: Mutex::new(HashSet::new()),
             prewarm: Mutex::new(PrewarmState::None),
             prewarm_epoch: AtomicU64::new(0),
             tool_identities: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -133,6 +197,7 @@ impl SessionManager {
             connect_lock_busy_ticks: AtomicU32::new(0),
             post_turn_journal_locks: Mutex::new(HashMap::new()),
             pending_soft_respawn: Mutex::new(HashMap::new()),
+            pending_context_window: Mutex::new(None),
         }
     }
 

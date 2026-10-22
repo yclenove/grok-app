@@ -408,31 +408,21 @@ theme = "dark"
 
     #[test]
     fn read_missing_file_reports_exists_false() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = temp_app_home("missing");
-        let prev = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &tmp);
         let res = read_agent_config_toml("independent");
         assert!(!res.exists);
         assert_eq!(res.mode, "independent");
         assert!(res.text.is_empty());
         assert!(res.path.ends_with("config.toml"));
-        match prev {
-            Some(v) => std::env::set_var("GROK_APP_HOME", v),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn read_existing_file_redacts() {
-        let _lock = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = temp_app_home("exists");
-        let prev = std::env::var("GROK_APP_HOME").ok();
         std::env::set_var("GROK_APP_HOME", &tmp);
         let agent = tmp.join("agent-home");
         fs::create_dir_all(&agent).unwrap();
@@ -447,10 +437,11 @@ theme = "dark"
         assert!(res.text.contains("[REDACTED]"), "{}", res.text);
         assert!(!res.text.contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
         assert!(res.sections.iter().any(|s| s == "[model.x]"));
-        match prev {
-            Some(v) => std::env::set_var("GROK_APP_HOME", v),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    crate::session_migration::test_home::fixture_home_variants_contract_tests!(
+        read_missing_file_reports_exists_false,
+        read_existing_file_redacts,
+    );
 }

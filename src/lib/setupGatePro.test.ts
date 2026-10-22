@@ -211,6 +211,34 @@ describe("wizard step + enter home honesty", () => {
     expect(canEnterHome(true)).toBe(true);
   });
 
+  it("U02: CLI present without official account still enters home for offline import", () => {
+    expect(
+      resolveSetupGateBoot({
+        cliFound: true,
+        wizardCompleted: true,
+        legacyDone: false,
+      }).phase,
+    ).toBe("ready");
+    const ready = buildReadyChecklist({ cliFound: true, authOk: false });
+    expect(ready.canEnter).toBe(true);
+    expect(ready.authDeferred).toBe(true);
+    expect(ready.rows.find((r) => r.id === "auth")?.soft).toBe(true);
+  });
+
+  it("U02: CLI absent keeps the original setup gate even if wizard/account look done", () => {
+    expect(
+      resolveSetupGateBoot({
+        cliFound: false,
+        wizardCompleted: true,
+        legacyDone: true,
+      }),
+    ).toMatchObject({ phase: "setup", reason: "cli_missing" });
+    expect(canEnterHome(false)).toBe(false);
+    expect(
+      buildReadyChecklist({ cliFound: false, authOk: true }).canEnter,
+    ).toBe(false);
+  });
+
   it("cannot advance past runtime without CLI", () => {
     expect(canAdvancePastRuntime(false)).toBe(false);
     expect(canAdvancePastRuntime(true)).toBe(true);

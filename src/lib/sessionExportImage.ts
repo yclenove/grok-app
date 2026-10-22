@@ -1488,7 +1488,8 @@ export async function buildExportImagePipeline(
   // code, images) matches chat rendering. Fall back to canvas text if capture
   // fails (tests / headless / WebView quirks).
   let blob: Blob | null = null;
-  if (typeof document !== "undefined") {
+  // A canvas-only document shim cannot mount React or run browser capture.
+  if (typeof window !== "undefined" && typeof document !== "undefined" && document.body) {
     try {
       const { rasterizeShareCardDomPng } = await import(
         "@/lib/shareCardDomExport"

@@ -10,14 +10,14 @@
 //! ## Safety
 //! - Key match is **exact** (never `starts_with`) so `yolo` cannot clobber `yolo_mode`.
 //! - Table headers accept trailing comments (`[ui] # note`).
-//! - [`ensure_agent_home_config_sane`] dedupes broken files only; valid configs are
-//!   never rewritten.
+//! - Runtime permission/compat overlays use the structural provider snapshot;
+//!   malformed configuration is rejected without guessing a repair.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::paths::{agent_config_toml, ensure_app_dirs};
 
@@ -79,6 +79,37 @@ fn finish_join_always_nl(_original: &str, lines: &[String]) -> String {
     joined
 }
 
+/// 定位结束表名的 `]`，跳过**引号内**的 `]`。
+///
+/// TOML 表名可以带引号包住任意字符：`[model."claude-glm-5.3[1M]"]` 的**第一个**
+/// `]` 属于名字本身。早先用 `find(']')` 取到的就是它，于是名字被截断成
+/// `model."claude-glm-5.3[1M]`、剩余部分是 `"]` —— 既不是空也不是注释，整个表头
+/// 被判定为**不是表头**，这张表的字段就被算进了上一张表的 scope，去重时把上一张
+/// 表的同名赋值当成重复项删掉（用户的 `[model.ada-anthropic]` 正是这样丢掉了
+/// `model` / `base_url` / `api_key` / `api_backend`）。
+fn closing_bracket_index(t: &str, is_array: bool) -> Option<usize> {
+    let bytes = t.as_bytes();
+    let mut in_quotes = false;
+    let mut i = if is_array { 2 } else { 1 };
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quotes = !in_quotes,
+            b']' if !in_quotes => {
+                if is_array {
+                    if bytes.get(i + 1) == Some(&b']') {
+                        return Some(i);
+                    }
+                } else {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse a TOML table / array-table header.
 ///
 /// Accepts trailing comments: `[ui] # note`, `[[hooks]] # x`.
@@ -89,16 +120,11 @@ pub fn parse_table_header(trimmed: &str) -> Option<(bool, &str)> {
         return None;
     }
     let is_array = t.starts_with("[[");
+    let end = closing_bracket_index(t, is_array)?;
     let (name, after_close) = if is_array {
-        let end = t.find("]]")?;
-        let name = t[2..end].trim();
-        let after = t[end + 2..].trim();
-        (name, after)
+        (t[2..end].trim(), t[end + 2..].trim())
     } else {
-        let end = t.find(']')?;
-        let name = t[1..end].trim();
-        let after = t[end + 1..].trim();
-        (name, after)
+        (t[1..end].trim(), t[end + 1..].trim())
     };
     if name.is_empty() {
         return None;
@@ -232,14 +258,13 @@ pub fn set_table_bool(text: &str, table: &str, key: &str, value: bool) -> String
 ///
 /// Without this, `~/.claude.json` mcpServers (Playwright, open-websearch, …)
 /// are imported by default and stall first-tool discovery for ~30s.
-pub fn ensure_compat_mcp_disabled(text: &str) -> String {
-    let t = set_table_bool(text, "compat.claude", "mcps", false);
-    set_table_bool(&t, "compat.cursor", "mcps", false)
+pub fn ensure_compat_mcp_disabled(text: &str) -> Result<String, String> {
+    crate::providers::compat_text(text)
 }
 
 /// Write `[compat.claude/cursor] mcps = false` into independent agent-home.
 pub fn apply_compat_mcp_disabled(session_data_mode: &str) -> Result<(), String> {
-    update_config_toml_if_independent(session_data_mode, ensure_compat_mcp_disabled).map(|_| ())
+    crate::providers::sync_compat_runtime(session_data_mode)
 }
 
 /// Upsert `[table] key = "value"`.
@@ -338,6 +363,7 @@ pub fn get_table_string(text: &str, table: &str, key: &str) -> Option<String> {
 ///   merges them and rejects duplicate keys across fragments)
 /// - Array table instance `[[hooks]]`: `"[[hooks]]#N"` so each element is
 ///   independent (keys may repeat across elements)
+#[cfg(test)]
 fn scope_id_for_header(
     is_array: bool,
     name: &str,
@@ -357,6 +383,7 @@ fn scope_id_for_header(
 ///
 /// Returns `(duplicate_assignment_lines, examples)` where examples are
 /// `"scope.key"` strings (capped).
+#[cfg(test)]
 pub fn count_duplicate_assignments(text: &str) -> (usize, Vec<String>) {
     let mut scope = String::new();
     let mut array_ordinals: HashMap<String, usize> = HashMap::new();
@@ -389,179 +416,6 @@ pub fn count_duplicate_assignments(text: &str) -> (usize, Vec<String>) {
         }
     }
     (dups, examples)
-}
-
-/// Drop earlier duplicate assignments; keep the **last** occurrence per
-/// `(table_scope, key)`. Comments, blanks, headers, and unique keys are
-/// preserved in order. Valid configs with no dups return an identical string.
-pub fn dedupe_assignment_keys(text: &str) -> (String, usize) {
-    let (dup_count, _) = count_duplicate_assignments(text);
-    if dup_count == 0 {
-        return (text.to_string(), 0);
-    }
-
-    // Pass 1: last line index for each (scope, key).
-    let mut scope = String::new();
-    let mut array_ordinals: HashMap<String, usize> = HashMap::new();
-    let mut last: HashMap<(String, String), usize> = HashMap::new();
-    let lines: Vec<&str> = text.lines().collect();
-
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if let Some((is_array, name)) = parse_table_header(trimmed) {
-            scope = scope_id_for_header(is_array, name, &mut array_ordinals);
-            continue;
-        }
-        if let Some(key) = assignment_key(trimmed) {
-            last.insert((scope.clone(), key.to_string()), i);
-        }
-    }
-
-    // Pass 2: emit lines, skip non-last duplicate assignments.
-    scope.clear();
-    array_ordinals.clear();
-    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
-    let mut removed = 0usize;
-
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if let Some((is_array, name)) = parse_table_header(trimmed) {
-            scope = scope_id_for_header(is_array, name, &mut array_ordinals);
-            out.push(line);
-            continue;
-        }
-        if let Some(key) = assignment_key(trimmed) {
-            let map_key = (scope.clone(), key.to_string());
-            if last.get(&map_key).copied() != Some(i) {
-                removed += 1;
-                continue;
-            }
-        }
-        out.push(line);
-    }
-
-    let mut joined = out.join("\n");
-    if (text.ends_with('\n') || text.is_empty()) && !joined.ends_with('\n') {
-        joined.push('\n');
-    }
-    (joined, removed)
-}
-
-/// Result of [`ensure_agent_home_config_sane`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigHealReport {
-    /// True when the on-disk file was rewritten.
-    pub changed: bool,
-    /// Absolute path of agent-home config (if resolved).
-    pub path: Option<String>,
-    /// Number of duplicate assignment lines removed.
-    pub removed_duplicates: usize,
-    /// Backup path when a heal write occurred.
-    pub backup_path: Option<String>,
-    /// Short reason when skipped / no-op.
-    pub note: &'static str,
-}
-
-impl ConfigHealReport {
-    fn skipped(note: &'static str) -> Self {
-        Self {
-            changed: false,
-            path: None,
-            removed_duplicates: 0,
-            backup_path: None,
-            note,
-        }
-    }
-}
-
-/// If independent agent-home `config.toml` has duplicate keys, backup and
-/// dedupe (keep last). **Valid files are never written.**
-///
-/// Shared mode: no-op. Missing / empty file: no-op.
-pub fn ensure_agent_home_config_sane(session_data_mode: &str) -> Result<ConfigHealReport, String> {
-    if normalize_mode(session_data_mode) == "shared" {
-        return Ok(ConfigHealReport::skipped("shared_mode"));
-    }
-
-    with_config_write_lock(|| {
-        let path = match resolve_writable_config_path(session_data_mode) {
-            Ok(p) => p,
-            Err(_) => return Ok(ConfigHealReport::skipped("path_refused")),
-        };
-        if !path.is_file() {
-            return Ok(ConfigHealReport {
-                changed: false,
-                path: Some(path.display().to_string()),
-                removed_duplicates: 0,
-                backup_path: None,
-                note: "missing",
-            });
-        }
-        let existing = fs::read_to_string(&path).unwrap_or_default();
-        if existing.trim().is_empty() {
-            return Ok(ConfigHealReport {
-                changed: false,
-                path: Some(path.display().to_string()),
-                removed_duplicates: 0,
-                backup_path: None,
-                note: "empty",
-            });
-        }
-
-        let (dup_count, examples) = count_duplicate_assignments(&existing);
-        if dup_count == 0 {
-            return Ok(ConfigHealReport {
-                changed: false,
-                path: Some(path.display().to_string()),
-                removed_duplicates: 0,
-                backup_path: None,
-                note: "ok",
-            });
-        }
-
-        let (healed, removed) = dedupe_assignment_keys(&existing);
-        if removed == 0 || healed == existing {
-            return Ok(ConfigHealReport {
-                changed: false,
-                path: Some(path.display().to_string()),
-                removed_duplicates: 0,
-                backup_path: None,
-                note: "dedupe_noop",
-            });
-        }
-        let (still, _) = count_duplicate_assignments(&healed);
-        if still > 0 {
-            return Err(format!(
-                "agent-home config.toml still has duplicate keys after heal (examples: {})",
-                examples.join(", ")
-            ));
-        }
-
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let backup = path.with_file_name(format!("config.toml.bak-heal-{nanos}"));
-        fs::copy(&path, &backup).map_err(|e| format!("backup config.toml: {e}"))?;
-        fs::write(&path, &healed).map_err(|e| format!("write healed config.toml: {e}"))?;
-
-        tracing::warn!(
-            target: "agent_home_config",
-            path = %path.display(),
-            backup = %backup.display(),
-            removed,
-            examples = %examples.join(","),
-            "healed agent-home config.toml duplicate keys (kept last assignment)"
-        );
-
-        Ok(ConfigHealReport {
-            changed: true,
-            path: Some(path.display().to_string()),
-            removed_duplicates: removed,
-            backup_path: Some(backup.display().to_string()),
-            note: "healed",
-        })
-    })
 }
 
 /// Strict write: read → transform → write agent-home config.toml.
@@ -600,24 +454,6 @@ pub fn update_config_toml_if_independent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_app_home(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!(
-            "grok-agent-home-cfg-{}-{}-{}",
-            label,
-            std::process::id(),
-            nanos
-        ));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
-        p
-    }
-
     #[test]
     fn refuse_shared_path_resolve() {
         let err = resolve_writable_config_path("shared").unwrap_err();
@@ -625,6 +461,57 @@ mod tests {
         assert!(err.contains("refused") || err.contains("~/.grok"), "{err}");
         // Case-insensitive.
         assert!(resolve_writable_config_path("SHARED").is_err());
+    }
+
+    /// 表名里带 `]` 的引号名（`[model."claude-glm-5.3[1M]"]`）必须被认成表头，
+    /// 否则它的字段会被算进上一张表的 scope，去重时把上一张表的同名赋值删掉。
+    #[test]
+    fn parse_table_header_quoted_name_with_bracket() {
+        assert_eq!(
+            parse_table_header(r#"[model."claude-glm-5.3[1M]"]"#),
+            Some((false, r#"model."claude-glm-5.3[1M]""#))
+        );
+        assert_eq!(
+            parse_table_header(r#"[model."a[b].c"] # note"#),
+            Some((false, r#"model."a[b].c""#))
+        );
+        // 数组表名同样适用
+        assert_eq!(
+            parse_table_header(r#"[[model."x[1]"]]"#),
+            Some((true, r#"model."x[1]""#))
+        );
+    }
+
+    /// 别名表排在 provider 表之后时，provider 的传输字段不能被当成重复项删掉。
+    #[test]
+    fn runtime_overlay_keeps_previous_table_when_next_name_has_bracket() {
+        let text = "\
+[model.ada-anthropic]
+model = \"claude-glm-5.3-flash[1M]\"
+base_url = \"http://relay/anthropic/v1\"
+api_key = \"sk-test\"
+api_backend = \"messages\"
+
+[model.\"claude-glm-5.3[1M]\"]
+model = \"claude-glm-5.3[1M]\"
+base_url = \"http://relay/anthropic/v1\"
+api_key = \"sk-test\"
+app_model_for = \"ada-anthropic\"
+";
+        let (dup, examples) = count_duplicate_assignments(text);
+        assert_eq!(dup, 0, "不同表之间不应被判为重复键: {examples:?}");
+        // Runtime config no longer guesses duplicate-key repairs. Exercise the
+        // real strict overlay, retaining both provider and quoted alias tables.
+        let updated = ensure_compat_mcp_disabled(text).unwrap();
+        assert_eq!(count_duplicate_assignments(&updated).0, 0);
+        assert_eq!(
+            get_table_string(&updated, "model.ada-anthropic", "api_backend").as_deref(),
+            Some("messages")
+        );
+        assert_eq!(
+            get_table_string(&updated, r#"model."claude-glm-5.3[1M]""#, "app_model_for").as_deref(),
+            Some("ada-anthropic")
+        );
     }
 
     #[test]
@@ -702,10 +589,10 @@ mod tests {
 
     #[test]
     fn ensure_compat_mcp_disabled_sets_both() {
-        let t = ensure_compat_mcp_disabled("");
+        let t = ensure_compat_mcp_disabled("").unwrap();
         assert_eq!(get_table_bool(&t, "compat.claude", "mcps"), Some(false));
         assert_eq!(get_table_bool(&t, "compat.cursor", "mcps"), Some(false));
-        let again = ensure_compat_mcp_disabled(&t);
+        let again = ensure_compat_mcp_disabled(&t).unwrap();
         assert_eq!(get_table_bool(&again, "compat.claude", "mcps"), Some(false));
     }
 
@@ -736,107 +623,43 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_keeps_last_and_preserves_unique() {
-        let bad = "\
-todo_gate_enabled = false
-[ui]
-permission_mode = \"always-approve\"
-yolo = true
-yolo = false
-[subagents]
-enabled = true
-";
-        assert!(count_duplicate_assignments(bad).0 >= 1);
-        let (healed, removed) = dedupe_assignment_keys(bad);
-        assert!(removed >= 1);
-        assert_eq!(count_duplicate_assignments(&healed).0, 0, "{healed}");
-        assert!(healed.contains("yolo = false"), "{healed}");
-        assert!(!healed.contains("yolo = true") || healed.matches("yolo =").count() == 1);
-        assert!(healed.contains("permission_mode"), "{healed}");
-        assert!(healed.contains("[subagents]"), "{healed}");
-        // Idempotent on clean text.
-        let (again, r2) = dedupe_assignment_keys(&healed);
-        assert_eq!(r2, 0);
-        assert_eq!(again, healed);
-    }
-
-    #[test]
-    fn dedupe_does_not_merge_array_table_elements() {
-        let text = "\
-[[hooks]]
-event = \"a\"
-command = \"x\"
-[[hooks]]
-event = \"b\"
-command = \"y\"
-";
-        assert_eq!(count_duplicate_assignments(text).0, 0);
-        let (out, removed) = dedupe_assignment_keys(text);
-        assert_eq!(removed, 0);
-        assert_eq!(out, text);
-    }
-
-    #[test]
-    fn dedupe_merges_split_ui_tables() {
-        // Two [ui] fragments with same key — TOML treats as one table.
-        let bad = "[ui]\nyolo = false\n\n[ui]\nyolo = true\npermission_mode = \"x\"\n";
-        assert!(count_duplicate_assignments(bad).0 >= 1);
-        let (healed, removed) = dedupe_assignment_keys(bad);
-        assert!(removed >= 1);
-        assert_eq!(count_duplicate_assignments(&healed).0, 0, "{healed}");
-        assert!(healed.contains("yolo = true"), "{healed}");
-        assert!(healed.contains("permission_mode"), "{healed}");
-    }
-
-    #[test]
-    fn ensure_sane_noops_on_valid_and_heals_dups() {
-        let _guard = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = temp_app_home("heal");
-        std::env::set_var("GROK_APP_HOME", &home);
-        let agent_home = home.join("agent-home");
-        fs::create_dir_all(&agent_home).unwrap();
-        let cfg = agent_home.join("config.toml");
-
-        // Valid → no write.
-        fs::write(&cfg, "[ui]\nyolo = true\n").unwrap();
-        let before = fs::read_to_string(&cfg).unwrap();
-        let r = ensure_agent_home_config_sane("independent").unwrap();
-        assert!(!r.changed);
-        assert_eq!(r.note, "ok");
-        assert_eq!(fs::read_to_string(&cfg).unwrap(), before);
-
-        // Dup → heal + backup.
-        fs::write(
-            &cfg,
-            "[ui]\nyolo = true\nyolo = false\npermission_mode = \"always-approve\"\n",
-        )
-        .unwrap();
-        let r2 = ensure_agent_home_config_sane("independent").unwrap();
-        assert!(r2.changed);
-        assert!(r2.removed_duplicates >= 1);
-        assert!(r2.backup_path.is_some());
-        let after = fs::read_to_string(&cfg).unwrap();
-        assert_eq!(count_duplicate_assignments(&after).0, 0, "{after}");
-        assert!(after.contains("yolo = false"), "{after}");
-
-        // Shared → skip.
-        let r3 = ensure_agent_home_config_sane("shared").unwrap();
-        assert!(!r3.changed);
-        assert_eq!(r3.note, "shared_mode");
-
-        std::env::remove_var("GROK_APP_HOME");
-        let _ = fs::remove_dir_all(&home);
+    fn invalid_configuration_is_rejected_without_rewriting_or_backup() {
+        let _fixture = crate::session_migration::test_home::IsolatedAppHome::acquire(
+            "grok-agent-config-rejection",
+        );
+        let cfg = crate::paths::agent_config_toml();
+        for text in [
+            "[ui]\nyolo = true\nyolo = false\n",
+            "[ui]\nyolo = false\n[ui]\nyolo = true\n",
+            "compat = false\n",
+        ] {
+            fs::write(&cfg, text).unwrap();
+            assert!(apply_compat_mcp_disabled("independent").is_err());
+            assert_eq!(fs::read_to_string(&cfg).unwrap(), text);
+            assert!(!cfg.with_file_name("config.toml.tmp").exists());
+            assert!(!fs::read_dir(cfg.parent().unwrap())
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("config.toml.bak")));
+        }
+        fs::write(&cfg, "ui = { yolo_mode = false }\n").unwrap();
+        apply_compat_mcp_disabled("independent").unwrap();
+        let valid = fs::read_to_string(&cfg).unwrap();
+        assert!(valid.contains("yolo_mode = false"));
+        apply_compat_mcp_disabled("independent").unwrap();
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), valid);
+        apply_compat_mcp_disabled("shared").unwrap();
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), valid);
     }
 
     #[test]
     fn shared_soft_skip_and_independent_write() {
-        let _guard = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = temp_app_home("write");
-        std::env::set_var("GROK_APP_HOME", &home);
+        let _fixture = crate::session_migration::test_home::IsolatedAppHome::acquire(
+            "grok-agent-config-write",
+        );
 
         assert_eq!(
             update_config_toml_if_independent("shared", |t| set_top_level_bool(
@@ -858,8 +681,19 @@ command = \"y\"
         assert!(path.ends_with("config.toml"));
         let disk = fs::read_to_string(&path).unwrap();
         assert_eq!(get_top_level_bool(&disk, "auto_wake_enabled"), Some(true));
+    }
 
-        std::env::remove_var("GROK_APP_HOME");
-        let _ = fs::remove_dir_all(&home);
+    #[test]
+    fn fixture_restores_inherited_home_child() {
+        crate::session_migration::test_home::run_fixture_home_contract(|| {
+            invalid_configuration_is_rejected_without_rewriting_or_backup();
+            shared_soft_skip_and_independent_write();
+        });
+    }
+    #[test]
+    fn fixture_restores_inherited_home_in_fresh_process() {
+        crate::session_migration::test_home::assert_fixture_home_contract(
+            "agent_home_config::tests::fixture_restores_inherited_home_child",
+        );
     }
 }

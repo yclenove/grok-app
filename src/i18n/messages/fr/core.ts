@@ -1,6 +1,7 @@
 /** fr messages — domain: core */
 export const frCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "La réponse à la demande d’autorisation a échoué. {error}",
   "image.loadingOriginal": "Chargement de l’original…",
   "image.originalFailed": "Impossible de charger l’original. L’aperçu reste disponible.",
   "app.tagline": "MIT · Non officiel · Projet sœur grok-go",
@@ -74,6 +75,8 @@ export const frCore = {
   "agent.streamStallBanner": "Aucun flux ni progression d’outil depuis environ {seconds} s. Continuez d’attendre ou terminez ce tour.",
   "agent.streamStallCancel": "Terminer le tour",
   "agent.streamStallEndTurn": "Terminer le tour",
+  "agent.streamStallEndAndContinue": "Terminer et continuer",
+  "agent.streamStallContinueNotReady": "Le tour est encore en cours d’arrêt — réessayez Continuer dans un instant.",
   "agent.streamStallKeepWaiting": "Continuer d’attendre",
   "agent.streamStallHardEndToast": "Le tour a été fermé après récupération de l’hôte — votre réponse a été conservée.",
   "agent.ghostStreamingHealed": "Le message n’a jamais atteint l’agent. Restauré dans la zone de saisie — renvoyez.",

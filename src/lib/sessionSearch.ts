@@ -22,6 +22,8 @@ export type SessionContentHit = {
   matchCount: number;
   updatedAt?: string;
   archived?: boolean;
+  /** Native journal vs imported catalog. Default session. */
+  kind?: "session" | "importedHistory";
 };
 
 export type SessionSearchHits = {
@@ -97,7 +99,17 @@ export type MergedSessionHit = {
   archived?: boolean;
   /** Optional score when hybrid ranking is active (higher = better). */
   score?: number;
+  kind?: "session" | "importedHistory";
 };
+
+/** Palette / sidebar hits for `imp:` catalog rows open the imported reader. */
+export function searchHitOpensImportedHistory(hit: {
+  id: string;
+  kind?: string | null;
+}): boolean {
+  if (hit.kind === "importedHistory") return true;
+  return /^imp:[0-9a-f-]{36}$/i.test(hit.id.trim());
+}
 
 /** Compact badge kind for a merged row (UI labels via i18n). */
 export type SessionSearchBadge = "title" | "content" | "both";
@@ -681,6 +693,7 @@ export function mergeSessionSearchHits(
         titleMatch: !!titleHit,
         contentMatch: true,
         archived: h.archived ?? titleHit?.archived,
+        kind: h.kind,
       });
       seen.add(h.id);
       if (out.length >= maxSessions) break;
@@ -701,6 +714,7 @@ export function mergeSessionSearchHits(
       titleMatch: q.length > 0,
       contentMatch: !!c,
       archived: s.archived,
+      kind: c?.kind,
     });
     seen.add(s.id);
     if (out.length >= maxSessions && rankMode !== "hybrid") return out;
@@ -725,6 +739,7 @@ export function mergeSessionSearchHits(
       titleMatch: false,
       contentMatch: true,
       archived: h.archived,
+      kind: h.kind,
     });
     if (rankMode !== "hybrid" && out.length >= maxSessions) break;
   }

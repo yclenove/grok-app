@@ -63,6 +63,8 @@ function renderPalette(
     onRunAction: vi.fn(),
     onPickProject: vi.fn(),
     onPickSession: vi.fn(),
+    onRebuildCatalog: vi.fn(),
+    onCancelCatalogRebuild: vi.fn(),
   };
   render(
     <SearchPalette
@@ -81,6 +83,8 @@ function renderPalette(
       sessions={sessions}
       projectsCatalog={projectsCatalog}
       contentSearchLoading={false}
+      contentError={null}
+      catalogRebuild={null}
       emptyState={null}
       settingsShortcutHint="Ctrl+,"
       {...handlers}
@@ -210,6 +214,53 @@ describe("SearchPalette", () => {
     renderPalette();
     const listbox = screen.getByRole("listbox");
     expect(listbox.closest(".search-panel__results")).not.toBeNull();
+  });
+
+  it("offers an explicit index rebuild for an imported schema error", async () => {
+    const { onRebuildCatalog } = renderPalette({
+      actions: [],
+      projects: [],
+      sessionHits: [],
+      itemCount: 0,
+      contentError: "SCHEMA_UNSUPPORTED",
+      emptyState: {
+        kind: "no_matches",
+        titleKey: "search.noMatches",
+        hintKey: "search.noMatchesHintKeyword",
+        showClearFilters: false,
+      },
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Imported history search needs an index rebuild.",
+    );
+    expect(screen.getByRole("alert")).toHaveAttribute(
+      "data-error-code",
+      "SCHEMA_UNSUPPORTED",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Rebuild index" }));
+    expect(onRebuildCatalog).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("No matches")).not.toBeInTheDocument();
+  });
+
+  it("shows rebuild progress and routes cancellation", async () => {
+    const { onCancelCatalogRebuild } = renderPalette({
+      contentError: "SCHEMA_UNSUPPORTED",
+      catalogRebuild: {
+        running: true,
+        phase: "rebuilding",
+        completedRevisions: 3,
+        totalRevisions: 8,
+        report: null,
+        errorCode: null,
+      },
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Rebuilding imported history index (3/8)…",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Cancel rebuild" }));
+    expect(onCancelCatalogRebuild).toHaveBeenCalledTimes(1);
   });
 
   it("closes on backdrop click but not on a click inside the panel", async () => {

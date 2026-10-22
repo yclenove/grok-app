@@ -52,6 +52,7 @@ export function MarkdownBody({
   locale = "en",
   imagePathMap,
   onOpenExternalLink,
+  inert = false,
 }: {
   children: string;
   streaming?: boolean;
@@ -62,6 +63,8 @@ export function MarkdownBody({
    * Preview / plan surfaces omit it so Host `open_external_url` runs.
    */
   onOpenExternalLink?: (url: string) => void;
+  /** Imported history: format text without links, media loads, or diagram actions. */
+  inert?: boolean;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const imageLabels = useMemo(() => imageUiLabels(locale), [locale]);
@@ -112,6 +115,7 @@ export function MarkdownBody({
         rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
         components={{
           a: ({ href, children: c }) => {
+            if (inert) return <span>{c}</span>;
             const text = textFromChildren(c).trim();
             const abs = resolveMediaHref(href, text, imagePathMap);
             if (abs) return renderMedia(abs, text || pathBasename(abs));
@@ -150,7 +154,7 @@ export function MarkdownBody({
               if (isSiteRootAbsolutePath(raw)) {
                 return <code className="md-body__code-inline">{c}</code>;
               }
-              const abs = resolveInlineMediaToken(raw, imagePathMap);
+              const abs = inert ? undefined : resolveInlineMediaToken(raw, imagePathMap);
               if (abs) {
                 const media = renderMedia(abs, pathBasename(abs));
                 if (media) return media;
@@ -161,7 +165,7 @@ export function MarkdownBody({
               typeof className === "string"
                 ? /language-([\w#+-]+)/.exec(className)
                 : null;
-            if (isMermaidLanguage(match?.[1])) {
+            if (!inert && isMermaidLanguage(match?.[1])) {
               return (
                 <MermaidBlock
                   streaming={Boolean(streaming)}
@@ -178,7 +182,8 @@ export function MarkdownBody({
             return <code className={className}>{c}</code>;
           },
           img: ({ src, alt }) => {
-            if (!src) return null;
+            if (inert) return <span>{alt ?? ""}</span>;
+            if (!src || typeof src !== "string") return null;
             if (isSiteRootAbsolutePath(src)) return null;
             const mapped =
               resolveInlineMediaToken(src, imagePathMap) ??

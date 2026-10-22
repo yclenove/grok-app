@@ -227,7 +227,7 @@ open /Applications/Grok.app
 - **AppImage**：通用桌面；`chmod +x` 后运行。  
 - **.deb**：Ubuntu / Debian / Mint / Pop!_OS 等。  
 - **.rpm**：Fedora / RHEL / openSUSE 等。  
-- x64 仍用 `ubuntu-22.04`（glibc 2.35）打出三种格式。  
+- x64 仍用 `ubuntu-22.04`（glibc 2.35）打出三种格式。
 - ARM64 用 GitHub 原生 `ubuntu-24.04-arm`（不交叉编译）。AppImage 文件名带 `aarch64`，`.deb` 用 Debian 架构名 `arm64`，`.rpm` 为 `aarch64`。glibc 底线 2.39，对应 Ubuntu 24.04+。`ubuntu-22.04-arm` 自 2026-09-17 起弃用，所以新腿不用它。Updater 键是 `linux-aarch64`（只认 AppImage）。
 
 ## 本地交叉编译（可选，不替代 CI）
@@ -246,10 +246,10 @@ pnpm build:win   # tauri + cargo-xwin + makensis
 
 **Agent 必须盯到整条 `release` 工作流结束**，不能只看 tag 已推或 mac/linux 先绿。`fail-fast: false` 时某一平台失败仍可能先挂上其它安装包，形成「Latest 缺 Windows」这类半成品（见 v0.2.32 / #1039）。
 
-- [ ] Actions `release`：**五个 Build job 全绿**（macOS-ARM64 / macOS-x64 / Windows-x64 / Linux-x64 / Linux-arm64）  
-- [ ] **`Gate — all platform installers present` 全绿**（`scripts/assert-release-assets.sh`；缺 setup.exe / portable.zip / Linux ARM64 包等会硬失败）  
+- [ ] Actions `release`：**五个 Build job 全绿**（macOS-ARM64 / macOS-x64 / Windows-x64 / Linux-x64 / Linux-arm64）
+- [ ] **`Gate — all platform installers present` 全绿**（`scripts/assert-release-assets.sh`；缺 setup.exe / portable.zip / Linux ARM64 包等会硬失败）
 - [ ] `Publish SHA256SUMS + website downloads` 全绿  
-- [ ] GitHub Release 页含：两 dmg、**`*-setup.exe`、`*-portable.zip`**、Linux x64 与 ARM64 的 AppImage、deb、rpm  
+- [ ] GitHub Release 页含：两 dmg、**`*-setup.exe`、`*-portable.zip`**、Linux x64 与 ARM64 的 AppImage、deb、rpm
 - [ ] 若配置了 updater secrets：`latest.json` 含 `linux-aarch64`（指向 `Grok_*_aarch64.AppImage`）
 - [ ] 同一 Release 含稳定别名（`Grok_mac_x64.dmg` / `Grok_windows_x64-setup.exe` 等）+ `downloads.json`
 - [ ] Release body 仅为该版本变更列表（无整页下载表/安装长文）  

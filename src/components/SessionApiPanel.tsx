@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "@/lib/api";
 import { isDesktopHost } from "@/lib/api";
+import { SessionReceiptPanel } from "./SessionReceiptPanel";
 import type { MessageKey, Vars } from "@/i18n";
 
 type TFn = (key: MessageKey, vars?: Vars) => string;
@@ -159,6 +160,7 @@ export function SessionApiPanel({ t }: { t: TFn }) {
         </code>
         <div className="settings-row__hint">{t("settings.sessionApi.httpHint")}</div>
         <div className="settings-row__hint">{t("settings.sessionApi.busyHint")}</div>
+        <SessionReceiptPanel t={t} />
       </div>
     </div>
   );

@@ -1,0 +1,173 @@
+/* Reader chrome follows the modal's theme; only the transcript body scrolls. */
+.session-import-reader {
+  container-type: inline-size;
+  container-name: session-import-reader;
+}
+
+.session-import__reader-split {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.4fr);
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.session-import__reader-matches,
+.session-import__reader-events {
+  min-width: 0;
+  min-height: 0;
+}
+
+.session-import__reader-panes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.session-import__reader-split[data-layout="narrow"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.session-import__reader-split[data-layout="wide"] {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.4fr);
+}
+
+.session-import__reader-split[data-matches="0"],
+.session-import__reader-split[data-layout="wide"][data-matches="0"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container session-import-reader (max-width: 719px) {
+  .session-import__reader-split:not([data-layout="wide"]) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.session-import-reader .modal-actions {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.import-reader-actions {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.import-reader-actions__main,
+.import-reader-actions__navigation,
+.import-reader-actions__group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.import-reader-actions__main,
+.import-reader-actions__navigation {
+  justify-content: space-between;
+}
+
+.import-reader-actions p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.import-reader-actions [role="alert"],
+.import-copy-action [role="alert"] {
+  color: var(--danger);
+}
+
+.import-copy-action {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.session-import-reader .session-import__reader-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.session-import-reader .session-import__hits .session-import__list {
+  max-height: min(24vh, 180px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 4px;
+}
+
+.session-import-reader .session-import__hits .session-import__list button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: 6px;
+  height: auto;
+  min-height: 32px;
+  padding: 6px 12px;
+  line-height: 1.4;
+  width: 100%;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.session-import-reader .session-import__hit-kind {
+  white-space: nowrap;
+}
+
+.session-import-reader .session-import__hit-snippet {
+  min-width: 0;
+}
+
+.session-import-reader .session-import__events {
+  /* Avoid a second transcript scrollbar inside the already scrolling body. */
+  max-height: none;
+  overflow: visible;
+}
+
+.session-import__full-text {
+  margin: 0;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+
+.session-import__full-text mark {
+  background: var(--accent-muted);
+  color: inherit;
+  outline: 1px solid var(--accent);
+}
+
+.session-import-text-reader .modal-actions > .session-import__toolbar {
+  width: 100%;
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .import-reader-actions__main > .btn--primary {
+    width: 100%;
+  }
+
+  .import-reader-actions__group {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .session-import-reader .session-import__reader-search > .input {
+    /* The stacked toolbar needs the input's height, not its row width basis. */
+    flex: 0 1 auto;
+  }
+}

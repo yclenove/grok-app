@@ -332,10 +332,10 @@ https://github.com/RongleCat/grok-app/releases/latest/download/SHA256SUMS
 
 官网发布前：
 
-- [ ] 十个安装按钮（或短链）都 302/直达 GitHub，响应不是官网域名吐出的文件流  
+- [ ] 十个安装按钮（或短链）都 302/直达 GitHub，响应不是官网域名吐出的文件流
 - [ ] Mac 两个架构都在，默认不明显导向 Intel  
 - [ ] Windows 主按钮是 setup.exe，绿色版是次入口  
-- [ ] Linux x64 与 ARM64 都能看到 AppImage + deb + rpm  
+- [ ] Linux x64 与 ARM64 都能看到 AppImage + deb + rpm
 - [ ] 页面版本号与 `downloads.json` 的 `tag` 一致（若构建时有拉清单）  
 - [ ] 国内访问失败时仍有「GitHub Releases」兜底链接  
 - [ ] 没有链到 `grok-desktop-latest`

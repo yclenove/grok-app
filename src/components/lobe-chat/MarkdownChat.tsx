@@ -23,7 +23,7 @@ import {
 import { createT } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { VideoUi, videoUiLabels } from "@/components/VideoUi";
-import { FilePathCard } from "@/components/FilePathCard";
+import { FilePathCard, type FilePathCardLabels } from "@/components/FilePathCard";
 import type { ResourceOpenTarget } from "@/components/resource-viewer/types";
 import { HighlightedText } from "@/components/HighlightedText";
 import {
@@ -45,10 +45,7 @@ import {
   resolveFileToken,
 } from "@/lib/pathRefs";
 import { parsePathLineCitation } from "@/lib/pathLineCitation";
-import {
-  filePathCardTokens,
-  getFilePathCardLabels,
-} from "@/lib/filePathCardPref";
+import { filePathCardTokens } from "@/lib/filePathCardPref";
 import { isExternalHttpUrl } from "@/lib/externalLinkPref";
 import {
   createSoftBufferState,
@@ -56,11 +53,9 @@ import {
   type SoftBufferState,
 } from "@/lib/softStreamBuffer";
 import { softCloseMarkdown } from "@/lib/softCloseMarkdown";
-import {
-  resolveMarkdownPaintSource,
-  resolveStreamMarkdownParseMs,
-} from "@/lib/streamRenderPolicy";
+import { useStreamingMarkdownSource } from "@/hooks/useStreamingMarkdownSource";
 import { splitStableMarkdownTail } from "@/lib/markdownTail";
+import { revealInOsLabel } from "@/lib/appPlatform";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
@@ -134,12 +129,11 @@ export const MARKDOWN_CHAT_REHYPE_PLUGINS_NO_MATH =
   MARKDOWN_REHYPE_PLUGINS_NO_MATH;
 
 /**
- * Streaming prefix view — memoized on the source string so the already-
- * painted markdown prefix is not re-parsed (and rehype-katex not re-run) on
- * every ~110ms tail flush. ReactMarkdown itself is synchronous and unmemoized,
- * so the memo boundary must live one level up.
+ * Memoize every parsed segment, not just the stable prefix. Parent stream
+ * ticks and soft-buffer state changes must not reparse unchanged painted
+ * text. Components stay in the key so links, locale and find state update.
  */
-const MarkdownStablePrefix = memo(function MarkdownStablePrefix({
+const MarkdownPaint = memo(function MarkdownPaint({
   source,
   components,
 }: {
@@ -250,6 +244,44 @@ function paintedLeaves(
   };
 }
 
+const fileLabelsCache = new Map<Locale, FilePathCardLabels>();
+
+export function getMarkdownFileLabels(locale: Locale): FilePathCardLabels {
+  let cached = fileLabelsCache.get(locale);
+  if (!cached) {
+    const tr = createT(locale);
+    cached = {
+      open: tr("attach.open"),
+      reveal: revealInOsLabel(tr),
+      copyPath: tr("attach.copyPath"),
+      openInPanel: tr("resources.openInPanel"),
+      openExternal: tr("resources.openExternal"),
+      details: tr("attach.details"),
+      detailsTitle: tr("attach.detailsTitle"),
+      detailsName: tr("attach.detailsName"),
+      detailsType: tr("attach.detailsType"),
+      detailsPath: tr("attach.detailsPath"),
+      detailsResolved: tr("attach.detailsResolved"),
+      detailsStatus: tr("attach.detailsStatus"),
+      detailsMissing: tr("attach.detailsMissing"),
+      detailsOk: tr("attach.detailsOk"),
+      detailsClose: tr("attach.detailsClose"),
+      typeFile: tr("attach.typeFile"),
+      typeUrl: tr("attach.typeUrl"),
+      typeDir: tr("attach.typeDir"),
+      errNotFound: tr("resources.openErr.notFound"),
+      errPathDenied: tr("resources.openErr.pathDenied"),
+      errHostOnly: tr("resources.openErr.hostOnly"),
+      errNoEditor: tr("resources.openErr.noEditor"),
+      errCancelled: tr("resources.openErr.cancelled"),
+      errOther: tr("resources.openErr.other"),
+      errRevealOther: tr("resources.revealErr.other"),
+    };
+    fileLabelsCache.set(locale, cached);
+  }
+  return cached;
+}
+
 function isSimplePlainText(text: string): boolean {
   if (!text || text.length > 500) return false;
   // `$` / `\` keep math (`$E=mc^2$`, `\(x\)`) on the ReactMarkdown path.
@@ -307,7 +339,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   const tr = useMemo(() => createT(locale), [locale]);
   const imageLabels = useMemo(() => imageUiLabels(locale), [locale]);
   const videoLabels = useMemo(() => videoUiLabels(locale), [locale]);
-  const fileLabels = useMemo(() => getFilePathCardLabels(locale), [locale]);
+  const fileLabels = useMemo(() => getMarkdownFileLabels(locale), [locale]);
   const gallery = useMemo(() => {
     if (!imagePathMap) return undefined;
     return Array.from(new Set(Object.values(imagePathMap))).filter(isImagePath);
@@ -352,26 +384,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   const buffered = streaming ? softDisplayed : children || "";
   const liveText = buffered || (streaming ? " " : "");
   const source = normalizeMarkdownMath(softCloseMarkdown(liveText, streaming));
-  const parseMs = resolveStreamMarkdownParseMs(source.length, streaming);
-
-  /**
-   * Throttle ReactMarkdown input while streaming so we re-parse ~4–8×/s instead
-   * of every soft-buffer tick. Longer bodies use a slower cadence; final
-   * (non-streaming) content always syncs immediately. Always keep markdown
-   * rendering (no plain-pre bare-syntax fallback).
-   */
-  const [mdSource, setMdSource] = useState(source);
-  useEffect(() => {
-    if (!streaming || parseMs <= 0) {
-      setMdSource(source);
-      return;
-    }
-    const id = window.setTimeout(() => {
-      setMdSource(source);
-    }, parseMs);
-    return () => window.clearTimeout(id);
-  }, [source, streaming, parseMs]);
-  const painted = resolveMarkdownPaintSource(streaming, source, mdSource);
+  const painted = useStreamingMarkdownSource(source, streaming);
 
   const qFind = findQuery.trim();
   // Fresh counter each render (including stream ticks). Kept on a ref so the
@@ -723,6 +736,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   }, [
     qFind,
     findActiveOccurrence,
+    findOccurrenceBase,
     pathCards,
     projectPath,
     imagePathMap,
@@ -740,13 +754,6 @@ export const MarkdownChat = memo(function MarkdownChat({
   ]);
 
   const isPlain = !streaming && !qFind && isSimplePlainText(painted);
-  const math = sourceHasMath(painted);
-  const remarkPlugins = math
-    ? MARKDOWN_CHAT_REMARK_PLUGINS
-    : MARKDOWN_CHAT_REMARK_PLUGINS_GFM;
-  const rehypePlugins = math
-    ? MARKDOWN_CHAT_REHYPE_PLUGINS
-    : MARKDOWN_CHAT_REHYPE_PLUGINS_NO_MATH;
   // Streaming incremental paint (DSH MarkdownText): freeze the stable prefix
   // so long answers only re-parse the tail each tick. Settled turns always
   // single-render, so a mid-stream block boundary never persists.
@@ -771,26 +778,14 @@ export const MarkdownChat = memo(function MarkdownChat({
         <p>{painted}</p>
       ) : tailSplit.prefix ? (
         <>
-          <MarkdownStablePrefix
+          <MarkdownPaint
             source={tailSplit.prefix}
             components={components}
           />
-          <ReactMarkdown
-            remarkPlugins={remarkPlugins}
-            rehypePlugins={rehypePlugins}
-            components={components}
-          >
-            {tailSplit.tail}
-          </ReactMarkdown>
+          <MarkdownPaint source={tailSplit.tail} components={components} />
         </>
       ) : (
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          components={components}
-        >
-          {painted}
-        </ReactMarkdown>
+        <MarkdownPaint source={painted} components={components} />
       )}
     </div>
   );

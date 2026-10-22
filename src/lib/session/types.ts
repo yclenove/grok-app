@@ -23,6 +23,7 @@ export interface AgentError {
 }
 
 export interface SessionSnapshot {
+  planChromeRevision?: string | null;
   sessionId: string | null;
   agentSessionId?: string | null;
   state: SessionState;
@@ -177,6 +178,8 @@ export interface ContextCompactPayload {
 }
 
 export interface TurnErrorPayload {
+  /** Modern Host already retired the captured gates through an identity-scoped event. */
+  humanGatesInvalidated?: boolean;
   sessionId?: string;
   messageId?: string;
   code?: string;
@@ -191,12 +194,17 @@ export interface StreamPayload {
   messageId?: string;
   text: string;
   done: boolean;
+  /** Host has already retired the turn. Unlike a legacy/raw done tick, this
+   * terminal fence is authoritative even if the cached state event is late. */
+  hostFinalized?: boolean;
   kind?: "assistant" | "thought";
   /** Host hint: open | new | continue | none — split multi-phase thinking. */
   thoughtPhase?: "open" | "new" | "continue" | "none" | string;
 }
 export interface PermissionPayload {
   rpcId: number;
+  /** Opaque Host identity; modern approval replies echo it unchanged. */
+  requestGeneration?: string | null;
   sessionId: string;
   toolCallId: string;
   toolName: string;
@@ -204,6 +212,8 @@ export interface PermissionPayload {
   preview: string;
   scopeKey: string;
   options: unknown;
+  /** Automatic reply failed; the same pending card remains available. */
+  responseError?: string | null;
 }
 
 export interface AskUserOption {
@@ -221,6 +231,7 @@ export interface AskUserQuestionItem {
 
 /** Payload for `session://ask_user` (`_x.ai/ask_user_question`). */
 export interface AskUserPayload {
+  requestGeneration?: string;
   rpcId: number;
   sessionId: string;
   toolCallId?: string | null;
@@ -341,5 +352,17 @@ export function isSessionLiveStreaming(state: SessionState): boolean {
  */
 /** A real prompt turn boundary. Mid-turn steering messages stay inside the active turn. */
 export function isTurnPromptMessage(message: ChatMessage | undefined): boolean {
-  return message?.role === "user" && message.marker !== "interjection";
+  return message?.role === "user" && !isInjectedPromptMarker(message.marker);
+}
+
+/**
+ * Markers for a user-row the user did not type: `interjection` (mid-turn steer)
+ * and `auto_wake` (a turn the host started on its own — PR-monitor wake,
+ * external send). Those stay inside the turn they belong to instead of opening
+ * a new one, so the assistant's answer reads as a continuation.
+ */
+export function isInjectedPromptMarker(
+  marker: string | null | undefined,
+): boolean {
+  return marker === "interjection" || marker === "auto_wake";
 }

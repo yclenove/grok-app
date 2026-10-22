@@ -1,0 +1,10 @@
+.workspace-runtime-modal .modal-body {
+  max-height: min(65dvh, 600px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.workspace-runtime-modal pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

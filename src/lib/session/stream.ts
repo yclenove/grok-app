@@ -1,11 +1,12 @@
 import { isDisplayableAttachmentPath } from "../attachments";
+import { localPathIdentity } from "../pathNormalize";
 import type {
   ChatMessage,
   MessageAttachment,
   MessageSegment,
   StreamPayload,
 } from "./types";
-import { isTurnPromptMessage } from "./types";
+import { isInjectedPromptMarker, isTurnPromptMessage } from "./types";
 import {
   EMPTY_USER_KEY,
   isClientOptimisticId,
@@ -84,7 +85,8 @@ export function applyGeneratedImage(
 
   const prev = messages[idx]!;
   const existing = prev.attachments ?? [];
-  if (existing.some((a) => a.path === path)) return messages;
+  const key = localPathIdentity(path);
+  if (existing.some((a) => localPathIdentity(a.path) === key)) return messages;
   const next = messages.slice();
   next[idx] = {
     ...prev,
@@ -214,7 +216,7 @@ export function applyRemoteUserMessage(
     let existingRealIdx = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
-      if (!m || m.role !== "user" || m.marker === "interjection") continue;
+      if (!m || m.role !== "user" || isInjectedPromptMarker(m.marker)) continue;
       if (userBubbleDedupeKey(m) !== userKey) continue;
       const id = m.id || "";
       if (

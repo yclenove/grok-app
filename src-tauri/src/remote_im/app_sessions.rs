@@ -294,6 +294,8 @@ mod tests {
             model_id: None,
             archived: false,
             pinned: false,
+            provider_id: None,
+            agent_execution: None,
             mode: None,
             effort: None,
             permission_policy: None,
@@ -312,7 +314,6 @@ mod tests {
             workspace_id: None,
             workspace_root_snapshot: None,
             workspace_capability: None,
-            provider_id: None,
         }
     }
 

@@ -1,6 +1,7 @@
 /** Simplified Chinese messages — domain: core */
 export const zhCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "权限回复失败。{error}",
   "image.loadingOriginal": "正在加载原文件…",
   "image.originalFailed": "原文件加载失败，仍可查看预览。",
   "app.tagline": "MIT · 非 xAI 官方 · 姐妹项目 grok-go",
@@ -74,6 +75,8 @@ export const zhCore = {
   "agent.streamStallBanner": "约 {seconds} 秒无流式片段或工具活动。可继续等待或结束本轮。",
   "agent.streamStallCancel": "结束本轮",
   "agent.streamStallEndTurn": "结束本轮",
+  "agent.streamStallEndAndContinue": "结束并继续",
+  "agent.streamStallContinueNotReady": "本轮还在结束，请稍后再点继续",
   "agent.streamStallKeepWaiting": "继续等待",
   "agent.streamStallHardEndToast": "Host 已恢复收尾，本轮内容已保留。",
   "agent.ghostStreamingHealed": "消息没有真正发给 Agent。已恢复到输入框，请重新发送。",

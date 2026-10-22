@@ -13,6 +13,7 @@ import {
 } from "react";
 import { createT } from "@/i18n";
 import * as api from "@/lib/api";
+import { isWorkspaceChangedError, requestWorkspaceRuntimeReview } from "@/lib/workspaceRuntime";
 import {
   isGeneralProject,
   projectDisplayName,
@@ -411,7 +412,8 @@ export function useSessionConnect(opts: {
             h.viewingSessionIdRef.current === preferredId) ||
           isSameView(originView, h.currentViewFocus())
         ) {
-          h.setLocalError(String(e));
+          h.setLocalError(isWorkspaceChangedError(e) ? h.tr("workspace.runtime.explain") : String(e));
+          if (preferredId && isWorkspaceChangedError(e)) requestWorkspaceRuntimeReview(preferredId);
         }
         return null;
       } finally {

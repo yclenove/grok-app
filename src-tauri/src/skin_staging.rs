@@ -156,8 +156,11 @@ pub fn abort_inspect(inspect_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn home_guard() -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
-        let g = crate::paths::APP_HOME_ENV_LOCK.lock().unwrap();
+    fn home_guard() -> (
+        crate::session_migration::test_home::AppHomeEnvGuard,
+        std::path::PathBuf,
+    ) {
+        let g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-skin-staging-{}-{}",
             std::process::id(),
@@ -178,7 +181,6 @@ mod tests {
         assert!(err.starts_with("busy"), "{err}");
         abort_upload(&a.upload_id).unwrap();
         let _ = fs::remove_dir_all(&tmp);
-        std::env::remove_var("GROK_APP_HOME");
     }
 
     #[test]
@@ -189,6 +191,10 @@ mod tests {
         let a = begin_upload().expect("upload while inspect exists");
         abort_upload(&a.upload_id).unwrap();
         let _ = fs::remove_dir_all(&tmp);
-        std::env::remove_var("GROK_APP_HOME");
     }
+
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        second_begin_is_busy,
+        inspect_does_not_block_upload,
+    );
 }

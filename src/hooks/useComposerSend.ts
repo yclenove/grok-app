@@ -10,7 +10,8 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
-import { serializeDom } from "@/components/composer";
+import { serializeDom } from "@/components/ComposerEditor";
+import { describeWorkspaceSendFailure } from "@/lib/workspaceRuntime";
 import { createT } from "@/i18n";
 import * as api from "@/lib/api";
 import type { AppDialog } from "@/lib/app/appDialogTypes";
@@ -29,7 +30,6 @@ import {
   stripChatTokens,
   type ChatRef,
 } from "@/lib/chatAttach";
-import { awaitComposerSendBarrier } from "@/lib/composerPrefsBarrier";
 import {
   clearComposerProjectDraft,
   loadComposerProjectDraft,
@@ -82,6 +82,8 @@ import {
   resolveComposerSendSessionId,
   type ViewFocus,
 } from "@/lib/viewFocus";
+import { classifyContextSlashLine } from "@/lib/contextInfoSnapshot";
+import { classifyContextWindowSlashLine } from "@/lib/contextWindowCommand";
 import { classifyWorkflowSlashLine } from "@/lib/workflowSlash";
 import type { ExecuteSendFromQueue } from "@/hooks/useSendQueue";
 
@@ -158,6 +160,10 @@ export type ComposerSendHost = {
   getDraft: () => string;
   requestComposerFocus: () => void;
   openWorkflowsSettings: () => void;
+  /** Lone `/context-window` line. Args are the size token, or empty. */
+  onContextWindowSlash: (args: string) => void;
+  /** Lone `/context` line. Opens the pager usage snapshot. */
+  onContextSlash: () => void;
   applySessionTitle: (sessionId: string, title: string) => void;
   restartTurnClock: (sessionId?: string | null, at?: number) => void;
   syncViewedTurnClock: (sessionId: string) => void;
@@ -237,6 +243,8 @@ export function useComposerSend(host: ComposerSendHost) {
     getDraft,
     requestComposerFocus,
     openWorkflowsSettings,
+    onContextWindowSlash,
+    onContextSlash,
     applySessionTitle,
     restartTurnClock,
     syncViewedTurnClock,
@@ -285,7 +293,7 @@ const executeSend = async (opts: {
   }
   const { storedDisplay, att, goalMode: useGoal, fromQueue } = opts;
   const quotesForSend = opts.quotes ?? [];
-  await awaitComposerSendBarrier(!!fromQueue, effortApplyRef.current);
+  if (!fromQueue) await effortApplyRef.current;
   const segments = parseStoredContent(storedDisplay);
   if (isDraftEmpty(segments) && !att.length && !quotesForSend.length) {
     sendInFlightRef.current = false;
@@ -495,6 +503,7 @@ const executeSend = async (opts: {
       sessionId = await ensureConnected({ sessionId: sendTargetId });
     }
     if (!sessionId) {
+      dropIds.add(userMessageId);
       failStrip();
       return false;
     }
@@ -678,8 +687,9 @@ const executeSend = async (opts: {
     return true;
   } catch (e) {
     if (!sendEpochCurrent()) return false;
+    const errorText = describeWorkspaceSendFailure(e, tr, dropIds, userMessageId, viewingTarget() ? sendTargetId : null);
     failStrip();
-    if (viewingTarget()) setLocalError(String(e));
+    if (viewingTarget()) setLocalError(errorText);
     return false;
   } finally {
     for (const key of heldSendKeys) {
@@ -852,6 +862,26 @@ const send = async () => {
         sessionDraftId: viewingSessionIdRef.current ?? session.sessionId,
       });
       openWorkflowsSettings();
+      return;
+    }
+    const contextWindow = classifyContextWindowSlashLine(plain);
+    if (contextWindow) {
+      clearComposerAfterSubmit({
+        clearProjectDraft: session.sessionId == null,
+        clearSessionDraft: session.sessionId != null,
+        sessionDraftId: viewingSessionIdRef.current ?? session.sessionId,
+      });
+      onContextWindowSlash(contextWindow.args);
+      return;
+    }
+    const contextSlash = classifyContextSlashLine(plain);
+    if (contextSlash) {
+      clearComposerAfterSubmit({
+        clearProjectDraft: session.sessionId == null,
+        clearSessionDraft: session.sessionId != null,
+        sessionDraftId: viewingSessionIdRef.current ?? session.sessionId,
+      });
+      onContextSlash();
       return;
     }
   }

@@ -3,7 +3,7 @@ import type { ComposerQuote } from "@/lib/composerQuotes";
 import { previewStoredAsSlash } from "@/lib/draftDoc";
 import { isSessionBusy, type SessionState } from "@/lib/session";
 
-/** Max follow-ups kept per session (FIFO drop oldest when exceeded). */
+/** Max composer-owned follow-ups per session; Host entries are never evicted here. */
 export const SEND_QUEUE_MAX = 20;
 
 export type QueuedSendSource = "composer" | "external";
@@ -18,6 +18,8 @@ export interface QueuedSend {
   createdAt: number;
   /** Absent / composer = typed in this window. `external` = session API. */
   source?: QueuedSendSource;
+  /** Durable Host delivery state; informational, never permission to resend. */
+  externalState?: import("./externalQueueSnapshot").ExternalQueueState;
 }
 
 export function queueSessionKey(sessionId: string | null | undefined): string {
@@ -116,9 +118,9 @@ export function applyExternalQueuePush(
   push: ExternalQueuePush,
   max = SEND_QUEUE_MAX,
 ): { byKey: Record<string, QueuedSend[]>; dropped: number; added: boolean } {
-  const sessionId = (push.sessionId ?? "").trim();
-  const itemId = (push.itemId ?? "").trim();
-  const prompt = (push.prompt ?? "").trim();
+  const sessionId = typeof push?.sessionId === "string" ? push.sessionId.trim() : "";
+  const itemId = typeof push?.itemId === "string" ? push.itemId.trim() : "";
+  const prompt = typeof push?.prompt === "string" ? push.prompt.trim() : "";
   if (!sessionId || sessionId === "__draft__" || !itemId || !prompt) {
     return { byKey, dropped: 0, added: false };
   }
@@ -252,26 +254,40 @@ export function shouldHoldFlushForLive(
   return liveSessionId === claimSessionId;
 }
 
-/**
- * Append item; drop oldest if over max.
- * Returns the new queue and how many oldest items were discarded.
- */
+/** Apply the local composer budget without hiding durable Host-owned entries. */
+function limitComposerQueue(
+  queue: QueuedSend[],
+  max: number,
+): { queue: QueuedSend[]; dropped: number } {
+  const cap = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : SEND_QUEUE_MAX;
+  const count = queue.filter((item) => item.source !== "external").length;
+  const dropped = Math.max(0, count - cap);
+  if (!dropped) return { queue, dropped: 0 };
+  let remaining = dropped;
+  const kept = queue.filter((item) => {
+    if (item.source === "external" || remaining === 0) return true;
+    remaining -= 1;
+    return false;
+  });
+  return { queue: kept, dropped };
+}
+
+/** Append an item; only oldest composer entries consume the local budget. */
 export function enqueueSend(
   queue: QueuedSend[],
   item: QueuedSend,
   max = SEND_QUEUE_MAX,
 ): { queue: QueuedSend[]; dropped: number } {
-  const next = [...queue, item];
-  if (next.length <= max) return { queue: next, dropped: 0 };
-  const dropped = next.length - max;
-  return { queue: next.slice(dropped), dropped };
+  if (item.source === "external") return { queue: [...queue, item], dropped: 0 };
+  return limitComposerQueue([...queue, item], max);
 }
 
 export function removeQueuedSend(
   queue: QueuedSend[],
   id: string,
 ): QueuedSend[] {
-  return queue.filter((q) => q.id !== id);
+  const next = queue.filter((q) => q.id !== id || q.source === "external");
+  return next.length === queue.length ? queue : next;
 }
 
 export type QueueMoveDirection = "up" | "down";
@@ -291,6 +307,9 @@ export function moveQueuedSend(
   if (idx < 0) return queue;
   const target = direction === "up" ? idx - 1 : idx + 1;
   if (target < 0 || target >= queue.length) return queue;
+  if (queue[idx]?.source === "external" || queue[target]?.source === "external") {
+    return queue;
+  }
   const next = queue.slice();
   const [item] = next.splice(idx, 1);
   next.splice(target, 0, item!);
@@ -312,6 +331,9 @@ export function reorderQueuedSend(
   const from = Math.max(0, Math.min(queue.length - 1, Math.trunc(fromIndex)));
   const to = Math.max(0, Math.min(queue.length - 1, Math.trunc(toIndex)));
   if (from === to) return queue;
+  if (queue.slice(Math.min(from, to), Math.max(from, to) + 1).some((item) => item.source === "external")) {
+    return queue;
+  }
   const next = queue.slice();
   const [item] = next.splice(from, 1);
   next.splice(to, 0, item!);
@@ -338,6 +360,7 @@ export function updateQueuedSend(
   if (idx < 0) return queue;
 
   const cur = queue[idx]!;
+  if (cur.source === "external") return queue;
   const nextDisplay =
     patch.storedDisplay !== undefined ? patch.storedDisplay : cur.storedDisplay;
   const nextAttachments =
@@ -401,19 +424,18 @@ export function requeueAtFront(
   if (queue.some((q) => q.id === item.id)) {
     return { queue, dropped: 0 };
   }
-  if (max <= 0) return { queue: [], dropped: queue.length + 1 };
-  // Room for restored head + up to max-1 of the existing queue.
-  const room = max - 1;
-  const dropped = Math.max(0, queue.length - room);
-  const rest = dropped > 0 ? queue.slice(dropped) : queue;
-  return { queue: [item, ...rest], dropped };
+  if (item.source === "external") return { queue: [item, ...queue], dropped: 0 };
+  const cap = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : SEND_QUEUE_MAX;
+  if (cap === 0) return limitComposerQueue([item, ...queue], 0);
+  const rest = limitComposerQueue(queue, cap - 1);
+  return { queue: [item, ...rest.queue], dropped: rest.dropped };
 }
 
 export function getQueueForKey(
   byKey: Record<string, QueuedSend[]>,
   key: string,
 ): QueuedSend[] {
-  return byKey[key] ?? [];
+  return Object.prototype.hasOwnProperty.call(byKey, key) ? byKey[key] ?? [] : [];
 }
 
 export function setQueueForKey(
@@ -490,21 +512,16 @@ export function applyExternalQueueTake(
   byKey: Record<string, QueuedSend[]>,
   take: ExternalQueueTake,
 ): { byKey: Record<string, QueuedSend[]>; removed: boolean } {
-  const itemId = (take.itemId ?? "").trim();
-  if (!itemId) return { byKey, removed: false };
-  const sessionId = (take.sessionId ?? "").trim();
-  const keys = sessionId ? [queueSessionKey(sessionId)] : Object.keys(byKey);
-  let next = byKey;
-  let removed = false;
-  for (const key of keys) {
-    const q = getQueueForKey(next, key);
-    const filtered = removeQueuedSend(q, itemId);
-    if (filtered.length !== q.length) {
-      next = setQueueForKey(next, key, filtered);
-      removed = true;
-    }
+  const itemId = typeof take?.itemId === "string" ? take.itemId.trim() : "";
+  const sessionId = typeof take?.sessionId === "string" ? take.sessionId.trim() : "";
+  if (!itemId || !sessionId || sessionId === "__draft__") {
+    return { byKey, removed: false };
   }
-  return { byKey: next, removed };
+  const key = queueSessionKey(sessionId);
+  const queue = getQueueForKey(byKey, key);
+  const next = queue.filter((item) => item.id !== itemId || item.source !== "external");
+  if (next.length === queue.length) return { byKey, removed: false };
+  return { byKey: setQueueForKey(byKey, key, next), removed: true };
 }
 
 /**
@@ -566,15 +583,16 @@ export function summarizeSendQueue(
     if (item.attachments?.length) withAttachments += 1;
     if (item.goalMode) goalModeCount += 1;
   }
-  const cap = max > 0 ? max : 0;
+  const cap = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : SEND_QUEUE_MAX;
+  const localCount = list.filter((item) => item.source !== "external").length;
   return {
     count,
     withAttachments,
     goalModeCount,
     max: cap,
     isEmpty: count === 0,
-    isFull: cap > 0 && count >= cap,
-    canReorder: count >= 2,
+    isFull: cap > 0 && localCount >= cap,
+    canReorder: canReorderSendQueue(list),
   };
 }
 
@@ -582,7 +600,9 @@ export function summarizeSendQueue(
 export function canReorderSendQueue(
   queue: readonly QueuedSend[] | null | undefined,
 ): boolean {
-  return Array.isArray(queue) && queue.length >= 2;
+  return Array.isArray(queue) && queue.some((item, index) =>
+    index > 0 && item.source !== "external" && queue[index - 1]?.source !== "external",
+  );
 }
 
 /**
@@ -594,7 +614,7 @@ export type ClearSendQueuePlan = {
   count: number;
   /** True when the UI should open a confirm (count > 0). */
   confirmNeeded: boolean;
-  /** Next list after clear (always empty). */
+  /** Host-owned entries remain until an authoritative Host event removes them. */
   next: QueuedSend[];
   /** Safe meta for logs / toasts — count only. */
   logMeta: { clearedCount: number } | null;
@@ -611,12 +631,13 @@ export function planClearSendQueue(
   max: number = SEND_QUEUE_MAX,
 ): ClearSendQueuePlan {
   const summary = summarizeSendQueue(queue, max);
-  const count = summary.count;
+  const list = Array.isArray(queue) ? queue : [];
+  const count = list.filter((item) => item.source !== "external").length;
   return {
     ok: true,
     count,
     confirmNeeded: count > 0,
-    next: [],
+    next: list.filter((item) => item.source === "external"),
     logMeta: count > 0 ? { clearedCount: count } : null,
     summary,
   };
@@ -631,7 +652,10 @@ export function applyClearSendQueuePlan(
   key: string,
   plan: ClearSendQueuePlan,
 ): Record<string, QueuedSend[]> {
-  return setQueueForKey(byKey, key, plan.next);
+  if (!plan.confirmNeeded) return byKey;
+  // Preserve new Host arrivals; never resurrect a taken entry from a stale plan.
+  const retained = getQueueForKey(byKey, key).filter((item) => item.source === "external");
+  return setQueueForKey(byKey, key, retained);
 }
 
 /** Composer strip presentation kinds. */
@@ -658,7 +682,8 @@ export function resolveSendQueueStripState(opts: {
   max?: number;
 }): SendQueueStripState {
   const summary = summarizeSendQueue(opts.queue, opts.max ?? SEND_QUEUE_MAX);
-  const hold = Boolean(opts.flushHold) && summary.count > 0;
+  const hasLocal = opts.queue?.some((item) => item.source !== "external") ?? false;
+  const hold = Boolean(opts.flushHold) && hasLocal;
   if (summary.isEmpty) {
     return {
       kind: "empty",
@@ -673,7 +698,7 @@ export function resolveSendQueueStripState(opts: {
     kind: hold ? "hold" : "queued",
     visible: true,
     count: summary.count,
-    canClear: true,
+    canClear: hasLocal,
     canReorder: summary.canReorder,
     showHold: hold,
   };

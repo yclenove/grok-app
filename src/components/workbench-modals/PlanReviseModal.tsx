@@ -5,13 +5,14 @@ export function PlanReviseModal(props: {
   locale: Locale;
   open: boolean;
   note: string;
+  busy?: boolean;
   onNoteChange: (value: string) => void;
   onClose: () => void;
   onSubmit: () => void;
 }) {
   const tr = createT(props.locale);
   const close = () => {
-    props.onClose();
+    if (!props.busy) props.onClose();
   };
   return (
     <GlassModal
@@ -24,13 +25,15 @@ export function PlanReviseModal(props: {
       className="plan-revise-modal"
       footer={
         <>
-          <button type="button" className="btn btn--ghost" onClick={close}>
+          <button type="button" className="btn btn--ghost" onClick={close} disabled={props.busy}>
             {tr("common.cancel")}
           </button>
           <button
             type="button"
             className="btn btn--solid"
             onClick={props.onSubmit}
+            disabled={props.busy}
+            aria-busy={props.busy}
             data-testid="plan-revise-submit"
           >
             {tr("plan.reviseNoteSubmit")}
@@ -44,6 +47,7 @@ export function PlanReviseModal(props: {
         <textarea
           className="plan-revise-modal__textarea"
           value={props.note}
+          disabled={props.busy}
           onChange={(e) => props.onNoteChange(e.target.value)}
           placeholder={tr("plan.reviseNotePlaceholder")}
           rows={4}

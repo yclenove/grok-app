@@ -10,7 +10,11 @@ fn windows_grok_go_config_candidates() -> Option<Vec<String>> {
             out.push(format!(r"{local}\com.grokgo.desktop\config.json"));
             out.push(format!(r"{local}\GrokGo\config.json"));
         }
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -158,7 +162,7 @@ pub fn session_fork(
 }
 
 /// Set the one-shot CLI `--fork-session` flag (new agent id on next connect).
-/// Soft-respawns the live agent for this chat when the flag is armed so the
+/// Retires this chat's idle agent (or queues a busy one) when the flag is armed so the
 /// next connect can fork instead of reusing the warm process.
 #[tauri::command]
 pub async fn session_set_fork_agent_session(
@@ -167,13 +171,13 @@ pub async fn session_set_fork_agent_session(
     id: String,
     fork_agent_session: bool,
 ) -> Result<store::SessionMeta, String> {
-    let meta = store::set_session_fork_agent_session(&id, fork_agent_session)?;
-    let snap = mgr.snapshot();
-    if fork_agent_session && snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_fork_agent")
-            .await;
-    }
-    Ok(meta)
+    session_spawn_options::apply_session_option(
+        Some(&app),
+        mgr.as_ref(),
+        &id,
+        session_spawn_options::SessionSpawnOption::ForkAgent(fork_agent_session),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -185,6 +189,17 @@ pub async fn session_stop(
     mgr.stop(app, session_id).await
 }
 
+/// Stop a turn and report whether `session/cancel` was delivered.
+/// Callers that only need the snapshot stay on [`session_stop`].
+#[tauri::command]
+pub async fn session_stop_report(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<StopReport, String> {
+    mgr.stop_report(app, session_id).await
+}
+
 /// Approve / revise / abandon pending plan (`_x.ai/exit_plan_mode`).
 #[tauri::command]
 pub async fn session_resolve_plan(
@@ -193,28 +208,26 @@ pub async fn session_resolve_plan(
     decision: String,
     feedback: Option<String>,
     rpc_id: Option<u64>,
+    request_generation: Option<uuid::Uuid>,
     session_id: Option<String>,
 ) -> Result<SessionSnapshot, String> {
-    let target = session_id.clone().filter(|s| !s.trim().is_empty());
-    let result = mgr
-        .resolve_plan(app, decision.clone(), feedback, rpc_id, session_id)
-        .await;
-    if result.is_ok() {
-        if let Some(sid) =
-            target.or_else(|| mgr.snapshot().session_id.filter(|s| !s.trim().is_empty()))
-        {
-            crate::plan_chrome::apply_decision(&sid, &decision, true);
-        }
-    }
-    result
+    mgr.resolve_plan(
+        app,
+        decision,
+        feedback,
+        rpc_id,
+        request_generation,
+        session_id,
+    )
+    .await
 }
 
 /// Load persisted plan chrome for an app session (P1 resume).
 #[tauri::command]
 pub fn session_plan_chrome_get(
     session_id: String,
-) -> Result<Option<crate::plan_chrome::PlanChromeStored>, String> {
-    Ok(crate::plan_chrome::load_plan_chrome_for_ui(&session_id))
+) -> Result<Option<crate::plan_chrome::PlanChromeView>, String> {
+    Ok(crate::plan_chrome::load_plan_chrome_view(&session_id))
 }
 
 /// Save plan chrome from the UI (hard dismiss / soft hide).
@@ -222,8 +235,12 @@ pub fn session_plan_chrome_get(
 pub fn session_plan_chrome_set(
     session_id: String,
     chrome: crate::plan_chrome::PlanChromeStored,
+    expected_revision: Option<String>,
 ) -> Result<(), String> {
-    crate::plan_chrome::save_plan_chrome(&session_id, &chrome)
+    if !chrome.user_closed {
+        return Err("UI plan writes only support conditional dismissal".into());
+    }
+    crate::plan_chrome::dismiss_plan_chrome(&session_id, expected_revision.as_deref())
 }
 
 /// Read agent-side plan_mode.json + plan.md for the app session (resume UI).
@@ -242,10 +259,18 @@ pub async fn session_resolve_ask_user(
     decision: String,
     answers: Option<serde_json::Value>,
     rpc_id: Option<u64>,
+    request_generation: Option<uuid::Uuid>,
     session_id: Option<String>,
 ) -> Result<SessionSnapshot, String> {
-    mgr.resolve_ask_user(app, decision, answers, rpc_id, session_id)
-        .await
+    mgr.resolve_ask_user(
+        app,
+        decision,
+        answers,
+        rpc_id,
+        request_generation,
+        session_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -270,6 +295,7 @@ pub async fn session_resolve_permission(
     app: tauri::AppHandle,
     mgr: State<'_, Arc<SessionManager>>,
     rpc_id: u64,
+    request_generation: Option<uuid::Uuid>,
     decision: String,
     option_id: Option<String>,
     scope_key: Option<String>,
@@ -279,7 +305,15 @@ pub async fn session_resolve_permission(
     tool_name: Option<String>,
 ) -> Result<SessionSnapshot, String> {
     mgr.resolve_permission(
-        app, rpc_id, decision, option_id, scope_key, session_id, options, tool_name,
+        app,
+        rpc_id,
+        request_generation,
+        decision,
+        option_id,
+        scope_key,
+        session_id,
+        options,
+        tool_name,
     )
     .await
 }
@@ -306,6 +340,14 @@ pub async fn session_pending_ask_user(
     session_id: Option<String>,
 ) -> Result<Option<crate::session_manager::UiAskUserRequest>, String> {
     Ok(mgr.pending_ask_user(session_id))
+}
+
+#[tauri::command]
+pub fn session_pending_plan(
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<Option<crate::session_manager::UiPlanRequest>, String> {
+    Ok(mgr.pending_plan(session_id))
 }
 
 #[tauri::command]
@@ -399,7 +441,11 @@ pub async fn cli_install_latest(
 ) -> Result<crate::cli_install::CliInstallResult, String> {
     let allow = match allow_unverified {
         Some(v) => v,
-        None => store::load_settings_async().await.allow_unverified_cli_install,
+        None => {
+            store::load_settings_async()
+                .await
+                .allow_unverified_cli_install
+        }
     };
     let result = crate::cli_install::install_cli_latest(app, allow).await?;
     // Remember last install verification for Doctor.
@@ -514,7 +560,7 @@ pub fn open_http_url(url: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn projects_list() -> Result<Vec<Project>, String> {
-    Ok(store::load_projects())
+    store::load_projects_checked()
 }
 
 /// Default cwd for chats without a bound project folder (`workspaces/general`).
@@ -530,11 +576,7 @@ pub async fn project_add(path: String, trust: bool) -> Result<Project, String> {
 }
 
 #[tauri::command]
-pub async fn project_add_ssh(
-    alias: String,
-    path: String,
-    trust: bool,
-) -> Result<Project, String> {
+pub async fn project_add_ssh(alias: String, path: String, trust: bool) -> Result<Project, String> {
     store::add_ssh_project(&alias, path, trust)
 }
 
@@ -558,7 +600,7 @@ pub async fn project_trust(id: String) -> Result<Project, String> {
 
 /// Set or clear the project-level permission tier (L10).
 /// `policy = null` / empty / `"inherit"` → fall back to app default.
-/// When this project is the live Host context, sync agent policy immediately.
+/// Refresh effective permissions for this project's running and parked chats.
 #[tauri::command]
 pub async fn project_set_permission_policy(
     app: tauri::AppHandle,
@@ -566,23 +608,12 @@ pub async fn project_set_permission_policy(
     id: String,
     policy: Option<String>,
 ) -> Result<Project, String> {
-    let p = store::set_project_permission_policy(&id, policy)?;
-    let (live_proj, live_sess) = mgr.current_context_ids();
-    if live_proj.as_deref() == Some(id.as_str()) {
-        let prefs = store::resolve_composer_prefs(Some(&id), live_sess.as_deref());
-        if let Err(e) = mgr
-            .apply_permission_policy(&app, &prefs.permission_policy)
-            .await
-        {
-            tracing::warn!("project_set_permission_policy apply live: {e}");
-        }
-    }
-    Ok(p)
+    permission_preferences::save_project_permission(Some(&app), &mgr, &id, policy).await
 }
 
 /// Set or clear the project-level OS sandbox profile.
 /// `profile = null` / empty / `"inherit"` → fall back to app Settings.
-/// When this project is the live Host context, soft-respawn so the flag applies.
+/// Refresh this project's live, background and parked owners; defer busy turns.
 #[tauri::command]
 pub async fn project_set_sandbox_profile(
     app: tauri::AppHandle,
@@ -590,12 +621,7 @@ pub async fn project_set_sandbox_profile(
     id: String,
     profile: Option<String>,
 ) -> Result<Project, String> {
-    let p = store::set_project_sandbox_profile(&id, profile)?;
-    let (live_proj, _) = mgr.current_context_ids();
-    if live_proj.as_deref() == Some(id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "project_sandbox").await;
-    }
-    Ok(p)
+    session_spawn_options::apply_project_sandbox(Some(&app), mgr.as_ref(), &id, profile).await
 }
 
 #[tauri::command]
@@ -653,7 +679,7 @@ pub async fn sessions_list() -> Result<Vec<SessionMeta>, String> {
 pub async fn sessions_search(
     query: String,
     limit: Option<u32>,
-) -> Result<Vec<crate::session_content_search::SessionContentHit>, String> {
+) -> Result<crate::session_content_search::SessionContentSearchResponse, String> {
     let lim = limit.unwrap_or(20).min(50) as usize;
     // Blocking disk scan — run off the async runtime.
     let q = query;
@@ -1043,7 +1069,7 @@ pub async fn session_move_to_project(
 
 /// Set session-only plugin directories (`--plugin-dir` at next spawn).
 /// Empty clears. Does not change global Extensions / installed plugins.
-/// Soft-respawns the live agent when this chat is the active shell.
+/// Retires this chat's idle agent, or queues a busy one, wherever it is tracked.
 #[tauri::command]
 pub async fn session_set_plugin_dirs(
     app: tauri::AppHandle,
@@ -1051,13 +1077,13 @@ pub async fn session_set_plugin_dirs(
     id: String,
     plugin_dirs: Vec<String>,
 ) -> Result<SessionMeta, String> {
-    let meta = store::set_session_plugin_dirs(&id, plugin_dirs)?;
-    let snap = mgr.snapshot();
-    if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_plugin_dirs")
-            .await;
-    }
-    Ok(meta)
+    session_spawn_options::apply_session_option(
+        Some(&app),
+        mgr.as_ref(),
+        &id,
+        session_spawn_options::SessionSpawnOption::PluginDirs(plugin_dirs),
+    )
+    .await
 }
 
 /// After AGENTS.md / project rules change: clear agent session ids for chats
@@ -1128,7 +1154,7 @@ pub async fn session_set_extra_rules(
 }
 
 /// Set or clear per-session max agent turns (`grok --max-turns` at next spawn).
-/// `None` / `0` clears (inherit global). Soft-respawns the live agent for this chat.
+/// `None` / `0` clears (inherit global). Rebinds this chat's agent wherever tracked.
 #[tauri::command]
 pub async fn session_set_max_agent_turns(
     app: tauri::AppHandle,
@@ -1136,13 +1162,13 @@ pub async fn session_set_max_agent_turns(
     id: String,
     max_agent_turns: Option<u32>,
 ) -> Result<SessionMeta, String> {
-    let meta = store::set_session_max_agent_turns(&id, max_agent_turns)?;
-    let snap = mgr.snapshot();
-    if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_max_agent_turns")
-            .await;
-    }
-    Ok(meta)
+    session_spawn_options::apply_session_option(
+        Some(&app),
+        mgr.as_ref(),
+        &id,
+        session_spawn_options::SessionSpawnOption::MaxTurns(max_agent_turns),
+    )
+    .await
 }
 
 /// Set or clear per-session system prompt override
@@ -1158,17 +1184,13 @@ pub async fn session_set_system_prompt_override(
     system_prompt_override: Option<String>,
 ) -> Result<SessionMeta, String> {
     let meta = store::set_session_system_prompt_override(&id, system_prompt_override)?;
-    mgr.invalidate_spawn_flags_for_session(
-        &app,
-        &meta.id,
-        "session_system_prompt_override",
-    )
-    .await;
+    mgr.invalidate_spawn_flags_for_session(&app, &meta.id, "session_system_prompt_override")
+        .await;
     Ok(meta)
 }
 
 /// Set or clear per-session `--no-ask-user` override (CLI ≥ 0.2.117).
-/// `None` inherits global Settings. Soft-respawns the live agent for this chat.
+/// `None` inherits global Settings. Rebinds this chat's agent wherever tracked.
 #[tauri::command]
 pub async fn session_set_no_ask_user(
     app: tauri::AppHandle,
@@ -1176,13 +1198,13 @@ pub async fn session_set_no_ask_user(
     id: String,
     no_ask_user: Option<bool>,
 ) -> Result<SessionMeta, String> {
-    let meta = store::set_session_no_ask_user(&id, no_ask_user)?;
-    let snap = mgr.snapshot();
-    if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_no_ask_user")
-            .await;
-    }
-    Ok(meta)
+    session_spawn_options::apply_session_option(
+        Some(&app),
+        mgr.as_ref(),
+        &id,
+        session_spawn_options::SessionSpawnOption::NoAskUser(no_ask_user),
+    )
+    .await
 }
 
 /// Load the App journal for a session.

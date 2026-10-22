@@ -1,6 +1,7 @@
 /** uk messages — domain: core */
 export const ukCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "Не вдалося відповісти на запит дозволу. {error}",
   "image.loadingOriginal": "Завантаження оригіналу…",
   "image.originalFailed": "Не вдалося завантажити оригінал. Попередній перегляд залишається доступним.",
   "app.tagline": "MIT · Неофіційний · Сестринський проєкт grok-go",
@@ -74,6 +75,8 @@ export const ukCore = {
   "agent.streamStallBanner": "Близько {seconds} с немає ані токенів, ані поступу інструментів. Продовжуйте чекати або завершіть цей хід.",
   "agent.streamStallCancel": "Завершити хід",
   "agent.streamStallEndTurn": "Завершити хід",
+  "agent.streamStallEndAndContinue": "Завершити й продовжити",
+  "agent.streamStallContinueNotReady": "Хід ще завершується — натисніть «Продовжити» трохи пізніше.",
   "agent.streamStallKeepWaiting": "Чекати далі",
   "agent.streamStallHardEndToast": "Хід закрито після відновлення Host — вашу відповідь збережено.",
   "agent.ghostStreamingHealed": "Повідомлення не дійшло до агента. Повернуто в поле введення — надішліть знову.",

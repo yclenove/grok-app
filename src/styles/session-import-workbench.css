@@ -1,0 +1,890 @@
+/* Import-specific layout; all surfaces inherit the application's theme. */
+.session-import__status-card,
+.session-import__handoff-workspace {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+}
+
+.session-import__status-card > p:first-child {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.session-import__status-card:is([data-state="failed"], [data-state="recovery_needed"]) {
+  border-inline-start: 3px solid var(--danger);
+}
+
+.session-import__status-card > p:not(:first-child) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.session-import-wizard .session-import__selected-summary {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.session-import__selected-summary > li {
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  background: var(--accent-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.session-import-wizard .session-import__mappings > li,
+.session-import-wizard .session-import__result-list > li {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+  overflow-wrap: anywhere;
+}
+
+.session-import__mappings .c-select {
+  width: 100%;
+  min-width: 0;
+}
+
+.session-import__result-list .tree-imported__actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.session-import__result-page-note {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.session-import__result-group { min-width: 0; margin-bottom: 20px; }
+.session-import__result-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.session-import__result-group-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.session-import__result-count {
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.session-import__result-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.session-import__result-heading strong { min-width: 0; font-size: 13px; font-weight: 600; }
+.session-import__result-badge { color: var(--text-secondary); font-size: 11px; }
+.session-import__result-list [data-group="failed"] .session-import__result-badge { color: var(--danger); }
+.session-import-wizard .session-import__result-list > [data-group="partial"] { border-inline-start: 3px solid var(--accent); }
+.session-import__result-confirm { display: flex; flex-wrap: wrap; gap: 8px; }
+.session-import__result-footer .session-import__result-done { margin-inline-start: auto; }
+.session-import__result-pager { padding-block: 8px; border-top: 1px solid var(--border-subtle); }
+.session-import__result-list .session-import__notice { margin: 0; }
+
+.session-import-wizard .session-import__result-list > [data-group="failed"] {
+  border-inline-start: 3px solid var(--danger);
+}
+
+.modal.glass-modal.session-import-modal.session-import-reader {
+  width: min(94vw, 940px);
+}
+
+.session-import__read-only {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--accent-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.session-import__reader-search > .input {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.session-import-reader .session-import__events {
+  gap: 16px;
+  max-height: 52dvh;
+  margin-top: 16px;
+}
+
+.session-import-reader .session-import__events > li {
+  padding: 16px;
+}
+
+.session-import__event-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.session-import__event-actions:empty {
+  display: none;
+}
+
+.session-import__handoff-workspace > .input {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+/* Continuation review also needs readable long localized actions on narrow windows. */
+.session-import-continuation .btn,
+.session-import-continuation .c-select__trigger {
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height);
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  padding-block: 6px;
+}
+
+.session-import-continuation .c-select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.session-import-continuation .c-select__value {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.session-import-continuation .session-import__pager {
+  flex-wrap: wrap;
+}
+
+.session-import-continuation .input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height);
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.session-import-continuation .session-import__draft {
+  min-height: 220px;
+  background: var(--glass-surface-solid);
+  font-size: 13px;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.session-import__handoff-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.session-import__handoff-grid > section {
+  min-width: 0;
+  margin: 0;
+}
+
+.session-import__handoff-grid > .session-import__handoff-target {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+}
+
+.session-import__handoff-target .session-import__draft {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  flex: 1;
+}
+
+@media (min-width: 761px) {
+  .session-import__handoff-grid[data-reviewing="0"] {
+    grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+  }
+
+  .session-import__handoff-grid[data-reviewing="0"] > .session-import__handoff-target {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}
+
+.session-import__source-intro {
+  margin: 0 0 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.session-import__source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+
+.session-import__source .session-import__group {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+}
+
+.session-import__source .session-import__group-title {
+  margin-bottom: 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.session-import__source .session-import__roots {
+  max-height: min(32dvh, 264px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+  margin: -3px;
+  margin-bottom: 0;
+  gap: 8px;
+}
+
+.session-import__source .session-import__roots button:not(.btn--sm) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 10px;
+  height: auto;
+  min-height: 64px;
+  white-space: normal;
+}
+
+.session-import__source-path {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.session-import__source .session-import__roots .session-import__badge {
+  margin-inline-start: auto;
+}
+
+.session-import__source .session-import__notice {
+  flex: 1 1 100%;
+  text-align: start;
+}
+
+.session-import__source-grid .session-import__group > p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.session-import__source .session-import__workspace-actions {
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.session-import__custom-source > .session-import__toolbar > .btn {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height);
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  padding-block: 6px;
+}
+
+.session-import__source-choice {
+  padding: 12px;
+  margin: 0 0 16px;
+  border-inline-start: 3px solid var(--accent);
+  background: var(--accent-muted);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+
+.session-import__source-choice .session-import__locator {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.session-import__source-actions > .btn--primary {
+  margin-inline-start: auto;
+}
+
+.modal.glass-modal.session-import-modal.session-import-wizard {
+  width: min(94vw, 920px);
+}
+
+.modal.glass-modal.session-import-modal.session-import-wizard--content {
+  width: min(96vw, 1140px);
+  height: min(92dvh, 900px);
+}
+
+.session-import-wizard--content [data-import-content] {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-import-wizard--content .session-import__scan-summary {
+  flex-shrink: 0;
+}
+
+/* A sibling footer reserves space; sticky-in-body hid focused row actions. */
+.session-import-wizard > .modal-actions {
+  flex: 0 0 auto;
+}
+
+.session-import-wizard > .modal-actions .session-import__footer {
+  position: static;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.session-import__action-host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.session-import-wizard .session-import__workspace-roots > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 14px;
+  background: var(--glass-surface-solid);
+}
+
+.session-import__workspace-root-heading strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.session-import-wizard .session-import__workspace-roots .c-select__trigger:disabled {
+  opacity: 1;
+  color: var(--text-secondary);
+}
+
+.session-import-wizard .session-import__workspace-roots .c-select {
+  width: 100%;
+  max-width: 100%;
+}
+
+.session-import__workspace-root-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-import__source-identity {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.session-import__source-identity .c-select__trigger {
+  width: 100%;
+  min-width: 0;
+  justify-content: space-between;
+}
+
+.session-import__source-identity-menu .c-select__option {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.session-import__locator.session-import__source-identity-details {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.session-import-wizard .session-import__workspace-roots .settings-row__desc {
+  margin: 0;
+}
+
+@media (min-width: 761px) {
+  .session-import-wizard .session-import__workspace-roots > li {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 10px 16px;
+  }
+
+  .session-import__workspace-root-actions {
+    grid-column: 2;
+  }
+
+  .session-import__workspace-root-heading {
+    grid-row: 1 / span 2;
+  }
+
+  .session-import__workspace-roots :is(.settings-row__desc, [role="status"]) {
+    grid-column: 1 / -1;
+  }
+}
+
+.session-import-wizard .session-import__steps {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+}
+
+.session-import-wizard .session-import__steps li[data-active="1"] {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.session-import-wizard .session-import__steps button {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.session-import-wizard .session-import__steps [data-active="1"] button {
+  color: var(--accent);
+  background: var(--accent-muted);
+  opacity: 1;
+}
+
+.session-import__step-number {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-active="1"] .session-import__step-number {
+  border-color: var(--accent);
+}
+
+.session-import__scan-summary > p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.session-import__scan-summary > [role="alert"] {
+  color: var(--danger);
+}
+
+.session-import__scan-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 16px;
+}
+
+.session-import__scan-summary > :is(ul, .session-import__progress) {
+  flex-basis: 100%;
+}
+
+.session-import__workbench {
+  display: grid;
+  grid-template-columns: minmax(290px, 0.8fr) minmax(0, 1.2fr);
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.session-import__candidates-pane,
+.session-import__preview-pane {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--glass-surface-solid);
+}
+
+.session-import__candidates-pane {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+}
+
+.session-import__preview-pane {
+  padding: 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.session-import__pane-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.session-import__preview-pane .session-import__peek {
+  border: none;
+  margin: 0;
+  padding: 0;
+  background: none;
+}
+
+.session-import__preview-pane .session-import__peek > p:first-child {
+  margin-top: 0;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.session-import__preview-pane .session-import__events {
+  max-height: none;
+  overflow: visible;
+}
+
+.session-import__empty-preview {
+  display: grid;
+  align-content: center;
+  min-height: 200px;
+  margin: 0;
+  padding: 24px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.8;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.session-import__candidates-pane .session-import__bulk-actions {
+  margin: 0 0 12px;
+  gap: 4px;
+  flex-direction: row;
+}
+
+.session-import__bulk-actions .btn {
+  white-space: normal;
+  text-align: start;
+}
+
+.session-import__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.session-import__filters > input {
+  flex: 1 1 100%;
+  width: 100%;
+  min-width: 0;
+}
+
+.session-import__filters > label,
+.session-import__content-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.session-import__candidate-scroll {
+  flex: 1;
+  min-height: 80px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+  margin: -3px;
+}
+
+.session-import__candidate-select,
+.session-import__candidate-footer {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.session-import__pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 12px;
+  padding-top: 8px;
+}
+
+.session-import__pagination > p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-import__pagination .session-import__page-actions {
+  margin: 0;
+  flex-direction: row;
+}
+
+.session-import-wizard .session-import__footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex-direction: row;
+  justify-content: space-between;
+  margin: 12px 0 0;
+  /* Keep the 2px outline + 2px offset inside the scrollport on all sides. */
+  padding: 12px 6px 6px;
+  border-top: 1px solid var(--border-subtle);
+  /* Sticky actions must obscure the scrolled rows, including in glass skins. */
+  background: var(--menu-context-bg);
+}
+
+.session-import__commit-status {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+.session-import__content-options {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.session-import__options-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.session-import__options-toggle[aria-expanded="true"] {
+  margin-bottom: 12px;
+}
+
+.session-import__content-options .session-import__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 760px) {
+  .modal.glass-modal.session-import-modal.session-import-wizard--content {
+    height: auto;
+  }
+
+  .session-import-wizard--content [data-import-content] {
+    display: block;
+    overflow: visible;
+  }
+
+  .session-import__source-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .session-import__workbench {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+  }
+
+  .session-import__candidate-scroll {
+    flex-basis: auto;
+    max-height: 40dvh;
+  }
+
+  .session-import__preview-pane {
+    max-height: 65dvh;
+  }
+
+  .session-import-wizard .session-import__steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 720px) and (min-width: 761px) {
+  .modal.glass-modal.session-import-modal.session-import-wizard--content {
+    --modal-gap: 12px;
+    --modal-pad-y: 16px;
+  }
+
+  .session-import-wizard .session-import__steps {
+    padding-bottom: 8px;
+    margin-bottom: 10px;
+  }
+
+  .session-import-wizard .session-import__steps button {
+    padding-block: 4px;
+  }
+
+  .session-import-wizard .session-import__page-status {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 2px 12px;
+  }
+
+  .session-import-wizard .session-import__page-line {
+    grid-column: 2;
+    grid-row: 1;
+    margin-top: 0;
+  }
+
+  .session-import-wizard .session-import__help {
+    grid-column: 3;
+    grid-row: 1;
+    margin: 0;
+    max-width: 280px;
+  }
+
+  .session-import-wizard--content [data-import-content] {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  .session-import-wizard--content .session-import__bulk-actions,
+  .session-import-wizard--content .session-import__filters {
+    margin-bottom: 8px;
+  }
+
+  .session-import-wizard--content .session-import__workbench {
+    flex: 0 0 420px;
+  }
+
+}
+
+.session-import__revision-notice {
+  padding: 12px 14px;
+  margin-block: 12px;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--danger);
+  border-radius: 10px;
+  background: var(--menu-context-bg);
+  overflow-wrap: anywhere;
+}
+
+.session-import__revision-notice > p:first-child {
+  margin-top: 0;
+}
+
+.session-import__revision-issues {
+  padding-inline-start: 20px;
+  max-height: 32dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.session-import__revision-issues p {
+  white-space: pre-wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-import-wizard .session-import__progress > span {
+    animation: none;
+  }
+}
+
+/* Optional review chrome is outside the measured product modal. Captures
+   omit it by default; ?controls=1 exposes the independent developer toolbar. */
+.session-import-review-controls:not([hidden]) {
+  position: fixed;
+  inset-block-start: 8px;
+  inset-inline-start: 8px;
+  z-index: 12001;
+  max-width: calc(100vw - 16px);
+  padding: 10px 12px;
+  border: 1px solid var(--menu-context-border);
+  border-radius: var(--radius-md);
+  background: var(--menu-context-bg);
+  box-shadow: var(--menu-context-shadow);
+}
+
+.session-import__versions-menu {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.session-import__versions-heading {
+  margin: 4px 8px 8px;
+  font-weight: 600;
+}
+
+.session-import__version-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  text-align: start;
+}
+
+.session-import__version-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.session-import__version-item[aria-checked="true"] {
+  background: var(--bg-hover);
+}
+
+.session-import__versions-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+}
+/* Reuse history-root row chrome inside the existing import dialog. */
+.session-import__source-location-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}

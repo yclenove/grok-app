@@ -34,9 +34,14 @@ pub fn ensure_app_dirs() -> std::io::Result<PathBuf> {
     let root = app_data_root();
     std::fs::create_dir_all(root.join("projects"))?;
     std::fs::create_dir_all(root.join("sessions"))?;
+    std::fs::create_dir_all(root.join("imports"))?;
+    std::fs::create_dir_all(root.join("imports").join("entries"))?;
+    std::fs::create_dir_all(root.join("imports").join("staging"))?;
     std::fs::create_dir_all(root.join("logs"))?;
     // Agent profile (config.toml / optional auth) when session_data_mode=independent.
     std::fs::create_dir_all(root.join("agent-home"))?;
+    // Per-process GROK_HOME snapshots (#1293). Not the canonical profile.
+    std::fs::create_dir_all(root.join("agent-proc"))?;
     // Clipboard paste / picker-written attachment files.
     std::fs::create_dir_all(root.join("attachments").join("paste"))?;
     // Multi-account auth snapshots.
@@ -213,44 +218,16 @@ pub fn percent_encode_path_component(s: &str) -> String {
 /// Locate the on-disk agent session directory for a given agent session id.
 /// Layout: `{GROK_HOME}/sessions/{percent-encoded-cwd}/{agent_session_id}/`
 ///
-/// `cwd_hint` (project path) avoids a directory scan when known.
+/// A specified cwd only selects that workspace (encoded short path or verified
+/// `.cwd` metadata for long paths). Without a cwd, the agent must be unique in
+/// this home; repeated ids in different workspaces are ambiguous.
 pub fn find_agent_session_dir(
     agent_session_id: &str,
     cwd_hint: Option<&str>,
     session_data_mode: &str,
 ) -> Option<PathBuf> {
-    if agent_session_id.is_empty() {
-        return None;
-    }
     let home = resolve_agent_grok_home(session_data_mode);
-    let sessions = home.join("sessions");
-    if !sessions.is_dir() {
-        return None;
-    }
-
-    if let Some(cwd) = cwd_hint.filter(|s| !s.is_empty()) {
-        let encoded = percent_encode_path_component(cwd);
-        let candidate = sessions.join(encoded).join(agent_session_id);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
-    // Fallback: scan cwd folders for this agent session id
-    let Ok(entries) = fs::read_dir(&sessions) else {
-        return None;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let candidate = path.join(agent_session_id);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
+    crate::session_execution::find_in_home(&home, agent_session_id, cwd_hint)
 }
 
 /// Join agent session root + relative path like `images/1.jpg`.

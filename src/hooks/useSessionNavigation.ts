@@ -14,6 +14,7 @@ import {
 } from "react";
 import * as api from "@/lib/api";
 import type { Project, SessionRow } from "@/lib/app/sidebarModels";
+import { resolveImportedNativeTarget } from "@/lib/sessionImport/nativeTarget";
 import {
   hydrateSessionJournal,
   type HydrateSessionJournalResult,
@@ -196,13 +197,13 @@ export type NewChatOpts = {
 };
 
 export type UseSessionNavigationResult = {
-  openSession: (s: SessionRow, project?: Project | null) => Promise<void>;
+  openSession: (s: SessionRow | string, project?: Project | null) => Promise<void>;
   newChat: (
     project?: Project | null,
     opts?: NewChatOpts,
   ) => Promise<void>;
   openSessionRef: MutableRefObject<
-    (s: SessionRow, project?: Project | null) => Promise<void>
+    (s: SessionRow | string, project?: Project | null) => Promise<void>
   >;
   openingSessionIdRef: MutableRefObject<string | null>;
   invalidateOpenPipelines: () => void;
@@ -302,7 +303,28 @@ export function useSessionNavigation(opts: {
   }, [focusedSessionId, viewingSessionIdRef]);
 
   const openSession = useCallback(
-    async (s: SessionRow, project?: Project | null) => {
+    async (target: SessionRow | string, project?: Project | null) => {
+      let s: SessionRow;
+      if (typeof target === "string") {
+        // Bind lookup ownership before the first await. A sidebar/new-chat
+        // navigation or another lookup must prevent late metadata taking over.
+        invalidateOpenPipelines();
+        const lookupGen = openSessionGenRef.current;
+        const origin = viewingSessionIdRef.current;
+        const current = () => lookupGen === openSessionGenRef.current
+          && origin === viewingSessionIdRef.current;
+        try {
+          const resolved = await resolveImportedNativeTarget(target);
+          if (!current()) return;
+          s = resolved.row;
+          project = resolved.project;
+        } catch (cause) {
+          if (!current()) return;
+          throw cause;
+        }
+      } else {
+        s = target;
+      }
       const host = hostRef.current;
       const proj = host.catalog.resolveProject(s, project);
       host.chrome.goToChat();
@@ -504,7 +526,7 @@ export function useSessionNavigation(opts: {
         }, WARM_CONNECT_DEBOUNCE_MS);
       }
     },
-    [bumpViewEpoch, hostRef, noteOpened, setLiveHost, setSession, viewingSessionIdRef],
+    [bumpViewEpoch, hostRef, invalidateOpenPipelines, noteOpened, setLiveHost, setSession, viewingSessionIdRef],
   );
 
   /**

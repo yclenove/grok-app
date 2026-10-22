@@ -141,11 +141,13 @@ mod tests {
         }
     }
 
+    crate::session_migration::test_home::fixture_home_contract_tests!(
+        rewind_fail_inflated_child_bootstraps_cut_and_keeps_ten_turns,
+    );
+
     #[test]
     fn rewind_fail_inflated_child_bootstraps_cut_and_keeps_ten_turns() {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
         let tmp = std::env::temp_dir().join(format!(
             "grok-app-rewind-fail-safe-{}-{}",
             std::process::id(),
@@ -184,7 +186,6 @@ mod tests {
         assert_eq!(kept.len(), 10);
         assert_eq!(kept.last().map(|m| m.content.as_str()), Some("a5"));
 
-        std::env::remove_var("GROK_APP_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 }

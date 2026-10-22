@@ -38,6 +38,7 @@ export type PlanStatusBarProps = {
   planRpcId?: number | null;
   /** Restored chrome waiting for Build re-park / reconnect. */
   planNeedsResume?: boolean;
+  busy?: boolean;
   entries: unknown[];
   labels: PlanStatusBarLabels;
   onApprove?: () => void;
@@ -78,6 +79,7 @@ export function PlanStatusBar({
   planWaiting,
   planRpcId = null,
   planNeedsResume = false,
+  busy = false,
   entries,
   labels,
   onApprove,
@@ -144,6 +146,7 @@ export function PlanStatusBar({
         aria-label={labels.aria}
         data-testid="plan-status-bar"
         data-kind={model.kind}
+        aria-busy={busy}
       >
       <div className="plan-bar__main">
         <span className="plan-bar__icon" aria-hidden>
@@ -205,6 +208,7 @@ export function PlanStatusBar({
             type="button"
             className="btn btn--solid btn--sm plan-bar__btn"
             onClick={onApprove}
+            disabled={busy}
           >
             {labels.approve}
           </button>
@@ -214,6 +218,7 @@ export function PlanStatusBar({
             type="button"
             className="btn btn--ghost btn--sm plan-bar__btn"
             onClick={() => onRequestChanges()}
+            disabled={busy}
           >
             {labels.changes}
           </button>
@@ -238,6 +243,7 @@ export function PlanStatusBar({
             type="button"
             className="icon-btn plan-bar__close"
             onClick={() => void onDismiss()}
+            disabled={busy}
             aria-label={labels.dismiss}
             title={labels.dismiss}
           >

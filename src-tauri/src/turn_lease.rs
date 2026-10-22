@@ -184,29 +184,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     fn with_home<T>(f: impl FnOnce(&PathBuf) -> T) -> T {
-        let _g = crate::paths::APP_HOME_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "grok-turn-lease-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
-        let prev = std::env::var("GROK_APP_HOME").ok();
-        std::env::set_var("GROK_APP_HOME", &tmp);
-        let _ = crate::paths::ensure_app_dirs();
-        let out = f(&tmp);
-        match prev {
-            Some(v) => std::env::set_var("GROK_APP_HOME", v),
-            None => std::env::remove_var("GROK_APP_HOME"),
-        }
-        let _ = fs::remove_dir_all(&tmp);
-        out
+        let home = crate::session_migration::test_home::IsolatedAppHome::acquire("grok-turn-lease");
+        f(&home.path)
     }
 
     fn sample(session_id: &str) -> TurnLease {
@@ -299,4 +280,28 @@ mod tests {
             assert_eq!(got.agent_session_id.as_deref(), Some("agent-2"));
         });
     }
+
+    fn fixture_panics_restore_home() {
+        let inherited = std::env::var_os("GROK_APP_HOME");
+        let mut owned_path = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_home(|_| {
+                owned_path = std::env::var_os("GROK_APP_HOME").map(std::path::PathBuf::from);
+                panic!("intentional fixture closure unwind");
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(std::env::var_os("GROK_APP_HOME"), inherited);
+        assert!(!owned_path.expect("fixture selected an owned home").exists());
+    }
+
+    crate::session_migration::test_home::fixture_home_variants_contract_tests!(
+        write_and_read_active_lease_roundtrip,
+        mark_interrupted_preserves_pending_tool,
+        clear_removes_file,
+        missing_file_is_none,
+        list_active_skips_interrupted,
+        begin_active_drops_old_pending,
+        fixture_panics_restore_home,
+    );
 }

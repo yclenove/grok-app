@@ -21,9 +21,11 @@ import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import {
   formatTurnErrorBody,
+  turnErrorContinuesOnRetry,
   isToolInlinedInAssistants,
   lastRegenerableAssistantId,
   messageSegments,
+  isInjectedPromptMarker,
   isTurnPromptMessage,
   weaveToolsIntoAssistantSegments,
   type ChatMessage,
@@ -470,8 +472,8 @@ export interface ConversationThreadProps {
     comment: string;
     sourceMessageId?: string;
   }) => void;
-  /** Resume after host_exit / agent_exit (new prompt; not permission RPC). */
-  onContinueInterrupted?: () => void;
+  /** Resume after host_exit / agent_exit / user_stop (new prompt; not permission RPC). */
+  onContinueInterrupted?: (reason: string) => void;
   attachLabels: {
     open: string;
     reveal: string;
@@ -981,8 +983,26 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
     ) : null;
   }
 
+  // A turn the Host started on its own (PR-monitor wake, external send) is not
+  // the user speaking: one quiet line, and the assistant's answer below reads as
+  // a continuation of the turn above instead of a new question.
+  if (m.role === "user" && m.marker === "auto_wake") {
+    const preview = m.content.trim().split("\n")[0] ?? "";
+    return wrap(
+      <div
+        className="lobe-chat-auto-wake"
+        key={m.id}
+        id={m.id}
+        data-message-marker={m.marker}
+        title={m.content.trim()}
+      >
+        {preview}
+      </div>,
+    );
+  }
+
   if (m.role === "user") {
-    const isInterjection = m.marker === "interjection";
+    const isInterjection = isInjectedPromptMarker(m.marker);
     const isLastUser = !isInterjection && lastUserMessageId === m.id;
     const isEditing = editingUserMessageId === m.id;
     const timeLabel =
@@ -1181,13 +1201,22 @@ const TranscriptMessageRow = memo(function TranscriptMessageRow({
           {canRegenError ? (
             <span className="lobe-chat-error__actions">
               <MessageRegenerateButton
-                label={tr("message.regenerate")}
+                label={
+                  turnErrorContinuesOnRetry(m.content) && onContinueInterrupted
+                    ? tr("endOfTurn.continue")
+                    : tr("message.regenerate")
+                }
                 sameModelLabel={tr("message.regenerateSameModel")}
                 pickModelLabel={tr("message.regeneratePickModel")}
                 disabled={!canRegenerate}
                 models={regenerateModels}
                 currentModelId={regenerateModelId}
                 iconSize={14}
+                onPrimary={
+                  turnErrorContinuesOnRetry(m.content) && onContinueInterrupted
+                    ? () => onContinueInterrupted("transport")
+                    : undefined
+                }
                 onRegenerate={(modelId) => {
                   if (!canRegenerate) return;
                   onRegenerateAssistant?.(

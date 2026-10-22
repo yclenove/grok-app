@@ -1,6 +1,7 @@
 /** ja messages — domain: core */
 export const jaCore = {
   "app.name": "Grok",
+  "perm.replyFailed": "権限リクエストへの応答に失敗しました。{error}",
   "image.loadingOriginal": "元のファイルを読み込み中…",
   "image.originalFailed": "元のファイルを読み込めませんでした。プレビューは引き続き表示できます。",
   "app.tagline": "MIT · 非公式 · 姉妹プロジェクト grok-go",
@@ -74,6 +75,8 @@ export const jaCore = {
   "agent.streamStallBanner": "約 {seconds} 秒間、ストリームもツールの進捗もありません。待ち続けるか、このターンを終了してください。",
   "agent.streamStallCancel": "ターンを終了",
   "agent.streamStallEndTurn": "ターンを終了",
+  "agent.streamStallEndAndContinue": "終了して続ける",
+  "agent.streamStallContinueNotReady": "このターンはまだ終了中です。しばらくしてから続行を押してください。",
   "agent.streamStallKeepWaiting": "待ち続ける",
   "agent.streamStallHardEndToast": "ホスト復旧後にターンを閉じました — 返信は保持されています。",
   "agent.ghostStreamingHealed": "メッセージがエージェントに届きませんでした。コンポーザーに戻しました — もう一度送信してください。",

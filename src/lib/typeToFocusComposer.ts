@@ -9,8 +9,11 @@
 
 import { isTypingTarget } from "@/lib/a11yFocus";
 
-/** Surfaces that must keep their own keyboard (terminal, code, rich text). */
+/** Surfaces that own their keyboard, including independently mounted dialogs. */
 export const TYPE_TO_FOCUS_PROTECTED_SEL = [
+  "[role='dialog']",
+  "[role='alertdialog']",
+  "dialog[open]",
   ".xterm",
   ".xterm-helper-textarea",
   ".sw-terminal",

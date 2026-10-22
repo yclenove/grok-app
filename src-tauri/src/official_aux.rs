@@ -420,9 +420,11 @@ No repo edits. Prefer built-in tools. Keep the final answer concise and complete
         no_ask_user: Some(true),
         fork_session: false,
         grok_home_override: Some(home.clone()),
+        main_profile: None,
         empty_mcp_servers: true,
         ssh_alias: None,
         folder_trust: false,
+        app_session_id: None,
     };
 
     tracing::info!(
@@ -1191,7 +1193,12 @@ pub fn mcp_server_acp_entry_reason() -> (Option<serde_json::Value>, &'static str
     )
 }
 
-fn which_node() -> Option<String> {
+/// Resolve the `node` binary for an injected stdio MCP server.
+///
+/// Shared with the PR-monitor MCP: `process_util::command` keeps a console from
+/// flashing on Windows, and callers fall back to the bare name when `which` is
+/// unavailable rather than dropping the server.
+pub(crate) fn which_node() -> Option<String> {
     for name in ["node", "nodejs"] {
         if let Ok(out) = process_util::command("which").arg(name).output() {
             if out.status.success() {
@@ -1258,9 +1265,12 @@ pub fn native_media_tools_to_disallow_on_custom_main() -> &'static [&'static str
 /// Note: CLI `--disallowed-tools` is **headless-only** (`grok -p`). ACP
 /// `agent stdio` often ignores it, so custom main also installs a PreToolUse
 /// hook via [`sync_native_media_block_hook`].
-pub fn merge_disallowed_tools_for_main(settings_tools: &[String]) -> Vec<String> {
+pub fn merge_disallowed_tools_for_main(
+    settings_tools: &[String],
+    inject_official_aux: bool,
+) -> Vec<String> {
     let mut out: Vec<String> = settings_tools.to_vec();
-    if should_inject_mcp_for_main() {
+    if inject_official_aux {
         for t in native_media_tools_to_disallow_on_custom_main() {
             out.push((*t).to_string());
         }
@@ -1556,14 +1566,29 @@ pub fn path_citation_session_rules() -> &'static str {
 
 /// Merge user session extra_rules with always-on path rules + official-aux inject.
 pub fn merge_extra_rules(user: Option<&str>) -> Option<String> {
+    merge_extra_rules_for_main(
+        user,
+        crate::providers::active_provider_append_prompt().as_deref(),
+        inject_session_rules().is_some(),
+    )
+}
+
+/// Process-scoped main profile policy; no global provider/credential reads.
+pub(crate) fn merge_extra_rules_for_main(
+    user: Option<&str>,
+    channel: Option<&str>,
+    inject: bool,
+) -> Option<String> {
     let path = path_citation_session_rules().trim();
-    let inject = inject_session_rules();
+    let inject = inject.then(|| official_aux_session_rules_text().trim().to_string());
     let user = user
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    // Channel-level rules from the active custom provider (Settings → Providers).
-    let channel = crate::providers::active_provider_append_prompt();
+    let channel = channel
+        .map(str::trim)
+        .filter(|rules| !rules.is_empty())
+        .map(str::to_owned);
     let mut parts: Vec<String> = Vec::with_capacity(4);
     if let Some(u) = user {
         parts.push(u);
@@ -2503,17 +2528,18 @@ A UI screenshot.
 
     #[test]
     fn merge_disallowed_includes_imagine_tools_when_list_nonempty() {
-        // When inject is off, merge still returns settings tools only (no panic).
         let base = vec!["Bash".into()];
-        let merged = merge_disallowed_tools_for_main(&base);
-        assert!(merged.iter().any(|t| t == "Bash"));
-        // Imagine denylist entries are only added when should_inject is true
-        // (env-dependent). Always expose the static list for docs/spawn.
-        let natives = native_media_tools_to_disallow_on_custom_main();
-        assert!(natives.contains(&"image_gen"));
-        assert!(natives.contains(&"image_edit"));
-        assert!(natives.contains(&"image_to_video"));
-        assert!(natives.contains(&"reference_to_video"));
+        assert_eq!(merge_disallowed_tools_for_main(&base, false), base);
+        assert_eq!(
+            merge_disallowed_tools_for_main(&base, true),
+            [
+                "Bash",
+                "image_gen",
+                "image_edit",
+                "image_to_video",
+                "reference_to_video"
+            ]
+        );
     }
 
     #[test]

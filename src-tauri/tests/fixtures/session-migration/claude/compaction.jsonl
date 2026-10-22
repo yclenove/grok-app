@@ -1,0 +1,6 @@
+{"type":"user","uuid":"old-question","parentUuid":null,"sessionId":"claude-compaction","timestamp":"2026-01-01T00:00:00Z","message":{"content":"最初的真实问题"}}
+{"type":"assistant","uuid":"old-answer","parentUuid":"old-question","sessionId":"claude-compaction","timestamp":"2026-01-01T00:00:01Z","message":{"content":"synthetic-old-secret"}}
+{"type":"system","subtype":"compact_boundary","uuid":"boundary","parentUuid":null,"logicalParentUuid":"old-answer","sessionId":"claude-compaction","timestamp":"2026-01-01T00:00:02Z"}
+{"type":"user","uuid":"compact-summary","parentUuid":"boundary","sessionId":"claude-compaction","isCompactSummary":true,"timestamp":"2026-01-01T00:00:03Z","message":{"content":"保留兼容约束（压缩摘要）"}}
+{"type":"user","uuid":"new-question","parentUuid":"compact-summary","sessionId":"claude-compaction","timestamp":"2026-01-01T00:00:04Z","message":{"content":"继续开发"}}
+{"type":"assistant","uuid":"new-answer","parentUuid":"new-question","sessionId":"claude-compaction","timestamp":"2026-01-01T00:00:05Z","message":{"content":"继续处理新问题"}}

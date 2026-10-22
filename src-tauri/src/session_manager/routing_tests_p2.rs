@@ -1,9 +1,6 @@
-
 #[test]
 fn journal_assistant_after_last_user_detects_answered_turn() {
-    let _lock = crate::paths::APP_HOME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _lock = crate::session_migration::test_home::AppHomeEnvGuard::acquire();
     let tmp =
         std::env::temp_dir().join(format!("grok-app-replay-gate-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -39,7 +36,6 @@ fn journal_assistant_after_last_user_detects_answered_turn() {
         },
     );
     assert!(SessionManager::journal_has_assistant_after_last_user(sid));
-    std::env::remove_var("GROK_APP_HOME");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -62,6 +58,8 @@ fn interjection_starts_host_owned_stream_segment() {
     let _ = fsm.begin_stream();
     let now = Instant::now();
     let mut session = LiveSession {
+        turn_open_epoch: 0,
+        workspace_context: None,
         app_session_id: "session-1".into(),
         process_id: "process-1".into(),
         meta: SessionMeta {
@@ -74,6 +72,8 @@ fn interjection_starts_host_owned_stream_segment() {
             model_id: None,
             archived: false,
             pinned: false,
+            provider_id: None,
+            agent_execution: None,
             effort: None,
             mode: None,
             permission_policy: None,
@@ -92,7 +92,6 @@ fn interjection_starts_host_owned_stream_segment() {
             workspace_id: None,
             workspace_root_snapshot: None,
             workspace_capability: None,
-            provider_id: None,
         },
         fsm,
         backend: "mock_acp".into(),
@@ -113,14 +112,17 @@ fn interjection_starts_host_owned_stream_segment() {
         policy: PermissionPolicy::default(),
         provider_retry_attempt: 0,
         provider_retry_aborted: false,
+        last_provider_retry: None,
         needs_history_bootstrap: false,
         pending_plan_rpc_id: None,
         pending_permission_rpc_id: None,
+        pending_permission_reply: None,
         pending_permission_options: None,
         pending_permission_tool_name: None,
         pending_permission_ui: None,
         pending_ask_user_rpc_id: None,
         pending_ask_user_ui: None,
+        human_gates: Default::default(),
         last_activity: now,
         last_stream_progress: now,
         last_stall_emit: None,
@@ -188,6 +190,8 @@ fn pick_interjection_target_rejects_non_streaming_session() {
     // Ready, not streaming
     let now = Instant::now();
     *mgr.inner.lock() = Some(LiveSession {
+        turn_open_epoch: 0,
+        workspace_context: None,
         app_session_id: "session-1".into(),
         process_id: "process-1".into(),
         meta: SessionMeta {
@@ -200,6 +204,8 @@ fn pick_interjection_target_rejects_non_streaming_session() {
             model_id: None,
             archived: false,
             pinned: false,
+            provider_id: None,
+            agent_execution: None,
             effort: None,
             mode: None,
             permission_policy: None,
@@ -218,7 +224,6 @@ fn pick_interjection_target_rejects_non_streaming_session() {
             workspace_id: None,
             workspace_root_snapshot: None,
             workspace_capability: None,
-            provider_id: None,
         },
         fsm,
         backend: "mock_acp".into(),
@@ -239,14 +244,17 @@ fn pick_interjection_target_rejects_non_streaming_session() {
         policy: PermissionPolicy::default(),
         provider_retry_attempt: 0,
         provider_retry_aborted: false,
+        last_provider_retry: None,
         needs_history_bootstrap: false,
         pending_plan_rpc_id: None,
         pending_permission_rpc_id: None,
+        pending_permission_reply: None,
         pending_permission_options: None,
         pending_permission_tool_name: None,
         pending_permission_ui: None,
         pending_ask_user_rpc_id: None,
         pending_ask_user_ui: None,
+        human_gates: Default::default(),
         last_activity: now,
         last_stream_progress: now,
         last_stall_emit: None,
@@ -275,12 +283,14 @@ fn pick_interjection_target_rejects_non_streaming_session() {
 }
 
 /// Minimal Ready session (no ACP child) for lock-ordering tests.
-fn bare_live_session(id: &str, process_id: &str) -> LiveSession {
+pub(super) fn bare_live_session(id: &str, process_id: &str) -> LiveSession {
     let mut fsm = SessionFsm::new();
     let _ = fsm.start_connect();
     let _ = fsm.handshake_ok();
     let now = Instant::now();
     LiveSession {
+        turn_open_epoch: 0,
+        workspace_context: None,
         app_session_id: id.into(),
         process_id: process_id.into(),
         meta: SessionMeta {
@@ -293,6 +303,8 @@ fn bare_live_session(id: &str, process_id: &str) -> LiveSession {
             model_id: None,
             archived: false,
             pinned: false,
+            provider_id: None,
+            agent_execution: None,
             effort: None,
             mode: None,
             permission_policy: None,
@@ -311,7 +323,6 @@ fn bare_live_session(id: &str, process_id: &str) -> LiveSession {
             workspace_id: None,
             workspace_root_snapshot: None,
             workspace_capability: None,
-            provider_id: None,
         },
         fsm,
         backend: "mock_acp".into(),
@@ -332,14 +343,17 @@ fn bare_live_session(id: &str, process_id: &str) -> LiveSession {
         policy: PermissionPolicy::default(),
         provider_retry_attempt: 0,
         provider_retry_aborted: false,
+        last_provider_retry: None,
         needs_history_bootstrap: false,
         pending_plan_rpc_id: None,
         pending_permission_rpc_id: None,
+        pending_permission_reply: None,
         pending_permission_options: None,
         pending_permission_tool_name: None,
         pending_permission_ui: None,
         pending_ask_user_rpc_id: None,
         pending_ask_user_ui: None,
+        human_gates: Default::default(),
         last_activity: now,
         last_stream_progress: now,
         last_stall_emit: None,
@@ -569,3 +583,7 @@ fn rewind_busy_check_allows_idle_background_session() {
         "an unknown chat has no running turn to protect"
     );
 }
+
+crate::session_migration::test_home::fixture_home_contract_tests!(
+    journal_assistant_after_last_user_detects_answered_turn,
+);

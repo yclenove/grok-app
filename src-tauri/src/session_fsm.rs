@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AgentError, AgentErrorCode};
 
+mod connection_lifetime;
+pub(crate) use connection_lifetime::ConnectionLease;
+use connection_lifetime::ConnectionLifetime;
+
 /// Host session lifecycle states (projection targets for UI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,12 +22,31 @@ pub enum SessionState {
 }
 
 /// Pure FSM transitions. No I/O.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 #[allow(dead_code)] // full transition set for PR3+ (crash/reattach/permission)
 pub struct SessionFsm {
     state: SessionState,
     last_error: Option<AgentError>,
+    connection_lifetime: Option<ConnectionLifetime>,
 }
+
+impl Clone for SessionFsm {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state,
+            last_error: self.last_error.clone(),
+            connection_lifetime: self.connection_lifetime.clone(),
+        }
+    }
+}
+
+impl PartialEq for SessionFsm {
+    fn eq(&self, other: &Self) -> bool {
+        self.state == other.state && self.last_error == other.last_error
+    }
+}
+
+impl Eq for SessionFsm {}
 
 impl Default for SessionFsm {
     fn default() -> Self {
@@ -37,6 +60,7 @@ impl SessionFsm {
         Self {
             state: SessionState::Idle,
             last_error: None,
+            connection_lifetime: None,
         }
     }
 
@@ -46,6 +70,12 @@ impl SessionFsm {
 
     pub fn last_error(&self) -> Option<&AgentError> {
         self.last_error.as_ref()
+    }
+
+    pub(crate) fn connection_lease(&self) -> Option<ConnectionLease> {
+        self.connection_lifetime
+            .as_ref()
+            .map(ConnectionLifetime::lease)
     }
 
     pub fn clear_error(&mut self) {
@@ -58,6 +88,7 @@ impl SessionFsm {
             SessionState::Idle | SessionState::Disconnected => {
                 self.state = SessionState::Connecting;
                 self.last_error = None;
+                self.connection_lifetime = Some(ConnectionLifetime::default());
                 Ok(())
             }
             other => Err(FsmError::InvalidTransition {
@@ -72,6 +103,7 @@ impl SessionFsm {
         match self.state {
             SessionState::Connecting => {
                 self.state = SessionState::Ready;
+                self.connection_lifetime = None;
                 Ok(())
             }
             other => Err(FsmError::InvalidTransition {
@@ -87,6 +119,7 @@ impl SessionFsm {
             SessionState::Connecting => {
                 self.state = SessionState::Disconnected;
                 self.last_error = Some(err);
+                self.connection_lifetime = None;
                 Ok(())
             }
             other => Err(FsmError::InvalidTransition {
@@ -138,6 +171,7 @@ impl SessionFsm {
             | SessionState::Connecting => {
                 self.state = SessionState::Disconnected;
                 self.last_error = None;
+                self.connection_lifetime = None;
             }
             SessionState::Idle | SessionState::Disconnected => {
                 self.last_error = None;
@@ -154,6 +188,7 @@ impl SessionFsm {
             | SessionState::Connecting => {
                 self.state = SessionState::Disconnected;
                 self.last_error = Some(err);
+                self.connection_lifetime = None;
                 Ok(())
             }
             other => Err(FsmError::InvalidTransition {
@@ -276,5 +311,63 @@ mod tests {
         fsm.crash("mock agent crashed").unwrap();
         assert_eq!(fsm.state(), SessionState::Disconnected);
         assert_eq!(fsm.last_error().unwrap().code, AgentErrorCode::AgentCrashed);
+    }
+
+    #[test]
+    fn connection_witness_is_revoked_on_every_exit_and_never_revives() {
+        for exit in ["ready", "failed", "soft", "crash", "drop"] {
+            let mut fsm = SessionFsm::new();
+            assert!(fsm.connection_lease().is_none());
+            fsm.start_connect().unwrap();
+            let lease = fsm.connection_lease().unwrap();
+            assert!(lease.check().is_ok());
+            match exit {
+                "ready" => fsm.handshake_ok().unwrap(),
+                "failed" => fsm
+                    .connect_failed(AgentError::new(AgentErrorCode::ConnectFailed, "synthetic"))
+                    .unwrap(),
+                "soft" => fsm.soft_disconnect(),
+                "crash" => fsm.crash("synthetic").unwrap(),
+                "drop" => {
+                    drop(fsm);
+                    assert!(lease.check().is_err());
+                    continue;
+                }
+                _ => unreachable!(),
+            }
+            assert!(lease.check().is_err(), "{exit}");
+            fsm.soft_disconnect();
+            fsm.start_connect().unwrap();
+            assert!(fsm.connection_lease().unwrap().check().is_ok());
+            assert!(lease.check().is_err());
+        }
+    }
+
+    #[test]
+    fn cloned_fsm_has_independent_witness_and_equal_logical_state() {
+        let mut fsm = SessionFsm::new();
+        fsm.start_connect().unwrap();
+        let original = fsm.connection_lease().unwrap();
+        let cloned = fsm.clone();
+        assert_eq!(fsm, cloned);
+        let separate = cloned.connection_lease().unwrap();
+        drop(cloned);
+        assert!(separate.check().is_err());
+        assert!(original.check().is_ok());
+        original.cancel();
+        assert!(fsm.clone().connection_lease().unwrap().check().is_err());
+    }
+
+    #[test]
+    fn moved_fsm_preserves_witness_but_invalid_transition_does_not_revoke_it() {
+        let mut fsm = SessionFsm::new();
+        fsm.start_connect().unwrap();
+        let lease = fsm.connection_lease().unwrap();
+        let mut moved = fsm;
+        assert!(moved.start_connect().is_err());
+        assert!(moved.begin_stream().is_err());
+        assert!(lease.check().is_ok());
+        moved.soft_disconnect();
+        assert!(lease.check().is_err());
     }
 }

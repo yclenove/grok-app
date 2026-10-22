@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   compareSessionsPinThenUpdated,
   groupSessionsByDate,
+  groupPinnedByWorkspaceRun,
   localDayOffset,
   parseSessionUpdatedAt,
-  groupPinnedByWorkspaceRun,
   partitionGlobalPinned,
   sidebarNavSessionIds,
   SIDEBAR_DATE_GROUP_I18N_KEYS,
@@ -280,8 +280,6 @@ describe("sidebarNavSessionIds", () => {
   });
 
   it("does not reclassify hidden-project chats as orphans", () => {
-    // A session whose project exists but is filtered out of the tree must not
-    // sneak back in through the default-workspace bucket.
     const sessions = [
       {
         id: "hidden-chat",

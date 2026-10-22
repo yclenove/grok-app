@@ -27,6 +27,21 @@ use crate::store::SecretsFile;
 /// Reverse-DNS service id shared with app data layout (`com.grokapp.grok-app`).
 const KEYRING_SERVICE: &str = "com.grokapp.grok-app";
 
+/// Tests keep real OS-store behavior without sharing the product's credentials.
+fn keyring_service() -> &'static str {
+    #[cfg(not(test))]
+    {
+        KEYRING_SERVICE
+    }
+    #[cfg(test)]
+    {
+        static TEST_SERVICE: OnceLock<String> = OnceLock::new();
+        TEST_SERVICE
+            .get_or_init(|| format!("{KEYRING_SERVICE}.test.{}", uuid::Uuid::new_v4()))
+            .as_str()
+    }
+}
+
 const KEY_OFFICIAL: &str = "official_api_key";
 const KEY_RELAY: &str = "relay_api_key";
 const KEY_PEXELS: &str = "pexels_api_key";
@@ -51,7 +66,7 @@ static SESSION_CACHE: Mutex<Option<SecretsFile>> = Mutex::new(None);
 /// macOS ask for Keychain password on every cold start.
 fn probe_keychain() -> bool {
     let probe_user = "__grok_app_keychain_probe__";
-    let entry = match keyring::Entry::new(KEYRING_SERVICE, probe_user) {
+    let entry = match keyring::Entry::new(keyring_service(), probe_user) {
         Ok(e) => e,
         Err(e) => {
             tracing::info!(
@@ -107,7 +122,7 @@ fn use_keychain_backend() -> bool {
 }
 
 fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, account).map_err(|e| e.to_string())
+    keyring::Entry::new(keyring_service(), account).map_err(|e| e.to_string())
 }
 
 fn keychain_get(account: &str) -> Option<String> {
@@ -1017,12 +1032,24 @@ mod tests {
     }
 
     #[test]
+    fn test_keyring_service_is_isolated_and_stable() {
+        let service = keyring_service();
+        assert_ne!(service, KEYRING_SERVICE);
+        let prefix = format!("{KEYRING_SERVICE}.test.");
+        let suffix = service
+            .strip_prefix(prefix.as_str())
+            .expect("test namespace");
+        assert!(uuid::Uuid::parse_str(suffix).is_ok());
+        assert_eq!(keyring_service(), service);
+    }
+
+    #[test]
     fn keychain_roundtrip_when_available() {
         if !probe_keychain() {
             return;
         }
         let account = format!("test_roundtrip_{}", std::process::id());
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &account).expect("entry");
+        let entry = keyring_entry(&account).expect("entry");
         let _ = entry.delete_credential();
         entry.set_password("unit-test-secret").expect("set");
         assert_eq!(entry.get_password().unwrap(), "unit-test-secret");
@@ -1034,7 +1061,7 @@ mod tests {
     fn soft_probe_does_not_require_write() {
         // Soft probe must not create credentials; leftover probe accounts should stay absent.
         let _ = probe_keychain();
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, "__grok_app_keychain_probe__") {
+        if let Ok(entry) = keyring_entry("__grok_app_keychain_probe__") {
             // After soft probe, either NoEntry or we cleaned a legacy probe write.
             match entry.get_password() {
                 Err(keyring::Error::NoEntry) => {}
