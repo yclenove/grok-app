@@ -22,132 +22,65 @@ pub(crate) struct GateBusy;
 /// unchanged-cursor check. Real hardware (2026-10-21, independent WH_MOUSE_LL log): the probe
 /// sampled the old cursor, the action moved, then the probe published the old position and a
 /// coordinate-less button landed there. The probe runs in the host process and the action's
-/// `SendInput` in the isolated worker, so the production gate is a named kernel mutex shared by
-/// both (`GCU_HOST_PID` names the host). Not reentrant across threads, not a lease, never held
-/// across an await, and the low-level hooks (listener thread) never take it.
-#[cfg(all(windows, not(test)))]
+/// `SendInput` in the isolated worker, so the production gate is a named kernel mutex. The host
+/// names it with its own pid and ignores `GCU_HOST_PID`. The worker names it with the parent pid
+/// installed at startup. Not reentrant across threads (a Win32 mutex is reentrant on the owning
+/// thread), not a lease, never held across an await, and the low-level hooks never take it.
 mod gate {
-    use std::{sync::OnceLock, time::Duration};
-    use windows::{
-        core::PCWSTR,
-        Win32::{
-            Foundation::{HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0},
-            System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
-        },
-    };
-    /// `0` means no mutex is held (debug-only experiment switch).
-    pub(super) struct Held(isize);
-    impl Drop for Held {
-        fn drop(&mut self) {
-            if self.0 != 0 {
-                // SAFETY: releases the mutex this thread acquired in `acquire`.
-                unsafe {
-                    let _ = ReleaseMutex(HANDLE(self.0 as *mut _));
-                }
-            }
-        }
-    }
-    pub(super) fn acquire(wait: Duration) -> Result<Held, super::GateBusy> {
-        // Debug/test workers only: lets the real-hardware stress test compare gate on and off.
-        #[cfg(all(feature = "test-worker-faults", debug_assertions))]
-        if std::env::var_os("GCU_POINTER_GATE_OFF").is_some() {
-            return Ok(Held(0));
-        }
-        static HANDLE_BITS: OnceLock<isize> = OnceLock::new();
-        let bits = *HANDLE_BITS.get_or_init(|| {
-            let host = std::env::var("GCU_HOST_PID")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or_else(std::process::id);
-            let name: Vec<u16> = format!("Local\\gcu-pointer-gate-{host}")
-                .encode_utf16()
-                .chain([0])
-                .collect();
-            // SAFETY: NUL-terminated name that outlives the call; the handle lives for the process.
-            unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-                .map(|h| h.0 as isize)
-                .unwrap_or(0)
-        });
-        if bits == 0 {
-            return Err(super::GateBusy);
-        }
-        let millis = u32::try_from(wait.as_millis()).unwrap_or(40);
-        // SAFETY: waits on the process-lifetime mutex handle.
-        let status = unsafe { WaitForSingleObject(HANDLE(bits as *mut _), millis) };
-        if status == WAIT_OBJECT_0 || status == WAIT_ABANDONED {
-            Ok(Held(bits))
-        } else {
-            Err(super::GateBusy)
-        }
-    }
+    include!("hook_probe/gate.rs");
 }
-#[cfg(not(all(windows, not(test))))]
-mod gate {
-    use std::{
-        sync::{Mutex, MutexGuard, TryLockError},
-        time::{Duration, Instant},
-    };
-    // Unit tests run in parallel threads: each gets its own gate so tests cannot starve one
-    // another. A holder and a waiter on the same thread still contend (not reentrant).
-    #[cfg(test)]
-    thread_local! {
-        static GATE: &'static Mutex<()> = Box::leak(Box::new(Mutex::new(())));
-    }
-    #[cfg(not(test))]
-    static GATE: Mutex<()> = Mutex::new(());
-    pub(super) struct Held(MutexGuard<'static, ()>);
-    pub(super) fn acquire(wait: Duration) -> Result<Held, super::GateBusy> {
-        #[cfg(test)]
-        let gate: &'static Mutex<()> = GATE.with(|gate| *gate);
-        #[cfg(not(test))]
-        let gate: &'static Mutex<()> = &GATE;
-        let deadline = Instant::now() + wait;
-        loop {
-            match gate.try_lock() {
-                Ok(guard) => return Ok(Held(guard)),
-                Err(TryLockError::Poisoned(poison)) => return Ok(Held(poison.into_inner())),
-                Err(TryLockError::WouldBlock) => {
-                    if Instant::now() >= deadline {
-                        return Err(super::GateBusy);
-                    }
-                    std::thread::sleep(Duration::from_micros(300));
-                }
-            }
-        }
-    }
-}
+// Sibling modules call these. The `#[path]` policy tests compile this file alone, so the
+// re-exports are unused in that crate.
+#[allow(unused_imports)]
+pub(crate) use gate::with_admitted_gate;
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub use gate::PointerGateGuard;
 #[cfg(test)]
-thread_local! {
-    static INJECTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
+#[allow(unused_imports)]
+pub(crate) use gate::{with_admitted_gate_on, with_shared_gate, SharedGate};
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn gate_held() -> bool {
-    INJECTION_DEPTH.with(|depth| depth.get() > 0)
+    gate::current_gate().held_by_current()
+}
+#[allow(dead_code)]
+pub(super) fn bind_worker_pointer_gate_from_env() -> gcu_core::driver::Result<()> {
+    #[cfg(all(windows, not(test)))]
+    {
+        gate::bind_from_process_env()
+    }
+    #[cfg(not(all(windows, not(test))))]
+    {
+        Ok(())
+    }
+}
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(super) fn enter_pointer_gate_for_test(
+    wait: std::time::Duration,
+) -> Result<PointerGateGuard, GateBusy> {
+    gate::enter_for_test(wait)
+}
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(super) fn pointer_gate_owner_pid_for_test() -> Result<u32, GateBusy> {
+    gate::owner_pid_for_test()
 }
 pub(crate) fn with_injection_gate_for<R>(
     wait: std::time::Duration,
     body: impl FnOnce() -> R,
 ) -> Result<R, GateBusy> {
-    let started = Instant::now();
-    let _held = gate::acquire(wait)?;
-    // Metadata only. A long wait is the first thing to rule out when a lease lapses near a gate.
-    let waited = started.elapsed();
-    if waited > std::time::Duration::from_millis(3) {
-        tracing::info!(target: "gcu_windows_timing", stage = "pointer_gate_wait", wait_ms = waited.as_millis() as u64);
+    // Admission is infallible here. Callers that must recheck use `with_admitted_gate`.
+    match gate::with_admitted_gate(
+        wait,
+        || Ok::<(), std::convert::Infallible>(()),
+        || Ok(body()),
+    ) {
+        Err(busy) => Err(busy),
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(never)) => match never {},
     }
-    #[cfg(test)]
-    struct Reset;
-    #[cfg(test)]
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            INJECTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-    #[cfg(test)]
-    INJECTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
-    #[cfg(test)]
-    let _reset = Reset;
-    Ok(body())
 }
 pub(crate) fn with_injection_gate<R>(body: impl FnOnce() -> R) -> Result<R, GateBusy> {
     with_injection_gate_for(INJECTION_GATE_WAIT, body)

@@ -16,7 +16,7 @@ pub(crate) async fn run() -> Result<u8, Failure> {
             },
         )
         .await
-        .map_err(|_| Failure::internal("Worker connection terminated"))?;
+        .map_err(|error| Failure::internal(format!("Worker connection terminated: {error}")))?;
         Ok(0)
     }
     #[cfg(not(windows))]

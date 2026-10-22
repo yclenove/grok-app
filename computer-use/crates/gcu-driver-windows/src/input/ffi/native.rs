@@ -308,32 +308,48 @@ fn keyboard(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
         },
     }
 }
-pub(super) fn inject(inputs: &[INPUT]) -> Result<()> {
+pub(super) fn inject(inputs: &[INPUT], admit: impl FnOnce() -> Result<()>) -> Result<()> {
     if inputs.is_empty() {
         return Ok(());
     }
     // Pointer packets share a gate with the heartbeat probe's cursor sample and publish, so a
     // stale same-position probe move cannot land between this move and a coordinate-less button.
     // Keyboard and Unicode packets are not gated (long packets must not starve the heartbeat).
+    // `admit` runs only after the gate is held and immediately before `SendInput`. A refusal
+    // has not inserted input, so it carries no `maybe_executed` and the ledger rolls the packet
+    // back. `inject_release` does not come through here.
     if inputs.iter().any(|input| input.r#type == INPUT_MOUSE) {
-        return crate::input::hook_probe::with_injection_gate(|| {
-            send_input(inputs)?;
-            // Windows applies an injected move to the cursor a moment after `SendInput` returns.
-            // Without this wait the probe's unchanged-cursor check, which runs as soon as the gate
-            // opens, sees the driver's own move land and reads it as someone else moving the mouse
-            // (a deliberate fail-closed Stop latch). Real hardware, 2026-10-22: `cursor changed
-            // during probe` latched Stop in about one drag in ten.
-            if let Some(target) = last_absolute_target(inputs) {
-                settle_cursor(target);
-            }
-            Ok(())
-        })
-        .unwrap_or(Err(DriverError::Native {
-            message: "pointer input gate busy; nothing was sent".into(),
-            maybe_executed: false,
-        }));
+        return match crate::input::hook_probe::with_admitted_gate(
+            crate::input::hook_probe::INJECTION_GATE_WAIT,
+            admit,
+            || dispatch_pointer(inputs),
+        ) {
+            Err(crate::input::hook_probe::GateBusy) => Err(DriverError::Native {
+                message: "pointer input gate busy; nothing was sent".into(),
+                maybe_executed: false,
+            }),
+            Ok(result) => result,
+        };
     }
+    admit()?;
     send_input(inputs)
+}
+fn dispatch_pointer(inputs: &[INPUT]) -> Result<()> {
+    send_input(inputs)?;
+    // Windows applies an injected move to the cursor a moment after `SendInput` returns.
+    // Without this wait the probe's unchanged-cursor check, which runs as soon as the gate
+    // opens, sees the driver's own move land and reads it as someone else moving the mouse
+    // (a deliberate fail-closed Stop latch). Real hardware, 2026-10-22: `cursor changed
+    // during probe` latched Stop in about one drag in ten.
+    if let Some(target) = last_absolute_target(inputs) {
+        // The move is already in the input stream. Timeout or an unreadable cursor must not
+        // look like success: the caller stops later button and drag packets, and the ledger
+        // keeps this packet because `maybe_executed` is set.
+        if let Some(error) = crate::input::pointer_settle::failure(settle_cursor(target)) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 /// Longest the gate is held waiting for the cursor to arrive. Well below the probe's 40ms gate wait.
 const CURSOR_SETTLE: std::time::Duration = std::time::Duration::from_millis(15);
@@ -365,21 +381,23 @@ fn last_absolute_target(inputs: &[INPUT]) -> Option<(i32, i32)> {
         y + (f64::from(last.1) * f64::from(h - 1) / 65535.).round() as i32,
     ))
 }
-/// True when the cursor is at the target pixel, allowing for the rounding of the 0..65535 mapping.
-fn cursor_at(actual: (i32, i32), target: (i32, i32)) -> bool {
-    (actual.0 - target.0).abs() <= 2 && (actual.1 - target.1).abs() <= 2
-}
-fn settle_cursor(target: (i32, i32)) {
+fn settle_cursor(target: (i32, i32)) -> crate::input::pointer_settle::Settle {
     let deadline = std::time::Instant::now() + CURSOR_SETTLE;
+    let mut progress = crate::input::pointer_settle::SettleProgress::pending();
     loop {
         let mut point = POINT::default();
         // SAFETY: bounded local output; read-only cursor query.
-        let known = unsafe { GetPhysicalCursorPos(&mut point) }.is_ok();
-        if known && cursor_at((point.x, point.y), target) {
-            return;
+        let sample = if unsafe { GetPhysicalCursorPos(&mut point) }.is_ok() {
+            Ok((point.x, point.y))
+        } else {
+            Err(())
+        };
+        progress = crate::input::pointer_settle::fold_sample(progress, sample, target);
+        if let crate::input::pointer_settle::SettleProgress::Done(done) = progress {
+            return done;
         }
         if std::time::Instant::now() >= deadline {
-            return;
+            return progress.finish();
         }
         std::thread::sleep(std::time::Duration::from_micros(500));
     }
@@ -429,14 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_arrival_tolerates_the_normalization_rounding_only() {
-        assert!(cursor_at((431, 607), (431, 608)));
-        assert!(cursor_at((433, 610), (431, 608)));
-        assert!(!cursor_at((434, 608), (431, 608)));
-        assert!(!cursor_at((-2460, 100), (431, 608)));
-    }
-
-    #[test]
     fn the_settle_target_is_the_last_absolute_move_in_the_packet() {
         let events = [
             Event::Move(gcu_core::model::WindowPoint { x: 100., y: 100. }, false),
@@ -448,7 +458,10 @@ mod tests {
             ),
         ];
         let target = last_absolute_target(&inputs(&events).unwrap()).expect("a move is present");
-        assert!(cursor_at(target, (100, 100)), "{target:?}");
+        assert!(
+            crate::input::pointer_settle::cursor_arrived(target, (100, 100)),
+            "{target:?}"
+        );
         let buttons = [Event::Button(
             Button::Left,
             false,

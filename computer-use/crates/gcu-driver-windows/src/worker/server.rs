@@ -91,6 +91,9 @@ where
     F: FnOnce(String, Arc<dyn crate::input::api::InputTracker>) -> Fut,
     Fut: Future<Output = Result<Arc<dyn Driver>>>,
 {
+    // Before any frame or native input. A worker that cannot name the host's pointer gate
+    // must not start; it must not fall back to its own pid.
+    crate::input::bind_worker_pointer_gate_from_env()?;
     let Some(first): Option<Call> = codec::read_frame(&mut input).await.map_err(|_| invalid())?
     else {
         return Ok(());

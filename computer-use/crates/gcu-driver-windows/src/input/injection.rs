@@ -7,8 +7,13 @@
 #[cfg(test)]
 mod tests {
     use super::super::hook_probe::{
-        dispatch_for_action, gate_held, with_injection_gate, with_injection_gate_for, Cursor,
-        Desktop, GateBusy, MouseProbe, MouseProbeApi, MouseProof, ProbeIdle, RecentInput,
+        dispatch_for_action, gate_held, with_admitted_gate_on, with_injection_gate,
+        with_shared_gate, Cursor, Desktop, GateBusy, MouseProbe, MouseProbeApi, MouseProof,
+        ProbeIdle, RecentInput, SharedGate,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
     };
 
     const OLD: Cursor = Cursor { x: 40, y: 50 };
@@ -116,39 +121,186 @@ mod tests {
         assert!(!gate_held());
     }
 
+    fn wait_until_blocked(gate: &SharedGate) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gate.waiters() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the other thread did not reach the gate"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
-    fn a_stuck_holder_refuses_the_waiter_within_its_bound_and_sends_nothing() {
-        // Same thread: the gate is not reentrant, so the inner waiter contends with the holder.
-        with_injection_gate(|| {
+    fn a_holder_on_another_thread_refuses_the_waiter_and_sends_nothing() {
+        // Win32 mutexes reenter on the owning thread, so a same-thread nested acquire is not
+        // contention. This std gate matches that, and the refusal is cross-thread.
+        let gate = SharedGate::new();
+        let held = gate.acquire(std::time::Duration::ZERO).unwrap();
+        let shared = Arc::clone(&gate);
+        let waiter = std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let mut sent = false;
-            let result =
-                with_injection_gate_for(std::time::Duration::from_millis(30), || sent = true);
-            let waited = started.elapsed();
-            assert_eq!(result, Err(GateBusy));
-            assert!(!sent, "a refused waiter must not run its body");
-            assert!(
-                waited >= std::time::Duration::from_millis(25)
-                    && waited < std::time::Duration::from_millis(500),
-                "bounded wait, got {waited:?}"
+            let result = with_admitted_gate_on(
+                &shared,
+                std::time::Duration::from_millis(30),
+                || Ok::<(), &str>(()),
+                || {
+                    sent = true;
+                    Ok(())
+                },
             );
-        })
-        .unwrap();
+            (result, sent, started.elapsed())
+        });
+        wait_until_blocked(&gate);
+        let (result, sent, waited) = waiter.join().unwrap();
+        assert_eq!(result, Err(GateBusy));
+        assert!(!sent, "a refused waiter must not run its body");
+        assert!(
+            waited >= std::time::Duration::from_millis(25)
+                && waited < std::time::Duration::from_millis(500),
+            "bounded wait, got {waited:?}"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn two_threads_share_exclusion_on_one_gate() {
+        let gate = SharedGate::new();
+        let held = gate.acquire(std::time::Duration::ZERO).unwrap();
+        let shared = Arc::clone(&gate);
+        let entered = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&entered);
+        let waiter = std::thread::spawn(move || {
+            let guard = shared
+                .acquire(std::time::Duration::from_secs(2))
+                .expect("enters after the holder releases");
+            flag.store(true, Ordering::SeqCst);
+            drop(guard);
+        });
+        wait_until_blocked(&gate);
+        assert!(
+            !entered.load(Ordering::SeqCst),
+            "the waiter must not enter while the gate is held"
+        );
+        drop(held);
+        waiter.join().unwrap();
+        assert!(entered.load(Ordering::SeqCst));
+        assert!(gate.acquire(std::time::Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn same_thread_reentry_keeps_other_threads_out_until_the_outer_release() {
+        let gate = SharedGate::new();
+        let outer = gate.acquire(std::time::Duration::ZERO).unwrap();
+        let inner = gate
+            .acquire(std::time::Duration::ZERO)
+            .expect("the owning thread reenters, matching a Win32 mutex");
+        let shared = Arc::clone(&gate);
+        let entered = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&entered);
+        let waiter = std::thread::spawn(move || {
+            let guard = shared.acquire(std::time::Duration::from_secs(2)).unwrap();
+            flag.store(true, Ordering::SeqCst);
+            drop(guard);
+        });
+        wait_until_blocked(&gate);
+        assert!(!entered.load(Ordering::SeqCst));
+        drop(inner);
+        assert_eq!(
+            gate.waiters(),
+            1,
+            "releasing the inner count must not admit the waiter"
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        drop(outer);
+        waiter.join().unwrap();
+        assert!(entered.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_admit_skips_the_body_and_releases_the_gate() {
+        let gate = SharedGate::new();
+        let mut ran = false;
+        let result = with_admitted_gate_on(
+            &gate,
+            std::time::Duration::from_millis(20),
+            || {
+                assert!(
+                    gate.held_by_current(),
+                    "admission runs only while the gate is held"
+                );
+                Err("refused")
+            },
+            || {
+                ran = true;
+                Ok::<(), &str>(())
+            },
+        );
+        assert_eq!(result, Ok(Err("refused")));
+        assert!(!ran, "a failed admission must not send");
+        assert!(
+            !gate.held_by_current(),
+            "a failed admission must release the gate"
+        );
+        assert!(gate.acquire(std::time::Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn admit_does_not_run_until_the_holding_thread_releases() {
+        let gate = SharedGate::new();
+        let held = gate.acquire(std::time::Duration::ZERO).unwrap();
+        let shared = Arc::clone(&gate);
+        let admitted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&admitted);
+        let waiter = std::thread::spawn(move || {
+            with_admitted_gate_on(
+                &shared,
+                std::time::Duration::from_secs(2),
+                || {
+                    flag.store(true, Ordering::SeqCst);
+                    Ok::<(), &str>(())
+                },
+                || Ok(()),
+            )
+        });
+        wait_until_blocked(&gate);
+        assert!(
+            !admitted.load(Ordering::SeqCst),
+            "admission must not run before this thread releases the gate"
+        );
+        drop(held);
+        assert!(waiter.join().unwrap().is_ok());
+        assert!(admitted.load(Ordering::SeqCst));
+        assert!(gate.acquire(std::time::Duration::ZERO).is_ok());
     }
 
     #[test]
     fn a_probe_that_cannot_get_the_gate_refuses_its_cycle() {
+        let gate = SharedGate::new();
+        let shared = Arc::clone(&gate);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let held = shared.acquire(std::time::Duration::ZERO).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(held);
+        });
+        ready_rx.recv().unwrap();
         let idle = ProbeIdle::default();
         let mut api = RacingApi {
             pending_move: None,
             ..RacingApi::armed()
         };
-        let error = with_injection_gate(|| {
+        let error = with_shared_gate(Arc::clone(&gate), || {
             dispatch_for_action(&mut api, MouseProbe::AbsoluteSamePosition, &idle)
         })
-        .unwrap()
         .expect_err("no gate, no probe");
         assert!(error.contains("pointer input in flight"), "{error}");
         assert_eq!(api.clicked, None);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
     }
 }

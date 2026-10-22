@@ -62,6 +62,32 @@ async fn foreground_lost_between_packets_returns_unknown_and_stops_input() {
     );
 }
 #[tokio::test]
+async fn uncertain_move_does_not_send_the_following_button() {
+    let (api, driver, win) = fixture().await;
+    api.update(|s| {
+        s.fail_at = Some(0);
+        s.send_error = DriverError::Native {
+            message: "pointer move was sent but the cursor did not arrive".into(),
+            maybe_executed: true,
+        };
+    });
+    let error = driver
+        .perform(
+            &click(&win, PointerRoute::AllowForeground),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.maybe_executed());
+    let sent = api.state().sent;
+    assert!(
+        sent.iter()
+            .all(|sent| matches!(sent.event, Event::Move(..))),
+        "a move that did not arrive must not be followed by a button"
+    );
+    assert_eq!(sent.len(), 1, "only the uncertain move is inserted");
+}
+#[tokio::test]
 async fn exact_focus_routes_only_focus_after_foreground_permission() {
     for route in [KeyRoute::TargetedOnly, KeyRoute::AllowForeground] {
         let (api, driver, win) = fixture().await;

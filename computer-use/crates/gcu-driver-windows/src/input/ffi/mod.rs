@@ -77,6 +77,43 @@ fn failure() -> DriverError {
         maybe_executed: false,
     }
 }
+/// Admission failed before `SendInput`. Nothing in this packet was inserted, so the ledger
+/// must roll it back even if an earlier `begin` had already raised the uncertainty bit.
+fn not_executed(error: DriverError) -> DriverError {
+    match error {
+        DriverError::Timeout { .. } => DriverError::Timeout {
+            maybe_executed: false,
+        },
+        DriverError::Cancelled { .. } => DriverError::Cancelled {
+            maybe_executed: false,
+        },
+        DriverError::Crashed { .. } => DriverError::Crashed {
+            maybe_executed: false,
+        },
+        DriverError::Native { message, .. } => DriverError::Native {
+            message,
+            maybe_executed: false,
+        },
+        DriverError::NotSettable { .. } => DriverError::NotSettable {
+            maybe_executed: false,
+        },
+        other => other,
+    }
+}
+fn recheck_admission(
+    state: &State,
+    request: &crate::uia::worker::Request,
+    target: &Target,
+) -> Result<()> {
+    if let Err(error) = request.check() {
+        return Err(not_executed(error));
+    }
+    // SAFETY: nonblocking foreground read immediately before SendInput, after the pointer-gate wait.
+    if unsafe { GetForegroundWindow() } != hwnd(target.window.hwnd) {
+        return Err(DriverError::CapabilityUnavailable);
+    }
+    state.validate(target, true).map_err(not_executed)
+}
 impl State {
     fn validate(&self, target: &Target, foreground: bool) -> Result<()> {
         let current = self
@@ -335,13 +372,14 @@ impl InputApi for RealInput {
                 r.check()?;
                 s.validate(&target, delivery == Delivery::Foreground)?;
                 if delivery == Delivery::Foreground {
-                    // SAFETY: nonblocking foreground probe immediately before SendInput.
+                    // SAFETY: nonblocking foreground probe before taking the ledger. Cancel,
+                    // deadline, foreground, and validate run again immediately before SendInput.
                     if unsafe { GetForegroundWindow() } != hwnd(target.window.hwnd) {
                         return Err(DriverError::CapabilityUnavailable);
                     }
                     let inputs = native::inputs(&events)?;
                     ledger.dispatch_packet(&target, &events, delivery, &context, || {
-                        native::inject(&inputs)
+                        native::inject(&inputs, || recheck_admission(s, r, &target))
                     })
                 } else {
                     for event in events {
