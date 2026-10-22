@@ -386,13 +386,21 @@ fn evidence_bad_paths_missing_tests_and_comment_only_names_are_rejected() {
 }
 
 #[test]
-fn external_review_remains_unsigned_and_release_gate_is_not_waived() {
+fn external_review_is_waived_by_the_owner_and_the_release_gate_is_not_waived() {
     if !full_tree() {
         return;
     }
     let doc = read(SECURITY);
     let rows = table(&doc, "external-review", 4).unwrap();
-    assert_eq!(rows, vec![vec!["外部审阅者", "", "", "needs-decision"]]);
+    assert_eq!(
+        rows,
+        vec![vec![
+            "外部审阅者",
+            "项目所有者裁定不需要",
+            "2026-10-22，用户在会话中明确表示",
+            "waived-by-owner"
+        ]]
+    );
     assert!(doc.contains("07 §8"));
     assert!(doc.contains("L1 / Wayland / DOM"));
     assert!(doc.contains("不得发布"));
