@@ -76,6 +76,66 @@ struct Cli {
     /// Scripted client behavior. Hidden; tests and the fake agent use it.
     #[arg(long, hide = true)]
     behavior: Option<String>,
+    /// `fake` (default) uses the fake driver and scripted scenes. `real` drives the real `gcu` driver
+    /// against a real fixture app on this desktop with CU auto-approval: run it only on a machine
+    /// where nobody is working and only the fixture and a terminal are open.
+    #[arg(long, default_value = "fake")]
+    driver: String,
+    /// Fixture app started for each task when `--driver real`.
+    #[arg(long)]
+    fixture: Option<PathBuf>,
+    /// Directory with a login made for this evaluation only (`--driver real`). Only its `auth.json` is
+    /// copied, unread, into each task's temporary `GROK_HOME`.
+    #[arg(long)]
+    auth_seed: Option<PathBuf>,
+    /// Run only these task ids (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    only: Vec<String>,
+}
+
+/// Fields every `RunConfig` takes from the real-driver flags.
+struct RealFlags {
+    real_driver: bool,
+    fixture_bin: Option<PathBuf>,
+    auth_seed: Option<PathBuf>,
+}
+
+fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
+    match cli.driver.as_str() {
+        "fake" => Ok(RealFlags {
+            real_driver: false,
+            fixture_bin: None,
+            auth_seed: None,
+        }),
+        "real" => {
+            if cli.grok.is_none() || cli.gcu.is_none() || cli.fixture.is_none() {
+                return Err(Stop::Usage(
+                    "--driver real needs --grok, --gcu and --fixture".into(),
+                ));
+            }
+            if cli.env != "local" {
+                return Err(Stop::Usage("--driver real needs --env local".into()));
+            }
+            if !cli.auto_approve {
+                return Err(Stop::Usage(
+                    "--driver real needs --auto-approve (an eval-autoapprove debug build)".into(),
+                ));
+            }
+            if cli.model != "fake" && cli.auth_seed.is_none() {
+                return Err(Stop::Usage(
+                    "--driver real with a real model needs --auth-seed".into(),
+                ));
+            }
+            Ok(RealFlags {
+                real_driver: true,
+                fixture_bin: cli.fixture.clone(),
+                auth_seed: cli.auth_seed.clone(),
+            })
+        }
+        other => Err(Stop::Usage(format!(
+            "unknown --driver {other}; expected fake or real"
+        ))),
+    }
 }
 
 fn main() -> ExitCode {
@@ -133,8 +193,13 @@ fn dispatch() -> Result<u8, Stop> {
         .ok_or_else(|| Stop::Usage("task directory not found; pass --tasks".into()))?;
     let mut tasks = load_tasks(&tasks_dir).map_err(|err| Stop::Run(err.into()))?;
     tasks.retain(|task| task.suites.iter().any(|suite| suite == &cli.suite));
+    retain_only(&mut tasks, &cli)?;
     let platform = platform_label(&cli)?;
+    let real = real_flags(&cli)?;
     let cfg = RunConfig {
+        real_driver: real.real_driver,
+        fixture_bin: real.fixture_bin,
+        auth_seed: real.auth_seed,
         grok_bin: cli.grok.clone(),
         gcu_bin: cli.gcu.clone(),
         model: cli.model.clone(),
@@ -156,6 +221,21 @@ fn dispatch() -> Result<u8, Stop> {
         write_reports(dir, &report).map_err(|err| Stop::Run(err.into()))?;
     }
     Ok(exit_code(&report, cli.allow_fail))
+}
+
+fn retain_only(tasks: &mut Vec<gcu_eval::Task>, cli: &Cli) -> Result<(), Stop> {
+    if cli.only.is_empty() {
+        return Ok(());
+    }
+    if let Some(unknown) = cli
+        .only
+        .iter()
+        .find(|id| !tasks.iter().any(|task| &task.id == *id))
+    {
+        return Err(Stop::Usage(format!("--only names unknown task {unknown}")));
+    }
+    tasks.retain(|task| cli.only.iter().any(|id| id == &task.id));
+    Ok(())
 }
 
 fn platform_label(cli: &Cli) -> Result<String, Stop> {
@@ -213,11 +293,16 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
                 )));
             }
         };
-        let tasks = core_tasks()?;
+        let mut tasks = core_tasks()?;
+        retain_only(&mut tasks, cli)?;
+        let real = real_flags(cli)?;
         if cli.grok.is_none() || !run_local {
             not_run_report(&tasks, &id)
         } else {
             let cfg = RunConfig {
+                real_driver: real.real_driver,
+                fixture_bin: real.fixture_bin,
+                auth_seed: real.auth_seed,
                 grok_bin: cli.grok.clone(),
                 gcu_bin: cli.gcu.clone(),
                 model: cli.model.clone(),

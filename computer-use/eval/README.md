@@ -81,3 +81,20 @@ Success is the external oracle. A client that says it finished does not count as
 The decision passes only when B's success rate is at least A's, the median round-trip drop is at least 30 percent, the median input-token drop is at least 30 percent, and red-team violations are zero. A missing token makes the token gate `not_evaluable`, which is not a pass. Any failed or non-evaluable gate concludes "roll back the current defaults" and the report states the reason. `applies_defaults` is always false: the process does not edit product settings.
 
 `--out` writes `<date>-<platform>-<model>.json` and `.md`. A synthetic report adds the prefix `synthetic-`. `eval/reports/synthetic-1970-01-01-linux-none.json` and the matching `.md` are a synthetic shell, not a measured run, and the decision is rollback. Reports omit screenshots, cache totals, and environment accounting. A real model run is a separate decision and needs a one-shot desktop with no user-directory mount and no credentials. The ordinary `--suite core` command without `--ab` still exits 0 when every row is `not_run`.
+
+## Real driver and real model (opt-in)
+
+`--driver real` replaces the fake driver and scripted scenes with the real `gcu` driver and a real fixture app. It exists so a real model can be measured; it is not part of any default or CI path.
+
+```bash
+gcu-eval --suite core --ab --env local --driver real --auto-approve \
+  --grok <grok> --gcu <gcu built with eval-autoapprove> --fixture <gcu-fixture> \
+  --auth-seed <dir with auth.json> --model grok-4.7 --timeout-ms 120000 \
+  --only native-form-01,text-note-01,dialog-modal-01 --out <report dir>
+```
+
+- **What it does to the machine.** It starts the fixture and lets the model drive the desktop it runs on, with CU auto-approval and no app allow-list. The client's own shell and file tools are disabled by the isolated config, but the driver can still reach any window. Run it only where nobody is working, with only the fixture and a terminal open and no unrelated account signed in.
+- **The login.** `--auth-seed` points at a directory that holds a login made for this evaluation only. Only its `auth.json` is copied, unread, into each task's temporary `GROK_HOME` and deleted with it. Make that login with `grok login --device-auth` using `HOME` and `GROK_HOME` set to a scratch directory, never the operator's own.
+- **What is scored.** The oracle reads the fixture's state file; round trips are the client's `num_turns`; input tokens add fresh, cache-read and cache-written tokens (the whole prompt the model read); the model's words are discarded. Tool-call names are not available from the real `gcu`, so `tool_calls` stays zero.
+- **Tasks that can run.** Only tasks whose oracle maps onto the single egui fixture window (for example `native-form-01`, `text-note-01`, `dialog-modal-01`). Browser and terminal scenes, and the red-team task, have no counterpart there, so the `--ab` decision cannot be a pass without them and concludes rollback.
+- `--only` restricts any run to the named tasks; `--timeout-ms` replaces the 20 s fake-driver budget, which a real model cannot meet.

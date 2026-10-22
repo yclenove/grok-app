@@ -237,6 +237,16 @@ pub struct RunConfig {
     pub arm_batch: Option<bool>,
     /// Whether the arm requests `computer_script` through the full profile.
     pub arm_script: Option<bool>,
+    /// Use the real `gcu` driver and a real fixture app instead of the fake driver and scene.
+    ///
+    /// A real run drives whatever desktop the process runs on, with CU auto-approval. It belongs on a
+    /// machine where nobody is working, with only the fixture and a terminal open.
+    pub real_driver: bool,
+    /// Fixture app started once per task when `real_driver` is set. It writes `$GCU_FIXTURE_STATE`.
+    pub fixture_bin: Option<PathBuf>,
+    /// Directory that holds a login made for this evaluation only. Only its `auth.json` is copied,
+    /// unread, into each task's temporary `GROK_HOME` and is deleted with it.
+    pub auth_seed: Option<PathBuf>,
 }
 
 impl Default for RunConfig {
@@ -262,6 +272,9 @@ impl Default for RunConfig {
             arm_diff: None,
             arm_batch: None,
             arm_script: None,
+            real_driver: false,
+            fixture_bin: None,
+            auth_seed: None,
         }
     }
 }
@@ -429,7 +442,24 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             "platform not listed on the task",
         );
     }
-    if !scene_ready(&task.scene).await {
+    if cfg.real_driver {
+        if cfg.gcu_bin.as_ref().is_none_or(|path| !path.is_file()) {
+            return skipped(
+                task,
+                cfg,
+                RunStatus::NotRun,
+                "real driver needs a gcu binary",
+            );
+        }
+        if cfg.fixture_bin.as_ref().is_none_or(|path| !path.is_file()) {
+            return skipped(
+                task,
+                cfg,
+                RunStatus::NotRun,
+                "real driver needs a fixture binary",
+            );
+        }
+    } else if !scene_ready(&task.scene).await {
         return skipped(task, cfg, RunStatus::Invalid, "fake scene is not available");
     }
     let env = match LocalTempProvider.provision(task) {
@@ -441,7 +471,30 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
     };
     let root = env.root.clone();
     let guard = crate::prep::Rm(root.clone());
+    // Declared after `guard`, so the fixture is stopped before its directory is removed.
+    let mut fixture = None;
+    if cfg.real_driver {
+        if let Some(seed) = &cfg.auth_seed {
+            if let Err(err) = crate::prep::seed_auth(seed, &env.grok_home) {
+                let _ = crate::prep::remove_root(&root);
+                return skipped(task, cfg, RunStatus::Invalid, &err.to_string());
+            }
+        }
+        match cfg
+            .fixture_bin
+            .as_deref()
+            .map(|bin| crate::prep::Fixture::start(bin, &env))
+        {
+            Some(Ok(started)) => fixture = Some(started),
+            Some(Err(err)) => {
+                let _ = crate::prep::remove_root(&root);
+                return skipped(task, cfg, RunStatus::Crash, &err.to_string());
+            }
+            None => {}
+        }
+    }
     let mut outcome = crate::exec::execute(task, cfg, grok, &env).await;
+    drop(fixture);
     let destroyed = crate::prep::remove_root(&root).unwrap_or(false);
     outcome.env_destroyed = destroyed || !root.exists();
     outcome.env_root = Some(root);

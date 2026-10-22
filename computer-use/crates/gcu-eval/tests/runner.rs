@@ -820,3 +820,94 @@ fn cli_fake_suite_exits_0_and_compare_prints_significance() {
 
 #[path = "common/runner_release.rs"]
 mod runner_release;
+
+#[cfg(unix)]
+fn fixture_script(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("fixture.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '{\"counter\":0}' > \"$GCU_FIXTURE_STATE\"\nsleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[test]
+fn real_driver_runs_a_task_with_a_started_fixture_and_cleans_up() {
+    let dir = scratch("real-driver");
+    let seed = dir.join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("auth.json"), b"opaque").unwrap();
+    let cfg = RunConfig {
+        real_driver: true,
+        fixture_bin: Some(fixture_script(&dir)),
+        auth_seed: Some(seed),
+        ..cfg_for(&dir, "pass")
+    };
+    let outcome = execute(named("native-form-01"), cfg);
+    assert_eq!(outcome.status, RunStatus::Pass, "{}", outcome.reason);
+    assert!(outcome.env_destroyed);
+    assert!(
+        !outcome.env_root.as_ref().unwrap().exists(),
+        "the task directory, with the seeded login, is gone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn real_driver_without_a_fixture_or_gcu_is_not_run_not_a_silent_fake() {
+    let dir = scratch("real-driver-missing");
+    let no_fixture = RunConfig {
+        real_driver: true,
+        ..cfg_for(&dir, "pass")
+    };
+    let outcome = execute(named("native-form-01"), no_fixture);
+    assert_eq!(outcome.status, RunStatus::NotRun);
+    assert!(outcome.reason.contains("fixture"), "{}", outcome.reason);
+    let no_gcu = RunConfig {
+        real_driver: true,
+        gcu_bin: None,
+        fixture_bin: Some(dir.join("fixture.sh")),
+        ..cfg_for(&dir, "pass")
+    };
+    let outcome = execute(named("native-form-01"), no_gcu);
+    assert_eq!(outcome.status, RunStatus::NotRun);
+    assert!(outcome.reason.contains("gcu"), "{}", outcome.reason);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cli_real_driver_flags_are_validated_and_the_default_stays_fake() {
+    let missing = Command::new(eval_bin())
+        .args(["--suite", "core", "--driver", "real"])
+        .env_remove("GCU_APPROVAL")
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--driver real"));
+    let unknown = Command::new(eval_bin())
+        .args(["--suite", "core", "--driver", "other"])
+        .env_remove("GCU_APPROVAL")
+        .output()
+        .unwrap();
+    assert_eq!(unknown.status.code(), Some(2));
+    let only = Command::new(eval_bin())
+        .args(["--suite", "core", "--only", "no-such-task"])
+        .env_remove("GCU_APPROVAL")
+        .output()
+        .unwrap();
+    assert_eq!(only.status.code(), Some(2));
+    let default = Command::new(eval_bin())
+        .args(["--suite", "core", "--env", "local"])
+        .env_remove("GCU_APPROVAL")
+        .output()
+        .unwrap();
+    assert_eq!(
+        default.status.code(),
+        Some(0),
+        "the fake default is unchanged"
+    );
+}
