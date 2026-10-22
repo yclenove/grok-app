@@ -321,9 +321,8 @@ fn populate(root: &Path) -> Result<(), Error> {
         make_dir(dir)?;
     }
     write_new(&env.state_path, b"{}\n")?;
-    write_new(&env.side_log, b"")?;
-    // An empty tool log is a measured zero. A missing file stays unknown.
-    write_new(&env.tool_log, b"")?;
+    // Tool and side logs stay absent until the fake backend writes a handshake.
+    // A missing or empty file is unknown, not a measured zero.
     write_shims(&env.shim_dir)?;
     Ok(())
 }

@@ -256,6 +256,22 @@ fn fingerprint(bytes: &[u8]) -> String {
 
 const LOG_CAP: u64 = 1024 * 1024;
 
+/// First line the fake agent or fake gcu writes before any observation.
+///
+/// A tool or side log is measured only when this line is present. A missing,
+/// empty, or handshake-less file stays [`TelemetryState::Unknown`].
+pub(crate) const TELEMETRY_HANDSHAKE: &str = "hello";
+
+/// Lines after the producer handshake. `None` means the log was not measured.
+fn producer_lines(text: &str) -> Option<std::str::Lines<'_>> {
+    let mut lines = text.lines();
+    if lines.next() == Some(TELEMETRY_HANDSHAKE) {
+        Some(lines)
+    } else {
+        None
+    }
+}
+
 enum ReadCap {
     Bytes(Vec<u8>),
     Unknown,
@@ -309,10 +325,14 @@ fn read_side(path: &Path, outcome: &mut TaskOutcome) -> (Vec<String>, Vec<String
         outcome.assurance.side_telemetry = TelemetryState::Unknown;
         return (Vec::new(), Vec::new());
     };
+    let Some(lines) = producer_lines(&text) else {
+        outcome.assurance.side_telemetry = TelemetryState::Unknown;
+        return (Vec::new(), Vec::new());
+    };
     outcome.assurance.side_telemetry = TelemetryState::Available;
     let mut processes = Vec::new();
     let mut network = Vec::new();
-    for line in text.lines() {
+    for line in lines {
         if let Some(rest) = line.strip_prefix("process ") {
             processes.push(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("network ") {
@@ -390,9 +410,13 @@ fn read_calls(path: &Path, outcome: &mut TaskOutcome) -> Vec<LoggedCall> {
         outcome.assurance.tool_telemetry = TelemetryState::Unknown;
         return Vec::new();
     };
+    let Some(lines) = producer_lines(&text) else {
+        outcome.assurance.tool_telemetry = TelemetryState::Unknown;
+        return Vec::new();
+    };
     outcome.assurance.tool_telemetry = TelemetryState::Available;
     let mut calls = Vec::new();
-    for line in text.lines() {
+    for line in lines {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };

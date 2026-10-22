@@ -30,6 +30,9 @@ fn run() -> Result<u8, String> {
         );
         return Ok(0);
     }
+    // Prove this process covered the invocation before any tool or shim line.
+    ensure_handshake("GCU_EVAL_TOOL_LOG")?;
+    ensure_handshake("GCU_EVAL_SIDE_LOG")?;
     let behavior = std::env::var("GCU_EVAL_BEHAVIOR").unwrap_or_else(|_| "scripted".into());
     write_probe()?;
     match behavior.as_str() {
@@ -217,6 +220,20 @@ fn write_transcript_body(claimed_done: bool, tokens: bool) -> Result<(), String>
     }
     let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
     std::fs::write(Path::new(&home).join("transcript.json"), bytes).map_err(|err| err.to_string())
+}
+
+fn ensure_handshake(key: &str) -> Result<(), String> {
+    let Ok(path) = std::env::var(key) else {
+        return Ok(());
+    };
+    if path.is_empty() {
+        return Ok(());
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) if !text.is_empty() => Ok(()),
+        _ => std::fs::write(path, format!("{}\n", crate::exec::TELEMETRY_HANDSHAKE))
+            .map_err(|err| err.to_string()),
+    }
 }
 
 fn append_side(text: &str) -> Result<(), String> {

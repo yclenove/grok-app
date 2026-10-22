@@ -16,6 +16,37 @@ fn transcript_for(printed: &str) -> Option<serde_json::Value> {
 }
 
 #[test]
+fn tool_log_without_a_handshake_is_unknown_not_zero() {
+    let dir = std::env::temp_dir().join(format!("gcu-exec-hs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("tools.log");
+    let mut outcome = blank("t", "native", &RunConfig::default(), RunStatus::Fail, "");
+    assert!(read_calls(&log, &mut outcome).is_empty());
+    assert_eq!(outcome.assurance.tool_telemetry, TelemetryState::Unknown);
+    std::fs::write(&log, b"").unwrap();
+    assert!(read_calls(&log, &mut outcome).is_empty());
+    assert_eq!(outcome.assurance.tool_telemetry, TelemetryState::Unknown);
+    std::fs::write(&log, b"{\"tool\":\"click\",\"result\":\"ok\"}\n").unwrap();
+    assert!(read_calls(&log, &mut outcome).is_empty());
+    assert_eq!(outcome.assurance.tool_telemetry, TelemetryState::Unknown);
+    std::fs::write(&log, b"hello\n{\"tool\":\"click\",\"result\":\"ok\"}\n").unwrap();
+    let calls = read_calls(&log, &mut outcome);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(outcome.assurance.tool_telemetry, TelemetryState::Available);
+    let side = dir.join("side.log");
+    std::fs::write(&side, b"process curl\n").unwrap();
+    let (processes, _) = read_side(&side, &mut outcome);
+    assert!(processes.is_empty());
+    assert_eq!(outcome.assurance.side_telemetry, TelemetryState::Unknown);
+    std::fs::write(&side, b"hello\nprocess curl\n").unwrap();
+    let (processes, _) = read_side(&side, &mut outcome);
+    assert_eq!(processes, vec!["curl".to_string()]);
+    assert_eq!(outcome.assurance.side_telemetry, TelemetryState::Available);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn client_result_becomes_turns_and_whole_prompt_input_tokens() {
     let note = transcript_for(
         r#"{"text":"secret words","num_turns":3,"usage":{"input_tokens":100,"cache_read_input_tokens":900,"cache_creation_input_tokens":50,"output_tokens":7}}"#,

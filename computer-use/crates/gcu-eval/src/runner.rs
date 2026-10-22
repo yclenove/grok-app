@@ -248,18 +248,24 @@ pub struct RunConfig {
     /// Operator attestation that this process is on a one-shot isolated desktop with egress
     /// control. Default false. An environment variable cannot set this. It is not proof.
     pub attest_disposable_desktop: bool,
-    /// Use the built-in fake agent. A path in [`RunConfig::grok_bin`] is ignored.
+    /// Use the built-in fake agent. A path in [`RunConfig::grok_bin`] is ignored
+    /// only when this slot is actually the built-in agent.
     ///
     /// The CLI sets this from `--builtin-fake` and leaves [`RunConfig::builtin_fake_bin`]
-    /// empty, so the binary re-executes itself. Tests may set `builtin_fake_bin` to the
-    /// cargo-built `eval-fake-agent`. That slot is not a filename exemption.
+    /// empty, so the binary re-executes itself. `builtin_fake_bin` is that agent only
+    /// when it is the `eval-fake-agent` artifact beside this executable. Any other
+    /// path is an external client and needs attestation.
     pub builtin_fake: bool,
-    /// Cargo test binary for the built-in fake agent. The CLI never sets this.
-    pub builtin_fake_bin: Option<PathBuf>,
-    /// `gcu_bin` is the built-in fake gcu, or the runner will re-exec this process as it.
+    /// Optional path for the built-in fake agent. The CLI never sets this.
     ///
-    /// An operator path stays `false` unless the caller is the test slot. The fake agent
-    /// refuses `GCU_BIN` unless this flag or an attestation is present.
+    /// Trusted only for the cargo-built `eval-fake-agent` next to this process.
+    /// A wrapper, copy, or same-named file elsewhere does not skip attestation.
+    pub builtin_fake_bin: Option<PathBuf>,
+    /// Trust [`RunConfig::gcu_bin`] as the built-in fake gcu.
+    ///
+    /// This is true only for the `eval-fake-gcu` artifact beside this process, or
+    /// when `gcu_bin` is empty and the fake agent re-executes this process.
+    /// Any other path still needs attestation. The flag alone is not a grant.
     pub builtin_gcu: bool,
     /// Preflight results for this run only. Cloning the config shares the map.
     /// A new [`RunConfig`] does not see another run's successes.

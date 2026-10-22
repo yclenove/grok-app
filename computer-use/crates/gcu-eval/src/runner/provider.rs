@@ -98,6 +98,7 @@ pub struct Environment {
 /// Fields a report records about how the launch was constrained.
 ///
 /// Missing telemetry is [`TelemetryState::Unknown`], never a measured zero.
+/// A tool or side log is available only after the backend writes `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Assurance {
     /// `--attest-disposable-desktop` was set. This is not a confinement proof.
@@ -130,10 +131,10 @@ pub struct Assurance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TelemetryState {
-    /// The file was missing, unreadable, or over the size cap.
+    /// The file was missing, empty, handshake-less, unreadable, or over the size cap.
     #[default]
     Unknown,
-    /// The bytes were read from one handle and were within the cap.
+    /// The producer wrote `hello` and the rest was read within the cap.
     Available,
 }
 

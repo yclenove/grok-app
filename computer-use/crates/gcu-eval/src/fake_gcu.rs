@@ -24,11 +24,15 @@ fn run() -> Result<(), String> {
     let path = std::env::var("GCU_EVAL_TOOL_LOG").map_err(|err| err.to_string())?;
     let line = serde_json::json!({"tool": tool, "result": "ok"});
     let text = serde_json::to_string(&line).map_err(|err| err.to_string())?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(&path)
         .map_err(|err| err.to_string())?;
+    if existing.is_empty() {
+        writeln!(file, "{}", crate::exec::TELEMETRY_HANDSHAKE).map_err(|err| err.to_string())?;
+    }
     writeln!(file, "{text}").map_err(|err| err.to_string())
 }
 

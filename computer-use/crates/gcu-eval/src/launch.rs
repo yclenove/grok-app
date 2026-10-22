@@ -64,9 +64,12 @@ impl ClientProgram {
     }
 }
 
-/// Resolve the client. `builtin_fake` ignores `grok_bin`.
+/// Resolve the client. A trusted `builtin_fake` slot ignores `grok_bin`.
+///
+/// An untrusted `builtin_fake_bin` is returned as an ordinary path. The caller
+/// must treat that launch as external; this function does not start it.
 pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
-    if cfg.builtin_fake {
+    if crate::boundary::builtin_fake_trusted(cfg) {
         if let Some(path) = &cfg.builtin_fake_bin {
             return Ok(ClientProgram::Path(path.clone()));
         }
@@ -74,10 +77,15 @@ pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
             .map_err(|err| Error::msg(format!("builtin fake agent: {err}")))?;
         return Ok(ClientProgram::Reexec(exe));
     }
-    cfg.grok_bin
-        .clone()
-        .map(ClientProgram::Path)
-        .ok_or_else(|| Error::msg("no client binary and no model credentials"))
+    if let Some(path) = cfg
+        .builtin_fake
+        .then(|| cfg.builtin_fake_bin.clone())
+        .flatten()
+        .or_else(|| cfg.grok_bin.clone())
+    {
+        return Ok(ClientProgram::Path(path));
+    }
+    Err(Error::msg("no client binary and no model credentials"))
 }
 
 /// Command for `program`. The re-exec form adds the internal fake-agent flag.
@@ -156,16 +164,16 @@ pub(crate) fn child_env(
 
 /// `GCU_BIN` and the flags that tell the fake agent whether that path is trusted.
 ///
-/// The built-in slot (`builtin_gcu`, or built-in fake with no `gcu_bin`) sets
-/// `GCU_EVAL_BUILTIN_GCU`. Re-exec sets `GCU_EVAL_GCU_REEXEC` and points
-/// `GCU_BIN` at this process. An operator path does not get the built-in flag.
-/// Attestation is a separate flag and does not make a path built-in.
+/// The built-in slot is the cargo artifact, or a re-exec of this process.
+/// Re-exec sets `GCU_EVAL_GCU_REEXEC` and points `GCU_BIN` at this process.
+/// `builtin_gcu: true` does not bless any other path. Attestation is a
+/// separate flag and does not make a path built-in.
 fn insert_gcu_env(map: &mut BTreeMap<String, String>, cfg: &RunConfig) {
     if cfg.attest_disposable_desktop {
         map.insert("GCU_EVAL_ATTESTED".into(), "1".into());
     }
     let reexec = cfg.builtin_fake && cfg.gcu_bin.is_none();
-    if cfg.builtin_gcu || reexec {
+    if crate::boundary::builtin_gcu_trusted(cfg) {
         map.insert("GCU_EVAL_BUILTIN_GCU".into(), "1".into());
     }
     if reexec {
@@ -375,8 +383,23 @@ mod tests {
             ..cfg.clone()
         };
         let marked = child_env(&task, &marked, &env, None);
+        assert!(
+            !marked.contains_key("GCU_EVAL_BUILTIN_GCU"),
+            "an arbitrary gcu path is not the built-in artifact"
+        );
+        let reexec = RunConfig {
+            builtin_fake: true,
+            builtin_gcu: true,
+            gcu_bin: None,
+            ..RunConfig::default()
+        };
+        let reexec = child_env(&task, &reexec, &env, None);
         assert_eq!(
-            marked.get("GCU_EVAL_BUILTIN_GCU").map(String::as_str),
+            reexec.get("GCU_EVAL_BUILTIN_GCU").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            reexec.get("GCU_EVAL_GCU_REEXEC").map(String::as_str),
             Some("1")
         );
     }

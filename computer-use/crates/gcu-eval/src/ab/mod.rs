@@ -368,7 +368,9 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
 ///
 /// Blocking: each client budget. Cancellation: the runner kills the client on
 /// timeout. Without a client, every task is `not_run`. After any cleanup
-/// failure, later arms and repeats are `not_run` and are not started.
+/// failure, later arms and repeats are `not_run` and are not started. A task
+/// id of `desktop-oneshot` does not skip that check. `include_desktop` is
+/// false here, so rows of that id are real tasks, not the gap row.
 pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport {
     if (!base.builtin_fake && base.grok_bin.is_none()) || !base.run_local {
         return not_run_report(tasks, id);
@@ -390,9 +392,6 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
             cfg.include_desktop = false;
             let suite = crate::run_tasks(tasks, &cfg).await;
             for row in suite.tasks {
-                if row.id == "desktop-oneshot" {
-                    continue;
-                }
                 if row.assurance.cleanup_failed {
                     halted = Some(format!(
                         "cleanup_failed: remaining tasks were not started ({})",
