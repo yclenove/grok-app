@@ -1,6 +1,6 @@
 //! Trusted fixture-scope assembly. Model tools cannot call this.
 
-use super::router::ActionRouter;
+use super::{router::ActionRouter, ToolOutcome};
 use crate::browser::Hub;
 use crate::driver::Driver;
 use crate::scope::{InstanceEvidence, ScopeLease, ScopedDriver};
@@ -39,6 +39,15 @@ impl ActionRouter {
             (None, None, None) => true,
             (Some(lease), Some(run), Some(generation)) => lease.same_epoch(run, generation),
             _ => false,
+        }
+    }
+
+    pub(super) fn scrub_unpublished_target(&self, out: &mut ToolOutcome) {
+        // Labels and screenshot references require a committed scoped observation.
+        // Clear the whole target before finish clones it into state or the ledger.
+        // A successful commit survives later revoke; do not recheck the lease here.
+        if self.lease.is_some() && out.state.is_none() {
+            out.action.target = None;
         }
     }
 

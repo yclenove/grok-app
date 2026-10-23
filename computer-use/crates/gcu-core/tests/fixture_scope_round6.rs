@@ -7,13 +7,78 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fixture_scope_support::{permissive, scope_only_b, World, SCOPE_MESSAGE};
-use gcu_core::action::{PublishGate, ToolCall};
+use fixture_scope_support::{
+    element_index, permissive, scope_only_b, HoldOp, World, SCOPE_MESSAGE,
+};
+use gcu_core::action::{PublishGate, ToolCall, ToolOutcome};
+use gcu_core::session::Session;
 use gcu_driver_fake::faults::Fault;
+use gcu_protocol::result::{Delivery, Outcome};
 use gcu_protocol::tools::{
     BatchStep, ClickArgs, Condition, GetAppStateParams, MouseButton, WaitForArgs,
 };
 use gcu_protocol::ErrorCode;
+
+const TARGET_CANARY: &str = "CANARY-REFUSED-ELEMENT-LABEL";
+
+#[tokio::test]
+async fn element_click_refused_commit_scrubs_return_and_ledger_without_changing_delivery() {
+    for remove in [false, true] {
+        for uncertain in [false, true] {
+            let world = World::open(permissive());
+            let index = observe_canary(&world).await;
+            let snapshots = world.session.delivered_snapshot_count();
+            let entries = world.session.action_ledger().entries().len();
+            let gate = world.session.index_gate();
+            gate.arm();
+            let release = std::thread::spawn({
+                let gate = Arc::clone(&gate);
+                let lease = world.lease.clone();
+                move || {
+                    let _unblock = Unblock(&gate);
+                    wait_until_parked(&gate);
+                    if remove {
+                        lease.rebind(scope_only_b(2)).unwrap();
+                    } else {
+                        lease.revoke();
+                    }
+                }
+            });
+            if uncertain {
+                world.spy.arm_hold(HoldOp::Perform, false);
+            }
+            let mut call = ToolCall::new("click-refused", "fixture.a", click_element(index));
+            call.window = Some("w-a".into());
+            call.settle_budget_ms = Some(0);
+            let (out, ()) = tokio::join!(world.router.execute(&world.session, call), async {
+                if uncertain {
+                    world.spy.wait_held().await;
+                    world
+                        .spy
+                        .inject(Fault::Timeout {
+                            maybe_executed: true,
+                        })
+                        .await
+                        .unwrap();
+                    world.spy.release_hold();
+                }
+            });
+            join_bounded(release);
+            let error = out.error.as_ref().expect("final publication was refused");
+            if uncertain {
+                assert_eq!(error.code, ErrorCode::Timeout, "{out:?}");
+                assert_eq!(out.action.outcome, Outcome::Unknown, "{out:?}");
+            } else {
+                assert_eq!(error.code, ErrorCode::AppDenied, "{out:?}");
+                assert_eq!(error.message, SCOPE_MESSAGE, "{out:?}");
+                assert_eq!(out.action.outcome, Outcome::Done, "{out:?}");
+            }
+            assert_eq!(out.action.delivery, Delivery::Accessibility, "{out:?}");
+            assert_unpublished_target_scrubbed(&world.session, &out, entries);
+            assert_eq!(world.session.delivered_snapshot_count(), snapshots);
+        }
+    }
+}
 
 #[tokio::test]
 async fn index_finished_revoke_before_commit_returns_no_snapshot() {
@@ -176,65 +241,125 @@ async fn revoke_after_commit_does_not_roll_back_the_snapshot() {
 
 #[tokio::test]
 async fn window_gone_revoke_while_snapshot_gate_waits_drops_metadata() {
-    let world = World::open(permissive());
-    let session = Arc::new(world.session);
-    world
-        .router
-        .observe(
-            &session,
-            state_params("fixture.a", Some("w-a"), serde_json::json!(true)),
-        )
-        .await
-        .expect("A is readable before the fault");
+    for remove in [false, true] {
+        let world = World::open(permissive());
+        let index = observe_canary(&world).await;
+        let session = Arc::new(world.session);
+        let snapshots = session.delivered_snapshot_count();
+        let entries = session.action_ledger().entries().len();
+        // Fault only after route::plan has copied the accessible label.
+        world.spy.arm_hold(HoldOp::Perform, false);
+        let gate = session.snapshot_gate();
+        gate.arm();
+        let release = std::thread::spawn({
+            let gate = Arc::clone(&gate);
+            let lease = world.lease.clone();
+            let session = Arc::clone(&session);
+            move || {
+                let _unblock = Unblock(&gate);
+                wait_until_parked(&gate);
+                // Hold the actual snapshot mutex on another thread. Let the
+                // fallback leave its gate, then revoke before it can acquire it.
+                let locked = session.delivery_gate();
+                locked.arm();
+                let unlock = Unblock(&locked);
+                let holder = std::thread::spawn(move || {
+                    let _delivery =
+                        session.prepare_screenshot_delivery("fixture.a", "w-a", "s_1", 200, 120);
+                });
+                wait_until_parked(&locked);
+                gate.release();
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while gate.is_parked() {
+                    assert!(Instant::now() < deadline, "fallback did not leave its gate");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                if remove {
+                    lease.rebind(scope_only_b(2)).unwrap();
+                } else {
+                    lease.revoke();
+                }
+                drop(unlock);
+                join_bounded(holder);
+            }
+        });
+        let mut call = ToolCall::new("click-gone", "fixture.a", click_element(index));
+        call.window = Some("w-a".into());
+        call.settle_budget_ms = Some(0);
+        let (outcome, ()) = tokio::join!(world.router.execute(&session, call), async {
+            world.spy.wait_held().await;
+            world
+                .spy
+                .inject(Fault::WindowGone {
+                    window: "w-a".into(),
+                })
+                .await
+                .unwrap();
+            world.spy.release_hold();
+        });
+        join_bounded(release);
+        let err = outcome.error.as_ref().expect("window gone");
+        assert_eq!(err.code, ErrorCode::WindowGone, "{err:?}");
+        assert_eq!(outcome.action.outcome, Outcome::Failed, "{outcome:?}");
+        assert_eq!(outcome.action.delivery, Delivery::None, "{outcome:?}");
+        assert_unpublished_target_scrubbed(&session, &outcome, entries);
+        assert_eq!(session.delivered_snapshot_count(), snapshots);
+        let rendered = format!("{outcome:?} {err:?}");
+        assert!(!rendered.contains("Allowed A"), "{rendered}");
+        assert!(!rendered.contains("Fixture A"), "{rendered}");
+    }
+}
+
+fn assert_unpublished_target_scrubbed(session: &Session, out: &ToolOutcome, prior_entries: usize) {
+    assert!(out.state.is_none(), "{out:?}");
+    assert!(out.windows.is_empty(), "{out:?}");
+    assert!(out.error.as_ref().unwrap().state.is_none(), "{out:?}");
+    let returned = serde_json::to_string(&out.action).unwrap();
+    assert!(!returned.contains(TARGET_CANARY), "{returned}");
+    assert!(out.action.target.is_none(), "{returned}");
+    let ledger = session.action_ledger();
+    assert_eq!(ledger.entries().len(), prior_entries + 1);
+    let entry = ledger.entries().back().unwrap();
+    let recorded = format!("{entry:?}");
+    assert!(!recorded.contains(TARGET_CANARY), "{recorded}");
+    assert!(entry.target.is_none(), "{recorded}");
+    assert_eq!(entry.delivery, out.action.delivery);
+    assert_eq!(entry.outcome, out.action.outcome);
+    assert_eq!(entry.effect, out.action.effect);
+}
+
+async fn observe_canary(world: &World) -> u32 {
     world
         .spy
-        .inject(Fault::WindowGone {
+        .inject(Fault::NodeChanged {
             window: "w-a".into(),
+            identifier: "go".into(),
+            name: TARGET_CANARY.into(),
+            value: None,
         })
         .await
         .unwrap();
-    let gate = session.snapshot_gate();
-    gate.arm();
-    let release = std::thread::spawn({
-        let gate = Arc::clone(&gate);
-        let lease = world.lease.clone();
-        let session = Arc::clone(&session);
-        move || {
-            let _unblock = Unblock(&gate);
-            wait_until_parked(&gate);
-            // Hold the actual snapshot mutex on another thread. Let the
-            // fallback leave its gate, then revoke before it can acquire it.
-            let locked = session.delivery_gate();
-            locked.arm();
-            let unlock = Unblock(&locked);
-            let holder = std::thread::spawn(move || {
-                let _delivery =
-                    session.prepare_screenshot_delivery("fixture.a", "w-a", "s_1", 200, 120);
-            });
-            wait_until_parked(&locked);
-            gate.release();
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while gate.is_parked() {
-                assert!(Instant::now() < deadline, "fallback did not leave its gate");
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            lease.revoke();
-            drop(unlock);
-            holder.join().unwrap();
-        }
-    });
-    let mut call = ToolCall::new("click-gone", "fixture.a", click_point());
-    call.window = Some("w-a".into());
-    call.settle_budget_ms = Some(0);
-    let outcome = world.router.execute(&session, call).await;
-    release.join().unwrap();
-    let err = outcome.error.as_ref().expect("window gone");
-    assert_eq!(err.code, ErrorCode::WindowGone, "{err:?}");
-    assert!(outcome.state.is_none(), "{outcome:?}");
-    assert!(outcome.windows.is_empty(), "{outcome:?}");
-    let rendered = format!("{outcome:?} {err:?}");
-    assert!(!rendered.contains("Allowed A"), "{rendered}");
-    assert!(!rendered.contains("Fixture A"), "{rendered}");
+    let seen = world
+        .router
+        .observe(
+            &world.session,
+            state_params("fixture.a", Some("w-a"), serde_json::json!(true)),
+        )
+        .await
+        .expect("element label is readable before the fault");
+    element_index(&seen.text, TARGET_CANARY)
+}
+
+fn join_bounded(thread: std::thread::JoinHandle<()>) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !thread.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "test thread did not finish within 15s"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    thread.join().unwrap();
 }
 
 struct Unblock<'a>(&'a PublishGate);
@@ -264,11 +389,11 @@ fn state_params(app: &str, window: Option<&str>, shot: serde_json::Value) -> Get
     serde_json::from_value(value).unwrap()
 }
 
-fn click_point() -> BatchStep {
+fn click_element(index: u32) -> BatchStep {
     BatchStep::Click(ClickArgs {
-        element_index: None,
-        x: Some(10.0),
-        y: Some(10.0),
+        element_index: Some(index),
+        x: None,
+        y: None,
         screenshot_id: None,
         click_count: 1,
         mouse_button: MouseButton::Left,

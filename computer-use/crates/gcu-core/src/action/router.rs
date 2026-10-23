@@ -289,6 +289,7 @@ impl ActionRouter {
     }
 
     fn finish(&self, session: &Session, call_id: &str, out: &mut ToolOutcome, start: Instant) {
+        self.scrub_unpublished_target(out);
         out.action.duration_ms = start.elapsed().as_millis() as u64;
         if let Some(state) = &mut out.state {
             state.state.action = Some(out.action.clone());

@@ -140,8 +140,10 @@ impl ActionRouter {
                     return out;
                 };
                 lease.commit_before_gate().enter();
+                // Host activity (including is_stopped) may take a foreign mutex.
+                let stopped = session.is_stopped() || session.activity().stop_requested();
                 let attached = lease.commit_if_current(&[(run.as_str(), *generation)], || {
-                    if session.is_stopped() || session.activity().stop_requested() {
+                    if stopped {
                         return None;
                     }
                     Some((state, windows))
