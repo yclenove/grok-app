@@ -2,10 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use gcu_core::{
-    action::ActionRouter,
+    action::{ActionRouter, ActionState, ToolOutcome},
     driver::Capture,
     model::Geometry,
     redact::{self, CapturedFrame},
+    scope::{FixtureScope, ScopeLease},
     session::WindowLocks,
     tree::ProcessedTree,
 };
@@ -13,6 +14,8 @@ use gcu_driver_fake::FakeDriver;
 use gcu_host_api::testing::{
     FakeUserActivity, MemoryPolicyStore, RecordingEventSink, ScriptedApprovals,
 };
+use gcu_protocol::result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason};
+use gcu_protocol::{AppInfo, AppState, ErrorCode, Rect, ToolError, ToolName, WindowInfo};
 use std::time::Duration;
 
 fn results() -> Results {
@@ -33,6 +36,7 @@ fn results() -> Results {
             Arc::new(FakeUserActivity::new()),
             router.input_release(),
         )),
+        scope: None,
     }
 }
 #[tokio::test]
@@ -139,4 +143,256 @@ async fn noisy_large_redacted_image_is_reduced_before_private_png_delivery() {
     assert_eq!(std::fs::read(&path).unwrap(), encoded.bytes());
     r.files.close().unwrap();
     assert!(r.image(image).await.is_err());
+}
+
+fn scope_lease(generation: u64) -> ScopeLease {
+    ScopeLease::install(
+        FixtureScope::try_new(
+            "run-s1",
+            generation,
+            "engine",
+            "desktop",
+            "lease",
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+}
+
+fn app_state(snapshot_id: &str) -> AppState {
+    AppState {
+        app: AppInfo {
+            id: "fixture.a".into(),
+            name: "Allowed A".into(),
+            pid: None,
+            identity: None,
+        },
+        window: WindowInfo {
+            id: "w-a".into(),
+            title: "Allowed A".into(),
+            frame: Rect {
+                x: 0.,
+                y: 0.,
+                w: 64.,
+                h: 64.,
+            },
+            scale: 1.,
+            on_current_desktop: Some(true),
+        },
+        snapshot_id: snapshot_id.into(),
+        screenshot: None,
+        focused: None,
+        truncated: None,
+        elements: None,
+        action: None,
+    }
+}
+
+fn solid_image() -> gcu_core::redact::RedactedImage {
+    let (width, height) = (256u32, 256u32);
+    let pixels = [255u8, 0, 0, 255].repeat((width * height) as usize);
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+    }
+    let geometry = Geometry {
+        frame: Rect {
+            x: 0.,
+            y: 0.,
+            w: width as f64,
+            h: height as f64,
+        },
+        scale: 1.,
+    };
+    let mut tree = ProcessedTree::default();
+    tree.state_version = Some(1);
+    tree.observed_at = Some(Duration::ZERO);
+    tree.sensitive_regions_reliable = true;
+    redact::apply(
+        &tree,
+        CapturedFrame::new(
+            Capture {
+                bytes,
+                width,
+                height,
+                mime: "image/png".into(),
+                geometry,
+            },
+            1,
+            Duration::ZERO,
+        ),
+    )
+    .unwrap()
+}
+
+fn unknown_outcome(state: Option<ActionState>, error_state: Option<AppState>) -> ToolOutcome {
+    ToolOutcome {
+        action: ActionResult {
+            tool: ToolName::Click,
+            target: None,
+            delivery: Delivery::Accessibility,
+            outcome: Outcome::Unknown,
+            effect: Effect::NotChecked,
+            verify: None,
+            duration_ms: 4,
+            settle: Settle {
+                ms: 0,
+                reason: SettleReason::Budget,
+            },
+            notes: vec!["Execution is uncertain; do not automatically retry.".into()],
+        },
+        error: Some(ToolError {
+            code: ErrorCode::DriverError,
+            message: "evaluation scope changed during delivery".into(),
+            hint: "Use fresh state.".into(),
+            retryable: false,
+            state: error_state,
+        }),
+        state,
+        windows: Vec::new(),
+    }
+}
+
+fn stamped_state(run: Option<&str>, generation: Option<u64>, image: bool) -> ActionState {
+    ActionState {
+        text: "CANARY-STALE observation".into(),
+        overflow_text: Some("CANARY-STALE overflow".into()),
+        state: app_state("s_9"),
+        image: image.then(solid_image),
+        scope_run: run.map(str::to_owned),
+        scope_generation: generation,
+    }
+}
+
+fn scoped_results(lease: ScopeLease) -> Results {
+    let mut built = results();
+    built.scope = Some(lease);
+    built
+}
+
+async fn encoded(results: &Results, out: ToolOutcome) -> (String, serde_json::Value) {
+    let result = results.outcome(out).await;
+    let value = serde_json::to_value(&result).unwrap();
+    let text = value["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (text, value)
+}
+
+#[tokio::test]
+async fn stale_epoch_unknown_drops_state_images_and_overflow_files() {
+    let live = scope_lease(1);
+    let kept = scoped_results(live.clone());
+    let (text, value) = encoded(
+        &kept,
+        unknown_outcome(
+            Some(stamped_state(Some("run-s1"), Some(1), true)),
+            Some(app_state("CANARY-STALE-ERR")),
+        ),
+    )
+    .await;
+    assert!(text.contains("CANARY-STALE observation"), "{text}");
+    assert!(text.contains("Screenshot file:"), "{text}");
+    assert!(text.contains("full text:"), "{text}");
+    assert_eq!(value["structuredContent"]["action"]["outcome"], "unknown");
+    assert_eq!(
+        value["structuredContent"]["error"]["code"], "driver_error",
+        "{value}"
+    );
+    assert_eq!(
+        value["structuredContent"]["error"]["state"]["snapshot_id"], "s_9",
+        "fresh observation replaces the error state"
+    );
+    assert_eq!(value["structuredContent"]["state"]["snapshot_id"], "s_9");
+    let kept_files = kept.files.export().unwrap();
+    assert!(kept_files
+        .iter()
+        .any(|(_, bytes)| String::from_utf8_lossy(bytes).contains("CANARY-STALE overflow")));
+    kept.files.close().unwrap();
+
+    for revoke in [false, true] {
+        let lease = scope_lease(1);
+        if revoke {
+            lease.revoke();
+        } else {
+            lease.rebind(scope_lease(2).current().unwrap()).unwrap();
+        }
+        let stale = scoped_results(lease);
+        let before = stale.files.export().unwrap().len();
+        let (text, value) = encoded(
+            &stale,
+            unknown_outcome(
+                Some(stamped_state(Some("run-s1"), Some(1), true)),
+                Some(app_state("CANARY-STALE-ERR")),
+            ),
+        )
+        .await;
+        let rendered = format!("{text} {value}");
+        assert!(!rendered.contains("CANARY-STALE"), "{rendered}");
+        assert!(!text.contains("Screenshot file:"), "{text}");
+        assert!(!text.contains("full text:"), "{text}");
+        assert!(value["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block.get("type").and_then(|kind| kind.as_str()) != Some("image")));
+        assert_eq!(value["structuredContent"]["action"]["outcome"], "unknown");
+        assert_eq!(value["structuredContent"]["error"]["code"], "driver_error");
+        assert_eq!(
+            value["structuredContent"]["error"]["message"],
+            "evaluation scope changed during delivery"
+        );
+        assert!(value["structuredContent"]["error"].get("state").is_none());
+        assert!(value["structuredContent"].get("state").is_none());
+        let files = stale.files.export().unwrap();
+        assert_eq!(files.len(), before);
+        assert!(files
+            .iter()
+            .all(|(_, bytes)| { !String::from_utf8_lossy(bytes).contains("CANARY-STALE") }));
+        stale.files.close().unwrap();
+    }
+
+    let active = scoped_results(scope_lease(1));
+    let (text, value) = encoded(
+        &active,
+        unknown_outcome(Some(stamped_state(None, None, false)), None),
+    )
+    .await;
+    assert!(text.contains("CANARY-STALE observation"), "{text}");
+    assert_eq!(value["structuredContent"]["state"]["snapshot_id"], "s_9");
+    active.files.close().unwrap();
+
+    let error_only = scoped_results(scope_lease(1));
+    error_only.scope.as_ref().unwrap().revoke();
+    let (text, value) = encoded(
+        &error_only,
+        unknown_outcome(None, Some(app_state("CANARY-STALE-ERR"))),
+    )
+    .await;
+    assert!(!text.contains("CANARY-STALE"), "{text}");
+    assert!(value["structuredContent"]["error"].get("state").is_none());
+    assert_eq!(value["structuredContent"]["action"]["outcome"], "unknown");
+    error_only.files.close().unwrap();
+
+    let partial = scoped_results(scope_lease(1));
+    let (text, value) = encoded(
+        &partial,
+        unknown_outcome(Some(stamped_state(Some("run-s1"), None, true)), None),
+    )
+    .await;
+    assert!(!text.contains("CANARY-STALE"), "{text}");
+    assert!(value["structuredContent"].get("state").is_none());
+    assert!(partial.files.export().unwrap().is_empty());
+    partial.files.close().unwrap();
 }

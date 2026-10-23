@@ -5,6 +5,7 @@ use gcu_core::{
     action::{ActionState, ToolOutcome},
     batch::BatchReport,
     redact::{EncodeOptions, RedactedImage},
+    scope::ScopeLease,
     session::Session,
 };
 use gcu_protocol::{result::Outcome, ActionResult, AppState, ErrorCode, ToolError};
@@ -40,6 +41,30 @@ fn step_summary(report: &BatchReport) -> String {
         .join("; ");
     format!("Batch: {body}.")
 }
+fn stale_scope_output(
+    lease: Option<&ScopeLease>,
+    state: Option<&ActionState>,
+    error: Option<&ToolError>,
+) -> bool {
+    let hard = error.as_ref().is_some_and(|err| {
+        err.code == ErrorCode::AppDenied && err.message == gcu_core::scope::SCOPE_DENIED_MESSAGE
+    });
+    if hard {
+        return true;
+    }
+    let Some(lease) = lease else {
+        return false;
+    };
+    match state {
+        Some(state) => match (&state.scope_run, state.scope_generation) {
+            (Some(run), Some(generation)) => !lease.same_epoch(run, generation),
+            (None, None) => lease.current().is_none(),
+            _ => true,
+        },
+        None => lease.current().is_none() && error.is_some_and(|err| err.state.is_some()),
+    }
+}
+
 fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Done => "done",
@@ -76,6 +101,8 @@ pub(crate) struct Results {
     pub session: Arc<Session>,
     pub encoding: EncodeOptions,
     pub images: Arc<crate::image_cache::ImageCache>,
+    /// Fixture lease, when the router was scoped. `None` for an ordinary host.
+    pub scope: Option<ScopeLease>,
 }
 impl Results {
     pub async fn batch(&self, report: BatchReport) -> CallToolResult {
@@ -142,9 +169,7 @@ impl Results {
         mut error: Option<ToolError>,
         mut data: Value,
     ) -> CallToolResult {
-        if error.as_ref().is_some_and(|err| {
-            err.code == ErrorCode::AppDenied && err.message == gcu_core::scope::SCOPE_DENIED_MESSAGE
-        }) {
+        if stale_scope_output(self.scope.as_ref(), state.as_ref(), error.as_ref()) {
             state = None;
             if let Some(err) = error.as_mut() {
                 err.state = None;

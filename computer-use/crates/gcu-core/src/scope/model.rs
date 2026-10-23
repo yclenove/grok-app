@@ -5,7 +5,8 @@
 //! A later card supplies those values. Missing or zero evidence cannot be
 //! stored, so a caller cannot register a target it cannot prove.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::task::Waker;
 
 use tokio::sync::watch;
 
@@ -195,6 +196,32 @@ pub trait InstanceEvidence: Send + Sync {
     /// Compares handle identity only. No content read, timeout, or cancellation
     /// is added by this trait.
     fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding>;
+
+    /// Pause before an attempt check. The default is ready immediately.
+    ///
+    /// Blocking: none in the default. Timeout: none. Cancellation: none.
+    /// A test double may wait and must bound that wait itself. Production
+    /// evidence uses this default and adds no latency.
+    fn attempt_fence<'a>(
+        &'a self,
+        _phase: AttemptPhase,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// Where an attempt waits so a test can revoke before the next check.
+///
+/// Memory only when the default fence is used. No blocking, timeout, or
+/// cancellation is added by the enum itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptPhase {
+    /// Before the attempt reads the lease.
+    BeforeOpen,
+    /// Before the synchronous admission query.
+    Admit,
+    /// After the receiver is armed and before that generation is marked seen.
+    MarkSeen,
 }
 
 /// Proof the assembler recorded an executable. The path is not an auth key.
@@ -414,16 +441,18 @@ fn token_ok(value: &str) -> bool {
 }
 
 #[derive(Debug)]
-enum LeaseState {
+pub(super) enum LeaseState {
     Active(FixtureScope),
     Revoked,
 }
 
 #[derive(Debug)]
-struct LeaseShared {
-    state: RwLock<LeaseState>,
-    /// Active generation, or `0` after revoke. Receivers wait; send never blocks.
-    epoch: watch::Sender<u64>,
+pub(super) struct LeaseShared {
+    pub(super) state: RwLock<LeaseState>,
+    /// Active generation, or `0` after revoke. A publish is stored even when
+    /// nobody is subscribed.
+    pub(super) epoch: watch::Sender<u64>,
+    pub(super) waiters: Mutex<Vec<Waker>>,
 }
 
 /// Shared scope generation. Clones share the record. The lock is never held
@@ -444,6 +473,7 @@ impl ScopeLease {
             shared: Arc::new(LeaseShared {
                 state: RwLock::new(LeaseState::Active(scope)),
                 epoch,
+                waiters: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -482,11 +512,25 @@ impl ScopeLease {
 
     /// Watch that publishes the active generation, or `0` after revoke.
     ///
-    /// Memory only. This does not block. The caller marks the current value
-    /// seen with `borrow_and_update` before waiting. Waiting is the caller's
-    /// cancellation; a send with no receiver is ignored.
+    /// Memory only. This does not block. Waiting is the caller's cancellation.
+    ///
+    /// A publish is stored when no receiver exists. The next [`Self::subscribe`]
+    /// observes that generation. Do not mark an unseen update seen unless it is
+    /// still the generation the caller compared.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.shared.epoch.subscribe()
+    }
+
+    pub(super) fn register_waker(&self, waker: &Waker) {
+        let mut waiters = self
+            .shared
+            .waiters
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        waiters.push(waker.clone());
     }
 
     /// Replace the scope when the run matches and the generation is newer.
@@ -516,7 +560,7 @@ impl ScopeLease {
                 }
             }
         };
-        let _ = self.shared.epoch.send(published);
+        publish(&self.shared, published);
         Ok(())
     }
 
@@ -533,6 +577,17 @@ impl ScopeLease {
                 .unwrap_or_else(|err| err.into_inner());
             *guard = LeaseState::Revoked;
         }
-        let _ = self.shared.epoch.send(0);
+        publish(&self.shared, 0);
+    }
+}
+
+fn publish(shared: &LeaseShared, generation: u64) {
+    shared.epoch.send_modify(|slot| *slot = generation);
+    let waiters = {
+        let mut guard = shared.waiters.lock().unwrap_or_else(|err| err.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for waker in waiters {
+        waker.wake();
     }
 }

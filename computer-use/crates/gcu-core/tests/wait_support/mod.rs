@@ -378,6 +378,7 @@ impl Rig {
                     events: driver.subscribe(&window),
                     until,
                     timeout: Duration::from_millis(timeout_ms),
+                    scope_epoch: None,
                 })
                 .await
         })

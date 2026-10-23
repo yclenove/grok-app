@@ -71,16 +71,26 @@ impl ActionRouter {
         };
         let mut intent = ActionIntent::new(Tool::Observe);
         intent.parameters = fresh.signature.clone();
-        if let Err(err) = self.authorize(session, &mut intent, &fresh).await {
-            action.verify = Some(verify(&label, VerifyState::Unknown));
-            return outcome(action, Some(err.tool_error()), None);
-        }
+        let approved = match self.authorize(session, &mut intent, &fresh).await {
+            Ok(approved) => approved,
+            Err(err) => {
+                action.verify = Some(verify(&label, VerifyState::Unknown));
+                return outcome(action, Some(err.tool_error()), None);
+            }
+        };
+        let epoch = self.binding_epoch(&approved);
+        drop(approved);
         drop(fresh);
         if let Err(code) = self.check_boundary(session).await {
             action.verify = Some(verify(&label, VerifyState::Unknown));
             return outcome(action, Some(error(code)), None);
         }
-        let fresh = match self.read(session, &win, false, &self.tree_opts).await {
+        let fresh = match crate::scope::with_attempt(
+            epoch,
+            self.read(session, &win, false, &self.tree_opts),
+        )
+        .await
+        {
             Ok(fresh) => fresh,
             Err(code) => {
                 action.verify = Some(verify(&label, VerifyState::Unknown));

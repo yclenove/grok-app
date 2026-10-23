@@ -42,6 +42,14 @@ impl ActionRouter {
         }
     }
 
+    /// Lease installed by the trusted assembler.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. `None` when this
+    /// router was not built with [`Self::with_fixture_scope`].
+    pub fn fixture_lease(&self) -> Option<ScopeLease> {
+        self.lease.clone()
+    }
+
     pub(crate) fn scope_stamp(&self) -> (Option<String>, Option<u64>) {
         self.lease
             .as_ref()

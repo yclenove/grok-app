@@ -94,27 +94,36 @@ impl ActionRouter {
         };
         let mut intent = ActionIntent::new(Tool::Observe);
         intent.parameters = fresh.signature.clone();
-        if let Err(err) = self.authorize(session, &mut intent, &fresh).await {
-            // The pre-approval read can contain a secret. Do not publish it.
-            return outcome(action, Some(err.tool_error()), None);
-        }
+        let approved = match self.authorize(session, &mut intent, &fresh).await {
+            Ok(approved) => approved,
+            Err(err) => {
+                // The pre-approval read can contain a secret. Do not publish it.
+                return outcome(action, Some(err.tool_error()), None);
+            }
+        };
+        let epoch = self.binding_epoch(&approved);
+        drop(approved);
         drop(fresh);
         if let Err(code) = self.check_boundary(session).await {
             return outcome(action, Some(error(code)), None);
         }
         let events = self.driver.subscribe(&win);
-        let report = match self
-            .wait_engine
-            .wait(WaitRequest {
-                driver: self.driver.as_ref(),
-                session,
-                window: &win,
-                tree_opts: &self.tree_opts,
-                events,
-                until: args.until,
-                timeout: Duration::from_millis(u64::from(args.timeout_ms)),
-            })
-            .await
+        let epoch_for_sample = epoch.clone();
+        let report = match crate::scope::with_attempt(epoch, async {
+            self.wait_engine
+                .wait(WaitRequest {
+                    driver: self.driver.as_ref(),
+                    session,
+                    window: &win,
+                    tree_opts: &self.tree_opts,
+                    events,
+                    until: args.until,
+                    timeout: Duration::from_millis(u64::from(args.timeout_ms)),
+                    scope_epoch: epoch_for_sample,
+                })
+                .await
+        })
+        .await
         {
             Ok(report) => report,
             Err(ErrorCode::WindowGone) => {
@@ -137,7 +146,10 @@ impl ActionRouter {
                 let (Some(raw), Some(info)) = (report.raw, report.info) else {
                     return outcome(action, Some(error(ErrorCode::Internal)), None);
                 };
-                match self.observation(session, &win, raw, info) {
+                if self.stale_sample(&report.scope_epoch) {
+                    return outcome(action, Some(CallError::ScopeDenied.tool_error()), None);
+                }
+                match self.observation(session, &win, raw, info, &report.scope_epoch) {
                     Ok(state) => {
                         action.outcome = Outcome::Done;
                         outcome(action, None, Some(state))
@@ -146,9 +158,14 @@ impl ActionRouter {
                 }
             }
             WaitPhase::TimedOut => {
+                if report.raw.is_some() && self.stale_sample(&report.scope_epoch) {
+                    return outcome(action, Some(CallError::ScopeDenied.tool_error()), None);
+                }
                 action.outcome = Outcome::Failed;
                 let state = match (report.raw, report.info) {
-                    (Some(raw), Some(info)) => self.observation(session, &win, raw, info).ok(),
+                    (Some(raw), Some(info)) => self
+                        .observation(session, &win, raw, info, &report.scope_epoch)
+                        .ok(),
                     _ => None,
                 };
                 outcome(action, Some(error(ErrorCode::Timeout)), state)
@@ -166,12 +183,20 @@ impl ActionRouter {
     }
 
     /// Publish one already-read sample. Does not snapshot again and does not attach an image.
+    fn stale_sample(&self, epoch: &Option<(String, u64)>) -> bool {
+        !self.scope_binding_current(
+            epoch.as_ref().map(|(run, _)| run.as_str()),
+            epoch.as_ref().map(|(_, generation)| *generation),
+        )
+    }
+
     fn observation(
         &self,
         session: &Session,
         win: &crate::driver::WindowRef,
         mut raw: RawTree,
         info: WindowInfo,
+        epoch: &Option<(String, u64)>,
     ) -> Result<super::ActionState, ErrorCode> {
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
@@ -202,8 +227,8 @@ impl ActionRouter {
             signature,
             image: None,
             quality,
-            scope_run: self.scope_stamp().0,
-            scope_generation: self.scope_stamp().1,
+            scope_run: epoch.as_ref().map(|(run, _)| run.clone()),
+            scope_generation: epoch.as_ref().map(|(_, generation)| *generation),
         };
         self.publish(session, fresh, false).map_err(|err| err.code)
     }

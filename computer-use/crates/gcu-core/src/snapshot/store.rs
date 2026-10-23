@@ -270,13 +270,18 @@ impl SnapshotStore {
         else {
             return;
         };
-        let extra = run.len();
+        let next = run.len();
         if let Some(snapshot) = self.snapshots.get_mut(position) {
+            let previous = snapshot
+                .scope_run
+                .as_ref()
+                .map(|value| value.len())
+                .unwrap_or(0);
+            Self::apply_scope_charge(&mut snapshot.memory_bytes, previous, next);
+            Self::apply_scope_charge(&mut self.memory_bytes, previous, next);
             snapshot.scope_run = Some(run.to_owned());
             snapshot.scope_generation = Some(generation);
-            snapshot.memory_bytes = snapshot.memory_bytes.saturating_add(extra);
         }
-        self.memory_bytes = self.memory_bytes.saturating_add(extra);
         while self.memory_bytes > self.memory_limit && self.snapshots.len() > 1 {
             if self
                 .snapshots
@@ -288,6 +293,15 @@ impl SnapshotStore {
             self.evict(0);
         }
     }
+
+    fn apply_scope_charge(bytes: &mut usize, previous: usize, next: usize) {
+        if next >= previous {
+            *bytes = bytes.saturating_add(next - previous);
+        } else {
+            *bytes = bytes.saturating_sub(previous - next);
+        }
+    }
+
     /// Resolve a snapshot-scoped reference only if still retained and its native
     /// fingerprint still exists at the same index in the latest window state.
     /// Eviction/removal always returns StaleElement; never match by label.

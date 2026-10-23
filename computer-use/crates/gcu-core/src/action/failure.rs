@@ -117,6 +117,8 @@ impl ActionRouter {
                     elements: None,
                     action: None,
                 },
+                scope_run: None,
+                scope_generation: None,
             });
         }
         out

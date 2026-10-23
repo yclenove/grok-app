@@ -120,6 +120,9 @@ pub enum HoldOp {
     Geometry,
     Perform,
     Focus,
+    BeforeOpen,
+    Admit,
+    MarkSeen,
 }
 
 struct Counts {
@@ -138,6 +141,10 @@ struct Counts {
     lists_after_flip: AtomicUsize,
     restore: AtomicUsize,
     held: AtomicBool,
+    started: AtomicUsize,
+    held_input: AtomicUsize,
+    unsubscribed: AtomicUsize,
+    events_parked: AtomicBool,
 }
 
 impl Counts {
@@ -158,6 +165,10 @@ impl Counts {
             lists_after_flip: AtomicUsize::new(0),
             restore: AtomicUsize::new(0),
             held: AtomicBool::new(false),
+            started: AtomicUsize::new(0),
+            held_input: AtomicUsize::new(0),
+            unsubscribed: AtomicUsize::new(0),
+            events_parked: AtomicBool::new(false),
         }
     }
 }
@@ -172,8 +183,11 @@ struct Evidence {
     stop_during_perform: bool,
     hold: Option<HoldOp>,
     hold_started: bool,
+    hold_skip: usize,
     hold_go: bool,
     deny_perform: bool,
+    snapshot_fault: Option<usize>,
+    fault_lease: Option<ScopeLease>,
     permission: Option<String>,
     events: Option<Arc<Mutex<VecDeque<UiEvent>>>>,
     waker: Arc<Mutex<Option<Waker>>>,
@@ -248,24 +262,6 @@ impl Spy {
         self.caps.version = version.into();
     }
 
-    pub fn arm_hold(&self, op: HoldOp, started: bool) {
-        let mut ev = lock(&self.evidence);
-        ev.hold = Some(op);
-        ev.hold_started = started;
-        ev.hold_go = false;
-        self.counts.held.store(false, Ordering::SeqCst);
-    }
-
-    pub async fn wait_held(&self) {
-        while !self.counts.held.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    pub fn release_hold(&self) {
-        lock(&self.evidence).hold_go = true;
-    }
-
     pub fn arm_deny_perform(&self) {
         lock(&self.evidence).deny_perform = true;
     }
@@ -298,22 +294,6 @@ impl Spy {
         if let Some(waker) = taken {
             waker.wake();
         }
-    }
-
-    async fn pause(&self, op: HoldOp) {
-        let armed = lock(&self.evidence).hold == Some(op);
-        if !armed {
-            return;
-        }
-        self.counts.held.store(true, Ordering::SeqCst);
-        loop {
-            if lock(&self.evidence).hold_go {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        self.counts.held.store(false, Ordering::SeqCst);
-        lock(&self.evidence).hold = None;
     }
 
     pub fn arm_flip(&self) {
@@ -441,8 +421,11 @@ fn initial_evidence() -> Evidence {
         stop_during_perform: false,
         hold: None,
         hold_started: false,
+        hold_skip: 0,
         hold_go: false,
         deny_perform: false,
+        snapshot_fault: None,
+        fault_lease: None,
         permission: None,
         events: None,
         waker: Arc::new(Mutex::new(None)),
@@ -466,6 +449,20 @@ impl InstanceEvidence for Spy {
             .find(|(known, _)| known.ptr_eq(handle))
             .map(|(_, id)| id.clone())?;
         ev.windows.get(&window).cloned().map(ElementBinding::new)
+    }
+
+    fn attempt_fence<'a>(
+        &'a self,
+        phase: gcu_core::scope::AttemptPhase,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let op = match phase {
+            gcu_core::scope::AttemptPhase::BeforeOpen => HoldOp::BeforeOpen,
+            gcu_core::scope::AttemptPhase::Admit => HoldOp::Admit,
+            gcu_core::scope::AttemptPhase::MarkSeen => HoldOp::MarkSeen,
+        };
+        Box::pin(async move {
+            self.pause(op).await;
+        })
     }
 }
 
@@ -561,6 +558,12 @@ impl Driver for Spy {
         cancel: &Cancel,
     ) -> DriverResult<RawTree> {
         self.pause(HoldOp::Snapshot).await;
+        if self.fire_snapshot_fault() {
+            return Err(DriverError::Native {
+                message: "injected snapshot fault".into(),
+                maybe_executed: false,
+            });
+        }
         if let Some(permission) = lock(&self.evidence).permission.take() {
             return Err(DriverError::PermissionMissing { permission });
         }
@@ -596,7 +599,7 @@ impl Driver for Spy {
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> DriverResult<Delivery> {
         let started = {
             let ev = lock(&self.evidence);
-            ev.hold == Some(HoldOp::Perform) && ev.hold_started
+            ev.hold == Some(HoldOp::Perform) && ev.hold_skip == 0 && ev.hold_started
         };
         self.pause(HoldOp::Perform).await;
         if lock(&self.evidence).deny_perform {
@@ -633,6 +636,7 @@ impl Driver for Spy {
             return Some(Box::pin(live::LiveEvents {
                 events,
                 waker: ev.waker.clone(),
+                counts: Arc::clone(&self.counts),
             }));
         }
         drop(ev);
@@ -640,6 +644,7 @@ impl Driver for Spy {
     }
 
     async fn release_all_input(&self) {
+        self.counts.held_input.store(0, Ordering::SeqCst);
         self.counts.release.fetch_add(1, Ordering::SeqCst);
         self.inner.release_all_input().await;
     }
@@ -955,6 +960,7 @@ pub fn forbidden_actions(win: &WindowRef, handle: NativeHandle) -> Vec<DriverAct
     actions
 }
 
+mod hold;
 mod live;
 
 pub fn element_index(text: &str, label: &str) -> u32 {

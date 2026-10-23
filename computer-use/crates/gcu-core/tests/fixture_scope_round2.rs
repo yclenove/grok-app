@@ -68,7 +68,9 @@ async fn reads_revoked_mid_call_drop_the_payload() {
                     .focused_element(&win.app)
                     .await
                     .map(|found| format!("{found:?}")),
-                HoldOp::Perform => unreachable!("perform has its own tests"),
+                HoldOp::Perform | HoldOp::BeforeOpen | HoldOp::Admit | HoldOp::MarkSeen => {
+                    unreachable!("perform has its own tests")
+                }
             }
         })
         .await;

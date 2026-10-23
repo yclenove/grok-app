@@ -204,6 +204,7 @@ impl Server {
                 },
                 ..Default::default()
             },
+            scope: router.fixture_lease(),
         };
         let script_ready = cfg!(feature = "script") && config.script.is_some();
         let tools =

@@ -36,7 +36,7 @@ impl ActionRouter {
         let app = host_app(fresh, self.driver.platform()).map_err(CallError::from)?;
         let window = policy_window(fresh);
         let config = self.policy.load();
-        let binding = self.binding(intent, fresh, &app);
+        let binding = self.binding(intent, fresh, &app, &opened);
         let mut approved = Approved {
             config,
             binding,
@@ -234,7 +234,13 @@ impl ActionRouter {
         }
         Ok(())
     }
-    fn binding(&self, intent: &ActionIntent, fresh: &Fresh, app: &AppInfo) -> ApprovalBinding {
+    fn binding(
+        &self,
+        intent: &ActionIntent,
+        fresh: &Fresh,
+        app: &AppInfo,
+        opened: &Option<(String, u64)>,
+    ) -> ApprovalBinding {
         ApprovalBinding {
             app: app.identity.clone(),
             pid: app.pid,
@@ -243,8 +249,8 @@ impl ActionRouter {
             action_digest: intent.action_digest,
             snapshot_id: intent.snapshot_id.clone(),
             policy_version: self.policy_version.load(Ordering::Acquire),
-            scope_run: self.opened_scope().map(|(run, _)| run),
-            scope_generation: self.opened_scope().map(|(_, generation)| generation),
+            scope_run: opened.as_ref().map(|(run, _)| run.clone()),
+            scope_generation: opened.as_ref().map(|(_, generation)| *generation),
         }
     }
     fn opened_scope(&self) -> Option<(String, u64)> {
@@ -261,7 +267,7 @@ impl ActionRouter {
             _ => false,
         }
     }
-    fn binding_epoch(&self, approved: &Approved) -> Option<(String, u64)> {
+    pub(crate) fn binding_epoch(&self, approved: &Approved) -> Option<(String, u64)> {
         match (
             approved.binding.scope_run.clone(),
             approved.binding.scope_generation,
@@ -327,20 +333,36 @@ impl ActionRouter {
         {
             return Err(CallError::Code(ErrorCode::StaleElement));
         }
-        if let Some(latest) = super::lock(&session.actions).snapshots.latest(&fresh.key()) {
-            if latest.scope_run() != approved.binding.scope_run.as_deref()
-                || latest.scope_generation() != approved.binding.scope_generation
+        let latest_epoch = {
+            let resources = super::lock(&session.actions);
+            resources.snapshots.latest(&fresh.key()).map(|latest| {
+                (
+                    latest.scope_run().map(str::to_owned),
+                    latest.scope_generation(),
+                )
+            })
+        };
+        if let Some((run, generation)) = latest_epoch {
+            if run.as_deref() != approved.binding.scope_run.as_deref()
+                || generation != approved.binding.scope_generation
             {
                 return Err(CallError::ScopeDenied);
             }
         }
+        super::epoch::screenshot_epoch(
+            self,
+            session,
+            &fresh.key(),
+            &gate.screenshot_id,
+            self.binding_epoch(approved),
+        )?;
         let mut current_intent = intent.clone();
         self.bind_parameters(&mut current_intent, call, &current, gate)
             .map_err(CallError::from)?;
         let app = host_app(&current, self.driver.platform()).map_err(CallError::from)?;
         revalidate(
             &approved.binding,
-            &self.binding(&current_intent, &current, &app),
+            &self.binding(&current_intent, &current, &app, &self.opened_scope()),
         )
         .map_err(|why| {
             if why == crate::policy::Invalidated::ScopeEpoch {

@@ -63,6 +63,16 @@ impl ActionRouter {
         mode: ScreenshotMode,
         opts: &TreeOpts,
     ) -> Result<Fresh, CallError> {
+        let producing = crate::scope::expected_epoch().or_else(|| {
+            self.lease.as_ref().and_then(|lease| {
+                lease
+                    .current()
+                    .map(|scope| (scope.run_id().to_owned(), scope.generation()))
+            })
+        });
+        if self.lease.is_some() && producing.is_none() {
+            return Err(CallError::ScopeDenied);
+        }
         let cancel = Cancel::default();
         let mut raw = self
             .native(
@@ -187,7 +197,11 @@ impl ActionRouter {
         ElementIndex::assign(&mut tree, previous.map(|s| s.index()), next)
             .map_err(|_| ErrorCode::StaleElement)?;
         drop(resources);
-        let (scope_run, scope_generation) = self.scope_stamp();
+        if let Some((run, generation)) = &producing {
+            if !self.scope_binding_current(Some(run.as_str()), Some(*generation)) {
+                return Err(CallError::ScopeDenied);
+            }
+        }
         Ok(Fresh {
             win: win.clone(),
             info,
@@ -196,8 +210,8 @@ impl ActionRouter {
             signature: merged_signature,
             image,
             quality,
-            scope_run,
-            scope_generation,
+            scope_run: producing.as_ref().map(|(run, _)| run.clone()),
+            scope_generation: producing.as_ref().map(|(_, generation)| *generation),
         })
     }
     pub(crate) fn rendered_diff_is_empty(
@@ -327,6 +341,8 @@ impl ActionRouter {
                 action: None,
             },
             image,
+            scope_run: fresh.scope_run,
+            scope_generation: fresh.scope_generation,
         })
     }
 }

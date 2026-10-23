@@ -2,6 +2,7 @@
 //! Native waits are bounded and cancellable; uncertain mutations are never replayed.
 mod authorize;
 mod discovery;
+mod epoch;
 mod expect;
 mod failure;
 mod fixture;
@@ -82,6 +83,14 @@ pub struct ActionState {
     pub state: AppState,
     /// Optional safe image, before encoding for the transport.
     pub image: Option<RedactedImage>,
+    /// Fixture run that produced this observation. `None` outside a scope and
+    /// for a synthetic window-gone line. Not a protocol field.
+    pub scope_run: Option<String>,
+    /// Fixture generation that produced this observation.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. A later encode must
+    /// not substitute the current generation when this is missing or stale.
+    pub scope_generation: Option<u64>,
 }
 impl fmt::Debug for ActionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

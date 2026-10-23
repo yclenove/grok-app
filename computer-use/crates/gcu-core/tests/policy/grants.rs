@@ -66,6 +66,38 @@ async fn grant_tiers_expire_on_turn_and_session_close() {
 }
 
 #[test]
+fn newer_epoch_retires_the_older_grant_and_none_does_not_match() {
+    let app = notes();
+    let config = config();
+    let mut grants = GrantTable::default();
+    grants.record_session_at(&app, Some(("run-s1", 1)));
+    assert!(grants
+        .covers_in(&config, &app, Some(("run-s1", 1)))
+        .is_some());
+    assert!(grants.covers_in(&config, &app, None).is_none());
+    assert!(grants
+        .covers_in(&config, &app, Some(("run-s1", 2)))
+        .is_none());
+    grants.record_session_at(&app, Some(("run-s1", 2)));
+    assert!(grants
+        .covers_in(&config, &app, Some(("run-s1", 1)))
+        .is_none());
+    assert!(grants
+        .covers_in(&config, &app, Some(("run-s1", 2)))
+        .is_some());
+    grants.record_session_at(&app, Some(("run-s1", 1)));
+    assert!(
+        grants
+            .covers_in(&config, &app, Some(("run-s1", 1)))
+            .is_none(),
+        "an older epoch was resurrected"
+    );
+    assert!(grants
+        .covers_in(&config, &app, Some(("run-s1", 2)))
+        .is_some());
+}
+
+#[test]
 fn always_grant_follows_platform_identity_and_can_be_disabled() {
     let activity = FakeUserActivity::new();
     let linux = notes();

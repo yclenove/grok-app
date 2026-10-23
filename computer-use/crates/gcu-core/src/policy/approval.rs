@@ -159,6 +159,25 @@ fn remember(grants: &mut Vec<HeldGrant>, app: &AppInfo, epoch: Option<(&str, u64
     {
         return;
     }
+    if let Some((run, generation)) = epoch {
+        let newer = grants.iter().any(|grant| {
+            instance_ok(grant, app)
+                && grant
+                    .epoch
+                    .as_ref()
+                    .is_some_and(|(held_run, held_gen)| held_run == run && *held_gen > generation)
+        });
+        if newer {
+            return;
+        }
+        grants.retain(|grant| {
+            !(instance_ok(grant, app)
+                && grant
+                    .epoch
+                    .as_ref()
+                    .is_some_and(|(held_run, held_gen)| held_run == run && *held_gen < generation))
+        });
+    }
     grants.push(HeldGrant {
         identity: app.identity.clone(),
         pid: app.pid,

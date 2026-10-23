@@ -37,6 +37,23 @@ fn record(store: &mut SnapshotStore, input: ProcessedTree) -> gcu_core::snapshot
 }
 
 #[test]
+fn set_scope_epoch_retag_charges_only_the_length_delta() {
+    let mut store = SnapshotStore::default();
+    let observation = record(&mut store, tree(&[1], &[]));
+    let before = store.memory_bytes();
+    store.set_scope_epoch(&key(), observation.snapshot_id, "run", 1);
+    let once = store.memory_bytes();
+    assert_eq!(once, before + "run".len());
+    store.set_scope_epoch(&key(), observation.snapshot_id, "run", 2);
+    assert_eq!(store.memory_bytes(), once);
+    store.set_scope_epoch(&key(), observation.snapshot_id, "run-longer", 3);
+    assert_eq!(
+        store.memory_bytes(),
+        once - "run".len() + "run-longer".len()
+    );
+}
+
+#[test]
 fn snapshot_turn_first_observation_always_full() {
     let mut store = SnapshotStore::default();
     assert_eq!(

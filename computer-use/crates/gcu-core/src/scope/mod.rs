@@ -7,14 +7,19 @@
 //! refused. A missing lease, a missing proof, or an identity mismatch all
 //! surface as the same fixed sentence.
 
+mod authority;
 mod driver;
+mod events;
 mod guard;
 mod model;
 
+pub use authority::AttemptAuthority;
+pub(crate) use authority::{expected_epoch, with_attempt};
 pub use driver::ScopedDriver;
 pub use model::{
-    BootIdentity, ElementBinding, ExecutableProof, FixtureScope, FixtureTarget, InstanceEvidence,
-    OsStartTime, ProcessInstance, RegisteredWindow, ScopeError, ScopeLease, WindowBinding,
+    AttemptPhase, BootIdentity, ElementBinding, ExecutableProof, FixtureScope, FixtureTarget,
+    InstanceEvidence, OsStartTime, ProcessInstance, RegisteredWindow, ScopeError, ScopeLease,
+    WindowBinding,
 };
 
 /// Model-facing sentence for every scope refusal.
