@@ -341,3 +341,96 @@ mod tests {
         }
     }
 }
+
+/// Fresh local-only owner pipe for scope bootstrap, with exactly one client.
+#[cfg(windows)]
+pub(crate) fn scope_pipe(
+    name: &str,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            Security::{
+                Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+            },
+        },
+    };
+    let wide: Vec<u16> = format!("D:P(A;;GA;;;{})", current_user_sid()?)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: terminated input and writable descriptor output; API allocates sd.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(wide.as_ptr()),
+            1,
+            &mut sd,
+            None,
+        )
+    }
+    .map_err(io::Error::other)?;
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0,
+        bInheritHandle: false.into(),
+    };
+    // SAFETY: descriptor and attributes remain alive until CreateNamedPipe returns.
+    let result = unsafe {
+        tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .max_instances(1)
+            .create_with_security_attributes_raw(
+                name,
+                (&sa as *const SECURITY_ATTRIBUTES).cast_mut().cast(),
+            )
+    };
+    // SAFETY: sd was allocated by the LocalAlloc-backed conversion API above.
+    unsafe {
+        LocalFree(Some(HLOCAL(sd.0)));
+    }
+    result
+}
+
+/// Remove the bootstrap capability from stdio after importing its private
+/// non-inheritable duplicate. Descendants with default stdio cannot regain it.
+#[cfg(unix)]
+pub(crate) fn detach_scope_stdin(_: usize) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let null = std::fs::File::open("/dev/null")?;
+    // SAFETY: null is a live readable descriptor; dup2 replaces only stdin.
+    if unsafe { libc::dup2(null.as_raw_fd(), 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(windows)]
+pub(crate) fn detach_scope_stdin(handle: usize) -> io::Result<()> {
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::Console::{SetStdHandle, STD_INPUT_HANDLE},
+    };
+    // SAFETY: replace this process's stdin table entry before any child spawn.
+    unsafe { SetStdHandle(STD_INPUT_HANDLE, HANDLE::default()) }.map_err(io::Error::other)?;
+    // SAFETY: the imported duplicate owns the connection now; the original
+    // inherited handle is not used again, including by future stdio spawning.
+    unsafe { CloseHandle(HANDLE(handle as *mut _)) }.map_err(io::Error::other)
+}
+
+/// A disk file can never be the Windows private control transport.
+#[cfg(windows)]
+pub(crate) fn check_scope_pipe(handle: usize) -> io::Result<()> {
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE},
+    };
+    // SAFETY: GetFileType validates the borrowed inherited handle and does not
+    // transfer ownership or read its data. The importer duplicates it next.
+    if unsafe { GetFileType(HANDLE(handle as *mut _)) } != FILE_TYPE_PIPE {
+        return Err(io::Error::other("scope control must be an inherited pipe"));
+    }
+    Ok(())
+}

@@ -5,7 +5,7 @@
 
 use crate::boundary::{launches_real_client, real_launch_block};
 use crate::launch::{
-    child_approval, child_env, client_command, grok_args, resolve_client, write_config,
+    child_approval, child_env, client_command, grok_args, resolve_client, write_config_for,
 };
 use crate::oracle::{judge, EffectCheck, Verdict, World};
 use crate::runner::{
@@ -16,7 +16,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub(crate) async fn execute(task: &Task, cfg: &RunConfig, env: &Environment) -> TaskOutcome {
+#[path = "scope/execute.rs"]
+mod entry;
+pub(crate) use entry::{execute, execute_scoped};
+
+async fn execute_ready(
+    task: &Task,
+    cfg: &RunConfig,
+    env: &Environment,
+    data_address: Option<std::net::SocketAddr>,
+) -> TaskOutcome {
     let real_client = launches_real_client(cfg);
     if let Some(reason) = real_launch_block(
         real_client,
@@ -42,7 +51,7 @@ pub(crate) async fn execute(task: &Task, cfg: &RunConfig, env: &Environment) -> 
     outcome.grok_home = env.grok_home.display().to_string();
     outcome.always_approve = true;
     outcome.web_search_disabled = true;
-    if let Err(err) = write_config(env, cfg, &task.scene) {
+    if let Err(err) = write_config_for(env, cfg, &task.scene, data_address) {
         outcome.status = RunStatus::Invalid;
         outcome.reason = err.to_string();
         return outcome;

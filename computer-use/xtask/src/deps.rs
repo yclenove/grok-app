@@ -139,6 +139,7 @@ const RULES: &[Rule] = &[
         allowed: Allowed::Only(&[
             "gcu-protocol",
             "gcu-core",
+            "gcu-host-protocol",
             "gcu-driver-fake",
             "serde",
             "serde_json",

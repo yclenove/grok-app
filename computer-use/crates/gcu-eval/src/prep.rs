@@ -156,6 +156,10 @@ pub(crate) struct HeldEnv {
 }
 
 impl HeldEnv {
+    pub(crate) fn arm(&mut self) {
+        self.guard.arm();
+    }
+
     pub(crate) fn disarm(&mut self) {
         self.guard.disarm();
     }
@@ -395,6 +399,38 @@ mod seed;
 pub(crate) use seed::seed_auth;
 #[cfg(all(test, unix))]
 pub(crate) use seed::seed_auth_in;
+
+/// S3 uses only a trusted in-memory fake manifest, never fixture state JSON.
+pub(crate) async fn start_scope(
+    task: &crate::tasks::Task,
+    cfg: &crate::runner::RunConfig,
+    env: &Environment,
+) -> Result<Option<crate::scope::Supervisor>, Error> {
+    let Some(scope) = cfg.fake_scope.clone() else {
+        return Ok(None);
+    };
+    crate::scope::validate(cfg)?;
+    let binary = cfg
+        .gcu_bin
+        .as_deref()
+        .ok_or_else(|| Error::msg("scope_needs_gcu_binary"))?;
+    let run = env
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::msg("scope_run_missing"))?
+        .to_owned();
+    crate::scope::Supervisor::start(
+        binary,
+        env,
+        &task.scene,
+        cfg.mcp_profile.as_deref().unwrap_or("default"),
+        run,
+        scope,
+    )
+    .await
+    .map(Some)
+}
 
 /// A fixture app started for one task and stopped when this value is dropped.
 pub(crate) struct Fixture(std::process::Child);

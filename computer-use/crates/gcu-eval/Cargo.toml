@@ -32,6 +32,7 @@ anyhow.workspace = true
 clap = { version = "4.6", features = ["derive"] }
 gcu-core.workspace = true
 gcu-driver-fake.workspace = true
+gcu-host-protocol.workspace = true
 gcu-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -44,3 +45,8 @@ libc = "0.2"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "scope_supervisor"
+path = "tests/scope_supervisor.rs"
+harness = false

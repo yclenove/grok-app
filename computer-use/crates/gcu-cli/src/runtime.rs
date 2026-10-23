@@ -31,6 +31,12 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
         return Ok(0);
     }
     let mode = args::approval_mode()?;
+    if let Some(Command::ScopedEngine { profile }) = &cli.command {
+        return crate::scope::run(&cli.driver, *profile, mode).await;
+    }
+    if let Some(Command::ScopeRelay { data_address }) = &cli.command {
+        return crate::scope::relay(*data_address).await;
+    }
     match cli.command.as_ref() {
         Some(Command::NativeHost { origin, .. }) => return crate::native_host::run(origin).await,
         Some(Command::Install(args)) => {

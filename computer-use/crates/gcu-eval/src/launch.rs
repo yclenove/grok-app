@@ -206,6 +206,13 @@ fn proxy_pairs(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)>
 
 /// Isolated client config. The text is the preflight cache input, not a secret.
 pub(crate) fn config_body(cfg: &RunConfig, scene: &str) -> String {
+    config_body_for(cfg, scene, None)
+}
+fn config_body_for(
+    cfg: &RunConfig,
+    scene: &str,
+    data_address: Option<std::net::SocketAddr>,
+) -> String {
     let command = toml_quote(
         &cfg.gcu_bin
             .as_ref()
@@ -220,7 +227,12 @@ pub(crate) fn config_body(cfg: &RunConfig, scene: &str) -> String {
         .map(|value| format!(", \"--profile\", {}", toml_quote(value)))
         .unwrap_or_default();
     // The real driver takes no scene: the fixture app on the desktop is the world.
-    let server_args = if cfg.real_driver {
+    let server_args = if let Some(address) = data_address {
+        format!(
+            "[\"scope-relay\", \"--data-address\", {}]",
+            toml_quote(&address.to_string())
+        )
+    } else if cfg.real_driver {
         format!("[\"mcp\"{profile}]")
     } else {
         format!("[\"mcp\", \"--driver\", \"fake\", \"--scene\", {scene}{profile}]")
@@ -248,8 +260,13 @@ pub(crate) fn config_body(cfg: &RunConfig, scene: &str) -> String {
     body
 }
 
-pub(crate) fn write_config(env: &Environment, cfg: &RunConfig, scene: &str) -> Result<(), Error> {
-    let body = config_body(cfg, scene);
+pub(crate) fn write_config_for(
+    env: &Environment,
+    cfg: &RunConfig,
+    scene: &str,
+    data_address: Option<std::net::SocketAddr>,
+) -> Result<(), Error> {
+    let body = config_body_for(cfg, scene, data_address);
     let path = env.grok_home.join("config.toml");
     if std::fs::symlink_metadata(&path).is_ok() {
         return Err(Error::msg("refusing a pre-existing config.toml"));
@@ -325,6 +342,28 @@ mod tests {
             "--output-format".into(),
             "json".into(),
         ]
+    }
+
+    #[test]
+    fn scoped_config_contains_only_fixed_relay_and_public_data_address() {
+        let cfg = RunConfig {
+            gcu_bin: Some(std::path::PathBuf::from("/fixtures/gcu")),
+            ..RunConfig::default()
+        };
+        let body = config_body_for(&cfg, "form", Some("127.0.0.1:23456".parse().unwrap()));
+        assert!(body.contains("args = [\"scope-relay\", \"--data-address\", \"127.0.0.1:23456\"]"));
+        for private in [
+            "Install",
+            "scope_digest",
+            "control_lease",
+            "--scene",
+            "--scope-fd",
+        ] {
+            assert!(
+                !body.contains(private),
+                "control content in MCP config: {private}"
+            );
+        }
     }
 
     #[test]

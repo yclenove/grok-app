@@ -26,6 +26,7 @@ mod owner_unix_imp;
 #[path = "owner_windows.rs"]
 mod owner_windows_imp;
 pub mod panel;
+pub mod scope;
 pub mod server;
 pub mod stop_reason;
 pub mod supervisor;
