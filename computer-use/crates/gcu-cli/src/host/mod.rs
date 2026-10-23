@@ -12,11 +12,13 @@ use gcu_host_api::*;
 use policy_store::HostPolicy;
 use std::{
     collections::VecDeque,
+    mem,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    task::Waker,
 };
 
 pub(crate) struct LocalHost {
@@ -66,6 +68,7 @@ impl LocalHost {
                 generation: Mutex::new(0),
                 io: Mutex::new(()),
                 physical: Mutex::new(None),
+                stop_wakers: Mutex::new(Vec::new()),
             }),
             None,
         )
@@ -263,6 +266,7 @@ pub(crate) struct Activity {
     generation: Mutex<u64>,
     io: Mutex<()>,
     physical: Mutex<Option<Arc<dyn gcu_mcp::host::PhysicalActivity>>>,
+    stop_wakers: Mutex<Vec<Waker>>,
 }
 impl Activity {
     fn open() -> Result<Self, Failure> {
@@ -282,6 +286,7 @@ impl Activity {
             generation: Mutex::new(0),
             io: Mutex::new(()),
             physical: Mutex::new(None),
+            stop_wakers: Mutex::new(Vec::new()),
         })
     }
     /// Native assembly supplies the same optional source used by route B.
@@ -293,6 +298,16 @@ impl Activity {
         let mut generation = self.generation.lock().unwrap_or_else(|e| e.into_inner());
         *generation = generation.wrapping_add(1);
         self.stopped.store(true, Ordering::Release);
+        drop(generation);
+        let wakers = mem::take(
+            &mut *self
+                .stop_wakers
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()),
+        );
+        for waker in wakers {
+            waker.wake();
+        }
     }
     pub(crate) fn persist_stop(&self) -> Result<(), Failure> {
         let _io = self.io.lock().unwrap_or_else(|e| e.into_inner());
@@ -344,6 +359,16 @@ impl UserActivity for Activity {
     }
     fn clear_stop_by_user(&self) {
         self.stopped.store(false, Ordering::Release);
+    }
+    fn register_stop_waker(&self, waker: &Waker) {
+        let mut wakers = self
+            .stop_wakers
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if wakers.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        wakers.push(waker.clone());
     }
 }
 

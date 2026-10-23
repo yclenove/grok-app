@@ -88,6 +88,8 @@ pub(crate) fn reject(params: &ComputerBatchParams, err: PreflightError) -> Batch
         failure: None,
         last: None,
         state: None,
+        scope_run: None,
+        scope_generation: None,
     }
 }
 

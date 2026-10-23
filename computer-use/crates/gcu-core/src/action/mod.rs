@@ -2,23 +2,29 @@
 //! Native waits are bounded and cancellable; uncertain mutations are never replayed.
 mod authorize;
 mod discovery;
+mod epoch;
 mod expect;
 mod failure;
+mod fixture;
 /// Snapshot, geometry, and exact-handle preflight gates.
 pub mod gate;
 /// Bounded metadata-only action history.
 pub mod ledger;
 pub(crate) mod observe;
 mod provenance;
+mod publish_gate;
 mod route;
 /// Policy-aware portable action executor.
 pub mod router;
 mod settle;
 mod wait;
+mod wire;
 
 use crate::{driver::PointerRoute, redact::RedactedImage, snapshot::SnapshotStore};
 use gcu_protocol::{result::ActionResult, tools::BatchStep, AppState, ToolError, WindowInfo};
 pub use ledger::{ActionLedger, LedgerEntry};
+/// Pause point for publication tests. Production leaves it disarmed.
+pub use publish_gate::PublishGate;
 pub use router::ActionRouter;
 use serde::Serialize;
 use std::{
@@ -80,6 +86,15 @@ pub struct ActionState {
     pub state: AppState,
     /// Optional safe image, before encoding for the transport.
     pub image: Option<RedactedImage>,
+    /// Fixture run that produced this observation. `None` outside a scope.
+    /// A scoped window-gone line carries the epoch that listed the remaining
+    /// windows. Not a protocol field.
+    pub scope_run: Option<String>,
+    /// Fixture generation that produced this observation.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. A later encode must
+    /// not substitute the current generation when this is missing or stale.
+    pub scope_generation: Option<u64>,
 }
 impl fmt::Debug for ActionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

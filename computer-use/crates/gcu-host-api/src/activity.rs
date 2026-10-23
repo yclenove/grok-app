@@ -58,4 +58,13 @@ pub trait UserActivity: Send + Sync {
     /// Cancellation: none. This is not cancelled by session close.
     /// Thread safety: `Send + Sync`.
     fn clear_stop_by_user(&self);
+
+    /// Register a waker for the next transition of the stop latch.
+    ///
+    /// The default records nothing. Hosts that can latch Stop should wake every
+    /// registered waker from that latch. Reading the bit does not consume it.
+    ///
+    /// Blocking: none. Timeout: none. Cancellation: none.
+    /// Thread safety: `Send + Sync`.
+    fn register_stop_waker(&self, _waker: &std::task::Waker) {}
 }

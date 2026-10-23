@@ -4,7 +4,11 @@ use crate::{
     server::{Cleanup, Server},
     Host, ServeError, ServerConfig,
 };
-use gcu_core::{driver::Driver, session::Session};
+use gcu_core::{
+    driver::Driver,
+    scope::{InstanceEvidence, ScopeLease},
+    session::Session,
+};
 use rmcp::model::CallToolResult;
 use serde_json::Value;
 use std::sync::Arc;
@@ -42,6 +46,26 @@ impl Connection {
         let cleanup = Cleanup::new(server.clone());
         Ok(Self { server, cleanup })
     }
+    /// Open a session whose driver is wrapped in the fixture scope.
+    ///
+    /// The caller is the trusted assembler. This is not an MCP tool and it does
+    /// not install a tool that sets, renews, or widens the scope. The server
+    /// does not retain the lease. Private-file startup caps at five seconds;
+    /// dropping cancels that wait. Elicitation stays off.
+    pub async fn open_scoped<D>(
+        driver: D,
+        lease: ScopeLease,
+        host: Host,
+        config: ServerConfig,
+    ) -> Result<Self, ServeError>
+    where
+        D: Driver + InstanceEvidence + 'static,
+    {
+        let files = crate::files::blocking(SessionFiles::new).await?;
+        let server = Server::new_scoped(driver, lease, host, config, files)?;
+        let cleanup = Cleanup::new(server.clone());
+        Ok(Self { server, cleanup })
+    }
     /// Trusted Host control handle; never publish this as a model tool.
     /// Memory only, nonblocking, with no timeout or cancellation.
     pub fn session(&self) -> Arc<Session> {
@@ -60,6 +84,13 @@ impl Connection {
     ) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, ServeError> {
         let files = self.server.files();
         Ok(crate::files::blocking(move || files.export()).await?)
+    }
+    /// Redacted image retained for a screenshot id. Not an MCP tool.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Returns `None` when
+    /// this session did not deliver that id.
+    pub fn cached_image(&self, id: &str) -> Option<gcu_host_protocol::messages::Image> {
+        self.server.screenshot(id)
     }
     /// Execute once through the stdio dispatcher, without a peer/elicitation.
     /// Native calls cap at five seconds; approvals follow Host policy. No retries.

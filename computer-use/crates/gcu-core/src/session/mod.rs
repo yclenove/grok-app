@@ -19,6 +19,7 @@ mod delivery;
 mod queue;
 mod stop;
 
+pub use delivery::ScreenshotDelivery;
 pub use queue::{SessionError, WindowGuard, WindowLocks, WINDOW_LOCK_WAIT};
 pub use stop::{
     drive_native, InputRelease, NativeTimeout, StopTimings, NATIVE_CALL_TIMEOUT,
@@ -58,6 +59,12 @@ pub struct Session {
     queue: tokio::sync::Mutex<()>,
     cancel: Cancel,
     pub(crate) actions: Mutex<crate::action::SessionActions>,
+    /// Parks before a screenshot size is stored. Production leaves it disarmed.
+    delivery_gate: std::sync::Arc<crate::action::PublishGate>,
+    /// Parks after indexing and before the snapshot is stored. Disarmed in production.
+    index_gate: std::sync::Arc<crate::action::PublishGate>,
+    /// Parks before WindowGone metadata is attached. Disarmed in production.
+    snapshot_gate: std::sync::Arc<crate::action::PublishGate>,
 }
 
 impl Session {
@@ -84,7 +91,36 @@ impl Session {
             queue: tokio::sync::Mutex::new(()),
             cancel: Cancel::new(),
             actions: Mutex::new(crate::action::SessionActions::default()),
+            delivery_gate: crate::action::PublishGate::new(),
+            index_gate: crate::action::PublishGate::new(),
+            snapshot_gate: crate::action::PublishGate::new(),
         }
+    }
+
+    /// Pause inside [`Session::prepare_screenshot_delivery`] with the snapshot mutex held.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed.
+    #[must_use]
+    pub fn delivery_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
+        std::sync::Arc::clone(&self.delivery_gate)
+    }
+
+    /// Pause after an observation is indexed and before it is stored.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed,
+    /// so entering it does not wait and does not hold the snapshot mutex.
+    #[must_use]
+    pub fn index_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
+        std::sync::Arc::clone(&self.index_gate)
+    }
+
+    /// Pause after a WindowGone list is read and before that metadata is attached.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed.
+    /// The snapshot mutex is not held while this gate waits.
+    #[must_use]
+    pub fn snapshot_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
+        std::sync::Arc::clone(&self.snapshot_gate)
     }
 
     /// Session id.
@@ -106,6 +142,15 @@ impl Session {
     /// with no timeout or cancellation. No input payloads are retained.
     pub fn action_ledger(&self) -> crate::action::ActionLedger {
         lock(&self.actions).ledger.clone()
+    }
+
+    /// Observations this session has recorded.
+    ///
+    /// Memory only. May wait on the snapshot mutex. No timeout or cancellation.
+    /// A publication that is refused does not increment the count.
+    #[must_use]
+    pub fn delivered_snapshot_count(&self) -> usize {
+        lock(&self.actions).snapshots.len()
     }
 
     pub(crate) fn turn_generation(&self) -> u64 {
@@ -308,6 +353,24 @@ impl Session {
         risk: Risk,
         timeout: std::time::Duration,
     ) -> ApprovalDecision {
+        self.request_app_at(provider, app, reason, risk, timeout, None)
+            .await
+    }
+
+    /// [`Self::request_app`] that stores turn and session grants for `scope_epoch`.
+    ///
+    /// The epoch is the generation that was current when the caller started the
+    /// wait, not the generation at record time. `None` stores an unscoped grant.
+    /// Blocking, timeout, and cancellation match [`Self::request_app`].
+    pub async fn request_app_at(
+        &self,
+        provider: &dyn ApprovalProvider,
+        app: &AppInfo,
+        reason: Option<&ModelReason>,
+        risk: Risk,
+        timeout: std::time::Duration,
+        scope_epoch: Option<(String, u64)>,
+    ) -> ApprovalDecision {
         if self.closed.load(Ordering::Acquire) {
             return ApprovalDecision::Deny;
         }
@@ -327,6 +390,7 @@ impl Session {
             closed: &self.closed,
             turn_open: &self.turn_open,
             grants: &self.grants,
+            scope_epoch,
         })
         .await
     }

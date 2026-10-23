@@ -1,7 +1,8 @@
 //! Sequential router attempts. No second policy path and no replay.
 
 use super::{skipped, step_name, timeout_error, BatchReport, BATCH_DEADLINE};
-use crate::action::{ActionRouter, ToolCall};
+use crate::action::{ActionRouter, ActionState, ToolCall};
+use crate::scope::{ScopeLease, SCOPE_DENIED_MESSAGE};
 use crate::session::Session;
 use gcu_protocol::{
     result::{BatchStepResult, Outcome},
@@ -16,6 +17,14 @@ pub(crate) async fn execute(
     call_id: &str,
     params: &ComputerBatchParams,
 ) -> BatchReport {
+    let lease = router.fixture_lease();
+    let captured = lease.as_ref().and_then(|lease| {
+        let authority = lease.arm_attempt()?;
+        Some((
+            authority.scope().run_id().to_owned(),
+            authority.scope().generation(),
+        ))
+    });
     let clock = router.settle_engine.clock();
     let deadline = clock.now().saturating_add(BATCH_DEADLINE);
     let mut steps = Vec::with_capacity(params.steps.len());
@@ -55,6 +64,12 @@ pub(crate) async fn execute(
         if stop {
             failed_step = Some(index as u32);
             error = out.error.take();
+            if scope_hard_stop(error.as_ref()) {
+                state = None;
+                if let Some(err) = error.as_mut() {
+                    err.state = None;
+                }
+            }
             failure = Some(out.action);
             last = None;
             steps.push(record);
@@ -65,6 +80,22 @@ pub(crate) async fn execute(
         steps.push(record);
     }
 
+    if output_expired(
+        lease.as_ref(),
+        captured.as_ref(),
+        state.as_ref(),
+        error.as_ref(),
+    ) {
+        state = None;
+        if let Some(err) = error.as_mut() {
+            err.state = None;
+        }
+    }
+
+    let (scope_run, scope_generation) = match &captured {
+        Some((run, generation)) => (Some(run.clone()), Some(*generation)),
+        None => (None, None),
+    };
     BatchReport {
         steps,
         failed_step,
@@ -72,6 +103,8 @@ pub(crate) async fn execute(
         failure,
         last,
         state,
+        scope_run,
+        scope_generation,
     }
 }
 
@@ -99,6 +132,42 @@ fn should_stop(out: &crate::action::ToolOutcome, stop_on_error: bool) -> bool {
         return true;
     }
     stop_on_error && (out.error.is_some() || out.action.outcome != Outcome::Done)
+}
+
+fn scope_hard_stop(error: Option<&ToolError>) -> bool {
+    error.is_some_and(|err| err.code == ErrorCode::AppDenied && err.message == SCOPE_DENIED_MESSAGE)
+}
+
+/// Clear retained output when the attempt epoch is gone, independent of the code.
+///
+/// Unscoped batches keep their historical state. A scoped line with no producing
+/// epoch is cleared. Unknown stays unknown.
+fn output_expired(
+    lease: Option<&ScopeLease>,
+    captured: Option<&(String, u64)>,
+    state: Option<&ActionState>,
+    error: Option<&ToolError>,
+) -> bool {
+    if scope_hard_stop(error) {
+        return true;
+    }
+    let Some(lease) = lease else {
+        return false;
+    };
+    let Some((run, generation)) = captured else {
+        return state.is_some() || error.is_some_and(|err| err.state.is_some());
+    };
+    if !lease.same_epoch(run, *generation) {
+        return true;
+    }
+    match state.map(|item| (&item.scope_run, item.scope_generation)) {
+        Some((Some(held_run), Some(held_generation))) => {
+            held_run != run || held_generation != *generation
+        }
+        Some((None, None)) => true,
+        Some(_) => true,
+        None => false,
+    }
 }
 
 fn hard_code(error: Option<&ToolError>) -> bool {

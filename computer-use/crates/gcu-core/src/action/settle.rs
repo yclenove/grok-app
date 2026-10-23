@@ -3,6 +3,7 @@ use super::{
     gate::Gate,
     observe::Fresh,
     router::{outcome, ActionRouter},
+    wire::CallError,
     ToolCall, ToolOutcome,
 };
 use crate::{
@@ -50,7 +51,11 @@ impl ActionRouter {
             .await
         {
             Ok(report) => report,
-            Err(code) => return self.failure(session, action, code, win).await,
+            Err(code) => {
+                return self
+                    .failure(session, action, CallError::from_driver_code(code), win)
+                    .await;
+            }
         };
         action.settle = report.settle.clone();
         let after = match self

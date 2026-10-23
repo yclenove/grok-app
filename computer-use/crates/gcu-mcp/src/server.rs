@@ -10,6 +10,7 @@ use crate::{
 use gcu_core::{
     action::ActionRouter,
     driver::Driver,
+    scope::{InstanceEvidence, ScopeLease},
     session::{Session, WindowLocks},
 };
 use gcu_host_api::{ApprovalProvider, EventSink, PolicyStore, UserActivity};
@@ -85,6 +86,11 @@ struct Inner {
 }
 /// Maximum concurrently running tool calls per session.
 const SLOTS: usize = 32;
+
+fn shared_locks() -> WindowLocks {
+    static LOCKS: OnceLock<WindowLocks> = OnceLock::new();
+    LOCKS.get_or_init(WindowLocks::new).clone()
+}
 impl Server {
     pub(crate) fn lifecycle(&self) -> crate::lifecycle::Lifecycle {
         self.0.lifecycle.clone()
@@ -122,9 +128,8 @@ impl Server {
         files: SessionFiles,
         elicitation_enabled: bool,
     ) -> Result<Self, ServeError> {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        static LOCKS: OnceLock<WindowLocks> = OnceLock::new();
         let policy = host.policy.load();
+        let activity = host.activity.clone();
         let router = ActionRouter::new(
             driver.clone(),
             if elicitation_enabled {
@@ -134,12 +139,56 @@ impl Server {
             },
             host.policy,
             host.events,
-            LOCKS.get_or_init(WindowLocks::new).clone(),
+            shared_locks(),
         );
+        Self::assemble(driver, router, activity, config, files, policy)
+    }
+
+    /// Trusted scoped session. The lease is not stored on the server, and no
+    /// browser hub or scope-editing tool is installed.
+    ///
+    /// File setup is the caller's. This constructor does not block, wait, or
+    /// take a timeout. Cancellation does not apply. Elicitation stays off, the
+    /// same as [`crate::Connection::open_host_only`].
+    pub(crate) fn new_scoped<D>(
+        driver: D,
+        lease: ScopeLease,
+        host: Host,
+        mut config: ServerConfig,
+        files: SessionFiles,
+    ) -> Result<Self, ServeError>
+    where
+        D: Driver + InstanceEvidence + 'static,
+    {
+        config.browser_session = None;
+        let policy = host.policy.load();
+        let activity = host.activity.clone();
+        let router = ActionRouter::with_fixture_scope(
+            driver,
+            lease,
+            activity.clone(),
+            host.approvals,
+            host.policy,
+            host.events,
+            shared_locks(),
+        );
+        let driver = router.bound_driver();
+        Self::assemble(driver, router, activity, config, files, policy)
+    }
+
+    fn assemble(
+        driver: Arc<dyn Driver>,
+        router: ActionRouter,
+        activity: Arc<dyn UserActivity>,
+        config: ServerConfig,
+        files: SessionFiles,
+        policy: gcu_host_api::PolicyConfig,
+    ) -> Result<Self, ServeError> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
         let connection = NEXT.fetch_add(1, Ordering::Relaxed);
         let session = Arc::new(Session::open(
             format!("mcp-{connection}"),
-            host.activity,
+            activity,
             router.input_release(),
         ));
         let results = Results {
@@ -155,6 +204,8 @@ impl Server {
                 },
                 ..Default::default()
             },
+            scope: router.fixture_lease(),
+            probe: result::FinishProbe::new(),
         };
         let script_ready = cfg!(feature = "script") && config.script.is_some();
         let tools =
@@ -213,16 +264,24 @@ impl Server {
         match name {
             "list_apps" => {
                 let _: ListAppsParams = params::parse(arguments)?;
+                let produced = this.results.opened_stamp();
                 let apps = this.router.list_apps(&this.session).await?;
-                Ok(this.results.discovery(json!({"apps":apps})).await)
+                Ok(this
+                    .results
+                    .discovery(json!({"apps": apps}), produced)
+                    .await)
             }
             "list_windows" => {
                 let p: ListWindowsParams = params::parse(arguments)?;
+                let produced = this.results.opened_stamp();
                 let windows = this
                     .router
                     .list_windows(&this.session, p.app.as_deref())
                     .await?;
-                Ok(this.results.discovery(json!({"windows":windows})).await)
+                Ok(this
+                    .results
+                    .discovery(json!({"windows": windows}), produced)
+                    .await)
             }
             "launch_app" => {
                 let p: LaunchAppParams = params::parse(arguments)?;
@@ -255,11 +314,16 @@ impl Server {
                 let Some(runner) = this.config.script.clone() else {
                     return Err(Box::new(result::error(ErrorCode::CapabilityUnavailable)));
                 };
+                let produced = this.results.opened_stamp();
                 let body = runner.run(&this.router, &this.session, &id, params).await;
-                Ok(this.results.script(&body.output, body.error).await)
+                Ok(this
+                    .results
+                    .script(&body.output, body.error, produced)
+                    .await)
             }
             "capabilities" => {
                 let _: CapabilitiesParams = params::parse(arguments)?;
+                let produced = this.results.opened_stamp();
                 let caps = this
                     .session
                     .enqueue(async {
@@ -270,7 +334,7 @@ impl Server {
                     })
                     .await
                     .map_err(|_| Box::new(result::error(ErrorCode::ApprovalDenied)))?;
-                Ok(this.results.discovery(json!(caps)).await)
+                Ok(this.results.discovery(json!(caps), produced).await)
             }
             _ => {
                 let call = params::action(name, arguments, id)?;

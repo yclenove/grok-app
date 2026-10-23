@@ -1,6 +1,7 @@
 use super::{
     lock,
     router::{error, ActionRouter},
+    wire::CallError,
     ActionState,
 };
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     redact::{self, CapturedFrame, RedactedImage},
     render::RenderOpts,
     session::Session,
-    snapshot::{ElementIndex, RenderedState, WindowKey},
+    snapshot::{assemble, ElementIndex, RenderedState, WindowKey},
     tree::{Pipeline, ProcessedTree},
 };
 use gcu_protocol::{
@@ -27,6 +28,8 @@ pub(crate) struct Fresh {
     pub signature: String,
     pub image: Option<RedactedImage>,
     pub quality: TreeQuality,
+    pub scope_run: Option<String>,
+    pub scope_generation: Option<u64>,
 }
 impl Fresh {
     pub fn geometry(&self) -> Geometry {
@@ -49,7 +52,7 @@ impl ActionRouter {
         win: &WindowRef,
         screenshot: bool,
         opts: &TreeOpts,
-    ) -> Result<Fresh, ErrorCode> {
+    ) -> Result<Fresh, CallError> {
         self.read_with_mode(session, win, ScreenshotMode::Explicit(screenshot), opts)
             .await
     }
@@ -59,7 +62,17 @@ impl ActionRouter {
         win: &WindowRef,
         mode: ScreenshotMode,
         opts: &TreeOpts,
-    ) -> Result<Fresh, ErrorCode> {
+    ) -> Result<Fresh, CallError> {
+        let producing = crate::scope::expected_epoch().or_else(|| {
+            self.lease.as_ref().and_then(|lease| {
+                lease
+                    .current()
+                    .map(|scope| (scope.run_id().to_owned(), scope.generation()))
+            })
+        });
+        if self.lease.is_some() && producing.is_none() {
+            return Err(CallError::ScopeDenied);
+        }
         let cancel = Cancel::default();
         let mut raw = self
             .native(
@@ -69,14 +82,14 @@ impl ActionRouter {
                 self.driver.snapshot_tree(win, opts, &cancel),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
         }
         let geometry = self
             .native(session, &cancel, false, self.driver.window_geometry(win))
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         // Screenshot identity is the accessibility tree. DOM fusion runs after
         // that compare so a DOM-only change cannot mark the capture stale, and
         // before redaction so shared password fields are still masked.
@@ -88,7 +101,7 @@ impl ActionRouter {
         // comparison or delivery; an omitted image never enters SnapshotStore.
         if mode != ScreenshotMode::Explicit(false) {
             if raw.incomplete.is_some() {
-                return Err(ErrorCode::HandoffRequired);
+                return Err(ErrorCode::HandoffRequired.into());
             }
             let shot = self
                 .native(
@@ -98,7 +111,7 @@ impl ActionRouter {
                     self.driver.capture(win, &CaptureOpts::default(), &cancel),
                 )
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             captured_at = self.epoch.elapsed();
             let after = self
                 .native(
@@ -108,35 +121,35 @@ impl ActionRouter {
                     self.driver.snapshot_tree(win, opts, &cancel),
                 )
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             if after.incomplete.is_some() {
-                return Err(ErrorCode::HandoffRequired);
+                return Err(ErrorCode::HandoffRequired.into());
             }
             if ax_signature != signature(&after)? {
-                return Err(ErrorCode::StaleScreenshot);
+                return Err(ErrorCode::StaleScreenshot.into());
             }
             let current = self
                 .native(session, &cancel, false, self.driver.window_geometry(win))
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             if geometry != current || shot.geometry != geometry {
-                return Err(ErrorCode::StaleGeometry);
+                return Err(ErrorCode::StaleGeometry.into());
             }
             capture = Some(shot);
         } else {
             captured_at = self.epoch.elapsed();
         }
-        if let Some(hub) = self.browser.clone() {
+        if let Some(hub) = self.browser_hub() {
             let aligned = self
                 .native(session, &cancel, false, async {
                     Ok(hub.align(session.id(), win, raw).await)
                 })
                 .await
-                .map_err(|e| e.error_code())?;
+                .map_err(|e| CallError::from_driver(&e))?;
             raw = aligned;
         }
         if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
-            return Err(ErrorCode::HandoffRequired);
+            return Err(ErrorCode::HandoffRequired.into());
         }
         let merged_signature = signature(&raw)?;
         let mut tree = Pipeline::default().run(raw.clone(), opts);
@@ -163,13 +176,13 @@ impl ActionRouter {
                 self.driver.list_windows(Some(&win.app)),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         let mut info = windows
             .into_iter()
             .find(|w| w.id == win.id)
             .ok_or(ErrorCode::WindowGone)?;
         if info.frame != geometry.frame || info.scale != geometry.scale {
-            return Err(ErrorCode::StaleGeometry);
+            return Err(ErrorCode::StaleGeometry.into());
         }
         info.frame = geometry.frame;
         let key = WindowKey {
@@ -184,6 +197,11 @@ impl ActionRouter {
         ElementIndex::assign(&mut tree, previous.map(|s| s.index()), next)
             .map_err(|_| ErrorCode::StaleElement)?;
         drop(resources);
+        if let Some((run, generation)) = &producing {
+            if !self.scope_binding_current(Some(run.as_str()), Some(*generation)) {
+                return Err(CallError::ScopeDenied);
+            }
+        }
         Ok(Fresh {
             win: win.clone(),
             info,
@@ -192,6 +210,8 @@ impl ActionRouter {
             signature: merged_signature,
             image,
             quality,
+            scope_run: producing.as_ref().map(|(run, _)| run.clone()),
+            scope_generation: producing.as_ref().map(|(_, generation)| *generation),
         })
     }
     pub(crate) fn rendered_diff_is_empty(
@@ -256,6 +276,9 @@ impl ActionRouter {
         text_limit: Option<usize>,
     ) -> Result<ActionState, Box<ToolError>> {
         let config = self.policy.load();
+        // After policy load and before the thumbnail. A revoke here refuses
+        // before an id is reserved.
+        self.publish_gate.enter();
         let image = if attach {
             fresh
                 .image
@@ -266,48 +289,49 @@ impl ActionRouter {
         } else {
             None
         };
-        let key = fresh.key();
+        self.publication_refusal(session, &fresh)?;
         let mut opts = RenderOpts::new(fresh.win.app.info.clone(), fresh.info.clone());
         opts.text_limit = text_limit;
-        let mut resources = lock(&session.actions);
-        // Retain only images actually handed to the model. A speculative image
-        // must not replace the model's latest coordinate observation.
-        let observation = resources
-            .snapshots
-            .record(
-                fresh.tree.clone(),
-                &opts,
-                if attach { fresh.image.take() } else { None },
-            )
+        let stored = if attach { fresh.image.take() } else { None };
+        let record_window = WindowKey::from_options(&opts);
+        let baseline = {
+            let resources = lock(&session.actions);
+            resources.snapshots.baseline(&record_window)
+        };
+        let mut assembled = assemble(fresh.tree.clone(), &opts, stored, &baseline)
             .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
-        let snapshot = resources
-            .snapshots
-            .get(&key, observation.snapshot_id)
-            .ok_or_else(|| Box::new(error(ErrorCode::Internal)))?;
-        ElementIndex::assign(&mut fresh.tree, Some(snapshot.index()), 0)
+        // Match the stored index onto the caller's tree before publication.
+        ElementIndex::assign(&mut fresh.tree, Some(&assembled.index), 0)
             .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
-        let screenshot = image.as_ref().map(|i| ScreenshotInfo {
-            id: format!("i_{}", observation.snapshot_id.0),
-            width: i.width(),
-            height: i.height(),
-            scale_to_window: Some(i.scale_to_window()),
-            mime: "image/png".into(),
+        let scope_run = fresh.scope_run.clone();
+        let scope_generation = fresh.scope_generation;
+        assembled.memory_bytes += scope_run.as_ref().map_or(0, String::len);
+        assembled.scope_run = scope_run.clone();
+        assembled.scope_generation = scope_generation;
+        let id = {
+            let mut resources = lock(&session.actions);
+            resources
+                .snapshots
+                .reserve_id()
+                .map_err(|_| Box::new(error(ErrorCode::Internal)))?
+        };
+        let screenshot = image.as_ref().map(|image| {
+            assembled.delivery_size = (image.width(), image.height());
+            ScreenshotInfo {
+                id: format!("i_{}", id.0),
+                width: image.width(),
+                height: image.height(),
+                scale_to_window: Some(image.scale_to_window()),
+                mime: "image/png".into(),
+            }
         });
-        if let Some(i) = &image {
-            resources.snapshots.set_delivery_size(
-                &key,
-                observation.snapshot_id,
-                i.width(),
-                i.height(),
-            );
-        }
-        Ok(ActionState {
-            text: observation.text,
-            overflow_text: observation.overflow_text,
+        let state = ActionState {
+            text: std::mem::take(&mut assembled.text),
+            overflow_text: assembled.overflow_text.take(),
             state: AppState {
                 app: opts.app,
                 window: opts.window,
-                snapshot_id: format!("s_{}", observation.snapshot_id.0),
+                snapshot_id: format!("s_{}", id.0),
                 screenshot,
                 focused: fresh.tree.focused,
                 truncated: fresh.tree.truncation(fresh.tree.omitted_nodes),
@@ -315,7 +339,70 @@ impl ActionRouter {
                 action: None,
             },
             image,
-        })
+            scope_run,
+            scope_generation,
+        };
+        // All rendering, indexing, state assembly and test pauses precede the
+        // snapshot lock and the lease. A denied id remains burned.
+        self.commit_gate.enter();
+        session.index_gate().enter();
+        if let Some(lease) = &self.lease {
+            lease.commit_before_gate().enter();
+        }
+        let mut resources = lock(&session.actions);
+        let plan = resources
+            .snapshots
+            .prepare_install(&assembled)
+            .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
+        let mut retired = Vec::with_capacity(resources.snapshots.len());
+        let install = || {
+            let observation = resources
+                .snapshots
+                .install(id, assembled, plan, &mut retired);
+            // Keep the prepared diff alive until after the lease lock, too.
+            (observation, state)
+        };
+        let committed = if let Some(lease) = &self.lease {
+            let (Some(run), Some(generation)) =
+                (fresh.scope_run.as_deref(), fresh.scope_generation)
+            else {
+                return Err(self.refusal_after_loss(session));
+            };
+            lease
+                .commit_if_current(&[(run, generation)], install)
+                .map_err(|_| self.refusal_after_loss(session))
+        } else {
+            Ok(install())
+        };
+        drop(resources);
+        let (observation, state) = committed?;
+        drop(observation);
+        drop(retired);
+        if let Some(lease) = &self.lease {
+            lease.commit_after_gate().enter();
+        }
+        Ok(state)
+    }
+
+    /// Refuse a sample whose producing epoch is missing or no longer current.
+    ///
+    /// Runs before indexing, without the snapshot lock. The closing check is
+    /// [`crate::scope::ScopeLease::commit_if_current`], which holds the lease
+    /// read lock across the install. Stop wins only when the epoch is already
+    /// gone. Memory only; no await, timeout, or cancellation.
+    fn publication_refusal(&self, session: &Session, fresh: &Fresh) -> Result<(), Box<ToolError>> {
+        if self.scope_binding_current(fresh.scope_run.as_deref(), fresh.scope_generation) {
+            return Ok(());
+        }
+        Err(self.refusal_after_loss(session))
+    }
+
+    fn refusal_after_loss(&self, session: &Session) -> Box<ToolError> {
+        if session.is_stopped() || session.activity().stop_requested() {
+            Box::new(error(ErrorCode::StoppedByUser))
+        } else {
+            Box::new(CallError::ScopeDenied.tool_error())
+        }
     }
 }
 // Full raw state is compared in memory, not just rendered/budgeted text. This

@@ -1,7 +1,9 @@
 //! One policy-bound attempt per tool call. No retry of uncertain or targeted input.
 use super::{
     gate::{self, Gate},
-    lock, route, ActionState, ToolCall, ToolOutcome,
+    lock, route,
+    wire::{self, CallError},
+    ActionState, ToolCall, ToolOutcome,
 };
 use crate::{
     driver::{self, AppQuery, Cancel, Driver, DriverError, TreeOpts, WindowRef},
@@ -15,7 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use gcu_host_api::{ApprovalProvider, CuEvent, EventSink, PolicyStore, SessionCtx};
 use gcu_protocol::{
-    result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason},
+    result::Outcome,
     tools::{ComputerBatchParams, GetAppStateParams},
     ErrorCode, ToolError,
 };
@@ -25,7 +27,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
 };
 use tokio::time::Instant;
 
@@ -44,6 +45,13 @@ pub struct ActionRouter {
     pub(crate) auto_capture: AutoCapturePolicy,
     pub(crate) wait_engine: crate::wait::WaitEngine,
     pub(crate) browser: Option<std::sync::Arc<crate::browser::Hub>>,
+    pub(crate) fixture_scoped: bool,
+    pub(crate) lease: Option<crate::scope::ScopeLease>,
+    pub(crate) publish_gate: std::sync::Arc<super::PublishGate>,
+    /// Parks after indexing and before the snapshot is stored. Disarmed in production.
+    pub(crate) commit_gate: std::sync::Arc<super::PublishGate>,
+    /// Parks while a WindowGone refresh is assembled. Disarmed in production.
+    pub(crate) refresh_gate: std::sync::Arc<super::PublishGate>,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -72,8 +80,32 @@ impl ActionRouter {
             auto_capture: AutoCapturePolicy::default(),
             wait_engine: crate::wait::WaitEngine::default(),
             browser: None,
+            fixture_scoped: false,
+            lease: None,
+            publish_gate: super::PublishGate::new(),
+            commit_gate: super::PublishGate::new(),
+            refresh_gate: super::PublishGate::new(),
         }
     }
+    /// Publication pause. Production leaves it disarmed, so entering it does not wait.
+    ///
+    /// Memory only. No timeout or cancellation. Cloning the handle does not copy a lease.
+    pub fn publication_gate(&self) -> std::sync::Arc<super::PublishGate> {
+        std::sync::Arc::clone(&self.publish_gate)
+    }
+    /// Pause after indexing and before the snapshot is stored.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed.
+    pub fn commit_gate(&self) -> std::sync::Arc<super::PublishGate> {
+        std::sync::Arc::clone(&self.commit_gate)
+    }
+    /// Pause while WindowGone metadata is assembled, after the originating epoch was copied.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed.
+    pub fn refresh_gate(&self) -> std::sync::Arc<super::PublishGate> {
+        std::sync::Arc::clone(&self.refresh_gate)
+    }
+
     /// Inject settling configuration and monotonic time before sharing the router.
     /// In-memory construction only; no waits, IO, timeout or cancellation.
     pub fn with_settle_engine(mut self, engine: SettleEngine) -> Self {
@@ -130,7 +162,7 @@ impl ActionRouter {
         let win = self
             .resolve(session, &params.app, params.window.as_deref())
             .await
-            .map_err(|code| Box::new(error(code)))?;
+            .map_err(|err| Box::new(err.tool_error()))?;
         let _window = self
             .locks
             .acquire(&window_lock_key(&win))
@@ -145,43 +177,53 @@ impl ActionRouter {
         let fresh = self
             .read_with_mode(session, &win, params.include_screenshot, &opts)
             .await
-            .map_err(|code| Box::new(error(code)))?;
+            .map_err(|err| Box::new(err.tool_error()))?;
         let mut intent = ActionIntent::new(Tool::GetAppState);
         intent.parameters = fresh.signature.clone();
         intent.reason = params.reason.map(gcu_host_api::ModelReason::new);
-        let _approved = self
+        let approved = self
             .authorize(session, &mut intent, &fresh)
             .await
-            .map_err(|code| Box::new(error(code)))?;
-        self.check_boundary(session)
-            .await
-            .map_err(|code| Box::new(error(code)))?;
-        let cancel = Cancel::default();
-        let current = self
-            .native(
-                session,
-                &cancel,
-                false,
-                self.driver.resolve_app(&AppQuery(win.app.info.id.clone())),
-            )
-            .await
-            .map_err(|e| Box::new(error(e.error_code())))?;
-        if current != win.app {
-            return Err(Box::new(error(ErrorCode::StaleElement)));
+            .map_err(|err| Box::new(err.tool_error()))?;
+        if !self.scope_binding_current(
+            approved.binding.scope_run.as_deref(),
+            approved.binding.scope_generation,
+        ) {
+            return Err(Box::new(CallError::ScopeDenied.tool_error()));
         }
-        // Read after the authorization wait, rather than releasing pre-approval
-        // contents that might now be obsolete.
-        let fresh = self
-            .read_with_mode(session, &win, params.include_screenshot, &opts)
-            .await
-            .map_err(|code| Box::new(error(code)))?;
-        let attach = self.observation_attachment(
-            session,
-            &fresh,
-            params.include_screenshot,
-            opts.text_limit,
-        );
-        self.publish_with_limit(session, fresh, attach, opts.text_limit)
+        let epoch = self.binding_epoch(&approved);
+        crate::scope::with_attempt(epoch, async {
+            self.check_boundary(session)
+                .await
+                .map_err(|code| Box::new(error(code)))?;
+            let cancel = Cancel::default();
+            let current = self
+                .native(
+                    session,
+                    &cancel,
+                    false,
+                    self.driver.resolve_app(&AppQuery(win.app.info.id.clone())),
+                )
+                .await
+                .map_err(|e| Box::new(CallError::from_driver(&e).tool_error()))?;
+            if current != win.app {
+                return Err(Box::new(error(ErrorCode::StaleElement)));
+            }
+            // Read after the authorization wait, rather than releasing pre-approval
+            // contents that might now be obsolete.
+            let fresh = self
+                .read_with_mode(session, &win, params.include_screenshot, &opts)
+                .await
+                .map_err(|err| Box::new(err.tool_error()))?;
+            let attach = self.observation_attachment(
+                session,
+                &fresh,
+                params.include_screenshot,
+                opts.text_limit,
+            );
+            self.publish_with_limit(session, fresh, attach, opts.text_limit)
+        })
+        .await
     }
     /// Execute once: exact-handle/coordinate gates, policy and cancellable approval,
     /// revalidate, perform, bounded settle, then a fresh state/diff. `wait_for` does
@@ -247,6 +289,7 @@ impl ActionRouter {
     }
 
     fn finish(&self, session: &Session, call_id: &str, out: &mut ToolOutcome, start: Instant) {
+        self.scrub_unpublished_target(out);
         out.action.duration_ms = start.elapsed().as_millis() as u64;
         if let Some(state) = &mut out.state {
             state.state.action = Some(out.action.clone());
@@ -293,7 +336,7 @@ impl ActionRouter {
             .await
         {
             Ok(win) => win,
-            Err(code) => return outcome(action, Some(error(code)), None),
+            Err(err) => return outcome(action, Some(err.tool_error()), None),
         };
         let _window = match self.locks.acquire(&window_lock_key(&win)).await {
             Ok(g) => g,
@@ -308,7 +351,9 @@ impl ActionRouter {
             .native(session, &cancel, false, self.driver.window_geometry(&win))
             .await
         {
-            return self.failure(session, action, e.error_code(), &win).await;
+            return self
+                .failure(session, action, CallError::from_driver(&e), &win)
+                .await;
         }
         let mut gate = match gate::prepare(session, call, &key) {
             Ok(gate) => gate,
@@ -331,6 +376,15 @@ impl ActionRouter {
                 return self.failure(session, action, code, &win).await;
             }
         }
+        if let Err(err) = super::epoch::screenshot_epoch(
+            self,
+            session,
+            &key,
+            &gate.screenshot_id,
+            super::epoch::current_attempt_epoch(self),
+        ) {
+            return self.failure(session, action, err, &win).await;
+        }
         if let Err(code) = gate::check(&gate, &fresh) {
             return self.failure(session, action, code, &win).await;
         }
@@ -344,7 +398,7 @@ impl ActionRouter {
         }
         let approved = match self.authorize(session, &mut plan.intent, &fresh).await {
             Ok(a) => a,
-            Err(code) => return self.failure(session, action, code, &win).await,
+            Err(err) => return self.failure(session, action, err, &win).await,
         };
         let before = match self
             .recheck(session, call, &gate, &fresh, &plan.intent, &approved)
@@ -353,49 +407,55 @@ impl ActionRouter {
             Ok(f) => f,
             Err(code) => return self.failure(session, action, code, &win).await,
         };
-        if let Err(code) = self.check_boundary(session).await {
-            return outcome(action, Some(error(code)), None);
-        }
-        let events = self.driver.subscribe(&win);
-        let cancel = Cancel::default();
-        let delivery =
-            crate::browser::dispatch(self, session, &cancel, &plan.request, &before.raw).await;
-        match delivery {
-            Err(e) => {
-                if e.maybe_executed()
-                    && crate::session::drive_native(self.driver.release_all_input())
-                        .await
-                        .is_err()
-                {
-                    action
-                        .notes
-                        .push("Input release reached the native timeout.".into());
-                }
-                action.outcome = if e.maybe_executed() {
-                    Outcome::Unknown
-                } else {
-                    Outcome::Failed
-                };
-                if e.maybe_executed() {
-                    action.delivery = plan.delivery;
-                    action
-                        .notes
-                        .push("Execution is uncertain; do not automatically retry.".into());
-                }
-                let code = if session.is_closed() {
-                    ErrorCode::ApprovalDenied
-                } else {
-                    e.error_code()
-                };
-                return self.failure(session, action, code, &win).await;
+        let epoch = self.binding_epoch(&approved);
+        return crate::scope::with_attempt(epoch, async {
+            if let Err(code) = self.check_boundary(session).await {
+                return outcome(action, Some(error(code)), None);
             }
-            Ok(delivery) => {
-                action.delivery = wire_delivery(delivery);
-                action.outcome = Outcome::Done;
+            let events = self.driver.subscribe(&win);
+            let cancel = Cancel::default();
+            let delivery =
+                crate::browser::dispatch(self, session, &cancel, &plan.request, &before.raw).await;
+            match delivery {
+                Err(e) => {
+                    if e.maybe_executed()
+                        && crate::session::drive_native(self.driver.release_all_input())
+                            .await
+                            .is_err()
+                    {
+                        action
+                            .notes
+                            .push("Input release reached the native timeout.".into());
+                    }
+                    action.outcome = if e.maybe_executed() {
+                        Outcome::Unknown
+                    } else if matches!(e, DriverError::ScopeDenied) {
+                        Outcome::Refused
+                    } else {
+                        Outcome::Failed
+                    };
+                    if e.maybe_executed() {
+                        action.delivery = plan.delivery;
+                        action
+                            .notes
+                            .push("Execution is uncertain; do not automatically retry.".into());
+                    }
+                    let failure = if session.is_closed() {
+                        CallError::Code(ErrorCode::ApprovalDenied)
+                    } else {
+                        CallError::from_driver(&e)
+                    };
+                    return self.failure(session, action, failure, &win).await;
+                }
+                Ok(delivery) => {
+                    action.delivery = wire::wire_delivery(delivery);
+                    action.outcome = Outcome::Done;
+                }
             }
-        }
-        self.settle_and_publish(session, call, &gate, action, before, events)
-            .await
+            self.settle_and_publish(session, call, &gate, action, before, events)
+                .await
+        })
+        .await;
     }
     pub(crate) async fn check_boundary(&self, session: &Session) -> Result<(), ErrorCode> {
         if session.is_stopped() || session.activity().stop_requested() {
@@ -412,7 +472,7 @@ impl ActionRouter {
         session: &Session,
         work: impl Future<Output = T>,
     ) -> Result<T, ErrorCode> {
-        self.wait_cancel(session, None, work).await
+        super::epoch::wait_cancel(self, session, None, work).await
     }
     async fn wait_cancel<T>(
         &self,
@@ -420,32 +480,7 @@ impl ActionRouter {
         cancel: Option<&Cancel>,
         work: impl Future<Output = T>,
     ) -> Result<T, ErrorCode> {
-        if session.is_stopped() || session.is_closed() {
-            if let Some(cancel) = cancel {
-                cancel.cancel();
-            }
-        }
-        self.check_boundary(session).await?;
-        let generation = session.turn_generation();
-        tokio::pin!(work);
-        loop {
-            tokio::select! {
-                biased;
-                _ = session.cancellation().cancelled() => { if let Some(cancel) = cancel { cancel.cancel(); } return Err(ErrorCode::ApprovalDenied); },
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    if session.turn_generation() != generation {
-                        if let Some(cancel) = cancel { cancel.cancel(); }
-                        return Err(ErrorCode::ApprovalDenied);
-                    }
-                    if session.is_stopped() { if let Some(cancel) = cancel { cancel.cancel(); } }
-                    self.check_boundary(session).await?;
-                },
-                value = &mut work => {
-                    if session.is_stopped() || session.is_closed() { if let Some(cancel) = cancel { cancel.cancel(); } }
-                    self.check_boundary(session).await?; return Ok(value);
-                }
-            }
-        }
+        super::epoch::wait_cancel(self, session, cancel, work).await
     }
     pub(crate) async fn native<T>(
         &self,
@@ -470,11 +505,15 @@ impl ActionRouter {
                     maybe_executed: mutation,
                 })
             }
-            Err(_) => {
+            Err(code) => {
                 cancel.cancel();
-                Err(DriverError::Cancelled {
-                    maybe_executed: mutation,
-                })
+                if code == ErrorCode::AppDenied {
+                    Err(DriverError::ScopeDenied)
+                } else {
+                    Err(DriverError::Cancelled {
+                        maybe_executed: mutation,
+                    })
+                }
             }
         };
         cancel_on_drop.0 = None;
@@ -485,7 +524,7 @@ impl ActionRouter {
         session: &Session,
         app: &str,
         window: Option<&str>,
-    ) -> Result<WindowRef, ErrorCode> {
+    ) -> Result<WindowRef, CallError> {
         let cancel = Cancel::default();
         let app = self
             .native(
@@ -495,13 +534,13 @@ impl ActionRouter {
                 self.driver.resolve_app(&AppQuery::from(app)),
             )
             .await
-            .map_err(|e| e.error_code())?;
+            .map_err(|e| CallError::from_driver(&e))?;
         let id = if let Some(id) = window {
             id.into()
         } else {
             self.native(session, &cancel, false, self.driver.key_window(&app))
                 .await
-                .map_err(|e| e.error_code())?
+                .map_err(|e| CallError::from_driver(&e))?
                 .id
         };
         Ok(WindowRef { app, id })
@@ -535,6 +574,7 @@ impl ActionRouter {
         Ok(())
     }
 }
+
 struct Release(Arc<dyn Driver>);
 #[async_trait]
 impl InputRelease for Release {
@@ -550,51 +590,8 @@ impl Drop for CancelOnDrop {
         }
     }
 }
-pub(crate) fn error(code: ErrorCode) -> ToolError {
-    ToolError {
-        code,
-        message: code.as_str().replace('_', " "),
-        hint: "Use the attached state; obtain fresh user authorization when required.".into(),
-        retryable: false,
-        state: None,
-    }
-}
-pub(crate) fn result(call: &ToolCall) -> ActionResult {
-    ActionResult {
-        tool: route::tool(&call.action),
-        target: None,
-        delivery: Delivery::None,
-        outcome: Outcome::Refused,
-        effect: Effect::NotChecked,
-        verify: None,
-        duration_ms: 0,
-        settle: Settle {
-            ms: 0,
-            reason: SettleReason::Budget,
-        },
-        notes: Vec::new(),
-    }
-}
-pub(crate) fn outcome(
-    action: ActionResult,
-    error: Option<ToolError>,
-    state: Option<ActionState>,
-) -> ToolOutcome {
-    ToolOutcome {
-        action,
-        error,
-        state,
-        windows: Vec::new(),
-    }
-}
+pub(crate) use super::wire::{error, outcome, result};
+
 pub(crate) fn window_lock_key(win: &WindowRef) -> String {
     format!("{}:{}:{}", win.app.info.id.len(), win.app.info.id, win.id)
-}
-fn wire_delivery(d: driver::Delivery) -> Delivery {
-    match d {
-        driver::Delivery::Accessibility => Delivery::Accessibility,
-        driver::Delivery::TargetedEvent => Delivery::TargetedEvent,
-        driver::Delivery::Foreground => Delivery::Foreground,
-        driver::Delivery::Clipboard => Delivery::Clipboard,
-    }
 }

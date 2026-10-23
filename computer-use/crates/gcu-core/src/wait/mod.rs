@@ -93,6 +93,11 @@ pub struct WaitRequest<'a> {
     pub until: Condition,
     /// Horizon, `1ms..=30s`. This is not wrapped in the 5s native timeout.
     pub timeout: Duration,
+    /// Epoch fixed before the first sample. `None` outside a fixture scope.
+    ///
+    /// Copied onto each stored sample. A later lease generation is not written
+    /// over a missing or older stamp. Memory only.
+    pub scope_epoch: Option<(String, u64)>,
 }
 
 /// Result of a finished wait. Payloads are omitted from [`Debug`].
@@ -107,6 +112,10 @@ pub struct WaitReport {
     pub raw: Option<RawTree>,
     /// Window info for `raw`, including the title that was matched.
     pub info: Option<WindowInfo>,
+    /// Epoch captured with the sample, unchanged at timeout.
+    ///
+    /// `None` when the wait held no scoped sample. Memory only.
+    pub scope_epoch: Option<(String, u64)>,
 }
 
 impl fmt::Debug for WaitReport {
@@ -120,23 +129,35 @@ impl fmt::Debug for WaitReport {
 }
 
 impl WaitReport {
-    fn ready(raw: RawTree, info: WindowInfo, elapsed: Duration) -> Self {
+    fn ready(
+        raw: RawTree,
+        info: WindowInfo,
+        elapsed: Duration,
+        scope_epoch: Option<(String, u64)>,
+    ) -> Self {
         Self {
             phase: transition(WaitPhase::Waiting, WaitSignal::ConditionMet),
             code: None,
             elapsed,
             raw: Some(raw),
             info: Some(info),
+            scope_epoch,
         }
     }
 
-    fn timed_out(raw: Option<RawTree>, info: Option<WindowInfo>, elapsed: Duration) -> Self {
+    fn timed_out(
+        raw: Option<RawTree>,
+        info: Option<WindowInfo>,
+        elapsed: Duration,
+        scope_epoch: Option<(String, u64)>,
+    ) -> Self {
         Self {
             phase: transition(WaitPhase::Waiting, WaitSignal::Deadline),
             code: Some(ErrorCode::Timeout),
             elapsed,
             raw,
             info,
+            scope_epoch,
         }
     }
 
@@ -147,6 +168,7 @@ impl WaitReport {
             elapsed,
             raw: None,
             info: None,
+            scope_epoch: None,
         }
     }
 }
@@ -194,6 +216,7 @@ impl WaitEngine {
             events,
             until,
             timeout,
+            scope_epoch,
         } = request;
         let start_at = self.clock.now();
         let deadline = Deadline::try_from_timeout(start_at, timeout)?;
@@ -220,7 +243,12 @@ impl WaitEngine {
             if deadline.expired(now) {
                 drop(read.take());
                 let (raw, info) = split(held);
-                return Ok(WaitReport::timed_out(raw, info, deadline.elapsed(now)));
+                return Ok(WaitReport::timed_out(
+                    raw,
+                    info,
+                    deadline.elapsed(now),
+                    scope_epoch.clone(),
+                ));
             }
             if read.as_ref().is_some_and(|pending| now >= pending.deadline) {
                 read = None;
@@ -310,7 +338,12 @@ impl WaitEngine {
                                 let matched = !dirty
                                     && condition::met(&until, &raw, &info.title, &mut stability)?;
                                 if matched {
-                                    return Ok(WaitReport::ready(raw, info, deadline.elapsed(now)));
+                                    return Ok(WaitReport::ready(
+                                        raw,
+                                        info,
+                                        deadline.elapsed(now),
+                                        scope_epoch.clone(),
+                                    ));
                                 }
                                 held = Some(Held { raw, info });
                                 next_poll = if dirty { now } else { now + POLL_INTERVAL };
@@ -323,9 +356,21 @@ impl WaitEngine {
                                     raw,
                                     info,
                                     deadline.elapsed(self.clock.now()),
+                                    scope_epoch.clone(),
                                 ));
                             }
-                            Err(code) => return Err(code),
+                            Err(code) => {
+                                if let Some(stop) = Self::boundary(session, generation) {
+                                    if stop == ErrorCode::StoppedByUser {
+                                        session.handle_stop().await;
+                                    }
+                                    return Ok(WaitReport::cancelled(
+                                        stop,
+                                        deadline.elapsed(self.clock.now()),
+                                    ));
+                                }
+                                return Err(code);
+                            }
                         },
                         Err(DriverError::WindowGone) => return Err(ErrorCode::WindowGone),
                         Err(DriverError::Cancelled { .. }) => {
@@ -338,12 +383,25 @@ impl WaitEngine {
                         }
                         Err(DriverError::Timeout { .. }) if deadline.expired(now) => {
                             let (raw, info) = split(held);
-                            return Ok(WaitReport::timed_out(raw, info, deadline.elapsed(now)));
+                            return Ok(WaitReport::timed_out(
+                                raw,
+                                info,
+                                deadline.elapsed(now),
+                                scope_epoch.clone(),
+                            ));
                         }
                         Err(DriverError::Timeout { .. }) => {
                             next_poll = now + POLL_INTERVAL;
                         }
-                        Err(error) => return Err(error.error_code()),
+                        Err(error) => {
+                            if let Some(stop) = Self::boundary(session, generation) {
+                                if stop == ErrorCode::StoppedByUser {
+                                    session.handle_stop().await;
+                                }
+                                return Ok(WaitReport::cancelled(stop, deadline.elapsed(now)));
+                            }
+                            return Err(error.error_code());
+                        }
                     }
                 }
             }

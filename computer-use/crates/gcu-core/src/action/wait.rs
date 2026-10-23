@@ -7,6 +7,7 @@ use super::{
     lock,
     observe::{self, Fresh},
     router::{error, outcome, result, window_lock_key, ActionRouter},
+    wire::CallError,
     ToolCall, ToolOutcome,
 };
 use crate::{
@@ -21,7 +22,7 @@ use crate::{
 use gcu_protocol::{
     result::Outcome,
     tools::{BatchStep, WaitForArgs},
-    ErrorCode, WindowInfo,
+    ErrorCode, ToolError, WindowInfo,
 };
 use std::time::Duration;
 
@@ -81,7 +82,7 @@ impl ActionRouter {
             .await
         {
             Ok(win) => win,
-            Err(code) => return outcome(action, Some(error(code)), None),
+            Err(err) => return outcome(action, Some(err.tool_error()), None),
         };
         let _window = match self.locks.acquire(&window_lock_key(&win)).await {
             Ok(guard) => guard,
@@ -93,27 +94,36 @@ impl ActionRouter {
         };
         let mut intent = ActionIntent::new(Tool::Observe);
         intent.parameters = fresh.signature.clone();
-        if let Err(code) = self.authorize(session, &mut intent, &fresh).await {
-            // The pre-approval read can contain a secret. Do not publish it.
-            return outcome(action, Some(error(code)), None);
-        }
+        let approved = match self.authorize(session, &mut intent, &fresh).await {
+            Ok(approved) => approved,
+            Err(err) => {
+                // The pre-approval read can contain a secret. Do not publish it.
+                return outcome(action, Some(err.tool_error()), None);
+            }
+        };
+        let epoch = self.binding_epoch(&approved);
+        drop(approved);
         drop(fresh);
         if let Err(code) = self.check_boundary(session).await {
             return outcome(action, Some(error(code)), None);
         }
         let events = self.driver.subscribe(&win);
-        let report = match self
-            .wait_engine
-            .wait(WaitRequest {
-                driver: self.driver.as_ref(),
-                session,
-                window: &win,
-                tree_opts: &self.tree_opts,
-                events,
-                until: args.until,
-                timeout: Duration::from_millis(u64::from(args.timeout_ms)),
-            })
-            .await
+        let epoch_for_sample = epoch.clone();
+        let report = match crate::scope::with_attempt(epoch, async {
+            self.wait_engine
+                .wait(WaitRequest {
+                    driver: self.driver.as_ref(),
+                    session,
+                    window: &win,
+                    tree_opts: &self.tree_opts,
+                    events,
+                    until: args.until,
+                    timeout: Duration::from_millis(u64::from(args.timeout_ms)),
+                    scope_epoch: epoch_for_sample,
+                })
+                .await
+        })
+        .await
         {
             Ok(report) => report,
             Err(ErrorCode::WindowGone) => {
@@ -121,7 +131,13 @@ impl ActionRouter {
                     .failure(session, action, ErrorCode::WindowGone, &win)
                     .await;
             }
-            Err(code) => return outcome(action, Some(error(code)), None),
+            Err(code) => {
+                return outcome(
+                    action,
+                    Some(CallError::from_driver_code(code).tool_error()),
+                    None,
+                );
+            }
         };
         action.settle.ms = u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX);
         action.notes.push("No input was delivered.".into());
@@ -130,42 +146,68 @@ impl ActionRouter {
                 let (Some(raw), Some(info)) = (report.raw, report.info) else {
                     return outcome(action, Some(error(ErrorCode::Internal)), None);
                 };
-                match self.observation(session, &win, raw, info) {
+                if self.stale_sample(&report.scope_epoch) {
+                    return outcome(action, Some(CallError::ScopeDenied.tool_error()), None);
+                }
+                match self.observation(session, &win, raw, info, &report.scope_epoch) {
                     Ok(state) => {
                         action.outcome = Outcome::Done;
                         outcome(action, None, Some(state))
                     }
-                    Err(code) => outcome(action, Some(error(code)), None),
+                    Err(err) => outcome(action, Some(*err), None),
                 }
             }
             WaitPhase::TimedOut => {
-                action.outcome = Outcome::Failed;
+                if report.raw.is_some() && self.stale_sample(&report.scope_epoch) {
+                    return outcome(action, Some(CallError::ScopeDenied.tool_error()), None);
+                }
                 let state = match (report.raw, report.info) {
-                    (Some(raw), Some(info)) => self.observation(session, &win, raw, info).ok(),
+                    (Some(raw), Some(info)) => {
+                        match self.observation(session, &win, raw, info, &report.scope_epoch) {
+                            Ok(state) => Some(state),
+                            Err(err) if scope_publication_error(&err) => {
+                                return outcome(action, Some(*err), None);
+                            }
+                            Err(_) => None,
+                        }
+                    }
                     _ => None,
                 };
+                action.outcome = Outcome::Failed;
                 outcome(action, Some(error(ErrorCode::Timeout)), state)
             }
             WaitPhase::Cancelled => {
                 let code = report.code.unwrap_or(ErrorCode::ApprovalDenied);
-                outcome(action, Some(error(code)), None)
+                outcome(
+                    action,
+                    Some(CallError::from_driver_code(code).tool_error()),
+                    None,
+                )
             }
             WaitPhase::Waiting => outcome(action, Some(error(ErrorCode::Internal)), None),
         }
     }
 
     /// Publish one already-read sample. Does not snapshot again and does not attach an image.
+    fn stale_sample(&self, epoch: &Option<(String, u64)>) -> bool {
+        !self.scope_binding_current(
+            epoch.as_ref().map(|(run, _)| run.as_str()),
+            epoch.as_ref().map(|(_, generation)| *generation),
+        )
+    }
+
     fn observation(
         &self,
         session: &Session,
         win: &crate::driver::WindowRef,
         mut raw: RawTree,
         info: WindowInfo,
-    ) -> Result<super::ActionState, ErrorCode> {
+        epoch: &Option<(String, u64)>,
+    ) -> Result<super::ActionState, Box<ToolError>> {
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
         }
-        let signature = observe::signature(&raw)?;
+        let signature = observe::signature(&raw).map_err(|code| Box::new(error(code)))?;
         let mut tree = Pipeline::default().run(raw.clone(), &self.tree_opts);
         tree.state_version = Some(observe::digest(signature.as_bytes()));
         tree.observed_at = Some(self.epoch.elapsed());
@@ -180,7 +222,7 @@ impl ActionRouter {
                 .and_then(|snapshot| snapshot.index().elements().keys().max())
                 .map_or(0, |index| u64::from(*index) + 1);
             ElementIndex::assign(&mut tree, previous.map(|snapshot| snapshot.index()), next)
-                .map_err(|_| ErrorCode::StaleElement)?;
+                .map_err(|_| Box::new(error(ErrorCode::StaleElement)))?;
         }
         let quality = crate::observe::TreeQuality::assess(&raw, &tree);
         let fresh = Fresh {
@@ -191,7 +233,14 @@ impl ActionRouter {
             signature,
             image: None,
             quality,
+            scope_run: epoch.as_ref().map(|(run, _)| run.clone()),
+            scope_generation: epoch.as_ref().map(|(_, generation)| *generation),
         };
-        self.publish(session, fresh, false).map_err(|err| err.code)
+        self.publish(session, fresh, false)
     }
+}
+
+fn scope_publication_error(err: &ToolError) -> bool {
+    err.code == ErrorCode::StoppedByUser
+        || (err.code == ErrorCode::AppDenied && err.message == crate::scope::SCOPE_DENIED_MESSAGE)
 }

@@ -42,6 +42,37 @@ pub fn router(driver: Arc<dyn Driver>) -> (ActionRouter, Session) {
     (router, session)
 }
 
+/// Assemble a permissive Host whose router holds a [`crate::scope::ScopedDriver`].
+///
+/// The same activity object is the session stop latch and the wrapper's stop
+/// probe. Memory only. No blocking, timeout, or cancellation. One session app
+/// approval is scripted. Production Hosts never use this fixture.
+#[cfg(feature = "testing")]
+pub fn scoped_router<D>(driver: D, lease: crate::scope::ScopeLease) -> (ActionRouter, Session)
+where
+    D: Driver + crate::scope::InstanceEvidence + 'static,
+{
+    let activity = Arc::new(FakeUserActivity::new());
+    let approvals = Arc::new(ScriptedApprovals::new());
+    approvals.push_decision(ApprovalDecision::Session);
+    let router = ActionRouter::with_fixture_scope(
+        driver,
+        lease,
+        activity.clone(),
+        approvals,
+        Arc::new(MemoryPolicyStore::new(PolicyConfig {
+            sensitive_action_confirmation: ConfirmationLevel::Off,
+            allow_foreground: ForegroundPolicy::Always,
+            ..Default::default()
+        })),
+        Arc::new(RecordingEventSink::new()),
+        WindowLocks::new(),
+    );
+    let session = Session::open("driver-contract", activity, router.input_release());
+    assert!(session.begin_turn().is_ok());
+    (router, session)
+}
+
 /// Evaluate every input route against a real driver's processed execution hints.
 /// The synthetic editor is unsigned and has no grants. Each pair contains the
 /// exact-target and unresolved-target decisions; callers assert refusal/handoff.
@@ -84,6 +115,7 @@ pub fn execution_decisions(
         policy_version: 1,
         closed: false,
         browser: None,
+        scope_epoch: None,
     };
     [
         Tool::Click,

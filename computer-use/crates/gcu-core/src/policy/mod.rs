@@ -241,6 +241,10 @@ pub struct PolicyCtx<'a> {
     /// A title, webview label, or page name is not this fact. The action router
     /// does not set it, because drivers do not supply a window generation.
     pub browser: Option<&'a gcu_protocol::builtin_browser::VerifiedWindow>,
+    /// Fixture-scope run and generation. `None` is an unscoped session.
+    ///
+    /// Turn and session grants match only this pair. Always grants ignore it.
+    pub scope_epoch: Option<(&'a str, u64)>,
 }
 
 /// How far a driver may go when the decision is allow.
@@ -373,7 +377,12 @@ impl PolicyEngine {
             Risk::Low
         };
         let binding = binding_of(ctx, intent);
-        if intent.tool.needs_auth() && ctx.grants.covers(ctx.config, ctx.app).is_none() {
+        if intent.tool.needs_auth()
+            && ctx
+                .grants
+                .covers_in(ctx.config, ctx.app, ctx.scope_epoch)
+                .is_none()
+        {
             return PolicyDecision::NeedApproval(ApprovalRequest {
                 app: Box::new(ctx.app.clone()),
                 risk: risk_level,
@@ -525,6 +534,8 @@ fn binding_of(ctx: &PolicyCtx<'_>, intent: &ActionIntent) -> ApprovalBinding {
         action_digest: intent.action_digest,
         snapshot_id: intent.snapshot_id.clone(),
         policy_version: ctx.policy_version,
+        scope_run: ctx.scope_epoch.map(|(run, _)| run.to_owned()),
+        scope_generation: ctx.scope_epoch.map(|(_, generation)| generation),
     }
 }
 

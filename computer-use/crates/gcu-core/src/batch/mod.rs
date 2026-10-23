@@ -47,6 +47,14 @@ pub struct BatchReport {
     pub last: Option<ActionResult>,
     /// Freshest observation when the caller asked for final state.
     pub state: Option<ActionState>,
+    /// Fixture run that produced the batch. `None` outside a scope.
+    /// Not a protocol field.
+    pub scope_run: Option<String>,
+    /// Fixture generation captured when the batch armed its attempt.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. An encoder must not
+    /// substitute the current generation when this is missing or stale.
+    pub scope_generation: Option<u64>,
 }
 
 /// Preflight, then run `params` on `router`.
@@ -139,5 +147,7 @@ fn closed_report(params: &ComputerBatchParams) -> BatchReport {
         failure: None,
         last: None,
         state: None,
+        scope_run: None,
+        scope_generation: None,
     }
 }

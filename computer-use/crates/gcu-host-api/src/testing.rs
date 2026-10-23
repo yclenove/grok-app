@@ -393,6 +393,16 @@ impl ApprovalProvider for ScriptedApprovals {
 #[derive(Debug, Default)]
 pub struct FakeUserActivity {
     inner: Mutex<ActivityState>,
+    stop_wakers: StopWakers,
+}
+
+#[derive(Default)]
+struct StopWakers(Mutex<Vec<Waker>>);
+
+impl std::fmt::Debug for StopWakers {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StopWakers")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -441,6 +451,10 @@ impl FakeUserActivity {
     /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: locks internally.
     pub fn request_stop(&self) {
         crate::lock(&self.inner).latch = true;
+        let wakers = std::mem::take(&mut *crate::lock(&self.stop_wakers.0));
+        for waker in wakers {
+            waker.wake();
+        }
     }
 }
 
@@ -463,6 +477,14 @@ impl UserActivity for FakeUserActivity {
 
     fn clear_stop_by_user(&self) {
         crate::lock(&self.inner).latch = false;
+    }
+
+    fn register_stop_waker(&self, waker: &Waker) {
+        let mut wakers = crate::lock(&self.stop_wakers.0);
+        if wakers.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        wakers.push(waker.clone());
     }
 }
 

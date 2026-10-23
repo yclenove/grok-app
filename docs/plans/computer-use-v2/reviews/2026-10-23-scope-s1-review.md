@@ -1,0 +1,89 @@
+**MERGE-AFTER-FIXES**
+
+Independent adversarial review of ADR 0017 card S1, branch `cu2/scope-s1`, HEAD `5e81e0093c1507290a897469a61e105fa99136bf` (feature commit `2b9616ee`). Compared with local `origin/feat/cu-v2` / merge base `09590c68cb7ae251a8fde3d392b86b38ed9131ea`. Read ADR §§1–3 and §5 before the code. The verdict concerns the S1 abstraction and its new constructors; it does not authorize real evaluation.
+
+Four must-fix findings follow. These are source-level counterexamples, not executed reproductions. No Cargo, network, SSH, model, or native GUI operations were run. No source or existing tests were edited. `git diff --check origin/feat/cu-v2...HEAD -- computer-use/crates` passed; compilation and test execution are **not_run**.
+
+**Must-fix**
+
+1. **[P1] Revocation/rebind does not cancel in-flight operations or invalidate their results; subscriptions retain access indefinitely.**
+
+   Evidence: `computer-use/crates/gcu-core/src/scope/driver.rs:59`, `:184`, `:203`, `:247`, `:254`, `:269`; `scope/model.rs:451`, `:471`.
+
+   `open()` clones the active scope. `revoke()` and `rebind()` only replace the `RwLock` value: they do not notify operations, cancel their `Cancel`, or issue input release. `capture` and `window_geometry` return the inner result without checking either current scope or current window identity afterward. `snapshot_tree` seals against its old scope clone. `list_apps`/`list_windows` also filter against a clone rather than checking the current generation before returning.
+
+   Concrete trace: admit A at generation 1; pause the inner capture; rebind to generation 2 containing only B (or revoke); let capture finish. The wrapper returns A's bytes successfully although A is no longer authorized. A direct `list_apps` paused across the same update can similarly return A's name/path. This is a failure of the in-memory S1 lease, independent of private IPC or real OS evidence.
+
+   The input case is worse: pause `inner.perform` before it delivers; revoke; resume it with unchanged OS identities and `Ok(Delivery)`. `finish_perform` checks Stop and identity, **never the lease or generation**, so the wrapper reports success after revoked delivery. Router cancellation observes session/turn/Stop, not `ScopeLease`; revocation does not trigger it. Merely adding an identity post-check does not prevent delivery between admission and the OS operation.
+
+   `subscribe` returns the raw `'static` inner stream. A stream opened for A keeps yielding after A is removed, the window incarnation changes, or Stop is latched. Its events have no names/pixels, but they still disclose unauthorized activity and can change `wait_for` results (`WindowGone` versus scope denial). There is no per-event admission or invalidation/drop hook.
+
+   Required fix: attach an operation epoch/invalidation signal to the lease, cancel and release on revocation/rebind, reject stale read/discovery results before handoff, and terminate subscriptions on invalidation. Preserve Stop priority and report uncertain delivery honestly if effects may have begun. At the native adapter boundary, carry an expected binding and live admission/cancellation mechanism to the actual delivery point; a pre-call metadata check plus a post-call check cannot establish ADR §1's delivery invariant. The OS implementation remains S2/S4 work, but the S1 abstraction must support it without treating stale cloned scopes as current authority.
+
+   Regression evidence needed: barrier-controlled revoke/rebind during each read/capture/perform, plus a live event stream invalidated after subscription. Assert no stale payload, no delivery when cancellation precedes delivery, `unknown` when already started, release issued, and `stopped_by_user` when Stop races invalidation. Existing tests change identity before admission or after completed fake delivery, and revoke during an approval; none exercise this gap.
+
+2. **[P1] `key_window` can restore/raise an unregistered window before window admission.**
+
+   Evidence: `computer-use/crates/gcu-core/src/scope/driver.rs:166`; the `Driver` contract at `driver.rs:481`; existing native implementations at `gcu-driver-macos/src/discovery.rs:177` and `gcu-driver-windows/src/driver_impl.rs:161`.
+
+   The wrapper admits only the app, calls `inner.key_window(app)`, then checks the returned window. This method is explicitly allowed to restore a window. The macOS implementation calls `unhide` when necessary and `ax_raise` for the chosen minimized window. Windows calls `api.restore` for the chosen minimized HWND. Neither receives the registered-window set from the wrapper.
+
+   Concrete trace: A has registered A1/A2 and unregistered A3; A3 is the inner driver's selected minimized key window. A model requests `get_app_state` for A without `window` (also the normal script `cu.app` path). A3 is restored/raised first, then the wrapper returns the fixed scope denial. The refusal comes after an unauthorized native side effect. An accurate `InstanceEvidence` implementation does not prevent it.
+
+   Required fix: select an admitted window through metadata-only discovery and admit its exact binding before any restore/unhide/raise, or use a scope-aware exact-window operation. Do not forward the current app-wide restoring helper in scoped mode. A fake that records restore separately from content/perform must show zero A3 effects for implicit-window observe, input, wait, and script entry points. Current spies count `key_window` as metadata and cannot detect this effect.
+
+3. **[P1] A new scope generation does not invalidate pending approvals for actions without sealed element handles.**
+
+   Evidence: `computer-use/crates/gcu-core/src/action/authorize.rs:180`, `:205`, `:228`; `action/router.rs:351`; `scope/guard.rs:269`; `scope/model.rs:451`.
+
+   Scope generation is attached to sealed native handles, but is absent from `Approved`, `ApprovalBinding`, canonical action parameters, `Fresh`, and the session snapshot/grant lifetime. `recheck` compares app identity/PID, window, parameters, snapshot, and policy; it never compares the scope epoch. `perform` simply opens whichever scope is current.
+
+   Concrete trace: start an in-scope `press_key` under generation 1; while foreground/sensitive confirmation is pending, the trusted controller rebinds to generation 2, retaining A and its window (for example while changing B's registration); return approval. With unchanged tree/geometry/policy, every recheck passes and the generation-1 approval delivers under generation 2. `PressKeys` contains no sealed handle, so the handle-generation defense does not apply. The same issue affects an observation approval across rebind. This contradicts ADR §2's explicit invalidation of unfinished approvals on every set change.
+
+   Required fix: bind approval/observation/action lifetimes to run/generation and invalidate them on rebind, including requests with no semantic handle. Do not rely on element pointer inequality to retire authority. Add a rebind-during-confirmation test that keeps the target and its content unchanged; the existing revoke-during-approval test only demonstrates that subsequent calls see a missing lease.
+
+4. **[P1] A batch can return a prior target's state/image alongside a later scope denial.**
+
+   Evidence: `computer-use/crates/gcu-core/src/batch/executor.rs:51`, `:55`, `:68`; `gcu-mcp/src/result.rs:81`; `gcu-core/tests/fixture_scope.rs:219`.
+
+   With `final_state=true`, the batch retains the last successful step's `ActionState`. On a later hard scope refusal, it stops subsequent steps but leaves that state intact. MCP `Results::batch` passes `report.state` and `report.error` together into `build`, which emits the state text and any image/files. Clearing `ToolError.state` in the scope error does not clear this separate channel.
+
+   Concrete trace: step 0 succeeds for A and produces state; A's instance becomes unauthorized before step 1; step 1 returns `ScopeDenied`; step 2 is skipped. The final response still delivers step 0's A state after authorization has been lost. This violates the no-state/no-image denial contract even though batch continuation itself stops correctly.
+
+   The existing `batch_mid_refusal_does_not_run_later_steps` fixture already supplies the identity flip needed for this trace, but sets `final_state: false` at line 241 and checks only `err.state`. With a true request, the executor retains `report.state`. This prediction was established by tracing the source, not by editing/running the test.
+
+   Required fix: clear retained batch state on a scope hard stop and validate any retained result's scope epoch before batch delivery. Preserve historical unscoped batch behavior. Assert `report.state`, encoded top-level state, image blocks, exported files, and error state are all absent for this case, with `stop_on_error=false` and `final_state=true`.
+
+**Nice-to-have and acceptance-test improvements**
+
+- **Make the DOM test able to reach DOM in its control case.** `gcu-core/tests/fixture_scope.rs:594` attaches an empty `BrowserHub`, binds no share, and clicks a native fake handle. Even an unscoped router would use L0 for that request; removing the new browser guards would leave its zero-DOM-perform assertion green. Bind a real fake share/token and first demonstrate that the otherwise identical unscoped case invokes the DOM channel. The inspected scoped construction and dispatch guards themselves are present and effective.
+
+- **Separate a script hard-stop test from proof of scoped admission.** `gcu-script/tests/fixture_scope.rs:13` genuinely exercises the script hard-stop machinery, including caught exceptions. However, `gcu-core/src/testing/probe.rs:214` makes the *inner* `resolve_app` unconditionally return `ScopeDenied`. Replacing its scoped router with an ordinary router would still produce the same refusal and counters. Use an inner fake that can resolve/read C, plus an allowed positive case, to prove that the scope wrapper creates the denial.
+
+- **Execute the served catalog instead of treating source enumeration as execution coverage.** `fixture_scope_support/mod.rs:565` unions names parsed from source; `fixture_scope.rs:692` manually maps them to direct router calls, and its `computer_script` branch only searches another test's source text (`fixture_scope_support/mod.rs:810`). The MCP test uses only `Profile::Full` with `script=None`, so script is not registered, and calls only a subset of actions. Enumerate actual `tools/list` for each profile, configure a real script runner, and run each tool through the serving dispatcher. The core union test is useful, but it does not establish that complete claim.
+
+- **Exercise successful image delivery and inspect pixels/files.** The MCP test never successfully observes A, and its `element_binding` returns `None` for every handle (`gcu-mcp/tests/fixture_scope.rs:152`), so a successful nonempty A tree would be rejected. Its canary checks search text/structured/debug strings; those checks cannot identify a forbidden image's base64 pixels. Add recognizable pixel canaries and inspect decoded attachments, image-cache retrieval, and exported overflow/image files. Core's positive screenshot assertion is only `is_some()`.
+
+- **Tighten cross-window `TypeText` consistency.** `scope/guard.rs:289` independently admits `win` and unseals `focus`, but never requires their `WindowBinding`s to match. A sealed A2/B handle can be paired with an A1 window and forwarded. Both are inside the allow-set, so this is not an established escape to C/D, but rejecting the mismatch here would enforce exact-target consistency instead of relying on each native implementation.
+
+- **Keep normalized metadata closed.** `ScopedDriver::new` clears private API names but copies the free-form capability `version`; `scrub` accepts any short non-whitespace permission token, including a canary-shaped string. Current native version declarations are static, and MCP action errors discard raw permission text, so I did not find a current model-facing C/D string leak through these fields. A normalized capability/version representation and permission allowlist would make the wrapper's sanitization contract stronger.
+
+**Other requested checks and boundaries**
+
+| Area | Static review result |
+| --- | --- |
+| Driver coverage | Every current method is explicitly implemented, including geometry, focus, discovery status, subscribe, doctor, and cleanup. Admission exists but is insufficient for the lifetimes and restoring helper described above. |
+| Discovery and denial equivalence | Resolve searches the filtered allowed app set and never calls inner `resolve_app`. `list_windows(None)` aggregates `Some(app)` lists rather than forwarding a desktop list. Stable missing/C/D requests take the same fixed denial path; external impostors do not add ambiguity to the filtered search. No stable-target canary leak was identified there. |
+| Forged handles/windows | Unsealed handles, old-generation sealed handles, changed element owners, and non-admitted window bindings are rejected before perform. Tree sealing checks every returned node's evidence against the admitted window. Correctness still depends on truthful native evidence. |
+| Browser/MCP construction | `with_fixture_scope` sets the router flag; `with_browser` ignores attachment; observe and dispatch also guard the flag. `Server::new_scoped` clears `browser_session` and stores `router.bound_driver()`, so direct MCP capability/discovery use does not retain the raw driver. No MCP scope install/renew/rebind/resume tool or parameter was found. Scope construction is opt-in through trusted Rust APIs, not inferred from a request. |
+| Evidence default | `InstanceEvidence` has no permissive default; wrapping a driver without an implementation fails the trait bound. `None` denies. Constructors check nonempty/nonzero shape, not OS authenticity; `ExecutableProof` is merely a stored path and is not compared for admission. All evidence implementations found are test/testing implementations. Real adapters must prove freshness, ownership/incarnation and delivery confinement; merely returning populated records is not proof. |
+| Delivery TOCTOU | Current checks precede the ordinary inner call, with an identity check only after perform. No native delivery permit or expected-binding parameter has been added. Actual OS owner/frontmost/hit-test enforcement is not proved by S1 and remains a prerequisite on S2/S4, in addition to fixing finding 1's lease semantics. |
+| Stop and cleanup | Existing router cancellation polls at 10 ms and checks Stop before accepting native completion; wrapper opening and perform completion give Stop priority. No scope code clears Stop or changes timing constants. `release_all_input` takes no model target/payload and forwards only the cleanup operation, without scope/seal locks. Releasing ledger-held ups can affect the current foreground app, but that bounded cleanup exception is explicitly accepted in ADR §§1/6; no arbitrary new press/action is exposed by it. Real timing under blocked native/IPC operations is not proved here. |
+| Batch/script continuation | `AppDenied` is an existing hard stop in both executors, regardless of `stop_on_error=false` or caught script exceptions. No later-step continuation bypass found. Retained batch output is a separate failure (finding 4). |
+| Wait/expect/settle/error refresh | These use the router's wrapped driver, including speculative capture and `failure.rs`'s `list_windows(None)` fallback. Direct scope refusals skip error refresh. They inherit the in-flight/generation defects. `wait_for` also holds an old sample for its timeout result without a scope-generation boundary, another place where result invalidation must apply. |
+| Late refusal wire result | If scope denial first occurs inside `perform`, `action/router.rs:380` labels it `failed` with `delivery=none`, whereas ADR §2 specifies `refused`. This is a wire-contract discrepancy; it still hard-stops and is not an additional scope escape. Fix it with the denial-path regressions. |
+| Unscoped behavior | The action edits predominantly preserve error codes via `CallError::Code`; the historical `error()` message/hint and result defaults were moved unchanged. `from_driver_code` special-cases `AppDenied`, but pre-existing `DriverError` variants did not generate that code. The only changed existing test file adds `ScopeDenied` cases; no existing expectation was weakened or rewritten. No concrete unscoped regression found by inspection; execution remains not_run. |
+| Images/files/resources | No MCP resource reader or model-supplied file path was added. Files are session-generated and caches session-local. They have no run/generation tags or lease invalidation; image cache is cleared on close, files deleted on close, not on `ScopeLease` changes. The ADR explicitly assigns this integration to S4, so it is not counted again as an S1 blocker. A real scoped connection must retire old files/cache/snapshots/grants and reject results during encoding before real use. |
+| Deferred work | Native `InstanceEvidence`, bootstrap/ACK/control EOF/expiry, dedicated helper/relay, environment provider, actual pixel/foreground/clipboard confinement and Stop timing, multi-instance fixture, and real evaluation are not implemented/proved by this card. Their not_run classification is supported by the inspected code; an in-process lease test does not establish any of those properties. No production CLI/eval path invoking the new scoped constructors was found. |
+
+The new constructors give the intended single driver access boundary for correctly assembled scoped sessions. Findings 1–4 must be addressed before accepting S1 as a closed scope abstraction. Keep real runs disabled until the separately documented native, transport, cache-lifecycle, approval-policy, and environment gates are satisfied.
