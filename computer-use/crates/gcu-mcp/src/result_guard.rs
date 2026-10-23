@@ -106,7 +106,7 @@ pub(crate) fn initial_block(
     data: &Value,
     produced: &LiveStamp,
 ) -> Guard {
-    if hard_denial(error) {
+    if lease.is_some() && hard_denial(error) {
         return blocked();
     }
     let Some(lease) = lease else {

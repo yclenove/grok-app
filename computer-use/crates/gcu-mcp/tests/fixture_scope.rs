@@ -559,7 +559,7 @@ impl ScriptRunner for ObserveRunner {
                 },
                 Err(error) => ScriptBody {
                     output: String::new(),
-                    error: Some(*error),
+                    error: Some((*error).into()),
                 },
             }
         })
@@ -912,7 +912,9 @@ async fn scope_batch_result_drops_state_images_and_files() {
         .await;
     let facts = denied.structured_content.as_ref().unwrap();
     assert_eq!(facts["error"]["message"], SCOPE_DENIED_MESSAGE, "{facts}");
-    assert_eq!(facts["failed_step"], 1, "{facts}");
+    assert!(facts.get("failed_step").is_none(), "{facts}");
+    assert!(facts.get("steps").is_none(), "{facts}");
+    assert!(facts.get("action").is_none(), "{facts}");
     assert!(facts.get("state").is_none(), "{facts}");
     assert!(facts["error"].get("state").is_none(), "{facts}");
     assert!(

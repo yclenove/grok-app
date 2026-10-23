@@ -105,11 +105,7 @@ fn armed_receiver(
 }
 
 fn lease_code(session: &Session) -> ErrorCode {
-    if session.is_stopped() || session.activity().stop_requested() {
-        ErrorCode::StoppedByUser
-    } else {
-        ErrorCode::AppDenied
-    }
+    session.stop_priority(ErrorCode::AppDenied)
 }
 
 async fn lease_changed(epoch: &mut Option<watch::Receiver<u64>>) {

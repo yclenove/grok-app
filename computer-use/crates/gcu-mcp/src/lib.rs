@@ -17,6 +17,7 @@ mod params;
 mod result;
 mod script;
 mod server;
+mod server_authority;
 mod stdio;
 mod ui_text;
 
@@ -26,7 +27,7 @@ pub use elicitation::{app_decision_schema, approval_message, approval_meta};
 use gcu_core::driver::Driver;
 pub use params::validate_arguments;
 use rmcp::ServiceExt;
-pub use script::{ScriptBody, ScriptRunner};
+pub use script::{ScriptBody, ScriptError, ScriptRunner};
 pub use server::{Host, ServerConfig};
 use std::sync::{atomic::Ordering, Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -93,7 +94,7 @@ where
     let session = connection.session();
     let transport = stdio::Stdio::new(input, output, session, server.lifecycle());
     let failed = transport.failure_flag();
-    let result = match server.serve(transport).await {
+    let result = match server_authority::Authorized(server).serve(transport).await {
         Ok(running) => running
             .waiting()
             .await

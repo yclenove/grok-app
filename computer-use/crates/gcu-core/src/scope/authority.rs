@@ -22,11 +22,19 @@ tokio::task_local! {
 /// Dropping this value does not change the lease.
 #[derive(Debug, Clone)]
 pub struct AttemptAuthority {
+    lease: ScopeLease,
     scope: FixtureScope,
     invalidation: watch::Receiver<u64>,
 }
 
 impl AttemptAuthority {
+    /// Active engine lease, unexpired deadline, and the original generation.
+    /// Checks the lease itself, even when no invalidation watcher has run.
+    /// Memory only; waits only for the lease lock, with no cancellation.
+    pub fn usable(&self) -> bool {
+        self.lease.matches(&self.scope) && *self.invalidation.borrow() == self.scope.generation()
+    }
+
     /// Install the connection authority on this task, including nested work.
     /// Spawned tasks must call this explicitly; Tokio does not inherit locals.
     /// Waiting and cancellation are those of `work`.
@@ -46,22 +54,30 @@ impl AttemptAuthority {
     /// A generation that arrived after arming is not marked seen. Memory only.
     /// No blocking, timeout, or cancellation.
     pub fn confirm(&mut self, lease: &ScopeLease) -> bool {
-        if !lease.matches(&self.scope) {
-            return false;
-        }
-        if *self.invalidation.borrow() != self.scope.generation() {
+        if !self.usable() || !lease.matches(&self.scope) {
             return false;
         }
         let marked = *self.invalidation.borrow_and_update();
-        marked == self.scope.generation() && lease.matches(&self.scope)
+        marked == self.scope.generation() && self.usable() && lease.matches(&self.scope)
     }
 
-    /// Wait until a later publish. Cancel-safe. The lease is not polled here.
+    /// Wait for invalidation or the engine-owned deadline. Cancel-safe.
     ///
-    /// Blocking: until the next publish or until this future is dropped.
-    /// Timeout: none. Cancellation: dropping the future.
+    /// Renewal may extend a pending sleep; recheck the same lease on waking.
+    /// Deadline-less leases wait only for publication. Dropping cancels the wait.
     pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
-        self.invalidation.changed().await
+        loop {
+            if !self.usable() {
+                return Ok(());
+            }
+            match self.lease.remaining() {
+                Some(remaining) => tokio::select! {
+                    changed = self.invalidation.changed() => return changed,
+                    _ = tokio::time::sleep(remaining) => {},
+                },
+                None => return self.invalidation.changed().await,
+            }
+        }
     }
 }
 
@@ -81,6 +97,7 @@ impl ScopeLease {
             return None;
         }
         Some(AttemptAuthority {
+            lease: self.clone(),
             scope,
             invalidation,
         })
@@ -148,5 +165,50 @@ pub(crate) async fn with_attempt<T>(
     match epoch {
         Some(epoch) => ATTEMPT_EPOCH.scope(epoch, work).await,
         None => work.await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Monotonic;
+    use super::*;
+    use std::{sync::Arc, time::Duration};
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_tracks_renewal_and_expiry_without_a_control_watcher() {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let scope =
+                FixtureScope::try_new("run", 1, "engine", "desktop", "control", vec![]).unwrap();
+            let lease = ScopeLease::install_with_deadline(
+                scope,
+                Arc::new(Monotonic::default()),
+                Duration::from_secs(3),
+            );
+            let mut authority = lease.arm_attempt().unwrap();
+            assert!(authority.usable());
+            let changed = authority.changed();
+            tokio::pin!(changed);
+            std::future::poll_fn(|cx| {
+                assert!(changed.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+            lease.renew_deadline(Duration::from_secs(6)).unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            std::future::poll_fn(|cx| {
+                assert!(
+                    changed.as_mut().poll(cx).is_pending(),
+                    "old deadline closed a renewed connection"
+                );
+                std::task::Poll::Ready(())
+            })
+            .await;
+            tokio::time::advance(Duration::from_secs(3)).await;
+            changed.await.unwrap();
+            assert!(lease.current().is_none());
+        })
+        .await
+        .unwrap();
     }
 }

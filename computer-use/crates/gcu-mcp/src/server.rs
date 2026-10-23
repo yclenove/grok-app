@@ -93,6 +93,18 @@ fn shared_locks() -> WindowLocks {
     LOCKS.get_or_init(WindowLocks::new).clone()
 }
 impl Server {
+    pub(crate) fn authority(&self) -> Option<&AttemptAuthority> {
+        self.0.authority.as_ref()
+    }
+    pub(crate) fn usable(&self) -> bool {
+        self.0
+            .authority
+            .as_ref()
+            .is_none_or(AttemptAuthority::usable)
+    }
+    pub(crate) fn scope_refusal(&self) -> rmcp::model::CallToolResult {
+        self.0.results.scope_refusal()
+    }
     pub(crate) fn lifecycle(&self) -> crate::lifecycle::Lifecycle {
         self.0.lifecycle.clone()
     }
@@ -241,6 +253,9 @@ impl Server {
         name: &str,
         arguments: Value,
     ) -> rmcp::model::CallToolResult {
+        if !self.usable() {
+            return self.scope_refusal();
+        }
         // Keep one dispatch future behind a pointer. Embedding it separately in
         // both branches multiplies its large inline state through the task-local
         // wrapper and every Connection::call future, even for discovery calls.
@@ -256,24 +271,8 @@ impl Server {
     async fn call_bound(&self, name: &str, arguments: Value) -> rmcp::model::CallToolResult {
         let _active = self.0.lifecycle.active();
         let _delivery = self.0.delivery.lock().await;
-        if self
-            .0
-            .results
-            .scope
-            .as_ref()
-            .is_some_and(|lease| lease.authorized_current().is_none())
-        {
-            let stopped = self.0.session.is_stopped() || self.0.session.activity().stop_requested();
-            let mut error = result::error(if stopped {
-                ErrorCode::StoppedByUser
-            } else {
-                ErrorCode::AppDenied
-            });
-            if !stopped {
-                error.message = gcu_core::scope::SCOPE_DENIED_MESSAGE.into();
-                error.hint = "Stay inside the registered evaluation targets.".into();
-            }
-            return self.0.results.failure(error).await;
+        if !self.usable() {
+            return self.scope_refusal();
         }
         let result = self.dispatch(name, arguments).await;
         match result {
@@ -430,6 +429,9 @@ impl ServerHandler for Server {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if !self.usable() {
+            return Ok(self.scope_refusal().into());
+        }
         let Ok(_slot) = self.0.slots.try_acquire() else {
             return Ok(self
                 .0
@@ -488,3 +490,7 @@ impl Drop for Cleanup {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_authority_tests.rs"]
+mod authority_tests;

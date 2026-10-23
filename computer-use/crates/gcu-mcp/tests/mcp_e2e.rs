@@ -276,7 +276,7 @@ impl gcu_mcp::ScriptRunner for ListAppsRunner {
                 },
                 Err(error) => gcu_mcp::ScriptBody {
                     output: String::new(),
-                    error: Some(*error),
+                    error: Some((*error).into()),
                 },
             }
         })

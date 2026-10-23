@@ -302,7 +302,18 @@ async fn script_refusal_drops_output_and_preserves_native_unknown_error() {
             scope.revoke();
         }
         let result = results
-            .script("CANARY-SCRIPT-OUTPUT", Some(error), produced)
+            .script(
+                "CANARY-SCRIPT-OUTPUT",
+                Some(if hard_denial {
+                    error.into()
+                } else {
+                    crate::ScriptError::NativeDelivery {
+                        script: Some(error.clone()),
+                        native: error,
+                    }
+                }),
+                produced,
+            )
             .await;
         let rendered = serde_json::to_string(&result).unwrap();
         assert_eq!(result.is_error, Some(true), "{rendered}");

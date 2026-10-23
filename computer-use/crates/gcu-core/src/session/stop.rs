@@ -6,8 +6,25 @@
 //! closing a session, and restarting the engine do not.
 
 use async_trait::async_trait;
+use gcu_protocol::ErrorCode;
 use std::future::Future;
 use std::time::Duration;
+
+impl super::Session {
+    /// Give the live Host Stop latch priority over an error code.
+    ///
+    /// Only selects the code; callers must retain uncertain-delivery evidence.
+    /// Memory only, with no await, timeout, or cancellation. Read before taking
+    /// a scope commit lock, since Host activity may take its own mutex.
+    #[must_use]
+    pub fn stop_priority(&self, code: ErrorCode) -> ErrorCode {
+        if self.is_stopped() || self.activity().stop_requested() {
+            ErrorCode::StoppedByUser
+        } else {
+            code
+        }
+    }
+}
 
 /// How quickly a latched stop must be observed.
 pub const STOP_LATCH_BUDGET: Duration = Duration::from_millis(100);

@@ -6,9 +6,15 @@ use gcu_core::{
     driver::Driver,
     scope::{AttemptAuthority, ScopeLease},
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
     task::JoinSet,
 };
@@ -106,11 +112,12 @@ async fn serve_one(
     // task can keep the MCP data connection alive after authority is lost.
     let (mut bridge, server) = tokio::io::duplex(64 * 1024);
     let (input, output) = tokio::io::split(server);
+    let bridge_authority = authority.clone();
     let result = tokio::select! {
         biased;
         _=authority.changed()=>Err(closed()),
         result=connection.serve_stream(input,output)=>result.map_err(Failure::from),
-        result=tokio::io::copy_bidirectional(&mut socket,&mut bridge)=>result.map(|_|()).map_err(|_|closed()),
+        result=copy_scoped(&mut socket,&mut bridge,bridge_authority)=>result.map_err(|_|closed()),
     };
     drop(socket);
     drop(bridge);
@@ -118,6 +125,93 @@ async fn serve_one(
     let _ = tokio::time::timeout(Duration::from_secs(5), session.session_closed()).await;
     result
 }
+
+// Check on every IO poll, including polls resumed after a pending read/write.
+// Cancellation alone cannot protect a copy future polled before its watcher.
+struct ScopedIo<T> {
+    inner: T,
+    authority: AttemptAuthority,
+}
+impl<T> ScopedIo<T> {
+    fn check(&self) -> io::Result<()> {
+        self.authority
+            .usable()
+            .then_some(())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "scope closed"))
+    }
+}
+impl<T: AsyncRead + Unpin> AsyncRead for ScopedIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+impl<T: AsyncWrite + Unpin> AsyncWrite for ScopedIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.check() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn copy_scoped<A, B>(
+    socket: A,
+    mut bridge: B,
+    mut authority: AttemptAuthority,
+) -> io::Result<()>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let copy_authority = authority.clone();
+    tokio::select! {
+        biased;
+        _ = authority.changed() => Err(io::Error::new(io::ErrorKind::PermissionDenied, "scope closed")),
+        copied = copy_authorized(socket, &mut bridge, copy_authority) => copied,
+    }
+}
+
+async fn copy_authorized<A, B>(
+    socket: A,
+    mut bridge: B,
+    authority: AttemptAuthority,
+) -> io::Result<()>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut socket = ScopedIo {
+        inner: socket,
+        authority,
+    };
+    tokio::io::copy_bidirectional(&mut socket, &mut bridge)
+        .await
+        .map(|_| ())
+}
+
+#[cfg(test)]
+#[path = "data_tests.rs"]
+mod tests;
 
 struct StopSignals {
     #[cfg(unix)]

@@ -4,6 +4,15 @@ mod fake;
 mod relay;
 mod state;
 
+#[cfg(all(test, feature = "script"))]
+pub(crate) async fn test_evidence(
+    driver: gcu_driver_fake::FakeDriver,
+) -> impl gcu_core::driver::Driver + gcu_core::scope::InstanceEvidence {
+    fake::FakeEvidence::new(driver)
+        .await
+        .expect("fake test evidence")
+}
+
 use crate::{
     args::{DriverArgs, DriverKind, Profile},
     exit::Failure,

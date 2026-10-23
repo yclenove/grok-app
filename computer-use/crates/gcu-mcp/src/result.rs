@@ -107,17 +107,23 @@ impl Results {
             .await
     }
     pub async fn failure(&self, error: ToolError) -> CallToolResult {
-        self.build(None, Some(error), json!({}), result_guard::LiveStamp::off())
+        self.build(None, Some(error), json!({}), self.opened_stamp())
             .await
     }
     pub async fn script(
         &self,
         output: &str,
-        error: Option<ToolError>,
+        error: Option<crate::ScriptError>,
         produced: result_guard::LiveStamp,
     ) -> CallToolResult {
-        if result_guard::hard_denial(error.as_ref()) {
-            return self.assemble_cleared(error.as_ref(), &json!({}));
+        let native = error.as_ref().and_then(crate::ScriptError::native);
+        let error = error.as_ref().and_then(crate::ScriptError::error);
+        if self.scope.is_some() && result_guard::hard_denial(error) {
+            return self.assemble_cleared_with_native(
+                native.or(error),
+                &json!({}),
+                native.is_some(),
+            );
         }
         let failed = error.is_some();
         let mut text = error
@@ -149,7 +155,9 @@ impl Results {
             .await
         {
             Ok(result) => result,
-            Err(FinishFault::Lost) => self.assemble_cleared(error.as_ref(), &json!({})),
+            Err(FinishFault::Lost) => {
+                self.assemble_cleared_with_native(native.or(error), &json!({}), native.is_some())
+            }
             Err(FinishFault::Io) => self.io_error(),
         }
     }
@@ -401,17 +409,29 @@ impl Results {
         }
     }
     fn assemble_cleared(&self, error: Option<&ToolError>, data: &Value) -> CallToolResult {
-        // Authority loss is a scope refusal, not an IO error or an empty success.
-        // Preserve any existing error, including native unknown delivery.
+        // `data` here is assembled from core outcomes, never script JSON.
+        let native = data.pointer("/action/outcome").and_then(Value::as_str) == Some("unknown");
+        self.assemble_cleared_with_native(error, data, native)
+    }
+
+    pub(crate) fn scope_refusal(&self) -> CallToolResult {
+        self.assemble_cleared(None, &json!({}))
+    }
+
+    fn assemble_cleared_with_native(
+        &self,
+        error: Option<&ToolError>,
+        data: &Value,
+        native: bool,
+    ) -> CallToolResult {
+        // An error message/code is content, not evidence of native delivery.
+        // Authority loss discards it exactly like state, output, images and files.
+        let code = self.session.stop_priority(ErrorCode::AppDenied);
+        let stopped = code == ErrorCode::StoppedByUser;
         let refusal;
         let error = match error {
-            None if self.scope.is_some() => {
-                let stopped = self.session.is_stopped() || self.session.activity().stop_requested();
-                let mut error = result_text::error(if stopped {
-                    ErrorCode::StoppedByUser
-                } else {
-                    ErrorCode::AppDenied
-                });
+            _ if stopped || (self.scope.is_some() && !native) => {
+                let mut error = result_text::error(code);
                 if !stopped {
                     error.message = gcu_core::scope::SCOPE_DENIED_MESSAGE.into();
                     error.hint = "Stay inside the registered evaluation targets.".into();
@@ -421,7 +441,11 @@ impl Results {
             }
             other => other,
         };
-        let mut data = data.clone();
+        let mut data = if self.scope.is_some() && !native {
+            json!({})
+        } else {
+            data.clone()
+        };
         result_guard::scrub(&mut data);
         let mut text = String::new();
         if let Some(error) = error {
@@ -440,6 +464,13 @@ impl Results {
         result
     }
     fn io_error(&self) -> CallToolResult {
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|lease| lease.authorized_current().is_none())
+        {
+            return self.scope_refusal();
+        }
         let error = error(ErrorCode::Internal);
         let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
             "error: {}: {}",
