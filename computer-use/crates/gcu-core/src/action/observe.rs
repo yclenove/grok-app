@@ -12,7 +12,7 @@ use crate::{
     redact::{self, CapturedFrame, RedactedImage},
     render::RenderOpts,
     session::Session,
-    snapshot::{ElementIndex, RenderedState, WindowKey},
+    snapshot::{assemble, ElementIndex, RenderedState, WindowKey},
     tree::{Pipeline, ProcessedTree},
 };
 use gcu_protocol::{
@@ -276,9 +276,8 @@ impl ActionRouter {
         text_limit: Option<usize>,
     ) -> Result<ActionState, Box<ToolError>> {
         let config = self.policy.load();
-        // After policy load and before the thumbnail or the snapshot lock.
-        // A test may revoke here. The epoch check is the next synchronous step
-        // once the snapshot lock is held, before anything is recorded.
+        // After policy load and before the thumbnail. A revoke here refuses
+        // before an id is reserved.
         self.publish_gate.enter();
         let image = if attach {
             fresh
@@ -290,66 +289,49 @@ impl ActionRouter {
         } else {
             None
         };
-        let key = fresh.key();
+        self.publication_refusal(session, &fresh)?;
         let mut opts = RenderOpts::new(fresh.win.app.info.clone(), fresh.info.clone());
         opts.text_limit = text_limit;
-        let mut resources = lock(&session.actions);
-        if let Err(err) = self.publication_refusal(session, &fresh) {
-            drop(resources);
-            return Err(err);
-        }
-        // Retain only images actually handed to the model. A speculative image
-        // must not replace the model's latest coordinate observation.
-        let observation = resources
-            .snapshots
-            .record(
-                fresh.tree.clone(),
-                &opts,
-                if attach { fresh.image.take() } else { None },
-            )
+        let stored = if attach { fresh.image.take() } else { None };
+        let record_window = WindowKey::from_options(&opts);
+        let baseline = {
+            let resources = lock(&session.actions);
+            resources.snapshots.baseline(&record_window)
+        };
+        let mut assembled = assemble(fresh.tree.clone(), &opts, stored, &baseline)
             .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
-        // Still holding the snapshot mutex. Rendering already finished inside
-        // `record`; this wait is test-only and does not take the scope lock.
-        self.commit_gate.enter();
-        if let Err(err) = self.publication_refusal(session, &fresh) {
-            resources.snapshots.discard(&key, observation.snapshot_id);
-            drop(resources);
-            return Err(err);
-        }
-        let snapshot = resources
-            .snapshots
-            .get(&key, observation.snapshot_id)
-            .ok_or_else(|| Box::new(error(ErrorCode::Internal)))?;
-        ElementIndex::assign(&mut fresh.tree, Some(snapshot.index()), 0)
+        // Match the stored index onto the caller's tree before publication.
+        ElementIndex::assign(&mut fresh.tree, Some(&assembled.index), 0)
             .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
-        let screenshot = image.as_ref().map(|i| ScreenshotInfo {
-            id: format!("i_{}", observation.snapshot_id.0),
-            width: i.width(),
-            height: i.height(),
-            scale_to_window: Some(i.scale_to_window()),
-            mime: "image/png".into(),
-        });
-        if let Some(i) = &image {
-            resources.snapshots.set_delivery_size(
-                &key,
-                observation.snapshot_id,
-                i.width(),
-                i.height(),
-            );
-        }
-        if let (Some(run), Some(generation)) = (fresh.scope_run.as_deref(), fresh.scope_generation)
-        {
+        let scope_run = fresh.scope_run.clone();
+        let scope_generation = fresh.scope_generation;
+        assembled.memory_bytes += scope_run.as_ref().map_or(0, String::len);
+        assembled.scope_run = scope_run.clone();
+        assembled.scope_generation = scope_generation;
+        let id = {
+            let mut resources = lock(&session.actions);
             resources
                 .snapshots
-                .set_scope_epoch(&key, observation.snapshot_id, run, generation);
-        }
-        Ok(ActionState {
-            text: observation.text,
-            overflow_text: observation.overflow_text,
+                .reserve_id()
+                .map_err(|_| Box::new(error(ErrorCode::Internal)))?
+        };
+        let screenshot = image.as_ref().map(|image| {
+            assembled.delivery_size = (image.width(), image.height());
+            ScreenshotInfo {
+                id: format!("i_{}", id.0),
+                width: image.width(),
+                height: image.height(),
+                scale_to_window: Some(image.scale_to_window()),
+                mime: "image/png".into(),
+            }
+        });
+        let state = ActionState {
+            text: std::mem::take(&mut assembled.text),
+            overflow_text: assembled.overflow_text.take(),
             state: AppState {
                 app: opts.app,
                 window: opts.window,
-                snapshot_id: format!("s_{}", observation.snapshot_id.0),
+                snapshot_id: format!("s_{}", id.0),
                 screenshot,
                 focused: fresh.tree.focused,
                 truncated: fresh.tree.truncation(fresh.tree.omitted_nodes),
@@ -357,26 +339,70 @@ impl ActionRouter {
                 action: None,
             },
             image,
-            scope_run: fresh.scope_run,
-            scope_generation: fresh.scope_generation,
-        })
+            scope_run,
+            scope_generation,
+        };
+        // All rendering, indexing, state assembly and test pauses precede the
+        // snapshot lock and the lease. A denied id remains burned.
+        self.commit_gate.enter();
+        session.index_gate().enter();
+        if let Some(lease) = &self.lease {
+            lease.commit_before_gate().enter();
+        }
+        let mut resources = lock(&session.actions);
+        let plan = resources
+            .snapshots
+            .prepare_install(&assembled)
+            .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
+        let mut retired = Vec::with_capacity(resources.snapshots.len());
+        let install = || {
+            let observation = resources
+                .snapshots
+                .install(id, assembled, plan, &mut retired);
+            // Keep the prepared diff alive until after the lease lock, too.
+            (observation, state)
+        };
+        let committed = if let Some(lease) = &self.lease {
+            let (Some(run), Some(generation)) =
+                (fresh.scope_run.as_deref(), fresh.scope_generation)
+            else {
+                return Err(self.refusal_after_loss(session));
+            };
+            lease
+                .commit_if_current(&[(run, generation)], install)
+                .map_err(|_| self.refusal_after_loss(session))
+        } else {
+            Ok(install())
+        };
+        drop(resources);
+        let (observation, state) = committed?;
+        drop(observation);
+        drop(retired);
+        if let Some(lease) = &self.lease {
+            lease.commit_after_gate().enter();
+        }
+        Ok(state)
     }
 
     /// Refuse a sample whose producing epoch is missing or no longer current.
     ///
-    /// Called twice under the snapshot lock: before `record`, and again after
-    /// `record` returns, before the sample is handed out. The second call drops
-    /// the scope lock before it returns; that lock is never held across render
-    /// or hashing. Stop wins over scope denial. Memory only; no await, timeout,
-    /// or cancellation.
+    /// Runs before indexing, without the snapshot lock. The closing check is
+    /// [`crate::scope::ScopeLease::commit_if_current`], which holds the lease
+    /// read lock across the install. Stop wins only when the epoch is already
+    /// gone. Memory only; no await, timeout, or cancellation.
     fn publication_refusal(&self, session: &Session, fresh: &Fresh) -> Result<(), Box<ToolError>> {
         if self.scope_binding_current(fresh.scope_run.as_deref(), fresh.scope_generation) {
             return Ok(());
         }
+        Err(self.refusal_after_loss(session))
+    }
+
+    fn refusal_after_loss(&self, session: &Session) -> Box<ToolError> {
         if session.is_stopped() || session.activity().stop_requested() {
-            return Err(Box::new(error(ErrorCode::StoppedByUser)));
+            Box::new(error(ErrorCode::StoppedByUser))
+        } else {
+            Box::new(CallError::ScopeDenied.tool_error())
         }
-        Err(Box::new(CallError::ScopeDenied.tool_error()))
     }
 }
 // Full raw state is compared in memory, not just rendered/budgeted text. This

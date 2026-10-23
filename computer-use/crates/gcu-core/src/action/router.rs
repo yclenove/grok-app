@@ -48,7 +48,7 @@ pub struct ActionRouter {
     pub(crate) fixture_scoped: bool,
     pub(crate) lease: Option<crate::scope::ScopeLease>,
     pub(crate) publish_gate: std::sync::Arc<super::PublishGate>,
-    /// Parks after `record` and before the snapshot is returned. Disarmed in production.
+    /// Parks after indexing and before the snapshot is stored. Disarmed in production.
     pub(crate) commit_gate: std::sync::Arc<super::PublishGate>,
     /// Parks while a WindowGone refresh is assembled. Disarmed in production.
     pub(crate) refresh_gate: std::sync::Arc<super::PublishGate>,
@@ -93,7 +93,7 @@ impl ActionRouter {
     pub fn publication_gate(&self) -> std::sync::Arc<super::PublishGate> {
         std::sync::Arc::clone(&self.publish_gate)
     }
-    /// Pause after the snapshot is stored and before it is returned.
+    /// Pause after indexing and before the snapshot is stored.
     ///
     /// Memory only. No timeout or cancellation. Production leaves this disarmed.
     pub fn commit_gate(&self) -> std::sync::Arc<super::PublishGate> {

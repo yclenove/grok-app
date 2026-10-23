@@ -19,6 +19,7 @@ mod delivery;
 mod queue;
 mod stop;
 
+pub use delivery::ScreenshotDelivery;
 pub use queue::{SessionError, WindowGuard, WindowLocks, WINDOW_LOCK_WAIT};
 pub use stop::{
     drive_native, InputRelease, NativeTimeout, StopTimings, NATIVE_CALL_TIMEOUT,
@@ -58,9 +59,12 @@ pub struct Session {
     queue: tokio::sync::Mutex<()>,
     cancel: Cancel,
     pub(crate) actions: Mutex<crate::action::SessionActions>,
-    /// Parks inside screenshot delivery while the snapshot mutex is held.
-    /// Production leaves it disarmed, so entering it does not wait.
+    /// Parks before a screenshot size is stored. Production leaves it disarmed.
     delivery_gate: std::sync::Arc<crate::action::PublishGate>,
+    /// Parks after indexing and before the snapshot is stored. Disarmed in production.
+    index_gate: std::sync::Arc<crate::action::PublishGate>,
+    /// Parks before WindowGone metadata is attached. Disarmed in production.
+    snapshot_gate: std::sync::Arc<crate::action::PublishGate>,
 }
 
 impl Session {
@@ -88,15 +92,35 @@ impl Session {
             cancel: Cancel::new(),
             actions: Mutex::new(crate::action::SessionActions::default()),
             delivery_gate: crate::action::PublishGate::new(),
+            index_gate: crate::action::PublishGate::new(),
+            snapshot_gate: crate::action::PublishGate::new(),
         }
     }
 
-    /// Pause inside [`Session::screenshot_delivered`] while the snapshot mutex is held.
+    /// Pause inside [`Session::prepare_screenshot_delivery`] with the snapshot mutex held.
     ///
     /// Memory only. No timeout or cancellation. Production leaves this disarmed.
     #[must_use]
     pub fn delivery_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
         std::sync::Arc::clone(&self.delivery_gate)
+    }
+
+    /// Pause after an observation is indexed and before it is stored.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed,
+    /// so entering it does not wait and does not hold the snapshot mutex.
+    #[must_use]
+    pub fn index_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
+        std::sync::Arc::clone(&self.index_gate)
+    }
+
+    /// Pause after a WindowGone list is read and before that metadata is attached.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed.
+    /// The snapshot mutex is not held while this gate waits.
+    #[must_use]
+    pub fn snapshot_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
+        std::sync::Arc::clone(&self.snapshot_gate)
     }
 
     /// Session id.

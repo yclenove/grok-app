@@ -1,12 +1,13 @@
+use super::prepare::{assemble, Assembled, ObservationBaseline};
 use super::{Diff, ElementIndex, RenderedState, SnapshotError};
 use crate::{
-    model::{Geometry, NodeValue, States, WindowPoint},
-    redact::{PixelHash, RedactedImage, MAX_STATE_SKEW},
+    model::Geometry,
+    redact::{PixelHash, RedactedImage},
     render::RenderOpts,
-    tree::{IndexedElement, ProcessedNode, ProcessedTree},
+    tree::{IndexedElement, ProcessedTree},
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     fmt,
     time::Duration,
 };
@@ -156,6 +157,25 @@ struct WindowHistory {
     next_index: u64,
     force_full: bool,
 }
+
+pub(super) fn window_history_charge(window: &WindowKey) -> usize {
+    std::mem::size_of::<(WindowKey, WindowHistory)>()
+        + window.app_id.capacity()
+        + window.window_id.capacity()
+        + 48
+}
+/// Retention work computed with the snapshot mutex, before the lease lock.
+pub(crate) struct InstallPlan {
+    window: WindowKey,
+    history_bytes: usize,
+    evictions: Vec<usize>,
+}
+/// Validated coordinate update; valid while the snapshot mutex stays held.
+pub(crate) struct DeliverySize {
+    position: usize,
+    width: u32,
+    height: u32,
+}
 /// Session-owned memory store with per-window retention and global FIFO eviction.
 /// High-water counters outlive eviction and turn changes, preventing index reuse.
 /// No filesystem/network IO, waits, blocking native work, or automatic retries.
@@ -244,24 +264,43 @@ impl SnapshotStore {
         width: u32,
         height: u32,
     ) {
-        if let Some(s) = self
+        if let Some(size) = self.prepare_delivery_size(window, id, width, height) {
+            self.apply_delivery_size(size);
+        }
+    }
+
+    pub(crate) fn prepare_delivery_size(
+        &self,
+        window: &WindowKey,
+        id: SnapshotId,
+        width: u32,
+        height: u32,
+    ) -> Option<DeliverySize> {
+        let position = self
             .snapshots
-            .iter_mut()
-            .find(|s| s.id == id && &s.window == window)
+            .iter()
+            .position(|s| s.id == id && &s.window == window)?;
+        let image = self.snapshots[position].screenshot.as_ref()?;
+        if width == 0
+            || height == 0
+            || u64::from(width) * u64::from(height) * 4 > crate::redact::MAX_CAPTURE_BYTES as u64
+            || (f64::from(width) / f64::from(image.width()) * f64::from(image.height())
+                - f64::from(height))
+            .abs()
+                > 1.
         {
-            if let Some(image) = &s.screenshot {
-                if width > 0
-                    && height > 0
-                    && u64::from(width) * u64::from(height) * 4
-                        <= crate::redact::MAX_CAPTURE_BYTES as u64
-                    && (f64::from(width) / f64::from(image.width()) * f64::from(image.height())
-                        - f64::from(height))
-                    .abs()
-                        <= 1.
-                {
-                    s.delivery_size = (width, height);
-                }
-            }
+            return None;
+        }
+        Some(DeliverySize {
+            position,
+            width,
+            height,
+        })
+    }
+
+    pub(crate) fn apply_delivery_size(&mut self, size: DeliverySize) {
+        if let Some(snapshot) = self.snapshots.get_mut(size.position) {
+            snapshot.delivery_size = (size.width, size.height);
         }
     }
     /// Tag one retained observation with the fixture-scope generation that produced it.
@@ -337,6 +376,98 @@ impl SnapshotStore {
         }
         Ok(latest)
     }
+    /// Copy the counters an off-lock index walk needs.
+    ///
+    /// Memory only. The caller must not hold this store across the walk, and
+    /// must recheck it in [`Self::prepare_install`]. No timeout or cancellation.
+    pub(crate) fn baseline(&self, window: &WindowKey) -> ObservationBaseline {
+        let history = self
+            .windows
+            .get(window)
+            .map(|item| (item.next_index, item.force_full));
+        let previous = self.latest(window);
+        ObservationBaseline {
+            history,
+            previous_index: previous.map(|snapshot| snapshot.index.clone()),
+            previous_rendered: previous.map(|snapshot| snapshot.rendered.clone()),
+            latest_id: previous.map(|snapshot| snapshot.id),
+            memory_limit: self.memory_limit,
+            history_bytes: self.history_bytes,
+        }
+    }
+
+    /// Burn the next snapshot id. The id is not reused when install is refused.
+    ///
+    /// Memory only. No timeout or cancellation. Does not insert a snapshot.
+    pub(crate) fn reserve_id(&mut self) -> Result<SnapshotId, SnapshotError> {
+        let next = self
+            .next_snapshot
+            .checked_add(1)
+            .ok_or(SnapshotError::IndexExhausted)?;
+        let id = SnapshotId(self.next_snapshot);
+        self.next_snapshot = next;
+        Ok(id)
+    }
+
+    /// Insert a prepared observation when the copied baseline is still current.
+    ///
+    /// Call `prepare_install` first and retain exclusive store access until
+    /// this call. Memory only, infallible, no timeout or cancellation. Eviction
+    /// matches [`Self::record`]. Retired snapshots move into `retired` so their
+    /// large trees/pixels can be dropped
+    /// after leaving the lease critical section. Reserve capacity before calling.
+    pub(crate) fn install(
+        &mut self,
+        id: SnapshotId,
+        assembled: Assembled,
+        plan: InstallPlan,
+        retired: &mut Vec<Snapshot>,
+    ) -> Observation {
+        let memory_bytes = assembled.memory_bytes;
+        let new_window_bytes = assembled.new_window_bytes;
+        let next_index = assembled.next_index;
+        let text = assembled.text;
+        let overflow_text = assembled.overflow_text;
+        let mode = assembled.mode;
+        let diff = assembled.diff;
+        self.windows.insert(
+            plan.window,
+            WindowHistory {
+                next_index,
+                force_full: false,
+            },
+        );
+        self.snapshots.push_back(Snapshot {
+            delivery_size: assembled.delivery_size,
+            id,
+            window: assembled.window,
+            index: assembled.index,
+            rendered: assembled.rendered,
+            screenshot: assembled.screenshot,
+            target_hashes: assembled.target_hashes,
+            geometry: assembled.geometry,
+            state_version: assembled.state_version,
+            observed_at: assembled.observed_at,
+            memory_bytes,
+            scope_run: assembled.scope_run,
+            scope_generation: assembled.scope_generation,
+        });
+        self.history_bytes = plan.history_bytes;
+        self.memory_bytes += memory_bytes + new_window_bytes;
+        // Descending positions keep every removal aligned with the prepared
+        // store. No tree walk, budget scan, allocation, or payload drop here.
+        for &position in plan.evictions.iter().rev() {
+            self.retire(position, retired);
+        }
+        Observation {
+            snapshot_id: id,
+            text,
+            overflow_text,
+            mode,
+            diff,
+        }
+    }
+
     /// Atomically record the observation being handed to the model. Observers must
     /// call this for delivered observations only, not speculative/settle reads.
     /// Assigns stable indices, computes diff against the last delivery this turn,
@@ -345,182 +476,94 @@ impl SnapshotStore {
     /// Screenshot input is exclusively RedactedImage; raw captures cannot enter.
     pub fn record(
         &mut self,
-        mut tree: ProcessedTree,
+        tree: ProcessedTree,
         opts: &RenderOpts,
         screenshot: Option<RedactedImage>,
     ) -> Result<Observation, SnapshotError> {
-        if let Some(image) = &screenshot {
-            if !image.is_window_capture()
-                || tree.state_version != Some(image.state_version())
-                || tree
-                    .observed_at
-                    .is_none_or(|t| t.abs_diff(image.captured_at()) > MAX_STATE_SKEW)
-                || image.geometry()
-                    != (Geometry {
-                        frame: opts.window.frame,
-                        scale: opts.window.scale,
-                    })
-            {
-                return Err(SnapshotError::StaleScreenshot);
-            }
-        }
-        sanitize(&mut tree);
         let window = WindowKey::from_options(opts);
-        let history = self.windows.get(&window);
-        let previous = self.latest(&window);
-        let (index, next_index) = ElementIndex::assign(
-            &mut tree,
-            previous.map(|s| &s.index),
-            history.map_or(0, |h| h.next_index),
-        )?;
-        let full_text = crate::render::text::file_text(&tree, opts);
-        let overflow_text =
-            (full_text.len() > crate::render::text::FACTS_PREFIX_BYTES).then_some(full_text);
-        let rendered = RenderedState::from_tree(&tree, opts);
-        let diff = if history.is_some_and(|h| !h.force_full) {
-            previous.map(|s| Diff::between(&s.rendered, &rendered))
-        } else {
-            None
-        };
-        let mode = match &diff {
-            None => ObservationMode::Full,
-            Some(d) if d.is_large_change() => ObservationMode::FullLargeChange,
-            Some(_) => ObservationMode::Diff,
-        };
-        let text = diff.as_ref().map_or_else(|| rendered.text(), Diff::text);
-        let mut target_hashes = BTreeMap::new();
-        if let Some(image) = &screenshot {
-            for (_, node) in tree.nodes() {
-                if node.interactive() {
-                    if let Some(frame) = node.node.frame {
-                        let center = WindowPoint {
-                            x: frame.x + frame.w / 2.,
-                            y: frame.y + frame.h / 2.,
-                        };
-                        if let Ok(hash) = image.target_hash(center) {
-                            target_hashes.insert(node.element_index, hash);
-                        }
-                    }
-                }
-            }
+        let baseline = self.baseline(&window);
+        let assembled = assemble(tree, opts, screenshot, &baseline)?;
+        let plan = self.prepare_install(&assembled)?;
+        let id = self.reserve_id()?;
+        let mut retired = Vec::with_capacity(self.snapshots.len());
+        Ok(self.install(id, assembled, plan, &mut retired))
+    }
+
+    /// Validate the copied baseline/budget and reserve registration capacity.
+    /// Keep the snapshot mutex from this call through `install`. Run before
+    /// entering a lease critical section. Memory only; no IO or cancellation.
+    pub(crate) fn prepare_install(
+        &mut self,
+        assembled: &Assembled,
+    ) -> Result<InstallPlan, SnapshotError> {
+        let history = self
+            .windows
+            .get(&assembled.window)
+            .map(|item| (item.next_index, item.force_full));
+        let latest = self.latest(&assembled.window).map(|snapshot| snapshot.id);
+        if history != assembled.baseline_history || latest != assembled.baseline_latest {
+            return Err(SnapshotError::StaleDiff);
         }
-        let memory_bytes = std::mem::size_of::<Snapshot>()
-            + window.app_id.capacity()
-            + window.window_id.capacity()
-            + index.memory_bytes()
-            + rendered.memory_bytes()
-            + screenshot.as_ref().map_or(0, RedactedImage::memory_bytes)
-            + target_hashes.len() * (std::mem::size_of::<(u32, PixelHash)>() + 48);
-        // Persistent high-water metadata is also charged. A stream of distinct
-        // windows cannot grow the session beyond its cap after snapshot eviction.
-        let new_window_bytes = if history.is_none() {
-            std::mem::size_of::<(WindowKey, WindowHistory)>()
-                + window.app_id.capacity()
-                + window.window_id.capacity()
-                + 48
-        } else {
-            0
-        };
         let history_bytes = self
             .history_bytes
-            .checked_add(new_window_bytes)
+            .checked_add(assembled.new_window_bytes)
             .ok_or(SnapshotError::MemoryLimit)?;
         if history_bytes
-            .checked_add(memory_bytes)
+            .checked_add(assembled.memory_bytes)
             .is_none_or(|size| size > self.memory_limit)
         {
             return Err(SnapshotError::MemoryLimit);
         }
-        let id = SnapshotId(self.next_snapshot);
-        let next_snapshot = self
-            .next_snapshot
-            .checked_add(1)
-            .ok_or(SnapshotError::IndexExhausted)?;
-        let delivery_size = screenshot
-            .as_ref()
-            .map_or((0, 0), |i| (i.width(), i.height()));
-        let snapshot = Snapshot {
-            delivery_size,
-            id,
-            window: window.clone(),
-            index,
-            rendered,
-            screenshot,
-            target_hashes,
-            geometry: Geometry {
-                frame: opts.window.frame,
-                scale: opts.window.scale,
-            },
-            state_version: tree.state_version,
-            observed_at: tree.observed_at,
-            memory_bytes,
-            scope_run: None,
-            scope_generation: None,
-        };
-        self.next_snapshot = next_snapshot;
-        self.windows.insert(
-            window.clone(),
-            WindowHistory {
-                next_index,
-                force_full: false,
-            },
-        );
-        self.snapshots.push_back(snapshot);
-        self.history_bytes = history_bytes;
-        self.memory_bytes += memory_bytes + new_window_bytes;
-        while self.snapshots.iter().filter(|s| s.window == window).count() > SNAPSHOTS_PER_WINDOW {
-            if let Some(position) = self.snapshots.iter().position(|s| s.window == window) {
-                self.evict(position);
-            } else {
+        let window_count = self
+            .snapshots
+            .iter()
+            .filter(|snapshot| snapshot.window == assembled.window)
+            .count();
+        let excess = (window_count + 1).saturating_sub(SNAPSHOTS_PER_WINDOW);
+        let mut evictions: Vec<_> = self
+            .snapshots
+            .iter()
+            .enumerate()
+            .filter(|(_, snapshot)| snapshot.window == assembled.window)
+            .take(excess)
+            .map(|(position, _)| position)
+            .collect();
+        let mut bytes = self.memory_bytes + assembled.memory_bytes + assembled.new_window_bytes;
+        for &position in &evictions {
+            bytes -= self.snapshots[position].memory_bytes;
+        }
+        let window_evictions = evictions.len();
+        for (position, snapshot) in self.snapshots.iter().enumerate() {
+            if bytes <= self.memory_limit {
                 break;
             }
+            if evictions[..window_evictions]
+                .binary_search(&position)
+                .is_err()
+            {
+                bytes -= snapshot.memory_bytes;
+                evictions.push(position);
+            }
         }
-        while self.memory_bytes > self.memory_limit {
-            self.evict(0);
-        }
-        Ok(Observation {
-            snapshot_id: id,
-            text,
-            overflow_text,
-            mode,
-            diff,
+        evictions.sort_unstable();
+        self.snapshots.reserve(1);
+        self.windows.reserve(1);
+        Ok(InstallPlan {
+            window: assembled.window.clone(),
+            history_bytes,
+            evictions,
         })
+    }
+
+    fn retire(&mut self, position: usize, retired: &mut Vec<Snapshot>) {
+        if let Some(snapshot) = self.snapshots.remove(position) {
+            self.memory_bytes -= snapshot.memory_bytes;
+            retired.push(snapshot);
+        }
     }
     fn evict(&mut self, position: usize) {
         if let Some(snapshot) = self.snapshots.remove(position) {
             self.memory_bytes -= snapshot.memory_bytes;
         }
-    }
-}
-pub(crate) fn sanitize(tree: &mut ProcessedTree) {
-    let sensitive: HashSet<_> = tree
-        .sensitive_regions
-        .iter()
-        .map(|r| r.fingerprint)
-        .collect();
-    fn walk(
-        node: &mut ProcessedNode,
-        inherited: bool,
-        sensitive: &HashSet<crate::model::Fingerprint>,
-    ) {
-        let secret = inherited
-            || sensitive.contains(&node.node.fingerprint)
-            || node.node.states.contains(States::PASSWORD);
-        if secret {
-            node.node.value = Some(NodeValue::Text("•••".into()));
-            node.node.text_extras = None;
-            node.node.name = None;
-            node.node.description = None;
-            node.node.help = None;
-            node.node.url = None;
-            node.node.identifier = None;
-            node.node.placeholder = None;
-        }
-        for child in &mut node.children {
-            walk(child, secret, sensitive);
-        }
-    }
-    if let Some(root) = &mut tree.root {
-        walk(root, false, &sensitive);
     }
 }

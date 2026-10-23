@@ -453,6 +453,9 @@ pub(super) struct LeaseShared {
     /// nobody is subscribed.
     pub(super) epoch: watch::Sender<u64>,
     pub(super) waiters: Mutex<Vec<Waker>>,
+    pub(super) commit_before: std::sync::Arc<crate::action::PublishGate>,
+    pub(super) commit_during: std::sync::Arc<crate::action::PublishGate>,
+    pub(super) commit_after: std::sync::Arc<crate::action::PublishGate>,
 }
 
 /// Shared scope generation. Clones share the record. The lock is never held
@@ -462,7 +465,7 @@ pub(super) struct LeaseShared {
 /// that already copied a scope must compare it again before handing out a result.
 #[derive(Debug, Clone)]
 pub struct ScopeLease {
-    shared: Arc<LeaseShared>,
+    pub(super) shared: Arc<LeaseShared>,
 }
 
 impl ScopeLease {
@@ -474,6 +477,9 @@ impl ScopeLease {
                 state: RwLock::new(LeaseState::Active(scope)),
                 epoch,
                 waiters: Mutex::new(Vec::new()),
+                commit_before: crate::action::PublishGate::new(),
+                commit_during: crate::action::PublishGate::new(),
+                commit_after: crate::action::PublishGate::new(),
             }),
         }
     }

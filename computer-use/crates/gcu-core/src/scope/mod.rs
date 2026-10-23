@@ -8,6 +8,7 @@
 //! surface as the same fixed sentence.
 
 mod authority;
+mod commit;
 mod driver;
 mod events;
 mod guard;

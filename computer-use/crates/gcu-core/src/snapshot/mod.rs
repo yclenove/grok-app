@@ -4,10 +4,12 @@
 
 mod diff;
 mod index;
+mod prepare;
 mod store;
 pub use diff::{Change, Diff, RenderedNode, RenderedState};
 pub use index::ElementIndex;
-pub(crate) use store::sanitize;
+pub(crate) use prepare::{assemble, sanitize};
+pub(crate) use store::DeliverySize;
 pub use store::{
     Observation, ObservationMode, Snapshot, SnapshotId, SnapshotStore, WindowKey,
     DEFAULT_MEMORY_LIMIT, SNAPSHOTS_PER_WINDOW,

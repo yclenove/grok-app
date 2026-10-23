@@ -89,7 +89,9 @@ impl ActionRouter {
             if self.lease.is_some() && !window_list_current(self, session, producing.as_ref()) {
                 return out;
             }
-            out.windows = windows;
+            // After the list await and before the snapshot mutex. A revoke while
+            // this waits never attaches the metadata assembled below.
+            session.snapshot_gate().enter();
             let prior = lock(&session.actions)
                 .snapshots
                 .latest(&WindowKey {
@@ -106,11 +108,11 @@ impl ActionRouter {
                 },
                 scale: 1.,
             });
-            out.state = Some(ActionState {
+            let state = ActionState {
                 text: format!(
                     "Window {} is gone. Available windows: {}",
                     win.id,
-                    serde_json::to_string(&out.windows).unwrap_or_default()
+                    serde_json::to_string(&windows).unwrap_or_default()
                 ),
                 image: None,
                 overflow_text: None,
@@ -132,7 +134,27 @@ impl ActionRouter {
                 },
                 scope_run: producing.as_ref().map(|(run, _)| run.clone()),
                 scope_generation: producing.as_ref().map(|(_, generation)| *generation),
-            });
+            };
+            if let Some(lease) = &self.lease {
+                let Some((run, generation)) = producing.as_ref() else {
+                    return out;
+                };
+                lease.commit_before_gate().enter();
+                let attached = lease.commit_if_current(&[(run.as_str(), *generation)], || {
+                    if session.is_stopped() || session.activity().stop_requested() {
+                        return None;
+                    }
+                    Some((state, windows))
+                });
+                if let Ok(Some((state, windows))) = attached {
+                    out.state = Some(state);
+                    out.windows = windows;
+                    lease.commit_after_gate().enter();
+                }
+            } else {
+                out.state = Some(state);
+                out.windows = windows;
+            }
         }
         out
     }

@@ -57,6 +57,18 @@ impl LiveStamp {
         }
     }
 
+    /// Epochs copied for one response. Memory only. No blocking or cancellation.
+    pub(crate) fn epochs(&self) -> &[(String, u64)] {
+        &self.epochs
+    }
+
+    /// Whether authority was already gone when it was copied.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     /// Whether any carried epoch is missing from the live lease.
     ///
     /// No lease never blocks. Memory only. The lease read drops its lock before

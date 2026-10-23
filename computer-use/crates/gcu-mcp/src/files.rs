@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::Duration,
 };
 use tempfile::TempDir;
@@ -24,6 +24,23 @@ struct Area {
     stage_seq: u64,
     bytes: usize,
     files: Vec<(PathBuf, usize)>,
+}
+/// Validated ledger insertion. Its lock is acquired before the lease lock.
+pub(crate) struct FileAdmission<'a> {
+    area: MutexGuard<'a, Area>,
+    rows: Vec<(PathBuf, usize)>,
+}
+impl FileAdmission<'_> {
+    /// Memory-only, infallible registration of the batch validated by `admission`.
+    pub(crate) fn commit(&mut self, staged: &mut [StagedFile]) {
+        for (path, len) in self.rows.drain(..) {
+            self.area.bytes += len;
+            self.area.files.push((path, len));
+        }
+        for file in staged {
+            file.committed = true;
+        }
+    }
 }
 impl SessionFiles {
     pub(crate) fn new() -> io::Result<Self> {
@@ -59,10 +76,10 @@ impl SessionFiles {
         let staged = self.stage(bytes, extension)?;
         self.commit(staged)
     }
-    /// Write to an unregistered name. The file is not exported until [`Self::commit`].
+    /// Write to an unregistered name. Export requires a committed [`Self::admission`].
     ///
     /// Dropping the result deletes the file. May wait on the test pause, then on
-    /// the area mutex. No timeout or cancellation of its own; the caller bounds
+    /// the area mutex. Test pauses are bounded; the caller bounds
     /// the blocking task. A closed area or a full budget returns an error and
     /// leaves the ledger unchanged.
     pub(crate) fn stage(&self, bytes: &[u8], extension: &str) -> io::Result<StagedFile> {
@@ -98,12 +115,59 @@ impl SessionFiles {
             gate,
         })
     }
+    /// Rename a staged file to its export name without registering it.
+    ///
+    /// The ledger and [`Self::export`] ignore it until its admission is committed.
+    /// Dropping it still deletes the bytes. May wait on the area mutex. No
+    /// await, timeout, or cancellation. A closed area leaves the staged name
+    /// in place for its guard to delete.
+    pub(crate) fn seal(&self, staged: &mut StagedFile) -> io::Result<PathBuf> {
+        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        let directory = area
+            .directory
+            .as_ref()
+            .ok_or_else(|| io::Error::other("session closed"))?;
+        let path = directory
+            .path()
+            .join(format!("{}.{}", area.next, staged.extension));
+        std::fs::rename(&staged.path, &path)?;
+        area.next = area.next.saturating_add(1);
+        drop(area);
+        staged.path = path.clone();
+        Ok(path)
+    }
+    /// Prepare to register already-sealed files. All of them, or none.
+    ///
+    /// Memory only aside from the area mutex. No rename, await, timeout, or
+    /// cancellation. Acquires the ledger lock and reserves space before the
+    /// lease commit point. Failure leaves the ledger unchanged and the caller
+    /// still owns all staged guards. Dropping the admission registers nothing.
+    pub(crate) fn admission(&self, staged: &[StagedFile]) -> io::Result<FileAdmission<'_>> {
+        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        if area.directory.is_none() {
+            return Err(io::Error::other("session closed"));
+        }
+        let extra = staged
+            .iter()
+            .try_fold(0usize, |sum, file| sum.checked_add(file.len))
+            .ok_or_else(|| io::Error::other("session file budget reached"))?;
+        if area.bytes.saturating_add(extra) > MAX_SESSION_BYTES {
+            return Err(io::Error::other("session file budget reached"));
+        }
+        let rows = staged
+            .iter()
+            .map(|file| (file.path.clone(), file.len))
+            .collect();
+        area.files.reserve(staged.len());
+        Ok(FileAdmission { area, rows })
+    }
     /// Rename a staged file into the export ledger.
     ///
     /// The area mutex is held across the rename and the ledger insert. No await,
     /// timeout, or cancellation. On failure the staged file is left for its guard
     /// to delete and the ledger is unchanged.
-    pub(crate) fn commit(&self, mut staged: StagedFile) -> io::Result<PathBuf> {
+    #[cfg(test)]
+    fn commit(&self, mut staged: StagedFile) -> io::Result<PathBuf> {
         let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
         if area.bytes.saturating_add(staged.len) > MAX_SESSION_BYTES {
             return Err(io::Error::other("session file budget reached"));
@@ -122,19 +186,6 @@ impl SessionFiles {
         area.files.push((path.clone(), staged.len));
         staged.committed = true;
         Ok(path)
-    }
-    /// Drop one file created by this session and its ledger entry.
-    ///
-    /// Memory plus one unlink. May wait on the area mutex. No timeout or
-    /// cancellation. Missing paths and missing ledger entries are ignored.
-    pub(crate) fn discard(&self, path: &Path) {
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(index) = area.files.iter().position(|(saved, _)| saved == path) {
-            let (_, size) = area.files.remove(index);
-            area.bytes = area.bytes.saturating_sub(size);
-        }
-        drop(area);
-        let _ = std::fs::remove_file(path);
     }
     pub(crate) fn export(&self) -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
         let area = self.area.lock().unwrap_or_else(|error| error.into_inner());
@@ -164,7 +215,7 @@ impl SessionFiles {
 /// One-shot pause around the first session-file write in a test.
 ///
 /// Memory only. The first [`SessionFiles::write`] waits until [`Self::release`].
-/// Later writes do not wait. No timeout or cancellation. Production never
+/// Later writes do not wait. Panics after 15 seconds. No cancellation. Production never
 /// constructs this value.
 #[cfg(test)]
 pub(crate) struct FilePause {
@@ -179,6 +230,8 @@ struct PauseState {
     parked: bool,
     released: bool,
     finished: bool,
+    /// Writes to ignore before the one that parks. Zero parks the next write.
+    skip: u32,
 }
 
 #[cfg(test)]
@@ -191,32 +244,47 @@ impl FilePause {
                 parked: false,
                 released: false,
                 finished: false,
+                skip: 0,
             }),
             cv: Condvar::new(),
         })
     }
 
-    fn arm(&self) {
+    fn arm_skip(&self, skip: u32) {
         let mut guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
         guard.armed = true;
         guard.released = false;
         guard.parked = false;
         guard.finished = false;
+        guard.used = false;
+        guard.skip = skip;
     }
 
-    fn pause_once(&self) {
+    fn pause_once(&self) -> bool {
         let mut guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if !guard.armed || guard.used {
-            return;
+            return false;
+        }
+        if guard.skip > 0 {
+            guard.skip -= 1;
+            return false;
         }
         guard.used = true;
         guard.parked = true;
         self.cv.notify_all();
-        while !guard.released {
-            guard = self.cv.wait(guard).unwrap_or_else(|err| err.into_inner());
-        }
+        let (mut guard, timeout) = self
+            .cv
+            .wait_timeout_while(guard, Duration::from_secs(15), |state| !state.released)
+            .unwrap_or_else(|err| err.into_inner());
+        let expired = timeout.timed_out() && !guard.released;
         guard.parked = false;
         guard.armed = false;
+        drop(guard);
+        assert!(
+            !expired,
+            "file test gate was not released within 15 seconds"
+        );
+        true
     }
 
     /// Unblock the write parked in this gate.
@@ -262,8 +330,17 @@ impl SessionFiles {
     /// Only the first write parks.
     #[cfg(test)]
     pub(crate) fn arm_file_gate(&self) -> Arc<FilePause> {
+        self.arm_file_gate_at(1)
+    }
+
+    /// Park the `nth` file write (1-based). Earlier writes do not wait.
+    ///
+    /// Test only. Memory only. No timeout or cancellation. The pause happens
+    /// before the file-area mutex is taken. `1` matches [`Self::arm_file_gate`].
+    #[cfg(test)]
+    pub(crate) fn arm_file_gate_at(&self, nth: u32) -> Arc<FilePause> {
         let pause = FilePause::new();
-        pause.arm();
+        pause.arm_skip(nth.saturating_sub(1));
         *self.gate.lock().unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(&pause));
         pause
     }
@@ -275,10 +352,7 @@ impl SessionFiles {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
-        if let Some(gate) = &gate {
-            gate.pause_once();
-        }
-        gate
+        gate.filter(|gate| gate.pause_once())
     }
 
     /// Whether any file in this session directory contains `needle`.
@@ -312,7 +386,7 @@ impl SessionFiles {
     }
 }
 
-/// Unregistered file. Dropping it deletes the bytes unless [`SessionFiles::commit`] ran.
+/// Unregistered file. Drop deletes its bytes until its admission is committed.
 pub(crate) struct StagedFile {
     path: PathBuf,
     len: usize,

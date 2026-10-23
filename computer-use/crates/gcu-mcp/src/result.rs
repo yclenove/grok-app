@@ -1,4 +1,6 @@
 //! Text/compact facts stay inside Grok's 20,000-byte prefix. Images stay safe.
+#[path = "result_commit.rs"]
+mod result_commit;
 #[path = "result_guard.rs"]
 mod result_guard;
 #[path = "result_text.rs"]
@@ -31,7 +33,7 @@ struct FinishIn {
     images: Vec<ContentBlock>,
     failed: bool,
     stamp: result_guard::LiveStamp,
-    created: Vec<PathBuf>,
+    created: Vec<StagedFile>,
     pending: Option<PendingShot>,
 }
 struct PendingShot {
@@ -119,9 +121,14 @@ impl Results {
             .as_ref()
             .map(|item| format!("error: {}: {}\n", item.code, item.message))
             .unwrap_or_default();
-        // The full output is what finish may spill. A 2_000-char cut here would
-        // drop a prior observation before the producing epoch is checked again.
-        text.push_str(output);
+        // Unscoped hosts keep the historical 2_000-byte prefix. Scoped output
+        // stays whole so a spill file remains private until the commit point.
+        let body = if self.scope.is_none() {
+            prefix(output, 2_000)
+        } else {
+            output
+        };
+        text.push_str(body);
         let data = json!({
             "output": prefix(output, 2_000),
             "error": error,
@@ -221,21 +228,21 @@ impl Results {
                 let mut encoded = match self.image(image).await {
                     Ok(encoded) => encoded,
                     Err(_) => {
-                        self.discard_all(&created);
+                        created.clear();
                         return self.io_error();
                     }
                 };
                 let Some(staged) = encoded.staged.take() else {
-                    self.discard_all(&created);
+                    created.clear();
                     return self.io_error();
                 };
-                encoded.path =
-                    match self.commit_checked(staged, &stamp, "image-worker", &mut created) {
-                        Ok(path) => path,
-                        Err(fault) => {
-                            return self.as_fault(fault, recovered_error.as_ref(), &recovered_data);
-                        }
-                    };
+                encoded.path = match self.keep_private(staged, &stamp, "image-worker", &mut created)
+                {
+                    Ok(path) => path,
+                    Err(fault) => {
+                        return self.as_fault(fault, recovered_error.as_ref(), &recovered_data);
+                    }
+                };
                 self.accept_image(&mut text, &mut images, &mut pending, state, encoded);
             }
             text.push_str(&state.text);
@@ -243,17 +250,17 @@ impl Results {
                 let staged = match self.save(full, "txt").await {
                     Ok(staged) => staged,
                     Err(_) => {
-                        self.discard_all(&created);
+                        created.clear();
                         return self.io_error();
                     }
                 };
-                let path =
-                    match self.commit_checked(staged, &stamp, "overflow-worker", &mut created) {
-                        Ok(path) => path,
-                        Err(fault) => {
-                            return self.as_fault(fault, recovered_error.as_ref(), &recovered_data);
-                        }
-                    };
+                let path = match self.keep_private(staged, &stamp, "overflow-worker", &mut created)
+                {
+                    Ok(path) => path,
+                    Err(fault) => {
+                        return self.as_fault(fault, recovered_error.as_ref(), &recovered_data);
+                    }
+                };
                 text.push_str(&format!(
                     "\n[truncated inline observation; full text: {}]\n",
                     path.to_string_lossy()
@@ -386,131 +393,6 @@ impl Results {
         let files = self.files.clone();
         blocking(move || files.stage(text.as_bytes(), extension)).await
     }
-    async fn finish(&self, mut input: FinishIn) -> Result<CallToolResult, FinishFault> {
-        let mut json = serde_json::to_string(&input.data).map_err(|_| FinishFault::Io)?;
-        if json.len() > 8_000 {
-            let staged = match self.save(json, "json").await {
-                Ok(staged) => staged,
-                Err(_) => {
-                    self.discard_all(&input.created);
-                    return Err(FinishFault::Io);
-                }
-            };
-            let path =
-                self.commit_checked(staged, &input.stamp, "json-spill", &mut input.created)?;
-            // Preserve error identity and the fresh snapshot ID in the prefix.
-            let shown = path.to_string_lossy();
-            let mut compact = json!({ "details_file": shown });
-            if let Some(error) = input.data.get("error") {
-                compact["error"] = json!({"code":error["code"],"message":prefix(error["message"].as_str().unwrap_or(""), 256),
-                    "hint":"See details_file for full facts.","retryable":false});
-                if let Some(id) = error.pointer("/state/snapshot_id") {
-                    compact["error"]["state"] = json!({"snapshot_id":id});
-                }
-            }
-            if let Some(action) = input.data.get("action") {
-                compact["action"] = action.clone();
-            }
-            if let Some(steps) = input.data.get("steps") {
-                compact["steps"] = steps.clone();
-            }
-            if let Some(index) = input.data.get("failed_step") {
-                compact["failed_step"] = index.clone();
-            }
-            input.data = compact;
-            json = serde_json::to_string(&input.data).map_err(|_| FinishFault::Io)?;
-        }
-        let budget = TEXT_LIMIT.min(COMBINED_LIMIT.saturating_sub(json.len() + 64));
-        if input.text.len() > budget {
-            let staged = match self.save(input.text.clone(), "txt").await {
-                Ok(staged) => staged,
-                Err(_) => {
-                    self.discard_all(&input.created);
-                    return Err(FinishFault::Io);
-                }
-            };
-            let path =
-                self.commit_checked(staged, &input.stamp, "text-spill", &mut input.created)?;
-            let marker = format!(
-                "\n[truncated to 20 KB result budget; full text: {}]\n",
-                path.to_string_lossy()
-            );
-            input.text = format!(
-                "{}{}",
-                prefix(&input.text, budget.saturating_sub(marker.len())),
-                marker
-            );
-        }
-        if self.denied(&input.stamp, "commit") {
-            self.discard_all(&input.created);
-            return Err(FinishFault::Lost);
-        }
-        if let Some(shot) = input.pending.take() {
-            let id = shot.id.clone();
-            let admitted = self.images.insert_if(
-                shot.id,
-                gcu_host_protocol::messages::Image {
-                    mime: shot.mime,
-                    width: shot.width,
-                    height: shot.height,
-                    bytes: shot.bytes,
-                },
-                || !self.denied(&input.stamp, "cache-commit"),
-            );
-            if !admitted {
-                self.discard_all(&input.created);
-                return Err(FinishFault::Lost);
-            }
-            self.session.screenshot_delivered(
-                &shot.app_id,
-                &shot.window_id,
-                &shot.snapshot_id,
-                shot.width,
-                shot.height,
-            );
-            if self.denied(&input.stamp, "after-delivery") {
-                self.images.remove(&id);
-                self.discard_all(&input.created);
-                return Err(FinishFault::Lost);
-            }
-        }
-        input.images.insert(0, ContentBlock::text(input.text));
-        let mut result = CallToolResult::success(input.images);
-        result.structured_content = Some(input.data);
-        result.is_error = Some(input.failed);
-        Ok(result)
-    }
-    /// Register `staged` only when `point` still admits the producing epoch.
-    ///
-    /// The file is unregistered until this returns `Ok`. A refusal or a commit
-    /// error drops it and every path already in `created`. Memory and one rename.
-    /// No await, timeout, or cancellation. The scope lock is not held here.
-    fn commit_checked(
-        &self,
-        staged: StagedFile,
-        stamp: &result_guard::LiveStamp,
-        point: &'static str,
-        created: &mut Vec<PathBuf>,
-    ) -> Result<PathBuf, FinishFault> {
-        if self.denied(stamp, point) {
-            drop(staged);
-            self.discard_all(created);
-            return Err(FinishFault::Lost);
-        }
-        match self.files.commit(staged) {
-            Ok(path) => {
-                created.push(path.clone());
-                Ok(path)
-            }
-            Err(_) => {
-                self.discard_all(created);
-                Err(FinishFault::Io)
-            }
-        }
-    }
-    fn denied(&self, stamp: &result_guard::LiveStamp, point: &'static str) -> bool {
-        self.probe.take(point) || stamp.blocks(self.scope.as_ref())
-    }
     fn as_fault(
         &self,
         fault: FinishFault,
@@ -520,11 +402,6 @@ impl Results {
         match fault {
             FinishFault::Lost => self.assemble_cleared(error, data),
             FinishFault::Io => self.io_error(),
-        }
-    }
-    fn discard_all(&self, paths: &[PathBuf]) {
-        for path in paths {
-            self.files.discard(path);
         }
     }
     fn assemble_cleared(&self, error: Option<&ToolError>, data: &Value) -> CallToolResult {
@@ -568,3 +445,7 @@ mod scope_tests;
 #[cfg(test)]
 #[path = "result_round5_tests.rs"]
 mod round5_tests;
+
+#[cfg(test)]
+#[path = "result_round6_tests.rs"]
+mod round6_tests;
