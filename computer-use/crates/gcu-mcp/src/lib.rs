@@ -15,6 +15,7 @@ mod instructions;
 pub mod lifecycle;
 mod params;
 mod result;
+mod scoped_stdio;
 mod script;
 mod server;
 mod server_authority;
@@ -42,6 +43,9 @@ pub enum ServeError {
     /// MCP initialization failed or the service task failed.
     #[error("MCP connection failed")]
     Protocol,
+    /// Scoped connections require the authority-checked stream transport.
+    #[error("scoped MCP connections cannot be served over HTTP")]
+    ScopedHttp,
 }
 
 /// Serve one NDJSON stdio connection with injected Driver and trusted Host.
@@ -94,7 +98,24 @@ where
     let session = connection.session();
     let transport = stdio::Stdio::new(input, output, session, server.lifecycle());
     let failed = transport.failure_flag();
-    let result = match server_authority::Authorized(server).serve(transport).await {
+    let result = if connection.is_scoped() {
+        let transport = scoped_stdio::Scoped::new(transport, server.clone());
+        run_transport(server, transport).await
+    } else {
+        run_transport(server, transport).await
+    };
+    connection.close().await?;
+    if failed.load(Ordering::Acquire) {
+        return Err(ServeError::Protocol);
+    }
+    result
+}
+
+async fn run_transport<T>(server: server::Server, transport: T) -> Result<(), ServeError>
+where
+    T: rmcp::transport::Transport<rmcp::RoleServer> + 'static,
+{
+    match server_authority::Authorized(server).serve(transport).await {
         Ok(running) => running
             .waiting()
             .await
@@ -104,12 +125,7 @@ where
                 _ => Err(ServeError::Protocol),
             }),
         Err(_) => Err(ServeError::Protocol),
-    };
-    connection.close().await?;
-    if failed.load(Ordering::Acquire) {
-        return Err(ServeError::Protocol);
     }
-    result
 }
 
 #[cfg(test)]

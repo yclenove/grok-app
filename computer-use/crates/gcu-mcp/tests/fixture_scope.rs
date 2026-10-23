@@ -1,6 +1,9 @@
 //! Scoped MCP session. No tool can set, renew, or widen the fixture scope.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "fixture_scope/transport.rs"]
+mod transport;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 

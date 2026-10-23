@@ -84,6 +84,11 @@ impl Connection {
         let cleanup = Cleanup::new(server.clone());
         Ok(Self { server, cleanup })
     }
+    /// Whether this connection carries a fixture scope, even after it expires
+    /// or is revoked. Scoped connections cannot be served over HTTP.
+    pub fn is_scoped(&self) -> bool {
+        self.server.authority().is_some()
+    }
     /// Trusted Host control handle; never publish this as a model tool.
     /// Memory only, nonblocking, with no timeout or cancellation.
     pub fn session(&self) -> Arc<Session> {

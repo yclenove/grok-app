@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use gcu_core::scope::{Clock, FixtureScope, SCOPE_DENIED_MESSAGE};
-use rmcp::ServiceExt;
+use rmcp::{transport::Transport, ServiceExt};
 use std::{sync::atomic::AtomicU64, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
@@ -188,6 +188,51 @@ async fn initialize_refuses_an_expired_connection_before_a_watcher_runs() {
         assert_eq!(denied["error"]["message"], SCOPE_DENIED_MESSAGE, "{denied}");
         assert_eq!(denied["error"]["data"]["code"], "app_denied", "{denied}");
         rpc.task.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn scoped_transport_rechecks_each_buffered_frame_without_another_read() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for loss in ["expiry", "rebind", "revoke"] {
+            let clock = Arc::new(HeldClock::default());
+            let server = server(clock.clone());
+            let lease = server.0.results.scope.clone().unwrap();
+            let mut cleanup = Cleanup::new(server.clone());
+            let (output, client) = tokio::io::duplex(64 * 1024);
+            let input = &b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n"[..];
+            let transport =
+                crate::stdio::Stdio::new(input, output, server.session(), server.lifecycle());
+            let mut transport = crate::scoped_stdio::Scoped::new(transport, server);
+            // Both frames arrive in the first read. Only the first is admitted.
+            assert!(transport.receive().await.is_some());
+            match loss {
+                "expiry" => clock.0.store(4, Ordering::SeqCst),
+                "rebind" => lease
+                    .rebind(
+                        FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![])
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                "revoke" => lease.revoke(),
+                _ => unreachable!(),
+            }
+            assert!(transport.receive().await.is_none());
+            transport.close().await.unwrap();
+            let mut client = BufReader::new(client);
+            let mut line = String::new();
+            assert!(client.read_line(&mut line).await.unwrap() > 0);
+            let denied: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(denied["id"], 2);
+            assert!(denied.get("result").is_none(), "{denied}");
+            assert_eq!(denied["error"]["message"], SCOPE_DENIED_MESSAGE);
+            assert_eq!(denied["error"]["data"]["code"], "app_denied");
+            line.clear();
+            assert_eq!(client.read_line(&mut line).await.unwrap(), 0);
+            cleanup.close().await.unwrap();
+        }
     })
     .await
     .unwrap();

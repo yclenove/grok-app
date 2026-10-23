@@ -1,0 +1,28 @@
+MERGE-AFTER-FIXES
+
+Independent source review of `ec028bc9` + `f060da1b` + `4ae08dae`. Cargo, runtime and mutation tests **not_run**, as instructed. `gcu-*` references are relative to `computer-use/crates/`; SDK references are to the locally cached, lockfile-pinned rmcp 3.5.1 source. **No NEW category-(a) class found:** both remaining findings are incomplete coverage of R2-1.
+
+- **R2-1 PARTIAL.** Established-session catalog/default handlers enter `Authorized` (`gcu-mcp/src/server_authority.rs:21`); Busy checks authority before returning and gets a producing stamp (`server.rs:432`, `result.rs:110`). Socket reads/writes consult `usable()` (`gcu-cli/src/scope/data.rs:149`, `:161`), and `AttemptAuthority::changed` wakes at the shared monotonic deadline, including renewal (`gcu-core/src/scope/authority.rs:34`, `:68`). The two alternate request paths below remain.
+- **R2-2 FIXED.** Worker Finish errors are always `Untrusted` (`gcu-cli/src/script_worker.rs:335`); native evidence comes from parent-dispatched replies (`:218`, `:237`). Failed script publication selects the independent native error or replaces untrusted errors with the fixed refusal (`gcu-mcp/src/result.rs:158`, `:429`). The hard-denial shortcuts are scoped-only (`result.rs:121`, `result_guard.rs:109`), restoring unscoped emit-then-throw output.
+
+**Must fix — category (a), residual R2-1; neither is a NEW class**
+
+1. **[P1] HTTP can serve a scoped Server without the authority boundary.** `gcu-mcp/src/http.rs:111` accepts any public `Connection`; `:157` clones its Server and `:159` serves it directly. Neither startup nor the HTTP gate (`:50`) rejects a scoped connection. `Connection::open_scoped` is public (`connection.rs:55`), so this is an available API composition.
+
+   Schedule: open a timed scoped connection while Active; pass it to `HttpEndpoint::start`; initialize; expire/revoke/rebind its lease without closing the Session; send authenticated `tools/list` or `ping`. The HTTP gate still passes, `Server::list_tools` (`server.rs:417`) or the SDK default handler responds, and no scoped socket bridge exists here. The existing executable callers construct unscoped connections (`gcu-cli/src/runtime.rs:257`, `gcu-mcp/src/host/session.rs:28`); no model-triggered transport switch was found. That limits current executable exposure, but does not establish the requested “can never serve a scoped Server” invariant. Reject scoped connections in the shared HTTP startup path before binding, or enforce the exclusion by type. Add a bounded test that the public scoped-to-HTTP composition is rejected, alongside the existing unscoped gateway control.
+
+2. **[P2] `Authorized` does not cover SDK bootstrap responses.** `gcu-mcp/src/lib.rs:97` wraps the Service, but rmcp `src/service/server.rs:581` handles pre-initialize ping itself and sends `{}` at `:584`, without calling `Service::handle_request`. The same bootstrap loop emits metadata errors directly at `:609`. `gcu-mcp/src/stdio.rs:93` and `:77` do not check authority either.
+
+   Schedule: open a scoped connection while Active; serve it through the public `Connection::serve_stream` (`connection.rs:133`); advance its clock past expiry with no watcher; send ping as the first request. The client receives success instead of refusal/closure. The CLI's outer scoped socket bridge blocks these expired bytes; this finding concerns the independently callable scoped stream surface and the requirement that every SDK request consult authority. Put authority checks beneath SDK bootstrap dispatch for scoped streams, preserving unscoped framing/behavior. Add bounded pre-initialize ping and metadata-error tests after expiry/rebind/revoke. The current ping test initializes first (`server_authority_tests.rs:117`), while the expired-bootstrap test sends only initialize (`:186`), so neither catches this bypass.
+
+**Tests and remaining checks**
+
+By inspection, the added catalog/Busy tests, both bridge directions and idle expiry, nested-dispatch-to-worker enqueue barrier, final script exception/forged-code/timeout barriers, and deadline crossing inside commit exercise the repaired properties. Exact refusal assertions include content, structured data, files and cache; restoring the old error fallback or unscoped shortcut would fail them. Actual red/green mutation execution remains not_run. New request/bridge tests have 5–10s outer bounds; nested/final-script tests have 10/30s bounds; synchronous publication gates and their observer loops also have wall-clock bounds.
+
+Both Stop-priority tests really request Stop: `gcu-cli/src/script_worker_tests.rs:213` and `gcu-mcp/src/result_round6_tests.rs:738` call `FakeUserActivity::request_stop` before `handle_stop`. Publication/worker refusal paths use `Session::stop_priority`. Existing canary assertions remain; changed action/batch assertions now demand the stricter fixed-denial shape. No Stop/native timeout or existing security assertion was relaxed.
+
+No additional category-(a) scope-widening, descendant control-FD inheritance, child-owner cancellation, unscoped fallback or unscoped payload regression found. The child registry still closes admission and kills/reaps before the engine's ordinary exit barrier. Accepted platform/S1 residuals are unchanged.
+
+**Nice to have:** isolate inbound and outbound bridge polls in separate test doubles; the current bidirectional test can close on the opposite direction's authority check, so it does not independently prove each individual poll guard is necessary.
+
+`git diff --check origin/feat/cu-v2...HEAD` passed. Source/tests unchanged; only this uncommitted report was added.

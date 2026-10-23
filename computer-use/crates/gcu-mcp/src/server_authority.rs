@@ -1,4 +1,5 @@
-//! A single boundary for every rmcp request, including SDK default handlers.
+//! Handler authority, including SDK defaults dispatched through the Service.
+//! Scoped transport admission also covers SDK bootstrap and framing replies.
 use crate::server::Server;
 use gcu_core::scope::SCOPE_DENIED_MESSAGE;
 use rmcp::{
@@ -67,7 +68,7 @@ impl Authorized {
     }
 }
 
-fn denied() -> ErrorData {
+pub(crate) fn denied() -> ErrorData {
     ErrorData::invalid_request(
         SCOPE_DENIED_MESSAGE,
         Some(json!({"code":"app_denied","message":SCOPE_DENIED_MESSAGE})),
