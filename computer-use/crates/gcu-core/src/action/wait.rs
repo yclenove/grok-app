@@ -94,9 +94,9 @@ impl ActionRouter {
         };
         let mut intent = ActionIntent::new(Tool::Observe);
         intent.parameters = fresh.signature.clone();
-        if let Err(code) = self.authorize(session, &mut intent, &fresh).await {
+        if let Err(err) = self.authorize(session, &mut intent, &fresh).await {
             // The pre-approval read can contain a secret. Do not publish it.
-            return outcome(action, Some(error(code)), None);
+            return outcome(action, Some(err.tool_error()), None);
         }
         drop(fresh);
         if let Err(code) = self.check_boundary(session).await {
@@ -202,6 +202,8 @@ impl ActionRouter {
             signature,
             image: None,
             quality,
+            scope_run: self.scope_stamp().0,
+            scope_generation: self.scope_stamp().1,
         };
         self.publish(session, fresh, false).map_err(|err| err.code)
     }

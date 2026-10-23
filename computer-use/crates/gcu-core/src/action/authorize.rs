@@ -28,8 +28,12 @@ impl ActionRouter {
         session: &Session,
         intent: &mut ActionIntent,
         fresh: &Fresh,
-    ) -> Result<Approved, ErrorCode> {
-        let app = host_app(fresh, self.driver.platform())?;
+    ) -> Result<Approved, CallError> {
+        let opened = self.opened_scope();
+        if !self.scope_still(&opened) {
+            return Err(CallError::ScopeDenied);
+        }
+        let app = host_app(fresh, self.driver.platform()).map_err(CallError::from)?;
         let window = policy_window(fresh);
         let config = self.policy.load();
         let binding = self.binding(intent, fresh, &app);
@@ -41,12 +45,20 @@ impl ActionRouter {
         };
         let timeout = Duration::from_secs(approved.config.timeout_secs);
         for _ in 0..4 {
-            self.check_boundary(session).await?;
+            self.check_boundary(session)
+                .await
+                .map_err(CallError::from)?;
+            if !self.scope_still(&opened) {
+                return Err(CallError::ScopeDenied);
+            }
             let decision = self.evaluate(session, intent, fresh, &app, &window, &approved);
             match decision {
                 PolicyDecision::Allow { route_limit } => {
                     if intent.foreground && route_limit != RouteLimit::ForegroundAllowed {
-                        return Err(ErrorCode::CapabilityUnavailable);
+                        return Err(ErrorCode::CapabilityUnavailable.into());
+                    }
+                    if !self.scope_still(&opened) {
+                        return Err(CallError::ScopeDenied);
                     }
                     return Ok(approved);
                 }
@@ -54,31 +66,36 @@ impl ActionRouter {
                     let answer = self
                         .wait(
                             session,
-                            session.request_app(
+                            session.request_app_at(
                                 self.approvals.as_ref(),
                                 &request.app,
                                 request.reason.as_ref(),
                                 request.risk,
                                 timeout,
+                                opened.clone(),
                             ),
                         )
-                        .await?;
+                        .await
+                        .map_err(scope_wait)?;
+                    if !self.scope_still(&opened) {
+                        return Err(CallError::ScopeDenied);
+                    }
                     match answer {
-                        ApprovalDecision::Deny => return Err(ErrorCode::ApprovalDenied),
-                        ApprovalDecision::Timeout => return Err(ErrorCode::ApprovalTimeout),
+                        ApprovalDecision::Deny => return Err(ErrorCode::ApprovalDenied.into()),
+                        ApprovalDecision::Timeout => return Err(ErrorCode::ApprovalTimeout.into()),
                         ApprovalDecision::Always => {
                             // Persistent grants are written by the trusted Host only.
                             self.policy.refresh();
                             let current = self.policy.load();
                             if session.grants().covers(&current, &app).is_none() {
-                                return Err(ErrorCode::ApprovalDenied);
+                                return Err(ErrorCode::ApprovalDenied.into());
                             }
                             // A newly persisted Always grant is the expected result
                             // of this request, not permission to change other policy.
                             let mut without_grants = current.clone();
                             without_grants.always = approved.config.always.clone();
                             if without_grants != approved.config {
-                                return Err(ErrorCode::StaleElement);
+                                return Err(ErrorCode::StaleElement.into());
                             }
                             approved.config = current;
                         }
@@ -89,7 +106,7 @@ impl ActionRouter {
                     if intent.foreground
                         && approved.config.allow_foreground == ForegroundPolicy::Never
                     {
-                        return Err(ErrorCode::CapabilityUnavailable);
+                        return Err(ErrorCode::CapabilityUnavailable.into());
                     }
                     let crop = match approval_crop(fresh, intent) {
                         Ok(crop) => crop,
@@ -99,10 +116,11 @@ impl ActionRouter {
                                 &app,
                                 HandoffReason::Other("sensitive area could not be located".into()),
                             )
-                            .await?;
-                            return Err(ErrorCode::HandoffRequired);
+                            .await
+                            .map_err(CallError::from)?;
+                            return Err(ErrorCode::HandoffRequired.into());
                         }
-                        Err(code) => return Err(code),
+                        Err(code) => return Err(code.into()),
                     };
                     let started = tokio::time::Instant::now();
                     let answer = self
@@ -116,27 +134,34 @@ impl ActionRouter {
                                 timeout,
                             ),
                         )
-                        .await?;
+                        .await
+                        .map_err(scope_wait)?;
+                    if !self.scope_still(&opened) {
+                        return Err(CallError::ScopeDenied);
+                    }
                     if !answer {
                         return Err(if started.elapsed() >= timeout {
                             ErrorCode::ApprovalTimeout
                         } else {
                             ErrorCode::ApprovalDenied
-                        });
+                        }
+                        .into());
                     }
                     match request.kind {
                         ConfirmKind::Sensitive => approved.sensitive = true,
                         ConfirmKind::Foreground => approved.foreground = true,
                     }
                 }
-                PolicyDecision::Refuse(code, _) => return Err(code),
+                PolicyDecision::Refuse(code, _) => return Err(code.into()),
                 PolicyDecision::Handoff(reason) => {
-                    self.take_over(session, &app, reason).await?;
-                    return Err(ErrorCode::HandoffRequired);
+                    self.take_over(session, &app, reason)
+                        .await
+                        .map_err(CallError::from)?;
+                    return Err(ErrorCode::HandoffRequired.into());
                 }
             }
         }
-        Err(ErrorCode::ApprovalDenied)
+        Err(ErrorCode::ApprovalDenied.into())
     }
     pub(super) fn evaluate(
         &self,
@@ -168,6 +193,11 @@ impl ActionRouter {
                 policy_version: approved.binding.policy_version,
                 closed: session.is_closed(),
                 browser: None,
+                scope_epoch: approved
+                    .binding
+                    .scope_run
+                    .as_deref()
+                    .zip(approved.binding.scope_generation),
             },
             intent,
         )
@@ -179,6 +209,7 @@ impl ActionRouter {
         fresh: &Fresh,
         gate: &Gate,
     ) -> Result<(), ErrorCode> {
+        let scope_epoch = self.opened_scope();
         intent.parameters = serde_json::to_string(&(
             call,
             format!("{:?}", call.pointer_route),
@@ -186,6 +217,7 @@ impl ActionRouter {
             &fresh.info,
             gate.element.as_ref().map(|e| e.fingerprint.0),
             gate.hashes.iter().map(|h| h.0).collect::<Vec<_>>(),
+            scope_epoch,
         ))
         .map_err(|_| ErrorCode::Internal)?;
         // This digest is an opaque change detector; security compares the full
@@ -211,6 +243,31 @@ impl ActionRouter {
             action_digest: intent.action_digest,
             snapshot_id: intent.snapshot_id.clone(),
             policy_version: self.policy_version.load(Ordering::Acquire),
+            scope_run: self.opened_scope().map(|(run, _)| run),
+            scope_generation: self.opened_scope().map(|(_, generation)| generation),
+        }
+    }
+    fn opened_scope(&self) -> Option<(String, u64)> {
+        self.lease.as_ref().and_then(|lease| {
+            lease
+                .current()
+                .map(|scope| (scope.run_id().to_owned(), scope.generation()))
+        })
+    }
+    fn scope_still(&self, opened: &Option<(String, u64)>) -> bool {
+        match (&self.lease, opened) {
+            (None, None) => true,
+            (Some(lease), Some((run, generation))) => lease.same_epoch(run, *generation),
+            _ => false,
+        }
+    }
+    fn binding_epoch(&self, approved: &Approved) -> Option<(String, u64)> {
+        match (
+            approved.binding.scope_run.clone(),
+            approved.binding.scope_generation,
+        ) {
+            (Some(run), Some(generation)) => Some((run, generation)),
+            _ => None,
         }
     }
     async fn take_over(
@@ -234,7 +291,12 @@ impl ActionRouter {
         intent: &ActionIntent,
         approved: &Approved,
     ) -> Result<Fresh, CallError> {
-        self.check_boundary(session).await?;
+        self.check_boundary(session)
+            .await
+            .map_err(CallError::from)?;
+        if !self.scope_still(&self.binding_epoch(approved)) {
+            return Err(CallError::ScopeDenied);
+        }
         let cancel = Cancel::default();
         let app = self
             .native(
@@ -265,18 +327,28 @@ impl ActionRouter {
         {
             return Err(CallError::Code(ErrorCode::StaleElement));
         }
+        if let Some(latest) = super::lock(&session.actions).snapshots.latest(&fresh.key()) {
+            if latest.scope_run() != approved.binding.scope_run.as_deref()
+                || latest.scope_generation() != approved.binding.scope_generation
+            {
+                return Err(CallError::ScopeDenied);
+            }
+        }
         let mut current_intent = intent.clone();
-        self.bind_parameters(&mut current_intent, call, &current, gate)?;
-        let app = host_app(&current, self.driver.platform())?;
+        self.bind_parameters(&mut current_intent, call, &current, gate)
+            .map_err(CallError::from)?;
+        let app = host_app(&current, self.driver.platform()).map_err(CallError::from)?;
         revalidate(
             &approved.binding,
             &self.binding(&current_intent, &current, &app),
         )
-        .map_err(|_| {
-            if gate.points.is_empty() {
-                ErrorCode::StaleElement
+        .map_err(|why| {
+            if why == crate::policy::Invalidated::ScopeEpoch {
+                CallError::ScopeDenied
+            } else if gate.points.is_empty() {
+                CallError::Code(ErrorCode::StaleElement)
             } else {
-                ErrorCode::StaleScreenshot
+                CallError::Code(ErrorCode::StaleScreenshot)
             }
         })?;
         match self.evaluate(
@@ -290,13 +362,23 @@ impl ActionRouter {
             PolicyDecision::Allow { .. } => Ok(current),
             PolicyDecision::Refuse(code, _) => Err(CallError::Code(code)),
             PolicyDecision::Handoff(reason) => {
-                self.take_over(session, &app, reason).await?;
+                self.take_over(session, &app, reason)
+                    .await
+                    .map_err(CallError::from)?;
                 Err(CallError::Code(ErrorCode::HandoffRequired))
             }
             _ => Err(CallError::Code(ErrorCode::ApprovalDenied)),
         }
     }
 }
+fn scope_wait(code: ErrorCode) -> CallError {
+    if code == ErrorCode::AppDenied {
+        CallError::ScopeDenied
+    } else {
+        CallError::from(code)
+    }
+}
+
 pub(crate) fn host_app(
     fresh: &Fresh,
     platform: crate::driver::Platform,

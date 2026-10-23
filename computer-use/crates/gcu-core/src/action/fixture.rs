@@ -27,10 +27,27 @@ impl ActionRouter {
     where
         D: Driver + InstanceEvidence + 'static,
     {
-        let wrapped = Arc::new(ScopedDriver::new(driver, lease, activity));
+        let wrapped = Arc::new(ScopedDriver::new(driver, lease.clone(), activity));
         let mut router = Self::new(wrapped, approvals, policy, events, locks);
         router.fixture_scoped = true;
+        router.lease = Some(lease);
         router
+    }
+
+    pub(crate) fn scope_binding_current(&self, run: Option<&str>, generation: Option<u64>) -> bool {
+        match (&self.lease, run, generation) {
+            (None, None, None) => true,
+            (Some(lease), Some(run), Some(generation)) => lease.same_epoch(run, generation),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn scope_stamp(&self) -> (Option<String>, Option<u64>) {
+        self.lease
+            .as_ref()
+            .and_then(|lease| lease.current())
+            .map(|scope| (Some(scope.run_id().to_owned()), Some(scope.generation())))
+            .unwrap_or((None, None))
     }
 
     /// Driver this router calls. In scoped mode it is the wrapper.

@@ -64,6 +64,7 @@ pub(crate) fn eval(
             policy_version: 7,
             closed,
             browser: None,
+            scope_epoch: None,
         },
         intent,
     )

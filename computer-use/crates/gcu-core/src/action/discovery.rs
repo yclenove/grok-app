@@ -180,6 +180,8 @@ impl ActionRouter {
             raw,
             image: None,
             signature: format!("{:?}", app),
+            scope_run: self.scope_stamp().0,
+            scope_generation: self.scope_stamp().1,
         };
         let mut intent = ActionIntent::new(Tool::LaunchApp);
         intent.foreground = true;
@@ -188,7 +190,7 @@ impl ActionRouter {
         let approved = self
             .authorize(session, &mut intent, &fresh)
             .await
-            .map_err(|code| (CallError::from(code), false))?;
+            .map_err(|err| (err, false))?;
         let current = self
             .native(
                 session,

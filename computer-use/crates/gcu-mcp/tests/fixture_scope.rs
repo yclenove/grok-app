@@ -1,30 +1,38 @@
 //! Scoped MCP session. No tool can set, renew, or widen the fixture scope.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use gcu_core::action::ActionRouter;
 use gcu_core::driver::{
     AppQuery, AppRef, Cancel, Capture, CaptureOpts, Delivery, DiscoveryStatus, DoctorReport,
     Driver, DriverAction, Platform, Result as DriverResult, TreeOpts, UiEvent, WindowRef,
 };
-use gcu_core::model::{NativeHandle, RawTree};
+use gcu_core::model::{Geometry, NativeHandle, RawNode, RawTree, Rect};
 use gcu_core::scope::{
     BootIdentity, ElementBinding, ExecutableProof, FixtureScope, FixtureTarget, InstanceEvidence,
     OsStartTime, ProcessInstance, RegisteredWindow, ScopeLease, WindowBinding,
     SCOPE_DENIED_MESSAGE,
 };
+use gcu_core::session::Session;
 use gcu_driver_fake::FakeDriver;
 use gcu_host_api::testing::{
     FakeUserActivity, MemoryPolicyStore, RecordingEventSink, ScriptedApprovals,
 };
 use gcu_host_api::{ApprovalDecision, ConfirmationLevel, ForegroundPolicy, PolicyConfig};
-use gcu_mcp::{Connection, Host, Profile, ServerConfig};
+use gcu_mcp::{Connection, Host, Profile, ScriptBody, ScriptRunner, ServeError, ServerConfig};
 use gcu_protocol::capabilities::PrivateApiStatus;
+use gcu_protocol::tools::{ComputerScriptParams, GetAppStateParams, ScreenshotMode, TextLimit};
 use gcu_protocol::Capabilities;
 use rmcp::model::CallToolResult;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
+use tokio::task::JoinHandle;
 
 const CANARIES: &[&str] = &[
     "CANARY-EXTERNAL-C",
@@ -39,9 +47,12 @@ const CANARIES: &[&str] = &[
 const SCENE: &str = r#"(
 apps: [
 (id: "fixture.a", name: "Fixture A", executable: "/fixtures/a", pid: 1101, windows: [
-(id: "w-a", title: "Allowed A", frame: (x: 0.0, y: 0.0, w: 200.0, h: 120.0), scale: 1.0,
+(id: "w-a", title: "Allowed A", frame: (x: 0.0, y: 0.0, w: 320.0, h: 280.0), scale: 1.0,
 root: Some((id: "root", role: window, states: "ENABLED", name: Some("Allowed A"),
-frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
+frame: Some((x: 0.0, y: 0.0, w: 320.0, h: 280.0)), children: [
+(id: "go", role: button, states: "ENABLED", name: Some("Go"),
+frame: Some((x: 20.0, y: 40.0, w: 80.0, h: 24.0)), actions: [press])
+])))
 ]),
 (id: "fixture.c", name: "CANARY-EXTERNAL-C", executable: "/canary/external/c", pid: 1103, windows: [
 (id: "w-c", title: "CANARY-WINDOW-C", frame: (x: 0.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
@@ -68,11 +79,19 @@ struct Counts {
     windows_none: AtomicUsize,
 }
 
+struct Shared {
+    handles: Mutex<Vec<(NativeHandle, String)>>,
+    flip: AtomicBool,
+    flipped: AtomicBool,
+    start_a: AtomicU64,
+}
+
 #[derive(Clone)]
 struct Spy {
     inner: FakeDriver,
     caps: Capabilities,
     counts: Arc<Counts>,
+    shared: Arc<Shared>,
 }
 
 impl Spy {
@@ -81,8 +100,10 @@ impl Spy {
         let mut caps = inner.capabilities().clone();
         caps.private_apis
             .insert("CANARY-PRIVATE".into(), PrivateApiStatus::Available);
+        caps.delivery.targeted_pointer = true;
+        caps.delivery.targeted_keys = true;
         Self {
-            inner,
+            inner: inner.with_targeted_input(true, true),
             caps,
             counts: Arc::new(Counts {
                 content: AtomicUsize::new(0),
@@ -91,7 +112,21 @@ impl Spy {
                 launch: AtomicUsize::new(0),
                 windows_none: AtomicUsize::new(0),
             }),
+            shared: Arc::new(Shared {
+                handles: Mutex::new(Vec::new()),
+                flip: AtomicBool::new(false),
+                flipped: AtomicBool::new(false),
+                start_a: AtomicU64::new(10),
+            }),
         }
+    }
+
+    fn arm_flip(&self) {
+        self.shared.flip.store(true, Ordering::SeqCst);
+    }
+
+    fn set_version(&mut self, version: &str) {
+        self.caps.version = version.into();
     }
 
     fn load(&self, cell: &AtomicUsize) -> usize {
@@ -132,7 +167,7 @@ fn allowed_scope() -> FixtureScope {
 impl InstanceEvidence for Spy {
     fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
         match app.info.id.as_str() {
-            "fixture.a" => Some(instance(1101, 10)),
+            "fixture.a" => Some(instance(1101, self.shared.start_a.load(Ordering::SeqCst))),
             "fixture.c" => Some(instance(1103, 12)),
             "fixture.d" => Some(instance(1104, 13)),
             _ => None,
@@ -149,8 +184,23 @@ impl InstanceEvidence for Spy {
         Some(WindowBinding::new(id, 1, owner).unwrap())
     }
 
-    fn element_binding(&self, _handle: &NativeHandle) -> Option<ElementBinding> {
-        None
+    fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {
+        let handles = self.shared.handles.lock().unwrap();
+        let window = handles
+            .iter()
+            .find(|(known, _)| known.ptr_eq(handle))
+            .map(|(_, id)| id.clone())?;
+        let (id, owner) = match window.as_str() {
+            "w-a" => (
+                "w-a",
+                instance(1101, self.shared.start_a.load(Ordering::SeqCst)),
+            ),
+            "w-c" => ("w-c", instance(1103, 12)),
+            _ => return None,
+        };
+        Some(ElementBinding::new(
+            WindowBinding::new(id, 1, owner).unwrap(),
+        ))
     }
 }
 
@@ -172,6 +222,13 @@ impl Driver for Spy {
     }
 
     async fn list_apps(&self) -> DriverResult<Vec<gcu_protocol::AppInfo>> {
+        if self.shared.flip.load(Ordering::SeqCst)
+            && !self.shared.flipped.load(Ordering::SeqCst)
+            && self.counts.perform.load(Ordering::SeqCst) > 0
+        {
+            self.shared.flipped.store(true, Ordering::SeqCst);
+            self.shared.start_a.store(99, Ordering::SeqCst);
+        }
         self.inner.list_apps().await
     }
 
@@ -209,7 +266,12 @@ impl Driver for Spy {
         cancel: &Cancel,
     ) -> DriverResult<RawTree> {
         self.counts.content.fetch_add(1, Ordering::SeqCst);
-        self.inner.snapshot_tree(win, opts, cancel).await
+        let raw = self.inner.snapshot_tree(win, opts, cancel).await?;
+        if let Some(root) = &raw.root {
+            let mut handles = self.shared.handles.lock().unwrap();
+            remember(root, &win.id, &mut handles);
+        }
+        Ok(raw)
     }
 
     async fn capture(
@@ -219,6 +281,23 @@ impl Driver for Spy {
         cancel: &Cancel,
     ) -> DriverResult<Capture> {
         self.counts.capture.fetch_add(1, Ordering::SeqCst);
+        if win.id == "w-c" {
+            return Ok(Capture {
+                bytes: canary_png(),
+                width: 1,
+                height: 1,
+                mime: "image/png".into(),
+                geometry: Geometry {
+                    frame: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 1.0,
+                    },
+                    scale: 1.0,
+                },
+            });
+        }
         self.inner.capture(win, opts, cancel).await
     }
 
@@ -397,4 +476,489 @@ async fn scoped_mcp_tools_hide_external_targets_and_reject_scope_editors() {
     assert_eq!(probe.load(&probe.counts.launch), 0);
     assert_eq!(probe.load(&probe.counts.windows_none), 0);
     connection.close().await.unwrap();
+}
+
+fn remember(node: &RawNode, window: &str, handles: &mut Vec<(NativeHandle, String)>) {
+    handles.push((node.handle.clone(), window.to_owned()));
+    for child in &node.children {
+        remember(child, window, handles);
+    }
+}
+
+fn canary_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&[0xC3, 0x0C, 0x0D, 0xFF]).unwrap();
+    writer.finish().unwrap();
+    bytes
+}
+
+fn has_canary(bytes: &[u8]) -> bool {
+    if bytes.windows(3).any(|pixel| pixel == [0xC3, 0x0C, 0x0D]) {
+        return true;
+    }
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let Ok(mut reader) = decoder.read_info() else {
+        return false;
+    };
+    let mut buf = vec![0; reader.output_buffer_size().unwrap_or(0)];
+    let Ok(frame) = reader.next_frame(&mut buf) else {
+        return false;
+    };
+    buf[..frame.buffer_size()]
+        .chunks(4)
+        .any(|pixel| pixel.len() >= 3 && pixel[0] == 0xC3 && pixel[1] == 0x0C && pixel[2] == 0x0D)
+}
+
+struct ObserveRunner;
+
+impl ScriptRunner for ObserveRunner {
+    fn run<'a>(
+        &'a self,
+        router: &'a ActionRouter,
+        session: &'a Session,
+        _call_id: &'a str,
+        params: ComputerScriptParams,
+    ) -> Pin<Box<dyn Future<Output = ScriptBody> + Send + 'a>> {
+        Box::pin(async move {
+            let app = params.code.lines().next().unwrap_or("").trim().to_owned();
+            let request = GetAppStateParams {
+                app,
+                window: None,
+                include_screenshot: ScreenshotMode::Explicit(false),
+                text_limit: TextLimit::default(),
+                max_tree_nodes: 200,
+                reason: None,
+            };
+            match router.observe_enqueued(session, request).await {
+                Ok(state) => ScriptBody {
+                    output: state.text,
+                    error: None,
+                },
+                Err(error) => ScriptBody {
+                    output: String::new(),
+                    error: Some(*error),
+                },
+            }
+        })
+    }
+}
+
+fn host(decisions: usize) -> Host {
+    let approvals = Arc::new(ScriptedApprovals::new());
+    for _ in 0..decisions {
+        approvals.push_decision(ApprovalDecision::Session);
+    }
+    Host {
+        approvals,
+        policy: Arc::new(MemoryPolicyStore::new(PolicyConfig {
+            sensitive_action_confirmation: ConfirmationLevel::Off,
+            allow_foreground: ForegroundPolicy::Always,
+            timeout_secs: 2,
+            ..PolicyConfig::default()
+        })),
+        events: Arc::new(RecordingEventSink::new()),
+        activity: Arc::new(FakeUserActivity::new()),
+    }
+}
+
+async fn open_scoped(spy: Spy, profile: Profile) -> Connection {
+    Connection::open_scoped(
+        spy,
+        ScopeLease::install(allowed_scope()),
+        host(32),
+        ServerConfig {
+            profile,
+            script: Some(Arc::new(ObserveRunner)),
+            ..ServerConfig::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+struct Rpc {
+    reader: BufReader<ReadHalf<DuplexStream>>,
+    writer: WriteHalf<DuplexStream>,
+    task: JoinHandle<Result<(), ServeError>>,
+    next: u64,
+}
+
+impl Rpc {
+    async fn serve(spy: Spy, profile: Profile) -> Self {
+        let connection = open_scoped(spy, profile).await;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let (input, output) = tokio::io::split(server);
+        let task = tokio::spawn(async move { connection.serve_stream(input, output).await });
+        Self {
+            reader: BufReader::new(reader),
+            writer,
+            task,
+            next: 1,
+        }
+    }
+
+    async fn send(&mut self, value: Value) {
+        let mut line = serde_json::to_vec(&value).unwrap();
+        line.push(b'\n');
+        self.writer.write_all(&line).await.unwrap();
+    }
+
+    async fn read(&mut self) -> Value {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(20), self.reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0, "server closed the catalog stream");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .await;
+        let result = self.read().await;
+        assert_eq!(result["id"], id, "{result}");
+        result
+    }
+
+    async fn initialize(&mut self) {
+        self.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "scope-s1", "version": "1"}
+            }),
+        )
+        .await;
+        self.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await;
+    }
+
+    async fn call(&mut self, name: &str, arguments: Value) -> Value {
+        self.request("tools/call", json!({"name": name, "arguments": arguments}))
+            .await["result"]
+            .clone()
+    }
+
+    async fn close(mut self) {
+        self.writer.shutdown().await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(10), self.task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+    }
+}
+
+fn listed_count(profile: Profile) -> usize {
+    match profile {
+        Profile::Minimal => 9,
+        Profile::Default => 15,
+        Profile::Full if cfg!(all(unix, feature = "script")) => 16,
+        Profile::Full => 15,
+    }
+}
+
+fn tool_arguments(name: &str) -> Value {
+    let app = "CANARY-EXTERNAL-C";
+    match name {
+        "list_apps" | "list_windows" | "capabilities" => json!({}),
+        "launch_app" => json!({"app": app}),
+        "get_app_state" => json!({"app": app, "include_screenshot": false}),
+        "click" => json!({"app": app, "element_index": 1}),
+        "perform_secondary_action" => json!({"app": app, "element_index": 1, "action": "press"}),
+        "set_value" => json!({"app": app, "element_index": 1, "value": "x"}),
+        "select_text" => json!({"app": app, "element_index": 1, "text": "x"}),
+        "type_text" => json!({"app": app, "text": "nope"}),
+        "press_key" => json!({"app": app, "key": "a"}),
+        "scroll" => json!({"app": app, "direction": "down", "element_index": 1}),
+        "drag" => json!({"app": app, "from_x": 1.0, "from_y": 1.0, "to_x": 2.0, "to_y": 2.0}),
+        "wait_for" => {
+            json!({"app": app, "until": {"text_present": "missing-token"}, "timeout_ms": 20})
+        }
+        "computer_batch" => json!({
+            "app": app,
+            "steps": [{"click": {"element_index": 1}}],
+            "stop_on_error": false,
+            "final_state": true
+        }),
+        "computer_script" => json!({"code": "CANARY-EXTERNAL-C\n", "timeout_ms": 5000}),
+        other => panic!("tools/list returned {other} without a dispatch argument"),
+    }
+}
+
+fn assert_rpc_clean(label: &str, result: &Value) {
+    assert_clean(label, &result.to_string());
+    for block in result["content"].as_array().into_iter().flatten() {
+        if block["type"] == "image" {
+            let bytes = decode_b64(block["data"].as_str().unwrap_or(""));
+            assert!(!has_canary(&bytes), "{label} attached a canary pixel");
+        }
+    }
+}
+
+fn assert_rpc_denied(label: &str, result: &Value) {
+    assert_eq!(result["isError"], true, "{label} {result}");
+    let error = &result["structuredContent"]["error"];
+    assert_eq!(error["code"], "app_denied", "{label} {result}");
+    assert_eq!(error["message"], SCOPE_DENIED_MESSAGE, "{label}");
+    assert!(error.get("state").is_none(), "{label} {result}");
+    assert!(
+        result["structuredContent"].get("state").is_none(),
+        "{label} kept a top-level state"
+    );
+    assert_rpc_clean(label, result);
+}
+
+#[tokio::test]
+async fn each_profile_dispatches_every_listed_tool_through_the_server() {
+    for profile in [Profile::Minimal, Profile::Default, Profile::Full] {
+        let spy = Spy::new();
+        let probe = spy.clone();
+        let mut rpc = Rpc::serve(spy, profile).await;
+        rpc.initialize().await;
+        let listed = rpc.request("tools/list", json!({})).await;
+        let tools = listed["result"]["tools"].as_array().expect("tools/list");
+        assert_eq!(tools.len(), listed_count(profile), "{profile:?} {listed}");
+        let mut names = Vec::new();
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            names.push(name.to_owned());
+            let result = rpc.call(name, tool_arguments(name)).await;
+            if matches!(name, "list_apps" | "list_windows" | "capabilities") {
+                assert_ne!(result["isError"], true, "{name} {result}");
+                let body = result.to_string();
+                if name == "list_apps" {
+                    assert!(body.contains("fixture.a"), "{body}");
+                }
+                assert_rpc_clean(name, &result);
+            } else {
+                assert_rpc_denied(name, &result);
+            }
+        }
+        assert!(names.iter().any(|name| name == "get_app_state"));
+        assert_eq!(
+            names.iter().any(|name| name == "computer_script"),
+            profile == Profile::Full && cfg!(all(unix, feature = "script"))
+        );
+        assert_eq!(probe.load(&probe.counts.content), 0, "{profile:?}");
+        assert_eq!(probe.load(&probe.counts.capture), 0, "{profile:?}");
+        assert_eq!(probe.load(&probe.counts.perform), 0, "{profile:?}");
+        assert_eq!(probe.load(&probe.counts.launch), 0, "{profile:?}");
+        assert_eq!(probe.load(&probe.counts.windows_none), 0, "{profile:?}");
+        rpc.close().await;
+    }
+}
+
+fn element_index(text: &str) -> u32 {
+    text.lines()
+        .find(|line| line.contains("Go"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|token| token.parse().ok())
+        .expect("allowed observation did not index Go")
+}
+
+fn attachment_bytes(result: &CallToolResult) -> Vec<Vec<u8>> {
+    result
+        .content
+        .iter()
+        .filter_map(|block| block.as_image().map(|image| decode_b64(&image.data)))
+        .collect()
+}
+
+async fn assert_files_have_no_canary(connection: &Connection) {
+    let exported = connection.export_private_files().await.unwrap();
+    for (path, bytes) in exported {
+        assert!(!has_canary(&bytes), "{}", path.display());
+        assert_clean("export", &String::from_utf8_lossy(&bytes));
+    }
+}
+
+#[tokio::test]
+async fn allowed_binding_is_observable_and_exports_omit_the_canary_pixel() {
+    let mut spy = Spy::new();
+    spy.set_version("CANARY-VERSION");
+    let probe = spy.clone();
+    let external = probe
+        .resolve_app(&AppQuery("fixture.c".into()))
+        .await
+        .unwrap();
+    let shot = probe
+        .capture(
+            &WindowRef {
+                app: external,
+                id: "w-c".into(),
+            },
+            &CaptureOpts::default(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        has_canary(&shot.bytes),
+        "direct capture did not plant the canary"
+    );
+    let captured = probe.load(&probe.counts.capture);
+    let mut connection = open_scoped(spy, Profile::Default).await;
+
+    let caps = connection.call("capabilities", json!({})).await;
+    let caps_body = rendered(&caps);
+    assert!(caps_body.contains("unlisted"), "{caps_body}");
+    assert!(!caps_body.contains("CANARY-VERSION"), "{caps_body}");
+    assert_clean("version", &caps_body);
+
+    let denied = connection
+        .call(
+            "get_app_state",
+            json!({"app": "CANARY-EXTERNAL-C", "window": "w-c", "include_screenshot": true}),
+        )
+        .await;
+    assert_denied("external shot", &denied);
+    assert!(
+        attachment_bytes(&denied).is_empty(),
+        "{}",
+        rendered(&denied)
+    );
+    assert_eq!(probe.load(&probe.counts.capture), captured);
+    assert_files_have_no_canary(&connection).await;
+
+    let seen = connection
+        .call(
+            "get_app_state",
+            json!({"app": "fixture.a", "window": "w-a", "include_screenshot": true}),
+        )
+        .await;
+    assert_ne!(seen.is_error, Some(true), "{}", rendered(&seen));
+    let body = rendered(&seen);
+    assert!(body.contains("Allowed A"), "{body}");
+    assert!(body.contains("Go"), "{body}");
+    assert_clean("allowed state", &body);
+    let images = attachment_bytes(&seen);
+    assert!(!images.is_empty(), "allowed screenshot was not attached");
+    for bytes in &images {
+        assert!(!has_canary(bytes));
+    }
+    let facts = seen.structured_content.as_ref().unwrap();
+    let id = facts["state"]["screenshot"]["id"]
+        .as_str()
+        .expect("screenshot id");
+    let cached = connection
+        .cached_image(id)
+        .expect("image cache missed the shot");
+    assert!(!has_canary(&cached.bytes));
+    assert_files_have_no_canary(&connection).await;
+    assert!(probe.load(&probe.counts.content) > 0);
+    connection.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn scope_batch_result_drops_state_images_and_files() {
+    let spy = Spy::new();
+    let probe = spy.clone();
+    let mut connection = open_scoped(spy, Profile::Default).await;
+    let seen = connection
+        .call(
+            "get_app_state",
+            json!({"app": "fixture.a", "window": "w-a", "include_screenshot": false}),
+        )
+        .await;
+    assert_ne!(seen.is_error, Some(true), "{}", rendered(&seen));
+    let index = element_index(&rendered(&seen));
+    probe.arm_flip();
+    let denied = connection
+        .call(
+            "computer_batch",
+            json!({
+                "app": "fixture.a",
+                "window": "w-a",
+                "steps": [
+                    {"click": {"element_index": index}},
+                    {"click": {"element_index": index}}
+                ],
+                "stop_on_error": false,
+                "final_state": true
+            }),
+        )
+        .await;
+    let facts = denied.structured_content.as_ref().unwrap();
+    assert_eq!(facts["error"]["message"], SCOPE_DENIED_MESSAGE, "{facts}");
+    assert_eq!(facts["failed_step"], 1, "{facts}");
+    assert!(facts.get("state").is_none(), "{facts}");
+    assert!(facts["error"].get("state").is_none(), "{facts}");
+    assert!(
+        attachment_bytes(&denied).is_empty(),
+        "{}",
+        rendered(&denied)
+    );
+    assert_clean("scope batch", &rendered(&denied));
+    assert_files_have_no_canary(&connection).await;
+    connection.close().await.unwrap();
+
+    let spy = Spy::new();
+    let mut connection = open_scoped(spy, Profile::Default).await;
+    let seen = connection
+        .call(
+            "get_app_state",
+            json!({"app": "fixture.a", "window": "w-a", "include_screenshot": false}),
+        )
+        .await;
+    let index = element_index(&rendered(&seen));
+    let kept = connection
+        .call(
+            "computer_batch",
+            json!({
+                "app": "fixture.a",
+                "window": "w-a",
+                "steps": [
+                    {"click": {"element_index": index}},
+                    {"wait_for": {"until": {"text_present": "missing-token"}, "timeout_ms": 20}}
+                ],
+                "stop_on_error": false,
+                "final_state": true
+            }),
+        )
+        .await;
+    let facts = kept.structured_content.as_ref().unwrap();
+    assert_ne!(facts["error"]["message"], SCOPE_DENIED_MESSAGE, "{facts}");
+    assert!(facts["state"].is_object(), "{facts}");
+    assert_clean("timeout batch", &rendered(&kept));
+    connection.close().await.unwrap();
+}
+
+fn decode_b64(data: &str) -> Vec<u8> {
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut vals = Vec::new();
+    for byte in data.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        let value = alphabet.iter().position(|item| *item == byte).unwrap();
+        vals.push(value as u8);
+    }
+    let mut out = Vec::new();
+    for chunk in vals.chunks(4) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        let d = chunk.get(3).copied().unwrap_or(0);
+        out.push((a << 2) | (b >> 4));
+        if chunk.len() >= 3 {
+            out.push((b << 4) | (c >> 2));
+        }
+        if chunk.len() == 4 {
+            out.push((c << 6) | d);
+        }
+    }
+    out
 }

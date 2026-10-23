@@ -1,16 +1,17 @@
 //! Spy desktop and scope fixtures for ADR 0017 S1.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Waker;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use gcu_core::action::ActionRouter;
 use gcu_core::driver::{
     AppQuery, AppRef, BoxStream, Button, Cancel, Capture, CaptureOpts, Delivery, Dir,
-    DiscoveryStatus, DoctorReport, Driver, DriverAction, KeyChord, KeyRoute, Platform,
+    DiscoveryStatus, DoctorReport, Driver, DriverAction, DriverError, KeyChord, KeyRoute, Platform,
     PointerRoute, Result as DriverResult, TreeOpts, UiEvent, WindowRef,
 };
 use gcu_core::model::{NativeHandle, NodeAction, RawNode, RawTree, TextRange, WindowPoint};
@@ -110,6 +111,17 @@ pub struct Tally {
     pub subscribe: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldOp {
+    ListApps,
+    ListWindows,
+    Snapshot,
+    Capture,
+    Geometry,
+    Perform,
+    Focus,
+}
+
 struct Counts {
     metadata: AtomicUsize,
     content: AtomicUsize,
@@ -124,6 +136,8 @@ struct Counts {
     resolve: AtomicUsize,
     release: AtomicUsize,
     lists_after_flip: AtomicUsize,
+    restore: AtomicUsize,
+    held: AtomicBool,
 }
 
 impl Counts {
@@ -142,6 +156,8 @@ impl Counts {
             resolve: AtomicUsize::new(0),
             release: AtomicUsize::new(0),
             lists_after_flip: AtomicUsize::new(0),
+            restore: AtomicUsize::new(0),
+            held: AtomicBool::new(false),
         }
     }
 }
@@ -154,6 +170,13 @@ struct Evidence {
     flipped: bool,
     change_during_perform: bool,
     stop_during_perform: bool,
+    hold: Option<HoldOp>,
+    hold_started: bool,
+    hold_go: bool,
+    deny_perform: bool,
+    permission: Option<String>,
+    events: Option<Arc<Mutex<VecDeque<UiEvent>>>>,
+    waker: Arc<Mutex<Option<Waker>>>,
 }
 
 #[derive(Clone)]
@@ -215,6 +238,82 @@ impl Spy {
 
     pub fn metadata(&self) -> usize {
         self.counts.metadata.load(Ordering::SeqCst)
+    }
+
+    pub fn restores(&self) -> usize {
+        self.counts.restore.load(Ordering::SeqCst)
+    }
+
+    pub fn set_version(&mut self, version: &str) {
+        self.caps.version = version.into();
+    }
+
+    pub fn arm_hold(&self, op: HoldOp, started: bool) {
+        let mut ev = lock(&self.evidence);
+        ev.hold = Some(op);
+        ev.hold_started = started;
+        ev.hold_go = false;
+        self.counts.held.store(false, Ordering::SeqCst);
+    }
+
+    pub async fn wait_held(&self) {
+        while !self.counts.held.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub fn release_hold(&self) {
+        lock(&self.evidence).hold_go = true;
+    }
+
+    pub fn arm_deny_perform(&self) {
+        lock(&self.evidence).deny_perform = true;
+    }
+
+    pub fn arm_permission(&self, token: &str) {
+        lock(&self.evidence).permission = Some(token.to_owned());
+    }
+
+    pub fn arm_events(&self) {
+        let mut ev = lock(&self.evidence);
+        ev.events = Some(Arc::new(Mutex::new(VecDeque::new())));
+    }
+
+    pub fn push_event(&self, event: UiEvent) {
+        let slot = {
+            let ev = lock(&self.evidence);
+            let Some(queue) = ev.events.clone() else {
+                return;
+            };
+            queue
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push_back(event);
+            ev.waker.clone()
+        };
+        let taken = {
+            let mut guard = slot.lock().unwrap_or_else(|err| err.into_inner());
+            guard.take()
+        };
+        if let Some(waker) = taken {
+            waker.wake();
+        }
+    }
+
+    async fn pause(&self, op: HoldOp) {
+        let armed = lock(&self.evidence).hold == Some(op);
+        if !armed {
+            return;
+        }
+        self.counts.held.store(true, Ordering::SeqCst);
+        loop {
+            if lock(&self.evidence).hold_go {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        self.counts.held.store(false, Ordering::SeqCst);
+        lock(&self.evidence).hold = None;
     }
 
     pub fn arm_flip(&self) {
@@ -340,6 +439,13 @@ fn initial_evidence() -> Evidence {
         flipped: false,
         change_during_perform: false,
         stop_during_perform: false,
+        hold: None,
+        hold_started: false,
+        hold_go: false,
+        deny_perform: false,
+        permission: None,
+        events: None,
+        waker: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -381,11 +487,14 @@ impl Driver for Spy {
             "permission missing: accessibility".into(),
             "permission missing: screen_recording".into(),
             "leak /canary/external/c".into(),
+            "accessibility".into(),
+            "zz".into(),
         ];
         report
     }
 
     async fn list_apps(&self) -> DriverResult<Vec<AppInfo>> {
+        self.pause(HoldOp::ListApps).await;
         {
             let mut ev = lock(&self.evidence);
             let armed = ev.flip && !ev.flipped && self.counts.perform.load(Ordering::SeqCst) > 0;
@@ -416,6 +525,7 @@ impl Driver for Spy {
     }
 
     async fn list_windows(&self, app: Option<&AppRef>) -> DriverResult<Vec<WindowInfo>> {
+        self.pause(HoldOp::ListWindows).await;
         self.counts.metadata.fetch_add(1, Ordering::SeqCst);
         if app.is_none() {
             self.counts.windows_none.fetch_add(1, Ordering::SeqCst);
@@ -426,7 +536,21 @@ impl Driver for Spy {
     }
 
     async fn key_window(&self, app: &AppRef) -> DriverResult<WindowInfo> {
-        self.counts.metadata.fetch_add(1, Ordering::SeqCst);
+        self.counts.restore.fetch_add(1, Ordering::SeqCst);
+        if app.info.id == "fixture.a" {
+            return Ok(WindowInfo {
+                id: "w-a3".into(),
+                title: "CANARY-WINDOW-A3".into(),
+                frame: gcu_protocol::Rect {
+                    x: 440.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 120.0,
+                },
+                scale: 1.0,
+                on_current_desktop: Some(false),
+            });
+        }
         self.inner.key_window(app).await
     }
 
@@ -436,6 +560,10 @@ impl Driver for Spy {
         opts: &TreeOpts,
         cancel: &Cancel,
     ) -> DriverResult<RawTree> {
+        self.pause(HoldOp::Snapshot).await;
+        if let Some(permission) = lock(&self.evidence).permission.take() {
+            return Err(DriverError::PermissionMissing { permission });
+        }
         self.counts.content.fetch_add(1, Ordering::SeqCst);
         let raw = self.inner.snapshot_tree(win, opts, cancel).await?;
         self.remember(&raw, &win.id);
@@ -448,21 +576,41 @@ impl Driver for Spy {
         opts: &CaptureOpts,
         cancel: &Cancel,
     ) -> DriverResult<Capture> {
+        self.pause(HoldOp::Capture).await;
         self.counts.capture.fetch_add(1, Ordering::SeqCst);
         self.inner.capture(win, opts, cancel).await
     }
 
     async fn window_geometry(&self, win: &WindowRef) -> DriverResult<gcu_core::model::Geometry> {
+        self.pause(HoldOp::Geometry).await;
         self.counts.geometry.fetch_add(1, Ordering::SeqCst);
         self.inner.window_geometry(win).await
     }
 
     async fn focused_element(&self, app: &AppRef) -> DriverResult<Option<NativeHandle>> {
+        self.pause(HoldOp::Focus).await;
         self.counts.focus.fetch_add(1, Ordering::SeqCst);
         self.inner.focused_element(app).await
     }
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> DriverResult<Delivery> {
+        let started = {
+            let ev = lock(&self.evidence);
+            ev.hold == Some(HoldOp::Perform) && ev.hold_started
+        };
+        self.pause(HoldOp::Perform).await;
+        if lock(&self.evidence).deny_perform {
+            return Err(DriverError::ScopeDenied);
+        }
+        if started {
+            self.counts.perform.fetch_add(1, Ordering::SeqCst);
+            return Ok(Delivery::Accessibility);
+        }
+        if cancel.is_cancelled() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
         self.counts.perform.fetch_add(1, Ordering::SeqCst);
         let result = self.inner.perform(req, cancel).await;
         let (change, stop) = {
@@ -480,6 +628,14 @@ impl Driver for Spy {
 
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
         self.counts.subscribe.fetch_add(1, Ordering::SeqCst);
+        let ev = lock(&self.evidence);
+        if let Some(events) = ev.events.clone() {
+            return Some(Box::pin(live::LiveEvents {
+                events,
+                waker: ev.waker.clone(),
+            }));
+        }
+        drop(ev);
         self.inner.subscribe(win)
     }
 
@@ -798,6 +954,8 @@ pub fn forbidden_actions(win: &WindowRef, handle: NativeHandle) -> Vec<DriverAct
     }
     actions
 }
+
+mod live;
 
 pub fn element_index(text: &str, label: &str) -> u32 {
     text.lines()

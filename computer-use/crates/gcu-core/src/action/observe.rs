@@ -28,6 +28,8 @@ pub(crate) struct Fresh {
     pub signature: String,
     pub image: Option<RedactedImage>,
     pub quality: TreeQuality,
+    pub scope_run: Option<String>,
+    pub scope_generation: Option<u64>,
 }
 impl Fresh {
     pub fn geometry(&self) -> Geometry {
@@ -185,6 +187,7 @@ impl ActionRouter {
         ElementIndex::assign(&mut tree, previous.map(|s| s.index()), next)
             .map_err(|_| ErrorCode::StaleElement)?;
         drop(resources);
+        let (scope_run, scope_generation) = self.scope_stamp();
         Ok(Fresh {
             win: win.clone(),
             info,
@@ -193,6 +196,8 @@ impl ActionRouter {
             signature: merged_signature,
             image,
             quality,
+            scope_run,
+            scope_generation,
         })
     }
     pub(crate) fn rendered_diff_is_empty(
@@ -301,6 +306,12 @@ impl ActionRouter {
                 i.width(),
                 i.height(),
             );
+        }
+        if let (Some(run), Some(generation)) = (fresh.scope_run.as_deref(), fresh.scope_generation)
+        {
+            resources
+                .snapshots
+                .set_scope_epoch(&key, observation.snapshot_id, run, generation);
         }
         Ok(ActionState {
             text: observation.text,

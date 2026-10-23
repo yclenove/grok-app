@@ -7,6 +7,8 @@
 
 use std::sync::{Arc, RwLock};
 
+use tokio::sync::watch;
+
 use crate::driver::{AppRef, WindowRef};
 use crate::model::NativeHandle;
 
@@ -417,18 +419,32 @@ enum LeaseState {
     Revoked,
 }
 
+#[derive(Debug)]
+struct LeaseShared {
+    state: RwLock<LeaseState>,
+    /// Active generation, or `0` after revoke. Receivers wait; send never blocks.
+    epoch: watch::Sender<u64>,
+}
+
 /// Shared scope generation. Clones share the record. The lock is never held
 /// across an await. Poison keeps the last value instead of panicking.
+///
+/// [`Self::rebind`] and [`Self::revoke`] publish on an in-memory watch. A caller
+/// that already copied a scope must compare it again before handing out a result.
 #[derive(Debug, Clone)]
 pub struct ScopeLease {
-    state: Arc<RwLock<LeaseState>>,
+    shared: Arc<LeaseShared>,
 }
 
 impl ScopeLease {
     /// Install a validated scope. Memory only; no blocking, timeout, or cancellation.
     pub fn install(scope: FixtureScope) -> Self {
+        let (epoch, _) = watch::channel(scope.generation());
         Self {
-            state: Arc::new(RwLock::new(LeaseState::Active(scope))),
+            shared: Arc::new(LeaseShared {
+                state: RwLock::new(LeaseState::Active(scope)),
+                epoch,
+            }),
         }
     }
 
@@ -437,39 +453,86 @@ impl ScopeLease {
     /// The lock is dropped before this returns. Memory only. No timeout or
     /// cancellation. A poisoned lock yields the inner value.
     pub fn current(&self) -> Option<FixtureScope> {
-        let guard = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let guard = self
+            .shared
+            .state
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
         match &*guard {
             LeaseState::Active(scope) => Some(scope.clone()),
             LeaseState::Revoked => None,
         }
     }
 
+    /// Whether `opened` is still the active record, including its generation.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. A poisoned lock
+    /// yields the inner value.
+    pub fn matches(&self, opened: &FixtureScope) -> bool {
+        self.current().as_ref() == Some(opened)
+    }
+
+    /// Whether the active scope still has this run and generation.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn same_epoch(&self, run_id: &str, generation: u64) -> bool {
+        self.current()
+            .is_some_and(|scope| scope.run_id() == run_id && scope.generation() == generation)
+    }
+
+    /// Watch that publishes the active generation, or `0` after revoke.
+    ///
+    /// Memory only. This does not block. The caller marks the current value
+    /// seen with `borrow_and_update` before waiting. Waiting is the caller's
+    /// cancellation; a send with no receiver is ignored.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.shared.epoch.subscribe()
+    }
+
     /// Replace the scope when the run matches and the generation is newer.
     ///
     /// Memory only. No blocking, timeout, or cancellation. Replay of an older
-    /// or equal generation fails. Rebind after revoke fails.
+    /// or equal generation fails. Rebind after revoke fails. A successful
+    /// replacement wakes [`Self::subscribe`] after the lock is dropped.
     pub fn rebind(&self, next: FixtureScope) -> Result<(), ScopeError> {
-        let mut guard = self.state.write().unwrap_or_else(|err| err.into_inner());
-        match &mut *guard {
-            LeaseState::Revoked => Err(ScopeError::Revoked),
-            LeaseState::Active(current) => {
-                if current.run_id != next.run_id {
-                    return Err(ScopeError::RunMismatch);
+        let published = {
+            let mut guard = self
+                .shared
+                .state
+                .write()
+                .unwrap_or_else(|err| err.into_inner());
+            match &mut *guard {
+                LeaseState::Revoked => return Err(ScopeError::Revoked),
+                LeaseState::Active(current) => {
+                    if current.run_id != next.run_id {
+                        return Err(ScopeError::RunMismatch);
+                    }
+                    if next.generation <= current.generation {
+                        return Err(ScopeError::StaleGeneration);
+                    }
+                    let generation = next.generation();
+                    *current = next;
+                    generation
                 }
-                if next.generation <= current.generation {
-                    return Err(ScopeError::StaleGeneration);
-                }
-                *current = next;
-                Ok(())
             }
-        }
+        };
+        let _ = self.shared.epoch.send(published);
+        Ok(())
     }
 
     /// Drop the active scope. Later calls refuse. Memory only.
     ///
-    /// No blocking, timeout, or cancellation. Idempotent.
+    /// No blocking, timeout, or cancellation. Idempotent. Wakes
+    /// [`Self::subscribe`] with generation `0` after the lock is dropped.
     pub fn revoke(&self) {
-        let mut guard = self.state.write().unwrap_or_else(|err| err.into_inner());
-        *guard = LeaseState::Revoked;
+        {
+            let mut guard = self
+                .shared
+                .state
+                .write()
+                .unwrap_or_else(|err| err.into_inner());
+            *guard = LeaseState::Revoked;
+        }
+        let _ = self.shared.epoch.send(0);
     }
 }

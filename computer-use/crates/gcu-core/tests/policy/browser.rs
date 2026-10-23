@@ -62,6 +62,7 @@ fn decide(
             policy_version: 7,
             closed: false,
             browser: grant,
+            scope_epoch: None,
         },
         intent,
     )
@@ -212,6 +213,7 @@ frame: Some((x: 10.0, y: 10.0, w: 400.0, h: 24.0)), actions: [press])])))])])"#;
             policy_version: 7,
             closed: false,
             browser: Some(&grant),
+            scope_epoch: None,
         },
         &intent,
     );

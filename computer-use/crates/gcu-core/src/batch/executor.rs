@@ -2,6 +2,7 @@
 
 use super::{skipped, step_name, timeout_error, BatchReport, BATCH_DEADLINE};
 use crate::action::{ActionRouter, ToolCall};
+use crate::scope::SCOPE_DENIED_MESSAGE;
 use crate::session::Session;
 use gcu_protocol::{
     result::{BatchStepResult, Outcome},
@@ -55,6 +56,12 @@ pub(crate) async fn execute(
         if stop {
             failed_step = Some(index as u32);
             error = out.error.take();
+            if scope_hard_stop(error.as_ref()) {
+                state = None;
+                if let Some(err) = error.as_mut() {
+                    err.state = None;
+                }
+            }
             failure = Some(out.action);
             last = None;
             steps.push(record);
@@ -99,6 +106,10 @@ fn should_stop(out: &crate::action::ToolOutcome, stop_on_error: bool) -> bool {
         return true;
     }
     stop_on_error && (out.error.is_some() || out.action.outcome != Outcome::Done)
+}
+
+fn scope_hard_stop(error: Option<&ToolError>) -> bool {
+    error.is_some_and(|err| err.code == ErrorCode::AppDenied && err.message == SCOPE_DENIED_MESSAGE)
 }
 
 fn hard_code(error: Option<&ToolError>) -> bool {

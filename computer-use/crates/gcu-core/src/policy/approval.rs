@@ -44,6 +44,7 @@ pub enum GrantScope {
 struct HeldGrant {
     identity: AppIdentity,
     pid: Option<u32>,
+    epoch: Option<(String, u64)>,
 }
 
 /// Turn and session grants for one session. Always grants stay on [`gcu_host_api::PolicyConfig`].
@@ -76,14 +77,30 @@ impl GrantTable {
     ///
     /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: `&mut self`.
     pub fn record_turn(&mut self, app: &AppInfo) {
-        remember(&mut self.turn, app);
+        self.record_turn_at(app, None);
+    }
+
+    /// Record a turn grant bound to a fixture-scope generation.
+    ///
+    /// `None` matches only later checks that also pass `None`. Blocking: none.
+    /// Timeout: none. Cancellation: none. Thread safety: `&mut self`.
+    pub fn record_turn_at(&mut self, app: &AppInfo, epoch: Option<(&str, u64)>) {
+        remember(&mut self.turn, app, epoch);
     }
 
     /// Record a session grant.
     ///
     /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: `&mut self`.
     pub fn record_session(&mut self, app: &AppInfo) {
-        remember(&mut self.session, app);
+        self.record_session_at(app, None);
+    }
+
+    /// Record a session grant bound to a fixture-scope generation.
+    ///
+    /// `None` matches only later checks that also pass `None`. Blocking: none.
+    /// Timeout: none. Cancellation: none. Thread safety: `&mut self`.
+    pub fn record_session_at(&mut self, app: &AppInfo, epoch: Option<(&str, u64)>) {
+        remember(&mut self.session, app, epoch);
     }
 
     /// The narrowest grant that covers `app`, if any.
@@ -95,10 +112,32 @@ impl GrantTable {
     /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: shared
     /// references only.
     pub fn covers(&self, config: &gcu_host_api::PolicyConfig, app: &AppInfo) -> Option<GrantScope> {
-        if self.turn.iter().any(|grant| instance_ok(grant, app)) {
+        self.covers_in(config, app, None)
+    }
+
+    /// Like [`Self::covers`], and turn/session grants must share `epoch`.
+    ///
+    /// `None` matches only grants recorded without a scope. A run or generation
+    /// mismatch does not fall through to another generation's grant. Always
+    /// grants ignore `epoch`. Blocking: none. Timeout: none. Cancellation: none.
+    pub fn covers_in(
+        &self,
+        config: &gcu_host_api::PolicyConfig,
+        app: &AppInfo,
+        epoch: Option<(&str, u64)>,
+    ) -> Option<GrantScope> {
+        if self
+            .turn
+            .iter()
+            .any(|grant| instance_ok(grant, app) && epoch_ok(grant, epoch))
+        {
             return Some(GrantScope::Turn);
         }
-        if self.session.iter().any(|grant| instance_ok(grant, app)) {
+        if self
+            .session
+            .iter()
+            .any(|grant| instance_ok(grant, app) && epoch_ok(grant, epoch))
+        {
             return Some(GrantScope::Session);
         }
         if config.always_allow_enabled
@@ -113,14 +152,28 @@ impl GrantTable {
     }
 }
 
-fn remember(grants: &mut Vec<HeldGrant>, app: &AppInfo) {
-    if grants.iter().any(|grant| instance_ok(grant, app)) {
+fn remember(grants: &mut Vec<HeldGrant>, app: &AppInfo, epoch: Option<(&str, u64)>) {
+    if grants
+        .iter()
+        .any(|grant| instance_ok(grant, app) && epoch_ok(grant, epoch))
+    {
         return;
     }
     grants.push(HeldGrant {
         identity: app.identity.clone(),
         pid: app.pid,
+        epoch: epoch.map(|(run, generation)| (run.to_owned(), generation)),
     });
+}
+
+fn epoch_ok(grant: &HeldGrant, want: Option<(&str, u64)>) -> bool {
+    match (&grant.epoch, want) {
+        (None, None) => true,
+        (Some((run, generation)), Some((want_run, want_generation))) => {
+            run == want_run && *generation == want_generation
+        }
+        _ => false,
+    }
 }
 
 fn instance_ok(grant: &HeldGrant, app: &AppInfo) -> bool {
@@ -153,6 +206,8 @@ pub enum Invalidated {
     Snapshot,
     /// The policy version changed.
     PolicyVersion,
+    /// The fixture-scope run or generation changed.
+    ScopeEpoch,
 }
 
 /// Facts that bind an approval to one delivery attempt.
@@ -174,6 +229,10 @@ pub struct ApprovalBinding {
     pub snapshot_id: String,
     /// Policy generation the decision used.
     pub policy_version: u64,
+    /// Fixture-scope run captured with the approval. `None` outside a fixture scope.
+    pub scope_run: Option<String>,
+    /// Fixture-scope generation captured with the approval.
+    pub scope_generation: Option<u64>,
 }
 
 impl fmt::Debug for ApprovalBinding {
@@ -187,6 +246,8 @@ impl fmt::Debug for ApprovalBinding {
             .field("action_digest", &self.action_digest)
             .field("snapshot_id", &self.snapshot_id)
             .field("policy_version", &self.policy_version)
+            .field("scope_run", &self.scope_run)
+            .field("scope_generation", &self.scope_generation)
             .finish()
     }
 }
@@ -197,6 +258,11 @@ impl fmt::Debug for ApprovalBinding {
 ///
 /// Blocking: none. Timeout: none. Cancellation: none. Thread safety: pure.
 pub fn revalidate(binding: &ApprovalBinding, current: &ApprovalBinding) -> Result<(), Invalidated> {
+    if binding.scope_run != current.scope_run
+        || binding.scope_generation != current.scope_generation
+    {
+        return Err(Invalidated::ScopeEpoch);
+    }
     if binding.app != current.app {
         return Err(Invalidated::AppIdentity);
     }
@@ -245,6 +311,8 @@ pub struct AppGrantWait<'a> {
     pub turn_open: &'a AtomicBool,
     /// Where a turn or session grant is stored. Always is not stored.
     pub grants: &'a Mutex<GrantTable>,
+    /// Fixture-scope generation captured when the wait started. `None` is unscoped.
+    pub scope_epoch: Option<(String, u64)>,
 }
 
 /// Wait for an app decision and record turn or session grants that are still valid.
@@ -282,6 +350,12 @@ pub async fn wait_for_app(wait: AppGrantWait<'_>) -> ApprovalDecision {
     decision
 }
 
+fn epoch_ref<'a>(wait: &'a AppGrantWait<'a>) -> Option<(&'a str, u64)> {
+    wait.scope_epoch
+        .as_ref()
+        .map(|(run, generation)| (run.as_str(), *generation))
+}
+
 fn remember_decision(wait: &AppGrantWait<'_>, decision: ApprovalDecision) {
     if wait.closed.load(Ordering::Acquire) || wait.session_cancel.is_cancelled() {
         return;
@@ -292,9 +366,9 @@ fn remember_decision(wait: &AppGrantWait<'_>, decision: ApprovalDecision) {
             if wait.turn_open.load(Ordering::Acquire)
                 && wait.generation.load(Ordering::Acquire) == wait.turn_generation =>
         {
-            grants.record_turn(wait.app);
+            grants.record_turn_at(wait.app, epoch_ref(wait));
         }
-        ApprovalDecision::Session => grants.record_session(wait.app),
+        ApprovalDecision::Session => grants.record_session_at(wait.app, epoch_ref(wait)),
         ApprovalDecision::Turn
         | ApprovalDecision::Always
         | ApprovalDecision::Deny

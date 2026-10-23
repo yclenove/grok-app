@@ -2,7 +2,7 @@
 
 use crate::model::{Geometry, NativeHandle, NodeAction, RawTree, TextRange, WindowPoint};
 use async_trait::async_trait;
-use futures_core::Stream;
+pub use futures_core::Stream;
 pub use gcu_protocol::capabilities::Platform;
 pub use gcu_protocol::tools::{Direction as Dir, MouseButton as Button};
 pub use gcu_protocol::{AppInfo, Capabilities, KeyChord, WindowInfo};

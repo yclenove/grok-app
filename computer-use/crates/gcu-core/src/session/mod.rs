@@ -308,6 +308,24 @@ impl Session {
         risk: Risk,
         timeout: std::time::Duration,
     ) -> ApprovalDecision {
+        self.request_app_at(provider, app, reason, risk, timeout, None)
+            .await
+    }
+
+    /// [`Self::request_app`] that stores turn and session grants for `scope_epoch`.
+    ///
+    /// The epoch is the generation that was current when the caller started the
+    /// wait, not the generation at record time. `None` stores an unscoped grant.
+    /// Blocking, timeout, and cancellation match [`Self::request_app`].
+    pub async fn request_app_at(
+        &self,
+        provider: &dyn ApprovalProvider,
+        app: &AppInfo,
+        reason: Option<&ModelReason>,
+        risk: Risk,
+        timeout: std::time::Duration,
+        scope_epoch: Option<(String, u64)>,
+    ) -> ApprovalDecision {
         if self.closed.load(Ordering::Acquire) {
             return ApprovalDecision::Deny;
         }
@@ -327,6 +345,7 @@ impl Session {
             closed: &self.closed,
             turn_open: &self.turn_open,
             grants: &self.grants,
+            scope_epoch,
         })
         .await
     }

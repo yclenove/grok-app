@@ -47,6 +47,7 @@ pub struct ActionRouter {
     pub(crate) wait_engine: crate::wait::WaitEngine,
     pub(crate) browser: Option<std::sync::Arc<crate::browser::Hub>>,
     pub(crate) fixture_scoped: bool,
+    pub(crate) lease: Option<crate::scope::ScopeLease>,
 }
 impl ActionRouter {
     /// Construct without native work or IO. No waits, timeout, or cancellation.
@@ -76,6 +77,7 @@ impl ActionRouter {
             wait_engine: crate::wait::WaitEngine::default(),
             browser: None,
             fixture_scoped: false,
+            lease: None,
         }
     }
     /// Inject settling configuration and monotonic time before sharing the router.
@@ -153,10 +155,16 @@ impl ActionRouter {
         let mut intent = ActionIntent::new(Tool::GetAppState);
         intent.parameters = fresh.signature.clone();
         intent.reason = params.reason.map(gcu_host_api::ModelReason::new);
-        let _approved = self
+        let approved = self
             .authorize(session, &mut intent, &fresh)
             .await
-            .map_err(|code| Box::new(error(code)))?;
+            .map_err(|err| Box::new(err.tool_error()))?;
+        if !self.scope_binding_current(
+            approved.binding.scope_run.as_deref(),
+            approved.binding.scope_generation,
+        ) {
+            return Err(Box::new(CallError::ScopeDenied.tool_error()));
+        }
         self.check_boundary(session)
             .await
             .map_err(|code| Box::new(error(code)))?;
@@ -350,7 +358,7 @@ impl ActionRouter {
         }
         let approved = match self.authorize(session, &mut plan.intent, &fresh).await {
             Ok(a) => a,
-            Err(code) => return self.failure(session, action, code, &win).await,
+            Err(err) => return self.failure(session, action, err, &win).await,
         };
         let before = match self
             .recheck(session, call, &gate, &fresh, &plan.intent, &approved)
@@ -379,6 +387,8 @@ impl ActionRouter {
                 }
                 action.outcome = if e.maybe_executed() {
                     Outcome::Unknown
+                } else if matches!(e, DriverError::ScopeDenied) {
+                    Outcome::Refused
                 } else {
                     Outcome::Failed
                 };
@@ -433,11 +443,27 @@ impl ActionRouter {
         }
         self.check_boundary(session).await?;
         let generation = session.turn_generation();
+        let mut epoch = self.lease.as_ref().map(|lease| {
+            let mut receiver = lease.subscribe();
+            receiver.borrow_and_update();
+            receiver
+        });
         tokio::pin!(work);
         loop {
             tokio::select! {
                 biased;
                 _ = session.cancellation().cancelled() => { if let Some(cancel) = cancel { cancel.cancel(); } return Err(ErrorCode::ApprovalDenied); },
+                _ = lease_changed(&mut epoch) => {
+                    if let Some(cancel) = cancel {
+                        cancel.cancel();
+                        continue;
+                    }
+                    return Err(if session.is_stopped() || session.activity().stop_requested() {
+                        ErrorCode::StoppedByUser
+                    } else {
+                        ErrorCode::AppDenied
+                    });
+                }
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {
                     if session.turn_generation() != generation {
                         if let Some(cancel) = cancel { cancel.cancel(); }
@@ -541,6 +567,14 @@ impl ActionRouter {
         Ok(())
     }
 }
+async fn lease_changed(epoch: &mut Option<tokio::sync::watch::Receiver<u64>>) {
+    if let Some(receiver) = epoch.as_mut() {
+        let _ = receiver.changed().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 struct Release(Arc<dyn Driver>);
 #[async_trait]
 impl InputRelease for Release {

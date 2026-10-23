@@ -67,11 +67,33 @@ pub(super) fn scrub(err: DriverError) -> DriverError {
     }
 }
 
+const PERMISSIONS: &[&str] = &[
+    "accessibility",
+    "screen_recording",
+    "screencast",
+    "remote_desktop",
+    "input",
+    "window_capture_protection_unknown",
+];
+
+const VERSIONS: &[&str] = &[
+    "fake-memory-v1 (no OS input)",
+    "x11-atspi",
+    "macOS 14+; AX tree (P1-03); screenshot (P1-04); semantic actions (P1-05); targeted events (P1-06)",
+    "Windows 10 1903+; discovery only (P2-01)",
+    "scope-probe",
+];
+
 fn permission_ok(permission: &str) -> bool {
-    !permission.is_empty()
-        && permission.len() <= 64
-        && !permission.contains('/')
-        && !permission.chars().any(char::is_whitespace)
+    PERMISSIONS.contains(&permission)
+}
+
+pub(super) fn normalize_version(version: &str) -> &'static str {
+    VERSIONS
+        .iter()
+        .copied()
+        .find(|known| *known == version)
+        .unwrap_or("unlisted")
 }
 
 pub(super) fn matches_query(app: &AppInfo, query: &str) -> bool {
@@ -290,6 +312,9 @@ pub(super) fn rewrite(
             let (focus, handle) = match focus {
                 Some(focus) => {
                     let (inner, window) = unseal(focus, scope, evidence)?;
+                    if window != binding {
+                        return Err(DriverError::ScopeDenied);
+                    }
                     (Some(inner.clone()), Some((inner, window)))
                 }
                 None => (None, None),

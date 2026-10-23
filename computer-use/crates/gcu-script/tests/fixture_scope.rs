@@ -3,6 +3,7 @@
 
 use std::sync::{atomic::AtomicBool, Arc};
 
+use gcu_core::driver::Driver;
 use gcu_core::scope::{ScopeLease, SCOPE_DENIED_MESSAGE};
 use gcu_core::testing::host::scoped_router;
 use gcu_core::testing::probe::ScopeProbe;
@@ -50,4 +51,63 @@ fn script_scope_denial_stops_before_a_second_call() {
     assert_eq!(probe.capture(), 0, "script captured external pixels");
     assert_eq!(probe.perform(), 0, "script delivered input");
     assert_eq!(probe.launch(), 0, "script launched");
+    assert_eq!(probe.restores(), 0, "script restored a window");
+}
+
+#[test]
+fn inner_probe_resolves_and_reads_the_external_canary() {
+    let probe = ScopeProbe::external_canary();
+    let read = gcu_core::testing::block_on(async {
+        let app = probe
+            .resolve_app(&gcu_core::driver::AppQuery::from("CANARY-EXTERNAL-C"))
+            .await
+            .unwrap();
+        let win = gcu_core::driver::WindowRef {
+            app,
+            id: "w-c".into(),
+        };
+        probe
+            .snapshot_tree(
+                &win,
+                &gcu_core::driver::TreeOpts::default(),
+                &gcu_core::driver::Cancel::default(),
+            )
+            .await
+            .unwrap()
+    })
+    .unwrap();
+    let name = read.root.unwrap().name.unwrap();
+    assert_eq!(name, "CANARY-EXTERNAL-C");
+    assert_eq!(probe.content(), 1, "inner driver did not read the canary");
+}
+
+#[test]
+fn allowed_script_observes_without_restoring_the_hidden_window() {
+    let probe = ScopeProbe::external_canary();
+    let lease = ScopeLease::install(ScopeProbe::allowed_scope());
+    let (router, session) = scoped_router(probe.clone(), lease);
+    let report = gcu_core::testing::block_on(run_router(
+        &router,
+        &session,
+        "allowed",
+        ComputerScriptParams {
+            code: "const app = await cu.app(\"Fixture Allowed\"); return await app.state({screenshot:false});"
+                .into(),
+            timeout_ms: 5_000,
+        },
+        Arc::new(AtomicBool::new(false)),
+    ))
+    .unwrap();
+    assert_eq!(report.status, ScriptStatus::Done, "{report:?}");
+    assert_eq!(report.driver_calls, 2, "{report:?}");
+    assert!(
+        report.output.contains("Allowed Target"),
+        "scope wrapper hid the allowed target: {report:?}"
+    );
+    assert!(probe.content() > 0, "allowed observation did not read");
+    assert_eq!(probe.restores(), 0, "cu.app restored the hidden key window");
+    assert_eq!(probe.capture(), 0);
+    assert_eq!(probe.perform(), 0);
+    assert_eq!(probe.launch(), 0);
+    assert!(!report.output.contains("CANARY-EXTERNAL-C"), "{report:?}");
 }

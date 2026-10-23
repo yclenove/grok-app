@@ -82,6 +82,8 @@ pub struct Snapshot {
     observed_at: Option<Duration>,
     memory_bytes: usize,
     delivery_size: (u32, u32),
+    scope_run: Option<String>,
+    scope_generation: Option<u64>,
 }
 impl fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -135,6 +137,18 @@ impl Snapshot {
     /// Estimated bytes charged against the session retention cap.
     pub fn memory_bytes(&self) -> usize {
         self.memory_bytes
+    }
+    /// Fixture-scope run recorded with this observation. `None` outside a scope.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn scope_run(&self) -> Option<&str> {
+        self.scope_run.as_deref()
+    }
+    /// Fixture-scope generation recorded with this observation.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn scope_generation(&self) -> Option<u64> {
+        self.scope_generation
     }
 }
 #[derive(Default)]
@@ -235,6 +249,43 @@ impl SnapshotStore {
                     s.delivery_size = (width, height);
                 }
             }
+        }
+    }
+    /// Tag one retained observation with the fixture-scope generation that produced it.
+    ///
+    /// Charges the run id against the session cap and evicts older snapshots when
+    /// that charge crosses the limit. Does not evict `id` itself when it is the
+    /// only remaining snapshot. Memory only. No blocking, timeout, or cancellation.
+    pub fn set_scope_epoch(
+        &mut self,
+        window: &WindowKey,
+        id: SnapshotId,
+        run: &str,
+        generation: u64,
+    ) {
+        let Some(position) = self
+            .snapshots
+            .iter()
+            .position(|snapshot| snapshot.id == id && &snapshot.window == window)
+        else {
+            return;
+        };
+        let extra = run.len();
+        if let Some(snapshot) = self.snapshots.get_mut(position) {
+            snapshot.scope_run = Some(run.to_owned());
+            snapshot.scope_generation = Some(generation);
+            snapshot.memory_bytes = snapshot.memory_bytes.saturating_add(extra);
+        }
+        self.memory_bytes = self.memory_bytes.saturating_add(extra);
+        while self.memory_bytes > self.memory_limit && self.snapshots.len() > 1 {
+            if self
+                .snapshots
+                .front()
+                .is_some_and(|snapshot| snapshot.id == id)
+            {
+                break;
+            }
+            self.evict(0);
         }
     }
     /// Resolve a snapshot-scoped reference only if still retained and its native
@@ -376,6 +427,8 @@ impl SnapshotStore {
             state_version: tree.state_version,
             observed_at: tree.observed_at,
             memory_bytes,
+            scope_run: None,
+            scope_generation: None,
         };
         self.next_snapshot = next_snapshot;
         self.windows.insert(

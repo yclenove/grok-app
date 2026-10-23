@@ -115,6 +115,7 @@ pub fn execution_decisions(
         policy_version: 1,
         closed: false,
         browser: None,
+        scope_epoch: None,
     };
     [
         Tool::Click,

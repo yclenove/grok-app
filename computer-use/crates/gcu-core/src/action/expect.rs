@@ -71,9 +71,9 @@ impl ActionRouter {
         };
         let mut intent = ActionIntent::new(Tool::Observe);
         intent.parameters = fresh.signature.clone();
-        if let Err(code) = self.authorize(session, &mut intent, &fresh).await {
+        if let Err(err) = self.authorize(session, &mut intent, &fresh).await {
             action.verify = Some(verify(&label, VerifyState::Unknown));
-            return outcome(action, Some(error(code)), None);
+            return outcome(action, Some(err.tool_error()), None);
         }
         drop(fresh);
         if let Err(code) = self.check_boundary(session).await {

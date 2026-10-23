@@ -85,6 +85,13 @@ impl Connection {
         let files = self.server.files();
         Ok(crate::files::blocking(move || files.export()).await?)
     }
+    /// Redacted image retained for a screenshot id. Not an MCP tool.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Returns `None` when
+    /// this session did not deliver that id.
+    pub fn cached_image(&self, id: &str) -> Option<gcu_host_protocol::messages::Image> {
+        self.server.screenshot(id)
+    }
     /// Execute once through the stdio dispatcher, without a peer/elicitation.
     /// Native calls cap at five seconds; approvals follow Host policy. No retries.
     pub async fn call(&self, name: &str, arguments: Value) -> CallToolResult {

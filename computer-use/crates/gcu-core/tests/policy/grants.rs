@@ -273,6 +273,8 @@ fn approval_binding_change_is_invalidated_field_by_field() {
         action_digest: [1; 32],
         snapshot_id: "snap".into(),
         policy_version: 3,
+        scope_run: None,
+        scope_generation: None,
     };
     assert!(revalidate(&binding, &binding).is_ok());
     let mut current = binding.clone();

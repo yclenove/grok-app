@@ -139,9 +139,17 @@ impl Results {
     async fn build(
         &self,
         mut state: Option<ActionState>,
-        error: Option<ToolError>,
+        mut error: Option<ToolError>,
         mut data: Value,
     ) -> CallToolResult {
+        if error.as_ref().is_some_and(|err| {
+            err.code == ErrorCode::AppDenied && err.message == gcu_core::scope::SCOPE_DENIED_MESSAGE
+        }) {
+            state = None;
+            if let Some(err) = error.as_mut() {
+                err.state = None;
+            }
+        }
         let failed = error.is_some();
         let mut text = error
             .as_ref()
