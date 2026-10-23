@@ -67,7 +67,7 @@ impl SecretReader {
             return Err(Error::Authentication);
         }
         crate::unsafe_platform::nonblocking(&file)?;
-        Ok(Self(tokio::io::unix::AsyncFd::new(file)?))
+        Ok(Self(crate::unsafe_platform::register_async(file)?))
     }
     async fn exact(&mut self, mut bytes: &mut [u8]) -> Result<(), Error> {
         while !bytes.is_empty() {
