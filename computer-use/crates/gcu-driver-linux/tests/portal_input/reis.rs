@@ -31,6 +31,10 @@ async fn portal_fd_reis_frames_arrive_and_pause_invalidates_generation() {
     let (ready, device_ready) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let context = eis::Context::new(server).unwrap();
+        // Test fixture only: the descriptor belongs to the in-process `UnixStream` pair above
+        // and outlives this task, so the I/O-safety hole tokio 1.54 deprecated `new` for
+        // (RUSTSEC-2026-0386) cannot occur. `register` would need `unsafe` in a test crate.
+        #[allow(deprecated)]
         let socket = tokio::io::unix::AsyncFd::new(context.clone()).unwrap();
         let mut handshake = EisHandshaker::new(&context, 1);
         let response = loop {

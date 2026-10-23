@@ -218,6 +218,20 @@ pub(crate) fn inherit(command: &mut std::process::Command, fds: Vec<i32>) {
         });
     }
 }
+/// Register an owned `File` with the current tokio reactor.
+///
+/// tokio 1.54 deprecated the safe `AsyncFd::new` (RUSTSEC-2026-0386); the
+/// replacement `register` is `unsafe` because the caller must keep the
+/// descriptor valid and unchanged for the life of the `AsyncFd`.
+#[cfg(unix)]
+pub(crate) fn register_async(
+    file: std::fs::File,
+) -> io::Result<tokio::io::unix::AsyncFd<std::fs::File>> {
+    // SAFETY: the `File` owns its open descriptor and moves into the `AsyncFd`,
+    // so it stays open and refers to the same file description until the
+    // `AsyncFd` is dropped; `File::as_raw_fd` always returns that descriptor.
+    unsafe { tokio::io::unix::AsyncFd::register(file) }.map_err(io::Error::from)
+}
 #[cfg(unix)]
 pub(crate) fn nonblocking(file: &std::fs::File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
