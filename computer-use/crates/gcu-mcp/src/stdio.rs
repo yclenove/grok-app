@@ -33,6 +33,11 @@ pub(crate) struct Stdio<R, W> {
     lifecycle: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     error_send: Option<Pin<Box<dyn Future<Output = io::Result<()>> + Send>>>,
 }
+pub(crate) enum Admission {
+    Allow,
+    Refuse(Value),
+    Close,
+}
 impl<R, W> Stdio<R, W> {
     pub(crate) fn new(
         input: R,
@@ -91,6 +96,29 @@ where
         }
     }
     async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        self.receive_checked(|_| Admission::Allow).await
+    }
+    async fn close(&mut self) -> io::Result<()> {
+        let result = self.output.lock().await.shutdown().await;
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+        }
+        result
+    }
+}
+impl<R, W> Stdio<R, W>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    // The unscoped transport supplies a constant Allow, with no scope wrapper
+    // or authority state. Scoped admission runs once per frame, including codec
+    // errors and frames already buffered by an earlier read, before rmcp parses
+    // the envelope or can produce a bootstrap response.
+    pub(crate) async fn receive_checked(
+        &mut self,
+        check: impl Fn(&Decoded) -> Admission + Send + Sync,
+    ) -> Option<ClientJsonRpcMessage> {
         loop {
             if self.failed_cancel.is_cancelled() && !self.eof {
                 self.eof = true;
@@ -118,6 +146,24 @@ where
                 continue;
             }
             if let Some(item) = self.pending.pop_front() {
+                match check(&item) {
+                    Admission::Allow => {}
+                    Admission::Refuse(value) => {
+                        let output = self.output.clone();
+                        self.error_send =
+                            Some(Box::pin(async move { write(&output, &value).await }));
+                        continue;
+                    }
+                    Admission::Close => {
+                        self.eof = true;
+                        self.pending.clear();
+                        let session = self.session.clone();
+                        self.lifecycle = Some(Box::pin(async move {
+                            session.session_closed().await;
+                        }));
+                        continue;
+                    }
+                }
                 let (code, id) = match item {
                     Decoded::Message(value) => {
                         let id = value
@@ -187,12 +233,5 @@ where
                 }
             }
         }
-    }
-    async fn close(&mut self) -> io::Result<()> {
-        let result = self.output.lock().await.shutdown().await;
-        if result.is_err() {
-            self.failed.store(true, Ordering::Release);
-        }
-        result
     }
 }

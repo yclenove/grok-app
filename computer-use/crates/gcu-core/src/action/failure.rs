@@ -23,7 +23,7 @@ impl ActionRouter {
     ) -> ToolOutcome {
         let failure = failure.into();
         // Copy the authority that started this failure before any refresh await.
-        // A later lease.current() would stamp the old window with a newer epoch.
+        // Copy once; a later admission must not stamp an old window with a newer epoch.
         let producing = originating_epoch(self);
         let code = match failure {
             CallError::ScopeDenied => {
@@ -171,7 +171,10 @@ fn originating_epoch(router: &ActionRouter) -> Option<(String, u64)> {
     if let Some(epoch) = crate::scope::expected_epoch() {
         return Some(epoch);
     }
-    let scope = router.lease.as_ref().and_then(|lease| lease.current())?;
+    let scope = router
+        .lease
+        .as_ref()
+        .and_then(|lease| lease.authorized_current())?;
     Some((scope.run_id().to_owned(), scope.generation()))
 }
 

@@ -1,6 +1,9 @@
 //! Scoped MCP session. No tool can set, renew, or widen the fixture scope.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "fixture_scope/transport.rs"]
+mod transport;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +75,7 @@ frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
 ])"#;
 
 struct Counts {
+    discovery: AtomicUsize,
     content: AtomicUsize,
     capture: AtomicUsize,
     perform: AtomicUsize,
@@ -106,6 +110,7 @@ impl Spy {
             inner: inner.with_targeted_input(true, true),
             caps,
             counts: Arc::new(Counts {
+                discovery: AtomicUsize::new(0),
                 content: AtomicUsize::new(0),
                 capture: AtomicUsize::new(0),
                 perform: AtomicUsize::new(0),
@@ -222,6 +227,7 @@ impl Driver for Spy {
     }
 
     async fn list_apps(&self) -> DriverResult<Vec<gcu_protocol::AppInfo>> {
+        self.counts.discovery.fetch_add(1, Ordering::SeqCst);
         if self.shared.flip.load(Ordering::SeqCst)
             && !self.shared.flipped.load(Ordering::SeqCst)
             && self.counts.perform.load(Ordering::SeqCst) > 0
@@ -348,6 +354,22 @@ fn assert_denied(label: &str, result: &CallToolResult) {
     assert_eq!(error["error"]["message"], SCOPE_DENIED_MESSAGE, "{label}");
     assert!(error["error"].get("state").is_none(), "{label} {body}");
     assert_clean(label, &body);
+}
+
+#[tokio::test]
+async fn connection_call_keeps_dispatch_state_out_of_the_callers_stack() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut connection = open_scoped(Spy::new(), Profile::Full).await;
+        let call = connection.call("list_apps", json!({}));
+        // All tool branches share this type, even when no script is called.
+        // Catch inline-future multiplication without raising the thread stack.
+        assert!(std::mem::size_of_val(&call) < 32 * 1024);
+        let result = call.await;
+        assert_ne!(result.is_error, Some(true), "{}", rendered(&result));
+        connection.close().await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -540,7 +562,7 @@ impl ScriptRunner for ObserveRunner {
                 },
                 Err(error) => ScriptBody {
                     output: String::new(),
-                    error: Some(*error),
+                    error: Some((*error).into()),
                 },
             }
         })
@@ -589,7 +611,10 @@ struct Rpc {
 
 impl Rpc {
     async fn serve(spy: Spy, profile: Profile) -> Self {
-        let connection = open_scoped(spy, profile).await;
+        Self::from_connection(open_scoped(spy, profile).await).await
+    }
+
+    async fn from_connection(connection: Connection) -> Self {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(client);
         let (input, output) = tokio::io::split(server);
@@ -890,7 +915,9 @@ async fn scope_batch_result_drops_state_images_and_files() {
         .await;
     let facts = denied.structured_content.as_ref().unwrap();
     assert_eq!(facts["error"]["message"], SCOPE_DENIED_MESSAGE, "{facts}");
-    assert_eq!(facts["failed_step"], 1, "{facts}");
+    assert!(facts.get("failed_step").is_none(), "{facts}");
+    assert!(facts.get("steps").is_none(), "{facts}");
+    assert!(facts.get("action").is_none(), "{facts}");
     assert!(facts.get("state").is_none(), "{facts}");
     assert!(facts["error"].get("state").is_none(), "{facts}");
     assert!(
@@ -961,4 +988,263 @@ fn decode_b64(data: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+// The call future is polled into the delivery queue before Rebind. This also
+// models rmcp's separately spawned handlers: the service, not the parent task,
+// must install the authority captured when the connection was accepted.
+#[cfg(feature = "script")]
+struct QueueRunner {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+}
+#[cfg(feature = "script")]
+impl ScriptRunner for QueueRunner {
+    fn run<'a>(
+        &'a self,
+        router: &'a ActionRouter,
+        session: &'a Session,
+        id: &'a str,
+        params: ComputerScriptParams,
+    ) -> Pin<Box<dyn Future<Output = ScriptBody> + Send + 'a>> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            ObserveRunner.run(router, session, id, params).await
+        })
+    }
+}
+
+#[cfg(feature = "script")]
+fn next_scope(generation: u64) -> FixtureScope {
+    let owner = instance(1101, 10);
+    FixtureScope::try_new(
+        "run-s1",
+        generation,
+        "engine-s1",
+        "desktop-s1",
+        "lease-s1",
+        vec![FixtureTarget::new(
+            owner.clone(),
+            "a",
+            ExecutableProof::new("/fixtures/a").unwrap(),
+            vec![RegisteredWindow::new(
+                WindowBinding::new("w-a", 1, owner).unwrap(),
+            )],
+        )
+        .unwrap()],
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "script")]
+#[tokio::test]
+async fn queued_connection_handlers_never_acquire_rebound_generation() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let spy = Spy::new();
+        let lease = ScopeLease::install(allowed_scope());
+        let gate = Arc::new(QueueRunner {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+        });
+        let connection = Arc::new(
+            Connection::open_scoped(
+                spy.clone(),
+                lease.clone(),
+                host(32),
+                ServerConfig {
+                    profile: Profile::Full,
+                    script: Some(gate.clone()),
+                    ..ServerConfig::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let first = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                connection
+                    .call(
+                        "computer_script",
+                        json!({"code":"fixture.a","timeout_ms":5000}),
+                    )
+                    .await
+            }
+        });
+        gate.entered.notified().await;
+        {
+            let read = connection.call(
+                "get_app_state",
+                json!({"app":"fixture.a","include_screenshot":false}),
+            );
+            let script = connection.call(
+                "computer_script",
+                json!({"code":"fixture.a","timeout_ms":5000}),
+            );
+            tokio::pin!(read, script);
+            for call in [&mut read, &mut script] {
+                assert!(
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(
+                        call.as_mut().poll(cx).is_pending()
+                    ))
+                    .await
+                );
+            }
+            lease.rebind(next_scope(2)).unwrap();
+            gate.release.notify_one();
+            assert_denied("nested script reply", &first.await.unwrap());
+            assert_denied("queued read", &read.await);
+            assert_denied("queued script", &script.await);
+        }
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(spy.load(&spy.counts.discovery), 0);
+        assert_eq!(spy.load(&spy.counts.content), 0);
+        assert_eq!(spy.load(&spy.counts.capture), 0);
+        assert_eq!(spy.load(&spy.counts.perform), 0);
+        let mut connection = Arc::try_unwrap(connection).ok().unwrap();
+        connection.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn data_and_commit_expire_without_polling_a_watcher_and_renew_uses_same_deadline() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let spy = Spy::new();
+        #[derive(Debug, Default)]
+        struct ManualClock(AtomicU64);
+        impl gcu_core::scope::Clock for ManualClock {
+            fn now(&self) -> Duration {
+                Duration::from_secs(self.0.load(Ordering::SeqCst))
+            }
+        }
+        let clock = Arc::new(ManualClock::default());
+        let lease = ScopeLease::install_with_deadline(
+            allowed_scope(),
+            clock.clone(),
+            Duration::from_secs(3),
+        );
+        let commit_lease = ScopeLease::install_with_deadline(
+            allowed_scope(),
+            clock.clone(),
+            Duration::from_secs(3),
+        );
+        let mut connection = Connection::open_scoped(
+            spy.clone(),
+            lease.clone(),
+            host(32),
+            ServerConfig::default(),
+        )
+        .await
+        .unwrap();
+        let bound = lease.arm_attempt().unwrap();
+        // No watcher exists in this test. A missing handler authority also refuses.
+        let raw = ActionRouter::with_fixture_scope(
+            spy.clone(),
+            lease.clone(),
+            Arc::new(FakeUserActivity::new()),
+            Arc::new(ScriptedApprovals::new()),
+            Arc::new(MemoryPolicyStore::new(PolicyConfig::default())),
+            Arc::new(RecordingEventSink::new()),
+            gcu_core::session::WindowLocks::new(),
+        );
+        assert!(raw.bound_driver().list_apps().await.is_err());
+        clock.0.store(2, Ordering::SeqCst);
+        lease.renew_deadline(Duration::from_secs(6)).unwrap();
+        commit_lease.renew_deadline(Duration::from_secs(6)).unwrap();
+        clock.0.store(4, Ordering::SeqCst);
+        assert!(bound.enter(raw.bound_driver().list_apps()).await.is_ok());
+        assert!(lease.commit_if_current(&[("run-s1", 1)], || ()).is_ok());
+        let renewed = connection
+            .call(
+                "get_app_state",
+                json!({"app":"fixture.a","include_screenshot":false}),
+            )
+            .await;
+        assert_ne!(
+            renewed.is_error,
+            Some(true),
+            "renewed lease refused content: {}",
+            rendered(&renewed)
+        );
+        let reads = spy.load(&spy.counts.content);
+        assert!(
+            reads > 0,
+            "positive renewed operation never reached the data plane"
+        );
+        clock.0.store(7, Ordering::SeqCst);
+        assert_denied(
+            "expired data",
+            &connection
+                .call(
+                    "get_app_state",
+                    json!({"app":"fixture.a","include_screenshot":false}),
+                )
+                .await,
+        );
+        assert!(bound.enter(raw.bound_driver().list_apps()).await.is_err());
+        let committed = AtomicBool::new(false);
+        assert!(commit_lease
+            .commit_if_current(&[("run-s1", 1)], || committed.store(true, Ordering::SeqCst))
+            .is_err());
+        assert!(!committed.load(Ordering::SeqCst));
+        assert!(lease.arm_attempt().is_none());
+        assert!(lease.renew_deadline(Duration::from_secs(12)).is_err());
+        assert_eq!(spy.load(&spy.counts.content), reads);
+        assert_eq!(spy.load(&spy.counts.perform), 0);
+        connection.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(feature = "script")]
+#[tokio::test]
+async fn rmcp_spawned_handlers_keep_the_accepted_connection_authority() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let spy = Spy::new();
+        let lease = ScopeLease::install(allowed_scope());
+        let gate = Arc::new(QueueRunner {
+            entered: tokio::sync::Notify::new(), release: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+        });
+        let connection = Connection::open_scoped(spy.clone(), lease.clone(), host(32), ServerConfig {
+            profile: Profile::Full, script: Some(gate.clone()), ..ServerConfig::default()
+        }).await.unwrap();
+        let mut rpc = Rpc::from_connection(connection).await;
+        rpc.initialize().await;
+        rpc.send(json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{
+            "name":"computer_script","arguments":{"code":"fixture.a","timeout_ms":5000}
+        }})).await;
+        gate.entered.notified().await;
+        for (id, name, arguments) in [
+            (11, "get_app_state", json!({"app":"fixture.a","include_screenshot":false})),
+            (12, "computer_script", json!({"code":"fixture.a","timeout_ms":5000})),
+        ] {
+            rpc.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await;
+        }
+        lease.rebind(next_scope(2)).unwrap();
+        gate.release.notify_one();
+        let mut ids = Vec::new();
+        while ids.len() < 3 {
+            let answer = rpc.read().await;
+            if let Some(id) = answer["id"].as_u64() {
+                assert!([10, 11, 12].contains(&id));
+                assert_rpc_denied("rmcp old connection", &answer["result"]);
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        assert_eq!(ids, vec![10, 11, 12]);
+        assert_eq!(spy.load(&spy.counts.discovery), 0);
+        assert_eq!(spy.load(&spy.counts.content), 0);
+        assert_eq!(spy.load(&spy.counts.perform), 0);
+        rpc.close().await;
+    }).await.unwrap();
 }

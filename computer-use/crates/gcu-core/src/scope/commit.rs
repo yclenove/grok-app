@@ -30,18 +30,27 @@ impl ScopeLease {
         authority: &[(&str, u64)],
         commit: impl FnOnce() -> T,
     ) -> Result<T, ScopeError> {
+        self.expire();
         let guard = self
             .shared
             .state
             .read()
             .unwrap_or_else(|err| err.into_inner());
-        let LeaseState::Active(scope) = &*guard else {
+        let LeaseState::Active { scope, .. } = &*guard else {
             return Err(ScopeError::Revoked);
         };
         if let Some(error) = reject_authority(scope, authority) {
             return Err(error);
         }
+        if !self.commit_authority_matches(scope) {
+            return Err(ScopeError::StaleGeneration);
+        }
         self.shared.commit_during.enter();
+        if self.expired(&guard) {
+            drop(guard);
+            self.expire();
+            return Err(ScopeError::Revoked);
+        }
         let value = commit();
         drop(guard);
         Ok(value)

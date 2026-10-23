@@ -111,3 +111,80 @@ fn allowed_script_observes_without_restoring_the_hidden_window() {
     assert_eq!(probe.launch(), 0);
     assert!(!report.output.contains("CANARY-EXTERNAL-C"), "{report:?}");
 }
+
+#[test]
+fn queued_script_operation_keeps_connection_authority_and_refuses_reply() {
+    use gcu_core::scope::{
+        BootIdentity, ExecutableProof, FixtureScope, FixtureTarget, OsStartTime, ProcessInstance,
+        RegisteredWindow, WindowBinding,
+    };
+    use std::{
+        future::Future,
+        task::Poll,
+        time::{Duration, Instant},
+    };
+    gcu_core::testing::block_on(async {
+        let probe = ScopeProbe::external_canary();
+        let initial = ScopeProbe::allowed_scope();
+        let lease = ScopeLease::install(initial.clone());
+        let authority = lease.arm_attempt().unwrap();
+        let (router, session) = scoped_router(probe.clone(), lease.clone());
+        let queued = authority.enter(gcu_script::dispatch(
+            &router,
+            &session,
+            "queued",
+            gcu_script::Op::App {
+                name: "Fixture Allowed".into(),
+            },
+        ));
+        let owner = ProcessInstance::new(
+            1101,
+            OsStartTime::new(10).unwrap(),
+            BootIdentity::new("boot-1").unwrap(),
+        )
+        .unwrap();
+        let target = FixtureTarget::new(
+            owner.clone(),
+            "allowed",
+            ExecutableProof::new("/fixtures/allowed").unwrap(),
+            vec![RegisteredWindow::new(
+                WindowBinding::new("w-allowed", 1, owner).unwrap(),
+            )],
+        )
+        .unwrap();
+        lease
+            .rebind(
+                FixtureScope::try_new(
+                    initial.run_id(),
+                    2,
+                    initial.engine_instance(),
+                    initial.desktop_session(),
+                    initial.control_lease(),
+                    vec![target],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut queued = std::pin::pin!(queued);
+        let end = Instant::now() + Duration::from_secs(5);
+        let reply = std::future::poll_fn(|cx| {
+            assert!(Instant::now() < end, "queued script operation hung");
+            match queued.as_mut().poll(cx) {
+                Poll::Ready(reply) => Poll::Ready(reply),
+                Poll::Pending => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        })
+        .await;
+        assert_eq!(reply.code, "app_denied");
+        assert_eq!(reply.message, SCOPE_DENIED_MESSAGE);
+        assert!(reply.state.is_none());
+        assert!(reply.hard_stop);
+        assert_eq!(probe.content(), 0);
+        assert_eq!(probe.capture(), 0);
+        assert_eq!(probe.perform(), 0);
+    })
+    .unwrap();
+}

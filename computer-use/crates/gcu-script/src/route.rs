@@ -115,6 +115,46 @@ pub fn outcome_to_response(out: &ToolOutcome) -> Reply {
 /// Blocking: the router call. Timeout: native 5s, `wait_for` up to its own horizon.
 /// Cancellation: the router observes Stop and session close.
 pub async fn dispatch(router: &ActionRouter, session: &Session, call_id: &str, op: Op) -> Reply {
+    // The scoped and unscoped paths poll the same future. Do not duplicate the
+    // large router state inside the authority wrapper's async state machine.
+    let work = Box::pin(dispatch_inner(router, session, call_id, op));
+    let Some(lease) = router.fixture_lease() else {
+        return work.await;
+    };
+    let Some(authority) = lease.data_attempt() else {
+        return scope_refusal(session, None);
+    };
+    let mut reply = Some(authority.enter(work).await);
+    match lease.commit_if_current(
+        &[(authority.scope().run_id(), authority.scope().generation())],
+        || reply.take(),
+    ) {
+        Ok(Some(reply)) => reply,
+        _ => scope_refusal(session, reply.as_ref()),
+    }
+}
+
+fn scope_refusal(session: &Session, prior: Option<&Reply>) -> Reply {
+    let unknown = prior.is_some_and(|reply| reply.unknown);
+    if session.is_stopped() || session.activity().stop_requested() {
+        let mut reply = Reply::stopped();
+        reply.unknown = unknown;
+        reply
+    } else if let Some(reply) = prior.filter(|reply| reply.unknown) {
+        // A native action may already have started. Drop its state while
+        // retaining the actual error and the no-replay latch.
+        Reply::fail(&reply.code, &reply.message, true, true)
+    } else {
+        Reply::fail(
+            "app_denied",
+            gcu_core::scope::SCOPE_DENIED_MESSAGE,
+            true,
+            unknown,
+        )
+    }
+}
+
+async fn dispatch_inner(router: &ActionRouter, session: &Session, call_id: &str, op: Op) -> Reply {
     match op {
         Op::App { name } => observe(router, session, name, false).await,
         Op::State { app, screenshot } => observe(router, session, app, screenshot).await,
@@ -391,4 +431,45 @@ fn json_string(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gcu_core::testing::{host::scoped_router, probe::ScopeProbe};
+
+    #[test]
+    fn scope_publication_refusal_clears_content_and_keeps_unknown_delivery() {
+        let lease = gcu_core::scope::ScopeLease::install(ScopeProbe::allowed_scope());
+        let (_, session) = scoped_router(ScopeProbe::external_canary(), lease.clone());
+        lease.revoke();
+        for unknown in [false, true] {
+            let mut prior = if unknown {
+                Reply::fail(
+                    "driver_error",
+                    "evaluation scope changed during delivery",
+                    true,
+                    true,
+                )
+            } else {
+                Reply::clear(None)
+            };
+            prior.state = Some(StateView {
+                text: "CANARY-UNPUBLISHED".into(),
+                focused: None,
+                elements: Vec::new(),
+            });
+            let reply = scope_refusal(&session, Some(&prior));
+            if unknown {
+                assert_eq!(reply.code, prior.code);
+                assert_eq!(reply.message, prior.message);
+            } else {
+                assert_eq!(reply.code, "app_denied");
+                assert_eq!(reply.message, gcu_core::scope::SCOPE_DENIED_MESSAGE);
+            }
+            assert!(reply.hard_stop);
+            assert_eq!(reply.unknown, unknown);
+            assert!(reply.state.is_none());
+        }
+    }
 }

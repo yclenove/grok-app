@@ -108,6 +108,7 @@ fn token_ok(gate: &Gate, headers: &HeaderMap) -> bool {
 impl HttpEndpoint {
     /// Bind 127.0.0.1 only, with a fresh 32-byte bearer secret. Port zero selects
     /// a random port. Startup IO uses the Connection's existing bounded cleanup.
+    /// Scoped connections are rejected before binding.
     pub async fn start(connection: Connection, port: u16) -> Result<Self, ServeError> {
         Self::start_with_secret(connection, port, Secret::random()).await
     }
@@ -132,6 +133,9 @@ impl HttpEndpoint {
         secret: Secret,
         host: Option<Peer>,
     ) -> Result<Self, ServeError> {
+        if connection.is_scoped() {
+            return Err(ServeError::ScopedHttp);
+        }
         let listener =
             tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
                 .await?;

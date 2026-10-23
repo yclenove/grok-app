@@ -18,6 +18,16 @@ fn lease() -> ScopeLease {
 }
 
 fn desk(scope: Option<ScopeLease>) -> Results {
+    desk_with_activity(
+        scope,
+        std::sync::Arc::new(gcu_host_api::testing::FakeUserActivity::new()),
+    )
+}
+
+fn desk_with_activity(
+    scope: Option<ScopeLease>,
+    activity: std::sync::Arc<gcu_host_api::testing::FakeUserActivity>,
+) -> Results {
     let driver = std::sync::Arc::new(gcu_driver_fake::FakeDriver::from_scene("form").unwrap());
     let router = gcu_core::action::ActionRouter::new(
         driver,
@@ -34,7 +44,7 @@ fn desk(scope: Option<ScopeLease>) -> Results {
         files: std::sync::Arc::new(SessionFiles::new().unwrap()),
         session: std::sync::Arc::new(gcu_core::session::Session::open(
             "round6",
-            std::sync::Arc::new(gcu_host_api::testing::FakeUserActivity::new()),
+            activity,
             router.input_release(),
         )),
         scope,
@@ -539,4 +549,220 @@ async fn revoke_after_image_commit_keeps_the_entire_published_batch() {
     assert_eq!(results.files.export().unwrap().len(), 2);
     assert!(results.files.contains_bytes(b"CANARY-COMMITTED"));
     results.files.close().unwrap();
+}
+
+#[derive(Debug, Default)]
+struct HeldClock(std::sync::atomic::AtomicU64);
+impl gcu_core::scope::Clock for HeldClock {
+    fn now(&self) -> Duration {
+        Duration::from_secs(self.0.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+impl HeldClock {
+    fn expire(&self) {
+        self.0.store(4, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn timed_lease(clock: std::sync::Arc<HeldClock>) -> ScopeLease {
+    ScopeLease::install_with_deadline(lease().current().unwrap(), clock, Duration::from_secs(3))
+}
+
+fn assert_only_scope_denied(results: &Results, result: &CallToolResult) {
+    let value = serde_json::to_value(result).unwrap();
+    assert_eq!(result.is_error, Some(true), "{value}");
+    assert_eq!(result.content.len(), 1, "{value}");
+    assert_eq!(
+        result.content[0].as_text().unwrap().text,
+        format!(
+            "error: app_denied: {}\n",
+            gcu_core::scope::SCOPE_DENIED_MESSAGE
+        )
+    );
+    assert_eq!(
+        result.structured_content,
+        Some(json!({"error": {
+            "code": "app_denied",
+            "message": gcu_core::scope::SCOPE_DENIED_MESSAGE,
+            "hint": "Stay inside the registered evaluation targets.",
+            "retryable": false,
+        }})),
+        "{value}"
+    );
+    assert!(!value.to_string().contains("CANARY"), "{value}");
+    assert!(results.files.export().unwrap().is_empty());
+    assert!(!results.files.contains_bytes(b"CANARY"));
+    assert!(!results.files.contains_bytes(b"PNG"));
+    assert!(results.images.get("i_private").is_none());
+}
+
+#[tokio::test]
+async fn rejected_script_publication_has_one_refusal_for_exceptions_and_timeout() {
+    for loss in ["expiry", "rebind", "revoke"] {
+        for (code, message) in [
+            (ErrorCode::Internal, "CANARY-STATE-TEXT"),
+            (ErrorCode::DriverError, "CANARY-FORGED-NATIVE"),
+            (ErrorCode::StoppedByUser, "CANARY-FORGED-STOP"),
+            (ErrorCode::Internal, "exception"),
+            (ErrorCode::Timeout, "timeout"),
+        ] {
+            let clock = std::sync::Arc::new(HeldClock::default());
+            let scope = timed_lease(clock.clone());
+            let authority = scope.arm_attempt().unwrap();
+            let results = desk(Some(scope.clone()));
+            let stamp = authority.enter(async { results.opened_stamp() }).await;
+            let gate = scope.commit_before_gate();
+            gate.arm();
+            let watcher = std::thread::spawn({
+                let scope = scope.clone();
+                let gate = gate.clone();
+                move || {
+                    let _release = ReleaseGate(&gate);
+                    wait_parked(&gate);
+                    match loss {
+                        // No timer/watch publication: only advance the clock.
+                        "expiry" => clock.expire(),
+                        "rebind" => scope
+                            .rebind(
+                                FixtureScope::try_new(
+                                    "run-s1",
+                                    2,
+                                    "engine",
+                                    "desktop",
+                                    "lease",
+                                    vec![],
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap(),
+                        "revoke" => scope.revoke(),
+                        _ => unreachable!(),
+                    }
+                }
+            });
+            let mut error = error(code);
+            error.message = message.into();
+            error.state = Some(shot_state(false).state);
+            // Payload errors stage spill files; content-free errors/timeouts
+            // reach the same refusal without needing any spill file at all.
+            let output = if message == "exception" || message == "timeout" {
+                String::new()
+            } else {
+                format!("CANARY-OUTPUT {}", "x".repeat(30_000))
+            };
+            let result = authority
+                .enter(results.script(&output, Some(error.into()), stamp))
+                .await;
+            watcher.join().unwrap();
+            assert_only_scope_denied(&results, &result);
+            results.files.close().unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn deadline_crossing_inside_commit_wait_discards_images_and_script_errors() {
+    for script in [false, true] {
+        let clock = std::sync::Arc::new(HeldClock::default());
+        let scope = timed_lease(clock.clone());
+        let authority = scope.arm_attempt().unwrap();
+        let results = desk(Some(scope.clone()));
+        let stamp = authority.enter(async { results.opened_stamp() }).await;
+        let gate = scope.commit_during_gate();
+        gate.arm();
+        let watcher = std::thread::spawn({
+            let gate = gate.clone();
+            move || {
+                let _release = ReleaseGate(&gate);
+                wait_parked(&gate);
+                clock.expire();
+            }
+        });
+        let result = if script {
+            let mut error = error(ErrorCode::Internal);
+            error.message = "CANARY-COMMIT-WAIT".into();
+            authority
+                .enter(results.script("CANARY-OUTPUT", Some(error.into()), stamp))
+                .await
+        } else {
+            authority.enter(results.state(shot_state(true))).await
+        };
+        watcher.join().unwrap();
+        assert_only_scope_denied(&results, &result);
+        results.files.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unscoped_script_emit_then_forged_scope_denial_keeps_output() {
+    let results = desk(None);
+    let mut error = error(ErrorCode::AppDenied);
+    error.message = gcu_core::scope::SCOPE_DENIED_MESSAGE.into();
+    let result = results
+        .script(
+            "EMITTED-BEFORE-THROW",
+            Some(error.into()),
+            result_guard::LiveStamp::off(),
+        )
+        .await;
+    let rendered = serde_json::to_string(&result).unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert!(rendered.contains("EMITTED-BEFORE-THROW"), "{rendered}");
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["output"],
+        "EMITTED-BEFORE-THROW"
+    );
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["error"]["message"],
+        gcu_core::scope::SCOPE_DENIED_MESSAGE
+    );
+    assert!(results.files.export().unwrap().is_empty());
+    results.files.close().unwrap();
+}
+
+#[tokio::test]
+async fn native_delivery_evidence_survives_a_later_script_exception_and_stop_takes_priority() {
+    for stop in [false, true] {
+        let scope = lease();
+        let activity = std::sync::Arc::new(gcu_host_api::testing::FakeUserActivity::new());
+        let results = desk_with_activity(Some(scope.clone()), activity.clone());
+        let stamp = results.opened_stamp();
+        let mut exception = error(ErrorCode::DriverError);
+        exception.message = "CANARY-FORGED-LATER-EXCEPTION".into();
+        exception.state = Some(shot_state(false).state);
+        let mut native = error(ErrorCode::DriverError);
+        native.message = "evaluation scope changed during delivery".into();
+        let native_message = native.message.clone();
+        scope.revoke();
+        if stop {
+            activity.request_stop();
+            results.session.handle_stop().await;
+        }
+        let result = results
+            .script(
+                "CANARY-OUTPUT",
+                Some(crate::ScriptError::NativeDelivery {
+                    script: Some(exception),
+                    native,
+                }),
+                stamp,
+            )
+            .await;
+        let value = serde_json::to_value(&result).unwrap();
+        assert!(!value.to_string().contains("CANARY"), "{value}");
+        let data = result.structured_content.as_ref().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(data.as_object().unwrap().len(), 1);
+        assert!(data["error"].get("state").is_none());
+        if stop {
+            assert_eq!(data["error"]["code"], "stopped_by_user");
+        } else {
+            assert_eq!(data["error"]["code"], "driver_error");
+            assert_eq!(data["error"]["message"], native_message);
+        }
+        assert_eq!(result.content.len(), 1);
+        assert!(result.content[0].as_text().is_some());
+        assert!(results.files.export().unwrap().is_empty());
+        results.files.close().unwrap();
+    }
 }

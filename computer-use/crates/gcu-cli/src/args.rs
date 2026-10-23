@@ -47,6 +47,18 @@ pub(crate) enum Command {
     /// Sandboxed script worker. Narrow frames on stdin/stdout, never an MCP tool.
     #[command(hide = true, name = "script-worker")]
     ScriptWorker,
+    /// Private fake scope engine; authority comes only from inherited duplex stdin.
+    #[command(hide = true)]
+    ScopedEngine {
+        #[arg(long, value_enum, default_value = "default")]
+        profile: Profile,
+    },
+    /// Copy MCP stdio to an already acknowledged scoped engine data socket.
+    #[command(hide = true)]
+    ScopeRelay {
+        #[arg(long)]
+        data_address: std::net::SocketAddr,
+    },
     /// Serve MCP over stdio or authenticated loopback HTTP; proxy an engine endpoint.
     Mcp {
         #[arg(long, value_enum, default_value = "stdio")]

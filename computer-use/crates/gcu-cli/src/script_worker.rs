@@ -22,12 +22,18 @@ use std::{
 
 /// Installed only when this binary was built with the script feature on Unix.
 pub(crate) fn runner() -> Option<Arc<dyn gcu_mcp::ScriptRunner>> {
+    runner_owned(crate::script_children::Children::default())
+}
+
+pub(crate) fn runner_owned(
+    _children: crate::script_children::Children,
+) -> Option<Arc<dyn gcu_mcp::ScriptRunner>> {
     #[cfg(feature = "script")]
     {
         // The 128MB worker cap is `RLIMIT_AS`. Without a Windows job object the
         // cap does not exist, so no runner is installed there (fail closed).
         if cfg!(unix) {
-            Some(Arc::new(ProcessRunner))
+            Some(Arc::new(ProcessRunner(_children)))
         } else {
             None
         }
@@ -79,7 +85,7 @@ fn kill_locked(child: &Mutex<Child>) {
 }
 
 #[cfg(feature = "script")]
-struct ProcessRunner;
+struct ProcessRunner(crate::script_children::Children);
 
 #[cfg(feature = "script")]
 impl gcu_mcp::ScriptRunner for ProcessRunner {
@@ -92,7 +98,7 @@ impl gcu_mcp::ScriptRunner for ProcessRunner {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gcu_mcp::ScriptBody> + Send + 'a>> {
         Box::pin(async move {
             match session
-                .enqueue(drive(router, session, call_id, params))
+                .enqueue(drive(router, session, call_id, params, &self.0))
                 .await
             {
                 Ok(body) => body,
@@ -115,9 +121,18 @@ async fn drive(
     session: &gcu_core::session::Session,
     call_id: &str,
     params: gcu_protocol::ComputerScriptParams,
+    children: &crate::script_children::Children,
 ) -> gcu_mcp::ScriptBody {
     if let Err(error) = params.validate() {
         return tool_body(gcu_protocol::ErrorCode::CapabilityUnavailable, error.0);
+    }
+    let lease = router.fixture_lease();
+    let authority = lease.as_ref().and_then(|lease| lease.data_attempt());
+    if lease.is_some() && authority.is_none() {
+        return tool_body(
+            gcu_protocol::ErrorCode::AppDenied,
+            gcu_core::scope::SCOPE_DENIED_MESSAGE,
+        );
     }
     let timeout = Duration::from_millis(u64::from(params.timeout_ms).min(30_000));
     let deadline = Instant::now() + timeout;
@@ -134,22 +149,24 @@ async fn drive(
         .stderr(Stdio::null());
     #[cfg(unix)]
     limit_address_space(&mut command);
-    let mut spawned = match command.spawn() {
-        Ok(child) => child,
+    let owner = match children.spawn(&mut command) {
+        Ok(owner) => owner,
         Err(_) => return tool_body(gcu_protocol::ErrorCode::Internal, "worker start"),
     };
-    let Some(input) = spawned.stdin.take() else {
-        let _ = spawned.kill();
-        let _ = spawned.wait();
+    let child = owner.child.clone();
+    let done = owner.done.clone();
+    let input = child.lock().unwrap_or_else(|e| e.into_inner()).stdin.take();
+    let Some(input) = input else {
         return tool_body(gcu_protocol::ErrorCode::Internal, "worker stdin");
     };
-    let Some(output) = spawned.stdout.take() else {
-        let _ = spawned.kill();
-        let _ = spawned.wait();
+    let output = child
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .stdout
+        .take();
+    let Some(output) = output else {
         return tool_body(gcu_protocol::ErrorCode::Internal, "worker stdout");
     };
-    let child = Arc::new(Mutex::new(spawned));
-    let done = Arc::new(AtomicBool::new(false));
     let watch = {
         let child = Arc::clone(&child);
         let done = Arc::clone(&done);
@@ -168,17 +185,18 @@ async fn drive(
     let io = match io {
         Ok(handle) => handle,
         Err(_) => {
-            done.store(true, Ordering::Release);
-            kill_locked(&child);
-            if let Some(handle) = watch {
-                let _ = handle.join();
-            }
-            reap(&child);
+            drop(owner);
             return tool_body(gcu_protocol::ErrorCode::Internal, "worker thread");
         }
     };
     let mut seq = 0u32;
-    let body = loop {
+    let replies = WorkerReplies {
+        sender: reply_tx,
+        #[cfg(test)]
+        gate: None,
+    };
+    let mut native_error = None;
+    let mut body = loop {
         if Instant::now() >= deadline {
             break tool_body(gcu_protocol::ErrorCode::Timeout, "timeout");
         }
@@ -189,13 +207,23 @@ async fn drive(
         match tokio::time::timeout(wait, events_rx.recv()).await {
             Ok(Some(ChildMsg::Request(op))) => {
                 if session.is_stopped() || session.is_closed() || Instant::now() >= deadline {
-                    let _ = reply_tx.send(gcu_script::Reply::stopped());
+                    let _ = replies.sender.try_send(gcu_script::Reply::stopped());
                     break tool_body(gcu_protocol::ErrorCode::StoppedByUser, "stopped");
                 }
                 let reply =
                     gcu_script::dispatch(router, session, &format!("{call_id}:{seq}"), op).await;
                 seq = seq.saturating_add(1);
-                if reply_tx.send(reply).is_err() {
+                // This Reply came directly from the parent router. Never infer
+                // delivery from a worker Finish code, message or driver_calls.
+                if reply.unknown {
+                    native_error = Some(reply_error(&reply, session));
+                }
+                let sent = match replies.enqueue(reply, session, lease.as_ref(), authority.as_ref())
+                {
+                    Ok(sent) => sent,
+                    Err(body) => break *body,
+                };
+                if !sent {
                     break tool_body(gcu_protocol::ErrorCode::Internal, "worker pipe");
                 }
             }
@@ -206,14 +234,31 @@ async fn drive(
             Err(_) => break tool_body(gcu_protocol::ErrorCode::Timeout, "timeout"),
         }
     };
-    done.store(true, Ordering::Release);
-    kill_locked(&child);
-    drop(reply_tx);
-    let _ = io.join();
-    if let Some(handle) = watch {
-        let _ = handle.join();
+    if let Some(mut error) = native_error {
+        // Stop can latch after the native reply, while the worker is finishing.
+        error.code = session.stop_priority(error.code);
+        let script = body.error.take().and_then(|error| match error {
+            gcu_mcp::ScriptError::Untrusted(error) => Some(error),
+            gcu_mcp::ScriptError::NativeDelivery { script, .. } => script,
+        });
+        body.error = Some(gcu_mcp::ScriptError::NativeDelivery {
+            script,
+            native: error,
+        });
     }
-    reap(&child);
+    drop(replies);
+    // Kill/reap before returning; the guard also runs on cancellation/panic.
+    drop(owner);
+    // Pipe/watchdog threads own no child lifecycle. Never join an unbounded IO
+    // read on the runtime thread; dropping receivers/pipes makes them finish.
+    if io.is_finished() {
+        let _ = io.join();
+    }
+    if let Some(handle) = watch {
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+    }
     body
 }
 
@@ -286,13 +331,14 @@ fn body_from_finish(frame: gcu_script::Frame) -> gcu_mcp::ScriptBody {
     };
     gcu_mcp::ScriptBody {
         output,
-        error: Some(gcu_protocol::ToolError {
+        // Even driver_error / stopped_by_user here can be script-chosen.
+        error: Some(gcu_mcp::ScriptError::Untrusted(gcu_protocol::ToolError {
             code,
             message,
             hint: "Use fresh state. Do not replay an unknown outcome.".into(),
             retryable: false,
             state: None,
-        }),
+        })),
     }
 }
 
@@ -300,20 +346,107 @@ fn body_from_finish(frame: gcu_script::Frame) -> gcu_mcp::ScriptBody {
 fn tool_body(code: gcu_protocol::ErrorCode, message: &str) -> gcu_mcp::ScriptBody {
     gcu_mcp::ScriptBody {
         output: String::new(),
-        error: Some(gcu_protocol::ToolError {
+        error: Some(gcu_mcp::ScriptError::Untrusted(gcu_protocol::ToolError {
             code,
             message: message.to_owned(),
             hint: "Use fresh state. Do not replay an unknown outcome.".into(),
             retryable: false,
             state: None,
-        }),
+        })),
     }
 }
 
 #[cfg(feature = "script")]
-fn reap(child: &Mutex<Child>) {
-    let mut guard = child.lock().unwrap_or_else(|err| err.into_inner());
-    let _ = guard.wait();
+fn reply_error(
+    reply: &gcu_script::Reply,
+    session: &gcu_core::session::Session,
+) -> gcu_protocol::ToolError {
+    let code = gcu_protocol::ErrorCode::ALL
+        .into_iter()
+        .find(|code| code.as_str() == reply.code)
+        .unwrap_or(gcu_protocol::ErrorCode::Internal);
+    gcu_protocol::ToolError {
+        code: session.stop_priority(code),
+        message: reply.message.clone(),
+        hint: "Use fresh state. Do not replay an unknown outcome.".into(),
+        retryable: false,
+        state: None,
+    }
+}
+
+#[cfg(feature = "script")]
+struct WorkerReplies {
+    sender: std::sync::mpsc::SyncSender<gcu_script::Reply>,
+    #[cfg(test)]
+    gate: Option<Arc<gcu_core::action::PublishGate>>,
+}
+
+#[cfg(feature = "script")]
+impl WorkerReplies {
+    fn enqueue(
+        &self,
+        reply: gcu_script::Reply,
+        session: &gcu_core::session::Session,
+        lease: Option<&gcu_core::scope::ScopeLease>,
+        authority: Option<&gcu_core::scope::AttemptAuthority>,
+    ) -> Result<bool, Box<gcu_mcp::ScriptBody>> {
+        // Tests park after nested dispatch has returned content, before the
+        // parent enqueues any bytes to its worker IO thread.
+        #[cfg(test)]
+        if let Some(gate) = &self.gate {
+            gate.enter();
+        }
+        let refused = if reply.unknown {
+            gcu_script::Reply::fail(&reply.code, &reply.message, true, true)
+        } else {
+            gcu_script::Reply::fail(
+                "app_denied",
+                gcu_core::scope::SCOPE_DENIED_MESSAGE,
+                true,
+                false,
+            )
+        };
+        if session.stop_priority(gcu_protocol::ErrorCode::AppDenied)
+            == gcu_protocol::ErrorCode::StoppedByUser
+        {
+            return Err(self.refuse(refused, session));
+        }
+        if let (Some(lease), Some(authority)) = (lease, authority) {
+            match lease.commit_if_current(
+                &[(authority.scope().run_id(), authority.scope().generation())],
+                || self.sender.try_send(reply).is_ok(),
+            ) {
+                Ok(sent) => Ok(sent),
+                Err(_) => Err(self.refuse(refused, session)),
+            }
+        } else {
+            Ok(self.sender.try_send(reply).is_ok())
+        }
+    }
+
+    fn refuse(
+        &self,
+        reply: gcu_script::Reply,
+        session: &gcu_core::session::Session,
+    ) -> Box<gcu_mcp::ScriptBody> {
+        // Re-read Stop after any lease-lock wait. Use the same selected code in
+        // the worker frame and the parent's trusted native-delivery evidence.
+        let error = reply_error(&reply, session);
+        let native = reply.unknown;
+        let reply = gcu_script::Reply::fail(error.code.as_str(), &error.message, true, native);
+        let _ = self.sender.try_send(reply);
+        Box::new(gcu_mcp::ScriptBody {
+            output: String::new(),
+            error: Some(if native {
+                gcu_mcp::ScriptError::NativeDelivery {
+                    script: Some(error.clone()),
+                    native: error,
+                }
+            } else {
+                gcu_mcp::ScriptError::Untrusted(error)
+            }),
+        })
+    }
 }
 
 #[cfg(all(unix, feature = "script"))]
@@ -366,3 +499,7 @@ mod tests {
         assert!(!status.success());
     }
 }
+
+#[cfg(all(test, feature = "script"))]
+#[path = "script_worker_tests.rs"]
+mod reply_tests;

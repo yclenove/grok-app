@@ -9,8 +9,48 @@ use std::{future::Future, pin::Pin};
 pub struct ScriptBody {
     /// Script output. No handles, paths, or tokens.
     pub output: String,
-    /// Failure. `None` when the script finished cleanly.
-    pub error: Option<ToolError>,
+    /// Script failure and any independent parent-side delivery evidence.
+    pub error: Option<ScriptError>,
+}
+
+/// Error origin retained in the trusted parent, never decoded from worker text.
+// Built only on failure paths and moved once into the reply. Boxing one variant would not
+// help (`Untrusted` is already 600+ bytes) and every variant is matched by value in the worker.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScriptError {
+    /// Worker exceptions, timeouts and failures without native-delivery evidence.
+    Untrusted(ToolError),
+    /// A parent-dispatched router reply proved uncertain native delivery.
+    /// Only the trusted runner may construct this; worker Finish frames cannot.
+    NativeDelivery {
+        /// Worker error for a still-authorized publication, if any.
+        script: Option<ToolError>,
+        /// Parent router's error, retained independently of script exceptions.
+        native: ToolError,
+    },
+}
+
+impl ScriptError {
+    pub(crate) fn error(&self) -> Option<&ToolError> {
+        match self {
+            Self::Untrusted(error) => Some(error),
+            Self::NativeDelivery { script, .. } => script.as_ref(),
+        }
+    }
+
+    pub(crate) fn native(&self) -> Option<&ToolError> {
+        match self {
+            Self::NativeDelivery { native, .. } => Some(native),
+            Self::Untrusted(_) => None,
+        }
+    }
+}
+
+impl From<ToolError> for ScriptError {
+    fn from(error: ToolError) -> Self {
+        Self::Untrusted(error)
+    }
 }
 
 /// Runs one script through the same router entry as a single tool and batch.

@@ -62,7 +62,7 @@ impl ActionRouter {
     pub(crate) fn scope_stamp(&self) -> (Option<String>, Option<u64>) {
         self.lease
             .as_ref()
-            .and_then(|lease| lease.current())
+            .and_then(|lease| lease.authorized_current())
             .map(|scope| (Some(scope.run_id().to_owned()), Some(scope.generation())))
             .unwrap_or((None, None))
     }

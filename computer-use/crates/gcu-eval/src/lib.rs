@@ -37,6 +37,7 @@ mod proc;
 mod release;
 mod report;
 mod runner;
+pub mod scope;
 pub mod soak;
 mod tasks;
 mod yaml;
@@ -66,8 +67,8 @@ pub use report::{escape_html, render_html, trials_from_summary, write_reports, R
 pub use runner::{
     block_on, bundled_tasks_dir, child_env_keys, host_platform, parse_approval, path_under_configs,
     run_tasks, user_config_dirs, ApprovalMode, Assurance, DesktopProvider, EnvProvider,
-    LocalTempProvider, Provision, RoundsSource, RunConfig, RunStatus, SuiteReport, TaskMetrics,
-    TaskOutcome, TelemetryState, DESKTOP_NOT_RUN,
+    Environment, LocalTempProvider, Provision, RoundsSource, RunConfig, RunStatus, SuiteReport,
+    TaskMetrics, TaskOutcome, TelemetryState, DESKTOP_NOT_RUN,
 };
 pub use tasks::{load_tasks, Task};
 

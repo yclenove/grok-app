@@ -10,13 +10,22 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
     reader: &mut R,
 ) -> Result<Option<T>, Error> {
+    read_frame_limited(reader, MAX_FRAME).await
+}
+/// Read a frame with a stricter application limit, checked before allocation.
+/// Uses the same framing/parser and EOF rules as [`read_frame`]. The caller
+/// owns the deadline; cancellation requires closing the stream.
+pub async fn read_frame_limited<R: AsyncRead + Unpin, T: DeserializeOwned>(
+    reader: &mut R,
+    limit: usize,
+) -> Result<Option<T>, Error> {
     let mut prefix = [0; 4];
     if reader.read(&mut prefix[..1]).await? == 0 {
         return Ok(None);
     }
     reader.read_exact(&mut prefix[1..]).await?;
     let n = u32::from_be_bytes(prefix) as usize;
-    if n == 0 || n > MAX_FRAME {
+    if n == 0 || n > limit.min(MAX_FRAME) {
         return Err(Error::Invalid);
     }
     let mut bytes = vec![0; n];

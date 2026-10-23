@@ -256,7 +256,7 @@ impl ActionRouter {
     fn opened_scope(&self) -> Option<(String, u64)> {
         self.lease.as_ref().and_then(|lease| {
             lease
-                .current()
+                .authorized_current()
                 .map(|scope| (scope.run_id().to_owned(), scope.generation()))
         })
     }

@@ -19,7 +19,7 @@ pub(crate) async fn execute(
 ) -> BatchReport {
     let lease = router.fixture_lease();
     let captured = lease.as_ref().and_then(|lease| {
-        let authority = lease.arm_attempt()?;
+        let authority = lease.data_attempt()?;
         Some((
             authority.scope().run_id().to_owned(),
             authority.scope().generation(),

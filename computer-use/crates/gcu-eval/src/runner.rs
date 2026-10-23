@@ -240,6 +240,9 @@ pub struct RunConfig {
     /// mitigations, not a confinement proof. Fixture-bound authorization and an OS sandbox
     /// are not implemented.
     pub real_driver: bool,
+    /// Trusted S3 fake-only manifest, sent exclusively over inherited control.
+    /// This does not enable native scope or waive the real-client boundary.
+    pub fake_scope: Option<gcu_host_protocol::scope::Scope>,
     /// Fixture app started once per task when `real_driver` is set. It writes `$GCU_FIXTURE_STATE`.
     pub fixture_bin: Option<PathBuf>,
     /// Directory that holds a login made for this evaluation only. Only its `auth.json` is copied,
@@ -296,6 +299,7 @@ impl Default for RunConfig {
             arm_batch: None,
             arm_script: None,
             real_driver: false,
+            fake_scope: None,
             fixture_bin: None,
             auth_seed: None,
             attest_disposable_desktop: false,
@@ -358,6 +362,9 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             RunStatus::NotRun,
             "platform not listed on the task",
         );
+    }
+    if let Err(error) = crate::scope::validate(cfg) {
+        return skipped(task, cfg, RunStatus::NotRun, &error.to_string());
     }
     let real_client = crate::boundary::launches_real_client(cfg);
     // Owner-only ACLs are not implemented. Real mode must not pretend a temp
@@ -452,7 +459,38 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             None => {}
         }
     }
-    let outcome = crate::exec::execute(task, cfg, &held.env).await;
+    // Cancellation cannot delete a run tree before the scoped child exits.
+    if cfg.fake_scope.is_some() {
+        held.disarm();
+    }
+    let scoped = match crate::prep::start_scope(task, cfg, &held.env).await {
+        Ok(scoped) => scoped,
+        Err(error) => {
+            drop(fixture);
+            if !error.to_string().contains("cleanup_failed") {
+                held.arm();
+            }
+            return finish(
+                skipped(task, cfg, RunStatus::NotRun, &error.to_string()),
+                &mut held,
+            );
+        }
+    };
+    let mut outcome = match scoped.as_ref() {
+        Some(scoped) => {
+            crate::exec::execute_scoped(task, cfg, &held.env, Some(scoped.data_address())).await
+        }
+        None => crate::exec::execute(task, cfg, &held.env).await,
+    };
+    if let Some(scoped) = scoped {
+        match scoped.close().await {
+            Ok(()) => held.arm(),
+            Err(_) => {
+                outcome.assurance.cleanup_failed = true;
+                crate::prep::apply_cleanup_failure(&mut outcome.status, &mut outcome.reason);
+            }
+        }
+    }
     drop(fixture);
     finish(outcome, &mut held)
 }

@@ -106,7 +106,7 @@ pub(crate) fn initial_block(
     data: &Value,
     produced: &LiveStamp,
 ) -> Guard {
-    if hard_denial(error) {
+    if lease.is_some() && hard_denial(error) {
         return blocked();
     }
     let Some(lease) = lease else {
@@ -180,7 +180,7 @@ fn blocked() -> Guard {
     }
 }
 
-fn hard_denial(error: Option<&ToolError>) -> bool {
+pub(super) fn hard_denial(error: Option<&ToolError>) -> bool {
     error.is_some_and(|err| err.code == ErrorCode::AppDenied && err.message == SCOPE_DENIED_MESSAGE)
 }
 

@@ -107,15 +107,24 @@ impl Results {
             .await
     }
     pub async fn failure(&self, error: ToolError) -> CallToolResult {
-        self.build(None, Some(error), json!({}), result_guard::LiveStamp::off())
+        self.build(None, Some(error), json!({}), self.opened_stamp())
             .await
     }
     pub async fn script(
         &self,
         output: &str,
-        error: Option<ToolError>,
+        error: Option<crate::ScriptError>,
         produced: result_guard::LiveStamp,
     ) -> CallToolResult {
+        let native = error.as_ref().and_then(crate::ScriptError::native);
+        let error = error.as_ref().and_then(crate::ScriptError::error);
+        if self.scope.is_some() && result_guard::hard_denial(error) {
+            return self.assemble_cleared_with_native(
+                native.or(error),
+                &json!({}),
+                native.is_some(),
+            );
+        }
         let failed = error.is_some();
         let mut text = error
             .as_ref()
@@ -133,7 +142,24 @@ impl Results {
             "output": prefix(output, 2_000),
             "error": error,
         });
-        self.finish_text(text, data, failed, produced).await
+        match self
+            .finish(FinishIn {
+                text,
+                data,
+                images: Vec::new(),
+                failed,
+                stamp: produced,
+                created: Vec::new(),
+                pending: None,
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(FinishFault::Lost) => {
+                self.assemble_cleared_with_native(native.or(error), &json!({}), native.is_some())
+            }
+            Err(FinishFault::Io) => self.io_error(),
+        }
     }
     pub async fn discovery(
         &self,
@@ -156,30 +182,8 @@ impl Results {
             .await
         {
             Ok(result) => result,
-            Err(_) => self.io_error(),
-        }
-    }
-    async fn finish_text(
-        &self,
-        text: String,
-        data: Value,
-        failed: bool,
-        produced: result_guard::LiveStamp,
-    ) -> CallToolResult {
-        match self
-            .finish(FinishIn {
-                text,
-                data,
-                images: Vec::new(),
-                failed,
-                stamp: produced,
-                created: Vec::new(),
-                pending: None,
-            })
-            .await
-        {
-            Ok(result) => result,
-            Err(_) => self.io_error(),
+            Err(FinishFault::Lost) => self.assemble_cleared(None, &json!({})),
+            Err(FinishFault::Io) => self.io_error(),
         }
     }
     /// Epoch to carry from before a scoped read. Unscoped hosts stay off.
@@ -190,7 +194,7 @@ impl Results {
         let Some(lease) = &self.scope else {
             return result_guard::LiveStamp::off();
         };
-        match lease.current() {
+        match lease.authorized_current() {
             Some(scope) => result_guard::LiveStamp::epoch(scope.run_id(), scope.generation()),
             None => result_guard::LiveStamp::closed(),
         }
@@ -405,7 +409,43 @@ impl Results {
         }
     }
     fn assemble_cleared(&self, error: Option<&ToolError>, data: &Value) -> CallToolResult {
-        let mut data = data.clone();
+        // `data` here is assembled from core outcomes, never script JSON.
+        let native = data.pointer("/action/outcome").and_then(Value::as_str) == Some("unknown");
+        self.assemble_cleared_with_native(error, data, native)
+    }
+
+    pub(crate) fn scope_refusal(&self) -> CallToolResult {
+        self.assemble_cleared(None, &json!({}))
+    }
+
+    fn assemble_cleared_with_native(
+        &self,
+        error: Option<&ToolError>,
+        data: &Value,
+        native: bool,
+    ) -> CallToolResult {
+        // An error message/code is content, not evidence of native delivery.
+        // Authority loss discards it exactly like state, output, images and files.
+        let code = self.session.stop_priority(ErrorCode::AppDenied);
+        let stopped = code == ErrorCode::StoppedByUser;
+        let refusal;
+        let error = match error {
+            _ if stopped || (self.scope.is_some() && !native) => {
+                let mut error = result_text::error(code);
+                if !stopped {
+                    error.message = gcu_core::scope::SCOPE_DENIED_MESSAGE.into();
+                    error.hint = "Stay inside the registered evaluation targets.".into();
+                }
+                refusal = error;
+                Some(&refusal)
+            }
+            other => other,
+        };
+        let mut data = if self.scope.is_some() && !native {
+            json!({})
+        } else {
+            data.clone()
+        };
         result_guard::scrub(&mut data);
         let mut text = String::new();
         if let Some(error) = error {
@@ -424,6 +464,13 @@ impl Results {
         result
     }
     fn io_error(&self) -> CallToolResult {
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|lease| lease.authorized_current().is_none())
+        {
+            return self.scope_refusal();
+        }
         let error = error(ErrorCode::Internal);
         let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
             "error: {}: {}",

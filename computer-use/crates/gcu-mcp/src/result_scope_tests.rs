@@ -425,12 +425,15 @@ async fn window_gone_sibling_title_is_dropped_on_revoke_or_rebind_before_encode(
         }
         let (text, value) = rendered(results.outcome(stale).await).await;
         assert_absent(if remove { "rebind" } else { "revoke" }, &text, &value);
-        assert_eq!(value["structuredContent"]["error"]["code"], "window_gone");
+        assert_eq!(value["structuredContent"]["error"]["code"], "app_denied");
         assert_eq!(
-            value["structuredContent"]["error"]["message"], "window gone",
+            value["structuredContent"]["error"]["message"],
+            gcu_core::scope::SCOPE_DENIED_MESSAGE
+        );
+        assert!(
+            value["structuredContent"].get("action").is_none(),
             "{value}"
         );
-        assert_eq!(value["structuredContent"]["action"]["outcome"], "refused");
         results.files.close().unwrap();
     }
 }
@@ -461,7 +464,15 @@ async fn element_label_and_batch_target_are_dropped_when_the_epoch_is_stale() {
         }
         let (text, value) = rendered(results.outcome(stale).await).await;
         assert_absent(if remove { "rebind" } else { "revoke" }, &text, &value);
-        assert_eq!(value["structuredContent"]["action"]["outcome"], "done");
+        assert_eq!(value["structuredContent"]["error"]["code"], "app_denied");
+        assert_eq!(
+            value["structuredContent"]["error"]["message"],
+            gcu_core::scope::SCOPE_DENIED_MESSAGE
+        );
+        assert!(
+            value["structuredContent"].get("action").is_none(),
+            "{value}"
+        );
         results.files.close().unwrap();
     }
 
@@ -503,6 +514,14 @@ async fn element_label_and_batch_target_are_dropped_when_the_epoch_is_stale() {
     desk.lease.rebind(only_b()).unwrap();
     let (text, value) = rendered(results.batch(stale).await).await;
     assert_absent("batch", &text, &value);
-    assert_eq!(value["structuredContent"]["action"]["outcome"], "done");
+    assert_eq!(value["structuredContent"]["error"]["code"], "app_denied");
+    assert_eq!(
+        value["structuredContent"]["error"]["message"],
+        gcu_core::scope::SCOPE_DENIED_MESSAGE
+    );
+    assert!(
+        value["structuredContent"].get("action").is_none(),
+        "{value}"
+    );
     results.files.close().unwrap();
 }

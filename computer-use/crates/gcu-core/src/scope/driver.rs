@@ -64,7 +64,10 @@ where
                 maybe_executed: false,
             });
         }
-        let scope = self.lease.current().ok_or(DriverError::ScopeDenied)?;
+        let scope = self
+            .lease
+            .authorized_current()
+            .ok_or(DriverError::ScopeDenied)?;
         if let Some((run, generation)) = super::authority::expected_epoch() {
             if scope.run_id() != run || scope.generation() != generation {
                 return Err(DriverError::ScopeDenied);
@@ -130,7 +133,8 @@ where
     }
 
     async fn doctor(&self) -> DoctorReport {
-        if self.activity.stop_requested() || self.lease.current().is_none() {
+        let opened = self.open().ok();
+        if opened.is_none() {
             return DoctorReport {
                 capabilities: self.capabilities.clone(),
                 ready: false,
@@ -139,6 +143,14 @@ where
         }
         let mut report = self.inner.doctor().await;
         report.capabilities = self.capabilities.clone();
+        if opened
+            .as_ref()
+            .is_none_or(|scope| self.handoff(scope).is_err())
+        {
+            report.ready = false;
+            report.issues.clear();
+            return report;
+        }
         report
             .issues
             .retain(|issue| DOCTOR_ALLOW.contains(&issue.as_str()));
@@ -166,7 +178,7 @@ where
     }
 
     fn discovery_status(&self) -> DiscoveryStatus {
-        if self.activity.stop_requested() || self.lease.current().is_none() {
+        if self.activity.stop_requested() || self.lease.authorized_current().is_none() {
             return DiscoveryStatus::default();
         }
         self.inner.discovery_status()
@@ -230,7 +242,10 @@ where
             app: app.clone(),
             id: info.id.clone(),
         };
-        let current = self.lease.current().ok_or(DriverError::ScopeDenied)?;
+        let current = self
+            .lease
+            .authorized_current()
+            .ok_or(DriverError::ScopeDenied)?;
         guard::admit_window(&current, self.inner.as_ref(), &window)?;
         if self.activity.stop_requested() {
             return Err(DriverError::Cancelled {
@@ -313,7 +328,7 @@ where
             });
         }
         self.inner.attempt_fence(AttemptPhase::BeforeOpen).await;
-        let Some(mut authority) = self.lease.arm_attempt() else {
+        let Some(mut authority) = self.lease.data_attempt() else {
             return Err(self.abandon(cancel).await);
         };
         if !self.authority_matches(&authority) {
@@ -351,7 +366,7 @@ where
         if self.activity.stop_requested() {
             return None;
         }
-        let mut authority = self.lease.arm_attempt()?;
+        let mut authority = self.lease.data_attempt()?;
         if !self.authority_matches(&authority) {
             return None;
         }

@@ -9,6 +9,7 @@
 
 mod authority;
 mod commit;
+mod deadline;
 mod driver;
 mod events;
 mod guard;
@@ -16,6 +17,7 @@ mod model;
 
 pub use authority::AttemptAuthority;
 pub(crate) use authority::{expected_epoch, with_attempt};
+pub use deadline::{Clock, Monotonic};
 pub use driver::ScopedDriver;
 pub use model::{
     AttemptPhase, BootIdentity, ElementBinding, ExecutableProof, FixtureScope, FixtureTarget,

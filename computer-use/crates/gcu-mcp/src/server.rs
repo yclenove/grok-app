@@ -10,7 +10,7 @@ use crate::{
 use gcu_core::{
     action::ActionRouter,
     driver::Driver,
-    scope::{InstanceEvidence, ScopeLease},
+    scope::{AttemptAuthority, InstanceEvidence, ScopeLease},
     session::{Session, WindowLocks},
 };
 use gcu_host_api::{ApprovalProvider, EventSink, PolicyStore, UserActivity};
@@ -69,6 +69,7 @@ impl std::fmt::Debug for ServerConfig {
 #[derive(Clone)]
 pub(crate) struct Server(Arc<Inner>);
 struct Inner {
+    authority: Option<AttemptAuthority>,
     driver: Arc<dyn Driver>,
     router: ActionRouter,
     session: Arc<Session>,
@@ -92,6 +93,18 @@ fn shared_locks() -> WindowLocks {
     LOCKS.get_or_init(WindowLocks::new).clone()
 }
 impl Server {
+    pub(crate) fn authority(&self) -> Option<&AttemptAuthority> {
+        self.0.authority.as_ref()
+    }
+    pub(crate) fn usable(&self) -> bool {
+        self.0
+            .authority
+            .as_ref()
+            .is_none_or(AttemptAuthority::usable)
+    }
+    pub(crate) fn scope_refusal(&self) -> rmcp::model::CallToolResult {
+        self.0.results.scope_refusal()
+    }
     pub(crate) fn lifecycle(&self) -> crate::lifecycle::Lifecycle {
         self.0.lifecycle.clone()
     }
@@ -144,7 +157,7 @@ impl Server {
         Self::assemble(driver, router, activity, config, files, policy)
     }
 
-    /// Trusted scoped session. The lease is not stored on the server, and no
+    /// Trusted scoped session. The connection authority is retained, and no
     /// browser hub or scope-editing tool is installed.
     ///
     /// File setup is the caller's. This constructor does not block, wait, or
@@ -153,6 +166,7 @@ impl Server {
     pub(crate) fn new_scoped<D>(
         driver: D,
         lease: ScopeLease,
+        mut authority: AttemptAuthority,
         host: Host,
         mut config: ServerConfig,
         files: SessionFiles,
@@ -160,6 +174,9 @@ impl Server {
     where
         D: Driver + InstanceEvidence + 'static,
     {
+        if !authority.confirm(&lease) {
+            return Err(ServeError::Protocol);
+        }
         config.browser_session = None;
         let policy = host.policy.load();
         let activity = host.activity.clone();
@@ -173,7 +190,11 @@ impl Server {
             shared_locks(),
         );
         let driver = router.bound_driver();
-        Self::assemble(driver, router, activity, config, files, policy)
+        let mut server = Self::assemble(driver, router, activity, config, files, policy)?;
+        Arc::get_mut(&mut server.0)
+            .ok_or(ServeError::Protocol)?
+            .authority = Some(authority);
+        Ok(server)
     }
 
     fn assemble(
@@ -212,6 +233,7 @@ impl Server {
             catalog::tools(config.profile, script_ready).map_err(|_| ServeError::Protocol)?;
         let lifecycle = crate::lifecycle::Lifecycle::new(session.clone());
         Ok(Self(Arc::new(Inner {
+            authority: None,
             driver,
             router,
             session,
@@ -231,8 +253,27 @@ impl Server {
         name: &str,
         arguments: Value,
     ) -> rmcp::model::CallToolResult {
+        if !self.usable() {
+            return self.scope_refusal();
+        }
+        // Keep one dispatch future behind a pointer. Embedding it separately in
+        // both branches multiplies its large inline state through the task-local
+        // wrapper and every Connection::call future, even for discovery calls.
+        let work = Box::pin(self.call_bound(name, arguments));
+        if let Some(authority) = &self.0.authority {
+            // rmcp spawns each handler. Install here, on the handler's own task,
+            // before queueing, and retain it through all nested script operations.
+            return authority.enter(work).await;
+        }
+        work.await
+    }
+
+    async fn call_bound(&self, name: &str, arguments: Value) -> rmcp::model::CallToolResult {
         let _active = self.0.lifecycle.active();
         let _delivery = self.0.delivery.lock().await;
+        if !self.usable() {
+            return self.scope_refusal();
+        }
         let result = self.dispatch(name, arguments).await;
         match result {
             Ok(result) => result,
@@ -388,6 +429,9 @@ impl ServerHandler for Server {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if !self.usable() {
+            return Ok(self.scope_refusal().into());
+        }
         let Ok(_slot) = self.0.slots.try_acquire() else {
             return Ok(self
                 .0
@@ -446,3 +490,7 @@ impl Drop for Cleanup {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_authority_tests.rs"]
+mod authority_tests;
