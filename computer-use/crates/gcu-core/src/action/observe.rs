@@ -276,6 +276,10 @@ impl ActionRouter {
         text_limit: Option<usize>,
     ) -> Result<ActionState, Box<ToolError>> {
         let config = self.policy.load();
+        // After policy load and before the thumbnail or the snapshot lock.
+        // A test may revoke here. The epoch check is the next synchronous step
+        // once the snapshot lock is held, before anything is recorded.
+        self.publish_gate.enter();
         let image = if attach {
             fresh
                 .image
@@ -290,6 +294,10 @@ impl ActionRouter {
         let mut opts = RenderOpts::new(fresh.win.app.info.clone(), fresh.info.clone());
         opts.text_limit = text_limit;
         let mut resources = lock(&session.actions);
+        if let Err(err) = self.publication_refusal(session, &fresh) {
+            drop(resources);
+            return Err(err);
+        }
         // Retain only images actually handed to the model. A speculative image
         // must not replace the model's latest coordinate observation.
         let observation = resources
@@ -344,6 +352,22 @@ impl ActionRouter {
             scope_run: fresh.scope_run,
             scope_generation: fresh.scope_generation,
         })
+    }
+
+    /// Refuse a sample whose producing epoch is missing or no longer current.
+    ///
+    /// Called after the snapshot lock is taken and before anything is recorded.
+    /// The scope lock is only the brief read inside `same_epoch` and is dropped
+    /// before record. Stop wins over scope denial. Memory only;
+    /// no await, timeout, or cancellation.
+    fn publication_refusal(&self, session: &Session, fresh: &Fresh) -> Result<(), Box<ToolError>> {
+        if self.scope_binding_current(fresh.scope_run.as_deref(), fresh.scope_generation) {
+            return Ok(());
+        }
+        if session.is_stopped() || session.activity().stop_requested() {
+            return Err(Box::new(error(ErrorCode::StoppedByUser)));
+        }
+        Err(Box::new(CallError::ScopeDenied.tool_error()))
     }
 }
 // Full raw state is compared in memory, not just rendered/budgeted text. This

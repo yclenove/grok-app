@@ -1,6 +1,7 @@
 //! Boundary checks for safe result encoding and resource lifetime.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
+use crate::files::FilePause;
 use gcu_core::{
     action::{ActionRouter, ActionState, ToolOutcome},
     driver::Capture,
@@ -15,7 +16,9 @@ use gcu_host_api::testing::{
     FakeUserActivity, MemoryPolicyStore, RecordingEventSink, ScriptedApprovals,
 };
 use gcu_protocol::result::{ActionResult, Delivery, Effect, Outcome, Settle, SettleReason};
-use gcu_protocol::{AppInfo, AppState, ErrorCode, Rect, ToolError, ToolName, WindowInfo};
+use gcu_protocol::{
+    AppInfo, AppState, ErrorCode, Rect, ScreenshotInfo, ToolError, ToolName, WindowInfo,
+};
 use std::time::Duration;
 
 fn results() -> Results {
@@ -42,10 +45,21 @@ fn results() -> Results {
 #[tokio::test]
 async fn oversized_facts_preserve_error_and_fresh_snapshot_in_prefix() {
     let r = results();
-    let result = r.finish("error: stale_element: state changed".into(), json!({
-        "error":{"code":"stale_element","message":"state changed","state":{"snapshot_id":"s_7"}},
-        "action":{"outcome":"refused"},"large":"界".repeat(9000)
-    }), Vec::new(), true).await.unwrap();
+    let result = r
+        .finish(FinishIn {
+            text: "error: stale_element: state changed".into(),
+            data: json!({
+                "error":{"code":"stale_element","message":"state changed","state":{"snapshot_id":"s_7"}},
+                "action":{"outcome":"refused"},"large":"界".repeat(9000)
+            }),
+            images: Vec::new(),
+            failed: true,
+            stamp: result_guard::LiveStamp::off(),
+            created: Vec::new(),
+            pending: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(result.is_error, Some(true));
     let facts = result.structured_content.unwrap();
     assert_eq!(facts["error"]["state"]["snapshot_id"], "s_7");
@@ -136,11 +150,11 @@ async fn noisy_large_redacted_image_is_reduced_before_private_png_delivery() {
         ),
     )
     .unwrap();
-    let (encoded, path) = r.image(image.clone()).await.unwrap();
-    assert!(encoded.reduced());
-    assert!(encoded.bytes().len() <= 300_000);
-    assert!(encoded.width() < width && encoded.height() < height);
-    assert_eq!(std::fs::read(&path).unwrap(), encoded.bytes());
+    let encoded = r.image(image.clone()).await.unwrap();
+    assert!(encoded.reduced);
+    assert!(encoded.bytes.len() <= 300_000);
+    assert!(encoded.width < width && encoded.height < height);
+    assert_eq!(std::fs::read(&encoded.path).unwrap(), encoded.bytes);
     r.files.close().unwrap();
     assert!(r.image(image).await.is_err());
 }
@@ -369,8 +383,13 @@ async fn stale_epoch_unknown_drops_state_images_and_overflow_files() {
         unknown_outcome(Some(stamped_state(None, None, false)), None),
     )
     .await;
-    assert!(text.contains("CANARY-STALE observation"), "{text}");
-    assert_eq!(value["structuredContent"]["state"]["snapshot_id"], "s_9");
+    let rendered = format!("{text} {value}");
+    assert!(
+        !rendered.contains("CANARY-STALE"),
+        "unstamped scope output is not safe: {rendered}"
+    );
+    assert!(value["structuredContent"].get("state").is_none());
+    assert!(active.files.export().unwrap().is_empty());
     active.files.close().unwrap();
 
     let error_only = scoped_results(scope_lease(1));
@@ -395,4 +414,112 @@ async fn stale_epoch_unknown_drops_state_images_and_overflow_files() {
     assert!(value["structuredContent"].get("state").is_none());
     assert!(partial.files.export().unwrap().is_empty());
     partial.files.close().unwrap();
+}
+
+#[tokio::test]
+async fn encoding_revoked_during_file_publish_drops_bytes_cache_and_files() {
+    let live = scope_lease(1);
+    let kept = scoped_results(live);
+    let (text, value) = encoded(
+        &kept,
+        unknown_outcome(
+            Some(canary_state(Some("run-s1"), Some(1), true)),
+            Some(app_state("CANARY-STALE-ERR")),
+        ),
+    )
+    .await;
+    assert!(text.contains("CANARY-STALE observation"), "{text}");
+    assert!(value["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("image")));
+    assert!(kept.images.get("i_canary").is_some());
+    assert!(kept
+        .files
+        .export()
+        .unwrap()
+        .iter()
+        .any(|(_, bytes)| String::from_utf8_lossy(bytes).contains("CANARY-STALE")));
+    kept.files.close().unwrap();
+
+    for revoke in [false, true] {
+        for with_image in [true, false] {
+            let lease = scope_lease(1);
+            let stale = scoped_results(lease.clone());
+            let gate = stale.files.arm_file_gate();
+            let files = Arc::clone(&stale.files);
+            let images = Arc::clone(&stale.images);
+            let before = files.export().unwrap().len();
+            let task = tokio::spawn(async move {
+                encoded(
+                    &stale,
+                    unknown_outcome(
+                        Some(canary_state(Some("run-s1"), Some(1), with_image)),
+                        Some(app_state("CANARY-STALE-ERR")),
+                    ),
+                )
+                .await
+            });
+            let parked = wait_until_parked(&gate).await;
+            if revoke {
+                lease.revoke();
+            } else {
+                lease.rebind(scope_lease(2).current().unwrap()).unwrap();
+            }
+            gate.release();
+            assert!(parked, "file publish did not park");
+            let (text, value) = task.await.unwrap();
+            let rendered = format!("{text} {value}");
+            assert!(!rendered.contains("CANARY-STALE"), "{rendered}");
+            assert!(!text.contains("Screenshot file:"), "{text}");
+            assert!(!text.contains("full text:"), "{text}");
+            assert!(value["content"].as_array().unwrap().iter().all(|block| {
+                block.get("type").and_then(|kind| kind.as_str()) != Some("image")
+            }));
+            assert!(images.get("i_canary").is_none());
+            assert_eq!(value["structuredContent"]["action"]["outcome"], "unknown");
+            assert_eq!(
+                value["structuredContent"]["error"]["code"], "driver_error",
+                "{value}"
+            );
+            assert_eq!(
+                value["structuredContent"]["error"]["message"],
+                "evaluation scope changed during delivery"
+            );
+            assert!(value["structuredContent"]["error"].get("state").is_none());
+            assert!(value["structuredContent"].get("state").is_none());
+            let exported = files.export().unwrap();
+            assert_eq!(exported.len(), before);
+            assert!(exported
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("CANARY-STALE")));
+            files.close().unwrap();
+        }
+    }
+}
+
+fn canary_state(run: Option<&str>, generation: Option<u64>, image: bool) -> ActionState {
+    let mut state = stamped_state(run, generation, image);
+    if image {
+        state.state.screenshot = Some(ScreenshotInfo {
+            id: "i_canary".into(),
+            width: 256,
+            height: 256,
+            mime: "image/png".into(),
+            scale_to_window: Some(1.0),
+        });
+    }
+    state
+}
+
+async fn wait_until_parked(gate: &FilePause) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !gate.is_parked() {
+        if tokio::time::Instant::now() > deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    true
 }

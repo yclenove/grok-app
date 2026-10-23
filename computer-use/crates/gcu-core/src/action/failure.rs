@@ -73,10 +73,24 @@ impl ActionRouter {
             out.state = self.publish(session, fresh, true).ok();
         }
         if out.state.is_none() && code == ErrorCode::WindowGone {
-            out.windows = self
+            let producing = crate::scope::expected_epoch().or_else(|| {
+                self.lease.as_ref().and_then(|lease| {
+                    lease
+                        .current()
+                        .map(|scope| (scope.run_id().to_owned(), scope.generation()))
+                })
+            });
+            if self.lease.is_some() && !window_list_current(self, session, producing.as_ref()) {
+                return out;
+            }
+            let windows = self
                 .native(session, &cancel, false, self.driver.list_windows(None))
                 .await
                 .unwrap_or_default();
+            if self.lease.is_some() && !window_list_current(self, session, producing.as_ref()) {
+                return out;
+            }
+            out.windows = windows;
             let prior = lock(&session.actions)
                 .snapshots
                 .latest(&WindowKey {
@@ -117,10 +131,29 @@ impl ActionRouter {
                     elements: None,
                     action: None,
                 },
-                scope_run: None,
-                scope_generation: None,
+                scope_run: producing.as_ref().map(|(run, _)| run.clone()),
+                scope_generation: producing.as_ref().map(|(_, generation)| *generation),
             });
         }
         out
     }
+}
+
+/// Whether a scoped window list may still be published.
+///
+/// `None` inside a scope is not proof. Unscoped callers do not use this.
+/// Memory only: the lease read drops its lock before return. No timeout or
+/// cancellation.
+fn window_list_current(
+    router: &ActionRouter,
+    session: &Session,
+    producing: Option<&(String, u64)>,
+) -> bool {
+    if session.is_stopped() || session.activity().stop_requested() {
+        return false;
+    }
+    let Some((run, generation)) = producing else {
+        return false;
+    };
+    router.scope_binding_current(Some(run.as_str()), Some(*generation))
 }

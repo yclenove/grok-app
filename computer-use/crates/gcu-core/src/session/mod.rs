@@ -108,6 +108,15 @@ impl Session {
         lock(&self.actions).ledger.clone()
     }
 
+    /// Observations this session has recorded.
+    ///
+    /// Memory only. May wait on the snapshot mutex. No timeout or cancellation.
+    /// A publication that is refused does not increment the count.
+    #[must_use]
+    pub fn delivered_snapshot_count(&self) -> usize {
+        lock(&self.actions).snapshots.len()
+    }
+
     pub(crate) fn turn_generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }

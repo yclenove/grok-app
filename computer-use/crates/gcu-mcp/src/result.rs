@@ -1,4 +1,7 @@
 //! Text/compact facts stay inside Grok's 20,000-byte prefix. Images stay safe.
+#[path = "result_guard.rs"]
+mod result_guard;
+
 use crate::files::{blocking, SessionFiles};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use gcu_core::{
@@ -11,7 +14,7 @@ use gcu_core::{
 use gcu_protocol::{result::Outcome, ActionResult, AppState, ErrorCode, ToolError};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{json, Value};
-use std::{io, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 
 const TEXT_LIMIT: usize = 19_000;
 const COMBINED_LIMIT: usize = 20_000;
@@ -41,30 +44,6 @@ fn step_summary(report: &BatchReport) -> String {
         .join("; ");
     format!("Batch: {body}.")
 }
-fn stale_scope_output(
-    lease: Option<&ScopeLease>,
-    state: Option<&ActionState>,
-    error: Option<&ToolError>,
-) -> bool {
-    let hard = error.as_ref().is_some_and(|err| {
-        err.code == ErrorCode::AppDenied && err.message == gcu_core::scope::SCOPE_DENIED_MESSAGE
-    });
-    if hard {
-        return true;
-    }
-    let Some(lease) = lease else {
-        return false;
-    };
-    match state {
-        Some(state) => match (&state.scope_run, state.scope_generation) {
-            (Some(run), Some(generation)) => !lease.same_epoch(run, generation),
-            (None, None) => lease.current().is_none(),
-            _ => true,
-        },
-        None => lease.current().is_none() && error.is_some_and(|err| err.state.is_some()),
-    }
-}
-
 fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Done => "done",
@@ -96,6 +75,59 @@ fn action_facts(action: &ActionResult) -> Value {
     }
     json!(action)
 }
+fn append_action(text: &mut String, data: &Value) {
+    let Some(action) = data.get("action") else {
+        return;
+    };
+    text.push_str(&format!(
+        "\nAction: {} — {} ({}).",
+        action["tool"].as_str().unwrap_or(""),
+        action["outcome"].as_str().unwrap_or(""),
+        action["effect"].as_str().unwrap_or("")
+    ));
+    if let Some(notes) = action["notes"].as_array() {
+        for note in notes {
+            if let Some(note) = note.as_str() {
+                text.push('\n');
+                text.push_str(note);
+            }
+        }
+    }
+}
+struct FinishIn {
+    text: String,
+    data: Value,
+    images: Vec<ContentBlock>,
+    failed: bool,
+    stamp: result_guard::LiveStamp,
+    created: Vec<PathBuf>,
+    pending: Option<PendingShot>,
+}
+struct PendingShot {
+    id: String,
+    mime: String,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+    app_id: String,
+    window_id: String,
+    snapshot_id: String,
+}
+struct EncodedFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    mime: &'static str,
+    scale: f64,
+    reduced: bool,
+    attach: bool,
+}
+#[derive(Debug)]
+enum FinishFault {
+    Lost,
+    Io,
+}
 pub(crate) struct Results {
     pub files: Arc<SessionFiles>,
     pub session: Arc<Session>,
@@ -116,7 +148,11 @@ impl Results {
             data["action"] = action_facts(&action);
         }
         let failed = report.failed_step.is_some() || report.error.is_some();
-        let mut result = self.build(report.state, report.error, data).await;
+        let produced = match (&report.scope_run, report.scope_generation) {
+            (Some(run), Some(generation)) => result_guard::LiveStamp::epoch(run, generation),
+            _ => result_guard::LiveStamp::off(),
+        };
+        let mut result = self.build(report.state, report.error, data, produced).await;
         if failed {
             result.is_error = Some(true);
         }
@@ -127,13 +163,16 @@ impl Results {
         if !out.windows.is_empty() {
             data["windows"] = json!(out.windows);
         }
-        self.build(out.state, out.error, data).await
+        self.build(out.state, out.error, data, result_guard::LiveStamp::off())
+            .await
     }
     pub async fn state(&self, state: ActionState) -> CallToolResult {
-        self.build(Some(state), None, json!({})).await
+        self.build(Some(state), None, json!({}), result_guard::LiveStamp::off())
+            .await
     }
     pub async fn failure(&self, error: ToolError) -> CallToolResult {
-        self.build(None, Some(error), json!({})).await
+        self.build(None, Some(error), json!({}), result_guard::LiveStamp::off())
+            .await
     }
     pub async fn script(&self, output: &str, error: Option<ToolError>) -> CallToolResult {
         let failed = error.is_some();
@@ -146,7 +185,18 @@ impl Results {
             "output": prefix(output, 2_000),
             "error": error,
         });
-        match self.finish(text, data, Vec::new(), failed).await {
+        match self
+            .finish(FinishIn {
+                text,
+                data,
+                images: Vec::new(),
+                failed,
+                stamp: result_guard::LiveStamp::off(),
+                created: Vec::new(),
+                pending: None,
+            })
+            .await
+        {
             Ok(result) => result,
             Err(_) => self.io_error(),
         }
@@ -156,80 +206,84 @@ impl Results {
         // structured suffix. Long lists get a session-private file too.
         let text = serde_json::to_string_pretty(&data).unwrap_or_default();
         match self
-            .finish(text, json!({"ok":true}), Vec::new(), false)
+            .finish(FinishIn {
+                text,
+                data: json!({"ok": true}),
+                images: Vec::new(),
+                failed: false,
+                stamp: result_guard::LiveStamp::off(),
+                created: Vec::new(),
+                pending: None,
+            })
             .await
         {
-            Ok(r) => r,
+            Ok(result) => result,
             Err(_) => self.io_error(),
         }
     }
     async fn build(
         &self,
         mut state: Option<ActionState>,
-        mut error: Option<ToolError>,
+        error: Option<ToolError>,
         mut data: Value,
+        produced: result_guard::LiveStamp,
     ) -> CallToolResult {
-        if stale_scope_output(self.scope.as_ref(), state.as_ref(), error.as_ref()) {
-            state = None;
-            if let Some(err) = error.as_mut() {
-                err.state = None;
-            }
+        let guard = result_guard::initial_block(
+            self.scope.as_ref(),
+            state.as_ref(),
+            error.as_ref(),
+            &data,
+            &produced,
+        );
+        let recovered_error = error.clone();
+        let recovered_data = data.clone();
+        if guard.block {
+            return self.assemble_cleared(recovered_error.as_ref(), &recovered_data);
         }
+        let stamp = guard.stamp;
         let failed = error.is_some();
         let mut text = error
             .as_ref()
-            .map(|e| format!("error: {}: {}\n", e.code, e.message))
+            .map(|item| format!("error: {}: {}\n", item.code, item.message))
             .unwrap_or_default();
         let mut images = Vec::new();
+        let mut created = Vec::new();
+        let mut pending = None;
         if let Some(state) = &mut state {
             if let Some(image) = state.image.take() {
-                match self.image(image).await {
-                    Ok((encoded, path)) => {
-                        text.push_str(&format!("Screenshot file: {path}\n"));
-                        if encoded.reduced() {
-                            text.push_str("[image reduced to meet PNG byte budget]\n");
-                        }
-                        if encoded.can_attach() {
-                            images.push(ContentBlock::image(
-                                STANDARD.encode(encoded.bytes()),
-                                encoded.mime(),
-                            ));
-                        } else {
-                            text.push_str("[image attachment omitted: short edge below 256; use screenshot file]\n");
-                        }
-                        if let Some(shot) = &mut state.state.screenshot {
-                            self.images.insert(
-                                shot.id.clone(),
-                                gcu_host_protocol::messages::Image {
-                                    mime: encoded.mime().into(),
-                                    width: encoded.width(),
-                                    height: encoded.height(),
-                                    bytes: encoded.bytes().to_vec(),
-                                },
-                            );
-                            shot.width = encoded.width();
-                            shot.height = encoded.height();
-                            shot.scale_to_window = Some(encoded.scale_to_window());
-                            shot.mime = encoded.mime().into();
-                        }
-                        self.session.screenshot_delivered(
-                            &state.state.app.id,
-                            &state.state.window.id,
-                            &state.state.snapshot_id,
-                            encoded.width(),
-                            encoded.height(),
-                        );
+                let encoded = match self.image(image).await {
+                    Ok(encoded) => encoded,
+                    Err(_) => {
+                        self.discard_all(&created);
+                        return self.io_error();
                     }
-                    Err(_) => return self.io_error(),
+                };
+                created.push(encoded.path.clone());
+                if self.rejected(&stamp) {
+                    self.discard_all(&created);
+                    return self.assemble_cleared(recovered_error.as_ref(), &recovered_data);
                 }
+                self.accept_image(&mut text, &mut images, &mut pending, state, encoded);
             }
             text.push_str(&state.text);
             if let Some(full) = state.overflow_text.take() {
                 match self.save(full, "txt").await {
-                    Ok(path) => text.push_str(&format!(
-                        "\n[truncated inline observation; full text: {path}]\n"
-                    )),
-                    Err(_) => return self.io_error(),
+                    Ok(path) => {
+                        created.push(path.clone());
+                        if self.rejected(&stamp) {
+                            self.discard_all(&created);
+                            return self
+                                .assemble_cleared(recovered_error.as_ref(), &recovered_data);
+                        }
+                        text.push_str(&format!(
+                            "\n[truncated inline observation; full text: {}]\n",
+                            path.to_string_lossy()
+                        ));
+                    }
+                    Err(_) => {
+                        self.discard_all(&created);
+                        return self.io_error();
+                    }
                 }
             }
             data["state"] = facts(&state.state);
@@ -237,7 +291,7 @@ impl Results {
         if let Some(error) = error {
             let fresh = state
                 .as_ref()
-                .map(|s| facts(&s.state))
+                .map(|item| facts(&item.state))
                 .or_else(|| error.state.as_ref().map(facts));
             let mut value = json!({"code":error.code,"message":error.message,"hint":error.hint,"retryable":error.retryable});
             if let Some(fresh) = fresh {
@@ -245,31 +299,74 @@ impl Results {
             }
             data["error"] = value;
         }
-        if let Some(action) = data.get("action") {
-            text.push_str(&format!(
-                "\nAction: {} — {} ({}).",
-                action["tool"].as_str().unwrap_or(""),
-                action["outcome"].as_str().unwrap_or(""),
-                action["effect"].as_str().unwrap_or("")
-            ));
-            if let Some(notes) = action["notes"].as_array() {
-                for note in notes {
-                    if let Some(note) = note.as_str() {
-                        text.push('\n');
-                        text.push_str(note);
-                    }
-                }
+        append_action(&mut text, &data);
+        match self
+            .finish(FinishIn {
+                text,
+                data,
+                images,
+                failed,
+                stamp,
+                created,
+                pending,
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(FinishFault::Lost) => {
+                self.assemble_cleared(recovered_error.as_ref(), &recovered_data)
             }
-        }
-        match self.finish(text, data, images, failed).await {
-            Ok(r) => r,
-            Err(_) => self.io_error(),
+            Err(FinishFault::Io) => self.io_error(),
         }
     }
-    async fn image(
+    fn accept_image(
         &self,
-        image: RedactedImage,
-    ) -> io::Result<(gcu_core::redact::EncodedImage, String)> {
+        text: &mut String,
+        images: &mut Vec<ContentBlock>,
+        pending: &mut Option<PendingShot>,
+        state: &mut ActionState,
+        encoded: EncodedFile,
+    ) {
+        text.push_str(&format!(
+            "Screenshot file: {}\n",
+            encoded.path.to_string_lossy()
+        ));
+        if encoded.reduced {
+            text.push_str("[image reduced to meet PNG byte budget]\n");
+        }
+        if encoded.attach {
+            images.push(ContentBlock::image(
+                STANDARD.encode(&encoded.bytes),
+                encoded.mime,
+            ));
+        } else {
+            text.push_str(
+                "[image attachment omitted: short edge below 256; use screenshot file]\n",
+            );
+        }
+        let app_id = state.state.app.id.clone();
+        let window_id = state.state.window.id.clone();
+        let snapshot_id = state.state.snapshot_id.clone();
+        let Some(shot) = state.state.screenshot.as_mut() else {
+            return;
+        };
+        let id = shot.id.clone();
+        shot.width = encoded.width;
+        shot.height = encoded.height;
+        shot.scale_to_window = Some(encoded.scale);
+        shot.mime = encoded.mime.into();
+        *pending = Some(PendingShot {
+            id,
+            mime: encoded.mime.into(),
+            width: encoded.width,
+            height: encoded.height,
+            bytes: encoded.bytes,
+            app_id,
+            window_id,
+            snapshot_id,
+        });
+    }
+    async fn image(&self, image: RedactedImage) -> io::Result<EncodedFile> {
         let files = self.files.clone();
         let encoding = self.encoding;
         blocking(move || {
@@ -299,65 +396,138 @@ impl Results {
                     "png"
                 },
             )?;
-            Ok((encoded, path.to_string_lossy().into_owned()))
+            Ok(EncodedFile {
+                path,
+                bytes: encoded.bytes().to_vec(),
+                width: encoded.width(),
+                height: encoded.height(),
+                mime: encoded.mime(),
+                scale: encoded.scale_to_window(),
+                reduced: encoded.reduced(),
+                attach: encoded.can_attach(),
+            })
         })
         .await
     }
-    async fn save(&self, text: String, extension: &'static str) -> io::Result<String> {
+    async fn save(&self, text: String, extension: &'static str) -> io::Result<PathBuf> {
         let files = self.files.clone();
-        blocking(move || {
-            files
-                .write(text.as_bytes(), extension)
-                .map(|p| p.to_string_lossy().into_owned())
-        })
-        .await
+        blocking(move || files.write(text.as_bytes(), extension)).await
     }
-    async fn finish(
-        &self,
-        mut text: String,
-        mut data: Value,
-        mut images: Vec<ContentBlock>,
-        failed: bool,
-    ) -> io::Result<CallToolResult> {
-        let mut json = serde_json::to_string(&data).map_err(io::Error::other)?;
+    async fn finish(&self, mut input: FinishIn) -> Result<CallToolResult, FinishFault> {
+        let mut json = serde_json::to_string(&input.data).map_err(|_| FinishFault::Io)?;
         if json.len() > 8_000 {
-            let path = self.save(json, "json").await?;
+            let path = match self.save(json, "json").await {
+                Ok(path) => path,
+                Err(_) => {
+                    self.discard_all(&input.created);
+                    return Err(FinishFault::Io);
+                }
+            };
+            input.created.push(path.clone());
+            if self.rejected(&input.stamp) {
+                self.discard_all(&input.created);
+                return Err(FinishFault::Lost);
+            }
             // Preserve error identity and the fresh snapshot ID in the prefix.
-            let mut compact = json!({"details_file":path});
-            if let Some(error) = data.get("error") {
+            let shown = path.to_string_lossy();
+            let mut compact = json!({ "details_file": shown });
+            if let Some(error) = input.data.get("error") {
                 compact["error"] = json!({"code":error["code"],"message":prefix(error["message"].as_str().unwrap_or(""), 256),
                     "hint":"See details_file for full facts.","retryable":false});
                 if let Some(id) = error.pointer("/state/snapshot_id") {
                     compact["error"]["state"] = json!({"snapshot_id":id});
                 }
             }
-            if let Some(action) = data.get("action") {
+            if let Some(action) = input.data.get("action") {
                 compact["action"] = action.clone();
             }
-            if let Some(steps) = data.get("steps") {
+            if let Some(steps) = input.data.get("steps") {
                 compact["steps"] = steps.clone();
             }
-            if let Some(index) = data.get("failed_step") {
+            if let Some(index) = input.data.get("failed_step") {
                 compact["failed_step"] = index.clone();
             }
-            data = compact;
-            json = serde_json::to_string(&data).map_err(io::Error::other)?;
+            input.data = compact;
+            json = serde_json::to_string(&input.data).map_err(|_| FinishFault::Io)?;
         }
         let budget = TEXT_LIMIT.min(COMBINED_LIMIT.saturating_sub(json.len() + 64));
-        if text.len() > budget {
-            let path = self.save(text.clone(), "txt").await?;
-            let marker = format!("\n[truncated to 20 KB result budget; full text: {path}]\n");
-            text = format!(
+        if input.text.len() > budget {
+            let path = match self.save(input.text.clone(), "txt").await {
+                Ok(path) => path,
+                Err(_) => {
+                    self.discard_all(&input.created);
+                    return Err(FinishFault::Io);
+                }
+            };
+            input.created.push(path.clone());
+            if self.rejected(&input.stamp) {
+                self.discard_all(&input.created);
+                return Err(FinishFault::Lost);
+            }
+            let marker = format!(
+                "\n[truncated to 20 KB result budget; full text: {}]\n",
+                path.to_string_lossy()
+            );
+            input.text = format!(
                 "{}{}",
-                prefix(&text, budget.saturating_sub(marker.len())),
+                prefix(&input.text, budget.saturating_sub(marker.len())),
                 marker
             );
         }
-        images.insert(0, ContentBlock::text(text));
-        let mut result = CallToolResult::success(images);
-        result.structured_content = Some(data);
-        result.is_error = Some(failed);
+        if self.rejected(&input.stamp) {
+            self.discard_all(&input.created);
+            return Err(FinishFault::Lost);
+        }
+        if let Some(shot) = input.pending.take() {
+            self.images.insert(
+                shot.id,
+                gcu_host_protocol::messages::Image {
+                    mime: shot.mime,
+                    width: shot.width,
+                    height: shot.height,
+                    bytes: shot.bytes,
+                },
+            );
+            self.session.screenshot_delivered(
+                &shot.app_id,
+                &shot.window_id,
+                &shot.snapshot_id,
+                shot.width,
+                shot.height,
+            );
+        }
+        input.images.insert(0, ContentBlock::text(input.text));
+        let mut result = CallToolResult::success(input.images);
+        result.structured_content = Some(input.data);
+        result.is_error = Some(input.failed);
         Ok(result)
+    }
+    fn rejected(&self, stamp: &result_guard::LiveStamp) -> bool {
+        stamp.blocks(self.scope.as_ref())
+    }
+    fn discard_all(&self, paths: &[PathBuf]) {
+        for path in paths {
+            self.files.discard(path);
+        }
+    }
+    fn assemble_cleared(&self, error: Option<&ToolError>, data: &Value) -> CallToolResult {
+        let mut data = data.clone();
+        result_guard::scrub(&mut data);
+        let mut text = String::new();
+        if let Some(error) = error {
+            text.push_str(&format!("error: {}: {}\n", error.code, error.message));
+            data["error"] = json!({
+                "code": error.code,
+                "message": error.message,
+                "hint": error.hint,
+                "retryable": error.retryable,
+            });
+        }
+        append_action(&mut text, &data);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        result.structured_content = Some(data);
+        result.is_error = Some(error.is_some());
+        result
     }
     fn io_error(&self) -> CallToolResult {
         let error = error(ErrorCode::Internal);
@@ -373,3 +543,7 @@ impl Results {
 #[cfg(test)]
 #[path = "result_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "result_scope_tests.rs"]
+mod scope_tests;

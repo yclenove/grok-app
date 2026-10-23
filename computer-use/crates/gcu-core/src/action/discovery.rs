@@ -253,10 +253,16 @@ impl ActionRouter {
             .await
             .map_err(|e| (CallError::from(e.code()), true))?;
         match self.read(session, &win, false, &self.tree_opts).await {
-            Ok(fresh) => self
-                .publish(session, fresh, false)
-                .map(Some)
-                .map_err(|e| (CallError::Code(e.code), true)),
+            Ok(fresh) => self.publish(session, fresh, false).map(Some).map_err(|e| {
+                let mapped = if e.code == ErrorCode::AppDenied
+                    && e.message == crate::scope::SCOPE_DENIED_MESSAGE
+                {
+                    CallError::ScopeDenied
+                } else {
+                    CallError::Code(e.code)
+                };
+                (mapped, true)
+            }),
             Err(_) => Ok(None),
         }
     }

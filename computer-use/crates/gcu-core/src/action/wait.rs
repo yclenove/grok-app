@@ -22,7 +22,7 @@ use crate::{
 use gcu_protocol::{
     result::Outcome,
     tools::{BatchStep, WaitForArgs},
-    ErrorCode, WindowInfo,
+    ErrorCode, ToolError, WindowInfo,
 };
 use std::time::Duration;
 
@@ -154,20 +154,26 @@ impl ActionRouter {
                         action.outcome = Outcome::Done;
                         outcome(action, None, Some(state))
                     }
-                    Err(code) => outcome(action, Some(error(code)), None),
+                    Err(err) => outcome(action, Some(*err), None),
                 }
             }
             WaitPhase::TimedOut => {
                 if report.raw.is_some() && self.stale_sample(&report.scope_epoch) {
                     return outcome(action, Some(CallError::ScopeDenied.tool_error()), None);
                 }
-                action.outcome = Outcome::Failed;
                 let state = match (report.raw, report.info) {
-                    (Some(raw), Some(info)) => self
-                        .observation(session, &win, raw, info, &report.scope_epoch)
-                        .ok(),
+                    (Some(raw), Some(info)) => {
+                        match self.observation(session, &win, raw, info, &report.scope_epoch) {
+                            Ok(state) => Some(state),
+                            Err(err) if scope_publication_error(&err) => {
+                                return outcome(action, Some(*err), None);
+                            }
+                            Err(_) => None,
+                        }
+                    }
                     _ => None,
                 };
+                action.outcome = Outcome::Failed;
                 outcome(action, Some(error(ErrorCode::Timeout)), state)
             }
             WaitPhase::Cancelled => {
@@ -197,11 +203,11 @@ impl ActionRouter {
         mut raw: RawTree,
         info: WindowInfo,
         epoch: &Option<(String, u64)>,
-    ) -> Result<super::ActionState, ErrorCode> {
+    ) -> Result<super::ActionState, Box<ToolError>> {
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
         }
-        let signature = observe::signature(&raw)?;
+        let signature = observe::signature(&raw).map_err(|code| Box::new(error(code)))?;
         let mut tree = Pipeline::default().run(raw.clone(), &self.tree_opts);
         tree.state_version = Some(observe::digest(signature.as_bytes()));
         tree.observed_at = Some(self.epoch.elapsed());
@@ -216,7 +222,7 @@ impl ActionRouter {
                 .and_then(|snapshot| snapshot.index().elements().keys().max())
                 .map_or(0, |index| u64::from(*index) + 1);
             ElementIndex::assign(&mut tree, previous.map(|snapshot| snapshot.index()), next)
-                .map_err(|_| ErrorCode::StaleElement)?;
+                .map_err(|_| Box::new(error(ErrorCode::StaleElement)))?;
         }
         let quality = crate::observe::TreeQuality::assess(&raw, &tree);
         let fresh = Fresh {
@@ -230,6 +236,11 @@ impl ActionRouter {
             scope_run: epoch.as_ref().map(|(run, _)| run.clone()),
             scope_generation: epoch.as_ref().map(|(_, generation)| *generation),
         };
-        self.publish(session, fresh, false).map_err(|err| err.code)
+        self.publish(session, fresh, false)
     }
+}
+
+fn scope_publication_error(err: &ToolError) -> bool {
+    err.code == ErrorCode::StoppedByUser
+        || (err.code == ErrorCode::AppDenied && err.message == crate::scope::SCOPE_DENIED_MESSAGE)
 }

@@ -12,6 +12,7 @@ pub mod gate;
 pub mod ledger;
 pub(crate) mod observe;
 mod provenance;
+mod publish_gate;
 mod route;
 /// Policy-aware portable action executor.
 pub mod router;
@@ -22,6 +23,8 @@ mod wire;
 use crate::{driver::PointerRoute, redact::RedactedImage, snapshot::SnapshotStore};
 use gcu_protocol::{result::ActionResult, tools::BatchStep, AppState, ToolError, WindowInfo};
 pub use ledger::{ActionLedger, LedgerEntry};
+/// Pause point for publication tests. Production leaves it disarmed.
+pub use publish_gate::PublishGate;
 pub use router::ActionRouter;
 use serde::Serialize;
 use std::{
@@ -83,8 +86,9 @@ pub struct ActionState {
     pub state: AppState,
     /// Optional safe image, before encoding for the transport.
     pub image: Option<RedactedImage>,
-    /// Fixture run that produced this observation. `None` outside a scope and
-    /// for a synthetic window-gone line. Not a protocol field.
+    /// Fixture run that produced this observation. `None` outside a scope.
+    /// A scoped window-gone line carries the epoch that listed the remaining
+    /// windows. Not a protocol field.
     pub scope_run: Option<String>,
     /// Fixture generation that produced this observation.
     ///

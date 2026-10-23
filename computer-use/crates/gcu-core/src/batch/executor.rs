@@ -92,6 +92,10 @@ pub(crate) async fn execute(
         }
     }
 
+    let (scope_run, scope_generation) = match &captured {
+        Some((run, generation)) => (Some(run.clone()), Some(*generation)),
+        None => (None, None),
+    };
     BatchReport {
         steps,
         failed_step,
@@ -99,6 +103,8 @@ pub(crate) async fn execute(
         failure,
         last,
         state,
+        scope_run,
+        scope_generation,
     }
 }
 
@@ -134,8 +140,8 @@ fn scope_hard_stop(error: Option<&ToolError>) -> bool {
 
 /// Clear retained output when the attempt epoch is gone, independent of the code.
 ///
-/// Unscoped batches keep their historical state. A window-gone line has no epoch
-/// and is cleared only after the lease itself is gone. Unknown stays unknown.
+/// Unscoped batches keep their historical state. A scoped line with no producing
+/// epoch is cleared. Unknown stays unknown.
 fn output_expired(
     lease: Option<&ScopeLease>,
     captured: Option<&(String, u64)>,
@@ -158,7 +164,7 @@ fn output_expired(
         Some((Some(held_run), Some(held_generation))) => {
             held_run != run || held_generation != *generation
         }
-        Some((None, None)) => false,
+        Some((None, None)) => true,
         Some(_) => true,
         None => false,
     }
