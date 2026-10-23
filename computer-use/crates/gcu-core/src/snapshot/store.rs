@@ -203,6 +203,19 @@ impl SnapshotStore {
     pub fn memory_bytes(&self) -> usize {
         self.memory_bytes
     }
+    /// Drop one snapshot that was recorded and then refused before delivery.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. A missing id is
+    /// ignored. Window high-water metadata stays; the observation bytes do not.
+    pub fn discard(&mut self, window: &WindowKey, id: SnapshotId) {
+        if let Some(position) = self
+            .snapshots
+            .iter()
+            .position(|snapshot| snapshot.id == id && &snapshot.window == window)
+        {
+            self.evict(position);
+        }
+    }
     /// Retained exact snapshot only in this session and app-qualified window.
     pub fn get(&self, window: &WindowKey, id: SnapshotId) -> Option<&Snapshot> {
         self.snapshots

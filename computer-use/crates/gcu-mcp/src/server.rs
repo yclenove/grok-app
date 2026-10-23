@@ -205,6 +205,7 @@ impl Server {
                 ..Default::default()
             },
             scope: router.fixture_lease(),
+            probe: result::FinishProbe::new(),
         };
         let script_ready = cfg!(feature = "script") && config.script.is_some();
         let tools =
@@ -263,16 +264,24 @@ impl Server {
         match name {
             "list_apps" => {
                 let _: ListAppsParams = params::parse(arguments)?;
+                let produced = this.results.opened_stamp();
                 let apps = this.router.list_apps(&this.session).await?;
-                Ok(this.results.discovery(json!({"apps":apps})).await)
+                Ok(this
+                    .results
+                    .discovery(json!({"apps": apps}), produced)
+                    .await)
             }
             "list_windows" => {
                 let p: ListWindowsParams = params::parse(arguments)?;
+                let produced = this.results.opened_stamp();
                 let windows = this
                     .router
                     .list_windows(&this.session, p.app.as_deref())
                     .await?;
-                Ok(this.results.discovery(json!({"windows":windows})).await)
+                Ok(this
+                    .results
+                    .discovery(json!({"windows": windows}), produced)
+                    .await)
             }
             "launch_app" => {
                 let p: LaunchAppParams = params::parse(arguments)?;
@@ -305,11 +314,16 @@ impl Server {
                 let Some(runner) = this.config.script.clone() else {
                     return Err(Box::new(result::error(ErrorCode::CapabilityUnavailable)));
                 };
+                let produced = this.results.opened_stamp();
                 let body = runner.run(&this.router, &this.session, &id, params).await;
-                Ok(this.results.script(&body.output, body.error).await)
+                Ok(this
+                    .results
+                    .script(&body.output, body.error, produced)
+                    .await)
             }
             "capabilities" => {
                 let _: CapabilitiesParams = params::parse(arguments)?;
+                let produced = this.results.opened_stamp();
                 let caps = this
                     .session
                     .enqueue(async {
@@ -320,7 +334,7 @@ impl Server {
                     })
                     .await
                     .map_err(|_| Box::new(result::error(ErrorCode::ApprovalDenied)))?;
-                Ok(this.results.discovery(json!(caps)).await)
+                Ok(this.results.discovery(json!(caps), produced).await)
             }
             _ => {
                 let call = params::action(name, arguments, id)?;

@@ -58,6 +58,9 @@ pub struct Session {
     queue: tokio::sync::Mutex<()>,
     cancel: Cancel,
     pub(crate) actions: Mutex<crate::action::SessionActions>,
+    /// Parks inside screenshot delivery while the snapshot mutex is held.
+    /// Production leaves it disarmed, so entering it does not wait.
+    delivery_gate: std::sync::Arc<crate::action::PublishGate>,
 }
 
 impl Session {
@@ -84,7 +87,16 @@ impl Session {
             queue: tokio::sync::Mutex::new(()),
             cancel: Cancel::new(),
             actions: Mutex::new(crate::action::SessionActions::default()),
+            delivery_gate: crate::action::PublishGate::new(),
         }
+    }
+
+    /// Pause inside [`Session::screenshot_delivered`] while the snapshot mutex is held.
+    ///
+    /// Memory only. No timeout or cancellation. Production leaves this disarmed.
+    #[must_use]
+    pub fn delivery_gate(&self) -> std::sync::Arc<crate::action::PublishGate> {
+        std::sync::Arc::clone(&self.delivery_gate)
     }
 
     /// Session id.

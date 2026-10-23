@@ -22,6 +22,9 @@ impl ActionRouter {
         win: &WindowRef,
     ) -> ToolOutcome {
         let failure = failure.into();
+        // Copy the authority that started this failure before any refresh await.
+        // A later lease.current() would stamp the old window with a newer epoch.
+        let producing = originating_epoch(self);
         let code = match failure {
             CallError::ScopeDenied => {
                 return outcome(action, Some(failure.tool_error()), None);
@@ -73,13 +76,9 @@ impl ActionRouter {
             out.state = self.publish(session, fresh, true).ok();
         }
         if out.state.is_none() && code == ErrorCode::WindowGone {
-            let producing = crate::scope::expected_epoch().or_else(|| {
-                self.lease.as_ref().and_then(|lease| {
-                    lease
-                        .current()
-                        .map(|scope| (scope.run_id().to_owned(), scope.generation()))
-                })
-            });
+            // Test barrier after the refresh awaits and before this epoch is used.
+            // The captured epoch is not read again from the lease.
+            self.refresh_gate.enter();
             if self.lease.is_some() && !window_list_current(self, session, producing.as_ref()) {
                 return out;
             }
@@ -137,6 +136,19 @@ impl ActionRouter {
         }
         out
     }
+}
+
+/// Authority copied at the start of [`ActionRouter::failure`].
+///
+/// Prefers the attempt epoch. Outside an attempt, copies the lease once.
+/// Memory only. No blocking, timeout, or cancellation. Callers must not
+/// replace this with a later `current()` after an await.
+fn originating_epoch(router: &ActionRouter) -> Option<(String, u64)> {
+    if let Some(epoch) = crate::scope::expected_epoch() {
+        return Some(epoch);
+    }
+    let scope = router.lease.as_ref().and_then(|lease| lease.current())?;
+    Some((scope.run_id().to_owned(), scope.generation()))
 }
 
 /// Whether a scoped window list may still be published.

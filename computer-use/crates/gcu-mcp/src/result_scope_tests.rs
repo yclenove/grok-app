@@ -271,6 +271,7 @@ impl Desk {
             encoding: Default::default(),
             images: Arc::new(crate::image_cache::ImageCache::default()),
             scope: Some(self.lease.clone()),
+            probe: super::FinishProbe::new(),
         }
     }
 }

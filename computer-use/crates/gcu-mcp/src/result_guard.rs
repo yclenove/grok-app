@@ -25,18 +25,35 @@ const FIXED_NOTES: &[&str] = &[
 #[derive(Clone, Debug)]
 pub(crate) struct LiveStamp {
     epochs: Vec<(String, u64)>,
+    /// Scoped capture that found no live epoch. Still blocks while a lease exists.
+    closed: bool,
 }
 
 impl LiveStamp {
     /// No observation epoch. Memory only. No blocking, timeout, or cancellation.
     pub(crate) fn off() -> Self {
-        Self { epochs: Vec::new() }
+        Self {
+            epochs: Vec::new(),
+            closed: false,
+        }
     }
 
     /// One producing run and generation. Memory only. No blocking or cancellation.
     pub(crate) fn epoch(run: impl Into<String>, generation: u64) -> Self {
         Self {
             epochs: vec![(run.into(), generation)],
+            closed: false,
+        }
+    }
+
+    /// Scoped work whose lease was already gone when authority was copied.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Unscoped callers
+    /// still pass, because [`Self::blocks`] ignores a missing lease.
+    pub(crate) fn closed() -> Self {
+        Self {
+            epochs: Vec::new(),
+            closed: true,
         }
     }
 
@@ -48,9 +65,11 @@ impl LiveStamp {
         let Some(lease) = lease else {
             return false;
         };
-        self.epochs
-            .iter()
-            .any(|(run, generation)| !lease.same_epoch(run, *generation))
+        self.closed
+            || self
+                .epochs
+                .iter()
+                .any(|(run, generation)| !lease.same_epoch(run, *generation))
     }
 }
 
@@ -65,8 +84,9 @@ pub(crate) struct Guard {
 /// Decide whether this response may carry scope-derived fields.
 ///
 /// Memory only. No await, timeout, or cancellation. A hard scope denial blocks
-/// even when the lease is already gone. An unstamped observation blocks unless
-/// it is the fixed refusal sentence and carries no window, target, or image.
+/// even when the lease is already gone. An unstamped observation always blocks
+/// while a lease exists, including a fixed refusal sentence that still carries
+/// app, window, or screenshot facts.
 pub(crate) fn initial_block(
     lease: Option<&ScopeLease>,
     state: Option<&ActionState>,
@@ -99,10 +119,6 @@ pub(crate) fn initial_block(
                     stamp,
                 }
             }
-            (None, None) if fixed_unstamped(state, data) => Guard {
-                block: false,
-                stamp: LiveStamp::off(),
-            },
             _ => blocked(),
         },
         None if residue(data) => {
@@ -163,13 +179,41 @@ fn residue(data: &Value) -> bool {
             .is_some_and(|target| !target.is_null())
 }
 
-fn fixed_unstamped(state: &ActionState, data: &Value) -> bool {
-    state.image.is_none()
-        && state.overflow_text.is_none()
-        && state.text == SCOPE_DENIED_MESSAGE
-        && !residue(data)
-}
-
 fn fixed_note(note: &str) -> bool {
     FIXED_NOTES.contains(&note) || note.starts_with("Batch: ")
+}
+
+/// One-shot test fault for a single finish check. Production never arms it.
+///
+/// Memory only. No await, timeout, or cancellation.
+#[derive(Debug)]
+pub(crate) struct FinishProbe {
+    point: std::sync::Mutex<Option<&'static str>>,
+}
+
+impl FinishProbe {
+    pub(crate) fn new() -> Self {
+        Self {
+            point: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Arm the next [`Self::take`] of `point`. Memory only.
+    #[cfg(test)]
+    pub(crate) fn arm(&self, point: &'static str) {
+        *self.point.lock().unwrap_or_else(|err| err.into_inner()) = Some(point);
+    }
+
+    /// Consume the arm when `point` matches. Other points are left armed.
+    ///
+    /// Memory only. No timeout or cancellation.
+    pub(crate) fn take(&self, point: &'static str) -> bool {
+        let mut slot = self.point.lock().unwrap_or_else(|err| err.into_inner());
+        if *slot == Some(point) {
+            *slot = None;
+            true
+        } else {
+            false
+        }
+    }
 }

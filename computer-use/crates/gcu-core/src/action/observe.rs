@@ -308,6 +308,14 @@ impl ActionRouter {
                 if attach { fresh.image.take() } else { None },
             )
             .map_err(|_| Box::new(error(ErrorCode::Internal)))?;
+        // Still holding the snapshot mutex. Rendering already finished inside
+        // `record`; this wait is test-only and does not take the scope lock.
+        self.commit_gate.enter();
+        if let Err(err) = self.publication_refusal(session, &fresh) {
+            resources.snapshots.discard(&key, observation.snapshot_id);
+            drop(resources);
+            return Err(err);
+        }
         let snapshot = resources
             .snapshots
             .get(&key, observation.snapshot_id)
@@ -356,10 +364,11 @@ impl ActionRouter {
 
     /// Refuse a sample whose producing epoch is missing or no longer current.
     ///
-    /// Called after the snapshot lock is taken and before anything is recorded.
-    /// The scope lock is only the brief read inside `same_epoch` and is dropped
-    /// before record. Stop wins over scope denial. Memory only;
-    /// no await, timeout, or cancellation.
+    /// Called twice under the snapshot lock: before `record`, and again after
+    /// `record` returns, before the sample is handed out. The second call drops
+    /// the scope lock before it returns; that lock is never held across render
+    /// or hashing. Stop wins over scope denial. Memory only; no await, timeout,
+    /// or cancellation.
     fn publication_refusal(&self, session: &Session, fresh: &Fresh) -> Result<(), Box<ToolError>> {
         if self.scope_binding_current(fresh.scope_run.as_deref(), fresh.scope_generation) {
             return Ok(());

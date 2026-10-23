@@ -40,6 +40,7 @@ fn results() -> Results {
             router.input_release(),
         )),
         scope: None,
+        probe: result_guard::FinishProbe::new(),
     }
 }
 #[tokio::test]
@@ -74,7 +75,12 @@ async fn oversized_facts_preserve_error_and_fresh_snapshot_in_prefix() {
 #[tokio::test]
 async fn long_discovery_spills_and_closed_file_area_returns_safe_error() {
     let r = results();
-    let result = r.discovery(json!({"apps":["界".repeat(10_000)]})).await;
+    let result = r
+        .discovery(
+            json!({"apps":["界".repeat(10_000)]}),
+            result_guard::LiveStamp::off(),
+        )
+        .await;
     let value = serde_json::to_value(result).unwrap();
     let text = value["content"][0]["text"].as_str().unwrap();
     assert!(text.len() <= TEXT_LIMIT);
@@ -89,8 +95,14 @@ async fn long_discovery_spills_and_closed_file_area_returns_safe_error() {
         .unwrap()
         .contains(&"界".repeat(10_000)));
     r.files.close().unwrap();
-    let error =
-        serde_json::to_value(r.discovery(json!({"long":"x".repeat(20_000)})).await).unwrap();
+    let error = serde_json::to_value(
+        r.discovery(
+            json!({"long":"x".repeat(20_000)}),
+            result_guard::LiveStamp::off(),
+        )
+        .await,
+    )
+    .unwrap();
     assert_eq!(error["isError"], true);
     assert_eq!(error["structuredContent"]["error"]["code"], "internal");
     assert!(r.files.write(b"no", "txt").is_err());

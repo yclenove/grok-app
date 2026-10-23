@@ -222,6 +222,17 @@ impl Spy {
         self.caps.delivery.targeted_keys = keys;
     }
 
+    /// Queue a fake-driver fault. The next snapshot or capture applies it.
+    ///
+    /// May wait on the fake desktop mutex, bounded by the driver timeout.
+    /// Dropping the future cancels that wait. Does not change the scope lease.
+    pub async fn inject(
+        &self,
+        fault: gcu_driver_fake::faults::Fault,
+    ) -> gcu_core::driver::Result<()> {
+        self.inner.inject(fault).await
+    }
+
     pub fn external(&self) -> Tally {
         Tally {
             content: self.counts.content.load(Ordering::SeqCst),

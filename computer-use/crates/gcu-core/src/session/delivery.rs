@@ -23,7 +23,11 @@ impl Session {
         if width == 0 || height == 0 || self.is_closed() {
             return;
         }
-        lock(&self.actions).snapshots.set_delivery_size(
+        let mut actions = lock(&self.actions);
+        // Test barrier while this mutex is held, before the size is committed.
+        // The scope lock is not taken here.
+        self.delivery_gate.enter();
+        actions.snapshots.set_delivery_size(
             &WindowKey {
                 app_id: app_id.into(),
                 window_id: window_id.into(),
