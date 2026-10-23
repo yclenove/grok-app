@@ -3,7 +3,7 @@ use super::*;
 use gcu_host_protocol::scope::{Control, Scope, VERSION};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FakeClock(AtomicU64);
 impl Clock for FakeClock {
     fn now(&self) -> Duration {

@@ -442,13 +442,17 @@ fn token_ok(value: &str) -> bool {
 
 #[derive(Debug)]
 pub(super) enum LeaseState {
-    Active(FixtureScope),
+    Active {
+        scope: FixtureScope,
+        deadline: Option<std::time::Duration>,
+    },
     Revoked,
 }
 
 #[derive(Debug)]
 pub(super) struct LeaseShared {
     pub(super) state: RwLock<LeaseState>,
+    pub(super) clock: Option<Arc<dyn super::Clock>>,
     /// Active generation, or `0` after revoke. A publish is stored even when
     /// nobody is subscribed.
     pub(super) epoch: watch::Sender<u64>,
@@ -471,10 +475,19 @@ pub struct ScopeLease {
 impl ScopeLease {
     /// Install a validated scope. Memory only; no blocking, timeout, or cancellation.
     pub fn install(scope: FixtureScope) -> Self {
+        Self::install_inner(scope, None, None)
+    }
+
+    pub(super) fn install_inner(
+        scope: FixtureScope,
+        clock: Option<Arc<dyn super::Clock>>,
+        deadline: Option<std::time::Duration>,
+    ) -> Self {
         let (epoch, _) = watch::channel(scope.generation());
         Self {
             shared: Arc::new(LeaseShared {
-                state: RwLock::new(LeaseState::Active(scope)),
+                state: RwLock::new(LeaseState::Active { scope, deadline }),
+                clock,
                 epoch,
                 waiters: Mutex::new(Vec::new()),
                 commit_before: crate::action::PublishGate::new(),
@@ -489,13 +502,19 @@ impl ScopeLease {
     /// The lock is dropped before this returns. Memory only. No timeout or
     /// cancellation. A poisoned lock yields the inner value.
     pub fn current(&self) -> Option<FixtureScope> {
+        self.expire();
         let guard = self
             .shared
             .state
             .read()
             .unwrap_or_else(|err| err.into_inner());
+        if self.expired(&guard) {
+            drop(guard);
+            self.expire();
+            return None;
+        }
         match &*guard {
-            LeaseState::Active(scope) => Some(scope.clone()),
+            LeaseState::Active { scope, .. } => Some(scope.clone()),
             LeaseState::Revoked => None,
         }
     }
@@ -545,15 +564,42 @@ impl ScopeLease {
     /// or equal generation fails. Rebind after revoke fails. A successful
     /// replacement wakes [`Self::subscribe`] after the lock is dropped.
     pub fn rebind(&self, next: FixtureScope) -> Result<(), ScopeError> {
+        self.rebind_inner(next, None)
+    }
+
+    /// Trusted control rebind and renewal under the same lease lock.
+    /// Memory only; no awaits, IO, or cancellation.
+    pub fn rebind_with_deadline(
+        &self,
+        next: FixtureScope,
+        deadline: std::time::Duration,
+    ) -> Result<(), ScopeError> {
+        self.rebind_inner(next, Some(deadline))
+    }
+
+    fn rebind_inner(
+        &self,
+        next: FixtureScope,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<(), ScopeError> {
+        self.expire();
         let published = {
             let mut guard = self
                 .shared
                 .state
                 .write()
                 .unwrap_or_else(|err| err.into_inner());
+            if self.expired(&guard) {
+                drop(guard);
+                self.expire();
+                return Err(ScopeError::Revoked);
+            }
             match &mut *guard {
                 LeaseState::Revoked => return Err(ScopeError::Revoked),
-                LeaseState::Active(current) => {
+                LeaseState::Active {
+                    scope: current,
+                    deadline: expires,
+                } => {
                     if current.run_id != next.run_id {
                         return Err(ScopeError::RunMismatch);
                     }
@@ -562,6 +608,9 @@ impl ScopeLease {
                     }
                     let generation = next.generation();
                     *current = next;
+                    if let Some(deadline) = deadline {
+                        *expires = Some(deadline);
+                    }
                     generation
                 }
             }
@@ -587,7 +636,7 @@ impl ScopeLease {
     }
 }
 
-fn publish(shared: &LeaseShared, generation: u64) {
+pub(super) fn publish(shared: &LeaseShared, generation: u64) {
     shared.epoch.send_modify(|slot| *slot = generation);
     let waiters = {
         let mut guard = shared.waiters.lock().unwrap_or_else(|err| err.into_inner());

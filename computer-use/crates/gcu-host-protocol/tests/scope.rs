@@ -111,7 +111,13 @@ mod process {
     impl Drop for FixtureChild {
         fn drop(&mut self) {
             let _ = self.0.kill();
-            let _ = self.0.wait();
+            let end = std::time::Instant::now() + Duration::from_secs(1);
+            while std::time::Instant::now() < end {
+                match self.0.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
         }
     }
 

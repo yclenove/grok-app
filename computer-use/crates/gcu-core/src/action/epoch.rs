@@ -90,7 +90,7 @@ fn armed_receiver(
     let mut receiver = lease.subscribe();
     let expected = crate::scope::expected_epoch()
         .map(|(_, generation)| generation)
-        .or_else(|| lease.current().map(|scope| scope.generation()));
+        .or_else(|| lease.authorized_current().map(|scope| scope.generation()));
     let Some(expected) = expected else {
         return Err(lease_code(session));
     };
@@ -125,7 +125,7 @@ pub(super) fn current_attempt_epoch(router: &ActionRouter) -> Option<(String, u6
     crate::scope::expected_epoch().or_else(|| {
         router.lease.as_ref().and_then(|lease| {
             lease
-                .current()
+                .authorized_current()
                 .map(|scope| (scope.run_id().to_owned(), scope.generation()))
         })
     })

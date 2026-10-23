@@ -296,6 +296,7 @@ async fn full_profile_with_runner_reaches_router_for_computer_script() {
             profile: Profile::Full,
             route_note: String::new(),
             script: Some(runner.clone()),
+            browser_session: None,
         },
     );
     full.initialize(false).await;
@@ -320,6 +321,7 @@ async fn full_profile_with_runner_reaches_router_for_computer_script() {
             profile: Profile::Default,
             route_note: String::new(),
             script: Some(runner),
+            browser_session: None,
         },
     );
     plain.initialize(false).await;

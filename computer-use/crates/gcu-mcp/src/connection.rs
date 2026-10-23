@@ -6,7 +6,7 @@ use crate::{
 };
 use gcu_core::{
     driver::Driver,
-    scope::{InstanceEvidence, ScopeLease},
+    scope::{AttemptAuthority, InstanceEvidence, ScopeLease},
     session::Session,
 };
 use rmcp::model::CallToolResult;
@@ -50,7 +50,7 @@ impl Connection {
     ///
     /// The caller is the trusted assembler. This is not an MCP tool and it does
     /// not install a tool that sets, renews, or widens the scope. The server
-    /// does not retain the lease. Private-file startup caps at five seconds;
+    /// retains the connection authority. Private-file startup caps at five seconds;
     /// dropping cancels that wait. Elicitation stays off.
     pub async fn open_scoped<D>(
         driver: D,
@@ -61,8 +61,26 @@ impl Connection {
     where
         D: Driver + InstanceEvidence + 'static,
     {
+        let authority = lease.arm_attempt().ok_or(ServeError::Protocol)?;
+        Self::open_scoped_with_authority(driver, lease, authority, host, config).await
+    }
+    /// Trusted transport entry: carry the authority captured at socket accept,
+    /// before asynchronous file setup. The same startup bounds as `open_scoped`.
+    pub async fn open_scoped_with_authority<D>(
+        driver: D,
+        lease: ScopeLease,
+        mut authority: AttemptAuthority,
+        host: Host,
+        config: ServerConfig,
+    ) -> Result<Self, ServeError>
+    where
+        D: Driver + InstanceEvidence + 'static,
+    {
+        if !authority.confirm(&lease) {
+            return Err(ServeError::Protocol);
+        }
         let files = crate::files::blocking(SessionFiles::new).await?;
-        let server = Server::new_scoped(driver, lease, host, config, files)?;
+        let server = Server::new_scoped(driver, lease, authority, host, config, files)?;
         let cleanup = Cleanup::new(server.clone());
         Ok(Self { server, cleanup })
     }

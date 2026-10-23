@@ -115,20 +115,88 @@ mod checks {
             assert!(env.events().contains("revoked"));
             assert!(env.events().contains("exited"));
             assert!(TcpStream::connect(address).await.is_err());
+            let dropped_env = TestEnv::new();
+            let dropped = Supervisor::start(
+                &binary,
+                &dropped_env.0,
+                "form",
+                "default",
+                "run".into(),
+                scope("normal"),
+            )
+            .await
+            .unwrap();
+            let dropped_address = dropped.data_address();
+            drop(dropped);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !dropped_env.events().contains("exited") {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(dropped_env.events().contains("revoked"));
+            assert!(TcpStream::connect(dropped_address).await.is_err());
+            for mode in ["bad-ack", "bad-run", "bad-digest"] {
+                let env = TestEnv::new();
+                assert!(Supervisor::start(
+                    &binary,
+                    &env.0,
+                    "form",
+                    "default",
+                    "run".into(),
+                    scope(mode)
+                )
+                .await
+                .is_err());
+                assert!(env.events().contains("exited"));
+            }
             let env = TestEnv::new();
-            assert!(Supervisor::start(
+            let start = Supervisor::start(
                 &binary,
                 &env.0,
                 "form",
                 "default",
                 "run".into(),
-                scope("bad-ack")
+                scope("early-address"),
+            );
+            tokio::pin!(start);
+            tokio::select! {
+                result = &mut start => panic!("startup completed before ACK: {}", result.is_ok()),
+                _ = async {
+                    while !env.events().contains("early-address") {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                } => {}
+            }
+            // stdout already contains a usable loopback address, but the
+            // startup future must still withhold it (and thus client startup).
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut start)
+                .await
+                .is_err());
+            assert!(!env.events().contains("client-start"));
+            std::fs::write(env.0.work.join("release-ack"), b"release").unwrap();
+            if let Ok(supervisor) = start.await {
+                std::fs::write(env.0.work.join("client-start"), b"started").unwrap();
+                let _ = request(supervisor.data_address()).await;
+                panic!("early-address child bypassed ACK verification");
+            }
+            assert!(!env.0.work.join("client-start").exists());
+            assert!(!env.events().contains("client-start"));
+            assert!(env.events().contains("exited"));
+            // A nonzero engine exit cannot certify child cleanup.
+            let env = TestEnv::new();
+            let supervisor = Supervisor::start(
+                &binary,
+                &env.0,
+                "form",
+                "default",
+                "run".into(),
+                scope("bad-exit"),
             )
             .await
-            .is_err());
-            // The failure path must also wait for the child, not just drop a
-            // kill-on-drop handle and immediately delete the task directory.
-            assert!(env.events().contains("exited"));
+            .unwrap();
+            assert!(supervisor.close().await.is_err());
         })
         .await
         .unwrap();
@@ -148,12 +216,30 @@ mod checks {
             let Control::Install {run_id,mut generation,scope_digest,scope,..}=frame else {panic!("missing Install");};
             assert_eq!(scope_digest,scope.digest(&run_id,generation).unwrap());
             let mut ack=Ack {run_id:run_id.clone(),generation,scope_digest};
-            if scope.engine_instance=="bad-ack" {ack.generation+=1;}
-            write_frame(&mut control,&ack).await.unwrap();
+            match scope.engine_instance.as_str() {
+                "bad-ack" => ack.generation += 1,
+                "bad-run" | "early-address" => ack.run_id = "wrong-run".into(),
+                "bad-digest" => ack.scope_digest = "wrong-digest".into(),
+                _ => {}
+            }
+            let early = scope.engine_instance == "early-address";
+            if !early { write_frame(&mut control,&ack).await.unwrap(); }
             let listener=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await.unwrap();
             let address=listener.local_addr().unwrap();
             println!("{}",serde_json::json!({"data_address":address}));std::io::stdout().flush().unwrap();
-            if scope.engine_instance=="bad-ack" {
+            if early {
+                event("early-address");
+                while !std::path::Path::new("release-ack").exists() {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+                        accepted = listener.accept() => {
+                            let _ = accepted.unwrap(); event("client-start");
+                        }
+                    }
+                }
+                write_frame(&mut control, &ack).await.unwrap();
+            }
+            if ["bad-ack", "bad-run", "bad-digest", "early-address"].contains(&scope.engine_instance.as_str()) {
                 let _=read_frame::<_,Control>(&mut control).await;event("exited");return;
             }
             let mut seq=0;
@@ -185,6 +271,7 @@ mod checks {
             }
             drop(listener);drop(control);
             tokio::time::sleep(Duration::from_millis(200)).await;event("exited");
+            if scope.engine_instance == "bad-exit" { std::process::exit(10); }
         }).await.unwrap();
     }
 }

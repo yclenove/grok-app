@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use super::model::{FixtureScope, ScopeLease};
 
 tokio::task_local! {
+    static CONNECTION_AUTHORITY: AttemptAuthority;
     static ATTEMPT_EPOCH: (String, u64);
 }
 
@@ -19,13 +20,20 @@ tokio::task_local! {
 ///
 /// Memory only. Waiting on [`Self::changed`] is the caller's cancellation.
 /// Dropping this value does not change the lease.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AttemptAuthority {
     scope: FixtureScope,
     invalidation: watch::Receiver<u64>,
 }
 
 impl AttemptAuthority {
+    /// Install the connection authority on this task, including nested work.
+    /// Spawned tasks must call this explicitly; Tokio does not inherit locals.
+    /// Waiting and cancellation are those of `work`.
+    pub async fn enter<T>(&self, work: impl Future<Output = T>) -> T {
+        CONNECTION_AUTHORITY.scope(self.clone(), work).await
+    }
+
     /// Borrow the scope that was current when the receiver was armed.
     ///
     /// Memory only. No blocking, timeout, or cancellation.
@@ -64,6 +72,9 @@ impl ScopeLease {
     /// that happens with zero receivers is still visible, because the lease stores
     /// it. Memory only. No blocking, timeout, or cancellation.
     pub fn arm_attempt(&self) -> Option<AttemptAuthority> {
+        if let Ok(mut authority) = CONNECTION_AUTHORITY.try_with(Clone::clone) {
+            return authority.confirm(self).then_some(authority);
+        }
         let invalidation = self.subscribe();
         let scope = self.current()?;
         if *invalidation.borrow() != scope.generation() {
@@ -73,6 +84,47 @@ impl ScopeLease {
             scope,
             invalidation,
         })
+    }
+
+    /// Data-plane admission. Engine leases require the original connection's
+    /// authority; deadline-less S1 assemblers retain direct in-process access.
+    /// Memory only, no waits except lease locks, no cancellation.
+    pub fn authorized_current(&self) -> Option<FixtureScope> {
+        let scope = self.current()?;
+        match CONNECTION_AUTHORITY.try_with(Clone::clone) {
+            Ok(mut authority) => {
+                if !authority.confirm(self) || authority.scope() != &scope {
+                    return None;
+                }
+            }
+            Err(_) if self.shared.clock.is_some() => return None,
+            Err(_) => {}
+        }
+        if let Some((run, generation)) = expected_epoch() {
+            if scope.run_id() != run || scope.generation() != generation {
+                return None;
+            }
+        }
+        Some(scope)
+    }
+
+    // Called under the lease read lock: compare only carried memory, never
+    // recursively read the lease. Explicit producing epochs remain sufficient
+    // for private encoding workers which intentionally cross spawn_blocking.
+    pub(super) fn commit_authority_matches(&self, scope: &FixtureScope) -> bool {
+        CONNECTION_AUTHORITY
+            .try_with(|authority| {
+                authority.scope() == scope && *authority.invalidation.borrow() == scope.generation()
+            })
+            .unwrap_or(true)
+    }
+
+    /// Arm a data operation without acquiring a newer connection generation.
+    /// Memory only; no waits except lease locks or cancellation.
+    pub fn data_attempt(&self) -> Option<AttemptAuthority> {
+        let scope = self.authorized_current()?;
+        let mut authority = self.arm_attempt()?;
+        (authority.scope() == &scope && authority.confirm(self)).then_some(authority)
     }
 }
 

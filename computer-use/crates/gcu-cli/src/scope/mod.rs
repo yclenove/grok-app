@@ -56,7 +56,7 @@ pub(crate) async fn run(
         control,
         driver,
         Machine::new(Monotonic::default()),
-        move |lease| data::serve(serving, lease, profile.into(), mode),
+        move |lease, children| data::serve(serving, lease, children, profile.into(), mode),
     )
     .await
 }
@@ -69,13 +69,15 @@ async fn run_controlled<C, F, D>(
 ) -> Result<u8, Failure>
 where
     C: Clock,
-    F: FnOnce(gcu_core::scope::ScopeLease) -> D,
+    F: FnOnce(gcu_core::scope::ScopeLease, crate::script_children::Children) -> D,
     D: std::future::Future<Output = Result<(), Failure>>,
 {
     let mut owner = EngineOwner {
         machine,
+        children: crate::script_children::Children::default(),
         release: Some(driver.clone()),
     };
+    let children = owner.children.clone();
     let machine = &mut owner.machine;
     let result: Result<(), Failure> = async {
         // No LocalHost, listener or script worker before Install and flushed ACK.
@@ -96,12 +98,15 @@ where
         tokio::select! {
             biased;
             result = watch(&mut *machine, &mut control) => result.map_err(Failure::from),
-            result = serve(lease) => result,
+            result = serve(lease, children) => result,
         }
     }
     .await;
     machine.revoke();
     drop(control);
+    // No existing parent-death signal mechanism is used in this repository.
+    // Supervisor death closes control; drain children here before engine exit.
+    let children_reaped = owner.children.close();
     // Initial parse/ACK failure also reaches the awaited release barrier.
     // Independent of scope and Stop; never take the router action mutex.
     let _ = tokio::time::timeout(
@@ -110,6 +115,9 @@ where
     )
     .await;
     owner.release = None;
+    if !children_reaped {
+        return Err(Failure::internal("Scope worker cleanup failed"));
+    }
     result.map(|_| 0)
 }
 
@@ -150,11 +158,13 @@ async fn watch<C: Clock>(machine: &mut Machine<C>, control: &mut BoxStream) -> R
 // The ordinary path awaits release and disarms this fallback.
 struct EngineOwner<C: Clock> {
     machine: Machine<C>,
+    children: crate::script_children::Children,
     release: Option<gcu_driver_fake::FakeDriver>,
 }
 impl<C: Clock> Drop for EngineOwner<C> {
     fn drop(&mut self) {
         self.machine.revoke();
+        self.children.close();
         if let (Some(driver), Ok(runtime)) =
             (self.release.take(), tokio::runtime::Handle::try_current())
         {

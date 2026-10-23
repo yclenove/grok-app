@@ -1,26 +1,13 @@
 //! Sole scope writer. The runtime calls this only for private control frames or
 //! terminal channel/clock failure. Data handlers receive a lease, never Machine.
 use gcu_core::scope::{self as core, ScopeLease};
+pub(super) use gcu_core::scope::{Clock, Monotonic};
 use gcu_host_protocol::{
     scope::{Ack, Control, Scope, LEASE, VERSION},
     Error,
 };
-use std::time::{Duration, Instant};
+use std::{sync::Arc, time::Duration};
 
-pub(super) trait Clock {
-    fn now(&self) -> Duration;
-}
-pub(super) struct Monotonic(Instant);
-impl Default for Monotonic {
-    fn default() -> Self {
-        Self(Instant::now())
-    }
-}
-impl Clock for Monotonic {
-    fn now(&self) -> Duration {
-        self.0.elapsed()
-    }
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Phase {
     Unbound,
@@ -36,18 +23,17 @@ enum State {
         run: String,
         generation: u64,
         seq: u64,
-        deadline: Duration,
     },
     Revoked,
 }
 pub(super) struct Machine<C: Clock> {
-    clock: C,
+    clock: Arc<C>,
     state: State,
 }
 impl<C: Clock> Machine<C> {
     pub(super) fn new(clock: C) -> Self {
         Self {
-            clock,
+            clock: Arc::new(clock),
             state: State::Unbound,
         }
     }
@@ -71,7 +57,7 @@ impl<C: Clock> Machine<C> {
         self.state = State::Revoked;
     }
     pub(super) fn check_time(&mut self) -> Result<(), Error> {
-        if matches!(&self.state, State::Active {deadline,..} if self.clock.now() >= *deadline) {
+        if matches!(&self.state, State::Active {lease,..} if lease.current().is_none()) {
             self.revoke();
         }
         if self.phase() == Phase::Revoked {
@@ -82,7 +68,7 @@ impl<C: Clock> Machine<C> {
     }
     pub(super) fn remaining(&self) -> Duration {
         match &self.state {
-            State::Active { deadline, .. } => deadline.saturating_sub(self.clock.now()),
+            State::Active { lease, .. } => lease.remaining().unwrap_or(Duration::ZERO),
             _ => Duration::ZERO,
         }
     }
@@ -110,7 +96,11 @@ impl<C: Clock> Machine<C> {
                 if version != VERSION || scope.digest(&run_id, generation)? != scope_digest {
                     return Err(Error::Invalid);
                 }
-                let lease = ScopeLease::install(to_core(&run_id, generation, &scope)?);
+                let lease = ScopeLease::install_with_deadline(
+                    to_core(&run_id, generation, &scope)?,
+                    self.clock.clone(),
+                    deadline,
+                );
                 let ack = Ack {
                     run_id: run_id.clone(),
                     generation,
@@ -122,7 +112,6 @@ impl<C: Clock> Machine<C> {
                     run: run_id,
                     generation,
                     seq: 0,
-                    deadline,
                 };
                 Ok(Some(ack))
             }
@@ -133,7 +122,6 @@ impl<C: Clock> Machine<C> {
                     run,
                     generation,
                     seq,
-                    deadline: expires,
                 },
                 Control::Rebind {
                     run_id,
@@ -151,10 +139,11 @@ impl<C: Clock> Machine<C> {
                 }
                 let next_scope = to_core(&run_id, next, &scope)?;
                 let digest = scope.digest(&run_id, next)?;
-                lease.rebind(next_scope).map_err(|_| Error::Invalid)?;
+                lease
+                    .rebind_with_deadline(next_scope, deadline)
+                    .map_err(|_| Error::Invalid)?;
                 *generation = next;
                 *seq = 0;
-                *expires = deadline;
                 *record = scope;
                 Ok(Some(Ack {
                     run_id,
@@ -164,10 +153,10 @@ impl<C: Clock> Machine<C> {
             }
             (
                 State::Active {
+                    lease,
                     run,
                     generation,
                     seq,
-                    deadline: expires,
                     ..
                 },
                 Control::Renew {
@@ -179,8 +168,8 @@ impl<C: Clock> Machine<C> {
                 if &run_id != run || next != *generation || next_seq <= *seq {
                     return Err(Error::Invalid);
                 }
+                lease.renew_deadline(deadline).map_err(|_| Error::Invalid)?;
                 *seq = next_seq;
-                *expires = deadline;
                 Ok(None)
             }
             (State::Active { run, .. }, Control::Revoke { run_id }) if run_id == *run => {

@@ -116,6 +116,9 @@ impl Results {
         error: Option<ToolError>,
         produced: result_guard::LiveStamp,
     ) -> CallToolResult {
+        if result_guard::hard_denial(error.as_ref()) {
+            return self.assemble_cleared(error.as_ref(), &json!({}));
+        }
         let failed = error.is_some();
         let mut text = error
             .as_ref()
@@ -133,7 +136,22 @@ impl Results {
             "output": prefix(output, 2_000),
             "error": error,
         });
-        self.finish_text(text, data, failed, produced).await
+        match self
+            .finish(FinishIn {
+                text,
+                data,
+                images: Vec::new(),
+                failed,
+                stamp: produced,
+                created: Vec::new(),
+                pending: None,
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(FinishFault::Lost) => self.assemble_cleared(error.as_ref(), &json!({})),
+            Err(FinishFault::Io) => self.io_error(),
+        }
     }
     pub async fn discovery(
         &self,
@@ -156,30 +174,8 @@ impl Results {
             .await
         {
             Ok(result) => result,
-            Err(_) => self.io_error(),
-        }
-    }
-    async fn finish_text(
-        &self,
-        text: String,
-        data: Value,
-        failed: bool,
-        produced: result_guard::LiveStamp,
-    ) -> CallToolResult {
-        match self
-            .finish(FinishIn {
-                text,
-                data,
-                images: Vec::new(),
-                failed,
-                stamp: produced,
-                created: Vec::new(),
-                pending: None,
-            })
-            .await
-        {
-            Ok(result) => result,
-            Err(_) => self.io_error(),
+            Err(FinishFault::Lost) => self.assemble_cleared(None, &json!({})),
+            Err(FinishFault::Io) => self.io_error(),
         }
     }
     /// Epoch to carry from before a scoped read. Unscoped hosts stay off.
@@ -190,7 +186,7 @@ impl Results {
         let Some(lease) = &self.scope else {
             return result_guard::LiveStamp::off();
         };
-        match lease.current() {
+        match lease.authorized_current() {
             Some(scope) => result_guard::LiveStamp::epoch(scope.run_id(), scope.generation()),
             None => result_guard::LiveStamp::closed(),
         }
@@ -405,6 +401,26 @@ impl Results {
         }
     }
     fn assemble_cleared(&self, error: Option<&ToolError>, data: &Value) -> CallToolResult {
+        // Authority loss is a scope refusal, not an IO error or an empty success.
+        // Preserve any existing error, including native unknown delivery.
+        let refusal;
+        let error = match error {
+            None if self.scope.is_some() => {
+                let stopped = self.session.is_stopped() || self.session.activity().stop_requested();
+                let mut error = result_text::error(if stopped {
+                    ErrorCode::StoppedByUser
+                } else {
+                    ErrorCode::AppDenied
+                });
+                if !stopped {
+                    error.message = gcu_core::scope::SCOPE_DENIED_MESSAGE.into();
+                    error.hint = "Stay inside the registered evaluation targets.".into();
+                }
+                refusal = error;
+                Some(&refusal)
+            }
+            other => other,
+        };
         let mut data = data.clone();
         result_guard::scrub(&mut data);
         let mut text = String::new();

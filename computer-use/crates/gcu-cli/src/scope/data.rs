@@ -16,6 +16,7 @@ use tokio::{
 pub(super) async fn serve(
     driver: gcu_driver_fake::FakeDriver,
     lease: ScopeLease,
+    children: crate::script_children::Children,
     profile: gcu_mcp::Profile,
     mode: Option<String>,
 ) -> Result<(), Failure> {
@@ -24,7 +25,8 @@ pub(super) async fn serve(
         return Err(closed());
     }
     let host = Arc::new(crate::runtime::open_local_host(mode).await?);
-    let evidence = FakeEvidence::new(driver.clone())
+    let evidence = initial
+        .enter(FakeEvidence::new(driver.clone()))
         .await
         .map_err(|_| Failure::internal("Fake instance evidence unavailable"))?;
     if !initial.confirm(&lease) {
@@ -57,8 +59,9 @@ pub(super) async fn serve(
             accepted = listener.accept(), if clients.len() < 32 => {
                 let (socket,_) = accepted.map_err(|_|closed())?;
                 let authority = lease.arm_attempt().ok_or_else(closed)?;
+                let children = children.clone();
                 let driver=evidence.clone();let lease=lease.clone();let host=host.clone();
-                clients.spawn(async move {let _=serve_one(socket,driver,lease,authority,host,profile).await;});
+                clients.spawn(async move {let _=serve_one(socket,driver,lease,authority,host,children,profile).await;});
             }
         }
     }
@@ -73,16 +76,18 @@ async fn serve_one(
     lease: ScopeLease,
     mut authority: AttemptAuthority,
     host: Arc<crate::host::LocalHost>,
+    children: crate::script_children::Children,
     profile: gcu_mcp::Profile,
 ) -> Result<(), Failure> {
     if !authority.confirm(&lease) {
         return Err(closed());
     }
+    let connection_authority = authority.clone();
     let connection = tokio::select! {
         biased;
         _=authority.changed()=>return Err(closed()),
-        result=gcu_mcp::Connection::open_scoped(driver,lease.clone(),host.host.clone(),gcu_mcp::ServerConfig {
-            profile,browser_session:None,route_note:String::new(),script:crate::script_worker::runner(),
+        result=gcu_mcp::Connection::open_scoped_with_authority(driver,lease.clone(),connection_authority,host.host.clone(),gcu_mcp::ServerConfig {
+            profile,browser_session:None,route_note:String::new(),script:crate::script_worker::runner_owned(children),
         })=>result?,
     };
     if !authority.confirm(&lease) {

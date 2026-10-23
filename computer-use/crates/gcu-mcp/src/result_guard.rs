@@ -180,7 +180,7 @@ fn blocked() -> Guard {
     }
 }
 
-fn hard_denial(error: Option<&ToolError>) -> bool {
+pub(super) fn hard_denial(error: Option<&ToolError>) -> bool {
     error.is_some_and(|err| err.code == ErrorCode::AppDenied && err.message == SCOPE_DENIED_MESSAGE)
 }
 

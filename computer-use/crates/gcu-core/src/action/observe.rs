@@ -66,7 +66,7 @@ impl ActionRouter {
         let producing = crate::scope::expected_epoch().or_else(|| {
             self.lease.as_ref().and_then(|lease| {
                 lease
-                    .current()
+                    .authorized_current()
                     .map(|scope| (scope.run_id().to_owned(), scope.generation()))
             })
         });

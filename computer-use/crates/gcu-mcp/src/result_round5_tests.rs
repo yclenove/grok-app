@@ -259,6 +259,14 @@ async fn discovery_and_script_spill_drop_canary_on_revoke_or_rebind() {
             gate.release();
             let result = task.await.unwrap();
             let rendered = serde_json::to_string(&result).unwrap();
+            assert_eq!(result.is_error, Some(true), "{rendered}");
+            let data = result.structured_content.as_ref().unwrap();
+            assert_eq!(data["error"]["code"], "app_denied", "{rendered}");
+            assert_eq!(data["error"]["message"], SCOPE_DENIED_MESSAGE, "{rendered}");
+            assert!(data.get("output").is_none(), "{rendered}");
+            assert!(data.get("state").is_none(), "{rendered}");
+            assert!(data.get("windows").is_none(), "{rendered}");
+            assert!(data["error"].get("state").is_none(), "{rendered}");
             assert!(!rendered.contains("CANARY-PRIOR"), "{rendered}");
             assert!(!rendered.contains("CANARY-DISC"), "{rendered}");
             assert!(finished(&gate).await);
@@ -267,6 +275,48 @@ async fn discovery_and_script_spill_drop_canary_on_revoke_or_rebind() {
             assert!(files.export().unwrap().is_empty());
             files.close().unwrap();
         }
+    }
+}
+
+#[tokio::test]
+async fn script_refusal_drops_output_and_preserves_native_unknown_error() {
+    for hard_denial in [false, true] {
+        let scope = lease(1);
+        let results = desk(Some(scope.clone()));
+        let produced = results.opened_stamp();
+        let mut error = error(if hard_denial {
+            ErrorCode::AppDenied
+        } else {
+            ErrorCode::DriverError
+        });
+        error.message = if hard_denial {
+            SCOPE_DENIED_MESSAGE
+        } else {
+            "evaluation scope changed during delivery"
+        }
+        .into();
+        error.state = Some(stamped(None).state);
+        let expected_code = error.code;
+        let expected_message = error.message.clone();
+        if !hard_denial {
+            scope.revoke();
+        }
+        let result = results
+            .script("CANARY-SCRIPT-OUTPUT", Some(error), produced)
+            .await;
+        let rendered = serde_json::to_string(&result).unwrap();
+        assert_eq!(result.is_error, Some(true), "{rendered}");
+        let data = result.structured_content.as_ref().unwrap();
+        assert_eq!(data["error"]["code"], expected_code.as_str(), "{rendered}");
+        assert_eq!(data["error"]["message"], expected_message, "{rendered}");
+        assert!(data.get("output").is_none(), "{rendered}");
+        assert!(data.get("state").is_none(), "{rendered}");
+        assert!(data["error"].get("state").is_none(), "{rendered}");
+        assert!(!rendered.contains("CANARY-SCRIPT-OUTPUT"), "{rendered}");
+        assert_eq!(result.content.len(), 1, "{rendered}");
+        assert!(result.content[0].as_text().is_some(), "{rendered}");
+        assert!(results.files.export().unwrap().is_empty());
+        results.files.close().unwrap();
     }
 }
 

@@ -31,6 +31,7 @@ mod proxy;
 pub mod resume;
 mod runtime;
 mod scope;
+mod script_children;
 mod script_worker;
 mod turn_ended;
 pub mod ui;

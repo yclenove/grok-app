@@ -17,7 +17,7 @@ use tokio::{
 
 /// Authority held by a trusted harness, never by the model/relay. The owner
 /// must call [`Self::close`] and await engine exit before deleting its run root.
-/// Drop closes control and kills the child; it cannot claim cleanup completed.
+/// Drop requests bounded teardown; it cannot claim cleanup completed.
 pub struct Supervisor {
     data_address: SocketAddr,
     run_id: String,
@@ -156,11 +156,14 @@ impl Supervisor {
 }
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        // Abort drops Child (kill_on_drop) and the only control end. No renewal
-        // task is detached on cancellation. Explicit close is the wait barrier.
-        if let Some(task) = self.task.take() {
-            task.abort();
+        // Let the engine drain its workers before exit. Aborting this task
+        // immediately would kill the engine before it could handle control EOF.
+        // The owner has bounded revoke/wait/kill phases; explicit close alone
+        // can attest success. Runtime loss still cannot attest cleanup.
+        if let Some(close) = self.close.take() {
+            close.send_replace(true);
         }
+        drop(self.task.take());
     }
 }
 async fn exchange(control: &mut BoxStream, frame: &Control) -> Result<Ack, Error> {
@@ -276,7 +279,8 @@ async fn bootstrap(
 
 async fn wait_exit(child: &mut Child) -> Result<(), Error> {
     match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-        Ok(Ok(_)) => Ok(()),
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(_)) => Err(Error::msg("scope_engine_cleanup_unconfirmed")),
         Ok(Err(_)) => Err(Error::msg("scope_engine_wait_failed")),
         Err(_) => {
             child
@@ -286,7 +290,8 @@ async fn wait_exit(child: &mut Child) -> Result<(), Error> {
                 .await
                 .map_err(|_| Error::msg("scope_engine_exit_timeout"))?
                 .map_err(|_| Error::msg("scope_engine_wait_failed"))?;
-            Ok(())
+            // Forced engine death cannot attest that its workers were reaped.
+            Err(Error::msg("scope_engine_cleanup_unconfirmed"))
         }
     }
 }

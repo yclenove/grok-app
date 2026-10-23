@@ -53,7 +53,7 @@ async fn eof_or_malformed_control_releases_held_input_and_cancels_data_work() {
                 Box::new(engine),
                 driver,
                 Machine::new(Monotonic::default()),
-                move |lease| async move {
+                move |lease, _children| async move {
                     *copy.lock().unwrap() = Some(lease);
                     std::future::pending::<Result<(), Failure>>().await
                 },
@@ -98,7 +98,7 @@ async fn lease_expiry_cancels_partial_control_read_and_releases_input() {
             Box::new(engine),
             driver,
             Machine::new(Monotonic::default()),
-            |_| std::future::pending::<Result<(), Failure>>(),
+            |_, _children| std::future::pending::<Result<(), Failure>>(),
         ));
         codec::write_frame(&mut supervisor, &install())
             .await
@@ -125,7 +125,7 @@ async fn cancellation_revokes_before_release_fallback() {
             Box::new(engine),
             driver,
             Machine::new(Monotonic::default()),
-            move |lease| async move {
+            move |lease, _children| async move {
                 *copy.lock().unwrap() = Some(lease);
                 std::future::pending::<Result<(), Failure>>().await
             },
@@ -169,7 +169,7 @@ async fn data_factory_is_not_polled_until_ack_is_fully_flushed() {
             Box::new(engine),
             driver,
             Machine::new(Monotonic::default()),
-            move |_| async move {
+            move |_, _children| async move {
                 seen.store(true, Ordering::SeqCst);
                 std::future::pending::<Result<(), Failure>>().await
             },
@@ -191,4 +191,103 @@ async fn data_factory_is_not_polled_until_ack_is_fully_flushed() {
     })
     .await
     .unwrap();
+}
+
+#[cfg(all(unix, feature = "script"))]
+#[test]
+#[ignore = "subprocess JS worker fixture"]
+fn owned_js_worker_helper() {
+    let code = gcu_script::worker_main(std::io::stdin(), std::io::stdout());
+    std::process::exit(code);
+}
+
+#[cfg(all(unix, feature = "script"))]
+#[test]
+fn runtime_shutdown_reaps_detached_script_worker() {
+    use std::{
+        process::{Command, Stdio},
+        sync::mpsc,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (pid_tx, pid_rx) = mpsc::sync_channel(1);
+    let task = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut supervisor, engine) = tokio::io::duplex(4096);
+            let driver = gcu_driver_fake::FakeDriver::from_scene("form").unwrap();
+            let task = tokio::spawn(run_controlled(
+                Box::new(engine),
+                driver,
+                Machine::new(Monotonic::default()),
+                move |_, children| async move {
+                    let mut command = Command::new(std::env::current_exe().unwrap());
+                    command
+                        .args([
+                            "--ignored",
+                            "--exact",
+                            "scope::runtime_tests::owned_js_worker_helper",
+                            "--nocapture",
+                        ])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    let owner = children.spawn(&mut command).unwrap();
+                    let pid = {
+                        let mut child = owner.child.lock().unwrap();
+                        gcu_script::write_frame(
+                            child.stdin.as_mut().unwrap(),
+                            &gcu_script::Frame::Start {
+                                timeout_ms: 30000,
+                                code: "for (;;) {}".into(),
+                            },
+                        )
+                        .unwrap();
+                        child.id()
+                    };
+                    // Keep the child in a detached handler, as rmcp does. Only the
+                    // engine registry can guarantee draining it at runtime shutdown.
+                    tokio::spawn(async move {
+                        let _owner = owner;
+                        std::future::pending::<()>().await;
+                    });
+                    pid_tx.send(pid).unwrap();
+                    std::future::pending::<Result<(), Failure>>().await
+                },
+            ));
+            codec::write_frame(&mut supervisor, &install())
+                .await
+                .unwrap();
+            let _: Ack = codec::read_frame(&mut supervisor).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(pid) = pid_rx.try_recv() {
+                        break pid;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map(|pid| (task, supervisor, pid))
+            .unwrap()
+        })
+        .await
+        .unwrap()
+    });
+    let (task, supervisor, pid) = task;
+    runtime.block_on(async { tokio::time::sleep(Duration::from_millis(100)).await });
+    assert_eq!(unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) }, 0);
+    // No control EOF: destroy the engine's entire runtime while data work lives.
+    runtime.shutdown_timeout(Duration::from_secs(3));
+    drop((task, supervisor));
+    assert_eq!(
+        unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) },
+        -1,
+        "worker survived runtime shutdown"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
 }

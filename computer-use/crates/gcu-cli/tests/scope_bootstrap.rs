@@ -391,6 +391,8 @@ async fn killed_supervisor_revokes_engine_in_another_process() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        #[cfg(feature = "script")]
+        assert_worker_reaped(u32::try_from(ready["worker"].as_u64().unwrap()).unwrap());
         std::fs::remove_dir_all(ready["root"].as_str().unwrap()).unwrap();
     })
     .await
@@ -402,13 +404,26 @@ async fn killed_supervisor_revokes_engine_in_another_process() {
 async fn supervisor_process_helper() {
     let marker = std::env::var_os("S3_SUPERVISOR_MARKER").unwrap();
     tokio::time::timeout(Duration::from_secs(12), async {
-        let mut engine = Engine::spawn("minimal").await;
+        let mut engine = Engine::spawn(if cfg!(feature = "script") { "full" } else { "minimal" }).await;
         engine.ack(&install()).await;
         let address = engine.address().await;
+        #[cfg(feature = "script")]
+        let worker = {
+            let mut mcp = Mcp::connect(address).await;
+            mcp.send(json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{
+                "name":"computer_script","arguments":{"code":"for (;;) {}","timeout_ms":30000}
+            }})).await;
+            let pid = script_worker_pid(engine.child.id().unwrap()).await;
+            // Keep the data socket alive until the supervisor itself is killed.
+            std::mem::forget(mcp);
+            pid
+        };
+        #[cfg(not(feature = "script"))]
+        let worker: Option<u32> = None;
         std::fs::write(
             marker,
             serde_json::to_vec(
-                &json!({"address":address,"pid":engine.child.id(),"root":engine._root.path()}),
+                &json!({"address":address,"pid":engine.child.id(),"root":engine._root.path(),"worker":worker}),
             )
             .unwrap(),
         )
@@ -513,6 +528,91 @@ async fn unscoped_fake_call_retains_existing_discovery_without_control() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("fake.form"));
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(all(unix, feature = "script"))]
+async fn script_worker_pid(parent: u32) -> u32 {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let mut ps = Command::new("ps");
+            ps.args(["-axo", "pid=,ppid=,args="]).kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(1), ps.output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(output.status.success());
+            for row in String::from_utf8(output.stdout).unwrap().lines() {
+                let mut fields = row.split_whitespace();
+                let pid = fields.next().and_then(|s| s.parse::<u32>().ok());
+                let ppid = fields.next().and_then(|s| s.parse::<u32>().ok());
+                if ppid == Some(parent) && fields.any(|arg| arg == "script-worker") {
+                    return pid.unwrap();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("real script worker was not started")
+}
+
+#[cfg(all(unix, feature = "script"))]
+fn assert_worker_reaped(pid: u32) {
+    // SAFETY: signal 0 only probes this positive, observed worker pid.
+    let result = unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) };
+    assert_eq!(
+        result, -1,
+        "worker {pid} survived the engine cleanup barrier (including zombies)"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+}
+
+#[cfg(all(unix, feature = "script"))]
+#[tokio::test]
+async fn revoke_and_control_eof_reap_a_running_js_worker_before_engine_exit() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for revoke in [true, false] {
+            let mut engine = Engine::spawn("full").await;
+            engine.ack(&install()).await;
+            let mut mcp = Mcp::connect(engine.address().await).await;
+            mcp.send(
+                json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{
+                    "name":"computer_script","arguments":{"code":"for (;;) {}","timeout_ms":30000}
+                }}),
+            )
+            .await;
+            let pid = script_worker_pid(engine.child.id().unwrap()).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // The child is still alive with a 30s JS horizon before revocation.
+            assert_eq!(unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) }, 0);
+            if revoke {
+                write_frame(
+                    engine.control.as_mut().unwrap(),
+                    &Control::Revoke {
+                        run_id: "run".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            } else {
+                engine.control.take();
+            }
+            let status = tokio::time::timeout(Duration::from_secs(4), engine.child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            if revoke {
+                assert!(status.success(), "engine cleanup failed: {status}");
+            }
+            // The supervisor's exit barrier is only meaningful after this is true.
+            assert_worker_reaped(pid);
+        }
     })
     .await
     .unwrap();
