@@ -91,7 +91,8 @@ async fn unproved_creation_time_returns_scope_denied_without_substituting_a_wind
         }),
     )
     .await
-    .unwrap_err();
+    .err()
+    .expect("unproved creation time");
     assert_eq!(error, DriverError::ScopeDenied);
     assert_eq!(error.to_string(), gcu_core::scope::SCOPE_DENIED_MESSAGE);
     blocked.release();

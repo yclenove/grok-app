@@ -164,7 +164,7 @@ pub(crate) fn parse_stamp(id: &str) -> Option<ParsedStamp> {
 }
 
 fn decode_class(hex: &str) -> Option<String> {
-    if hex.is_empty() || hex.len() % 2 != 0 {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
         return None;
     }
     let bytes = (0..hex.len())
