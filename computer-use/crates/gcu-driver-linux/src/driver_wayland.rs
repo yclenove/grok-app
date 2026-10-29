@@ -196,6 +196,7 @@ pub(super) async fn capture_native(
     win: &WindowRef,
     cancel: &Cancel,
 ) -> Result<Capture> {
+    driver.admit_wayland_window(&win.id)?;
     let Some(bound) = driver.bound_capture.as_ref() else {
         return Err(DriverError::CapabilityUnavailable);
     };
@@ -260,6 +261,7 @@ pub(super) async fn capture_native(
         driver.stop_latch.request_stop();
         return Err(DriverError::CapabilityUnavailable);
     }
+    driver.admit_wayland_window(&win.id)?;
     Ok(Capture {
         geometry: bound.geometry,
         ..shot

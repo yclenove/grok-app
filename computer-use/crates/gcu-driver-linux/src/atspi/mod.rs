@@ -5,6 +5,7 @@ pub mod bus;
 pub mod discovery;
 pub mod events;
 pub mod roles;
+pub(crate) mod scope;
 pub mod sensitive;
 pub mod source;
 pub mod tree;

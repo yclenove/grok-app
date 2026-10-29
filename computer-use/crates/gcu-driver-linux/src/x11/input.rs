@@ -6,6 +6,7 @@ use crate::x11::{
         restore_remapped_keycode,
     },
     ledger::InputLedger,
+    scope::X11Scope,
     server::XServer,
 };
 use gcu_core::{
@@ -20,6 +21,36 @@ pub const TYPE_TEXT_CHUNK_SIZE: usize = 2000;
 /// How long to wait after remapping keycodes before typing with them, and again before
 /// restoring them, so the target client has refreshed its key table.
 const REMAP_SETTLE: Duration = Duration::from_millis(120);
+
+/// Prove the window, activate it, then prove it again before the first input event.
+///
+/// A refusal before focus is requested is [`DriverError::ScopeDenied`]. A refusal
+/// after an activate request was sent reports that delivery may have started.
+async fn gate_delivery(
+    x: &dyn XServer,
+    xid: u32,
+    scope: Option<&X11Scope<'_>>,
+    cancel: &Cancel,
+) -> Result<(), DriverError> {
+    if let Some(scope) = scope {
+        scope.allow(x, xid)?;
+    }
+    let was_active = matches!(x.active_window(), Ok(Some(active)) if active == xid);
+    activate_and_verify(x, xid, cancel).await?;
+    if let Some(scope) = scope {
+        if let Err(error) = scope.allow(x, xid) {
+            return Err(if was_active {
+                error
+            } else {
+                DriverError::Native {
+                    message: "native driver failure".into(),
+                    maybe_executed: true,
+                }
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Activate target window using `_NET_ACTIVE_WINDOW` and verify activation succeeded.
 ///
@@ -82,8 +113,10 @@ pub async fn activate_and_verify(
 }
 
 /// Execute a physical pointer click via XTEST.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_pointer_click(
     x: &dyn XServer,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     at: WindowPoint,
@@ -91,7 +124,7 @@ pub async fn execute_pointer_click(
     count: u8,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let geom = x.window_geometry(xid).map_err(|e| DriverError::Native {
         message: e.to_string(),
@@ -159,8 +192,10 @@ pub async fn execute_pointer_click(
 }
 
 /// Execute pointer scroll events using X11 wheel buttons (4=up, 5=down, 6=left, 7=right).
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_pointer_scroll(
     x: &dyn XServer,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     at: WindowPoint,
@@ -168,7 +203,7 @@ pub async fn execute_pointer_scroll(
     dy: i32,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let geom = x.window_geometry(xid).map_err(|e| DriverError::Native {
         message: e.to_string(),
@@ -230,6 +265,7 @@ pub async fn execute_pointer_scroll(
 /// Execute an interpolated pointer drag along a path.
 pub async fn execute_pointer_drag(
     x: &dyn XServer,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     path: &[WindowPoint],
@@ -239,7 +275,7 @@ pub async fn execute_pointer_drag(
         return Err(DriverError::InvalidRequest);
     }
 
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let geom = x.window_geometry(xid).map_err(|e| DriverError::Native {
         message: e.to_string(),
@@ -313,12 +349,13 @@ pub async fn execute_pointer_drag(
 /// Execute a key chord with modifiers and key press/release.
 pub async fn execute_press_keys(
     x: &dyn XServer,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     chord: &KeyChord,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let mut held_mod_keycodes = Vec::new();
     let mut remapped_keycodes = Vec::new();
@@ -425,12 +462,13 @@ pub async fn execute_press_keys(
 /// Execute type_text via X11 XTEST keysyms, chunking long inputs without splitting grapheme clusters.
 pub async fn execute_type_text_x11(
     x: &dyn XServer,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     text: &str,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let chars: Vec<char> = text.chars().collect();
     let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);

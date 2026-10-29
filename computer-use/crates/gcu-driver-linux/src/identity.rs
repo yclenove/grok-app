@@ -11,6 +11,7 @@
 #[cfg(unix)]
 mod hash;
 pub(crate) mod inspection;
+pub mod scope;
 
 use std::{
     io,

@@ -89,6 +89,16 @@ pub trait XServer: Send + Sync {
     /// Query `_NET_WM_PID` for a window.
     fn window_pid(&self, window: u32) -> Result<Option<u32>, XError>;
 
+    /// Lifetime token for `window`.
+    ///
+    /// `Ok(None)` means this server cannot tell a reused window id from the
+    /// original. Scoped capture and input treat that as unproved and refuse.
+    /// The default is unproved. A test double that tracks creation supplies a
+    /// non-zero token.
+    fn window_incarnation(&self, _window: u32) -> Result<Option<u64>, XError> {
+        Ok(None)
+    }
+
     /// Query `_NET_WM_NAME` (falling back to `WM_NAME`) for a window.
     fn window_name(&self, window: u32) -> Result<Option<String>, XError>;
 

@@ -18,6 +18,7 @@ pub mod input_stop;
 pub mod kwin;
 pub mod portal;
 pub mod restore;
+pub(crate) mod scope;
 pub mod toplevel;
 pub mod windows;
 

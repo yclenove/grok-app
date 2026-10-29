@@ -73,6 +73,8 @@ pub struct FakeX {
     xi_devices: Mutex<Vec<crate::x11::activity::DeviceInfo>>,
     xi2_available: Mutex<bool>,
     incoming: Mutex<VecDeque<XEventKind>>,
+    incarnations: Mutex<HashMap<u32, u64>>,
+    bump_incarnation_on_image: Mutex<bool>,
 }
 
 impl FakeX {
@@ -100,7 +102,21 @@ impl FakeX {
             xi_devices: Mutex::new(Vec::new()),
             xi2_available: Mutex::new(true),
             incoming: Mutex::new(VecDeque::new()),
+            incarnations: Mutex::new(HashMap::new()),
+            bump_incarnation_on_image: Mutex::new(false),
         }
+    }
+
+    /// Set the lifetime token scoped capture uses to detect a reused window id.
+    pub fn set_window_incarnation(&self, window: u32, incarnation: u64) {
+        lock_m(&self.incarnations).insert(window, incarnation);
+    }
+
+    /// After the next pixmap read, increment that window's incarnation.
+    ///
+    /// Scoped capture must drop the pixels when the token changes during the read.
+    pub fn set_bump_incarnation_on_image(&self, enabled: bool) {
+        *lock_m(&self.bump_incarnation_on_image) = enabled;
     }
 
     /// Queue one event for the next [`XServer::poll_event`] call.
@@ -206,6 +222,14 @@ impl XServer for FakeX {
             Err(poisoned) => poisoned.into_inner(),
         };
         Ok(wins.keys().copied().collect())
+    }
+
+    fn window_incarnation(&self, window: u32) -> Result<Option<u64>, XError> {
+        let wins = lock_m(&self.windows);
+        if !wins.contains_key(&window) {
+            return Err(XError::WindowNotFound(window));
+        }
+        Ok(lock_m(&self.incarnations).get(&window).copied())
     }
 
     fn window_pid(&self, window: u32) -> Result<Option<u32>, XError> {
@@ -349,8 +373,15 @@ impl XServer for FakeX {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some((_, img)) = pixmaps.get(&drawable) {
+        if let Some((window, img)) = pixmaps.get(&drawable) {
+            let window = *window;
             crop_into(&mut result_data, w, h, img, x as i32, y as i32);
+            drop(pixmaps);
+            if *lock_m(&self.bump_incarnation_on_image) {
+                if let Some(token) = lock_m(&self.incarnations).get_mut(&window) {
+                    *token = token.saturating_add(1);
+                }
+            }
             return Ok(RawImage {
                 width: width as u32,
                 height: height as u32,

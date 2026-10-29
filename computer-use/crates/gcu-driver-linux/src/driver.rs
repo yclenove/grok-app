@@ -7,12 +7,15 @@ use crate::atspi::{
     source::{FakeNode, FakeSource},
     tree::build_raw_tree,
 };
+use crate::identity::scope::{ProcessClock, ScopeBinding, ScopeGate};
 use crate::wayland::{detect_environment, LinuxEnvironment, PortalInfo, SystemEnv};
 use crate::x11::{
     activity::{ActivityClock, SharedActivityClock},
     align_windows, capture_window,
     hotkey::{attach_x11_listener, HotkeyConfig, HotkeyManager, SharedStopLatch, StopLatch},
-    list_x11_windows, AtspiWindowCandidate, InputLedger, RealX, XServer,
+    list_x11_windows,
+    scope::{capture_in_scope, observe_x11, X11Scope},
+    AtspiWindowCandidate, InputLedger, RealX, XServer,
 };
 use async_trait::async_trait;
 use gcu_core::{
@@ -21,6 +24,7 @@ use gcu_core::{
         DoctorReport, Driver, DriverAction, DriverError, Result, TreeOpts, UiEvent, WindowRef,
     },
     model::{Geometry, NativeHandle, RawTree, Rect},
+    scope::{ElementBinding, InstanceEvidence, ProcessInstance, WindowBinding},
 };
 use gcu_protocol::{capabilities::Platform, AppInfo, Capabilities, WindowInfo};
 use std::{
@@ -60,6 +64,7 @@ pub struct LinuxDriver {
     portal_info: PortalInfo,
     bound_capture: Option<Arc<crate::wayland::assembly::ProvenCapture>>,
     wayland_stop: Option<Arc<crate::wayland::input_control::StopControl>>,
+    scope: Option<Arc<ScopeBinding>>,
 }
 
 impl LinuxDriver {
@@ -141,6 +146,7 @@ impl LinuxDriver {
             portal_info,
             bound_capture: None,
             wayland_stop: None,
+            scope: None,
         };
         driver.recompute_capabilities();
         driver
@@ -301,6 +307,184 @@ impl LinuxDriver {
         Ok(xid)
     }
 
+    /// Register the fixture windows and the clock that re-reads their owner.
+    ///
+    /// Later reads and input prove against this binding. An unbound driver
+    /// keeps the existing desktop paths.
+    pub fn bind_scope(
+        &mut self,
+        gate: ScopeGate,
+        clock: Arc<dyn ProcessClock>,
+    ) -> Arc<ScopeBinding> {
+        let binding = Arc::new(ScopeBinding::new(gate, clock));
+        self.scope = Some(Arc::clone(&binding));
+        binding
+    }
+
+    /// Install an already built fixture scope.
+    pub fn bind_scope_binding(&mut self, binding: Arc<ScopeBinding>) {
+        self.scope = Some(binding);
+    }
+
+    pub(crate) fn scope(&self) -> Option<&ScopeBinding> {
+        self.scope.as_deref()
+    }
+
+    pub(crate) fn x11_scope(&self) -> Option<X11Scope<'_>> {
+        let binding = self.scope.as_ref()?;
+        Some(X11Scope::new(binding.gate(), binding.oracle().clock()))
+    }
+
+    /// Prove `win`, or do nothing when no scope is bound.
+    ///
+    /// An X11 id is proved from the server only. A failed X11 proof does not
+    /// fall through to AT-SPI. Wayland without a peer credential is closed.
+    pub(crate) fn prove_target(&self, win: &WindowRef) -> Result<()> {
+        let Some(binding) = &self.scope else {
+            return Ok(());
+        };
+        if self.is_native_wayland_window(win) {
+            return self.admit_wayland_window(&win.id);
+        }
+        if self.x11_window_id(win) {
+            let server = self.x_server.as_ref().ok_or(DriverError::ScopeDenied)?;
+            let xid = self
+                .resolve_xid(win)
+                .map_err(|_| DriverError::ScopeDenied)?;
+            return X11Scope::new(binding.gate(), binding.oracle().clock())
+                .allow(server.as_ref(), xid);
+        }
+        crate::atspi::scope::admit_tree(binding, &win.app.info.id, &win.id)
+    }
+
+    pub(crate) fn admit_wayland_window(&self, window_id: &str) -> Result<()> {
+        let Some(binding) = &self.scope else {
+            return Ok(());
+        };
+        crate::wayland::scope::admit(binding.gate(), window_id, self.portal_source_kind(), None)
+    }
+
+    fn x11_window_id(&self, win: &WindowRef) -> bool {
+        if win.id.parse::<u32>().is_ok() {
+            return true;
+        }
+        self.atspi_to_x
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .contains_key(&win.id)
+    }
+
+    fn portal_source_kind(&self) -> crate::wayland::PortalSourceKind {
+        self.bound_capture
+            .as_ref()
+            .map(|bound| bound.stream.source_type)
+            .unwrap_or(crate::wayland::PortalSourceKind::Monitor)
+    }
+
+    async fn refresh_scope_owner(&self, app_id: &str) {
+        let Some(binding) = &self.scope else {
+            return;
+        };
+        let Some(connection) = &self.connection else {
+            return;
+        };
+        if app_id.is_empty() {
+            return;
+        }
+        let bus = AtspiBus::new(connection.clone());
+        let node = AtspiNodeRef {
+            destination: app_id.to_string(),
+            path: "/org/a11y/atspi/accessible/0".to_string(),
+        };
+        let pid = bus.application_pid(&node).await;
+        binding.oracle().set_atspi_pid(app_id, pid);
+    }
+
+    async fn admit_read(&self, win: &WindowRef) -> Result<()> {
+        if self.scope.is_none() {
+            return Ok(());
+        }
+        if self.is_native_wayland_window(win) {
+            return self.admit_wayland_window(&win.id);
+        }
+        if self.x11_window_id(win) {
+            self.prove_target(win)?;
+        }
+        self.refresh_scope_owner(&win.app.info.id).await;
+        let Some(binding) = &self.scope else {
+            return Ok(());
+        };
+        crate::atspi::scope::admit_tree(binding, &win.app.info.id, &win.id)
+    }
+
+    async fn read_tree(
+        &self,
+        win: &WindowRef,
+        opts: &TreeOpts,
+        cancel: &Cancel,
+    ) -> Result<RawTree> {
+        if let Some(ref fake_source) = self.fake_source {
+            let root = self.fake_root.as_ref().ok_or(DriverError::WindowGone)?;
+            return build_raw_tree(fake_source.as_ref(), root, opts, cancel).await;
+        }
+
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or(DriverError::PermissionMissing {
+                permission: "accessibility".into(),
+            })?;
+
+        let bus = AtspiBus::new(conn.clone());
+
+        let target_path = if let Ok(xid) = win.id.parse::<u32>() {
+            let map = match self.x_to_atspi.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            map.get(&xid).cloned().unwrap_or_else(|| win.id.clone())
+        } else {
+            win.id.clone()
+        };
+
+        let root = AtspiNodeRef {
+            destination: win.app.info.id.clone(),
+            path: target_path,
+        };
+
+        build_raw_tree(&bus, &root, opts, cancel).await
+    }
+
+    async fn geometry_of(&self, win: &WindowRef) -> Result<Geometry> {
+        if let Some(geometry) = wayland_bind::bound_geometry(self, win) {
+            return Ok(geometry);
+        }
+        if let Some(ref server) = self.x_server {
+            if let Ok(id) = self.resolve_xid(win) {
+                if let Ok(geom) = server.window_geometry(id) {
+                    let scale = server.root_geometry().map(|root| root.scale).unwrap_or(1.0);
+                    let frame = Rect {
+                        x: geom.x as f64,
+                        y: geom.y as f64,
+                        w: geom.width as f64,
+                        h: geom.height as f64,
+                    };
+                    return Ok(Geometry { frame, scale });
+                }
+            }
+        }
+
+        let windows = self.list_windows(Some(&win.app)).await?;
+        let matched = windows
+            .into_iter()
+            .find(|candidate| candidate.id == win.id)
+            .ok_or(DriverError::WindowGone)?;
+        Ok(Geometry {
+            frame: matched.frame,
+            scale: matched.scale,
+        })
+    }
+
     fn align_and_record(&self, x: &dyn XServer, cands: &[AtspiWindowCandidate]) -> Vec<WindowInfo> {
         let x_cands = list_x11_windows(x).unwrap_or_default();
         let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
@@ -443,36 +627,17 @@ impl Driver for LinuxDriver {
         opts: &TreeOpts,
         cancel: &Cancel,
     ) -> Result<RawTree> {
-        if let Some(ref fake_source) = self.fake_source {
-            let root = self.fake_root.as_ref().ok_or(DriverError::WindowGone)?;
-            return build_raw_tree(fake_source.as_ref(), root, opts, cancel).await;
+        if self.scope.is_some() {
+            self.admit_read(win).await?;
         }
-
-        let conn = self
-            .connection
-            .as_ref()
-            .ok_or(DriverError::PermissionMissing {
-                permission: "accessibility".into(),
-            })?;
-
-        let bus = AtspiBus::new(conn.clone());
-
-        let target_path = if let Ok(xid) = win.id.parse::<u32>() {
-            let map = match self.x_to_atspi.read() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            map.get(&xid).cloned().unwrap_or_else(|| win.id.clone())
-        } else {
-            win.id.clone()
-        };
-
-        let root = AtspiNodeRef {
-            destination: win.app.info.id.clone(),
-            path: target_path,
-        };
-
-        build_raw_tree(&bus, &root, opts, cancel).await
+        let tree = self.read_tree(win, opts, cancel).await?;
+        if self.scope.is_some() {
+            self.admit_read(win).await?;
+            if let Some(binding) = &self.scope {
+                crate::atspi::scope::seal_tree(binding, &tree, &win.id)?;
+            }
+        }
+        Ok(tree)
     }
 
     async fn capture(
@@ -481,45 +646,42 @@ impl Driver for LinuxDriver {
         _opts: &CaptureOpts,
         cancel: &Cancel,
     ) -> Result<Capture> {
+        if self.scope.is_some() {
+            if self.is_native_wayland_window(win) {
+                return wayland_bind::capture_native(self, win, cancel).await;
+            }
+            let server = self.x_server.as_ref().ok_or(DriverError::ScopeDenied)?;
+            let xid = self
+                .resolve_xid(win)
+                .map_err(|_| DriverError::ScopeDenied)?;
+            let binding = self.scope.as_ref().ok_or(DriverError::ScopeDenied)?;
+            return capture_in_scope(
+                server.as_ref(),
+                xid,
+                binding.gate(),
+                binding.oracle().clock(),
+            );
+        }
         if self.is_native_wayland_window(win) {
             return wayland_bind::capture_native(self, win, cancel).await;
         }
-        let x = self
+        let server = self
             .x_server
             .as_ref()
             .ok_or(DriverError::CapabilityUnavailable)?;
         let xid = self.resolve_xid(win)?;
-        capture_window(x.as_ref(), xid)
+        capture_window(server.as_ref(), xid)
     }
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
-        if let Some(geometry) = wayland_bind::bound_geometry(self, win) {
-            return Ok(geometry);
+        if self.scope.is_some() {
+            self.prove_target(win)?;
         }
-        if let Some(ref x) = self.x_server {
-            if let Ok(id) = self.resolve_xid(win) {
-                if let Ok(geom) = x.window_geometry(id) {
-                    let scale = x.root_geometry().map(|r| r.scale).unwrap_or(1.0);
-                    let frame = Rect {
-                        x: geom.x as f64,
-                        y: geom.y as f64,
-                        w: geom.width as f64,
-                        h: geom.height as f64,
-                    };
-                    return Ok(Geometry { frame, scale });
-                }
-            }
+        let geometry = self.geometry_of(win).await?;
+        if self.scope.is_some() {
+            self.prove_target(win)?;
         }
-
-        let windows = self.list_windows(Some(&win.app)).await?;
-        let matched = windows
-            .into_iter()
-            .find(|w| w.id == win.id)
-            .ok_or(DriverError::WindowGone)?;
-        Ok(Geometry {
-            frame: matched.frame,
-            scale: matched.scale,
-        })
+        Ok(geometry)
     }
 
     async fn focused_element(&self, _app: &AppRef) -> Result<Option<NativeHandle>> {
@@ -543,6 +705,78 @@ impl Driver for LinuxDriver {
         if let Some(ref x) = self.x_server {
             self.ledger.release_all(x.as_ref());
         }
+    }
+}
+
+impl InstanceEvidence for LinuxDriver {
+    fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
+        let binding = self.scope.as_ref()?;
+        if app.info.id.is_empty() {
+            return None;
+        }
+        let (owner_pid, start, boot) = {
+            let registered = binding
+                .gate()
+                .windows()
+                .iter()
+                .find(|window| window.app_id() == app.info.id)?;
+            (
+                registered.owner().pid(),
+                registered.owner().start_time(),
+                registered.owner().boot_id().to_string(),
+            )
+        };
+        let live = binding.oracle().process(owner_pid)?;
+        if live.start_time != start || live.boot_id != boot {
+            return None;
+        }
+        for window in binding.gate().windows() {
+            if window.app_id() != app.info.id {
+                continue;
+            }
+            crate::identity::scope::check_process(window.owner(), Some(&live)).ok()?;
+        }
+        binding
+            .gate()
+            .windows()
+            .iter()
+            .find(|window| window.app_id() == app.info.id)?
+            .binding(&live)
+            .map(|window| window.owner().clone())
+    }
+
+    fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {
+        let binding = self.scope.as_ref()?;
+        if self.is_native_wayland_window(window) {
+            let source = self.portal_source_kind();
+            let view = crate::wayland::scope::view_for_scope(&window.id, source, None);
+            let proved = binding.gate().prove_wayland(&view).ok()?;
+            return proved.binding(view.owner.as_ref()?);
+        }
+        if self.x11_window_id(window) {
+            let server = self.x_server.as_ref()?;
+            let xid = self.resolve_xid(window).ok()?;
+            let view = observe_x11(server.as_ref(), xid, binding.oracle().clock());
+            let proved = binding.gate().prove_x11(&view).ok()?;
+            return proved.binding(view.owner.as_ref()?);
+        }
+        let (native_id, incarnation) = {
+            let expected = binding
+                .gate()
+                .windows()
+                .iter()
+                .find(|candidate| candidate.native_id() == window.id)?;
+            (expected.native_id().to_string(), expected.incarnation())
+        };
+        let view = binding
+            .oracle()
+            .atspi(&window.app.info.id, &native_id, incarnation);
+        let proved = binding.gate().prove_atspi(&view).ok()?;
+        proved.binding(view.owner.as_ref()?)
+    }
+
+    fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {
+        self.scope.as_ref()?.element_binding(handle)
     }
 }
 

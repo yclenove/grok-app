@@ -13,6 +13,7 @@ pub mod keys;
 pub mod ledger;
 pub mod overlay;
 pub mod real;
+pub(crate) mod scope;
 pub mod server;
 pub mod watchdog;
 pub mod windows;
