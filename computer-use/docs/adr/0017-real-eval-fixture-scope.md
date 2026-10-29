@@ -164,7 +164,7 @@ mac-pro 的共享程度须 owner 说明；不能从机器别名推断。`docs/ll
 | S7 首个平台验收证据 | `docs/` 的确定性原生矩阵、环境回执与未支持项；owner 操作真实用户恢复，控制方审阅再安排 LLM | Grok + Codex | 1 |
 | S8 多目标任务扩展（后续） | `apps/fixture/src/`、eval task schema/启动器及上述 8 个 cross_app YAML；显式角色/进程/窗口声明，缺映射不跑 | Codex | 1–2 |
 | S9 Windows 适配（独立 PR） | `gcu-driver-windows/src/discovery.rs`、`src/worker/`、`src/uia/`、`src/input/`；创建时间/HWND/UIA owner、Worker 端复验；保持 ADR 0013 | Grok | 2–3 |
-| S10 Linux 适配（按 X11/Wayland 拆 PR） | `gcu-driver-linux/src/identity.rs`、`src/{atspi,x11,wayland}/`；复用 start-time，窗口/portal 来源不可证即关闭 | Grok | 2–3/后端 |
+| S10 Linux 适配（按 X11/Wayland 拆 PR） | `gcu-driver-linux/src/identity.rs`、`src/{atspi,x11,wayland}/`；复用 start-time，窗口/portal 来源不可证即关闭。已实现（不启用 real eval）：夹具实例复用 pid + `/proc` start-time + boot_id，缺一即固定 ScopeDenied。X11 窗口身份是 window id + `_NET_WM_PID`，再与该进程的 start-time/boot 交叉核验；缺 PID、缺 incarnation、同 PID 新 start-time、窗口 id 的 incarnation 变化、owner 变化、同进程另一窗口均为拒绝。作用域内截图像素只走 Composite，失败不回退根窗口或全桌面。读、几何与截图在返回前再验，失败丢弃 payload；输入在第一次 XTEST 或激活前再验，激活已经发出之后的失败按 maybe_executed 上报。AT-SPI accessible 的 owner pid+start 必须对上已登记窗口。读树时把句柄记到该窗口，交给 core 封存前再用进程时钟复核，pid 复用则绑不上。交付仍要当场的窗口观察；没有观察，或观察落到另一窗口，则拒绝。Wayland/portal 只有带 peer credential、且流来源精确等于该窗口时可通过；monitor、desktop、无 peer 的 portal/toplevel 关闭为固定 ScopeDenied，不回退全桌面。Stop 常量与 fail-closed 未改。单测无桌面，走 FakeX / 内存时钟（`identity/scope.rs`、`x11/scope.rs`、`atspi/scope.rs`、`wayland/scope.rs`）。未覆盖 / not_run：真实 X11 桌面（活的 XID 复用没有可核验 incarnation，RealX 报不了就关闭）、真实 Wayland 合成器与 portal peer、捕获遮挡是否混入其他窗口像素。 | Grok | 2–3/后端 |
 
 S1→S2/S3→S4→S5/S6→S7 是首个平台 12–18 人日；S8–S10 另计，平台补证失败的调查不在固定估算内。S1/S3 可先在 fake 上验收；S2 与 S4 完整接线、S6 外部边界未就绪前不启 real。
 
