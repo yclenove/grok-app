@@ -33,6 +33,11 @@ pub trait UiaSource: Send + Sync + 'static {
     /// Re-read the exact observed slot, RuntimeId, HWND ancestry and metadata.
     /// A mismatch is StaleElement; no name lookup or replacement is permitted.
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties>;
+    /// Process id of this element, from the element itself and not from a window title.
+    ///
+    /// `Ok(None)` means this source has no owner probe. Real UIA must return
+    /// `Ok(Some(pid))` or an error, never `Ok(None)`. A zero pid is not evidence.
+    async fn owner_pid(&self, node: NodeId) -> Result<Option<u32>>;
     /// Revalidate on the MTA immediately before dispatching one pattern command.
     /// Set the context marker only at mutation dispatch. Abandoned jobs cannot
     /// start later. Only explicit Unsupported/Unavailable permit a fallback.
@@ -77,6 +82,8 @@ pub(super) struct FakeState {
     calls: usize,
     max_page: usize,
     pub(super) actions: super::fake_actions::FakeActions,
+    /// Reported owner. `None` means this fake has no owner probe.
+    pub(super) owner_pid: Option<u32>,
 }
 impl FakeState {
     pub(super) fn node(&self, slot: u64) -> NodeId {
@@ -159,6 +166,14 @@ impl FakeUia {
 }
 #[async_trait]
 impl UiaSource for FakeUia {
+    async fn owner_pid(&self, _node: NodeId) -> Result<Option<u32>> {
+        self.0
+            .lock()
+            .map(|state| state.owner_pid)
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })
+    }
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
         self.gate().await?;
         self.validate_action(node, hwnd)

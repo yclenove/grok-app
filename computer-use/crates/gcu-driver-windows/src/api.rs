@@ -89,6 +89,13 @@ pub trait WinApi: Send + Sync + 'static {
     fn engine_security(&self) -> Result<ProcessSecurity>;
     /// Security state of a process, including creation time.
     fn process_security(&self, pid: u32) -> Result<ProcessSecurity>;
+    /// Boot identity for fixture scope. A path, image name, or window title is not a boot id.
+    ///
+    /// Empty, unavailable, or unstable evidence returns [`gcu_core::driver::DriverError::ScopeDenied`].
+    /// The default fails closed so an API that does not implement this cannot prove a scope.
+    fn boot_identity(&self) -> Result<String> {
+        Err(gcu_core::driver::DriverError::ScopeDenied)
+    }
     /// Enumerate top-level HWNDs and their child process IDs.
     fn enum_windows(&self) -> Result<Vec<NativeWindow>>;
     /// Query the process image path, not an untrusted window label.

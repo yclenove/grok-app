@@ -64,6 +64,9 @@ impl Discovery {
             read,
         ))
     }
+    pub(super) fn api(&self) -> Arc<dyn WinApi> {
+        self.api.clone()
+    }
     pub(super) fn indexing(&self) -> bool {
         self.index.indexing() || self.catalog.indexing.load(Ordering::Acquire)
     }

@@ -216,6 +216,7 @@ impl Driver for WindowsDriver {
                 }
                 info.frame = current.frame;
             }
+            s.scope_close(&win)?;
             Ok(info)
         })
         .await
@@ -249,7 +250,8 @@ impl Driver for WindowsDriver {
             // Do not release tree payloads if identity/security changed during UIA.
             let target = win.clone();
             self.call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
-                s.validate_window(&target, false)
+                s.validate_window(&target, false)?;
+                s.scope_close(&target)
             })
             .await?;
             observer.remember(win, window.hwnd);
@@ -278,6 +280,7 @@ impl Driver for WindowsDriver {
         let win = win.clone();
         self.call(NATIVE_TIMEOUT, None, false, move |s| {
             let window = s.observation_window(&win, false)?;
+            s.scope_close(&win)?;
             Ok(Geometry {
                 frame: window.frame,
                 scale: window.scale,
@@ -361,7 +364,10 @@ impl Driver for WindowsDriver {
                 false,
                 move |s| {
                     let (win, foreground) = action_window(&request)?;
-                    s.observation_window(win, foreground)
+                    let win = win.clone();
+                    let observed = s.observation_window(&win, foreground)?;
+                    s.scope_close(&win)?;
+                    Ok(observed)
                 },
             )
             .await?;
@@ -421,6 +427,7 @@ impl Driver for WindowsDriver {
                 if tx.is_closed()
                     || std::time::Instant::now() >= expires
                     || s.validate_window(&target, false).is_err()
+                    || s.scope_close(&target).is_err()
                     || tx.is_closed()
                     || std::time::Instant::now() >= expires
                 {

@@ -18,6 +18,7 @@ pub mod gate;
 pub mod identity;
 pub mod input;
 pub mod overlay;
+mod scope_identity;
 pub mod testing;
 mod timing;
 pub mod uia;

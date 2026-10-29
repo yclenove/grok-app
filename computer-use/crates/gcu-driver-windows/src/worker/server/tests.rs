@@ -57,6 +57,46 @@ async fn restarted_worker_closed_process_returns_window_gone_without_substitutio
     blocked.release();
 }
 
+#[tokio::test]
+async fn unproved_creation_time_returns_scope_denied_without_substituting_a_window() {
+    let (api, driver, blocked) = fixture().await;
+    api.update(|state| {
+        state.processes.get_mut(&7).unwrap().created = 0;
+        for window in &mut state.windows {
+            if window.pid == 7 {
+                window.process_created = 0;
+            }
+        }
+    });
+    let mut handles = Handles::default();
+    let app = resolve(&driver, &mut handles).await;
+    let Reply::Windows(windows) = dispatch(
+        &driver,
+        &mut handles,
+        1,
+        Request::ListWindows(Some(app.clone())),
+    )
+    .await
+    .unwrap() else {
+        panic!("expected the fixture window list");
+    };
+    assert_eq!(windows.len(), 1);
+    let error = dispatch(
+        &driver,
+        &mut handles,
+        1,
+        Request::Geometry(Window {
+            app,
+            id: windows[0].id.clone(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert_eq!(error.to_string(), gcu_core::scope::SCOPE_DENIED_MESSAGE);
+    blocked.release();
+}
+
 async fn resolve(driver: &dyn Driver, handles: &mut Handles) -> gcu_protocol::AppInfo {
     let Reply::App(app) = dispatch(driver, handles, 1, Request::ResolveApp("fixture".into()))
         .await

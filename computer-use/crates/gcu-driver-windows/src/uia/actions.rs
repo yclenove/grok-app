@@ -55,11 +55,23 @@ pub(crate) async fn perform_until(
     };
     budget.context.check()?;
     let el = target(req).ok_or(DriverError::CapabilityUnavailable)?;
-    let node = el
+    let observed = el
         .downcast_ref::<UiaElement>()
-        .ok_or(DriverError::StaleElement)?
-        .node;
+        .ok_or(DriverError::StaleElement)?;
+    let node = observed.node;
+    let element_hwnd = observed.hwnd;
+    let window_id = observed.window.id.clone();
+    let admitted_pid = observed.window.app.info.pid;
     let props = budget.read(source.validate(node, hwnd)).await?;
+    let owner = budget.read(source.owner_pid(node)).await?;
+    // After the stale-element check and before any pattern dispatch.
+    crate::scope_identity::admit_delivery_element(
+        hwnd,
+        element_hwnd,
+        &window_id,
+        owner,
+        admitted_pid,
+    )?;
     let result = match req {
         DriverAction::SetValue { value, .. } => {
             super::value::set(source, node, hwnd, &props, value, &budget).await

@@ -9,6 +9,7 @@ use crate::{
 use gcu_core::{
     driver::*,
     model::{Geometry, NativeHandle, RawTree},
+    scope::{ElementBinding, InstanceEvidence, ProcessInstance, WindowBinding},
 };
 use gcu_protocol::{capabilities::*, AppInfo, WindowInfo};
 use std::{
@@ -359,6 +360,45 @@ fn discovery_capabilities() -> Capabilities {
 pub struct WindowsElement {
     /// Exact stamped window owning the element.
     pub window: WindowRef,
+}
+
+impl InstanceEvidence for WindowsDriver {
+    fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
+        // The isolated parent has no WinApi. Unproved evidence stays closed.
+        // The worker child is the in-process driver and re-reads the handle time.
+        let api = self.discovery.as_ref()?.api();
+        crate::scope_identity::live_process(api.as_ref(), app.info.pid?)
+    }
+
+    fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {
+        let api = self.discovery.as_ref()?.api();
+        crate::scope_identity::live_window(api.as_ref(), window)
+    }
+
+    fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {
+        let element = handle.downcast_ref::<crate::uia::UiaElement>()?;
+        let binding = self.window_binding(&element.window)?;
+        let stamp = crate::scope_identity::parse_stamp(binding.native_id())?;
+        let claim = crate::scope_identity::WindowClaim {
+            hwnd: stamp.hwnd,
+            incarnation: binding.incarnation(),
+            owner: crate::scope_identity::ProcessClaim {
+                pid: binding.owner().pid(),
+                created: binding.owner().start().ticks(),
+                boot: binding.owner().boot().as_str().to_owned(),
+            },
+        };
+        // Same rule as the pure proof: a crossed HWND or a foreign owner is unproved.
+        crate::scope_identity::prove_element(
+            &claim,
+            binding.native_id(),
+            element.hwnd,
+            &element.window.id,
+            Some(binding.owner().pid()),
+        )
+        .ok()?;
+        Some(ElementBinding::new(binding))
+    }
 }
 
 #[path = "driver_impl.rs"]

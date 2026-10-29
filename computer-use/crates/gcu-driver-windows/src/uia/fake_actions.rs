@@ -84,6 +84,13 @@ impl FakeUia {
             s.actions.runtime_ids.insert(id, runtime);
         }
     }
+    /// Report the element's owning process. `None` leaves the portable probe unset.
+    /// A mismatch with the admitted app pid refuses the action before dispatch.
+    pub fn set_owner_pid(&self, pid: Option<u32>) {
+        if let Ok(mut state) = self.0.lock() {
+            state.owner_pid = pid;
+        }
+    }
     /// Change exact HWND ancestry without resolving any other node.
     pub fn set_action_hwnd(&self, hwnd: u64) {
         if let Ok(mut s) = self.0.lock() {

@@ -41,6 +41,7 @@ impl WindowsDriver {
                     if w.minimized {
                         return Err(DriverError::WindowMinimized);
                     }
+                    s.scope_close(&target)?;
                     Ok(w)
                 })
                 .await?;
@@ -58,7 +59,10 @@ impl WindowsDriver {
             let target = win.clone();
             let current = self
                 .call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
-                    s.observation_window(&target, false)
+                    let current = s.observation_window(&target, false)?;
+                    // Drop the pixels below when this proof fails. Do not encode them.
+                    s.scope_close(&target)?;
+                    Ok(current)
                 })
                 .await?;
             if current.minimized {

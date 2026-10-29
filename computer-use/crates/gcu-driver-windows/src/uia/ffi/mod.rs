@@ -123,6 +123,18 @@ impl State {
             .cloned()
             .ok_or(DriverError::StaleElement)
     }
+    fn owner_pid(&self, id: NodeId) -> Result<u32> {
+        let element = self.element(id)?;
+        // SAFETY: MTA-local element. CurrentProcessId reads one property and does
+        // not walk the tree or add UIA_ProcessId to the cache request.
+        // The COM property is a signed LONG. Zero and negative values are not a pid.
+        let pid = unsafe { element.CurrentProcessId() }.map_err(|_| DriverError::ScopeDenied)?;
+        let pid = u32::try_from(pid).map_err(|_| DriverError::ScopeDenied)?;
+        if pid == 0 {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(pid)
+    }
     fn root(&mut self, hwnd: u64, request: &Request) -> Result<Option<NodeId>> {
         {
             let _timing = crate::timing::Timing::provider("uia_release_previous_elements");
@@ -230,6 +242,14 @@ impl State {
 }
 #[async_trait]
 impl UiaSource for RealUia {
+    async fn owner_pid(&self, node: NodeId) -> Result<Option<u32>> {
+        self.worker
+            .call(move |state, request| {
+                request.check()?;
+                state.owner_pid(node).map(Some)
+            })
+            .await
+    }
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
         self.worker
             .call(move |s, r| s.validate(node, hwnd, r).map(|(_, p)| p))

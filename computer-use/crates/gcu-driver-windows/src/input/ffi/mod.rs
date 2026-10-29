@@ -172,6 +172,13 @@ impl State {
             .find(|w| w.hwnd == target.window.hwnd)
             .ok_or(DriverError::WindowGone)?;
         crate::desktop::HwndStamp::from(&target.window).validate(&current)?;
+        crate::scope_identity::require_delivery_scalars(
+            current.hwnd,
+            current.pid,
+            current.process_created,
+            current.created,
+            target.hwnd,
+        )?;
         if current.frame != target.window.frame || current.scale != target.window.scale {
             return Err(DriverError::InvalidRequest);
         }

@@ -105,6 +105,25 @@ pub(super) fn allocated_string(value: PWSTR) -> Result<String> {
     }
     text
 }
+/// Quantized boot time, cached by the caller. Cross-process agreement within one
+/// second is not proved here. Failure leaves the boot empty so scope stays closed.
+fn boot_token() -> Result<String> {
+    use ::windows::Win32::System::SystemInformation::GetTickCount64;
+    // SAFETY: GetTickCount64 takes no pointers and does not block.
+    let uptime_ms = unsafe { GetTickCount64() };
+    let now_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(native)?
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    let boot_s = now_ms.saturating_sub(uptime_ms) / 1000;
+    if boot_s == 0 {
+        return Err(DriverError::ScopeDenied);
+    }
+    Ok(boot_s.to_string())
+}
 /// Real Windows discovery API. All methods are called on dedicated native workers.
 /// Owns no COM interfaces across threads; apartments/resources are scoped per call.
 pub struct RealWinApi {
@@ -113,6 +132,8 @@ pub struct RealWinApi {
     cache: PathBuf,
     watcher: std::sync::Mutex<Option<shell::WatchSet>>,
     enumeration: std::sync::Mutex<()>,
+    /// Cached at process start so later reads in this process agree.
+    boot: String,
 }
 impl RealWinApi {
     /// Allocate adapter metadata; does not enumerate or launch any application.
@@ -137,6 +158,7 @@ impl RealWinApi {
                 .join("apps.json"),
             watcher: std::sync::Mutex::new(None),
             enumeration: std::sync::Mutex::new(()),
+            boot: boot_token().unwrap_or_default(),
         })
     }
     // Stable across child restarts, private to one parent process instance.
@@ -168,6 +190,12 @@ impl WinApi for RealWinApi {
     }
     fn process_security(&self, pid: u32) -> Result<ProcessSecurity> {
         security::security(pid)
+    }
+    fn boot_identity(&self) -> Result<String> {
+        if self.boot.is_empty() || self.boot.len() > 256 {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(self.boot.clone())
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
         let timing = crate::timing::Timing::start("enum_windows_lock");

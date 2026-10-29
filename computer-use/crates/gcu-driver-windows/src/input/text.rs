@@ -104,6 +104,13 @@ impl Paste<'_> {
             }
             // Recheck focus/Stop after the clipboard read as well.
             self.before_paste().await?;
+            crate::scope_identity::require_delivery_scalars(
+                self.target.window.hwnd,
+                self.target.window.pid,
+                self.target.window.process_created,
+                self.target.window.created,
+                self.target.hwnd,
+            )?;
             let result = self
                 .api
                 .send(

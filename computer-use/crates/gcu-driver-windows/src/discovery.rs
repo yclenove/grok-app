@@ -302,6 +302,58 @@ impl State {
         }
         Ok(current)
     }
+    /// Re-prove the bound fixture instance immediately before content is returned
+    /// or input is delivered. Call only after [`Self::observation_window`] or
+    /// [`Self::metadata_window`], so elevation and secure-desktop errors keep
+    /// their priority. A miss is [`DriverError::ScopeDenied`] and does not select
+    /// another window. The image path is not an input.
+    pub(super) fn scope_close(&self, win: &WindowRef) -> Result<()> {
+        let (old, pid, target_created, _) =
+            self.windows.get(&win.id).ok_or(DriverError::ScopeDenied)?;
+        let boot = self.api.boot_identity()?;
+        let current = self
+            .api
+            .enum_windows()?
+            .into_iter()
+            .find(|item| item.hwnd == old.hwnd)
+            .ok_or(DriverError::ScopeDenied)?;
+        let owner = match window_process(self.api.as_ref(), &current) {
+            Ok(owner) => owner,
+            Err(
+                DriverError::WindowGone
+                | DriverError::AppNotFound
+                | DriverError::AmbiguousApp
+                | DriverError::PermissionMissing { .. },
+            ) => return Err(DriverError::ScopeDenied),
+            Err(error) => return Err(error),
+        };
+        let created = match self.api.process_security(owner) {
+            Ok(security) => security.created,
+            Err(DriverError::WindowGone | DriverError::PermissionMissing { .. }) => {
+                return Err(DriverError::ScopeDenied);
+            }
+            Err(error) => return Err(error),
+        };
+        let stored = crate::scope_identity::WindowClaim {
+            hwnd: old.hwnd,
+            incarnation: old.created,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: *pid,
+                created: *target_created,
+                boot: boot.clone(),
+            },
+        };
+        let live = crate::scope_identity::WindowClaim {
+            hwnd: current.hwnd,
+            incarnation: current.created,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: owner,
+                created,
+                boot,
+            },
+        };
+        crate::scope_identity::prove_window(&stored, &live)
+    }
 }
 pub(super) fn executable_name(path: &str) -> String {
     path.rsplit(['\\', '/'])

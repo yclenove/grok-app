@@ -195,6 +195,14 @@ impl InputBackend {
                 return Err(DriverError::CapabilityUnavailable);
             }
             self.api.validate(target.clone(), foreground).await?;
+            // Outside the pointer gate. Unproved scalars never reach SendInput.
+            crate::scope_identity::require_delivery_scalars(
+                target.window.hwnd,
+                target.window.pid,
+                target.window.process_created,
+                target.window.created,
+                target.hwnd,
+            )?;
             if let Some(guard) = &safety {
                 guard.check(foreground)?;
                 if foreground {
@@ -290,6 +298,13 @@ impl InputBackend {
                 }
                 let result = async {
                     context.check()?;
+                    crate::scope_identity::require_delivery_scalars(
+                        target.window.hwnd,
+                        target.window.pid,
+                        target.window.process_created,
+                        target.window.created,
+                        target.hwnd,
+                    )?;
                     self.api
                         .send(
                             target.clone(),
