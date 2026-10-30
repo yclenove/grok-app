@@ -1,0 +1,52 @@
+(
+apps: [
+(id: "fixture.a", name: "Fixture A", executable: "/fixtures/a", pid: 1101, windows: [
+(id: "w-a", title: "Allowed A", frame: (x: 0.0, y: 0.0, w: 320.0, h: 280.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("Allowed A"),
+frame: Some((x: 0.0, y: 0.0, w: 320.0, h: 280.0)), children: [
+(id: "go", role: button, states: "ENABLED", name: Some("Go"),
+frame: Some((x: 20.0, y: 40.0, w: 80.0, h: 24.0)), actions: [press]),
+(id: "edit", role: text_field, states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Entry"), value: Some(text("")),
+frame: Some((x: 20.0, y: 80.0, w: 100.0, h: 24.0)))
+]))),
+(id: "w-a2", title: "Allowed A2", frame: (x: 0.0, y: 0.0, w: 320.0, h: 280.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("Allowed A2"),
+frame: Some((x: 0.0, y: 0.0, w: 320.0, h: 280.0)), children: [
+(id: "go", role: button, states: "ENABLED", name: Some("Go"),
+frame: Some((x: 20.0, y: 40.0, w: 80.0, h: 24.0)), actions: [press]),
+(id: "edit", role: text_field, states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Entry"), value: Some(text("")),
+frame: Some((x: 20.0, y: 80.0, w: 100.0, h: 24.0)))
+]))),
+(id: "w-a3", title: "CANARY-WINDOW-A3", frame: (x: 660.0, y: 0.0, w: 200.0, h: 120.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-WINDOW-A3"),
+frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
+]),
+(id: "fixture.b", name: "Fixture B", executable: "/fixtures/b", pid: 1102, windows: [
+(id: "w-b", title: "Allowed B", frame: (x: 0.0, y: 0.0, w: 320.0, h: 280.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("Allowed B"),
+frame: Some((x: 0.0, y: 0.0, w: 320.0, h: 280.0)), children: [
+(id: "go", role: button, states: "ENABLED", name: Some("Go"),
+frame: Some((x: 20.0, y: 40.0, w: 80.0, h: 24.0)), actions: [press]),
+(id: "edit", role: text_field, states: "ENABLED | FOCUSABLE | EDITABLE | SETTABLE | FOCUSED",
+name: Some("Entry"), value: Some(text("")),
+frame: Some((x: 20.0, y: 80.0, w: 100.0, h: 24.0)))
+])))
+]),
+(id: "fixture.c", name: "CANARY-EXTERNAL-C", executable: "/canary/external/c", pid: 1103, windows: [
+(id: "w-c", title: "CANARY-WINDOW-C", frame: (x: 0.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-WINDOW-C"),
+frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
+]),
+(id: "fixture.d", name: "Fixture A", executable: "/fixtures/a", pid: 1104, windows: [
+(id: "w-d", title: "CANARY-IMPOSTOR-D", frame: (x: 220.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-IMPOSTOR-D"),
+frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
+]),
+(id: "fixture.g", name: "CANARY-GHOST", executable: "/canary/ghost", pid: 1105, windows: [
+(id: "w-g", title: "CANARY-GHOST", frame: (x: 440.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
+root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-GHOST"),
+frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
+])
+])

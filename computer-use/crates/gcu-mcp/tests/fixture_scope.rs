@@ -45,34 +45,10 @@ const CANARIES: &[&str] = &[
     "CANARY-GHOST",
     "fixture.d",
     "CANARY-PRIVATE",
+    "CANARY-WINDOW-A3",
 ];
 
-const SCENE: &str = r#"(
-apps: [
-(id: "fixture.a", name: "Fixture A", executable: "/fixtures/a", pid: 1101, windows: [
-(id: "w-a", title: "Allowed A", frame: (x: 0.0, y: 0.0, w: 320.0, h: 280.0), scale: 1.0,
-root: Some((id: "root", role: window, states: "ENABLED", name: Some("Allowed A"),
-frame: Some((x: 0.0, y: 0.0, w: 320.0, h: 280.0)), children: [
-(id: "go", role: button, states: "ENABLED", name: Some("Go"),
-frame: Some((x: 20.0, y: 40.0, w: 80.0, h: 24.0)), actions: [press])
-])))
-]),
-(id: "fixture.c", name: "CANARY-EXTERNAL-C", executable: "/canary/external/c", pid: 1103, windows: [
-(id: "w-c", title: "CANARY-WINDOW-C", frame: (x: 0.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
-root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-WINDOW-C"),
-frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
-]),
-(id: "fixture.d", name: "Fixture A", executable: "/fixtures/a", pid: 1104, windows: [
-(id: "w-d", title: "CANARY-IMPOSTOR-D", frame: (x: 220.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
-root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-IMPOSTOR-D"),
-frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
-]),
-(id: "fixture.g", name: "CANARY-GHOST", executable: "/canary/ghost", pid: 1105, windows: [
-(id: "w-g", title: "CANARY-GHOST", frame: (x: 440.0, y: 400.0, w: 200.0, h: 120.0), scale: 1.0,
-root: Some((id: "root", role: window, states: "ENABLED", name: Some("CANARY-GHOST"),
-frame: Some((x: 0.0, y: 0.0, w: 200.0, h: 120.0)), children: [])))
-])
-])"#;
+const SCENE: &str = include_str!("fixture_scope/desktop.ron");
 
 struct Counts {
     discovery: AtomicUsize,
@@ -81,6 +57,8 @@ struct Counts {
     perform: AtomicUsize,
     launch: AtomicUsize,
     windows_none: AtomicUsize,
+    // Read, capture, delivery, launch outside A/A2/B, including C and D.
+    outside: [AtomicUsize; 4],
 }
 
 struct Shared {
@@ -96,6 +74,7 @@ struct Spy {
     caps: Capabilities,
     counts: Arc<Counts>,
     shared: Arc<Shared>,
+    clipboard: bool,
 }
 
 impl Spy {
@@ -108,6 +87,7 @@ impl Spy {
         caps.delivery.targeted_keys = true;
         Self {
             inner: inner.with_targeted_input(true, true),
+            clipboard: false,
             caps,
             counts: Arc::new(Counts {
                 discovery: AtomicUsize::new(0),
@@ -116,6 +96,7 @@ impl Spy {
                 perform: AtomicUsize::new(0),
                 launch: AtomicUsize::new(0),
                 windows_none: AtomicUsize::new(0),
+                outside: std::array::from_fn(|_| AtomicUsize::new(0)),
             }),
             shared: Arc::new(Shared {
                 handles: Mutex::new(Vec::new()),
@@ -124,6 +105,15 @@ impl Spy {
                 start_a: AtomicU64::new(10),
             }),
         }
+    }
+
+    fn input_mode(mut self, mode: &str) -> Self {
+        let targeted = mode == "targeted";
+        self.inner = self.inner.with_targeted_input(targeted, targeted);
+        self.caps.delivery.targeted_pointer = targeted;
+        self.caps.delivery.targeted_keys = targeted;
+        self.clipboard = mode == "clipboard";
+        self
     }
 
     fn arm_flip(&self) {
@@ -137,6 +127,35 @@ impl Spy {
     fn load(&self, cell: &AtomicUsize) -> usize {
         cell.load(Ordering::SeqCst)
     }
+
+    fn track_window(&self, operation: usize, window: Option<&str>) {
+        if !matches!(window, Some("w-a" | "w-a2" | "w-b")) {
+            self.counts.outside[operation].fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn action_window(&self, action: &DriverAction) -> Option<String> {
+        let handle = match action {
+            DriverAction::PointerClick { win, .. }
+            | DriverAction::PointerScroll { win, .. }
+            | DriverAction::PointerDrag { win, .. }
+            | DriverAction::TypeText { win, .. }
+            | DriverAction::PressKeys { win, .. }
+            | DriverAction::Activate { win } => return Some(win.id.clone()),
+            DriverAction::Press { el }
+            | DriverAction::SecondaryAction { el, .. }
+            | DriverAction::SetValue { el, .. }
+            | DriverAction::SelectText { el, .. }
+            | DriverAction::ScrollElement { el, .. } => el,
+        };
+        self.shared
+            .handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(known, _)| known.ptr_eq(handle))
+            .map(|(_, window)| window.clone())
+    }
 }
 
 fn instance(pid: u32, ticks: u64) -> ProcessInstance {
@@ -149,30 +168,37 @@ fn instance(pid: u32, ticks: u64) -> ProcessInstance {
 }
 
 fn allowed_scope() -> FixtureScope {
-    let owner = instance(1101, 10);
-    let window = RegisteredWindow::new(WindowBinding::new("w-a", 1, owner.clone()).unwrap());
-    let target = FixtureTarget::new(
-        owner,
-        "a",
-        ExecutableProof::new("/fixtures/a").unwrap(),
-        vec![window],
-    )
-    .unwrap();
-    FixtureScope::try_new(
-        "run-s1",
-        1,
-        "engine-s1",
-        "desktop-s1",
-        "lease-s1",
-        vec![target],
-    )
-    .unwrap()
+    scope_for_run("run-s1")
+}
+
+fn scope_for_run(run: &str) -> FixtureScope {
+    let targets = [
+        (1101, 10, "a", &["w-a", "w-a2"][..]),
+        (1102, 11, "b", &["w-b"][..]),
+    ]
+    .into_iter()
+    .map(|(pid, ticks, role, windows)| {
+        let owner = instance(pid, ticks);
+        FixtureTarget::new(
+            owner.clone(),
+            role,
+            ExecutableProof::new(format!("/fixtures/{role}")).unwrap(),
+            windows
+                .iter()
+                .map(|id| RegisteredWindow::new(WindowBinding::new(*id, 1, owner.clone()).unwrap()))
+                .collect(),
+        )
+        .unwrap()
+    })
+    .collect();
+    FixtureScope::try_new(run, 1, "engine-s1", "desktop-s1", "lease-s1", targets).unwrap()
 }
 
 impl InstanceEvidence for Spy {
     fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
         match app.info.id.as_str() {
             "fixture.a" => Some(instance(1101, self.shared.start_a.load(Ordering::SeqCst))),
+            "fixture.b" => Some(instance(1102, 11)),
             "fixture.c" => Some(instance(1103, 12)),
             "fixture.d" => Some(instance(1104, 13)),
             _ => None,
@@ -181,7 +207,8 @@ impl InstanceEvidence for Spy {
 
     fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {
         let (id, owner) = match window.id.as_str() {
-            "w-a" => ("w-a", instance(1101, 10)),
+            "w-a" | "w-a2" | "w-a3" => (window.id.as_str(), instance(1101, 10)),
+            "w-b" => ("w-b", instance(1102, 11)),
             "w-c" => ("w-c", instance(1103, 12)),
             "w-d" => ("w-d", instance(1104, 13)),
             _ => return None,
@@ -196,11 +223,13 @@ impl InstanceEvidence for Spy {
             .find(|(known, _)| known.ptr_eq(handle))
             .map(|(_, id)| id.clone())?;
         let (id, owner) = match window.as_str() {
-            "w-a" => (
-                "w-a",
+            "w-a" | "w-a2" | "w-a3" => (
+                window.as_str(),
                 instance(1101, self.shared.start_a.load(Ordering::SeqCst)),
             ),
+            "w-b" => ("w-b", instance(1102, 11)),
             "w-c" => ("w-c", instance(1103, 12)),
+            "w-d" => ("w-d", instance(1104, 13)),
             _ => return None,
         };
         Some(ElementBinding::new(
@@ -248,6 +277,9 @@ impl Driver for Spy {
 
     async fn launch_app(&self, app: &AppRef) -> DriverResult<AppRef> {
         self.counts.launch.fetch_add(1, Ordering::SeqCst);
+        if !matches!(app.info.id.as_str(), "fixture.a" | "fixture.b") {
+            self.counts.outside[3].fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.launch_app(app).await
     }
 
@@ -272,7 +304,13 @@ impl Driver for Spy {
         cancel: &Cancel,
     ) -> DriverResult<RawTree> {
         self.counts.content.fetch_add(1, Ordering::SeqCst);
-        let raw = self.inner.snapshot_tree(win, opts, cancel).await?;
+        self.track_window(0, Some(&win.id));
+        let mut raw = self.inner.snapshot_tree(win, opts, cancel).await?;
+        if self.clipboard {
+            if let Some(root) = &mut raw.root {
+                native_text_only(root);
+            }
+        }
         if let Some(root) = &raw.root {
             let mut handles = self.shared.handles.lock().unwrap();
             remember(root, &win.id, &mut handles);
@@ -287,6 +325,7 @@ impl Driver for Spy {
         cancel: &Cancel,
     ) -> DriverResult<Capture> {
         self.counts.capture.fetch_add(1, Ordering::SeqCst);
+        self.track_window(1, Some(&win.id));
         if win.id == "w-c" {
             return Ok(Capture {
                 bytes: canary_png(),
@@ -317,7 +356,13 @@ impl Driver for Spy {
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> DriverResult<Delivery> {
         self.counts.perform.fetch_add(1, Ordering::SeqCst);
-        self.inner.perform(req, cancel).await
+        self.track_window(2, self.action_window(req).as_deref());
+        let delivery = self.inner.perform(req, cancel).await?;
+        if self.clipboard && matches!(req, DriverAction::TypeText { .. }) {
+            Ok(Delivery::Clipboard)
+        } else {
+            Ok(delivery)
+        }
     }
 
     fn subscribe(&self, win: &WindowRef) -> Option<gcu_core::driver::BoxStream<'static, UiEvent>> {
@@ -507,6 +552,15 @@ fn remember(node: &RawNode, window: &str, handles: &mut Vec<(NativeHandle, Strin
     }
 }
 
+// Model a field without semantic SetValue support. The inner fake still edits
+// its text through TypeText; the spy reports synthetic clipboard delivery.
+fn native_text_only(node: &mut RawNode) {
+    node.states.remove(gcu_core::model::States::SETTABLE);
+    for child in &mut node.children {
+        native_text_only(child);
+    }
+}
+
 fn canary_png() -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
@@ -549,7 +603,7 @@ impl ScriptRunner for ObserveRunner {
             let app = params.code.lines().next().unwrap_or("").trim().to_owned();
             let request = GetAppStateParams {
                 app,
-                window: None,
+                window: params.code.lines().nth(1).map(str::to_owned),
                 include_screenshot: ScreenshotMode::Explicit(false),
                 text_limit: TextLimit::default(),
                 max_tree_nodes: 200,
@@ -692,32 +746,65 @@ fn listed_count(profile: Profile) -> usize {
     }
 }
 
-fn tool_arguments(name: &str) -> Value {
-    let app = "CANARY-EXTERNAL-C";
-    match name {
-        "list_apps" | "list_windows" | "capabilities" => json!({}),
-        "launch_app" => json!({"app": app}),
-        "get_app_state" => json!({"app": app, "include_screenshot": false}),
-        "click" => json!({"app": app, "element_index": 1}),
-        "perform_secondary_action" => json!({"app": app, "element_index": 1, "action": "press"}),
-        "set_value" => json!({"app": app, "element_index": 1, "value": "x"}),
-        "select_text" => json!({"app": app, "element_index": 1, "text": "x"}),
-        "type_text" => json!({"app": app, "text": "nope"}),
-        "press_key" => json!({"app": app, "key": "a"}),
-        "scroll" => json!({"app": app, "direction": "down", "element_index": 1}),
-        "drag" => json!({"app": app, "from_x": 1.0, "from_y": 1.0, "to_x": 2.0, "to_y": 2.0}),
-        "wait_for" => {
-            json!({"app": app, "until": {"text_present": "missing-token"}, "timeout_ms": 20})
+// Every listed tool is mapped explicitly: catalog growth must add a row.
+// Input variants are tool parameters; clipboard/foreground are driver routes.
+fn tool_arguments(name: &str, app: &str, window: Option<&str>) -> Vec<Value> {
+    let mut args = match name {
+        "list_apps" | "capabilities" => vec![json!({})],
+        "list_windows" | "launch_app" => vec![json!({"app": app})],
+        "get_app_state" => [json!(false), json!(true), json!("auto")]
+            .into_iter()
+            .map(|shot| json!({"app": app, "include_screenshot": shot}))
+            .collect(),
+        "click" => vec![
+            json!({"app": app, "element_index": 1}),
+            json!({"app": app, "x": 25.0, "y": 45.0}),
+            json!({"app": app, "x": 25.0, "y": 45.0, "screenshot_id": "i_foreign_run"}),
+        ],
+        "perform_secondary_action" => {
+            vec![json!({"app": app, "element_index": 1, "action": "press"})]
         }
-        "computer_batch" => json!({
+        "set_value" => vec![json!({"app": app, "element_index": 1, "value": "x"})],
+        "select_text" => vec![json!({"app": app, "element_index": 1, "text": "x"})],
+        "type_text" => vec![
+            json!({"app": app, "text": "nope"}),
+            json!({"app": app, "text": "paste".repeat(128), "element_index": 1}),
+        ],
+        "press_key" => vec![json!({"app": app, "key": "ctrl+v"})],
+        "scroll" => vec![
+            json!({"app": app, "direction": "down", "element_index": 1}),
+            json!({"app": app, "direction": "down", "x": 25.0, "y": 45.0}),
+        ],
+        "drag" => {
+            vec![json!({"app": app, "from_x": 25.0, "from_y": 45.0, "to_x": 30.0, "to_y": 50.0})]
+        }
+        "wait_for" => {
+            vec![json!({"app": app, "until": {"text_present": "missing-token"}, "timeout_ms": 20})]
+        }
+        "computer_batch" => vec![json!({
             "app": app,
-            "steps": [{"click": {"element_index": 1}}],
+            "steps": [{"click": {"element_index": 1}}, {"type_text": {"text": "later"}}],
             "stop_on_error": false,
             "final_state": true
-        }),
-        "computer_script" => json!({"code": "CANARY-EXTERNAL-C\n", "timeout_ms": 5000}),
+        })],
+        // ObserveRunner is the existing in-process adapter. Actual JS hard-stop
+        // behavior is covered separately in gcu-script/tests/fixture_scope.rs.
+        "computer_script" => {
+            vec![json!({"code": format!("{app}\n{}", window.unwrap_or("")), "timeout_ms": 5000})]
+        }
         other => panic!("tools/list returned {other} without a dispatch argument"),
+    };
+    if !matches!(
+        name,
+        "list_apps" | "list_windows" | "launch_app" | "capabilities" | "computer_script"
+    ) {
+        if let Some(window) = window {
+            for arg in &mut args {
+                arg["window"] = json!(window);
+            }
+        }
     }
+    args
 }
 
 fn assert_rpc_clean(label: &str, result: &Value) {
@@ -740,47 +827,161 @@ fn assert_rpc_denied(label: &str, result: &Value) {
         result["structuredContent"].get("state").is_none(),
         "{label} kept a top-level state"
     );
+    assert!(
+        result["structuredContent"].get("windows").is_none(),
+        "{label} {result}"
+    );
+    assert!(
+        result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block["type"] == "text"),
+        "{label} attached an image or resource: {result}"
+    );
     assert_rpc_clean(label, result);
 }
 
 #[tokio::test]
 async fn each_profile_dispatches_every_listed_tool_through_the_server() {
-    for profile in [Profile::Minimal, Profile::Default, Profile::Full] {
-        let spy = Spy::new();
-        let probe = spy.clone();
-        let mut rpc = Rpc::serve(spy, profile).await;
-        rpc.initialize().await;
-        let listed = rpc.request("tools/list", json!({})).await;
-        let tools = listed["result"]["tools"].as_array().expect("tools/list");
-        assert_eq!(tools.len(), listed_count(profile), "{profile:?} {listed}");
-        let mut names = Vec::new();
-        for tool in tools {
-            let name = tool["name"].as_str().unwrap();
-            names.push(name.to_owned());
-            let result = rpc.call(name, tool_arguments(name)).await;
-            if matches!(name, "list_apps" | "list_windows" | "capabilities") {
-                assert_ne!(result["isError"], true, "{name} {result}");
-                let body = result.to_string();
-                if name == "list_apps" {
-                    assert!(body.contains("fixture.a"), "{body}");
+    tokio::time::timeout(Duration::from_secs(120), async {
+        for profile in [Profile::Minimal, Profile::Default, Profile::Full] {
+            for mode in ["targeted", "foreground", "clipboard"] {
+                let spy = Spy::new().input_mode(mode);
+                let probe = spy.clone();
+                let mut rpc = Rpc::serve(spy, profile).await;
+                rpc.initialize().await;
+                let listed = rpc.request("tools/list", json!({})).await;
+                assert_rpc_clean("catalog", &listed);
+                let tools = listed["result"]["tools"].as_array().expect("tools/list");
+                assert_eq!(tools.len(), listed_count(profile), "{profile:?} {listed}");
+                assert!(tools.iter().any(|tool| tool["name"] == "get_app_state"));
+                assert_eq!(
+                    tools.iter().any(|tool| tool["name"] == "computer_script"),
+                    profile == Profile::Full && cfg!(all(unix, feature = "script"))
+                );
+                for tool in tools {
+                    let name = tool["name"].as_str().unwrap();
+                    for (app, window) in [
+                        ("CANARY-EXTERNAL-C", None),
+                        ("fixture.d", None),
+                        ("missing-app", None),
+                        ("fixture.a", Some("w-a3")),
+                        ("fixture.a", Some("forged-window")),
+                    ] {
+                        for args in tool_arguments(name, app, window) {
+                            let label = format!("{profile:?}/{mode}/{name}/{app}/{window:?}");
+                            let result = rpc.call(name, args).await;
+                            // Discovery and capabilities have no window parameter.
+                            // App-level discovery of A is allowed and filters A3.
+                            if matches!(name, "list_apps" | "capabilities")
+                                || (name == "list_windows" && window.is_some())
+                            {
+                                assert_ne!(result["isError"], true, "{label} {result}");
+                                assert_rpc_clean(&label, &result);
+                            } else {
+                                assert_rpc_denied(&label, &result);
+                            }
+                        }
+                    }
                 }
-                assert_rpc_clean(name, &result);
-            } else {
-                assert_rpc_denied(name, &result);
+                assert_eq!(probe.load(&probe.counts.content), 0, "{profile:?}/{mode}");
+                assert_eq!(probe.load(&probe.counts.capture), 0, "{profile:?}/{mode}");
+                assert_eq!(probe.load(&probe.counts.perform), 0, "{profile:?}/{mode}");
+                assert_eq!(probe.load(&probe.counts.launch), 0, "{profile:?}/{mode}");
+                assert_eq!(
+                    probe.load(&probe.counts.windows_none),
+                    0,
+                    "{profile:?}/{mode}"
+                );
+                // Same closed engine, now prove A, A2, and registered B work.
+                for (app, window) in [
+                    ("fixture.a", "w-a"),
+                    ("fixture.a", "w-a2"),
+                    ("fixture.b", "w-b"),
+                ] {
+                    let seen = rpc
+                        .call(
+                            "get_app_state",
+                            json!({
+                                "app": app, "window": window, "include_screenshot": true
+                            }),
+                        )
+                        .await;
+                    assert_ne!(seen["isError"], true, "{seen}");
+                    assert_rpc_clean("allowed state", &seen);
+                    let text = seen["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|block| block["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let index = element_index(&text);
+                    let clicked = rpc
+                        .call(
+                            "click",
+                            json!({"app":app,"window":window,"element_index":index}),
+                        )
+                        .await;
+                    assert_ne!(clicked["isError"], true, "{clicked}");
+                    assert_rpc_clean("allowed click", &clicked);
+                    // Click the editable field using the screenshot, then type
+                    // through a real fake-driver text operation.
+                    let seen = rpc
+                        .call(
+                            "get_app_state",
+                            json!({"app":app,"window":window,"include_screenshot":true}),
+                        )
+                        .await;
+                    assert_ne!(seen["isError"], true, "{seen}");
+                    let clicked = rpc
+                        .call(
+                            "click",
+                            json!({"app":app,"window":window,"x":25.0,"y":85.0}),
+                        )
+                        .await;
+                    assert_ne!(clicked["isError"], true, "{clicked}");
+                    assert_eq!(
+                        clicked["structuredContent"]["action"]["delivery"],
+                        if mode == "targeted" {
+                            "targeted_event"
+                        } else {
+                            "foreground"
+                        },
+                        "{clicked}"
+                    );
+                    let typed = rpc
+                        .call(
+                            "type_text",
+                            json!({"app":app,"window":window,"text":"scoped input"}),
+                        )
+                        .await;
+                    assert_ne!(typed["isError"], true, "{typed}");
+                    assert_rpc_clean("allowed typing", &typed);
+                    if mode == "clipboard" {
+                        assert_eq!(
+                            typed["structuredContent"]["action"]["delivery"], "clipboard",
+                            "{typed}"
+                        );
+                    }
+                }
+                for (operation, count) in ["read", "capture", "delivery", "launch"]
+                    .iter()
+                    .zip(&probe.counts.outside)
+                {
+                    assert_eq!(
+                        probe.load(count),
+                        0,
+                        "{profile:?}/{mode}: outside {operation}"
+                    );
+                }
+                rpc.close().await;
             }
         }
-        assert!(names.iter().any(|name| name == "get_app_state"));
-        assert_eq!(
-            names.iter().any(|name| name == "computer_script"),
-            profile == Profile::Full && cfg!(all(unix, feature = "script"))
-        );
-        assert_eq!(probe.load(&probe.counts.content), 0, "{profile:?}");
-        assert_eq!(probe.load(&probe.counts.capture), 0, "{profile:?}");
-        assert_eq!(probe.load(&probe.counts.perform), 0, "{profile:?}");
-        assert_eq!(probe.load(&probe.counts.launch), 0, "{profile:?}");
-        assert_eq!(probe.load(&probe.counts.windows_none), 0, "{profile:?}");
-        rpc.close().await;
-    }
+    })
+    .await
+    .unwrap();
 }
 
 fn element_index(text: &str) -> u32 {
@@ -906,7 +1107,8 @@ async fn scope_batch_result_drops_state_images_and_files() {
                 "window": "w-a",
                 "steps": [
                     {"click": {"element_index": index}},
-                    {"click": {"element_index": index}}
+                    {"click": {"element_index": index}},
+                    {"type_text": {"text": "later"}}
                 ],
                 "stop_on_error": false,
                 "final_state": true
@@ -927,6 +1129,11 @@ async fn scope_batch_result_drops_state_images_and_files() {
     );
     assert_clean("scope batch", &rendered(&denied));
     assert_files_have_no_canary(&connection).await;
+    assert_eq!(
+        probe.load(&probe.counts.perform),
+        1,
+        "batch ran after refusal"
+    );
     connection.close().await.unwrap();
 
     let spy = Spy::new();

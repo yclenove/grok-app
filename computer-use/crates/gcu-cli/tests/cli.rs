@@ -497,11 +497,12 @@ impl Mcp {
 #[test]
 fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
     let h = TempDir::new().unwrap();
+    let oracle = h.path().join("oracle.json");
     for (tool, args) in [
         ("get_app_state", r#"{"app":"fake.form"}"#),
-        ("click", r#"{"app":"fake.form","element_index":3}"#),
+        ("click", r#"{"app":"fake.form","element_index":1}"#),
+        ("type_text", r#"{"app":"fake.form","text":"Ada"}"#),
     ] {
-        let oracle = h.path().join("oracle.json");
         let o = command(&h)
             .env("GCU_APPROVAL", "auto-allow-session")
             .env("GCU_EVAL_ORACLE_FILE", &oracle)
@@ -534,22 +535,57 @@ fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
                     0o700
                 );
             }
-        } else {
-            let v: Value = serde_json::from_slice(&std::fs::read(oracle).unwrap()).unwrap();
-            assert_eq!(v["presses"]["submit"], 1);
-            let report = command(&h)
-                .args(["doctor", "--driver", "fake", "--json"])
-                .assert()
-                .success()
-                .get_output()
-                .stdout
-                .clone();
-            let report: Value = serde_json::from_slice(&report).unwrap();
-            assert_eq!(report["recent_calls"][0]["tool"], "click");
-            assert!(report["recent_calls"][0].get("target").is_none());
-            assert!(report["recent_calls"][0].get("thumbnail").is_none());
+        }
+        let v: Value = serde_json::from_slice(&std::fs::read(&oracle).unwrap()).unwrap();
+        // The oracle creates a counter only after the first press.
+        assert_eq!(v["presses"]["submit"].as_u64().unwrap_or(0), 0);
+        assert_eq!(v["held_input"], 0);
+        if tool == "type_text" {
+            assert_eq!(v["text"]["text"], "Ada");
         }
     }
+
+    // Each call has a fresh fake scene. The app grant permits ordinary input,
+    // but does not confirm the sensitive Submit action (ADR 0017 §3).
+    std::fs::remove_file(&oracle).unwrap();
+    let denied = command(&h)
+        .env("GCU_APPROVAL", "auto-allow-session")
+        .env("GCU_EVAL_ORACLE_FILE", &oracle)
+        .args([
+            "call",
+            "click",
+            "--driver",
+            "fake",
+            "--args",
+            r#"{"app":"fake.form","element_index":3}"#,
+            "--json",
+        ])
+        .assert()
+        .code(4)
+        .get_output()
+        .stdout
+        .clone();
+    let denied: Value = serde_json::from_slice(&denied).unwrap();
+    assert_eq!(denied["isError"], true);
+    assert_eq!(denied["structuredContent"]["error"]["code"], "approval_denied");
+    assert_eq!(denied["structuredContent"]["error"]["message"], "approval denied");
+    assert_eq!(denied["structuredContent"]["action"]["outcome"], "refused");
+    assert_eq!(denied["structuredContent"]["action"]["delivery"], "none");
+    let v: Value = serde_json::from_slice(&std::fs::read(&oracle).unwrap()).unwrap();
+    assert_eq!(v["presses"]["submit"].as_u64().unwrap_or(0), 0);
+    assert_eq!(v["held_input"], 0);
+
+    let report = command(&h)
+        .args(["doctor", "--driver", "fake", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&report).unwrap();
+    assert_eq!(report["recent_calls"][0]["tool"], "click");
+    assert!(report["recent_calls"][0].get("target").is_none());
+    assert!(report["recent_calls"][0].get("thumbnail").is_none());
 }
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
@@ -738,15 +774,23 @@ fn mcp_form_submit_process_is_verified_by_fake_oracle() {
         ("get_app_state", json!({"app":"fake.form"})),
         ("click", json!({"app":"fake.form","element_index":1})),
         ("type_text", json!({"app":"fake.form","text":"Ada"})),
-        ("click", json!({"app":"fake.form","element_index":3})),
     ] {
-        assert_eq!(m.call(tool, args)["isError"], false);
+        let result = m.call(tool, args);
+        assert_eq!(result["isError"], false, "{tool}: {result}");
     }
+    // A session app grant leaves the sensitive confirmation denied.
+    let denied = m.call("click", json!({"app":"fake.form","element_index":3}));
+    assert_eq!(denied["isError"], true);
+    assert_eq!(denied["structuredContent"]["error"]["code"], "approval_denied");
+    assert_eq!(denied["structuredContent"]["error"]["message"], "approval denied");
+    assert_eq!(denied["structuredContent"]["action"]["outcome"], "refused");
+    assert_eq!(denied["structuredContent"]["action"]["delivery"], "none");
     m.close();
     let oracle: Value =
         serde_json::from_slice(&std::fs::read(h.path().join("oracle.json")).unwrap()).unwrap();
     assert_eq!(oracle["text"]["text"], "Ada");
-    assert_eq!(oracle["presses"]["submit"], 1);
+    // An absent counter means no submit was delivered.
+    assert_eq!(oracle["presses"]["submit"].as_u64().unwrap_or(0), 0);
     assert_eq!(oracle["held_input"], 0);
 }
 
