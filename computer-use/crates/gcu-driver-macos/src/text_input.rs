@@ -86,7 +86,7 @@ impl MacosDriver {
             )
             .await?;
         let events = self.event_api().ok_or(DriverError::CapabilityUnavailable)?;
-        let _armed = crate::input::arm(
+        let armed = crate::input::arm(
             events.as_ref(),
             Arc::clone(&self.evidence),
             target.window_id,
@@ -98,6 +98,7 @@ impl MacosDriver {
             pasteboard: backend.pasteboard,
             ledger: Arc::clone(&self.ledger),
             clock: backend.clock,
+            gate: Some(armed.gate()),
         };
         let budget = DRIVER_DEADLINE.saturating_sub(context.clock.now().saturating_sub(started));
         crate::input::text::type_text(

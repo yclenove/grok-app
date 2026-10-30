@@ -132,6 +132,28 @@ pub struct TextContext {
     pub ledger: Arc<InputLedger>,
     /// Monotonic runtime clock.
     pub clock: Arc<dyn Clock>,
+    /// Proof for this action. Not a process-wide slot.
+    pub gate: Option<Arc<dyn super::PostGate>>,
+}
+
+impl TextContext {
+    /// Whether this action refuses a global HID post.
+    ///
+    /// A carried gate wins. Otherwise the backend slot is the test fallback.
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn blocks_global_hid(&self) -> bool {
+        match &self.gate {
+            Some(gate) => gate.blocks_global_hid(),
+            None => self.events.blocks_global_hid(),
+        }
+    }
+
+    /// Proof passed into each post of this action.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn post_gate(&self) -> Option<Arc<dyn super::PostGate>> {
+        self.gate.clone()
+    }
 }
 
 /// Input with a bounded budget, cleanup, and no retries on any uncertain result.
@@ -246,7 +268,7 @@ async fn run(
     }
     let targeted = probe.background_ready()
         && !crate::ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name);
-    let hid_blocked = ctx.events.blocks_global_hid();
+    let hid_blocked = ctx.blocks_global_hid();
     let path = if targeted {
         PostPath::ToPid
     } else if !hid_blocked && route == KeyRoute::AllowForeground && probe.foreground {
@@ -279,6 +301,7 @@ async fn run(
             op.sent,
             None,
             ctx.clock.as_ref(),
+            ctx.post_gate(),
         ))
         .await?;
     }

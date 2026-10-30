@@ -201,20 +201,15 @@ impl RealEvents {
         &self,
         event: SyntheticEvent,
         prove: bool,
+        gate: Option<Arc<dyn PostGate>>,
     ) -> std::result::Result<(), PostFault> {
         if !self.poster.appkit_ready() {
             return Err(PostFault::NotSent);
         }
         let guards = self.guards.clone();
         let poster = Arc::clone(&self.poster);
-        let identity = if prove {
-            self.identity
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .clone()
-        } else {
-            None
-        };
+        // The caller's gate, not the shared slot. A missing proof is NotSent.
+        let identity = if prove { gate } else { None };
         // A stalled down keeps this permit; no new downs are queued behind it.
         // Ups use the independent release executor and must bypass the permit.
         let permit = if event.down {
@@ -339,12 +334,16 @@ impl EventApi for RealEvents {
         *self.identity.lock().unwrap_or_else(|err| err.into_inner()) = gate;
     }
 
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        self.dispatch(event, true).await
+    async fn post(
+        &self,
+        event: SyntheticEvent,
+        gate: Option<Arc<dyn PostGate>>,
+    ) -> std::result::Result<(), PostFault> {
+        self.dispatch(event, true, gate).await
     }
 
     async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        self.dispatch(event, false).await
+        self.dispatch(event, false, None).await
     }
 
     async fn verify_arrival(

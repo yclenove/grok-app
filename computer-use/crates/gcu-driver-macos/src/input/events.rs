@@ -297,12 +297,22 @@ pub trait EventApi: Send + Sync {
     fn blocks_global_hid(&self) -> bool {
         false
     }
-    /// Post one event. Must not retry internally.
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
+    /// Post one event with the proof for this action.
+    ///
+    /// `gate` belongs to the caller. Another action dropping its own proof
+    /// does not clear it. The real backend treats `None` as not sent. Must
+    /// not retry internally.
+    async fn post(
+        &self,
+        event: SyntheticEvent,
+        gate: Option<Arc<dyn PostGate>>,
+    ) -> std::result::Result<(), PostFault>;
     /// Post a cleanup up. Skips the identity gate. Must not retry.
     async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
-    /// Install the gate [`EventApi::post`] checks immediately before the OS call.
-    /// `None` clears it. The default ignores the gate.
+    /// Optional slot for tests that do not pass a gate into [`EventApi::post`].
+    ///
+    /// The real backend does not read this slot when posting. `None` clears
+    /// it. The default ignores the gate.
     fn arm_post_gate(&self, gate: Option<Arc<dyn PostGate>>) {
         let _ = gate;
     }

@@ -122,6 +122,8 @@ pub async fn release_held(api: &dyn EventApi, ledger: &InputLedger) {
 
 /// Deliver one pointer, key, or text action. Other actions are refused.
 ///
+/// `gate` is this action's proof and is not shared with another action.
+/// `None` leaves a fake backend on its slot and makes the real backend refuse.
 /// `budget` includes cleanup. The function does not exceed it. Cancellation
 /// before the first post is `maybe_executed: false`.
 pub async fn deliver(
@@ -131,6 +133,7 @@ pub async fn deliver(
     action: &DriverAction,
     cancel: &Cancel,
     budget: Duration,
+    gate: Option<Arc<dyn events::PostGate>>,
 ) -> Result<Delivery> {
     let guards = api.guards();
     if let Some(guards) = &guards {
@@ -156,6 +159,7 @@ pub async fn deliver(
     let target = target.clone();
     let action = action.clone();
     let cancel_op = cancel.clone();
+    let gate_op = gate.clone();
     let operation = async move {
         run(
             api_op.as_ref(),
@@ -165,6 +169,7 @@ pub async fn deliver(
             &cancel_op,
             &sent_op,
             clock_op.as_ref(),
+            gate_op,
         )
         .await
     };
@@ -185,6 +190,7 @@ pub async fn deliver(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     api: &dyn EventApi,
     ledger: &InputLedger,
@@ -193,6 +199,7 @@ async fn run(
     cancel: &Cancel,
     sent: &AtomicBool,
     clock: &dyn clock::Clock,
+    gate: Option<Arc<dyn events::PostGate>>,
 ) -> Result<Delivery> {
     if cancel.is_cancelled() {
         return Err(DriverError::Cancelled {
@@ -203,7 +210,10 @@ async fn run(
     refuse_before_post(&probe, target, api)?;
     let foreground = route_foreground(action)?;
     let chromium = crate::ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name);
-    let hid_blocked = api.blocks_global_hid();
+    let hid_blocked = match &gate {
+        Some(gate) => gate.blocks_global_hid(),
+        None => api.blocks_global_hid(),
+    };
     if hid_blocked && matches!(action, DriverAction::Activate { .. }) {
         return Err(DriverError::CapabilityUnavailable);
     }
@@ -230,7 +240,7 @@ async fn run(
         DriverAction::PointerDrag { .. } | DriverAction::PointerScroll { .. }
     )
     .then_some(events::DRAG_SAMPLE_GAP);
-    post_all(api, ledger, &events, cancel, sent, gap, clock).await?;
+    post_all(api, ledger, &events, cancel, sent, gap, clock, gate).await?;
     if delivery == Delivery::TargetedEvent {
         confirm_arrival(api, target, sent).await?;
     }
@@ -302,6 +312,7 @@ async fn confirm_arrival(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn post_all(
     api: &dyn EventApi,
     ledger: &InputLedger,
@@ -310,6 +321,7 @@ async fn post_all(
     sent: &AtomicBool,
     gap: Option<Duration>,
     clock: &dyn clock::Clock,
+    gate: Option<Arc<dyn events::PostGate>>,
 ) -> Result<()> {
     for (index, event) in events.iter().enumerate() {
         if index > 0 {
@@ -351,7 +363,7 @@ async fn post_all(
         };
         let prior = sent.load(Ordering::Acquire);
         sent.store(true, Ordering::Release);
-        match api.post(event.clone()).await {
+        match api.post(event.clone(), gate.clone()).await {
             Ok(()) => {
                 if !event.down {
                     ledger.record_release(event);

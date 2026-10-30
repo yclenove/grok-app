@@ -139,14 +139,16 @@ impl FakeEvents {
         &self,
         event: SyntheticEvent,
         check_gate: bool,
+        gate: Option<std::sync::Arc<dyn super::events::PostGate>>,
     ) -> std::result::Result<(), PostFault> {
         if check_gate {
-            let gate = self
-                .gate
-                .0
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .clone();
+            let gate = gate.or_else(|| {
+                self.gate
+                    .0
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .clone()
+            });
             if let Some(gate) = gate {
                 gate.before_post(&event)?;
             }
@@ -234,12 +236,16 @@ impl EventApi for FakeEvents {
         *self.gate.0.lock().unwrap_or_else(|err| err.into_inner()) = gate;
     }
 
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        self.post_inner(event, true).await
+    async fn post(
+        &self,
+        event: SyntheticEvent,
+        gate: Option<std::sync::Arc<dyn super::events::PostGate>>,
+    ) -> std::result::Result<(), PostFault> {
+        self.post_inner(event, true, gate).await
     }
 
     async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        self.post_inner(event, false).await
+        self.post_inner(event, false, None).await
     }
 
     async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault> {

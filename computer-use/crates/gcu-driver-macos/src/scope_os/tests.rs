@@ -507,6 +507,7 @@ async fn deliver_unproved_window_posts_nothing() {
         &click(sample_window()),
         &Cancel::default(),
         Duration::from_secs(2),
+        None,
     )
     .await
     .expect_err("refused");
@@ -535,6 +536,7 @@ async fn deliver_second_event_refusal_is_unknown_and_does_not_replay() {
         &click(sample_window()),
         &Cancel::default(),
         Duration::from_secs(2),
+        None,
     )
     .await
     .expect_err("second event");

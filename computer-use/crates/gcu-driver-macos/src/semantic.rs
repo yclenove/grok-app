@@ -2,7 +2,7 @@
 
 use gcu_core::driver::{Cancel, Delivery, DriverAction, DriverError, Result};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 use gcu_core::model::NativeHandle;
 
 use crate::driver::MacosDriver;
@@ -24,7 +24,7 @@ use gcu_core::{driver::TreeOpts, model::RawTree};
 use crate::ax::ErasedToggle;
 #[cfg(target_os = "macos")]
 use crate::discovery::TreeTarget;
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 use crate::scope_os::{Evidence, JobScope};
 
 impl MacosDriver {
@@ -101,14 +101,30 @@ impl MacosDriver {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn ax_job_scope(evidence: &Evidence, req: &DriverAction) -> Result<JobScope> {
-    if evidence.session_scoped() && evidence.pinned().is_none() {
-        return Ok(JobScope::scoped(None));
-    }
-    if evidence.pinned().is_some() {
+/// Scope for one semantic action.
+///
+/// Session scope and the pin are read once, into `admitted`. Later clears of
+/// the pin slot are ignored. A scoped session with no binding stays scoped
+/// and refuses; it does not become [`JobScope::unscoped`], including when the
+/// live adapter is not enforcing. Memory only, aside from the element lookup.
+/// No extra timeout or cancellation.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn ax_job_scope(evidence: &Evidence, req: &DriverAction) -> Result<JobScope> {
+    let admitted = JobScope::admit(evidence);
+    #[cfg(test)]
+    evidence.run_admission_barrier();
+    if admitted.is_scoped() {
+        let Some(binding) = admitted.expected().cloned() else {
+            return Ok(JobScope::scoped(None));
+        };
         let handle = action_element(req).ok_or_else(crate::scope_os::not_proved)?;
-        return Ok(JobScope::scoped(Some(evidence.mutation_window(handle)?)));
+        let live = evidence
+            .element_handle(handle)
+            .ok_or_else(crate::scope_os::not_proved)?;
+        if live.window() != &binding {
+            return Err(crate::scope_os::not_proved());
+        }
+        return Ok(JobScope::scoped(Some(binding)));
     }
     if evidence.enforcing() {
         let handle = action_element(req).ok_or_else(crate::scope_os::not_proved)?;
@@ -120,7 +136,7 @@ fn ax_job_scope(evidence: &Evidence, req: &DriverAction) -> Result<JobScope> {
     Ok(JobScope::unscoped())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn action_element(req: &DriverAction) -> Option<&NativeHandle> {
     match req {
         DriverAction::Press { el }

@@ -546,6 +546,67 @@ fn scoped_ax_job_without_expected_refuses_before_write() {
 }
 
 #[test]
+fn scoped_semantic_admission_clear_pin_between_reads_refuses_write_on_live_adapter() {
+    let (facts, evidence) = live_editor();
+    assert!(!evidence.enforcing());
+    evidence.mark_session_scoped();
+    let binding = evidence.window_binding_cg(7).expect("window");
+    evidence.pin(Some(binding.clone()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    evidence.set_admission_barrier(move || {
+        let _ = entered_tx.send(());
+        let guard = release_rx.lock().unwrap_or_else(|err| err.into_inner());
+        let _ = guard.recv_timeout(Duration::from_secs(2));
+    });
+    let req = DriverAction::SetValue {
+        el: NativeHandle::new(AxHandle {
+            pid: 4,
+            id: 3,
+            identity: AxIdentity::default(),
+        }),
+        value: "x".into(),
+    };
+    let evidence_job = Arc::clone(&evidence);
+    let worker = thread::spawn(move || crate::semantic::ax_job_scope(&evidence_job, &req));
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("admission paused between the snapshot and the decision");
+    evidence.pin(None);
+    release_tx.send(()).expect("release");
+    let scope = worker.join().expect("admission").expect("captured scope");
+    assert!(scope.is_scoped());
+    assert_eq!(scope.expected(), Some(&binding));
+    facts.set_element(
+        4,
+        3,
+        ElementFact {
+            pid: 4,
+            cg_id: Some(42),
+        },
+    );
+    let mut writes = 0u32;
+    let err = evidence
+        .commit_ax_job(&scope, |admitted| {
+            let Some(admitted) = admitted else {
+                writes += 1;
+                return Ok(());
+            };
+            let fact = facts.element(4, 3).ok_or_else(not_proved)?;
+            let snap = facts.snapshot().ok_or_else(not_proved)?;
+            evidence.accept_facts(admitted, std::slice::from_ref(&fact), &snap)?;
+            writes += 1;
+            Ok(())
+        })
+        .expect_err("moved element");
+    assert_nothing_executed(&err);
+    assert_eq!(writes, 0);
+    assert!(!evidence.enforcing());
+    assert!(evidence.session_scoped());
+}
+
+#[test]
 fn unscoped_live_adapter_ax_write_still_runs() {
     let (facts, evidence) = live_editor();
     assert!(!evidence.enforcing());

@@ -90,7 +90,7 @@ impl MacosDriver {
             work.await?
         };
         let left = DRIVER_DEADLINE.saturating_sub(clock.now().saturating_sub(started));
-        let _armed = crate::input::arm(
+        let armed = crate::input::arm(
             api.as_ref(),
             Arc::clone(&self.evidence),
             target.window_id,
@@ -106,6 +106,7 @@ impl MacosDriver {
             req,
             cancel,
             left,
+            Some(armed.gate()),
         )
         .await
     }

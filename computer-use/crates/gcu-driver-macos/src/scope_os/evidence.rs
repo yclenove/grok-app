@@ -39,6 +39,9 @@ pub struct Evidence {
     /// Set for the life of a scoped driver. Not the pin slot.
     session_scoped: AtomicBool,
     barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test seam between the one scope snapshot and the rest of admission.
+    #[cfg(test)]
+    admission_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Evidence {
@@ -81,6 +84,8 @@ impl Evidence {
             pinned: Mutex::new(None),
             session_scoped: AtomicBool::new(false),
             barrier: Mutex::new(None),
+            #[cfg(test)]
+            admission_barrier: Mutex::new(None),
         }
     }
 
@@ -97,6 +102,10 @@ impl Evidence {
         self.enforcing.store(enforcing, Ordering::Release);
         self.pin(None);
         *self.barrier.lock().unwrap_or_else(|err| err.into_inner()) = None;
+        *self
+            .admission_barrier
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = None;
     }
 
     /// Store the admitted binding, or clear it. This does not look up a window.
@@ -139,6 +148,36 @@ impl Evidence {
     #[cfg(test)]
     pub(crate) fn set_pre_sink_barrier(&self, barrier: impl Fn() + Send + Sync + 'static) {
         *self.barrier.lock().unwrap_or_else(|err| err.into_inner()) = Some(Arc::new(barrier));
+    }
+
+    /// Pause once after scope is snapshotted and before admission decides.
+    ///
+    /// Tests use this to clear another session's pin between those steps.
+    /// Production builds have no hook. The hook runs after the lock is
+    /// released. No timeout or cancellation is added here.
+    #[cfg(test)]
+    pub(crate) fn set_admission_barrier(&self, barrier: impl Fn() + Send + Sync + 'static) {
+        *self
+            .admission_barrier
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(Arc::new(barrier));
+    }
+
+    /// Take and run the one-shot admission hook, if a test installed one.
+    ///
+    /// The hook runs after the lock is released. No timeout or cancellation.
+    #[cfg(test)]
+    pub(crate) fn run_admission_barrier(&self) {
+        let hook = {
+            let mut slot = self
+                .admission_barrier
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            slot.take()
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Take and run the one-shot pre-sink hook, if a test installed one.
@@ -351,8 +390,9 @@ impl Evidence {
     /// Pinned window for an element, or an error when the element moved.
     ///
     /// Never returns the element's new window. Memory or one fact read. No
-    /// extra timeout or cancellation.
-    #[cfg(any(test, target_os = "macos"))]
+    /// extra timeout or cancellation. Production admission does not call this:
+    /// it would read the shared pin again. The reparent test is the caller.
+    #[cfg(test)]
     pub(crate) fn mutation_window(&self, handle: &NativeHandle) -> Result<WindowBinding> {
         let pin = self.pinned().ok_or_else(not_proved)?;
         let binding = self.element_handle(handle).ok_or_else(not_proved)?;
