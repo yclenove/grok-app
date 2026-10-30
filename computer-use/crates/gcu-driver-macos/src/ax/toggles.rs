@@ -162,6 +162,27 @@ impl<S: ToggleStore> AccessibilityToggles<S> {
     }
 }
 
+/// Arm process-wide switches for one observation, or do nothing in a scope.
+///
+/// Scoped mode does not write `AXEnhancedUserInterface` or
+/// `AXManualAccessibility`, and it does not record values to restore.
+/// A tree that stays incomplete uses the walker's existing incomplete fact.
+/// Memory only when `session_scoped` is true. Otherwise this is [`AccessibilityToggles::enable`].
+///
+/// The macOS snapshot and tests are the callers. A host build that is not
+/// macOS and not a test has no observation path.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+pub(crate) fn arm_for_observation<S: ToggleStore>(
+    toggles: &AccessibilityToggles<S>,
+    pid: u32,
+    session_scoped: bool,
+) -> Result<()> {
+    if session_scoped {
+        return Ok(());
+    }
+    toggles.enable(pid)
+}
+
 impl<S: ToggleStore> Drop for AccessibilityToggles<S> {
     fn drop(&mut self) {
         self.restore();

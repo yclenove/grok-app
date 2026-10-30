@@ -26,6 +26,19 @@ pub(super) struct PostCheck {
     handle: Option<(NativeHandle, WindowBinding)>,
 }
 
+impl PostCheck {
+    /// Binding admission produced. Window actions prefer the window binding.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. This does not
+    /// re-read the platform.
+    pub(super) fn admitted(&self) -> Option<&WindowBinding> {
+        self.window
+            .as_ref()
+            .map(|(_, binding)| binding)
+            .or_else(|| self.handle.as_ref().map(|(_, binding)| binding))
+    }
+}
+
 pub(super) fn admit_app(
     scope: &FixtureScope,
     evidence: &impl InstanceEvidence,

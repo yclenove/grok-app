@@ -24,6 +24,16 @@ const DOCTOR_ALLOW: [&str; 2] = [
     "permission missing: screen_recording",
 ];
 
+struct ClearPin<'a, D: InstanceEvidence + ?Sized> {
+    evidence: &'a D,
+}
+
+impl<D: InstanceEvidence + ?Sized> Drop for ClearPin<'_, D> {
+    fn drop(&mut self) {
+        self.evidence.pin_admitted(None);
+    }
+}
+
 /// Driver that admits only the targets in its [`ScopeLease`].
 ///
 /// The lease is shared with the assembler that installed it. This type does
@@ -46,7 +56,8 @@ where
     /// Memory only. No blocking, timeout, or cancellation. The activity object
     /// is the same stop latch the session uses.
     pub fn new(inner: D, lease: ScopeLease, activity: Arc<dyn UserActivity>) -> Self {
-        let mut capabilities = inner.capabilities().clone();
+        inner.note_scoped_session();
+        let mut capabilities = inner.scope_capabilities(inner.capabilities());
         capabilities.private_apis.clear();
         capabilities.version = guard::normalize_version(&capabilities.version).to_owned();
         Self {
@@ -154,6 +165,9 @@ where
         report
             .issues
             .retain(|issue| DOCTOR_ALLOW.contains(&issue.as_str()));
+        if let Some(note) = self.inner.scoped_doctor_note() {
+            report.issues.push(note.to_owned());
+        }
         report
     }
 
@@ -336,6 +350,11 @@ where
         }
         self.inner.attempt_fence(AttemptPhase::Admit).await;
         let (action, post) = guard::rewrite(req, authority.scope(), self.inner.as_ref())?;
+        let pinned = post.admitted().cloned();
+        self.inner.pin_admitted(pinned.as_ref());
+        let _clear_pin = ClearPin {
+            evidence: self.inner.as_ref(),
+        };
         self.inner.attempt_fence(AttemptPhase::MarkSeen).await;
         if !authority.confirm(&self.lease) || !self.authority_matches(&authority) {
             return Err(self.abandon(cancel).await);

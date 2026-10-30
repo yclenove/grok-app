@@ -6,6 +6,7 @@
 //! `PointerRoute::TargetedOnly` and `KeyRoute::TargetedOnly` never become a
 //! HID-tap event here; the router returns [`DriverError::CapabilityUnavailable`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -236,6 +237,29 @@ pub enum Call {
         /// Window number.
         window_id: u32,
     },
+    /// Raise one admitted window. Not a process-wide activation.
+    Raise {
+        /// Target pid.
+        pid: i32,
+        /// Window number.
+        window_id: u32,
+    },
+}
+
+/// Last check before [`EventApi::post`] hands an event to the OS.
+///
+/// [`EventApi::post_release`] does not call this. Cleanup must still release
+/// a button or key after a refused post.
+pub trait PostGate: Send + Sync {
+    /// `Err(NotSent)` means this event was not posted.
+    fn before_post(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault>;
+
+    /// True when a global HID post must not be selected or sent.
+    ///
+    /// The default allows HID. Memory only. No blocking, timeout, or cancellation.
+    fn blocks_global_hid(&self) -> bool {
+        false
+    }
 }
 
 /// Backend. Real CoreGraphics and SkyLight live behind this trait.
@@ -258,8 +282,40 @@ pub trait EventApi: Send + Sync {
     fn window_open(&self, pid: i32, window_id: u32) -> bool;
     /// Bring `pid` to the foreground. Targeted routes must not call this.
     async fn activate(&self, pid: i32) -> Result<()>;
-    /// Post one event. Must not retry internally.
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
+    /// Raise one window. The default does not activate the process.
+    ///
+    /// Blocking and timeout are the implementor's. The default does not block
+    /// and returns [`DriverError::CapabilityUnavailable`]. Cancellation is the
+    /// caller's.
+    async fn raise_window(&self, pid: i32, window_id: u32) -> Result<()> {
+        let _ = (pid, window_id);
+        Err(DriverError::CapabilityUnavailable)
+    }
+    /// True when the armed gate refuses global HID delivery.
+    ///
+    /// Memory only in the default, which returns false. No timeout or cancellation.
+    fn blocks_global_hid(&self) -> bool {
+        false
+    }
+    /// Post one event with the proof for this action.
+    ///
+    /// `gate` belongs to the caller. Another action dropping its own proof
+    /// does not clear it. The real backend treats `None` as not sent. Must
+    /// not retry internally.
+    async fn post(
+        &self,
+        event: SyntheticEvent,
+        gate: Option<Arc<dyn PostGate>>,
+    ) -> std::result::Result<(), PostFault>;
+    /// Post a cleanup up. Skips the identity gate. Must not retry.
+    async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
+    /// Optional slot for tests that do not pass a gate into [`EventApi::post`].
+    ///
+    /// The real backend does not read this slot when posting. `None` clears
+    /// it. The default ignores the gate.
+    fn arm_post_gate(&self, gate: Option<Arc<dyn PostGate>>) {
+        let _ = gate;
+    }
     /// Observe whether the targeted event landed. Must not post again.
     async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault>;
 }

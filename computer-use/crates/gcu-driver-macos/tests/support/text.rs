@@ -286,6 +286,7 @@ impl Rig {
             pasteboard: self.board.clone(),
             ledger: self.ledger.clone(),
             clock: self.clock.clone(),
+            gate: None,
         }
     }
     pub async fn run(&self, text: &str, options: TextOptions) -> Result<Delivery> {

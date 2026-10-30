@@ -113,6 +113,7 @@ async fn two_point_drag_posts_move_after_injected_frame_gap() {
             &action,
             &Cancel::default(),
             Duration::from_secs(2),
+            None,
         )
         .await
     });

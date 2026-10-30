@@ -70,6 +70,9 @@ pub struct MacosDriver {
     /// True only after the macOS constructor. Portable drivers never set it.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) live_ax: AtomicBool,
+    /// Identity evidence. Declared before the AX thread so its drop releases
+    /// held elements while that thread still exists.
+    pub(crate) evidence: Arc<crate::scope_os::Evidence>,
     #[cfg(target_os = "macos")]
     pub(crate) ax: Option<Arc<crate::real::AxThread>>,
     #[cfg(target_os = "macos")]
@@ -143,6 +146,7 @@ impl MacosDriver {
             text: Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(()),
             live_ax: AtomicBool::new(false),
+            evidence: crate::scope_os::Evidence::closed(),
             #[cfg(target_os = "macos")]
             ax: None,
             #[cfg(target_os = "macos")]
@@ -174,7 +178,9 @@ impl MacosDriver {
     ) -> Result<Self> {
         let mut driver = Self::with_api(Arc::new(crate::RealMacApi::new())).await?;
         driver.live_ax.store(true, Ordering::Release);
-        driver.ax = Some(Arc::new(crate::real::AxThread::spawn()?));
+        let thread = Arc::new(crate::real::AxThread::spawn()?);
+        driver.evidence = crate::scope_os::live_evidence(Arc::clone(&thread));
+        driver.ax = Some(thread);
         driver.inject_capture(Arc::new(capture::SckCapture::new()));
         let events = Arc::new(crate::input::RealEvents::with_stop_latch(
             latch, config, idle_ms,
@@ -189,6 +195,7 @@ impl MacosDriver {
                 Arc::new(crate::real::RealText::new(
                     Arc::clone(thread),
                     clock.clone(),
+                    Arc::clone(&driver.evidence),
                 )),
                 Arc::new(crate::input::NativePasteboard::general()),
                 clock,

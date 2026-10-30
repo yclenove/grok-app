@@ -119,6 +119,75 @@ pub(super) fn ax_raise(pid: u32, index: u32) -> Result<()> {
     result
 }
 
+/// Raise the window whose private id is `cg_id`. A missing match does not
+/// activate the process, and the window index is not the identity.
+///
+/// Blocking: the accessibility calls inside. Timeout: the element's messaging
+/// timeout. Cancellation: none; the caller bounds the wait.
+pub(crate) fn raise_by_cg_id(pid: u32, cg_id: u32) -> Result<()> {
+    if pid == 0 || cg_id == 0 {
+        return Err(DriverError::CapabilityUnavailable);
+    }
+    let pid = i32::try_from(pid).map_err(|_| DriverError::CapabilityUnavailable)?;
+    // SAFETY: same create-rule contract as [`ax_raise`].
+    let app = unsafe {
+        crate::diagnostics::ax_call("AXUIElementCreateApplication", 0, "", || {
+            AXUIElementCreateApplication(pid)
+        })
+    };
+    if app.is_null() {
+        return Err(DriverError::CapabilityUnavailable);
+    }
+    let result = (|| {
+        let value = copy_attribute(app, kAXWindowsAttribute)?;
+        let raised = raise_matching(value, cg_id);
+        release(value);
+        raised
+    })();
+    release(app as CFTypeRef);
+    result
+}
+
+fn raise_matching(value: CFTypeRef, cg_id: u32) -> Result<()> {
+    let array = as_array(value).ok_or(DriverError::CapabilityUnavailable)?;
+    for index in 0..array.len() {
+        let Some(item) = array.get(index) else {
+            continue;
+        };
+        let element = item.as_CFTypeRef() as accessibility_sys::AXUIElementRef;
+        let Some(found) = crate::scope_os::cg_id_from_ax(element as usize) else {
+            continue;
+        };
+        if found != cg_id {
+            continue;
+        }
+        let action = CFString::new(kAXRaiseAction);
+        // SAFETY: `element` is an AX window from the array we still hold, and
+        // `action` is the AXRaise constant. This does not activate the app.
+        let status = unsafe {
+            crate::diagnostics::ax_call(
+                "AXUIElementPerformAction",
+                element as usize,
+                kAXRaiseAction,
+                || AXUIElementPerformAction(element, action.as_concrete_TypeRef()),
+            )
+        };
+        if status == kAXErrorAPIDisabled {
+            return Err(DriverError::PermissionMissing {
+                permission: "accessibility".into(),
+            });
+        }
+        if status == kAXErrorSuccess {
+            return Ok(());
+        }
+        return Err(DriverError::Native {
+            message: "window raise was not accepted".into(),
+            maybe_executed: true,
+        });
+    }
+    Err(DriverError::CapabilityUnavailable)
+}
+
 fn read_windows(value: CFTypeRef) -> Result<Vec<AxWindow>> {
     let array = as_array(value).ok_or(DriverError::Native {
         message: "accessibility windows were not an array".into(),

@@ -19,13 +19,19 @@ use std::{
 use gcu_core::driver::DriverError;
 
 use super::world::World;
+use crate::scope_os::{not_proved, JobScope};
 use gcu_core::driver::Result;
 
 /// Wait for one AX job. Longer than the 1s messaging timeout so a finished
 /// call is observed before this deadline.
 pub const AX_CALL_TIMEOUT: Duration = Duration::from_millis(1500);
 
-type Job = Box<dyn FnOnce(&mut World) + Send>;
+type JobBody = Box<dyn FnOnce(&mut World, &JobScope) + Send>;
+
+struct Job {
+    scope: JobScope,
+    body: JobBody,
+}
 
 /// Serial AX worker. Drop closes the queue and joins the thread.
 pub struct AxThread {
@@ -42,7 +48,8 @@ impl AxThread {
             .spawn(move || {
                 let mut world = World::new();
                 while let Ok(job) = rx.recv() {
-                    job(&mut world);
+                    let Job { scope, body } = job;
+                    body(&mut world, &scope);
                 }
             })
             .map_err(|_| DriverError::Crashed {
@@ -54,30 +61,61 @@ impl AxThread {
         })
     }
 
-    /// Run `job` and wait asynchronously. See the module note on cancellation.
+    /// Run an unscoped `job` and wait asynchronously. See the module note on cancellation.
     pub async fn call<T: Send + 'static>(
         &self,
         timeout: Duration,
         mutation: bool,
         job: impl FnOnce(&mut World) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.call_with_liveness(timeout, mutation, move |world, _| job(world))
-            .await
+        self.call_scoped(timeout, mutation, JobScope::unscoped(), move |world, _| {
+            job(world)
+        })
+        .await
     }
 
-    /// Run a job that can recheck waiter liveness immediately before mutation.
-    /// Dropping/timing out the future closes the receiver. Already-entered AX
-    /// writes remain uncertain; queued or still-preparing writes can stop.
-    pub(crate) async fn call_with_liveness<T: Send + 'static>(
+    /// Run `job` with the scope captured at admission.
+    ///
+    /// A scoped job whose binding is missing is refused before `job` runs.
+    /// The scope value is the one stored on the job, not a later pin read.
+    /// Same timeout and cancellation as [`Self::call`].
+    pub(crate) async fn call_scoped<T: Send + 'static>(
         &self,
         timeout: Duration,
         mutation: bool,
-        job: impl FnOnce(&mut World, &dyn Fn() -> bool) -> Result<T> + Send + 'static,
+        scope: JobScope,
+        job: impl FnOnce(&mut World, &JobScope) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.call_with_liveness_scoped(timeout, mutation, scope, move |world, scope, _| {
+            job(world, scope)
+        })
+        .await
+    }
+
+    /// Run a job that can recheck waiter liveness immediately before mutation.
+    ///
+    /// `scope` is the admission captured with the job. Dropping or timing out
+    /// the future closes the receiver. Already-entered AX writes remain
+    /// uncertain; queued or still-preparing writes can stop.
+    pub(crate) async fn call_with_liveness_scoped<T: Send + 'static>(
+        &self,
+        timeout: Duration,
+        mutation: bool,
+        scope: JobScope,
+        job: impl FnOnce(&mut World, &JobScope, &dyn Fn() -> bool) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.enqueue(mutation, move |world| {
+        self.enqueue(mutation, scope, move |world, scope| {
             if !tx.is_closed() {
-                let result = catch_job(mutation, |world| job(world, &|| !tx.is_closed()), world);
+                let result = if scope.missing() {
+                    Err(not_proved())
+                } else {
+                    catch_job(
+                        mutation,
+                        |world| job(world, scope, &|| !tx.is_closed()),
+                        world,
+                    )
+                };
                 let _ = tx.send(result);
             }
         })?;
@@ -102,7 +140,7 @@ impl AxThread {
         job: impl FnOnce(&mut World) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.enqueue(mutation, move |world| {
+        self.enqueue(mutation, JobScope::unscoped(), move |world, _| {
             let _ = tx.send(catch_job(mutation, job, world));
         })?;
         match rx.recv_timeout(timeout) {
@@ -116,17 +154,25 @@ impl AxThread {
         }
     }
 
-    fn enqueue(&self, mutation: bool, job: impl FnOnce(&mut World) + Send + 'static) -> Result<()> {
+    fn enqueue(
+        &self,
+        mutation: bool,
+        scope: JobScope,
+        job: impl FnOnce(&mut World, &JobScope) + Send + 'static,
+    ) -> Result<()> {
         let guard = self.tx.lock().map_err(|_| DriverError::Crashed {
             maybe_executed: mutation,
         })?;
         let tx = guard.as_ref().ok_or(DriverError::Crashed {
             maybe_executed: mutation,
         })?;
-        tx.try_send(Box::new(job))
-            .map_err(|_| DriverError::Crashed {
-                maybe_executed: mutation,
-            })
+        tx.try_send(Job {
+            scope,
+            body: Box::new(job),
+        })
+        .map_err(|_| DriverError::Crashed {
+            maybe_executed: mutation,
+        })
     }
 }
 

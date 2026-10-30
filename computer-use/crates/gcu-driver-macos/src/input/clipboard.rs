@@ -118,6 +118,9 @@ async fn paste_route(
     path: PostPath,
     foreground: bool,
 ) -> Result<Delivery> {
+    if path == PostPath::HidTap && ctx.blocks_global_hid() {
+        return Err(DriverError::CapabilityUnavailable);
+    }
     let foreground_op;
     let op = if foreground {
         foreground_op = op.foreground();
@@ -281,6 +284,7 @@ async fn paste_once(
             op.sent,
             None,
             ctx.clock.as_ref(),
+            ctx.post_gate(),
         ))
         .await?;
     }

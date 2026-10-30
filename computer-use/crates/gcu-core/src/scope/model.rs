@@ -208,6 +208,38 @@ pub trait InstanceEvidence: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(std::future::ready(()))
     }
+
+    /// Store the binding admission already produced.
+    ///
+    /// `Some` is the immutable identity later OS calls must match. Callers must
+    /// not replace it with a later lookup. `None` clears it. The default does
+    /// nothing. Memory only. No blocking, timeout, or cancellation.
+    fn pin_admitted(&self, _binding: Option<&WindowBinding>) {}
+
+    /// Capability snapshot used while a scope wraps this driver.
+    ///
+    /// The default clones `current`. A platform that cannot bind a route marks
+    /// that route unavailable here and leaves the unscoped table alone. Memory
+    /// only. No blocking, timeout, or cancellation.
+    fn scope_capabilities(
+        &self,
+        current: &gcu_protocol::Capabilities,
+    ) -> gcu_protocol::Capabilities {
+        current.clone()
+    }
+
+    /// Extra doctor sentence while a scope is installed, or `None`.
+    ///
+    /// The default adds nothing. Memory only. No blocking, timeout, or cancellation.
+    fn scoped_doctor_note(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Mark this driver scoped for the life of the wrapper.
+    ///
+    /// The default does nothing. Memory only. No blocking, timeout, or
+    /// cancellation. This is not the perform pin: observation has no pin.
+    fn note_scoped_session(&self) {}
 }
 
 /// Where an attempt waits so a test can revoke before the next check.

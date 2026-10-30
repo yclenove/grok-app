@@ -75,6 +75,7 @@ impl MacosDriver {
             .map(|guards| guards.clock.clone())
             .unwrap_or_else(crate::input::clock::runtime_clock);
         let started = clock.now();
+        let scope = crate::scope_os::JobScope::admit(&self.evidence);
         let win = action_window(req)?.clone();
         let work = self.call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
             state.prepare_input(&win)
@@ -89,8 +90,40 @@ impl MacosDriver {
             work.await?
         };
         let left = DRIVER_DEADLINE.saturating_sub(clock.now().saturating_sub(started));
-        crate::input::deliver(api, self.ledger.clone(), &target, req, cancel, left).await
+        let armed = crate::input::arm(
+            api.as_ref(),
+            Arc::clone(&self.evidence),
+            target.window_id,
+            &scope,
+        )?;
+        if scope.is_scoped() && matches!(req, DriverAction::Activate { .. }) {
+            return confined_activate(api.as_ref(), &self.evidence, &target).await;
+        }
+        crate::input::deliver(
+            Arc::clone(&api),
+            self.ledger.clone(),
+            &target,
+            req,
+            cancel,
+            left,
+            Some(armed.gate()),
+        )
+        .await
     }
+}
+
+async fn confined_activate(
+    api: &dyn crate::input::EventApi,
+    evidence: &crate::scope_os::Evidence,
+    target: &crate::input::InputTarget,
+) -> Result<Delivery> {
+    evidence.recheck_pinned()?;
+    api.raise_window(target.pid, target.window_id).await?;
+    evidence.recheck_pinned().map_err(|_| DriverError::Native {
+        message: "target identity changed during delivery".into(),
+        maybe_executed: true,
+    })?;
+    Ok(Delivery::Accessibility)
 }
 
 fn action_window(action: &DriverAction) -> Result<&WindowRef> {

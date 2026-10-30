@@ -104,6 +104,7 @@ impl Fixture {
             &click(),
             &Cancel::default(),
             DRIVER_DEADLINE,
+            None,
         )
         .await
     }
@@ -394,6 +395,7 @@ async fn stop_during_hung_post_releases_independently_with_virtual_clock() {
             &action,
             &Cancel::default(),
             DRIVER_DEADLINE,
+            None,
         )
         .await
     });
@@ -435,6 +437,7 @@ async fn native_hang_times_out_before_five_seconds_without_sleep() {
             &click(),
             &Cancel::default(),
             DRIVER_DEADLINE,
+            None,
         )
         .await
     });

@@ -68,6 +68,7 @@ impl MacosDriver {
             .and_then(|s| s.clone())
             .ok_or(DriverError::CapabilityUnavailable)?;
         let started = backend.clock.now();
+        let scope = crate::scope_os::JobScope::admit(&self.evidence);
         let sent = AtomicBool::new(false);
         let gate = Operation::new(
             cancel,
@@ -84,12 +85,20 @@ impl MacosDriver {
                 }),
             )
             .await?;
+        let events = self.event_api().ok_or(DriverError::CapabilityUnavailable)?;
+        let armed = crate::input::arm(
+            events.as_ref(),
+            Arc::clone(&self.evidence),
+            target.window_id,
+            &scope,
+        )?;
         let context = TextContext {
             text: backend.text,
-            events: self.event_api().ok_or(DriverError::CapabilityUnavailable)?,
+            events: Arc::clone(&events),
             pasteboard: backend.pasteboard,
             ledger: Arc::clone(&self.ledger),
             clock: backend.clock,
+            gate: Some(armed.gate()),
         };
         let budget = DRIVER_DEADLINE.saturating_sub(context.clock.now().saturating_sub(started));
         crate::input::text::type_text(

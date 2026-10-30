@@ -7,7 +7,7 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use async_trait::async_trait;
@@ -24,7 +24,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSProcessInfo;
 
-use super::events::{EventApi, EventKind, PostFault, PostPath, Probe, SyntheticEvent};
+use super::events::{EventApi, EventKind, PostFault, PostGate, PostPath, Probe, SyntheticEvent};
 use super::skylight;
 use super::{
     activity::{ActivityMonitor, OWN_EVENT_TAG},
@@ -101,12 +101,46 @@ fn location_symbol() -> Option<SetWindowLocation> {
 
 type SetWindowLocation = unsafe extern "C" fn(event: *const CGEvent, point: CGPoint);
 
+/// OS calls behind [`RealEvents`]. Tests supply a poster that does not post.
+pub(crate) trait OsPoster: Send + Sync {
+    /// True when AppKit is initialized enough to post.
+    fn appkit_ready(&self) -> bool;
+    /// True when accessibility trust allows a down event.
+    fn trusted(&self) -> bool;
+    /// Frontmost pid, when the workspace reports one.
+    fn frontmost_pid(&self) -> Option<i32>;
+    /// Deliver one event. Must not retry.
+    fn post_event(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault>;
+}
+
+struct LivePoster;
+
+impl OsPoster for LivePoster {
+    fn appkit_ready(&self) -> bool {
+        ensure_appkit()
+    }
+
+    fn trusted(&self) -> bool {
+        super::ffi::accessibility_trusted()
+    }
+
+    fn frontmost_pid(&self) -> Option<i32> {
+        workspace_frontmost_pid()
+    }
+
+    fn post_event(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault> {
+        post_one(event)
+    }
+}
+
 /// Live CoreGraphics backend. One process-wide AppKit flag.
 pub struct RealEvents {
     arrival_failed: AtomicBool,
     guards: Arc<Guards>,
     _listener: Option<super::ffi::Listener>,
     post_gate: Arc<tokio::sync::Semaphore>,
+    identity: Mutex<Option<Arc<dyn PostGate>>>,
+    poster: Arc<dyn OsPoster>,
 }
 
 impl RealEvents {
@@ -143,7 +177,74 @@ impl RealEvents {
             guards,
             _listener: listener,
             post_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            identity: Mutex::new(None),
+            poster: Arc::new(LivePoster),
         }
+    }
+
+    /// Backend with an injected poster. Does not start a listener or AppKit.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    #[cfg(test)]
+    pub(crate) fn with_poster(poster: Arc<dyn OsPoster>) -> Self {
+        Self {
+            arrival_failed: AtomicBool::new(false),
+            guards: Guards::fixture(),
+            _listener: None,
+            post_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            identity: Mutex::new(None),
+            poster,
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        event: SyntheticEvent,
+        prove: bool,
+        gate: Option<Arc<dyn PostGate>>,
+    ) -> std::result::Result<(), PostFault> {
+        if !self.poster.appkit_ready() {
+            return Err(PostFault::NotSent);
+        }
+        let guards = self.guards.clone();
+        let poster = Arc::clone(&self.poster);
+        // The caller's gate, not the shared slot. A missing proof is NotSent.
+        let identity = if prove { gate } else { None };
+        // A stalled down keeps this permit; no new downs are queued behind it.
+        // Ups use the independent release executor and must bypass the permit.
+        let permit = if event.down {
+            Some(
+                self.post_gate
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| PostFault::NotSent)?,
+            )
+        } else {
+            None
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if event.down {
+                guards
+                    .check(event.path == PostPath::HidTap)
+                    .map_err(|_| PostFault::NotSent)?;
+                if event.path == PostPath::HidTap && poster.frontmost_pid() != Some(event.pid) {
+                    return Err(PostFault::NotSent);
+                }
+                if !poster.trusted() {
+                    return Err(PostFault::Permission);
+                }
+            }
+            if prove {
+                match identity {
+                    Some(gate) => gate.before_post(&event)?,
+                    None => return Err(PostFault::NotSent),
+                }
+            }
+            poster.post_event(&event)
+        })
+        .await
+        .map_err(|_| PostFault::Uncertain)?
     }
 
     fn probe_now(&self) -> Probe {
@@ -171,7 +272,7 @@ impl EventApi for RealEvents {
     }
 
     async fn frontmost_pid(&self) -> Result<Option<i32>> {
-        tokio::task::spawn_blocking(frontmost_pid)
+        tokio::task::spawn_blocking(workspace_frontmost_pid)
             .await
             .map_err(|_| DriverError::Crashed {
                 maybe_executed: false,
@@ -187,6 +288,23 @@ impl EventApi for RealEvents {
 
     fn window_open(&self, pid: i32, window_id: u32) -> bool {
         pid > 0 && window_id > 0
+    }
+
+    fn blocks_global_hid(&self) -> bool {
+        self.identity
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .is_some_and(|gate| gate.blocks_global_hid())
+    }
+
+    async fn raise_window(&self, pid: i32, window_id: u32) -> Result<()> {
+        let pid = u32::try_from(pid).map_err(|_| DriverError::CapabilityUnavailable)?;
+        tokio::task::spawn_blocking(move || crate::real::raise_by_cg_id(pid, window_id))
+            .await
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
     }
 
     async fn activate(&self, pid: i32) -> Result<()> {
@@ -212,40 +330,20 @@ impl EventApi for RealEvents {
         })?
     }
 
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        if !ensure_appkit() {
-            return Err(PostFault::NotSent);
-        }
-        let guards = self.guards.clone();
-        // A stalled down keeps this permit; no new downs are queued behind it.
-        // Ups use the independent release executor and must bypass the permit.
-        let permit = if event.down {
-            Some(
-                self.post_gate
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| PostFault::NotSent)?,
-            )
-        } else {
-            None
-        };
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            if event.down {
-                guards
-                    .check(event.path == PostPath::HidTap)
-                    .map_err(|_| PostFault::NotSent)?;
-                if event.path == PostPath::HidTap && frontmost_pid() != Some(event.pid) {
-                    return Err(PostFault::NotSent);
-                }
-                if !super::ffi::accessibility_trusted() {
-                    return Err(PostFault::Permission);
-                }
-            }
-            post_one(&event)
-        })
-        .await
-        .map_err(|_| PostFault::Uncertain)?
+    fn arm_post_gate(&self, gate: Option<Arc<dyn PostGate>>) {
+        *self.identity.lock().unwrap_or_else(|err| err.into_inner()) = gate;
+    }
+
+    async fn post(
+        &self,
+        event: SyntheticEvent,
+        gate: Option<Arc<dyn PostGate>>,
+    ) -> std::result::Result<(), PostFault> {
+        self.dispatch(event, true, gate).await
+    }
+
+    async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
+        self.dispatch(event, false, None).await
     }
 
     async fn verify_arrival(
@@ -270,7 +368,7 @@ impl Default for RealEvents {
     }
 }
 
-fn frontmost_pid() -> Option<i32> {
+fn workspace_frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()
         .frontmostApplication()
         .map(|app| app.processIdentifier())

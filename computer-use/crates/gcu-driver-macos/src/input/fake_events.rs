@@ -9,6 +9,15 @@ use std::sync::{Mutex, MutexGuard};
 #[derive(Debug)]
 pub struct FakeEvents {
     inner: Mutex<FakeInner>,
+    gate: GateSlot,
+}
+
+struct GateSlot(Mutex<Option<std::sync::Arc<dyn super::events::PostGate>>>);
+
+impl std::fmt::Debug for GateSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GateSlot")
+    }
 }
 
 #[derive(Debug)]
@@ -33,6 +42,7 @@ impl FakeEvents {
     /// Backend whose probe is `probe`. Frontmost starts at pid 1.
     pub fn new(probe: Probe) -> Self {
         Self {
+            gate: GateSlot(Mutex::new(None)),
             inner: Mutex::new(FakeInner {
                 steal_after_post: None,
                 guards: super::hotkey::Guards::fixture(),
@@ -124,43 +134,25 @@ impl FakeEvents {
     pub fn set_probe(&self, probe: Probe) {
         self.lock().probe = probe;
     }
-}
 
-#[async_trait]
-impl EventApi for FakeEvents {
-    fn guards(&self) -> Option<std::sync::Arc<super::hotkey::Guards>> {
-        Some(self.lock().guards.clone())
-    }
-    async fn frontmost_pid(&self) -> Result<Option<i32>> {
-        Ok(self.lock().frontmost)
-    }
-    fn probe(&self) -> Probe {
-        self.lock().probe.clone()
-    }
-
-    fn note_arrival_failed(&self) {
-        let mut inner = self.lock();
-        inner.probe.field_51 = false;
-        inner.probe.arrival_verified = false;
-    }
-
-    fn window_open(&self, pid: i32, window_id: u32) -> bool {
-        !self.lock().closed.contains(&(pid, window_id))
-    }
-
-    async fn activate(&self, pid: i32) -> Result<()> {
-        let mut inner = self.lock();
-        inner.calls.push(Call::Activate(pid));
-        if inner.activate_fails {
-            return Err(DriverError::CapabilityUnavailable);
+    async fn post_inner(
+        &self,
+        event: SyntheticEvent,
+        check_gate: bool,
+        gate: Option<std::sync::Arc<dyn super::events::PostGate>>,
+    ) -> std::result::Result<(), PostFault> {
+        if check_gate {
+            let gate = gate.or_else(|| {
+                self.gate
+                    .0
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .clone()
+            });
+            if let Some(gate) = gate {
+                gate.before_post(&event)?;
+            }
         }
-        if !inner.accept_without_activation {
-            inner.frontmost = Some(pid);
-        }
-        Ok(())
-    }
-
-    async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
         let (hold, fault) = {
             let mut inner = self.lock();
             inner.calls.push(Call::Post(event.clone()));
@@ -189,6 +181,71 @@ impl EventApi for FakeEvents {
             std::future::pending::<()>().await;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl EventApi for FakeEvents {
+    fn guards(&self) -> Option<std::sync::Arc<super::hotkey::Guards>> {
+        Some(self.lock().guards.clone())
+    }
+    async fn frontmost_pid(&self) -> Result<Option<i32>> {
+        Ok(self.lock().frontmost)
+    }
+    fn probe(&self) -> Probe {
+        self.lock().probe.clone()
+    }
+
+    fn note_arrival_failed(&self) {
+        let mut inner = self.lock();
+        inner.probe.field_51 = false;
+        inner.probe.arrival_verified = false;
+    }
+
+    fn window_open(&self, pid: i32, window_id: u32) -> bool {
+        !self.lock().closed.contains(&(pid, window_id))
+    }
+
+    fn blocks_global_hid(&self) -> bool {
+        self.gate
+            .0
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .is_some_and(|gate| gate.blocks_global_hid())
+    }
+
+    async fn raise_window(&self, pid: i32, window_id: u32) -> Result<()> {
+        self.lock().calls.push(Call::Raise { pid, window_id });
+        Ok(())
+    }
+
+    async fn activate(&self, pid: i32) -> Result<()> {
+        let mut inner = self.lock();
+        inner.calls.push(Call::Activate(pid));
+        if inner.activate_fails {
+            return Err(DriverError::CapabilityUnavailable);
+        }
+        if !inner.accept_without_activation {
+            inner.frontmost = Some(pid);
+        }
+        Ok(())
+    }
+
+    fn arm_post_gate(&self, gate: Option<std::sync::Arc<dyn super::events::PostGate>>) {
+        *self.gate.0.lock().unwrap_or_else(|err| err.into_inner()) = gate;
+    }
+
+    async fn post(
+        &self,
+        event: SyntheticEvent,
+        gate: Option<std::sync::Arc<dyn super::events::PostGate>>,
+    ) -> std::result::Result<(), PostFault> {
+        self.post_inner(event, true, gate).await
+    }
+
+    async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
+        self.post_inner(event, false, None).await
     }
 
     async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault> {
