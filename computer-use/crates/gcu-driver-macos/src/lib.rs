@@ -34,6 +34,7 @@ pub mod identity;
 pub mod input;
 #[cfg(target_os = "macos")]
 mod real;
+mod scope_os;
 mod semantic;
 pub mod spotlight;
 pub mod testing;

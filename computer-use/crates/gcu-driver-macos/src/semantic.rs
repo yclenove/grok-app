@@ -2,6 +2,9 @@
 
 use gcu_core::driver::{Cancel, Delivery, DriverAction, DriverError, Result};
 
+#[cfg(target_os = "macos")]
+use gcu_core::model::NativeHandle;
+
 use crate::driver::MacosDriver;
 
 #[cfg(target_os = "macos")]
@@ -73,13 +76,38 @@ impl MacosDriver {
         #[cfg(target_os = "macos")]
         if self.live_ax.load(Ordering::Acquire) {
             if let Some(thread) = &self.ax {
-                let source = crate::real::RealAxSource::attach(Arc::clone(thread));
+                let evidence = Arc::clone(&self.evidence);
+                let source = crate::real::RealAxSource::attach(
+                    Arc::clone(thread),
+                    Some(Arc::clone(&evidence)),
+                );
+                if evidence.enforcing() {
+                    let Some(handle) = action_element(req) else {
+                        return Err(crate::scope_os::not_proved());
+                    };
+                    let Some(binding) = evidence.element_handle(handle) else {
+                        return Err(crate::scope_os::not_proved());
+                    };
+                    source.set_expected(binding.window().clone());
+                }
                 return ax::perform(&source, req, cancel, gcu_core::driver::DRIVER_DEADLINE).await;
             }
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (req, cancel);
         Err(action_source_missing())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn action_element(req: &DriverAction) -> Option<&NativeHandle> {
+    match req {
+        DriverAction::Press { el }
+        | DriverAction::SecondaryAction { el, .. }
+        | DriverAction::SetValue { el, .. }
+        | DriverAction::SelectText { el, .. }
+        | DriverAction::ScrollElement { el, .. } => Some(el),
+        _ => None,
     }
 }
 

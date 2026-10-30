@@ -84,9 +84,15 @@ impl MacosDriver {
                 }),
             )
             .await?;
+        let events = self.event_api().ok_or(DriverError::CapabilityUnavailable)?;
+        let _armed = crate::input::arm(
+            events.as_ref(),
+            Arc::clone(&self.evidence),
+            target.window_id,
+        )?;
         let context = TextContext {
             text: backend.text,
-            events: self.event_api().ok_or(DriverError::CapabilityUnavailable)?,
+            events: Arc::clone(&events),
             pasteboard: backend.pasteboard,
             ledger: Arc::clone(&self.ledger),
             clock: backend.clock,

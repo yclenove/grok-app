@@ -7,7 +7,7 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use async_trait::async_trait;
@@ -24,7 +24,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSProcessInfo;
 
-use super::events::{EventApi, EventKind, PostFault, PostPath, Probe, SyntheticEvent};
+use super::events::{EventApi, EventKind, PostFault, PostGate, PostPath, Probe, SyntheticEvent};
 use super::skylight;
 use super::{
     activity::{ActivityMonitor, OWN_EVENT_TAG},
@@ -107,6 +107,7 @@ pub struct RealEvents {
     guards: Arc<Guards>,
     _listener: Option<super::ffi::Listener>,
     post_gate: Arc<tokio::sync::Semaphore>,
+    identity: Mutex<Option<Arc<dyn PostGate>>>,
 }
 
 impl RealEvents {
@@ -143,7 +144,62 @@ impl RealEvents {
             guards,
             _listener: listener,
             post_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            identity: Mutex::new(None),
         }
+    }
+
+    async fn dispatch(
+        &self,
+        event: SyntheticEvent,
+        prove: bool,
+    ) -> std::result::Result<(), PostFault> {
+        if !ensure_appkit() {
+            return Err(PostFault::NotSent);
+        }
+        let guards = self.guards.clone();
+        let identity = if prove {
+            self.identity
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone()
+        } else {
+            None
+        };
+        // A stalled down keeps this permit; no new downs are queued behind it.
+        // Ups use the independent release executor and must bypass the permit.
+        let permit = if event.down {
+            Some(
+                self.post_gate
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| PostFault::NotSent)?,
+            )
+        } else {
+            None
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if event.down {
+                guards
+                    .check(event.path == PostPath::HidTap)
+                    .map_err(|_| PostFault::NotSent)?;
+                if event.path == PostPath::HidTap && frontmost_pid() != Some(event.pid) {
+                    return Err(PostFault::NotSent);
+                }
+                if !super::ffi::accessibility_trusted() {
+                    return Err(PostFault::Permission);
+                }
+            }
+            if prove {
+                match identity {
+                    Some(gate) => gate.before_post(&event)?,
+                    None => return Err(PostFault::NotSent),
+                }
+            }
+            post_one(&event)
+        })
+        .await
+        .map_err(|_| PostFault::Uncertain)?
     }
 
     fn probe_now(&self) -> Probe {
@@ -212,40 +268,16 @@ impl EventApi for RealEvents {
         })?
     }
 
+    fn arm_post_gate(&self, gate: Option<Arc<dyn PostGate>>) {
+        *self.identity.lock().unwrap_or_else(|err| err.into_inner()) = gate;
+    }
+
     async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        if !ensure_appkit() {
-            return Err(PostFault::NotSent);
-        }
-        let guards = self.guards.clone();
-        // A stalled down keeps this permit; no new downs are queued behind it.
-        // Ups use the independent release executor and must bypass the permit.
-        let permit = if event.down {
-            Some(
-                self.post_gate
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| PostFault::NotSent)?,
-            )
-        } else {
-            None
-        };
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            if event.down {
-                guards
-                    .check(event.path == PostPath::HidTap)
-                    .map_err(|_| PostFault::NotSent)?;
-                if event.path == PostPath::HidTap && frontmost_pid() != Some(event.pid) {
-                    return Err(PostFault::NotSent);
-                }
-                if !super::ffi::accessibility_trusted() {
-                    return Err(PostFault::Permission);
-                }
-            }
-            post_one(&event)
-        })
-        .await
-        .map_err(|_| PostFault::Uncertain)?
+        self.dispatch(event, true).await
+    }
+
+    async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
+        self.dispatch(event, false).await
     }
 
     async fn verify_arrival(

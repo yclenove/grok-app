@@ -21,6 +21,7 @@ pub mod foreground;
 pub mod hotkey;
 mod keys;
 mod ledger;
+mod proof;
 mod skylight;
 pub mod text;
 pub mod timing;
@@ -37,11 +38,12 @@ pub use pasteboard_native::NativePasteboard;
 
 pub use events::{
     plan_click, plan_drag, plan_scroll, Call, EventApi, EventKind, InputTarget, PostFault,
-    PostPath, Probe, SyntheticEvent, DRAG_SAMPLE_GAP, FIELD_WINDOW_NUMBER,
+    PostGate, PostPath, Probe, SyntheticEvent, DRAG_SAMPLE_GAP, FIELD_WINDOW_NUMBER,
 };
 pub use fake_events::FakeEvents;
 pub use keys::utf16_chunks;
 pub use ledger::InputLedger;
+pub(crate) use proof::arm;
 pub use skylight::{classify as classify_skylight, status as skylight_status};
 
 #[cfg(target_os = "macos")]
@@ -78,6 +80,8 @@ pub fn apply_probe(caps: &mut Capabilities, probe: &Probe) {
     };
     caps.background_operation = BackgroundOperation::Partial;
     caps.private_apis.insert("skylight".into(), probe.skylight);
+    caps.private_apis
+        .insert("ax_window".into(), crate::scope_os::ax_window_status());
     if !caps.version.contains("P1-06") {
         caps.version.push_str("; targeted events (P1-06)");
     }
@@ -90,7 +94,7 @@ pub async fn release_held(api: &dyn EventApi, ledger: &InputLedger) {
     let mut posts: Vec<_> = ledger
         .take_ups()
         .into_iter()
-        .map(|up| api.post(up))
+        .map(|up| api.post_release(up))
         .collect();
     std::future::poll_fn(|cx| {
         let mut index = 0;

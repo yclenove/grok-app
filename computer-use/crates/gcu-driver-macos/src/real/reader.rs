@@ -21,6 +21,7 @@ use core_foundation::string::CFString;
 use gcu_core::{
     driver::DriverError,
     model::{NativeHandle, NodeAction, NodeValue, Rect, TextRange},
+    scope::WindowBinding,
 };
 
 use super::act;
@@ -38,6 +39,8 @@ pub struct RealAxSource {
     root: u64,
     pid: u32,
     text_limit: Mutex<Option<usize>>,
+    evidence: Option<Arc<crate::scope_os::Evidence>>,
+    expected: Mutex<Option<WindowBinding>>,
 }
 
 impl RealAxSource {
@@ -57,6 +60,8 @@ impl RealAxSource {
             root,
             pid,
             text_limit: Mutex::new(None),
+            evidence: None,
+            expected: Mutex::new(None),
         })
     }
 
@@ -75,14 +80,41 @@ impl RealAxSource {
     /// Action source for elements a snapshot already stored.
     ///
     /// Does not reset the element map. The next [`RealAxSource::open`] does.
-    pub fn attach(thread: Arc<AxThread>) -> Self {
+    /// `evidence` is checked again inside each mutation, on this thread.
+    pub fn attach(thread: Arc<AxThread>, evidence: Option<Arc<crate::scope_os::Evidence>>) -> Self {
         Self {
             thread,
             cache: Mutex::new(HashMap::new()),
             root: 0,
             pid: 0,
             text_limit: Mutex::new(None),
+            evidence,
+            expected: Mutex::new(None),
         }
+    }
+
+    /// Window the mutation must still belong to. Set before `AX` perform.
+    pub fn set_expected(&self, window: WindowBinding) {
+        *self.expected.lock().unwrap_or_else(|err| err.into_inner()) = Some(window);
+    }
+
+    async fn mutate<T: Send + 'static>(
+        &self,
+        ids: Vec<u64>,
+        job: impl FnOnce(&mut World) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let evidence = self.evidence.clone();
+        let expected = self
+            .expected
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        self.thread
+            .call(AX_CALL_TIMEOUT, true, move |world| {
+                super::prove_mutation(evidence.as_deref(), expected.as_ref(), &ids, world)?;
+                job(world)
+            })
+            .await
     }
 
     async fn ensure(&self, id: u64) -> Result<Facts> {
@@ -200,10 +232,7 @@ impl AxSource for RealAxSource {
     async fn invoke(&self, node: &Self::Node, name: &str) -> Result<AxCall> {
         let id = *node;
         let name = name.to_string();
-        self.thread
-            .call(AX_CALL_TIMEOUT, true, move |world| {
-                act::invoke(world, id, &name)
-            })
+        self.mutate(vec![id], move |world| act::invoke(world, id, &name))
             .await
     }
 
@@ -221,40 +250,34 @@ impl AxSource for RealAxSource {
         let id = *node;
         let attribute = attribute.to_string();
         let value = value.to_string();
-        self.thread
-            .call(AX_CALL_TIMEOUT, true, move |world| {
-                act::set_string(world, id, &attribute, &value)
-            })
-            .await
+        self.mutate(vec![id], move |world| {
+            act::set_string(world, id, &attribute, &value)
+        })
+        .await
     }
 
     async fn set_number(&self, node: &Self::Node, attribute: &str, value: f64) -> Result<AxCall> {
         let id = *node;
         let attribute = attribute.to_string();
-        self.thread
-            .call(AX_CALL_TIMEOUT, true, move |world| {
-                act::set_number(world, id, &attribute, value)
-            })
-            .await
+        self.mutate(vec![id], move |world| {
+            act::set_number(world, id, &attribute, value)
+        })
+        .await
     }
 
     async fn set_text_range(&self, node: &Self::Node, range: TextRange) -> Result<AxCall> {
         let id = *node;
-        self.thread
-            .call(AX_CALL_TIMEOUT, true, move |world| {
-                act::set_text_range(world, id, range)
-            })
+        self.mutate(vec![id], move |world| act::set_text_range(world, id, range))
             .await
     }
 
     async fn select_child(&self, parent: &Self::Node, child: &Self::Node) -> Result<AxCall> {
         let parent = *parent;
         let child = *child;
-        self.thread
-            .call(AX_CALL_TIMEOUT, true, move |world| {
-                act::select_child(world, parent, child)
-            })
-            .await
+        self.mutate(vec![parent, child], move |world| {
+            act::select_child(world, parent, child)
+        })
+        .await
     }
 
     async fn parent(&self, node: &Self::Node) -> Result<Option<Self::Node>> {

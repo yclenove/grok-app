@@ -6,6 +6,7 @@
 //! `PointerRoute::TargetedOnly` and `KeyRoute::TargetedOnly` never become a
 //! HID-tap event here; the router returns [`DriverError::CapabilityUnavailable`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -238,6 +239,15 @@ pub enum Call {
     },
 }
 
+/// Last check before [`EventApi::post`] hands an event to the OS.
+///
+/// [`EventApi::post_release`] does not call this. Cleanup must still release
+/// a button or key after a refused post.
+pub trait PostGate: Send + Sync {
+    /// `Err(NotSent)` means this event was not posted.
+    fn before_post(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault>;
+}
+
 /// Backend. Real CoreGraphics and SkyLight live behind this trait.
 #[async_trait]
 pub trait EventApi: Send + Sync {
@@ -260,6 +270,13 @@ pub trait EventApi: Send + Sync {
     async fn activate(&self, pid: i32) -> Result<()>;
     /// Post one event. Must not retry internally.
     async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
+    /// Post a cleanup up. Skips the identity gate. Must not retry.
+    async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
+    /// Install the gate [`EventApi::post`] checks immediately before the OS call.
+    /// `None` clears it. The default ignores the gate.
+    fn arm_post_gate(&self, gate: Option<Arc<dyn PostGate>>) {
+        let _ = gate;
+    }
     /// Observe whether the targeted event landed. Must not post again.
     async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault>;
 }

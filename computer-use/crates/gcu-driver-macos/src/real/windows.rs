@@ -20,12 +20,15 @@ use objc2_core_graphics::{
 use std::ptr;
 
 pub(super) fn windows() -> Result<Vec<CgWindow>> {
+    Ok(copy_windows().unwrap_or_default())
+}
+
+/// On-screen windows, front to back. `None` means the list itself could not be read.
+pub(crate) fn copy_windows() -> Option<Vec<CgWindow>> {
     let displays = active_displays();
     let option =
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
-    let Some(list) = CGWindowListCopyWindowInfo(option, 0) else {
-        return Ok(Vec::new());
-    };
+    let list = CGWindowListCopyWindowInfo(option, 0)?;
     let mut out = Vec::new();
     for index in 0..list.len() {
         // SAFETY: `index` is below `len`. The returned pointer is +0 and stays
@@ -41,7 +44,7 @@ pub(super) fn windows() -> Result<Vec<CgWindow>> {
             out.push(window);
         }
     }
-    Ok(out)
+    Some(out)
 }
 
 fn one_window(dict: &CFDictionary, displays: &[DisplayMetrics]) -> Option<CgWindow> {

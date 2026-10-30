@@ -9,6 +9,15 @@ use std::sync::{Mutex, MutexGuard};
 #[derive(Debug)]
 pub struct FakeEvents {
     inner: Mutex<FakeInner>,
+    gate: GateSlot,
+}
+
+struct GateSlot(Mutex<Option<std::sync::Arc<dyn super::events::PostGate>>>);
+
+impl std::fmt::Debug for GateSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GateSlot")
+    }
 }
 
 #[derive(Debug)]
@@ -33,6 +42,7 @@ impl FakeEvents {
     /// Backend whose probe is `probe`. Frontmost starts at pid 1.
     pub fn new(probe: Probe) -> Self {
         Self {
+            gate: GateSlot(Mutex::new(None)),
             inner: Mutex::new(FakeInner {
                 steal_after_post: None,
                 guards: super::hotkey::Guards::fixture(),
@@ -124,6 +134,52 @@ impl FakeEvents {
     pub fn set_probe(&self, probe: Probe) {
         self.lock().probe = probe;
     }
+
+    async fn post_inner(
+        &self,
+        event: SyntheticEvent,
+        check_gate: bool,
+    ) -> std::result::Result<(), PostFault> {
+        if check_gate {
+            let gate = self
+                .gate
+                .0
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            if let Some(gate) = gate {
+                gate.before_post(&event)?;
+            }
+        }
+        let (hold, fault) = {
+            let mut inner = self.lock();
+            inner.calls.push(Call::Post(event.clone()));
+            if event.down {
+                if let Some(pid) = inner.steal_after_post.take() {
+                    inner.frontmost = Some(pid);
+                }
+            }
+            if !event.down && !inner.hold_ups {
+                return Ok(());
+            }
+            let fault = if event.down { inner.fault.take() } else { None };
+            (
+                if event.down {
+                    inner.hold
+                } else {
+                    inner.hold_ups
+                },
+                fault,
+            )
+        };
+        if let Some(fault) = fault {
+            return Err(fault);
+        }
+        if hold {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -160,35 +216,16 @@ impl EventApi for FakeEvents {
         Ok(())
     }
 
+    fn arm_post_gate(&self, gate: Option<std::sync::Arc<dyn super::events::PostGate>>) {
+        *self.gate.0.lock().unwrap_or_else(|err| err.into_inner()) = gate;
+    }
+
     async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
-        let (hold, fault) = {
-            let mut inner = self.lock();
-            inner.calls.push(Call::Post(event.clone()));
-            if event.down {
-                if let Some(pid) = inner.steal_after_post.take() {
-                    inner.frontmost = Some(pid);
-                }
-            }
-            if !event.down && !inner.hold_ups {
-                return Ok(());
-            }
-            let fault = if event.down { inner.fault.take() } else { None };
-            (
-                if event.down {
-                    inner.hold
-                } else {
-                    inner.hold_ups
-                },
-                fault,
-            )
-        };
-        if let Some(fault) = fault {
-            return Err(fault);
-        }
-        if hold {
-            std::future::pending::<()>().await;
-        }
-        Ok(())
+        self.post_inner(event, true).await
+    }
+
+    async fn post_release(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault> {
+        self.post_inner(event, false).await
     }
 
     async fn verify_arrival(&self, pid: i32, window_id: u32) -> std::result::Result<(), PostFault> {

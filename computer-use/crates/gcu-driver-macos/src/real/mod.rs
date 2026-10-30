@@ -8,6 +8,7 @@
 mod act;
 mod apps;
 mod ax;
+mod identity;
 mod parse;
 mod reader;
 mod spotlight;
@@ -16,10 +17,12 @@ mod thread;
 mod windows;
 mod world;
 
+pub(crate) use identity::{element_fact, prove_mutation, refresh_tokens, release_book};
 pub(crate) use reader::{AxToggleStore, RealAxSource};
 pub(crate) use text::RealText;
 pub(crate) use thread::AxThread;
 pub(crate) use thread::AX_CALL_TIMEOUT;
+pub(crate) use windows::copy_windows;
 pub(crate) use world::MESSAGING_TIMEOUT_SECS;
 
 use crate::api::{AxWindow, BundleFacts, CgWindow, MacApi, RunningApp, SpotlightHit};
