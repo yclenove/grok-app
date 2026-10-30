@@ -94,6 +94,8 @@ async fn execute_ready(
             return outcome;
         }
     };
+    // run_command only returns Err when spawning failed, independently of scoring/cleanup.
+    outcome.assurance.client_started = true;
     if finished.wait_failed {
         outcome.status = RunStatus::Crash;
         outcome.reason = "wait: client wait failed".into();

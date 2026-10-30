@@ -4,7 +4,7 @@
 //! fake driver. It is not an OS sandbox. [`DesktopProvider`] does not launch
 //! anything.
 
-use super::RunConfig;
+use super::{RunConfig, RunStatus, TaskOutcome};
 use crate::tasks::Task;
 use crate::Error;
 use std::path::PathBuf;
@@ -101,6 +101,13 @@ pub struct Environment {
 /// A tool or side log is available only after the backend writes `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Assurance {
+    /// The task client was spawned, even if scoring or cleanup later failed.
+    /// False for setup failures and rows skipped after an earlier failure.
+    #[serde(default)]
+    pub client_started: bool,
+    /// ADR 0017 §4 gate and cleanup evidence. None for local fake-only tasks.
+    #[serde(default)]
+    pub environment: Option<crate::disposable::EnvironmentReport>,
     /// `--attest-disposable-desktop` was set. This is not a confinement proof.
     #[serde(default)]
     pub attestation_provided: bool,
@@ -164,5 +171,32 @@ pub(crate) fn assurance_for(cfg: &RunConfig) -> Assurance {
         attestation_provided: cfg.attest_disposable_desktop,
         driver_mode: driver_mode(cfg),
         ..Assurance::default()
+    }
+}
+
+pub(super) fn cleanup_failed(outcome: &mut TaskOutcome) {
+    crate::prep::apply_cleanup_failure(&mut outcome.status, &mut outcome.reason);
+    outcome.status = RunStatus::NotRun;
+}
+
+impl TaskOutcome {
+    /// False for skipped rows, which stay out of rates and percentiles.
+    #[must_use]
+    pub fn scored(&self) -> bool {
+        !matches!(self.status_for_report(), RunStatus::NotRun)
+    }
+
+    pub(crate) fn status_for_report(&self) -> RunStatus {
+        if self.assurance.cleanup_failed
+            || self
+                .assurance
+                .environment
+                .as_ref()
+                .is_some_and(|environment| !environment.complete())
+        {
+            RunStatus::NotRun
+        } else {
+            self.status
+        }
     }
 }

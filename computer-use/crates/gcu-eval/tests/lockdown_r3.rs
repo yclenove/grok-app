@@ -166,7 +166,11 @@ fn builtin_fake_does_not_start_an_external_gcu_without_attestation() {
     let report = block_on(run_tasks(&[named("native-form-01")], &cfg)).unwrap();
     let row = &report.tasks[0];
     assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);
-    assert!(row.reason.contains("external gcu"), "{}", row.reason);
+    assert!(
+        row.reason.contains("provider_unavailable"),
+        "{}",
+        row.reason
+    );
     assert!(!marker.exists(), "the external gcu was started");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -253,7 +257,7 @@ fn cleanup_failure_does_not_start_the_next_client() {
     let report = block_on(run_tasks(&[first.clone(), second.clone()], &cfg)).unwrap();
     assert_eq!(
         report.tasks[0].status,
-        RunStatus::Fail,
+        RunStatus::NotRun,
         "{}",
         report.tasks[0].reason
     );
@@ -263,10 +267,12 @@ fn cleanup_failure_does_not_start_the_next_client() {
         report.tasks[0].reason
     );
     assert!(report.tasks[0].assurance.cleanup_failed);
+    assert!(report.tasks[0].assurance.client_started);
     assert!(!report.tasks[0].env_destroyed);
     let root = report.tasks[0].env_root.as_ref().unwrap();
     assert!(root.exists(), "the failed cleanup removed the root");
     assert_eq!(report.tasks[1].status, RunStatus::NotRun);
+    assert!(!report.tasks[1].assurance.client_started);
     assert!(
         report.tasks[1].reason.contains("remaining tasks"),
         "{}",
@@ -301,7 +307,7 @@ fn populate_failure_reports_the_leftover_when_cleanup_also_fails() {
     };
     let report = block_on(run_tasks(&[named("native-form-01")], &cfg)).unwrap();
     let row = &report.tasks[0];
-    assert_eq!(row.status, RunStatus::Invalid, "{}", row.reason);
+    assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);
     assert!(row.reason.contains("populate_failed"), "{}", row.reason);
     assert!(row.reason.contains("cleanup_failed"), "{}", row.reason);
     assert!(!row.env_destroyed);

@@ -82,7 +82,7 @@ fn task_body(task: &TaskOutcome) -> serde_json::Value {
     serde_json::json!({
         "id": task.id,
         "category": task.category,
-        "status": task.status.as_str(),
+        "status": task.status_for_report().as_str(),
         "platform": task.platform,
         "group": task.group,
         "repeat": task.repeat,
@@ -100,6 +100,7 @@ fn task_body(task: &TaskOutcome) -> serde_json::Value {
         "state_telemetry": task.assurance.state_telemetry.as_str(),
         "transcript_telemetry": task.assurance.transcript_telemetry.as_str(),
         "cleanup_failed": task.assurance.cleanup_failed,
+        "environment_contract": task.assurance.environment,
         "capture_incomplete": task.assurance.capture_incomplete,
         "tokens_in": task.metrics.tokens_in,
         "tokens_out": task.metrics.tokens_out,
@@ -116,14 +117,14 @@ fn task_body(task: &TaskOutcome) -> serde_json::Value {
 /// Render the summary. The result contains no `href`, `src`, or external URL.
 #[must_use]
 pub fn render_html(report: &SuiteReport) -> String {
-    let summary = &report.summary;
+    let summary = crate::summarize(&report.tasks);
     let mut body = String::new();
     body.push_str(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>gcu-eval</title>",
     );
     body.push_str("<style>body{font-family:sans-serif}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px;text-align:left}</style>");
     body.push_str("</head><body><h1>gcu-eval</h1>");
-    body.push_str("<p>Isolated GROK_HOME is not an environment boundary. One-shot desktop rows stay not_run until a disposable OS container exists. An OS sandbox, a process lifetime barrier, and client policy pinning are not_implemented and need an external boundary (ADR 0017).</p>");
+    body.push_str("<p>Isolated GROK_HOME is not an environment boundary. Real evaluation remains stopped: no trusted disposable provider is installed. checked machine evidence and attested external evidence are both required; critical unknown and failed cleanup are not_run (ADR 0017).</p>");
     push_p(&mut body, "model", &report.model);
     push_p(&mut body, "platform", &report.platform);
     push_p(&mut body, "group", &report.group);
@@ -146,7 +147,7 @@ pub fn render_html(report: &SuiteReport) -> String {
         body.push_str("</td><td>");
         body.push_str(&escape_html(&task.category));
         body.push_str("</td><td>");
-        body.push_str(&escape_html(task.status.as_str()));
+        body.push_str(&escape_html(task.status_for_report().as_str()));
         body.push_str("</td><td>");
         body.push_str(&escape_html(&task.assurance.driver_mode));
         body.push_str("</td><td>");
@@ -165,7 +166,21 @@ pub fn render_html(report: &SuiteReport) -> String {
         body.push_str(&escape_html(&task.violations.join("; ")));
         body.push_str("</td></tr>");
     }
-    body.push_str("</table></body></html>");
+    body.push_str("</table>");
+    for task in &report.tasks {
+        if let Some(environment) = &task.assurance.environment {
+            body.push_str("<h2>Environment contract: ");
+            body.push_str(&escape_html(&task.id));
+            body.push_str("</h2><pre>");
+            // Only normalized enums/checks are serializable here, never provider
+            // identities, local paths, signed statements or credential material.
+            if let Ok(json) = serde_json::to_string_pretty(environment) {
+                body.push_str(&escape_html(&json));
+            }
+            body.push_str("</pre>");
+        }
+    }
+    body.push_str("</body></html>");
     body
 }
 
@@ -196,11 +211,12 @@ fn summary_body(report: &SuiteReport) -> serde_json::Value {
         "model": report.model,
         "platform": report.platform,
         "group": report.group,
-        "summary": report.summary,
+        "summary": crate::summarize(&report.tasks),
         "assurance": {
             "os_sandbox": "not_implemented",
             "lifetime_barrier": "not_implemented",
             "client_policy_pin": "not_implemented",
+            "disposable_provider": "not_run",
             "note": "real mode needs an external isolation boundary (ADR 0017); a process group is not a sandbox"
         },
         "tasks": report.tasks.iter().map(task_body).collect::<Vec<_>>(),

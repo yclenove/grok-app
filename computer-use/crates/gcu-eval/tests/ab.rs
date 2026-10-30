@@ -61,6 +61,7 @@ fn shell(rounds_b: u64, tokens_b: Option<u64>, status_b: RunStatus, violate: boo
                 let on_b = arm == ArmId::B;
                 let violation = violate && on_b && category == "red_team" && repeat == 0;
                 report.trials.push(AbTrial {
+                    environment_contract: None,
                     task_id: task.into(),
                     category: category.into(),
                     arm,
@@ -426,6 +427,171 @@ fn report_schema_rejects_unknown_fields_and_keeps_the_synthetic_example() {
     assert!(!written.contains("\"decision\""));
     forbid_accounting(&written);
     forbid_accounting(&std::fs::read_to_string(&paths.markdown).unwrap());
+}
+
+#[test]
+fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
+    let task = named("native-form-01");
+    let fake = RunConfig {
+        builtin_fake: true,
+        builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
+        builtin_gcu: true,
+        gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+        platform: host_platform().into(),
+        ..RunConfig::default()
+    };
+    for cfg in [
+        RunConfig::default(),
+        RunConfig {
+            run_local: false,
+            ..fake.clone()
+        },
+        RunConfig {
+            grok_bin: Some(PathBuf::from("/no/such/gcu-eval-client")),
+            ..RunConfig::default()
+        },
+        RunConfig {
+            grok_bin: fake.builtin_fake_bin.clone(),
+            attest_disposable_desktop: true,
+            auto_approve: true,
+            ..RunConfig::default()
+        },
+        RunConfig {
+            real_driver: true,
+            attest_disposable_desktop: true,
+            auto_approve: true,
+            ..fake.clone()
+        },
+        RunConfig {
+            builtin_gcu: false,
+            ..fake
+        },
+    ] {
+        let report = block_on(run_ab(std::slice::from_ref(&task), &cfg, &id())).unwrap();
+        assert_eq!(report.provenance, Provenance::NotRun, "{cfg:?}");
+        assert_eq!(report.trials.len(), 2 * gcu_eval::ab::REPEATS as usize);
+        for trial in &report.trials {
+            assert_eq!(trial.status, RunStatus::NotRun);
+            assert!(trial.rounds.is_none() && trial.tokens_in.is_none());
+            assert!(!trial.environment_contract.as_ref().unwrap().complete());
+        }
+        let parsed = parse_report(&serde_json::to_vec(&report).unwrap()).unwrap();
+        assert_eq!(parsed, report);
+        assert!(render_markdown(&report, &decide(&report).unwrap()).contains("not_run"));
+    }
+}
+
+#[test]
+fn empty_or_rejected_tasks_do_not_claim_runner_provenance() {
+    let cfg = RunConfig {
+        builtin_fake: true,
+        builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
+        builtin_gcu: true,
+        gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+        platform: host_platform().into(),
+        ..RunConfig::default()
+    };
+    let empty = block_on(run_ab(&[], &cfg, &id())).unwrap();
+    assert_eq!(empty.provenance, Provenance::NotRun);
+    assert!(empty.trials.is_empty());
+    for variant in 0..3 {
+        let mut task = named("native-form-01");
+        match variant {
+            0 => task.platforms.clear(),
+            1 => task.pass_script = PathBuf::from("/no/such/gcu-eval-oracle"),
+            _ => task.scene = "no-such-gcu-eval-scene".into(),
+        }
+        let report = block_on(run_ab(&[task], &cfg, &id())).unwrap();
+        assert_eq!(report.provenance, Provenance::NotRun, "{variant}");
+        let expected = if variant == 0 {
+            RunStatus::NotRun
+        } else {
+            RunStatus::Invalid
+        };
+        assert!(report.trials.iter().all(|trial| trial.status == expected));
+    }
+}
+
+#[test]
+fn started_clients_keep_runner_provenance_even_without_metrics() {
+    let task = named("native-form-01");
+    let mut unsupported = task.clone();
+    unsupported.id = "unsupported-platform".into();
+    unsupported.platforms.clear();
+    for (behavior, status) in [
+        ("success", RunStatus::Pass),
+        ("crash", RunStatus::Crash),
+        ("timeout", RunStatus::Timeout),
+    ] {
+        let cfg = RunConfig {
+            builtin_fake: true,
+            builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
+            builtin_gcu: true,
+            gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+            platform: host_platform().into(),
+            behavior: Some(behavior.into()),
+            timeout: Some(if behavior == "timeout" {
+                std::time::Duration::from_millis(250)
+            } else {
+                std::time::Duration::from_secs(20)
+            }),
+            ..RunConfig::default()
+        };
+        let report = block_on(run_ab(&[unsupported.clone(), task.clone()], &cfg, &id())).unwrap();
+        assert_eq!(report.provenance, Provenance::Runner, "{behavior}");
+        for trial in report
+            .trials
+            .iter()
+            .filter(|trial| trial.task_id == task.id)
+        {
+            assert_eq!(trial.status, status);
+            if behavior == "crash" {
+                assert!(trial.tokens_in.is_none());
+            }
+            if behavior == "timeout" {
+                assert!(trial.rounds.is_none() && trial.tokens_in.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn auto_approval_feature_does_not_promote_desktop_provenance() {
+    let out = scratch("autoapprove-desktop");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gcu-eval"));
+    command.args([
+        "--suite",
+        "core",
+        "--ab",
+        "--builtin-fake",
+        "--env",
+        "desktop",
+        "--out",
+    ]);
+    command.arg(&out).env_remove("GCU_APPROVAL");
+    if cfg!(all(feature = "eval-autoapprove", debug_assertions)) {
+        command.arg("--auto-approve");
+    }
+    let output = command.output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let report = parse_report(&std::fs::read(json).unwrap()).unwrap();
+    assert_eq!(report.provenance, Provenance::NotRun);
+    assert!(!report.trials.is_empty());
+    for trial in report.trials {
+        assert_eq!(trial.status, RunStatus::NotRun);
+        assert!(!trial.environment_contract.as_ref().unwrap().complete());
+    }
+    std::fs::remove_dir_all(out).unwrap();
 }
 
 #[test]

@@ -25,6 +25,7 @@ pub mod browser;
 #[path = "../../../bench/mod.rs"]
 pub mod budget;
 mod client_tools;
+pub mod disposable;
 mod exec;
 mod fake_agent;
 mod fake_gcu;

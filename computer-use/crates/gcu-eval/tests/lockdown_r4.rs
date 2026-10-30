@@ -99,45 +99,6 @@ exit 0
     script
 }
 
-/// External client that records each real task start as one `GROK_HOME` line.
-fn counting_client(dir: &Path, marker: &Path) -> PathBuf {
-    let script = dir.join("grok.sh");
-    let body = format!(
-        r#"#!/bin/sh
-prompt=
-prev=
-for arg in "$@"; do
-  if [ "$prev" = "-p" ]; then
-    prompt=$arg
-  fi
-  prev=$arg
-done
-case "$prompt" in
-  *"List the exact names"*)
-    printf '%s\n' '{listing}'
-    exit 0
-    ;;
-esac
-printf '%s\n' "$GROK_HOME" >> '{marker}'
-exit 0
-"#,
-        listing = preflight_listing(),
-        marker = marker.display(),
-    );
-    std::fs::write(&script, body).unwrap();
-    executable(&script);
-    script
-}
-
-fn marker_lines(path: &Path) -> Vec<String> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 fn remove_marked_roots(lines: &[String]) {
     for line in lines {
         let path = Path::new(line);
@@ -216,7 +177,7 @@ fn builtin_gcu_wrapper_without_attestation_is_not_started() {
 }
 
 #[test]
-fn successful_client_without_logs_reports_unknown_not_zero() {
+fn blocked_external_client_reports_unknown_not_zero() {
     let dir = scratch("silent");
     let marker = dir.join("client-started");
     let script = silent_success_client(&dir, &marker);
@@ -231,7 +192,10 @@ fn successful_client_without_logs_reports_unknown_not_zero() {
     };
     let report = block_on(run_tasks(&[named("native-form-01")], &cfg)).unwrap();
     let row = &report.tasks[0];
-    assert!(marker.exists(), "the successful client did not run");
+    assert!(
+        !marker.exists(),
+        "client/preflight ran without provider evidence"
+    );
     assert_eq!(
         row.assurance.tool_telemetry,
         TelemetryState::Unknown,
@@ -251,7 +215,11 @@ fn successful_client_without_logs_reports_unknown_not_zero() {
         "missing logs were scored as a measured pass: {}",
         row.reason
     );
-    assert!(row.reason.contains("telemetry unknown"), "{}", row.reason);
+    assert!(
+        row.reason.contains("provider_unavailable"),
+        "{}",
+        row.reason
+    );
     let out = dir.join("out");
     write_reports(&out, &report).unwrap();
     let task_json = std::fs::read_to_string(out.join("native-form-01.json")).unwrap();
@@ -276,21 +244,19 @@ fn successful_client_without_logs_reports_unknown_not_zero() {
 #[test]
 fn ab_cleanup_failure_on_desktop_oneshot_stops_later_arms() {
     let dir = scratch("ab-halt");
-    let marker = dir.join("starts.log");
-    let script = counting_client(&dir, &marker);
-    let _cleanup = AbCleanup {
-        dir: dir.clone(),
-        marker: marker.clone(),
-    };
+    let _cleanup = AbCleanup { dir: dir.clone() };
     gcu_eval::testing_fail_next_removal();
     let mut task = named("text-note-01");
     task.id = "desktop-oneshot".into();
     let cfg = RunConfig {
-        grok_bin: Some(script),
+        builtin_fake: true,
+        builtin_fake_bin: Some(agent()),
+        builtin_gcu: true,
         gcu_bin: Some(gcu()),
+        probe: Some(dir.join("probe.json")),
+        behavior: Some("scripted".into()),
         platform: host_platform().into(),
         include_desktop: true,
-        attest_disposable_desktop: true,
         timeout: Some(Duration::from_secs(5)),
         ..RunConfig::default()
     };
@@ -302,12 +268,14 @@ fn ab_cleanup_failure_on_desktop_oneshot_stops_later_arms() {
         machine: "unspecified".into(),
     };
     let report = block_on(run_ab(std::slice::from_ref(&task), &cfg, &id)).unwrap();
-    let starts = marker_lines(&marker);
-    assert_eq!(
-        starts.len(),
-        1,
-        "later repeats or arms started: {starts:?}\n{report:?}"
-    );
+    assert_eq!(report.provenance, gcu_eval::ab::Provenance::Runner);
+    let probe: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("probe.json")).unwrap()).unwrap();
+    let leftover = Path::new(probe["grok_home"].as_str().unwrap())
+        .parent()
+        .unwrap();
+    assert!(leftover.exists(), "failed cleanup did not retain the tree");
+    std::fs::remove_dir_all(leftover).unwrap();
     assert!(
         report.trials.iter().any(|trial| {
             trial.arm == ArmId::A && trial.repeat == 0 && trial.reason.contains("cleanup_failed")
@@ -336,12 +304,17 @@ fn ab_cleanup_failure_on_desktop_oneshot_stops_later_arms() {
 
 struct AbCleanup {
     dir: PathBuf,
-    marker: PathBuf,
 }
 
 impl Drop for AbCleanup {
     fn drop(&mut self) {
-        remove_marked_roots(&marker_lines(&self.marker));
+        let homes: Vec<String> = std::fs::read(self.dir.join("probe.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|probe| probe["grok_home"].as_str().map(str::to_owned))
+            .into_iter()
+            .collect();
+        remove_marked_roots(&homes);
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

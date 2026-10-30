@@ -79,7 +79,7 @@ pub(crate) fn builtin_gcu_trusted(cfg: &RunConfig) -> bool {
 /// Cargo puts test binaries in `deps/` and the package binaries next to that
 /// directory. A symlink is not the artifact. This does not detect a hard link
 /// that has replaced the artifact in that directory.
-fn is_builtin_artifact(path: &Path, stem: &str) -> bool {
+pub(crate) fn is_builtin_artifact(path: &Path, stem: &str) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };

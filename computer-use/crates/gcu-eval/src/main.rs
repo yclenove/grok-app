@@ -50,7 +50,7 @@ pub(crate) struct Cli {
     /// Report directory. Omitted reports are not written into the repo.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// `local` uses a temp directory for tests. `desktop` is interface-only.
+    /// `local` is fake-only. `desktop` records the unavailable disposable provider.
     #[arg(long, default_value = "local")]
     env: String,
     /// Override each task budget, in milliseconds.
@@ -86,15 +86,12 @@ pub(crate) struct Cli {
     /// Scripted client behavior. Hidden; tests and the fake agent use it.
     #[arg(long, hide = true)]
     behavior: Option<String>,
-    /// `fake` (default) uses the fake driver. `real` drives the real `gcu` driver and refuses to
-    /// start unless `--attest-disposable-desktop` is set.
+    /// `fake` (default) uses the fake driver. `real` remains not_run: no trusted
+    /// disposable provider or native S2/S4 integration is installed.
     #[arg(long, default_value = "fake")]
     driver: String,
-    /// Attest that this process is on a one-shot isolated desktop with egress control.
-    ///
-    /// Required before a real driver or any external client. A file named
-    /// `eval-fake-agent` is external. An environment variable cannot replace this
-    /// flag. It is not a confinement proof.
+    /// Legacy declaration, recorded for compatibility. Never boundary evidence
+    /// and never enables real/external clients, even their tool preflight.
     #[arg(long)]
     attest_disposable_desktop: bool,
     /// Fixture app started for each task when `--driver real`.
@@ -141,9 +138,6 @@ fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
                 return Err(Stop::Usage(
                     "--driver real needs --grok, --gcu and --fixture".into(),
                 ));
-            }
-            if cli.env != "local" {
-                return Err(Stop::Usage("--driver real needs --env local".into()));
             }
             if !cli.attest_disposable_desktop {
                 return Err(Stop::Usage(format!("--driver real: {ATTEST_REQUIRED}")));
@@ -339,7 +333,7 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
         let mut tasks = core_tasks()?;
         retain_only(&mut tasks, cli)?;
         let real = real_flags(cli)?;
-        if (!cli.builtin_fake && cli.grok.is_none()) || !run_local {
+        if !cli.builtin_fake && cli.grok.is_none() {
             not_run_report(&tasks, &id)
         } else {
             let cfg = RunConfig {
@@ -358,7 +352,7 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
                 behavior: cli.behavior.clone(),
                 auto_approve: cli.auto_approve,
                 include_desktop: false,
-                run_local: true,
+                run_local,
                 ..RunConfig::default()
             };
             block_on(run_ab(&tasks, &cfg, &id)).map_err(|err| Stop::Run(err.into()))?
