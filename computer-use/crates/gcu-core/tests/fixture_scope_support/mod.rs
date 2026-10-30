@@ -187,6 +187,7 @@ struct Evidence {
     hold_go: bool,
     deny_perform: bool,
     snapshot_fault: Option<usize>,
+    subscribed_read_fault: Option<(usize, gcu_driver_fake::faults::Fault)>,
     fault_lease: Option<ScopeLease>,
     permission: Option<String>,
     events: Option<Arc<Mutex<VecDeque<UiEvent>>>>,
@@ -436,6 +437,7 @@ fn initial_evidence() -> Evidence {
         hold_go: false,
         deny_perform: false,
         snapshot_fault: None,
+        subscribed_read_fault: None,
         fault_lease: None,
         permission: None,
         events: None,
@@ -577,6 +579,9 @@ impl Driver for Spy {
         }
         if let Some(permission) = lock(&self.evidence).permission.take() {
             return Err(DriverError::PermissionMissing { permission });
+        }
+        if let Some(fault) = self.take_subscribed_read_fault() {
+            self.inner.inject(fault).await?;
         }
         self.counts.content.fetch_add(1, Ordering::SeqCst);
         let raw = self.inner.snapshot_tree(win, opts, cancel).await?;

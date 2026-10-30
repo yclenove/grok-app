@@ -3,9 +3,8 @@
 
 mod fixture_scope_support;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fixture_scope_support::{permissive, scope_only_b, World, SCOPE_MESSAGE};
 use gcu_core::action::{PublishGate, ToolCall};
@@ -106,47 +105,23 @@ async fn window_gone_rebind_during_refresh_drops_old_metadata() {
                     .await
                     .unwrap();
             }
-            GonePath::Wait => {}
+            GonePath::Wait => {
+                // InstantClock can exhaust the wait horizon before another task
+                // or thread runs. Inject inline in the first subscribed sample,
+                // after authorization and before the wait can time out.
+                world.spy.arm_read_fault_after_subscribe(Fault::WindowGone {
+                    window: "w-a".into(),
+                });
+            }
         }
         let gate = world.router.refresh_gate();
         gate.arm();
         let subscribed = world.spy.external().subscribe;
-        let ready = Arc::new(AtomicBool::new(false));
-        if kind == GonePath::Wait {
-            let spy = world.spy.clone();
-            let flag = Arc::clone(&ready);
-            tokio::spawn(async move {
-                let deadline = Instant::now() + Duration::from_secs(8);
-                while !flag.load(Ordering::SeqCst) {
-                    if Instant::now() >= deadline {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                spy.inject(Fault::WindowGone {
-                    window: "w-a".into(),
-                })
-                .await
-                .unwrap();
-            });
-        }
         let release = std::thread::spawn({
             let gate = Arc::clone(&gate);
             let lease = world.lease.clone();
-            let spy = world.spy.clone();
-            let ready = Arc::clone(&ready);
             move || {
                 let _unblock = Unblock(&gate);
-                if kind == GonePath::Wait {
-                    let deadline = Instant::now() + Duration::from_secs(8);
-                    while spy.external().subscribe == subscribed {
-                        if Instant::now() >= deadline {
-                            panic!("wait did not subscribe");
-                        }
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    ready.store(true, Ordering::SeqCst);
-                }
                 wait_until_parked(&gate);
                 lease.rebind(scope_only_b(2)).unwrap();
                 gate.release();
@@ -171,6 +146,9 @@ async fn window_gone_rebind_during_refresh_drops_old_metadata() {
             world.router.execute(&world.session, call).await
         };
         release.join().unwrap();
+        if kind == GonePath::Wait {
+            assert_eq!(world.spy.external().subscribe, subscribed + 1);
+        }
         let err = outcome.error.as_ref().expect("window gone");
         assert_eq!(err.code, ErrorCode::WindowGone, "{err:?}");
         assert!(outcome.state.is_none(), "{outcome:?}");
@@ -197,14 +175,10 @@ impl Drop for Unblock<'_> {
 }
 
 fn wait_until_parked(gate: &PublishGate) {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while !gate.is_parked() {
-        if Instant::now() >= deadline {
-            gate.release();
-            panic!("commit boundary did not park");
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    assert!(
+        gate.wait_until_parked(Duration::from_secs(8)),
+        "commit boundary did not park"
+    );
 }
 
 fn state_params(app: &str, window: Option<&str>, shot: serde_json::Value) -> GetAppStateParams {
