@@ -335,6 +335,8 @@ fn network_probes(leaking_route: Option<usize>) -> Vec<(Probe, Check)> {
         while count < 7 && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // BSD/macOS accepted sockets inherit the listener's non-blocking mode.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(1)))
                         .unwrap();
