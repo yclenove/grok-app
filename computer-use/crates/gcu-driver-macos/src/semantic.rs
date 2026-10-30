@@ -81,7 +81,12 @@ impl MacosDriver {
                     Arc::clone(thread),
                     Some(Arc::clone(&evidence)),
                 );
-                if evidence.enforcing() {
+                if evidence.pinned().is_some() {
+                    let Some(handle) = action_element(req) else {
+                        return Err(crate::scope_os::not_proved());
+                    };
+                    source.set_expected(evidence.mutation_window(handle)?);
+                } else if evidence.enforcing() {
                     let Some(handle) = action_element(req) else {
                         return Err(crate::scope_os::not_proved());
                     };

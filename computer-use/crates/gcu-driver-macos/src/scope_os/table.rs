@@ -6,10 +6,11 @@
 //! are not inputs.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gcu_core::scope::{BootIdentity, OsStartTime, ProcessInstance, WindowBinding};
 
-use super::facts::{is_app_window, OsFacts, OsWindow};
+use super::facts::{is_app_window, OsFacts, OsWindow, Snapshot};
 
 #[derive(Clone, Debug)]
 struct Witness {
@@ -26,9 +27,10 @@ struct Slot {
 
 /// Witnesses and window incarnations for one driver.
 ///
-/// A poisoned id stays unproved for the life of this table.
-#[derive(Default)]
+/// A poisoned id stays unproved for the life of this table. `epoch` is chosen
+/// once per table so a new driver does not restart incarnation at 1.
 pub(crate) struct IdentityState {
+    epoch: u64,
     witnessed: HashMap<u32, Witness>,
     slots: HashMap<u32, Slot>,
     retired: HashMap<u32, u64>,
@@ -36,6 +38,26 @@ pub(crate) struct IdentityState {
     gap: bool,
     /// Rows from the last readable list. Empty after a lost observation.
     pub(crate) rows: Vec<OsWindow>,
+}
+
+impl Default for IdentityState {
+    fn default() -> Self {
+        Self {
+            epoch: next_epoch(),
+            witnessed: HashMap::new(),
+            slots: HashMap::new(),
+            retired: HashMap::new(),
+            poisoned: HashSet::new(),
+            gap: false,
+            rows: Vec::new(),
+        }
+    }
+}
+
+fn next_epoch() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    n.saturating_mul(1_u64 << 32)
 }
 
 impl IdentityState {
@@ -74,6 +96,18 @@ pub(crate) fn prove_pid(
     }
     let start = facts.process_start_us(pid).filter(|ticks| *ticks != 0)?;
     let boot = facts.boot_identity().filter(|value| !value.is_empty())?;
+    remember_owner(state, pid, start, &boot)
+}
+
+fn remember_owner(
+    state: &mut IdentityState,
+    pid: u32,
+    start: u64,
+    boot: &str,
+) -> Option<ProcessInstance> {
+    if pid == 0 || start == 0 || boot.is_empty() {
+        return None;
+    }
     if let Some(seen) = state.witnessed.get(&pid) {
         if seen.start_us != start || seen.boot != boot {
             return None;
@@ -83,35 +117,41 @@ pub(crate) fn prove_pid(
             pid,
             Witness {
                 start_us: start,
-                boot: boot.clone(),
+                boot: boot.to_owned(),
             },
         );
     }
     ProcessInstance::new(
         pid,
         OsStartTime::new(start).ok()?,
-        BootIdentity::new(boot).ok()?,
+        BootIdentity::new(boot.to_owned()).ok()?,
     )
     .ok()
 }
 
-/// Apply one window-list observation. `None` from the list is a lost observation.
+/// Apply one window-list observation. A missing snapshot is a lost observation.
 pub(crate) fn sync(state: &mut IdentityState, facts: &dyn OsFacts) {
     if facts.observation_lost() {
         state.note_lost();
         return;
     }
-    let Some(rows) = facts.windows() else {
+    let Some(snap) = facts.snapshot() else {
         state.note_lost();
         return;
     };
+    apply(state, &snap);
+}
+
+/// Apply `snap` as one observation. Rows, boot, and starts are not re-read.
+pub(crate) fn apply(state: &mut IdentityState, snap: &Snapshot) {
+    let rows = &snap.rows;
     if state.gap {
-        for row in &rows {
+        for row in rows {
             state.poisoned.insert(row.cg_id);
         }
         state.slots.clear();
         state.retired.clear();
-        state.rows = rows;
+        state.rows.clone_from(rows);
         state.gap = false;
         return;
     }
@@ -127,13 +167,15 @@ pub(crate) fn sync(state: &mut IdentityState, facts: &dyn OsFacts) {
             state.retired.insert(id, slot.incarnation);
         }
     }
-    for row in &rows {
-        consider(state, facts, row);
+    let boot = snap.boot.as_deref().unwrap_or("");
+    for row in rows {
+        let start = snap.starts.get(&row.owner_pid).copied().unwrap_or(0);
+        consider(state, boot, start, row);
     }
-    state.rows = rows;
+    state.rows.clone_from(rows);
 }
 
-fn consider(state: &mut IdentityState, facts: &dyn OsFacts, row: &OsWindow) {
+fn consider(state: &mut IdentityState, boot: &str, start: u64, row: &OsWindow) {
     if row.cg_id == 0 || state.poisoned.contains(&row.cg_id) {
         return;
     }
@@ -141,7 +183,7 @@ fn consider(state: &mut IdentityState, facts: &dyn OsFacts, row: &OsWindow) {
         state.poison(row.cg_id);
         return;
     };
-    let Some(owner) = prove_pid(state, facts, row.owner_pid) else {
+    let Some(owner) = remember_owner(state, row.owner_pid, start, boot) else {
         state.poison(row.cg_id);
         return;
     };
@@ -175,7 +217,13 @@ fn consider(state: &mut IdentityState, facts: &dyn OsFacts, row: &OsWindow) {
                         return;
                     }
                 },
-                None => 1,
+                None => match state.epoch.checked_add(1) {
+                    Some(next) => next,
+                    None => {
+                        state.poison(row.cg_id);
+                        return;
+                    }
+                },
             };
             state.slots.insert(
                 row.cg_id,

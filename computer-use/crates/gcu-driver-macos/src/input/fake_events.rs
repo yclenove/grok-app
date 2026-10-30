@@ -204,6 +204,20 @@ impl EventApi for FakeEvents {
         !self.lock().closed.contains(&(pid, window_id))
     }
 
+    fn blocks_global_hid(&self) -> bool {
+        self.gate
+            .0
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .is_some_and(|gate| gate.blocks_global_hid())
+    }
+
+    async fn raise_window(&self, pid: i32, window_id: u32) -> Result<()> {
+        self.lock().calls.push(Call::Raise { pid, window_id });
+        Ok(())
+    }
+
     async fn activate(&self, pid: i32) -> Result<()> {
         let mut inner = self.lock();
         inner.calls.push(Call::Activate(pid));

@@ -245,6 +245,23 @@ impl EventApi for RealEvents {
         pid > 0 && window_id > 0
     }
 
+    fn blocks_global_hid(&self) -> bool {
+        self.identity
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .is_some_and(|gate| gate.blocks_global_hid())
+    }
+
+    async fn raise_window(&self, pid: i32, window_id: u32) -> Result<()> {
+        let pid = u32::try_from(pid).map_err(|_| DriverError::CapabilityUnavailable)?;
+        tokio::task::spawn_blocking(move || crate::real::raise_by_cg_id(pid, window_id))
+            .await
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?
+    }
+
     async fn activate(&self, pid: i32) -> Result<()> {
         let guards = self.guards.clone();
         tokio::task::spawn_blocking(move || {

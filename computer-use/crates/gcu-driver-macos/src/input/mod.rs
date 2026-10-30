@@ -201,11 +201,15 @@ async fn run(
     refuse_before_post(&probe, target, api)?;
     let foreground = route_foreground(action)?;
     let chromium = crate::ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name);
+    let hid_blocked = api.blocks_global_hid();
+    if hid_blocked && matches!(action, DriverAction::Activate { .. }) {
+        return Err(DriverError::CapabilityUnavailable);
+    }
     let targeted =
         probe.background_ready() && !chromium && !matches!(action, DriverAction::Activate { .. });
     let path = if targeted {
         PostPath::ToPid
-    } else if foreground && probe.foreground && probe.appkit_ready {
+    } else if !hid_blocked && foreground && probe.foreground && probe.appkit_ready {
         PostPath::HidTap
     } else {
         return Err(DriverError::CapabilityUnavailable);

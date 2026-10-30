@@ -16,7 +16,8 @@ use gcu_core::scope::WindowBinding;
 
 use super::act;
 use super::world::{self, World};
-use crate::scope_os::{cg_id_from_ax, not_proved, ElementFact, Evidence, TokenBook};
+use crate::api::CgWindow;
+use crate::scope_os::{cg_id_from_ax, not_proved, ElementFact, Evidence, OsWindow, TokenBook};
 
 /// Refresh tokens for the current on-screen windows.
 ///
@@ -87,7 +88,65 @@ pub(crate) fn element_fact(world: &mut World, id: u64) -> Option<ElementFact> {
     Some(ElementFact { pid, cg_id: cg })
 }
 
-/// Refuse the mutation unless every id still belongs to `expected`.
+/// Two token refreshes and two window-list reads. A mismatch is `None`.
+///
+/// Tokens are attached only to ids present in both reads. This does not join
+/// an older published map to a later list.
+pub(crate) fn observe_window_rows(world: &mut World, book: &TokenBook) -> Option<Vec<OsWindow>> {
+    refresh_tokens(world, book);
+    let first = super::windows::copy_windows()?;
+    let tokens_first = book.published();
+    refresh_tokens(world, book);
+    let second = super::windows::copy_windows()?;
+    let tokens_second = book.published();
+    if !same_window_identity(&first, &second) || tokens_first != tokens_second {
+        book.clear_published();
+        return None;
+    }
+    Some(
+        second
+            .into_iter()
+            .map(|row| OsWindow {
+                cg_id: row.window_id,
+                owner_pid: row.pid,
+                layer: row.layer,
+                alpha: row.alpha,
+                frame: row.frame,
+                on_screen: true,
+                token: tokens_second.get(&row.window_id).copied(),
+            })
+            .collect(),
+    )
+}
+
+/// Window rows, boot, and owner starts from one consistent observation.
+///
+/// A second read must match. Any gap returns `None` instead of joining the
+/// two results. Blocks on the window list and process reads. No extra timeout
+/// or cancellation; the caller is already on the accessibility thread.
+pub(crate) fn observe_snapshot(
+    world: &mut World,
+    book: &TokenBook,
+) -> Option<crate::scope_os::Snapshot> {
+    let first = observe_window_rows(world, book)?;
+    let snap = crate::scope_os::snapshot_from_rows(first);
+    let second = observe_window_rows(world, book)?;
+    let again = crate::scope_os::snapshot_from_rows(second);
+    if snap != again {
+        book.clear_published();
+        return None;
+    }
+    Some(again)
+}
+
+fn same_window_identity(left: &[CgWindow], right: &[CgWindow]) -> bool {
+    let ids = |rows: &[CgWindow]| -> Vec<(u32, u32)> {
+        rows.iter().map(|row| (row.window_id, row.pid)).collect()
+    };
+    ids(left) == ids(right)
+}
+
+/// Refuse the mutation unless every id still belongs to the admitted window.
 pub(crate) fn prove_mutation(
     evidence: Option<&Evidence>,
     expected: Option<&WindowBinding>,
@@ -97,25 +156,31 @@ pub(crate) fn prove_mutation(
     let Some(evidence) = evidence else {
         return Ok(());
     };
-    if !evidence.enforcing() {
+    let pinned = evidence.pinned();
+    if pinned.is_none() && !evidence.enforcing() {
         return Ok(());
     }
-    let Some(expected) = expected else {
-        return Err(not_proved());
+    let admitted = match pinned {
+        Some(pin) => {
+            if expected.is_some_and(|got| got != &pin) {
+                return Err(not_proved());
+            }
+            pin
+        }
+        None => expected.cloned().ok_or_else(not_proved)?,
     };
+    evidence.run_barrier();
     let Some(book) = evidence.token_book() else {
         return Err(not_proved());
     };
-    refresh_tokens(world, &book);
+    let Some(snap) = observe_snapshot(world, &book) else {
+        return Err(not_proved());
+    };
+    let mut facts = Vec::with_capacity(ids.len());
     for id in ids {
-        let Some(fact) = element_fact(world, *id) else {
-            return Err(not_proved());
-        };
-        if !evidence.accept_gathered(&fact, expected) {
-            return Err(not_proved());
-        }
+        facts.push(element_fact(world, *id).ok_or_else(not_proved)?);
     }
-    Ok(())
+    evidence.accept_facts(&admitted, &facts, &snap)
 }
 
 fn window_elements(world: &mut World, pid: u32) -> Vec<AXUIElementRef> {

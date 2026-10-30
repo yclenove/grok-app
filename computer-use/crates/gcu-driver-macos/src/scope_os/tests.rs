@@ -140,7 +140,7 @@ fn window_binding_same_token_and_owner_keeps_incarnation() {
     let first = evidence.window_binding_cg(7).expect("window");
     facts.set_windows(Some(vec![row(7, 4, Some(1), (3.0, 4.0, 10.0, 10.0))]));
     let second = evidence.window_binding_cg(7).expect("same object");
-    assert_eq!(first.incarnation(), 1);
+    assert_ne!(first.incarnation(), 1);
     assert_eq!(second, first);
     assert_eq!(second.native_id(), "7");
     assert_eq!(parse_cg("cg:7:999"), Some(7));
@@ -158,8 +158,8 @@ fn window_binding_different_owner_instance_bumps_incarnation() {
     let first = evidence.window_binding_cg(7).expect("first owner");
     facts.set_windows(Some(vec![row(7, 5, Some(1), frame)]));
     let second = evidence.window_binding_cg(7).expect("new owner");
-    assert_eq!(first.incarnation(), 1);
-    assert_eq!(second.incarnation(), 2);
+    assert_ne!(first.incarnation(), 1);
+    assert_eq!(second.incarnation(), first.incarnation() + 1);
     assert_eq!(second.owner().pid(), 5);
 }
 
@@ -168,10 +168,8 @@ fn window_binding_disappear_then_reappear_bumps_incarnation() {
     let (facts, evidence) = facts_for(4, 100);
     let frame = (0.0, 0.0, 40.0, 40.0);
     facts.set_windows(Some(vec![row(7, 4, Some(1), frame)]));
-    assert_eq!(
-        evidence.window_binding_cg(7).expect("seen").incarnation(),
-        1
-    );
+    let origin = evidence.window_binding_cg(7).expect("seen").incarnation();
+    assert_ne!(origin, 1);
     facts.set_windows(Some(vec![]));
     assert!(evidence.window_binding_cg(7).is_none());
     facts.set_windows(Some(vec![row(7, 4, Some(1), frame)]));
@@ -180,7 +178,7 @@ fn window_binding_disappear_then_reappear_bumps_incarnation() {
             .window_binding_cg(7)
             .expect("reused id")
             .incarnation(),
-        2
+        origin + 1
     );
 }
 
@@ -189,7 +187,8 @@ fn window_binding_lost_observation_returns_none() {
     let (facts, evidence) = facts_for(4, 100);
     let frame = (0.0, 0.0, 40.0, 40.0);
     facts.set_windows(Some(vec![row(7, 4, Some(1), frame)]));
-    assert!(evidence.window_binding_cg(7).is_some());
+    let origin = evidence.window_binding_cg(7).expect("window").incarnation();
+    assert_ne!(origin, 1);
     facts.set_lost(true);
     assert!(evidence.window_binding_cg(7).is_none());
     facts.set_lost(false);
@@ -205,8 +204,9 @@ fn window_binding_lost_observation_returns_none() {
             .window_binding_cg(9)
             .expect("later id")
             .incarnation(),
-        1
+        origin
     );
+    assert_ne!(origin, 1);
     assert!(evidence.window_binding_cg(7).is_none());
 }
 
@@ -661,7 +661,7 @@ fn own_process_start_is_stable_and_plausible() {
 }
 
 /// Real window proof. Run later in a Tart guest:
-/// `GCU_DESKTOP=1 cargo test -p gcu-driver-macos live_scope_window_proof -- --ignored --exact`.
+/// `GCU_DESKTOP=1 cargo test -p gcu-driver-macos --lib scope_os::tests::live_scope_window_proof -- --ignored --exact`.
 /// Do not run this on the shared mac-mini.
 #[cfg(target_os = "macos")]
 #[tokio::test]

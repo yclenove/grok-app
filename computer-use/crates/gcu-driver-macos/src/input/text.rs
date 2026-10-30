@@ -246,9 +246,10 @@ async fn run(
     }
     let targeted = probe.background_ready()
         && !crate::ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name);
+    let hid_blocked = ctx.events.blocks_global_hid();
     let path = if targeted {
         PostPath::ToPid
-    } else if route == KeyRoute::AllowForeground && probe.foreground {
+    } else if !hid_blocked && route == KeyRoute::AllowForeground && probe.foreground {
         PostPath::HidTap
     } else {
         return Err(DriverError::CapabilityUnavailable);

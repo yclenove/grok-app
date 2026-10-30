@@ -195,6 +195,7 @@ impl MacosDriver {
                 Arc::new(crate::real::RealText::new(
                     Arc::clone(thread),
                     clock.clone(),
+                    Arc::clone(&driver.evidence),
                 )),
                 Arc::new(crate::input::NativePasteboard::general()),
                 clock,

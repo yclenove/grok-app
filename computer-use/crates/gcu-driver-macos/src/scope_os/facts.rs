@@ -3,7 +3,6 @@
 //! A missing fact is absence. Callers return `None` or refuse the delivery.
 //! Nothing here substitutes a title, a frame, a bundle id, or a cached pid.
 
-#[cfg(any(test, target_os = "macos"))]
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +36,31 @@ pub struct OsWindow {
     pub token: Option<u64>,
 }
 
+/// One observation of tokens, window rows, boot identity, and process starts.
+///
+/// The fields come from a single read. Callers must not fill them from a
+/// later query. A missing boot is absence, not a wall-clock substitute.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    /// Front-to-back rows from this read.
+    pub rows: Vec<OsWindow>,
+    /// Boot session UUID, when the read returned one.
+    pub boot: Option<String>,
+    /// Process start in microseconds for each owner pid in `rows`. Zero is unproved.
+    pub starts: HashMap<u32, u64>,
+}
+
+/// Boot session UUID only. A readable boot time is not an identity.
+///
+/// Memory only. No blocking, timeout, or cancellation. `boot_time` is ignored
+/// so a wall-clock reset cannot make two boots compare equal.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn boot_identity_from(uuid: Option<&str>, boot_time: Option<&str>) -> Option<String> {
+    let _boot_time_is_not_identity = boot_time;
+    let uuid = uuid.map(str::trim).filter(|value| !value.is_empty())?;
+    Some(uuid.to_owned())
+}
+
 /// AX element facts. `cg_id` is `None` when the window cannot be proved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElementFact {
@@ -48,10 +72,11 @@ pub struct ElementFact {
 
 /// Facts the platform can re-derive now.
 ///
-/// Implementations must not answer from an identity cache. `prepare` may
-/// refresh continuity tokens. The default does nothing and does not block.
-/// A live macOS body may block on the accessibility thread for at most the
-/// accessibility call budget; it does not add cancellation.
+/// Implementations must not answer from an identity cache. Proof reads
+/// [`OsFacts::snapshot`], which is one observation. The default snapshot is
+/// unavailable and does not block. A live macOS body may block on the
+/// accessibility thread for at most the accessibility call budget. It does
+/// not add cancellation.
 pub trait OsFacts: Send + Sync {
     /// Boot identity, or `None` when the sysctl cannot be read.
     fn boot_identity(&self) -> Option<String>;
@@ -65,16 +90,24 @@ pub trait OsFacts: Send + Sync {
     #[allow(dead_code)]
     fn executable_path(&self, pid: u32) -> Option<String>;
     /// Front-to-back window rows. `None` means the list itself could not be read.
-    /// An empty vector is a real empty desktop.
+    /// An empty vector is a real empty desktop. Proof uses [`OsFacts::snapshot`].
+    #[allow(dead_code)]
     fn windows(&self) -> Option<Vec<OsWindow>>;
+    /// Token, rows, boot, and owner starts from one read.
+    ///
+    /// `None` means the read was inconsistent or unavailable. Callers refuse.
+    /// The default is unavailable and does not block. A live body may block on
+    /// the accessibility thread for at most the accessibility call budget. It
+    /// does not add cancellation.
+    fn snapshot(&self) -> Option<Snapshot> {
+        None
+    }
     /// AX owner for a driver element id. `None` when the id is unknown or unproved.
     fn element(&self, pid: u32, id: u64) -> Option<ElementFact>;
     /// True when the observer knows it dropped a window event.
     fn observation_lost(&self) -> bool {
         false
     }
-    /// Refresh tokens before a proof. The default does not block.
-    fn prepare(&self) {}
     /// Shared token book, when this source has one.
     #[cfg(target_os = "macos")]
     fn token_book(&self) -> Option<Arc<TokenBook>> {
@@ -170,10 +203,13 @@ impl OsFacts for ClosedFacts {
 #[derive(Default)]
 struct FakeInner {
     boot: Option<String>,
+    boot_time: Option<String>,
     procs: HashMap<u32, (u64, Option<String>)>,
     windows: Option<Vec<OsWindow>>,
     lost: bool,
     elements: HashMap<(u32, u64), ElementFact>,
+    /// Token map and the window list disagree. `windows` stays readable.
+    token_cg_gap: bool,
 }
 
 /// Scripted facts for tests. No process, window, or accessibility call.
@@ -196,6 +232,22 @@ impl FakeOsFacts {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .boot = Some(boot.into());
+    }
+
+    /// Store a readable boot time. It is not accepted as boot identity.
+    pub fn set_boot_time(&self, boot_time: impl Into<String>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .boot_time = Some(boot_time.into());
+    }
+
+    /// The next snapshot is inconsistent even though [`OsFacts::windows`] still joins by id.
+    pub fn arm_token_cg_reuse(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .token_cg_gap = true;
     }
 
     /// Replace one process. `path` is evidence only.
@@ -245,17 +297,8 @@ impl FakeOsFacts {
 #[cfg(test)]
 impl OsFacts for FakeOsFacts {
     fn boot_identity(&self) -> Option<String> {
-        let boot = self
-            .inner
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .boot
-            .clone()?;
-        if boot.is_empty() {
-            None
-        } else {
-            Some(boot)
-        }
+        let inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        boot_identity_from(inner.boot.as_deref(), inner.boot_time.as_deref())
     }
 
     fn process_start_us(&self, pid: u32) -> Option<u64> {
@@ -311,6 +354,25 @@ impl OsFacts for FakeOsFacts {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .lost
+    }
+
+    fn snapshot(&self) -> Option<Snapshot> {
+        let inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        if inner.token_cg_gap {
+            return None;
+        }
+        let rows = inner.windows.clone()?;
+        let boot = boot_identity_from(inner.boot.as_deref(), inner.boot_time.as_deref());
+        let mut starts = HashMap::new();
+        for row in &rows {
+            let start = inner
+                .procs
+                .get(&row.owner_pid)
+                .map(|pair| pair.0)
+                .unwrap_or(0);
+            starts.insert(row.owner_pid, start);
+        }
+        Some(Snapshot { rows, boot, starts })
     }
 }
 

@@ -237,6 +237,13 @@ pub enum Call {
         /// Window number.
         window_id: u32,
     },
+    /// Raise one admitted window. Not a process-wide activation.
+    Raise {
+        /// Target pid.
+        pid: i32,
+        /// Window number.
+        window_id: u32,
+    },
 }
 
 /// Last check before [`EventApi::post`] hands an event to the OS.
@@ -246,6 +253,13 @@ pub enum Call {
 pub trait PostGate: Send + Sync {
     /// `Err(NotSent)` means this event was not posted.
     fn before_post(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault>;
+
+    /// True when a global HID post must not be selected or sent.
+    ///
+    /// The default allows HID. Memory only. No blocking, timeout, or cancellation.
+    fn blocks_global_hid(&self) -> bool {
+        false
+    }
 }
 
 /// Backend. Real CoreGraphics and SkyLight live behind this trait.
@@ -268,6 +282,21 @@ pub trait EventApi: Send + Sync {
     fn window_open(&self, pid: i32, window_id: u32) -> bool;
     /// Bring `pid` to the foreground. Targeted routes must not call this.
     async fn activate(&self, pid: i32) -> Result<()>;
+    /// Raise one window. The default does not activate the process.
+    ///
+    /// Blocking and timeout are the implementor's. The default does not block
+    /// and returns [`DriverError::CapabilityUnavailable`]. Cancellation is the
+    /// caller's.
+    async fn raise_window(&self, pid: i32, window_id: u32) -> Result<()> {
+        let _ = (pid, window_id);
+        Err(DriverError::CapabilityUnavailable)
+    }
+    /// True when the armed gate refuses global HID delivery.
+    ///
+    /// Memory only in the default, which returns false. No timeout or cancellation.
+    fn blocks_global_hid(&self) -> bool {
+        false
+    }
     /// Post one event. Must not retry internally.
     async fn post(&self, event: SyntheticEvent) -> std::result::Result<(), PostFault>;
     /// Post a cleanup up. Skips the identity gate. Must not retry.

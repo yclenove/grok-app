@@ -17,7 +17,8 @@ mod thread;
 mod windows;
 mod world;
 
-pub(crate) use identity::{element_fact, prove_mutation, refresh_tokens, release_book};
+pub(crate) use ax::raise_by_cg_id;
+pub(crate) use identity::{element_fact, observe_snapshot, prove_mutation, release_book};
 pub(crate) use reader::{AxToggleStore, RealAxSource};
 pub(crate) use text::RealText;
 pub(crate) use thread::AxThread;

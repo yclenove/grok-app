@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::facts::{ElementFact, OsFacts, OsWindow, TokenBook};
-use crate::real::{copy_windows, element_fact, refresh_tokens, AxThread, AX_CALL_TIMEOUT};
+use crate::real::{copy_windows, element_fact, AxThread, AX_CALL_TIMEOUT};
 
 /// OS reads for the production driver.
 pub struct LiveOsFacts {
@@ -92,18 +92,18 @@ impl OsFacts for LiveOsFacts {
         }
     }
 
-    fn prepare(&self) {
-        let Some(thread) = self.thread.clone() else {
-            return;
-        };
-        let book = Arc::clone(&self.book);
-        let refreshed = thread.call_blocking(AX_CALL_TIMEOUT, false, move |world| {
-            refresh_tokens(world, &book);
-            Ok(())
-        });
-        if refreshed.is_err() {
-            self.book.clear_published();
+    fn snapshot(&self) -> Option<super::facts::Snapshot> {
+        if std::thread::current().name() == Some("gcu-macos-ax") {
+            return None;
         }
+        let thread = self.thread.as_ref()?;
+        let book = Arc::clone(&self.book);
+        thread
+            .call_blocking(AX_CALL_TIMEOUT, false, move |world| {
+                Ok(crate::real::observe_snapshot(world, &book))
+            })
+            .ok()
+            .flatten()
     }
 
     fn token_book(&self) -> Option<Arc<TokenBook>> {
@@ -111,21 +111,33 @@ impl OsFacts for LiveOsFacts {
     }
 }
 
-/// Enforcing live evidence bound to `thread`.
+/// Live evidence. Scoped checks start only after a scope pins a binding.
 pub(crate) fn live_evidence(thread: Arc<AxThread>) -> Arc<super::Evidence> {
-    super::Evidence::from_facts(LiveOsFacts::with_thread(thread))
+    super::Evidence::live_adapter(LiveOsFacts::with_thread(thread))
 }
 
-/// Boot identity. The session uuid is preferred. `kern.boottime` is the fallback.
+/// Boot session UUID. `kern.boottime` is read and then ignored.
 pub(crate) fn boot_identity() -> Option<String> {
-    if let Some(uuid) = sysctl_string(c"kern.bootsessionuuid") {
-        return Some(uuid);
+    let uuid = sysctl_string(c"kern.bootsessionuuid");
+    let boot_time = sysctl_boottime().and_then(|(sec, usec)| {
+        if sec == 0 && usec == 0 {
+            None
+        } else {
+            Some(format!("{sec}.{usec}"))
+        }
+    });
+    super::facts::boot_identity_from(uuid.as_deref(), boot_time.as_deref())
+}
+
+/// One snapshot from rows already observed on this thread.
+pub(crate) fn snapshot_from_rows(rows: Vec<super::facts::OsWindow>) -> super::facts::Snapshot {
+    use std::collections::HashMap;
+    let boot = boot_identity();
+    let mut starts = HashMap::new();
+    for row in &rows {
+        starts.insert(row.owner_pid, process_start_us(row.owner_pid).unwrap_or(0));
     }
-    let (sec, usec) = sysctl_boottime()?;
-    if sec == 0 && usec == 0 {
-        return None;
-    }
-    Some(format!("{sec}.{usec}"))
+    super::facts::Snapshot { rows, boot, starts }
 }
 
 /// Process start in microseconds, or `None` when the pid is gone or the time is zero.

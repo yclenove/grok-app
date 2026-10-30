@@ -24,11 +24,26 @@ impl Drop for Armed<'_> {
 }
 
 /// Install the proof for `window_id`. Closed evidence clears the gate and allows the post.
+///
+/// A pinned binding is used as-is. This function does not look up a new window
+/// to replace it. Unscoped evidence that is not enforcing clears the gate.
 pub(crate) fn arm(
     api: &dyn EventApi,
     evidence: Arc<Evidence>,
     window_id: u32,
 ) -> Result<Armed<'_>> {
+    if let Some(admitted) = evidence.pinned() {
+        if admitted.native_id() != window_id.to_string() {
+            api.arm_post_gate(None);
+            return Err(not_proved());
+        }
+        api.arm_post_gate(Some(Arc::new(EvidenceGate {
+            evidence,
+            admitted,
+            scoped: true,
+        })));
+        return Ok(Armed { api });
+    }
     if !evidence.enforcing() {
         api.arm_post_gate(None);
         return Ok(Armed { api });
@@ -37,17 +52,30 @@ pub(crate) fn arm(
         api.arm_post_gate(None);
         return Err(not_proved());
     };
-    api.arm_post_gate(Some(Arc::new(EvidenceGate { evidence, admitted })));
+    api.arm_post_gate(Some(Arc::new(EvidenceGate {
+        evidence,
+        admitted,
+        scoped: false,
+    })));
     Ok(Armed { api })
 }
 
 struct EvidenceGate {
     evidence: Arc<Evidence>,
     admitted: WindowBinding,
+    scoped: bool,
 }
 
 impl PostGate for EvidenceGate {
+    fn blocks_global_hid(&self) -> bool {
+        self.scoped
+    }
+
     fn before_post(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault> {
+        self.evidence.run_barrier();
+        if self.scoped && event.path == PostPath::HidTap {
+            return Err(PostFault::NotSent);
+        }
         let post = PostView {
             foreground: event.path == PostPath::HidTap,
             coordinate: matches!(

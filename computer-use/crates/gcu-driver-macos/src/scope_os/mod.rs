@@ -16,6 +16,8 @@ mod table;
 mod live;
 
 #[cfg(test)]
+mod round2_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use deliver::PostView;
@@ -23,8 +25,8 @@ pub(crate) use evidence::{not_proved, Evidence};
 pub(crate) use spi::ax_window_status;
 
 #[cfg(target_os = "macos")]
-pub(crate) use facts::{ElementFact, TokenBook};
+pub(crate) use facts::{ElementFact, OsWindow, Snapshot, TokenBook};
 #[cfg(target_os = "macos")]
-pub(crate) use live::live_evidence;
+pub(crate) use live::{live_evidence, snapshot_from_rows};
 #[cfg(target_os = "macos")]
 pub(crate) use spi::cg_id_from_ax;

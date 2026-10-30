@@ -25,25 +25,39 @@ use std::{sync::Arc, time::Duration};
 pub(crate) struct RealText {
     thread: Arc<AxThread>,
     clock: Arc<dyn Clock>,
+    evidence: Arc<crate::scope_os::Evidence>,
 }
 impl RealText {
-    pub(crate) fn new(thread: Arc<AxThread>, clock: Arc<dyn Clock>) -> Self {
-        Self { thread, clock }
+    pub(crate) fn new(
+        thread: Arc<AxThread>,
+        clock: Arc<dyn Clock>,
+        evidence: Arc<crate::scope_os::Evidence>,
+    ) -> Self {
+        Self {
+            thread,
+            clock,
+            evidence,
+        }
     }
 }
 #[async_trait]
 impl TextApi for RealText {
     async fn focus(&self, target: &InputTarget) -> Result<TextFocus> {
         let target = target.clone();
+        let pin = self.evidence.pinned();
         self.thread
-            .call(AX_CALL_TIMEOUT, false, move |world| focus(world, &target))
+            .call(AX_CALL_TIMEOUT, false, move |world| {
+                focus(world, &target, pin.as_ref())
+            })
             .await
     }
     async fn append(&self, target: &InputTarget, expected: &TextFocus, text: &str) -> Result<()> {
         let (target, expected, text) = (target.clone(), expected.clone(), text.to_owned());
+        let evidence = Arc::clone(&self.evidence);
         self.thread
             .call_with_liveness(AX_CALL_TIMEOUT, true, move |world, live| {
-                let fresh = focus(world, &target)?;
+                let pin = evidence.pinned();
+                let fresh = focus(world, &target, pin.as_ref())?;
                 if fresh.handle != expected.handle
                     || !fresh.editable
                     || fresh.sensitive
@@ -62,6 +76,16 @@ impl TextApi for RealText {
                     });
                 }
                 let id = fresh.handle.id;
+                if let Some(pin) = evidence.pinned() {
+                    let book = evidence
+                        .token_book()
+                        .ok_or_else(crate::scope_os::not_proved)?;
+                    let snap = super::identity::observe_snapshot(world, &book)
+                        .ok_or_else(crate::scope_os::not_proved)?;
+                    let fact = super::identity::element_fact(world, id)
+                        .ok_or_else(crate::scope_os::not_proved)?;
+                    evidence.accept_facts(&pin, &[fact], &snap)?;
+                }
                 match act::set_string(world, id, "AXValue", &full)? {
                     crate::ax::AxCall::Performed => {
                         confirm_append(world, id, &full, previous.as_deref())
@@ -142,7 +166,11 @@ impl TextApi for RealText {
     }
 }
 
-fn focus(world: &mut World, target: &InputTarget) -> Result<TextFocus> {
+fn focus(
+    world: &mut World,
+    target: &InputTarget,
+    pin: Option<&gcu_core::scope::WindowBinding>,
+) -> Result<TextFocus> {
     if !crate::input::ensure_appkit() {
         return Err(DriverError::CapabilityUnavailable);
     }
@@ -164,15 +192,23 @@ fn focus(world: &mut World, target: &InputTarget) -> Result<TextFocus> {
     let win = element(ptr, "AXWindow")?.ok_or(DriverError::ElementNotActionable)?;
     let window = win.as_CFTypeRef() as AXUIElementRef;
     world::set_messaging_timeout(window)?;
-    let frame = act::copy_frame(window)?.ok_or(DriverError::WindowGone)?;
-    // Conservative public AX/CG alignment: reject coincident/ambiguous windows.
-    let cg = windows::windows()?;
-    let same: Vec<_> = cg
-        .iter()
-        .filter(|w| w.pid == pid as u32 && w.layer == 0 && close(w.frame, frame))
-        .collect();
-    if same.len() != 1 || same[0].window_id != target.window_id {
-        return Err(DriverError::StaleElement);
+    if let Some(pin) = pin {
+        let cg =
+            crate::scope_os::cg_id_from_ax(window as usize).ok_or(DriverError::StaleElement)?;
+        if cg != target.window_id || cg.to_string() != pin.native_id() {
+            return Err(DriverError::StaleElement);
+        }
+    } else {
+        let frame = act::copy_frame(window)?.ok_or(DriverError::WindowGone)?;
+        // Conservative public AX/CG alignment: reject coincident/ambiguous windows.
+        let cg = windows::windows()?;
+        let same: Vec<_> = cg
+            .iter()
+            .filter(|w| w.pid == pid as u32 && w.layer == 0 && close(w.frame, frame))
+            .collect();
+        if same.len() != 1 || same[0].window_id != target.window_id {
+            return Err(DriverError::StaleElement);
+        }
     }
     let id = world.intern(world::retain(field.as_CFTypeRef()) as AXUIElementRef);
     let identity = act::fresh_identity(world, id)?;
