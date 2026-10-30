@@ -567,8 +567,14 @@ fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
         .clone();
     let denied: Value = serde_json::from_slice(&denied).unwrap();
     assert_eq!(denied["isError"], true);
-    assert_eq!(denied["structuredContent"]["error"]["code"], "approval_denied");
-    assert_eq!(denied["structuredContent"]["error"]["message"], "approval denied");
+    assert_eq!(
+        denied["structuredContent"]["error"]["code"],
+        "approval_denied"
+    );
+    assert_eq!(
+        denied["structuredContent"]["error"]["message"],
+        "approval denied"
+    );
     assert_eq!(denied["structuredContent"]["action"]["outcome"], "refused");
     assert_eq!(denied["structuredContent"]["action"]["delivery"], "none");
     let v: Value = serde_json::from_slice(&std::fs::read(&oracle).unwrap()).unwrap();
@@ -781,8 +787,14 @@ fn mcp_form_submit_process_is_verified_by_fake_oracle() {
     // A session app grant leaves the sensitive confirmation denied.
     let denied = m.call("click", json!({"app":"fake.form","element_index":3}));
     assert_eq!(denied["isError"], true);
-    assert_eq!(denied["structuredContent"]["error"]["code"], "approval_denied");
-    assert_eq!(denied["structuredContent"]["error"]["message"], "approval denied");
+    assert_eq!(
+        denied["structuredContent"]["error"]["code"],
+        "approval_denied"
+    );
+    assert_eq!(
+        denied["structuredContent"]["error"]["message"],
+        "approval denied"
+    );
     assert_eq!(denied["structuredContent"]["action"]["outcome"], "refused");
     assert_eq!(denied["structuredContent"]["action"]["delivery"], "none");
     m.close();
