@@ -8,7 +8,7 @@ use crate::x11::input::{
 };
 use crate::x11::watchdog::run_with_watchdog;
 use gcu_core::driver::{
-    Cancel, Delivery, DriverAction, DriverError, KeyRoute, PointerRoute, Result, WindowRef,
+    Cancel, Delivery, Driver, DriverAction, DriverError, KeyRoute, PointerRoute, Result, WindowRef,
 };
 use gcu_core::model::NativeHandle;
 

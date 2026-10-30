@@ -4,7 +4,9 @@
 //! A handle sealed to one window is refused when a later observation places it
 //! on another window. A missing pid closes the read.
 
-use crate::identity::scope::{HandleKey, HandleView, ScopeBinding, ScopeFault};
+#[cfg(test)]
+use crate::identity::scope::{HandleKey, HandleView};
+use crate::identity::scope::{ScopeBinding, ScopeFault};
 use gcu_core::driver::DriverError;
 use gcu_core::model::{NativeHandle, RawTree};
 

@@ -161,7 +161,7 @@ mod tests {
         x.set_root_image(RawImage {
             width: 64,
             height: 64,
-            data: vec![1, 2, 3, 255; 64 * 64],
+            data: [1u8, 2, 3, 255].repeat(64 * 64),
         });
         x
     }
