@@ -76,6 +76,8 @@ FixtureScope v1 {
 原生树不得把其他进程/未登记窗口的子树或 handle 当成本窗口内容；无法证明来源则拒绝该次观察。所有 handle 包装为 `(run, generation, instance, window incarnation, inner_handle)`，语义动作不能绕开窗口检查。
 每次读/图/输入前复核，结果交付前再核代次；driver 在真正 OS 投递处复验 owner/前台窗口/命中目标，坐标或拖拽越出允许窗口即拒绝。macOS 现有前台检查只证 PID（`gcu-driver-macos/src/input/foreground.rs:42`），不足以证明同进程里的正确窗口。无法保证的全局输入路线保持不可用。
 
+**macOS 安全声明（所有者 2026-10-30 决定，S2 的第 2 轮独立评审之后）：** macOS 没有任何 OS 原语能让“检查”和“投递/写入”原子地绑定到同一个窗口（`CGEventPostToPid` 只按进程路由，窗口位置字段只是事件元数据；AX 代理不持有远端 NSWindow，元素可在检查后被 reparent；窗口号可复用；`AXRaise` 按 pid/窗口号重新解析）。因此 macOS scoped 的保证分两层：①**硬保证 = 进程实例级绑定**：`pid + 进程启动时间 + kern.bootsessionuuid` 可由 OS 重新推导；AX 元素引用天然绑定原进程，不会因 pid 复用跑到别的进程；pid 定向事件在出口前一刻复验进程实例；scoped 与否由随作业传入的不可变上下文决定（超时/drop/清 pin 不改变已开始作业的约束）；全局 HID 投递、整进程激活、应用元素级 AX 写在 scoped 模式禁用；缺证据即拒绝。②**窗口级绑定 = 尽力而为的失败即关闭检查**，不声称防住“同一受信夹具进程内部、检查→使用之间被换窗口”的极小间隙；理由：夹具进程是我们自己的受信代码，真正的安全边界是一次性 Tart 访客机（只有夹具与评测工具，没有用户的其它应用）。**已知残余（OS 限制 + VM 缓解，不再追，复发或平台提供原语时重开）：** A1 pid 定向事件不能把接收者绑定到准入窗口（同进程其它窗口/sheet 可能收键）；A2 两次相同读取不是原子观察；A3 AX 写/文本追加在检查与写之间元素可能被 reparent；A4 `AXRaise` 按 pid/窗口号重新解析。Linux/Windows 的同类间隙需各自平台适配时单独评估。
+
 **重启：** fixture 退出即撤销其 scope，不自动按同名/路径/PID 认领替代品。默认本次 attempt 结束；需重启的任务由 supervisor 暂停调度、杀净旧树、重新 spawn/核验，再原子安装 `generation+1` 并等待 ACK。清除旧授权绑定、队列、handles、快照、MCP 图片缓存/文件引用；所有 session 一并失效，未知投递不重放。Stop 保持锁存，重启不是 resume。
 
 **任务目录核查：** 对 `eval/tasks` 的 YAML prompt/setup 做 grep，结论如下；类别名或 compatibility 软件名称不授予真实应用访问权。
