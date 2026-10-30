@@ -2,8 +2,8 @@
 //!
 //! [`Evidence::closed`] does not enforce delivery, so portable event tests
 //! keep their current posts. [`Evidence::install`] enforces. The live adapter
-//! does not enforce until a scope pins the admitted binding. A pinned binding
-//! is that admitted value. A later lookup does not replace it.
+//! sends unscoped posts. A pinned binding is the admitted value for jobs that
+//! captured it. Clearing the pin does not relax a job that already started.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -25,7 +25,10 @@ use crate::ax::AxHandle;
 use crate::driver::MacosDriver;
 
 /// Doctor sentence for scoped macOS routes. It names no target.
-pub(crate) const SCOPED_ROUTE_NOTE: &str = "scoped mode: global HID delivery is unavailable; process-wide activation is unavailable; targeted events and accessibility actions remain when they can be bound.";
+///
+/// Process-wide accessibility switches stay off, so some application trees
+/// are incomplete and the walk reports that with the existing incomplete fact.
+pub(crate) const SCOPED_ROUTE_NOTE: &str = "scoped mode: global HID delivery is unavailable; process-wide activation is unavailable; application accessibility switches AXEnhancedUserInterface and AXManualAccessibility are not written, so some application trees may be incomplete; targeted events and accessibility actions remain when they can be bound.";
 
 /// Process, window, and element evidence for one macOS driver.
 pub struct Evidence {
@@ -33,6 +36,8 @@ pub struct Evidence {
     state: Mutex<IdentityState>,
     enforcing: AtomicBool,
     pinned: Mutex<Option<WindowBinding>>,
+    /// Set for the life of a scoped driver. Not the pin slot.
+    session_scoped: AtomicBool,
     barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
@@ -48,11 +53,21 @@ impl Evidence {
         Arc::new(Self::new(facts, true))
     }
 
-    /// Live adapter with no scope pin. Missing private SPI does not block input.
+    /// Live adapter for tests. Same non-enforcing gate as production.
     ///
-    /// A later [`Evidence::pin`] is what turns delivery checks on. Memory only
+    /// Memory only. No blocking, timeout, or cancellation.
+    /// The macOS RealEvents test is the caller.
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn live_for_test() -> Arc<Self> {
+        Self::live_adapter(Arc::new(ClosedFacts))
+    }
+
+    /// Live adapter with no scope pin. Unscoped posts are sent.
+    ///
+    /// A later [`Evidence::pin`] is what a new job captures. Memory only
     /// aside from the fact source the caller already holds. No timeout or
-    /// cancellation is added here.
+    /// cancellation is added here. Missing private SPI does not block input.
     #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn live_adapter(facts: Arc<dyn OsFacts>) -> Arc<Self> {
         Arc::new(Self::new(facts, false))
@@ -64,6 +79,7 @@ impl Evidence {
             state: Mutex::new(IdentityState::default()),
             enforcing: AtomicBool::new(enforcing),
             pinned: Mutex::new(None),
+            session_scoped: AtomicBool::new(false),
             barrier: Mutex::new(None),
         }
     }
@@ -100,9 +116,20 @@ impl Evidence {
             .clone()
     }
 
-    /// True when delivery must use the pinned binding.
-    pub(crate) fn is_scoped(&self) -> bool {
-        self.pinned().is_some()
+    /// Remember that this driver is wrapped by a scope for its whole life.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Not cleared by
+    /// [`Self::pin`]. Tree observation reads this instead of the pin slot,
+    /// because scope pinning exists only for perform.
+    pub(crate) fn mark_session_scoped(&self) {
+        self.session_scoped.store(true, Ordering::Release);
+    }
+
+    /// True after [`Self::mark_session_scoped`].
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn session_scoped(&self) -> bool {
+        self.session_scoped.load(Ordering::Acquire)
     }
 
     /// Run once, immediately before the next sink check. Tests use this to
@@ -130,6 +157,26 @@ impl Evidence {
     /// True when a post without a fresh proof is refused.
     pub(crate) fn enforcing(&self) -> bool {
         self.enforcing.load(Ordering::Acquire)
+    }
+
+    /// Run the one-shot barrier, then admit `scope` and call `act`.
+    ///
+    /// The barrier runs before the decision so a timeout can clear the pin
+    /// while this job is paused. The decision reads `scope` only. `act`
+    /// receives `None` for an unscoped job and must not treat that as a scoped
+    /// grant. A scoped job with no binding returns before `act`. May block
+    /// inside `act`. No extra timeout or cancellation is added here.
+    ///
+    /// macOS jobs and tests call this. Other host builds have no AX writer.
+    #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn commit_ax_job<R>(
+        &self,
+        scope: &super::JobScope,
+        act: impl FnOnce(Option<&WindowBinding>) -> Result<R>,
+    ) -> Result<R> {
+        self.run_barrier();
+        let admitted = scope.binding()?;
+        act(admitted)
     }
 
     /// Shared token book, when the fact source has one.
@@ -331,6 +378,10 @@ impl InstanceEvidence for MacosDriver {
 
     fn pin_admitted(&self, binding: Option<&WindowBinding>) {
         self.evidence.pin(binding.cloned());
+    }
+
+    fn note_scoped_session(&self) {
+        self.evidence.mark_session_scoped();
     }
 
     fn scope_capabilities(&self, current: &Capabilities) -> Capabilities {

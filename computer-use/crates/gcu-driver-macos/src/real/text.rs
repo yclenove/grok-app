@@ -44,20 +44,20 @@ impl RealText {
 impl TextApi for RealText {
     async fn focus(&self, target: &InputTarget) -> Result<TextFocus> {
         let target = target.clone();
-        let pin = self.evidence.pinned();
+        let scope = crate::scope_os::JobScope::admit(&self.evidence);
         self.thread
-            .call(AX_CALL_TIMEOUT, false, move |world| {
-                focus(world, &target, pin.as_ref())
+            .call_scoped(AX_CALL_TIMEOUT, false, scope, move |world, scope| {
+                focus(world, &target, scope.expected())
             })
             .await
     }
     async fn append(&self, target: &InputTarget, expected: &TextFocus, text: &str) -> Result<()> {
         let (target, expected, text) = (target.clone(), expected.clone(), text.to_owned());
         let evidence = Arc::clone(&self.evidence);
+        let scope = crate::scope_os::JobScope::admit(&evidence);
         self.thread
-            .call_with_liveness(AX_CALL_TIMEOUT, true, move |world, live| {
-                let pin = evidence.pinned();
-                let fresh = focus(world, &target, pin.as_ref())?;
+            .call_with_liveness_scoped(AX_CALL_TIMEOUT, true, scope, move |world, scope, live| {
+                let fresh = focus(world, &target, scope.expected())?;
                 if fresh.handle != expected.handle
                     || !fresh.editable
                     || fresh.sensitive
@@ -76,24 +76,21 @@ impl TextApi for RealText {
                     });
                 }
                 let id = fresh.handle.id;
-                if let Some(pin) = evidence.pinned() {
-                    let book = evidence
-                        .token_book()
-                        .ok_or_else(crate::scope_os::not_proved)?;
-                    let snap = super::identity::observe_snapshot(world, &book)
-                        .ok_or_else(crate::scope_os::not_proved)?;
-                    let fact = super::identity::element_fact(world, id)
-                        .ok_or_else(crate::scope_os::not_proved)?;
-                    evidence.accept_facts(&pin, &[fact], &snap)?;
-                }
-                match act::set_string(world, id, "AXValue", &full)? {
-                    crate::ax::AxCall::Performed => {
-                        confirm_append(world, id, &full, previous.as_deref())
+                evidence.commit_ax_job(scope, |admitted| {
+                    if let Some(admitted) = admitted {
+                        let (facts, snap) =
+                            super::identity::observe_ids(evidence.as_ref(), &[id], world)?;
+                        evidence.accept_facts(admitted, &facts, &snap)?;
                     }
-                    _ => Err(DriverError::NotSettable {
-                        maybe_executed: false,
-                    }),
-                }
+                    match act::set_string(world, id, "AXValue", &full)? {
+                        crate::ax::AxCall::Performed => {
+                            confirm_append(world, id, &full, previous.as_deref())
+                        }
+                        _ => Err(DriverError::NotSettable {
+                            maybe_executed: false,
+                        }),
+                    }
+                })
             })
             .await
     }

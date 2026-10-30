@@ -68,6 +68,7 @@ impl MacosDriver {
             .and_then(|s| s.clone())
             .ok_or(DriverError::CapabilityUnavailable)?;
         let started = backend.clock.now();
+        let scope = crate::scope_os::JobScope::admit(&self.evidence);
         let sent = AtomicBool::new(false);
         let gate = Operation::new(
             cancel,
@@ -89,6 +90,7 @@ impl MacosDriver {
             events.as_ref(),
             Arc::clone(&self.evidence),
             target.window_id,
+            &scope,
         )?;
         let context = TextContext {
             text: backend.text,

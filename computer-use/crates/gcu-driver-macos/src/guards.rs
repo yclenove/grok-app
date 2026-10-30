@@ -75,6 +75,7 @@ impl MacosDriver {
             .map(|guards| guards.clock.clone())
             .unwrap_or_else(crate::input::clock::runtime_clock);
         let started = clock.now();
+        let scope = crate::scope_os::JobScope::admit(&self.evidence);
         let win = action_window(req)?.clone();
         let work = self.call(DRIVER_DEADLINE, Some(cancel), false, move |state| {
             state.prepare_input(&win)
@@ -89,8 +90,13 @@ impl MacosDriver {
             work.await?
         };
         let left = DRIVER_DEADLINE.saturating_sub(clock.now().saturating_sub(started));
-        let _armed = crate::input::arm(api.as_ref(), Arc::clone(&self.evidence), target.window_id)?;
-        if self.evidence.is_scoped() && matches!(req, DriverAction::Activate { .. }) {
+        let _armed = crate::input::arm(
+            api.as_ref(),
+            Arc::clone(&self.evidence),
+            target.window_id,
+            &scope,
+        )?;
+        if scope.is_scoped() && matches!(req, DriverAction::Activate { .. }) {
             return confined_activate(api.as_ref(), &self.evidence, &target).await;
         }
         crate::input::deliver(

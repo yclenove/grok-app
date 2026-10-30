@@ -1,10 +1,12 @@
 //! Round-2 schedules for the admitted-binding rule. No window server.
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use gcu_core::driver::{
     AppQuery, AppRef, Button, Cancel, Driver, DriverAction, DriverError, KeyRoute, PointerRoute,
-    WindowRef,
+    Result, WindowRef,
 };
 use gcu_core::model::{NativeHandle, WindowPoint};
 use gcu_core::scope::{
@@ -15,9 +17,10 @@ use gcu_protocol::KeyChord;
 
 use super::evidence::{not_proved, Evidence, SCOPED_ROUTE_NOTE};
 use super::facts::{boot_identity_from, ElementFact, FakeOsFacts, OsFacts, OsWindow};
+use super::job::JobScope;
 use super::spi::ax_window_capability;
 use crate::api::MacApi;
-use crate::ax::{AxHandle, AxIdentity};
+use crate::ax::{AccessibilityToggles, AxHandle, AxIdentity, FakeToggleStore, ToggleName};
 use crate::driver::MacosDriver;
 use crate::input::{Call, EventApi, EventKind, FakeEvents};
 use crate::testing::{cg_window, rect, signed_facts, FakeMacApi};
@@ -449,9 +452,146 @@ async fn scoped_capabilities_mark_global_hid_unavailable() {
     );
     assert_eq!(driver.scoped_doctor_note(), Some(SCOPED_ROUTE_NOTE));
     assert!(!SCOPED_ROUTE_NOTE.contains("CANARY"));
+    assert!(SCOPED_ROUTE_NOTE.contains("AXEnhancedUserInterface"));
+    assert!(SCOPED_ROUTE_NOTE.contains("AXManualAccessibility"));
+    assert!(SCOPED_ROUTE_NOTE.contains("incomplete"));
+    assert!(!driver.evidence.session_scoped());
     let report = driver.doctor().await;
     assert!(report
         .issues
         .iter()
         .all(|issue| !issue.contains("scoped mode")));
+}
+
+fn live_editor() -> (Arc<FakeOsFacts>, Arc<Evidence>) {
+    let facts = Arc::new(FakeOsFacts::new());
+    facts.set_boot("boot-uuid");
+    facts.set_process(4, 100, Some("/bin/editor"));
+    facts.set_windows(Some(vec![
+        row(7, 4, Some(11), (0.0, 0.0, 80.0, 40.0)),
+        row(8, 4, Some(12), (90.0, 0.0, 80.0, 40.0)),
+    ]));
+    facts.set_element(
+        4,
+        3,
+        ElementFact {
+            pid: 4,
+            cg_id: Some(7),
+        },
+    );
+    let evidence = Evidence::live_adapter(Arc::clone(&facts) as Arc<dyn OsFacts>);
+    (facts, evidence)
+}
+
+/// `Ok` means the accessibility write would run. Same order as production:
+/// the gate decides, and only then does the caller mutate.
+fn ax_write_after_gate(evidence: &Evidence, scope: &JobScope, facts: &FakeOsFacts) -> Result<()> {
+    evidence.commit_ax_job(scope, |admitted| {
+        let Some(admitted) = admitted else {
+            return Ok(());
+        };
+        let fact = facts.element(4, 3).ok_or_else(not_proved)?;
+        let snap = facts.snapshot().ok_or_else(not_proved)?;
+        evidence.accept_facts(admitted, std::slice::from_ref(&fact), &snap)
+    })
+}
+
+#[test]
+fn scoped_ax_write_after_clear_pin_is_refused_on_live_adapter() {
+    let (facts, evidence) = live_editor();
+    assert!(!evidence.enforcing());
+    let admitted = evidence.window_binding_cg(7).expect("window");
+    evidence.pin(Some(admitted));
+    let scope = JobScope::capture(&evidence);
+    assert!(scope.is_scoped());
+    assert!(scope.expected().is_some());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    evidence.set_pre_sink_barrier(move || {
+        let _ = entered_tx.send(());
+        let guard = release_rx.lock().unwrap_or_else(|err| err.into_inner());
+        let _ = guard.recv_timeout(Duration::from_secs(2));
+    });
+    let evidence_job = Arc::clone(&evidence);
+    let facts_job = Arc::clone(&facts);
+    let worker = thread::spawn(move || ax_write_after_gate(&evidence_job, &scope, &facts_job));
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker entered the gate");
+    evidence.pin(None);
+    facts.set_element(
+        4,
+        3,
+        ElementFact {
+            pid: 4,
+            cg_id: Some(8),
+        },
+    );
+    release_tx.send(()).expect("release");
+    let err = worker.join().expect("worker").expect_err("moved element");
+    assert_nothing_executed(&err);
+    assert!(evidence.pinned().is_none());
+    assert!(!evidence.enforcing());
+}
+
+#[test]
+fn scoped_ax_job_without_expected_refuses_before_write() {
+    let (facts, evidence) = live_editor();
+    assert!(!evidence.enforcing());
+    let scope = JobScope::scoped(None);
+    assert!(scope.missing());
+    let err = ax_write_after_gate(&evidence, &scope, &facts).expect_err("missing binding");
+    assert_nothing_executed(&err);
+}
+
+#[test]
+fn unscoped_live_adapter_ax_write_still_runs() {
+    let (facts, evidence) = live_editor();
+    assert!(!evidence.enforcing());
+    let scope = JobScope::admit(&evidence);
+    assert!(!scope.is_scoped());
+    ax_write_after_gate(&evidence, &scope, &facts).expect("unscoped write");
+}
+
+#[tokio::test]
+async fn note_scoped_session_stays_set_after_the_pin_is_cleared() {
+    let (_events, driver, _win) = editor_session().await;
+    assert!(!driver.evidence.session_scoped());
+    InstanceEvidence::note_scoped_session(&driver);
+    driver.evidence.pin(None);
+    assert!(driver.evidence.session_scoped());
+    let caps = driver.capabilities();
+    let _ = InstanceEvidence::scope_capabilities(&driver, caps);
+    assert!(driver.evidence.session_scoped());
+}
+
+#[test]
+fn scoped_observation_writes_no_application_accessibility_switches() {
+    let store = FakeToggleStore::shared();
+    let toggles = AccessibilityToggles::new(Arc::clone(&store));
+    crate::ax::toggles::arm_for_observation(&toggles, 4, true).expect("scoped");
+    assert_eq!(store.value(4, ToggleName::EnhancedUserInterface), None);
+    assert_eq!(store.value(4, ToggleName::ManualAccessibility), None);
+    toggles.restore();
+    assert_eq!(store.value(4, ToggleName::EnhancedUserInterface), None);
+    assert_eq!(store.value(4, ToggleName::ManualAccessibility), None);
+}
+
+#[test]
+fn unscoped_observation_enables_accessibility_switches() {
+    let store = FakeToggleStore::shared();
+    let toggles = AccessibilityToggles::new(Arc::clone(&store));
+    crate::ax::toggles::arm_for_observation(&toggles, 4, false).expect("unscoped");
+    assert_eq!(
+        store.value(4, ToggleName::EnhancedUserInterface),
+        Some(true)
+    );
+    assert_eq!(store.value(4, ToggleName::ManualAccessibility), Some(true));
+    toggles.restore();
+    assert_eq!(
+        store.value(4, ToggleName::EnhancedUserInterface),
+        Some(false)
+    );
+    assert_eq!(store.value(4, ToggleName::ManualAccessibility), Some(false));
 }

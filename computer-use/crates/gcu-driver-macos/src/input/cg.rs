@@ -101,6 +101,38 @@ fn location_symbol() -> Option<SetWindowLocation> {
 
 type SetWindowLocation = unsafe extern "C" fn(event: *const CGEvent, point: CGPoint);
 
+/// OS calls behind [`RealEvents`]. Tests supply a poster that does not post.
+pub(crate) trait OsPoster: Send + Sync {
+    /// True when AppKit is initialized enough to post.
+    fn appkit_ready(&self) -> bool;
+    /// True when accessibility trust allows a down event.
+    fn trusted(&self) -> bool;
+    /// Frontmost pid, when the workspace reports one.
+    fn frontmost_pid(&self) -> Option<i32>;
+    /// Deliver one event. Must not retry.
+    fn post_event(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault>;
+}
+
+struct LivePoster;
+
+impl OsPoster for LivePoster {
+    fn appkit_ready(&self) -> bool {
+        ensure_appkit()
+    }
+
+    fn trusted(&self) -> bool {
+        super::ffi::accessibility_trusted()
+    }
+
+    fn frontmost_pid(&self) -> Option<i32> {
+        workspace_frontmost_pid()
+    }
+
+    fn post_event(&self, event: &SyntheticEvent) -> std::result::Result<(), PostFault> {
+        post_one(event)
+    }
+}
+
 /// Live CoreGraphics backend. One process-wide AppKit flag.
 pub struct RealEvents {
     arrival_failed: AtomicBool,
@@ -108,6 +140,7 @@ pub struct RealEvents {
     _listener: Option<super::ffi::Listener>,
     post_gate: Arc<tokio::sync::Semaphore>,
     identity: Mutex<Option<Arc<dyn PostGate>>>,
+    poster: Arc<dyn OsPoster>,
 }
 
 impl RealEvents {
@@ -145,6 +178,22 @@ impl RealEvents {
             _listener: listener,
             post_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             identity: Mutex::new(None),
+            poster: Arc::new(LivePoster),
+        }
+    }
+
+    /// Backend with an injected poster. Does not start a listener or AppKit.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    #[cfg(test)]
+    pub(crate) fn with_poster(poster: Arc<dyn OsPoster>) -> Self {
+        Self {
+            arrival_failed: AtomicBool::new(false),
+            guards: Guards::fixture(),
+            _listener: None,
+            post_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            identity: Mutex::new(None),
+            poster,
         }
     }
 
@@ -153,10 +202,11 @@ impl RealEvents {
         event: SyntheticEvent,
         prove: bool,
     ) -> std::result::Result<(), PostFault> {
-        if !ensure_appkit() {
+        if !self.poster.appkit_ready() {
             return Err(PostFault::NotSent);
         }
         let guards = self.guards.clone();
+        let poster = Arc::clone(&self.poster);
         let identity = if prove {
             self.identity
                 .lock()
@@ -183,10 +233,10 @@ impl RealEvents {
                 guards
                     .check(event.path == PostPath::HidTap)
                     .map_err(|_| PostFault::NotSent)?;
-                if event.path == PostPath::HidTap && frontmost_pid() != Some(event.pid) {
+                if event.path == PostPath::HidTap && poster.frontmost_pid() != Some(event.pid) {
                     return Err(PostFault::NotSent);
                 }
-                if !super::ffi::accessibility_trusted() {
+                if !poster.trusted() {
                     return Err(PostFault::Permission);
                 }
             }
@@ -196,7 +246,7 @@ impl RealEvents {
                     None => return Err(PostFault::NotSent),
                 }
             }
-            post_one(&event)
+            poster.post_event(&event)
         })
         .await
         .map_err(|_| PostFault::Uncertain)?
@@ -227,7 +277,7 @@ impl EventApi for RealEvents {
     }
 
     async fn frontmost_pid(&self) -> Result<Option<i32>> {
-        tokio::task::spawn_blocking(frontmost_pid)
+        tokio::task::spawn_blocking(workspace_frontmost_pid)
             .await
             .map_err(|_| DriverError::Crashed {
                 maybe_executed: false,
@@ -319,7 +369,7 @@ impl Default for RealEvents {
     }
 }
 
-fn frontmost_pid() -> Option<i32> {
+fn workspace_frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()
         .frontmostApplication()
         .map(|app| app.processIdentifier())

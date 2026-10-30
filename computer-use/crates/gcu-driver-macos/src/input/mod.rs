@@ -29,6 +29,8 @@ pub mod watchdog;
 
 #[cfg(target_os = "macos")]
 mod cg;
+#[cfg(all(test, target_os = "macos"))]
+mod cg_tests;
 #[cfg(target_os = "macos")]
 mod ffi;
 #[cfg(target_os = "macos")]

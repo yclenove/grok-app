@@ -21,7 +21,6 @@ use core_foundation::string::CFString;
 use gcu_core::{
     driver::DriverError,
     model::{NativeHandle, NodeAction, NodeValue, Rect, TextRange},
-    scope::WindowBinding,
 };
 
 use super::act;
@@ -30,6 +29,7 @@ use super::thread::{AxThread, AX_CALL_TIMEOUT};
 use super::world::{self, World};
 use crate::ax::source::{AxCall, AxHandle, AxIdentity, AxSource, AxStateBits};
 use crate::ax::{ToggleName, ToggleStore};
+use crate::scope_os::JobScope;
 use gcu_core::driver::Result;
 
 /// AX source. Nodes are ids into the worker's element map.
@@ -40,7 +40,7 @@ pub struct RealAxSource {
     pid: u32,
     text_limit: Mutex<Option<usize>>,
     evidence: Option<Arc<crate::scope_os::Evidence>>,
-    expected: Mutex<Option<WindowBinding>>,
+    scope: Mutex<JobScope>,
 }
 
 impl RealAxSource {
@@ -61,7 +61,7 @@ impl RealAxSource {
             pid,
             text_limit: Mutex::new(None),
             evidence: None,
-            expected: Mutex::new(None),
+            scope: Mutex::new(JobScope::unscoped()),
         })
     }
 
@@ -80,7 +80,7 @@ impl RealAxSource {
     /// Action source for elements a snapshot already stored.
     ///
     /// Does not reset the element map. The next [`RealAxSource::open`] does.
-    /// `evidence` is checked again inside each mutation, on this thread.
+    /// The admitted scope is checked again inside each mutation, on this thread.
     pub fn attach(thread: Arc<AxThread>, evidence: Option<Arc<crate::scope_os::Evidence>>) -> Self {
         Self {
             thread,
@@ -89,13 +89,15 @@ impl RealAxSource {
             pid: 0,
             text_limit: Mutex::new(None),
             evidence,
-            expected: Mutex::new(None),
+            scope: Mutex::new(JobScope::unscoped()),
         }
     }
 
-    /// Window the mutation must still belong to. Set before `AX` perform.
-    pub fn set_expected(&self, window: WindowBinding) {
-        *self.expected.lock().unwrap_or_else(|err| err.into_inner()) = Some(window);
+    /// Scope captured at admission. A later pin clear does not change it.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn set_scope(&self, scope: JobScope) {
+        *self.scope.lock().unwrap_or_else(|err| err.into_inner()) = scope;
     }
 
     async fn mutate<T: Send + 'static>(
@@ -104,14 +106,14 @@ impl RealAxSource {
         job: impl FnOnce(&mut World) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let evidence = self.evidence.clone();
-        let expected = self
-            .expected
+        let scope = self
+            .scope
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
         self.thread
-            .call(AX_CALL_TIMEOUT, true, move |world| {
-                super::prove_mutation(evidence.as_deref(), expected.as_ref(), &ids, world)?;
+            .call_scoped(AX_CALL_TIMEOUT, true, scope, move |world, scope| {
+                super::prove_mutation(evidence.as_deref(), scope, &ids, world)?;
                 job(world)
             })
             .await
@@ -315,12 +317,27 @@ impl AxSource for RealAxSource {
 /// Writes `AXEnhancedUserInterface` and `AXManualAccessibility` on the AX thread.
 pub struct AxToggleStore {
     thread: Arc<AxThread>,
+    writes_enabled: bool,
 }
 
 impl AxToggleStore {
-    /// Store that shares the driver's AX thread.
+    /// Store that shares the driver's AX thread. Writes are allowed.
     pub fn new(thread: Arc<AxThread>) -> Self {
-        Self { thread }
+        Self {
+            thread,
+            writes_enabled: true,
+        }
+    }
+
+    /// Store that refuses process-wide attribute writes.
+    ///
+    /// `set` returns `Ok(false)` and does not call into accessibility.
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn without_process_writes(thread: Arc<AxThread>) -> Self {
+        Self {
+            thread,
+            writes_enabled: false,
+        }
     }
 }
 
@@ -333,6 +350,9 @@ impl ToggleStore for AxToggleStore {
     }
 
     fn set(&self, pid: u32, name: ToggleName, value: bool) -> Result<bool> {
+        if !self.writes_enabled {
+            return Ok(false);
+        }
         self.thread
             .call_blocking(AX_CALL_TIMEOUT, true, move |world| {
                 write_toggle(world, pid, name, value)

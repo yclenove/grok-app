@@ -111,7 +111,7 @@ impl OsFacts for LiveOsFacts {
     }
 }
 
-/// Live evidence. Scoped checks start only after a scope pins a binding.
+/// Live evidence. Unscoped posts are sent. A pin is what a new job captures.
 pub(crate) fn live_evidence(thread: Arc<AxThread>) -> Arc<super::Evidence> {
     super::Evidence::live_adapter(LiveOsFacts::with_thread(thread))
 }

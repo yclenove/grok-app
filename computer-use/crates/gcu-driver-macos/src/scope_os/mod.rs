@@ -9,6 +9,7 @@
 mod deliver;
 mod evidence;
 mod facts;
+mod job;
 mod spi;
 mod table;
 
@@ -22,6 +23,7 @@ mod tests;
 
 pub(crate) use deliver::PostView;
 pub(crate) use evidence::{not_proved, Evidence};
+pub(crate) use job::JobScope;
 pub(crate) use spi::ax_window_status;
 
 #[cfg(target_os = "macos")]

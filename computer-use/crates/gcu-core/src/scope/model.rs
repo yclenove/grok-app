@@ -234,6 +234,12 @@ pub trait InstanceEvidence: Send + Sync {
     fn scoped_doctor_note(&self) -> Option<&'static str> {
         None
     }
+
+    /// Mark this driver scoped for the life of the wrapper.
+    ///
+    /// The default does nothing. Memory only. No blocking, timeout, or
+    /// cancellation. This is not the perform pin: observation has no pin.
+    fn note_scoped_session(&self) {}
 }
 
 /// Where an attempt waits so a test can revoke before the next check.

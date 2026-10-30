@@ -24,6 +24,8 @@ use gcu_core::{driver::TreeOpts, model::RawTree};
 use crate::ax::ErasedToggle;
 #[cfg(target_os = "macos")]
 use crate::discovery::TreeTarget;
+#[cfg(target_os = "macos")]
+use crate::scope_os::{Evidence, JobScope};
 
 impl MacosDriver {
     #[cfg(target_os = "macos")]
@@ -41,18 +43,26 @@ impl MacosDriver {
             });
         };
         if ax::needs_enhanced_accessibility(&target.bundle_id, &target.app_name) {
-            let toggles = Arc::new(ax::AccessibilityToggles::new(
-                crate::real::AxToggleStore::new(Arc::clone(&thread)),
-            ));
+            let session_scoped = self.evidence.session_scoped();
+            let store = if session_scoped {
+                crate::real::AxToggleStore::without_process_writes(Arc::clone(&thread))
+            } else {
+                crate::real::AxToggleStore::new(Arc::clone(&thread))
+            };
+            let toggles = Arc::new(ax::AccessibilityToggles::new(store));
             let enabling = Arc::clone(&toggles);
             let pid = target.pid;
-            let enabled = tokio::task::spawn_blocking(move || enabling.enable(pid))
-                .await
-                .map_err(|_| DriverError::Crashed {
-                    maybe_executed: false,
-                })?;
+            let enabled = tokio::task::spawn_blocking(move || {
+                ax::toggles::arm_for_observation(enabling.as_ref(), pid, session_scoped)
+            })
+            .await
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })?;
             enabled?;
-            self.track_toggles(ArcToggle(toggles));
+            if !session_scoped {
+                self.track_toggles(ArcToggle(toggles));
+            }
         }
         let Some(index) = target.ax_index else {
             return Ok(RawTree {
@@ -81,20 +91,7 @@ impl MacosDriver {
                     Arc::clone(thread),
                     Some(Arc::clone(&evidence)),
                 );
-                if evidence.pinned().is_some() {
-                    let Some(handle) = action_element(req) else {
-                        return Err(crate::scope_os::not_proved());
-                    };
-                    source.set_expected(evidence.mutation_window(handle)?);
-                } else if evidence.enforcing() {
-                    let Some(handle) = action_element(req) else {
-                        return Err(crate::scope_os::not_proved());
-                    };
-                    let Some(binding) = evidence.element_handle(handle) else {
-                        return Err(crate::scope_os::not_proved());
-                    };
-                    source.set_expected(binding.window().clone());
-                }
+                source.set_scope(ax_job_scope(evidence.as_ref(), req)?);
                 return ax::perform(&source, req, cancel, gcu_core::driver::DRIVER_DEADLINE).await;
             }
         }
@@ -102,6 +99,25 @@ impl MacosDriver {
         let _ = (req, cancel);
         Err(action_source_missing())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_job_scope(evidence: &Evidence, req: &DriverAction) -> Result<JobScope> {
+    if evidence.session_scoped() && evidence.pinned().is_none() {
+        return Ok(JobScope::scoped(None));
+    }
+    if evidence.pinned().is_some() {
+        let handle = action_element(req).ok_or_else(crate::scope_os::not_proved)?;
+        return Ok(JobScope::scoped(Some(evidence.mutation_window(handle)?)));
+    }
+    if evidence.enforcing() {
+        let handle = action_element(req).ok_or_else(crate::scope_os::not_proved)?;
+        let binding = evidence
+            .element_handle(handle)
+            .ok_or_else(crate::scope_os::not_proved)?;
+        return Ok(JobScope::scoped(Some(binding.window().clone())));
+    }
+    Ok(JobScope::unscoped())
 }
 
 #[cfg(target_os = "macos")]

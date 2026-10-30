@@ -12,12 +12,13 @@ use core_foundation::array::CFArray;
 use core_foundation::base::{CFEqual, CFGetTypeID, CFType, CFTypeRef, TCFType};
 use core_foundation::string::CFString;
 use gcu_core::driver::Result;
-use gcu_core::scope::WindowBinding;
 
 use super::act;
 use super::world::{self, World};
 use crate::api::CgWindow;
-use crate::scope_os::{cg_id_from_ax, not_proved, ElementFact, Evidence, OsWindow, TokenBook};
+use crate::scope_os::{
+    cg_id_from_ax, not_proved, ElementFact, Evidence, JobScope, OsWindow, Snapshot, TokenBook,
+};
 
 /// Refresh tokens for the current on-screen windows.
 ///
@@ -146,30 +147,15 @@ fn same_window_identity(left: &[CgWindow], right: &[CgWindow]) -> bool {
     ids(left) == ids(right)
 }
 
-/// Refuse the mutation unless every id still belongs to the admitted window.
-pub(crate) fn prove_mutation(
-    evidence: Option<&Evidence>,
-    expected: Option<&WindowBinding>,
+/// Facts for `ids` from this thread's window observation.
+///
+/// Blocks on the window list for the caller's budget. No extra timeout or
+/// cancellation. A gap is [`not_proved`].
+pub(crate) fn observe_ids(
+    evidence: &Evidence,
     ids: &[u64],
     world: &mut World,
-) -> Result<()> {
-    let Some(evidence) = evidence else {
-        return Ok(());
-    };
-    let pinned = evidence.pinned();
-    if pinned.is_none() && !evidence.enforcing() {
-        return Ok(());
-    }
-    let admitted = match pinned {
-        Some(pin) => {
-            if expected.is_some_and(|got| got != &pin) {
-                return Err(not_proved());
-            }
-            pin
-        }
-        None => expected.cloned().ok_or_else(not_proved)?,
-    };
-    evidence.run_barrier();
+) -> Result<(Vec<ElementFact>, Snapshot)> {
     let Some(book) = evidence.token_book() else {
         return Err(not_proved());
     };
@@ -180,7 +166,34 @@ pub(crate) fn prove_mutation(
     for id in ids {
         facts.push(element_fact(world, *id).ok_or_else(not_proved)?);
     }
-    evidence.accept_facts(&admitted, &facts, &snap)
+    Ok((facts, snap))
+}
+
+/// Refuse the mutation unless `scope` still owns every id.
+///
+/// `scope` is the admission captured with the job. A cleared pin is not an
+/// unscoped grant. No evidence on a scoped job refuses. Unscoped jobs return
+/// before any accessibility call.
+pub(crate) fn prove_mutation(
+    evidence: Option<&Evidence>,
+    scope: &JobScope,
+    ids: &[u64],
+    world: &mut World,
+) -> Result<()> {
+    let Some(evidence) = evidence else {
+        return if scope.is_scoped() {
+            Err(not_proved())
+        } else {
+            Ok(())
+        };
+    };
+    evidence.commit_ax_job(scope, |admitted| {
+        let Some(admitted) = admitted else {
+            return Ok(());
+        };
+        let (facts, snap) = observe_ids(evidence, ids, world)?;
+        evidence.accept_facts(admitted, &facts, &snap)
+    })
 }
 
 fn window_elements(world: &mut World, pid: u32) -> Vec<AXUIElementRef> {

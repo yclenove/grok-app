@@ -56,6 +56,7 @@ where
     /// Memory only. No blocking, timeout, or cancellation. The activity object
     /// is the same stop latch the session uses.
     pub fn new(inner: D, lease: ScopeLease, activity: Arc<dyn UserActivity>) -> Self {
+        inner.note_scoped_session();
         let mut capabilities = inner.scope_capabilities(inner.capabilities());
         capabilities.private_apis.clear();
         capabilities.version = guard::normalize_version(&capabilities.version).to_owned();
