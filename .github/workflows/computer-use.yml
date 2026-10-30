@@ -127,6 +127,13 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo test --locked --workspace ${{ runner.os == 'macOS' && '--features gcu-cli/macos-webview' || '' }}
 
+      # Approval tests for the debug-only eval auto-approval path (ADR 0017 S5) compile only with this feature.
+      - name: cargo clippy (eval-autoapprove)
+        run: cargo clippy --locked -p gcu-cli -p gcu-eval --all-targets --features gcu-cli/eval-autoapprove,gcu-eval/eval-autoapprove -- -D warnings
+
+      - name: cargo test (eval-autoapprove)
+        run: cargo test --locked -p gcu-cli -p gcu-eval --features gcu-cli/eval-autoapprove,gcu-eval/eval-autoapprove
+
       # pointer_gate sets required-features = test-support, so the workspace test above skips it.
       - name: cargo clippy (Windows pointer gate)
         if: runner.os == 'Windows'
