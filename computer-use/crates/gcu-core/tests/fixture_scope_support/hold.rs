@@ -28,6 +28,21 @@ impl Spy {
         ev.fault_lease = Some(lease);
     }
 
+    /// Apply a fault in the first tree read after the next subscription.
+    /// Pre-approval reads remain intact; no other task must win a clock race.
+    pub fn arm_read_fault_after_subscribe(&self, fault: gcu_driver_fake::faults::Fault) {
+        lock(&self.evidence).subscribed_read_fault = Some((self.external().subscribe, fault));
+    }
+
+    pub(super) fn take_subscribed_read_fault(&self) -> Option<gcu_driver_fake::faults::Fault> {
+        let mut ev = lock(&self.evidence);
+        let (subscribed, _) = ev.subscribed_read_fault.as_ref()?;
+        if self.external().subscribe <= *subscribed {
+            return None;
+        }
+        ev.subscribed_read_fault.take().map(|(_, fault)| fault)
+    }
+
     pub async fn wait_held(&self) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while !self.counts.held.load(Ordering::SeqCst) {

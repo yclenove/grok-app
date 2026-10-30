@@ -95,6 +95,21 @@ impl PublishGate {
         self.cv.notify_all();
     }
 
+    /// Wait until the armed publisher parks, or the gate is released.
+    ///
+    /// Returns false on timeout or when disarmed without a parked publisher.
+    /// The predicate and notification share the gate mutex, so a publisher
+    /// that parks before this call is also observed. Memory only; blocks for
+    /// at most `timeout` on the condvar. No cancellation. Recovers poison.
+    pub fn wait_until_parked(&self, timeout: Duration) -> bool {
+        let guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, timeout, |state| state.armed && !state.parked)
+            .unwrap_or_else(|err| err.into_inner());
+        guard.parked
+    }
+
     /// Whether a publisher is inside [`Self::enter`].
     ///
     /// Memory only. May wait on the gate mutex. No timeout or cancellation.
