@@ -33,6 +33,16 @@ fn native_command(home: &TempDir) -> std::process::Command {
     c
 }
 
+fn config_directory(home: &TempDir) -> std::path::PathBuf {
+    // Match the CLI's platform config path; macOS does not use XDG_CONFIG_HOME.
+    let root = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support")
+    } else {
+        home.path().to_path_buf()
+    };
+    root.join("grok-computer-use")
+}
+
 #[test]
 fn arguments_unsupported_modes_exit_two() {
     let h = TempDir::new().unwrap();
@@ -392,14 +402,7 @@ fn resume_non_tty_refuses_before_reading_credentials() {
 #[test]
 fn config_malformed_or_invalid_values_exit_two() {
     let h = TempDir::new().unwrap();
-    // The config root differs per platform: macOS keeps it under Library/Application Support,
-    // while Windows (APPDATA) and Linux (XDG_CONFIG_HOME) use the temp root itself.
-    let root = if cfg!(target_os = "macos") {
-        h.path().join("Library").join("Application Support")
-    } else {
-        h.path().to_path_buf()
-    };
-    let dir = root.join("grok-computer-use");
+    let dir = config_directory(&h);
     std::fs::create_dir_all(&dir).unwrap();
     for config in [
         "[observe",
@@ -494,6 +497,30 @@ impl Mcp {
 }
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
+fn assert_confirmation_denied(result: &Value) {
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "approval_denied"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["message"],
+        "approval denied"
+    );
+    assert_eq!(result["structuredContent"]["action"]["outcome"], "refused");
+    assert_eq!(result["structuredContent"]["action"]["delivery"], "none");
+}
+
+#[cfg(all(feature = "eval-autoapprove", debug_assertions))]
+fn assert_form_oracle_unchanged(path: &std::path::Path) {
+    let oracle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(oracle["text"]["text"], "", "{oracle}");
+    // The oracle creates a counter only after the first press.
+    assert_eq!(oracle["presses"]["submit"].as_u64().unwrap_or(0), 0);
+    assert_eq!(oracle["held_input"], 0);
+}
+
+#[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
 fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
     let h = TempDir::new().unwrap();
@@ -501,7 +528,6 @@ fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
     for (tool, args) in [
         ("get_app_state", r#"{"app":"fake.form"}"#),
         ("click", r#"{"app":"fake.form","element_index":1}"#),
-        ("type_text", r#"{"app":"fake.form","text":"Ada"}"#),
     ] {
         let o = command(&h)
             .env("GCU_APPROVAL", "auto-allow-session")
@@ -536,50 +562,32 @@ fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
                 );
             }
         }
-        let v: Value = serde_json::from_slice(&std::fs::read(&oracle).unwrap()).unwrap();
-        // The oracle creates a counter only after the first press.
-        assert_eq!(v["presses"]["submit"].as_u64().unwrap_or(0), 0);
-        assert_eq!(v["held_input"], 0);
-        if tool == "type_text" {
-            assert_eq!(v["text"]["text"], "Ada");
-        }
+        assert_form_oracle_unchanged(&oracle);
     }
 
-    // Each call has a fresh fake scene. The app grant permits ordinary input,
-    // but does not confirm the sensitive Submit action (ADR 0017 §3).
-    std::fs::remove_file(&oracle).unwrap();
-    let denied = command(&h)
-        .env("GCU_APPROVAL", "auto-allow-session")
-        .env("GCU_EVAL_ORACLE_FILE", &oracle)
-        .args([
-            "call",
-            "click",
-            "--driver",
-            "fake",
-            "--args",
-            r#"{"app":"fake.form","element_index":3}"#,
-            "--json",
-        ])
-        .assert()
-        .code(4)
-        .get_output()
-        .stdout
-        .clone();
-    let denied: Value = serde_json::from_slice(&denied).unwrap();
-    assert_eq!(denied["isError"], true);
-    assert_eq!(
-        denied["structuredContent"]["error"]["code"],
-        "approval_denied"
-    );
-    assert_eq!(
-        denied["structuredContent"]["error"]["message"],
-        "approval denied"
-    );
-    assert_eq!(denied["structuredContent"]["action"]["outcome"], "refused");
-    assert_eq!(denied["structuredContent"]["action"]["delivery"], "none");
-    let v: Value = serde_json::from_slice(&std::fs::read(&oracle).unwrap()).unwrap();
-    assert_eq!(v["presses"]["submit"].as_u64().unwrap_or(0), 0);
-    assert_eq!(v["held_input"], 0);
+    // Each call has a fresh scene. The explicit Name click above is targeted
+    // input needing only the app grant. Unindexed type_text has no policy target
+    // (even though the driver can use the focused field), so unknown-target risk
+    // requires a sensitive confirmation, as does Submit. Neither is foreground.
+    // ADR 0017 §3: an app grant does not confirm either mutation.
+    for (tool, args) in [
+        ("type_text", r#"{"app":"fake.form","text":"Ada"}"#),
+        ("click", r#"{"app":"fake.form","element_index":3}"#),
+    ] {
+        std::fs::remove_file(&oracle).unwrap();
+        let denied = command(&h)
+            .env("GCU_APPROVAL", "auto-allow-session")
+            .env("GCU_EVAL_ORACLE_FILE", &oracle)
+            .args(["call", tool, "--driver", "fake", "--args", args, "--json"])
+            .assert()
+            .code(4)
+            .get_output()
+            .stdout
+            .clone();
+        let denied: Value = serde_json::from_slice(&denied).unwrap();
+        assert_confirmation_denied(&denied);
+        assert_form_oracle_unchanged(&oracle);
+    }
 
     let report = command(&h)
         .args(["doctor", "--driver", "fake", "--json"])
@@ -598,8 +606,8 @@ fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
 #[test]
 fn call_config_denied_app_and_observation_limits_are_enforced() {
     let h = TempDir::new().unwrap();
-    let dir = h.path().join("grok-computer-use");
-    std::fs::create_dir(&dir).unwrap();
+    let dir = config_directory(&h);
+    std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.toml"),
         "[observe]\nmax_tree_nodes=2\nmax_image_edge=320\nimage_format='jpeg'",
@@ -624,6 +632,7 @@ fn call_config_denied_app_and_observation_limits_are_enforced() {
     let v: Value = serde_json::from_slice(&out).unwrap();
     let screenshot = &v["structuredContent"]["state"]["screenshot"];
     assert!(screenshot["width"].as_u64().unwrap() <= 320);
+    assert!(screenshot["height"].as_u64().unwrap() <= 320);
     assert_eq!(screenshot["mime"], "image/jpeg");
     assert!(v["structuredContent"]["state"]["truncated"].is_object());
     let output = command(&h)
@@ -773,37 +782,29 @@ fn mcp_control_stop_persists_across_process_restart() {
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
 fn mcp_form_submit_process_is_verified_by_fake_oracle() {
-    let h = TempDir::new().unwrap();
-    let mut m = Mcp::start(&h, "default");
-    m.request("tools/list", json!({}));
+    // As in the one-shot test, the explicit Name click needs only the app grant;
+    // unindexed typing (unknown policy target) and Submit need sensitive confirms.
+    // Close a separate process after each refusal to check its independent oracle.
     for (tool, args) in [
-        ("get_app_state", json!({"app":"fake.form"})),
-        ("click", json!({"app":"fake.form","element_index":1})),
         ("type_text", json!({"app":"fake.form","text":"Ada"})),
+        ("click", json!({"app":"fake.form","element_index":3})),
     ] {
-        let result = m.call(tool, args);
-        assert_eq!(result["isError"], false, "{tool}: {result}");
+        let h = TempDir::new().unwrap();
+        let mut m = Mcp::start(&h, "default");
+        m.request("tools/list", json!({}));
+        let state = m.call("get_app_state", json!({"app":"fake.form"}));
+        assert_eq!(state["isError"], false, "{state}");
+        let click = m.call("click", json!({"app":"fake.form","element_index":1}));
+        assert_eq!(click["isError"], false, "{click}");
+        assert_eq!(
+            click["structuredContent"]["action"]["delivery"],
+            "targeted_event"
+        );
+        let denied = m.call(tool, args);
+        assert_confirmation_denied(&denied);
+        m.close();
+        assert_form_oracle_unchanged(&h.path().join("oracle.json"));
     }
-    // A session app grant leaves the sensitive confirmation denied.
-    let denied = m.call("click", json!({"app":"fake.form","element_index":3}));
-    assert_eq!(denied["isError"], true);
-    assert_eq!(
-        denied["structuredContent"]["error"]["code"],
-        "approval_denied"
-    );
-    assert_eq!(
-        denied["structuredContent"]["error"]["message"],
-        "approval denied"
-    );
-    assert_eq!(denied["structuredContent"]["action"]["outcome"], "refused");
-    assert_eq!(denied["structuredContent"]["action"]["delivery"], "none");
-    m.close();
-    let oracle: Value =
-        serde_json::from_slice(&std::fs::read(h.path().join("oracle.json")).unwrap()).unwrap();
-    assert_eq!(oracle["text"]["text"], "Ada");
-    // An absent counter means no submit was delivered.
-    assert_eq!(oracle["presses"]["submit"].as_u64().unwrap_or(0), 0);
-    assert_eq!(oracle["held_input"], 0);
 }
 
 #[test]
