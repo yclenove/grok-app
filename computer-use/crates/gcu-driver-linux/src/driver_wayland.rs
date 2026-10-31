@@ -196,6 +196,7 @@ pub(super) async fn capture_native(
     win: &WindowRef,
     cancel: &Cancel,
 ) -> Result<Capture> {
+    driver.admit_wayland_window(&win.id)?;
     let Some(bound) = driver.bound_capture.as_ref() else {
         return Err(DriverError::CapabilityUnavailable);
     };
@@ -260,6 +261,7 @@ pub(super) async fn capture_native(
         driver.stop_latch.request_stop();
         return Err(DriverError::CapabilityUnavailable);
     }
+    driver.admit_wayland_window(&win.id)?;
     Ok(Capture {
         geometry: bound.geometry,
         ..shot
@@ -286,6 +288,16 @@ fn map_capture(error: CaptureError) -> DriverError {
 }
 
 pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
+    if driver.missing_platform_binding() {
+        // The session is scoped and no platform binding was installed.
+        // Report the capability snapshot captured at construction. Do not
+        // probe Composite, XTest, or the bus on this thread.
+        return DoctorReport {
+            capabilities: driver.capabilities().clone(),
+            ready: false,
+            issues: Vec::new(),
+        };
+    }
     let atspi_ready = driver.fake_source.is_some()
         || driver
             .connection
@@ -304,24 +316,15 @@ pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
             None,
         );
     }
+    // Scoped probes leave the runtime. A timeout closes the report. This does
+    // not start an evidence budget, and the worker does not own input release.
     let has_x = driver.x_server.is_some();
-    let composite = if driver.fake_source.is_some() && !has_x {
-        true
-    } else {
-        driver
-            .x_server
-            .as_ref()
-            .and_then(|server| server.is_composite_available().ok())
-            .unwrap_or(false)
-    };
-    let xtest = if driver.fake_source.is_some() && !has_x {
-        true
-    } else {
-        driver
-            .x_server
-            .as_ref()
-            .and_then(|server| server.is_xtest_available().ok())
-            .unwrap_or(false)
+    let Some((composite, xtest)) = extension_flags(driver).await else {
+        return DoctorReport {
+            capabilities: driver.capabilities().clone(),
+            ready: false,
+            issues: Vec::new(),
+        };
     };
     let mut report = run_driver_doctor(
         &driver.env,
@@ -374,6 +377,51 @@ pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
         }
     }
     report
+}
+
+/// Composite and XTest flags. `None` means the probe did not finish, or the
+/// session is scoped and has no platform binding.
+///
+/// A missing binding does not probe. A fake driver with no X server keeps
+/// the historical in-memory pair. A scoped driver with a binding and an X
+/// server reads both flags off the runtime. Every other driver still probes
+/// on the caller thread.
+async fn extension_flags(driver: &LinuxDriver) -> Option<(bool, bool)> {
+    if driver.missing_platform_binding() {
+        return None;
+    }
+    let has_x = driver.x_server.is_some();
+    if driver.fake_source.is_some() && !has_x {
+        return Some((true, true));
+    }
+    if has_x && driver.scope().is_some() {
+        return probe_extensions(driver).await;
+    }
+    let composite = driver
+        .x_server
+        .as_ref()
+        .and_then(|server| server.is_composite_available().ok())
+        .unwrap_or(false);
+    let xtest = driver
+        .x_server
+        .as_ref()
+        .and_then(|server| server.is_xtest_available().ok())
+        .unwrap_or(false);
+    Some((composite, xtest))
+}
+
+async fn probe_extensions(driver: &LinuxDriver) -> Option<(bool, bool)> {
+    let server = driver.x_server.clone()?;
+    crate::x11::scope::off_runtime(
+        gcu_core::driver::NATIVE_TIMEOUT,
+        &driver.stop_latch,
+        move || {
+            let composite = server.is_composite_available().unwrap_or(false);
+            let xtest = server.is_xtest_available().unwrap_or(false);
+            (composite, xtest)
+        },
+    )
+    .await
 }
 
 pub(super) fn retire_on_drop(bound: &ProvenCapture) {

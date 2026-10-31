@@ -42,6 +42,15 @@ impl AttemptAuthority {
         CONNECTION_AUTHORITY.scope(self.clone(), work).await
     }
 
+    /// Authority this task entered, if any.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. `None` when this
+    /// task did not call [`Self::enter`]. A spawned task does not inherit it.
+    /// `None` is not permission to use an older registration.
+    pub fn on_task() -> Option<Self> {
+        CONNECTION_AUTHORITY.try_with(Clone::clone).ok()
+    }
+
     /// Borrow the scope that was current when the receiver was armed.
     ///
     /// Memory only. No blocking, timeout, or cancellation.

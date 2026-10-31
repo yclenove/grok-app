@@ -13,6 +13,7 @@ pub mod keys;
 pub mod ledger;
 pub mod overlay;
 pub mod real;
+pub(crate) mod scope;
 pub mod server;
 pub mod watchdog;
 pub mod windows;
@@ -33,10 +34,7 @@ pub use capture::{
     WindowVisibility,
 };
 pub use fake::{FakeWindow, FakeX};
-pub use input::{
-    activate_and_verify, execute_pointer_click, execute_pointer_drag, execute_pointer_scroll,
-    execute_press_keys, execute_type_text_x11, TYPE_TEXT_CHUNK_SIZE,
-};
+pub use input::{activate_and_verify, TYPE_TEXT_CHUNK_SIZE};
 pub use keys::{
     char_to_keysym, key_to_keysym, modifier_to_keysym, named_key_to_keysym, plan_text_chunk,
     resolve_or_remap_keysym, restore_remapped_keycode, ResolvedKeycode, TextPlan,

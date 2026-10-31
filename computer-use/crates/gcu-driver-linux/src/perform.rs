@@ -8,8 +8,9 @@ use crate::x11::input::{
 };
 use crate::x11::watchdog::run_with_watchdog;
 use gcu_core::driver::{
-    Cancel, Delivery, Driver, DriverAction, DriverError, KeyRoute, PointerRoute, Result,
+    Cancel, Delivery, Driver, DriverAction, DriverError, KeyRoute, PointerRoute, Result, WindowRef,
 };
+use gcu_core::model::NativeHandle;
 
 fn require_foreground(driver: &LinuxDriver) -> Result<()> {
     if !driver.is_hotkey_available() || driver.is_stopped() {
@@ -29,6 +30,7 @@ pub async fn perform_action(
     req: &DriverAction,
     cancel: &Cancel,
 ) -> Result<Delivery> {
+    driver.refuse_unbound_scope()?;
     if cancel.is_cancelled() {
         driver.release_all_input().await;
         return Err(DriverError::Cancelled {
@@ -38,11 +40,12 @@ pub async fn perform_action(
 
     // An attached portal owns one exact window. Its DriverAction path is reachable only
     // through the same Driver boundary used by ActionRouter; X11 is never a fallback.
-    if let Some(input) = driver.portal_input() {
+    if let Some(input) = driver.portal_input().cloned() {
         let window = crate::wayland::input_plan::window(req);
         if window == Some(input.window())
             && !matches!(req, DriverAction::TypeText { focus: Some(_), .. })
         {
+            driver.admit_wayland_window(&input.window().id)?;
             return input.perform(req, cancel).await;
         }
     }
@@ -58,6 +61,7 @@ async fn perform_action_inner(
     req: &DriverAction,
     cancel: &Cancel,
 ) -> Result<Delivery> {
+    scoped_admit(driver, req)?;
     let result = match req {
         DriverAction::Press { .. }
         | DriverAction::SecondaryAction { .. }
@@ -96,10 +100,10 @@ async fn perform_action_inner(
             count,
             route,
         } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            let xid = driver.resolve_xid(win)?;
+            let xid = action_xid(driver, win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -107,8 +111,10 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
+            let scope = driver.x11_scope();
             execute_pointer_click(
-                x.as_ref(),
+                x,
+                scope.as_ref(),
                 driver.ledger(),
                 xid,
                 *at,
@@ -125,10 +131,10 @@ async fn perform_action_inner(
             dy,
             route,
         } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            let xid = driver.resolve_xid(win)?;
+            let xid = action_xid(driver, win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -136,13 +142,24 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            execute_pointer_scroll(x.as_ref(), driver.ledger(), xid, *at, *dx, *dy, cancel).await
+            let scope = driver.x11_scope();
+            execute_pointer_scroll(
+                x,
+                scope.as_ref(),
+                driver.ledger(),
+                xid,
+                *at,
+                *dx,
+                *dy,
+                cancel,
+            )
+            .await
         }
         DriverAction::PointerDrag { win, path, route } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            let xid = driver.resolve_xid(win)?;
+            let xid = action_xid(driver, win)?;
             if *route == PointerRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -150,7 +167,8 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            execute_pointer_drag(x.as_ref(), driver.ledger(), xid, path, cancel).await
+            let scope = driver.x11_scope();
+            execute_pointer_drag(x, scope.as_ref(), driver.ledger(), xid, path, cancel).await
         }
         DriverAction::TypeText {
             win,
@@ -178,10 +196,10 @@ async fn perform_action_inner(
             }
 
             // Otherwise fall back to X11 keyboard input
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            let xid = driver.resolve_xid(win)?;
+            let xid = action_xid(driver, win)?;
             if *route == KeyRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -189,13 +207,14 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            execute_type_text_x11(x.as_ref(), driver.ledger(), xid, text, cancel).await
+            let scope = driver.x11_scope();
+            execute_type_text_x11(x, scope.as_ref(), driver.ledger(), xid, text, cancel).await
         }
         DriverAction::PressKeys { win, chord, route } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            let xid = driver.resolve_xid(win)?;
+            let xid = action_xid(driver, win)?;
             if *route == KeyRoute::TargetedOnly {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -203,21 +222,89 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
-            execute_press_keys(x.as_ref(), driver.ledger(), xid, chord, cancel).await
+            let scope = driver.x11_scope();
+            execute_press_keys(x, scope.as_ref(), driver.ledger(), xid, chord, cancel).await
         }
         DriverAction::Activate { win } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
-            let xid = driver.resolve_xid(win)?;
+            let xid = action_xid(driver, win)?;
             require_foreground(driver)?;
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
+            // Scope was proved above. Activation is the delivery: a later refusal
+            // is ScopeDenied only when this call did not request focus.
+            let was_active = matches!(x.active_window(), Ok(Some(active)) if active == xid);
             activate_and_verify(x.as_ref(), xid, cancel).await?;
+            if let Some(scope) = driver.x11_scope() {
+                if let Err(error) = scope.allow_live(x, xid).await {
+                    return Err(if was_active {
+                        error
+                    } else {
+                        DriverError::Native {
+                            message: "native driver failure".into(),
+                            maybe_executed: true,
+                        }
+                    });
+                }
+            }
             Ok(Delivery::Foreground)
         }
     };
 
     result
+}
+
+fn scoped_admit(driver: &LinuxDriver, req: &DriverAction) -> Result<()> {
+    if driver.missing_platform_binding() {
+        return Err(DriverError::ScopeDenied);
+    }
+    if driver.scope().is_none() {
+        return Ok(());
+    }
+    if action_element(req).is_some() {
+        return Err(DriverError::ScopeDenied);
+    }
+    if let Some(win) = action_window(req) {
+        driver.prove_target(win)?;
+    }
+    Ok(())
+}
+
+/// Element handle carried by `req`, when the action names one.
+pub(crate) fn action_element(req: &DriverAction) -> Option<&NativeHandle> {
+    match req {
+        DriverAction::Press { el }
+        | DriverAction::SecondaryAction { el, .. }
+        | DriverAction::SetValue { el, .. }
+        | DriverAction::SelectText { el, .. }
+        | DriverAction::ScrollElement { el, .. } => Some(el),
+        DriverAction::TypeText { focus, .. } => focus.as_ref(),
+        _ => None,
+    }
+}
+
+/// Window carried by `req`, when the action names one.
+pub(crate) fn action_window(req: &DriverAction) -> Option<&WindowRef> {
+    match req {
+        DriverAction::PointerClick { win, .. }
+        | DriverAction::PointerScroll { win, .. }
+        | DriverAction::PointerDrag { win, .. }
+        | DriverAction::PressKeys { win, .. }
+        | DriverAction::TypeText { win, .. }
+        | DriverAction::Activate { win } => Some(win),
+        _ => None,
+    }
+}
+
+fn action_xid(driver: &LinuxDriver, win: &WindowRef) -> Result<u32> {
+    if driver.missing_platform_binding() {
+        return Err(DriverError::ScopeDenied);
+    }
+    if driver.scope().is_some() {
+        return driver.memory_xid(win).ok_or(DriverError::ScopeDenied);
+    }
+    driver.resolve_xid(win)
 }

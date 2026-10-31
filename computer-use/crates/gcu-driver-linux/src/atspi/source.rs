@@ -5,6 +5,8 @@ use gcu_core::{
     driver::DriverError,
     model::{NativeHandle, NodeAction, NodeValue, Rect, TextExtras},
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
 /// Abstraction over an AT-SPI node source, decoupling raw tree construction from live D-Bus.
@@ -102,12 +104,27 @@ impl Default for FakeNode {
 }
 
 /// Pure in-memory `AtspiSource` for logic tests without D-Bus.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FakeSource {
     /// Simulated per-call latency.
     pub delay: Duration,
     /// Specific node ID to fail with a native driver error.
     pub error_on_id: Option<u64>,
+    /// Counts name, description, help, value, text, and url reads.
+    ///
+    /// Children, role, and geometry are not counted. Tests use this to prove a
+    /// scoped tree refusal did not read node content.
+    pub content_reads: Arc<AtomicUsize>,
+}
+
+impl Default for FakeSource {
+    fn default() -> Self {
+        Self {
+            delay: Duration::ZERO,
+            error_on_id: None,
+            content_reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 #[async_trait]
@@ -132,14 +149,17 @@ impl AtspiSource for FakeSource {
     }
 
     async fn name(&self, node: &Self::Node) -> Result<Option<String>, DriverError> {
+        self.note_content();
         Ok(node.name.clone())
     }
 
     async fn description(&self, node: &Self::Node) -> Result<Option<String>, DriverError> {
+        self.note_content();
         Ok(node.description.clone())
     }
 
     async fn help(&self, node: &Self::Node) -> Result<Option<String>, DriverError> {
+        self.note_content();
         Ok(node.help.clone())
     }
 
@@ -156,6 +176,7 @@ impl AtspiSource for FakeSource {
     }
 
     async fn value(&self, node: &Self::Node) -> Result<Option<NodeValue>, DriverError> {
+        self.note_content();
         Ok(node.value.clone())
     }
 
@@ -172,14 +193,22 @@ impl AtspiSource for FakeSource {
         node: &Self::Node,
         _text_limit: Option<usize>,
     ) -> Result<Option<TextExtras>, DriverError> {
+        self.note_content();
         Ok(node.text_extras.clone())
     }
 
     async fn url(&self, node: &Self::Node) -> Result<Option<String>, DriverError> {
+        self.note_content();
         Ok(node.url.clone())
     }
 
     fn handle(&self, node: &Self::Node) -> NativeHandle {
         NativeHandle::new(node.id)
+    }
+}
+
+impl FakeSource {
+    fn note_content(&self) {
+        self.content_reads.fetch_add(1, Ordering::Relaxed);
     }
 }

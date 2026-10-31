@@ -115,6 +115,52 @@ where
         DriverError::ScopeDenied
     }
 
+    /// Capture platform metadata before a synchronous admission.
+    ///
+    /// The default evidence future is empty. A platform wait stays on the
+    /// driver's own ceiling and does not run `release_all_input`.
+    async fn prepare_scope(&self) -> Result<()> {
+        self.inner.prepare_evidence().await;
+        if self.activity.stop_requested() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Capture the attempt this read will filter with. Stop wins.
+    ///
+    /// The value is the same [`AttemptAuthority`] perform carries, taken once.
+    /// The lease lock is dropped before this returns. No cancellation.
+    fn begin_read(&self) -> Result<AttemptAuthority> {
+        if self.activity.stop_requested() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        let authority = self.lease.data_attempt().ok_or(DriverError::ScopeDenied)?;
+        if !self.authority_matches(&authority) {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(authority)
+    }
+
+    /// Stop wins. A generation or record change drops the payload.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    fn ensure_current(&self, authority: &AttemptAuthority, opened: &FixtureScope) -> Result<()> {
+        if self.activity.stop_requested() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        if !authority.usable() || !self.lease.matches(opened) {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(())
+    }
+
     /// Stop wins. A generation or record change drops the payload.
     fn handoff(&self, opened: &FixtureScope) -> Result<()> {
         if self.activity.stop_requested() {
@@ -172,22 +218,19 @@ where
     }
 
     async fn list_apps(&self) -> Result<Vec<gcu_protocol::AppInfo>> {
-        let scope = self.open()?;
-        let listed = self.inner.list_apps().await;
-        if self.activity.stop_requested() {
-            return Err(DriverError::Cancelled {
-                maybe_executed: false,
-            });
-        }
+        let authority = self.begin_read()?;
+        let opened = authority.scope().clone();
+        let listed = authority.enter(self.inner.list_apps()).await;
+        self.ensure_current(&authority, &opened)?;
         let apps = listed.map_err(|_| DriverError::ScopeDenied)?;
         let mut kept = Vec::new();
         for app in apps {
             let reference = AppRef { info: app.clone() };
-            if guard::admit_app(&scope, self.inner.as_ref(), &reference).is_ok() {
+            if guard::admit_app(&opened, self.inner.as_ref(), &reference).is_ok() {
                 kept.push(app);
             }
         }
-        self.handoff(&scope)?;
+        self.ensure_current(&authority, &opened)?;
         Ok(kept)
     }
 
@@ -218,55 +261,72 @@ where
     }
 
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<gcu_protocol::WindowInfo>> {
-        let scope = self.open()?;
-        if let Some(app) = app {
-            guard::admit_app(&scope, self.inner.as_ref(), app)?;
-            let windows = self.inner.list_windows(Some(app)).await;
-            let windows = self.settle_read(&scope, windows)?;
-            let kept = guard::filter_windows(&scope, self.inner.as_ref(), app, windows);
-            self.handoff(&scope)?;
-            return Ok(kept);
-        }
-        let apps = self.list_apps().await?;
-        let mut all = Vec::new();
-        for info in apps {
-            let app = AppRef { info };
-            let windows = self.inner.list_windows(Some(&app)).await;
-            let windows = self.settle_read(&scope, windows)?;
-            all.extend(guard::filter_windows(
-                &scope,
-                self.inner.as_ref(),
-                &app,
-                windows,
-            ));
-        }
-        self.handoff(&scope)?;
-        Ok(all)
+        let authority = self.begin_read()?;
+        let opened = authority.scope().clone();
+        let app = app.cloned();
+        let current = authority.clone();
+        authority
+            .enter(async move {
+                self.prepare_scope().await?;
+                if let Some(app) = app.as_ref() {
+                    guard::admit_app(&opened, self.inner.as_ref(), app)?;
+                    let windows = self.inner.list_windows(Some(app)).await;
+                    let windows = self.settle_read(&opened, windows)?;
+                    let kept = guard::filter_windows(&opened, self.inner.as_ref(), app, windows);
+                    self.ensure_current(&current, &opened)?;
+                    return Ok(kept);
+                }
+                let apps = self.list_apps().await?;
+                let mut all = Vec::new();
+                for info in apps {
+                    let app = AppRef { info };
+                    let windows = self.inner.list_windows(Some(&app)).await;
+                    let windows = self.settle_read(&opened, windows)?;
+                    all.extend(guard::filter_windows(
+                        &opened,
+                        self.inner.as_ref(),
+                        &app,
+                        windows,
+                    ));
+                }
+                self.ensure_current(&current, &opened)?;
+                Ok(all)
+            })
+            .await
     }
 
     async fn key_window(&self, app: &AppRef) -> Result<gcu_protocol::WindowInfo> {
-        let scope = self.open()?;
-        guard::admit_app(&scope, self.inner.as_ref(), app)?;
-        let windows = self.inner.list_windows(Some(app)).await;
-        let windows = self.settle_read(&scope, windows)?;
-        let kept = guard::filter_windows(&scope, self.inner.as_ref(), app, windows);
-        self.handoff(&scope)?;
-        let info = kept.into_iter().next().ok_or(DriverError::ScopeDenied)?;
-        let window = WindowRef {
-            app: app.clone(),
-            id: info.id.clone(),
-        };
-        let current = self
-            .lease
-            .authorized_current()
-            .ok_or(DriverError::ScopeDenied)?;
-        guard::admit_window(&current, self.inner.as_ref(), &window)?;
-        if self.activity.stop_requested() {
-            return Err(DriverError::Cancelled {
-                maybe_executed: false,
-            });
-        }
-        Ok(info)
+        let authority = self.begin_read()?;
+        let opened = authority.scope().clone();
+        let app = app.clone();
+        let current = authority.clone();
+        authority
+            .enter(async move {
+                self.prepare_scope().await?;
+                guard::admit_app(&opened, self.inner.as_ref(), &app)?;
+                let windows = self.inner.list_windows(Some(&app)).await;
+                let windows = self.settle_read(&opened, windows)?;
+                let kept = guard::filter_windows(&opened, self.inner.as_ref(), &app, windows);
+                self.ensure_current(&current, &opened)?;
+                let info = kept.into_iter().next().ok_or(DriverError::ScopeDenied)?;
+                let window = WindowRef {
+                    app: app.clone(),
+                    id: info.id.clone(),
+                };
+                let live = self
+                    .lease
+                    .authorized_current()
+                    .ok_or(DriverError::ScopeDenied)?;
+                guard::admit_window(&live, self.inner.as_ref(), &window)?;
+                if self.activity.stop_requested() {
+                    return Err(DriverError::Cancelled {
+                        maybe_executed: false,
+                    });
+                }
+                self.ensure_current(&current, &opened)?;
+                Ok(info)
+            })
+            .await
     }
 
     async fn snapshot_tree(
@@ -276,6 +336,7 @@ where
         cancel: &Cancel,
     ) -> Result<RawTree> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         let binding = guard::admit_window(&scope, self.inner.as_ref(), win)?;
         let raw = self.inner.snapshot_tree(win, opts, cancel).await;
         let mut raw = self.settle_read(&scope, raw)?;
@@ -294,6 +355,7 @@ where
         cancel: &Cancel,
     ) -> Result<Capture> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         guard::admit_window(&scope, self.inner.as_ref(), win)?;
         let shot = self.inner.capture(win, opts, cancel).await;
         let shot = self.settle_read(&scope, shot)?;
@@ -303,6 +365,7 @@ where
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<crate::model::Geometry> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         guard::admit_window(&scope, self.inner.as_ref(), win)?;
         let geometry = self.inner.window_geometry(win).await;
         let geometry = self.settle_read(&scope, geometry)?;
@@ -312,6 +375,7 @@ where
 
     async fn focused_element(&self, app: &AppRef) -> Result<Option<NativeHandle>> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         let instance = guard::admit_app(&scope, self.inner.as_ref(), app)?;
         let found = self.inner.focused_element(app).await;
         let found = self.settle_read(&scope, found)?;
@@ -349,6 +413,11 @@ where
             return Err(self.abandon(cancel).await);
         }
         self.inner.attempt_fence(AttemptPhase::Admit).await;
+        if let Err(error) = self.prepare_scope().await {
+            cancel.cancel();
+            self.inner.release_all_input().await;
+            return Err(error);
+        }
         let (action, post) = guard::rewrite(req, authority.scope(), self.inner.as_ref())?;
         let pinned = post.admitted().cloned();
         self.inner.pin_admitted(pinned.as_ref());
