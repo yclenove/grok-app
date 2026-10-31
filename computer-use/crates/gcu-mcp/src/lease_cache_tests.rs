@@ -1,4 +1,5 @@
 //! Delivered images and files follow the lease generation stamped at commit.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::files::SessionFiles;
 use super::image_cache::ImageCache;
 use super::lease_view::{visible, Epoch};
