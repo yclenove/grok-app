@@ -60,3 +60,20 @@ Nice-to-have:
 - Update ADR 0017 §4's stale statement at `computer-use/docs/adr/0017-real-eval-fixture-scope.md:131` that real mode forces `--env local`; both selectors now reach refusal. This is documentation drift, not an observed fallback.
 
 Validation: **static inspection only**; `git diff --check origin/feat/cu-v2...HEAD` and working-tree whitespace checks passed. No Cargo/build/tests, candidate executables, mutation/reproduction runs, network, SSH, model calls, desktop execution, credential operations, or source/test edits. Only `docs/plans/computer-use-v2/reviews/2026-10-31-scope-s6-review-r3.md` was written, uncommitted.
+
+## 修复记录
+
+本节追加第 3 轮修复；保留以上独立评审正文、结论及原验证范围。按本轮要求删除整个“路径位置证明内置代码”类别，不再保留相邻文件、构建目录或自重入路径的例外；A2/A3 的修复保留。
+
+| 条目 | 根因修复 | 确定性回归（已添加；完整 crate 执行 not_run） |
+| --- | --- | --- |
+| finding 1 / A1：复制真实 runner 可替相邻任意 client 背书 | 删除 `is_builtin_artifact`、`builtin_fake_trusted`、目录比较和全部调用；删除公开 `RunConfig::builtin_fake_bin`。`builtin_fake` 只选择不带路径的 `ClientProgram::BuiltinFake`，runner 直接调用进程内 fake client；其 backend 也直接调用进程内实现。fake 不构造 Command、不自重入、不发现 sibling。调用参数、环境及工作目录均由 invocation 私有持有；相对文件路径在该工作目录内解析，不修改进程全局 env/cwd。 | 新增 harness-free `gcu-eval/tests/offline_admission.rs`：把真实 runner harness 复制到新目录，在同目录伪造 `eval-fake-agent`、`eval-fake-gcu`、`gcu-eval`；Unix wrapper 只用 shell builtin 和绝对 sentinel 路径，Windows 使用真实可执行 sentinel。先直接启动每个 sentinel 验证可观测，再由复制后的 runner 经生产 `run_tasks` / `run_ab` 同时覆盖 client 与 backend 槽，检查 sentinel/probe 未写、零分配、全部 not_run、unknown telemetry、后续坏 oracle 未验证、task/arm/repeat 的 inherited refusal、A/B not_run provenance、task/suite/A/B 报告及 JSON round-trip。覆盖有/无 fake 选择及旧声明；进程内 fake 有真实 Pass/cleanup 正向对照，另检相对 watch 不改 host sentinel。再复制实际 `gcu-eval` CLI 到同目录，验证两种 external slot 的生产报告与 halt。子进程有 15 秒界限、失败 kill/reap 守卫；内部异步矩阵有 10 秒界限。 |
+| 单一 client/backend 准入与 Command 构造 | `boundary::admit_launch` 同时决定任何显式 client/backend 路径、real driver 和 scoped engine 请求；runner、client 解析/Command 构造、standalone/hidden fake-agent 都调用它。即使 fake=true 或 legacy attest/builtin 声明为真，也不能授权路径。CLI 删除独立的文件存在/宣誓准入，统一生成 provider_unavailable/not_run；A/B 删除“缺 client 即绕过 backend refusal”的捷径。拒绝仍发生在 allocation、凭据、fixture、scope engine 和 preflight 之前，并沿现有 InheritedStop 停后续尝试。 | `launch::tests::fake_selection_has_no_path_and_unverified_paths_never_build_commands` 验证 fake 无文件 identity、无法转成 Command；对 fake client/backend 的两种平台名字及空路径，解析与直接 Command 构造均拒绝，并检查两份 fake 实现源码没有 subprocess API。既有 `fake_agent_boundary.rs` 原位/复制后的 standalone/hidden backend relocation、8 种标记、真实 artifact/空路径与正向对照继续覆盖同一决定。既有 runner/lockdown/A/B/S3 测试迁移到无 client/backend 路径的进程内选择；CLI 用例改验标准 not_run 报告，语法错误仍保留 usage error。 |
+
+使用变化已写入 `computer-use/eval/README.md` 与 ADR 0017 §4：库调用方只需 `builtin_fake: true`，两个 executable 路径均留空；显式路径一律外部。常规 suite 全 not_run 仍退出 0，A/B rollback 仍退出 1；legacy 宣誓不再作为 CLI 独立 gate。`client_started` 表示实际开始执行 client（fake 为进程内），不再专指 spawn。原真实 pipe-flood/process-group 回归迁到直接调用 `proc::run_command` 的 Unix 单元测试，fake timeout/output 测试仅声称进程内行为。
+
+验证（没有运行 Cargo）：直接 `rustc --test -D warnings` 编译实际 `boundary.rs` / `launch.rs`，使用实际 `RunConfig` 定义、其余模块的最小 API 形状适配器；Linux 实际执行 **12 项** admission/launch 单元测试，全部通过，包含禁止未验证 fake path 构造 Command 的测试。同一组合在 Linux `aarch64-unknown-linux-gnu`、Windows `x86_64-pc-windows-gnu`、macOS `aarch64-apple-darwin` 的 `--emit metadata -D warnings` 均通过。实际 `fake_agent.rs` / `fake_gcu.rs` 另以 serde_json/Tokio API 形状适配器完成三平台无警告 metadata 类型检查；此检查不验证适配器所替代的依赖或运行时语义。直接 rustfmt 检查所有改动 Rust 文件、manifest 的 harness 注册检查、信任符号删除检查及 `git diff --check` 通过。
+
+**仍为 not_run：** 完整 crate 编译/clippy、上述 relocation/CLI/S3/进程工具集成回归的实际执行，以及 Linux/Windows/macOS 完整 warning-free 构建；隔离 rustc 检查不能代替它们。按“不运行 Cargo”交由构建机完成。真实 provider、可信签名、原生桌面/模型、外部隔离/网关、任意整树/父死回收与其余 (b) 证据边界未被本轮离线修复证明。
+
+提交结果：已尝试 `git add`，sandbox 无法创建 `/home/claude/src/grok-app/.git/worktrees/cu2-s6/index.lock`（`Read-only file system`）；未暂存、未提交、未 push，改动完整保留在本 worktree。

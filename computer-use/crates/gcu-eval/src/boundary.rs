@@ -1,15 +1,16 @@
-//! Client classification and the single offline backend admission decision.
+//! The single admission decision for every offline client/backend launch.
 //!
-//! Fake agents execute the fake backend in process. Every supplied backend
+//! Fake clients and backends run in process. Every supplied executable
 //! path requires the unavailable disposable provider, regardless of placement,
 //! file name, legacy declarations, or a requested S3 scope.
 
 use crate::runner::RunConfig;
 use std::path::Path;
 
-/// Printed when an external client would start without a disposable-desktop attestation.
+/// Printed when an external client lacks the unavailable disposable provider.
 pub const ATTEST_REQUIRED: &str = concat!(
-    "refusing to start an external client without --attest-disposable-desktop: ",
+    "refusing to start an external client: provider_unavailable; ",
+    "--attest-disposable-desktop is not evidence; ",
     "real mode must not run on an ordinary host; ",
     "it needs a one-shot isolated desktop and egress control; ",
     "--tools and preflight are mitigations, not proof; ",
@@ -17,7 +18,7 @@ pub const ATTEST_REQUIRED: &str = concat!(
     "a file named eval-fake-agent is not the built-in fake agent"
 );
 
-/// Printed when the built-in fake agent would call an operator-supplied `gcu`.
+/// Printed when any launch requests an external backend or scoped engine.
 pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend: provider_unavailable; --attest-disposable-desktop is not evidence; the built-in fake agent uses only its in-process backend";
 
 /// Printed when a real client would run a red-team task.
@@ -36,92 +37,28 @@ pub const INTERNAL_FAKE_AGENT: &str = "--gcu-eval-internal-fake-agent";
 /// Hidden argv that re-enters this binary as the built-in fake gcu.
 pub const INTERNAL_FAKE_GCU: &str = "--gcu-eval-internal-fake-gcu";
 
-/// Real driver, or any client that was not selected as the built-in fake agent.
-///
-/// `grok_bin` is never consulted for a name match. A path is external even when
-/// its file name is `eval-fake-agent`, including one stored in `builtin_fake_bin`.
+/// Real driver or any explicit external client, irrespective of fake selection.
 pub(crate) fn launches_real_client(cfg: &RunConfig) -> bool {
-    if cfg.real_driver {
-        return true;
-    }
-    if builtin_fake_trusted(cfg) {
-        return false;
-    }
-    cfg.grok_bin.is_some() || cfg.builtin_fake_bin.is_some()
+    cfg.real_driver || cfg.grok_bin.is_some()
 }
 
-/// `builtin_fake` re-executes this process, or names the cargo-built fake agent.
-pub(crate) fn builtin_fake_trusted(cfg: &RunConfig) -> bool {
-    if !cfg.builtin_fake {
-        return false;
-    }
-    match &cfg.builtin_fake_bin {
-        None => true,
-        Some(path) => is_builtin_artifact(path, "eval-fake-agent"),
-    }
-}
-
-/// Admit only the in-process fake implementation, never an executable path.
+/// Admit only compiled, in-process implementations, never executable paths.
 ///
-/// Both runner admission and both fake-agent entries use this decision before
-/// any preparation, preflight, telemetry, or scripted behavior. A copied caller
-/// cannot authorize a sibling: no filesystem property or marker is consulted.
-/// A requested scoped engine also needs an external backend, even if its path
-/// was omitted. It must not reach allocation as an ordinary fake run.
-pub(crate) fn admit_fake_backend(
-    external: Option<&Path>,
+/// Runner, client resolution/command construction and standalone fake-agent
+/// entries all use this decision. No location, name or declaration grants trust.
+/// A scoped engine request also requires the unavailable disposable provider.
+pub(crate) fn admit_launch(
+    client: Option<&Path>,
+    backend: Option<&Path>,
     scoped: bool,
+    real_driver: bool,
 ) -> Result<(), &'static str> {
-    if external.is_some() || scoped {
+    if backend.is_some() || scoped {
         Err(EXTERNAL_GCU_REFUSED)
+    } else if client.is_some() || real_driver {
+        Err(ATTEST_REQUIRED)
     } else {
         Ok(())
-    }
-}
-
-/// Regular file named `stem` in this process's cargo output directory.
-///
-/// Cargo puts test binaries in `deps/` and the package binaries next to that
-/// directory. A symlink is not the artifact. This does not detect a hard link
-/// that has replaced the artifact in that directory.
-/// Used only for the explicit fake-client test slot, never backend admission.
-pub(crate) fn is_builtin_artifact(path: &Path, stem: &str) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return false;
-    }
-    let mut expected = stem.to_string();
-    if cfg!(windows) {
-        expected.push_str(".exe");
-    }
-    if path.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
-        return false;
-    }
-    let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
-        return false;
-    };
-    let Some(dir) = artifact_dir() else {
-        return false;
-    };
-    same_directory(parent, &dir)
-}
-
-fn artifact_dir() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    if dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        dir.parent().map(Path::to_path_buf)
-    } else {
-        Some(dir.to_path_buf())
-    }
-}
-
-fn same_directory(left: &Path, right: &Path) -> bool {
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left_real), Ok(right_real)) => left_real == right_real,
-        _ => left == right,
     }
 }
 
@@ -169,13 +106,13 @@ mod tests {
     }
 
     #[test]
-    fn builtin_fake_does_not_require_attestation_until_the_driver_is_real() {
+    fn explicit_client_is_external_even_with_builtin_fake_selected() {
         let builtin = RunConfig {
             builtin_fake: true,
             grok_bin: Some(PathBuf::from("/tmp/eval-fake-agent")),
             ..cfg()
         };
-        assert!(!launches_real_client(&builtin));
+        assert!(launches_real_client(&builtin));
         assert!(real_launch_block(false, false, false).is_none());
         let real = RunConfig {
             builtin_fake: true,
@@ -195,7 +132,7 @@ mod tests {
             ..cfg()
         };
         assert_eq!(
-            admit_fake_backend(external.gcu_bin.as_deref(), false),
+            admit_launch(None, external.gcu_bin.as_deref(), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
         let flagged = RunConfig {
@@ -203,43 +140,55 @@ mod tests {
             ..external.clone()
         };
         assert_eq!(
-            admit_fake_backend(flagged.gcu_bin.as_deref(), false),
+            admit_launch(None, flagged.gcu_bin.as_deref(), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
-        let reexec = RunConfig {
+        let in_process = RunConfig {
             builtin_fake: true,
             builtin_gcu: true,
             gcu_bin: None,
             ..cfg()
         };
-        assert!(admit_fake_backend(reexec.gcu_bin.as_deref(), false).is_ok());
-        assert_eq!(admit_fake_backend(None, true), Err(EXTERNAL_GCU_REFUSED));
+        assert!(admit_launch(None, in_process.gcu_bin.as_deref(), false, false).is_ok());
+        assert_eq!(
+            admit_launch(None, None, true, false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
         let attested = RunConfig {
             attest_disposable_desktop: true,
             builtin_gcu: false,
             ..external
         };
         assert_eq!(
-            admit_fake_backend(attested.gcu_bin.as_deref(), false),
+            admit_launch(None, attested.gcu_bin.as_deref(), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
         assert_eq!(
-            admit_fake_backend(Some(Path::new("")), false),
+            admit_launch(None, Some(Path::new("")), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
     }
 
     #[test]
-    fn builtin_path_outside_the_artifact_dir_is_an_external_client() {
+    fn explicit_paths_never_select_in_process_code() {
         let wrapped = RunConfig {
             builtin_fake: true,
-            builtin_fake_bin: Some(PathBuf::from("/tmp/eval-fake-agent")),
+            grok_bin: Some(PathBuf::from("/tmp/eval-fake-agent")),
             ..cfg()
         };
         assert!(launches_real_client(&wrapped));
+        assert_eq!(
+            admit_launch(wrapped.grok_bin.as_deref(), None, false, false),
+            Err(ATTEST_REQUIRED)
+        );
+        assert_eq!(
+            admit_launch(Some(Path::new("")), None, false, false),
+            Err(ATTEST_REQUIRED)
+        );
+        assert!(admit_launch(None, None, false, false).is_ok());
         assert_eq!(real_launch_block(true, false, false), Some(ATTEST_REQUIRED));
         assert_eq!(
-            admit_fake_backend(Some(Path::new("/tmp/eval-fake-gcu")), false),
+            admit_launch(None, Some(Path::new("/tmp/eval-fake-gcu")), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
     }

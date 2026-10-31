@@ -36,10 +36,6 @@ fn bin(name: &str) -> PathBuf {
     path
 }
 
-fn agent() -> PathBuf {
-    bin("eval-fake-agent")
-}
-
 fn gcu() -> PathBuf {
     bin("eval-fake-gcu")
 }
@@ -115,14 +111,14 @@ fn remove_marked_roots(lines: &[String]) {
 }
 
 #[test]
-fn builtin_fake_bin_wrapper_without_attestation_is_not_started() {
+fn explicit_fake_named_client_without_provider_is_not_started() {
     let dir = scratch("fake-slot");
     let marker = dir.join("started");
     let wrapper = dir.join("eval-fake-agent");
     touch_script(&wrapper, &marker);
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(wrapper),
+        grok_bin: Some(wrapper),
         builtin_gcu: false,
         platform: host_platform().into(),
         include_desktop: false,
@@ -139,7 +135,7 @@ fn builtin_fake_bin_wrapper_without_attestation_is_not_started() {
     );
     assert!(
         !marker.exists(),
-        "builtin_fake_bin wrapper was started without attestation"
+        "external fake-named client was started without provider"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -152,7 +148,6 @@ fn builtin_gcu_wrapper_without_attestation_is_not_started() {
     touch_script(&wrapper, &marker);
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
         gcu_bin: Some(wrapper),
         platform: host_platform().into(),
@@ -250,7 +245,6 @@ fn ab_cleanup_failure_on_desktop_oneshot_stops_later_arms() {
     task.id = "desktop-oneshot".into();
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
         gcu_bin: None,
         probe: Some(dir.join("probe.json")),

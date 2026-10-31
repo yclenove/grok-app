@@ -1,5 +1,5 @@
 //! Round-2 S6: actual run_tasks/run_ab with the genuine S3 executable available.
-//! Harness-free to re-enter eval's genuine fake client through its production entry.
+//! Fake client and backend use the production in-process implementations.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gcu_eval::{
@@ -37,8 +37,6 @@ fn tasks() -> [Task; 2] {
 fn config() -> RunConfig {
     RunConfig {
         builtin_fake: true,
-        // Self-reentry below uses the same entry as the production gcu-eval CLI.
-        builtin_fake_bin: None,
         builtin_gcu: true,
         platform: host_platform().into(),
         behavior: Some("scripted".into()),
@@ -149,9 +147,6 @@ async fn check() {
 }
 
 fn main() -> ExitCode {
-    if std::env::args().nth(1).as_deref() == Some(gcu_eval::INTERNAL_FAKE_AGENT) {
-        return gcu_eval::builtin_fake_agent_exit();
-    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

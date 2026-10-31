@@ -398,7 +398,17 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
 /// Provenance stays `not_run` until a task client actually starts, independently
 /// of trial status (including setup errors and failed cleanup).
 pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport {
-    if !base.builtin_fake && base.grok_bin.is_none() {
+    if !base.builtin_fake
+        && base.grok_bin.is_none()
+        && base.run_local
+        && crate::boundary::admit_launch(
+            base.grok_bin.as_deref(),
+            base.gcu_bin.as_deref(),
+            base.fake_scope.is_some(),
+            base.real_driver,
+        )
+        .is_ok()
+    {
         return not_run_report(tasks, id);
     }
     let mut report = blank_report(id, Provenance::NotRun, false);

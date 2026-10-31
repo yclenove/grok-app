@@ -135,7 +135,8 @@ impl InheritedStop {
 /// A tool or side log is available only after the backend writes `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Assurance {
-    /// The task client was spawned, even if scoring or cleanup later failed.
+    /// The task client began execution (in process for fake, spawned for external),
+    /// even if scoring or cleanup later failed.
     /// False for setup failures and rows skipped after an earlier failure.
     #[serde(default)]
     pub client_started: bool,

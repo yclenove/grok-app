@@ -244,3 +244,7 @@ async fn read_capped(mut pipe: impl tokio::io::AsyncRead + Unpin, limit: usize) 
         incomplete,
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "proc_tests.rs"]
+mod tests;

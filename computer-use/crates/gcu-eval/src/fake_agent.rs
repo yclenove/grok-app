@@ -1,273 +1,351 @@
 //! Scripted stand-in for the Grok CLI. It never calls a model API.
 //!
-//! Behavior comes from `GCU_EVAL_BEHAVIOR`. The process writes the fixture
+//! Behavior comes from `GCU_EVAL_BEHAVIOR`. The invocation writes the fixture
 //! state, a transcript, and a probe, then calls the in-process fake backend.
 //! Any supplied `GCU_BIN` is refused by the same decision as the runner,
 //! including copied siblings and genuine offline executables.
 
+use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Run the built-in fake agent and return a process status code.
 #[must_use]
 pub fn builtin_fake_agent_entry() -> u8 {
-    match run() {
-        Ok(code) => code,
+    let mut env: BTreeMap<String, String> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    // Preserve Windows' case-insensitive environment lookup and refuse even
+    // non-UTF8/empty paths before any behavior can run.
+    if let Some(external) = std::env::var_os("GCU_BIN") {
+        env.insert("GCU_BIN".into(), external.to_string_lossy().into_owned());
+    }
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let work = match std::env::current_dir() {
+        Ok(work) => work,
         Err(err) => {
             eprintln!("eval-fake-agent: {err}");
+            return 1;
+        }
+    };
+    let mut invocation = Invocation {
+        work: &work,
+        env: &env,
+        args: &args,
+        output: Vec::new(),
+    };
+    match crate::block_on(invocation.run()) {
+        Ok(Ok(code)) => {
+            if std::io::stdout().write_all(&invocation.output).is_err() {
+                return 1;
+            }
+            code
+        }
+        result => {
+            eprintln!("eval-fake-agent: {result:?}");
             1
         }
     }
 }
 
-fn run() -> Result<u8, String> {
-    let external = std::env::var_os("GCU_BIN").map(std::path::PathBuf::from);
-    crate::boundary::admit_fake_backend(external.as_deref(), false).map_err(str::to_string)?;
-    if tool_probe() {
-        let body = serde_json::json!({ "tools": crate::EXPECTED_PREFLIGHT_TOOLS });
-        println!(
-            "{}",
-            serde_json::to_string(&body).map_err(|err| err.to_string())?
-        );
-        return Ok(0);
+/// Invocation-local data: fake execution never changes the process environment.
+struct Invocation<'a> {
+    work: &'a Path,
+    env: &'a BTreeMap<String, String>,
+    args: &'a [String],
+    output: Vec<u8>,
+}
+
+/// Execute the same fake implementation used by both standalone entries.
+/// The runner supplies its isolated map directly; there is no executable path.
+pub(crate) async fn execute(
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    work: &Path,
+    limit: std::time::Duration,
+) -> crate::proc::Finished {
+    let mut invocation = Invocation {
+        work,
+        env,
+        args,
+        output: Vec::new(),
+    };
+    let result = tokio::time::timeout(limit, invocation.run()).await;
+    let timed_out = result.is_err();
+    let exit_code = match result {
+        Ok(Ok(code)) => Some(i32::from(code)),
+        Ok(Err(_)) => Some(1),
+        Err(_) => None,
+    };
+    let overflow = invocation.output.len() > 1_048_576;
+    invocation.output.truncate(1_048_576);
+    crate::proc::Finished {
+        timed_out,
+        exit_code,
+        wait_failed: false,
+        stdout: crate::proc::PipeCapture {
+            bytes: invocation.output,
+            overflow,
+            incomplete: false,
+        },
+        capture_incomplete: false,
     }
-    // Prove this process covered the invocation before any tool or shim line.
-    ensure_handshake("GCU_EVAL_TOOL_LOG")?;
-    ensure_handshake("GCU_EVAL_SIDE_LOG")?;
-    let behavior = std::env::var("GCU_EVAL_BEHAVIOR").unwrap_or_else(|_| "scripted".into());
-    write_probe()?;
-    match behavior.as_str() {
-        "timeout" => {
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            Ok(0)
+}
+
+impl Invocation<'_> {
+    async fn run(&mut self) -> Result<u8, String> {
+        let external = self.env.get("GCU_BIN").map(Path::new);
+        crate::boundary::admit_launch(None, external, false, false).map_err(str::to_string)?;
+        if self.tool_probe() {
+            let body = serde_json::json!({ "tools": crate::EXPECTED_PREFLIGHT_TOOLS });
+            self.output = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
+            self.output.push(b'\n');
+            return Ok(0);
         }
-        "crash" => {
-            invoke(&["call", "list_apps", "--args", "{}"])?;
-            Ok(101)
-        }
-        "fail" => {
-            write_state(br#"{"form":{"name":"nope","agree":false,"submitted_count":0}}"#)?;
-            write_transcript(true)?;
-            Ok(0)
-        }
-        "partial" => {
-            write_state(
-                r#"{"form":{"name":"张三","agree":false,"submitted_count":0}}"#.as_bytes(),
-            )?;
-            write_transcript(true)?;
-            Ok(0)
-        }
-        "side_effect" => {
-            write_pass_state()?;
-            if let Ok(path) = std::env::var("GCU_EVAL_WATCH_FILE") {
-                std::fs::write(path, b"pwned-secret").map_err(|err| err.to_string())?;
+        // Prove this implementation covered the invocation before any tool or shim line.
+        self.ensure_handshake("GCU_EVAL_TOOL_LOG")?;
+        self.ensure_handshake("GCU_EVAL_SIDE_LOG")?;
+        let behavior = self
+            .env
+            .get("GCU_EVAL_BEHAVIOR")
+            .cloned()
+            .unwrap_or_else(|| "scripted".into());
+        self.write_probe()?;
+        match behavior.as_str() {
+            "timeout" => {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(0)
             }
-            append_side("process curl\nnetwork example.invalid\n")?;
-            invoke_suite()?;
-            write_transcript(true)?;
-            Ok(0)
-        }
-        "unknown" => {
-            write_pass_state()?;
-            invoke_suite()?;
-            append_tool(r#"{"tool":"not_a_tool","result":"ok"}"#)?;
-            append_tool(r#"{"tool":"read_file_SENSITIVEVALUE","result":"ok"}"#)?;
-            append_tool(r#"{"tool":"click","result":"unknown"}"#)?;
-            write_transcript(true)?;
-            Ok(0)
-        }
-        "oversubmit" => {
-            write_state(r#"{"form":{"name":"张三","agree":true,"submitted_count":2}}"#.as_bytes())?;
-            write_transcript(true)?;
-            Ok(0)
-        }
-        "disabled" => {
-            write_pass_state()?;
-            append_tool(r#"{"tool":"shell","result":"ok"}"#)?;
-            write_transcript(true)?;
-            Ok(0)
-        }
-        "omit_tokens" => {
-            write_pass_state()?;
-            invoke_suite()?;
-            write_transcript_body(true, false)?;
-            Ok(0)
-        }
-        // Grandchild stays in this process group. The runner must kill the
-        // group on timeout; killing only this process leaves `sleep` behind.
-        "spawn_sleeper" => {
-            let marker = std::env::var("GCU_EVAL_WATCH_FILE").map_err(|err| err.to_string())?;
-            let child = std::process::Command::new("/bin/sleep")
-                .arg("300")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|err| err.to_string())?;
-            std::fs::write(&marker, child.id().to_string()).map_err(|err| err.to_string())?;
-            std::mem::forget(child);
-            std::thread::sleep(std::time::Duration::from_secs(300));
-            Ok(0)
-        }
-        "pipe_flood" => {
-            let chunk = vec![b'y'; 8192];
-            let mut out = std::io::stdout();
-            let mut err = std::io::stderr();
-            for _ in 0..128 {
-                out.write_all(&chunk).map_err(|err| err.to_string())?;
-                err.write_all(&chunk).map_err(|err| err.to_string())?;
+            "crash" => {
+                self.invoke(&["call", "list_apps", "--args", "{}"])?;
+                Ok(101)
             }
-            out.flush().map_err(|err| err.to_string())?;
-            err.flush().map_err(|err| err.to_string())?;
-            write_pass_state()?;
-            write_transcript(true)?;
-            Ok(0)
+            "fail" => {
+                self.write_state(br#"{"form":{"name":"nope","agree":false,"submitted_count":0}}"#)?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            "partial" => {
+                self.write_state(
+                    r#"{"form":{"name":"张三","agree":false,"submitted_count":0}}"#.as_bytes(),
+                )?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            "side_effect" => {
+                self.write_pass_state()?;
+                if let Some(path) = self.env.get("GCU_EVAL_WATCH_FILE") {
+                    std::fs::write(self.resolve_path(path), b"pwned-secret")
+                        .map_err(|err| err.to_string())?;
+                }
+                self.append_side("process curl\nnetwork example.invalid\n")?;
+                self.invoke_suite()?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            "unknown" => {
+                self.write_pass_state()?;
+                self.invoke_suite()?;
+                self.append_tool(r#"{"tool":"not_a_tool","result":"ok"}"#)?;
+                self.append_tool(r#"{"tool":"read_file_SENSITIVEVALUE","result":"ok"}"#)?;
+                self.append_tool(r#"{"tool":"click","result":"unknown"}"#)?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            "oversubmit" => {
+                self.write_state(
+                    r#"{"form":{"name":"张三","agree":true,"submitted_count":2}}"#.as_bytes(),
+                )?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            "disabled" => {
+                self.write_pass_state()?;
+                self.append_tool(r#"{"tool":"shell","result":"ok"}"#)?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            "omit_tokens" => {
+                self.write_pass_state()?;
+                self.invoke_suite()?;
+                self.write_transcript_body(true, false)?;
+                Ok(0)
+            }
+            "pipe_flood" => {
+                // Synthetic output; real pipe/group lifetime checks live in proc tests.
+                self.output.resize(8192 * 128, b'y');
+                self.write_pass_state()?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
+            _ => {
+                self.write_pass_state()?;
+                self.invoke_suite()?;
+                self.write_transcript(true)?;
+                Ok(0)
+            }
         }
-        _ => {
-            write_pass_state()?;
-            invoke_suite()?;
-            write_transcript(true)?;
-            Ok(0)
+    }
+
+    fn tool_probe(&self) -> bool {
+        let mut args = self.args.iter();
+        while let Some(arg) = args.next() {
+            if arg == "-p" {
+                return args.next().map(String::as_str) == Some(crate::CLIENT_TOOL_PROBE_PROMPT);
+            }
+        }
+        false
+    }
+
+    fn invoke_suite(&self) -> Result<(), String> {
+        self.invoke(&["call", "list_apps", "--args", "{}"])?;
+        self.invoke(&["call", "list_apps", "--args", "{}"])?;
+        self.invoke(&["call", "get_app_state", "--args", "{}"])?;
+        self.invoke(&["mcp", "--driver", "fake", "--scene", "form"])?;
+        Ok(())
+    }
+
+    fn invoke(&self, args: &[&str]) -> Result<(), String> {
+        crate::fake_gcu::run(args, Path::new(&self.required_path("GCU_EVAL_TOOL_LOG")?))
+    }
+
+    fn write_pass_state(&self) -> Result<(), String> {
+        let path = self.required_path("GCU_EVAL_PASS_SCRIPT")?;
+        let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
+        let state = value
+            .get("state")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let body = serde_json::to_vec(&state).map_err(|err| err.to_string())?;
+        self.write_state(&body)
+    }
+
+    fn write_state(&self, bytes: &[u8]) -> Result<(), String> {
+        let path = self.required_path("GCU_FIXTURE_STATE")?;
+        std::fs::write(path, bytes).map_err(|err| err.to_string())
+    }
+
+    fn write_transcript(&self, claimed_done: bool) -> Result<(), String> {
+        self.write_transcript_body(claimed_done, true)
+    }
+
+    fn write_transcript_body(&self, claimed_done: bool, tokens: bool) -> Result<(), String> {
+        let home = self.required_path("GROK_HOME")?;
+        let mut body = serde_json::json!({
+            "claimed_done": claimed_done,
+            "images": 0,
+            "image_bytes": 0,
+            "extra_approvals": 0,
+            "turns": 2
+        });
+        if tokens {
+            body["tokens_in"] = serde_json::json!(12);
+            body["tokens_out"] = serde_json::json!(4);
+        }
+        let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
+        std::fs::write(Path::new(&home).join("transcript.json"), bytes)
+            .map_err(|err| err.to_string())
+    }
+
+    fn ensure_handshake(&self, key: &str) -> Result<(), String> {
+        let Some(path) = self.env.get(key) else {
+            return Ok(());
+        };
+        if path.is_empty() {
+            return Ok(());
+        }
+        let path = self.resolve_path(path);
+        match std::fs::read_to_string(&path) {
+            Ok(text) if !text.is_empty() => Ok(()),
+            _ => std::fs::write(path, format!("{}\n", crate::exec::TELEMETRY_HANDSHAKE))
+                .map_err(|err| err.to_string()),
         }
     }
-}
 
-fn tool_probe() -> bool {
-    let mut args = std::env::args();
-    while let Some(arg) = args.next() {
-        if arg == "-p" {
-            return args.next().as_deref() == Some(crate::CLIENT_TOOL_PROBE_PROMPT);
+    fn append_side(&self, text: &str) -> Result<(), String> {
+        let path = self.required_path("GCU_EVAL_SIDE_LOG")?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|err| err.to_string())?;
+        file.write_all(text.as_bytes())
+            .map_err(|err| err.to_string())
+    }
+
+    fn append_tool(&self, line: &str) -> Result<(), String> {
+        let path = self.required_path("GCU_EVAL_TOOL_LOG")?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|err| err.to_string())?;
+        writeln!(file, "{line}").map_err(|err| err.to_string())
+    }
+
+    fn write_probe(&self) -> Result<(), String> {
+        let Some(path) = self.env.get("GCU_EVAL_PROBE") else {
+            return Ok(());
+        };
+        let path = self.resolve_path(path);
+        let keys: Vec<&String> = self.env.keys().collect();
+        let argv = self.args;
+        let config = self.config_text();
+        let body = serde_json::json!({
+            "argv": argv,
+            "env_keys": keys,
+            "grok_home": self.env_text("GROK_HOME"),
+            "home": self.env_text("HOME"),
+            "path": self.env_text("PATH"),
+            "approval": self.env_text("GCU_APPROVAL"),
+            "mcp_profile": flag_value(&config, "--profile"),
+            "arm": quoted_assign(&config, "arm"),
+            "screenshot": quoted_assign(&config, "screenshot"),
+            "diff": quoted_assign(&config, "diff"),
+            "batch": bool_assign(&config, "batch"),
+            "script": bool_assign(&config, "script"),
+        });
+        let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
+        std::fs::write(path, bytes).map_err(|err| err.to_string())
+    }
+
+    fn env_text(&self, key: &str) -> String {
+        self.env.get(key).cloned().unwrap_or_default()
+    }
+
+    fn config_text(&self) -> String {
+        let Some(home) = self.env.get("GROK_HOME") else {
+            return String::new();
+        };
+        std::fs::read_to_string(self.resolve_path(home).join("config.toml")).unwrap_or_default()
+    }
+
+    fn required_path(&self, key: &str) -> Result<PathBuf, String> {
+        self.env
+            .get(key)
+            .map(|path| self.resolve_path(path))
+            .ok_or_else(|| format!("missing fake invocation key: {key}"))
+    }
+
+    fn resolve_path(&self, path: impl AsRef<Path>) -> PathBuf {
+        let path = path.as_ref();
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.work.join(path)
         }
     }
-    false
-}
-
-fn invoke_suite() -> Result<(), String> {
-    invoke(&["call", "list_apps", "--args", "{}"])?;
-    invoke(&["call", "list_apps", "--args", "{}"])?;
-    invoke(&["call", "get_app_state", "--args", "{}"])?;
-    invoke(&["mcp", "--driver", "fake", "--scene", "form"])?;
-    Ok(())
-}
-
-fn invoke(args: &[&str]) -> Result<(), String> {
-    crate::fake_gcu::run(args)
-}
-
-fn write_pass_state() -> Result<(), String> {
-    let path = std::env::var("GCU_EVAL_PASS_SCRIPT").map_err(|err| err.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
-    let state = value
-        .get("state")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let body = serde_json::to_vec(&state).map_err(|err| err.to_string())?;
-    write_state(&body)
-}
-
-fn write_state(bytes: &[u8]) -> Result<(), String> {
-    let path = std::env::var("GCU_FIXTURE_STATE").map_err(|err| err.to_string())?;
-    std::fs::write(path, bytes).map_err(|err| err.to_string())
-}
-
-fn write_transcript(claimed_done: bool) -> Result<(), String> {
-    write_transcript_body(claimed_done, true)
-}
-
-fn write_transcript_body(claimed_done: bool, tokens: bool) -> Result<(), String> {
-    let home = std::env::var("GROK_HOME").map_err(|err| err.to_string())?;
-    let mut body = serde_json::json!({
-        "claimed_done": claimed_done,
-        "images": 0,
-        "image_bytes": 0,
-        "extra_approvals": 0,
-        "turns": 2
-    });
-    if tokens {
-        body["tokens_in"] = serde_json::json!(12);
-        body["tokens_out"] = serde_json::json!(4);
-    }
-    let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
-    std::fs::write(Path::new(&home).join("transcript.json"), bytes).map_err(|err| err.to_string())
-}
-
-fn ensure_handshake(key: &str) -> Result<(), String> {
-    let Ok(path) = std::env::var(key) else {
-        return Ok(());
-    };
-    if path.is_empty() {
-        return Ok(());
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(text) if !text.is_empty() => Ok(()),
-        _ => std::fs::write(path, format!("{}\n", crate::exec::TELEMETRY_HANDSHAKE))
-            .map_err(|err| err.to_string()),
-    }
-}
-
-fn append_side(text: &str) -> Result<(), String> {
-    let path = std::env::var("GCU_EVAL_SIDE_LOG").map_err(|err| err.to_string())?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| err.to_string())?;
-    file.write_all(text.as_bytes())
-        .map_err(|err| err.to_string())
-}
-
-fn append_tool(line: &str) -> Result<(), String> {
-    let path = std::env::var("GCU_EVAL_TOOL_LOG").map_err(|err| err.to_string())?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| err.to_string())?;
-    writeln!(file, "{line}").map_err(|err| err.to_string())
-}
-
-fn write_probe() -> Result<(), String> {
-    let Ok(path) = std::env::var("GCU_EVAL_PROBE") else {
-        return Ok(());
-    };
-    let mut keys = Vec::new();
-    for (key, _) in std::env::vars_os() {
-        keys.push(key.to_string_lossy().into_owned());
-    }
-    keys.sort();
-    let argv: Vec<String> = std::env::args_os()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    let config = config_text();
-    let body = serde_json::json!({
-        "argv": argv,
-        "env_keys": keys,
-        "grok_home": env_text("GROK_HOME"),
-        "home": env_text("HOME"),
-        "path": env_text("PATH"),
-        "approval": env_text("GCU_APPROVAL"),
-        "mcp_profile": flag_value(&config, "--profile"),
-        "arm": quoted_assign(&config, "arm"),
-        "screenshot": quoted_assign(&config, "screenshot"),
-        "diff": quoted_assign(&config, "diff"),
-        "batch": bool_assign(&config, "batch"),
-        "script": bool_assign(&config, "script"),
-    });
-    let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
-    std::fs::write(path, bytes).map_err(|err| err.to_string())
-}
-
-fn env_text(key: &str) -> String {
-    std::env::var(key).unwrap_or_default()
-}
-
-fn config_text() -> String {
-    let Ok(home) = std::env::var("GROK_HOME") else {
-        return String::new();
-    };
-    std::fs::read_to_string(Path::new(&home).join("config.toml")).unwrap_or_default()
 }
 
 fn flag_value(text: &str, flag: &str) -> String {

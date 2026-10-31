@@ -98,7 +98,6 @@ fn run_arm(task: &Task, arm: ArmId, behavior: &str, dir: &Path) -> AbTrial {
     };
     let mut cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
         builtin_gcu: true,
         gcu_bin: None,
         platform: host_platform().into(),
@@ -435,7 +434,6 @@ fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
     let task = named("native-form-01");
     let fake = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
         builtin_gcu: true,
         gcu_bin: None,
         platform: host_platform().into(),
@@ -452,7 +450,7 @@ fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
             ..RunConfig::default()
         },
         RunConfig {
-            grok_bin: fake.builtin_fake_bin.clone(),
+            grok_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
             attest_disposable_desktop: true,
             auto_approve: true,
             ..RunConfig::default()
@@ -573,7 +571,6 @@ fn halted_tasks_and_ab_repeats_report_inherited_stop_without_new_observations() 
 fn empty_or_rejected_tasks_do_not_claim_runner_provenance() {
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
         builtin_gcu: true,
         gcu_bin: None,
         platform: host_platform().into(),
@@ -613,7 +610,6 @@ fn started_clients_keep_runner_provenance_even_without_metrics() {
     ] {
         let cfg = RunConfig {
             builtin_fake: true,
-            builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
             builtin_gcu: true,
             gcu_bin: None,
             platform: host_platform().into(),

@@ -3,7 +3,7 @@
 //! Every real client gets the same `--tools` allow-list, cleared environment,
 //! and proxy forwarding. The eval fake agent keeps the narrower test path.
 
-use crate::boundary::{launches_real_client, INTERNAL_FAKE_AGENT};
+use crate::boundary::{admit_launch, launches_real_client};
 use crate::runner::{ApprovalMode, Environment, RunConfig};
 use crate::tasks::Task;
 use crate::Error;
@@ -47,55 +47,51 @@ pub(crate) fn grok_args(task: &Task, cfg: &RunConfig) -> Vec<String> {
     args
 }
 
-/// How the runner starts the client. `Reexec` is this process, not a path the operator passed.
+/// Fake selection carries no executable path.
+#[derive(Debug)]
 pub(crate) enum ClientProgram {
-    /// Operator path or the cargo-built fake agent selected by the test slot.
-    Path(std::path::PathBuf),
-    /// `gcu-eval` re-entering as the built-in fake agent.
-    Reexec(std::path::PathBuf),
+    BuiltinFake,
+    External(std::path::PathBuf),
 }
 
 impl ClientProgram {
-    /// Path or executable used for logs and the preflight cache. Not a trust decision.
-    pub(crate) fn identity_path(&self) -> &std::path::Path {
+    /// External identity for preflight caching; fake code has no file identity.
+    pub(crate) fn identity_path(&self) -> Option<&std::path::Path> {
         match self {
-            Self::Path(path) | Self::Reexec(path) => path,
+            Self::BuiltinFake => None,
+            Self::External(path) => Some(path),
         }
     }
 }
 
-/// Resolve the client. A trusted `builtin_fake` slot ignores `grok_bin`.
-///
-/// An untrusted `builtin_fake_bin` is returned as an ordinary path. The caller
-/// must treat that launch as external; this function does not start it.
+/// Resolve only after the same admission decision used by the runner/helper.
 pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
-    if crate::boundary::builtin_fake_trusted(cfg) {
-        if let Some(path) = &cfg.builtin_fake_bin {
-            return Ok(ClientProgram::Path(path.clone()));
-        }
-        let exe = std::env::current_exe()
-            .map_err(|err| Error::msg(format!("builtin fake agent: {err}")))?;
-        return Ok(ClientProgram::Reexec(exe));
+    admit_launch(
+        cfg.grok_bin.as_deref(),
+        cfg.gcu_bin.as_deref(),
+        cfg.fake_scope.is_some(),
+        cfg.real_driver,
+    )
+    .map_err(Error::msg)?;
+    if let Some(path) = &cfg.grok_bin {
+        return Ok(ClientProgram::External(path.clone()));
     }
-    if let Some(path) = cfg
-        .builtin_fake
-        .then(|| cfg.builtin_fake_bin.clone())
-        .flatten()
-        .or_else(|| cfg.grok_bin.clone())
-    {
-        return Ok(ClientProgram::Path(path));
+    if cfg.builtin_fake {
+        return Ok(ClientProgram::BuiltinFake);
     }
     Err(Error::msg("no client binary and no model credentials"))
 }
 
-/// Command for `program`. The re-exec form adds the internal fake-agent flag.
-pub(crate) fn client_command(program: &ClientProgram) -> tokio::process::Command {
+/// External commands require admission even if resolution was bypassed.
+/// No fake selection can be converted into a process command.
+pub(crate) fn client_command(
+    program: &ClientProgram,
+) -> Result<tokio::process::Command, &'static str> {
     match program {
-        ClientProgram::Path(path) => tokio::process::Command::new(path),
-        ClientProgram::Reexec(exe) => {
-            let mut command = tokio::process::Command::new(exe);
-            command.arg(INTERNAL_FAKE_AGENT);
-            command
+        ClientProgram::BuiltinFake => Err("the fake client runs in process"),
+        ClientProgram::External(path) => {
+            admit_launch(Some(path), None, false, false)?;
+            Ok(tokio::process::Command::new(path))
         }
     }
 }
@@ -320,6 +316,50 @@ mod tests {
             "--output-format".into(),
             "json".into(),
         ]
+    }
+
+    #[test]
+    fn fake_selection_has_no_path_and_unverified_paths_never_build_commands() {
+        let cfg = RunConfig {
+            builtin_fake: true,
+            ..RunConfig::default()
+        };
+        let program = resolve_client(&cfg).unwrap();
+        assert!(matches!(program, ClientProgram::BuiltinFake));
+        assert!(program.identity_path().is_none());
+        assert!(client_command(&program).is_err());
+        for path in [
+            "eval-fake-agent",
+            "eval-fake-agent.exe",
+            "eval-fake-gcu",
+            "gcu-eval",
+            "",
+        ] {
+            let path = std::path::PathBuf::from(path);
+            // Even bypassing resolution cannot build a Command from a fake-named path.
+            assert!(client_command(&ClientProgram::External(path.clone())).is_err());
+            assert!(resolve_client(&RunConfig {
+                grok_bin: Some(path.clone()),
+                ..cfg.clone()
+            })
+            .is_err());
+            assert!(resolve_client(&RunConfig {
+                gcu_bin: Some(path),
+                ..cfg.clone()
+            })
+            .is_err());
+        }
+        // Keep both in-process implementations free of subprocess launch APIs.
+        for source in [include_str!("fake_agent.rs"), include_str!("fake_gcu.rs")] {
+            for forbidden in ["Command", "std::process::", "tokio::process::"] {
+                // ExitCode is just the standalone binary's status adapter.
+                let source = source.replace("use std::process::ExitCode;", "");
+                assert!(
+                    !source.contains(forbidden),
+                    "fake implementation gained {forbidden}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -11,7 +11,11 @@ use std::process::ExitCode;
 pub fn builtin_fake_gcu_entry() -> u8 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match run(&args) {
+    let Some(log) = std::env::var_os("GCU_EVAL_TOOL_LOG") else {
+        eprintln!("eval-fake-gcu: missing tool log");
+        return 1;
+    };
+    match run(&args, std::path::Path::new(&log)) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("eval-fake-gcu: {err}");
@@ -20,16 +24,15 @@ pub fn builtin_fake_gcu_entry() -> u8 {
     }
 }
 
-pub(crate) fn run(args: &[&str]) -> Result<(), String> {
+pub(crate) fn run(args: &[&str], path: &std::path::Path) -> Result<(), String> {
     let tool = tool_name(args);
-    let path = std::env::var("GCU_EVAL_TOOL_LOG").map_err(|err| err.to_string())?;
     let line = serde_json::json!({"tool": tool, "result": "ok"});
     let text = serde_json::to_string(&line).map_err(|err| err.to_string())?;
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|err| err.to_string())?;
     if existing.is_empty() {
         writeln!(file, "{}", crate::exec::TELEMETRY_HANDSHAKE).map_err(|err| err.to_string())?;

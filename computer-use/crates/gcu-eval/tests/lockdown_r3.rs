@@ -131,17 +131,8 @@ fn same_name_wrapper_copy_and_hard_link_still_need_attestation() {
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("attest-disposable-desktop"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("provider_unavailable"));
     assert!(!marker.exists(), "the CLI started the same-named wrapper");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -154,7 +145,6 @@ fn builtin_fake_does_not_start_an_external_gcu_without_attestation() {
     touch_script(&wrap, &marker, None);
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: false,
         gcu_bin: Some(wrap),
         platform: host_platform().into(),
@@ -226,7 +216,6 @@ fn cleanup_failure_does_not_start_the_next_client() {
     let probe = dir.join("probe.json");
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
         gcu_bin: None,
         platform: host_platform().into(),
@@ -344,7 +333,6 @@ fn populate_failure_reports_the_leftover_when_cleanup_also_fails() {
     gcu_eval::testing_fail_next_removal();
     let cfg = RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
         gcu_bin: None,
         platform: host_platform().into(),

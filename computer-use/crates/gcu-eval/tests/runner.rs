@@ -55,7 +55,6 @@ fn eval_bin() -> PathBuf {
 fn cfg_for(dir: &Path, behavior: &str) -> RunConfig {
     RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
         gcu_bin: None,
         platform: host_platform().into(),
@@ -464,6 +463,7 @@ fn desktop_provider_and_missing_client_are_not_run() {
         .any(|row| row.id == "desktop-oneshot" && row.reason == DESKTOP_NOT_RUN));
     cfg.run_local = true;
     cfg.grok_bin = None;
+    cfg.gcu_bin = None;
     let skipped = block_on(run_tasks(&loaded[..1], &cfg)).unwrap();
     assert_eq!(skipped.tasks[0].status, RunStatus::NotRun);
     assert!(skipped.tasks[0].reason.contains("no client binary"));
@@ -909,14 +909,14 @@ fn real_driver_without_a_fixture_or_gcu_is_not_run_not_a_silent_fake() {
 }
 
 #[test]
-fn cli_real_driver_flags_are_validated_and_the_default_stays_fake() {
+fn cli_real_driver_reaches_provider_refusal_and_the_default_stays_fake() {
     let missing = Command::new(eval_bin())
         .args(["--suite", "core", "--driver", "real"])
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
-    assert_eq!(missing.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("--driver real"));
+    assert_eq!(missing.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("provider_unavailable"));
     let unknown = Command::new(eval_bin())
         .args(["--suite", "core", "--driver", "other"])
         .env_remove("GCU_APPROVAL")

@@ -50,3 +50,8 @@ workspace = true
 name = "scope_supervisor"
 path = "tests/scope_supervisor.rs"
 harness = false
+
+[[test]]
+name = "offline_admission"
+path = "tests/offline_admission.rs"
+harness = false

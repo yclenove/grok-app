@@ -184,7 +184,8 @@ pub struct SuiteReport {
 /// Knobs for one suite. Paths are binaries and report directories, not user homes.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
-    /// Client binary. `None` skips every task as `not_run`.
+    /// External client binary. Every explicit path requires the disposable provider.
+    /// Without a path, `builtin_fake` selects in-process code; otherwise tasks are `not_run`.
     pub grok_bin: Option<PathBuf>,
     /// `gcu` binary written into the isolated MCP config. Every supplied path
     /// requires the unavailable provider; local fake runs leave this absent.
@@ -243,19 +244,10 @@ pub struct RunConfig {
     /// Operator attestation that this process is on a one-shot isolated desktop with egress
     /// control. Default false. An environment variable cannot set this. It is not proof.
     pub attest_disposable_desktop: bool,
-    /// Use the built-in fake agent. A path in [`RunConfig::grok_bin`] is ignored
-    /// only when this slot is actually the built-in agent.
-    ///
-    /// The CLI sets this from `--builtin-fake` and leaves [`RunConfig::builtin_fake_bin`]
-    /// empty, so the binary re-executes itself. `builtin_fake_bin` is that agent only
-    /// when it is the `eval-fake-agent` artifact beside this executable. Any other
-    /// path is an external client and needs attestation.
+    /// Select the compiled in-process fake client. There is no fake executable slot.
+    /// Any supplied `grok_bin` or `gcu_bin` is external and requires the
+    /// disposable provider, even when this flag is set.
     pub builtin_fake: bool,
-    /// Optional path for the built-in fake agent. The CLI never sets this.
-    ///
-    /// Trusted only for the cargo-built `eval-fake-agent` next to this process.
-    /// A wrapper, copy, or same-named file elsewhere does not skip attestation.
-    pub builtin_fake_bin: Option<PathBuf>,
     /// Legacy declaration retained for config compatibility; grants no admission.
     /// The fake backend runs in process only when `gcu_bin` is absent.
     pub builtin_gcu: bool,
@@ -293,7 +285,6 @@ impl Default for RunConfig {
             auth_seed: None,
             attest_disposable_desktop: false,
             builtin_fake: false,
-            builtin_fake_bin: None,
             builtin_gcu: false,
             preflight: crate::client_tools::PreflightCache::default(),
         }
@@ -374,7 +365,7 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
         Ok(program) => program,
         Err(err) => return skipped(task, cfg, RunStatus::NotRun, &err.to_string()),
     };
-    if !program.identity_path().is_file() {
+    if program.identity_path().is_some_and(|path| !path.is_file()) {
         return skipped(task, cfg, RunStatus::NotRun, "client binary missing");
     }
     if let Some(reason) = crate::boundary::real_launch_block(
