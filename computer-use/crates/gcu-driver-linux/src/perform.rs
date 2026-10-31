@@ -167,15 +167,7 @@ async fn perform_action_inner(
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
-            execute_pointer_drag(
-                x,
-                scope.as_ref(),
-                driver.ledger(),
-                xid,
-                path,
-                cancel,
-            )
-            .await
+            execute_pointer_drag(x, scope.as_ref(), driver.ledger(), xid, path, cancel).await
         }
         DriverAction::TypeText {
             win,
@@ -215,15 +207,7 @@ async fn perform_action_inner(
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
-            execute_type_text_x11(
-                x,
-                scope.as_ref(),
-                driver.ledger(),
-                xid,
-                text,
-                cancel,
-            )
-            .await
+            execute_type_text_x11(x, scope.as_ref(), driver.ledger(), xid, text, cancel).await
         }
         DriverAction::PressKeys { win, chord, route } => {
             if driver.route_is_wayland(win) {
@@ -238,15 +222,7 @@ async fn perform_action_inner(
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
-            execute_press_keys(
-                x,
-                scope.as_ref(),
-                driver.ledger(),
-                xid,
-                chord,
-                cancel,
-            )
-            .await
+            execute_press_keys(x, scope.as_ref(), driver.ledger(), xid, chord, cancel).await
         }
         DriverAction::Activate { win } => {
             if driver.route_is_wayland(win) {

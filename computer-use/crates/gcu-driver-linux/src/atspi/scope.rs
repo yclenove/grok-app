@@ -5,9 +5,9 @@
 //! observation. [`admit_tree`] refuses without copying the registered
 //! incarnation. Handle comparisons below are test-only.
 
+use crate::identity::scope::ScopeBinding;
 #[cfg(test)]
 use crate::identity::scope::{HandleKey, HandleView};
-use crate::identity::scope::ScopeBinding;
 use gcu_core::driver::DriverError;
 #[cfg(test)]
 use gcu_core::model::{NativeHandle, RawTree};

@@ -353,7 +353,10 @@ impl LinuxDriver {
             return false;
         }
         if self.fake_source.is_some() {
-            return self.fake_windows.iter().any(|(_, window)| window.id == win.id);
+            return self
+                .fake_windows
+                .iter()
+                .any(|(_, window)| window.id == win.id);
         }
         self.env.session_type.is_wayland()
             && (win.id.starts_with('/') || win.id.starts_with("wayland"))
@@ -579,8 +582,14 @@ impl LinuxDriver {
             if !binding.oracle().budget_is_live() {
                 return Err(DriverError::ScopeDenied);
             }
-            load_x11_snapshot(binding.gate(), binding.oracle(), &self.stop_latch, server, xid)
-                .await?;
+            load_x11_snapshot(
+                binding.gate(),
+                binding.oracle(),
+                &self.stop_latch,
+                server,
+                xid,
+            )
+            .await?;
         }
         let geometry = binding
             .oracle()
@@ -591,9 +600,14 @@ impl LinuxDriver {
             binding.oracle().clear_x11(xid);
             return Err(DriverError::ScopeDenied);
         }
-        let checked =
-            load_x11_snapshot(binding.gate(), binding.oracle(), &self.stop_latch, server, xid)
-                .await?;
+        let checked = load_x11_snapshot(
+            binding.gate(),
+            binding.oracle(),
+            &self.stop_latch,
+            server,
+            xid,
+        )
+        .await?;
         let again = checked.geometry.ok_or(DriverError::ScopeDenied)?;
         if again != geometry {
             binding.oracle().clear_x11(xid);
@@ -885,7 +899,9 @@ impl InstanceEvidence for LinuxDriver {
             }
             crate::identity::scope::check_process(window.owner(), Some(&live)).ok()?;
         }
-        registered.binding(&live).map(|window| window.owner().clone())
+        registered
+            .binding(&live)
+            .map(|window| window.owner().clone())
     }
 
     fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {

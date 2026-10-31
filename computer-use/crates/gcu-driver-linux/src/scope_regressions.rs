@@ -8,16 +8,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gcu_core::driver::{
-    AppQuery, AppRef, Cancel, Driver, DriverAction, DriverError, NATIVE_TIMEOUT, TreeOpts,
-    WindowRef,
+    AppQuery, AppRef, Cancel, Driver, DriverAction, DriverError, TreeOpts, WindowRef,
+    NATIVE_TIMEOUT,
 };
 use gcu_core::model::NativeHandle;
 use gcu_core::scope::{
     BootIdentity, ExecutableProof, FixtureScope, FixtureTarget, InstanceEvidence, OsStartTime,
     ProcessInstance, RegisteredWindow, ScopeLease, ScopedDriver, WindowBinding,
 };
-use gcu_host_api::testing::FakeUserActivity;
-use gcu_host_api::UserActivity;
 use gcu_protocol::{AppIdentity, AppInfo, Rect, WindowInfo};
 
 use crate::atspi::{FakeNode, FakeSource};
@@ -27,10 +25,6 @@ use crate::x11::{FakeWindow, FakeX, XRootGeometry, XServer, XWindowGeometry};
 
 const BOOT: &str = "boot-a";
 const APP_ID: &str = "org.fixture.App";
-
-fn activity() -> Arc<dyn UserActivity> {
-    Arc::new(FakeUserActivity::new())
-}
 
 fn process(pid: u32, start: u64) -> ProcessInstance {
     ProcessInstance::new(
@@ -66,8 +60,15 @@ fn lease_for(native_id: &str) -> ScopeLease {
 
 fn empty_lease() -> ScopeLease {
     ScopeLease::install(
-        FixtureScope::try_new("run-s10", 1, "engine-s10", "desktop-s10", "lease-s10", vec![])
-            .unwrap(),
+        FixtureScope::try_new(
+            "run-s10",
+            1,
+            "engine-s10",
+            "desktop-s10",
+            "lease-s10",
+            vec![],
+        )
+        .unwrap(),
     )
 }
 
@@ -207,7 +208,11 @@ async fn stalled_x11_evidence_releases_stop_before_the_native_ceiling() {
     let driver = driver.with_x_server(server);
     let (entered, release) = x.arm_metadata_stall();
     let _guard = ReleaseOnDrop(Arc::clone(&release));
-    let scoped = Arc::new(ScopedDriver::new(driver, empty_lease(), activity()));
+    let scoped = Arc::new(ScopedDriver::new(
+        driver,
+        empty_lease(),
+        gcu_core::testing::host::fake_activity(),
+    ));
     let go_release = Arc::new(AtomicBool::new(false));
     let release_done = Arc::new(AtomicBool::new(false));
     let failed = Arc::new(AtomicBool::new(false));
@@ -414,11 +419,18 @@ async fn atspi_path_reuse_publishes_no_replacement_payload() {
     assert_clean(&err.to_string(), &["replacement-canary", "sibling-canary"]);
     let geometry = driver.window_geometry(&win).await.unwrap_err();
     assert_eq!(geometry, DriverError::ScopeDenied);
-    assert_clean(&geometry.to_string(), &["sibling-canary", "replacement-canary"]);
+    assert_clean(
+        &geometry.to_string(),
+        &["sibling-canary", "replacement-canary"],
+    );
     assert!(driver.element_binding(&NativeHandle::new(1u64)).is_none());
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 
-    let scoped = ScopedDriver::new(driver, lease_for("fixture-window"), activity());
+    let scoped = ScopedDriver::new(
+        driver,
+        lease_for("fixture-window"),
+        gcu_core::testing::host::fake_activity(),
+    );
     let err = scoped
         .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
         .await
@@ -427,7 +439,11 @@ async fn atspi_path_reuse_publishes_no_replacement_payload() {
     let listed = scoped.list_windows(Some(&app_ref(info))).await.unwrap();
     assert_clean(
         &format!("{listed:?}"),
-        &["sibling-canary", "replacement-canary", "foreign-destination-canary"],
+        &[
+            "sibling-canary",
+            "replacement-canary",
+            "foreign-destination-canary",
+        ],
     );
     let geometry = scoped.window_geometry(&win).await.unwrap_err();
     assert_eq!(geometry, DriverError::ScopeDenied);
@@ -473,7 +489,11 @@ async fn scoped_tree_reads_no_foreign_or_sibling_content() {
     assert!(driver.element_binding(&NativeHandle::new(2u64)).is_none());
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 
-    let scoped = ScopedDriver::new(driver, lease_for("fixture-window"), activity());
+    let scoped = ScopedDriver::new(
+        driver,
+        lease_for("fixture-window"),
+        gcu_core::testing::host::fake_activity(),
+    );
     let err = scoped
         .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
         .await
@@ -522,10 +542,17 @@ async fn fresh_scoped_driver_refuses_atspi_observe_and_press() {
         .await
         .unwrap_err();
     assert_eq!(pressed, DriverError::ScopeDenied);
-    assert_clean(&format!("{err}{pressed}"), &["fresh-canary", "replacement-canary"]);
+    assert_clean(
+        &format!("{err}{pressed}"),
+        &["fresh-canary", "replacement-canary"],
+    );
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 
-    let scoped = ScopedDriver::new(driver, lease_for("fixture-window"), activity());
+    let scoped = ScopedDriver::new(
+        driver,
+        lease_for("fixture-window"),
+        gcu_core::testing::host::fake_activity(),
+    );
     assert!(!scoped.capabilities().observe.tree);
     assert!(!scoped.capabilities().delivery.accessibility);
     assert_eq!(scoped.capabilities().delivery.foreground, foreground);
@@ -561,8 +588,14 @@ async fn moved_bus_name_is_not_published_while_the_registered_pid_is_alive() {
     );
     let stolen_clock = clock();
     bind(&mut stolen_driver, "fixture-window", &stolen_clock);
-    assert!(stolen_driver.app_instance(&app_ref(stolen.clone())).is_none());
-    let stolen_scoped = ScopedDriver::new(stolen_driver, lease_for("fixture-window"), activity());
+    assert!(stolen_driver
+        .app_instance(&app_ref(stolen.clone()))
+        .is_none());
+    let stolen_scoped = ScopedDriver::new(
+        stolen_driver,
+        lease_for("fixture-window"),
+        gcu_core::testing::host::fake_activity(),
+    );
     let listed = stolen_scoped.list_apps().await.unwrap();
     assert!(listed.is_empty());
     assert_clean(&format!("{listed:?}"), &forbidden);
@@ -586,7 +619,11 @@ async fn moved_bus_name_is_not_published_while_the_registered_pid_is_alive() {
     assert_eq!(proved.pid(), 42);
     assert_eq!(proved.start().ticks(), 1000);
     assert_eq!(proved.boot().as_str(), BOOT);
-    let owned_scoped = ScopedDriver::new(owned_driver, lease_for("fixture-window"), activity());
+    let owned_scoped = ScopedDriver::new(
+        owned_driver,
+        lease_for("fixture-window"),
+        gcu_core::testing::host::fake_activity(),
+    );
     let listed = owned_scoped.list_apps().await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "fixture-app");
