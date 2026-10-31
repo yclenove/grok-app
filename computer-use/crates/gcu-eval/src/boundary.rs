@@ -161,7 +161,7 @@ pub fn mint_scope_lifecycle_test(program: std::path::PathBuf) -> AdmittedLaunch 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn mint_test_fixture(program: std::path::PathBuf) -> AdmittedLaunch {
     AdmittedLaunch {
         program,
