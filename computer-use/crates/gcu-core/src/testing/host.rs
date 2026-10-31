@@ -59,6 +59,12 @@ pub struct StopControl {
     activity: Arc<FakeUserActivity>,
 }
 
+impl Default for StopControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StopControl {
     /// Idle latch.
     ///
