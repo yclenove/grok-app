@@ -306,7 +306,7 @@ async fn scoped_foreground_sendinput_is_unsupported_and_does_not_sample_or_send(
     input.update(|state| state.hit_receiver = Some(8));
     let driver = driver
         .with_input(Arc::new(InputBackend::new(
-            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
         )))
         .with_safety(guard());
     driver.note_scoped_session();
@@ -324,7 +324,10 @@ async fn scoped_foreground_sendinput_is_unsupported_and_does_not_sample_or_send(
         },
     ] {
         input.update(|state| state.sent.clear());
-        let error = driver.perform(&action, &Cancel::default()).await.unwrap_err();
+        let error = driver
+            .perform(&action, &Cancel::default())
+            .await
+            .unwrap_err();
         assert_eq!(error, DriverError::CapabilityUnavailable);
         assert!(!error.maybe_executed());
         assert_eq!(button_downs(&input), 0);
@@ -342,7 +345,7 @@ async fn unscoped_foreground_click_still_sends() {
     input.update(|state| state.hit_receiver = Some(8));
     let driver = driver
         .with_input(Arc::new(InputBackend::new(
-            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
         )))
         .with_safety(guard());
     driver
@@ -362,17 +365,14 @@ async fn scoped_targeted_rechecks_process_before_send() {
     input.update(|state| state.replace_recipient_after = Some((1, 99, 5)));
     let driver = driver
         .with_input(Arc::new(InputBackend::new(
-            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
         )))
         .with_safety(guard());
     driver.note_scoped_session();
     let binding = driver.window_binding(&win).unwrap();
     driver.pin_admitted(Some(&binding));
     let error = driver
-        .perform(
-            &click(win, PointerRoute::TargetedOnly),
-            &Cancel::default(),
-        )
+        .perform(&click(win, PointerRoute::TargetedOnly), &Cancel::default())
         .await
         .unwrap_err();
     assert_eq!(error, DriverError::ScopeDenied);
@@ -388,17 +388,14 @@ async fn scoped_application_frame_target_is_unsupported() {
     input.update(|state| state.class = "ApplicationFrameWindow".into());
     let driver = driver
         .with_input(Arc::new(InputBackend::new(
-            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
         )))
         .with_safety(guard());
     driver.note_scoped_session();
     let binding = driver.window_binding(&win).unwrap();
     driver.pin_admitted(Some(&binding));
     let error = driver
-        .perform(
-            &click(win, PointerRoute::TargetedOnly),
-            &Cancel::default(),
-        )
+        .perform(&click(win, PointerRoute::TargetedOnly), &Cancel::default())
         .await
         .unwrap_err();
     assert_eq!(error, DriverError::CapabilityUnavailable);

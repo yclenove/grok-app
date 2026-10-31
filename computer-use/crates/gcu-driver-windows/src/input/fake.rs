@@ -177,7 +177,10 @@ impl InputApi for FakeInput {
         Ok(self.state().clipboard_safe)
     }
     async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
-        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         state.recipient_reads = state.recipient_reads.saturating_add(1);
         if let Some((after, pid, created)) = state.replace_recipient_after {
             if state.recipient_reads > after {
