@@ -119,6 +119,13 @@ impl RealUia {
                     // SAFETY: exact parent, no search by name or replacement element.
                     ancestor = unsafe { trace_call!(s.walker.GetParentElement(&ancestor)) }
                         .map_err(native)?;
+                    if let Some(admitted) = s.admitted.clone() {
+                        let (pid, top) = s.fragment_owner(&ancestor, r)?;
+                        if top != admitted.hwnd {
+                            return Err(DriverError::ScopeDenied);
+                        }
+                        super::identity::prove_live_owner(&s.api, &admitted, pid)?;
+                    }
                     // SAFETY: refresh this exact ancestor with bounded cached properties.
                     let cached = unsafe { trace_call!(ancestor.BuildUpdatedCache(&s.cache)) }
                         .map_err(native)?;

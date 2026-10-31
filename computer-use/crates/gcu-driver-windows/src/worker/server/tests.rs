@@ -4,6 +4,7 @@ use crate::{
     testing::{medium_security, signed_image, window, ControlledBlock, FakeWinApi},
     WindowsDriver,
 };
+use gcu_core::scope::InstanceEvidence;
 
 async fn fixture() -> (Arc<FakeWinApi>, WindowsDriver, Arc<ControlledBlock>) {
     let api = Arc::new(FakeWinApi::default());
@@ -54,6 +55,79 @@ async fn restarted_worker_closed_process_returns_window_gone_without_substitutio
         dispatch(&driver, &mut restarted, 2, Request::Geometry(win)).await,
         Err(DriverError::AppNotFound)
     ));
+    blocked.release();
+}
+
+async fn unproved_listed_window(
+    api: &FakeWinApi,
+    driver: &WindowsDriver,
+    handles: &mut Handles,
+) -> (gcu_protocol::AppInfo, gcu_protocol::WindowInfo) {
+    api.update(|state| {
+        state.processes.get_mut(&7).unwrap().created = 0;
+        for window in &mut state.windows {
+            if window.pid == 7 {
+                window.process_created = 0;
+            }
+        }
+    });
+    let app = resolve(driver, handles).await;
+    let Reply::Windows(windows) =
+        dispatch(driver, handles, 1, Request::ListWindows(Some(app.clone())))
+            .await
+            .unwrap()
+    else {
+        panic!("expected the fixture window list");
+    };
+    assert_eq!(windows.len(), 1);
+    let window = windows.into_iter().next().unwrap();
+    assert!(
+        window.id.starts_with("7:7:0:63:"),
+        "hwnd 7, pid 7, creation time 0, generation 99"
+    );
+    (app, window)
+}
+
+#[tokio::test]
+async fn unproved_creation_time_returns_scope_denied_without_substituting_a_window() {
+    let (api, driver, blocked) = fixture().await;
+    driver.note_scoped_session();
+    let mut handles = Handles::default();
+    let (app, window) = unproved_listed_window(&api, &driver, &mut handles).await;
+    let error = dispatch(
+        &driver,
+        &mut handles,
+        1,
+        Request::Geometry(Window { app, id: window.id }),
+    )
+    .await
+    .err()
+    .expect("unproved creation time");
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert_eq!(error.to_string(), gcu_core::scope::SCOPE_DENIED_MESSAGE);
+    blocked.release();
+}
+
+#[tokio::test]
+async fn unscoped_unproved_creation_time_returns_that_windows_geometry() {
+    let (api, driver, blocked) = fixture().await;
+    let mut handles = Handles::default();
+    let (app, window) = unproved_listed_window(&api, &driver, &mut handles).await;
+    let Reply::Geometry(geometry) = dispatch(
+        &driver,
+        &mut handles,
+        1,
+        Request::Geometry(Window {
+            app,
+            id: window.id.clone(),
+        }),
+    )
+    .await
+    .unwrap() else {
+        panic!("expected geometry of the listed window");
+    };
+    assert_eq!(geometry.frame, window.frame);
+    assert_eq!(geometry.scale, window.scale);
     blocked.release();
 }
 

@@ -43,12 +43,17 @@ impl Observer {
             windows: Mutex::new(BTreeMap::new()),
         }
     }
+    /// Fragment fact for `node`, or `None` when this source never proved it.
+    pub(crate) fn fragment_now(&self, node: NodeId) -> Option<(u32, u64)> {
+        self.source.fragment_now(node)
+    }
     pub(crate) async fn snapshot(
         &self,
         hwnd: u64,
         win: &WindowRef,
         opts: &TreeOpts,
         cancel: &Cancel,
+        admitted: Option<&crate::scope_identity::WindowClaim>,
     ) -> Result<RawTree> {
         // Serializing generations prevents concurrent observations invalidating
         // each other's element maps. Waiting for this lock is cancellable too.
@@ -59,7 +64,9 @@ impl Observer {
         };
         let mut remaining = opts.clone();
         remaining.timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let mut raw = tree::build_raw_tree(self.source.as_ref(), hwnd, &remaining, cancel).await?;
+        let mut raw =
+            tree::build_scoped_tree(self.source.as_ref(), hwnd, &remaining, cancel, admitted)
+                .await?;
         fn bind(node: &mut RawNode, win: &WindowRef, hwnd: u64) {
             if let Some(id) = node.handle.downcast_ref::<CachedElement>().cloned() {
                 node.handle = NativeHandle::new(UiaElement {
@@ -85,6 +92,7 @@ impl Observer {
         req: &gcu_core::driver::DriverAction,
         cancel: &Cancel,
         deadline: tokio::time::Instant,
+        scope: &crate::scope_identity::JobScope,
     ) -> Result<gcu_core::driver::Delivery> {
         // Actions and observations share the generation lock. Never let a new root
         // invalidate the selected slot between preflight and worker dispatch.
@@ -92,7 +100,8 @@ impl Observer {
             _ = cancel.cancelled() => return Err(DriverError::Cancelled { maybe_executed: false }),
             guard = tokio::time::timeout_at(deadline, self.reading.lock()) => guard.map_err(|_| DriverError::Timeout { maybe_executed: false })?,
         };
-        super::actions::perform_until(self.source.as_ref(), hwnd, req, cancel, deadline).await
+        super::actions::perform_until(self.source.as_ref(), hwnd, req, cancel, deadline, scope)
+            .await
     }
     pub(crate) fn remember(&self, win: &WindowRef, hwnd: u64) {
         if let Ok(mut windows) = self.windows.lock() {

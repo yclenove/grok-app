@@ -84,6 +84,14 @@ impl FakeUia {
             s.actions.runtime_ids.insert(id, runtime);
         }
     }
+    /// Report the element's owning process. `None` leaves the portable probe unset.
+    /// Scoped admission refuses a mismatch or a missing probe. Unscoped admission
+    /// does not consult this value.
+    pub fn set_owner_pid(&self, pid: Option<u32>) {
+        if let Ok(mut state) = self.0.lock() {
+            state.owner_pid = pid;
+        }
+    }
     /// Change exact HWND ancestry without resolving any other node.
     pub fn set_action_hwnd(&self, hwnd: u64) {
         if let Ok(mut s) = self.0.lock() {

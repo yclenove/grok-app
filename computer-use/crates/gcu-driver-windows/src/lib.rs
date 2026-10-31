@@ -18,6 +18,9 @@ pub mod gate;
 pub mod identity;
 pub mod input;
 pub mod overlay;
+mod scope_identity;
+#[cfg(test)]
+mod scope_regressions;
 pub mod testing;
 mod timing;
 pub mod uia;

@@ -19,6 +19,7 @@ pub mod messages;
 mod plan;
 #[cfg(any(windows, test))]
 mod pointer_settle;
+pub(crate) mod sample_job;
 pub mod text;
 pub mod watchdog;
 use crate::{api::NativeWindow, uia::patterns::ActionContext};
@@ -147,6 +148,33 @@ impl InputBackend {
         cancel: &Cancel,
         deadline: tokio::time::Instant,
     ) -> Result<Delivery> {
+        self.perform_scoped(
+            window,
+            req,
+            cancel,
+            deadline,
+            &crate::scope_identity::JobScope::unscoped(),
+        )
+        .await
+    }
+    /// Deliver under one scope copied by the caller.
+    ///
+    /// [`crate::scope_identity::JobScope::Unscoped`] keeps the historical route,
+    /// including foreground SendInput and the multi-read sample. A scoped job
+    /// refuses foreground SendInput before resolve, sample, focus, paste, or
+    /// send. Targeted delivery carries the admitted process into each send and
+    /// into each sample, including every settle sample. A scoped sample reads
+    /// window text once, proves that process immediately before the read, and
+    /// proves it again before the hash leaves. A missing scope is refused and
+    /// is not treated as unscoped. Nothing here runs inside the pointer gate.
+    pub(crate) async fn perform_scoped(
+        &self,
+        window: NativeWindow,
+        req: &DriverAction,
+        cancel: &Cancel,
+        deadline: tokio::time::Instant,
+        scope: &crate::scope_identity::JobScope,
+    ) -> Result<Delivery> {
         // Reserve cleanup time inside the shared deadline, including queueing.
         let work_deadline = deadline - std::time::Duration::from_millis(110);
         let serial = tokio::select! { biased;
@@ -183,11 +211,41 @@ impl InputBackend {
             if let Some(guard) = &safety {
                 guard.check(false)?;
             }
-            let target = self
-                .api
-                .resolve(window, plan.point, plan.focus.clone())
-                .await?;
+            // Second guard. `WindowsDriver::perform` already refused a scoped
+            // foreground request before any proof or native call. Close it again
+            // before resolve. Capabilities report the same gap.
+            if scope.claim()?.is_some() && plan.foreground {
+                return Err(DriverError::CapabilityUnavailable);
+            }
+            let target = if let Some(claim) = scope.claim()? {
+                self.api
+                    .resolve_scoped(
+                        window,
+                        plan.point,
+                        plan.focus.clone(),
+                        claim.owner.pid,
+                        claim.hwnd,
+                    )
+                    .await?
+            } else {
+                self.api
+                    .resolve(window, plan.point, plan.focus.clone())
+                    .await?
+            };
             context.check()?;
+            if let Some(claim) = scope.claim()? {
+                let stamp = crate::desktop::HwndStamp::from(&target.window).id();
+                crate::scope_identity::admit_delivery_element(
+                    claim.hwnd,
+                    target.window.hwnd,
+                    &stamp,
+                    Some(target.window.pid),
+                    Some(claim.owner.pid),
+                )?;
+            }
+            // One copy for every sample and send in this action, including settle.
+            // Later pin changes are not read. The native job compares it.
+            let carried = carried_target(scope)?;
             let foreground = plan.foreground;
             if !foreground
                 && (!target.message_capable || messages::ineffective_class(&target.class))
@@ -195,6 +253,14 @@ impl InputBackend {
                 return Err(DriverError::CapabilityUnavailable);
             }
             self.api.validate(target.clone(), foreground).await?;
+            // Outside the pointer gate. Unproved scalars never reach SendInput.
+            crate::scope_identity::require_delivery_scalars(
+                target.window.hwnd,
+                target.window.pid,
+                target.window.process_created,
+                target.window.created,
+                target.hwnd,
+            )?;
             if let Some(guard) = &safety {
                 guard.check(foreground)?;
                 if foreground {
@@ -215,7 +281,7 @@ impl InputBackend {
             let before = if packets.is_empty() {
                 None
             } else {
-                Some(self.api.sample(target.clone()).await?)
+                Some(self.api.sample(target.clone(), carried.clone()).await?)
             };
             if foreground {
                 if let Some(guard) = &safety {
@@ -228,6 +294,7 @@ impl InputBackend {
                         .await?;
                 }
             }
+            // Scoped foreground already returned above. This paste is unscoped.
             let paste = if foreground {
                 if let (Some(board), DriverAction::TypeText { text, focus, .. }) =
                     (&self.clipboard, req)
@@ -290,6 +357,13 @@ impl InputBackend {
                 }
                 let result = async {
                     context.check()?;
+                    crate::scope_identity::require_delivery_scalars(
+                        target.window.hwnd,
+                        target.window.pid,
+                        target.window.process_created,
+                        target.window.created,
+                        target.hwnd,
+                    )?;
                     self.api
                         .send(
                             target.clone(),
@@ -297,6 +371,7 @@ impl InputBackend {
                             delivery,
                             self.ledger.clone(),
                             context.clone(),
+                            carried.clone(),
                         )
                         .await
                 }
@@ -314,7 +389,7 @@ impl InputBackend {
             }
             if let Some(before) = before {
                 let effect = self
-                    .settle(&target, before, plan.text, &context, work_deadline)
+                    .settle(&target, before, plan.text, &context, work_deadline, carried)
                     .await?;
                 *self.effect.lock().unwrap_or_else(|p| p.into_inner()) = Some(effect);
             }
@@ -347,6 +422,7 @@ impl InputBackend {
         text: bool,
         context: &ActionContext,
         deadline: tokio::time::Instant,
+        carried: Option<api::AdmittedTarget>,
     ) -> Result<Effect> {
         let until = (tokio::time::Instant::now()
             + std::time::Duration::from_millis(if text { 1500 } else { 800 }))
@@ -357,7 +433,7 @@ impl InputBackend {
             context.check()?;
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             context.check()?;
-            let state = self.api.sample(target.clone()).await?;
+            let state = self.api.sample(target.clone(), carried.clone()).await?;
             changed |= state != before;
             if last == Some(state) || tokio::time::Instant::now() >= until {
                 return Ok(if changed {
@@ -409,6 +485,22 @@ impl Drop for Cleanup<'_> {
             });
         }
     }
+}
+
+/// Admitted window copied once for every sample and send in this action.
+///
+/// `None` is unscoped. The value is not read from the pin again.
+fn carried_target(scope: &crate::scope_identity::JobScope) -> Result<Option<api::AdmittedTarget>> {
+    let Some(claim) = scope.claim()? else {
+        return Ok(None);
+    };
+    Ok(Some(api::AdmittedTarget {
+        hwnd: claim.hwnd,
+        incarnation: claim.incarnation,
+        pid: claim.owner.pid,
+        created: claim.owner.created,
+        boot: claim.owner.boot.clone(),
+    }))
 }
 
 async fn release_bounded(api: Arc<dyn InputApi>, ledger: Arc<ledger::InputLedger>) {

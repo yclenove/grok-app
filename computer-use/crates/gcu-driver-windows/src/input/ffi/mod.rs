@@ -172,6 +172,13 @@ impl State {
             .find(|w| w.hwnd == target.window.hwnd)
             .ok_or(DriverError::WindowGone)?;
         crate::desktop::HwndStamp::from(&target.window).validate(&current)?;
+        crate::scope_identity::require_delivery_scalars(
+            current.hwnd,
+            current.pid,
+            current.process_created,
+            current.created,
+            target.hwnd,
+        )?;
         if current.frame != target.window.frame || current.scale != target.window.scale {
             return Err(DriverError::InvalidRequest);
         }
@@ -251,6 +258,32 @@ impl State {
             generation_property,
             dpi,
         })
+    }
+    /// Child process instance, after `validate` and before content or identity adoption.
+    ///
+    /// Compares the carried claim with a fresh pid, creation time, and boot. A
+    /// replacement is not stored as the expected authority. Metadata only, outside
+    /// the pointer gate and the input ledger.
+    fn prove_child(&self, claim: &AdmittedTarget, child: u64) -> Result<()> {
+        let mut pid = 0u32;
+        // SAFETY: borrowed numeric HWND and a writable pid slot. The handle is not
+        // kept. Process creation time and boot are metadata reads.
+        let tid = unsafe { GetWindowThreadProcessId(hwnd(child), Some(&mut pid)) };
+        if tid == 0 || pid == 0 {
+            return Err(DriverError::ScopeDenied);
+        }
+        let created = self.api.process_security(pid)?.created;
+        let boot = self.api.boot_identity()?;
+        let admitted = crate::scope_identity::WindowClaim {
+            hwnd: claim.hwnd,
+            incarnation: claim.incarnation,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: claim.pid,
+                created: claim.created,
+                boot: claim.boot.clone(),
+            },
+        };
+        crate::scope_identity::admit_recipient(&admitted, pid, created, &boot)
     }
     fn resolve(
         &self,
@@ -378,6 +411,69 @@ impl InputApi for RealInput {
             })
             .await
     }
+    async fn resolve_scoped(
+        &self,
+        window: NativeWindow,
+        point: Option<WindowPoint>,
+        focus: Option<NativeHandle>,
+        admitted_pid: u32,
+        admitted_hwnd: u64,
+    ) -> Result<Target> {
+        let recipient = if let Some(focus) = focus.as_ref() {
+            let element = focus
+                .downcast_ref::<UiaElement>()
+                .ok_or(DriverError::StaleElement)?;
+            let node = element.node;
+            let element_hwnd = element.hwnd;
+            let window_id = element.window.id.clone();
+            let (pid, top) = self.uia.prove_fragment(node).await?;
+            crate::scope_identity::admit_delivery_element(
+                admitted_hwnd,
+                element_hwnd,
+                &window_id,
+                Some(pid),
+                Some(admitted_pid),
+            )?;
+            if top != admitted_hwnd {
+                return Err(DriverError::ScopeDenied);
+            }
+            Some(self.uia.input_recipient(node, window.hwnd).await?)
+        } else {
+            None
+        };
+        self.worker
+            .call(move |s, r| {
+                r.check()?;
+                s.resolve(window, point, recipient)
+            })
+            .await
+    }
+    async fn pointer_receiver(&self, point: WindowPoint) -> Result<Option<u64>> {
+        self.worker
+            .call(move |_, r| {
+                r.check()?;
+                // SAFETY: numeric screen point and HWND queries. No message is sent.
+                // Capture wins over the window under the point. A null result is unproved.
+                unsafe {
+                    let captured = GetCapture();
+                    let hit = if !captured.0.is_null() {
+                        captured
+                    } else {
+                        WindowFromPoint(POINT {
+                            x: point.x.round() as i32,
+                            y: point.y.round() as i32,
+                        })
+                    };
+                    if hit.0.is_null() {
+                        return Ok(None);
+                    }
+                    let root = GetAncestor(hit, GA_ROOT);
+                    let id = id(root);
+                    Ok((id != 0).then_some(id))
+                }
+            })
+            .await
+    }
     async fn character_key(
         &self,
         target: Target,
@@ -461,13 +557,14 @@ impl InputApi for RealInput {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()> {
         self.worker
             .call_action(context.clone(), move |s, r| {
                 if delivery != Delivery::Foreground {
-                    // One full stamp, security, and recipient validation for this packet,
-                    // outside the ledger and the gate. Each post then rechecks scalar identity
-                    // and does not require the foreground window. This branch does not take the gate.
+                    // Stamp, security, and the carried process check run once in this
+                    // job, outside the ledger and the gate, before any post. Each post
+                    // then rechecks scalar identity. This branch does not take the gate.
                     let live = WinScalar;
                     return super::admission::dispatch_targeted(
                         super::admission::TargetedSend {
@@ -480,21 +577,29 @@ impl InputApi for RealInput {
                         || r.check(),
                         || {
                             r.check()?;
-                            Ok(expected_identity(&target, s.validate(&target, false)?))
+                            let snap = s.validate(&target, false)?;
+                            if let Some(claim) = claim.as_ref() {
+                                s.prove_child(claim, target.hwnd)?;
+                            }
+                            Ok(expected_identity(&target, snap))
                         },
                         &live,
                         |event| native::post(&target, event),
                     );
                 }
-                // Enumeration, the security gate, and COM finish in `prepare`, before the ledger
-                // and the pointer gate. The gate then only re-reads cancellation, the deadline,
-                // the foreground window, and scalar identity.
+                // Enumeration, the security gate, and the process check finish in
+                // `prepare`, before the ledger and the pointer gate. The gate then
+                // only re-reads cancellation, the deadline, the foreground window,
+                // and scalar identity.
                 let pointer = super::admission::packet_is_pointer(&events);
                 super::admission::prepare_then_dispatch(
                     || {
                         r.check()?;
                         let snap = s.validate(&target, true)?;
                         let inputs = native::inputs(&events)?;
+                        if let Some(claim) = claim.as_ref() {
+                            s.prove_child(claim, target.hwnd)?;
+                        }
                         Ok(PreparedSend {
                             identity: expected_identity(&target, snap),
                             inputs,
@@ -520,12 +625,16 @@ impl InputApi for RealInput {
             })
             .await
     }
-    async fn sample(&self, target: Target) -> Result<u64> {
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64> {
         self.worker
             .call(move |s, r| {
                 r.check()?;
                 s.validate(&target, false)?;
-                sample::sample(&target)
+                let scoped = claim.is_some();
+                sample::sample(&target, scoped, || match claim.as_ref() {
+                    Some(claim) => s.prove_child(claim, target.hwnd),
+                    None => Ok(()),
+                })
             })
             .await
     }
