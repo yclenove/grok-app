@@ -221,15 +221,6 @@ fn button_downs(input: &FakeInput) -> usize {
         .count()
 }
 
-fn wheels(input: &FakeInput) -> usize {
-    input
-        .state()
-        .sent
-        .iter()
-        .filter(|sent| matches!(sent.event, Event::Wheel(..)))
-        .count()
-}
-
 fn replace_owner(api: &FakeWinApi) {
     api.update(|state| {
         state.processes.get_mut(&7).unwrap().created += 1;
