@@ -1178,9 +1178,10 @@ impl ExtentNode {
     fn get_extents(
         &self,
         _coord_type: atspi::CoordType,
-        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> (i32, i32, i32, i32) {
-        let destination = header_destination(&header);
+        // Methods receive the header itself; property getters receive an Option.
+        let destination = header_destination(&Some(header));
         self.state.note_extents(&destination, self.path);
         (9, 9, 11, 13)
     }
