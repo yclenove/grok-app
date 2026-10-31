@@ -2196,6 +2196,7 @@ dependencies = [
  "atspi 0.30.0",
  "futures-core",
  "gcu-core",
+ "gcu-host-api",
  "gcu-protocol",
  "libc",
  "pipewire",
