@@ -673,10 +673,6 @@ struct Rpc {
 }
 
 impl Rpc {
-    async fn serve(spy: Spy, profile: Profile) -> Self {
-        Self::from_connection(open_scoped(spy, profile).await).await
-    }
-
     async fn from_connection(connection: Connection) -> Self {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(client);
