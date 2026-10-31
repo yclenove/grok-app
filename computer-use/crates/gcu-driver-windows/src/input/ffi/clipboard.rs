@@ -1,7 +1,7 @@
 //! Thread-affine clipboard owner and cross-process transaction mutex.
 mod data;
 mod text_formats;
-use super::super::clipboard::{ClipboardApi, PublishProof};
+use super::super::clipboard::ClipboardApi;
 use crate::uia::{patterns::ActionContext, worker::Worker};
 use async_trait::async_trait;
 use data::{Format, Open};
@@ -57,15 +57,7 @@ impl NativeClipboard {
 #[async_trait]
 impl ClipboardApi for NativeClipboard {
     async fn stage(&self, text: String, context: ActionContext) -> Result<u32> {
-        self.stage_with(text, context, None).await
-    }
-    async fn stage_proved(
-        &self,
-        text: String,
-        context: ActionContext,
-        proof: PublishProof,
-    ) -> Result<u32> {
-        self.stage_with(text, context, Some(proof)).await
+        self.stage_with(text, context).await
     }
     async fn matches(&self, sequence: u32, text: String) -> Result<bool> {
         self.worker()
@@ -93,23 +85,17 @@ impl ClipboardApi for NativeClipboard {
     }
 }
 impl NativeClipboard {
-    async fn stage_with(
-        &self,
-        text: String,
-        context: ActionContext,
-        proof: Option<PublishProof>,
-    ) -> Result<u32> {
+    async fn stage_with(&self, text: String, context: ActionContext) -> Result<u32> {
         loop {
             context.check()?;
             let value = text.clone();
             let action = context.clone();
-            let proof = proof.clone();
             if let Some(sequence) = self
                 .worker()
                 .await?
                 .call_action(context.clone(), move |s, r| {
                     r.check()?;
-                    s.stage(value, action, proof)
+                    s.stage(value, action)
                 })
                 .await?
             {
@@ -212,12 +198,7 @@ impl State {
             tracing::warn!("cancelled clipboard recovery pending");
         }
     }
-    fn stage(
-        &mut self,
-        text: String,
-        context: ActionContext,
-        proof: Option<PublishProof>,
-    ) -> Result<Option<u32>> {
+    fn stage(&mut self, text: String, context: ActionContext) -> Result<Option<u32>> {
         if self.transaction.is_some() {
             return Err(DriverError::CapabilityUnavailable);
         }
@@ -232,12 +213,7 @@ impl State {
             .map(|(id, bytes)| Format::new(id, bytes))
             .collect::<Result<Vec<_>>>()?;
         let mut publication = text_formats::prepare(&text)?;
-        if let Some(proof) = proof.as_ref() {
-            // Recheck cancellation after the proof, before any clipboard mutation.
-            crate::input::clipboard::authorize_publish(&context, proof)?;
-        } else {
-            context.check()?;
-        }
+        context.check()?;
         // SAFETY: this thread holds OpenClipboard and owns a non-null HWND.
         unsafe { EmptyClipboard() }.map_err(|_| failure())?;
         self.pending.store(true, Ordering::Release);
@@ -249,11 +225,14 @@ impl State {
             restoring: false,
             context: context.clone(),
         });
-        // EmptyClipboard can notify the previous owner before it returns. Recheck
-        // cancellation and the bound target before every SetClipboardData. The
-        // unscoped loop does not add checks between formats.
-        let result = self.publish_prepared(&mut publication, &context, proof.as_ref());
-        if let Err(error) = result {
+        let mut published = Ok(());
+        for entry in publication.iter_mut() {
+            if let Err(error) = self.write_format(entry) {
+                published = Err(error);
+                break;
+            }
+        }
+        if let Err(error) = published {
             // Keep the same OS lock through initial rollback; no external writer
             // can slip between partial publication and restoration.
             if self.restore_locked().is_err() {
@@ -265,25 +244,6 @@ impl State {
             return Err(error);
         }
         Ok(self.transaction.as_ref().map(|t| t.sequence))
-    }
-    fn publish_prepared(
-        &mut self,
-        publication: &mut [Format],
-        context: &ActionContext,
-        proof: Option<&PublishProof>,
-    ) -> Result<()> {
-        if let Some(proof) = proof {
-            crate::input::clipboard::publish_formats(
-                publication.len(),
-                || crate::input::clipboard::authorize_publish(context, proof),
-                |index| self.write_format(&mut publication[index]),
-            )
-        } else {
-            for entry in publication.iter_mut() {
-                self.write_format(entry)?;
-            }
-            Ok(())
-        }
     }
     fn write_format(&mut self, entry: &mut Format) -> Result<()> {
         let published = entry.publish();

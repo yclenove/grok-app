@@ -154,7 +154,6 @@ impl Supervisor {
         let (done_tx, done_rx) = oneshot::channel();
         let safety = Arc::new(std::sync::Mutex::new(None));
         let recovery = super::input::Recovery::new(release, safety.clone());
-        recovery.arm_publication(&config.namespace);
         tokio::spawn(run(
             config,
             rx,

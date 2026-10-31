@@ -27,8 +27,6 @@ use windows::Win32::{
 pub struct RealInput {
     worker: Worker<State>,
     uia: Arc<RealUia>,
-    /// Discovery API kept for publication recheck. The worker holds another clone.
-    api: Arc<dyn WinApi>,
 }
 /// Up-only sender and lazy clipboard owner for the isolated parent.
 /// Starts no COM/provider/input-action worker.
@@ -48,20 +46,18 @@ impl InputReleaser for NativeRelease {
 impl RealInput {
     /// Start the input MTA using the same stamped discovery API as the driver.
     pub async fn start(api: Arc<dyn WinApi>, uia: Arc<RealUia>) -> Result<Self> {
-        let worker_api = Arc::clone(&api);
         Ok(Self {
             worker: Worker::start(
                 move || {
                     Ok(State {
-                        _context: worker_api.enter_thread()?,
-                        api: worker_api,
+                        _context: api.enter_thread()?,
+                        api,
                     })
                 },
                 |_| {},
             )
             .await?,
             uia,
-            api,
         })
     }
 }
@@ -478,43 +474,6 @@ impl InputApi for RealInput {
             })
             .await
     }
-    fn recheck_publish(
-        &self,
-        hwnd: u64,
-        incarnation: u64,
-        pid: u32,
-        created: u64,
-        boot: &str,
-    ) -> Result<()> {
-        let current = self
-            .api
-            .enum_windows()?
-            .into_iter()
-            .find(|window| window.hwnd == hwnd)
-            .ok_or(DriverError::WindowGone)?;
-        let owner = crate::desktop::window_process(self.api.as_ref(), &current)?;
-        let live_created = self.api.process_security(owner)?.created;
-        let live_boot = self.api.boot_identity()?;
-        let stored = crate::scope_identity::WindowClaim {
-            hwnd,
-            incarnation,
-            owner: crate::scope_identity::ProcessClaim {
-                pid,
-                created,
-                boot: boot.to_owned(),
-            },
-        };
-        let live = crate::scope_identity::WindowClaim {
-            hwnd: current.hwnd,
-            incarnation: current.created,
-            owner: crate::scope_identity::ProcessClaim {
-                pid: owner,
-                created: live_created,
-                boot: live_boot,
-            },
-        };
-        crate::scope_identity::prove_window(&stored, &live)
-    }
     async fn character_key(
         &self,
         target: Target,
@@ -671,10 +630,11 @@ impl InputApi for RealInput {
             .call(move |s, r| {
                 r.check()?;
                 s.validate(&target, false)?;
-                if let Some(claim) = claim.as_ref() {
-                    s.prove_child(claim, target.hwnd)?;
-                }
-                sample::sample(&target)
+                let scoped = claim.is_some();
+                sample::sample(&target, scoped, || match claim.as_ref() {
+                    Some(claim) => s.prove_child(claim, target.hwnd),
+                    None => Ok(()),
+                })
             })
             .await
     }

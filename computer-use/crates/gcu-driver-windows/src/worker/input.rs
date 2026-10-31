@@ -1,7 +1,5 @@
 //! Parent-held ledger and child acknowledgement barrier; cleanup never uses RPC.
 use super::{codec, wire::WireDelivery, Action, Reply, Request, Response};
-#[cfg(any(windows, test))]
-use crate::input::clipboard::bind_admitted_proof;
 use crate::input::{
     api::{AdmittedTarget, Event, InputReleaser, InputTracker, Target},
     ledger::InputLedger,
@@ -60,6 +58,9 @@ impl InputTracker for Tracker {
         text: String,
         admitted: Option<AdmittedTarget>,
     ) -> Result<u32> {
+        if admitted.is_some() {
+            return Err(DriverError::CapabilityUnavailable);
+        }
         self.notify(Reply::ClipboardStage {
             target,
             text,
@@ -118,43 +119,11 @@ pub(super) async fn notify<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let _ = notice.done.send(Ok(ack.clipboard_sequence));
     Ok(())
 }
-fn bound_os_proof(
-    namespace: &str,
-    admitted: &AdmittedTarget,
-) -> Option<crate::input::clipboard::PublishProof> {
-    #[cfg(windows)]
-    {
-        let namespace = namespace.to_owned();
-        let admitted = admitted.clone();
-        Some(bind_admitted_proof(
-            admitted,
-            Arc::new(move |target| {
-                crate::ffi::prove_parent_publication(
-                    &namespace,
-                    target.hwnd,
-                    target.incarnation,
-                    target.pid,
-                    target.created,
-                    &target.boot,
-                )
-            }),
-        ))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (namespace, admitted);
-        None
-    }
-}
 fn crashed() -> DriverError {
     DriverError::Crashed {
         maybe_executed: true,
     }
 }
-
-/// Test stand-in for the OS publication proof. Each call sees the staged target.
-#[cfg(test)]
-pub(super) type PublicationProver = Arc<dyn Fn(&str, &AdmittedTarget) -> Result<()> + Send + Sync>;
 
 pub(super) struct Recovery {
     ledger: Arc<InputLedger>,
@@ -162,11 +131,6 @@ pub(super) struct Recovery {
     pending: Mutex<Option<(InputPacket, usize)>>,
     clipboard: Option<Arc<dyn crate::input::clipboard::ClipboardApi>>,
     safety: Arc<Mutex<Option<Arc<crate::input::hotkey::SafetyGuard>>>>,
-    /// Worker namespace captured by each staged proof. Not a shared claim slot.
-    publish_namespace: Mutex<Option<String>>,
-    /// Test stand-in for the OS publication proof. Production leaves it unset.
-    #[cfg(test)]
-    test_prover: Mutex<Option<PublicationProver>>,
 }
 impl Recovery {
     pub(super) fn new(
@@ -179,57 +143,7 @@ impl Recovery {
             release,
             pending: Mutex::default(),
             safety,
-            publish_namespace: Mutex::default(),
-            #[cfg(test)]
-            test_prover: Mutex::default(),
         }
-    }
-    /// Arm publication for this worker namespace.
-    ///
-    /// Each scoped stage copies its admitted target into the proof. The proof
-    /// does not reread a shared slot. On Windows it checks that target's
-    /// process, creation time, generation property, and boot session inside
-    /// `stage_proved`, after the clipboard wait and before the bytes are
-    /// visible. A non-Windows parent cannot make that OS proof, so a scoped
-    /// stage is refused before `stage`. Restore stays unconditional.
-    pub(super) fn arm_publication(&self, namespace: &str) {
-        *self
-            .publish_namespace
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(namespace.to_owned());
-    }
-    /// Replace the OS proof for one test. The admitted target is still copied.
-    #[cfg(test)]
-    pub(super) fn set_prover(&self, prover: PublicationProver) {
-        *self
-            .test_prover
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(prover);
-    }
-    fn publication_proof(
-        &self,
-        admitted: &AdmittedTarget,
-    ) -> Result<crate::input::clipboard::PublishProof> {
-        let namespace = self
-            .publish_namespace
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
-            .ok_or(DriverError::ScopeDenied)?;
-        #[cfg(test)]
-        if let Some(prover) = self
-            .test_prover
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
-        {
-            let namespace = namespace.clone();
-            return Ok(bind_admitted_proof(
-                admitted.clone(),
-                Arc::new(move |target| prover(&namespace, target)),
-            ));
-        }
-        bound_os_proof(&namespace, admitted).ok_or(DriverError::ScopeDenied)
     }
     pub(super) fn ready(&self) -> bool {
         self.ledger.is_empty() && self.clipboard.as_ref().is_none_or(|c| !c.pending())
@@ -280,6 +194,11 @@ impl Recovery {
                 text,
                 admitted,
             } => {
+                // Scoped staging is closed. Refuse before the foreground Stop
+                // check and before any clipboard lookup or open.
+                if admitted.is_some() {
+                    return Err(DriverError::CapabilityUnavailable);
+                }
                 self.check_delivery(true)?;
                 let Request::Perform(Action::TypeText {
                     win,
@@ -300,12 +219,7 @@ impl Recovery {
                     &Cancel::default(),
                     std::time::Instant::now() + DRIVER_DEADLINE,
                 );
-                clipboard_sequence = Some(if let Some(admitted) = admitted {
-                    let proof = self.publication_proof(&admitted)?;
-                    clipboard.stage_proved(text, context, proof).await?
-                } else {
-                    clipboard.stage(text, context).await?
-                });
+                clipboard_sequence = Some(clipboard.stage(text, context).await?);
                 // Stop may latch while staging awaits clipboard ownership/FFI.
                 // Never acknowledge publication after the parent latch closes.
                 self.check_delivery(true)?;
@@ -467,7 +381,10 @@ mod tests {
     use super::*;
     use crate::{
         desktop::HwndStamp,
-        input::clipboard::{ClipboardApi, PublishProof},
+        input::{
+            clipboard::ClipboardApi,
+            hotkey::{FakeSafetyApi, StopLatch},
+        },
         testing::window,
         worker::{action::Action, wire::Window},
     };
@@ -475,20 +392,23 @@ mod tests {
     use gcu_core::driver::KeyRoute;
     use gcu_protocol::AppInfo;
     use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
 
-    struct Spy {
-        stage_calls: AtomicUsize,
-        publishes: AtomicUsize,
-        entered: AtomicBool,
-        /// Close the stage context after the proof returns and before publication.
-        cancel_after: AtomicBool,
-        serial: Arc<tokio::sync::Mutex<()>>,
+    struct Stopped;
+    impl StopLatch for Stopped {
+        fn is_stopped(&self) -> bool {
+            true
+        }
+        fn request_stop(&self) {}
+    }
+
+    struct Counting {
+        stages: AtomicUsize,
         contents: Mutex<String>,
     }
-    struct Releaser(Arc<Spy>);
+    struct Releaser(Arc<Counting>);
     #[async_trait]
     impl InputReleaser for Releaser {
         async fn release(&self, _: Arc<crate::input::ledger::InputLedger>) {}
@@ -497,40 +417,13 @@ mod tests {
         }
     }
     #[async_trait]
-    impl ClipboardApi for Spy {
+    impl ClipboardApi for Counting {
         async fn stage(&self, text: String, _: crate::uia::patterns::ActionContext) -> Result<u32> {
-            self.stage_calls.fetch_add(1, Ordering::SeqCst);
+            self.stages.fetch_add(1, Ordering::SeqCst);
             *self
                 .contents
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = text;
-            self.publishes.fetch_add(1, Ordering::SeqCst);
-            Ok(1)
-        }
-        async fn stage_proved(
-            &self,
-            text: String,
-            context: crate::uia::patterns::ActionContext,
-            proof: PublishProof,
-        ) -> Result<u32> {
-            self.stage_calls.fetch_add(1, Ordering::SeqCst);
-            self.entered.store(true, Ordering::SeqCst);
-            let _held = self.serial.lock().await;
-            let ctx = context.clone();
-            let cancel_after = self.cancel_after.load(Ordering::SeqCst);
-            let wrapped: PublishProof = Arc::new(move || {
-                let result = proof();
-                if cancel_after {
-                    ctx.close();
-                }
-                result
-            });
-            crate::input::clipboard::authorize_publish(&context, &wrapped)?;
-            *self
-                .contents
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = text;
-            self.publishes.fetch_add(1, Ordering::SeqCst);
             Ok(1)
         }
         async fn matches(&self, _: u32, _: String) -> Result<bool> {
@@ -544,7 +437,14 @@ mod tests {
         }
     }
 
-    fn stage_pair(text: &str) -> (Reply, Request) {
+    fn counting() -> Arc<Counting> {
+        Arc::new(Counting {
+            stages: AtomicUsize::new(0),
+            contents: Mutex::new(String::new()),
+        })
+    }
+
+    fn stage_pair(text: &str, admitted: bool) -> (Reply, Request) {
         let native = window(8, 7);
         let win = Window {
             app: AppInfo {
@@ -561,6 +461,13 @@ mod tests {
             text: text.to_owned(),
             route: KeyRoute::AllowForeground,
         });
+        let admitted = admitted.then(|| crate::input::api::AdmittedTarget {
+            hwnd: native.hwnd,
+            incarnation: native.created,
+            pid: native.pid,
+            created: native.process_created,
+            boot: "boot-session".into(),
+        });
         let reply = Reply::ClipboardStage {
             target: crate::input::api::Target {
                 window: native.clone(),
@@ -569,13 +476,7 @@ mod tests {
                 message_capable: true,
             },
             text: text.to_owned(),
-            admitted: Some(crate::input::api::AdmittedTarget {
-                hwnd: native.hwnd,
-                incarnation: native.created,
-                pid: native.pid,
-                created: native.process_created,
-                boot: "boot-session".into(),
-            }),
+            admitted,
         };
         (reply, request)
     }
@@ -602,31 +503,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_clipboard_stage_refuses_before_publish_when_the_parent_has_no_proof() {
-        let spy = Arc::new(Spy {
-            stage_calls: AtomicUsize::new(0),
-            publishes: AtomicUsize::new(0),
-            entered: AtomicBool::new(false),
-            cancel_after: AtomicBool::new(false),
-            serial: Arc::new(tokio::sync::Mutex::new(())),
-            contents: Mutex::new(String::new()),
-        });
-        let recovery = Recovery::new(
-            Arc::new(Releaser(Arc::clone(&spy))),
-            Arc::new(Mutex::new(None)),
-        );
-        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
+    async fn scoped_clipboard_stage_refuses_before_open() {
+        let board = counting();
+        let safety = Arc::new(Mutex::new(Some(
+            FakeSafetyApi::default().start(Default::default(), Arc::new(Stopped)),
+        )));
+        let recovery = Recovery::new(Arc::new(Releaser(Arc::clone(&board))), safety);
+        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD", true);
         let (_reader, mut writer) = tokio::io::duplex(64);
         let error = recovery
             .receive(reply, &request, &mut writer, 1, 1)
             .await
-            .err()
-            .expect("scoped clipboard stage published without a proof");
-        assert_eq!(error, DriverError::ScopeDenied);
+            .expect_err("scoped clipboard stage opened");
+        assert_eq!(error, DriverError::CapabilityUnavailable);
         assert!(!error.maybe_executed());
-        assert_eq!(spy.stage_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
-        assert!(!spy
+        assert_eq!(board.stages.load(Ordering::SeqCst), 0);
+        assert!(!board
             .contents
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -634,211 +526,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_clipboard_invalidated_during_the_wait_does_not_publish() {
-        let serial = Arc::new(tokio::sync::Mutex::new(()));
-        let hold = serial.clone().lock_owned().await;
-        let spy = Arc::new(Spy {
-            stage_calls: AtomicUsize::new(0),
-            publishes: AtomicUsize::new(0),
-            entered: AtomicBool::new(false),
-            cancel_after: AtomicBool::new(false),
-            serial,
-            contents: Mutex::new(String::new()),
-        });
-        let recovery = Recovery::new(
-            Arc::new(Releaser(Arc::clone(&spy))),
-            Arc::new(Mutex::new(None)),
-        );
-        recovery.arm_publication("7.1");
-        let valid = Arc::new(AtomicBool::new(true));
-        let flag = Arc::clone(&valid);
-        recovery.set_prover(Arc::new(move |_namespace, _admitted| {
-            if flag.load(Ordering::SeqCst) {
-                Ok(())
-            } else {
-                Err(DriverError::ScopeDenied)
-            }
-        }));
-        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
-        let entered = Arc::clone(&spy);
-        let task = tokio::spawn(async move {
-            let (_reader, mut writer) = tokio::io::duplex(64);
-            recovery.receive(reply, &request, &mut writer, 1, 1).await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !entered.entered.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        valid.store(false, Ordering::SeqCst);
-        drop(hold);
-        let error = task
+    async fn child_tracker_refuses_scoped_clipboard_stage_without_notifying() {
+        let (tracker, mut notices) = channel();
+        let (reply, _request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD", true);
+        let Reply::ClipboardStage {
+            target,
+            text,
+            admitted,
+        } = reply
+        else {
+            panic!("stage pair");
+        };
+        let error = tracker
+            .clipboard_stage_admitted(target, text, admitted)
             .await
-            .unwrap()
-            .err()
-            .expect("scoped clipboard published after the proof was withdrawn");
-        assert_eq!(error, DriverError::ScopeDenied);
-        assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
-        assert!(!spy
-            .contents
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .contains("CANARY-CLIPBOARD-PAYLOAD"));
-    }
-
-    #[tokio::test]
-    async fn scoped_parent_publication_is_armed_and_refuses_an_unproved_window() {
-        let spy = Arc::new(Spy {
-            stage_calls: AtomicUsize::new(0),
-            publishes: AtomicUsize::new(0),
-            entered: AtomicBool::new(false),
-            cancel_after: AtomicBool::new(false),
-            serial: Arc::new(tokio::sync::Mutex::new(())),
-            contents: Mutex::new(String::new()),
-        });
-        let recovery = Recovery::new(
-            Arc::new(Releaser(Arc::clone(&spy))),
-            Arc::new(Mutex::new(None)),
-        );
-        recovery.arm_publication("7.1");
-        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
-        let (_reader, mut writer) = tokio::io::duplex(64);
-        let error = recovery
-            .receive(reply, &request, &mut writer, 1, 1)
-            .await
-            .err()
-            .expect("unproved scoped clipboard was published");
-        assert_eq!(error, DriverError::ScopeDenied);
+            .expect_err("scoped stage notified the parent");
+        assert_eq!(error, DriverError::CapabilityUnavailable);
         assert!(!error.maybe_executed());
-        assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
-        assert!(!spy
-            .contents
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .contains("CANARY-CLIPBOARD-PAYLOAD"));
+        assert!(notices.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn scoped_clipboard_does_not_publish_when_cancelled_during_the_proof() {
-        let spy = Arc::new(Spy {
-            stage_calls: AtomicUsize::new(0),
-            publishes: AtomicUsize::new(0),
-            entered: AtomicBool::new(false),
-            cancel_after: AtomicBool::new(true),
-            serial: Arc::new(tokio::sync::Mutex::new(())),
-            contents: Mutex::new(String::new()),
-        });
+    async fn unscoped_clipboard_stage_still_publishes_once() {
+        let board = counting();
         let recovery = Recovery::new(
-            Arc::new(Releaser(Arc::clone(&spy))),
+            Arc::new(Releaser(Arc::clone(&board))),
             Arc::new(Mutex::new(None)),
         );
-        recovery.arm_publication("7.1");
-        recovery.set_prover(Arc::new(|_namespace, _admitted| Ok(())));
-        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
-        let (_reader, mut writer) = tokio::io::duplex(64);
-        let error = recovery
-            .receive(reply, &request, &mut writer, 1, 1)
-            .await
-            .err()
-            .expect("cancelled proof published");
-        assert!(matches!(
-            error,
-            DriverError::Timeout {
-                maybe_executed: false
-            }
-        ));
-        assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
-        assert!(!spy
+        let (reply, request) = stage_pair("UNSCOPED-CLIPBOARD-PAYLOAD", false);
+        let (_reader, mut writer) = tokio::io::duplex(256);
+        let result = recovery.receive(reply, &request, &mut writer, 1, 1).await;
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(board.stages.load(Ordering::SeqCst), 1);
+        assert!(board
             .contents
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .contains("CANARY-CLIPBOARD-PAYLOAD"));
-    }
-
-    #[tokio::test]
-    async fn publication_proof_stays_bound_to_the_staged_window() {
-        let serial = Arc::new(tokio::sync::Mutex::new(()));
-        let hold = serial.clone().lock_owned().await;
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let spy = Arc::new(Spy {
-            stage_calls: AtomicUsize::new(0),
-            publishes: AtomicUsize::new(0),
-            entered: AtomicBool::new(false),
-            cancel_after: AtomicBool::new(false),
-            serial,
-            contents: Mutex::new(String::new()),
-        });
-        let recovery = Arc::new(Recovery::new(
-            Arc::new(Releaser(Arc::clone(&spy))),
-            Arc::new(Mutex::new(None)),
-        ));
-        recovery.arm_publication("7.1");
-        let record = Arc::clone(&seen);
-        recovery.set_prover(Arc::new(move |_namespace, admitted| {
-            record
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(admitted.hwnd);
-            Err(DriverError::ScopeDenied)
-        }));
-        let (reply_a, request_a) = stage_pair("CANARY-A");
-        let (mut reply_b, request_b) = stage_pair("CANARY-B");
-        if let Reply::ClipboardStage {
-            admitted: Some(admitted),
-            ..
-        } = &mut reply_b
-        {
-            admitted.hwnd = 77;
-        }
-        let first = Arc::clone(&recovery);
-        let entered = Arc::clone(&spy);
-        let task_a = tokio::spawn(async move {
-            let (_reader, mut writer) = tokio::io::duplex(64);
-            first.receive(reply_a, &request_a, &mut writer, 1, 1).await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !entered.entered.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first stage did not reach the proof");
-        let second = Arc::clone(&recovery);
-        let waiting = Arc::clone(&spy);
-        let task_b = tokio::spawn(async move {
-            let (_reader, mut writer) = tokio::io::duplex(64);
-            second.receive(reply_b, &request_b, &mut writer, 2, 1).await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while waiting.stage_calls.load(Ordering::SeqCst) < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("second stage did not reach the proof");
-        drop(hold);
-        let error_a = tokio::time::timeout(std::time::Duration::from_secs(2), task_a)
-            .await
-            .expect("first stage join")
-            .expect("first stage task")
-            .err()
-            .expect("first stage published");
-        let error_b = tokio::time::timeout(std::time::Duration::from_secs(2), task_b)
-            .await
-            .expect("second stage join")
-            .expect("second stage task")
-            .err()
-            .expect("second stage published");
-        assert_eq!(error_a, DriverError::ScopeDenied);
-        assert_eq!(error_b, DriverError::ScopeDenied);
-        let recorded = seen
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        assert_eq!(recorded.iter().filter(|hwnd| **hwnd == 8).count(), 1);
-        assert_eq!(recorded.iter().filter(|hwnd| **hwnd == 77).count(), 1);
-        assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
+            .contains("UNSCOPED-CLIPBOARD-PAYLOAD"));
     }
 }

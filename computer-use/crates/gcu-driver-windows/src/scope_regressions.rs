@@ -6,7 +6,7 @@ use crate::{
     capture::{CaptureBackend, CapturePath, FakeCapture, Paint},
     input::{
         api::Event,
-        clipboard::{ClipboardApi, PublishProof},
+        clipboard::ClipboardApi,
         fake::FakeInput,
         hotkey::{FakeSafetyApi, StopLatch},
         InputBackend,
@@ -65,10 +65,6 @@ struct CountingClipboard {
 #[async_trait]
 impl ClipboardApi for CountingClipboard {
     async fn stage(&self, _: String, _: ActionContext) -> Result<u32> {
-        self.stages.fetch_add(1, Ordering::SeqCst);
-        Ok(1)
-    }
-    async fn stage_proved(&self, _: String, _: ActionContext, _: PublishProof) -> Result<u32> {
         self.stages.fetch_add(1, Ordering::SeqCst);
         Ok(1)
     }
@@ -295,6 +291,7 @@ async fn scoped_click_does_not_sample_focus_or_post_a_foreign_child() {
     assert_eq!(error, DriverError::ScopeDenied);
     assert!(!error.maybe_executed());
     assert_eq!(input.state().samples, 0);
+    assert_eq!(input.state().text_reads, 0);
     assert_eq!(input.state().focuses, 0);
     assert!(input.state().sent.is_empty());
     assert_eq!(input.state().delivery_checks, 1);
@@ -307,6 +304,8 @@ async fn scoped_click_does_not_sample_focus_or_post_a_foreign_child() {
         .await
         .unwrap();
     assert!(!input.state().sent.is_empty());
+    assert!(input.state().samples >= 1);
+    assert!(input.state().text_reads >= 1);
 }
 
 #[tokio::test]
@@ -454,27 +453,45 @@ async fn scoped_delivery_refuses_a_replaced_process_before_the_sample() {
     let error = targeted(Arc::clone(&input), true).await.unwrap_err();
     assert_eq!(error, DriverError::ScopeDenied);
     assert!(!error.maybe_executed());
+    assert_eq!(input.state().text_reads, 0);
     assert_eq!(input.state().samples, 0);
     assert!(input.state().sent.is_empty());
     assert_eq!(input.state().delivery_checks, 1);
 }
 
 #[tokio::test]
-async fn scoped_send_rechecks_process_inside_the_send_job() {
+async fn scoped_sample_drops_text_when_the_process_changes_after_the_read() {
     let input = Arc::new(FakeInput::default());
     input.update(|state| state.replace_on_delivery = Some((1, 99, 5)));
     let error = targeted(Arc::clone(&input), true).await.unwrap_err();
     assert_eq!(error, DriverError::ScopeDenied);
     assert!(!error.maybe_executed());
-    assert_eq!(input.state().samples, 1);
+    assert_eq!(input.state().text_reads, 1);
+    assert_eq!(input.state().samples, 0);
     assert!(input.state().sent.is_empty());
     assert_eq!(input.state().delivery_checks, 2);
 }
 
 #[tokio::test]
+async fn scoped_send_rechecks_process_inside_the_send_job() {
+    let input = Arc::new(FakeInput::default());
+    let after = crate::input::sample_job::SCOPED_PROOFS;
+    input.update(|state| state.replace_on_delivery = Some((after, 99, 5)));
+    let error = targeted(Arc::clone(&input), true).await.unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert!(!error.maybe_executed());
+    assert_eq!(input.state().text_reads, 1);
+    assert_eq!(input.state().samples, 1);
+    assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().delivery_checks, after + 1);
+}
+
+#[tokio::test]
 async fn scoped_settle_sample_rechecks_the_original_process() {
     let input = Arc::new(FakeInput::default());
-    input.update(|state| state.replace_on_delivery = Some((3, 99, 5)));
+    // Two sample proofs, two sends, then the settle sample's entry proof.
+    let after = crate::input::sample_job::SCOPED_PROOFS + 2 + 1;
+    input.update(|state| state.replace_on_delivery = Some((after, 99, 5)));
     let error = targeted(Arc::clone(&input), true).await.unwrap_err();
     assert!(error.maybe_executed());
     assert!(matches!(
@@ -484,9 +501,10 @@ async fn scoped_settle_sample_rechecks_the_original_process() {
             ..
         }
     ));
+    assert_eq!(input.state().text_reads, 2);
     assert_eq!(input.state().samples, 1);
     assert_eq!(input.state().sent.len(), 3);
-    assert_eq!(input.state().delivery_checks, 4);
+    assert_eq!(input.state().delivery_checks, after + 1);
 }
 
 #[tokio::test]
@@ -496,6 +514,7 @@ async fn scoped_delivery_refuses_a_different_boot_before_reading() {
     let error = targeted(Arc::clone(&input), true).await.unwrap_err();
     assert_eq!(error, DriverError::ScopeDenied);
     assert!(!error.maybe_executed());
+    assert_eq!(input.state().text_reads, 0);
     assert_eq!(input.state().samples, 0);
     assert!(input.state().sent.is_empty());
     assert_eq!(input.state().delivery_checks, 1);
@@ -508,6 +527,7 @@ async fn unscoped_delivery_still_posts_when_the_recipient_changes() {
     targeted(Arc::clone(&input), false).await.unwrap();
     assert!(!input.state().sent.is_empty());
     assert!(input.state().samples >= 1);
+    assert_eq!(input.state().text_reads, 0);
 }
 
 #[tokio::test]

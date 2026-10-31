@@ -19,6 +19,7 @@ pub mod messages;
 mod plan;
 #[cfg(any(windows, test))]
 mod pointer_settle;
+pub(crate) mod sample_job;
 pub mod text;
 pub mod watchdog;
 use crate::{api::NativeWindow, uia::patterns::ActionContext};
@@ -159,11 +160,13 @@ impl InputBackend {
     /// Deliver under one scope copied by the caller.
     ///
     /// [`crate::scope_identity::JobScope::Unscoped`] keeps the historical route,
-    /// including foreground SendInput. A scoped job refuses foreground SendInput
-    /// before resolve, sample, focus, paste, or send. Targeted delivery carries
-    /// the admitted process into each sample and send and re-checks it there,
-    /// including every settle sample. A missing scope is refused and is not
-    /// treated as unscoped. Nothing here runs inside the pointer gate.
+    /// including foreground SendInput and the multi-read sample. A scoped job
+    /// refuses foreground SendInput before resolve, sample, focus, paste, or
+    /// send. Targeted delivery carries the admitted process into each send and
+    /// into each sample, including every settle sample. A scoped sample reads
+    /// window text once, proves that process immediately before the read, and
+    /// proves it again before the hash leaves. A missing scope is refused and
+    /// is not treated as unscoped. Nothing here runs inside the pointer gate.
     pub(crate) async fn perform_scoped(
         &self,
         window: NativeWindow,
@@ -291,6 +294,7 @@ impl InputBackend {
                         .await?;
                 }
             }
+            // Scoped foreground already returned above. This paste is unscoped.
             let paste = if foreground {
                 if let (Some(board), DriverAction::TypeText { text, focus, .. }) =
                     (&self.clipboard, req)
@@ -319,7 +323,6 @@ impl InputBackend {
                 Delivery::TargetedEvent
             };
             if let Some((clipboard, text, focus)) = paste {
-                let (admitted, proof) = publication(self.api.clone(), scope)?;
                 text::Paste {
                     api: self.api.as_ref(),
                     clipboard,
@@ -330,8 +333,6 @@ impl InputBackend {
                     text,
                     context: context.clone(),
                     safety: safety.clone(),
-                    admitted,
-                    proof,
                 }
                 .run()
                 .await?;
@@ -500,30 +501,6 @@ fn carried_target(scope: &crate::scope_identity::JobScope) -> Result<Option<api:
         created: claim.owner.created,
         boot: claim.owner.boot.clone(),
     }))
-}
-
-fn publication(
-    api: Arc<dyn InputApi>,
-    scope: &crate::scope_identity::JobScope,
-) -> Result<(Option<api::AdmittedTarget>, Option<clipboard::PublishProof>)> {
-    let Some(claim) = scope.claim()? else {
-        return Ok((None, None));
-    };
-    let admitted = api::AdmittedTarget {
-        hwnd: claim.hwnd,
-        incarnation: claim.incarnation,
-        pid: claim.owner.pid,
-        created: claim.owner.created,
-        boot: claim.owner.boot.clone(),
-    };
-    let hwnd = claim.hwnd;
-    let incarnation = claim.incarnation;
-    let pid = claim.owner.pid;
-    let created = claim.owner.created;
-    let boot = claim.owner.boot.clone();
-    let proof: clipboard::PublishProof =
-        Arc::new(move || api.recheck_publish(hwnd, incarnation, pid, created, &boot));
-    Ok((Some(admitted), Some(proof)))
 }
 
 async fn release_bounded(api: Arc<dyn InputApi>, ledger: Arc<ledger::InputLedger>) {

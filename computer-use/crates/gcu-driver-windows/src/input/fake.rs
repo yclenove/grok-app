@@ -49,16 +49,6 @@ pub struct FakeState {
     /// Window under the pointer when capture and [`Self::hit_at`] do not match.
     /// `None` means the receiver is unproved.
     pub hit_receiver: Option<u64>,
-    /// Live HWND for publication recheck. Zero inherits the claim.
-    pub live_hwnd: u64,
-    /// Live window generation. Zero inherits the claim.
-    pub live_incarnation: u64,
-    /// Live owner pid. Zero inherits the claim.
-    pub live_pid: u32,
-    /// Live process creation time. Zero inherits the claim.
-    pub live_created: u64,
-    /// Live boot identity. Empty inherits the claim.
-    pub live_boot: String,
     /// Native class name.
     pub class: String,
     /// All attempted input events, including cleanup ups.
@@ -83,8 +73,10 @@ pub struct FakeState {
     pub send_pause: Option<(usize, std::time::Duration)>,
     /// Recorded packet sizes, exposing real text chunk boundaries.
     pub packet_sizes: Vec<usize>,
-    /// Number of effect samples.
+    /// Number of effect samples that returned a hash.
     pub samples: usize,
+    /// Scoped text reads. Unscoped sampling does not increment this.
+    pub text_reads: usize,
     /// Whether dispatched inputs change sampled state.
     pub changes: bool,
     /// Failure on post-delivery effect sampling.
@@ -111,11 +103,6 @@ impl Default for FakeState {
             hit_at: Vec::new(),
             capture_hwnd: None,
             hit_receiver: None,
-            live_hwnd: 0,
-            live_incarnation: 0,
-            live_pid: 0,
-            live_created: 0,
-            live_boot: String::new(),
             class: "Edit".into(),
             sent: Vec::new(),
             activations: 0,
@@ -130,6 +117,7 @@ impl Default for FakeState {
             },
             cancel_at: None,
             samples: 0,
+            text_reads: 0,
             send_pause: None,
             packet_sizes: Vec::new(),
             changes: true,
@@ -162,11 +150,12 @@ impl FakeInput {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    /// Compare a carried claim at the start of sample or send.
+    /// Compare a carried claim inside sample or send.
     ///
-    /// The replacement is applied before the comparison and before any content
-    /// read or posted event. `None` is unscoped and does not compare. An empty
-    /// `child_boot` uses the claim's boot so ordinary fixtures keep matching.
+    /// Scoped sampling calls this before the text read and again before the hash
+    /// is returned. A send calls it before any posted event. The replacement is
+    /// applied before the comparison. `None` is unscoped and does not compare.
+    /// An empty `child_boot` uses the claim's boot so ordinary fixtures match.
     fn prove_delivery(&self, target: &Target, claim: Option<&AdmittedTarget>) -> Result<()> {
         let (pid, created, boot, carried) = {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -242,51 +231,6 @@ impl InputApi for FakeInput {
             return Ok(Some(*hwnd));
         }
         Ok(state.hit_receiver)
-    }
-    fn recheck_publish(
-        &self,
-        hwnd: u64,
-        incarnation: u64,
-        pid: u32,
-        created: u64,
-        boot: &str,
-    ) -> Result<()> {
-        let state = self.state();
-        let live_hwnd = if state.live_hwnd == 0 {
-            hwnd
-        } else {
-            state.live_hwnd
-        };
-        let live_incarnation = if state.live_incarnation == 0 {
-            incarnation
-        } else {
-            state.live_incarnation
-        };
-        let live_pid = if state.live_pid == 0 {
-            pid
-        } else {
-            state.live_pid
-        };
-        let live_created = if state.live_created == 0 {
-            created
-        } else {
-            state.live_created
-        };
-        let live_boot = if state.live_boot.is_empty() {
-            boot
-        } else {
-            state.live_boot.as_str()
-        };
-        if live_hwnd == hwnd
-            && live_incarnation == incarnation
-            && live_pid == pid
-            && live_created == created
-            && live_boot == boot
-        {
-            Ok(())
-        } else {
-            Err(DriverError::ScopeDenied)
-        }
     }
     async fn resolve(
         &self,
@@ -402,7 +346,20 @@ impl InputApi for FakeInput {
         Ok(())
     }
     async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64> {
-        self.prove_delivery(&target, claim.as_ref())?;
+        if let Some(claim) = claim {
+            let hash = super::sample_job::scoped(
+                || self.prove_delivery(&target, Some(&claim)),
+                || {
+                    self.update(|state| {
+                        state.text_reads = state.text_reads.saturating_add(1);
+                    });
+                    Ok(vec![1])
+                },
+            )?;
+            self.update(|state| state.samples = state.samples.saturating_add(1));
+            return Ok(hash);
+        }
+        self.prove_delivery(&target, None)?;
         let s = self.state();
         if !s.sent.is_empty() {
             tokio::time::sleep(s.sample_delay).await;

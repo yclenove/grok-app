@@ -228,7 +228,8 @@ pub enum Reply {
         target: crate::input::api::Target,
         /// Private payload, never logged or included in observations.
         text: String,
-        /// Admitted window for a scoped paste. Absent means the unscoped route.
+        /// Closed scoped route. `Some` is refused before the clipboard opens.
+        /// Absent means the unscoped route. Kept so `Some` cannot decode as none.
         #[serde(default)]
         admitted: Option<crate::input::api::AdmittedTarget>,
     },

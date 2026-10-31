@@ -3,13 +3,7 @@
 use async_trait::async_trait;
 use gcu_core::{driver::*, model::*};
 use gcu_driver_windows::{
-    input::{
-        api::*,
-        clipboard::{ClipboardApi, PublishProof},
-        fake::FakeInput,
-        ledger::InputLedger,
-        InputBackend,
-    },
+    input::{api::*, clipboard::ClipboardApi, fake::FakeInput, ledger::InputLedger, InputBackend},
     uia::patterns::ActionContext,
     WindowsDriver,
 };
@@ -134,12 +128,7 @@ impl FakeClipboard {
             wait.await;
         }
     }
-    async fn publish(
-        &self,
-        text: String,
-        context: ActionContext,
-        proof: Option<PublishProof>,
-    ) -> Result<u32> {
+    async fn publish(&self, text: String, context: ActionContext) -> Result<u32> {
         if self.pending() {
             return Err(DriverError::CapabilityUnavailable);
         }
@@ -151,9 +140,6 @@ impl FakeClipboard {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         };
         context.check()?;
-        if let Some(proof) = proof {
-            proof()?;
-        }
         let mut state = self.desktop.state.lock().unwrap();
         let published = vec![(13, text.into_bytes())];
         let original = std::mem::replace(&mut state.contents, published.clone());
@@ -177,15 +163,7 @@ impl FakeClipboard {
 #[async_trait]
 impl ClipboardApi for FakeClipboard {
     async fn stage(&self, text: String, context: ActionContext) -> Result<u32> {
-        self.publish(text, context, None).await
-    }
-    async fn stage_proved(
-        &self,
-        text: String,
-        context: ActionContext,
-        proof: PublishProof,
-    ) -> Result<u32> {
-        self.publish(text, context, Some(proof)).await
+        self.publish(text, context).await
     }
     async fn matches(&self, sequence: u32, text: String) -> Result<bool> {
         let mut state = self.desktop.state.lock().unwrap();

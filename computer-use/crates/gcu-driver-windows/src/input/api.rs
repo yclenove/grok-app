@@ -83,10 +83,11 @@ pub trait InputTracker: Send + Sync + 'static {
     async fn clipboard_stage(&self, _target: Target, _text: String) -> Result<u32> {
         Err(DriverError::CapabilityUnavailable)
     }
-    /// Stage scoped text only when `admitted` can be proved at publication.
+    /// Scoped clipboard staging is closed.
     ///
-    /// `Some` is the claim copied at admission. The default refuses it and does
-    /// not publish. `None` is the unscoped [`InputTracker::clipboard_stage`] route.
+    /// `Some` returns [`DriverError::CapabilityUnavailable`] and does not notify
+    /// a parent or open the clipboard. `None` is the unscoped
+    /// [`InputTracker::clipboard_stage`] route.
     async fn clipboard_stage_admitted(
         &self,
         target: Target,
@@ -94,7 +95,7 @@ pub trait InputTracker: Send + Sync + 'static {
         admitted: Option<AdmittedTarget>,
     ) -> Result<u32> {
         if admitted.is_some() {
-            return Err(DriverError::ScopeDenied);
+            return Err(DriverError::CapabilityUnavailable);
         }
         self.clipboard_stage(target, text).await
     }
@@ -187,19 +188,6 @@ pub trait InputApi: Send + Sync + 'static {
     async fn pointer_receiver(&self, _point: WindowPoint) -> Result<Option<u64>> {
         Ok(None)
     }
-    /// Live identity at a publication boundary. The default cannot prove it.
-    ///
-    /// Memory or a metadata read the implementor bounds. Not inside the pointer gate.
-    fn recheck_publish(
-        &self,
-        _hwnd: u64,
-        _incarnation: u64,
-        _pid: u32,
-        _created: u64,
-        _boot: &str,
-    ) -> Result<()> {
-        Err(DriverError::ScopeDenied)
-    }
     /// Resolve a character using the recipient keyboard layout before dispatch.
     async fn character_key(
         &self,
@@ -235,8 +223,10 @@ pub trait InputApi: Send + Sync + 'static {
     ) -> Result<()>;
     /// Sample state or pixel evidence. Core owns the final tree and redacted diff.
     ///
-    /// `claim` is compared inside this call before content is read. `None` skips
-    /// that comparison. Each settle sample carries the original claim.
+    /// `None` is the historical multi-read sample and does not compare a process.
+    /// `Some` reads window text once: the carried process is proved immediately
+    /// before that read and again before the hash is returned. A mismatch drops
+    /// the hash. Each settle sample carries the original claim.
     async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64>;
     /// Release held inputs on an independent path, including after Stop.
     async fn release(&self, ledger: Arc<InputLedger>);
