@@ -116,6 +116,35 @@ pub(super) async fn notify<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let _ = notice.done.send(Ok(ack.clipboard_sequence));
     Ok(())
 }
+fn parent_publication_proof(
+    namespace: &str,
+    claim: Arc<Mutex<Option<crate::input::api::AdmittedTarget>>>,
+) -> Option<crate::input::clipboard::PublishProof> {
+    #[cfg(windows)]
+    {
+        let namespace = namespace.to_owned();
+        Some(Arc::new(move || {
+            let admitted = claim
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
+                .ok_or(DriverError::ScopeDenied)?;
+            crate::ffi::prove_parent_publication(
+                &namespace,
+                admitted.hwnd,
+                admitted.incarnation,
+                admitted.pid,
+                admitted.created,
+                &admitted.boot,
+            )
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (namespace, claim);
+        None
+    }
+}
 fn crashed() -> DriverError {
     DriverError::Crashed {
         maybe_executed: true,
@@ -129,6 +158,9 @@ pub(super) struct Recovery {
     clipboard: Option<Arc<dyn crate::input::clipboard::ClipboardApi>>,
     safety: Arc<Mutex<Option<Arc<crate::input::hotkey::SafetyGuard>>>>,
     publish_proof: Mutex<Option<crate::input::clipboard::PublishProof>>,
+    /// Admitted target for the proof installed by `arm_publication`.
+    /// Written before `stage_proved` and read after the clipboard wait.
+    publish_claim: Arc<Mutex<Option<crate::input::api::AdmittedTarget>>>,
 }
 impl Recovery {
     pub(super) fn new(
@@ -142,17 +174,32 @@ impl Recovery {
             pending: Mutex::default(),
             safety,
             publish_proof: Mutex::default(),
+            publish_claim: Arc::default(),
         }
     }
     /// Install the live proof used at scoped clipboard publication.
     ///
-    /// `None` refuses a scoped stage and does not publish. The isolated parent
-    /// leaves this unset. Memory only. No blocking, timeout, or cancellation.
+    /// `None` refuses a scoped stage before `stage` and does not publish.
+    /// [`Self::arm_publication`] is the production caller. Memory only.
+    /// No blocking, timeout, or cancellation.
     pub(super) fn set_publish_proof(&self, proof: Option<crate::input::clipboard::PublishProof>) {
         *self
             .publish_proof
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = proof;
+    }
+    /// Arm the parent publication proof for this worker namespace.
+    ///
+    /// On Windows the proof re-reads the admitted HWND's process, creation time,
+    /// generation property, and boot session inside `stage_proved`, after the
+    /// clipboard wait and before the bytes are visible. A parent that cannot
+    /// make that proof leaves it unset, and every scoped stage is refused
+    /// before publication. Restore stays unconditional.
+    pub(super) fn arm_publication(&self, namespace: &str) {
+        self.set_publish_proof(parent_publication_proof(
+            namespace,
+            Arc::clone(&self.publish_claim),
+        ));
     }
     pub(super) fn ready(&self) -> bool {
         self.ledger.is_empty() && self.clipboard.as_ref().is_none_or(|c| !c.pending())
@@ -223,7 +270,11 @@ impl Recovery {
                     &Cancel::default(),
                     std::time::Instant::now() + DRIVER_DEADLINE,
                 );
-                clipboard_sequence = Some(if admitted.is_some() {
+                clipboard_sequence = Some(if let Some(admitted) = admitted {
+                    *self
+                        .publish_claim
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = Some(admitted);
                     let proof = self
                         .publish_proof
                         .lock()
@@ -597,6 +648,37 @@ mod tests {
             .err()
             .expect("scoped clipboard published after the proof was withdrawn");
         assert_eq!(error, DriverError::ScopeDenied);
+        assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
+        assert!(!spy
+            .contents
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains("CANARY-CLIPBOARD-PAYLOAD"));
+    }
+
+    #[tokio::test]
+    async fn scoped_parent_publication_is_armed_and_refuses_an_unproved_window() {
+        let spy = Arc::new(Spy {
+            stage_calls: AtomicUsize::new(0),
+            publishes: AtomicUsize::new(0),
+            entered: AtomicBool::new(false),
+            serial: Arc::new(tokio::sync::Mutex::new(())),
+            contents: Mutex::new(String::new()),
+        });
+        let recovery = Recovery::new(
+            Arc::new(Releaser(Arc::clone(&spy))),
+            Arc::new(Mutex::new(None)),
+        );
+        recovery.arm_publication("7.1");
+        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
+        let (_reader, mut writer) = tokio::io::duplex(64);
+        let error = recovery
+            .receive(reply, &request, &mut writer, 1, 1)
+            .await
+            .err()
+            .expect("unproved scoped clipboard was published");
+        assert_eq!(error, DriverError::ScopeDenied);
+        assert!(!error.maybe_executed());
         assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
         assert!(!spy
             .contents

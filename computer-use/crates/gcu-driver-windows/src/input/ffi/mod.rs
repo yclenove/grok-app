@@ -403,8 +403,16 @@ impl InputApi for RealInput {
                 .ok_or(DriverError::StaleElement)?;
             let node = element.node;
             let element_hwnd = element.hwnd;
+            let window_id = element.window.id.clone();
             let (pid, top) = self.uia.prove_fragment(node).await?;
-            if pid != admitted_pid || top != admitted_hwnd || element_hwnd != admitted_hwnd {
+            crate::scope_identity::admit_delivery_element(
+                admitted_hwnd,
+                element_hwnd,
+                &window_id,
+                Some(pid),
+                Some(admitted_pid),
+            )?;
+            if top != admitted_hwnd {
                 return Err(DriverError::ScopeDenied);
             }
             Some(self.uia.input_recipient(node, window.hwnd).await?)

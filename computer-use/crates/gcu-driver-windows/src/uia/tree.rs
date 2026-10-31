@@ -147,6 +147,19 @@ impl Walk<'_> {
                     top_hwnd,
                 },
             );
+        // A missing fragment is hwnd 0. `admit_fragment` still refuses an unset
+        // owner and an unproved process; `None` is not the admitted owner.
+        let (element_hwnd, owner_pid) = match fact {
+            Some(fact) => (fact.top_hwnd, Some(fact.owner_pid)),
+            None => (0, None),
+        };
+        crate::scope_identity::admit_delivery_element(
+            claim.hwnd,
+            element_hwnd,
+            "",
+            owner_pid,
+            Some(claim.owner.pid),
+        )?;
         crate::scope_identity::admit_fragment(claim, fact)
     }
     async fn node(&mut self, id: NodeId, depth: usize) -> Result<RawNode> {

@@ -89,12 +89,14 @@ pub(crate) async fn perform_until(
     // Unscoped work does not consult the owner probe. Scoped work proves the
     // element's own process and top-level window before any pattern dispatch.
     if let Some(claim) = scope.claim()? {
-        if crate::scope_identity::parse_stamp(&window_id)
-            .is_some_and(|stamp| stamp.hwnd != claim.hwnd)
-        {
-            return Err(DriverError::ScopeDenied);
-        }
         let owner = budget.read(source.owner_pid(node)).await?;
+        crate::scope_identity::admit_delivery_element(
+            claim.hwnd,
+            element_hwnd,
+            &window_id,
+            owner,
+            Some(claim.owner.pid),
+        )?;
         let fact =
             owner
                 .filter(|pid| *pid != 0)
@@ -102,6 +104,7 @@ pub(crate) async fn perform_until(
                     owner_pid,
                     top_hwnd: element_hwnd,
                 });
+        // An unset probe is not the admitted owner. Real UIA does not return Ok(None).
         crate::scope_identity::admit_fragment(claim, fact)?;
     }
     let result = match req {

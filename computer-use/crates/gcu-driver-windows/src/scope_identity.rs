@@ -123,7 +123,10 @@ pub(crate) fn admit_fragment(admitted: &WindowClaim, fact: Option<FragmentFact>)
 ///
 /// A missing, empty, oversized, or purely numeric session fails closed. The
 /// numeric form is the rejected uptime estimate and is never promoted into
-/// [`BootIdentity`]. Memory only. No blocking, timeout, or cancellation.
+/// [`BootIdentity`]. Windows reads the session with `NtQuerySystemInformation`.
+/// The portable proof ([`live_process`], [`live_window`]) uses this same
+/// function, so a numeric session is not evidence on any platform. Memory only.
+/// No blocking, timeout, or cancellation.
 pub(crate) fn boot_token(session: Option<&str>, wall_clock_origin: Option<u64>) -> Result<String> {
     let _ = wall_clock_origin;
     let Some(session) = session.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -198,10 +201,14 @@ pub(crate) fn prove_element(
     }
 }
 
-/// Delivery-time element check. An unset owner probe (`None`) does not by
-/// itself deny, because the portable UIA fake has no `CurrentProcessId`.
-/// A reported pid, a zero pid, a zero HWND, or a stamp for a different HWND does.
-/// Real UIA returns `Ok(Some(_))` or `Err`, never `Ok(None)`.
+/// Delivery-time element check used by the production tree, evidence, semantic,
+/// input, and scoped foreground-pointer paths.
+///
+/// An unset owner probe (`None`) does not by itself deny. Callers that require
+/// an owner still run [`admit_fragment`] or [`prove_element`], so `None` is not
+/// treated as the admitted process. A reported pid, a zero pid, a zero HWND, or
+/// a stamp for a different HWND does deny. Real UIA returns `Ok(Some(_))` or
+/// `Err`, never `Ok(None)`. Memory only. No blocking, timeout, or cancellation.
 pub(crate) fn admit_delivery_element(
     admitted_hwnd: u64,
     element_hwnd: u64,
@@ -283,7 +290,7 @@ pub(crate) fn live_process(api: &dyn WinApi, pid: u32) -> Option<ProcessInstance
         return None;
     }
     let created = api.process_security(pid).ok()?.created;
-    let boot = api.boot_identity().ok()?;
+    let boot = boot_token(Some(&api.boot_identity().ok()?), None).ok()?;
     ProcessInstance::new(
         pid,
         OsStartTime::new(created).ok()?,
@@ -300,7 +307,7 @@ pub(crate) fn live_process(api: &dyn WinApi, pid: u32) -> Option<ProcessInstance
 /// substitute window.
 pub(crate) fn live_window(api: &dyn WinApi, window: &WindowRef) -> Option<WindowBinding> {
     let stamp = parse_stamp(&window.id)?;
-    let boot = api.boot_identity().ok()?;
+    let boot = boot_token(Some(&api.boot_identity().ok()?), None).ok()?;
     let current = api
         .enum_windows()
         .ok()?
@@ -489,6 +496,20 @@ mod tests {
         denied(admit_delivery_element(0, 0, "8", None, Some(7)));
         let other = HwndStamp::from(&window(9, 7)).id();
         denied(admit_delivery_element(8, 8, &other, Some(7), Some(7)));
+    }
+
+    #[test]
+    fn portable_live_process_rejects_a_numeric_boot_and_accepts_a_session() {
+        let api = FakeWinApi::default();
+        api.update(|state| {
+            state.processes.insert(7, medium_security());
+            state.boot = "1700000000".into();
+        });
+        assert!(live_process(&api, 7).is_none());
+        api.update(|state| state.boot = "boot-session".into());
+        let proved = live_process(&api, 7).expect("session");
+        assert_eq!(proved.boot().as_str(), "boot-session");
+        assert_eq!(proved.pid(), 7);
     }
 
     #[test]

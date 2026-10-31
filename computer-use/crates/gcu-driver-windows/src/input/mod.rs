@@ -225,6 +225,14 @@ impl InputBackend {
             if let Some(claim) = scope.claim()? {
                 let (pid, created) = self.api.recipient_process(target.clone()).await?;
                 crate::scope_identity::admit_recipient(claim, pid, created)?;
+                let stamp = crate::desktop::HwndStamp::from(&target.window).id();
+                crate::scope_identity::admit_delivery_element(
+                    claim.hwnd,
+                    target.window.hwnd,
+                    &stamp,
+                    Some(pid),
+                    Some(claim.owner.pid),
+                )?;
                 if plan.foreground {
                     confine_pointer(self.api.as_ref(), claim.hwnd, &plan.packets).await?;
                 }
@@ -486,8 +494,14 @@ async fn confine_pointer(api: &dyn InputApi, hwnd: u64, packets: &[Vec<api::Even
                 continue;
             };
             match api.pointer_receiver(point).await? {
-                Some(receiver) if receiver == hwnd => {}
-                _ => return Err(DriverError::ScopeDenied),
+                Some(receiver) => {
+                    // The receiver is an HWND. Process identity was checked on the
+                    // recipient. An unproved or different top-level window is denied.
+                    crate::scope_identity::admit_delivery_element(
+                        hwnd, receiver, "", None, None,
+                    )?;
+                }
+                None => return Err(DriverError::ScopeDenied),
             }
         }
     }

@@ -318,6 +318,13 @@ impl State {
             )
         })?;
         let (pid, top) = self.fragment_owner(&element, request)?;
+        crate::scope_identity::admit_delivery_element(
+            admitted.hwnd,
+            top,
+            "",
+            Some(pid),
+            Some(admitted.pid),
+        )?;
         crate::scope_identity::admit_fragment(
             &crate::scope_identity::WindowClaim::from(&admitted),
             Some(crate::scope_identity::FragmentFact {
@@ -369,15 +376,21 @@ impl State {
                 Err(DriverError::ScopeDenied) => continue,
                 Err(error) => return Err(error),
             };
-            if crate::scope_identity::admit_fragment(
+            let element_ok = crate::scope_identity::admit_delivery_element(
+                admitted.hwnd,
+                top,
+                "",
+                Some(pid),
+                Some(admitted.pid),
+            );
+            let fragment_ok = crate::scope_identity::admit_fragment(
                 &crate::scope_identity::WindowClaim::from(&admitted),
                 Some(crate::scope_identity::FragmentFact {
                     owner_pid: pid,
                     top_hwnd: top,
                 }),
-            )
-            .is_err()
-            {
+            );
+            if element_ok.is_err() || fragment_ok.is_err() {
                 continue;
             }
             let started = tokio::time::Instant::now();

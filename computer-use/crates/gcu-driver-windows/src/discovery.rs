@@ -310,7 +310,7 @@ impl State {
     pub(super) fn scope_close(&self, win: &WindowRef) -> Result<()> {
         let (old, pid, target_created, _) =
             self.windows.get(&win.id).ok_or(DriverError::ScopeDenied)?;
-        let boot = self.api.boot_identity()?;
+        let boot = crate::scope_identity::boot_token(Some(&self.api.boot_identity()?), None)?;
         let current = self
             .api
             .enum_windows()?
@@ -365,7 +365,7 @@ impl State {
     ) -> Result<crate::scope_identity::WindowClaim> {
         let (old, pid, target_created, _) =
             self.windows.get(&win.id).ok_or(DriverError::ScopeDenied)?;
-        let boot = self.api.boot_identity()?;
+        let boot = crate::scope_identity::boot_token(Some(&self.api.boot_identity()?), None)?;
         if old.hwnd == 0 || old.created == 0 || *pid == 0 || *target_created == 0 || boot.is_empty()
         {
             return Err(DriverError::ScopeDenied);
@@ -386,7 +386,7 @@ impl State {
     /// Product errors from a caller that ran [`Self::observation_window`] first keep
     /// their priority. This function itself reports [`DriverError::ScopeDenied`].
     pub(super) fn prove_carried(&self, stored: &crate::scope_identity::WindowClaim) -> Result<()> {
-        let boot = self.api.boot_identity()?;
+        let boot = crate::scope_identity::boot_token(Some(&self.api.boot_identity()?), None)?;
         let current = self
             .api
             .enum_windows()?

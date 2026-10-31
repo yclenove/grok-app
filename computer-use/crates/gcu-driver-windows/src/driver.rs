@@ -463,6 +463,14 @@ impl InstanceEvidence for WindowsDriver {
                 boot: binding.owner().boot().as_str().to_owned(),
             },
         };
+        crate::scope_identity::admit_delivery_element(
+            claim.hwnd,
+            element.hwnd,
+            &element.window.id,
+            Some(fact.owner_pid),
+            Some(claim.owner.pid),
+        )
+        .ok()?;
         crate::scope_identity::prove_element(
             &claim,
             binding.native_id(),
