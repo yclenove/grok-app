@@ -523,6 +523,74 @@ impl LinuxDriver {
         aligned.windows
     }
 
+    /// Registered windows with a live process and an already proved X11 snapshot.
+    ///
+    /// Scoped AT-SPI is closed. This reads no bus name, title, child, or
+    /// extents. A window without a proved X11 snapshot is omitted.
+    fn scoped_registered_windows(&self, app: Option<&AppRef>) -> Vec<WindowInfo> {
+        let Some(binding) = &self.scope else {
+            return Vec::new();
+        };
+        let _ = binding.oracle().take_prepared();
+        let registered: Vec<(String, u32, String)> = binding
+            .gate()
+            .windows()
+            .iter()
+            .map(|window| {
+                (
+                    window.native_id().to_string(),
+                    window.owner().pid(),
+                    window.app_id().to_string(),
+                )
+            })
+            .collect();
+        let mut listed = Vec::new();
+        for (native_id, pid, app_id) in registered {
+            if let Some(target) = app {
+                if app_id != target.info.id {
+                    continue;
+                }
+                if target.info.pid.is_some_and(|seen| seen != pid) {
+                    continue;
+                }
+            }
+            if binding.discovered_instance(&app_id, pid).is_none() {
+                continue;
+            }
+            // The registration id is the X id. The AT-SPI path map is not evidence.
+            let Ok(xid) = native_id.parse::<u32>() else {
+                continue;
+            };
+            let Some(snapshot) = binding.oracle().x11_snapshot(xid) else {
+                continue;
+            };
+            if binding.gate().prove_x11(&snapshot.view).is_err() {
+                continue;
+            }
+            let frame = snapshot
+                .geometry
+                .map(|geometry| geometry.frame)
+                .unwrap_or(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                });
+            let scale = snapshot
+                .geometry
+                .map(|geometry| geometry.scale)
+                .unwrap_or(1.0);
+            listed.push(WindowInfo {
+                id: native_id,
+                title: String::new(),
+                frame,
+                scale,
+                on_current_desktop: Some(true),
+            });
+        }
+        listed
+    }
+
     async fn prepare_registered_x11(&self) {
         let Some(binding) = &self.scope else {
             return;
@@ -721,12 +789,10 @@ impl Driver for LinuxDriver {
     }
 
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<WindowInfo>> {
-        let scoped = if let Some(binding) = &self.scope {
-            let _ = binding.oracle().take_prepared();
-            true
-        } else {
-            false
-        };
+        if self.scope.is_some() {
+            let windows = self.scoped_registered_windows(app);
+            return Ok(wayland_bind::paint_frames(self, windows));
+        }
         if self.fake_source.is_some() {
             let base: Vec<WindowInfo> = self
                 .fake_windows
@@ -735,22 +801,20 @@ impl Driver for LinuxDriver {
                 .map(|(_, w)| w.clone())
                 .collect();
 
-            if !scoped {
-                if let Some(ref x) = self.x_server {
-                    let cands: Vec<_> = base
-                        .iter()
-                        .map(|w| AtspiWindowCandidate {
-                            path: w.id.clone(),
-                            title: w.title.clone(),
-                            frame: w.frame,
-                            pid: app.and_then(|a| a.info.pid),
-                        })
-                        .collect();
-                    return Ok(wayland_bind::paint_frames(
-                        self,
-                        self.align_and_record(x.as_ref(), &cands),
-                    ));
-                }
+            if let Some(ref x) = self.x_server {
+                let cands: Vec<_> = base
+                    .iter()
+                    .map(|w| AtspiWindowCandidate {
+                        path: w.id.clone(),
+                        title: w.title.clone(),
+                        frame: w.frame,
+                        pid: app.and_then(|a| a.info.pid),
+                    })
+                    .collect();
+                return Ok(wayland_bind::paint_frames(
+                    self,
+                    self.align_and_record(x.as_ref(), &cands),
+                ));
             }
             return Ok(wayland_bind::paint_frames(self, base));
         }
@@ -763,21 +827,8 @@ impl Driver for LinuxDriver {
             })?;
 
         let candidates = crate::atspi::list_atspi_candidate_windows(conn, app).await?;
-        let windows = if !scoped {
-            if let Some(ref x) = self.x_server {
-                self.align_and_record(x.as_ref(), &candidates)
-            } else {
-                candidates
-                    .into_iter()
-                    .map(|c| WindowInfo {
-                        id: c.path,
-                        title: c.title,
-                        frame: c.frame,
-                        scale: 1.0,
-                        on_current_desktop: Some(true),
-                    })
-                    .collect()
-            }
+        let windows = if let Some(ref x) = self.x_server {
+            self.align_and_record(x.as_ref(), &candidates)
         } else {
             candidates
                 .into_iter()

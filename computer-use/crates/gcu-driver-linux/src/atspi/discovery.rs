@@ -154,6 +154,10 @@ pub fn resolve_atspi_app(apps: &[AppInfo], query: &AppQuery) -> Result<AppRef> {
 }
 
 /// Enumerate window candidates exposed via AT-SPI for the given app filter.
+///
+/// Unscoped only. The walk reads every application's name, then its children,
+/// titles, and extents, before any ownership check. A scoped session must not
+/// call it. Scoped listing uses the registration and a proved X11 snapshot.
 pub async fn list_atspi_candidate_windows(
     conn: &zbus::Connection,
     app: Option<&AppRef>,

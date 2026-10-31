@@ -670,6 +670,12 @@ const FIXTURE_NAME: &str = "fixture-app";
 const APP_PATH: &str = "/org/a11y/atspi/accessible/app";
 const HELD_KEY: u8 = 38;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BusProbe {
+    destination: String,
+    path: String,
+}
+
 struct BusState {
     owner: Mutex<String>,
     stall: AtomicBool,
@@ -677,6 +683,9 @@ struct BusState {
     release: AtomicBool,
     pid_args: Mutex<Vec<String>>,
     name_dests: Mutex<Vec<String>>,
+    name_probes: Mutex<Vec<BusProbe>>,
+    extent_probes: Mutex<Vec<BusProbe>>,
+    child_paths: Mutex<Vec<String>>,
 }
 
 impl BusState {
@@ -688,6 +697,9 @@ impl BusState {
             release: AtomicBool::new(false),
             pid_args: Mutex::new(Vec::new()),
             name_dests: Mutex::new(Vec::new()),
+            name_probes: Mutex::new(Vec::new()),
+            extent_probes: Mutex::new(Vec::new()),
+            child_paths: Mutex::new(Vec::new()),
         }
     }
 
@@ -729,6 +741,70 @@ impl BusState {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clear();
+        self.clear_content();
+    }
+
+    fn clear_content(&self) {
+        self.name_probes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.extent_probes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.child_paths
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
+
+    fn note_name(&self, destination: &str, path: &str) {
+        self.name_probes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(BusProbe {
+                destination: destination.to_string(),
+                path: path.to_string(),
+            });
+    }
+
+    fn note_extents(&self, destination: &str, path: &str) {
+        self.extent_probes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(BusProbe {
+                destination: destination.to_string(),
+                path: path.to_string(),
+            });
+    }
+
+    fn note_children(&self, path: &str) {
+        self.child_paths
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(path.to_string());
+    }
+
+    fn name_probes(&self) -> Vec<BusProbe> {
+        self.name_probes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn extent_probes(&self) -> Vec<BusProbe> {
+        self.extent_probes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn child_paths(&self) -> Vec<String> {
+        self.child_paths
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 }
 
@@ -990,6 +1066,384 @@ async fn bus_name_held_by_another_pid_publishes_nothing() {
     assert_eq!(err, DriverError::ScopeDenied);
     assert_clean(&err.to_string(), &[CANARY_C, WELL_KNOWN_CANARY]);
     assert!(bus.state.names().is_empty());
+}
+
+const REGISTRY_PATH: &str = "/org/a11y/atspi/accessible/root";
+const C_APP_PATH: &str = "/org/a11y/atspi/accessible/c";
+const P_WIN_PATH: &str = "/org/a11y/atspi/accessible/app/p";
+const SIBLING_PATH: &str = "/org/a11y/atspi/accessible/app/sibling";
+const C_WIN_PATH: &str = "/org/a11y/atspi/accessible/c/win";
+const SIBLING_CANARY: &str = "sibling-title-canary";
+const FOREIGN_CANARY: &str = "foreign-window-canary";
+const HANDOFF_CANARY: &str = "handoff-name-canary";
+const REGISTERED_TITLE: &str = "registered-title";
+const WINDOW_CANARIES: &[&str] = &[
+    SIBLING_CANARY,
+    FOREIGN_CANARY,
+    HANDOFF_CANARY,
+    WELL_KNOWN_CANARY,
+    CANARY_C,
+    REGISTERED_TITLE,
+    "x-window",
+];
+
+#[derive(Clone, Copy)]
+enum WindowRole {
+    Registry,
+    App,
+    Titled(&'static str),
+}
+
+const WINDOW_NODES: &[(&str, WindowRole)] = &[
+    (REGISTRY_PATH, WindowRole::Registry),
+    (APP_PATH, WindowRole::App),
+    (C_APP_PATH, WindowRole::App),
+    (P_WIN_PATH, WindowRole::Titled(REGISTERED_TITLE)),
+    (SIBLING_PATH, WindowRole::Titled(SIBLING_CANARY)),
+    (C_WIN_PATH, WindowRole::Titled(FOREIGN_CANARY)),
+];
+
+fn owned_path(path: &str) -> zbus::zvariant::OwnedObjectPath {
+    zbus::zvariant::OwnedObjectPath::try_from(path).unwrap()
+}
+
+fn child_pairs(path: &str) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+    let pairs: &[(&str, &str)] = match path {
+        REGISTRY_PATH => &[(APP_ID, APP_PATH), (UNIQUE_C, C_APP_PATH)],
+        APP_PATH => &[(APP_ID, P_WIN_PATH), (APP_ID, SIBLING_PATH)],
+        C_APP_PATH => &[(UNIQUE_C, C_WIN_PATH)],
+        _ => &[],
+    };
+    pairs
+        .iter()
+        .map(|(name, child)| ((*name).to_string(), owned_path(child)))
+        .collect()
+}
+
+fn header_destination(header: &Option<zbus::message::Header<'_>>) -> String {
+    header
+        .as_ref()
+        .and_then(|header| header.destination())
+        .map(|name| name.to_string())
+        .unwrap_or_default()
+}
+
+fn window_accessible_name(node: &AccessibleNode, destination: &str) -> String {
+    if let WindowRole::Titled(title) = node.role {
+        return title.to_string();
+    }
+    if node.path == C_APP_PATH {
+        return FIXTURE_NAME.to_string();
+    }
+    if node.path != APP_PATH {
+        return "registry".to_string();
+    }
+    if destination == UNIQUE_P {
+        return FIXTURE_NAME.to_string();
+    }
+    if destination == UNIQUE_C || node.state.owner() == UNIQUE_C {
+        return HANDOFF_CANARY.to_string();
+    }
+    WELL_KNOWN_CANARY.to_string()
+}
+
+struct AccessibleNode {
+    state: Arc<BusState>,
+    path: &'static str,
+    role: WindowRole,
+}
+
+#[zbus::interface(interface = "org.a11y.atspi.Accessible")]
+impl AccessibleNode {
+    fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+        self.state.note_children(self.path);
+        child_pairs(self.path)
+    }
+
+    #[zbus(property)]
+    fn name(&self, #[zbus(header)] header: Option<zbus::message::Header<'_>>) -> String {
+        let destination = header_destination(&header);
+        self.state.note_name(&destination, self.path);
+        window_accessible_name(self, &destination)
+    }
+}
+
+struct ExtentNode {
+    state: Arc<BusState>,
+    path: &'static str,
+}
+
+#[zbus::interface(interface = "org.a11y.atspi.Component")]
+impl ExtentNode {
+    fn get_extents(
+        &self,
+        _coord_type: atspi::CoordType,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+    ) -> (i32, i32, i32, i32) {
+        let destination = header_destination(&header);
+        self.state.note_extents(&destination, self.path);
+        (9, 9, 11, 13)
+    }
+}
+
+fn foreign_content(state: &BusState) -> Vec<String> {
+    let mut leaks = Vec::new();
+    for probe in state.name_probes() {
+        let allowed = probe.destination == UNIQUE_P && probe.path == APP_PATH;
+        if !allowed {
+            leaks.push(format!("name {}:{}", probe.destination, probe.path));
+        }
+    }
+    for probe in state.extent_probes() {
+        leaks.push(format!("extents {}:{}", probe.destination, probe.path));
+    }
+    for path in state.child_paths() {
+        if path != REGISTRY_PATH {
+            leaks.push(format!("children {path}"));
+        }
+    }
+    leaks
+}
+
+fn assert_foreign_quiet(state: &BusState) {
+    let leaks = foreign_content(state);
+    assert!(leaks.is_empty(), "foreign AT-SPI content: {leaks:?}");
+}
+
+fn assert_bus_silent(state: &BusState) {
+    let names = state.name_probes();
+    let extents = state.extent_probes();
+    let children = state.child_paths();
+    assert!(
+        names.is_empty() && extents.is_empty() && children.is_empty(),
+        "window discovery read names {names:?}, extents {extents:?}, children {children:?}"
+    );
+}
+
+async fn window_bus(owner: &str) -> TestBus {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let guid = zbus::Guid::generate();
+    let state = Arc::new(BusState::new(owner, false));
+    let server_state = Arc::clone(&state);
+    let server = async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut builder = zbus::connection::Builder::tcp_stream(stream)
+            .server(guid)
+            .unwrap()
+            .p2p();
+        for &(path, role) in WINDOW_NODES {
+            let accessible = AccessibleNode {
+                state: Arc::clone(&server_state),
+                path,
+                role,
+            };
+            let extents = ExtentNode {
+                state: Arc::clone(&server_state),
+                path,
+            };
+            builder = builder.serve_at(path, accessible).unwrap();
+            builder = builder.serve_at(path, extents).unwrap();
+        }
+        builder
+            .serve_at("/org/freedesktop/DBus", Daemon(server_state))
+            .unwrap()
+            .build()
+            .await
+            .unwrap()
+    };
+    let client = async move {
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        zbus::connection::Builder::tcp_stream(stream)
+            .p2p()
+            .build()
+            .await
+            .unwrap()
+    };
+    let (server, client) = tokio::join!(server, client);
+    TestBus {
+        client,
+        server,
+        state,
+    }
+}
+
+fn scoped_for(
+    bus: &TestBus,
+    native_id: &str,
+    server: Option<Arc<dyn XServer>>,
+) -> ScopedDriver<LinuxDriver> {
+    let mut driver = LinuxDriver::from_bus(bus.client.clone());
+    let clock = Arc::new(MapClock::new(BOOT));
+    clock.set(PID_P, 1000);
+    clock.set(PID_C, 5000);
+    let clock: Arc<dyn ProcessClock> = clock;
+    driver.bind_scope(gate_for(PID_P, native_id), clock);
+    let driver = match server {
+        Some(server) => driver.with_x_server(server),
+        None => driver,
+    };
+    ScopedDriver::new(
+        driver,
+        lease_for_pid(PID_P, native_id),
+        gcu_core::testing::host::fake_activity(),
+    )
+}
+
+fn proved_server() -> Arc<FakeX> {
+    let x = Arc::new(FakeX::new(
+        XRootGeometry {
+            root_id: 1,
+            width: 100,
+            height: 100,
+            scale: 1.0,
+        },
+        true,
+    ));
+    x.add_window(x_window(7, PID_P));
+    x.set_window_incarnation(7, 5);
+    let mut foreign = x_window(8, PID_C);
+    foreign.name = Some(FOREIGN_CANARY.to_string());
+    x.add_window(foreign);
+    x
+}
+
+fn proved_frame() -> Rect {
+    Rect {
+        x: 1.0,
+        y: 2.0,
+        w: 30.0,
+        h: 40.0,
+    }
+}
+
+fn one_app(listed: &[AppInfo]) -> AppRef {
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, APP_ID);
+    assert_eq!(listed[0].name, FIXTURE_NAME);
+    assert_eq!(listed[0].pid, Some(PID_P));
+    app_ref(listed[0].clone())
+}
+
+async fn expect_app_round(scoped: &ScopedDriver<LinuxDriver>, state: &BusState) -> AppRef {
+    state.clear_content();
+    let listed = scoped.list_apps().await.unwrap();
+    let app = one_app(&listed);
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_foreign_quiet(state);
+    state.clear_content();
+    let resolved = scoped
+        .resolve_app(&AppQuery(FIXTURE_NAME.into()))
+        .await
+        .unwrap();
+    assert_eq!(resolved.info.pid, Some(PID_P));
+    assert_eq!(resolved.info.id, APP_ID);
+    assert_foreign_quiet(state);
+    let err = scoped
+        .resolve_app(&AppQuery(FOREIGN_CANARY.into()))
+        .await
+        .unwrap_err();
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_clean(&err.to_string(), WINDOW_CANARIES);
+    assert_foreign_quiet(state);
+    app
+}
+
+async fn expect_closed_windows(scoped: &ScopedDriver<LinuxDriver>, app: &AppRef, state: &BusState) {
+    state.clear_content();
+    let listed = scoped.list_windows(Some(app)).await.unwrap();
+    assert!(listed.is_empty());
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_bus_silent(state);
+    state.clear_content();
+    let listed = scoped.list_windows(None).await.unwrap();
+    assert!(listed.is_empty());
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_foreign_quiet(state);
+    state.clear_content();
+    let err = scoped.key_window(app).await.unwrap_err();
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_clean(&err.to_string(), WINDOW_CANARIES);
+    assert_bus_silent(state);
+}
+
+async fn expect_proved_window(scoped: &ScopedDriver<LinuxDriver>, app: &AppRef, state: &BusState) {
+    state.clear_content();
+    let listed = scoped.list_windows(Some(app)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "7");
+    assert!(listed[0].title.is_empty());
+    assert_eq!(listed[0].frame, proved_frame());
+    assert_eq!(listed[0].scale, 1.0);
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_bus_silent(state);
+    state.clear_content();
+    let listed = scoped.list_windows(None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "7");
+    assert!(listed[0].title.is_empty());
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_foreign_quiet(state);
+    state.clear_content();
+    let key = scoped.key_window(app).await.unwrap();
+    assert_eq!(key.id, "7");
+    assert!(key.title.is_empty());
+    assert_eq!(key.frame, proved_frame());
+    assert_clean(&format!("{key:?}"), WINDOW_CANARIES);
+    assert_bus_silent(state);
+}
+
+async fn expect_handoff_keeps_proved_window(
+    scoped: &ScopedDriver<LinuxDriver>,
+    app: &AppRef,
+    state: &BusState,
+) {
+    state.clear_content();
+    let listed = scoped.list_windows(Some(app)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "7");
+    assert!(listed[0].title.is_empty());
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_bus_silent(state);
+    state.clear_content();
+    let listed = scoped.list_windows(None).await.unwrap();
+    assert!(listed.is_empty());
+    assert_clean(&format!("{listed:?}"), WINDOW_CANARIES);
+    assert_foreign_quiet(state);
+    state.clear_content();
+    let key = scoped.key_window(app).await.unwrap();
+    assert_eq!(key.id, "7");
+    assert!(key.title.is_empty());
+    assert_bus_silent(state);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scoped_window_discovery_reads_no_foreign_atspi_content() {
+    let bus = window_bus(UNIQUE_P).await;
+    assert!(!bus.server.is_closed());
+    let closed = scoped_for(&bus, "fixture-window", None);
+    let app = expect_app_round(&closed, &bus.state).await;
+    expect_closed_windows(&closed, &app, &bus.state).await;
+
+    bus.state.set_owner(UNIQUE_C);
+    expect_closed_windows(&closed, &app, &bus.state).await;
+    bus.state.clear_content();
+    let denied = closed
+        .resolve_app(&AppQuery(FIXTURE_NAME.into()))
+        .await
+        .unwrap_err();
+    assert_eq!(denied, DriverError::ScopeDenied);
+    assert_clean(&denied.to_string(), WINDOW_CANARIES);
+    assert_foreign_quiet(&bus.state);
+
+    bus.state.set_owner(UNIQUE_P);
+    let x = proved_server();
+    let server: Arc<dyn XServer> = x;
+    let open = scoped_for(&bus, "7", Some(server));
+    let app = expect_app_round(&open, &bus.state).await;
+    expect_proved_window(&open, &app, &bus.state).await;
+    bus.state.set_owner(UNIQUE_C);
+    expect_handoff_keeps_proved_window(&open, &app, &bus.state).await;
 }
 
 struct DoctorStop {
