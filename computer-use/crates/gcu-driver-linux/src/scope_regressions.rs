@@ -2233,7 +2233,14 @@ async fn unbound_scoped_doctor_returns_without_an_x_probe_and_stop_releases() {
     );
     assert!(!report.ready);
     assert_routes_closed(&report.capabilities);
-    assert!(report.issues.iter().any(|issue| issue.contains("AT-SPI")));
+    // Stop races the doctor here. If Stop latches first, the wrapper's handoff
+    // refuses and clears every issue; otherwise only the scoped note remains.
+    // Both are fail-closed. The note alone is covered by the Stop-free tests.
+    assert!(
+        report.issues.is_empty() || report.issues.iter().all(|issue| issue.contains("AT-SPI")),
+        "{:?}",
+        report.issues
+    );
     assert_unpublished(&format!("{report:?}"));
     // Doctor makes no X11 call. Release sends one key-up and one flush.
     assert_eq!(x.x_calls(), calls + 2);
