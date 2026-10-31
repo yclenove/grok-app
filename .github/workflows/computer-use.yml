@@ -134,6 +134,14 @@ jobs:
       - name: cargo test (eval-autoapprove)
         run: cargo test --locked -p gcu-cli -p gcu-eval --features gcu-cli/eval-autoapprove,gcu-eval/eval-autoapprove
 
+      # scope_supervisor sets required-features = test-support (the feature that compiles the
+      # lifecycle launch mint, ADR 0017 S6), so the workspace test above skips it.
+      - name: cargo clippy (gcu-eval test-support)
+        run: cargo clippy --locked -p gcu-eval --all-targets --features gcu-eval/test-support -- -D warnings
+
+      - name: cargo test (gcu-eval test-support)
+        run: cargo test --locked -p gcu-eval --features gcu-eval/test-support
+
       # pointer_gate sets required-features = test-support, so the workspace test above skips it.
       - name: cargo clippy (Windows pointer gate)
         if: runner.os == 'Windows'
