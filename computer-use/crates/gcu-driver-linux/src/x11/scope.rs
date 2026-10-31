@@ -22,6 +22,8 @@ use std::time::Duration;
 /// Borrowed gate used at X11 delivery.
 pub(crate) struct X11Scope<'a> {
     gate: &'a ScopeGate,
+    /// In-memory proof clock. Live delivery reads the oracle instead.
+    #[cfg(test)]
     clock: &'a dyn ProcessClock,
     oracle: Option<&'a ScopeOracle>,
     stop: Option<Arc<dyn StopLatch>>,
@@ -32,6 +34,7 @@ impl<'a> X11Scope<'a> {
     ///
     /// This synchronous handle is for in-memory servers. Production delivery
     /// uses [`Self::with_runtime`] so the X round trip leaves the runtime.
+    #[cfg(test)]
     pub(crate) fn new(gate: &'a ScopeGate, clock: &'a dyn ProcessClock) -> Self {
         Self {
             gate,
@@ -48,8 +51,12 @@ impl<'a> X11Scope<'a> {
         oracle: &'a ScopeOracle,
         stop: Arc<dyn StopLatch>,
     ) -> Self {
+        // The sync proof is the only reader. Live admission uses `oracle`.
+        #[cfg(not(test))]
+        let _ = clock;
         Self {
             gate,
+            #[cfg(test)]
             clock,
             oracle: Some(oracle),
             stop: Some(stop),
@@ -59,6 +66,7 @@ impl<'a> X11Scope<'a> {
     /// Re-read the window and refuse when it is not the admitted instance.
     ///
     /// In-memory only. A live server goes through [`Self::allow_live`].
+    #[cfg(test)]
     pub(crate) fn allow(&self, x: &dyn XServer, xid: u32) -> Result<(), DriverError> {
         self.gate
             .prove_x11(&observe_x11(x, xid, self.clock))

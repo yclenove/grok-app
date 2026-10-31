@@ -204,7 +204,7 @@ async fn stalled_x11_evidence_releases_stop_before_the_native_ceiling() {
         Vec::new(),
     );
     bind(&mut driver, "7", &clock);
-    let server: Arc<dyn XServer> = Arc::clone(&x);
+    let server: Arc<dyn XServer> = Arc::clone(&x) as Arc<dyn XServer>;
     let driver = driver.with_x_server(server);
     let (entered, release) = x.arm_metadata_stall();
     let _guard = ReleaseOnDrop(Arc::clone(&release));
@@ -360,7 +360,7 @@ async fn window_binding_does_not_query_the_x_server() {
         Vec::new(),
     );
     bind(&mut driver, "7", &clock);
-    let server: Arc<dyn XServer> = Arc::clone(&x);
+    let server: Arc<dyn XServer> = Arc::clone(&x) as Arc<dyn XServer>;
     let driver = driver.with_x_server(server);
     tokio::task::yield_now().await;
     let (entered, release) = x.arm_metadata_stall();

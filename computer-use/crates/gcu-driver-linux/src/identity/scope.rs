@@ -183,10 +183,10 @@ pub(crate) fn check_process(
     if live.pid == 0 || live.start_time == 0 || live.boot_id.is_empty() {
         return Err(ScopeFault::Unprovable);
     }
-    if live.boot_id != expected.boot_id {
+    if live.boot_id != expected.boot_id() {
         return Err(ScopeFault::Unprovable);
     }
-    if live.pid == expected.pid && live.start_time != expected.start_time {
+    if live.pid == expected.pid && live.start_time != expected.start_time() {
         return Err(ScopeFault::PidReuse);
     }
     if live.pid != expected.pid {
@@ -286,7 +286,7 @@ pub(crate) fn check_x11(expected: &ScopeWindow, live: &X11View) -> Result<(), Sc
     let Some(incarnation) = live.incarnation.filter(|value| *value > 0) else {
         return Err(ScopeFault::Closed);
     };
-    if incarnation != expected.incarnation {
+    if incarnation != expected.incarnation() {
         return Err(ScopeFault::WindowReuse);
     }
     let Some(owner) = live.owner.as_ref() else {
@@ -327,7 +327,7 @@ pub(crate) fn check_atspi(expected: &ScopeWindow, live: &AtspiView) -> Result<()
     if live.incarnation == 0 {
         return Err(ScopeFault::Unprovable);
     }
-    if live.incarnation != expected.incarnation {
+    if live.incarnation != expected.incarnation() {
         return Err(ScopeFault::WindowReuse);
     }
     let Some(pid) = live.pid else {
@@ -361,7 +361,7 @@ pub(crate) fn check_handle(expected: &ScopeWindow, live: &HandleView) -> Result<
     if live.incarnation == 0 {
         return Err(ScopeFault::Unprovable);
     }
-    if live.incarnation != expected.incarnation {
+    if live.incarnation != expected.incarnation() {
         return Err(ScopeFault::WindowReuse);
     }
     check_process(&expected.owner, live.owner.as_ref())
@@ -412,7 +412,7 @@ pub(crate) fn check_wayland(expected: &ScopeWindow, live: &WaylandView) -> Resul
     if live.generation == 0 {
         return Err(ScopeFault::Closed);
     }
-    if live.generation != expected.incarnation {
+    if live.generation != expected.incarnation() {
         return Err(ScopeFault::WindowReuse);
     }
     let Some(pid) = live.peer_pid else {
