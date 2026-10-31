@@ -441,7 +441,11 @@ impl InstanceEvidence for WindowsDriver {
     fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {
         let element = handle.downcast_ref::<crate::uia::UiaElement>()?;
         // The source record is the element's owner. The requested window is not.
-        let fact = self.observer.as_ref()?.fragment_now(element.node)?;
+        let (owner_pid, top_hwnd) = self.observer.as_ref()?.fragment_now(element.node)?;
+        let fact = crate::scope_identity::FragmentFact {
+            owner_pid,
+            top_hwnd,
+        };
         let binding = self.window_binding(&element.window)?;
         let stamp = crate::scope_identity::parse_stamp(binding.native_id())?;
         if fact.top_hwnd != element.hwnd

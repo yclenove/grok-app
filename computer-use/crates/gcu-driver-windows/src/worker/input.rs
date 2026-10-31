@@ -539,7 +539,8 @@ mod tests {
         let error = recovery
             .receive(reply, &request, &mut writer, 1, 1)
             .await
-            .unwrap_err();
+            .err()
+            .expect("scoped clipboard stage published without a proof");
         assert_eq!(error, DriverError::ScopeDenied);
         assert!(!error.maybe_executed());
         assert_eq!(spy.stage_calls.load(Ordering::SeqCst), 0);
@@ -590,7 +591,11 @@ mod tests {
         .unwrap();
         valid.store(false, Ordering::SeqCst);
         drop(hold);
-        let error = task.await.unwrap().unwrap_err();
+        let error = task
+            .await
+            .unwrap()
+            .err()
+            .expect("scoped clipboard published after the proof was withdrawn");
         assert_eq!(error, DriverError::ScopeDenied);
         assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);
         assert!(!spy

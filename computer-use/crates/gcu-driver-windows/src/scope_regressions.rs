@@ -16,7 +16,7 @@ use crate::{
         actions,
         cache::{Patterns, Properties},
         events::FakeUiaEvents,
-        source::{FakeNode, FakeUia},
+        source::{FakeNode, FakeUia, UiaSource},
         UiaElement,
     },
     WindowsDriver,
@@ -67,7 +67,9 @@ async fn editor() -> (Arc<FakeWinApi>, WindowsDriver, AppRef, WindowRef) {
         state.windows.push(window(8, 7));
         state.desktops.insert(8, Some(true));
     });
-    let driver = WindowsDriver::with_api(Arc::clone(&api)).await.unwrap();
+    let driver = WindowsDriver::with_api(Arc::clone(&api) as Arc<dyn crate::api::WinApi>)
+        .await
+        .unwrap();
     let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
     let info = driver.key_window(&app).await.unwrap();
     let win = WindowRef {
@@ -230,7 +232,9 @@ async fn scoped_click_does_not_sample_focus_or_post_a_foreign_child() {
         state.child_created = 5;
     });
     let driver = driver
-        .with_input(Arc::new(InputBackend::new(Arc::clone(&input))))
+        .with_input(Arc::new(InputBackend::new(
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
+        )))
         .with_safety(guard());
     driver.note_scoped_session();
     let binding = driver.window_binding(&win).unwrap();
@@ -267,7 +271,9 @@ async fn unscoped_click_still_posts_a_foreign_child() {
         state.child_created = 5;
     });
     let driver = driver
-        .with_input(Arc::new(InputBackend::new(Arc::clone(&input))))
+        .with_input(Arc::new(InputBackend::new(
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
+        )))
         .with_safety(guard());
     driver
         .perform(&click(win, PointerRoute::TargetedOnly), &Cancel::default())
@@ -282,7 +288,9 @@ async fn scoped_foreground_refuses_an_overlay_and_a_drag_that_crosses_another_wi
     let input = Arc::new(FakeInput::default());
     input.update(|state| state.hit_receiver = Some(77));
     let driver = driver
-        .with_input(Arc::new(InputBackend::new(Arc::clone(&input))))
+        .with_input(Arc::new(InputBackend::new(
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
+        )))
         .with_safety(guard());
     driver.note_scoped_session();
     let binding = driver.window_binding(&win).unwrap();
@@ -357,7 +365,7 @@ async fn replacement_after_admission_does_not_enter_uia_or_capture() {
     let (api, _, _, _) = editor().await;
     let source = canary_source();
     let driver = WindowsDriver::with_uia(
-        Arc::clone(&api),
+        Arc::clone(&api) as Arc<dyn crate::api::WinApi>,
         Arc::new(source.clone()),
         Arc::new(FakeUiaEvents::default()),
     )
