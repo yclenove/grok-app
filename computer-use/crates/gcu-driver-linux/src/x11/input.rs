@@ -14,6 +14,7 @@ use gcu_core::{
     model::WindowPoint,
 };
 use gcu_protocol::{keys::KeyChord, tools::MouseButton as Button};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Threshold for chunking long text typing requests.
@@ -27,18 +28,18 @@ const REMAP_SETTLE: Duration = Duration::from_millis(120);
 /// A refusal before focus is requested is [`DriverError::ScopeDenied`]. A refusal
 /// after an activate request was sent reports that delivery may have started.
 async fn gate_delivery(
-    x: &dyn XServer,
+    x: &Arc<dyn XServer>,
     xid: u32,
     scope: Option<&X11Scope<'_>>,
     cancel: &Cancel,
 ) -> Result<(), DriverError> {
     if let Some(scope) = scope {
-        scope.allow(x, xid)?;
+        scope.allow_live(x, xid).await?;
     }
     let was_active = matches!(x.active_window(), Ok(Some(active)) if active == xid);
-    activate_and_verify(x, xid, cancel).await?;
+    activate_and_verify(x.as_ref(), xid, cancel).await?;
     if let Some(scope) = scope {
-        if let Err(error) = scope.allow(x, xid) {
+        if let Err(error) = scope.allow_live(x, xid).await {
             return Err(if was_active {
                 error
             } else {
@@ -115,7 +116,7 @@ pub async fn activate_and_verify(
 /// Execute a physical pointer click via XTEST.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_pointer_click(
-    x: &dyn XServer,
+    x: &Arc<dyn XServer>,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
@@ -194,7 +195,7 @@ pub(crate) async fn execute_pointer_click(
 /// Execute pointer scroll events using X11 wheel buttons (4=up, 5=down, 6=left, 7=right).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_pointer_scroll(
-    x: &dyn XServer,
+    x: &Arc<dyn XServer>,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
@@ -264,7 +265,7 @@ pub(crate) async fn execute_pointer_scroll(
 
 /// Execute an interpolated pointer drag along a path.
 pub(crate) async fn execute_pointer_drag(
-    x: &dyn XServer,
+    x: &Arc<dyn XServer>,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
@@ -348,7 +349,7 @@ pub(crate) async fn execute_pointer_drag(
 
 /// Execute a key chord with modifiers and key press/release.
 pub(crate) async fn execute_press_keys(
-    x: &dyn XServer,
+    x: &Arc<dyn XServer>,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
@@ -461,7 +462,7 @@ pub(crate) async fn execute_press_keys(
 
 /// Execute type_text via X11 XTEST keysyms, chunking long inputs without splitting grapheme clusters.
 pub(crate) async fn execute_type_text_x11(
-    x: &dyn XServer,
+    x: &Arc<dyn XServer>,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,

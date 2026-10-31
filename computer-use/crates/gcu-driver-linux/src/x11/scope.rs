@@ -1,49 +1,233 @@
 //! Scoped X11 window proof. Pixels come from the window pixmap only.
 //!
-//! `_NET_WM_PID` is cross-checked against the fixture pid and start time.
-//! A missing pid, a missing incarnation, or a failed pixmap read refuses the
-//! capture. The root window is not a fallback.
+//! `_NET_WM_PID` is client-controlled. It is compared with the fixture pid and
+//! start time, and a missing pid, a missing incarnation, or a failed pixmap
+//! read refuses the capture. That comparison is not server-authenticated
+//! client ownership. The root window is not a fallback.
+//!
+//! Blocking reads run on a worker thread. The control runtime only waits, and
+//! that wait shares the open [`gcu_core::driver::NATIVE_TIMEOUT`] budget.
 
+use super::hotkey::StopLatch;
 use super::server::{XServer, XWindowGeometry};
 use crate::identity::scope::{
-    confirm_twice, process_view, ProcessClock, ScopeFault, ScopeGate, X11View,
+    confirm_twice, process_view, ProcessClock, ScopeFault, ScopeGate, ScopeOracle, X11Snapshot,
+    X11View,
 };
 use gcu_core::driver::{Capture, DriverError};
 use gcu_core::model::{Geometry, Rect};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Borrowed gate used at X11 delivery.
 pub(crate) struct X11Scope<'a> {
     gate: &'a ScopeGate,
     clock: &'a dyn ProcessClock,
+    oracle: Option<&'a ScopeOracle>,
+    stop: Option<Arc<dyn StopLatch>>,
 }
 
 impl<'a> X11Scope<'a> {
     /// Proof handle for one gate and clock.
+    ///
+    /// This synchronous handle is for in-memory servers. Production delivery
+    /// uses [`Self::with_runtime`] so the X round trip leaves the runtime.
     pub(crate) fn new(gate: &'a ScopeGate, clock: &'a dyn ProcessClock) -> Self {
-        Self { gate, clock }
+        Self {
+            gate,
+            clock,
+            oracle: None,
+            stop: None,
+        }
+    }
+
+    /// Proof handle that reads X off the control runtime.
+    pub(crate) fn with_runtime(
+        gate: &'a ScopeGate,
+        clock: &'a dyn ProcessClock,
+        oracle: &'a ScopeOracle,
+        stop: Arc<dyn StopLatch>,
+    ) -> Self {
+        Self {
+            gate,
+            clock,
+            oracle: Some(oracle),
+            stop: Some(stop),
+        }
     }
 
     /// Re-read the window and refuse when it is not the admitted instance.
+    ///
+    /// In-memory only. A live server goes through [`Self::allow_live`].
     pub(crate) fn allow(&self, x: &dyn XServer, xid: u32) -> Result<(), DriverError> {
         self.gate
             .prove_x11(&observe_x11(x, xid, self.clock))
             .map(|_| ())
             .map_err(ScopeFault::deny)
     }
+
+    /// Re-read the window off the runtime, inside the open evidence budget.
+    pub(crate) async fn allow_live(
+        &self,
+        x: &Arc<dyn XServer>,
+        xid: u32,
+    ) -> Result<(), DriverError> {
+        let (Some(oracle), Some(stop)) = (self.oracle, self.stop.clone()) else {
+            return Err(DriverError::ScopeDenied);
+        };
+        load_x11_snapshot(self.gate, oracle, &stop, x, xid)
+            .await
+            .map(|_| ())
+    }
 }
 
-/// Read `_NET_WM_PID`, the incarnation, and the process start time.
+/// Read the incarnation first. Pid and geometry run only when it is present.
 pub(crate) fn observe_x11(x: &dyn XServer, xid: u32, clock: &dyn ProcessClock) -> X11View {
-    let (net_wm_pid, incarnation) = match x.window_pid(xid) {
-        Ok(pid) => (pid, x.window_incarnation(xid).ok().flatten()),
-        Err(_) => (None, None),
+    observe_snapshot(x, xid, clock).view
+}
+
+fn observe_snapshot(x: &dyn XServer, xid: u32, clock: &dyn ProcessClock) -> X11Snapshot {
+    let incarnation = match x.window_incarnation(xid) {
+        Ok(value) => value.filter(|value| *value > 0),
+        Err(_) => None,
     };
+    if incarnation.is_none() {
+        return X11Snapshot {
+            view: X11View {
+                window_id: xid,
+                net_wm_pid: None,
+                incarnation: None,
+                owner: None,
+            },
+            geometry: None,
+        };
+    }
+    let net_wm_pid = x.window_pid(xid).ok().flatten();
     let owner = net_wm_pid.and_then(|pid| process_view(clock, pid));
-    X11View {
-        window_id: xid,
-        net_wm_pid,
-        incarnation,
-        owner,
+    let geometry = x.window_geometry(xid).ok().map(|geom| {
+        let scale = x.root_geometry().map(|root| root.scale).unwrap_or(1.0);
+        Geometry {
+            frame: Rect {
+                x: geom.x as f64,
+                y: geom.y as f64,
+                w: geom.width as f64,
+                h: geom.height as f64,
+            },
+            scale,
+        }
+    });
+    X11Snapshot {
+        view: X11View {
+            window_id: xid,
+            net_wm_pid,
+            incarnation,
+            owner,
+        },
+        geometry,
+    }
+}
+
+/// Run `work` on a named thread and wait at most `budget`.
+///
+/// `None` means the budget ran out, Stop was latched, or the thread did not
+/// start. Dropping the receiver leaves the worker running. The worker must
+/// not own input release. A zero budget or an already latched Stop does not
+/// start a thread.
+pub(crate) async fn off_runtime<T, F>(
+    budget: Duration,
+    stop: &Arc<dyn StopLatch>,
+    work: F,
+) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if budget.is_zero() || stop.is_stopped() {
+        return None;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let Ok(worker) = std::thread::Builder::new()
+        .name("gcu-linux-evidence".to_string())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+    else {
+        return None;
+    };
+    let stop = Arc::clone(stop);
+    let stop_wait = async move {
+        loop {
+            if stop.is_stopped() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let outcome = tokio::select! {
+        biased;
+        _ = stop_wait => None,
+        result = tokio::time::timeout(budget, rx) => {
+            match result {
+                Ok(Ok(value)) => Some(value),
+                _ => None,
+            }
+        }
+    };
+    drop(worker);
+    outcome
+}
+
+/// Observe `xid` off the runtime and store it only when the gate accepts it.
+///
+/// An exhausted budget, a missing incarnation, or a failed proof clears `xid`.
+pub(crate) async fn load_x11_snapshot(
+    gate: &ScopeGate,
+    oracle: &ScopeOracle,
+    stop: &Arc<dyn StopLatch>,
+    x: &Arc<dyn XServer>,
+    xid: u32,
+) -> Result<X11Snapshot, DriverError> {
+    if !oracle.budget_is_live() {
+        oracle.clear_x11(xid);
+        return Err(DriverError::ScopeDenied);
+    }
+    let budget = oracle.evidence_remaining();
+    let clock = oracle.clock_arc();
+    let server = Arc::clone(x);
+    let observed = off_runtime(budget, stop, move || {
+        observe_snapshot(server.as_ref(), xid, clock.as_ref())
+    })
+    .await;
+    let Some(snapshot) = observed else {
+        oracle.clear_x11(xid);
+        return Err(DriverError::ScopeDenied);
+    };
+    if gate.prove_x11(&snapshot.view).is_err() {
+        oracle.clear_x11(xid);
+        return Err(DriverError::ScopeDenied);
+    }
+    oracle.store_x11(xid, snapshot.clone());
+    Ok(snapshot)
+}
+
+/// Capture on a worker, then stop waiting when the budget or Stop wins.
+///
+/// The bytes stay on the worker when this returns [`DriverError::ScopeDenied`].
+pub(crate) async fn capture_off_runtime(
+    x: Arc<dyn XServer>,
+    xid: u32,
+    gate: ScopeGate,
+    clock: Arc<dyn ProcessClock>,
+    stop: &Arc<dyn StopLatch>,
+    budget: Duration,
+) -> Result<Capture, DriverError> {
+    let observed = off_runtime(budget, stop, move || {
+        capture_in_scope(x.as_ref(), xid, &gate, clock.as_ref())
+    })
+    .await;
+    match observed {
+        Some(result) => result,
+        None => Err(DriverError::ScopeDenied),
     }
 }
 

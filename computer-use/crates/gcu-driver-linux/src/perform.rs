@@ -99,7 +99,7 @@ async fn perform_action_inner(
             count,
             route,
         } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
             let xid = action_xid(driver, win)?;
@@ -112,7 +112,7 @@ async fn perform_action_inner(
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
             execute_pointer_click(
-                x.as_ref(),
+                x,
                 scope.as_ref(),
                 driver.ledger(),
                 xid,
@@ -130,7 +130,7 @@ async fn perform_action_inner(
             dy,
             route,
         } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
             let xid = action_xid(driver, win)?;
@@ -143,7 +143,7 @@ async fn perform_action_inner(
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
             execute_pointer_scroll(
-                x.as_ref(),
+                x,
                 scope.as_ref(),
                 driver.ledger(),
                 xid,
@@ -155,7 +155,7 @@ async fn perform_action_inner(
             .await
         }
         DriverAction::PointerDrag { win, path, route } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
             let xid = action_xid(driver, win)?;
@@ -168,7 +168,7 @@ async fn perform_action_inner(
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
             execute_pointer_drag(
-                x.as_ref(),
+                x,
                 scope.as_ref(),
                 driver.ledger(),
                 xid,
@@ -203,7 +203,7 @@ async fn perform_action_inner(
             }
 
             // Otherwise fall back to X11 keyboard input
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
             let xid = action_xid(driver, win)?;
@@ -216,7 +216,7 @@ async fn perform_action_inner(
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
             execute_type_text_x11(
-                x.as_ref(),
+                x,
                 scope.as_ref(),
                 driver.ledger(),
                 xid,
@@ -226,7 +226,7 @@ async fn perform_action_inner(
             .await
         }
         DriverAction::PressKeys { win, chord, route } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
             let xid = action_xid(driver, win)?;
@@ -239,7 +239,7 @@ async fn perform_action_inner(
                 .ok_or(DriverError::CapabilityUnavailable)?;
             let scope = driver.x11_scope();
             execute_press_keys(
-                x.as_ref(),
+                x,
                 scope.as_ref(),
                 driver.ledger(),
                 xid,
@@ -249,7 +249,7 @@ async fn perform_action_inner(
             .await
         }
         DriverAction::Activate { win } => {
-            if driver.is_native_wayland_window(win) {
+            if driver.route_is_wayland(win) {
                 return Err(DriverError::CapabilityUnavailable);
             }
             let xid = action_xid(driver, win)?;
@@ -262,7 +262,7 @@ async fn perform_action_inner(
             let was_active = matches!(x.active_window(), Ok(Some(active)) if active == xid);
             activate_and_verify(x.as_ref(), xid, cancel).await?;
             if let Some(scope) = driver.x11_scope() {
-                if let Err(error) = scope.allow(x.as_ref(), xid) {
+                if let Err(error) = scope.allow_live(x, xid).await {
                     return Err(if was_active {
                         error
                     } else {
@@ -281,11 +281,11 @@ async fn perform_action_inner(
 }
 
 fn scoped_admit(driver: &LinuxDriver, req: &DriverAction) -> Result<()> {
-    let Some(binding) = driver.scope() else {
+    if driver.scope().is_none() {
         return Ok(());
-    };
-    if let Some(handle) = action_element(req) {
-        crate::atspi::scope::admit_handle(binding, handle)?;
+    }
+    if action_element(req).is_some() {
+        return Err(DriverError::ScopeDenied);
     }
     if let Some(win) = action_window(req) {
         driver.prove_target(win)?;
@@ -293,7 +293,8 @@ fn scoped_admit(driver: &LinuxDriver, req: &DriverAction) -> Result<()> {
     Ok(())
 }
 
-fn action_element(req: &DriverAction) -> Option<&NativeHandle> {
+/// Element handle carried by `req`, when the action names one.
+pub(crate) fn action_element(req: &DriverAction) -> Option<&NativeHandle> {
     match req {
         DriverAction::Press { el }
         | DriverAction::SecondaryAction { el, .. }
@@ -305,7 +306,8 @@ fn action_element(req: &DriverAction) -> Option<&NativeHandle> {
     }
 }
 
-fn action_window(req: &DriverAction) -> Option<&WindowRef> {
+/// Window carried by `req`, when the action names one.
+pub(crate) fn action_window(req: &DriverAction) -> Option<&WindowRef> {
     match req {
         DriverAction::PointerClick { win, .. }
         | DriverAction::PointerScroll { win, .. }
@@ -318,9 +320,8 @@ fn action_window(req: &DriverAction) -> Option<&WindowRef> {
 }
 
 fn action_xid(driver: &LinuxDriver, win: &WindowRef) -> Result<u32> {
-    match driver.resolve_xid(win) {
-        Ok(xid) => Ok(xid),
-        Err(DriverError::WindowGone) if driver.scope().is_some() => Err(DriverError::ScopeDenied),
-        Err(err) => Err(err),
+    if driver.scope().is_some() {
+        return driver.memory_xid(win).ok_or(DriverError::ScopeDenied);
     }
+    driver.resolve_xid(win)
 }

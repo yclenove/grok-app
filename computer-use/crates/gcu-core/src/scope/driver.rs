@@ -115,6 +115,20 @@ where
         DriverError::ScopeDenied
     }
 
+    /// Capture platform metadata before a synchronous admission.
+    ///
+    /// The default evidence future is empty. A platform wait stays on the
+    /// driver's own ceiling and does not run `release_all_input`.
+    async fn prepare_scope(&self) -> Result<()> {
+        self.inner.prepare_evidence().await;
+        if self.activity.stop_requested() {
+            return Err(DriverError::Cancelled {
+                maybe_executed: false,
+            });
+        }
+        Ok(())
+    }
+
     /// Stop wins. A generation or record change drops the payload.
     fn handoff(&self, opened: &FixtureScope) -> Result<()> {
         if self.activity.stop_requested() {
@@ -219,6 +233,7 @@ where
 
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<gcu_protocol::WindowInfo>> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         if let Some(app) = app {
             guard::admit_app(&scope, self.inner.as_ref(), app)?;
             let windows = self.inner.list_windows(Some(app)).await;
@@ -246,6 +261,7 @@ where
 
     async fn key_window(&self, app: &AppRef) -> Result<gcu_protocol::WindowInfo> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         guard::admit_app(&scope, self.inner.as_ref(), app)?;
         let windows = self.inner.list_windows(Some(app)).await;
         let windows = self.settle_read(&scope, windows)?;
@@ -276,6 +292,7 @@ where
         cancel: &Cancel,
     ) -> Result<RawTree> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         let binding = guard::admit_window(&scope, self.inner.as_ref(), win)?;
         let raw = self.inner.snapshot_tree(win, opts, cancel).await;
         let mut raw = self.settle_read(&scope, raw)?;
@@ -294,6 +311,7 @@ where
         cancel: &Cancel,
     ) -> Result<Capture> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         guard::admit_window(&scope, self.inner.as_ref(), win)?;
         let shot = self.inner.capture(win, opts, cancel).await;
         let shot = self.settle_read(&scope, shot)?;
@@ -303,6 +321,7 @@ where
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<crate::model::Geometry> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         guard::admit_window(&scope, self.inner.as_ref(), win)?;
         let geometry = self.inner.window_geometry(win).await;
         let geometry = self.settle_read(&scope, geometry)?;
@@ -312,6 +331,7 @@ where
 
     async fn focused_element(&self, app: &AppRef) -> Result<Option<NativeHandle>> {
         let scope = self.open()?;
+        self.prepare_scope().await?;
         let instance = guard::admit_app(&scope, self.inner.as_ref(), app)?;
         let found = self.inner.focused_element(app).await;
         let found = self.settle_read(&scope, found)?;
@@ -349,6 +369,11 @@ where
             return Err(self.abandon(cancel).await);
         }
         self.inner.attempt_fence(AttemptPhase::Admit).await;
+        if let Err(error) = self.prepare_scope().await {
+            cancel.cancel();
+            self.inner.release_all_input().await;
+            return Err(error);
+        }
         let (action, post) = guard::rewrite(req, authority.scope(), self.inner.as_ref())?;
         let pinned = post.admitted().cloned();
         self.inner.pin_admitted(pinned.as_ref());

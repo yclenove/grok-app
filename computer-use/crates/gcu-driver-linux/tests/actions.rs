@@ -204,6 +204,7 @@ async fn test_action_timeout_maybe_executed_semantics() {
         FakeSource {
             delay: Duration::ZERO,
             error_on_id: Some(2),
+            ..FakeSource::default()
         },
         root,
         vec![],

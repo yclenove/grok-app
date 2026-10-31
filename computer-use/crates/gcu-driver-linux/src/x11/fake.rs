@@ -4,7 +4,10 @@ use crate::x11::server::{
     crop_into, RawImage, XError, XEventKind, XRootGeometry, XServer, XWindowGeometry,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 /// In-memory mock window for [`FakeX`].
 #[derive(Debug, Clone)]
@@ -75,6 +78,13 @@ pub struct FakeX {
     incoming: Mutex<VecDeque<XEventKind>>,
     incarnations: Mutex<HashMap<u32, u64>>,
     bump_incarnation_on_image: Mutex<bool>,
+    metadata_stall: Mutex<MetadataStall>,
+}
+
+struct MetadataStall {
+    armed: bool,
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
 }
 
 impl FakeX {
@@ -104,6 +114,40 @@ impl FakeX {
             incoming: Mutex::new(VecDeque::new()),
             incarnations: Mutex::new(HashMap::new()),
             bump_incarnation_on_image: Mutex::new(false),
+            metadata_stall: Mutex::new(MetadataStall {
+                armed: false,
+                entered: Arc::new(AtomicBool::new(false)),
+                release: Arc::new(AtomicBool::new(false)),
+            }),
+        }
+    }
+
+    /// Stall later `window_pid` and `window_geometry` calls.
+    ///
+    /// Returns `(entered, release)`. `entered` becomes true after the stalled
+    /// call has dropped its locks. Store `true` into `release` to let it
+    /// finish. Incarnation, event polling, and input injection are not stalled.
+    pub fn arm_metadata_stall(&self) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let mut stall = lock_m(&self.metadata_stall);
+        stall.armed = true;
+        stall.entered = Arc::clone(&entered);
+        stall.release = Arc::clone(&release);
+        (entered, release)
+    }
+
+    fn block_metadata(&self) {
+        let (entered, release) = {
+            let stall = lock_m(&self.metadata_stall);
+            if !stall.armed {
+                return;
+            }
+            (Arc::clone(&stall.entered), Arc::clone(&stall.release))
+        };
+        entered.store(true, Ordering::SeqCst);
+        while !release.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -233,6 +277,7 @@ impl XServer for FakeX {
     }
 
     fn window_pid(&self, window: u32) -> Result<Option<u32>, XError> {
+        self.block_metadata();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -261,6 +306,7 @@ impl XServer for FakeX {
     }
 
     fn window_geometry(&self, window: u32) -> Result<XWindowGeometry, XError> {
+        self.block_metadata();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),

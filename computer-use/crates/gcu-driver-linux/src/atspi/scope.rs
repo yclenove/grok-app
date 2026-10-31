@@ -1,36 +1,31 @@
 //! AT-SPI owner check for a scoped read or handle delivery.
 //!
-//! The accessible's bus pid is re-read and compared with the fixture instance.
-//! A handle sealed to one window is refused when a later observation places it
-//! on another window. A missing pid closes the read.
+//! Scoped AT-SPI trees and semantic actions are closed. An object path is not
+//! a window incarnation, and this card has no production per-node owner
+//! observation. [`admit_tree`] refuses without copying the registered
+//! incarnation. Handle comparisons below are test-only.
 
 #[cfg(test)]
 use crate::identity::scope::{HandleKey, HandleView};
-use crate::identity::scope::{ScopeBinding, ScopeFault};
+use crate::identity::scope::ScopeBinding;
 use gcu_core::driver::DriverError;
+#[cfg(test)]
 use gcu_core::model::{NativeHandle, RawTree};
 
-/// Refuse the tree unless `app_id`'s live owner is still `window_id`.
+/// Scoped AT-SPI trees are closed.
+///
+/// The registered incarnation is not an observation, so this does not read it.
 pub(crate) fn admit_tree(
     binding: &ScopeBinding,
     app_id: &str,
     window_id: &str,
 ) -> Result<(), DriverError> {
-    let window = binding
-        .gate()
-        .by_id(window_id)
-        .ok_or(DriverError::ScopeDenied)?;
-    let view = binding
-        .oracle()
-        .atspi(app_id, window_id, window.incarnation());
-    binding
-        .gate()
-        .prove_atspi(&view)
-        .map(|_| ())
-        .map_err(ScopeFault::deny)
+    let _ = (binding, app_id, window_id);
+    Err(DriverError::ScopeDenied)
 }
 
 /// Seal `tree` to `window_id` after a proof that has just succeeded.
+#[cfg(test)]
 pub(crate) fn seal_tree(
     binding: &ScopeBinding,
     tree: &RawTree,
@@ -40,6 +35,7 @@ pub(crate) fn seal_tree(
 }
 
 /// Refuse delivery when the handle's live window is not the sealed window.
+#[cfg(test)]
 pub(crate) fn admit_handle(
     binding: &ScopeBinding,
     handle: &NativeHandle,
@@ -104,8 +100,12 @@ mod tests {
             Err(DriverError::ScopeDenied)
         );
         binding.oracle().set_atspi_pid("app.fixture", Some(42));
-        assert!(admit_tree(&binding, "app.fixture", "7").is_ok());
-        binding.oracle().set_atspi_pid("app.fixture", Some(42));
+        let manufactured = binding.oracle().atspi("app.fixture", "7", 5);
+        assert_eq!(manufactured.incarnation, 5);
+        assert_eq!(
+            admit_tree(&binding, "app.fixture", "7"),
+            Err(DriverError::ScopeDenied)
+        );
         let clock = MapClock::new("boot-a");
         clock.set(42, 2000);
         let moved = ScopeBinding::new(binding.gate().clone(), Arc::new(clock));
@@ -190,14 +190,12 @@ mod tests {
             },
             id: "fixture-window".into(),
         };
-        let tree = driver
+        let err = driver
             .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
             .await
-            .unwrap();
-        assert_eq!(
-            tree.root.as_ref().and_then(|root| root.name.as_deref()),
-            Some("canary-tree")
-        );
+            .unwrap_err();
+        assert_eq!(err, DriverError::ScopeDenied);
+        assert!(!err.to_string().contains("canary"));
         clock.set(42, 2000);
         let err = driver
             .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())

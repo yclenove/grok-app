@@ -38,6 +38,7 @@ default = []
 pipewire = ["ashpd/pipewire", "dep:pipewire"]
 
 [dev-dependencies]
+gcu-host-api = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 unicode-segmentation = "1"
 tempfile = "3"

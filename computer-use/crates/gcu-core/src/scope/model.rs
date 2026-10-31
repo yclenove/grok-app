@@ -240,6 +240,18 @@ pub trait InstanceEvidence: Send + Sync {
     /// The default does nothing. Memory only. No blocking, timeout, or
     /// cancellation. This is not the perform pin: observation has no pin.
     fn note_scoped_session(&self) {}
+
+    /// Refresh metadata before a scoped admission.
+    ///
+    /// The default is ready immediately and does not block. A platform may
+    /// read metadata off the control runtime. That wait is bounded by the
+    /// existing native-call ceiling. Dropping the future abandons the wait
+    /// and must not own `release_all_input`. No pixels and no input.
+    fn prepare_evidence<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 /// Where an attempt waits so a test can revoke before the next check.

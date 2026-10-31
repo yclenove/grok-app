@@ -7,11 +7,14 @@
 //! fixed sentence from core. This module does not read a desktop; callers
 //! pass the observation.
 
-use gcu_core::driver::DriverError;
-use gcu_core::model::{NativeHandle, RawNode, RawTree};
+use gcu_core::driver::{DriverError, NATIVE_TIMEOUT};
+use gcu_core::model::{Geometry, NativeHandle};
+#[cfg(test)]
+use gcu_core::model::{RawNode, RawTree};
 use gcu_core::scope::{BootIdentity, OsStartTime, ProcessInstance, WindowBinding};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Why a scope proof failed. Callers surface only [`DriverError::ScopeDenied`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +299,9 @@ pub(crate) fn check_x11(expected: &ScopeWindow, live: &X11View) -> Result<(), Sc
 }
 
 /// AT-SPI owner observation for one accessible.
+///
+/// Test-only. Scoped AT-SPI reads do not build this view.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AtspiView {
     /// Bus-owner pid. `None` is not proof.
@@ -309,6 +315,7 @@ pub(crate) struct AtspiView {
 }
 
 /// Prove the accessible owner is still the admitted window's process.
+#[cfg(test)]
 pub(crate) fn check_atspi(expected: &ScopeWindow, live: &AtspiView) -> Result<(), ScopeFault> {
     if live.window_id != expected.native_id {
         return Err(if live.pid == Some(expected.owner.pid) {
@@ -489,6 +496,7 @@ impl ScopeGate {
     }
 
     /// Prove an AT-SPI owner observation.
+    #[cfg(test)]
     pub(crate) fn prove_atspi(&self, live: &AtspiView) -> Result<&ScopeWindow, ScopeFault> {
         let Some(expected) = self.by_id(&live.window_id) else {
             if self
@@ -560,11 +568,29 @@ pub(crate) fn confirm_twice<T>(
     Ok(value)
 }
 
+/// One off-runtime X11 observation. Missing geometry is not a frame.
+#[derive(Debug, Clone)]
+pub(crate) struct X11Snapshot {
+    /// Identity observation. An absent incarnation is not proof.
+    pub view: X11View,
+    /// Frame read with that identity, when the server returned one.
+    pub geometry: Option<Geometry>,
+}
+
+struct EvidenceState {
+    deadline: Option<Instant>,
+    prepared: bool,
+    fresh: HashSet<u32>,
+    snapshots: HashMap<u32, X11Snapshot>,
+}
+
 /// Pid cache and handle observations shared by a bound driver.
 pub(crate) struct ScopeOracle {
     clock: Arc<dyn ProcessClock>,
+    #[cfg(test)]
     atspi_pid: Mutex<HashMap<String, u32>>,
     handles: Mutex<HashMap<HandleKey, HandleView>>,
+    evidence: Mutex<EvidenceState>,
 }
 
 impl ScopeOracle {
@@ -572,8 +598,15 @@ impl ScopeOracle {
     pub(crate) fn new(clock: Arc<dyn ProcessClock>) -> Self {
         Self {
             clock: clock.clone(),
+            #[cfg(test)]
             atspi_pid: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
+            evidence: Mutex::new(EvidenceState {
+                deadline: None,
+                prepared: false,
+                fresh: HashSet::new(),
+                snapshots: HashMap::new(),
+            }),
         }
     }
 
@@ -587,7 +620,78 @@ impl ScopeOracle {
         process_view(self.clock.as_ref(), pid)
     }
 
+    /// Owned clock handle for an off-runtime read.
+    pub(crate) fn clock_arc(&self) -> Arc<dyn ProcessClock> {
+        Arc::clone(&self.clock)
+    }
+
+    fn evidence(&self) -> std::sync::MutexGuard<'_, EvidenceState> {
+        self.evidence.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Open one native-call budget and drop every captured X11 snapshot.
+    ///
+    /// Later reads in the same action share this deadline. They do not add
+    /// another [`NATIVE_TIMEOUT`].
+    pub(crate) fn begin_evidence_action(&self) {
+        let mut evidence = self.evidence();
+        evidence.deadline = Some(Instant::now() + NATIVE_TIMEOUT);
+        evidence.prepared = true;
+        evidence.fresh.clear();
+        evidence.snapshots.clear();
+    }
+
+    /// Whether [`Self::begin_evidence_action`] ran and has not been taken.
+    pub(crate) fn take_prepared(&self) -> bool {
+        let mut evidence = self.evidence();
+        let prepared = evidence.prepared;
+        evidence.prepared = false;
+        prepared
+    }
+
+    /// Whether the open budget is still inside [`NATIVE_TIMEOUT`].
+    pub(crate) fn budget_is_live(&self) -> bool {
+        self.evidence()
+            .deadline
+            .is_some_and(|deadline| deadline > Instant::now())
+    }
+
+    /// Time left in the open budget. Zero when no budget is live.
+    pub(crate) fn evidence_remaining(&self) -> std::time::Duration {
+        match self.evidence().deadline {
+            Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+            None => std::time::Duration::ZERO,
+        }
+    }
+
+    /// Whether `xid` was proved during the open budget.
+    pub(crate) fn is_fresh(&self, xid: u32) -> bool {
+        self.evidence().fresh.contains(&xid)
+    }
+
+    /// Store a proved snapshot and mark `xid` fresh.
+    pub(crate) fn store_x11(&self, xid: u32, snapshot: X11Snapshot) {
+        let mut evidence = self.evidence();
+        evidence.snapshots.insert(xid, snapshot);
+        evidence.fresh.insert(xid);
+    }
+
+    /// Forget `xid`. The next admission cannot reuse it.
+    pub(crate) fn clear_x11(&self, xid: u32) {
+        let mut evidence = self.evidence();
+        evidence.snapshots.remove(&xid);
+        evidence.fresh.remove(&xid);
+    }
+
+    /// Captured X11 observation, when this budget stored one.
+    pub(crate) fn x11_snapshot(&self, xid: u32) -> Option<X11Snapshot> {
+        self.evidence().snapshots.get(&xid).cloned()
+    }
+
     /// Remember a bus pid. `None` clears a stale cache entry.
+    ///
+    /// Test-only. Production scoped AT-SPI does not consult this cache.
+    #[cfg(test)]
     pub(crate) fn set_atspi_pid(&self, app_id: &str, pid: Option<u32>) {
         let mut pids = self.atspi_pid.lock().unwrap_or_else(|err| err.into_inner());
         match pid {
@@ -601,6 +705,9 @@ impl ScopeOracle {
     }
 
     /// AT-SPI view for `app_id` under `window_id`.
+    ///
+    /// Test-only. The incarnation argument is not a live observation.
+    #[cfg(test)]
     pub(crate) fn atspi(&self, app_id: &str, window_id: &str, incarnation: u64) -> AtspiView {
         let pid = self
             .atspi_pid
@@ -663,6 +770,9 @@ impl ScopeBinding {
     }
 
     /// Record that `key` was read under `window_id`.
+    ///
+    /// Test-only. Production scoped trees return before any handle is sealed.
+    #[cfg(test)]
     pub(crate) fn note_seal(&self, key: HandleKey, window_id: &str) -> Result<(), DriverError> {
         if self.gate.by_id(window_id).is_none() {
             return Err(DriverError::ScopeDenied);
@@ -675,6 +785,7 @@ impl ScopeBinding {
     }
 
     /// Seal every handle in `tree` to `window_id`. An unkeyed handle refuses the tree.
+    #[cfg(test)]
     pub(crate) fn seal_tree(&self, tree: &RawTree, window_id: &str) -> Result<(), DriverError> {
         if let Some(root) = &tree.root {
             self.seal_node(root, window_id)?;
@@ -682,6 +793,7 @@ impl ScopeBinding {
         Ok(())
     }
 
+    #[cfg(test)]
     fn seal_node(&self, node: &RawNode, window_id: &str) -> Result<(), DriverError> {
         let key = handle_key(&node.handle).ok_or(DriverError::ScopeDenied)?;
         self.note_seal(key, window_id)?;
@@ -711,45 +823,20 @@ impl ScopeBinding {
         check_handle(expected, &live).map_err(ScopeFault::deny)
     }
 
-    /// Element binding for a handle whose read window still proves.
+    /// Element binding for a handle with a live observation.
     ///
-    /// A live observation is checked against its seal and the process clock.
-    /// A handle now sitting on another window is `None`. With no later
-    /// observation, the window recorded at the read is checked against the
-    /// process clock again, so a proved tree can be sealed. Delivery still
-    /// goes through [`Self::admit_handle`] and needs that live observation.
+    /// A seal alone is not an observation. The owner is the process clock's
+    /// current view of the live pid, not the pid stored on the registration.
     pub(crate) fn element_binding(
         &self,
         handle: &NativeHandle,
     ) -> Option<gcu_core::scope::ElementBinding> {
         let key = handle_key(handle)?;
-        if self.oracle.handle(&key).is_some() {
-            self.admit_handle(handle).ok()?;
-            let (window_id, pid) = {
-                let live = self.oracle.handle(&key)?;
-                (live.window_id, live.owner.as_ref()?.pid)
-            };
-            let owner = self.oracle.process(pid)?;
-            let expected = self.gate.by_id(&window_id)?;
-            return Some(gcu_core::scope::ElementBinding::new(
-                expected.binding(&owner)?,
-            ));
-        }
-        let window_id = self
-            .seals
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .get(&key)
-            .cloned()?;
-        if self.oracle.handle(&key).is_some() {
-            return None;
-        }
-        let pid = {
-            let expected = self.gate.by_id(&window_id)?;
-            expected.owner().pid()
-        };
+        self.admit_handle(handle).ok()?;
+        let live = self.oracle.handle(&key)?;
+        let pid = live.owner.as_ref()?.pid;
         let owner = self.oracle.process(pid)?;
-        let expected = self.gate.by_id(&window_id)?;
+        let expected = self.gate.by_id(&live.window_id)?;
         Some(gcu_core::scope::ElementBinding::new(
             expected.binding(&owner)?,
         ))
@@ -987,11 +1074,7 @@ mod tests {
             .element_binding(&NativeHandle::new("forged"))
             .is_none());
         binding.note_seal(HandleKey::Fake(11), "7").unwrap();
-        let bound = binding.element_binding(&handle).unwrap();
-        assert_eq!(bound.window().native_id(), "7");
-        assert_eq!(bound.window().incarnation(), 5);
-        assert_eq!(bound.window().owner().pid(), 42);
-        assert_eq!(bound.window().owner().start().ticks(), 1000);
+        assert!(binding.element_binding(&handle).is_none());
 
         clock.set(42, 0);
         assert!(binding.element_binding(&handle).is_none());
@@ -1018,6 +1101,9 @@ mod tests {
         );
         let bound = binding.element_binding(&handle).unwrap();
         assert_eq!(bound.window().native_id(), "7");
+        assert_eq!(bound.window().incarnation(), 5);
+        assert_eq!(bound.window().owner().pid(), 42);
+        assert_eq!(bound.window().owner().start().ticks(), 1000);
         clock.set(42, 2000);
         assert!(binding.element_binding(&handle).is_none());
     }

@@ -480,6 +480,7 @@ pub async fn test_c22_timeout_no_replay() -> Result<ContractOutcome, String> {
     let fake_source = gcu_driver_linux::atspi::source::FakeSource {
         delay: Duration::ZERO,
         error_on_id: Some(10),
+        ..Default::default()
     };
     let mut root = gcu_driver_linux::atspi::source::FakeNode {
         id: 1,
