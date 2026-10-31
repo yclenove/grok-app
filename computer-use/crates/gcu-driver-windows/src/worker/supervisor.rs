@@ -153,6 +153,7 @@ impl Supervisor {
         let shutdown = Cancel::default();
         let (done_tx, done_rx) = oneshot::channel();
         let safety = Arc::new(std::sync::Mutex::new(None));
+        let recovery = super::input::Recovery::new(release, safety.clone());
         tokio::spawn(run(
             config,
             rx,
@@ -160,7 +161,7 @@ impl Supervisor {
             shutdown.clone(),
             Some(process),
             done_tx,
-            super::input::Recovery::new(release, safety.clone()),
+            recovery,
         ));
         Ok(Self {
             queue: tx,

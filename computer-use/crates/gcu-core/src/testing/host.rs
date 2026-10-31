@@ -15,6 +15,13 @@ use gcu_host_api::{
 };
 use std::sync::Arc;
 
+/// A fresh idle activity source and Stop latch for driver-level scope tests,
+/// so drivers can build a `ScopedDriver` without a Host dependency.
+/// Memory only. No blocking, timeout or cancellation.
+pub fn fake_activity() -> Arc<dyn gcu_host_api::UserActivity> {
+    Arc::new(FakeUserActivity::new())
+}
+
 /// Assemble an in-memory, explicitly permissive Host for a disposable driver.
 /// No OS IO, blocking, timeout or cancellation occurs during assembly. One
 /// session app approval is scripted; production Hosts never use this fixture.

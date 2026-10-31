@@ -1,6 +1,6 @@
 //! Native bindings and owned Win32 resources; compiled only on Windows.
 mod packages;
-mod security;
+pub(crate) mod security;
 mod shell;
 mod signature;
 mod windows;
@@ -105,6 +105,66 @@ pub(super) fn allocated_string(value: PWSTR) -> Result<String> {
     }
     text
 }
+/// Boot-environment record. `NtQuerySystemInformation` class 90.
+///
+/// Layout is the documented 32-byte structure: a 16-byte GUID, a firmware
+/// type, padding, and boot flags. A nil GUID is not a session id.
+#[repr(C)]
+struct BootEnvironment {
+    identifier: [u8; 16],
+    _firmware_type: u32,
+    _pad: u32,
+    _flags: u64,
+}
+const _: () = assert!(std::mem::size_of::<BootEnvironment>() == 32);
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtQuerySystemInformation(
+        class: u32,
+        buffer: *mut core::ffi::c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> i32;
+}
+
+/// OS boot-session GUID, or `None` when the query fails or the GUID is nil.
+///
+/// This is not a wall-clock estimate. `scope_identity::boot_token` rejects a
+/// numeric session. One stack query. No process handle and no retry.
+pub(crate) fn read_boot_session() -> Option<String> {
+    let mut info = BootEnvironment {
+        identifier: [0; 16],
+        _firmware_type: 0,
+        _pad: 0,
+        _flags: 0,
+    };
+    let mut returned = 0u32;
+    // SAFETY: writable stack buffer of the asserted size. The call does not
+    // retain the pointer. A negative status or a short result is unproved.
+    let status = unsafe {
+        NtQuerySystemInformation(
+            90,
+            (&mut info as *mut BootEnvironment).cast(),
+            32,
+            &mut returned,
+        )
+    };
+    if status < 0 || returned < 16 || info.identifier == [0; 16] {
+        return None;
+    }
+    let bytes = info.identifier;
+    let data1 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let data2 = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let data3 = u16::from_le_bytes([bytes[6], bytes[7]]);
+    let [b8, b9, b10, b11, b12, b13, b14, b15] = [
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ];
+    Some(format!(
+        "{data1:08x}-{data2:04x}-{data3:04x}-{b8:02x}{b9:02x}-{b10:02x}{b11:02x}{b12:02x}{b13:02x}{b14:02x}{b15:02x}"
+    ))
+}
+
 /// Real Windows discovery API. All methods are called on dedicated native workers.
 /// Owns no COM interfaces across threads; apartments/resources are scoped per call.
 pub struct RealWinApi {
@@ -113,6 +173,8 @@ pub struct RealWinApi {
     cache: PathBuf,
     watcher: std::sync::Mutex<Option<shell::WatchSet>>,
     enumeration: std::sync::Mutex<()>,
+    /// Cached at process start so later reads in this process agree.
+    boot: String,
 }
 impl RealWinApi {
     /// Allocate adapter metadata; does not enumerate or launch any application.
@@ -121,11 +183,12 @@ impl RealWinApi {
         // SAFETY: GetCurrentProcessId takes no pointers and cannot block.
         let pid = unsafe { GetCurrentProcessId() };
         let created = security::process_created(pid)?;
+        let namespace = format!("{pid}.{created}");
         let root = std::env::var_os("LOCALAPPDATA").ok_or(DriverError::PermissionMissing {
             permission: "LOCALAPPDATA".into(),
         })?;
         Ok(Self {
-            property: wide(&format!("GrokComputerUse.WindowGeneration.{pid}.{created}")),
+            property: wide(&crate::scope_identity::generation_property_name(&namespace)),
             generation: AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -137,6 +200,15 @@ impl RealWinApi {
                 .join("apps.json"),
             watcher: std::sync::Mutex::new(None),
             enumeration: std::sync::Mutex::new(()),
+            // The wall-clock argument is ignored. A missing session stays empty.
+            boot: crate::scope_identity::boot_token(
+                read_boot_session().as_deref(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok()),
+            )
+            .unwrap_or_default(),
         })
     }
     // Stable across child restarts, private to one parent process instance.
@@ -148,7 +220,7 @@ impl RealWinApi {
             return Err(DriverError::InvalidRequest);
         }
         let mut api = Self::new()?;
-        api.property = wide(&format!("GrokComputerUse.WindowGeneration.{namespace}"));
+        api.property = wide(&crate::scope_identity::generation_property_name(namespace));
         Ok(api)
     }
     fn generation(&self) -> u64 {
@@ -168,6 +240,12 @@ impl WinApi for RealWinApi {
     }
     fn process_security(&self, pid: u32) -> Result<ProcessSecurity> {
         security::security(pid)
+    }
+    fn boot_identity(&self) -> Result<String> {
+        if self.boot.is_empty() || self.boot.len() > 256 {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(self.boot.clone())
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
         let timing = crate::timing::Timing::start("enum_windows_lock");

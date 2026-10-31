@@ -33,6 +33,21 @@ pub async fn build_raw_tree(
     opts: &TreeOpts,
     cancel: &Cancel,
 ) -> Result<RawTree> {
+    build_scoped_tree(source, hwnd, opts, cancel, None).await
+}
+
+/// Build a tree, proving each fragment against `admitted` before its content.
+///
+/// `None` is the unscoped route and does not ask for a fragment. `Some` refuses
+/// an unproved root and omits an unproved child without reading its name or value.
+/// The claim is the value passed in. This function does not look up a replacement.
+pub(crate) async fn build_scoped_tree(
+    source: &dyn UiaSource,
+    hwnd: u64,
+    opts: &TreeOpts,
+    cancel: &Cancel,
+    admitted: Option<&crate::scope_identity::WindowClaim>,
+) -> Result<RawTree> {
     let _timing = crate::timing::Timing::start("uia_tree");
     check_cancel(cancel)?;
     let empty_reason = if opts.max_tree_nodes == 0 {
@@ -62,8 +77,15 @@ pub async fn build_raw_tree(
         reason: None,
         origin: (0., 0.),
         visited: BTreeSet::new(),
+        admitted: admitted.cloned(),
     };
-    let Some(root) = walk.read(source.root(hwnd)).await? else {
+    let root_id = if let Some(claim) = admitted {
+        walk.read(source.open_root(hwnd, Some(claim.into())))
+            .await?
+    } else {
+        walk.read(source.root(hwnd)).await?
+    };
+    let Some(root) = root_id else {
         return Ok(RawTree::default());
     };
     let mut raw = walk.node(root, 0).await?;
@@ -87,6 +109,7 @@ struct Walk<'a> {
     reason: Option<IncompleteReason>,
     origin: (f64, f64),
     visited: BTreeSet<NodeId>,
+    admitted: Option<crate::scope_identity::WindowClaim>,
 }
 impl Walk<'_> {
     async fn read<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
@@ -111,7 +134,42 @@ impl Walk<'_> {
             Err(error) => Err(error),
         }
     }
+    async fn prove(&self, id: NodeId) -> Result<()> {
+        let Some(claim) = &self.admitted else {
+            return Ok(());
+        };
+        if let Some((pid, created, boot)) = self.read(self.source.owner_instance(id)).await? {
+            crate::scope_identity::prove_process(
+                &claim.owner,
+                &crate::scope_identity::ProcessClaim { pid, created, boot },
+            )?;
+        }
+        let fact = self
+            .read(self.source.fragment(id))
+            .await?
+            .map(
+                |(owner_pid, top_hwnd)| crate::scope_identity::FragmentFact {
+                    owner_pid,
+                    top_hwnd,
+                },
+            );
+        // A missing fragment is hwnd 0. `admit_fragment` still refuses an unset
+        // owner and an unproved process; `None` is not the admitted owner.
+        let (element_hwnd, owner_pid) = match fact {
+            Some(fact) => (fact.top_hwnd, Some(fact.owner_pid)),
+            None => (0, None),
+        };
+        crate::scope_identity::admit_delivery_element(
+            claim.hwnd,
+            element_hwnd,
+            "",
+            owner_pid,
+            Some(claim.owner.pid),
+        )?;
+        crate::scope_identity::admit_fragment(claim, fact)
+    }
     async fn node(&mut self, id: NodeId, depth: usize) -> Result<RawNode> {
+        self.prove(id).await?;
         let started = tokio::time::Instant::now();
         let props = self.read(self.source.properties(id)).await;
         if self.reason.is_none() {
@@ -180,6 +238,13 @@ impl Walk<'_> {
                 if self.visited.contains(child) {
                     self.reason.get_or_insert(IncompleteReason::PartialError);
                     return Ok(raw);
+                }
+                if self.admitted.is_some() {
+                    match self.prove(*child).await {
+                        Ok(()) => {}
+                        Err(DriverError::ScopeDenied) => continue,
+                        Err(error) => return Err(error),
+                    }
                 }
                 match Box::pin(self.node(*child, depth + 1)).await {
                     Ok(child) => raw.children.push(child),

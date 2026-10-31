@@ -35,7 +35,7 @@ fn created(handle: HANDLE) -> Result<u64> {
     }
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
-pub(super) fn process_created(pid: u32) -> Result<u64> {
+pub(crate) fn process_created(pid: u32) -> Result<u64> {
     created(open_process(pid)?.0)
 }
 pub(super) fn process_path(pid: u32) -> Result<String> {

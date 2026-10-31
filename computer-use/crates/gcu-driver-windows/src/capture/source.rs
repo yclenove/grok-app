@@ -27,6 +27,25 @@ pub fn check_display_affinity(path: CapturePath, affinity: Option<u32>) -> Resul
         }),
     }
 }
+/// Identity copied at admission and carried into one capture job.
+///
+/// The worker compares these fields before it reads pixels. A later lookup
+/// does not replace them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureAdmission {
+    /// Admitted top-level HWND.
+    pub hwnd: u64,
+    /// Window creation generation.
+    pub incarnation: u64,
+    /// Owner process id.
+    pub pid: u32,
+    /// Owner process creation time.
+    pub created: u64,
+    /// Boot-session identity. Empty fails closed.
+    pub boot: String,
+    /// NUL-terminated generation property. Empty fails closed.
+    pub generation_property: Vec<u16>,
+}
 /// Exact window selected by the discovery/security gate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceWindow {
@@ -90,6 +109,19 @@ pub trait CaptureSource: Send + Sync {
         deadline: Duration,
         cancel: &Cancel,
     ) -> Result<RawPixels>;
+    /// Capture only after `admitted` is the window that will be read.
+    ///
+    /// The default refuses and does not read pixels. Unscoped [`CaptureSource::capture`]
+    /// is unchanged.
+    async fn capture_admitted(
+        &self,
+        _window: &SourceWindow,
+        _deadline: Duration,
+        _cancel: &Cancel,
+        _admitted: &CaptureAdmission,
+    ) -> Result<RawPixels> {
+        Err(gcu_core::driver::DriverError::ScopeDenied)
+    }
 }
 /// Capture metadata only; no image, window title, or UI text is retained.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

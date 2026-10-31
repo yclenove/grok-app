@@ -1,4 +1,7 @@
 //! Private clipboard transactions. Clipboard bytes never enter observations.
+//!
+//! Scoped staging is closed. Callers refuse before opening the clipboard.
+//! Unscoped [`ClipboardApi::stage`] still publishes every prepared text format.
 use crate::uia::patterns::ActionContext;
 use async_trait::async_trait;
 use gcu_core::driver::Result;

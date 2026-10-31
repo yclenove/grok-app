@@ -8,10 +8,25 @@ use windows::Win32::{
     Graphics::Gdi::*,
     UI::WindowsAndMessaging::*,
 };
-pub(super) fn sample(target: &Target) -> Result<u64> {
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
+
+/// `scoped` reads window text once through [`crate::input::sample_job::scoped`].
+/// The closure proves the admitted process before that read and again before the
+/// hash is returned. Unscoped sampling is the historical multi-read sequence and
+/// does not call `prove`.
+pub(super) fn sample(
+    target: &Target,
+    scoped: bool,
+    prove: impl FnMut() -> Result<()>,
+) -> Result<u64> {
+    if scoped {
+        crate::input::sample_job::scoped(prove, || text_units(target))
+    } else {
+        unscoped(target)
+    }
+}
+fn text_units(target: &Target) -> Result<Vec<u16>> {
     let mut text = [0u16; 4096];
-    let mut length = 0;
+    let mut length = 0usize;
     // SAFETY: WM_GETTEXT is system-marshalled, bounded writable UTF-16 buffer
     // kept alive until the synchronous call returns. Hung providers time out.
     let ok = unsafe {
@@ -30,7 +45,11 @@ pub(super) fn sample(target: &Target) -> Result<u64> {
             maybe_executed: false,
         });
     }
-    text[..length.min(text.len())].hash(&mut hash);
+    Ok(text[..length.min(text.len())].to_vec())
+}
+fn unscoped(target: &Target) -> Result<u64> {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    text_units(target)?.hash(&mut hash);
     let mut info = GUITHREADINFO {
         cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
         ..Default::default()

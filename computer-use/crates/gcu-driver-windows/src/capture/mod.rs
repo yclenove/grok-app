@@ -15,8 +15,8 @@ pub use fake::{CaptureFault, FakeCapture, Paint};
 #[cfg(windows)]
 pub use print_window::PrintWindowCapture;
 pub use source::{
-    bgra_to_rgba, check_display_affinity, physical_size, CapturePath, CaptureSource, CaptureStats,
-    RawPixels, SourceWindow,
+    bgra_to_rgba, check_display_affinity, physical_size, CaptureAdmission, CapturePath,
+    CaptureSource, CaptureStats, RawPixels, SourceWindow,
 };
 #[cfg(windows)]
 pub use wgc::WgcCapture;
@@ -62,13 +62,20 @@ impl CaptureBackend {
         window: &SourceWindow,
         remaining: Duration,
         cancel: &Cancel,
+        admitted: Option<&CaptureAdmission>,
     ) -> Result<RawPixels> {
         self.note(|s| match source.path() {
             CapturePath::Wgc => s.wgc_attempts += 1,
             CapturePath::PrintWindow => s.print_window_attempts += 1,
         });
         let pixels = if source.available() {
-            source.capture(window, remaining, cancel).await?
+            if let Some(admitted) = admitted {
+                source
+                    .capture_admitted(window, remaining, cancel, admitted)
+                    .await?
+            } else {
+                source.capture(window, remaining, cancel).await?
+            }
         } else {
             return Err(DriverError::CapabilityUnavailable);
         };
@@ -99,13 +106,27 @@ pub async fn take_capture(
     requested: Duration,
     cancel: &Cancel,
 ) -> Result<RawPixels> {
+    take_capture_admitted(backend, window, requested, cancel, None).await
+}
+
+/// Run both sources. `admitted` is the claim copied at admission.
+///
+/// `None` is the unscoped route and calls [`CaptureSource::capture`]. `Some`
+/// calls [`CaptureSource::capture_admitted`] and does not replace the claim.
+pub async fn take_capture_admitted(
+    backend: &CaptureBackend,
+    window: &SourceWindow,
+    requested: Duration,
+    cancel: &Cancel,
+    admitted: Option<&CaptureAdmission>,
+) -> Result<RawPixels> {
     let budget = requested.min(DRIVER_DEADLINE);
     let deadline = tokio::time::Instant::now() + budget;
     backend.note(|s| s.deadline = Some(budget));
     let mut pending = Pending(backend, false);
     let operation = async {
         let first = backend
-            .attempt(backend.wgc.as_ref(), window, budget, cancel)
+            .attempt(backend.wgc.as_ref(), window, budget, cancel, admitted)
             .await;
         match first {
             Ok(pixels) => Ok((pixels, CapturePath::Wgc)),
@@ -117,7 +138,7 @@ pub async fn take_capture(
                 );
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 backend
-                    .attempt(backend.print.as_ref(), window, remaining, cancel)
+                    .attempt(backend.print.as_ref(), window, remaining, cancel, admitted)
                     .await
                     .map(|p| (p, CapturePath::PrintWindow))
             }

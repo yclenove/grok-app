@@ -53,6 +53,8 @@ pub struct FakeState {
     pub enumerations: usize,
     /// Windows/native metadata probe failure.
     pub failure: Option<DriverError>,
+    /// Stable boot identity. Empty is unproved and fails scope closed.
+    pub boot: String,
 }
 impl Default for FakeState {
     fn default() -> Self {
@@ -75,6 +77,7 @@ impl Default for FakeState {
             image_reads: Vec::new(),
             enumerations: 0,
             failure: None,
+            boot: "boot-1".into(),
         }
     }
 }
@@ -158,6 +161,13 @@ impl WinApi for FakeWinApi {
             .get(&pid)
             .cloned()
             .ok_or(DriverError::WindowGone)
+    }
+    fn boot_identity(&self) -> Result<String> {
+        let boot = self.state()?.boot;
+        if boot.is_empty() || boot.len() > 256 {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(boot)
     }
     fn enum_windows(&self) -> Result<Vec<NativeWindow>> {
         // The background catalog refresh (spawned per resolve/list) enumerates on

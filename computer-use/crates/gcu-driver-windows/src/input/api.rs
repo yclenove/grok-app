@@ -21,6 +21,24 @@ pub struct Target {
     /// Whether the exact focus element has a native message recipient.
     pub message_capable: bool,
 }
+
+/// Admitted window copied into one scoped clipboard or input job.
+///
+/// Later enumeration must not replace these fields. Absent on an unscoped job.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedTarget {
+    /// Top-level HWND.
+    pub hwnd: u64,
+    /// Window creation generation.
+    pub incarnation: u64,
+    /// Owner process id.
+    pub pid: u32,
+    /// Owner process creation time.
+    pub created: u64,
+    /// Boot-session identity. Empty is unproved.
+    pub boot: String,
+}
 /// One physical/Unicode input. Debug output excludes text payloads.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
@@ -64,6 +82,22 @@ pub trait InputTracker: Send + Sync + 'static {
     /// Stage text in the parent before acknowledging any paste. No retry.
     async fn clipboard_stage(&self, _target: Target, _text: String) -> Result<u32> {
         Err(DriverError::CapabilityUnavailable)
+    }
+    /// Scoped clipboard staging is closed.
+    ///
+    /// `Some` returns [`DriverError::CapabilityUnavailable`] and does not notify
+    /// a parent or open the clipboard. `None` is the unscoped
+    /// [`InputTracker::clipboard_stage`] route.
+    async fn clipboard_stage_admitted(
+        &self,
+        target: Target,
+        text: String,
+        admitted: Option<AdmittedTarget>,
+    ) -> Result<u32> {
+        if admitted.is_some() {
+            return Err(DriverError::CapabilityUnavailable);
+        }
+        self.clipboard_stage(target, text).await
     }
     /// Restore the parent's transaction, including after cancelled dispatch.
     async fn clipboard_restore(&self) -> Result<()> {
@@ -132,6 +166,28 @@ pub trait InputApi: Send + Sync + 'static {
         point: Option<WindowPoint>,
         focus: Option<NativeHandle>,
     ) -> Result<Target>;
+    /// Resolve under an admitted window copied by the caller.
+    ///
+    /// The default is [`InputApi::resolve`]. A scoped focus element must be
+    /// proved before any of its content is read. `admitted_pid` and
+    /// `admitted_hwnd` are that copy, not a fresh lookup.
+    async fn resolve_scoped(
+        &self,
+        window: NativeWindow,
+        point: Option<WindowPoint>,
+        focus: Option<NativeHandle>,
+        _admitted_pid: u32,
+        _admitted_hwnd: u64,
+    ) -> Result<Target> {
+        self.resolve(window, point, focus).await
+    }
+    /// Top-level window under `point`, or the captured window when capture is set.
+    ///
+    /// `Ok(None)` means the receiver cannot be proved. Scoped foreground pointer
+    /// packets refuse that result. The default cannot prove a receiver.
+    async fn pointer_receiver(&self, _point: WindowPoint) -> Result<Option<u64>> {
+        Ok(None)
+    }
     /// Resolve a character using the recipient keyboard layout before dispatch.
     async fn character_key(
         &self,
@@ -152,6 +208,10 @@ pub trait InputApi: Send + Sync + 'static {
         context: ActionContext,
     ) -> Result<()>;
     /// Deliver one packet with press-before-send accounting.
+    ///
+    /// `claim` is the admitted window copied by value. `None` is an unscoped send
+    /// and does not read a recipient. A scoped send compares the live child
+    /// process inside this call, before any message is posted.
     async fn send(
         &self,
         target: Target,
@@ -159,9 +219,15 @@ pub trait InputApi: Send + Sync + 'static {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()>;
-    /// Sample state/pixel evidence. Core owns the final tree and redacted diff.
-    async fn sample(&self, target: Target) -> Result<u64>;
+    /// Sample state or pixel evidence. Core owns the final tree and redacted diff.
+    ///
+    /// `None` is the historical multi-read sample and does not compare a process.
+    /// `Some` reads window text once: the carried process is proved immediately
+    /// before that read and again before the hash is returned. A mismatch drops
+    /// the hash. Each settle sample carries the original claim.
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64>;
     /// Release held inputs on an independent path, including after Stop.
     async fn release(&self, ledger: Arc<InputLedger>);
 }
