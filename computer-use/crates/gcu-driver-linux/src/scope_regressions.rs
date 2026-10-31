@@ -9,17 +9,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gcu_core::driver::{
-    AppQuery, AppRef, Cancel, Driver, DriverAction, DriverError, TreeOpts, WindowRef,
-    NATIVE_TIMEOUT,
+    AppQuery, AppRef, Button, Cancel, CaptureOpts, Driver, DriverAction, DriverError, KeyRoute,
+    PointerRoute, TreeOpts, WindowRef, NATIVE_TIMEOUT,
 };
-use gcu_core::model::NativeHandle;
+use gcu_core::model::{NativeHandle, WindowPoint};
 use gcu_core::scope::{
     BootIdentity, ExecutableProof, FixtureScope, FixtureTarget, InstanceEvidence, OsStartTime,
     ProcessInstance, RegisteredWindow, ScopeLease, ScopedDriver, WindowBinding,
 };
 use gcu_core::session::{StopTimings, RELEASE_INPUT_BUDGET, STOP_LATCH_BUDGET};
 use gcu_core::testing::host::StopControl;
-use gcu_protocol::{types::AppIdentity, AppInfo, Rect, WindowInfo};
+use gcu_protocol::capabilities::ForegroundCapability;
+use gcu_protocol::{types::AppIdentity, AppInfo, Capabilities, Rect, WindowInfo};
 
 use crate::atspi::{FakeNode, FakeSource};
 use crate::driver::LinuxDriver;
@@ -681,6 +682,7 @@ struct BusState {
     name_probes: Mutex<Vec<BusProbe>>,
     extent_probes: Mutex<Vec<BusProbe>>,
     child_paths: Mutex<Vec<String>>,
+    owner_queries: Mutex<Vec<String>>,
     on_name: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -696,6 +698,7 @@ impl BusState {
             name_probes: Mutex::new(Vec::new()),
             extent_probes: Mutex::new(Vec::new()),
             child_paths: Mutex::new(Vec::new()),
+            owner_queries: Mutex::new(Vec::new()),
             on_name: Mutex::new(None),
         }
     }
@@ -751,6 +754,10 @@ impl BusState {
             .unwrap_or_else(|err| err.into_inner())
             .clear();
         self.child_paths
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.owner_queries
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clear();
@@ -814,6 +821,20 @@ impl BusState {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    fn owner_queries(&self) -> Vec<String> {
+        self.owner_queries
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn note_owner(&self, name: &str) {
+        self.owner_queries
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(name.to_string());
     }
 
     fn set_name_hook(&self, hook: impl FnOnce() + Send + 'static) {
@@ -904,6 +925,7 @@ struct Daemon(Arc<BusState>);
 #[zbus::interface(interface = "org.freedesktop.DBus")]
 impl Daemon {
     async fn get_name_owner(&self, name: String) -> zbus::fdo::Result<String> {
+        self.0.note_owner(&name);
         if name == APP_ID {
             return Ok(self.0.owner());
         }
@@ -1801,4 +1823,361 @@ async fn stalled_scoped_doctor_releases_stop_while_the_extension_probe_is_blocke
     assert!(observed_ms.load(Ordering::SeqCst) <= 500);
     assert!(!report.ready);
     assert!(report.issues.is_empty());
+}
+
+fn root_geom() -> XRootGeometry {
+    XRootGeometry {
+        root_id: 1,
+        width: 100,
+        height: 100,
+        scale: 1.0,
+    }
+}
+
+fn assert_dbus_quiet(state: &BusState) {
+    assert_bus_silent(state);
+    assert!(state.pids().is_empty(), "pid queries: {:?}", state.pids());
+    assert!(
+        state.names().is_empty(),
+        "accessible names: {:?}",
+        state.names()
+    );
+    assert!(
+        state.owner_queries().is_empty(),
+        "GetNameOwner: {:?}",
+        state.owner_queries()
+    );
+}
+
+fn assert_routes_closed(caps: &Capabilities) {
+    assert!(!caps.observe.tree);
+    assert!(!caps.observe.screenshot);
+    assert!(!caps.observe.events);
+    assert!(!caps.delivery.accessibility);
+    assert!(!caps.delivery.targeted_pointer);
+    assert!(!caps.delivery.targeted_keys);
+    assert_eq!(caps.delivery.foreground, ForegroundCapability::Unavailable);
+}
+
+fn assert_denied(err: DriverError) {
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_unpublished(&err.to_string());
+}
+
+struct StallWatch {
+    done: Arc<AtomicBool>,
+    extension: Arc<AtomicBool>,
+    metadata: Arc<AtomicBool>,
+}
+
+impl Drop for StallWatch {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        self.extension.store(true, Ordering::SeqCst);
+        self.metadata.store(true, Ordering::SeqCst);
+    }
+}
+
+fn watch_stalls(
+    done: Arc<AtomicBool>,
+    extension: Arc<AtomicBool>,
+    metadata: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let start = Instant::now();
+        while !done.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_secs(2) {
+                failed.store(true, Ordering::SeqCst);
+                extension.store(true, Ordering::SeqCst);
+                metadata.store(true, Ordering::SeqCst);
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    })
+}
+
+fn unbound_driver(bus: &TestBus, x: Arc<FakeX>) -> LinuxDriver {
+    let server: Arc<dyn XServer> = x;
+    LinuxDriver::from_bus(bus.client.clone()).with_x_server(server)
+}
+
+async fn exercise_unbound_scope(bus: &TestBus, x: Arc<FakeX>, lease: ScopeLease) {
+    let driver = unbound_driver(bus, Arc::clone(&x));
+    let calls = x.x_calls();
+    bus.state.clear_reads();
+    let (extension_entered, extension_release) = x.arm_extension_stall();
+    let (metadata_entered, metadata_release) = x.arm_metadata_stall();
+    let failed = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let watcher = watch_stalls(
+        Arc::clone(&done),
+        Arc::clone(&extension_release),
+        Arc::clone(&metadata_release),
+        Arc::clone(&failed),
+    );
+    let _watch = StallWatch {
+        done,
+        extension: extension_release,
+        metadata: metadata_release,
+    };
+    let scoped = ScopedDriver::new(driver, lease, gcu_core::testing::host::fake_activity());
+    let info = app(FIXTURE_NAME, PID_P, "/usr/bin/fixture", "p-hash");
+    let win = window_ref(&info, "7");
+    assert_denied(scoped.list_apps().await.unwrap_err());
+    assert_denied(
+        scoped
+            .resolve_app(&AppQuery(CANARY_C.into()))
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(scoped.list_windows(None).await.unwrap_err());
+    assert_denied(
+        scoped
+            .list_windows(Some(&app_ref(info.clone())))
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(scoped.key_window(&app_ref(info.clone())).await.unwrap_err());
+    assert_denied(
+        scoped
+            .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(scoped.focused_element(&app_ref(info)).await.unwrap_err());
+    assert_denied(
+        scoped
+            .capture(&win, &CaptureOpts::default(), &Cancel::default())
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(scoped.window_geometry(&win).await.unwrap_err());
+    let cancel = Cancel::default();
+    assert_denied(
+        scoped
+            .perform(
+                &DriverAction::Press {
+                    el: NativeHandle::new(11u64),
+                },
+                &cancel,
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(
+        scoped
+            .perform(
+                &DriverAction::TypeText {
+                    win: win.clone(),
+                    focus: Some(NativeHandle::new(11u64)),
+                    text: CANARY_C.into(),
+                    route: KeyRoute::AllowForeground,
+                },
+                &cancel,
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(
+        scoped
+            .perform(
+                &DriverAction::PointerClick {
+                    win: win.clone(),
+                    at: WindowPoint { x: 1.0, y: 1.0 },
+                    button: Button::Left,
+                    count: 1,
+                    route: PointerRoute::AllowForeground,
+                },
+                &cancel,
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert_denied(
+        scoped
+            .perform(&DriverAction::Activate { win: win.clone() }, &cancel)
+            .await
+            .unwrap_err(),
+    );
+    assert_routes_closed(scoped.capabilities());
+    let report = scoped.doctor().await;
+    assert!(!report.ready);
+    assert_routes_closed(&report.capabilities);
+    assert_routes_closed(scoped.capabilities());
+    assert!(report.issues.iter().any(|issue| issue.contains("AT-SPI")));
+    assert_unpublished(&format!("{report:?}"));
+    assert_dbus_quiet(&bus.state);
+    assert_eq!(x.x_calls(), calls, "scoped entries called X11");
+    assert!(
+        !extension_entered.load(Ordering::SeqCst),
+        "extension probe ran"
+    );
+    assert!(
+        !metadata_entered.load(Ordering::SeqCst),
+        "metadata probe ran"
+    );
+    assert!(!failed.load(Ordering::SeqCst), "scoped entries blocked");
+    drop(_watch);
+    watcher.join().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wrapped_linux_without_a_platform_binding_refuses_before_discovery() {
+    let bus = window_bus(UNIQUE_C).await;
+    assert!(!bus.server.is_closed());
+    let x = Arc::new(FakeX::new(root_geom(), true));
+    x.add_window(x_window(7, PID_C));
+    let bare = unbound_driver(&bus, Arc::clone(&x));
+    assert!(!bare.session_scoped());
+    assert!(bare.capabilities().observe.tree);
+    bus.state.clear_reads();
+    let before_discovery = x.x_calls();
+    let listed = bare.list_apps().await.unwrap();
+    assert!(!listed.is_empty(), "unscoped discovery published nothing");
+    assert!(
+        !bus.state.child_paths().is_empty(),
+        "unscoped list_apps did not read children"
+    );
+    assert!(
+        !bus.state.name_probes().is_empty(),
+        "unscoped list_apps did not read names"
+    );
+    let _windows = bare.list_windows(None).await.unwrap();
+    let bare_report = bare.doctor().await;
+    assert!(!bare_report.issues.is_empty());
+    assert!(
+        x.x_calls() > before_discovery,
+        "unscoped listing and doctor did not call X11"
+    );
+
+    bus.state.clear_reads();
+    exercise_unbound_scope(&bus, Arc::clone(&x), lease_for_pid(PID_P, "7")).await;
+    exercise_unbound_scope(&bus, Arc::clone(&x), empty_lease()).await;
+
+    bus.state.clear_reads();
+    let again = bare.list_apps().await.unwrap();
+    assert!(!again.is_empty());
+    assert!(!bus.state.child_paths().is_empty());
+    assert!(!bus.state.name_probes().is_empty());
+    assert!(!bare.session_scoped());
+}
+
+fn spawn_unbound_stop_observer(
+    go_stop: Arc<AtomicBool>,
+    stop_done: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+    stop: StopControl,
+    observed_ms: Arc<AtomicU64>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        stop.request_stop();
+        let marked = Instant::now();
+        go_stop.store(true, Ordering::SeqCst);
+        while !stop_done.load(Ordering::SeqCst) {
+            if marked.elapsed() > Duration::from_secs(1) {
+                failed.store(true, Ordering::SeqCst);
+                release.store(true, Ordering::SeqCst);
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let elapsed = u64::try_from(marked.elapsed().as_millis()).unwrap_or(u64::MAX);
+        observed_ms.store(elapsed, Ordering::SeqCst);
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unbound_scoped_doctor_returns_without_an_x_probe_and_stop_releases() {
+    assert_eq!(STOP_LATCH_BUDGET, Duration::from_millis(100));
+    assert_eq!(RELEASE_INPUT_BUDGET, Duration::from_millis(500));
+    assert_eq!(NATIVE_TIMEOUT, Duration::from_secs(5));
+    let bus = window_bus(UNIQUE_C).await;
+    assert!(!bus.server.is_closed());
+    let x = Arc::new(FakeX::new(root_geom(), true));
+    x.add_window(x_window(7, PID_C));
+    let driver = unbound_driver(&bus, Arc::clone(&x));
+    driver.ledger().record_key_down(HELD_KEY);
+    let ledger = Arc::clone(driver.ledger());
+    let calls = x.x_calls();
+    bus.state.clear_reads();
+    let (entered, release) = x.arm_extension_stall();
+    let (metadata_entered, metadata_release) = x.arm_metadata_stall();
+    let _guard = ReleaseOnDrop(Arc::clone(&release));
+    let _metadata = ReleaseOnDrop(Arc::clone(&metadata_release));
+    let stop = StopControl::new();
+    let (router, session) = gcu_core::testing::host::scoped_router_with(
+        driver,
+        lease_for_pid(PID_P, "7"),
+        stop.activity(),
+    );
+    let scoped = router.bound_driver();
+    assert_routes_closed(scoped.capabilities());
+    let go_stop = Arc::new(AtomicBool::new(false));
+    let stop_done = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(AtomicBool::new(false));
+    let ledger_empty = Arc::new(AtomicBool::new(false));
+    let key_up = Arc::new(AtomicBool::new(false));
+    let while_stalled = Arc::new(AtomicBool::new(false));
+    let timings = Arc::new(Mutex::new(None));
+    let observed_ms = Arc::new(AtomicU64::new(u64::MAX));
+    let doctor = tokio::spawn(async move { scoped.doctor().await });
+    let stop_task = spawn_doctor_stop(DoctorStop {
+        go_stop: Arc::clone(&go_stop),
+        stop_done: Arc::clone(&stop_done),
+        failed: Arc::clone(&failed),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        ledger_empty: Arc::clone(&ledger_empty),
+        key_up: Arc::clone(&key_up),
+        while_stalled: Arc::clone(&while_stalled),
+        timings: Arc::clone(&timings),
+        session,
+        ledger,
+        x: Arc::clone(&x),
+    });
+    let observer = spawn_unbound_stop_observer(
+        go_stop,
+        Arc::clone(&stop_done),
+        Arc::clone(&failed),
+        Arc::clone(&release),
+        stop,
+        Arc::clone(&observed_ms),
+    );
+    while !stop_done.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    observer.join().unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(2), doctor)
+        .await
+        .expect("doctor returned")
+        .unwrap();
+    stop_task.await.unwrap();
+    assert!(
+        !failed.load(Ordering::SeqCst),
+        "stop did not finish while doctor could have blocked the runtime"
+    );
+    assert!(!entered.load(Ordering::SeqCst), "doctor probed extensions");
+    assert!(
+        !metadata_entered.load(Ordering::SeqCst),
+        "doctor probed metadata"
+    );
+    assert_dbus_quiet(&bus.state);
+    assert!(ledger_empty.load(Ordering::SeqCst));
+    assert!(key_up.load(Ordering::SeqCst));
+    let timings = timings
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .expect("stop timings");
+    assert!(timings.latch <= STOP_LATCH_BUDGET);
+    assert!(timings.release_issued <= RELEASE_INPUT_BUDGET);
+    assert!(observed_ms.load(Ordering::SeqCst) <= 500);
+    assert!(!report.ready);
+    assert_routes_closed(&report.capabilities);
+    assert!(report.issues.iter().any(|issue| issue.contains("AT-SPI")));
+    assert_unpublished(&format!("{report:?}"));
+    // Doctor makes no X11 call. Release sends one key-up and one flush.
+    assert_eq!(x.x_calls(), calls + 2);
 }

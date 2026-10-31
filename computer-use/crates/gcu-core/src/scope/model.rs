@@ -237,8 +237,11 @@ pub trait InstanceEvidence: Send + Sync {
 
     /// Mark this driver scoped for the life of the wrapper.
     ///
-    /// The default does nothing. Memory only. No blocking, timeout, or
-    /// cancellation. This is not the perform pin: observation has no pin.
+    /// The default does nothing. A platform that can discover without a
+    /// binding must latch this and refuse that discovery; a missing binding
+    /// is not an unscoped session. The latch is not cleared. Memory only.
+    /// No blocking, timeout, or cancellation. This is not the perform pin:
+    /// observation has no pin.
     fn note_scoped_session(&self) {}
 
     /// Refresh metadata before a scoped admission.

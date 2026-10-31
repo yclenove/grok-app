@@ -26,10 +26,16 @@ use gcu_core::{
     model::{Geometry, NativeHandle, RawTree, Rect},
     scope::{AttemptAuthority, ElementBinding, InstanceEvidence, ProcessInstance, WindowBinding},
 };
-use gcu_protocol::{capabilities::Platform, AppInfo, Capabilities, WindowInfo};
+use gcu_protocol::{
+    capabilities::{ForegroundCapability, Platform},
+    AppInfo, Capabilities, WindowInfo,
+};
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock, RwLock,
+    },
 };
 
 #[path = "driver_bind.rs"]
@@ -65,6 +71,10 @@ pub struct LinuxDriver {
     bound_capture: Option<Arc<crate::wayland::assembly::ProvenCapture>>,
     wayland_stop: Option<Arc<crate::wayland::input_control::StopControl>>,
     scope: Option<Arc<ScopeBinding>>,
+    /// Set for the life of a [`gcu_core::scope::ScopedDriver`]. Not the binding.
+    session_scoped: AtomicBool,
+    /// Routes closed because the session is scoped and no binding was installed.
+    unbound_caps: OnceLock<Capabilities>,
 }
 
 impl LinuxDriver {
@@ -147,6 +157,8 @@ impl LinuxDriver {
             bound_capture: None,
             wayland_stop: None,
             scope: None,
+            session_scoped: AtomicBool::new(false),
+            unbound_caps: OnceLock::new(),
         };
         driver.recompute_capabilities();
         driver
@@ -321,8 +333,9 @@ impl LinuxDriver {
 
     /// Register the fixture windows and the clock that re-reads their owner.
     ///
-    /// Later reads and input prove against this binding. An unbound driver
-    /// keeps the existing desktop paths.
+    /// Later reads and input prove against this binding. A driver that was
+    /// never wrapped keeps the existing desktop paths. A wrapped driver with
+    /// no binding refuses those paths.
     pub fn bind_scope(
         &mut self,
         gate: ScopeGate,
@@ -340,6 +353,33 @@ impl LinuxDriver {
 
     pub(crate) fn scope(&self) -> Option<&ScopeBinding> {
         self.scope.as_deref()
+    }
+
+    /// True after [`InstanceEvidence::note_scoped_session`]. Never cleared.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. This is not the
+    /// platform binding and it is not the perform pin.
+    pub(crate) fn session_scoped(&self) -> bool {
+        self.session_scoped.load(Ordering::Acquire)
+    }
+
+    /// Scoped session whose platform binding was never installed.
+    ///
+    /// That is a refusal, not an unscoped driver. Memory only. No blocking,
+    /// timeout, or cancellation.
+    pub(crate) fn missing_platform_binding(&self) -> bool {
+        self.session_scoped() && self.scope.is_none()
+    }
+
+    /// [`DriverError::ScopeDenied`] when [`Self::missing_platform_binding`].
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn refuse_unbound_scope(&self) -> Result<()> {
+        if self.missing_platform_binding() {
+            Err(DriverError::ScopeDenied)
+        } else {
+            Ok(())
+        }
     }
 
     /// X id remembered for `native_id`, without asking the server.
@@ -376,7 +416,7 @@ impl LinuxDriver {
 
     /// Wayland route for one action. Scoped mode does not query X to decide.
     pub(crate) fn route_is_wayland(&self, win: &WindowRef) -> bool {
-        if self.scope.is_some() {
+        if self.scope.is_some() || self.session_scoped() {
             self.memory_wayland(win)
         } else {
             self.is_native_wayland_window(win)
@@ -409,6 +449,7 @@ impl LinuxDriver {
     /// refuses. AT-SPI-only windows are closed. Wayland without a peer
     /// credential is closed. This function does not call the X server.
     pub(crate) fn prove_target(&self, win: &WindowRef) -> Result<()> {
+        self.refuse_unbound_scope()?;
         let Some(binding) = &self.scope else {
             return Ok(());
         };
@@ -429,6 +470,7 @@ impl LinuxDriver {
     }
 
     pub(crate) fn admit_wayland_window(&self, window_id: &str) -> Result<()> {
+        self.refuse_unbound_scope()?;
         let Some(binding) = &self.scope else {
             return Ok(());
         };
@@ -448,6 +490,7 @@ impl LinuxDriver {
         opts: &TreeOpts,
         cancel: &Cancel,
     ) -> Result<RawTree> {
+        self.refuse_unbound_scope()?;
         if let Some(ref fake_source) = self.fake_source {
             let root = self.fake_root.as_ref().ok_or(DriverError::WindowGone)?;
             return build_raw_tree(fake_source.as_ref(), root, opts, cancel).await;
@@ -481,6 +524,7 @@ impl LinuxDriver {
     }
 
     async fn geometry_of(&self, win: &WindowRef) -> Result<Geometry> {
+        self.refuse_unbound_scope()?;
         if let Some(geometry) = wayland_bind::bound_geometry(self, win) {
             return Ok(geometry);
         }
@@ -808,17 +852,10 @@ impl Driver for LinuxDriver {
     }
 
     fn capabilities(&self) -> &Capabilities {
-        if let Some(input) = self.portal_input.as_ref().filter(|i| i.available()) {
-            return input.capabilities();
+        if let Some(closed) = self.unbound_caps.get() {
+            return closed;
         }
-        let hotkey_ok = self.hotkey_manager.is_available() && !self.stop_latch.is_stopped();
-        let guard_ok = self.activity_clock.is_available();
-        match (hotkey_ok, guard_ok) {
-            (true, true) => &self.caps_all,
-            (true, false) => &self.caps_no_guard,
-            (false, true) => &self.caps_no_hotkey,
-            (false, false) => &self.caps_none,
-        }
+        self.stored_capabilities()
     }
 
     async fn doctor(&self) -> DoctorReport {
@@ -830,6 +867,7 @@ impl Driver for LinuxDriver {
     }
 
     async fn list_apps(&self) -> Result<Vec<AppInfo>> {
+        self.refuse_unbound_scope()?;
         if self.fake_source.is_some() {
             return Ok(self.fake_apps.clone());
         }
@@ -848,15 +886,18 @@ impl Driver for LinuxDriver {
     }
 
     async fn resolve_app(&self, query: &AppQuery) -> Result<AppRef> {
+        self.refuse_unbound_scope()?;
         let apps = self.list_apps().await?;
         crate::atspi::resolve_atspi_app(&apps, query)
     }
 
     async fn launch_app(&self, _app: &AppRef) -> Result<AppRef> {
+        self.refuse_unbound_scope()?;
         Err(DriverError::CapabilityUnavailable)
     }
 
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<WindowInfo>> {
+        self.refuse_unbound_scope()?;
         if self.scope.is_some() {
             let windows = self.scoped_registered_windows(app)?;
             return Ok(wayland_bind::paint_frames(self, windows));
@@ -913,6 +954,7 @@ impl Driver for LinuxDriver {
     }
 
     async fn key_window(&self, app: &AppRef) -> Result<WindowInfo> {
+        self.refuse_unbound_scope()?;
         if let Some(binding) = &self.scope {
             let _ = binding.oracle().take_prepared();
             let windows = self.list_windows(Some(app)).await?;
@@ -941,6 +983,7 @@ impl Driver for LinuxDriver {
         opts: &TreeOpts,
         cancel: &Cancel,
     ) -> Result<RawTree> {
+        self.refuse_unbound_scope()?;
         if let Some(binding) = &self.scope {
             let _ = binding.oracle().take_prepared();
             crate::atspi::scope::admit_tree(binding, &win.app.info.id, &win.id)?;
@@ -955,6 +998,7 @@ impl Driver for LinuxDriver {
         _opts: &CaptureOpts,
         cancel: &Cancel,
     ) -> Result<Capture> {
+        self.refuse_unbound_scope()?;
         if self.scope.is_some() {
             self.continue_scope_budget();
             return self.capture_scoped(win, cancel).await;
@@ -971,6 +1015,7 @@ impl Driver for LinuxDriver {
     }
 
     async fn window_geometry(&self, win: &WindowRef) -> Result<Geometry> {
+        self.refuse_unbound_scope()?;
         if self.scope.is_some() {
             self.continue_scope_budget();
             return self.scoped_window_geometry(win).await;
@@ -979,6 +1024,7 @@ impl Driver for LinuxDriver {
     }
 
     async fn focused_element(&self, _app: &AppRef) -> Result<Option<NativeHandle>> {
+        self.refuse_unbound_scope()?;
         if let Some(binding) = &self.scope {
             let _ = binding.oracle().take_prepared();
         }
@@ -986,11 +1032,15 @@ impl Driver for LinuxDriver {
     }
 
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
+        self.refuse_unbound_scope()?;
         self.prepare_action_evidence(req).await;
         crate::perform::perform_action(self, req, cancel).await
     }
 
     fn subscribe(&self, win: &WindowRef) -> Option<BoxStream<'static, UiEvent>> {
+        if self.missing_platform_binding() {
+            return None;
+        }
         self.subscriber.as_ref().and_then(|s| s.subscribe(&win.id))
     }
 
@@ -1007,6 +1057,36 @@ impl Driver for LinuxDriver {
 }
 
 const SCOPED_ROUTE_NOTE: &str = "scoped mode: AT-SPI tree reads and semantic accessibility actions are unavailable; an X11 window without a live incarnation stays closed.";
+
+impl LinuxDriver {
+    /// Capability quad selected by hotkey, activity guard, and portal state.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Does not apply the
+    /// scoped-session latch.
+    fn stored_capabilities(&self) -> &Capabilities {
+        if let Some(input) = self.portal_input.as_ref().filter(|input| input.available()) {
+            return input.capabilities();
+        }
+        let hotkey_ok = self.hotkey_manager.is_available() && !self.stop_latch.is_stopped();
+        let guard_ok = self.activity_clock.is_available();
+        match (hotkey_ok, guard_ok) {
+            (true, true) => &self.caps_all,
+            (true, false) => &self.caps_no_guard,
+            (false, true) => &self.caps_no_hotkey,
+            (false, false) => &self.caps_none,
+        }
+    }
+}
+
+fn close_scoped_routes(capabilities: &mut Capabilities) {
+    capabilities.observe.tree = false;
+    capabilities.observe.screenshot = false;
+    capabilities.observe.events = false;
+    capabilities.delivery.accessibility = false;
+    capabilities.delivery.targeted_pointer = false;
+    capabilities.delivery.targeted_keys = false;
+    capabilities.delivery.foreground = ForegroundCapability::Unavailable;
+}
 
 impl InstanceEvidence for LinuxDriver {
     fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
@@ -1031,6 +1111,10 @@ impl InstanceEvidence for LinuxDriver {
         current: &gcu_protocol::Capabilities,
     ) -> gcu_protocol::Capabilities {
         let mut capabilities = current.clone();
+        if self.missing_platform_binding() {
+            close_scoped_routes(&mut capabilities);
+            return capabilities;
+        }
         capabilities.observe.tree = false;
         capabilities.delivery.accessibility = false;
         capabilities
@@ -1038,6 +1122,16 @@ impl InstanceEvidence for LinuxDriver {
 
     fn scoped_doctor_note(&self) -> Option<&'static str> {
         Some(SCOPED_ROUTE_NOTE)
+    }
+
+    fn note_scoped_session(&self) {
+        self.session_scoped.store(true, Ordering::Release);
+        if self.scope.is_some() {
+            return;
+        }
+        let mut closed = self.stored_capabilities().clone();
+        close_scoped_routes(&mut closed);
+        let _ = self.unbound_caps.set(closed);
     }
 
     fn prepare_evidence<'a>(

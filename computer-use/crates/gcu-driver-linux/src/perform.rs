@@ -30,6 +30,7 @@ pub async fn perform_action(
     req: &DriverAction,
     cancel: &Cancel,
 ) -> Result<Delivery> {
+    driver.refuse_unbound_scope()?;
     if cancel.is_cancelled() {
         driver.release_all_input().await;
         return Err(DriverError::Cancelled {
@@ -257,6 +258,9 @@ async fn perform_action_inner(
 }
 
 fn scoped_admit(driver: &LinuxDriver, req: &DriverAction) -> Result<()> {
+    if driver.missing_platform_binding() {
+        return Err(DriverError::ScopeDenied);
+    }
     if driver.scope().is_none() {
         return Ok(());
     }
@@ -296,6 +300,9 @@ pub(crate) fn action_window(req: &DriverAction) -> Option<&WindowRef> {
 }
 
 fn action_xid(driver: &LinuxDriver, win: &WindowRef) -> Result<u32> {
+    if driver.missing_platform_binding() {
+        return Err(DriverError::ScopeDenied);
+    }
     if driver.scope().is_some() {
         return driver.memory_xid(win).ok_or(DriverError::ScopeDenied);
     }

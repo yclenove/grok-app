@@ -288,6 +288,16 @@ fn map_capture(error: CaptureError) -> DriverError {
 }
 
 pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
+    if driver.missing_platform_binding() {
+        // The session is scoped and no platform binding was installed.
+        // Report the capability snapshot captured at construction. Do not
+        // probe Composite, XTest, or the bus on this thread.
+        return DoctorReport {
+            capabilities: driver.capabilities().clone(),
+            ready: false,
+            issues: Vec::new(),
+        };
+    }
     let atspi_ready = driver.fake_source.is_some()
         || driver
             .connection
@@ -369,12 +379,17 @@ pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
     report
 }
 
-/// Composite and XTest flags. `None` means the scoped probe did not finish.
+/// Composite and XTest flags. `None` means the probe did not finish, or the
+/// session is scoped and has no platform binding.
 ///
-/// A fake driver with no X server keeps the historical in-memory pair. A
-/// scoped driver with an X server reads both flags off the runtime. Every
-/// other driver still probes on the caller thread.
+/// A missing binding does not probe. A fake driver with no X server keeps
+/// the historical in-memory pair. A scoped driver with a binding and an X
+/// server reads both flags off the runtime. Every other driver still probes
+/// on the caller thread.
 async fn extension_flags(driver: &LinuxDriver) -> Option<(bool, bool)> {
+    if driver.missing_platform_binding() {
+        return None;
+    }
     let has_x = driver.x_server.is_some();
     if driver.fake_source.is_some() && !has_x {
         return Some((true, true));

@@ -4,7 +4,7 @@ use crate::x11::server::{
     crop_into, RawImage, XError, XEventKind, XRootGeometry, XServer, XWindowGeometry,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -80,6 +80,8 @@ pub struct FakeX {
     bump_incarnation_on_image: Mutex<bool>,
     metadata_stall: Mutex<ProbeStall>,
     extension_stall: Mutex<ProbeStall>,
+    /// Content, geometry, and extension calls. Event polling is not counted.
+    calls: AtomicUsize,
 }
 
 struct ProbeStall {
@@ -125,7 +127,20 @@ impl FakeX {
             bump_incarnation_on_image: Mutex::new(false),
             metadata_stall: Mutex::new(idle_stall()),
             extension_stall: Mutex::new(idle_stall()),
+            calls: AtomicUsize::new(0),
         }
+    }
+
+    /// X11 requests observed since construction, excluding event polling.
+    ///
+    /// The hotkey listener polls on its own task. Geometry, extension, input,
+    /// and property calls increment this counter. Memory only.
+    pub fn x_calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn note_x_call(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Stall later `window_pid` and `window_geometry` calls.
@@ -291,9 +306,11 @@ impl XServer for FakeX {
         &self,
         target: u32,
     ) -> Result<Box<dyn super::overlay::CaptureScope + '_>, XError> {
+        self.note_x_call();
         self.overlay.begin(target)
     }
     fn client_list(&self) -> Result<Vec<u32>, XError> {
+        self.note_x_call();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -302,6 +319,7 @@ impl XServer for FakeX {
     }
 
     fn window_incarnation(&self, window: u32) -> Result<Option<u64>, XError> {
+        self.note_x_call();
         let wins = lock_m(&self.windows);
         if !wins.contains_key(&window) {
             return Err(XError::WindowNotFound(window));
@@ -310,6 +328,7 @@ impl XServer for FakeX {
     }
 
     fn window_pid(&self, window: u32) -> Result<Option<u32>, XError> {
+        self.note_x_call();
         self.block_metadata();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
@@ -321,6 +340,7 @@ impl XServer for FakeX {
     }
 
     fn window_name(&self, window: u32) -> Result<Option<String>, XError> {
+        self.note_x_call();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -331,6 +351,7 @@ impl XServer for FakeX {
     }
 
     fn active_window(&self) -> Result<Option<u32>, XError> {
+        self.note_x_call();
         let active = match self.active_window.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -339,6 +360,7 @@ impl XServer for FakeX {
     }
 
     fn window_geometry(&self, window: u32) -> Result<XWindowGeometry, XError> {
+        self.note_x_call();
         self.block_metadata();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
@@ -350,10 +372,12 @@ impl XServer for FakeX {
     }
 
     fn root_geometry(&self) -> Result<XRootGeometry, XError> {
+        self.note_x_call();
         Ok(self.root)
     }
 
     fn query_tree(&self, _root: u32) -> Result<Vec<u32>, XError> {
+        self.note_x_call();
         let stack = match self.stacking_order.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -362,11 +386,13 @@ impl XServer for FakeX {
     }
 
     fn is_composite_available(&self) -> Result<bool, XError> {
+        self.note_x_call();
         self.block_extension();
         Ok(self.composite_available)
     }
 
     fn is_window_mapped(&self, window: u32) -> Result<bool, XError> {
+        self.note_x_call();
         let wins = match self.windows.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -377,6 +403,7 @@ impl XServer for FakeX {
     }
 
     fn composite_name_window_pixmap(&self, window: u32) -> Result<u32, XError> {
+        self.note_x_call();
         if !self.composite_available {
             return Err(XError::ExtensionUnavailable("Composite".into()));
         }
@@ -407,6 +434,7 @@ impl XServer for FakeX {
     }
 
     fn free_pixmap(&self, pixmap: u32) -> Result<(), XError> {
+        self.note_x_call();
         let mut pixmaps = match self.pixmaps.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -423,6 +451,7 @@ impl XServer for FakeX {
         width: u16,
         height: u16,
     ) -> Result<RawImage, XError> {
+        self.note_x_call();
         let w = width as usize;
         let h = height as usize;
         let mut result_data = vec![0u8; w * h * 4];
@@ -495,11 +524,13 @@ impl XServer for FakeX {
     }
 
     fn is_xtest_available(&self) -> Result<bool, XError> {
+        self.note_x_call();
         self.block_extension();
         Ok(self.xtest_enabled())
     }
 
     fn xtest_fake_motion(&self, root_x: i16, root_y: i16) -> Result<(), XError> {
+        self.note_x_call();
         if !self.xtest_enabled() {
             return Err(XError::ExtensionUnavailable("XTEST".into()));
         }
@@ -520,6 +551,7 @@ impl XServer for FakeX {
     }
 
     fn xtest_fake_button(&self, button: u8, is_press: bool) -> Result<(), XError> {
+        self.note_x_call();
         if !self.xtest_enabled() {
             return Err(XError::ExtensionUnavailable("XTEST".into()));
         }
@@ -543,6 +575,7 @@ impl XServer for FakeX {
     }
 
     fn xtest_fake_key(&self, keycode: u8, is_press: bool) -> Result<(), XError> {
+        self.note_x_call();
         if !self.xtest_enabled() {
             return Err(XError::ExtensionUnavailable("XTEST".into()));
         }
@@ -566,6 +599,7 @@ impl XServer for FakeX {
     }
 
     fn activate_window(&self, window: u32) -> Result<(), XError> {
+        self.note_x_call();
         let fails = match self.activate_fails.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -582,10 +616,12 @@ impl XServer for FakeX {
     }
 
     fn keyboard_bounds(&self) -> Result<(u8, u8), XError> {
+        self.note_x_call();
         Ok((8, 255))
     }
 
     fn get_keyboard_mapping(&self, first_keycode: u8, count: u8) -> Result<(Vec<u32>, u8), XError> {
+        self.note_x_call();
         let map = match self.keymap.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -616,6 +652,7 @@ impl XServer for FakeX {
         keysyms_per_keycode: u8,
         keysyms: &[u32],
     ) -> Result<(), XError> {
+        self.note_x_call();
         let mut map = match self.keymap.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -629,10 +666,12 @@ impl XServer for FakeX {
     }
 
     fn flush(&self) -> Result<(), XError> {
+        self.note_x_call();
         Ok(())
     }
 
     fn is_xi2_available(&self) -> Result<bool, XError> {
+        self.note_x_call();
         let g = match self.xi2_available.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -641,6 +680,7 @@ impl XServer for FakeX {
     }
 
     fn query_xi_devices(&self) -> Result<Vec<crate::x11::activity::DeviceInfo>, XError> {
+        self.note_x_call();
         let g = match self.xi_devices.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -649,6 +689,7 @@ impl XServer for FakeX {
     }
 
     fn grab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError> {
+        self.note_x_call();
         let conflicts = match self.conflicting_keys.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -667,6 +708,7 @@ impl XServer for FakeX {
     }
 
     fn ungrab_key(&self, keycode: u8, modifiers: u16) -> Result<(), XError> {
+        self.note_x_call();
         let mut grabbed = match self.grabbed_keys.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -677,5 +719,10 @@ impl XServer for FakeX {
 
     fn poll_event(&self) -> Result<Option<XEventKind>, XError> {
         Ok(lock_m(&self.incoming).pop_front())
+    }
+
+    fn select_xi2_events(&self) -> Result<(), XError> {
+        self.note_x_call();
+        Ok(())
     }
 }
