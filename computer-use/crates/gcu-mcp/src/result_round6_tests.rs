@@ -338,7 +338,7 @@ async fn connection_export_and_cached_image_stay_empty_before_commit() {
 }
 
 #[tokio::test]
-async fn revoke_before_commit_hides_the_spill_and_after_commit_keeps_it() {
+async fn revoke_before_commit_hides_the_spill_and_revoke_after_commit_reclaims_it() {
     let scope = lease();
     let results = desk(Some(scope.clone()));
     let gate = scope.commit_before_gate();
@@ -396,13 +396,11 @@ async fn revoke_before_commit_hides_the_spill_and_after_commit_keeps_it() {
     watcher.join().unwrap();
     let rendered = serde_json::to_string(&published).unwrap();
     assert_eq!(published.is_error, Some(false), "{rendered}");
-    let rows = files.export().unwrap();
     assert!(
-        rows.iter().any(|(_, bytes)| bytes
-            .windows(b"CANARY-AFTER".len())
-            .any(|window| window == b"CANARY-AFTER")),
-        "revoke rolled back a committed spill: {rendered}"
+        files.export().unwrap().is_empty(),
+        "revoked spill stayed readable: {rendered}"
     );
+    assert!(!files.contains_bytes(b"CANARY-AFTER"));
     files.close().unwrap();
 }
 
@@ -441,13 +439,11 @@ async fn revoke_during_commit_waits_until_registration_finishes() {
     watcher.join().unwrap();
     let rendered = serde_json::to_string(&published).unwrap();
     assert_eq!(published.is_error, Some(false), "{rendered}");
-    let rows = files.export().unwrap();
     assert!(
-        rows.iter().any(|(_, bytes)| bytes
-            .windows(b"CANARY-DURING".len())
-            .any(|window| window == b"CANARY-DURING")),
-        "{rendered}"
+        files.export().unwrap().is_empty(),
+        "revoked spill stayed readable: {rendered}"
     );
+    assert!(!files.contains_bytes(b"CANARY-DURING"));
     files.close().unwrap();
 }
 

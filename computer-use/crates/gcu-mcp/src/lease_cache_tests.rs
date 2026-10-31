@@ -40,8 +40,10 @@ fn visibility_matrix_hides_every_mismatch() {
 #[test]
 fn unscoped_image_and_file_without_an_epoch_stay_readable() {
     let cache = ImageCache::default();
-    let mut admission = cache.admission("shot".into(), image(1));
-    admission.commit();
+    {
+        let mut admission = cache.admission("shot".into(), image(1));
+        admission.commit();
+    }
     assert_eq!(cache.get("shot").unwrap().bytes, vec![1]);
 
     let files = SessionFiles::new().unwrap();
@@ -56,9 +58,11 @@ fn unscoped_image_and_file_without_an_epoch_stay_readable() {
 #[test]
 fn stamped_image_without_a_bound_lease_is_not_readable() {
     let cache = ImageCache::default();
-    let mut admission = cache.admission("shot".into(), image(2));
-    admission.stamp(Some(epoch(1)));
-    admission.commit();
+    {
+        let mut admission = cache.admission("shot".into(), image(2));
+        admission.stamp(Some(epoch(1)));
+        admission.commit();
+    }
     assert!(cache.get("shot").is_none());
 }
 
@@ -66,8 +70,10 @@ fn stamped_image_without_a_bound_lease_is_not_readable() {
 fn bound_lease_without_a_stamp_is_not_readable() {
     let cache = ImageCache::default();
     cache.bind_lease(lease(1));
-    let mut admission = cache.admission("shot".into(), image(3));
-    admission.commit();
+    {
+        let mut admission = cache.admission("shot".into(), image(3));
+        admission.commit();
+    }
     assert!(cache.get("shot").is_none());
 }
 
@@ -76,16 +82,20 @@ fn delivered_image_is_unreadable_after_rebind_and_the_new_generation_is_readable
     let bound = lease(1);
     let cache = ImageCache::default();
     cache.bind_lease(bound.clone());
-    let mut admission = cache.admission("shot".into(), image(4));
-    admission.stamp(Some(epoch(1)));
-    admission.commit();
+    {
+        let mut admission = cache.admission("shot".into(), image(4));
+        admission.stamp(Some(epoch(1)));
+        admission.commit();
+    }
     assert!(cache.get("shot").is_some());
     let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();
     bound.rebind(next).unwrap();
     assert!(cache.get("shot").is_none());
-    let mut next_admission = cache.admission("shot".into(), image(5));
-    next_admission.stamp(Some(epoch(2)));
-    next_admission.commit();
+    {
+        let mut next_admission = cache.admission("shot".into(), image(5));
+        next_admission.stamp(Some(epoch(2)));
+        next_admission.commit();
+    }
     assert_eq!(cache.get("shot").unwrap().bytes, vec![5]);
 }
 
@@ -96,9 +106,11 @@ async fn delivered_image_is_unreadable_after_lease_expiry() {
     let bound = ScopeLease::install_with_deadline(scope, clock, Duration::from_secs(3));
     let cache = ImageCache::default();
     cache.bind_lease(bound.clone());
-    let mut admission = cache.admission("shot".into(), image(6));
-    admission.stamp(Some(epoch(1)));
-    admission.commit();
+    {
+        let mut admission = cache.admission("shot".into(), image(6));
+        admission.stamp(Some(epoch(1)));
+        admission.commit();
+    }
     assert!(cache.get("shot").is_some());
     tokio::time::advance(Duration::from_secs(3)).await;
     assert!(cache.get("shot").is_none());
@@ -114,9 +126,11 @@ async fn delivered_file_is_unreadable_after_lease_expiry() {
     files.bind_lease(bound.clone());
     let mut staged = files.stage(b"png-bytes", "png").unwrap();
     files.seal(&mut staged).unwrap();
-    let mut admission = files.admission(std::slice::from_ref(&staged)).unwrap();
-    admission.stamp(Some(epoch(1)));
-    admission.commit(std::slice::from_mut(&mut staged));
+    {
+        let mut admission = files.admission(std::slice::from_ref(&staged)).unwrap();
+        admission.stamp(Some(epoch(1)));
+        admission.commit(std::slice::from_mut(&mut staged));
+    }
     assert_eq!(files.export().unwrap().len(), 1);
     tokio::time::advance(Duration::from_secs(3)).await;
     assert!(files.export().unwrap().is_empty());
