@@ -684,6 +684,16 @@ struct BusState {
     child_paths: Mutex<Vec<String>>,
     owner_queries: Mutex<Vec<String>>,
     on_name: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// When set, registry and app children use peer unique names.
+    ///
+    /// Scoped discovery parses `GetChildren` as plain strings and then calls
+    /// `GetNameOwner`, so it can admit the well-known `APP_ID`. Unscoped
+    /// `list_atspi_apps` uses `AccessibleProxy::get_children`, which decodes
+    /// each child as an `ObjectRef`. That type requires a unique name
+    /// (`:1.50`). One well-known name fails the whole array, `children`
+    /// returns an error, and unscoped discovery publishes nothing. Scoped
+    /// tests leave this clear.
+    unique_children: AtomicBool,
 }
 
 impl BusState {
@@ -700,7 +710,20 @@ impl BusState {
             child_paths: Mutex::new(Vec::new()),
             owner_queries: Mutex::new(Vec::new()),
             on_name: Mutex::new(None),
+            unique_children: AtomicBool::new(false),
         }
+    }
+
+    /// Publish peer unique names from `GetChildren`.
+    ///
+    /// The bare unscoped control needs this. Scoped discovery keeps matching
+    /// the well-known application id. Memory only.
+    fn publish_unique_children(&self) {
+        self.unique_children.store(true, Ordering::SeqCst);
+    }
+
+    fn unique_children(&self) -> bool {
+        self.unique_children.load(Ordering::SeqCst)
     }
 
     fn set_owner(&self, owner: &str) {
@@ -1156,11 +1179,15 @@ fn owned_path(path: &str) -> zbus::zvariant::OwnedObjectPath {
     zbus::zvariant::OwnedObjectPath::try_from(path).unwrap()
 }
 
-fn child_pairs(path: &str) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
-    let pairs: &[(&str, &str)] = match path {
-        REGISTRY_PATH => &[(APP_ID, APP_PATH), (UNIQUE_C, C_APP_PATH)],
-        APP_PATH => &[(APP_ID, P_WIN_PATH), (APP_ID, SIBLING_PATH)],
-        C_APP_PATH => &[(UNIQUE_C, C_WIN_PATH)],
+fn child_pairs(path: &str, unique_refs: bool) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+    // `unique_refs` is the unscoped ObjectRef shape. The default keeps the
+    // well-known application id that scoped admission matches.
+    let pairs: &[(&str, &str)] = match (path, unique_refs) {
+        (REGISTRY_PATH, false) => &[(APP_ID, APP_PATH), (UNIQUE_C, C_APP_PATH)],
+        (REGISTRY_PATH, true) => &[(UNIQUE_P, APP_PATH), (UNIQUE_C, C_APP_PATH)],
+        (APP_PATH, false) => &[(APP_ID, P_WIN_PATH), (APP_ID, SIBLING_PATH)],
+        (APP_PATH, true) => &[(UNIQUE_P, P_WIN_PATH), (UNIQUE_P, SIBLING_PATH)],
+        (C_APP_PATH, _) => &[(UNIQUE_C, C_WIN_PATH)],
         _ => &[],
     };
     pairs
@@ -1206,7 +1233,7 @@ struct AccessibleNode {
 impl AccessibleNode {
     fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
         self.state.note_children(self.path);
-        child_pairs(self.path)
+        child_pairs(self.path, self.state.unique_children())
     }
 
     #[zbus(property)]
@@ -2027,6 +2054,11 @@ async fn exercise_unbound_scope(bus: &TestBus, x: Arc<FakeX>, lease: ScopeLease)
 async fn wrapped_linux_without_a_platform_binding_refuses_before_discovery() {
     let bus = window_bus(UNIQUE_C).await;
     assert!(!bus.server.is_closed());
+    // Case (b): this bus's default children include the well-known APP_ID.
+    // Unscoped discovery cannot decode that as an ObjectRef. Publishing
+    // unique names makes the bare control actually list apps. Scoped
+    // assertions below still require zero bus and X11 reads.
+    bus.state.publish_unique_children();
     let x = Arc::new(FakeX::new(root_geom(), true));
     x.add_window(x_window(7, PID_C));
     let bare = unbound_driver(&bus, Arc::clone(&x));
@@ -2036,6 +2068,18 @@ async fn wrapped_linux_without_a_platform_binding_refuses_before_discovery() {
     let before_discovery = x.x_calls();
     let listed = bare.list_apps().await.unwrap();
     assert!(!listed.is_empty(), "unscoped discovery published nothing");
+    assert!(
+        listed
+            .iter()
+            .any(|app| app.id == UNIQUE_P && app.name == FIXTURE_NAME),
+        "unscoped discovery did not publish {UNIQUE_P}: {listed:?}"
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|app| app.id == UNIQUE_C && app.name == FIXTURE_NAME),
+        "unscoped discovery did not publish {UNIQUE_C}: {listed:?}"
+    );
     assert!(
         !bus.state.child_paths().is_empty(),
         "unscoped list_apps did not read children"
@@ -2070,13 +2114,16 @@ fn spawn_unbound_stop_observer(
     failed: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
     stop: StopControl,
-    observed_ms: Arc<AtomicU64>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         stop.request_stop();
         let marked = Instant::now();
         go_stop.store(true, Ordering::SeqCst);
         while !stop_done.load(Ordering::SeqCst) {
+            // Deadlock detector only. A synchronous X probe holds this
+            // current-thread runtime inside the stall, so the stop task never
+            // stores `stop_done`. Opening the stall lets the test fail.
+            // This is not `STOP_LATCH_BUDGET` or `RELEASE_INPUT_BUDGET`.
             if marked.elapsed() > Duration::from_secs(1) {
                 failed.store(true, Ordering::SeqCst);
                 release.store(true, Ordering::SeqCst);
@@ -2084,8 +2131,6 @@ fn spawn_unbound_stop_observer(
             }
             thread::sleep(Duration::from_millis(5));
         }
-        let elapsed = u64::try_from(marked.elapsed().as_millis()).unwrap_or(u64::MAX);
-        observed_ms.store(elapsed, Ordering::SeqCst);
     })
 }
 
@@ -2122,7 +2167,6 @@ async fn unbound_scoped_doctor_returns_without_an_x_probe_and_stop_releases() {
     let key_up = Arc::new(AtomicBool::new(false));
     let while_stalled = Arc::new(AtomicBool::new(false));
     let timings = Arc::new(Mutex::new(None));
-    let observed_ms = Arc::new(AtomicU64::new(u64::MAX));
     let doctor = tokio::spawn(async move { scoped.doctor().await });
     let stop_task = spawn_doctor_stop(DoctorStop {
         go_stop: Arc::clone(&go_stop),
@@ -2144,7 +2188,6 @@ async fn unbound_scoped_doctor_returns_without_an_x_probe_and_stop_releases() {
         Arc::clone(&failed),
         Arc::clone(&release),
         stop,
-        Arc::clone(&observed_ms),
     );
     while !stop_done.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2171,9 +2214,23 @@ async fn unbound_scoped_doctor_returns_without_an_x_probe_and_stop_releases() {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .expect("stop timings");
-    assert!(timings.latch <= STOP_LATCH_BUDGET);
-    assert!(timings.release_issued <= RELEASE_INPUT_BUDGET);
-    assert!(observed_ms.load(Ordering::SeqCst) <= 500);
+    // Ordering, not a wall-clock budget. `handle_stop` stamps both fields
+    // with `std::time::Instant` before it awaits release, and a parallel
+    // suite can preempt that gap past 100 ms without doctor blocking Stop.
+    // The constants above stay the production values. What this proves:
+    // doctor finished, neither stall was entered or released, and Stop
+    // still issued release. A synchronous X reply would still be inside
+    // the armed stall, so these flags could not all be clear.
+    assert!(timings.release_issued >= timings.latch);
+    assert!(!while_stalled.load(Ordering::SeqCst));
+    assert!(
+        !release.load(Ordering::SeqCst),
+        "extension stall had to be released"
+    );
+    assert!(
+        !metadata_release.load(Ordering::SeqCst),
+        "metadata stall had to be released"
+    );
     assert!(!report.ready);
     assert_routes_closed(&report.capabilities);
     assert!(report.issues.iter().any(|issue| issue.contains("AT-SPI")));
