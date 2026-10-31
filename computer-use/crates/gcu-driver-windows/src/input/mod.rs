@@ -158,10 +158,12 @@ impl InputBackend {
     }
     /// Deliver under one scope copied by the caller.
     ///
-    /// [`crate::scope_identity::JobScope::Unscoped`] keeps the historical route.
-    /// A scoped job carries that claim through recipient, pointer, and clipboard
-    /// publication checks. A missing scope is refused and is not treated as unscoped.
-    /// Nothing here runs inside the pointer gate.
+    /// [`crate::scope_identity::JobScope::Unscoped`] keeps the historical route,
+    /// including foreground SendInput. A scoped job refuses foreground SendInput
+    /// before resolve, sample, focus, paste, or send. Targeted delivery re-checks
+    /// the admitted process instance immediately before each sample and send. A
+    /// missing scope is refused and is not treated as unscoped. Nothing here runs
+    /// inside the pointer gate.
     pub(crate) async fn perform_scoped(
         &self,
         window: NativeWindow,
@@ -206,6 +208,11 @@ impl InputBackend {
             if let Some(guard) = &safety {
                 guard.check(false)?;
             }
+            // Scoped foreground SendInput cannot name the recipient of each packet.
+            // Close it before resolve. Capabilities report the same gap.
+            if scope.claim()?.is_some() && plan.foreground {
+                return Err(DriverError::CapabilityUnavailable);
+            }
             let target = if let Some(claim) = scope.claim()? {
                 self.api
                     .resolve_scoped(
@@ -233,9 +240,6 @@ impl InputBackend {
                     Some(pid),
                     Some(claim.owner.pid),
                 )?;
-                if plan.foreground {
-                    confine_pointer(self.api.as_ref(), claim.hwnd, &plan.packets).await?;
-                }
             }
             let foreground = plan.foreground;
             if !foreground
@@ -268,6 +272,11 @@ impl InputBackend {
                     _ => None,
                 };
                 packets.push(messages::chord_events(&chord, character)?);
+            }
+            if !packets.is_empty() {
+                if let Some(claim) = scope.claim()? {
+                    recheck_recipient(self.api.as_ref(), target.clone(), claim).await?;
+                }
             }
             let before = if packets.is_empty() {
                 None
@@ -347,6 +356,9 @@ impl InputBackend {
                     tracker
                         .prepare(target.clone(), packet.clone(), delivery)
                         .await?;
+                }
+                if let Some(claim) = scope.claim()? {
+                    recheck_recipient(self.api.as_ref(), target.clone(), claim).await?;
                 }
                 let result = async {
                     context.check()?;
@@ -478,32 +490,17 @@ impl Drop for Cleanup<'_> {
     }
 }
 
-fn pointer_point(event: api::Event) -> Option<gcu_core::model::WindowPoint> {
-    match event {
-        api::Event::Move(point, _)
-        | api::Event::Button(_, _, point, _)
-        | api::Event::Wheel(_, _, point) => Some(point),
-        _ => None,
-    }
-}
-
-async fn confine_pointer(api: &dyn InputApi, hwnd: u64, packets: &[Vec<api::Event>]) -> Result<()> {
-    for packet in packets {
-        for event in packet {
-            let Some(point) = pointer_point(*event) else {
-                continue;
-            };
-            match api.pointer_receiver(point).await? {
-                Some(receiver) => {
-                    // The receiver is an HWND. Process identity was checked on the
-                    // recipient. An unproved or different top-level window is denied.
-                    crate::scope_identity::admit_delivery_element(hwnd, receiver, "", None, None)?;
-                }
-                None => return Err(DriverError::ScopeDenied),
-            }
-        }
-    }
-    Ok(())
+/// Process instance of the recipient, compared with the original claim.
+///
+/// Runs immediately before a scoped sample or send. It does not adopt a new
+/// pid. Memory and one process-times read. Not inside the pointer gate.
+async fn recheck_recipient(
+    api: &dyn InputApi,
+    target: Target,
+    claim: &crate::scope_identity::WindowClaim,
+) -> Result<()> {
+    let (pid, created) = api.recipient_process(target).await?;
+    crate::scope_identity::admit_recipient(claim, pid, created)
 }
 
 fn publication(

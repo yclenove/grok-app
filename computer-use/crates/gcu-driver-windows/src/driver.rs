@@ -144,13 +144,17 @@ impl WindowsDriver {
     /// explicit diagnostics only; caller timeouts cannot terminate blocked FFI.
     #[cfg(windows)]
     pub async fn new_in_process() -> Result<Self> {
-        Self::native(Arc::new(crate::RealWinApi::new()?)).await
+        Self::native(Arc::new(crate::RealWinApi::new()?), None).await
     }
     /// Initialize the child adapter with the launcher's process-instance namespace.
     /// Called only after the private startup frame; window stamps survive restart.
     #[cfg(windows)]
     pub async fn new_worker(namespace: &str) -> Result<Self> {
-        let mut driver = Self::native(Arc::new(crate::RealWinApi::for_worker(namespace)?)).await?;
+        let mut driver = Self::native(
+            Arc::new(crate::RealWinApi::for_worker(namespace)?),
+            Some(namespace.to_owned()),
+        )
+        .await?;
         driver.child = true;
         Ok(driver)
     }
@@ -173,13 +177,15 @@ impl WindowsDriver {
         Ok(driver)
     }
     #[cfg(windows)]
-    async fn native(api: Arc<dyn WinApi>) -> Result<Self> {
+    async fn native(api: Arc<dyn WinApi>, namespace: Option<String>) -> Result<Self> {
         let _timing = crate::timing::Timing::start("native_initialize");
         // Prewarm COM/UIA immediately alongside discovery and capture, before
         // the parent handshake. No first-window request initializes UIA.
+        // `namespace` is the discovery generation property. In-process passes
+        // `None` and UIA uses the same property as `RealWinApi::new`.
         let (driver, uia, wgc, print) = tokio::try_join!(
             Self::with_api(api.clone()),
-            crate::uia::RealUia::start(),
+            crate::uia::RealUia::start(namespace),
             crate::capture::WgcCapture::new(),
             crate::capture::PrintWindowCapture::new(),
         )?;
@@ -418,6 +424,19 @@ fn discovery_capabilities() -> Capabilities {
         },
     }
 }
+/// Doctor sentence for routes scoped Windows cannot bind to a process instance.
+///
+/// It names no target. Foreground SendInput, foreground paste, and recipients
+/// that cannot be proved are unavailable. Targeted messages and UIA patterns
+/// remain when the process instance can be proved.
+pub(crate) const SCOPED_ROUTE_NOTE: &str = concat!(
+    "scoped mode: foreground SendInput pointer and keyboard are unavailable, ",
+    "including approach and drag samples; clipboard paste via foreground keys ",
+    "is unavailable; routes whose recipient cannot be proved, including ",
+    "ApplicationFrameHost, are unavailable; targeted window messages and UIA ",
+    "patterns remain when the recipient process instance can be proved."
+);
+
 /// Private element binding for the common gate; P2-02 will attach UIA handles.
 #[derive(Clone, Debug)]
 pub struct WindowsElement {
@@ -489,6 +508,16 @@ impl InstanceEvidence for WindowsDriver {
 
     fn note_scoped_session(&self) {
         self.session_scoped.store(true, Ordering::Release);
+    }
+
+    fn scope_capabilities(&self, current: &Capabilities) -> Capabilities {
+        let mut caps = current.clone();
+        caps.delivery.foreground = ForegroundCapability::Unavailable;
+        caps
+    }
+
+    fn scoped_doctor_note(&self) -> Option<&'static str> {
+        Some(SCOPED_ROUTE_NOTE)
     }
 }
 

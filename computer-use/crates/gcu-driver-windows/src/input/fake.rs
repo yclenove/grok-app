@@ -32,6 +32,13 @@ pub struct FakeState {
     pub child_pid: u32,
     /// Child process creation time. Zero uses the window's creation time.
     pub child_created: u64,
+    /// After this many recipient reads, install the pid and creation time.
+    ///
+    /// `None` keeps `child_pid`. The count starts at one for the first recipient
+    /// read. Used to replace the process after the first admission and before a
+    /// later sample or send.
+    pub replace_recipient_after: Option<(usize, u32, u64)>,
+    recipient_reads: usize,
     /// Exact screen points and the HWND under them. Checked before [`Self::hit_receiver`].
     pub hit_at: Vec<(f64, f64, u64)>,
     /// Mouse-capture owner. When set, every pointer query returns it.
@@ -95,6 +102,8 @@ impl Default for FakeState {
             child: 9,
             child_pid: 0,
             child_created: 0,
+            replace_recipient_after: None,
+            recipient_reads: 0,
             hit_at: Vec::new(),
             capture_hwnd: None,
             hit_receiver: None,
@@ -168,17 +177,27 @@ impl InputApi for FakeInput {
         Ok(self.state().clipboard_safe)
     }
     async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
-        let state = self.state();
+        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        state.recipient_reads = state.recipient_reads.saturating_add(1);
+        if let Some((after, pid, created)) = state.replace_recipient_after {
+            if state.recipient_reads > after {
+                state.child_pid = pid;
+                state.child_created = created;
+            }
+        }
+        let child_pid = state.child_pid;
+        let child_created = state.child_created;
+        drop(state);
         Ok((
-            if state.child_pid == 0 {
+            if child_pid == 0 {
                 target.window.pid
             } else {
-                state.child_pid
+                child_pid
             },
-            if state.child_created == 0 {
+            if child_created == 0 {
                 target.window.process_created
             } else {
-                state.child_created
+                child_created
             },
         ))
     }

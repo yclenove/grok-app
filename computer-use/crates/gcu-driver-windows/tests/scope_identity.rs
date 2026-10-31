@@ -134,11 +134,54 @@ async fn unproved_creation_time_does_not_capture_or_return_geometry() {
 }
 
 #[tokio::test]
-async fn empty_boot_closes_a_previously_proved_window() {
+async fn unscoped_empty_boot_keeps_geometry_and_a_targeted_click() {
     let (api, driver, _, win) = common::fixture().await;
+    let binding = driver.window_binding(&win).expect("proved window");
+    driver.pin_admitted(Some(&binding));
+    api.update(|state| state.boot.clear());
+    assert!(driver.window_geometry(&win).await.is_ok());
+    assert!(driver.app_instance(&win.app).is_none());
+    let input = Arc::new(FakeInput::default());
+    let driver = driver
+        .with_input(Arc::new(InputBackend::new(input.clone())))
+        .with_safety(common::fake_guard());
+    driver
+        .perform(
+            &DriverAction::PointerClick {
+                win,
+                at: WindowPoint { x: 10., y: 10. },
+                button: Button::Left,
+                count: 1,
+                route: PointerRoute::TargetedOnly,
+            },
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!input.state().sent.is_empty());
+}
+
+#[tokio::test]
+async fn scoped_empty_boot_refuses_geometry_and_capture() {
+    let (api, driver, _, win) = common::fixture().await;
+    let binding = driver.window_binding(&win).expect("proved window");
+    driver.note_scoped_session();
+    driver.pin_admitted(Some(&binding));
     api.update(|state| state.boot.clear());
     denied(driver.window_geometry(&win).await.unwrap_err());
-    assert!(driver.app_instance(&win.app).is_none());
+    let wgc = Arc::new(FakeCapture::new(CapturePath::Wgc));
+    let print = Arc::new(FakeCapture::new(CapturePath::PrintWindow));
+    let driver = driver.with_capture(Arc::new(CaptureBackend::new(wgc, print)));
+    denied(
+        driver
+            .capture(&win, &CaptureOpts::default(), &Cancel::default())
+            .await
+            .unwrap_err(),
+    );
+    let stats = driver.capture_stats().unwrap();
+    assert_eq!(stats.wgc_attempts, 0);
+    assert_eq!(stats.print_window_attempts, 0);
+    assert_eq!(stats.published, 0);
 }
 
 #[tokio::test]

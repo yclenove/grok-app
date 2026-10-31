@@ -78,6 +78,24 @@ async fn editor() -> (Arc<FakeWinApi>, WindowsDriver, AppRef, WindowRef) {
     (api, driver, app, win)
 }
 
+async fn scoped_source(source: FakeUia) -> (Arc<FakeWinApi>, WindowsDriver, WindowRef) {
+    let (api, _, _, _) = editor().await;
+    let driver = WindowsDriver::with_uia(
+        Arc::clone(&api) as Arc<dyn crate::api::WinApi>,
+        Arc::new(source),
+        Arc::new(FakeUiaEvents::default()),
+    )
+    .await
+    .unwrap();
+    let app = driver.resolve_app(&AppQuery::from("Editor")).await.unwrap();
+    let info = driver.key_window(&app).await.unwrap();
+    let win = WindowRef { app, id: info.id };
+    driver.note_scoped_session();
+    let binding = driver.window_binding(&win).unwrap();
+    driver.pin_admitted(Some(&binding));
+    (api, driver, win)
+}
+
 fn canary_source() -> FakeUia {
     let source = FakeUia::new(FakeNode {
         properties: Properties {
@@ -282,73 +300,51 @@ async fn unscoped_click_still_posts_a_foreign_child() {
 }
 
 #[tokio::test]
-async fn scoped_foreground_refuses_an_overlay_and_a_drag_that_crosses_another_window() {
+async fn scoped_foreground_sendinput_is_unsupported_and_does_not_sample_or_send() {
     let (_, driver, _, win) = editor().await;
     let input = Arc::new(FakeInput::default());
-    input.update(|state| state.hit_receiver = Some(77));
+    input.update(|state| state.hit_receiver = Some(8));
     let driver = driver
         .with_input(Arc::new(InputBackend::new(
-            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
         )))
         .with_safety(guard());
     driver.note_scoped_session();
     let binding = driver.window_binding(&win).unwrap();
     driver.pin_admitted(Some(&binding));
-    let error = driver
-        .perform(
-            &click(win.clone(), PointerRoute::AllowForeground),
-            &Cancel::default(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error, DriverError::ScopeDenied);
-    assert_eq!(button_downs(&input), 0);
-    assert_eq!(wheels(&input), 0);
+    for action in [
+        click(win.clone(), PointerRoute::AllowForeground),
+        DriverAction::PointerDrag {
+            win: win.clone(),
+            path: vec![
+                WindowPoint { x: 10., y: 10. },
+                WindowPoint { x: 30., y: 10. },
+            ],
+            route: PointerRoute::AllowForeground,
+        },
+    ] {
+        input.update(|state| state.sent.clear());
+        let error = driver.perform(&action, &Cancel::default()).await.unwrap_err();
+        assert_eq!(error, DriverError::CapabilityUnavailable);
+        assert!(!error.maybe_executed());
+        assert_eq!(button_downs(&input), 0);
+        assert_eq!(wheels(&input), 0);
+        assert_eq!(input.state().samples, 0);
+        assert_eq!(input.state().focuses, 0);
+        assert!(input.state().sent.is_empty());
+    }
+}
 
-    input.update(|state| {
-        state.hit_receiver = Some(8);
-        state.hit_at = vec![(20.0, 10.0, 77)];
-        state.sent.clear();
-    });
-    let error = driver
-        .perform(
-            &DriverAction::PointerDrag {
-                win: win.clone(),
-                path: vec![
-                    WindowPoint { x: 10., y: 10. },
-                    WindowPoint { x: 30., y: 10. },
-                ],
-                route: PointerRoute::AllowForeground,
-            },
-            &Cancel::default(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error, DriverError::ScopeDenied);
-    assert_eq!(button_downs(&input), 0);
-    assert_eq!(wheels(&input), 0);
-
-    input.update(|state| {
-        state.hit_at.clear();
-        state.hit_receiver = None;
-        state.capture_hwnd = Some(77);
-        state.sent.clear();
-    });
-    let error = driver
-        .perform(
-            &click(win.clone(), PointerRoute::AllowForeground),
-            &Cancel::default(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error, DriverError::ScopeDenied);
-    assert_eq!(button_downs(&input), 0);
-
-    input.update(|state| {
-        state.capture_hwnd = None;
-        state.hit_receiver = Some(8);
-        state.sent.clear();
-    });
+#[tokio::test]
+async fn unscoped_foreground_click_still_sends() {
+    let (_, driver, _, win) = editor().await;
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.hit_receiver = Some(8));
+    let driver = driver
+        .with_input(Arc::new(InputBackend::new(
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+        )))
+        .with_safety(guard());
     driver
         .perform(
             &click(win, PointerRoute::AllowForeground),
@@ -357,6 +353,101 @@ async fn scoped_foreground_refuses_an_overlay_and_a_drag_that_crosses_another_wi
         .await
         .unwrap();
     assert!(button_downs(&input) >= 1);
+}
+
+#[tokio::test]
+async fn scoped_targeted_rechecks_process_before_send() {
+    let (_, driver, _, win) = editor().await;
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.replace_recipient_after = Some((1, 99, 5)));
+    let driver = driver
+        .with_input(Arc::new(InputBackend::new(
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+        )))
+        .with_safety(guard());
+    driver.note_scoped_session();
+    let binding = driver.window_binding(&win).unwrap();
+    driver.pin_admitted(Some(&binding));
+    let error = driver
+        .perform(
+            &click(win, PointerRoute::TargetedOnly),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert!(!error.maybe_executed());
+    assert_eq!(input.state().samples, 0);
+    assert!(input.state().sent.is_empty());
+}
+
+#[tokio::test]
+async fn scoped_application_frame_target_is_unsupported() {
+    let (_, driver, _, win) = editor().await;
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.class = "ApplicationFrameWindow".into());
+    let driver = driver
+        .with_input(Arc::new(InputBackend::new(
+            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>,
+        )))
+        .with_safety(guard());
+    driver.note_scoped_session();
+    let binding = driver.window_binding(&win).unwrap();
+    driver.pin_admitted(Some(&binding));
+    let error = driver
+        .perform(
+            &click(win, PointerRoute::TargetedOnly),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, DriverError::CapabilityUnavailable);
+    assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().samples, 0);
+}
+
+#[tokio::test]
+async fn scoped_capabilities_and_doctor_mark_foreground_unavailable() {
+    let (_, driver, _, win) = editor().await;
+    let mut open = driver.capabilities().clone();
+    open.delivery.foreground = gcu_protocol::capabilities::ForegroundCapability::Policy;
+    let forced = InstanceEvidence::scope_capabilities(&driver, &open);
+    assert_eq!(
+        forced.delivery.foreground,
+        gcu_protocol::capabilities::ForegroundCapability::Unavailable
+    );
+    assert_eq!(
+        open.delivery.foreground,
+        gcu_protocol::capabilities::ForegroundCapability::Policy
+    );
+    assert_eq!(
+        InstanceEvidence::scoped_doctor_note(&driver),
+        Some(crate::driver::SCOPED_ROUTE_NOTE)
+    );
+    let binding = driver.window_binding(&win).unwrap();
+    let target = FixtureTarget::new(
+        binding.owner().clone(),
+        "editor",
+        ExecutableProof::new("C:\\Editor.exe").unwrap(),
+        vec![RegisteredWindow::new(binding)],
+    )
+    .unwrap();
+    let scope =
+        FixtureScope::try_new("run", 1, "engine", "desktop", "lease", vec![target]).unwrap();
+    let scoped = ScopedDriver::new(
+        driver,
+        ScopeLease::install(scope),
+        gcu_core::testing::host::fake_activity(),
+    );
+    assert_eq!(
+        scoped.capabilities().delivery.foreground,
+        gcu_protocol::capabilities::ForegroundCapability::Unavailable
+    );
+    let report = scoped.doctor().await;
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue == crate::driver::SCOPED_ROUTE_NOTE));
 }
 
 #[tokio::test]
@@ -493,6 +584,25 @@ async fn scoped_uia_pattern_dispatch_requires_the_element_owner() {
     .unwrap_err();
     assert_eq!(error, DriverError::ScopeDenied);
     assert!(source.action_calls().is_empty());
+    assert_eq!(source.validate_reads(), 0);
+
+    let (source, handle) = press_handle(8).await;
+    source.set_owner_pid(Some(7));
+    let mut live = claim().owner;
+    live.created += 1;
+    source.set_live_instance(1, live);
+    let error = actions::perform_scoped(
+        &source,
+        8,
+        &DriverAction::Press { el: handle },
+        &Cancel::default(),
+        &scope,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert!(source.action_calls().is_empty());
+    assert_eq!(source.validate_reads(), 0);
 
     let (source, handle) = press_handle(8).await;
     source.set_owner_pid(Some(7));
@@ -517,4 +627,82 @@ async fn scoped_uia_pattern_dispatch_requires_the_element_owner() {
     .await
     .unwrap();
     assert_eq!(source.action_calls().len(), 1);
+}
+
+#[tokio::test]
+async fn scoped_snapshot_omits_a_child_after_its_process_instance_changes() {
+    let source = canary_source();
+    // Fragment pid and top-level HWND still match the admitted window.
+    source.set_fragment(2, 7, 8);
+    source.set_live_instance(1, claim().owner.clone());
+    let mut replaced = claim().owner;
+    replaced.created += 1;
+    source.set_live_instance(2, replaced);
+    let (_, driver, win) = scoped_source(source.clone()).await;
+    let tree = driver
+        .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+        .await
+        .unwrap();
+    let root = tree.root.unwrap();
+    assert!(contains(&root, "Editor"));
+    assert!(!contains(&root, "CANARY-FOREIGN"));
+    assert!(root.children.is_empty());
+    assert_eq!(source.content_reads(2), 0);
+    assert!(source.content_reads(1) >= 1);
+    assert_eq!(source.validate_reads(), 0);
+}
+
+#[tokio::test]
+async fn scoped_snapshot_omits_a_same_process_window_before_reading_it() {
+    let source = canary_source();
+    source.set_fragment(2, 7, 9);
+    source.set_live_instance(1, claim().owner.clone());
+    source.set_live_instance(2, claim().owner.clone());
+    let (_, driver, win) = scoped_source(source.clone()).await;
+    let tree = driver
+        .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+        .await
+        .unwrap();
+    let root = tree.root.unwrap();
+    assert!(contains(&root, "Editor"));
+    assert!(!contains(&root, "CANARY-FOREIGN"));
+    assert_eq!(source.content_reads(2), 0);
+    assert!(source.content_reads(1) >= 1);
+
+    let source = canary_source();
+    source.set_fragment(1, 7, 9);
+    source.set_live_instance(1, claim().owner);
+    let (_, driver, win) = scoped_source(source.clone()).await;
+    let error = driver
+        .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert!(!error.maybe_executed());
+    assert_eq!(source.content_reads(1), 0);
+    assert_eq!(source.content_reads(2), 0);
+    assert_eq!(source.validate_reads(), 0);
+}
+
+#[tokio::test]
+async fn scoped_snapshot_refuses_when_generation_changes_before_the_read() {
+    let source = canary_source();
+    let (api, driver, win) = scoped_source(source.clone()).await;
+    let barrier = Arc::clone(&api);
+    driver.set_native_barrier(Some(Arc::new(move || {
+        barrier.update(|state| {
+            state.windows[0].created += 1;
+        });
+    })));
+    let error = driver
+        .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DriverError::WindowGone | DriverError::ScopeDenied
+    ));
+    assert!(!error.maybe_executed());
+    assert_eq!(source.content_reads(1), 0);
+    assert_eq!(source.content_reads(2), 0);
 }

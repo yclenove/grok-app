@@ -81,6 +81,15 @@ pub trait UiaSource: Send + Sync + 'static {
     /// `Ok(None)` means this source has no owner probe. Real UIA must return
     /// `Ok(Some(pid))` or an error, never `Ok(None)`. A zero pid is not evidence.
     async fn owner_pid(&self, node: NodeId) -> Result<Option<u32>>;
+    /// Process instance of this element, from the element and not a cached fact.
+    ///
+    /// `Ok(None)` means this source has no process-instance probe. A reported
+    /// instance is `(pid, creation time, boot)`. Callers that hold a scope prove
+    /// it before reading content. The default is unproved.
+    async fn owner_instance(&self, node: NodeId) -> Result<Option<(u32, u64, String)>> {
+        let _ = node;
+        Ok(None)
+    }
     /// Revalidate on the MTA immediately before dispatching one pattern command.
     /// Set the context marker only at mutation dispatch. Abandoned jobs cannot
     /// start later. Only explicit Unsupported/Unavailable permit a fallback.
@@ -157,6 +166,12 @@ pub(super) struct FakeState {
     fragments: BTreeMap<u64, crate::scope_identity::FragmentFact>,
     /// `properties` calls per slot. Fragment queries do not increment this.
     content_reads: BTreeMap<u64, usize>,
+    /// Times [`UiaSource::validate`] was entered.
+    validate_reads: usize,
+    /// Live process instance reported by [`UiaSource::owner_instance`].
+    ///
+    /// Per-slot values win. Absent means this fake has no instance probe.
+    live_instance: BTreeMap<u64, crate::scope_identity::ProcessClaim>,
 }
 impl FakeState {
     pub(super) fn node(&self, slot: u64) -> NodeId {
@@ -224,6 +239,26 @@ impl FakeUia {
             );
         }
     }
+    /// Install the process instance [`UiaSource::owner_instance`] reports for `slot`.
+    ///
+    /// This does not read a name or value. Slot numbers match [`FakeUia::new`].
+    pub(crate) fn set_live_instance(
+        &self,
+        slot: u64,
+        claim: crate::scope_identity::ProcessClaim,
+    ) {
+        if let Ok(mut state) = self.0.lock() {
+            state.live_instance.insert(slot, claim);
+        }
+    }
+    /// Times [`UiaSource::validate`] was entered. A refused pre-check stays at zero.
+    pub fn validate_reads(&self) -> usize {
+        self.0
+            .lock()
+            .ok()
+            .map(|state| state.validate_reads)
+            .unwrap_or(0)
+    }
     /// Times [`UiaSource::properties`] read this slot. Fragment checks stay at zero.
     pub fn content_reads(&self, slot: u64) -> usize {
         self.0
@@ -274,7 +309,23 @@ impl UiaSource for FakeUia {
                 maybe_executed: false,
             })
     }
+    async fn owner_instance(&self, node: NodeId) -> Result<Option<(u32, u64, String)>> {
+        self.0
+            .lock()
+            .map(|state| {
+                state
+                    .live_instance
+                    .get(&node.slot)
+                    .map(|claim| (claim.pid, claim.created, claim.boot.clone()))
+            })
+            .map_err(|_| DriverError::Crashed {
+                maybe_executed: false,
+            })
+    }
     async fn validate(&self, node: NodeId, hwnd: u64) -> Result<Properties> {
+        if let Ok(mut state) = self.0.lock() {
+            state.validate_reads += 1;
+        }
         self.gate().await?;
         self.validate_action(node, hwnd)
     }

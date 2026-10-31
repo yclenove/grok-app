@@ -10,6 +10,7 @@ use super::{
     source::{AdmittedWindow, ChildPage, NodeId, UiaSource},
     worker::{Request, Worker},
 };
+use crate::api::WinApi;
 use crate::ffi::Com;
 use async_trait::async_trait;
 use gcu_core::driver::{DriverError, Result};
@@ -44,11 +45,14 @@ pub struct RealUia {
 impl RealUia {
     /// Initialize COM/UIA on its native worker, bounded by DRIVER_DEADLINE.
     /// No applications are launched and Chromium accessibility settings are untouched.
-    pub async fn start() -> Result<Self> {
+    ///
+    /// `namespace` is the discovery generation property. `None` is the in-process
+    /// adapter, which stamps `{pid}.{created}` the same way discovery does.
+    pub async fn start(namespace: Option<String>) -> Result<Self> {
         let facts = Arc::new(Mutex::new(BTreeMap::new()));
         let shared = Arc::clone(&facts);
         Ok(Self {
-            worker: Worker::start(move || State::new(shared), State::maintain).await?,
+            worker: Worker::start(move || State::new(shared, namespace), State::maintain).await?,
             version: TreeVersion::default(),
             facts,
         })
@@ -87,7 +91,10 @@ struct State {
     _com: Com,
 }
 impl State {
-    fn new(facts: Arc<Mutex<BTreeMap<NodeId, (u32, u64)>>>) -> Result<Self> {
+    fn new(
+        facts: Arc<Mutex<BTreeMap<NodeId, (u32, u64)>>>,
+        namespace: Option<String>,
+    ) -> Result<Self> {
         let _timing = crate::timing::Timing::start("uia_initialize");
         let com = Com::new()?;
         // SAFETY: this dedicated thread has initialized MTA; interfaces stay here.
@@ -127,7 +134,10 @@ impl State {
             registrations: Vec::new(),
             observed: BTreeMap::new(),
             window: None,
-            api: crate::RealWinApi::new()?,
+            api: match namespace.as_deref() {
+                Some(namespace) => crate::RealWinApi::for_worker(namespace)?,
+                None => crate::RealWinApi::new()?,
+            },
             admitted: None,
             facts,
             _com: com,
@@ -332,6 +342,7 @@ impl State {
                 top_hwnd: top,
             }),
         )?;
+        identity::prove_live_owner(&self.api, &admitted, pid)?;
         let started = tokio::time::Instant::now();
         // SAFETY: the fragment above belongs to the admitted window. Cache only that element.
         let cached = unsafe { element.BuildUpdatedCache(&self.cache) }.map_err(|error| {
@@ -359,6 +370,8 @@ impl State {
             return Err(DriverError::InvalidRequest);
         }
         let admitted = self.admitted.clone().ok_or(DriverError::ScopeDenied)?;
+        // One window proof for the page, before any child property cache.
+        identity::window_matching(&self.api, &admitted, request)?;
         let mut next = if let Some(after) = after {
             self.next_raw(&self.element(after)?, false, request)?
         } else {
@@ -393,8 +406,11 @@ impl State {
             if element_ok.is_err() || fragment_ok.is_err() {
                 continue;
             }
+            if identity::prove_live_owner(&self.api, &admitted, pid).is_err() {
+                continue;
+            }
             let started = tokio::time::Instant::now();
-            // SAFETY: this child matched the admitted window. Cache only then.
+            // SAFETY: this child matched the admitted process. Cache only then.
             let cached = unsafe { element.BuildUpdatedCache(&self.cache) }.map_err(|error| {
                 super::diagnostics::native_call(
                     "BuildUpdatedCache",
@@ -501,6 +517,25 @@ impl State {
 }
 #[async_trait]
 impl UiaSource for RealUia {
+    async fn owner_instance(&self, node: NodeId) -> Result<Option<(u32, u64, String)>> {
+        self.worker
+            .call(move |state, request| {
+                request.check()?;
+                let element = state.element(node)?;
+                let (pid, _) = state.fragment_owner(&element, request)?;
+                let created = state
+                    .api
+                    .process_security(pid)
+                    .map_err(|_| DriverError::ScopeDenied)?
+                    .created;
+                let boot = state
+                    .api
+                    .boot_identity()
+                    .map_err(|_| DriverError::ScopeDenied)?;
+                Ok(Some((pid, created, boot)))
+            })
+            .await
+    }
     async fn owner_pid(&self, node: NodeId) -> Result<Option<u32>> {
         self.worker
             .call(move |state, request| {

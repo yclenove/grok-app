@@ -152,6 +152,16 @@ fn proved_process(claim: &ProcessClaim) -> bool {
     claim.pid != 0 && claim.created != 0 && !claim.boot.is_empty() && claim.boot.len() <= 256
 }
 
+/// Window-generation property shared by discovery and UIA for one namespace.
+///
+/// Discovery stamps `GrokComputerUse.WindowGeneration.{namespace}`. A worker's
+/// UIA adapter must read that same property. An in-process adapter uses
+/// `{pid}.{created}` as its namespace. Memory only.
+#[cfg(any(windows, test))]
+pub(crate) fn generation_property_name(namespace: &str) -> String {
+    format!("GrokComputerUse.WindowGeneration.{namespace}")
+}
+
 /// Same pid and creation time with a different boot is a different boot, not a match.
 pub(crate) fn prove_process(stored: &ProcessClaim, live: &ProcessClaim) -> Result<()> {
     if !proved_process(stored) || !proved_process(live) {
@@ -461,6 +471,19 @@ mod tests {
         let stored = process(7, 42, "boot-1");
         let live = process(7, 42, "boot-2");
         denied(prove_process(&stored, &live));
+    }
+
+    #[test]
+    fn generation_property_shares_one_namespace_and_incarnation_still_denies() {
+        let shared = generation_property_name("7.42");
+        assert_eq!(shared, generation_property_name("7.42"));
+        assert_eq!(shared, "GrokComputerUse.WindowGeneration.7.42");
+        assert_ne!(shared, generation_property_name("8.42"));
+        assert_ne!(shared, generation_property_name("7.43"));
+        let (stored, mut live) = claims();
+        prove_process(&stored.owner, &live.owner).unwrap();
+        live.incarnation += 1;
+        denied(prove_window(&stored, &live));
     }
 
     #[test]

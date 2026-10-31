@@ -138,6 +138,12 @@ impl Walk<'_> {
         let Some(claim) = &self.admitted else {
             return Ok(());
         };
+        if let Some((pid, created, boot)) = self.read(self.source.owner_instance(id)).await? {
+            crate::scope_identity::prove_process(
+                &claim.owner,
+                &crate::scope_identity::ProcessClaim { pid, created, boot },
+            )?;
+        }
         let fact = self
             .read(self.source.fragment(id))
             .await?

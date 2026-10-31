@@ -165,6 +165,7 @@ impl Driver for WindowsDriver {
             return worker.key_window(app).await;
         }
         let app = app.clone();
+        let scoped = self.session_is_scoped();
         self.call(NATIVE_TIMEOUT, None, true, move |s| {
             s.validate_app(&app)?;
             let windows = s.enumerate(Some(&app))?;
@@ -216,7 +217,9 @@ impl Driver for WindowsDriver {
                 }
                 info.frame = current.frame;
             }
-            s.scope_close(&win)?;
+            if scoped {
+                s.scope_close(&win)?;
+            }
             Ok(info)
         })
         .await
@@ -270,9 +273,9 @@ impl Driver for WindowsDriver {
             let target = win.clone();
             self.call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
                 s.validate_window(&target, false)?;
-                s.scope_close(&target)?;
-                if let Some(claim) = carried {
-                    s.prove_carried(&claim)?;
+                if let Some(claim) = &carried {
+                    s.scope_close(&target)?;
+                    s.prove_carried(claim)?;
                 }
                 Ok(())
             })
@@ -301,9 +304,12 @@ impl Driver for WindowsDriver {
             return worker.window_geometry(win).await;
         }
         let win = win.clone();
+        let scoped = self.session_is_scoped();
         self.call(NATIVE_TIMEOUT, None, false, move |s| {
             let window = s.observation_window(&win, false)?;
-            s.scope_close(&win)?;
+            if scoped {
+                s.scope_close(&win)?;
+            }
             Ok(Geometry {
                 frame: window.frame,
                 scale: window.scale,
@@ -377,6 +383,7 @@ impl Driver for WindowsDriver {
             return worker.perform_until(req, cancel, deadline).await;
         }
         let scope = self.job_scope();
+        let scoped = self.session_is_scoped();
         let foreground = crate::input::watchdog::foreground(req);
         // A proof can submit absolute mouse input. Preserve the common live
         // target gate and its error priority before any capability/proof check.
@@ -390,7 +397,9 @@ impl Driver for WindowsDriver {
                     let (win, foreground) = action_window(&request)?;
                     let win = win.clone();
                     let observed = s.observation_window(&win, foreground)?;
-                    s.scope_close(&win)?;
+                    if scoped {
+                        s.scope_close(&win)?;
+                    }
                     Ok(observed)
                 },
             )
@@ -447,6 +456,7 @@ impl Driver for WindowsDriver {
         }
         let (hwnd, events) = self.observer.as_ref()?.subscription(win)?;
         let target = win.clone();
+        let scoped = self.session_is_scoped();
         let expires = std::time::Instant::now() + DRIVER_DEADLINE;
         let (tx, rx) = oneshot::channel();
         self.worker
@@ -454,7 +464,7 @@ impl Driver for WindowsDriver {
                 if tx.is_closed()
                     || std::time::Instant::now() >= expires
                     || s.validate_window(&target, false).is_err()
-                    || s.scope_close(&target).is_err()
+                    || (scoped && s.scope_close(&target).is_err())
                     || tx.is_closed()
                     || std::time::Instant::now() >= expires
                 {

@@ -232,9 +232,11 @@ impl State {
             .map(|(id, bytes)| Format::new(id, bytes))
             .collect::<Result<Vec<_>>>()?;
         let mut publication = text_formats::prepare(&text)?;
-        context.check()?;
-        if let Some(proof) = proof {
-            proof()?;
+        if let Some(proof) = proof.as_ref() {
+            // Recheck cancellation after the proof, before any clipboard mutation.
+            crate::input::clipboard::authorize_publish(&context, proof)?;
+        } else {
+            context.check()?;
         }
         // SAFETY: this thread holds OpenClipboard and owns a non-null HWND.
         unsafe { EmptyClipboard() }.map_err(|_| failure())?;

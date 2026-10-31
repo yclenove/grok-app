@@ -220,10 +220,7 @@ pub(crate) fn prove_parent_publication(
     if live_created != created {
         return Err(DriverError::ScopeDenied);
     }
-    let property: Vec<u16> = format!("GrokComputerUse.WindowGeneration.{namespace}")
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let property = wide(&crate::scope_identity::generation_property_name(namespace));
     // SAFETY: the name is NUL-terminated and borrowed for this call. GetPropW
     // reads the property list. It does not send a message or set a property.
     let marker = unsafe { GetPropW(window, PCWSTR(property.as_ptr())) };
@@ -251,11 +248,12 @@ impl RealWinApi {
         // SAFETY: GetCurrentProcessId takes no pointers and cannot block.
         let pid = unsafe { GetCurrentProcessId() };
         let created = security::process_created(pid)?;
+        let namespace = format!("{pid}.{created}");
         let root = std::env::var_os("LOCALAPPDATA").ok_or(DriverError::PermissionMissing {
             permission: "LOCALAPPDATA".into(),
         })?;
         Ok(Self {
-            property: wide(&format!("GrokComputerUse.WindowGeneration.{pid}.{created}")),
+            property: wide(&crate::scope_identity::generation_property_name(&namespace)),
             generation: AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -287,7 +285,7 @@ impl RealWinApi {
             return Err(DriverError::InvalidRequest);
         }
         let mut api = Self::new()?;
-        api.property = wide(&format!("GrokComputerUse.WindowGeneration.{namespace}"));
+        api.property = wide(&crate::scope_identity::generation_property_name(namespace));
         Ok(api)
     }
     fn generation(&self) -> u64 {

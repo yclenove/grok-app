@@ -85,10 +85,15 @@ pub(crate) async fn perform_until(
     let node = observed.node;
     let element_hwnd = observed.hwnd;
     let window_id = observed.window.id.clone();
-    let props = budget.read(source.validate(node, hwnd)).await?;
     // Unscoped work does not consult the owner probe. Scoped work proves the
-    // element's own process and top-level window before any pattern dispatch.
+    // process instance and the top-level window before any content refresh.
     if let Some(claim) = scope.claim()? {
+        if let Some((pid, created, boot)) = budget.read(source.owner_instance(node)).await? {
+            crate::scope_identity::prove_process(
+                &claim.owner,
+                &crate::scope_identity::ProcessClaim { pid, created, boot },
+            )?;
+        }
         let owner = budget.read(source.owner_pid(node)).await?;
         crate::scope_identity::admit_delivery_element(
             claim.hwnd,
@@ -107,6 +112,7 @@ pub(crate) async fn perform_until(
         // An unset probe is not the admitted owner. Real UIA does not return Ok(None).
         crate::scope_identity::admit_fragment(claim, fact)?;
     }
+    let props = budget.read(source.validate(node, hwnd)).await?;
     let result = match req {
         DriverAction::SetValue { value, .. } => {
             super::value::set(source, node, hwnd, &props, value, &budget).await

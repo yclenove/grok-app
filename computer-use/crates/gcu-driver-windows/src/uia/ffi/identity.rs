@@ -28,6 +28,7 @@ pub(super) struct Observed {
 impl State {
     pub(super) fn observe(&mut self, node: NodeId, request: &Request) -> Result<Properties> {
         let _timing = crate::timing::Timing::provider("uia_observe_properties");
+        self.prove_before_cache(node, request)?;
         let element = self.element(node)?;
         let properties = properties::read(&element);
         let runtime = runtime(&element, request).inspect_err(|_| {
@@ -73,6 +74,7 @@ impl State {
             return Err(DriverError::StaleElement);
         }
         request.check()?;
+        self.prove_before_cache(node, request)?;
         // SAFETY: element/cache are live MTA-local interfaces. This refreshes only
         // the exact retained element; it never searches by name or other hints.
         let fresh = {
@@ -90,6 +92,13 @@ impl State {
         let mut ancestor = element.clone();
         for depth in 0..=super::super::tree::DEPTH_CAP {
             request.check()?;
+            if let Some(admitted) = &self.admitted {
+                let (pid, top) = self.fragment_owner(&ancestor, request)?;
+                if top != admitted.hwnd {
+                    return Err(DriverError::ScopeDenied);
+                }
+                prove_live_owner(&self.api, admitted, pid)?;
+            }
             // SAFETY: refresh only the retained ancestor on its owning MTA.
             let cached = {
                 let _timing = crate::timing::Timing::provider("BuildUpdatedCache(ancestor)");
@@ -108,6 +117,13 @@ impl State {
                 unsafe { ancestor.CurrentNativeWindowHandle() }.map_err(read_error)?
             };
             if native_hwnd.0 as usize as u64 == hwnd {
+                if let Some(admitted) = &self.admitted {
+                    let (pid, top) = self.fragment_owner(&element, request)?;
+                    if top != admitted.hwnd {
+                        return Err(DriverError::ScopeDenied);
+                    }
+                    prove_live_owner(&self.api, admitted, pid)?;
+                }
                 return Ok((element, props));
             }
             request.check()?;
@@ -123,6 +139,47 @@ impl State {
         }
         Err(DriverError::StaleElement)
     }
+
+    /// Process instance and best-effort window membership before a content cache.
+    ///
+    /// Unscoped state (`admitted` is `None`) does nothing. A process mismatch is
+    /// [`DriverError::ScopeDenied`] and does not build a cache. Window generation
+    /// is the shared discovery property; a mismatch fails closed.
+    fn prove_before_cache(&self, node: NodeId, request: &Request) -> Result<()> {
+        let Some(admitted) = self.admitted.clone() else {
+            return Ok(());
+        };
+        let element = self.element(node)?;
+        let (pid, top) = self.fragment_owner(&element, request)?;
+        if top != admitted.hwnd {
+            return Err(DriverError::ScopeDenied);
+        }
+        prove_live_owner(&self.api, &admitted, pid)?;
+        window_matching(&self.api, &admitted, request).map(|_| ())
+    }
+}
+/// Process instance of one fragment. Creation time and boot must match.
+///
+/// Does not read a UIA property bag. A missing process or boot is
+/// [`DriverError::ScopeDenied`].
+pub(super) fn prove_live_owner(
+    api: &crate::RealWinApi,
+    admitted: &AdmittedWindow,
+    pid: u32,
+) -> Result<()> {
+    let created = api
+        .process_security(pid)
+        .map_err(|_| DriverError::ScopeDenied)?
+        .created;
+    let boot = api.boot_identity().map_err(|_| DriverError::ScopeDenied)?;
+    crate::scope_identity::prove_process(
+        &crate::scope_identity::ProcessClaim {
+            pid: admitted.pid,
+            created: admitted.created,
+            boot: admitted.boot.clone(),
+        },
+        &crate::scope_identity::ProcessClaim { pid, created, boot },
+    )
 }
 /// Prove `admitted` against the live window. A different creation generation
 /// is refused and is not stored as this job's window.
