@@ -2,10 +2,11 @@
 
 use crate::atspi::bus::{AtspiBus, AtspiNodeRef};
 use crate::atspi::source::AtspiSource;
-use crate::identity::scope::ScopeBinding;
+use crate::identity::scope::{ScopeBinding, ScopeGate};
 use crate::x11::AtspiWindowCandidate;
 use gcu_core::driver::{AppQuery, AppRef, DriverError, Result, DRIVER_DEADLINE};
 use gcu_core::model::Rect;
+use gcu_core::scope::AttemptAuthority;
 use gcu_protocol::types::AppIdentity as ProtocolIdentity;
 use gcu_protocol::AppInfo;
 use std::time::{Duration, Instant};
@@ -65,49 +66,117 @@ pub async fn list_atspi_apps(conn: &zbus::Connection) -> Result<Vec<AppInfo>> {
 
 /// Scoped applications. The accessible name comes from the unique owner.
 ///
-/// `GetNameOwner` runs before any name query. The pid is that unique
-/// connection, not the well-known name. The name is read only after `pid`,
-/// start time, and boot id match the registration for the original bus name.
-/// A reference that has no unique owner is skipped. Unscoped discovery does
-/// not use this function.
+/// `gate` is the admitted index for `authority`, not the original catalog.
+/// An empty bus-name set returns no apps and does not call the bus. Otherwise
+/// `GetNameOwner` runs before any name query, and only for a destination in
+/// `gate`. The pid is that unique connection, not the well-known name. The
+/// name is read only after `pid`, start time, and boot id match that gate.
+/// A reference that has no unique owner is skipped. If `authority` stops
+/// matching during the call, the names already read are dropped and this
+/// returns [`DriverError::ScopeDenied`]. Unscoped discovery does not use this
+/// function. The lease lock is not held here.
 pub(crate) async fn list_scoped_atspi_apps(
     conn: &zbus::Connection,
     binding: &ScopeBinding,
+    gate: &ScopeGate,
+    authority: &AttemptAuthority,
 ) -> Result<Vec<AppInfo>> {
+    if !authority.usable() {
+        return Err(DriverError::ScopeDenied);
+    }
+    if !gate_has_bus_name(gate) {
+        return Ok(Vec::new());
+    }
     let bus = AtspiBus::new(conn.clone());
     let started = Instant::now();
     let children = bus.scoped_children(&registry_root()).await;
+    still_current(authority)?;
     let mut apps = Vec::new();
     for child in children {
-        let Some(owner) = bus.unique_owner(&child.destination).await else {
-            continue;
-        };
-        let Some(pid) = bus.scoped_connection_pid(&owner).await else {
-            continue;
-        };
-        if binding
-            .discovered_instance(&child.destination, pid)
-            .is_none()
-        {
-            continue;
+        if let Some(app) = admitted_app(&bus, binding, gate, authority, child, started).await? {
+            apps.push(app);
         }
-        let named = AtspiNodeRef {
-            destination: owner,
-            path: child.path,
-        };
-        let name = match bus.name(&named).await {
-            Ok(Some(name)) if !name.is_empty() => name,
-            _ => continue,
-        };
-        let identity = identity_for_pid(pid, started).await;
-        apps.push(AppInfo {
-            id: child.destination,
-            name,
-            pid: Some(pid),
-            identity,
-        });
     }
+    still_current(authority)?;
     Ok(apps)
+}
+
+fn gate_has_bus_name(gate: &ScopeGate) -> bool {
+    gate.windows()
+        .iter()
+        .any(|window| !window.app_id().is_empty())
+}
+
+fn app_admitted(gate: &ScopeGate, app_id: &str) -> bool {
+    !app_id.is_empty()
+        && gate
+            .windows()
+            .iter()
+            .any(|window| window.app_id() == app_id)
+}
+
+fn still_current(authority: &AttemptAuthority) -> Result<()> {
+    if authority.usable() {
+        Ok(())
+    } else {
+        Err(DriverError::ScopeDenied)
+    }
+}
+
+async fn admitted_app(
+    bus: &AtspiBus,
+    binding: &ScopeBinding,
+    gate: &ScopeGate,
+    authority: &AttemptAuthority,
+    child: AtspiNodeRef,
+    started: Instant,
+) -> Result<Option<AppInfo>> {
+    if !app_admitted(gate, &child.destination) {
+        return Ok(None);
+    }
+    let owner = match bus.unique_owner(&child.destination).await {
+        Some(owner) => owner,
+        None => {
+            still_current(authority)?;
+            return Ok(None);
+        }
+    };
+    still_current(authority)?;
+    let pid = match bus.scoped_connection_pid(&owner).await {
+        Some(pid) => pid,
+        None => {
+            still_current(authority)?;
+            return Ok(None);
+        }
+    };
+    still_current(authority)?;
+    if binding
+        .discovered_from(gate, &child.destination, pid)
+        .is_none()
+    {
+        return Ok(None);
+    }
+    still_current(authority)?;
+    let named = AtspiNodeRef {
+        destination: owner,
+        path: child.path,
+    };
+    let name = match bus.name(&named).await {
+        Ok(Some(name)) if !name.is_empty() => name,
+        _ => {
+            still_current(authority)?;
+            return Ok(None);
+        }
+    };
+    still_current(authority)?;
+    let identity = identity_for_pid(pid, started).await;
+    still_current(authority)?;
+    Ok(Some(AppInfo {
+        id: child.destination,
+        name,
+        pid: Some(pid),
+        identity,
+    }))
 }
 
 async fn identity_for_pid(pid: u32, started: Instant) -> Option<ProtocolIdentity> {

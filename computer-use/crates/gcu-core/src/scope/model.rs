@@ -463,13 +463,21 @@ impl FixtureScope {
         &self.control_lease
     }
 
-    pub(crate) fn admits_instance(&self, instance: &ProcessInstance) -> bool {
+    /// Whether `instance` is a registered target.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Identity is pid,
+    /// start time, and boot id. Role and executable proof are not keys.
+    pub fn admits_instance(&self, instance: &ProcessInstance) -> bool {
         self.targets
             .iter()
             .any(|target| &target.instance == instance)
     }
 
-    pub(crate) fn admits_window(&self, binding: &WindowBinding) -> bool {
+    /// Whether `binding` is a window this scope registered on its owner.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. A window whose
+    /// owner is not a target is refused. This does not read the platform.
+    pub fn admits_window(&self, binding: &WindowBinding) -> bool {
         self.targets.iter().any(|target| {
             target.instance == binding.owner
                 && target

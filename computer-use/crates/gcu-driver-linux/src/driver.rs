@@ -24,7 +24,7 @@ use gcu_core::{
         DoctorReport, Driver, DriverAction, DriverError, Result, TreeOpts, UiEvent, WindowRef,
     },
     model::{Geometry, NativeHandle, RawTree, Rect},
-    scope::{ElementBinding, InstanceEvidence, ProcessInstance, WindowBinding},
+    scope::{AttemptAuthority, ElementBinding, InstanceEvidence, ProcessInstance, WindowBinding},
 };
 use gcu_protocol::{capabilities::Platform, AppInfo, Capabilities, WindowInfo};
 use std::{
@@ -523,17 +523,27 @@ impl LinuxDriver {
         aligned.windows
     }
 
-    /// Registered windows with a live process and an already proved X11 snapshot.
+    /// Registered windows the current attempt admits, with a proved X11 snapshot.
     ///
-    /// Scoped AT-SPI is closed. This reads no bus name, title, child, or
-    /// extents. A window without a proved X11 snapshot is omitted.
-    fn scoped_registered_windows(&self, app: Option<&AppRef>) -> Vec<WindowInfo> {
+    /// The catalog is only an index. Permission is the attempt entered on this
+    /// task. A missing or stale attempt refuses. Scoped AT-SPI is closed: this
+    /// reads no bus name, title, child, or extents. A window without a proved
+    /// X11 snapshot is omitted.
+    fn scoped_registered_windows(&self, app: Option<&AppRef>) -> Result<Vec<WindowInfo>> {
         let Some(binding) = &self.scope else {
-            return Vec::new();
+            return Ok(Vec::new());
+        };
+        let Some(authority) = AttemptAuthority::on_task() else {
+            return Err(DriverError::ScopeDenied);
+        };
+        if !authority.usable() {
+            return Err(DriverError::ScopeDenied);
+        }
+        let Some(gate) = binding.gate_for_scope(authority.scope()) else {
+            return Err(DriverError::ScopeDenied);
         };
         let _ = binding.oracle().take_prepared();
-        let registered: Vec<(String, u32, String)> = binding
-            .gate()
+        let registered: Vec<(String, u32, String)> = gate
             .windows()
             .iter()
             .map(|window| {
@@ -554,7 +564,7 @@ impl LinuxDriver {
                     continue;
                 }
             }
-            if binding.discovered_instance(&app_id, pid).is_none() {
+            if binding.discovered_from(&gate, &app_id, pid).is_none() {
                 continue;
             }
             // The registration id is the X id. The AT-SPI path map is not evidence.
@@ -564,7 +574,7 @@ impl LinuxDriver {
             let Some(snapshot) = binding.oracle().x11_snapshot(xid) else {
                 continue;
             };
-            if binding.gate().prove_x11(&snapshot.view).is_err() {
+            if gate.prove_x11(&snapshot.view).is_err() {
                 continue;
             }
             let frame = snapshot
@@ -588,7 +598,65 @@ impl LinuxDriver {
                 on_current_desktop: Some(true),
             });
         }
+        if !authority.usable() {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(listed)
+    }
+
+    /// Names for the attempt entered on this task.
+    ///
+    /// The catalog is filtered by that attempt's scope before any bus call.
+    /// A missing or stale attempt refuses. An epoch change drops the payload.
+    async fn scoped_app_list(&self, conn: &zbus::Connection) -> Result<Vec<AppInfo>> {
+        let Some(binding) = &self.scope else {
+            return Err(DriverError::ScopeDenied);
+        };
+        let Some(authority) = AttemptAuthority::on_task() else {
+            return Err(DriverError::ScopeDenied);
+        };
+        if !authority.usable() {
+            return Err(DriverError::ScopeDenied);
+        }
+        let Some(gate) = binding.gate_for_scope(authority.scope()) else {
+            return Err(DriverError::ScopeDenied);
+        };
+        let listed =
+            crate::atspi::discovery::list_scoped_atspi_apps(conn, binding, &gate, &authority).await;
+        if !authority.usable() {
+            return Err(DriverError::ScopeDenied);
+        }
         listed
+    }
+
+    /// Catalog when no attempt is entered. The admitted subset when one is.
+    ///
+    /// A stale attempt is `None`. Callers that require an attempt refuse
+    /// before this. No D-Bus and no X11.
+    fn evidence_gate(&self, binding: &ScopeBinding) -> Option<ScopeGate> {
+        match AttemptAuthority::on_task() {
+            Some(authority) if authority.usable() => binding.gate_for_scope(authority.scope()),
+            Some(_) => None,
+            None => Some(binding.gate().clone()),
+        }
+    }
+
+    fn proved_window(
+        &self,
+        binding: &ScopeBinding,
+        gate: &ScopeGate,
+        window: &WindowRef,
+    ) -> Option<WindowBinding> {
+        if self.memory_wayland(window) {
+            let source = self.portal_source_kind();
+            let view = crate::wayland::scope::view_for_scope(&window.id, source, None);
+            let proved = gate.prove_wayland(&view).ok()?;
+            return proved.binding(view.owner.as_ref()?);
+        }
+        let xid = self.memory_xid(window)?;
+        let snapshot = binding.oracle().x11_snapshot(xid)?;
+        let proved = gate.prove_x11(&snapshot.view).ok()?;
+        proved.binding(snapshot.view.owner.as_ref()?)
     }
 
     async fn prepare_registered_x11(&self) {
@@ -773,8 +841,8 @@ impl Driver for LinuxDriver {
                 permission: "accessibility".into(),
             })?;
 
-        if let Some(binding) = &self.scope {
-            return crate::atspi::discovery::list_scoped_atspi_apps(conn, binding).await;
+        if self.scope.is_some() {
+            return self.scoped_app_list(conn).await;
         }
         crate::atspi::list_atspi_apps(conn).await
     }
@@ -790,7 +858,7 @@ impl Driver for LinuxDriver {
 
     async fn list_windows(&self, app: Option<&AppRef>) -> Result<Vec<WindowInfo>> {
         if self.scope.is_some() {
-            let windows = self.scoped_registered_windows(app);
+            let windows = self.scoped_registered_windows(app)?;
             return Ok(wayland_bind::paint_frames(self, windows));
         }
         if self.fake_source.is_some() {
@@ -944,21 +1012,14 @@ impl InstanceEvidence for LinuxDriver {
     fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
         let binding = self.scope.as_ref()?;
         let discovered = app.info.pid.filter(|pid| *pid > 0)?;
-        binding.discovered_instance(&app.info.id, discovered)
+        let gate = self.evidence_gate(binding)?;
+        binding.discovered_from(&gate, &app.info.id, discovered)
     }
 
     fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {
         let binding = self.scope.as_ref()?;
-        if self.memory_wayland(window) {
-            let source = self.portal_source_kind();
-            let view = crate::wayland::scope::view_for_scope(&window.id, source, None);
-            let proved = binding.gate().prove_wayland(&view).ok()?;
-            return proved.binding(view.owner.as_ref()?);
-        }
-        let xid = self.memory_xid(window)?;
-        let snapshot = binding.oracle().x11_snapshot(xid)?;
-        let proved = binding.gate().prove_x11(&snapshot.view).ok()?;
-        proved.binding(snapshot.view.owner.as_ref()?)
+        let gate = self.evidence_gate(binding)?;
+        self.proved_window(binding, &gate, window)
     }
 
     fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {

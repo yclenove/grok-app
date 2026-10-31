@@ -11,7 +11,7 @@ use gcu_core::driver::{DriverError, NATIVE_TIMEOUT};
 use gcu_core::model::{Geometry, NativeHandle};
 #[cfg(test)]
 use gcu_core::model::{RawNode, RawTree};
-use gcu_core::scope::{BootIdentity, OsStartTime, ProcessInstance, WindowBinding};
+use gcu_core::scope::{BootIdentity, FixtureScope, OsStartTime, ProcessInstance, WindowBinding};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -247,6 +247,17 @@ impl ScopeWindow {
     /// AT-SPI application id. Empty when the window has no bus name.
     pub(crate) fn app_id(&self) -> &str {
         &self.app_id
+    }
+
+    /// Core binding from the registered owner.
+    ///
+    /// Does not read the clock, D-Bus, or X11. `None` when the stored owner
+    /// cannot be expressed as a core binding.
+    pub(crate) fn registered_binding(&self) -> Option<WindowBinding> {
+        let start = OsStartTime::new(self.owner.start_time()).ok()?;
+        let boot = BootIdentity::new(self.owner.boot_id()).ok()?;
+        let owner = ProcessInstance::new(self.owner.pid(), start, boot).ok()?;
+        WindowBinding::new(self.native_id.clone(), self.incarnation, owner).ok()
     }
 
     /// Core binding from a live process view that already matches `owner`.
@@ -742,7 +753,10 @@ impl ScopeOracle {
     }
 }
 
-/// Gate plus the fresh observations used before a read returns or an input is sent.
+/// Catalog plus the fresh observations used before a read returns or an input is sent.
+///
+/// `gate` indexes bus names and window ids. It is not permission. Scoped name
+/// and window reads admit through the attempt's current [`FixtureScope`].
 pub struct ScopeBinding {
     gate: ScopeGate,
     oracle: ScopeOracle,
@@ -759,9 +773,29 @@ impl ScopeBinding {
         }
     }
 
-    /// Admitted windows.
+    /// Platform index of bus names and window ids. Not permission.
     pub(crate) fn gate(&self) -> &ScopeGate {
         &self.gate
+    }
+
+    /// Catalog windows whose registered binding `scope` admits.
+    ///
+    /// The owner, id, and incarnation are the registered values, not a live
+    /// clock read. An empty list is a valid gate and admits nothing. `None`
+    /// means that list could not be stored. No D-Bus and no X11.
+    pub(crate) fn gate_for_scope(&self, scope: &FixtureScope) -> Option<ScopeGate> {
+        let windows = self
+            .gate
+            .windows()
+            .iter()
+            .filter(|window| {
+                window
+                    .registered_binding()
+                    .is_some_and(|binding| scope.admits_window(&binding))
+            })
+            .cloned()
+            .collect();
+        ScopeGate::try_new(windows).ok()
     }
 
     /// Observation cache.
@@ -769,17 +803,31 @@ impl ScopeBinding {
         &self.oracle
     }
 
-    /// Live instance of `app_id` when `pid` is that registration right now.
+    /// Live instance of `app_id` when `pid` is the stored catalog right now.
     ///
-    /// Every window of the app must use this pid. The clock must still show
-    /// the registered start time and boot id. An empty id or a zero pid is
-    /// `None`. Memory only: no D-Bus and no X11.
+    /// Delegates to [`Self::discovered_from`] with this binding's catalog.
+    /// An empty id or a zero pid is `None`. This does not call D-Bus or X11.
+    /// The clock may read `/proc`.
     pub(crate) fn discovered_instance(&self, app_id: &str, pid: u32) -> Option<ProcessInstance> {
+        self.discovered_from(&self.gate, app_id, pid)
+    }
+
+    /// Live instance of `app_id` when `pid` is `gate` right now.
+    ///
+    /// Every window of the app in `gate` must use this pid. The clock must
+    /// still show the registered start time and boot id. An empty id or a
+    /// zero pid is `None`. This does not call D-Bus or X11. The clock may
+    /// read `/proc`. `gate` is the admitted index, not a second lease.
+    pub(crate) fn discovered_from(
+        &self,
+        gate: &ScopeGate,
+        app_id: &str,
+        pid: u32,
+    ) -> Option<ProcessInstance> {
         if app_id.is_empty() || pid == 0 {
             return None;
         }
-        let registered = self
-            .gate
+        let registered = gate
             .windows()
             .iter()
             .find(|window| window.app_id() == app_id)?;
@@ -787,7 +835,7 @@ impl ScopeBinding {
             return None;
         }
         let live = self.oracle.process(pid)?;
-        for window in self.gate.windows() {
+        for window in gate.windows() {
             if window.app_id() != app_id {
                 continue;
             }

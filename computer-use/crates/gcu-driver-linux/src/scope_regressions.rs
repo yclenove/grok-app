@@ -43,41 +43,36 @@ fn lease_for(native_id: &str) -> ScopeLease {
     lease_for_pid(42, native_id)
 }
 
-fn lease_for_pid(pid: u32, native_id: &str) -> ScopeLease {
+fn target_for(pid: u32, native_id: &str) -> FixtureTarget {
     let owner = process(pid, 1000);
     let window = WindowBinding::new(native_id, 5, owner.clone()).unwrap();
-    let target = FixtureTarget::new(
+    FixtureTarget::new(
         owner,
         "fixture",
         ExecutableProof::new("/usr/bin/fixture").unwrap(),
         vec![RegisteredWindow::new(window)],
     )
-    .unwrap();
-    ScopeLease::install(
-        FixtureScope::try_new(
-            "run-s10",
-            1,
-            "engine-s10",
-            "desktop-s10",
-            "lease-s10",
-            vec![target],
-        )
-        .unwrap(),
+    .unwrap()
+}
+
+fn generation_scope(targets: Vec<FixtureTarget>, generation: u64) -> FixtureScope {
+    FixtureScope::try_new(
+        "run-s10",
+        generation,
+        "engine-s10",
+        "desktop-s10",
+        "lease-s10",
+        targets,
     )
+    .unwrap()
+}
+
+fn lease_for_pid(pid: u32, native_id: &str) -> ScopeLease {
+    ScopeLease::install(generation_scope(vec![target_for(pid, native_id)], 1))
 }
 
 fn empty_lease() -> ScopeLease {
-    ScopeLease::install(
-        FixtureScope::try_new(
-            "run-s10",
-            1,
-            "engine-s10",
-            "desktop-s10",
-            "lease-s10",
-            vec![],
-        )
-        .unwrap(),
-    )
+    ScopeLease::install(generation_scope(Vec::new(), 1))
 }
 
 fn gate(native_id: &str) -> ScopeGate {
@@ -686,6 +681,7 @@ struct BusState {
     name_probes: Mutex<Vec<BusProbe>>,
     extent_probes: Mutex<Vec<BusProbe>>,
     child_paths: Mutex<Vec<String>>,
+    on_name: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl BusState {
@@ -700,6 +696,7 @@ impl BusState {
             name_probes: Mutex::new(Vec::new()),
             extent_probes: Mutex::new(Vec::new()),
             child_paths: Mutex::new(Vec::new()),
+            on_name: Mutex::new(None),
         }
     }
 
@@ -759,6 +756,18 @@ impl BusState {
             .clear();
     }
 
+    fn clear_reads(&self) {
+        self.pid_args
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.name_dests
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.clear_content();
+    }
+
     fn note_name(&self, destination: &str, path: &str) {
         self.name_probes
             .lock()
@@ -805,6 +814,24 @@ impl BusState {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    fn set_name_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.on_name.lock().unwrap_or_else(|err| err.into_inner()) = Some(Box::new(hook));
+    }
+
+    fn run_name_hook(&self, path: &str) {
+        if path != APP_PATH {
+            return;
+        }
+        let hook = self
+            .on_name
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 
@@ -1164,6 +1191,7 @@ impl AccessibleNode {
     fn name(&self, #[zbus(header)] header: Option<zbus::message::Header<'_>>) -> String {
         let destination = header_destination(&header);
         self.state.note_name(&destination, self.path);
+        self.state.run_name_hook(self.path);
         window_accessible_name(self, &destination)
     }
 }
@@ -1269,24 +1297,36 @@ async fn window_bus(owner: &str) -> TestBus {
     }
 }
 
-fn scoped_for(
-    bus: &TestBus,
-    native_id: &str,
-    server: Option<Arc<dyn XServer>>,
-) -> ScopedDriver<LinuxDriver> {
+fn bound_driver(bus: &TestBus, native_id: &str, server: Option<Arc<dyn XServer>>) -> LinuxDriver {
     let mut driver = LinuxDriver::from_bus(bus.client.clone());
     let clock = Arc::new(MapClock::new(BOOT));
     clock.set(PID_P, 1000);
     clock.set(PID_C, 5000);
     let clock: Arc<dyn ProcessClock> = clock;
     driver.bind_scope(gate_for(PID_P, native_id), clock);
-    let driver = match server {
+    match server {
         Some(server) => driver.with_x_server(server),
         None => driver,
-    };
+    }
+}
+
+fn scoped_for(
+    bus: &TestBus,
+    native_id: &str,
+    server: Option<Arc<dyn XServer>>,
+) -> ScopedDriver<LinuxDriver> {
+    scoped_lease(bus, native_id, lease_for_pid(PID_P, native_id), server)
+}
+
+fn scoped_lease(
+    bus: &TestBus,
+    native_id: &str,
+    lease: ScopeLease,
+    server: Option<Arc<dyn XServer>>,
+) -> ScopedDriver<LinuxDriver> {
     ScopedDriver::new(
-        driver,
-        lease_for_pid(PID_P, native_id),
+        bound_driver(bus, native_id, server),
+        lease,
         gcu_core::testing::host::fake_activity(),
     )
 }
@@ -1445,6 +1485,148 @@ async fn scoped_window_discovery_reads_no_foreign_atspi_content() {
     expect_proved_window(&open, &app, &bus.state).await;
     bus.state.set_owner(UNIQUE_C);
     expect_handoff_keeps_proved_window(&open, &app, &bus.state).await;
+}
+
+fn fixture_app() -> AppRef {
+    app_ref(app(FIXTURE_NAME, PID_P, "/usr/bin/fixture", "p-hash"))
+}
+
+fn assert_unpublished(text: &str) {
+    assert_clean(text, &[FIXTURE_NAME]);
+    assert_clean(text, WINDOW_CANARIES);
+}
+
+fn assert_refused(err: &DriverError, stopped: bool) {
+    if stopped {
+        assert_eq!(
+            err,
+            &DriverError::Cancelled {
+                maybe_executed: false,
+            }
+        );
+    } else {
+        assert_eq!(err, &DriverError::ScopeDenied);
+    }
+    assert_unpublished(&err.to_string());
+}
+
+fn assert_no_bus_reads(state: &BusState) {
+    assert_bus_silent(state);
+    assert!(
+        state.pids().is_empty(),
+        "pid query after the lease narrowed: {:?}",
+        state.pids()
+    );
+    assert!(
+        state.names().is_empty(),
+        "accessible name after the lease narrowed: {:?}",
+        state.names()
+    );
+}
+
+async fn expect_narrowed(scoped: &ScopedDriver<LinuxDriver>) {
+    let listed = scoped.list_apps().await.unwrap();
+    assert!(listed.is_empty());
+    assert_unpublished(&format!("{listed:?}"));
+    let resolved = scoped
+        .resolve_app(&AppQuery(FIXTURE_NAME.into()))
+        .await
+        .unwrap_err();
+    assert_eq!(resolved, DriverError::ScopeDenied);
+    assert_unpublished(&resolved.to_string());
+    let windows = scoped.list_windows(None).await.unwrap();
+    assert!(windows.is_empty());
+    assert_unpublished(&format!("{windows:?}"));
+    let denied = scoped.list_windows(Some(&fixture_app())).await.unwrap_err();
+    assert_eq!(denied, DriverError::ScopeDenied);
+    assert_unpublished(&denied.to_string());
+    let key = scoped.key_window(&fixture_app()).await.unwrap_err();
+    assert_eq!(key, DriverError::ScopeDenied);
+    assert_unpublished(&key.to_string());
+}
+
+async fn expect_refused(scoped: &ScopedDriver<LinuxDriver>, stopped: bool) {
+    let listed = scoped.list_apps().await.unwrap_err();
+    assert_refused(&listed, stopped);
+    let resolved = scoped
+        .resolve_app(&AppQuery(FIXTURE_NAME.into()))
+        .await
+        .unwrap_err();
+    assert_refused(&resolved, stopped);
+    let windows = scoped.list_windows(None).await.unwrap_err();
+    assert_refused(&windows, stopped);
+    let denied = scoped.list_windows(Some(&fixture_app())).await.unwrap_err();
+    assert_refused(&denied, stopped);
+    let key = scoped.key_window(&fixture_app()).await.unwrap_err();
+    assert_refused(&key, stopped);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn removed_process_is_not_named_after_the_lease_narrows() {
+    let bus = window_bus(UNIQUE_P).await;
+    assert!(!bus.server.is_closed());
+    assert_eq!(bus.state.owner(), UNIQUE_P);
+
+    let lease = lease_for_pid(PID_P, "7");
+    let scoped = scoped_lease(&bus, "7", lease.clone(), None);
+    lease.rebind(generation_scope(Vec::new(), 2)).unwrap();
+    assert!(lease.current().is_some_and(|scope| scope.generation() == 2));
+    bus.state.clear_reads();
+    expect_narrowed(&scoped).await;
+    assert_eq!(bus.state.owner(), UNIQUE_P);
+    assert_no_bus_reads(&bus.state);
+
+    let kept = lease_for_pid(PID_P, "7");
+    kept.rebind(generation_scope(vec![target_for(PID_P, "7")], 2))
+        .unwrap();
+    let server: Arc<dyn XServer> = proved_server();
+    let open = scoped_lease(&bus, "7", kept, Some(server));
+    let app = expect_app_round(&open, &bus.state).await;
+    expect_proved_window(&open, &app, &bus.state).await;
+
+    let revoked = lease_for_pid(PID_P, "7");
+    let closed = scoped_lease(&bus, "7", revoked.clone(), None);
+    revoked.revoke();
+    bus.state.clear_reads();
+    expect_refused(&closed, false).await;
+    assert_no_bus_reads(&bus.state);
+
+    let stop = StopControl::new();
+    let stopped = ScopedDriver::new(
+        bound_driver(&bus, "7", None),
+        lease_for_pid(PID_P, "7"),
+        stop.activity(),
+    );
+    stop.request_stop();
+    bus.state.clear_reads();
+    expect_refused(&stopped, true).await;
+    assert_no_bus_reads(&bus.state);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lease_epoch_change_during_name_read_drops_the_name() {
+    let bus = window_bus(UNIQUE_P).await;
+    assert!(!bus.server.is_closed());
+    let lease = lease_for_pid(PID_P, "7");
+    let scoped = scoped_lease(&bus, "7", lease.clone(), None);
+    let hook_lease = lease.clone();
+    bus.state.set_name_hook(move || {
+        hook_lease
+            .rebind(generation_scope(Vec::new(), 2))
+            .expect("narrow during name");
+    });
+    bus.state.clear_reads();
+    let err = scoped.list_apps().await.unwrap_err();
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_unpublished(&err.to_string());
+    assert_eq!(lease.current().unwrap().generation(), 2);
+    let probes = bus.state.name_probes();
+    assert!(
+        probes
+            .iter()
+            .any(|probe| probe.destination == UNIQUE_P && probe.path == APP_PATH),
+        "name read did not reach the narrowed lease: {probes:?}"
+    );
 }
 
 struct DoctorStop {
