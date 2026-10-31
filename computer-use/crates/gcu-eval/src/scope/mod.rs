@@ -11,7 +11,7 @@ use gcu_host_protocol::{
 use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    process::{Child, Command},
+    process::Child,
     sync::{mpsc, oneshot, watch},
 };
 
@@ -30,11 +30,18 @@ struct Update {
     reply: oneshot::Sender<Result<Ack, Error>>,
 }
 impl Supervisor {
-    /// Spawn only `gcu scoped-engine --driver fake`, install over inherited
-    /// control, verify ACK, then read the data address. Every startup stage has
-    /// a five-second cap. Cancellation kills the child and closes control.
-    /// No fixture state file, env value or client input supplies authority.
-    pub async fn start(
+    /// Admit `binary` before any spawn or control bootstrap.
+    ///
+    /// Admission runs first and returns the unavailable-provider error without
+    /// calling `prepare`, spawning, or exchanging ACK. No fixture state file,
+    /// env value, or client input supplies authority. Today no accepting
+    /// provider is linked, so this does not spawn.
+    ///
+    /// Blocking: the refusal itself does not block. An admitted start still
+    /// uses the existing five-second cap on every stage. Timeout: five seconds
+    /// per admitted stage. Cancellation: drop or a failed stage kills the child
+    /// and closes control.
+    pub async fn open(
         binary: &Path,
         env: &Environment,
         scene: &str,
@@ -42,7 +49,29 @@ impl Supervisor {
         run_id: String,
         scope: Scope,
     ) -> Result<Self, Error> {
-        let mut command = Command::new(binary);
+        let launch = crate::boundary::admit_scoped_backend(binary).map_err(Error::msg)?;
+        Self::start(launch, env, scene, profile, run_id, scope).await
+    }
+
+    /// Spawn the admitted backend as `gcu scoped-engine --driver fake`.
+    ///
+    /// `launch` is consumed. The program is the one bound into that value.
+    /// Startup installs inherited control, checks ACK, then reads the data
+    /// address. No fixture state file, env value, or client input supplies
+    /// authority.
+    ///
+    /// Blocking: until ACK, the ready line, or a five-second stage cap.
+    /// Timeout: five seconds per stage. Cancellation: drop or a failed stage
+    /// kills the child and closes control.
+    pub async fn start(
+        launch: crate::AdmittedLaunch,
+        env: &Environment,
+        scene: &str,
+        profile: &str,
+        run_id: String,
+        scope: Scope,
+    ) -> Result<Self, Error> {
+        let mut command = crate::boundary::tokio_command(launch);
         command
             .args([
                 "scoped-engine",

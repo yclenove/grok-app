@@ -42,6 +42,130 @@ pub(crate) fn launches_real_client(cfg: &RunConfig) -> bool {
     cfg.real_driver || cfg.grok_bin.is_some()
 }
 
+/// Which process an [`AdmittedLaunch`] would start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessRole {
+    Client,
+    Backend,
+    Fixture,
+}
+
+/// Unforgeable permission to build one client, backend, or fixture process.
+///
+/// The fields are private. Production code obtains a value only from
+/// [`admit_client`], [`admit_scoped_backend`], or [`admit_fixture`]. Those
+/// functions run the single [`admit_launch`] decision and then the provider
+/// gate. A scoped backend also requires that provider's ACK. No accepting
+/// provider is installed, so every executable is refused. [`std_command`] and
+/// [`tokio_command`] consume the value; nothing else may call `Command::new`
+/// for a client or backend.
+#[derive(Debug)]
+pub struct AdmittedLaunch {
+    program: std::path::PathBuf,
+    role: ProcessRole,
+}
+
+/// External client process. Refused until a provider admits it.
+pub(crate) fn admit_client(program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    admit_launch(Some(program), None, false, false)?;
+    grant_process(ProcessRole::Client, program, false)
+}
+
+/// Scoped backend process. Refused until a provider admits it and ACKs.
+pub(crate) fn admit_scoped_backend(program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    admit_launch(None, Some(program), true, false)?;
+    grant_process(ProcessRole::Backend, program, true)
+}
+
+/// Fixture process used only by a real driver. Refused with that driver.
+pub(crate) fn admit_fixture(program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    admit_launch(None, None, false, true)?;
+    grant_process(ProcessRole::Fixture, program, false)
+}
+
+fn grant_process(
+    role: ProcessRole,
+    program: &Path,
+    scoped: bool,
+) -> Result<AdmittedLaunch, &'static str> {
+    if !provider_gate_allows_process(scoped) {
+        return Err(refusal_for(role));
+    }
+    Ok(AdmittedLaunch {
+        program: program.to_path_buf(),
+        role,
+    })
+}
+
+/// Provider gate. A scoped engine additionally needs the provider's ACK.
+///
+/// Both halves stay closed: this crate does not link an accepting provider,
+/// and no ACK is recorded. Callers cannot pass a boolean that skips the gate.
+fn provider_gate_allows_process(scoped: bool) -> bool {
+    accepting_provider_linked() && (!scoped || scoped_provider_ack())
+}
+
+fn accepting_provider_linked() -> bool {
+    // Closed. Nothing in this crate stores `true`. The load is not a const so
+    // the admit arm stays compiled for a future provider in this module.
+    // Callers cannot pass a boolean that skips the gate.
+    static LINKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    LINKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn scoped_provider_ack() -> bool {
+    static ACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    ACK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn refusal_for(role: ProcessRole) -> &'static str {
+    match role {
+        ProcessRole::Client => ATTEST_REQUIRED,
+        ProcessRole::Backend | ProcessRole::Fixture => EXTERNAL_GCU_REFUSED,
+    }
+}
+
+/// The only `std::process::Command::new` for an admitted process.
+pub(crate) fn std_command(launch: AdmittedLaunch) -> std::process::Command {
+    std::process::Command::new(program_of(launch))
+}
+
+/// The only `tokio::process::Command::new` for an admitted process.
+pub(crate) fn tokio_command(launch: AdmittedLaunch) -> tokio::process::Command {
+    tokio::process::Command::new(program_of(launch))
+}
+
+fn program_of(launch: AdmittedLaunch) -> std::path::PathBuf {
+    let AdmittedLaunch { program, role } = launch;
+    // Every role is a process. The program was bound by admission or by the
+    // test-only mint, not by the caller of `Command` construction.
+    match role {
+        ProcessRole::Client | ProcessRole::Backend | ProcessRole::Fixture => program,
+    }
+}
+
+/// Harness-free S3 lifecycle only. Not an admission decision and not a provider.
+///
+/// `tests/scope_supervisor.rs` is outside this crate, so the capability it
+/// needs to exercise ACK, renew, and teardown cannot be `cfg(test)`. The
+/// source test rejects every other caller. Production paths use [`admit_scoped_backend`].
+#[doc(hidden)]
+#[must_use]
+pub fn mint_scope_lifecycle_test(program: std::path::PathBuf) -> AdmittedLaunch {
+    AdmittedLaunch {
+        program,
+        role: ProcessRole::Backend,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mint_test_fixture(program: std::path::PathBuf) -> AdmittedLaunch {
+    AdmittedLaunch {
+        program,
+        role: ProcessRole::Fixture,
+    }
+}
+
 /// Admit only compiled, in-process implementations, never executable paths.
 ///
 /// Runner, client resolution/command construction and standalone fake-agent
@@ -191,5 +315,103 @@ mod tests {
             admit_launch(None, Some(Path::new("/tmp/eval-fake-gcu")), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
+    }
+
+    #[test]
+    fn process_capabilities_stay_refused_without_a_provider() {
+        for path in ["eval-fake-agent", "eval-fake-gcu", "gcu-eval", ""] {
+            let path = Path::new(path);
+            assert!(admit_client(path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+            assert!(admit_scoped_backend(path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+            assert!(admit_fixture(path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+        }
+        assert!(!provider_gate_allows_process(false));
+        assert!(!provider_gate_allows_process(true));
+    }
+
+    #[test]
+    fn command_new_is_only_in_the_admission_module() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut command_hits = Vec::new();
+        let mut lifecycle_hits = Vec::new();
+        let mut fixture_hits = Vec::new();
+        let mut visit = |path: &Path, text: &str| {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let name = path
+                .file_name()
+                .and_then(|item| item.to_str())
+                .unwrap_or("");
+            let test_module = name == "tests.rs" || name.ends_with("_tests.rs");
+            let admission = rel.ends_with("src/boundary.rs");
+            if !test_module
+                && !admission
+                && !rel.starts_with("tests/")
+                && text.contains("Command::new")
+            {
+                command_hits.push(rel.clone());
+            }
+            let lifecycle = "mint_scope_lifecycle_test";
+            if text.contains(lifecycle) && !admission && !rel.ends_with("tests/scope_supervisor.rs")
+            {
+                // `lib.rs` may re-export the name. A call there is still a hit.
+                let reexport =
+                    rel.ends_with("src/lib.rs") && !text.contains(&format!("{lifecycle}("));
+                if !reexport {
+                    lifecycle_hits.push(rel.clone());
+                }
+            }
+            if text.contains("mint_test_fixture")
+                && !admission
+                && !rel.ends_with("src/prep_tests.rs")
+            {
+                fixture_hits.push(rel);
+            }
+        };
+        walk(&root.join("src"), &mut visit);
+        walk(&root.join("tests"), &mut visit);
+        assert!(
+            command_hits.is_empty(),
+            "Command::new outside the admission module: {command_hits:?}"
+        );
+        assert!(
+            lifecycle_hits.is_empty(),
+            "lifecycle mint escaped its test: {lifecycle_hits:?}"
+        );
+        assert!(
+            fixture_hits.is_empty(),
+            "fixture mint escaped its test: {fixture_hits:?}"
+        );
+    }
+
+    fn walk(dir: &Path, visit: &mut dyn FnMut(&Path, &str)) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, visit);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            visit(&path, &text);
+        }
     }
 }

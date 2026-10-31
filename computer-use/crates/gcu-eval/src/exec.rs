@@ -5,8 +5,7 @@
 
 use crate::boundary::{launches_real_client, real_launch_block};
 use crate::launch::{
-    child_approval, child_env, client_command, grok_args, resolve_client, write_config_for,
-    ClientProgram,
+    child_approval, child_env, grok_args, resolve_client, write_config_for, ClientProgram,
 };
 use crate::oracle::{judge, EffectCheck, Verdict, World};
 use crate::runner::{
@@ -82,16 +81,17 @@ async fn execute_ready(
         ClientProgram::BuiltinFake => {
             crate::fake_agent::execute(&args, &env_map, &env.work, limit).await
         }
-        ClientProgram::External(_) => {
+        ClientProgram::External(path) => {
             // Recheck admission at command construction, including preflight.
-            let mut command = match client_command(&program) {
-                Ok(command) => command,
+            let launch = match crate::boundary::admit_client(path) {
+                Ok(launch) => launch,
                 Err(reason) => {
                     outcome.status = RunStatus::NotRun;
                     outcome.reason = reason.into();
                     return outcome;
                 }
             };
+            let mut command = crate::boundary::tokio_command(launch);
             command
                 .args(&args)
                 .env_clear()

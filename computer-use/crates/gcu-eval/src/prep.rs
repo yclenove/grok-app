@@ -420,8 +420,9 @@ pub(crate) async fn start_scope(
         .and_then(|name| name.to_str())
         .ok_or_else(|| Error::msg("scope_run_missing"))?
         .to_owned();
+    let launch = crate::boundary::admit_scoped_backend(binary).map_err(Error::msg)?;
     crate::scope::Supervisor::start(
-        binary,
+        launch,
         env,
         &task.scene,
         cfg.mcp_profile.as_deref().unwrap_or("default"),
@@ -436,8 +437,11 @@ pub(crate) async fn start_scope(
 pub(crate) struct Fixture(std::process::Child);
 
 impl Fixture {
-    pub(crate) fn start(bin: &Path, env: &crate::runner::Environment) -> Result<Self, Error> {
-        let mut command = std::process::Command::new(bin);
+    pub(crate) fn start(
+        launch: crate::AdmittedLaunch,
+        env: &crate::runner::Environment,
+    ) -> Result<Self, Error> {
+        let mut command = crate::boundary::std_command(launch);
         command
             .env_clear()
             .env("PATH", system_path())

@@ -12,7 +12,7 @@
 //! driver, profile, model, approval, and the config body. A new config does not
 //! reuse another run's result. Cloning a config shares one run's map.
 
-use crate::launch::{child_approval, client_command, config_body, ClientProgram};
+use crate::launch::{child_approval, config_body, ClientProgram};
 use crate::runner::RunConfig;
 use crate::tasks::Task;
 use std::collections::{BTreeMap, BTreeSet};
@@ -358,7 +358,11 @@ async fn run_preflight(
     env: &BTreeMap<String, String>,
     model: &str,
 ) -> Result<(), String> {
-    let mut command = client_command(program).map_err(str::to_string)?;
+    let ClientProgram::External(path) = program else {
+        return Err("the fake client runs in process".into());
+    };
+    let launch = crate::boundary::admit_client(path).map_err(str::to_string)?;
+    let mut command = crate::boundary::tokio_command(launch);
     command
         .args(preflight_args(model))
         .env_clear()

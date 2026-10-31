@@ -131,7 +131,7 @@ fn fixture_is_started_with_the_state_path_and_stopped_on_drop() {
         )
         .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let fixture = Fixture::start(&script, &env).unwrap();
+    let fixture = Fixture::start(crate::boundary::mint_test_fixture(script.clone()), &env).unwrap();
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&env.state_path).unwrap()).unwrap();
     let pid = state["pid"].as_u64().unwrap().to_string();
@@ -158,7 +158,7 @@ fn a_fixture_that_never_writes_state_fails_instead_of_hanging_the_run() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     // The fixture exits at once and never writes state: fail fast, do not wait out the deadline.
     let started = std::time::Instant::now();
-    let result = Fixture::start(&script, &env);
+    let result = Fixture::start(crate::boundary::mint_test_fixture(script.clone()), &env);
     assert!(result.is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
     let _ = std::fs::remove_dir_all(&root);

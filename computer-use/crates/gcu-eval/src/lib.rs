@@ -29,6 +29,7 @@ pub mod disposable;
 mod exec;
 mod fake_agent;
 mod fake_gcu;
+mod fake_io;
 mod ffi;
 mod launch;
 mod metrics;
@@ -46,8 +47,8 @@ mod yaml;
 pub use access::GCU_ACCEPTED_APPROVAL;
 pub use access::{config_dirs_from, path_within};
 pub use boundary::{
-    ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
-    WINDOWS_REAL_NOT_RUN,
+    mint_scope_lifecycle_test, AdmittedLaunch, ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED,
+    INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU, WINDOWS_REAL_NOT_RUN,
 };
 pub use client_tools::{PreflightCache, CLIENT_TOOL_PROBE_PROMPT, EXPECTED_PREFLIGHT_TOOLS};
 pub use fake_agent::{builtin_fake_agent_entry, builtin_fake_agent_exit};

@@ -82,20 +82,6 @@ pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
     Err(Error::msg("no client binary and no model credentials"))
 }
 
-/// External commands require admission even if resolution was bypassed.
-/// No fake selection can be converted into a process command.
-pub(crate) fn client_command(
-    program: &ClientProgram,
-) -> Result<tokio::process::Command, &'static str> {
-    match program {
-        ClientProgram::BuiltinFake => Err("the fake client runs in process"),
-        ClientProgram::External(path) => {
-            admit_launch(Some(path), None, false, false)?;
-            Ok(tokio::process::Command::new(path))
-        }
-    }
-}
-
 pub(crate) fn child_env(
     task: &Task,
     cfg: &RunConfig,
@@ -327,7 +313,6 @@ mod tests {
         let program = resolve_client(&cfg).unwrap();
         assert!(matches!(program, ClientProgram::BuiltinFake));
         assert!(program.identity_path().is_none());
-        assert!(client_command(&program).is_err());
         for path in [
             "eval-fake-agent",
             "eval-fake-agent.exe",
@@ -336,8 +321,10 @@ mod tests {
             "",
         ] {
             let path = std::path::PathBuf::from(path);
-            // Even bypassing resolution cannot build a Command from a fake-named path.
-            assert!(client_command(&ClientProgram::External(path.clone())).is_err());
+            // Even bypassing resolution cannot admit a fake-named path.
+            assert!(crate::boundary::admit_client(&path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
             assert!(resolve_client(&RunConfig {
                 grok_bin: Some(path.clone()),
                 ..cfg.clone()

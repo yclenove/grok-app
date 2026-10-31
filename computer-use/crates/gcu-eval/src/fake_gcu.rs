@@ -3,7 +3,6 @@
 //! The real `gcu mcp` server waits for stdin EOF. This binary does not read
 //! stdin, so an evaluation client cannot hang on it.
 
-use std::io::Write;
 use std::process::ExitCode;
 
 /// Run the built-in fake gcu and return a process status code.
@@ -28,16 +27,14 @@ pub(crate) fn run(args: &[&str], path: &std::path::Path) -> Result<(), String> {
     let tool = tool_name(args);
     let line = serde_json::json!({"tool": tool, "result": "ok"});
     let text = serde_json::to_string(&line).map_err(|err| err.to_string())?;
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| err.to_string())?;
-    if existing.is_empty() {
-        writeln!(file, "{}", crate::exec::TELEMETRY_HANDSHAKE).map_err(|err| err.to_string())?;
+    let existing = crate::fake_io::read_optional(path)?;
+    let mut body = String::new();
+    if existing.as_ref().is_none_or(|bytes| bytes.is_empty()) {
+        body.push_str(&format!("{}\n", crate::exec::TELEMETRY_HANDSHAKE));
     }
-    writeln!(file, "{text}").map_err(|err| err.to_string())
+    body.push_str(&text);
+    body.push('\n');
+    crate::fake_io::append(path, body.as_bytes())
 }
 
 fn tool_name(args: &[&str]) -> String {

@@ -424,11 +424,11 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
                 );
             }
         }
-        match cfg
-            .fixture_bin
-            .as_deref()
-            .map(|bin| crate::prep::Fixture::start(bin, &held.env))
-        {
+        match cfg.fixture_bin.as_deref().map(|bin| {
+            crate::boundary::admit_fixture(bin)
+                .map_err(Error::msg)
+                .and_then(|launch| crate::prep::Fixture::start(launch, &held.env))
+        }) {
             Some(Ok(started)) => fixture = Some(started),
             Some(Err(err)) => {
                 return finish(
