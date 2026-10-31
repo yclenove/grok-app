@@ -147,8 +147,11 @@ fn program_of(launch: AdmittedLaunch) -> std::path::PathBuf {
 /// Harness-free S3 lifecycle only. Not an admission decision and not a provider.
 ///
 /// `tests/scope_supervisor.rs` is outside this crate, so the capability it
-/// needs to exercise ACK, renew, and teardown cannot be `cfg(test)`. The
-/// source test rejects every other caller. Production paths use [`admit_scoped_backend`].
+/// needs to exercise ACK, renew, and teardown cannot be `cfg(test)`. It exists
+/// only when the `test-support` feature is on, so no production build has a way
+/// to mint a launch for an arbitrary executable. The source test rejects every
+/// other caller. Production paths use [`admit_scoped_backend`].
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[must_use]
 pub fn mint_scope_lifecycle_test(program: std::path::PathBuf) -> AdmittedLaunch {
@@ -388,6 +391,26 @@ mod tests {
         assert!(
             lifecycle_hits.is_empty(),
             "lifecycle mint escaped its test: {lifecycle_hits:?}"
+        );
+        // The mint and its re-export must not exist without the feature.
+        let gated = |file: &str, needle: &str| {
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            let at = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{file}: {needle}"));
+            let mut from = at.saturating_sub(240);
+            while !text.is_char_boundary(from) {
+                from += 1;
+            }
+            text[from..at].contains("#[cfg(feature = \"test-support\")]")
+        };
+        assert!(
+            gated("src/boundary.rs", "pub fn mint_scope_lifecycle_test"),
+            "the lifecycle mint must be behind the test-support feature"
+        );
+        assert!(
+            gated("src/lib.rs", "pub use boundary::mint_scope_lifecycle_test"),
+            "the lifecycle mint re-export must be behind the test-support feature"
         );
         assert!(
             fixture_hits.is_empty(),

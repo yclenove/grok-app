@@ -26,6 +26,10 @@ path = "src/bin/fake_gcu.rs"
 [features]
 # Debug-only automatic CU approval. Release builds refuse GCU_APPROVAL=auto-*.
 eval-autoapprove = []
+# Compiles `mint_scope_lifecycle_test`, which mints an `AdmittedLaunch` for any
+# executable. Only the harness-free `scope_supervisor` test enables it; no
+# production build may.
+test-support = []
 
 [dependencies]
 anyhow.workspace = true
@@ -50,6 +54,7 @@ workspace = true
 name = "scope_supervisor"
 path = "tests/scope_supervisor.rs"
 harness = false
+required-features = ["test-support"]
 
 [[test]]
 name = "offline_admission"
