@@ -497,9 +497,7 @@ async fn confine_pointer(api: &dyn InputApi, hwnd: u64, packets: &[Vec<api::Even
                 Some(receiver) => {
                     // The receiver is an HWND. Process identity was checked on the
                     // recipient. An unproved or different top-level window is denied.
-                    crate::scope_identity::admit_delivery_element(
-                        hwnd, receiver, "", None, None,
-                    )?;
+                    crate::scope_identity::admit_delivery_element(hwnd, receiver, "", None, None)?;
                 }
                 None => return Err(DriverError::ScopeDenied),
             }

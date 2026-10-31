@@ -32,7 +32,6 @@ use gcu_core::{
         ScopeLease, ScopedDriver,
     },
 };
-use gcu_host_api::{testing::FakeUserActivity, UserActivity};
 use gcu_protocol::AppInfo;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -209,7 +208,7 @@ async fn scoped_snapshot_omits_a_foreign_child_without_reading_it() {
     let scoped = ScopedDriver::new(
         driver,
         ScopeLease::install(scope),
-        Arc::new(FakeUserActivity::new()) as Arc<dyn UserActivity>,
+        gcu_core::testing::host::fake_activity(),
     );
     let tree = scoped
         .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
