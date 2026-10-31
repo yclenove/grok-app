@@ -253,10 +253,11 @@ fn relocated_cli_checks(root: &Path) {
                 "core",
                 "--env",
                 "local",
-                "--builtin-fake",
                 "--only",
                 "native-form-01,text-note-01",
             ])
+            // `--builtin-fake` conflicts with `--grok`; the client slot is external on its own.
+            .args((slot == "--gcu").then_some("--builtin-fake"))
             .arg(slot)
             .arg(root.join(executable_name(stem)))
             .arg("--out")
