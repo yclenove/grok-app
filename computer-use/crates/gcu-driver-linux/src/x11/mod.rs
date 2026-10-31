@@ -35,11 +35,6 @@ pub use capture::{
 };
 pub use fake::{FakeWindow, FakeX};
 pub use input::{activate_and_verify, TYPE_TEXT_CHUNK_SIZE};
-// Crate-private: these take the crate-private `X11Scope`.
-pub(crate) use input::{
-    execute_pointer_click, execute_pointer_drag, execute_pointer_scroll, execute_press_keys,
-    execute_type_text_x11,
-};
 pub use keys::{
     char_to_keysym, key_to_keysym, modifier_to_keysym, named_key_to_keysym, plan_text_chunk,
     resolve_or_remap_keysym, restore_remapped_keycode, ResolvedKeycode, TextPlan,
