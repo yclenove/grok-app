@@ -6,6 +6,7 @@ use crate::{
     capture::{CaptureBackend, CapturePath, FakeCapture, Paint},
     input::{
         api::Event,
+        clipboard::{ClipboardApi, PublishProof},
         fake::FakeInput,
         hotkey::{FakeSafetyApi, StopLatch},
         InputBackend,
@@ -16,15 +17,17 @@ use crate::{
         actions,
         cache::{Patterns, Properties},
         events::FakeUiaEvents,
+        patterns::ActionContext,
         source::{FakeNode, FakeUia, UiaSource},
         UiaElement,
     },
     WindowsDriver,
 };
+use async_trait::async_trait;
 use gcu_core::{
     driver::{
-        AppQuery, AppRef, Button, Cancel, CaptureOpts, Driver, DriverAction, DriverError,
-        PointerRoute, TreeOpts, WindowRef,
+        AppQuery, AppRef, Button, Cancel, CaptureOpts, Driver, DriverAction, DriverError, KeyRoute,
+        PointerRoute, Result, TreeOpts, WindowRef,
     },
     model::{NativeHandle, RawNode, WindowPoint},
     scope::{
@@ -34,7 +37,7 @@ use gcu_core::{
 };
 use gcu_protocol::AppInfo;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -53,6 +56,41 @@ fn guard() -> Arc<crate::input::hotkey::SafetyGuard> {
         Default::default(),
         Arc::new(TestStop(AtomicBool::new(false))),
     )
+}
+
+struct CountingClipboard {
+    stages: AtomicUsize,
+}
+
+#[async_trait]
+impl ClipboardApi for CountingClipboard {
+    async fn stage(&self, _: String, _: ActionContext) -> Result<u32> {
+        self.stages.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+    async fn stage_proved(&self, _: String, _: ActionContext, _: PublishProof) -> Result<u32> {
+        self.stages.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+    async fn matches(&self, _: u32, _: String) -> Result<bool> {
+        Ok(true)
+    }
+    async fn restore(&self) -> Result<()> {
+        Ok(())
+    }
+    fn pending(&self) -> bool {
+        false
+    }
+}
+
+fn assert_untouched(input: &FakeInput, safety: &FakeSafetyApi, stages: usize) {
+    assert_eq!(safety.proof_requests(), 0);
+    assert_eq!(input.state().samples, 0);
+    assert_eq!(input.state().focuses, 0);
+    assert_eq!(input.state().activations, 0);
+    assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().delivery_checks, 0);
+    assert_eq!(stages, 0);
 }
 
 async fn editor() -> (Arc<FakeWinApi>, WindowsDriver, AppRef, WindowRef) {
@@ -268,6 +306,7 @@ async fn scoped_click_does_not_sample_focus_or_post_a_foreign_child() {
     assert_eq!(input.state().samples, 0);
     assert_eq!(input.state().focuses, 0);
     assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().delivery_checks, 1);
     input.update(|state| {
         state.child_pid = 0;
         state.child_created = 0;
@@ -303,16 +342,37 @@ async fn unscoped_click_still_posts_a_foreign_child() {
 async fn scoped_foreground_sendinput_is_unsupported_and_does_not_sample_or_send() {
     let (_, driver, _, win) = editor().await;
     let input = Arc::new(FakeInput::default());
-    input.update(|state| state.hit_receiver = Some(8));
-    let driver = driver
-        .with_input(Arc::new(InputBackend::new(
-            Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
-        )))
-        .with_safety(guard());
+    input.update(|state| {
+        state.hit_receiver = Some(8);
+        state.clipboard_safe = true;
+    });
+    let safety = FakeSafetyApi::default();
+    let guard = safety.start(
+        Default::default(),
+        Arc::new(TestStop(AtomicBool::new(false))),
+    );
+    let board = Arc::new(CountingClipboard {
+        stages: AtomicUsize::new(0),
+    });
+    let backend = InputBackend::new(Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>)
+        .with_clipboard(Arc::clone(&board) as Arc<dyn ClipboardApi>);
+    let driver = driver.with_input(Arc::new(backend)).with_safety(guard);
     driver.note_scoped_session();
+    let missing = driver
+        .perform(
+            &click(win.clone(), PointerRoute::AllowForeground),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing, DriverError::ScopeDenied);
+    assert!(!missing.maybe_executed());
+    assert_untouched(&input, &safety, board.stages.load(Ordering::SeqCst));
+
     let binding = driver.window_binding(&win).unwrap();
     driver.pin_admitted(Some(&binding));
-    for action in [
+    let long = "x".repeat(crate::input::messages::TEXT_MAX_UNITS + 1);
+    let actions = vec![
         click(win.clone(), PointerRoute::AllowForeground),
         DriverAction::PointerDrag {
             win: win.clone(),
@@ -322,19 +382,40 @@ async fn scoped_foreground_sendinput_is_unsupported_and_does_not_sample_or_send(
             ],
             route: PointerRoute::AllowForeground,
         },
-    ] {
-        input.update(|state| state.sent.clear());
+        DriverAction::PointerScroll {
+            win: win.clone(),
+            at: WindowPoint { x: 10., y: 10. },
+            dx: 0,
+            dy: -120,
+            route: PointerRoute::AllowForeground,
+        },
+        DriverAction::PressKeys {
+            win: win.clone(),
+            chord: gcu_protocol::keys::KeyChord::parse("a").unwrap(),
+            route: KeyRoute::AllowForeground,
+        },
+        DriverAction::TypeText {
+            win: win.clone(),
+            focus: None,
+            text: "hi".into(),
+            route: KeyRoute::AllowForeground,
+        },
+        DriverAction::TypeText {
+            win: win.clone(),
+            focus: None,
+            text: long,
+            route: KeyRoute::AllowForeground,
+        },
+        DriverAction::Activate { win: win.clone() },
+    ];
+    for action in actions {
         let error = driver
             .perform(&action, &Cancel::default())
             .await
             .unwrap_err();
         assert_eq!(error, DriverError::CapabilityUnavailable);
         assert!(!error.maybe_executed());
-        assert_eq!(button_downs(&input), 0);
-        assert_eq!(wheels(&input), 0);
-        assert_eq!(input.state().samples, 0);
-        assert_eq!(input.state().focuses, 0);
-        assert!(input.state().sent.is_empty());
+        assert_untouched(&input, &safety, board.stages.load(Ordering::SeqCst));
     }
 }
 
@@ -358,27 +439,84 @@ async fn unscoped_foreground_click_still_sends() {
     assert!(button_downs(&input) >= 1);
 }
 
-#[tokio::test]
-async fn scoped_targeted_rechecks_process_before_send() {
+async fn targeted(input: Arc<FakeInput>, scoped: bool) -> Result<gcu_core::driver::Delivery> {
     let (_, driver, _, win) = editor().await;
-    let input = Arc::new(FakeInput::default());
-    input.update(|state| state.replace_recipient_after = Some((1, 99, 5)));
     let driver = driver
         .with_input(Arc::new(InputBackend::new(
             Arc::clone(&input) as Arc<dyn crate::input::api::InputApi>
         )))
         .with_safety(guard());
-    driver.note_scoped_session();
-    let binding = driver.window_binding(&win).unwrap();
-    driver.pin_admitted(Some(&binding));
-    let error = driver
+    if scoped {
+        driver.note_scoped_session();
+        let binding = driver.window_binding(&win).unwrap();
+        driver.pin_admitted(Some(&binding));
+    }
+    driver
         .perform(&click(win, PointerRoute::TargetedOnly), &Cancel::default())
         .await
-        .unwrap_err();
+}
+
+#[tokio::test]
+async fn scoped_delivery_refuses_a_replaced_process_before_the_sample() {
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.replace_on_delivery = Some((0, 99, 5)));
+    let error = targeted(Arc::clone(&input), true).await.unwrap_err();
     assert_eq!(error, DriverError::ScopeDenied);
     assert!(!error.maybe_executed());
     assert_eq!(input.state().samples, 0);
     assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().delivery_checks, 1);
+}
+
+#[tokio::test]
+async fn scoped_send_rechecks_process_inside_the_send_job() {
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.replace_on_delivery = Some((1, 99, 5)));
+    let error = targeted(Arc::clone(&input), true).await.unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert!(!error.maybe_executed());
+    assert_eq!(input.state().samples, 1);
+    assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().delivery_checks, 2);
+}
+
+#[tokio::test]
+async fn scoped_settle_sample_rechecks_the_original_process() {
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.replace_on_delivery = Some((3, 99, 5)));
+    let error = targeted(Arc::clone(&input), true).await.unwrap_err();
+    assert!(error.maybe_executed());
+    assert!(matches!(
+        error,
+        DriverError::Native {
+            maybe_executed: true,
+            ..
+        }
+    ));
+    assert_eq!(input.state().samples, 1);
+    assert_eq!(input.state().sent.len(), 3);
+    assert_eq!(input.state().delivery_checks, 4);
+}
+
+#[tokio::test]
+async fn scoped_delivery_refuses_a_different_boot_before_reading() {
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.child_boot = "other-boot".into());
+    let error = targeted(Arc::clone(&input), true).await.unwrap_err();
+    assert_eq!(error, DriverError::ScopeDenied);
+    assert!(!error.maybe_executed());
+    assert_eq!(input.state().samples, 0);
+    assert!(input.state().sent.is_empty());
+    assert_eq!(input.state().delivery_checks, 1);
+}
+
+#[tokio::test]
+async fn unscoped_delivery_still_posts_when_the_recipient_changes() {
+    let input = Arc::new(FakeInput::default());
+    input.update(|state| state.replace_on_delivery = Some((0, 99, 5)));
+    targeted(Arc::clone(&input), false).await.unwrap();
+    assert!(!input.state().sent.is_empty());
+    assert!(input.state().samples >= 1);
 }
 
 #[tokio::test]

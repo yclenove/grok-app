@@ -160,10 +160,10 @@ impl InputBackend {
     ///
     /// [`crate::scope_identity::JobScope::Unscoped`] keeps the historical route,
     /// including foreground SendInput. A scoped job refuses foreground SendInput
-    /// before resolve, sample, focus, paste, or send. Targeted delivery re-checks
-    /// the admitted process instance immediately before each sample and send. A
-    /// missing scope is refused and is not treated as unscoped. Nothing here runs
-    /// inside the pointer gate.
+    /// before resolve, sample, focus, paste, or send. Targeted delivery carries
+    /// the admitted process into each sample and send and re-checks it there,
+    /// including every settle sample. A missing scope is refused and is not
+    /// treated as unscoped. Nothing here runs inside the pointer gate.
     pub(crate) async fn perform_scoped(
         &self,
         window: NativeWindow,
@@ -208,8 +208,9 @@ impl InputBackend {
             if let Some(guard) = &safety {
                 guard.check(false)?;
             }
-            // Scoped foreground SendInput cannot name the recipient of each packet.
-            // Close it before resolve. Capabilities report the same gap.
+            // Second guard. `WindowsDriver::perform` already refused a scoped
+            // foreground request before any proof or native call. Close it again
+            // before resolve. Capabilities report the same gap.
             if scope.claim()?.is_some() && plan.foreground {
                 return Err(DriverError::CapabilityUnavailable);
             }
@@ -230,17 +231,18 @@ impl InputBackend {
             };
             context.check()?;
             if let Some(claim) = scope.claim()? {
-                let (pid, created) = self.api.recipient_process(target.clone()).await?;
-                crate::scope_identity::admit_recipient(claim, pid, created)?;
                 let stamp = crate::desktop::HwndStamp::from(&target.window).id();
                 crate::scope_identity::admit_delivery_element(
                     claim.hwnd,
                     target.window.hwnd,
                     &stamp,
-                    Some(pid),
+                    Some(target.window.pid),
                     Some(claim.owner.pid),
                 )?;
             }
+            // One copy for every sample and send in this action, including settle.
+            // Later pin changes are not read. The native job compares it.
+            let carried = carried_target(scope)?;
             let foreground = plan.foreground;
             if !foreground
                 && (!target.message_capable || messages::ineffective_class(&target.class))
@@ -273,15 +275,10 @@ impl InputBackend {
                 };
                 packets.push(messages::chord_events(&chord, character)?);
             }
-            if !packets.is_empty() {
-                if let Some(claim) = scope.claim()? {
-                    recheck_recipient(self.api.as_ref(), target.clone(), claim).await?;
-                }
-            }
             let before = if packets.is_empty() {
                 None
             } else {
-                Some(self.api.sample(target.clone()).await?)
+                Some(self.api.sample(target.clone(), carried.clone()).await?)
             };
             if foreground {
                 if let Some(guard) = &safety {
@@ -357,9 +354,6 @@ impl InputBackend {
                         .prepare(target.clone(), packet.clone(), delivery)
                         .await?;
                 }
-                if let Some(claim) = scope.claim()? {
-                    recheck_recipient(self.api.as_ref(), target.clone(), claim).await?;
-                }
                 let result = async {
                     context.check()?;
                     crate::scope_identity::require_delivery_scalars(
@@ -376,6 +370,7 @@ impl InputBackend {
                             delivery,
                             self.ledger.clone(),
                             context.clone(),
+                            carried.clone(),
                         )
                         .await
                 }
@@ -393,7 +388,14 @@ impl InputBackend {
             }
             if let Some(before) = before {
                 let effect = self
-                    .settle(&target, before, plan.text, &context, work_deadline)
+                    .settle(
+                        &target,
+                        before,
+                        plan.text,
+                        &context,
+                        work_deadline,
+                        carried,
+                    )
                     .await?;
                 *self.effect.lock().unwrap_or_else(|p| p.into_inner()) = Some(effect);
             }
@@ -426,6 +428,7 @@ impl InputBackend {
         text: bool,
         context: &ActionContext,
         deadline: tokio::time::Instant,
+        carried: Option<api::AdmittedTarget>,
     ) -> Result<Effect> {
         let until = (tokio::time::Instant::now()
             + std::time::Duration::from_millis(if text { 1500 } else { 800 }))
@@ -436,7 +439,7 @@ impl InputBackend {
             context.check()?;
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             context.check()?;
-            let state = self.api.sample(target.clone()).await?;
+            let state = self.api.sample(target.clone(), carried.clone()).await?;
             changed |= state != before;
             if last == Some(state) || tokio::time::Instant::now() >= until {
                 return Ok(if changed {
@@ -490,17 +493,22 @@ impl Drop for Cleanup<'_> {
     }
 }
 
-/// Process instance of the recipient, compared with the original claim.
+/// Admitted window copied once for every sample and send in this action.
 ///
-/// Runs immediately before a scoped sample or send. It does not adopt a new
-/// pid. Memory and one process-times read. Not inside the pointer gate.
-async fn recheck_recipient(
-    api: &dyn InputApi,
-    target: Target,
-    claim: &crate::scope_identity::WindowClaim,
-) -> Result<()> {
-    let (pid, created) = api.recipient_process(target).await?;
-    crate::scope_identity::admit_recipient(claim, pid, created)
+/// `None` is unscoped. The value is not read from the pin again.
+fn carried_target(
+    scope: &crate::scope_identity::JobScope,
+) -> Result<Option<api::AdmittedTarget>> {
+    let Some(claim) = scope.claim()? else {
+        return Ok(None);
+    };
+    Ok(Some(api::AdmittedTarget {
+        hwnd: claim.hwnd,
+        incarnation: claim.incarnation,
+        pid: claim.owner.pid,
+        created: claim.owner.created,
+        boot: claim.owner.boot.clone(),
+    }))
 }
 
 fn publication(

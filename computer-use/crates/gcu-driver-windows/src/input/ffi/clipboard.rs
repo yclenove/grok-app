@@ -247,21 +247,12 @@ impl State {
             current: Vec::new(),
             sequence: data::sequence(),
             restoring: false,
-            context,
+            context: context.clone(),
         });
-        let result = (|| {
-            for entry in &mut publication {
-                let result = entry.publish();
-                if let Some(t) = &mut self.transaction {
-                    t.sequence = data::sequence();
-                    if result.is_ok() {
-                        t.current.push((entry.id, entry.bytes.clone()));
-                    }
-                }
-                result?;
-            }
-            Ok(())
-        })();
+        // EmptyClipboard can notify the previous owner before it returns. Recheck
+        // cancellation and the bound target before every SetClipboardData. The
+        // unscoped loop does not add checks between formats.
+        let result = self.publish_prepared(&mut publication, &context, proof.as_ref());
         if let Err(error) = result {
             // Keep the same OS lock through initial rollback; no external writer
             // can slip between partial publication and restoration.
@@ -274,6 +265,35 @@ impl State {
             return Err(error);
         }
         Ok(self.transaction.as_ref().map(|t| t.sequence))
+    }
+    fn publish_prepared(
+        &mut self,
+        publication: &mut [Format],
+        context: &ActionContext,
+        proof: Option<&PublishProof>,
+    ) -> Result<()> {
+        if let Some(proof) = proof {
+            crate::input::clipboard::publish_formats(
+                publication.len(),
+                || crate::input::clipboard::authorize_publish(context, proof),
+                |index| self.write_format(&mut publication[index]),
+            )
+        } else {
+            for entry in publication.iter_mut() {
+                self.write_format(entry)?;
+            }
+            Ok(())
+        }
+    }
+    fn write_format(&mut self, entry: &mut Format) -> Result<()> {
+        let published = entry.publish();
+        if let Some(transaction) = &mut self.transaction {
+            transaction.sequence = data::sequence();
+            if published.is_ok() {
+                transaction.current.push((entry.id, entry.bytes.clone()));
+            }
+        }
+        published
     }
     fn restore(&mut self) -> Result<()> {
         if self.transaction.is_none() {

@@ -416,17 +416,18 @@ impl InputApi for TestInput {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()> {
         self.inner
-            .send(target, events, delivery, ledger, context)
+            .send(target, events, delivery, ledger, context, claim)
             .await?;
         if self.external_after.swap(false, Ordering::SeqCst) {
             self.board.copy_external();
         }
         Ok(())
     }
-    async fn sample(&self, target: Target) -> Result<u64> {
-        self.inner.sample(target).await
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64> {
+        self.inner.sample(target, claim).await
     }
     async fn release(&self, ledger: Arc<InputLedger>) {
         InputApi::release(&self.inner, ledger).await;

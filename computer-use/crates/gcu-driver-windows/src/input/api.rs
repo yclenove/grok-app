@@ -180,13 +180,6 @@ pub trait InputApi: Send + Sync + 'static {
     ) -> Result<Target> {
         self.resolve(window, point, focus).await
     }
-    /// Process that owns the resolved recipient.
-    ///
-    /// The default is the top-level window owner. That is not proof of a child.
-    /// Native input overrides this and reads the child outside the pointer gate.
-    async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
-        Ok((target.window.pid, target.window.process_created))
-    }
     /// Top-level window under `point`, or the captured window when capture is set.
     ///
     /// `Ok(None)` means the receiver cannot be proved. Scoped foreground pointer
@@ -227,6 +220,10 @@ pub trait InputApi: Send + Sync + 'static {
         context: ActionContext,
     ) -> Result<()>;
     /// Deliver one packet with press-before-send accounting.
+    ///
+    /// `claim` is the admitted window copied by value. `None` is an unscoped send
+    /// and does not read a recipient. A scoped send compares the live child
+    /// process inside this call, before any message is posted.
     async fn send(
         &self,
         target: Target,
@@ -234,9 +231,13 @@ pub trait InputApi: Send + Sync + 'static {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()>;
-    /// Sample state/pixel evidence. Core owns the final tree and redacted diff.
-    async fn sample(&self, target: Target) -> Result<u64>;
+    /// Sample state or pixel evidence. Core owns the final tree and redacted diff.
+    ///
+    /// `claim` is compared inside this call before content is read. `None` skips
+    /// that comparison. Each settle sample carries the original claim.
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64>;
     /// Release held inputs on an independent path, including after Stop.
     async fn release(&self, ledger: Arc<InputLedger>);
 }

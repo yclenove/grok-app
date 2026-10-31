@@ -150,6 +150,7 @@ impl Paste<'_> {
                     Delivery::Foreground,
                     self.ledger.clone(),
                     self.context.clone(),
+                    None,
                 )
                 .await;
             if let Some(tracker) = &self.tracker {

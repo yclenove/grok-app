@@ -377,6 +377,13 @@ impl Driver for WindowsDriver {
     }
     async fn perform(&self, req: &DriverAction, cancel: &Cancel) -> Result<Delivery> {
         let deadline = tokio::time::Instant::now() + DRIVER_DEADLINE;
+        // Scoped foreground SendInput cannot name a recipient. Refuse before any
+        // native call, proof, activation, focus, or lease. Memory only. A missing
+        // pin stays ScopeDenied. The backend refusal is a second guard.
+        if crate::input::watchdog::foreground(req) && self.session_is_scoped() {
+            self.job_scope().claim()?;
+            return Err(DriverError::CapabilityUnavailable);
+        }
         self.check_safety(false)?;
         if let Some(worker) = &self.isolated {
             // The WorkerDriver owns the sole parent proof window and deadline.

@@ -263,6 +263,32 @@ impl State {
             dpi,
         })
     }
+    /// Child process instance, after `validate` and before content or identity adoption.
+    ///
+    /// Compares the carried claim with a fresh pid, creation time, and boot. A
+    /// replacement is not stored as the expected authority. Metadata only, outside
+    /// the pointer gate and the input ledger.
+    fn prove_child(&self, claim: &AdmittedTarget, child: u64) -> Result<()> {
+        let mut pid = 0u32;
+        // SAFETY: borrowed numeric HWND and a writable pid slot. The handle is not
+        // kept. Process creation time and boot are metadata reads.
+        let tid = unsafe { GetWindowThreadProcessId(hwnd(child), Some(&mut pid)) };
+        if tid == 0 || pid == 0 {
+            return Err(DriverError::ScopeDenied);
+        }
+        let created = self.api.process_security(pid)?.created;
+        let boot = self.api.boot_identity()?;
+        let admitted = crate::scope_identity::WindowClaim {
+            hwnd: claim.hwnd,
+            incarnation: claim.incarnation,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: claim.pid,
+                created: claim.created,
+                boot: claim.boot.clone(),
+            },
+        };
+        crate::scope_identity::admit_recipient(&admitted, pid, created, &boot)
+    }
     fn resolve(
         &self,
         window: NativeWindow,
@@ -426,22 +452,6 @@ impl InputApi for RealInput {
             })
             .await
     }
-    async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
-        self.worker
-            .call(move |s, r| {
-                r.check()?;
-                let mut pid = 0u32;
-                // SAFETY: borrowed numeric HWND and a writable pid slot. No process handle
-                // is kept. This runs on the input worker, outside the pointer gate.
-                let tid = unsafe { GetWindowThreadProcessId(hwnd(target.hwnd), Some(&mut pid)) };
-                if tid == 0 || pid == 0 {
-                    return Err(DriverError::ScopeDenied);
-                }
-                let created = s.api.process_security(pid)?.created;
-                Ok((pid, created))
-            })
-            .await
-    }
     async fn pointer_receiver(&self, point: WindowPoint) -> Result<Option<u64>> {
         self.worker
             .call(move |_, r| {
@@ -588,13 +598,14 @@ impl InputApi for RealInput {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()> {
         self.worker
             .call_action(context.clone(), move |s, r| {
                 if delivery != Delivery::Foreground {
-                    // One full stamp, security, and recipient validation for this packet,
-                    // outside the ledger and the gate. Each post then rechecks scalar identity
-                    // and does not require the foreground window. This branch does not take the gate.
+                    // Stamp, security, and the carried process check run once in this
+                    // job, outside the ledger and the gate, before any post. Each post
+                    // then rechecks scalar identity. This branch does not take the gate.
                     let live = WinScalar;
                     return super::admission::dispatch_targeted(
                         super::admission::TargetedSend {
@@ -607,21 +618,29 @@ impl InputApi for RealInput {
                         || r.check(),
                         || {
                             r.check()?;
-                            Ok(expected_identity(&target, s.validate(&target, false)?))
+                            let snap = s.validate(&target, false)?;
+                            if let Some(claim) = claim.as_ref() {
+                                s.prove_child(claim, target.hwnd)?;
+                            }
+                            Ok(expected_identity(&target, snap))
                         },
                         &live,
                         |event| native::post(&target, event),
                     );
                 }
-                // Enumeration, the security gate, and COM finish in `prepare`, before the ledger
-                // and the pointer gate. The gate then only re-reads cancellation, the deadline,
-                // the foreground window, and scalar identity.
+                // Enumeration, the security gate, and the process check finish in
+                // `prepare`, before the ledger and the pointer gate. The gate then
+                // only re-reads cancellation, the deadline, the foreground window,
+                // and scalar identity.
                 let pointer = super::admission::packet_is_pointer(&events);
                 super::admission::prepare_then_dispatch(
                     || {
                         r.check()?;
                         let snap = s.validate(&target, true)?;
                         let inputs = native::inputs(&events)?;
+                        if let Some(claim) = claim.as_ref() {
+                            s.prove_child(claim, target.hwnd)?;
+                        }
                         Ok(PreparedSend {
                             identity: expected_identity(&target, snap),
                             inputs,
@@ -647,11 +666,14 @@ impl InputApi for RealInput {
             })
             .await
     }
-    async fn sample(&self, target: Target) -> Result<u64> {
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64> {
         self.worker
             .call(move |s, r| {
                 r.check()?;
                 s.validate(&target, false)?;
+                if let Some(claim) = claim.as_ref() {
+                    s.prove_child(claim, target.hwnd)?;
+                }
                 sample::sample(&target)
             })
             .await

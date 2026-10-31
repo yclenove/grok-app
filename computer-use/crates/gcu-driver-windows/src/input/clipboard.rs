@@ -37,6 +37,64 @@ pub(crate) fn bind_admitted_proof(
     Arc::new(move || prove(&admitted))
 }
 
+/// Recheck immediately before each publication.
+///
+/// A failed recheck does not publish that format or any later one. When no
+/// format has been set, the original error is returned. When an earlier format
+/// was set, or a later publish fails after one succeeded, the error reports
+/// mutation uncertainty. The caller rolls the clipboard back, or leaves it
+/// empty when rollback fails. Unscoped staging does not call this function.
+#[cfg(any(windows, test))]
+pub(crate) fn publish_formats(
+    count: usize,
+    mut recheck: impl FnMut() -> Result<()>,
+    mut publish: impl FnMut(usize) -> Result<()>,
+) -> Result<()> {
+    let mut published = 0usize;
+    for index in 0..count {
+        if let Err(error) = recheck() {
+            return Err(publication_error(published, error));
+        }
+        if let Err(error) = publish(index) {
+            return Err(publication_error(published, error));
+        }
+        published = published.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// Preserve a refusal that happened before any format was set. A later failure
+/// can no longer prove the payload stayed unpublished.
+#[cfg(any(windows, test))]
+fn publication_error(published: usize, error: DriverError) -> DriverError {
+    if published == 0 {
+        error
+    } else {
+        match error {
+            DriverError::Cancelled { .. } => DriverError::Cancelled {
+                maybe_executed: true,
+            },
+            DriverError::Timeout { .. } => DriverError::Timeout {
+                maybe_executed: true,
+            },
+            DriverError::Crashed { .. } => DriverError::Crashed {
+                maybe_executed: true,
+            },
+            DriverError::NotSettable { .. } => DriverError::NotSettable {
+                maybe_executed: true,
+            },
+            DriverError::Native { message, .. } => DriverError::Native {
+                message,
+                maybe_executed: true,
+            },
+            _ => DriverError::Native {
+                message: "clipboard publication stopped after a format was set".into(),
+                maybe_executed: true,
+            },
+        }
+    }
+}
+
 /// Injectable clipboard OS boundary. Every method is bounded by the caller.
 /// `stage` serializes the ENTIRE transaction across sessions and processes and
 /// saves all supported formats before mutation; unsupported formats refuse.
@@ -72,11 +130,14 @@ pub use super::ffi::clipboard::NativeClipboard;
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize_publish, bind_admitted_proof, PublishProof};
+    use super::{authorize_publish, bind_admitted_proof, publish_formats, PublishProof};
     use crate::input::api::AdmittedTarget;
     use crate::uia::patterns::ActionContext;
-    use gcu_core::driver::{Cancel, DriverError};
-    use std::sync::{Arc, Mutex};
+    use gcu_core::driver::{Cancel, DriverError, Result};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
 
     fn target(hwnd: u64) -> AdmittedTarget {
         AdmittedTarget {
@@ -132,5 +193,179 @@ mod tests {
             }
         ));
         assert!(!context.maybe_executed());
+    }
+
+    fn context() -> ActionContext {
+        ActionContext::until(
+            &Cancel::default(),
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+    }
+
+    fn count_publishes(recheck: impl FnMut() -> Result<()>) -> (usize, Result<()>) {
+        let published = AtomicUsize::new(0);
+        let result = publish_formats(4, recheck, |_| {
+            published.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        (published.load(Ordering::SeqCst), result)
+    }
+
+    #[test]
+    fn publish_formats_does_not_publish_when_cancelled_after_empty() {
+        let cancel = Cancel::default();
+        let context = ActionContext::until(
+            &cancel,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        let proof: PublishProof = Arc::new(|| Ok(()));
+        authorize_publish(&context, &proof).unwrap();
+        cancel.cancel();
+        let (published, result) = count_publishes(|| authorize_publish(&context, &proof));
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            DriverError::Cancelled {
+                maybe_executed: false
+            }
+        ));
+        assert_eq!(published, 0);
+    }
+
+    #[test]
+    fn publish_formats_does_not_publish_when_the_post_empty_proof_closes() {
+        let context = context();
+        let closing = context.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let proof: PublishProof = Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) >= 1 {
+                closing.close();
+            }
+            Ok(())
+        });
+        authorize_publish(&context, &proof).unwrap();
+        let (published, result) = count_publishes(|| authorize_publish(&context, &proof));
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            DriverError::Timeout {
+                maybe_executed: false
+            }
+        ));
+        assert_eq!(published, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn publish_formats_does_not_publish_when_the_bound_target_changes() {
+        let live = Arc::new(Mutex::new(target(8)));
+        let current = Arc::clone(&live);
+        let proof = bind_admitted_proof(
+            target(8),
+            Arc::new(move |admitted| {
+                let live = current.lock().unwrap_or_else(|poison| poison.into_inner());
+                if live.hwnd != admitted.hwnd
+                    || live.incarnation != admitted.incarnation
+                    || live.pid != admitted.pid
+                    || live.created != admitted.created
+                    || live.boot != admitted.boot
+                {
+                    return Err(DriverError::ScopeDenied);
+                }
+                Ok(())
+            }),
+        );
+        let context = context();
+        authorize_publish(&context, &proof).unwrap();
+        *live.lock().unwrap_or_else(|poison| poison.into_inner()) = target(99);
+        let (published, result) = count_publishes(|| authorize_publish(&context, &proof));
+        let error = result.unwrap_err();
+        assert_eq!(error, DriverError::ScopeDenied);
+        assert!(!error.maybe_executed());
+        assert_eq!(published, 0);
+    }
+
+    #[test]
+    fn publish_formats_stops_after_one_format_when_the_next_recheck_fails() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let proof: PublishProof = Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) >= 2 {
+                Err(DriverError::ScopeDenied)
+            } else {
+                Ok(())
+            }
+        });
+        let context = context();
+        authorize_publish(&context, &proof).unwrap();
+        let (published, result) = count_publishes(|| authorize_publish(&context, &proof));
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            DriverError::Native {
+                maybe_executed: true,
+                ..
+            }
+        ));
+        assert_eq!(published, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn publish_formats_publishes_every_format_when_rechecks_pass() {
+        let context = context();
+        let proof: PublishProof = Arc::new(|| Ok(()));
+        authorize_publish(&context, &proof).unwrap();
+        let (published, result) = count_publishes(|| authorize_publish(&context, &proof));
+        result.unwrap();
+        assert_eq!(published, 4);
+    }
+
+    #[test]
+    fn publish_formats_keeps_the_original_error_when_the_first_publish_fails() {
+        let error = publish_formats(2, || Ok(()), |_| {
+            Err(DriverError::Native {
+                message: "Windows clipboard operation failed".into(),
+                maybe_executed: false,
+            })
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DriverError::Native {
+                message: "Windows clipboard operation failed".into(),
+                maybe_executed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn publish_formats_reports_uncertainty_when_a_later_publish_fails() {
+        let published = AtomicUsize::new(0);
+        let error = publish_formats(
+            4,
+            || Ok(()),
+            |index| {
+                if index == 0 {
+                    published.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                } else {
+                    Err(DriverError::Native {
+                        message: "Windows clipboard operation failed".into(),
+                        maybe_executed: false,
+                    })
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            DriverError::Native {
+                maybe_executed: true,
+                ..
+            }
+        ));
+        assert_eq!(published.load(Ordering::SeqCst), 1);
     }
 }

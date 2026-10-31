@@ -32,13 +32,16 @@ pub struct FakeState {
     pub child_pid: u32,
     /// Child process creation time. Zero uses the window's creation time.
     pub child_created: u64,
-    /// After this many recipient reads, install the pid and creation time.
+    /// Live boot read by a scoped sample or send. Empty uses the carried claim.
+    pub child_boot: String,
+    /// After this many sample/send entries, install the pid and creation time.
     ///
-    /// `None` keeps `child_pid`. The count starts at one for the first recipient
-    /// read. Used to replace the process after the first admission and before a
-    /// later sample or send.
-    pub replace_recipient_after: Option<(usize, u32, u64)>,
-    recipient_reads: usize,
+    /// The count starts at one for the first sample or send in that action.
+    /// `None` keeps `child_pid`. This runs inside the sample or send, before a
+    /// content read or a posted event, not as a separate recipient query.
+    pub replace_on_delivery: Option<(usize, u32, u64)>,
+    /// Sample and send entries, including those that refuse before delivery.
+    pub delivery_checks: usize,
     /// Exact screen points and the HWND under them. Checked before [`Self::hit_receiver`].
     pub hit_at: Vec<(f64, f64, u64)>,
     /// Mouse-capture owner. When set, every pointer query returns it.
@@ -102,8 +105,9 @@ impl Default for FakeState {
             child: 9,
             child_pid: 0,
             child_created: 0,
-            replace_recipient_after: None,
-            recipient_reads: 0,
+            child_boot: String::new(),
+            replace_on_delivery: None,
+            delivery_checks: 0,
             hit_at: Vec::new(),
             capture_hwnd: None,
             hit_receiver: None,
@@ -157,7 +161,56 @@ impl FakeInput {
     pub fn state(&self) -> FakeState {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
+
+    /// Compare a carried claim at the start of sample or send.
+    ///
+    /// The replacement is applied before the comparison and before any content
+    /// read or posted event. `None` is unscoped and does not compare. An empty
+    /// `child_boot` uses the claim's boot so ordinary fixtures keep matching.
+    fn prove_delivery(&self, target: &Target, claim: Option<&AdmittedTarget>) -> Result<()> {
+        let (pid, created, boot, carried) = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.delivery_checks = state.delivery_checks.saturating_add(1);
+            if let Some((after, next_pid, next_created)) = state.replace_on_delivery {
+                if state.delivery_checks > after {
+                    state.child_pid = next_pid;
+                    state.child_created = next_created;
+                }
+            }
+            let pid = if state.child_pid == 0 {
+                target.window.pid
+            } else {
+                state.child_pid
+            };
+            let created = if state.child_created == 0 {
+                target.window.process_created
+            } else {
+                state.child_created
+            };
+            let boot = state.child_boot.clone();
+            (pid, created, boot, claim.cloned())
+        };
+        let Some(carried) = carried else {
+            return Ok(());
+        };
+        let live_boot = if boot.is_empty() {
+            carried.boot.clone()
+        } else {
+            boot
+        };
+        let admitted = crate::scope_identity::WindowClaim {
+            hwnd: carried.hwnd,
+            incarnation: carried.incarnation,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: carried.pid,
+                created: carried.created,
+                boot: carried.boot,
+            },
+        };
+        crate::scope_identity::admit_recipient(&admitted, pid, created, &live_boot)
+    }
 }
+
 #[async_trait]
 impl InputApi for FakeInput {
     async fn before_paste(
@@ -175,34 +228,6 @@ impl InputApi for FakeInput {
 
     async fn clipboard_safe(&self, _: Target, _: Option<NativeHandle>, _: String) -> Result<bool> {
         Ok(self.state().clipboard_safe)
-    }
-    async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        state.recipient_reads = state.recipient_reads.saturating_add(1);
-        if let Some((after, pid, created)) = state.replace_recipient_after {
-            if state.recipient_reads > after {
-                state.child_pid = pid;
-                state.child_created = created;
-            }
-        }
-        let child_pid = state.child_pid;
-        let child_created = state.child_created;
-        drop(state);
-        Ok((
-            if child_pid == 0 {
-                target.window.pid
-            } else {
-                child_pid
-            },
-            if child_created == 0 {
-                target.window.process_created
-            } else {
-                child_created
-            },
-        ))
     }
     async fn pointer_receiver(&self, point: WindowPoint) -> Result<Option<u64>> {
         let state = self.state();
@@ -324,7 +349,9 @@ impl InputApi for FakeInput {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()> {
+        self.prove_delivery(&target, claim.as_ref())?;
         self.update(|s| s.packet_sizes.push(events.len()));
         for event in events {
             let n = self
@@ -374,7 +401,8 @@ impl InputApi for FakeInput {
         });
         Ok(())
     }
-    async fn sample(&self, _: Target) -> Result<u64> {
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64> {
+        self.prove_delivery(&target, claim.as_ref())?;
         let s = self.state();
         if !s.sent.is_empty() {
             tokio::time::sleep(s.sample_delay).await;

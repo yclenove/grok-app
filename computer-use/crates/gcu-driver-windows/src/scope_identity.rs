@@ -78,24 +78,27 @@ impl JobScope {
 
 /// The child that will receive input must be the admitted process instance.
 ///
-/// Memory only. No blocking, timeout, or cancellation. A different creation
-/// time is a different process, including the same pid.
+/// Compares pid, creation time, and boot. Memory only. No blocking, timeout,
+/// or cancellation. A different creation time or boot is a different process,
+/// including the same pid. Callers read the live fields outside the pointer gate
+/// and do not replace `admitted` with that live identity.
 pub(crate) fn admit_recipient(
     admitted: &WindowClaim,
     recipient_pid: u32,
     recipient_created: u64,
+    recipient_boot: &str,
 ) -> Result<()> {
-    if !proved_process(&admitted.owner) || admitted.hwnd == 0 || admitted.incarnation == 0 {
+    if admitted.hwnd == 0 || admitted.incarnation == 0 {
         return Err(DriverError::ScopeDenied);
     }
-    if recipient_pid == 0
-        || recipient_created == 0
-        || recipient_pid != admitted.owner.pid
-        || recipient_created != admitted.owner.created
-    {
-        return Err(DriverError::ScopeDenied);
-    }
-    Ok(())
+    prove_process(
+        &admitted.owner,
+        &ProcessClaim {
+            pid: recipient_pid,
+            created: recipient_created,
+            boot: recipient_boot.to_owned(),
+        },
+    )
 }
 
 /// The fragment must belong to the admitted window. `None` is unproved.
