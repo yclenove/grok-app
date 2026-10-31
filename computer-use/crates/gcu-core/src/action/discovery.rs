@@ -140,6 +140,12 @@ impl ActionRouter {
         self.check_boundary(session)
             .await
             .map_err(|code| (CallError::from(code), false))?;
+        // Scope never permits launching, even an already admitted fixture.
+        // Refuse before resolution or Host approval; keep the driver's own
+        // refusal as an independent boundary for direct driver callers.
+        if self.fixture_scoped {
+            return Err((CallError::ScopeDenied, false));
+        }
         let cancel = Cancel::default();
         let app = self
             .native(

@@ -266,6 +266,47 @@ async fn autoclick_covers_four_decisions_timeout_and_cancel() {
 }
 
 #[tokio::test]
+async fn eval_modes_only_auto_grant_apps_and_never_confirm_or_persist() {
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("approvals.json");
+    let app = sample("Fixture A", SignatureState::Unsigned);
+    let eval = cfg!(all(feature = "eval-autoapprove", debug_assertions));
+    for (mode, expected) in [
+        ("auto-allow-turn", ApprovalDecision::Turn),
+        ("auto-allow-session", ApprovalDecision::Session),
+        ("auto-allow-always", ApprovalDecision::Session),
+        ("auto-deny", ApprovalDecision::Deny),
+    ] {
+        let cancel = Cancel::new();
+        let mut req = hook(
+            &app,
+            Some(&path),
+            &cancel,
+            Some("deny"),
+            Duration::from_secs(1),
+            true,
+        );
+        req.mode = Some(mode);
+        assert_eq!(
+            decide_with_autoclick(&req).await,
+            if eval {
+                expected
+            } else {
+                ApprovalDecision::Deny
+            }
+        );
+        // Even the test hook cannot turn an active eval app grant into a
+        // sensitive/foreground confirmation. Outside eval builds the mode is inert.
+        req.autoclick = Some("confirm-allow");
+        assert_eq!(confirm_for_test(&req).await, !eval, "{mode}");
+        cancel.cancel();
+        assert_eq!(decide_with_autoclick(&req).await, ApprovalDecision::Deny);
+        assert!(!confirm_for_test(&req).await);
+        assert!(!path.exists(), "{mode} persisted Always");
+    }
+}
+
+#[tokio::test]
 async fn pre_cancelled_or_disabled_always_does_not_write() {
     let app = sample("Demo", SignatureState::Unsigned);
     let dir = TempDir::new().unwrap();

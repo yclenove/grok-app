@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus, Stdio};
 use tempfile::TempDir;
 #[cfg(target_os = "linux")]
 #[path = "support/resume.rs"]
@@ -31,6 +31,16 @@ fn native_command(home: &TempDir) -> std::process::Command {
         .env_remove("GCU_EVAL_READ_ERROR")
         .env_remove("GCU_EVAL_ORACLE_FILE");
     c
+}
+
+fn config_directory(home: &TempDir) -> std::path::PathBuf {
+    // Match the CLI's platform config path; macOS does not use XDG_CONFIG_HOME.
+    let root = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support")
+    } else {
+        home.path().to_path_buf()
+    };
+    root.join("grok-computer-use")
 }
 
 #[test]
@@ -392,14 +402,7 @@ fn resume_non_tty_refuses_before_reading_credentials() {
 #[test]
 fn config_malformed_or_invalid_values_exit_two() {
     let h = TempDir::new().unwrap();
-    // The config root differs per platform: macOS keeps it under Library/Application Support,
-    // while Windows (APPDATA) and Linux (XDG_CONFIG_HOME) use the temp root itself.
-    let root = if cfg!(target_os = "macos") {
-        h.path().join("Library").join("Application Support")
-    } else {
-        h.path().to_path_buf()
-    };
-    let dir = root.join("grok-computer-use");
+    let dir = config_directory(&h);
     std::fs::create_dir_all(&dir).unwrap();
     for config in [
         "[observe",
@@ -417,7 +420,7 @@ fn config_malformed_or_invalid_values_exit_two() {
 struct Mcp {
     child: Child,
     input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    output: std::sync::mpsc::Receiver<std::io::Result<String>>,
     id: u64,
 }
 impl Mcp {
@@ -429,6 +432,9 @@ impl Mcp {
         )
     }
     fn start_with_approval(h: &TempDir, profile: &str, automatic: bool) -> Self {
+        Self::start_with_mode(h, profile, automatic.then_some("auto-allow-session"))
+    }
+    fn start_with_mode(h: &TempDir, profile: &str, mode: Option<&str>) -> Self {
         let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gcu"));
         c.args([
             "mcp",
@@ -453,13 +459,31 @@ impl Mcp {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-        if automatic {
-            c.env("GCU_APPROVAL", "auto-allow-session")
+        if let Some(mode) = mode {
+            c.env("GCU_APPROVAL", mode)
                 .env("GCU_EVAL_ORACLE_FILE", h.path().join("oracle.json"));
         }
         let mut child = c.spawn().unwrap();
         let input = child.stdin.take();
-        let output = BufReader::new(child.stdout.take().unwrap());
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let (lines, output) = std::sync::mpsc::sync_channel(1);
+        // A pipe read has no portable deadline. Keep it off the test thread;
+        // timeout/panic drops Mcp, kills the child and closes this reader's pipe.
+        let _reader = std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if lines.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = lines.send(Err(error));
+                    break;
+                }
+            }
+        });
         let mut m = Self {
             child,
             input,
@@ -477,8 +501,11 @@ impl Mcp {
     fn request(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
         self.send(json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params}));
-        let mut line = String::new();
-        assert!(self.output.read_line(&mut line).unwrap() > 0);
+        let line = self
+            .output
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("MCP response timed out or stdout closed")
+            .unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["id"], self.id, "{v}");
         assert!(v.get("error").is_none(), "{v}");
@@ -489,19 +516,59 @@ impl Mcp {
     }
     fn close(mut self) {
         self.input.take();
-        assert!(self.child.wait().unwrap().success());
+        let status = self
+            .wait_for_exit(std::time::Duration::from_secs(10))
+            .unwrap()
+            .expect("MCP child did not exit after stdin closed");
+        assert!(status.success(), "{status}");
+    }
+    fn wait_for_exit(&mut self, limit: std::time::Duration) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(Some(status));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
+fn assert_confirmation_denied(result: &Value) {
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "approval_denied"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["message"],
+        "approval denied"
+    );
+    assert_eq!(result["structuredContent"]["action"]["outcome"], "refused");
+    assert_eq!(result["structuredContent"]["action"]["delivery"], "none");
+}
+
+#[cfg(all(feature = "eval-autoapprove", debug_assertions))]
+fn assert_form_oracle_unchanged(path: &std::path::Path) {
+    let oracle: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(oracle["text"]["text"], "", "{oracle}");
+    // The oracle creates a counter only after the first press.
+    assert_eq!(oracle["presses"]["submit"].as_u64().unwrap_or(0), 0);
+    assert_eq!(oracle["held_input"], 0);
+}
+
+#[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
-fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
+fn call_form_sensitive_mutations_are_denied_and_observation_image_survives_exit() {
     let h = TempDir::new().unwrap();
+    let oracle = h.path().join("oracle.json");
     for (tool, args) in [
         ("get_app_state", r#"{"app":"fake.form"}"#),
-        ("click", r#"{"app":"fake.form","element_index":3}"#),
+        ("click", r#"{"app":"fake.form","element_index":1}"#),
     ] {
-        let oracle = h.path().join("oracle.json");
         let o = command(&h)
             .env("GCU_APPROVAL", "auto-allow-session")
             .env("GCU_EVAL_ORACLE_FILE", &oracle)
@@ -534,30 +601,53 @@ fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
                     0o700
                 );
             }
-        } else {
-            let v: Value = serde_json::from_slice(&std::fs::read(oracle).unwrap()).unwrap();
-            assert_eq!(v["presses"]["submit"], 1);
-            let report = command(&h)
-                .args(["doctor", "--driver", "fake", "--json"])
-                .assert()
-                .success()
-                .get_output()
-                .stdout
-                .clone();
-            let report: Value = serde_json::from_slice(&report).unwrap();
-            assert_eq!(report["recent_calls"][0]["tool"], "click");
-            assert!(report["recent_calls"][0].get("target").is_none());
-            assert!(report["recent_calls"][0].get("thumbnail").is_none());
         }
+        assert_form_oracle_unchanged(&oracle);
     }
+
+    // Each call has a fresh scene. The explicit Name click above is targeted
+    // input needing only the app grant. Unindexed type_text has no policy target
+    // (even though the driver can use the focused field), so unknown-target risk
+    // requires a sensitive confirmation, as does Submit. Neither is foreground.
+    // ADR 0017 §3: an app grant does not confirm either mutation.
+    for (tool, args) in [
+        ("type_text", r#"{"app":"fake.form","text":"Ada"}"#),
+        ("click", r#"{"app":"fake.form","element_index":3}"#),
+    ] {
+        std::fs::remove_file(&oracle).unwrap();
+        let denied = command(&h)
+            .env("GCU_APPROVAL", "auto-allow-session")
+            .env("GCU_EVAL_ORACLE_FILE", &oracle)
+            .args(["call", tool, "--driver", "fake", "--args", args, "--json"])
+            .assert()
+            .code(4)
+            .get_output()
+            .stdout
+            .clone();
+        let denied: Value = serde_json::from_slice(&denied).unwrap();
+        assert_confirmation_denied(&denied);
+        assert_form_oracle_unchanged(&oracle);
+    }
+
+    let report = command(&h)
+        .args(["doctor", "--driver", "fake", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&report).unwrap();
+    assert_eq!(report["recent_calls"][0]["tool"], "click");
+    assert!(report["recent_calls"][0].get("target").is_none());
+    assert!(report["recent_calls"][0].get("thumbnail").is_none());
 }
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
 fn call_config_denied_app_and_observation_limits_are_enforced() {
     let h = TempDir::new().unwrap();
-    let dir = h.path().join("grok-computer-use");
-    std::fs::create_dir(&dir).unwrap();
+    let dir = config_directory(&h);
+    std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.toml"),
         "[observe]\nmax_tree_nodes=2\nmax_image_edge=320\nimage_format='jpeg'",
@@ -582,6 +672,7 @@ fn call_config_denied_app_and_observation_limits_are_enforced() {
     let v: Value = serde_json::from_slice(&out).unwrap();
     let screenshot = &v["structuredContent"]["state"]["screenshot"];
     assert!(screenshot["width"].as_u64().unwrap() <= 320);
+    assert!(screenshot["height"].as_u64().unwrap() <= 320);
     assert_eq!(screenshot["mime"], "image/jpeg");
     assert!(v["structuredContent"]["state"]["truncated"].is_object());
     let output = command(&h)
@@ -632,7 +723,7 @@ fn call_config_denied_app_and_observation_limits_are_enforced() {
 impl Drop for Mcp {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.wait_for_exit(std::time::Duration::from_secs(2));
     }
 }
 
@@ -730,24 +821,112 @@ fn mcp_control_stop_persists_across_process_restart() {
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
-fn mcp_form_submit_process_is_verified_by_fake_oracle() {
-    let h = TempDir::new().unwrap();
-    let mut m = Mcp::start(&h, "default");
-    m.request("tools/list", json!({}));
+fn mcp_form_sensitive_mutations_are_denied_without_changing_fake_oracle() {
+    // As in the one-shot test, the explicit Name click needs only the app grant;
+    // unindexed typing (unknown policy target) and Submit need sensitive confirms.
+    // Close a separate process after each refusal to check its independent oracle.
     for (tool, args) in [
-        ("get_app_state", json!({"app":"fake.form"})),
-        ("click", json!({"app":"fake.form","element_index":1})),
         ("type_text", json!({"app":"fake.form","text":"Ada"})),
         ("click", json!({"app":"fake.form","element_index":3})),
     ] {
-        assert_eq!(m.call(tool, args)["isError"], false);
+        let h = TempDir::new().unwrap();
+        let mut m = Mcp::start(&h, "default");
+        m.request("tools/list", json!({}));
+        let state = m.call("get_app_state", json!({"app":"fake.form"}));
+        assert_eq!(state["isError"], false, "{state}");
+        let click = m.call("click", json!({"app":"fake.form","element_index":1}));
+        assert_eq!(click["isError"], false, "{click}");
+        assert_eq!(
+            click["structuredContent"]["action"]["delivery"],
+            "targeted_event"
+        );
+        let denied = m.call(tool, args);
+        assert_confirmation_denied(&denied);
+        m.close();
+        assert_form_oracle_unchanged(&h.path().join("oracle.json"));
     }
-    m.close();
-    let oracle: Value =
-        serde_json::from_slice(&std::fs::read(h.path().join("oracle.json")).unwrap()).unwrap();
-    assert_eq!(oracle["text"]["text"], "Ada");
-    assert_eq!(oracle["presses"]["submit"], 1);
-    assert_eq!(oracle["held_input"], 0);
+}
+
+#[cfg(all(
+    unix,
+    feature = "script",
+    feature = "eval-autoapprove",
+    debug_assertions
+))]
+#[test]
+fn mcp_production_worker_and_batch_hard_stop_after_confirmation_denial() {
+    for mode in ["auto-allow-turn", "auto-allow-session", "auto-allow-always"] {
+        for script in [false, true] {
+            let h = TempDir::new().unwrap();
+            let mut m = Mcp::start_with_mode(&h, "full", Some(mode));
+            let seen = m.call(
+                "get_app_state",
+                json!({"app":"fake.form","include_screenshot":false}),
+            );
+            assert_eq!(seen["isError"], false, "{seen}");
+            if script {
+                // Both mutations run inside the actual supervised worker. The
+                // second would set Name if catching the first refusal cleared
+                // the worker's hard stop latch.
+                let result = m.call(
+                    "computer_script",
+                    json!({
+                        "code": r#"
+                        const app = await cu.app("fake.form");
+                        const state = await app.state({ screenshot: false });
+                        const submit = state.find({ name: "Submit" });
+                        const name = state.find({ role: "text_field" });
+                        try { await app.click(submit); } catch (e) {}
+                        await app.setValue(name, "later");
+                        return "after-refusal";
+                    "#,
+                        "timeout_ms": 5000
+                    }),
+                );
+                assert_eq!(result["isError"], true, "{mode}: {result}");
+                // The caught denial drops the observation the follow-up write
+                // was based on, so the router refuses it as stale. Either
+                // refusal is acceptable; what must hold is that the write does
+                // not run, which the oracle check after close verifies.
+                let code = result["structuredContent"]["error"]["code"].as_str();
+                assert!(
+                    matches!(code, Some("approval_denied" | "stale_screenshot")),
+                    "{result}"
+                );
+                assert!(!result.to_string().contains("after-refusal"), "{result}");
+            } else {
+                let result = m.call(
+                    "computer_batch",
+                    json!({
+                        "app":"fake.form",
+                        "steps":[
+                            {"click":{"element_index":3}},
+                            {"set_value":{"element_index":1,"value":"later"}}
+                        ],
+                        "stop_on_error":false,
+                        "final_state":false
+                    }),
+                );
+                assert_confirmation_denied(&result);
+                assert_eq!(result["structuredContent"]["failed_step"], 0, "{result}");
+                assert_eq!(
+                    result["structuredContent"]["steps"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            }
+            m.close();
+            assert_form_oracle_unchanged(&h.path().join("oracle.json"));
+            let grants = if cfg!(target_os = "macos") {
+                config_directory(&h).join("state/approvals.json")
+            } else {
+                h.path().join("state/grok-computer-use/approvals.json")
+            };
+            assert!(!grants.exists(), "{mode} persisted a grant");
+        }
+    }
 }
 
 #[test]
