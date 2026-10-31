@@ -514,7 +514,8 @@ mod tests {
         let error = recovery
             .receive(reply, &request, &mut writer, 1, 1)
             .await
-            .expect_err("scoped clipboard stage opened");
+            .err()
+            .expect("scoped clipboard stage opened");
         assert_eq!(error, DriverError::CapabilityUnavailable);
         assert!(!error.maybe_executed());
         assert_eq!(board.stages.load(Ordering::SeqCst), 0);
@@ -556,7 +557,8 @@ mod tests {
         let (reply, request) = stage_pair("UNSCOPED-CLIPBOARD-PAYLOAD", false);
         let (_reader, mut writer) = tokio::io::duplex(256);
         let result = recovery.receive(reply, &request, &mut writer, 1, 1).await;
-        assert_eq!(result.unwrap(), None);
+        // `Reply` carries clipboard text and has no Debug/PartialEq.
+        assert!(matches!(result, Ok(None)));
         assert_eq!(board.stages.load(Ordering::SeqCst), 1);
         assert!(board
             .contents

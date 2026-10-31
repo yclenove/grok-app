@@ -4,6 +4,7 @@ use gcu_core::driver::Result;
 use std::hash::{Hash, Hasher};
 
 /// Process proofs in one scoped sample: before the text read, then before return.
+#[cfg(test)]
 pub(crate) const SCOPED_PROOFS: usize = 2;
 
 /// Read window text once. Drop the hash when `prove` fails. No later read runs here.
