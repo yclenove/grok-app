@@ -252,7 +252,7 @@ fn ab_cleanup_failure_on_desktop_oneshot_stops_later_arms() {
         builtin_fake: true,
         builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
-        gcu_bin: Some(gcu()),
+        gcu_bin: None,
         probe: Some(dir.join("probe.json")),
         behavior: Some("scripted".into()),
         platform: host_platform().into(),

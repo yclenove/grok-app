@@ -2122,6 +2122,7 @@ dependencies = [
  "gcu-driver-linux",
  "gcu-driver-macos",
  "gcu-driver-windows",
+ "gcu-eval",
  "gcu-host-api",
  "gcu-host-protocol",
  "gcu-mcp",

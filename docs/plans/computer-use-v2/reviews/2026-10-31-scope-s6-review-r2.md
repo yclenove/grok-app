@@ -58,3 +58,18 @@ Nice-to-have:
 - Bound and own subprocess-test failure cleanup. `FakeProvider::teardown` blocks in `Child::wait` (`src/disposable/tests.rs:92`), and the owner/supervisor/workloads lack failure-safe cleanup guards if startup assertions fail. The new fake-agent executable tests also use unbounded `.output()` (`tests/fake_agent_boundary.rs:50`, `:89`).
 
 Validation: **static inspection only**; `git diff --check origin/feat/cu-v2...HEAD` passed. No Cargo/build/tests, mutation or reproduction runs, network, SSH, model calls, desktop execution, credential operations, or source/test edits. Only `docs/plans/computer-use-v2/reviews/2026-10-31-scope-s6-review-r2.md` was written, uncommitted.
+
+## 修复记录
+
+本节追加第 2 轮修复，保留原独立评审正文、结论及其验证范围。按本轮要求改为单一准入决定，不再用相邻目录、文件名或环境标记认证 backend；A2/A3 的实现保留。
+
+| 条目 | 根因修复 | 确定性回归（生产路径，已添加，完整执行未运行） |
+| --- | --- | --- |
+| finding 1 / A1：复制真实 helper 后可替相邻任意可执行文件背书 | `boundary::admit_fake_backend` 是唯一离线 backend 准入决定：只允许进程内 fake 实现，任何显式路径或请求外部 scoped engine 均拒绝。standalone 与 hidden fake-agent 在 preflight、handshake/probe 和行为分支之前调用它；后端调用直接进入 `fake_gcu::run`，不再构造 backend `Command`。runner 同样调用该决定；移除旧 artifact 后端信任、声明豁免与 CLI 的独立 backend 检查。`launch` 不再注入隐式 `GCU_BIN` 或重入标记。`builtin_gcu` 仅保留配置兼容，不授予权限。 | `gcu-eval/tests/fake_agent_boundary.rs::relocated_genuine_callers_never_bless_forged_sibling_backends` 把真实 standalone / hidden 调用方复制到新目录，在旁边分别放置伪装成 `eval-fake-gcu` / `gcu-eval` 的启动 sentinel；Unix 是任意 shell wrapper，Windows 是可执行的无害日志 sentinel。覆盖旧标记的 8 种缺失/置位组合（含全部缺失）、两种 backend 形式，拒绝时 sentinel 必须不存在；先直接启动 sentinel 作正向对照。另有原位置/复制后两个真实 helper 的进程内 backend 正向对照（工具调用后正常返回脚本设定的 101），以及真实外部 artifact / 空 backend 路径的拒绝。子进程有 5 秒退出界限、失败时有界 kill/reap 守卫，输出写文件避免管道阻塞。 |
+| finding 2 / A4：runner 放行 S3 backend，agent 拒绝后被评分为 crash 并继续 | 删除 `trusted_fake_scope` 豁免；真实 `gcu` 加 `fake_scope` 的组合也走同一准入。不支持的组合在 `run_one` 原有 provider 门禁处生成 `not_run` 和 unavailable-provider 环境证据，无分配、engine/client 启动、scope ACK 或凭据操作；既有 `InheritedStop` 因而停止后续 task/arm/repeat。缺少 engine 路径的 scope 请求同样提前拒绝。README 与 ADR 0017 §4 记录此离线策略。 | 新增 `gcu-cli/tests/eval_backend_admission.rs`（harness-free），`CARGO_BIN_EXE_gcu` 保证使用实际 S3 binary，fake client 自重入直接调用生产 fake-agent 入口。经实际 `run_tasks` / `run_ab` 覆盖 `crash` / `scripted`、有/无 scope、legacy 声明真假、缺失 engine 路径；后续 task 使用坏 oracle 证明连自检也未开始。断言全部 `not_run`、`client_started=false`、无环境分配、工具 telemetry unknown、后续 task/arm/repeat 带源 task/A/0 的 inherited refusal、A/B provenance 为 `not_run`；写真实 task/suite/A/B 报告检查 null 未测量计数及 JSON round-trip。无外部 backend 的进程内正向对照仍启动真实 fake client、得到 Pass 并清理。整段有 30 秒超时。测试专用的 `gcu-cli → gcu-eval` dev-dependency 及 lockfile 同步，避免依赖预先手工构建的 sibling 文件；不增加 runtime dependency。 |
+
+既有 runner、A/B 和 cleanup-failure 正向配置改用无 backend 路径的进程内 fake，使 A2 的 cleanup/telemetry 回归仍到达真实 client 与清理路径。A3 的新鲜时钟实现与回归未改。
+
+验证（未调用 Cargo）：直接 `rustc --test -D warnings` 编译实际 `boundary.rs` 与上述仅依赖 std 的 executable 回归模块；以最小 `RunConfig` 形状适配器隔离其余 crate，Linux 上实际执行 4 个 `boundary::tests`，全部通过。对同一隔离组合执行 Linux `aarch64-unknown-linux-gnu`、Windows `x86_64-pc-windows-gnu`、macOS `aarch64-apple-darwin` 的 `--emit metadata -D warnings`，均无警告通过；此处没有执行 executable 回归，也不代表整个 crate 的三平台构建。直接 rustfmt 检查改动 Rust 文件、manifest/lockfile/harness 登记检查及 `git diff --check` 通过。完整 crate 编译、clippy、上述生产 executable / S3 集成回归与 Linux/Windows/macOS 完整 warning-free 构建均为 **not_run**，按“不运行 Cargo”交由构建机验证。
+
+其余 (b) 证据边界保持：真实 provider、原生桌面/模型、可信签名、外部隔离/网关、整树与父死回收均未被本轮离线修复证明。

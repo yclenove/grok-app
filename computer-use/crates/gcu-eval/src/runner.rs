@@ -186,7 +186,8 @@ pub struct SuiteReport {
 pub struct RunConfig {
     /// Client binary. `None` skips every task as `not_run`.
     pub grok_bin: Option<PathBuf>,
-    /// `gcu` binary written into the isolated MCP config.
+    /// `gcu` binary written into the isolated MCP config. Every supplied path
+    /// requires the unavailable provider; local fake runs leave this absent.
     pub gcu_bin: Option<PathBuf>,
     /// Model id. This runner never calls a model API itself.
     pub model: String,
@@ -231,7 +232,8 @@ pub struct RunConfig {
     /// integration exist. The legacy attestation flag cannot enable this path.
     pub real_driver: bool,
     /// Trusted S3 fake-only manifest, sent exclusively over inherited control.
-    /// This does not enable native scope or waive the real-client boundary.
+    /// Runner compositions needing an external S3 engine remain `not_run`.
+    /// The standalone S3 supervisor is independently testable with a fake driver.
     pub fake_scope: Option<gcu_host_protocol::scope::Scope>,
     /// Fixture app started once per task when `real_driver` is set. It writes `$GCU_FIXTURE_STATE`.
     pub fixture_bin: Option<PathBuf>,
@@ -254,11 +256,8 @@ pub struct RunConfig {
     /// Trusted only for the cargo-built `eval-fake-agent` next to this process.
     /// A wrapper, copy, or same-named file elsewhere does not skip attestation.
     pub builtin_fake_bin: Option<PathBuf>,
-    /// Trust [`RunConfig::gcu_bin`] as the built-in fake gcu.
-    ///
-    /// This is true only for the `eval-fake-gcu` artifact beside this process, or
-    /// when `gcu_bin` is empty and the fake agent re-executes this process.
-    /// Any other path still needs attestation. The flag alone is not a grant.
+    /// Legacy declaration retained for config compatibility; grants no admission.
+    /// The fake backend runs in process only when `gcu_bin` is absent.
     pub builtin_gcu: bool,
     /// Preflight results for this run only. Cloning the config shares the map.
     /// A new [`RunConfig`] does not see another run's successes.
@@ -370,9 +369,6 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             RunStatus::NotRun,
             crate::boundary::WINDOWS_REAL_NOT_RUN,
         );
-    }
-    if let Some(reason) = crate::boundary::external_backend_block(cfg) {
-        return skipped(task, cfg, RunStatus::NotRun, reason);
     }
     let program = match crate::launch::resolve_client(cfg) {
         Ok(program) => program,

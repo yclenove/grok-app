@@ -14,7 +14,7 @@ use gcu_eval::{
     block_on, builtin_fake_agent_exit, builtin_fake_gcu_exit, bundled_tasks_dir, compare_trials,
     host_platform, judge_release, load_tasks, parse_approval, parse_release_evidence, run_tasks,
     trials_from_summary, write_release_report, write_reports, RunConfig, RunStatus, SuiteReport,
-    ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
+    ATTEST_REQUIRED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -116,11 +116,7 @@ struct RealFlags {
 fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
     match cli.driver.as_str() {
         "fake" => {
-            if cli.builtin_fake {
-                if cli.gcu.is_some() && !cli.attest_disposable_desktop {
-                    return Err(Stop::Usage(EXTERNAL_GCU_REFUSED.into()));
-                }
-            } else if let Some(grok) = &cli.grok {
+            if let Some(grok) = &cli.grok {
                 // A missing path never starts. Any file that is actually there is external.
                 let present = std::fs::symlink_metadata(grok).is_ok();
                 if present && !cli.attest_disposable_desktop {

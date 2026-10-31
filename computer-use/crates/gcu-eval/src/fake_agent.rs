@@ -1,9 +1,9 @@
 //! Scripted stand-in for the Grok CLI. It never calls a model API.
 //!
 //! Behavior comes from `GCU_EVAL_BEHAVIOR`. The process writes the fixture
-//! state, a transcript, and a probe, then optionally invokes `GCU_BIN`.
-//! `GCU_BIN` must be a verified built-in fake artifact. Environment declarations
-//! never admit an external backend. Every invocation passes `--driver fake`.
+//! state, a transcript, and a probe, then calls the in-process fake backend.
+//! Any supplied `GCU_BIN` is refused by the same decision as the runner,
+//! including copied siblings and genuine offline executables.
 
 use std::io::Write;
 use std::path::Path;
@@ -22,6 +22,8 @@ pub fn builtin_fake_agent_entry() -> u8 {
 }
 
 fn run() -> Result<u8, String> {
+    let external = std::env::var_os("GCU_BIN").map(std::path::PathBuf::from);
+    crate::boundary::admit_fake_backend(external.as_deref(), false).map_err(str::to_string)?;
     if tool_probe() {
         let body = serde_json::json!({ "tools": crate::EXPECTED_PREFLIGHT_TOOLS });
         println!(
@@ -150,32 +152,7 @@ fn invoke_suite() -> Result<(), String> {
 }
 
 fn invoke(args: &[&str]) -> Result<(), String> {
-    let bin = std::env::var_os("GCU_BIN")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| "GCU_BIN missing".to_string())?;
-    let reexec = std::env::var("GCU_EVAL_GCU_REEXEC").ok().as_deref() == Some("1");
-    // Reuse the runner's artifact identity policy in both executable entries.
-    // The re-entry marker selects argv only; it cannot authorize an arbitrary path.
-    let stem = if reexec { "gcu-eval" } else { "eval-fake-gcu" };
-    if !crate::boundary::is_builtin_artifact(&bin, stem) {
-        return Err(
-            "refusing an external gcu backend: provider_unavailable; declarations are not evidence"
-                .into(),
-        );
-    }
-    let mut command = std::process::Command::new(&bin);
-    if reexec {
-        command.arg(crate::INTERNAL_FAKE_GCU);
-    }
-    if !args.contains(&"--driver") {
-        command.arg("--driver").arg("fake");
-    }
-    let status = command.args(args).status().map_err(|err| err.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("gcu status {status}"))
-    }
+    crate::fake_gcu::run(args)
 }
 
 fn write_pass_state() -> Result<(), String> {

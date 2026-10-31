@@ -577,17 +577,11 @@ pub(crate) fn refuse_unsupported_launch(
     task: &crate::tasks::Task,
     cfg: &crate::RunConfig,
 ) -> Option<crate::TaskOutcome> {
-    // S3's scoped engine has a fixed --driver fake launch. Only the compiled
-    // artifact is an offline backend; an arbitrary path plus fake_scope is not.
-    let trusted_fake_scope = cfg.fake_scope.is_some()
-        && cfg
-            .gcu_bin
-            .as_deref()
-            .is_some_and(|path| crate::boundary::is_builtin_artifact(path, "gcu"));
+    // Use the helper's exact backend decision. S3's external engine is not an
+    // exception: unsupported compositions stop before allocating or spawning.
     let external_backend = cfg.builtin_fake
-        && cfg.gcu_bin.is_some()
-        && !crate::boundary::builtin_gcu_trusted(cfg)
-        && !trusted_fake_scope;
+        && crate::boundary::admit_fake_backend(cfg.gcu_bin.as_deref(), cfg.fake_scope.is_some())
+            .is_err();
     if cfg.run_local && !crate::boundary::launches_real_client(cfg) && !external_backend {
         return None;
     }

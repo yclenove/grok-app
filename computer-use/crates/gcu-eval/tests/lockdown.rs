@@ -76,7 +76,7 @@ fn cfg(_dir: &Path, behavior: &str) -> RunConfig {
         builtin_fake: true,
         builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
-        gcu_bin: Some(gcu()),
+        gcu_bin: None,
         platform: host_platform().into(),
         behavior: Some(behavior.into()),
         include_desktop: false,

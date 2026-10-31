@@ -1,13 +1,8 @@
-//! Whether a launch is allowed to start an external client.
+//! Client classification and the single offline backend admission decision.
 //!
-//! The built-in fake agent is selected by [`crate::runner::RunConfig::builtin_fake`],
-//! not by the file name of a path. A path in that slot is trusted only when it
-//! is this crate's `eval-fake-agent` or `eval-fake-gcu` artifact beside the
-//! running executable. Every other executable, and every real-driver launch,
-//! requires the disposable provider gate, which currently refuses all external
-//! launches. Legacy declarations are not evidence. A same-named copy or wrapper outside
-//! that directory is an external client. A hard link that replaces the
-//! artifact in place is not detected.
+//! Fake agents execute the fake backend in process. Every supplied backend
+//! path requires the unavailable disposable provider, regardless of placement,
+//! file name, legacy declarations, or a requested S3 scope.
 
 use crate::runner::RunConfig;
 use std::path::Path;
@@ -23,7 +18,7 @@ pub const ATTEST_REQUIRED: &str = concat!(
 );
 
 /// Printed when the built-in fake agent would call an operator-supplied `gcu`.
-pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend: provider_unavailable; --attest-disposable-desktop is not evidence; the built-in fake agent may call only verified offline artifacts";
+pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend: provider_unavailable; --attest-disposable-desktop is not evidence; the built-in fake agent uses only its in-process backend";
 
 /// Printed when a real client would run a red-team task.
 ///
@@ -66,11 +61,21 @@ pub(crate) fn builtin_fake_trusted(cfg: &RunConfig) -> bool {
     }
 }
 
-/// `gcu_bin` is the cargo-built fake gcu, or this process re-executes as it.
-pub(crate) fn builtin_gcu_trusted(cfg: &RunConfig) -> bool {
-    match &cfg.gcu_bin {
-        None => cfg.builtin_fake,
-        Some(path) => cfg.builtin_gcu && is_builtin_artifact(path, "eval-fake-gcu"),
+/// Admit only the in-process fake implementation, never an executable path.
+///
+/// Both runner admission and both fake-agent entries use this decision before
+/// any preparation, preflight, telemetry, or scripted behavior. A copied caller
+/// cannot authorize a sibling: no filesystem property or marker is consulted.
+/// A requested scoped engine also needs an external backend, even if its path
+/// was omitted. It must not reach allocation as an ordinary fake run.
+pub(crate) fn admit_fake_backend(
+    external: Option<&Path>,
+    scoped: bool,
+) -> Result<(), &'static str> {
+    if external.is_some() || scoped {
+        Err(EXTERNAL_GCU_REFUSED)
+    } else {
+        Ok(())
     }
 }
 
@@ -79,6 +84,7 @@ pub(crate) fn builtin_gcu_trusted(cfg: &RunConfig) -> bool {
 /// Cargo puts test binaries in `deps/` and the package binaries next to that
 /// directory. A symlink is not the artifact. This does not detect a hard link
 /// that has replaced the artifact in that directory.
+/// Used only for the explicit fake-client test slot, never backend admission.
 pub(crate) fn is_builtin_artifact(path: &Path, stem: &str) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
@@ -137,17 +143,6 @@ pub(crate) fn real_launch_block(
     None
 }
 
-/// Built-in fake agent plus a `gcu` path that is not the cargo artifact.
-pub(crate) fn external_backend_block(cfg: &RunConfig) -> Option<&'static str> {
-    if cfg.attest_disposable_desktop || !cfg.builtin_fake {
-        return None;
-    }
-    if cfg.gcu_bin.is_some() && !builtin_gcu_trusted(cfg) {
-        return Some(EXTERNAL_GCU_REFUSED);
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -192,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_fake_refuses_an_external_gcu_without_attestation() {
+    fn fake_backend_admission_never_uses_declarations_or_artifact_placement() {
         let external = RunConfig {
             builtin_fake: true,
             gcu_bin: Some(PathBuf::from("/tmp/gcu")),
@@ -200,27 +195,38 @@ mod tests {
             ..cfg()
         };
         assert_eq!(
-            external_backend_block(&external),
-            Some(EXTERNAL_GCU_REFUSED)
+            admit_fake_backend(external.gcu_bin.as_deref(), false),
+            Err(EXTERNAL_GCU_REFUSED)
         );
         let flagged = RunConfig {
             builtin_gcu: true,
             ..external.clone()
         };
-        assert_eq!(external_backend_block(&flagged), Some(EXTERNAL_GCU_REFUSED));
+        assert_eq!(
+            admit_fake_backend(flagged.gcu_bin.as_deref(), false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
         let reexec = RunConfig {
             builtin_fake: true,
             builtin_gcu: true,
             gcu_bin: None,
             ..cfg()
         };
-        assert!(external_backend_block(&reexec).is_none());
+        assert!(admit_fake_backend(reexec.gcu_bin.as_deref(), false).is_ok());
+        assert_eq!(admit_fake_backend(None, true), Err(EXTERNAL_GCU_REFUSED));
         let attested = RunConfig {
             attest_disposable_desktop: true,
             builtin_gcu: false,
             ..external
         };
-        assert!(external_backend_block(&attested).is_none());
+        assert_eq!(
+            admit_fake_backend(attested.gcu_bin.as_deref(), false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
+        assert_eq!(
+            admit_fake_backend(Some(Path::new("")), false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
     }
 
     #[test]
@@ -232,11 +238,9 @@ mod tests {
         };
         assert!(launches_real_client(&wrapped));
         assert_eq!(real_launch_block(true, false, false), Some(ATTEST_REQUIRED));
-        assert!(!builtin_gcu_trusted(&RunConfig {
-            builtin_fake: true,
-            builtin_gcu: true,
-            gcu_bin: Some(PathBuf::from("/tmp/eval-fake-gcu")),
-            ..cfg()
-        }));
+        assert_eq!(
+            admit_fake_backend(Some(Path::new("/tmp/eval-fake-gcu")), false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
     }
 }

@@ -125,6 +125,9 @@ eval Stop 同时持久化在边界外的可信控制方；销毁 VM、恢复快�
 
 只允许预声明的 guest 内 fixture 本地通道和 MCP/控制 IPC；不把任意 loopback 当成 egress 例外。模型服务地址须精确受控，DNS 解析在网关侧；禁重定向到任意主机，代理凭据不交模型/MCP。首版避免联网登录，用短期 eval 凭据；endpoint 未确定即 `not_run`。
 进程/挂载快照只能发现部分违约，不能证明“没有秘密”。provider 的签名证据需绑定本次实例/策略，owner 签认需绑定镜像和有效期；自报 `--disposable` 不算证明。机检失败或必需证明缺失即拒绝，不以手工勾选覆盖失败。报告分别记录 `checked/attested/unknown`，关键 unknown 不产生 pass。
+
+**S6 第 2 轮修复的离线准入决定：** fake agent 的 backend 固定为进程内 fake 实现，不启动外部 backend。runner 与 standalone/hidden fake-agent 入口共用 `boundary::admit_fake_backend`；任何显式 backend 路径（包括真实构建产物、复制后的相邻文件、旧 fake 重入）或需要外部引擎的 `fake_scope` 组合都不能凭文件名、目录或声明准入。runner 在分配、引擎启动、凭据复制及 preflight 前生成 `provider_unavailable` / `not_run`，并停止后续 task/arm/repeat；不会先启动 fake client 再把 backend 拒绝评分为 crash。独立 S3 supervisor 的 fake bootstrap 测试仍保留，但不豁免 runner 的 provider 门禁；真实 provider 仍未安装。
+
 当前 real 模式强制 `--env local`（`gcu-eval/src/main.rs:116`），`DesktopProvider` 只返回 `NotRun`（`gcu-eval/src/runner.rs:378`）；必须先实现受控 provider，禁止静默回退 local。
 
 | owner 选项 | 成本/好处 | 判定 |

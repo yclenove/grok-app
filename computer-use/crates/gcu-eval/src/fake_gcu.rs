@@ -9,7 +9,9 @@ use std::process::ExitCode;
 /// Run the built-in fake gcu and return a process status code.
 #[must_use]
 pub fn builtin_fake_gcu_entry() -> u8 {
-    match run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match run(&args) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("eval-fake-gcu: {err}");
@@ -18,9 +20,8 @@ pub fn builtin_fake_gcu_entry() -> u8 {
     }
 }
 
-fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let tool = tool_name(&args);
+pub(crate) fn run(args: &[&str]) -> Result<(), String> {
+    let tool = tool_name(args);
     let path = std::env::var("GCU_EVAL_TOOL_LOG").map_err(|err| err.to_string())?;
     let line = serde_json::json!({"tool": tool, "result": "ok"});
     let text = serde_json::to_string(&line).map_err(|err| err.to_string())?;
@@ -36,10 +37,10 @@ fn run() -> Result<(), String> {
     writeln!(file, "{text}").map_err(|err| err.to_string())
 }
 
-fn tool_name(args: &[String]) -> String {
+fn tool_name(args: &[&str]) -> String {
     let args: Vec<&str> = args
         .iter()
-        .map(String::as_str)
+        .copied()
         .filter(|arg| *arg != crate::INTERNAL_FAKE_GCU)
         .collect();
     if let Some(index) = args.iter().position(|arg| *arg == "call") {

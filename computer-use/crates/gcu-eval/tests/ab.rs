@@ -100,7 +100,7 @@ fn run_arm(task: &Task, arm: ArmId, behavior: &str, dir: &Path) -> AbTrial {
         builtin_fake: true,
         builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
         builtin_gcu: true,
-        gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+        gcu_bin: None,
         platform: host_platform().into(),
         behavior: Some(behavior.into()),
         probe: Some(dir.join(format!("probe-{}-{behavior}.json", arm.as_str()))),
@@ -437,7 +437,7 @@ fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
         builtin_fake: true,
         builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
         builtin_gcu: true,
-        gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+        gcu_bin: None,
         platform: host_platform().into(),
         ..RunConfig::default()
     };
@@ -465,6 +465,7 @@ fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
         },
         RunConfig {
             builtin_gcu: false,
+            gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
             ..fake
         },
     ] {
@@ -574,7 +575,7 @@ fn empty_or_rejected_tasks_do_not_claim_runner_provenance() {
         builtin_fake: true,
         builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
         builtin_gcu: true,
-        gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+        gcu_bin: None,
         platform: host_platform().into(),
         ..RunConfig::default()
     };
@@ -614,7 +615,7 @@ fn started_clients_keep_runner_provenance_even_without_metrics() {
             builtin_fake: true,
             builtin_fake_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-agent"))),
             builtin_gcu: true,
-            gcu_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_eval-fake-gcu"))),
+            gcu_bin: None,
             platform: host_platform().into(),
             behavior: Some(behavior.into()),
             timeout: Some(if behavior == "timeout" {

@@ -162,27 +162,12 @@ pub(crate) fn child_env(
     map
 }
 
-/// `GCU_BIN` and the fake gcu re-entry selector. The agent verifies the artifact.
-///
-/// The built-in slot is the cargo artifact, or a re-exec of this process.
-/// Re-exec sets `GCU_EVAL_GCU_REEXEC` and points `GCU_BIN` at this process.
-/// No environment declaration grants backend admission.
+/// Forward a supplied backend path; fake agents refuse it using shared admission.
+/// An absent path selects the in-process fake backend and needs no marker.
 fn insert_gcu_env(map: &mut BTreeMap<String, String>, cfg: &RunConfig) {
-    let reexec = cfg.builtin_fake && cfg.gcu_bin.is_none();
-    if reexec {
-        if let Ok(exe) = std::env::current_exe() {
-            map.insert("GCU_BIN".into(), exe.display().to_string());
-            map.insert("GCU_EVAL_GCU_REEXEC".into(), "1".into());
-        }
-        return;
+    if let Some(path) = &cfg.gcu_bin {
+        map.insert("GCU_BIN".into(), path.display().to_string());
     }
-    map.insert(
-        "GCU_BIN".into(),
-        cfg.gcu_bin
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default(),
-    );
 }
 
 /// Proxy settings found through `lookup`. Empty values are dropped.
@@ -428,10 +413,8 @@ mod tests {
         let reexec = child_env(&task, &reexec, &env, None);
         assert!(!reexec.contains_key("GCU_EVAL_BUILTIN_GCU"));
         assert!(!reexec.contains_key("GCU_EVAL_ATTESTED"));
-        assert_eq!(
-            reexec.get("GCU_EVAL_GCU_REEXEC").map(String::as_str),
-            Some("1")
-        );
+        assert!(!reexec.contains_key("GCU_BIN"));
+        assert!(!reexec.contains_key("GCU_EVAL_GCU_REEXEC"));
     }
 
     #[test]
