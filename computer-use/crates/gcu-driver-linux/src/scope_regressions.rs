@@ -1,6 +1,7 @@
 //! Production regressions for the S10 scope fixes.
 //!
-//! Each test calls a driver or `ScopedDriver` method. Helpers only build fixtures.
+//! Each test calls a driver, `ScopedDriver`, or `Session` method. Helpers only
+//! build fixtures.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,11 +17,14 @@ use gcu_core::scope::{
     BootIdentity, ExecutableProof, FixtureScope, FixtureTarget, InstanceEvidence, OsStartTime,
     ProcessInstance, RegisteredWindow, ScopeLease, ScopedDriver, WindowBinding,
 };
+use gcu_core::session::{StopTimings, RELEASE_INPUT_BUDGET, STOP_LATCH_BUDGET};
+use gcu_core::testing::host::StopControl;
 use gcu_protocol::{types::AppIdentity, AppInfo, Rect, WindowInfo};
 
 use crate::atspi::{FakeNode, FakeSource};
 use crate::driver::LinuxDriver;
 use crate::identity::scope::{MapClock, ProcessClock, ScopeGate, ScopeInstance, ScopeWindow};
+use crate::x11::fake::FakeXEvent;
 use crate::x11::{FakeWindow, FakeX, XRootGeometry, XServer, XWindowGeometry};
 
 const BOOT: &str = "boot-a";
@@ -36,7 +40,11 @@ fn process(pid: u32, start: u64) -> ProcessInstance {
 }
 
 fn lease_for(native_id: &str) -> ScopeLease {
-    let owner = process(42, 1000);
+    lease_for_pid(42, native_id)
+}
+
+fn lease_for_pid(pid: u32, native_id: &str) -> ScopeLease {
+    let owner = process(pid, 1000);
     let window = WindowBinding::new(native_id, 5, owner.clone()).unwrap();
     let target = FixtureTarget::new(
         owner,
@@ -73,7 +81,11 @@ fn empty_lease() -> ScopeLease {
 }
 
 fn gate(native_id: &str) -> ScopeGate {
-    let owner = ScopeInstance::try_new(42, 1000, BOOT).unwrap();
+    gate_for(42, native_id)
+}
+
+fn gate_for(pid: u32, native_id: &str) -> ScopeGate {
+    let owner = ScopeInstance::try_new(pid, 1000, BOOT).unwrap();
     let window = ScopeWindow::try_new(native_id, 5, owner, APP_ID).unwrap();
     ScopeGate::try_new(vec![window]).unwrap()
 }
@@ -646,4 +658,510 @@ async fn moved_bus_name_is_not_published_while_the_registered_pid_is_alive() {
         .await
         .unwrap_err();
     assert_eq!(err, DriverError::ScopeDenied);
+}
+
+const PID_P: u32 = 4_200_000_042;
+const PID_C: u32 = 4_200_000_099;
+const UNIQUE_P: &str = ":1.50";
+const UNIQUE_C: &str = ":1.60";
+const CANARY_C: &str = "canary-c";
+const WELL_KNOWN_CANARY: &str = "well-known-canary";
+const FIXTURE_NAME: &str = "fixture-app";
+const APP_PATH: &str = "/org/a11y/atspi/accessible/app";
+const HELD_KEY: u8 = 38;
+
+struct BusState {
+    owner: Mutex<String>,
+    stall: AtomicBool,
+    entered: AtomicBool,
+    release: AtomicBool,
+    pid_args: Mutex<Vec<String>>,
+    name_dests: Mutex<Vec<String>>,
+}
+
+impl BusState {
+    fn new(owner: &str, stall: bool) -> Self {
+        Self {
+            owner: Mutex::new(owner.to_string()),
+            stall: AtomicBool::new(stall),
+            entered: AtomicBool::new(false),
+            release: AtomicBool::new(false),
+            pid_args: Mutex::new(Vec::new()),
+            name_dests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn set_owner(&self, owner: &str) {
+        *self.owner.lock().unwrap_or_else(|err| err.into_inner()) = owner.to_string();
+    }
+
+    fn owner(&self) -> String {
+        self.owner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.name_dests
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn pids(&self) -> Vec<String> {
+        self.pid_args
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn reset_round(&self, owner: &str) {
+        self.set_owner(owner);
+        self.stall.store(true, Ordering::SeqCst);
+        self.entered.store(false, Ordering::SeqCst);
+        self.release.store(false, Ordering::SeqCst);
+        self.pid_args
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.name_dests
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
+}
+
+fn accessible_name(state: &BusState, destination: &str) -> String {
+    if destination == UNIQUE_P {
+        return FIXTURE_NAME.to_string();
+    }
+    if destination == UNIQUE_C {
+        return CANARY_C.to_string();
+    }
+    if destination == APP_ID {
+        if state.owner() == UNIQUE_C {
+            return CANARY_C.to_string();
+        }
+        return WELL_KNOWN_CANARY.to_string();
+    }
+    "unknown".to_string()
+}
+
+fn connection_pid(state: &BusState, name: &str) -> Option<u32> {
+    if name == UNIQUE_P {
+        return Some(PID_P);
+    }
+    if name == UNIQUE_C {
+        return Some(PID_C);
+    }
+    if name == APP_ID {
+        if state.owner() == UNIQUE_P {
+            return Some(PID_P);
+        }
+        if state.owner() == UNIQUE_C {
+            return Some(PID_C);
+        }
+    }
+    None
+}
+
+struct RegistryRoot;
+
+#[zbus::interface(interface = "org.a11y.atspi.Accessible")]
+impl RegistryRoot {
+    fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+        let path = zbus::zvariant::OwnedObjectPath::try_from(APP_PATH).unwrap();
+        vec![(APP_ID.to_string(), path)]
+    }
+}
+
+struct AppNode(Arc<BusState>);
+
+#[zbus::interface(interface = "org.a11y.atspi.Accessible")]
+impl AppNode {
+    #[zbus(property)]
+    fn name(&self, #[zbus(header)] header: Option<zbus::message::Header<'_>>) -> String {
+        let destination = header
+            .as_ref()
+            .and_then(|header| header.destination())
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+        self.0
+            .name_dests
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(destination.clone());
+        accessible_name(&self.0, &destination)
+    }
+}
+
+struct Daemon(Arc<BusState>);
+
+#[zbus::interface(interface = "org.freedesktop.DBus")]
+impl Daemon {
+    async fn get_name_owner(&self, name: String) -> zbus::fdo::Result<String> {
+        if name == APP_ID {
+            return Ok(self.0.owner());
+        }
+        if name == UNIQUE_P || name == UNIQUE_C {
+            return Ok(name);
+        }
+        Err(zbus::fdo::Error::NameHasNoOwner(name))
+    }
+
+    #[zbus(name = "GetConnectionUnixProcessID")]
+    async fn connection_unix_process_id(&self, name: String) -> zbus::fdo::Result<u32> {
+        if self.0.stall.load(Ordering::SeqCst) {
+            self.0.entered.store(true, Ordering::SeqCst);
+            while !self.0.release.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        self.0
+            .pid_args
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(name.clone());
+        connection_pid(&self.0, &name).ok_or_else(|| zbus::fdo::Error::NameHasNoOwner(name))
+    }
+}
+
+struct TestBus {
+    client: zbus::Connection,
+    server: zbus::Connection,
+    state: Arc<BusState>,
+}
+
+async fn test_bus(owner: &str, stall: bool) -> TestBus {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let guid = zbus::Guid::generate();
+    let state = Arc::new(BusState::new(owner, stall));
+    let server_state = Arc::clone(&state);
+    let server = async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        zbus::connection::Builder::tcp_stream(stream)
+            .server(guid)
+            .unwrap()
+            .p2p()
+            .serve_at("/org/a11y/atspi/accessible/root", RegistryRoot)
+            .unwrap()
+            .serve_at(
+                "/org/a11y/atspi/accessible/app",
+                AppNode(Arc::clone(&server_state)),
+            )
+            .unwrap()
+            .serve_at("/org/freedesktop/DBus", Daemon(server_state))
+            .unwrap()
+            .build()
+            .await
+            .unwrap()
+    };
+    let client = async move {
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        zbus::connection::Builder::tcp_stream(stream)
+            .p2p()
+            .build()
+            .await
+            .unwrap()
+    };
+    let (server, client) = tokio::join!(server, client);
+    TestBus {
+        client,
+        server,
+        state,
+    }
+}
+
+fn scoped_on(bus: &TestBus, pid: u32) -> ScopedDriver<LinuxDriver> {
+    let mut driver = LinuxDriver::from_bus(bus.client.clone());
+    let clock = Arc::new(MapClock::new(BOOT));
+    clock.set(pid, 1000);
+    let clock: Arc<dyn ProcessClock> = clock;
+    driver.bind_scope(gate_for(pid, "fixture-window"), clock);
+    ScopedDriver::new(
+        driver,
+        lease_for_pid(pid, "fixture-window"),
+        gcu_core::testing::host::fake_activity(),
+    )
+}
+
+async fn wait_for_pid_barrier(state: &BusState) {
+    let wait = async {
+        while !state.entered.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), wait)
+        .await
+        .expect("pid barrier");
+    assert!(
+        state.names().is_empty(),
+        "name was read before the pid barrier: {:?}",
+        state.names()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn handed_off_bus_name_does_not_publish_the_previous_owners_name() {
+    let bus = test_bus(UNIQUE_C, true).await;
+    assert!(!bus.server.is_closed());
+    let scoped = scoped_on(&bus, PID_P);
+    let state = Arc::clone(&bus.state);
+
+    let task = tokio::spawn(async move {
+        let listed = scoped.list_apps().await;
+        (scoped, listed)
+    });
+    wait_for_pid_barrier(&state).await;
+    state.set_owner(UNIQUE_P);
+    state.release.store(true, Ordering::SeqCst);
+    let (scoped, listed) = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("list finished")
+        .unwrap();
+    let listed = listed.unwrap();
+    assert!(listed.is_empty());
+    assert_clean(&format!("{listed:?}"), &[CANARY_C, WELL_KNOWN_CANARY]);
+    assert_eq!(state.pids(), vec![UNIQUE_C.to_string()]);
+    assert!(state.names().is_empty());
+
+    state.reset_round(UNIQUE_C);
+    let task = tokio::spawn(async move { scoped.resolve_app(&AppQuery(CANARY_C.into())).await });
+    wait_for_pid_barrier(&state).await;
+    state.set_owner(UNIQUE_P);
+    state.release.store(true, Ordering::SeqCst);
+    let err = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("resolve finished")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_clean(&err.to_string(), &[CANARY_C, WELL_KNOWN_CANARY]);
+    assert_eq!(state.pids(), vec![UNIQUE_C.to_string()]);
+    assert!(state.names().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn verified_unique_owner_publishes_its_own_name() {
+    let bus = test_bus(UNIQUE_P, false).await;
+    assert!(!bus.server.is_closed());
+    let scoped = scoped_on(&bus, PID_P);
+    let listed = scoped.list_apps().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, APP_ID);
+    assert_eq!(listed[0].name, FIXTURE_NAME);
+    assert_eq!(listed[0].pid, Some(PID_P));
+    assert!(listed[0].identity.is_none());
+    assert_clean(&format!("{listed:?}"), &[CANARY_C, WELL_KNOWN_CANARY]);
+    assert_eq!(bus.state.pids(), vec![UNIQUE_P.to_string()]);
+    let names = bus.state.names();
+    assert!(!names.is_empty());
+    assert!(names.iter().all(|name| name == UNIQUE_P));
+    let resolved = scoped
+        .resolve_app(&AppQuery(FIXTURE_NAME.into()))
+        .await
+        .unwrap();
+    assert_eq!(resolved.info.name, FIXTURE_NAME);
+    assert_eq!(resolved.info.pid, Some(PID_P));
+    let err = scoped
+        .resolve_app(&AppQuery(CANARY_C.into()))
+        .await
+        .unwrap_err();
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_clean(&err.to_string(), &[CANARY_C, WELL_KNOWN_CANARY]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bus_name_held_by_another_pid_publishes_nothing() {
+    let bus = test_bus(UNIQUE_C, false).await;
+    assert!(!bus.server.is_closed());
+    let scoped = scoped_on(&bus, PID_P);
+    let listed = scoped.list_apps().await.unwrap();
+    assert!(listed.is_empty());
+    assert_clean(&format!("{listed:?}"), &[CANARY_C, WELL_KNOWN_CANARY]);
+    assert_eq!(bus.state.pids(), vec![UNIQUE_C.to_string()]);
+    assert!(bus.state.names().is_empty());
+    let err = scoped
+        .resolve_app(&AppQuery(CANARY_C.into()))
+        .await
+        .unwrap_err();
+    assert_eq!(err, DriverError::ScopeDenied);
+    assert_clean(&err.to_string(), &[CANARY_C, WELL_KNOWN_CANARY]);
+    assert!(bus.state.names().is_empty());
+}
+
+struct DoctorStop {
+    go_stop: Arc<AtomicBool>,
+    stop_done: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+    ledger_empty: Arc<AtomicBool>,
+    key_up: Arc<AtomicBool>,
+    while_stalled: Arc<AtomicBool>,
+    timings: Arc<Mutex<Option<StopTimings>>>,
+    session: gcu_core::session::Session,
+    ledger: Arc<crate::x11::InputLedger>,
+    x: Arc<FakeX>,
+}
+
+fn spawn_doctor_stop(task: DoctorStop) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while !task.go_stop.load(Ordering::SeqCst) && !task.failed.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if task.failed.load(Ordering::SeqCst) && !task.go_stop.load(Ordering::SeqCst) {
+            task.stop_done.store(true, Ordering::SeqCst);
+            return;
+        }
+        let timings = task.session.handle_stop().await;
+        let events = task.x.get_events();
+        let key_up = events.iter().any(|event| {
+            matches!(
+                event,
+                FakeXEvent::Key {
+                    keycode: HELD_KEY,
+                    is_press: false
+                }
+            )
+        });
+        task.key_up.store(key_up, Ordering::SeqCst);
+        task.ledger_empty
+            .store(task.ledger.is_empty(), Ordering::SeqCst);
+        task.while_stalled.store(
+            task.entered.load(Ordering::SeqCst) && !task.release.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+        *task.timings.lock().unwrap_or_else(|err| err.into_inner()) = Some(timings);
+        task.stop_done.store(true, Ordering::SeqCst);
+    })
+}
+
+fn spawn_doctor_observer(
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+    go_stop: Arc<AtomicBool>,
+    stop_done: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    stop: StopControl,
+    observed_ms: Arc<AtomicU64>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let start = Instant::now();
+        while !entered.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_secs(2) {
+                failed.store(true, Ordering::SeqCst);
+                release.store(true, Ordering::SeqCst);
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        stop.request_stop();
+        let marked = Instant::now();
+        go_stop.store(true, Ordering::SeqCst);
+        while !stop_done.load(Ordering::SeqCst) {
+            if marked.elapsed() > Duration::from_secs(1) {
+                failed.store(true, Ordering::SeqCst);
+                release.store(true, Ordering::SeqCst);
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let elapsed = u64::try_from(marked.elapsed().as_millis()).unwrap_or(u64::MAX);
+        observed_ms.store(elapsed, Ordering::SeqCst);
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stalled_scoped_doctor_releases_stop_while_the_extension_probe_is_blocked() {
+    assert_eq!(STOP_LATCH_BUDGET, Duration::from_millis(100));
+    assert_eq!(RELEASE_INPUT_BUDGET, Duration::from_millis(500));
+    assert_eq!(NATIVE_TIMEOUT, Duration::from_secs(5));
+    let x = Arc::new(FakeX::new(
+        XRootGeometry {
+            root_id: 1,
+            width: 100,
+            height: 100,
+            scale: 1.0,
+        },
+        true,
+    ));
+    let clock = clock();
+    let mut driver = LinuxDriver::new_fake(
+        FakeSource::default(),
+        FakeNode::default(),
+        Vec::new(),
+        Vec::new(),
+    );
+    bind(&mut driver, "7", &clock);
+    let server: Arc<dyn XServer> = Arc::clone(&x) as Arc<dyn XServer>;
+    let driver = driver.with_x_server(server);
+    driver.ledger().record_key_down(HELD_KEY);
+    let ledger = Arc::clone(driver.ledger());
+    let (entered, release) = x.arm_extension_stall();
+    let _guard = ReleaseOnDrop(Arc::clone(&release));
+    let stop = StopControl::new();
+    let (router, session) =
+        gcu_core::testing::host::scoped_router_with(driver, empty_lease(), stop.activity());
+    let scoped = router.bound_driver();
+    let go_stop = Arc::new(AtomicBool::new(false));
+    let stop_done = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(AtomicBool::new(false));
+    let ledger_empty = Arc::new(AtomicBool::new(false));
+    let key_up = Arc::new(AtomicBool::new(false));
+    let while_stalled = Arc::new(AtomicBool::new(false));
+    let timings = Arc::new(Mutex::new(None));
+    let observed_ms = Arc::new(AtomicU64::new(u64::MAX));
+    let doctor = tokio::spawn(async move { scoped.doctor().await });
+    let stop_task = spawn_doctor_stop(DoctorStop {
+        go_stop: Arc::clone(&go_stop),
+        stop_done: Arc::clone(&stop_done),
+        failed: Arc::clone(&failed),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        ledger_empty: Arc::clone(&ledger_empty),
+        key_up: Arc::clone(&key_up),
+        while_stalled: Arc::clone(&while_stalled),
+        timings: Arc::clone(&timings),
+        session,
+        ledger,
+        x: Arc::clone(&x),
+    });
+    let observer = spawn_doctor_observer(
+        Arc::clone(&entered),
+        Arc::clone(&release),
+        go_stop,
+        Arc::clone(&stop_done),
+        Arc::clone(&failed),
+        stop,
+        Arc::clone(&observed_ms),
+    );
+    while !stop_done.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    observer.join().unwrap();
+    release.store(true, Ordering::SeqCst);
+    let report = tokio::time::timeout(Duration::from_secs(2), doctor)
+        .await
+        .expect("doctor returned")
+        .unwrap();
+    stop_task.await.unwrap();
+    assert!(
+        !failed.load(Ordering::SeqCst),
+        "stop did not finish while the extension probe was stalled"
+    );
+    assert!(while_stalled.load(Ordering::SeqCst));
+    assert!(ledger_empty.load(Ordering::SeqCst));
+    assert!(key_up.load(Ordering::SeqCst));
+    let timings = timings
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .expect("stop timings");
+    assert!(timings.latch <= STOP_LATCH_BUDGET);
+    assert!(timings.release_issued <= RELEASE_INPUT_BUDGET);
+    assert!(observed_ms.load(Ordering::SeqCst) <= 500);
+    assert!(!report.ready);
+    assert!(report.issues.is_empty());
 }

@@ -11,7 +11,7 @@ use crate::{
 use gcu_host_api::{
     testing::{FakeUserActivity, MemoryPolicyStore, RecordingEventSink, ScriptedApprovals},
     AppIdentity, AppInfo, ApprovalDecision, ConfirmationLevel, ForegroundPolicy, Platform,
-    PolicyConfig, SignatureState,
+    PolicyConfig, SignatureState, UserActivity,
 };
 use std::sync::Arc;
 
@@ -49,6 +49,41 @@ pub fn router(driver: Arc<dyn Driver>) -> (ActionRouter, Session) {
     (router, session)
 }
 
+/// Host Stop latch shared by a scoped router and the test that trips it.
+///
+/// [`Self::activity`] is the object the session and `ScopedDriver` hold.
+/// [`Self::request_stop`] sets that same latch. Memory only. No blocking,
+/// timeout, or cancellation. Safe to call from another thread.
+#[derive(Clone, Debug)]
+pub struct StopControl {
+    activity: Arc<FakeUserActivity>,
+}
+
+impl StopControl {
+    /// Idle latch.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn new() -> Self {
+        Self {
+            activity: Arc::new(FakeUserActivity::new()),
+        }
+    }
+
+    /// Activity for [`Session::open`] and the scoped wrapper.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub fn activity(&self) -> Arc<dyn UserActivity> {
+        self.activity.clone()
+    }
+
+    /// Latch Host Stop. Idempotent while the latch is already set.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Thread safe.
+    pub fn request_stop(&self) {
+        self.activity.request_stop();
+    }
+}
+
 /// Assemble a permissive Host whose router holds a [`crate::scope::ScopedDriver`].
 ///
 /// The same activity object is the session stop latch and the wrapper's stop
@@ -59,7 +94,23 @@ pub fn scoped_router<D>(driver: D, lease: crate::scope::ScopeLease) -> (ActionRo
 where
     D: Driver + crate::scope::InstanceEvidence + 'static,
 {
-    let activity = Arc::new(FakeUserActivity::new());
+    scoped_router_with(driver, lease, Arc::new(FakeUserActivity::new()))
+}
+
+/// [`scoped_router`] with a caller-supplied activity.
+///
+/// Pass [`StopControl::activity`] so an outside thread can latch the same
+/// Stop the session and wrapper observe. Memory only. No blocking, timeout,
+/// or cancellation. One session app approval is scripted.
+#[cfg(feature = "testing")]
+pub fn scoped_router_with<D>(
+    driver: D,
+    lease: crate::scope::ScopeLease,
+    activity: Arc<dyn UserActivity>,
+) -> (ActionRouter, Session)
+where
+    D: Driver + crate::scope::InstanceEvidence + 'static,
+{
     let approvals = Arc::new(ScriptedApprovals::new());
     approvals.push_decision(ApprovalDecision::Session);
     let router = ActionRouter::with_fixture_scope(

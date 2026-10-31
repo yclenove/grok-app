@@ -769,6 +769,38 @@ impl ScopeBinding {
         &self.oracle
     }
 
+    /// Live instance of `app_id` when `pid` is that registration right now.
+    ///
+    /// Every window of the app must use this pid. The clock must still show
+    /// the registered start time and boot id. An empty id or a zero pid is
+    /// `None`. Memory only: no D-Bus and no X11.
+    pub(crate) fn discovered_instance(&self, app_id: &str, pid: u32) -> Option<ProcessInstance> {
+        if app_id.is_empty() || pid == 0 {
+            return None;
+        }
+        let registered = self
+            .gate
+            .windows()
+            .iter()
+            .find(|window| window.app_id() == app_id)?;
+        if pid != registered.owner().pid() {
+            return None;
+        }
+        let live = self.oracle.process(pid)?;
+        for window in self.gate.windows() {
+            if window.app_id() != app_id {
+                continue;
+            }
+            if window.owner().pid() != pid {
+                return None;
+            }
+            check_process(window.owner(), Some(&live)).ok()?;
+        }
+        registered
+            .binding(&live)
+            .map(|window| window.owner().clone())
+    }
+
     /// Record that `key` was read under `window_id`.
     ///
     /// Test-only. Production scoped trees return before any handle is sealed.

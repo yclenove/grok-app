@@ -78,13 +78,22 @@ pub struct FakeX {
     incoming: Mutex<VecDeque<XEventKind>>,
     incarnations: Mutex<HashMap<u32, u64>>,
     bump_incarnation_on_image: Mutex<bool>,
-    metadata_stall: Mutex<MetadataStall>,
+    metadata_stall: Mutex<ProbeStall>,
+    extension_stall: Mutex<ProbeStall>,
 }
 
-struct MetadataStall {
+struct ProbeStall {
     armed: bool,
     entered: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
+}
+
+fn idle_stall() -> ProbeStall {
+    ProbeStall {
+        armed: false,
+        entered: Arc::new(AtomicBool::new(false)),
+        release: Arc::new(AtomicBool::new(false)),
+    }
 }
 
 impl FakeX {
@@ -114,11 +123,8 @@ impl FakeX {
             incoming: Mutex::new(VecDeque::new()),
             incarnations: Mutex::new(HashMap::new()),
             bump_incarnation_on_image: Mutex::new(false),
-            metadata_stall: Mutex::new(MetadataStall {
-                armed: false,
-                entered: Arc::new(AtomicBool::new(false)),
-                release: Arc::new(AtomicBool::new(false)),
-            }),
+            metadata_stall: Mutex::new(idle_stall()),
+            extension_stall: Mutex::new(idle_stall()),
         }
     }
 
@@ -128,27 +134,30 @@ impl FakeX {
     /// call has dropped its locks. Store `true` into `release` to let it
     /// finish. Incarnation, event polling, and input injection are not stalled.
     pub fn arm_metadata_stall(&self) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
-        let entered = Arc::new(AtomicBool::new(false));
-        let release = Arc::new(AtomicBool::new(false));
-        let mut stall = lock_m(&self.metadata_stall);
-        stall.armed = true;
-        stall.entered = Arc::clone(&entered);
-        stall.release = Arc::clone(&release);
-        (entered, release)
+        arm_stall(&self.metadata_stall)
+    }
+
+    /// Stall later Composite and XTest availability probes.
+    ///
+    /// Returns `(entered, release)`. `entered` becomes true after the probe
+    /// has dropped its locks. Store `true` into `release` to let it finish.
+    /// Input injection reads the XTest flag without entering this stall, so
+    /// release can run while a probe is blocked.
+    pub fn arm_extension_stall(&self) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        arm_stall(&self.extension_stall)
     }
 
     fn block_metadata(&self) {
-        let (entered, release) = {
-            let stall = lock_m(&self.metadata_stall);
-            if !stall.armed {
-                return;
-            }
-            (Arc::clone(&stall.entered), Arc::clone(&stall.release))
-        };
-        entered.store(true, Ordering::SeqCst);
-        while !release.load(Ordering::SeqCst) {
-            thread::sleep(Duration::from_millis(5));
-        }
+        wait_stall(&self.metadata_stall);
+    }
+
+    fn block_extension(&self) {
+        wait_stall(&self.extension_stall);
+    }
+
+    /// XTest flag without the extension stall. Release uses this path.
+    fn xtest_enabled(&self) -> bool {
+        *lock_m(&self.xtest_available)
     }
 
     /// Set the lifetime token scoped capture uses to detect a reused window id.
@@ -253,6 +262,30 @@ fn lock_m<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+fn arm_stall(stall: &Mutex<ProbeStall>) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let mut guard = lock_m(stall);
+    guard.armed = true;
+    guard.entered = Arc::clone(&entered);
+    guard.release = Arc::clone(&release);
+    (entered, release)
+}
+
+fn wait_stall(stall: &Mutex<ProbeStall>) {
+    let (entered, release) = {
+        let guard = lock_m(stall);
+        if !guard.armed {
+            return;
+        }
+        (Arc::clone(&guard.entered), Arc::clone(&guard.release))
+    };
+    entered.store(true, Ordering::SeqCst);
+    while !release.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 impl XServer for FakeX {
     fn overlay_capture_scope(
         &self,
@@ -329,6 +362,7 @@ impl XServer for FakeX {
     }
 
     fn is_composite_available(&self) -> Result<bool, XError> {
+        self.block_extension();
         Ok(self.composite_available)
     }
 
@@ -461,15 +495,12 @@ impl XServer for FakeX {
     }
 
     fn is_xtest_available(&self) -> Result<bool, XError> {
-        let xt = match self.xtest_available.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        Ok(*xt)
+        self.block_extension();
+        Ok(self.xtest_enabled())
     }
 
     fn xtest_fake_motion(&self, root_x: i16, root_y: i16) -> Result<(), XError> {
-        if !self.is_xtest_available()? {
+        if !self.xtest_enabled() {
             return Err(XError::ExtensionUnavailable("XTEST".into()));
         }
         let mut pos = match self.mouse_pos.lock() {
@@ -489,7 +520,7 @@ impl XServer for FakeX {
     }
 
     fn xtest_fake_button(&self, button: u8, is_press: bool) -> Result<(), XError> {
-        if !self.is_xtest_available()? {
+        if !self.xtest_enabled() {
             return Err(XError::ExtensionUnavailable("XTEST".into()));
         }
         let mut btns = match self.pressed_buttons.lock() {
@@ -512,7 +543,7 @@ impl XServer for FakeX {
     }
 
     fn xtest_fake_key(&self, keycode: u8, is_press: bool) -> Result<(), XError> {
-        if !self.is_xtest_available()? {
+        if !self.xtest_enabled() {
             return Err(XError::ExtensionUnavailable("XTEST".into()));
         }
         let mut keys = match self.pressed_keys.lock() {

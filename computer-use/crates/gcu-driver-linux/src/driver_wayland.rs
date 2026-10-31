@@ -306,24 +306,15 @@ pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
             None,
         );
     }
+    // Scoped probes leave the runtime. A timeout closes the report. This does
+    // not start an evidence budget, and the worker does not own input release.
     let has_x = driver.x_server.is_some();
-    let composite = if driver.fake_source.is_some() && !has_x {
-        true
-    } else {
-        driver
-            .x_server
-            .as_ref()
-            .and_then(|server| server.is_composite_available().ok())
-            .unwrap_or(false)
-    };
-    let xtest = if driver.fake_source.is_some() && !has_x {
-        true
-    } else {
-        driver
-            .x_server
-            .as_ref()
-            .and_then(|server| server.is_xtest_available().ok())
-            .unwrap_or(false)
+    let Some((composite, xtest)) = extension_flags(driver).await else {
+        return DoctorReport {
+            capabilities: driver.capabilities().clone(),
+            ready: false,
+            issues: Vec::new(),
+        };
     };
     let mut report = run_driver_doctor(
         &driver.env,
@@ -376,6 +367,46 @@ pub(super) async fn doctor(driver: &LinuxDriver) -> DoctorReport {
         }
     }
     report
+}
+
+/// Composite and XTest flags. `None` means the scoped probe did not finish.
+///
+/// A fake driver with no X server keeps the historical in-memory pair. A
+/// scoped driver with an X server reads both flags off the runtime. Every
+/// other driver still probes on the caller thread.
+async fn extension_flags(driver: &LinuxDriver) -> Option<(bool, bool)> {
+    let has_x = driver.x_server.is_some();
+    if driver.fake_source.is_some() && !has_x {
+        return Some((true, true));
+    }
+    if has_x && driver.scope().is_some() {
+        return probe_extensions(driver).await;
+    }
+    let composite = driver
+        .x_server
+        .as_ref()
+        .and_then(|server| server.is_composite_available().ok())
+        .unwrap_or(false);
+    let xtest = driver
+        .x_server
+        .as_ref()
+        .and_then(|server| server.is_xtest_available().ok())
+        .unwrap_or(false);
+    Some((composite, xtest))
+}
+
+async fn probe_extensions(driver: &LinuxDriver) -> Option<(bool, bool)> {
+    let server = driver.x_server.clone()?;
+    crate::x11::scope::off_runtime(
+        gcu_core::driver::NATIVE_TIMEOUT,
+        &driver.stop_latch,
+        move || {
+            let composite = server.is_composite_available().unwrap_or(false);
+            let xtest = server.is_xtest_available().unwrap_or(false);
+            (composite, xtest)
+        },
+    )
+    .await
 }
 
 pub(super) fn retire_on_drop(bound: &ProvenCapture) {

@@ -206,6 +206,18 @@ impl LinuxDriver {
         d
     }
 
+    /// Driver whose app list comes from `connection`, with no X server.
+    ///
+    /// Does not open a display. Tests use this so scoped discovery hits the
+    /// bus instead of the fake app list.
+    #[cfg(test)]
+    pub(crate) fn from_bus(connection: zbus::Connection) -> Self {
+        let mut driver = Self::new_internal(Some(connection), None, None, false);
+        driver.env = LinuxEnvironment::pure_x11_test();
+        driver.recompute_capabilities();
+        driver
+    }
+
     /// Attach an XServer implementation to this driver (useful for injecting FakeX).
     pub fn with_x_server(mut self, x: Arc<dyn XServer>) -> Self {
         if let Some(h) = self._listener_handle.take() {
@@ -693,6 +705,9 @@ impl Driver for LinuxDriver {
                 permission: "accessibility".into(),
             })?;
 
+        if let Some(binding) = &self.scope {
+            return crate::atspi::discovery::list_scoped_atspi_apps(conn, binding).await;
+        }
         crate::atspi::list_atspi_apps(conn).await
     }
 
@@ -877,31 +892,8 @@ const SCOPED_ROUTE_NOTE: &str = "scoped mode: AT-SPI tree reads and semantic acc
 impl InstanceEvidence for LinuxDriver {
     fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
         let binding = self.scope.as_ref()?;
-        if app.info.id.is_empty() {
-            return None;
-        }
         let discovered = app.info.pid.filter(|pid| *pid > 0)?;
-        let registered = binding
-            .gate()
-            .windows()
-            .iter()
-            .find(|window| window.app_id() == app.info.id)?;
-        if discovered != registered.owner().pid() {
-            return None;
-        }
-        let live = binding.oracle().process(discovered)?;
-        for window in binding.gate().windows() {
-            if window.app_id() != app.info.id {
-                continue;
-            }
-            if window.owner().pid() != discovered {
-                return None;
-            }
-            crate::identity::scope::check_process(window.owner(), Some(&live)).ok()?;
-        }
-        registered
-            .binding(&live)
-            .map(|window| window.owner().clone())
+        binding.discovered_instance(&app.info.id, discovered)
     }
 
     fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {

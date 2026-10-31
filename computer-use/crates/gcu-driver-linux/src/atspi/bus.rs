@@ -40,6 +40,21 @@ fn bus_dest(dest: &str) -> Result<zbus::names::OwnedBusName, DriverError> {
         })
 }
 
+/// A peer unique name (`:1.50`). The bus daemon name is not a peer.
+fn peer_unique(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(':') else {
+        return false;
+    };
+    !rest.is_empty() && rest.contains('.')
+}
+
+async fn dbus_proxy(connection: &zbus::Connection) -> Option<zbus::fdo::DBusProxy<'_>> {
+    tokio::time::timeout(DBUS_CALL_TIMEOUT, zbus::fdo::DBusProxy::new(connection))
+        .await
+        .ok()?
+        .ok()
+}
+
 fn obj_path(path: &str) -> Result<zbus::zvariant::OwnedObjectPath, DriverError> {
     path.try_into()
         .map_err(|e: zbus::zvariant::Error| DriverError::Native {
@@ -73,6 +88,87 @@ impl AtspiBus {
         .await
         .ok()?
         .ok()?;
+        let pid = tokio::time::timeout(
+            DBUS_CALL_TIMEOUT,
+            dbus.get_connection_unix_process_id(zbus::names::BusName::from(dest)),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        positive_pid(pid)
+    }
+
+    /// Child references as bus-name strings.
+    ///
+    /// A well-known name is kept. This does not parse the name as a unique
+    /// connection, and it does not read the accessible name. Failures return
+    /// an empty list; callers must not invent children.
+    pub(crate) async fn scoped_children(&self, node: &AtspiNodeRef) -> Vec<AtspiNodeRef> {
+        let Ok(dest) = bus_dest(&node.destination) else {
+            return Vec::new();
+        };
+        let Ok(path) = obj_path(&node.path) else {
+            return Vec::new();
+        };
+        let Ok(Ok(reply)) = tokio::time::timeout(
+            DBUS_CALL_TIMEOUT,
+            self.connection.call_method(
+                Some(zbus::names::BusName::from(dest)),
+                path.as_str(),
+                Some("org.a11y.atspi.Accessible"),
+                "GetChildren",
+                &(),
+            ),
+        )
+        .await
+        else {
+            return Vec::new();
+        };
+        let Ok(children) = reply
+            .body()
+            .deserialize::<Vec<(String, zbus::zvariant::OwnedObjectPath)>>()
+        else {
+            return Vec::new();
+        };
+        children
+            .into_iter()
+            .map(|(destination, path)| AtspiNodeRef {
+                destination,
+                path: path.as_str().to_string(),
+            })
+            .collect()
+    }
+
+    /// Unique connection that currently owns `name`.
+    ///
+    /// Runs before any name or content query. A missing owner, the bus
+    /// daemon, or a result that is not a peer unique name is `None`.
+    pub(crate) async fn unique_owner(&self, name: &str) -> Option<String> {
+        if name.is_empty() || name == "org.freedesktop.DBus" {
+            return None;
+        }
+        let dest = bus_dest(name).ok()?;
+        let dbus = dbus_proxy(&self.connection).await?;
+        let owner = tokio::time::timeout(
+            DBUS_CALL_TIMEOUT,
+            dbus.get_name_owner(zbus::names::BusName::from(dest)),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let owner = owner.as_str().to_string();
+        peer_unique(&owner).then_some(owner)
+    }
+
+    /// Unix pid of the connection named `name`.
+    ///
+    /// Scoped discovery passes the unique owner from [`Self::unique_owner`],
+    /// not the well-known name that pointed at it. The query uses `name`
+    /// exactly, so a later owner of a well-known name is not what this reads
+    /// when `name` is already unique.
+    pub(crate) async fn scoped_connection_pid(&self, name: &str) -> Option<u32> {
+        let dest = bus_dest(name).ok()?;
+        let dbus = dbus_proxy(&self.connection).await?;
         let pid = tokio::time::timeout(
             DBUS_CALL_TIMEOUT,
             dbus.get_connection_unix_process_id(zbus::names::BusName::from(dest)),

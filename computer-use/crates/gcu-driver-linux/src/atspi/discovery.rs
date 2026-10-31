@@ -2,6 +2,7 @@
 
 use crate::atspi::bus::{AtspiBus, AtspiNodeRef};
 use crate::atspi::source::AtspiSource;
+use crate::identity::scope::ScopeBinding;
 use crate::x11::AtspiWindowCandidate;
 use gcu_core::driver::{AppQuery, AppRef, DriverError, Result, DRIVER_DEADLINE};
 use gcu_core::model::Rect;
@@ -56,6 +57,53 @@ pub async fn list_atspi_apps(conn: &zbus::Connection) -> Result<Vec<AppInfo>> {
             id: node.destination.clone(),
             name,
             pid,
+            identity,
+        });
+    }
+    Ok(apps)
+}
+
+/// Scoped applications. The accessible name comes from the unique owner.
+///
+/// `GetNameOwner` runs before any name query. The pid is that unique
+/// connection, not the well-known name. The name is read only after `pid`,
+/// start time, and boot id match the registration for the original bus name.
+/// A reference that has no unique owner is skipped. Unscoped discovery does
+/// not use this function.
+pub(crate) async fn list_scoped_atspi_apps(
+    conn: &zbus::Connection,
+    binding: &ScopeBinding,
+) -> Result<Vec<AppInfo>> {
+    let bus = AtspiBus::new(conn.clone());
+    let started = Instant::now();
+    let children = bus.scoped_children(&registry_root()).await;
+    let mut apps = Vec::new();
+    for child in children {
+        let Some(owner) = bus.unique_owner(&child.destination).await else {
+            continue;
+        };
+        let Some(pid) = bus.scoped_connection_pid(&owner).await else {
+            continue;
+        };
+        if binding
+            .discovered_instance(&child.destination, pid)
+            .is_none()
+        {
+            continue;
+        }
+        let named = AtspiNodeRef {
+            destination: owner,
+            path: child.path,
+        };
+        let name = match bus.name(&named).await {
+            Ok(Some(name)) if !name.is_empty() => name,
+            _ => continue,
+        };
+        let identity = identity_for_pid(pid, started).await;
+        apps.push(AppInfo {
+            id: child.destination,
+            name,
+            pid: Some(pid),
             identity,
         });
     }
