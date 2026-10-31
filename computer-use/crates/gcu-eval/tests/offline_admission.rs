@@ -17,13 +17,16 @@ use std::{
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
+        // Unique within the process even when the clock repeats (coarse on macOS).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "gcu-s6-r3-{}-{}",
+            "gcu-s6-r3-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
         Self(path)

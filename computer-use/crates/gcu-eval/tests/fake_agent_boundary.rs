@@ -9,13 +9,18 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
+        // The clock alone is not unique: macOS has microsecond resolution and the
+        // tests of this file start in parallel, so one test's cleanup could delete
+        // another's directory. The counter makes the name unique within the process.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "gcu-fake-admission-{}-{}",
+            "gcu-fake-admission-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
