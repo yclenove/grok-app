@@ -4,6 +4,9 @@ mod fake;
 mod relay;
 mod state;
 
+#[cfg(all(test, feature = "eval-autoapprove", debug_assertions))]
+mod approval_tests;
+
 #[cfg(all(test, feature = "script"))]
 pub(crate) async fn test_evidence(
     driver: gcu_driver_fake::FakeDriver,
