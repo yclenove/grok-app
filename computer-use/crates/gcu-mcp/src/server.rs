@@ -212,8 +212,14 @@ impl Server {
             activity,
             router.input_release(),
         ));
+        let images = crate::image_cache::ImageCache::default();
+        let scope = router.fixture_lease();
+        if let Some(lease) = scope.clone() {
+            images.bind_lease(lease.clone());
+            files.bind_lease(lease);
+        }
         let results = Results {
-            images: Arc::new(crate::image_cache::ImageCache::default()),
+            images: Arc::new(images),
             files: Arc::new(files),
             session: session.clone(),
             encoding: gcu_core::redact::EncodeOptions {
@@ -225,7 +231,7 @@ impl Server {
                 },
                 ..Default::default()
             },
-            scope: router.fixture_lease(),
+            scope,
             probe: result::FinishProbe::new(),
         };
         let script_ready = cfg!(feature = "script") && config.script.is_some();

@@ -1,4 +1,6 @@
 //! Session-owned files; paths and names never come from tool arguments.
+use crate::lease_view::{visible, Epoch};
+use gcu_core::scope::ScopeLease;
 use gcu_host_protocol::owner_only::{self, OwnerLock};
 #[cfg(test)]
 use std::sync::{Arc, Condvar};
@@ -23,19 +25,35 @@ struct Area {
     next: u64,
     stage_seq: u64,
     bytes: usize,
-    files: Vec<(PathBuf, usize)>,
+    files: Vec<StoredFile>,
+    lease: Option<ScopeLease>,
+}
+struct StoredFile {
+    path: PathBuf,
+    len: usize,
+    epoch: Option<Epoch>,
 }
 /// Validated ledger insertion. Its lock is acquired before the lease lock.
 pub(crate) struct FileAdmission<'a> {
     area: MutexGuard<'a, Area>,
-    rows: Vec<(PathBuf, usize)>,
+    rows: Vec<StoredFile>,
+    epoch: Option<Epoch>,
 }
 impl FileAdmission<'_> {
+    /// Generation copied from the authority pairs inside the commit closure.
+    ///
+    /// Memory only. No await, timeout, or cancellation. `None` is unscoped.
+    pub(crate) fn stamp(&mut self, epoch: Option<Epoch>) {
+        self.epoch = epoch;
+    }
+
     /// Memory-only, infallible registration of the batch validated by `admission`.
     pub(crate) fn commit(&mut self, staged: &mut [StagedFile]) {
-        for (path, len) in self.rows.drain(..) {
-            self.area.bytes += len;
-            self.area.files.push((path, len));
+        let epoch = self.epoch.clone();
+        for mut row in self.rows.drain(..) {
+            self.area.bytes += row.len;
+            row.epoch = epoch.clone();
+            self.area.files.push(row);
         }
         for file in staged {
             file.committed = true;
@@ -62,6 +80,7 @@ impl SessionFiles {
                 stage_seq: 0,
                 bytes: 0,
                 files: Vec::new(),
+                lease: None,
             }),
             #[cfg(test)]
             gate: Mutex::new(None),
@@ -156,10 +175,28 @@ impl SessionFiles {
         }
         let rows = staged
             .iter()
-            .map(|file| (file.path.clone(), file.len))
+            .map(|file| StoredFile {
+                path: file.path.clone(),
+                len: file.len,
+                epoch: None,
+            })
             .collect();
         area.files.reserve(staged.len());
-        Ok(FileAdmission { area, rows })
+        Ok(FileAdmission {
+            area,
+            rows,
+            epoch: None,
+        })
+    }
+
+    /// Remember the lease that later exports compare. Memory only.
+    ///
+    /// Call before taking the area lock for a commit. No timeout or cancellation.
+    pub(crate) fn bind_lease(&self, lease: ScopeLease) {
+        self.area
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .lease = Some(lease);
     }
     /// Rename a staged file into the export ledger.
     ///
@@ -183,23 +220,43 @@ impl SessionFiles {
         staged.path = path.clone();
         area.next = area.next.saturating_add(1);
         area.bytes += staged.len;
-        area.files.push((path.clone(), staged.len));
+        area.files.push(StoredFile {
+            path: path.clone(),
+            len: staged.len,
+            epoch: None,
+        });
         staged.committed = true;
         Ok(path)
     }
     pub(crate) fn export(&self) -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
-        let area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
         if area.directory.is_none() {
             return Err(io::Error::other("session closed"));
         }
+        let lease = area.lease.clone();
+        let mut stale_len = 0usize;
+        let mut stale_paths = Vec::new();
+        area.files.retain(|row| {
+            if visible(lease.as_ref(), row.epoch.as_ref()) {
+                true
+            } else {
+                stale_len = stale_len.saturating_add(row.len);
+                stale_paths.push(row.path.clone());
+                false
+            }
+        });
+        area.bytes = area.bytes.saturating_sub(stale_len);
+        for path in &stale_paths {
+            let _ = std::fs::remove_file(path);
+        }
         area.files
             .iter()
-            .map(|(path, size)| {
-                let bytes = owner_only::read_no_follow(path, *size as u64)?;
-                if bytes.len() != *size {
+            .map(|row| {
+                let bytes = owner_only::read_no_follow(&row.path, row.len as u64)?;
+                if bytes.len() != row.len {
                     return Err(io::Error::other("session file changed"));
                 }
-                Ok((path.clone(), bytes))
+                Ok((row.path.clone(), bytes))
             })
             .collect()
     }

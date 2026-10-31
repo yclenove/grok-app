@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
-#[cfg(any(test, target_os = "macos"))]
 use std::sync::Mutex;
 
 use gcu_protocol::Rect;
@@ -54,7 +53,6 @@ pub struct Snapshot {
 ///
 /// Memory only. No blocking, timeout, or cancellation. `boot_time` is ignored
 /// so a wall-clock reset cannot make two boots compare equal.
-#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn boot_identity_from(uuid: Option<&str>, boot_time: Option<&str>) -> Option<String> {
     let _boot_time_is_not_identity = boot_time;
     let uuid = uuid.map(str::trim).filter(|value| !value.is_empty())?;
@@ -111,6 +109,108 @@ pub trait OsFacts: Send + Sync {
     /// Shared token book, when this source has one.
     #[cfg(target_os = "macos")]
     fn token_book(&self) -> Option<Arc<TokenBook>> {
+        None
+    }
+}
+
+/// Process-instance facts a scoped helper re-reads at admission.
+///
+/// This is the [`OsFacts`] surface used for a peer: boot session and process
+/// start. A pathname is not part of the check. Implementations must not answer
+/// from a cache that can outlive the process. Memory only. No timeout or
+/// cancellation. A live macOS body may block on the same budget as [`OsFacts`].
+pub trait ProcessFacts: Send + Sync {
+    /// Boot session, or `None` when it cannot be re-derived.
+    fn boot_identity(&self) -> Option<String>;
+    /// Process start in microseconds, or `None` when the pid is gone or the time is zero.
+    fn process_start_us(&self, pid: u32) -> Option<u64>;
+}
+
+impl<T> ProcessFacts for T
+where
+    T: OsFacts + ?Sized,
+{
+    fn boot_identity(&self) -> Option<String> {
+        OsFacts::boot_identity(self)
+    }
+    fn process_start_us(&self, pid: u32) -> Option<u64> {
+        OsFacts::process_start_us(self, pid)
+    }
+}
+
+/// Injected process facts. No process, window, or accessibility call.
+///
+/// Used by the scoped helper handshake. A missing pid or a zero start is absence.
+#[derive(Default)]
+pub struct ScriptedFacts {
+    boot: Mutex<Option<String>>,
+    boot_time: Mutex<Option<String>>,
+    procs: Mutex<HashMap<u32, u64>>,
+}
+
+impl ScriptedFacts {
+    /// Empty facts. Every read is `None` until a setter runs.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the boot identity. An empty string is stored and then rejected.
+    pub fn set_boot(&self, boot: impl Into<String>) {
+        *self.boot.lock().unwrap_or_else(|err| err.into_inner()) = Some(boot.into());
+    }
+
+    /// Store a readable boot time. It is not accepted as boot identity.
+    pub fn set_boot_time(&self, boot_time: impl Into<String>) {
+        *self.boot_time.lock().unwrap_or_else(|err| err.into_inner()) = Some(boot_time.into());
+    }
+
+    /// Replace one process start. Zero is stored and then rejected on read.
+    pub fn set_process(&self, pid: u32, start_us: u64) {
+        self.procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(pid, start_us);
+    }
+
+    /// Remove a process so the next read looks like it exited.
+    pub fn drop_process(&self, pid: u32) {
+        self.procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&pid);
+    }
+}
+
+impl OsFacts for ScriptedFacts {
+    fn boot_identity(&self) -> Option<String> {
+        let boot = self.boot.lock().unwrap_or_else(|err| err.into_inner());
+        let boot_time = self.boot_time.lock().unwrap_or_else(|err| err.into_inner());
+        boot_identity_from(boot.as_deref(), boot_time.as_deref())
+    }
+
+    fn process_start_us(&self, pid: u32) -> Option<u64> {
+        let start = *self
+            .procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&pid)?;
+        if start == 0 {
+            None
+        } else {
+            Some(start)
+        }
+    }
+
+    fn executable_path(&self, _pid: u32) -> Option<String> {
+        None
+    }
+
+    fn windows(&self) -> Option<Vec<OsWindow>> {
+        None
+    }
+
+    fn element(&self, _pid: u32, _id: u64) -> Option<ElementFact> {
         None
     }
 }

@@ -125,6 +125,10 @@ where
         .read_exact(&mut bytes)
         .await
         .map_err(|error| HelperError::from_io(&error))?;
+    // A scoped bootstrap is a different endpoint. Refuse it before MCP.
+    if super::scope_link::ordinary_must_refuse(&bytes) {
+        return Err(HelperError::Frame);
+    }
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|_| HelperError::Frame)

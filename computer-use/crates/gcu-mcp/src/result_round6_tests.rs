@@ -516,7 +516,7 @@ async fn revoke_while_cache_admission_waits_does_not_deadlock_or_publish() {
 }
 
 #[tokio::test]
-async fn revoke_after_image_commit_keeps_the_entire_published_batch() {
+async fn revoke_after_image_commit_hides_the_published_batch() {
     let scope = lease();
     let results = desk(Some(scope.clone()));
     let gate = scope.commit_after_gate();
@@ -545,9 +545,12 @@ async fn revoke_after_image_commit_keeps_the_entire_published_batch() {
     let result = results.state(state).await;
     watcher.join().unwrap();
     assert_eq!(result.is_error, Some(false));
-    assert!(results.images.get("i_private").is_some());
-    assert_eq!(results.files.export().unwrap().len(), 2);
-    assert!(results.files.contains_bytes(b"CANARY-COMMITTED"));
+    assert!(
+        results.images.get("i_private").is_none(),
+        "revoked generation stayed readable"
+    );
+    assert!(results.files.export().unwrap().is_empty());
+    assert!(!results.files.contains_bytes(b"CANARY-COMMITTED"));
     results.files.close().unwrap();
 }
 

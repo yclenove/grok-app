@@ -111,6 +111,10 @@ impl Results {
     /// crosses an await. The lease critical section contains only infallible
     /// memory registration; readers cannot see a partially registered batch.
     fn commit_outputs(&self, input: &mut FinishIn) -> Result<(), FinishFault> {
+        if let Some(lease) = &self.scope {
+            self.images.bind_lease(lease.clone());
+            self.files.bind_lease(lease.clone());
+        }
         let authority = input.stamp.epochs().to_vec();
         let pairs: Vec<(&str, u64)> = authority
             .iter()
@@ -153,13 +157,20 @@ impl Results {
                 .files
                 .admission(&input.created)
                 .map_err(|_| FinishFault::Io)?;
+            let epoch = self.scope.as_ref().and_then(|_| {
+                pairs
+                    .first()
+                    .map(|(run, generation)| ((*run).to_owned(), *generation))
+            });
             let mut publish = || {
                 if let Some(delivery) = &mut delivery {
                     delivery.commit();
                 }
                 if let Some(image) = &mut image {
+                    image.stamp(epoch.clone());
                     image.commit();
                 }
+                files.stamp(epoch.clone());
                 files.commit(&mut input.created);
             };
             if let Some(lease) = &self.scope {
@@ -170,8 +181,9 @@ impl Results {
                 publish();
             }
         }
-        // Output locks and the lease have all been released. A later revoke
-        // does not roll back products that were committed while authorized.
+        // Output locks and the lease have all been released. This function does
+        // not undo a commit. A later get or export hides a row whose stamped
+        // generation is no longer current.
         if let Some(lease) = &self.scope {
             lease.commit_after_gate().enter();
         }
