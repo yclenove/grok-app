@@ -32,12 +32,35 @@ pub async fn perform(
     req: &DriverAction,
     cancel: &Cancel,
 ) -> Result<Delivery> {
+    perform_scoped(
+        source,
+        hwnd,
+        req,
+        cancel,
+        &crate::scope_identity::JobScope::unscoped(),
+    )
+    .await
+}
+/// Semantic action under one scope copied by the caller.
+///
+/// [`JobScope::Unscoped`] keeps the historical route: a foreign owner and a
+/// missing probe still dispatch. A scoped job requires the element's own
+/// process and top-level window. A missing scope is refused and is not treated
+/// as unscoped.
+pub(crate) async fn perform_scoped(
+    source: &dyn UiaSource,
+    hwnd: u64,
+    req: &DriverAction,
+    cancel: &Cancel,
+    scope: &crate::scope_identity::JobScope,
+) -> Result<Delivery> {
     perform_until(
         source,
         hwnd,
         req,
         cancel,
         tokio::time::Instant::now() + DRIVER_DEADLINE,
+        scope,
     )
     .await
 }
@@ -47,6 +70,7 @@ pub(crate) async fn perform_until(
     req: &DriverAction,
     cancel: &Cancel,
     deadline: tokio::time::Instant,
+    scope: &crate::scope_identity::JobScope,
 ) -> Result<Delivery> {
     let budget = Budget {
         deadline,
@@ -55,10 +79,39 @@ pub(crate) async fn perform_until(
     };
     budget.context.check()?;
     let el = target(req).ok_or(DriverError::CapabilityUnavailable)?;
-    let node = el
+    let observed = el
         .downcast_ref::<UiaElement>()
-        .ok_or(DriverError::StaleElement)?
-        .node;
+        .ok_or(DriverError::StaleElement)?;
+    let node = observed.node;
+    let element_hwnd = observed.hwnd;
+    let window_id = observed.window.id.clone();
+    // Unscoped work does not consult the owner probe. Scoped work proves the
+    // process instance and the top-level window before any content refresh.
+    if let Some(claim) = scope.claim()? {
+        if let Some((pid, created, boot)) = budget.read(source.owner_instance(node)).await? {
+            crate::scope_identity::prove_process(
+                &claim.owner,
+                &crate::scope_identity::ProcessClaim { pid, created, boot },
+            )?;
+        }
+        let owner = budget.read(source.owner_pid(node)).await?;
+        crate::scope_identity::admit_delivery_element(
+            claim.hwnd,
+            element_hwnd,
+            &window_id,
+            owner,
+            Some(claim.owner.pid),
+        )?;
+        let fact =
+            owner
+                .filter(|pid| *pid != 0)
+                .map(|owner_pid| crate::scope_identity::FragmentFact {
+                    owner_pid,
+                    top_hwnd: element_hwnd,
+                });
+        // An unset probe is not the admitted owner. Real UIA does not return Ok(None).
+        crate::scope_identity::admit_fragment(claim, fact)?;
+    }
     let props = budget.read(source.validate(node, hwnd)).await?;
     let result = match req {
         DriverAction::SetValue { value, .. } => {

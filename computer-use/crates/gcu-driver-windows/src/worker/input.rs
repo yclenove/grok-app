@@ -1,7 +1,7 @@
 //! Parent-held ledger and child acknowledgement barrier; cleanup never uses RPC.
 use super::{codec, wire::WireDelivery, Action, Reply, Request, Response};
 use crate::input::{
-    api::{Event, InputReleaser, InputTracker, Target},
+    api::{AdmittedTarget, Event, InputReleaser, InputTracker, Target},
     ledger::InputLedger,
 };
 use async_trait::async_trait;
@@ -50,9 +50,24 @@ impl Tracker {
 #[async_trait]
 impl InputTracker for Tracker {
     async fn clipboard_stage(&self, target: Target, text: String) -> Result<u32> {
-        self.notify(Reply::ClipboardStage { target, text })
-            .await?
-            .ok_or_else(crashed)
+        self.clipboard_stage_admitted(target, text, None).await
+    }
+    async fn clipboard_stage_admitted(
+        &self,
+        target: Target,
+        text: String,
+        admitted: Option<AdmittedTarget>,
+    ) -> Result<u32> {
+        if admitted.is_some() {
+            return Err(DriverError::CapabilityUnavailable);
+        }
+        self.notify(Reply::ClipboardStage {
+            target,
+            text,
+            admitted,
+        })
+        .await?
+        .ok_or_else(crashed)
     }
     async fn clipboard_restore(&self) -> Result<()> {
         self.notify(Reply::ClipboardRestore).await.map(|_| ())
@@ -174,7 +189,16 @@ impl Recovery {
     ) -> Result<Option<Reply>> {
         let mut clipboard_sequence = None;
         match reply {
-            Reply::ClipboardStage { target, text } => {
+            Reply::ClipboardStage {
+                target,
+                text,
+                admitted,
+            } => {
+                // Scoped staging is closed. Refuse before the foreground Stop
+                // check and before any clipboard lookup or open.
+                if admitted.is_some() {
+                    return Err(DriverError::CapabilityUnavailable);
+                }
                 self.check_delivery(true)?;
                 let Request::Perform(Action::TypeText {
                     win,
@@ -355,6 +379,108 @@ fn press_packet(events: &[Event]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        desktop::HwndStamp,
+        input::{
+            clipboard::ClipboardApi,
+            hotkey::{FakeSafetyApi, StopLatch},
+        },
+        testing::window,
+        worker::{action::Action, wire::Window},
+    };
+    use async_trait::async_trait;
+    use gcu_core::driver::KeyRoute;
+    use gcu_protocol::AppInfo;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    struct Stopped;
+    impl StopLatch for Stopped {
+        fn is_stopped(&self) -> bool {
+            true
+        }
+        fn request_stop(&self) {}
+    }
+
+    struct Counting {
+        stages: AtomicUsize,
+        contents: Mutex<String>,
+    }
+    struct Releaser(Arc<Counting>);
+    #[async_trait]
+    impl InputReleaser for Releaser {
+        async fn release(&self, _: Arc<crate::input::ledger::InputLedger>) {}
+        fn clipboard(&self) -> Option<Arc<dyn ClipboardApi>> {
+            Some(self.0.clone())
+        }
+    }
+    #[async_trait]
+    impl ClipboardApi for Counting {
+        async fn stage(&self, text: String, _: crate::uia::patterns::ActionContext) -> Result<u32> {
+            self.stages.fetch_add(1, Ordering::SeqCst);
+            *self
+                .contents
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = text;
+            Ok(1)
+        }
+        async fn matches(&self, _: u32, _: String) -> Result<bool> {
+            Ok(false)
+        }
+        async fn restore(&self) -> Result<()> {
+            Ok(())
+        }
+        fn pending(&self) -> bool {
+            false
+        }
+    }
+
+    fn counting() -> Arc<Counting> {
+        Arc::new(Counting {
+            stages: AtomicUsize::new(0),
+            contents: Mutex::new(String::new()),
+        })
+    }
+
+    fn stage_pair(text: &str, admitted: bool) -> (Reply, Request) {
+        let native = window(8, 7);
+        let win = Window {
+            app: AppInfo {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                pid: Some(7),
+                identity: None,
+            },
+            id: HwndStamp::from(&native).id(),
+        };
+        let request = Request::Perform(Action::TypeText {
+            win: win.clone(),
+            focus: None,
+            text: text.to_owned(),
+            route: KeyRoute::AllowForeground,
+        });
+        let admitted = admitted.then(|| crate::input::api::AdmittedTarget {
+            hwnd: native.hwnd,
+            incarnation: native.created,
+            pid: native.pid,
+            created: native.process_created,
+            boot: "boot-session".into(),
+        });
+        let reply = Reply::ClipboardStage {
+            target: crate::input::api::Target {
+                window: native.clone(),
+                hwnd: native.hwnd,
+                class: "Edit".into(),
+                message_capable: true,
+            },
+            text: text.to_owned(),
+            admitted,
+        };
+        (reply, request)
+    }
+
     #[test]
     fn semantic_press_packets_cannot_grant_keys_drag_or_unbalanced_downs() {
         let p = gcu_core::model::WindowPoint { x: 20., y: 30. };
@@ -374,5 +500,70 @@ mod tests {
         ] {
             assert!(!press_packet(&events));
         }
+    }
+
+    #[tokio::test]
+    async fn scoped_clipboard_stage_refuses_before_open() {
+        let board = counting();
+        let safety = Arc::new(Mutex::new(Some(
+            FakeSafetyApi::default().start(Default::default(), Arc::new(Stopped)),
+        )));
+        let recovery = Recovery::new(Arc::new(Releaser(Arc::clone(&board))), safety);
+        let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD", true);
+        let (_reader, mut writer) = tokio::io::duplex(64);
+        let error = recovery
+            .receive(reply, &request, &mut writer, 1, 1)
+            .await
+            .err()
+            .expect("scoped clipboard stage opened");
+        assert_eq!(error, DriverError::CapabilityUnavailable);
+        assert!(!error.maybe_executed());
+        assert_eq!(board.stages.load(Ordering::SeqCst), 0);
+        assert!(!board
+            .contents
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains("CANARY-CLIPBOARD-PAYLOAD"));
+    }
+
+    #[tokio::test]
+    async fn child_tracker_refuses_scoped_clipboard_stage_without_notifying() {
+        let (tracker, mut notices) = channel();
+        let (reply, _request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD", true);
+        let Reply::ClipboardStage {
+            target,
+            text,
+            admitted,
+        } = reply
+        else {
+            panic!("stage pair");
+        };
+        let error = tracker
+            .clipboard_stage_admitted(target, text, admitted)
+            .await
+            .expect_err("scoped stage notified the parent");
+        assert_eq!(error, DriverError::CapabilityUnavailable);
+        assert!(!error.maybe_executed());
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unscoped_clipboard_stage_still_publishes_once() {
+        let board = counting();
+        let recovery = Recovery::new(
+            Arc::new(Releaser(Arc::clone(&board))),
+            Arc::new(Mutex::new(None)),
+        );
+        let (reply, request) = stage_pair("UNSCOPED-CLIPBOARD-PAYLOAD", false);
+        let (_reader, mut writer) = tokio::io::duplex(256);
+        let result = recovery.receive(reply, &request, &mut writer, 1, 1).await;
+        // `Reply` carries clipboard text and has no Debug/PartialEq.
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(board.stages.load(Ordering::SeqCst), 1);
+        assert!(board
+            .contents
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains("UNSCOPED-CLIPBOARD-PAYLOAD"));
     }
 }

@@ -128,10 +128,7 @@ impl FakeClipboard {
             wait.await;
         }
     }
-}
-#[async_trait]
-impl ClipboardApi for FakeClipboard {
-    async fn stage(&self, text: String, context: ActionContext) -> Result<u32> {
+    async fn publish(&self, text: String, context: ActionContext) -> Result<u32> {
         if self.pending() {
             return Err(DriverError::CapabilityUnavailable);
         }
@@ -161,6 +158,12 @@ impl ClipboardApi for FakeClipboard {
             }
         }
         Ok(state.sequence)
+    }
+}
+#[async_trait]
+impl ClipboardApi for FakeClipboard {
+    async fn stage(&self, text: String, context: ActionContext) -> Result<u32> {
+        self.publish(text, context).await
     }
     async fn matches(&self, sequence: u32, text: String) -> Result<bool> {
         let mut state = self.desktop.state.lock().unwrap();
@@ -391,17 +394,18 @@ impl InputApi for TestInput {
         delivery: Delivery,
         ledger: Arc<InputLedger>,
         context: ActionContext,
+        claim: Option<AdmittedTarget>,
     ) -> Result<()> {
         self.inner
-            .send(target, events, delivery, ledger, context)
+            .send(target, events, delivery, ledger, context, claim)
             .await?;
         if self.external_after.swap(false, Ordering::SeqCst) {
             self.board.copy_external();
         }
         Ok(())
     }
-    async fn sample(&self, target: Target) -> Result<u64> {
-        self.inner.sample(target).await
+    async fn sample(&self, target: Target, claim: Option<AdmittedTarget>) -> Result<u64> {
+        self.inner.sample(target, claim).await
     }
     async fn release(&self, ledger: Arc<InputLedger>) {
         InputApi::release(&self.inner, ledger).await;

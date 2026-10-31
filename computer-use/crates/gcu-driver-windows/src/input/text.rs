@@ -51,6 +51,17 @@ impl Paste<'_> {
         }
         self.context.check()
     }
+    async fn stage(&self) -> Result<u32> {
+        if let Some(tracker) = &self.tracker {
+            tracker
+                .clipboard_stage(self.target.clone(), self.text.clone())
+                .await
+        } else {
+            self.clipboard
+                .stage(self.text.clone(), self.context.clone())
+                .await
+        }
+    }
     async fn before_paste(&self) -> Result<()> {
         self.check_stop()?;
         let result = self
@@ -74,15 +85,7 @@ impl Paste<'_> {
             tracker: self.tracker.clone(),
         };
         let result = async {
-            let sequence = if let Some(tracker) = &self.tracker {
-                tracker
-                    .clipboard_stage(self.target.clone(), self.text.clone())
-                    .await?
-            } else {
-                self.clipboard
-                    .stage(self.text.clone(), self.context.clone())
-                    .await?
-            };
+            let sequence = self.stage().await?;
             self.check_stop()?;
             let packet = messages::chord_events(
                 &KeyChord::parse("ctrl+v").map_err(|_| DriverError::InvalidRequest)?,
@@ -104,6 +107,13 @@ impl Paste<'_> {
             }
             // Recheck focus/Stop after the clipboard read as well.
             self.before_paste().await?;
+            crate::scope_identity::require_delivery_scalars(
+                self.target.window.hwnd,
+                self.target.window.pid,
+                self.target.window.process_created,
+                self.target.window.created,
+                self.target.hwnd,
+            )?;
             let result = self
                 .api
                 .send(
@@ -112,6 +122,7 @@ impl Paste<'_> {
                     Delivery::Foreground,
                     self.ledger.clone(),
                     self.context.clone(),
+                    None,
                 )
                 .await;
             if let Some(tracker) = &self.tracker {

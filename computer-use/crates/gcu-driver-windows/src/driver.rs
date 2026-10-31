@@ -9,11 +9,15 @@ use crate::{
 use gcu_core::{
     driver::*,
     model::{Geometry, NativeHandle, RawTree},
+    scope::{ElementBinding, InstanceEvidence, ProcessInstance, WindowBinding},
 };
 use gcu_protocol::{capabilities::*, AppInfo, WindowInfo};
 use std::{
     collections::BTreeMap,
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     time::Duration,
 };
 use tokio::sync::oneshot;
@@ -35,6 +39,13 @@ pub struct WindowsDriver {
     input: Option<Arc<crate::input::InputBackend>>,
     observer: Option<crate::uia::observe::Observer>,
     pub(crate) capture_backend: Option<Arc<crate::capture::CaptureBackend>>,
+    /// Set for the life of a [`gcu_core::scope::ScopedDriver`]. Observation has no pin.
+    session_scoped: AtomicBool,
+    /// Perform pin, copied into [`crate::scope_identity::JobScope`] once per action.
+    pinned: std::sync::Mutex<Option<crate::scope_identity::WindowClaim>>,
+    /// Test barrier between outer admission and the first content read.
+    /// Production leaves it empty. It is not inside the pointer gate.
+    native_barrier: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl WindowsDriver {
     /// Start independent native queues after refusing elevated/noninteractive
@@ -56,6 +67,9 @@ impl WindowsDriver {
             input: None,
             observer: None,
             capture_backend: None,
+            session_scoped: AtomicBool::new(false),
+            pinned: std::sync::Mutex::new(None),
+            native_barrier: std::sync::Mutex::new(None),
         })
     }
     /// Start the production Windows adapter in the default isolated mode.
@@ -121,19 +135,26 @@ impl WindowsDriver {
             discovery: None,
             observer: None,
             capture_backend: None,
+            session_scoped: AtomicBool::new(false),
+            pinned: std::sync::Mutex::new(None),
+            native_barrier: std::sync::Mutex::new(None),
         }
     }
     /// Start native threads inside this process. For the worker executable or
     /// explicit diagnostics only; caller timeouts cannot terminate blocked FFI.
     #[cfg(windows)]
     pub async fn new_in_process() -> Result<Self> {
-        Self::native(Arc::new(crate::RealWinApi::new()?)).await
+        Self::native(Arc::new(crate::RealWinApi::new()?), None).await
     }
     /// Initialize the child adapter with the launcher's process-instance namespace.
     /// Called only after the private startup frame; window stamps survive restart.
     #[cfg(windows)]
     pub async fn new_worker(namespace: &str) -> Result<Self> {
-        let mut driver = Self::native(Arc::new(crate::RealWinApi::for_worker(namespace)?)).await?;
+        let mut driver = Self::native(
+            Arc::new(crate::RealWinApi::for_worker(namespace)?),
+            Some(namespace.to_owned()),
+        )
+        .await?;
         driver.child = true;
         Ok(driver)
     }
@@ -156,13 +177,15 @@ impl WindowsDriver {
         Ok(driver)
     }
     #[cfg(windows)]
-    async fn native(api: Arc<dyn WinApi>) -> Result<Self> {
+    async fn native(api: Arc<dyn WinApi>, namespace: Option<String>) -> Result<Self> {
         let _timing = crate::timing::Timing::start("native_initialize");
         // Prewarm COM/UIA immediately alongside discovery and capture, before
         // the parent handshake. No first-window request initializes UIA.
+        // `namespace` is the discovery generation property. In-process passes
+        // `None` and UIA uses the same property as `RealWinApi::new`.
         let (driver, uia, wgc, print) = tokio::try_join!(
             Self::with_api(api.clone()),
-            crate::uia::RealUia::start(),
+            crate::uia::RealUia::start(namespace),
             crate::capture::WgcCapture::new(),
             crate::capture::PrintWindowCapture::new(),
         )?;
@@ -277,6 +300,53 @@ impl WindowsDriver {
         );
         Ok(driver?.with_safety(guard).with_overlay_exclusion(overlay))
     }
+    /// Install a barrier that runs after outer admission and before content.
+    ///
+    /// Production never sets it. A test uses it to replace the admitted
+    /// instance before UIA or capture runs. The callback must not block Stop
+    /// and is not invoked from the pointer gate.
+    pub fn set_native_barrier(&self, barrier: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self
+            .native_barrier
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = barrier;
+    }
+
+    /// Run the test barrier, if one was installed. Production returns immediately.
+    pub(super) fn run_native_barrier(&self) {
+        let barrier = self
+            .native_barrier
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier();
+        }
+    }
+
+    /// Copy scope once. A scoped session with no pin is [`crate::scope_identity::JobScope::Missing`].
+    pub(super) fn job_scope(&self) -> crate::scope_identity::JobScope {
+        if !self.session_scoped.load(Ordering::Acquire) {
+            return crate::scope_identity::JobScope::unscoped();
+        }
+        match self
+            .pinned
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+        {
+            Some(claim) => crate::scope_identity::JobScope::Scoped(claim),
+            None => crate::scope_identity::JobScope::Missing,
+        }
+    }
+
+    /// Whether [`gcu_core::scope::ScopedDriver`] wrapped this driver.
+    ///
+    /// Observation uses this flag and a discovery claim. It does not read the pin.
+    pub(super) fn session_is_scoped(&self) -> bool {
+        self.session_scoped.load(Ordering::Acquire)
+    }
+
     pub(crate) async fn call<T: Send + 'static>(
         &self,
         timeout: Duration,
@@ -354,11 +424,114 @@ fn discovery_capabilities() -> Capabilities {
         },
     }
 }
+/// Doctor sentence for routes scoped Windows cannot bind to a process instance.
+///
+/// It names no target. Foreground SendInput, foreground paste, and recipients
+/// that cannot be proved are unavailable. Targeted messages and UIA patterns
+/// remain when the process instance can be proved.
+pub(crate) const SCOPED_ROUTE_NOTE: &str = concat!(
+    "scoped mode: foreground SendInput pointer and keyboard are unavailable, ",
+    "including approach and drag samples; clipboard paste via foreground keys ",
+    "is unavailable; routes whose recipient cannot be proved, including ",
+    "ApplicationFrameHost, are unavailable; targeted window messages and UIA ",
+    "patterns remain when the recipient process instance can be proved."
+);
+
 /// Private element binding for the common gate; P2-02 will attach UIA handles.
 #[derive(Clone, Debug)]
 pub struct WindowsElement {
     /// Exact stamped window owning the element.
     pub window: WindowRef,
+}
+
+impl InstanceEvidence for WindowsDriver {
+    fn app_instance(&self, app: &AppRef) -> Option<ProcessInstance> {
+        // The isolated parent has no WinApi. Unproved evidence stays closed.
+        // The worker child is the in-process driver and re-reads the handle time.
+        let api = self.discovery.as_ref()?.api();
+        crate::scope_identity::live_process(api.as_ref(), app.info.pid?)
+    }
+
+    fn window_binding(&self, window: &WindowRef) -> Option<WindowBinding> {
+        let api = self.discovery.as_ref()?.api();
+        crate::scope_identity::live_window(api.as_ref(), window)
+    }
+
+    fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {
+        let element = handle.downcast_ref::<crate::uia::UiaElement>()?;
+        // The source record is the element's owner. The requested window is not.
+        let (owner_pid, top_hwnd) = self.observer.as_ref()?.fragment_now(element.node)?;
+        let fact = crate::scope_identity::FragmentFact {
+            owner_pid,
+            top_hwnd,
+        };
+        let binding = self.window_binding(&element.window)?;
+        let stamp = crate::scope_identity::parse_stamp(binding.native_id())?;
+        if fact.top_hwnd != element.hwnd
+            || fact.top_hwnd != stamp.hwnd
+            || fact.owner_pid != binding.owner().pid()
+        {
+            return None;
+        }
+        let claim = crate::scope_identity::WindowClaim {
+            hwnd: stamp.hwnd,
+            incarnation: binding.incarnation(),
+            owner: crate::scope_identity::ProcessClaim {
+                pid: binding.owner().pid(),
+                created: binding.owner().start().ticks(),
+                boot: binding.owner().boot().as_str().to_owned(),
+            },
+        };
+        crate::scope_identity::admit_delivery_element(
+            claim.hwnd,
+            element.hwnd,
+            &element.window.id,
+            Some(fact.owner_pid),
+            Some(claim.owner.pid),
+        )
+        .ok()?;
+        crate::scope_identity::prove_element(
+            &claim,
+            binding.native_id(),
+            element.hwnd,
+            &element.window.id,
+            Some(fact.owner_pid),
+        )
+        .ok()?;
+        Some(ElementBinding::new(binding))
+    }
+
+    fn pin_admitted(&self, binding: Option<&WindowBinding>) {
+        let claim = binding.and_then(claim_from_binding);
+        *self.pinned.lock().unwrap_or_else(|err| err.into_inner()) = claim;
+    }
+
+    fn note_scoped_session(&self) {
+        self.session_scoped.store(true, Ordering::Release);
+    }
+
+    fn scope_capabilities(&self, current: &Capabilities) -> Capabilities {
+        let mut caps = current.clone();
+        caps.delivery.foreground = ForegroundCapability::Unavailable;
+        caps
+    }
+
+    fn scoped_doctor_note(&self) -> Option<&'static str> {
+        Some(SCOPED_ROUTE_NOTE)
+    }
+}
+
+fn claim_from_binding(binding: &WindowBinding) -> Option<crate::scope_identity::WindowClaim> {
+    let stamp = crate::scope_identity::parse_stamp(binding.native_id())?;
+    Some(crate::scope_identity::WindowClaim {
+        hwnd: stamp.hwnd,
+        incarnation: binding.incarnation(),
+        owner: crate::scope_identity::ProcessClaim {
+            pid: binding.owner().pid(),
+            created: binding.owner().start().ticks(),
+            boot: binding.owner().boot().as_str().to_owned(),
+        },
+    })
 }
 
 #[path = "driver_impl.rs"]
