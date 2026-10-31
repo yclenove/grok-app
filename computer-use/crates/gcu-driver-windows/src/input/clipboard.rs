@@ -324,12 +324,16 @@ mod tests {
 
     #[test]
     fn publish_formats_keeps_the_original_error_when_the_first_publish_fails() {
-        let error = publish_formats(2, || Ok(()), |_| {
-            Err(DriverError::Native {
-                message: "Windows clipboard operation failed".into(),
-                maybe_executed: false,
-            })
-        })
+        let error = publish_formats(
+            2,
+            || Ok(()),
+            |_| {
+                Err(DriverError::Native {
+                    message: "Windows clipboard operation failed".into(),
+                    maybe_executed: false,
+                })
+            },
+        )
         .unwrap_err();
         assert_eq!(
             error,

@@ -388,14 +388,7 @@ impl InputBackend {
             }
             if let Some(before) = before {
                 let effect = self
-                    .settle(
-                        &target,
-                        before,
-                        plan.text,
-                        &context,
-                        work_deadline,
-                        carried,
-                    )
+                    .settle(&target, before, plan.text, &context, work_deadline, carried)
                     .await?;
                 *self.effect.lock().unwrap_or_else(|p| p.into_inner()) = Some(effect);
             }
@@ -496,9 +489,7 @@ impl Drop for Cleanup<'_> {
 /// Admitted window copied once for every sample and send in this action.
 ///
 /// `None` is unscoped. The value is not read from the pin again.
-fn carried_target(
-    scope: &crate::scope_identity::JobScope,
-) -> Result<Option<api::AdmittedTarget>> {
+fn carried_target(scope: &crate::scope_identity::JobScope) -> Result<Option<api::AdmittedTarget>> {
     let Some(claim) = scope.claim()? else {
         return Ok(None);
     };
