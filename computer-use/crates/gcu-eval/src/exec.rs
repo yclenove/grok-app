@@ -110,6 +110,14 @@ async fn execute_ready(
     };
     // Both in-process entry and successful external spawn count as client execution.
     outcome.assurance.client_started = true;
+    if finished.worker_unconfirmed {
+        // The worker may still be inside a write that already passed its check.
+        // Do not score files or stdout from this attempt.
+        outcome.status = RunStatus::NotRun;
+        outcome.reason = crate::fake_agent::WORKER_UNCONFIRMED.into();
+        outcome.metrics.duration_ms = elapsed_ms(started);
+        return outcome;
+    }
     if finished.wait_failed {
         outcome.status = RunStatus::Crash;
         outcome.reason = "wait: client wait failed".into();

@@ -30,6 +30,7 @@ mod exec;
 mod fake_agent;
 mod fake_gcu;
 mod fake_io;
+mod fake_worker;
 mod ffi;
 mod launch;
 mod metrics;

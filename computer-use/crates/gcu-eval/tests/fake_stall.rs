@@ -194,7 +194,8 @@ fn assert_no_late_writer(fifo: &std::path::Path) {
     options.read(true);
     options.custom_flags(O_NONBLOCK | O_CLOEXEC);
     let mut file = options.open(fifo).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    // The runner joins this worker before returning, so a completed write is
+    // already in the pipe. There is no grace period to sleep for.
     let mut buf = [0u8; 64];
     match file.read(&mut buf) {
         Ok(0) => {}

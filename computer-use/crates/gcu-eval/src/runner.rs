@@ -295,8 +295,10 @@ impl Default for RunConfig {
 ///
 /// Each local task gets its own environment. The client is killed when the
 /// budget elapses. The environment is removed before this function returns,
-/// including after timeout, crash, and oracle failure. Blocking: for the
-/// client budget. Cancellation: killing the client on timeout.
+/// including after timeout, crash, and oracle failure. An in-process worker
+/// that does not confirm it has stopped is not evidence: cleanup stays failed,
+/// the tree is left in place, and later tasks are not started. Blocking: for
+/// the client budget. Cancellation: killing the client on timeout.
 pub async fn run_tasks(tasks: &[Task], cfg: &RunConfig) -> SuiteReport {
     let mut rows = Vec::with_capacity(tasks.len() + 1);
     let mut halted: Option<(String, InheritedStop)> = None;
@@ -477,10 +479,15 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
 
 fn finish(mut outcome: TaskOutcome, held: &mut crate::prep::HeldEnv) -> TaskOutcome {
     let root = held.env.root.clone();
+    let unconfirmed = crate::fake_agent::reason_is_unconfirmed(&outcome.reason);
+    if unconfirmed {
+        // A worker that is still running must not make this tree look deleted.
+        held.disarm();
+    }
     match held.cleanup() {
-        Ok(()) => outcome.env_destroyed = true,
-        Err(_) => {
-            outcome.env_destroyed = !root.exists();
+        Ok(()) if !unconfirmed => outcome.env_destroyed = true,
+        _ => {
+            outcome.env_destroyed = !unconfirmed && !root.exists();
             outcome.assurance.cleanup_failed = true;
             cleanup_failed(&mut outcome);
         }

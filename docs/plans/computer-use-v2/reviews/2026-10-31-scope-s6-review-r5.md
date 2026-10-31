@@ -26,3 +26,19 @@ Nice-to-have:
 - Broaden the boundary source guard beyond this crate and replace the 240-character cfg lookback with an item-aware or compile-fail check (`src/boundary.rs:385`, `:395`). The requested simple mutations are caught today; aliases, filename exemptions, and nearby unrelated attributes can evade this textual guard.
 
 Validation: static inspection, read-only source/manifest checks and in-memory scan mutations only; `git diff --check origin/feat/cu-v2...HEAD` passed. No Cargo, compilation, candidate execution, network, SSH, model calls, or source edits. Only this report was written, uncommitted. No additional NEW category-(a) defect found within the requested scope.
+
+## 修复记录
+
+本节追加第 5 轮唯一必修项；保留以上独立评审正文与结论。原则：工作线程的停止必须被确认；确认不了，该尝试和之后的一切都不可信。未改 Stop 常量、fail-closed、准入、能力类型、`test-support` 门、`STATUS.md` 或 GitHub Actions。未再使用 `mem::forget`，也没有另造一套停后续任务的机制。
+
+超时后 `execute` 置取消标志，再在最多 500ms（`fake_worker::JOIN_BUDGET`）内 `join`。句柄放在 `OwnedWorker` 里，跨 `.await` 仍留在该结构中，取消 future 不会把它 detach。`join` 成功才是普通超时（`worker_unconfirmed == false`，状态仍由既有超时路径判定）。预算到期仍未结束：句柄进入进程内 `PARKED`（毒化的 mutex 用 `into_inner`，不把句柄丢在地上），`Finished.worker_unconfirmed = true`。这个字段不复用 `wait_failed`：后者仍是进程 wait 失败，继续走 `Crash`。真实 `proc::run_command` 把该字段设为 false。
+
+`exec` 在读日志、读状态、打分之前返回：该 task 为 `NotRun`，原因标签 `worker_unconfirmed`，`client_started` 为 true（线程已经开始跑），遥测保持 `Unknown`。`runner::finish` 认出该标签后 `disarm`，于是既有 `Cleanup::remove` 返回 `cleanup_failed` 且不删树，`Drop` 也不会删。随后走既有 `cleanup_failed()`：原因前缀 `cleanup_failed; …`，状态强制 `NotRun`。`env_destroyed` 在未确认时不得为 true。`InheritedStop::from_outcome` 因此停掉同一次 `run_tasks` 的后续 task，以及 `ab::run_ab` 的后续 arm/repeat。`run()` 已经把结果送出、只是线程还没退出时，仍停靠句柄，但不把该结果改成未确认。
+
+丢弃 `execute` 的 future 时，`OwnedWorker::drop` 先置取消标志，再做同一预算的同步 `join`，仍未结束则停靠。取消标志保证线程下一次检查就停。
+
+回归在 crate 内、`cfg(test)`，不靠 sleep。栅栏在取消检查成功之后、`write_replace` 之前；join 预算可注入（测试用 0）。三条测试：`execute` 返回未确认且 stdout 为空；runner 上该 task 为 `NotRun` + `cleanup_failed` + `env_destroyed == false`，root 仍在，后续 task 不启动，`summary.scored == 0`；丢弃 future 会置取消标志并停靠。释放 worker 之后探针写入被记为迟到，已密封的 `Finished` / `TaskOutcome` 不被改写，下一次取消检查不再写 state。`tests/fake_stall.rs` 的晚写检查去掉 100ms sleep：runner 返回前已经 `join`，非阻塞读到 `Ok(0)` 或 `WouldBlock` 即可。集成测试不带 `cfg(test)`，钩子不进入该二进制。
+
+**已知窗口。** 线程若在“检查已通过”和“写”之间恢复，再查一次取消标志也盖不住这次写。因此以未确认停止把整次尝试判为不可信：不打分、不报环境已销毁、不启动后续 task/arm/repeat。停靠的线程仍由进程持有，可以在返回之后把探针写到 root 之外；该写入不是证据。丢弃 future 本身不产生 `TaskOutcome`，只置取消并停靠；若外层 `Cleanup` 仍 armed 且整个 run future 被丢，既有 `Drop` 仍可能删树，这与本次“返回未确认则 disarm”不是同一条路径。同进程里下一次独立的 `run_tasks` 不会被进程级毒化。`exec.rs` 本次只加了提前返回，现为 622 行，改前已超过 600 行上限，未做无关拆分。
+
+验证（Linux，`RCARGO_HOST=build-laoxin`，一次一个 cargo）：本地 `. ~/.cargo/env; cargo fmt --all`。`rcargo clippy -p gcu-eval --all-targets --locked -- -D warnings` 与带 `--features gcu-eval/test-support` 的同一 clippy 均为退出码 0。`rcargo test -p gcu-eval --locked --no-fail-fast` 首次退出码 101：仅 `tests/fake_agent_boundary.rs` 的 `relocated_genuine_callers_never_bless_forged_sibling_backends` 在 spawn 时得到 `Text file busy`（os error 26）；其余目标通过，含三条新单测与 `fake_stall`。单独重跑该测试 3 通过。随后 `rcargo test -p gcu-eval --locked --features gcu-eval/test-support --no-fail-fast` 退出码 0；`rcargo test -p gcu-cli -p gcu-eval --locked --features gcu-cli/eval-autoapprove,gcu-eval/eval-autoapprove --no-fail-fast` 退出码 0（其中 `fake_agent_boundary` 再次 3 通过）。未改 `Cargo.toml` / `Cargo.lock`。未跑 `gcu-driver-linux` compositor。macOS / Windows 由总控验证。

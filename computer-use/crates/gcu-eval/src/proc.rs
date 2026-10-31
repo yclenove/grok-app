@@ -45,6 +45,11 @@ pub(crate) struct Finished {
     pub timed_out: bool,
     pub exit_code: Option<i32>,
     pub wait_failed: bool,
+    /// In-process worker was cancelled and did not stop within the join budget.
+    ///
+    /// The handle stays owned by the process. This attempt is not evidence.
+    /// Real process waits leave this false.
+    pub worker_unconfirmed: bool,
     pub stdout: PipeCapture,
     /// Stderr is discarded after the drain. Incomplete means the drain did not
     /// reach EOF, so the capture is not a full record of the child.
@@ -179,6 +184,7 @@ pub(crate) async fn run_command(
         timed_out,
         exit_code,
         wait_failed,
+        worker_unconfirmed: false,
         stdout,
         capture_incomplete,
     })

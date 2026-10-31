@@ -46,6 +46,8 @@ pub fn builtin_fake_agent_entry() -> u8 {
         args: &args,
         output: Vec::new(),
         cancel: &cancel,
+        #[cfg(test)]
+        pause_before_probe_write: false,
     };
     match invocation.run() {
         Ok(code) => {
@@ -68,17 +70,34 @@ struct Invocation<'a> {
     args: &'a [String],
     output: Vec<u8>,
     cancel: &'a std::sync::atomic::AtomicBool,
+    /// Test-only. When set, block after the probe's cancel check and before the write.
+    #[cfg(test)]
+    pause_before_probe_write: bool,
+}
+
+/// Label for an in-process worker that did not stop within the join budget.
+///
+/// The runner treats this attempt as not run, fails cleanup, and does not
+/// start later tasks. The thread handle stays owned by the process.
+pub(crate) const WORKER_UNCONFIRMED: &str = "worker_unconfirmed";
+
+pub(crate) fn reason_is_unconfirmed(reason: &str) -> bool {
+    reason
+        .split(';')
+        .any(|part| part.trim() == WORKER_UNCONFIRMED)
 }
 
 /// Execute the same fake implementation used by the standalone entry.
 ///
 /// The runner supplies its isolated map directly; there is no executable path.
 /// Work runs on a dedicated thread so a file open cannot freeze the caller's
-/// runtime. The thread uses the same deadline: on timeout it is asked to stop,
-/// then joined if it has finished. File IO refuses non-regular files without
-/// blocking, so the join is bounded. Blocking: until `limit`, plus at most
-/// 500ms to join a cancelled thread. Cancellation: the flag checked by the
-/// fake, including its sleep.
+/// runtime. The thread shares the deadline. On timeout it is asked to stop and
+/// joined for at most 500ms. If that join does not finish, the handle stays
+/// owned and the result is [`WORKER_UNCONFIRMED`]: this attempt is not evidence.
+/// Dropping the future sets the cancel flag and makes the same bounded join,
+/// then parks a thread that is still running. A cancel check does not cover a
+/// write that has already passed it. Blocking: until `limit`, plus at most
+/// 500ms. Cancellation: the flag the fake checks between steps.
 pub(crate) async fn execute(
     args: &[String],
     env: &BTreeMap<String, String>,
@@ -86,12 +105,16 @@ pub(crate) async fn execute(
     limit: std::time::Duration,
 ) -> crate::proc::Finished {
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(test)]
+    crate::fake_worker::test_hook::publish_cancel(std::sync::Arc::clone(&cancel));
     let worker_cancel = std::sync::Arc::clone(&cancel);
     let args = args.to_vec();
     let env = env.clone();
     let work = work.to_path_buf();
+    #[cfg(test)]
+    let pause_before_probe_write = crate::fake_worker::test_hook::pause_this_call();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let worker = match std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("gcu-eval-fake".into())
         .spawn(move || {
             let mut invocation = Invocation {
@@ -100,36 +123,75 @@ pub(crate) async fn execute(
                 args: &args,
                 output: Vec::new(),
                 cancel: &worker_cancel,
+                #[cfg(test)]
+                pause_before_probe_write,
             };
             let result = invocation.run();
             let _ = tx.send((result, invocation.output));
-        }) {
+        });
+    let worker = match spawned {
         Ok(worker) => worker,
-        Err(_) => return pack(false, Some(1), Vec::new(), true),
+        Err(_) => return pack(false, Some(1), Vec::new(), true, false),
     };
-    match tokio::time::timeout(limit, rx).await {
-        Ok(Ok((Ok(code), output))) => pack(false, Some(i32::from(code)), output, false),
-        Ok(Ok((Err(_), output))) => pack(false, Some(1), output, false),
-        Ok(Err(_)) => pack(false, Some(1), Vec::new(), false),
-        Err(_) => {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            loop {
-                if worker.is_finished() {
-                    let _ = worker.join();
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    // Still running after the join budget. Leak the handle so
-                    // this function can return and the runner can clean up.
-                    // Nonblocking IO should have returned already.
-                    std::mem::forget(worker);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            pack(true, None, Vec::new(), false)
+    let mut owned = crate::fake_worker::OwnedWorker::new(
+        worker,
+        crate::fake_worker::join_budget(),
+        std::sync::Arc::clone(&cancel),
+    );
+    match wait_for_finish(rx, limit).await {
+        Wait::Done(Ok((Ok(code), output))) => {
+            reap(&mut owned).await;
+            pack(false, Some(i32::from(code)), output, false, false)
         }
+        Wait::Done(Ok((Err(_), output))) => {
+            reap(&mut owned).await;
+            pack(false, Some(1), output, false, false)
+        }
+        Wait::Done(Err(_)) => {
+            reap(&mut owned).await;
+            pack(false, Some(1), Vec::new(), false, false)
+        }
+        Wait::Expired => {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            if owned.confirm().await {
+                pack(true, None, Vec::new(), false, false)
+            } else {
+                owned.park();
+                tracing::warn!("in-process fake worker did not stop; attempt is unconfirmed");
+                pack(true, None, Vec::new(), false, true)
+            }
+        }
+    }
+}
+
+enum Wait {
+    Done(Result<(Result<u8, String>, Vec<u8>), tokio::sync::oneshot::error::RecvError>),
+    Expired,
+}
+
+async fn wait_for_finish(
+    rx: tokio::sync::oneshot::Receiver<(Result<u8, String>, Vec<u8>)>,
+    limit: std::time::Duration,
+) -> Wait {
+    #[cfg(test)]
+    if crate::fake_worker::test_hook::expire_when_paused() {
+        tokio::select! {
+            biased;
+            result = rx => return Wait::Done(result),
+            _ = crate::fake_worker::test_hook::paused() => return Wait::Expired,
+        }
+    }
+    match tokio::time::timeout(limit, rx).await {
+        Ok(result) => Wait::Done(result),
+        Err(_elapsed) => Wait::Expired,
+    }
+}
+
+async fn reap(worker: &mut crate::fake_worker::OwnedWorker) {
+    if !worker.confirm().await {
+        // `run` already finished before the send. Parking keeps the exiting
+        // thread owned; the result it sent is still the attempt's result.
+        worker.park();
     }
 }
 
@@ -138,6 +200,7 @@ fn pack(
     exit_code: Option<i32>,
     mut output: Vec<u8>,
     wait_failed: bool,
+    worker_unconfirmed: bool,
 ) -> crate::proc::Finished {
     let overflow = output.len() > 1_048_576;
     output.truncate(1_048_576);
@@ -145,6 +208,7 @@ fn pack(
         timed_out,
         exit_code,
         wait_failed,
+        worker_unconfirmed,
         stdout: crate::proc::PipeCapture {
             bytes: output,
             overflow,
@@ -378,6 +442,17 @@ impl Invocation<'_> {
         });
         let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
         self.cancelled()?;
+        // This check does not cover the write below. A flag that flips in
+        // between still reaches `write_replace`. An unconfirmed join is what
+        // makes that attempt unusable.
+        #[cfg(test)]
+        if self.pause_before_probe_write {
+            crate::fake_worker::test_hook::pause_after_cancel_check();
+        }
+        #[cfg(test)]
+        if self.pause_before_probe_write && self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::fake_worker::test_hook::record_late_write(&path);
+        }
         crate::fake_io::write_replace(&path, &bytes)
     }
 
@@ -467,3 +542,7 @@ fn bool_assign(text: &str, key: &str) -> Option<bool> {
 pub fn builtin_fake_agent_exit() -> ExitCode {
     ExitCode::from(builtin_fake_agent_entry())
 }
+
+#[cfg(test)]
+#[path = "fake_agent_tests.rs"]
+mod tests;
