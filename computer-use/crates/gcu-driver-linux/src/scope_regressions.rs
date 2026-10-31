@@ -16,7 +16,7 @@ use gcu_core::scope::{
     BootIdentity, ExecutableProof, FixtureScope, FixtureTarget, InstanceEvidence, OsStartTime,
     ProcessInstance, RegisteredWindow, ScopeLease, ScopedDriver, WindowBinding,
 };
-use gcu_protocol::{AppIdentity, AppInfo, Rect, WindowInfo};
+use gcu_protocol::{types::AppIdentity, AppInfo, Rect, WindowInfo};
 
 use crate::atspi::{FakeNode, FakeSource};
 use crate::driver::LinuxDriver;

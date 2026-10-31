@@ -155,7 +155,7 @@ pub(crate) async fn execute_pointer_click(
     let effective_count = count.max(1);
     for _ in 0..effective_count {
         if cancel.is_cancelled() {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Cancelled {
                 maybe_executed: true,
             });
@@ -164,7 +164,7 @@ pub(crate) async fn execute_pointer_click(
         // Record before send
         ledger.record_button_down(btn_code);
         if let Err(e) = x.xtest_fake_button(btn_code, true) {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: true,
@@ -173,7 +173,7 @@ pub(crate) async fn execute_pointer_click(
         tokio::time::sleep(Duration::from_millis(15)).await;
 
         if let Err(e) = x.xtest_fake_button(btn_code, false) {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: true,
@@ -230,7 +230,7 @@ pub(crate) async fn execute_pointer_scroll(
         let clicks = ((dy.abs() as f32) / 120.0).ceil().max(1.0) as usize;
         for _ in 0..clicks {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -248,7 +248,7 @@ pub(crate) async fn execute_pointer_scroll(
         let clicks = ((dx.abs() as f32) / 120.0).ceil().max(1.0) as usize;
         for _ in 0..clicks {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -301,7 +301,7 @@ pub(crate) async fn execute_pointer_drag(
     // Press button 1 (Left) with press-before-send accounting
     ledger.record_button_down(1);
     if let Err(e) = x.xtest_fake_button(1, true) {
-        ledger.release_all(x);
+        ledger.release_all(x.as_ref());
         return Err(DriverError::Native {
             message: e.to_string(),
             maybe_executed: true,
@@ -317,7 +317,7 @@ pub(crate) async fn execute_pointer_drag(
 
         for step in 1..=steps {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -336,7 +336,7 @@ pub(crate) async fn execute_pointer_drag(
 
     // Release button 1
     if let Err(e) = x.xtest_fake_button(1, false) {
-        ledger.release_all(x);
+        ledger.release_all(x.as_ref());
         return Err(DriverError::Native {
             message: e.to_string(),
             maybe_executed: true,
@@ -364,19 +364,19 @@ pub(crate) async fn execute_press_keys(
     // 1. Resolve and press modifiers
     for &m in &chord.modifiers {
         if cancel.is_cancelled() {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Cancelled {
                 maybe_executed: false,
             });
         }
         let sym = modifier_to_keysym(m);
-        let resolved = resolve_or_remap_keysym(x, sym)?;
+        let resolved = resolve_or_remap_keysym(x.as_ref(), sym)?;
         if let Some(r) = resolved.remapped_keycode {
             remapped_keycodes.push(r);
         }
         ledger.record_key_down(resolved.keycode);
         if let Err(e) = x.xtest_fake_key(resolved.keycode, true) {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: true,
@@ -392,7 +392,7 @@ pub(crate) async fn execute_press_keys(
 
     // 2. Resolve and press main key
     let main_sym = key_to_keysym(&chord.key);
-    let main_resolved = resolve_or_remap_keysym(x, main_sym)?;
+    let main_resolved = resolve_or_remap_keysym(x.as_ref(), main_sym)?;
     if let Some(r) = main_resolved.remapped_keycode {
         remapped_keycodes.push(r);
     }
@@ -402,12 +402,12 @@ pub(crate) async fn execute_press_keys(
         && !held_mod_keycodes.iter().any(|&k| {
             // Shift keycode check
             let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
-            resolve_or_remap_keysym(x, shift_sym)
+            resolve_or_remap_keysym(x.as_ref(), shift_sym)
                 .map(|r| r.keycode == k)
                 .unwrap_or(false)
         }) {
         let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
-        if let Ok(sr) = resolve_or_remap_keysym(x, shift_sym) {
+        if let Ok(sr) = resolve_or_remap_keysym(x.as_ref(), shift_sym) {
             ledger.record_key_down(sr.keycode);
             let _ = x.xtest_fake_key(sr.keycode, true);
             Some(sr.keycode)
@@ -420,7 +420,7 @@ pub(crate) async fn execute_press_keys(
 
     ledger.record_key_down(main_resolved.keycode);
     if let Err(e) = x.xtest_fake_key(main_resolved.keycode, true) {
-        ledger.release_all(x);
+        ledger.release_all(x.as_ref());
         return Err(DriverError::Native {
             message: e.to_string(),
             maybe_executed: true,
@@ -454,7 +454,7 @@ pub(crate) async fn execute_press_keys(
 
     // 4. Restore any remapped keycodes
     for rkc in remapped_keycodes {
-        restore_remapped_keycode(x, rkc);
+        restore_remapped_keycode(x.as_ref(), rkc);
     }
 
     Ok(Delivery::Foreground)
@@ -473,14 +473,14 @@ pub(crate) async fn execute_type_text_x11(
 
     let chars: Vec<char> = text.chars().collect();
     let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
-    let shift_kc = resolve_or_remap_keysym(x, shift_sym)
+    let shift_kc = resolve_or_remap_keysym(x.as_ref(), shift_sym)
         .map(|r| r.keycode)
         .unwrap_or(50); // standard X11 keycode for Shift_L
 
     let mut pos = 0;
     while pos < chars.len() {
         let end = (pos + TYPE_TEXT_CHUNK_SIZE).min(chars.len());
-        let plan = plan_text_chunk(x, &chars[pos..end])?;
+        let plan = plan_text_chunk(x.as_ref(), &chars[pos..end])?;
         if !plan.remapped.is_empty() {
             // Clients rebuild their key tables asynchronously after MappingNotify; type only
             // once they have had time to, and never change these keycodes mid-chunk.
@@ -488,9 +488,9 @@ pub(crate) async fn execute_type_text_x11(
         }
         for resolved in &plan.keys {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 for &kc in &plan.remapped {
-                    restore_remapped_keycode(x, kc);
+                    restore_remapped_keycode(x.as_ref(), kc);
                 }
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
@@ -517,7 +517,7 @@ pub(crate) async fn execute_type_text_x11(
             // Let the application finish reading the last keystrokes before they change meaning.
             tokio::time::sleep(REMAP_SETTLE).await;
             for &kc in &plan.remapped {
-                restore_remapped_keycode(x, kc);
+                restore_remapped_keycode(x.as_ref(), kc);
             }
         }
         pos += plan.consumed;
