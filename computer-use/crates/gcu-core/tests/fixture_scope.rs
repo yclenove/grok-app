@@ -111,8 +111,15 @@ async fn catalog_calls_on_external_targets_do_not_touch_content() {
     let world = World::open(permissive());
     let before = world.spy.external();
     for name in catalog_names() {
-        for target in [Target::External, Target::Impostor, Target::Forged] {
+        for target in [
+            Target::External,
+            Target::Impostor,
+            Target::Forged,
+            Target::Unregistered,
+        ] {
             exercise(&world, &name, target).await;
+            assert!(world.approvals.app_requests().is_empty(), "{name}");
+            assert!(world.approvals.confirm_requests().is_empty(), "{name}");
         }
     }
     assert_eq!(
@@ -122,6 +129,58 @@ async fn catalog_calls_on_external_targets_do_not_touch_content() {
     );
     assert_eq!(world.spy.windows_none(), 0);
     assert_eq!(world.spy.resolve_calls(), 0);
+}
+
+#[tokio::test]
+async fn scoped_launch_refuses_before_resolution_or_approval_with_stop_priority() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for app in ["fixture.a", "fixture.c"] {
+            for stopped in [false, true] {
+                let world = World::open(Default::default());
+                // Return promptly and record any unexpected authorization.
+                world.approvals.push_confirm(false);
+                let before = world.spy.external();
+                let metadata = world.spy.metadata();
+                if stopped {
+                    world.activity.request_stop();
+                }
+                let out = world
+                    .router
+                    .launch_app(
+                        &world.session,
+                        "scope-launch",
+                        LaunchAppParams {
+                            app: app.into(),
+                            reason: None,
+                        },
+                    )
+                    .await;
+                let err = out.error.unwrap();
+                assert_eq!(
+                    err.code,
+                    if stopped {
+                        ErrorCode::StoppedByUser
+                    } else {
+                        ErrorCode::AppDenied
+                    }
+                );
+                if !stopped {
+                    assert_eq!(err.message, SCOPE_DENIED_MESSAGE);
+                }
+                assert!(err.state.is_none() && out.windows.is_empty());
+                assert!(out.state.is_none() && out.action.target.is_none());
+                assert_eq!(out.action.outcome, Outcome::Refused);
+                assert_eq!(out.action.delivery, gcu_protocol::result::Delivery::None);
+                assert!(world.approvals.app_requests().is_empty());
+                assert!(world.approvals.confirm_requests().is_empty());
+                assert_eq!(world.spy.external(), before);
+                assert_eq!(world.spy.metadata(), metadata);
+                assert_eq!(world.spy.resolve_calls(), 0);
+            }
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -371,6 +430,68 @@ async fn forged_and_cross_target_actions_do_not_deliver() {
     let focused = driver.focused_element(&external.app).await.unwrap_err();
     assert!(matches!(focused, DriverError::ScopeDenied));
     assert_eq!(world.spy.external().focus, before.focus);
+}
+
+#[tokio::test]
+async fn another_run_cannot_use_retained_images_or_sealed_handles() {
+    let world = World::open(permissive());
+    observe(&world, "fixture.a", Some("w-a"), json!(true)).await;
+    let win = world.spy.real_window("fixture.a", "w-a").await;
+    let tree = world
+        .direct()
+        .snapshot_tree(&win, &TreeOpts::default(), &Cancel::default())
+        .await
+        .unwrap();
+    let handle = find_named(tree.root.as_ref().unwrap(), "Go").unwrap();
+    let foreign = ScopeLease::install(fixture_scope_support::allowed_scope_for_run(
+        1,
+        "another-run",
+    ));
+    let router = routed(
+        world.spy.clone(),
+        foreign.clone(),
+        world.activity.clone(),
+        world.approvals.clone(),
+        Arc::new(MemoryPolicyStore::new(permissive())),
+        Arc::new(RecordingEventSink::new()),
+    );
+    // Deliberately retain the old session's delivered sample. Matching window,
+    // generation, pixels and geometry cannot make a different run authoritative.
+    let before = world.spy.external();
+    for step in [
+        click_point(25.0, 45.0),
+        BatchStep::Drag(DragArgs {
+            from_x: 25.0,
+            from_y: 45.0,
+            to_x: 30.0,
+            to_y: 50.0,
+            screenshot_id: None,
+        }),
+    ] {
+        let mut call = ToolCall::new("replay", "fixture.a", step);
+        call.window = Some("w-a".into());
+        call.settle_budget_ms = Some(0);
+        let out = router.execute(&world.session, call).await;
+        let err = out.error.unwrap();
+        assert_eq!(err.code, ErrorCode::AppDenied);
+        assert_eq!(err.message, SCOPE_MESSAGE);
+        assert_eq!(out.action.outcome, Outcome::Refused);
+        assert_eq!(out.action.delivery, gcu_protocol::result::Delivery::None);
+        assert!(err.state.is_none() && out.state.is_none());
+        assert_clean("cross-run image", &format!("{err:?} {:?}", out.action));
+    }
+    let driver =
+        gcu_core::scope::ScopedDriver::new(world.spy.clone(), foreign, world.activity.clone());
+    let err = driver
+        .perform(
+            &gcu_core::driver::DriverAction::Press { el: handle },
+            &Cancel::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DriverError::ScopeDenied));
+    assert_eq!(world.spy.external().perform, before.perform);
+    assert_eq!(world.spy.external().launch, before.launch);
 }
 
 #[tokio::test]
@@ -671,6 +792,7 @@ enum Target {
     External,
     Impostor,
     Forged,
+    Unregistered,
 }
 
 impl Target {
@@ -678,12 +800,13 @@ impl Target {
         match self {
             Self::External => "CANARY-EXTERNAL-C",
             Self::Impostor => "fixture.d",
-            Self::Forged => "fixture.a",
+            Self::Forged | Self::Unregistered => "fixture.a",
         }
     }
     fn window(self) -> Option<String> {
         match self {
             Self::Forged => Some("forged-window".into()),
+            Self::Unregistered => Some("w-a3".into()),
             _ => None,
         }
     }
@@ -699,7 +822,7 @@ async fn exercise(world: &World, tool: &str, target: Target) {
             assert_clean(&label, &serde_json::to_string(&apps).unwrap());
         }
         "list_windows" => {
-            if matches!(target, Target::Forged) {
+            if matches!(target, Target::Forged | Target::Unregistered) {
                 let windows = world
                     .router
                     .list_windows(&world.session, Some(app))

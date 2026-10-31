@@ -679,11 +679,15 @@ pub fn binding(id: &str, incarnation: u64, owner: ProcessInstance) -> WindowBind
 }
 
 pub fn allowed_scope(generation: u64) -> FixtureScope {
+    allowed_scope_for_run(generation, "run-s1")
+}
+
+pub fn allowed_scope_for_run(generation: u64, run: &str) -> FixtureScope {
     let a = process(1101, 10);
     let b = process(1102, 11);
     scope(
         generation,
-        "run-s1",
+        run,
         vec![
             target(a, "a", "/fixtures/a", &[("w-a", 1), ("w-a2", 1)]),
             target(b, "b", "/fixtures/b", &[("w-b", 1)]),
