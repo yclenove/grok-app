@@ -7,6 +7,11 @@ use std::sync::Arc;
 /// Live proof run after the clipboard wait and before bytes become visible.
 pub type PublishProof = Arc<dyn Fn() -> Result<()> + Send + Sync>;
 
+/// Check of one admitted target. [`bind_admitted_proof`] copies that target in.
+#[cfg(any(windows, test))]
+pub(crate) type AdmittedProver =
+    Arc<dyn Fn(&crate::input::api::AdmittedTarget) -> Result<()> + Send + Sync>;
+
 /// Run `proof`, then require the operation to still be current.
 ///
 /// Call this after the clipboard wait and backup, and before `EmptyClipboard`.
@@ -27,7 +32,7 @@ pub(crate) fn authorize_publish(context: &ActionContext, proof: &PublishProof) -
 #[cfg(any(windows, test))]
 pub(crate) fn bind_admitted_proof(
     admitted: crate::input::api::AdmittedTarget,
-    prove: Arc<dyn Fn(&crate::input::api::AdmittedTarget) -> Result<()> + Send + Sync>,
+    prove: AdmittedProver,
 ) -> PublishProof {
     Arc::new(move || prove(&admitted))
 }
@@ -88,7 +93,9 @@ mod tests {
         let proof = bind_admitted_proof(
             target(8),
             Arc::new(move |admitted| {
-                *seen_proof.lock().unwrap_or_else(|poison| poison.into_inner()) = admitted.hwnd;
+                *seen_proof
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = admitted.hwnd;
                 Ok(())
             }),
         );
@@ -96,7 +103,9 @@ mod tests {
         proof().unwrap();
         assert_eq!(*seen.lock().unwrap_or_else(|poison| poison.into_inner()), 8);
         assert_eq!(
-            slot.lock().unwrap_or_else(|poison| poison.into_inner()).hwnd,
+            slot.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .hwnd,
             77
         );
     }

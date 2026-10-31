@@ -126,7 +126,7 @@ fn bound_os_proof(
     {
         let namespace = namespace.to_owned();
         let admitted = admitted.clone();
-        return Some(bind_admitted_proof(
+        Some(bind_admitted_proof(
             admitted,
             Arc::new(move |target| {
                 crate::ffi::prove_parent_publication(
@@ -138,7 +138,7 @@ fn bound_os_proof(
                     &target.boot,
                 )
             }),
-        ));
+        ))
     }
     #[cfg(not(windows))]
     {
@@ -152,19 +152,21 @@ fn crashed() -> DriverError {
     }
 }
 
+/// Test stand-in for the OS publication proof. Each call sees the staged target.
+#[cfg(test)]
+pub(super) type PublicationProver = Arc<dyn Fn(&str, &AdmittedTarget) -> Result<()> + Send + Sync>;
+
 pub(super) struct Recovery {
     ledger: Arc<InputLedger>,
     release: Arc<dyn InputReleaser>,
     pending: Mutex<Option<(InputPacket, usize)>>,
     clipboard: Option<Arc<dyn crate::input::clipboard::ClipboardApi>>,
     safety: Arc<Mutex<Option<Arc<crate::input::hotkey::SafetyGuard>>>>,
-    publish_proof: Mutex<Option<crate::input::clipboard::PublishProof>>,
     /// Worker namespace captured by each staged proof. Not a shared claim slot.
     publish_namespace: Mutex<Option<String>>,
     /// Test stand-in for the OS publication proof. Production leaves it unset.
     #[cfg(test)]
-    test_prover:
-        Mutex<Option<Arc<dyn Fn(&str, &AdmittedTarget) -> Result<()> + Send + Sync>>>,
+    test_prover: Mutex<Option<PublicationProver>>,
 }
 impl Recovery {
     pub(super) fn new(
@@ -177,22 +179,10 @@ impl Recovery {
             release,
             pending: Mutex::default(),
             safety,
-            publish_proof: Mutex::default(),
             publish_namespace: Mutex::default(),
             #[cfg(test)]
             test_prover: Mutex::default(),
         }
-    }
-    /// Install the live proof used at scoped clipboard publication.
-    ///
-    /// `None` refuses a scoped stage before `stage` and does not publish.
-    /// [`Self::arm_publication`] is the production caller. Memory only.
-    /// No blocking, timeout, or cancellation.
-    pub(super) fn set_publish_proof(&self, proof: Option<crate::input::clipboard::PublishProof>) {
-        *self
-            .publish_proof
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = proof;
     }
     /// Arm publication for this worker namespace.
     ///
@@ -210,10 +200,7 @@ impl Recovery {
     }
     /// Replace the OS proof for one test. The admitted target is still copied.
     #[cfg(test)]
-    pub(super) fn set_prover(
-        &self,
-        prover: Arc<dyn Fn(&str, &AdmittedTarget) -> Result<()> + Send + Sync>,
-    ) {
+    pub(super) fn set_prover(&self, prover: PublicationProver) {
         *self
             .test_prover
             .lock()
@@ -223,14 +210,6 @@ impl Recovery {
         &self,
         admitted: &AdmittedTarget,
     ) -> Result<crate::input::clipboard::PublishProof> {
-        if let Some(proof) = self
-            .publish_proof
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
-        {
-            return Ok(proof);
-        }
         let namespace = self
             .publish_namespace
             .lock()
@@ -670,15 +649,16 @@ mod tests {
             Arc::new(Releaser(Arc::clone(&spy))),
             Arc::new(Mutex::new(None)),
         );
+        recovery.arm_publication("7.1");
         let valid = Arc::new(AtomicBool::new(true));
         let flag = Arc::clone(&valid);
-        recovery.set_publish_proof(Some(Arc::new(move || {
+        recovery.set_prover(Arc::new(move |_namespace, _admitted| {
             if flag.load(Ordering::SeqCst) {
                 Ok(())
             } else {
                 Err(DriverError::ScopeDenied)
             }
-        })));
+        }));
         let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
         let entered = Arc::clone(&spy);
         let task = tokio::spawn(async move {
@@ -754,13 +734,15 @@ mod tests {
             Arc::new(Releaser(Arc::clone(&spy))),
             Arc::new(Mutex::new(None)),
         );
-        recovery.set_publish_proof(Some(Arc::new(|| Ok(()))));
+        recovery.arm_publication("7.1");
+        recovery.set_prover(Arc::new(|_namespace, _admitted| Ok(())));
         let (reply, request) = stage_pair("CANARY-CLIPBOARD-PAYLOAD");
         let (_reader, mut writer) = tokio::io::duplex(64);
         let error = recovery
             .receive(reply, &request, &mut writer, 1, 1)
             .await
-            .expect_err("cancelled proof published");
+            .err()
+            .expect("cancelled proof published");
         assert!(matches!(
             error,
             DriverError::Timeout {
@@ -827,9 +809,7 @@ mod tests {
         let waiting = Arc::clone(&spy);
         let task_b = tokio::spawn(async move {
             let (_reader, mut writer) = tokio::io::duplex(64);
-            second
-                .receive(reply_b, &request_b, &mut writer, 2, 1)
-                .await
+            second.receive(reply_b, &request_b, &mut writer, 2, 1).await
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while waiting.stage_calls.load(Ordering::SeqCst) < 2 {
@@ -843,15 +823,20 @@ mod tests {
             .await
             .expect("first stage join")
             .expect("first stage task")
-            .expect_err("first stage published");
+            .err()
+            .expect("first stage published");
         let error_b = tokio::time::timeout(std::time::Duration::from_secs(2), task_b)
             .await
             .expect("second stage join")
             .expect("second stage task")
-            .expect_err("second stage published");
+            .err()
+            .expect("second stage published");
         assert_eq!(error_a, DriverError::ScopeDenied);
         assert_eq!(error_b, DriverError::ScopeDenied);
-        let recorded = seen.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+        let recorded = seen
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
         assert_eq!(recorded.iter().filter(|hwnd| **hwnd == 8).count(), 1);
         assert_eq!(recorded.iter().filter(|hwnd| **hwnd == 77).count(), 1);
         assert_eq!(spy.publishes.load(Ordering::SeqCst), 0);

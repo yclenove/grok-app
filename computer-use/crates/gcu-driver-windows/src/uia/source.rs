@@ -242,11 +242,8 @@ impl FakeUia {
     /// Install the process instance [`UiaSource::owner_instance`] reports for `slot`.
     ///
     /// This does not read a name or value. Slot numbers match [`FakeUia::new`].
-    pub(crate) fn set_live_instance(
-        &self,
-        slot: u64,
-        claim: crate::scope_identity::ProcessClaim,
-    ) {
+    #[cfg(test)]
+    pub(crate) fn set_live_instance(&self, slot: u64, claim: crate::scope_identity::ProcessClaim) {
         if let Ok(mut state) = self.0.lock() {
             state.live_instance.insert(slot, claim);
         }

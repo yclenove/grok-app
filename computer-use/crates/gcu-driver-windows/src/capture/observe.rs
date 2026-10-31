@@ -64,7 +64,7 @@ impl WindowsDriver {
             let target = win.clone();
             let current = self
                 .call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
-                    Ok(s.observation_window(&target, false)?)
+                    s.observation_window(&target, false)
                 })
                 .await?;
             if current.minimized {
