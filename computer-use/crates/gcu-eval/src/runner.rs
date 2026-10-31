@@ -166,14 +166,6 @@ pub struct TaskOutcome {
     pub assurance: Assurance,
 }
 
-impl TaskOutcome {
-    /// False for skipped rows, which stay out of rates and percentiles.
-    #[must_use]
-    pub const fn scored(&self) -> bool {
-        !matches!(self.status, RunStatus::NotRun)
-    }
-}
-
 /// Suite result after every task and the optional desktop gap row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuiteReport {
@@ -192,9 +184,11 @@ pub struct SuiteReport {
 /// Knobs for one suite. Paths are binaries and report directories, not user homes.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
-    /// Client binary. `None` skips every task as `not_run`.
+    /// External client binary. Every explicit path requires the disposable provider.
+    /// Without a path, `builtin_fake` selects in-process code; otherwise tasks are `not_run`.
     pub grok_bin: Option<PathBuf>,
-    /// `gcu` binary written into the isolated MCP config.
+    /// `gcu` binary written into the isolated MCP config. Every supplied path
+    /// requires the unavailable provider; local fake runs leave this absent.
     pub gcu_bin: Option<PathBuf>,
     /// Model id. This runner never calls a model API itself.
     pub model: String,
@@ -235,13 +229,12 @@ pub struct RunConfig {
     pub arm_script: Option<bool>,
     /// Use the real `gcu` driver and a real fixture app instead of the fake driver and scene.
     ///
-    /// A real run drives whatever desktop the process runs on. It refuses to start unless
-    /// [`RunConfig::attest_disposable_desktop`] is set. `--tools` and the preflight are
-    /// mitigations, not a confinement proof. Fixture-bound authorization and an OS sandbox
-    /// are not implemented.
+    /// Always `not_run` until a trusted disposable provider and native S2/S4
+    /// integration exist. The legacy attestation flag cannot enable this path.
     pub real_driver: bool,
     /// Trusted S3 fake-only manifest, sent exclusively over inherited control.
-    /// This does not enable native scope or waive the real-client boundary.
+    /// Runner compositions needing an external S3 engine remain `not_run`.
+    /// The standalone S3 supervisor is independently testable with a fake driver.
     pub fake_scope: Option<gcu_host_protocol::scope::Scope>,
     /// Fixture app started once per task when `real_driver` is set. It writes `$GCU_FIXTURE_STATE`.
     pub fixture_bin: Option<PathBuf>,
@@ -251,24 +244,12 @@ pub struct RunConfig {
     /// Operator attestation that this process is on a one-shot isolated desktop with egress
     /// control. Default false. An environment variable cannot set this. It is not proof.
     pub attest_disposable_desktop: bool,
-    /// Use the built-in fake agent. A path in [`RunConfig::grok_bin`] is ignored
-    /// only when this slot is actually the built-in agent.
-    ///
-    /// The CLI sets this from `--builtin-fake` and leaves [`RunConfig::builtin_fake_bin`]
-    /// empty, so the binary re-executes itself. `builtin_fake_bin` is that agent only
-    /// when it is the `eval-fake-agent` artifact beside this executable. Any other
-    /// path is an external client and needs attestation.
+    /// Select the compiled in-process fake client. There is no fake executable slot.
+    /// Any supplied `grok_bin` or `gcu_bin` is external and requires the
+    /// disposable provider, even when this flag is set.
     pub builtin_fake: bool,
-    /// Optional path for the built-in fake agent. The CLI never sets this.
-    ///
-    /// Trusted only for the cargo-built `eval-fake-agent` next to this process.
-    /// A wrapper, copy, or same-named file elsewhere does not skip attestation.
-    pub builtin_fake_bin: Option<PathBuf>,
-    /// Trust [`RunConfig::gcu_bin`] as the built-in fake gcu.
-    ///
-    /// This is true only for the `eval-fake-gcu` artifact beside this process, or
-    /// when `gcu_bin` is empty and the fake agent re-executes this process.
-    /// Any other path still needs attestation. The flag alone is not a grant.
+    /// Legacy declaration retained for config compatibility; grants no admission.
+    /// The fake backend runs in process only when `gcu_bin` is absent.
     pub builtin_gcu: bool,
     /// Preflight results for this run only. Cloning the config shares the map.
     /// A new [`RunConfig`] does not see another run's successes.
@@ -304,7 +285,6 @@ impl Default for RunConfig {
             auth_seed: None,
             attest_disposable_desktop: false,
             builtin_fake: false,
-            builtin_fake_bin: None,
             builtin_gcu: false,
             preflight: crate::client_tools::PreflightCache::default(),
         }
@@ -315,21 +295,25 @@ impl Default for RunConfig {
 ///
 /// Each local task gets its own environment. The client is killed when the
 /// budget elapses. The environment is removed before this function returns,
-/// including after timeout, crash, and oracle failure. Blocking: for the
-/// client budget. Cancellation: killing the client on timeout.
+/// including after timeout, crash, and oracle failure. An in-process worker
+/// that does not confirm it has stopped is not evidence: cleanup stays failed,
+/// the tree is left in place, and later tasks are not started. Blocking: for
+/// the client budget. Cancellation: killing the client on timeout.
 pub async fn run_tasks(tasks: &[Task], cfg: &RunConfig) -> SuiteReport {
     let mut rows = Vec::with_capacity(tasks.len() + 1);
-    let mut halted: Option<String> = None;
+    let mut halted: Option<(String, InheritedStop)> = None;
     for task in tasks {
-        if let Some(reason) = &halted {
-            rows.push(skipped(task, cfg, RunStatus::NotRun, reason));
+        if let Some((reason, stop)) = &halted {
+            let mut row = skipped(task, cfg, RunStatus::NotRun, reason);
+            row.assurance.inherited_stop = Some(stop.clone());
+            rows.push(row);
             continue;
         }
         let row = run_one(task, cfg).await;
-        if row.assurance.cleanup_failed {
-            halted = Some(format!(
-                "cleanup_failed: remaining tasks were not started ({})",
-                row.reason
+        if let Some(stop) = InheritedStop::from_outcome(&row) {
+            halted = Some((
+                format!("{}; remaining tasks were not started", row.reason),
+                stop,
             ));
         }
         rows.push(row);
@@ -352,9 +336,6 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
     if let Some(outcome) = selftest(task, cfg) {
         return outcome;
     }
-    if !cfg.run_local {
-        return skipped(task, cfg, RunStatus::NotRun, DESKTOP_NOT_RUN);
-    }
     if !task.platforms.iter().any(|item| item == &cfg.platform) {
         return skipped(
             task,
@@ -362,6 +343,10 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             RunStatus::NotRun,
             "platform not listed on the task",
         );
+    }
+    // Gate before auth seeding, fixture startup, and even cached tool preflight.
+    if let Some(row) = crate::disposable::refuse_unsupported_launch(task, cfg) {
+        return row;
     }
     if let Err(error) = crate::scope::validate(cfg) {
         return skipped(task, cfg, RunStatus::NotRun, &error.to_string());
@@ -378,14 +363,11 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             crate::boundary::WINDOWS_REAL_NOT_RUN,
         );
     }
-    if let Some(reason) = crate::boundary::external_backend_block(cfg) {
-        return skipped(task, cfg, RunStatus::NotRun, reason);
-    }
     let program = match crate::launch::resolve_client(cfg) {
         Ok(program) => program,
         Err(err) => return skipped(task, cfg, RunStatus::NotRun, &err.to_string()),
     };
-    if !program.identity_path().is_file() {
+    if program.identity_path().is_some_and(|path| !path.is_file()) {
         return skipped(task, cfg, RunStatus::NotRun, "client binary missing");
     }
     if let Some(reason) = crate::boundary::real_launch_block(
@@ -428,7 +410,7 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
                 row.env_root = Some(root);
                 row.env_destroyed = false;
                 row.assurance.cleanup_failed = true;
-                crate::prep::apply_cleanup_failure(&mut row.status, &mut row.reason);
+                cleanup_failed(&mut row);
             }
             return row;
         }
@@ -444,11 +426,11 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
                 );
             }
         }
-        match cfg
-            .fixture_bin
-            .as_deref()
-            .map(|bin| crate::prep::Fixture::start(bin, &held.env))
-        {
+        match cfg.fixture_bin.as_deref().map(|bin| {
+            crate::boundary::admit_fixture(bin)
+                .map_err(Error::msg)
+                .and_then(|launch| crate::prep::Fixture::start(launch, &held.env))
+        }) {
             Some(Ok(started)) => fixture = Some(started),
             Some(Err(err)) => {
                 return finish(
@@ -487,7 +469,7 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             Ok(()) => held.arm(),
             Err(_) => {
                 outcome.assurance.cleanup_failed = true;
-                crate::prep::apply_cleanup_failure(&mut outcome.status, &mut outcome.reason);
+                cleanup_failed(&mut outcome);
             }
         }
     }
@@ -497,12 +479,17 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
 
 fn finish(mut outcome: TaskOutcome, held: &mut crate::prep::HeldEnv) -> TaskOutcome {
     let root = held.env.root.clone();
+    let unconfirmed = crate::fake_agent::reason_is_unconfirmed(&outcome.reason);
+    if unconfirmed {
+        // A worker that is still running must not make this tree look deleted.
+        held.disarm();
+    }
     match held.cleanup() {
-        Ok(()) => outcome.env_destroyed = true,
-        Err(_) => {
-            outcome.env_destroyed = !root.exists();
+        Ok(()) if !unconfirmed => outcome.env_destroyed = true,
+        _ => {
+            outcome.env_destroyed = !unconfirmed && !root.exists();
             outcome.assurance.cleanup_failed = true;
-            crate::prep::apply_cleanup_failure(&mut outcome.status, &mut outcome.reason);
+            cleanup_failed(&mut outcome);
         }
     }
     outcome.env_root = Some(root);
@@ -549,6 +536,7 @@ fn desktop_row(cfg: &RunConfig) -> TaskOutcome {
         DESKTOP_NOT_RUN,
     );
     row.env_destroyed = true;
+    row.assurance.environment = Some(crate::disposable::unavailable_report());
     row
 }
 

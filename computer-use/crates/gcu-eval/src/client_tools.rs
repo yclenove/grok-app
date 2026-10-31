@@ -12,7 +12,7 @@
 //! driver, profile, model, approval, and the config body. A new config does not
 //! reuse another run's result. Cloning a config shares one run's map.
 
-use crate::launch::{child_approval, client_command, config_body, ClientProgram};
+use crate::launch::{child_approval, config_body, ClientProgram};
 use crate::runner::RunConfig;
 use crate::tasks::Task;
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,7 +78,7 @@ struct FileId {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PreflightKey {
-    client: FileId,
+    client: Option<FileId>,
     gcu: Option<FileId>,
     real_driver: bool,
     builtin_fake: bool,
@@ -214,7 +214,7 @@ fn fnv(text: &str) -> u64 {
 fn preflight_key(program: &ClientProgram, cfg: &RunConfig, task: &Task) -> PreflightKey {
     let approval = child_approval(task, cfg).unwrap_or("").to_string();
     PreflightKey {
-        client: file_id(program.identity_path()),
+        client: program.identity_path().map(file_id),
         gcu: cfg.gcu_bin.as_deref().map(file_id),
         real_driver: cfg.real_driver,
         builtin_fake: cfg.builtin_fake,
@@ -358,7 +358,11 @@ async fn run_preflight(
     env: &BTreeMap<String, String>,
     model: &str,
 ) -> Result<(), String> {
-    let mut command = client_command(program);
+    let ClientProgram::External(path) = program else {
+        return Err("the fake client runs in process".into());
+    };
+    let launch = crate::boundary::admit_client(path).map_err(str::to_string)?;
+    let mut command = crate::boundary::tokio_command(launch);
     command
         .args(preflight_args(model))
         .env_clear()

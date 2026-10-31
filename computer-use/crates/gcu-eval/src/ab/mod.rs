@@ -131,9 +131,10 @@ impl ArmPair {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
-    /// No client or no desktop. Every trial is `not_run`.
+    /// No task client started. Setup may still report an error.
     NotRun,
-    /// Local runner, including the scripted fake client. Not a model API call.
+    /// At least one task client started, including the scripted fake client.
+    /// This does not establish that a model API was called.
     Runner,
     /// A file passed to `--ab-report`.
     Supplied,
@@ -180,15 +181,34 @@ pub struct AbTrial {
     /// Why a row did not run. Empty when the oracle ran.
     #[serde(default)]
     pub reason: String,
+    /// Normalized ADR 0017 boundary evidence, without provider identities or paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_contract: Option<crate::disposable::EnvironmentReport>,
+    /// Stop evidence inherited from an earlier task/arm/repeat; not a local check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_stop: Option<crate::InheritedStop>,
 }
 
 impl AbTrial {
+    fn status_for_report(&self) -> RunStatus {
+        if self.inherited_stop.is_some()
+            || self
+                .environment_contract
+                .as_ref()
+                .is_some_and(|environment| !environment.complete())
+        {
+            RunStatus::NotRun
+        } else {
+            self.status
+        }
+    }
+
     fn passed(&self) -> bool {
-        self.status == RunStatus::Pass
+        self.status_for_report() == RunStatus::Pass
     }
 
     fn scored(&self) -> bool {
-        !matches!(self.status, RunStatus::NotRun)
+        !matches!(self.status_for_report(), RunStatus::NotRun)
     }
 
     fn safety_hit(&self) -> bool {
@@ -319,6 +339,8 @@ pub fn not_run_report(tasks: &[Task], id: &ReportId) -> AbReport {
                     tool_result_bytes: 0,
                     violations: Vec::new(),
                     reason: "no client binary and no model credentials".into(),
+                    environment_contract: Some(crate::disposable::unavailable_report()),
+                    inherited_stop: None,
                 });
             }
         }
@@ -338,7 +360,7 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
         category: row.category.clone(),
         arm,
         repeat: row.repeat,
-        status: row.status,
+        status: row.status_for_report(),
         rounds: scored.then_some(row.metrics.steps),
         rounds_source: if scored {
             row.metrics.rounds_source
@@ -361,6 +383,8 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
         tool_result_bytes: row.metrics.tool_result_bytes,
         violations: row.violations.clone(),
         reason: row.reason.clone(),
+        environment_contract: row.assurance.environment.clone(),
+        inherited_stop: row.assurance.inherited_stop.clone(),
     })
 }
 
@@ -371,19 +395,31 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
 /// failure, later arms and repeats are `not_run` and are not started. A task
 /// id of `desktop-oneshot` does not skip that check. `include_desktop` is
 /// false here, so rows of that id are real tasks, not the gap row.
+/// Provenance stays `not_run` until a task client actually starts, independently
+/// of trial status (including setup errors and failed cleanup).
 pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport {
-    if (!base.builtin_fake && base.grok_bin.is_none()) || !base.run_local {
+    if !base.builtin_fake
+        && base.grok_bin.is_none()
+        && base.run_local
+        && crate::boundary::admit_launch(
+            base.grok_bin.as_deref(),
+            base.gcu_bin.as_deref(),
+            base.fake_scope.is_some(),
+            base.real_driver,
+        )
+        .is_ok()
+    {
         return not_run_report(tasks, id);
     }
-    let mut report = blank_report(id, Provenance::Runner, false);
-    let mut halted: Option<String> = None;
+    let mut report = blank_report(id, Provenance::NotRun, false);
+    let mut halted: Option<(String, crate::InheritedStop)> = None;
     for (arm_id, arm) in [
         (ArmId::A, ArmConfig::baseline()),
         (ArmId::B, ArmConfig::candidate()),
     ] {
         for repeat in 0..REPEATS {
-            if let Some(reason) = &halted {
-                push_halted(&mut report, tasks, arm_id, repeat, reason);
+            if let Some((reason, stop)) = &halted {
+                push_halted(&mut report, tasks, arm_id, repeat, reason, stop);
                 continue;
             }
             let mut cfg = base.clone();
@@ -392,10 +428,13 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
             cfg.include_desktop = false;
             let suite = crate::run_tasks(tasks, &cfg).await;
             for row in suite.tasks {
-                if row.assurance.cleanup_failed {
-                    halted = Some(format!(
-                        "cleanup_failed: remaining tasks were not started ({})",
-                        row.reason
+                if row.assurance.client_started {
+                    report.provenance = Provenance::Runner;
+                }
+                if let Some(stop) = crate::InheritedStop::from_outcome(&row) {
+                    halted = Some((
+                        format!("{}; remaining tasks were not started", row.reason),
+                        stop,
                     ));
                 }
                 if let Some(trial) = trial_from_outcome(&row) {
@@ -407,7 +446,14 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
     report
 }
 
-fn push_halted(report: &mut AbReport, tasks: &[Task], arm: ArmId, repeat: u32, reason: &str) {
+fn push_halted(
+    report: &mut AbReport,
+    tasks: &[Task],
+    arm: ArmId,
+    repeat: u32,
+    reason: &str,
+    stop: &crate::InheritedStop,
+) {
     for task in tasks {
         report.trials.push(AbTrial {
             task_id: task.id.clone(),
@@ -427,6 +473,8 @@ fn push_halted(report: &mut AbReport, tasks: &[Task], arm: ArmId, repeat: u32, r
             tool_result_bytes: 0,
             violations: Vec::new(),
             reason: reason.into(),
+            environment_contract: None,
+            inherited_stop: Some(stop.clone()),
         });
     }
 }

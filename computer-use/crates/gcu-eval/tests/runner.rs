@@ -55,9 +55,8 @@ fn eval_bin() -> PathBuf {
 fn cfg_for(dir: &Path, behavior: &str) -> RunConfig {
     RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
-        gcu_bin: Some(gcu()),
+        gcu_bin: None,
         platform: host_platform().into(),
         behavior: Some(behavior.into()),
         probe: Some(dir.join("probe.json")),
@@ -464,6 +463,7 @@ fn desktop_provider_and_missing_client_are_not_run() {
         .any(|row| row.id == "desktop-oneshot" && row.reason == DESKTOP_NOT_RUN));
     cfg.run_local = true;
     cfg.grok_bin = None;
+    cfg.gcu_bin = None;
     let skipped = block_on(run_tasks(&loaded[..1], &cfg)).unwrap();
     assert_eq!(skipped.tasks[0].status, RunStatus::NotRun);
     assert!(skipped.tasks[0].reason.contains("no client binary"));
@@ -850,7 +850,7 @@ fn fixture_script(dir: &Path) -> PathBuf {
 
 #[cfg(unix)]
 #[test]
-fn real_driver_runs_a_task_with_a_started_fixture_and_cleans_up() {
+fn real_driver_stays_not_run_even_with_fixture_seed_and_legacy_attestation() {
     let dir = scratch("real-driver");
     let seed = dir.join("seed");
     std::fs::create_dir_all(&seed).unwrap();
@@ -863,11 +863,15 @@ fn real_driver_runs_a_task_with_a_started_fixture_and_cleans_up() {
         ..cfg_for(&dir, "pass")
     };
     let outcome = execute(named("native-form-01"), cfg);
-    assert_eq!(outcome.status, RunStatus::Pass, "{}", outcome.reason);
-    assert!(outcome.env_destroyed);
+    assert_eq!(outcome.status, RunStatus::NotRun, "{}", outcome.reason);
+    assert!(outcome.reason.contains("provider_unavailable"));
     assert!(
-        !outcome.env_root.as_ref().unwrap().exists(),
-        "the task directory, with the seeded login, is gone"
+        outcome.env_root.is_none(),
+        "no environment or credential copy was created"
+    );
+    assert!(
+        !dir.join("probe.json").exists(),
+        "client/preflight was started"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -882,15 +886,11 @@ fn real_driver_without_a_fixture_or_gcu_is_not_run_not_a_silent_fake() {
     };
     let outcome = execute(named("native-form-01"), no_fixture);
     assert_eq!(outcome.status, RunStatus::NotRun);
-    if cfg!(windows) {
-        assert!(
-            outcome.reason.contains("windows real mode"),
-            "{}",
-            outcome.reason
-        );
-    } else {
-        assert!(outcome.reason.contains("fixture"), "{}", outcome.reason);
-    }
+    assert!(
+        outcome.reason.contains("provider_unavailable"),
+        "{}",
+        outcome.reason
+    );
     let no_gcu = RunConfig {
         real_driver: true,
         attest_disposable_desktop: true,
@@ -900,27 +900,23 @@ fn real_driver_without_a_fixture_or_gcu_is_not_run_not_a_silent_fake() {
     };
     let outcome = execute(named("native-form-01"), no_gcu);
     assert_eq!(outcome.status, RunStatus::NotRun);
-    if cfg!(windows) {
-        assert!(
-            outcome.reason.contains("windows real mode"),
-            "{}",
-            outcome.reason
-        );
-    } else {
-        assert!(outcome.reason.contains("gcu"), "{}", outcome.reason);
-    }
+    assert!(
+        outcome.reason.contains("provider_unavailable"),
+        "{}",
+        outcome.reason
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn cli_real_driver_flags_are_validated_and_the_default_stays_fake() {
+fn cli_real_driver_reaches_provider_refusal_and_the_default_stays_fake() {
     let missing = Command::new(eval_bin())
         .args(["--suite", "core", "--driver", "real"])
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
-    assert_eq!(missing.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("--driver real"));
+    assert_eq!(missing.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("provider_unavailable"));
     let unknown = Command::new(eval_bin())
         .args(["--suite", "core", "--driver", "other"])
         .env_remove("GCU_APPROVAL")

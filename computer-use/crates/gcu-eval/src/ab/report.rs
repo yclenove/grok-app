@@ -27,10 +27,13 @@ pub fn parse_report(bytes: &[u8]) -> Result<AbReport, Error> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::msg("A/B report exceeds 2MiB"));
     }
-    let report: AbReport = serde_json::from_slice(bytes)
+    let mut report: AbReport = serde_json::from_slice(bytes)
         .map_err(|err| Error::msg(format!("core A/B schema: {err}")))?;
     if report.schema_version != 1 || report.suite != "core" {
         return Err(Error::msg("unsupported core A/B schema"));
+    }
+    for trial in &mut report.trials {
+        trial.status = trial.status_for_report();
     }
     Ok(report)
 }
@@ -134,7 +137,7 @@ pub fn render_markdown(report: &AbReport, decision: &Decision) -> String {
         out.push_str(" | ");
         out.push_str(&trial.repeat.to_string());
         out.push_str(" | ");
-        out.push_str(trial.status.as_str());
+        out.push_str(trial.status_for_report().as_str());
         out.push_str(" | ");
         out.push_str(&opt_num(trial.rounds));
         out.push_str(" | ");
@@ -159,6 +162,30 @@ pub fn render_markdown(report: &AbReport, decision: &Decision) -> String {
         out.push_str(&trial.violations.join(","));
         out.push_str(" |\n");
     }
+    for trial in &report.trials {
+        if let Some(environment) = &trial.environment_contract {
+            out.push_str(&format!(
+                "\nEnvironment contract (normalized evidence; task `{}`, arm {}, repeat {}):\n\n```json\n",
+                sanitize(&trial.task_id), trial.arm.as_str(), trial.repeat
+            ));
+            if let Ok(json) = serde_json::to_string_pretty(environment) {
+                out.push_str(&json);
+            }
+            out.push_str("\n```\n");
+        }
+        if let Some(stop) = &trial.inherited_stop {
+            out.push_str(&format!(
+                "\nInherited run stop (task `{}`, arm {}, repeat {}):\n\n```json\n",
+                sanitize(&trial.task_id),
+                trial.arm.as_str(),
+                trial.repeat
+            ));
+            if let Ok(json) = serde_json::to_string_pretty(stop) {
+                out.push_str(&json);
+            }
+            out.push_str("\n```\n");
+        }
+    }
     out
 }
 
@@ -172,7 +199,11 @@ pub fn write_reports(dir: &Path, report: &AbReport) -> Result<ReportPaths, Error
     let stem = file_stem(report);
     let json = dir.join(format!("{stem}.json"));
     let markdown = dir.join(format!("{stem}.md"));
-    let body = serde_json::to_vec_pretty(report)
+    let mut normalized = report.clone();
+    for trial in &mut normalized.trials {
+        trial.status = trial.status_for_report();
+    }
+    let body = serde_json::to_vec_pretty(&normalized)
         .map_err(|err| Error::msg(format!("report json: {err}")))?;
     std::fs::write(&json, body).map_err(|err| Error::msg(format!("report json: {err}")))?;
     std::fs::write(&markdown, render_markdown(report, &decision))

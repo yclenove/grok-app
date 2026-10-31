@@ -3,7 +3,7 @@
 //! Every real client gets the same `--tools` allow-list, cleared environment,
 //! and proxy forwarding. The eval fake agent keeps the narrower test path.
 
-use crate::boundary::{launches_real_client, INTERNAL_FAKE_AGENT};
+use crate::boundary::{admit_launch, launches_real_client};
 use crate::runner::{ApprovalMode, Environment, RunConfig};
 use crate::tasks::Task;
 use crate::Error;
@@ -47,57 +47,39 @@ pub(crate) fn grok_args(task: &Task, cfg: &RunConfig) -> Vec<String> {
     args
 }
 
-/// How the runner starts the client. `Reexec` is this process, not a path the operator passed.
+/// Fake selection carries no executable path.
+#[derive(Debug)]
 pub(crate) enum ClientProgram {
-    /// Operator path or the cargo-built fake agent selected by the test slot.
-    Path(std::path::PathBuf),
-    /// `gcu-eval` re-entering as the built-in fake agent.
-    Reexec(std::path::PathBuf),
+    BuiltinFake,
+    External(std::path::PathBuf),
 }
 
 impl ClientProgram {
-    /// Path or executable used for logs and the preflight cache. Not a trust decision.
-    pub(crate) fn identity_path(&self) -> &std::path::Path {
+    /// External identity for preflight caching; fake code has no file identity.
+    pub(crate) fn identity_path(&self) -> Option<&std::path::Path> {
         match self {
-            Self::Path(path) | Self::Reexec(path) => path,
+            Self::BuiltinFake => None,
+            Self::External(path) => Some(path),
         }
     }
 }
 
-/// Resolve the client. A trusted `builtin_fake` slot ignores `grok_bin`.
-///
-/// An untrusted `builtin_fake_bin` is returned as an ordinary path. The caller
-/// must treat that launch as external; this function does not start it.
+/// Resolve only after the same admission decision used by the runner/helper.
 pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
-    if crate::boundary::builtin_fake_trusted(cfg) {
-        if let Some(path) = &cfg.builtin_fake_bin {
-            return Ok(ClientProgram::Path(path.clone()));
-        }
-        let exe = std::env::current_exe()
-            .map_err(|err| Error::msg(format!("builtin fake agent: {err}")))?;
-        return Ok(ClientProgram::Reexec(exe));
+    admit_launch(
+        cfg.grok_bin.as_deref(),
+        cfg.gcu_bin.as_deref(),
+        cfg.fake_scope.is_some(),
+        cfg.real_driver,
+    )
+    .map_err(Error::msg)?;
+    if let Some(path) = &cfg.grok_bin {
+        return Ok(ClientProgram::External(path.clone()));
     }
-    if let Some(path) = cfg
-        .builtin_fake
-        .then(|| cfg.builtin_fake_bin.clone())
-        .flatten()
-        .or_else(|| cfg.grok_bin.clone())
-    {
-        return Ok(ClientProgram::Path(path));
+    if cfg.builtin_fake {
+        return Ok(ClientProgram::BuiltinFake);
     }
     Err(Error::msg("no client binary and no model credentials"))
-}
-
-/// Command for `program`. The re-exec form adds the internal fake-agent flag.
-pub(crate) fn client_command(program: &ClientProgram) -> tokio::process::Command {
-    match program {
-        ClientProgram::Path(path) => tokio::process::Command::new(path),
-        ClientProgram::Reexec(exe) => {
-            let mut command = tokio::process::Command::new(exe);
-            command.arg(INTERNAL_FAKE_AGENT);
-            command
-        }
-    }
 }
 
 pub(crate) fn child_env(
@@ -162,34 +144,12 @@ pub(crate) fn child_env(
     map
 }
 
-/// `GCU_BIN` and the flags that tell the fake agent whether that path is trusted.
-///
-/// The built-in slot is the cargo artifact, or a re-exec of this process.
-/// Re-exec sets `GCU_EVAL_GCU_REEXEC` and points `GCU_BIN` at this process.
-/// `builtin_gcu: true` does not bless any other path. Attestation is a
-/// separate flag and does not make a path built-in.
+/// Forward a supplied backend path; fake agents refuse it using shared admission.
+/// An absent path selects the in-process fake backend and needs no marker.
 fn insert_gcu_env(map: &mut BTreeMap<String, String>, cfg: &RunConfig) {
-    if cfg.attest_disposable_desktop {
-        map.insert("GCU_EVAL_ATTESTED".into(), "1".into());
+    if let Some(path) = &cfg.gcu_bin {
+        map.insert("GCU_BIN".into(), path.display().to_string());
     }
-    let reexec = cfg.builtin_fake && cfg.gcu_bin.is_none();
-    if crate::boundary::builtin_gcu_trusted(cfg) {
-        map.insert("GCU_EVAL_BUILTIN_GCU".into(), "1".into());
-    }
-    if reexec {
-        if let Ok(exe) = std::env::current_exe() {
-            map.insert("GCU_BIN".into(), exe.display().to_string());
-            map.insert("GCU_EVAL_GCU_REEXEC".into(), "1".into());
-        }
-        return;
-    }
-    map.insert(
-        "GCU_BIN".into(),
-        cfg.gcu_bin
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default(),
-    );
 }
 
 /// Proxy settings found through `lookup`. Empty values are dropped.
@@ -345,6 +305,51 @@ mod tests {
     }
 
     #[test]
+    fn fake_selection_has_no_path_and_unverified_paths_never_build_commands() {
+        let cfg = RunConfig {
+            builtin_fake: true,
+            ..RunConfig::default()
+        };
+        let program = resolve_client(&cfg).unwrap();
+        assert!(matches!(program, ClientProgram::BuiltinFake));
+        assert!(program.identity_path().is_none());
+        for path in [
+            "eval-fake-agent",
+            "eval-fake-agent.exe",
+            "eval-fake-gcu",
+            "gcu-eval",
+            "",
+        ] {
+            let path = std::path::PathBuf::from(path);
+            // Even bypassing resolution cannot admit a fake-named path.
+            assert!(crate::boundary::admit_client(&path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+            assert!(resolve_client(&RunConfig {
+                grok_bin: Some(path.clone()),
+                ..cfg.clone()
+            })
+            .is_err());
+            assert!(resolve_client(&RunConfig {
+                gcu_bin: Some(path),
+                ..cfg.clone()
+            })
+            .is_err());
+        }
+        // Keep both in-process implementations free of subprocess launch APIs.
+        for source in [include_str!("fake_agent.rs"), include_str!("fake_gcu.rs")] {
+            for forbidden in ["Command", "std::process::", "tokio::process::"] {
+                // ExitCode is just the standalone binary's status adapter.
+                let source = source.replace("use std::process::ExitCode;", "");
+                assert!(
+                    !source.contains(forbidden),
+                    "fake implementation gained {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn scoped_config_contains_only_fixed_relay_and_public_data_address() {
         let cfg = RunConfig {
             gcu_bin: Some(std::path::PathBuf::from("/fixtures/gcu")),
@@ -433,14 +438,10 @@ mod tests {
             ..RunConfig::default()
         };
         let reexec = child_env(&task, &reexec, &env, None);
-        assert_eq!(
-            reexec.get("GCU_EVAL_BUILTIN_GCU").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            reexec.get("GCU_EVAL_GCU_REEXEC").map(String::as_str),
-            Some("1")
-        );
+        assert!(!reexec.contains_key("GCU_EVAL_BUILTIN_GCU"));
+        assert!(!reexec.contains_key("GCU_EVAL_ATTESTED"));
+        assert!(!reexec.contains_key("GCU_BIN"));
+        assert!(!reexec.contains_key("GCU_EVAL_GCU_REEXEC"));
     }
 
     #[test]

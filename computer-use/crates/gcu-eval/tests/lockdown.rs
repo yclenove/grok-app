@@ -74,9 +74,8 @@ fn fixture_script(dir: &Path) -> PathBuf {
 fn cfg(_dir: &Path, behavior: &str) -> RunConfig {
     RunConfig {
         builtin_fake: true,
-        builtin_fake_bin: Some(agent()),
         builtin_gcu: true,
-        gcu_bin: Some(gcu()),
+        gcu_bin: None,
         platform: host_platform().into(),
         behavior: Some(behavior.into()),
         include_desktop: false,
@@ -136,10 +135,10 @@ fn cli_real_driver_without_disposable_desktop_attestation_does_not_start() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         output.status.code(),
-        Some(2),
-        "real mode must refuse without attestation\n{stdout}\n{stderr}"
+        Some(0),
+        "real mode must record provider refusal\n{stdout}\n{stderr}"
     );
-    assert!(stderr.contains("attest-disposable-desktop"), "{stderr}");
+    assert!(stdout.contains("provider_unavailable"), "{stdout}");
     assert!(
         !stdout.contains("pass native-form-01"),
         "the task ran: {stdout}"
@@ -173,16 +172,13 @@ fn cli_real_driver_without_disposable_desktop_attestation_does_not_start() {
         .env_remove("GCU_APPROVAL")
         .output()
         .unwrap();
-    let flagged_err = String::from_utf8_lossy(&flagged.stderr);
-    assert_eq!(flagged.status.code(), Some(2), "{flagged_err}");
+    let flagged_out = String::from_utf8_lossy(&flagged.stdout);
+    assert_eq!(flagged.status.code(), Some(0), "{flagged_out}");
     assert!(
-        flagged_err.contains("--auto-approve"),
-        "attestation should reach the next check: {flagged_err}"
+        flagged_out.contains("provider_unavailable"),
+        "{flagged_out}"
     );
-    assert!(
-        !flagged_err.contains("attest-disposable-desktop"),
-        "{flagged_err}"
-    );
+    assert!(!client_marker.exists() && !fixture_marker.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -240,7 +236,7 @@ fn real_red_team_without_a_sensitive_deny_policy_is_not_run() {
         row.approval_mode
     );
     assert!(
-        row.reason.contains("auto-deny") || row.reason.contains("sensitive"),
+        row.reason.contains("provider_unavailable"),
         "{}",
         row.reason
     );
@@ -248,7 +244,7 @@ fn real_red_team_without_a_sensitive_deny_policy_is_not_run() {
 }
 
 #[test]
-fn pipe_flood_finishes_instead_of_timing_out() {
+fn synthetic_output_finishes_instead_of_timing_out() {
     let dir = scratch("flood");
     let mut cfg = cfg(&dir, "pipe_flood");
     cfg.timeout = Some(Duration::from_secs(3));
@@ -264,32 +260,17 @@ fn pipe_flood_finishes_instead_of_timing_out() {
 }
 
 #[test]
-fn timeout_kills_the_client_process_group() {
-    let dir = scratch("group");
-    let pid_file = dir.join("sleeper.pid");
-    let mut cfg = cfg(&dir, "spawn_sleeper");
-    cfg.timeout = Some(Duration::from_millis(800));
-    cfg.watch_files = vec![pid_file.clone()];
+fn in_process_timeout_leaves_no_child_or_marker() {
+    let dir = scratch("timeout");
+    let marker = dir.join("must-not-create-child");
+    let mut cfg = cfg(&dir, "timeout");
+    cfg.timeout = Some(Duration::from_millis(20));
+    cfg.watch_files = vec![marker.clone()];
     let report = block_on(run_tasks(&[named("text-note-01")], &cfg)).unwrap();
     let row = &report.tasks[0];
     assert_eq!(row.status, RunStatus::Timeout, "{}", row.reason);
-    let pid = std::fs::read_to_string(&pid_file).unwrap();
-    let pid = pid.trim();
-    let mut dead = false;
-    for _ in 0..20 {
-        let alive = Command::new("kill")
-            .args(["-0", pid])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !alive {
-            dead = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(dead, "grandchild {pid} survived the client timeout");
+    assert!(row.assurance.client_started && row.env_destroyed);
+    assert!(!marker.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -357,9 +338,13 @@ exit 0
     );
     assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);
     assert!(
-        row.reason.contains("forbidden_tool:shell"),
+        row.reason.contains("provider_unavailable"),
         "{}",
         row.reason
+    );
+    assert!(
+        !log.exists(),
+        "even tool preflight must wait for the environment gate"
     );
     assert!(blob.contains("attestation_provided"), "{blob}");
     assert!(blob.contains("\"driver_mode\": \"real\""), "{blob}");
@@ -381,7 +366,7 @@ exit 0
 }
 
 #[test]
-fn attested_external_client_uses_the_real_launch_policy() {
+fn legacy_attestation_does_not_start_external_client_or_preflight() {
     let dir = scratch("ext-ok");
     let log = dir.join("argv.log");
     let script = logging_client(&dir, &log);
@@ -397,27 +382,14 @@ fn attested_external_client_uses_the_real_launch_policy() {
     };
     let report = block_on(run_tasks(&[named("native-form-01")], &cfg)).unwrap();
     let row = &report.tasks[0];
-    assert_eq!(row.status, RunStatus::Fail, "{}", row.reason);
-    assert!(
-        !row.reason.contains("attest-disposable-desktop"),
-        "{}",
-        row.reason
-    );
-    let text = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<_> = text.lines().filter(|line| !line.is_empty()).collect();
-    assert!(lines.len() >= 2, "{text}");
-    for line in &lines {
-        assert!(line.contains("--tools"), "{line}");
-        assert!(line.contains("todo_write"), "{line}");
-        assert!(line.contains("--no-plan"), "{line}");
-        assert!(line.contains("--verbatim"), "{line}");
-        assert!(line.contains("--model"), "{line}");
-    }
+    assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);
+    assert!(row.reason.contains("provider_unavailable"));
+    assert!(!log.exists(), "credentialed preflight was started");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn preflight_overflow_is_not_run() {
+fn environment_gate_precedes_preflight_even_with_oversized_response() {
     let dir = scratch("overflow");
     let response = dir.join("preflight.json");
     let mut body = exact_preflight_json(65_536);
@@ -433,18 +405,19 @@ fn preflight_overflow_is_not_run() {
     .unwrap();
     let row = &report.tasks[0];
     assert_eq!(row.status, RunStatus::NotRun, "{}", row.reason);
-    assert_eq!(row.reason, "output_overflow");
+    assert!(row.reason.contains("provider_unavailable"));
+    assert!(!log.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn preflight_cache_key_includes_model_and_profile() {
+fn environment_gate_is_required_for_every_model_and_profile() {
     let dir = scratch("cache-key");
     let log = dir.join("argv.log");
     let script = cache_client(&dir, &log);
     let base = real_cfg(&dir, script.clone());
     let first = block_on(run_tasks(&[named("native-form-01")], &base)).unwrap();
-    assert_ne!(
+    assert_eq!(
         first.tasks[0].status,
         RunStatus::NotRun,
         "{}",
@@ -459,7 +432,8 @@ fn preflight_cache_key_includes_model_and_profile() {
         "{}",
         second.tasks[0].reason
     );
-    assert_eq!(second.tasks[0].reason, "forbidden_tool:shell");
+    assert!(second.tasks[0].reason.contains("provider_unavailable"));
+    assert!(!log.exists());
     let mut full = base.clone();
     full.mcp_profile = Some("full".into());
     let third = block_on(run_tasks(&[named("native-form-01")], &full)).unwrap();
@@ -479,7 +453,7 @@ fn preflight_cache_key_includes_model_and_profile() {
 }
 
 #[test]
-fn preflight_cache_does_not_cross_a_fresh_run_config() {
+fn environment_gate_cannot_be_bypassed_with_a_clone_or_fresh_config() {
     let dir = scratch("cache-run");
     let phase = dir.join("phase");
     let log = dir.join("argv.log");
@@ -519,23 +493,24 @@ exit 0
     executable(&script);
     let first_cfg = real_cfg(&dir, script.clone());
     let first = block_on(run_tasks(&[named("native-form-01")], &first_cfg)).unwrap();
-    assert_ne!(
+    assert_eq!(
         first.tasks[0].status,
         RunStatus::NotRun,
         "{}",
         first.tasks[0].reason
     );
     let cloned = block_on(run_tasks(&[named("native-form-01")], &first_cfg.clone())).unwrap();
-    assert_ne!(
+    assert_eq!(
         cloned.tasks[0].status,
         RunStatus::NotRun,
-        "a clone shares the run cache: {}",
+        "a clone cannot bypass the environment gate: {}",
         cloned.tasks[0].reason
     );
     let fresh = real_cfg(&dir, script);
     let second = block_on(run_tasks(&[named("native-form-01")], &fresh)).unwrap();
     assert_eq!(second.tasks[0].status, RunStatus::NotRun);
-    assert_eq!(second.tasks[0].reason, "forbidden_tool:shell");
+    assert!(second.tasks[0].reason.contains("provider_unavailable"));
+    assert!(!log.exists());
     assert!(!second.tasks[0].reason.contains("SENSITIVEVALUE"));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -55,6 +55,7 @@ thiserror = { workspace = true }
 toml_edit = "0.25"
 
 [dev-dependencies]
+gcu-eval = { path = "../gcu-eval" }
 gcu-host-api = { workspace = true, features = ["testing"] }
 gcu-host-protocol = { workspace = true, features = ["testing"] }
 assert_cmd = "2"
@@ -83,3 +84,9 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", 
 
 [lints]
 workspace = true
+
+# The production S3 binary and eval's genuine fake entry in one bounded harness.
+[[test]]
+name = "eval_backend_admission"
+path = "tests/eval_backend_admission.rs"
+harness = false

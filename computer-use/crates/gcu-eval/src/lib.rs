@@ -25,9 +25,12 @@ pub mod browser;
 #[path = "../../../bench/mod.rs"]
 pub mod budget;
 mod client_tools;
+pub mod disposable;
 mod exec;
 mod fake_agent;
 mod fake_gcu;
+mod fake_io;
+mod fake_worker;
 mod ffi;
 mod launch;
 mod metrics;
@@ -44,8 +47,10 @@ mod yaml;
 
 pub use access::GCU_ACCEPTED_APPROVAL;
 pub use access::{config_dirs_from, path_within};
+#[cfg(feature = "test-support")]
+pub use boundary::mint_scope_lifecycle_test;
 pub use boundary::{
-    ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
+    AdmittedLaunch, ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
     WINDOWS_REAL_NOT_RUN,
 };
 pub use client_tools::{PreflightCache, CLIENT_TOOL_PROBE_PROMPT, EXPECTED_PREFLIGHT_TOOLS};
@@ -67,8 +72,8 @@ pub use report::{escape_html, render_html, trials_from_summary, write_reports, R
 pub use runner::{
     block_on, bundled_tasks_dir, child_env_keys, host_platform, parse_approval, path_under_configs,
     run_tasks, user_config_dirs, ApprovalMode, Assurance, DesktopProvider, EnvProvider,
-    Environment, LocalTempProvider, Provision, RoundsSource, RunConfig, RunStatus, SuiteReport,
-    TaskMetrics, TaskOutcome, TelemetryState, DESKTOP_NOT_RUN,
+    Environment, InheritedStop, LocalTempProvider, Provision, RoundsSource, RunConfig, RunStatus,
+    SuiteReport, TaskMetrics, TaskOutcome, TelemetryState, DESKTOP_NOT_RUN,
 };
 pub use tasks::{load_tasks, Task};
 

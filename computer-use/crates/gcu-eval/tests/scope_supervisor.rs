@@ -5,7 +5,7 @@
 // Windows private-pipe runtime proof: not_run (ADR 0017 S3)
 #[cfg(unix)]
 mod checks {
-    use gcu_eval::{scope::Supervisor, Environment};
+    use gcu_eval::{scope::Supervisor, EnvProvider, Environment};
     use gcu_host_protocol::{
         codec::{read_frame, write_frame},
         scope::{Ack, Control, Scope, LEASE},
@@ -58,6 +58,59 @@ mod checks {
             let _ = std::fs::remove_dir_all(&self.0.root);
         }
     }
+    fn admitted_engine(binary: &std::path::Path) -> gcu_eval::AdmittedLaunch {
+        gcu_eval::mint_scope_lifecycle_test(binary.to_path_buf())
+    }
+    fn shell_quote(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+    async fn public_path_refuses_before_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let task = gcu_eval::load_tasks(&gcu_eval::bundled_tasks_dir().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|task| task.id == "native-form-01")
+            .unwrap();
+        let provision = gcu_eval::LocalTempProvider.provision(&task).unwrap();
+        let gcu_eval::Provision::Ready(env) = provision else {
+            panic!("local temp provider did not prepare an environment");
+        };
+        let sentinel = env.work.join("started");
+        let wrapper = env.work.join("wrapper.sh");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' started > {}\nexit 0\n",
+            shell_quote(&sentinel.display().to_string())
+        );
+        std::fs::write(&wrapper, body).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The wrapper itself can write the sentinel. Admission must not run it.
+        let demonstrated = std::process::Command::new(&wrapper).status().unwrap();
+        assert!(demonstrated.success());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"started\n");
+        std::fs::remove_file(&sentinel).unwrap();
+        let started = Instant::now();
+        let opened = Supervisor::open(
+            &wrapper,
+            &env,
+            "form",
+            "default",
+            "run".into(),
+            scope("normal"),
+        )
+        .await;
+        let Err(err) = opened else {
+            panic!("public entry spawned an unadmitted backend");
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "admission blocked for {:?}",
+            started.elapsed()
+        );
+        let text = err.to_string();
+        assert!(text.contains("provider_unavailable"), "{text}");
+        assert!(!sentinel.exists(), "public entry spawned before admission");
+        assert!(gcu_eval::LocalTempProvider.destroy(*env).unwrap());
+    }
     fn scope(mode: &str) -> Scope {
         Scope {
             engine_instance: mode.into(),
@@ -79,10 +132,11 @@ mod checks {
             return;
         }
         tokio::time::timeout(Duration::from_secs(20), async {
+            public_path_refuses_before_spawn().await;
             let binary = std::env::current_exe().unwrap();
             let env = TestEnv::new();
             let supervisor = Supervisor::start(
-                &binary,
+                admitted_engine(&binary),
                 &env.0,
                 "form",
                 "default",
@@ -117,7 +171,7 @@ mod checks {
             assert!(TcpStream::connect(address).await.is_err());
             let dropped_env = TestEnv::new();
             let dropped = Supervisor::start(
-                &binary,
+                admitted_engine(&binary),
                 &dropped_env.0,
                 "form",
                 "default",
@@ -140,7 +194,7 @@ mod checks {
             for mode in ["bad-ack", "bad-run", "bad-digest"] {
                 let env = TestEnv::new();
                 assert!(Supervisor::start(
-                    &binary,
+                    admitted_engine(&binary),
                     &env.0,
                     "form",
                     "default",
@@ -153,7 +207,7 @@ mod checks {
             }
             let env = TestEnv::new();
             let start = Supervisor::start(
-                &binary,
+                admitted_engine(&binary),
                 &env.0,
                 "form",
                 "default",
@@ -187,7 +241,7 @@ mod checks {
             // A nonzero engine exit cannot certify child cleanup.
             let env = TestEnv::new();
             let supervisor = Supervisor::start(
-                &binary,
+                admitted_engine(&binary),
                 &env.0,
                 "form",
                 "default",

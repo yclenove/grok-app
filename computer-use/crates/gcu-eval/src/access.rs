@@ -113,8 +113,6 @@ pub const fn child_env_keys() -> &'static [&'static str] {
         "GCU_EVAL_PROBE",
         "GCU_EVAL_BEHAVIOR",
         "GCU_EVAL_WATCH_FILE",
-        "GCU_EVAL_ATTESTED",
-        "GCU_EVAL_BUILTIN_GCU",
         "GCU_EVAL_GCU_REEXEC",
         "GCU_BIN",
         "GCU_APPROVAL",

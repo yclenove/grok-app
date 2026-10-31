@@ -1,20 +1,16 @@
-//! Whether a launch is allowed to start an external client.
+//! The single admission decision for every offline client/backend launch.
 //!
-//! The built-in fake agent is selected by [`crate::runner::RunConfig::builtin_fake`],
-//! not by the file name of a path. A path in that slot is trusted only when it
-//! is this crate's `eval-fake-agent` or `eval-fake-gcu` artifact beside the
-//! running executable. Every other executable, and every real-driver launch,
-//! refuses until `--attest-disposable-desktop` is set. The flag is an
-//! attestation, not a confinement proof. A same-named copy or wrapper outside
-//! that directory is an external client. A hard link that replaces the
-//! artifact in place is not detected.
+//! Fake clients and backends run in process. Every supplied executable
+//! path requires the unavailable disposable provider, regardless of placement,
+//! file name, legacy declarations, or a requested S3 scope.
 
 use crate::runner::RunConfig;
 use std::path::Path;
 
-/// Printed when an external client would start without a disposable-desktop attestation.
+/// Printed when an external client lacks the unavailable disposable provider.
 pub const ATTEST_REQUIRED: &str = concat!(
-    "refusing to start an external client without --attest-disposable-desktop: ",
+    "refusing to start an external client: provider_unavailable; ",
+    "--attest-disposable-desktop is not evidence; ",
     "real mode must not run on an ordinary host; ",
     "it needs a one-shot isolated desktop and egress control; ",
     "--tools and preflight are mitigations, not proof; ",
@@ -22,8 +18,8 @@ pub const ATTEST_REQUIRED: &str = concat!(
     "a file named eval-fake-agent is not the built-in fake agent"
 );
 
-/// Printed when the built-in fake agent would call an operator-supplied `gcu`.
-pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend without --attest-disposable-desktop: the built-in fake agent may call only the built-in fake gcu unless the operator attests a disposable desktop";
+/// Printed when any launch requests an external backend or scoped engine.
+pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend: provider_unavailable; --attest-disposable-desktop is not evidence; the built-in fake agent uses only its in-process backend";
 
 /// Printed when a real client would run a red-team task.
 ///
@@ -41,81 +37,155 @@ pub const INTERNAL_FAKE_AGENT: &str = "--gcu-eval-internal-fake-agent";
 /// Hidden argv that re-enters this binary as the built-in fake gcu.
 pub const INTERNAL_FAKE_GCU: &str = "--gcu-eval-internal-fake-gcu";
 
-/// Real driver, or any client that was not selected as the built-in fake agent.
-///
-/// `grok_bin` is never consulted for a name match. A path is external even when
-/// its file name is `eval-fake-agent`, including one stored in `builtin_fake_bin`.
+/// Real driver or any explicit external client, irrespective of fake selection.
 pub(crate) fn launches_real_client(cfg: &RunConfig) -> bool {
-    if cfg.real_driver {
-        return true;
-    }
-    if builtin_fake_trusted(cfg) {
-        return false;
-    }
-    cfg.grok_bin.is_some() || cfg.builtin_fake_bin.is_some()
+    cfg.real_driver || cfg.grok_bin.is_some()
 }
 
-/// `builtin_fake` re-executes this process, or names the cargo-built fake agent.
-pub(crate) fn builtin_fake_trusted(cfg: &RunConfig) -> bool {
-    if !cfg.builtin_fake {
-        return false;
-    }
-    match &cfg.builtin_fake_bin {
-        None => true,
-        Some(path) => is_builtin_artifact(path, "eval-fake-agent"),
-    }
+/// Which process an [`AdmittedLaunch`] would start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessRole {
+    Client,
+    Backend,
+    Fixture,
 }
 
-/// `gcu_bin` is the cargo-built fake gcu, or this process re-executes as it.
-pub(crate) fn builtin_gcu_trusted(cfg: &RunConfig) -> bool {
-    match &cfg.gcu_bin {
-        None => cfg.builtin_fake,
-        Some(path) => cfg.builtin_gcu && is_builtin_artifact(path, "eval-fake-gcu"),
-    }
-}
-
-/// Regular file named `stem` in this process's cargo output directory.
+/// Unforgeable permission to build one client, backend, or fixture process.
 ///
-/// Cargo puts test binaries in `deps/` and the package binaries next to that
-/// directory. A symlink is not the artifact. This does not detect a hard link
-/// that has replaced the artifact in that directory.
-fn is_builtin_artifact(path: &Path, stem: &str) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return false;
-    }
-    let mut expected = stem.to_string();
-    if cfg!(windows) {
-        expected.push_str(".exe");
-    }
-    if path.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
-        return false;
-    }
-    let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
-        return false;
-    };
-    let Some(dir) = artifact_dir() else {
-        return false;
-    };
-    same_directory(parent, &dir)
+/// The fields are private. Production code obtains a value only from
+/// [`admit_client`], [`admit_scoped_backend`], or [`admit_fixture`]. Those
+/// functions run the single [`admit_launch`] decision and then the provider
+/// gate. A scoped backend also requires that provider's ACK. No accepting
+/// provider is installed, so every executable is refused. [`std_command`] and
+/// [`tokio_command`] consume the value; nothing else may call `Command::new`
+/// for a client or backend.
+#[derive(Debug)]
+pub struct AdmittedLaunch {
+    program: std::path::PathBuf,
+    role: ProcessRole,
 }
 
-fn artifact_dir() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    if dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        dir.parent().map(Path::to_path_buf)
+/// External client process. Refused until a provider admits it.
+pub(crate) fn admit_client(program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    admit_launch(Some(program), None, false, false)?;
+    grant_process(ProcessRole::Client, program, false)
+}
+
+/// Scoped backend process. Refused until a provider admits it and ACKs.
+pub(crate) fn admit_scoped_backend(program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    admit_launch(None, Some(program), true, false)?;
+    grant_process(ProcessRole::Backend, program, true)
+}
+
+/// Fixture process used only by a real driver. Refused with that driver.
+pub(crate) fn admit_fixture(program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    admit_launch(None, None, false, true)?;
+    grant_process(ProcessRole::Fixture, program, false)
+}
+
+fn grant_process(
+    role: ProcessRole,
+    program: &Path,
+    scoped: bool,
+) -> Result<AdmittedLaunch, &'static str> {
+    if !provider_gate_allows_process(scoped) {
+        return Err(refusal_for(role));
+    }
+    Ok(AdmittedLaunch {
+        program: program.to_path_buf(),
+        role,
+    })
+}
+
+/// Provider gate. A scoped engine additionally needs the provider's ACK.
+///
+/// Both halves stay closed: this crate does not link an accepting provider,
+/// and no ACK is recorded. Callers cannot pass a boolean that skips the gate.
+fn provider_gate_allows_process(scoped: bool) -> bool {
+    accepting_provider_linked() && (!scoped || scoped_provider_ack())
+}
+
+fn accepting_provider_linked() -> bool {
+    // Closed. Nothing in this crate stores `true`. The load is not a const so
+    // the admit arm stays compiled for a future provider in this module.
+    // Callers cannot pass a boolean that skips the gate.
+    static LINKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    LINKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn scoped_provider_ack() -> bool {
+    static ACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    ACK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn refusal_for(role: ProcessRole) -> &'static str {
+    match role {
+        ProcessRole::Client => ATTEST_REQUIRED,
+        ProcessRole::Backend | ProcessRole::Fixture => EXTERNAL_GCU_REFUSED,
+    }
+}
+
+/// The only `std::process::Command::new` for an admitted process.
+pub(crate) fn std_command(launch: AdmittedLaunch) -> std::process::Command {
+    std::process::Command::new(program_of(launch))
+}
+
+/// The only `tokio::process::Command::new` for an admitted process.
+pub(crate) fn tokio_command(launch: AdmittedLaunch) -> tokio::process::Command {
+    tokio::process::Command::new(program_of(launch))
+}
+
+fn program_of(launch: AdmittedLaunch) -> std::path::PathBuf {
+    let AdmittedLaunch { program, role } = launch;
+    // Every role is a process. The program was bound by admission or by the
+    // test-only mint, not by the caller of `Command` construction.
+    match role {
+        ProcessRole::Client | ProcessRole::Backend | ProcessRole::Fixture => program,
+    }
+}
+
+/// Harness-free S3 lifecycle only. Not an admission decision and not a provider.
+///
+/// `tests/scope_supervisor.rs` is outside this crate, so the capability it
+/// needs to exercise ACK, renew, and teardown cannot be `cfg(test)`. It exists
+/// only when the `test-support` feature is on, so no production build has a way
+/// to mint a launch for an arbitrary executable. The source test rejects every
+/// other caller. Production paths use [`admit_scoped_backend`].
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub fn mint_scope_lifecycle_test(program: std::path::PathBuf) -> AdmittedLaunch {
+    AdmittedLaunch {
+        program,
+        role: ProcessRole::Backend,
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn mint_test_fixture(program: std::path::PathBuf) -> AdmittedLaunch {
+    AdmittedLaunch {
+        program,
+        role: ProcessRole::Fixture,
+    }
+}
+
+/// Admit only compiled, in-process implementations, never executable paths.
+///
+/// Runner, client resolution/command construction and standalone fake-agent
+/// entries all use this decision. No location, name or declaration grants trust.
+/// A scoped engine request also requires the unavailable disposable provider.
+pub(crate) fn admit_launch(
+    client: Option<&Path>,
+    backend: Option<&Path>,
+    scoped: bool,
+    real_driver: bool,
+) -> Result<(), &'static str> {
+    if backend.is_some() || scoped {
+        Err(EXTERNAL_GCU_REFUSED)
+    } else if client.is_some() || real_driver {
+        Err(ATTEST_REQUIRED)
     } else {
-        Some(dir.to_path_buf())
-    }
-}
-
-fn same_directory(left: &Path, right: &Path) -> bool {
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left_real), Ok(right_real)) => left_real == right_real,
-        _ => left == right,
+        Ok(())
     }
 }
 
@@ -133,17 +203,6 @@ pub(crate) fn real_launch_block(
     }
     if red_team {
         return Some(REAL_RED_TEAM_NOT_RUN);
-    }
-    None
-}
-
-/// Built-in fake agent plus a `gcu` path that is not the cargo artifact.
-pub(crate) fn external_backend_block(cfg: &RunConfig) -> Option<&'static str> {
-    if cfg.attest_disposable_desktop || !cfg.builtin_fake {
-        return None;
-    }
-    if cfg.gcu_bin.is_some() && !builtin_gcu_trusted(cfg) {
-        return Some(EXTERNAL_GCU_REFUSED);
     }
     None
 }
@@ -174,13 +233,13 @@ mod tests {
     }
 
     #[test]
-    fn builtin_fake_does_not_require_attestation_until_the_driver_is_real() {
+    fn explicit_client_is_external_even_with_builtin_fake_selected() {
         let builtin = RunConfig {
             builtin_fake: true,
             grok_bin: Some(PathBuf::from("/tmp/eval-fake-agent")),
             ..cfg()
         };
-        assert!(!launches_real_client(&builtin));
+        assert!(launches_real_client(&builtin));
         assert!(real_launch_block(false, false, false).is_none());
         let real = RunConfig {
             builtin_fake: true,
@@ -192,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_fake_refuses_an_external_gcu_without_attestation() {
+    fn fake_backend_admission_never_uses_declarations_or_artifact_placement() {
         let external = RunConfig {
             builtin_fake: true,
             gcu_bin: Some(PathBuf::from("/tmp/gcu")),
@@ -200,43 +259,182 @@ mod tests {
             ..cfg()
         };
         assert_eq!(
-            external_backend_block(&external),
-            Some(EXTERNAL_GCU_REFUSED)
+            admit_launch(None, external.gcu_bin.as_deref(), false, false),
+            Err(EXTERNAL_GCU_REFUSED)
         );
         let flagged = RunConfig {
             builtin_gcu: true,
             ..external.clone()
         };
-        assert_eq!(external_backend_block(&flagged), Some(EXTERNAL_GCU_REFUSED));
-        let reexec = RunConfig {
+        assert_eq!(
+            admit_launch(None, flagged.gcu_bin.as_deref(), false, false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
+        let in_process = RunConfig {
             builtin_fake: true,
             builtin_gcu: true,
             gcu_bin: None,
             ..cfg()
         };
-        assert!(external_backend_block(&reexec).is_none());
+        assert!(admit_launch(None, in_process.gcu_bin.as_deref(), false, false).is_ok());
+        assert_eq!(
+            admit_launch(None, None, true, false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
         let attested = RunConfig {
             attest_disposable_desktop: true,
             builtin_gcu: false,
             ..external
         };
-        assert!(external_backend_block(&attested).is_none());
+        assert_eq!(
+            admit_launch(None, attested.gcu_bin.as_deref(), false, false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
+        assert_eq!(
+            admit_launch(None, Some(Path::new("")), false, false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
     }
 
     #[test]
-    fn builtin_path_outside_the_artifact_dir_is_an_external_client() {
+    fn explicit_paths_never_select_in_process_code() {
         let wrapped = RunConfig {
             builtin_fake: true,
-            builtin_fake_bin: Some(PathBuf::from("/tmp/eval-fake-agent")),
+            grok_bin: Some(PathBuf::from("/tmp/eval-fake-agent")),
             ..cfg()
         };
         assert!(launches_real_client(&wrapped));
+        assert_eq!(
+            admit_launch(wrapped.grok_bin.as_deref(), None, false, false),
+            Err(ATTEST_REQUIRED)
+        );
+        assert_eq!(
+            admit_launch(Some(Path::new("")), None, false, false),
+            Err(ATTEST_REQUIRED)
+        );
+        assert!(admit_launch(None, None, false, false).is_ok());
         assert_eq!(real_launch_block(true, false, false), Some(ATTEST_REQUIRED));
-        assert!(!builtin_gcu_trusted(&RunConfig {
-            builtin_fake: true,
-            builtin_gcu: true,
-            gcu_bin: Some(PathBuf::from("/tmp/eval-fake-gcu")),
-            ..cfg()
-        }));
+        assert_eq!(
+            admit_launch(None, Some(Path::new("/tmp/eval-fake-gcu")), false, false),
+            Err(EXTERNAL_GCU_REFUSED)
+        );
+    }
+
+    #[test]
+    fn process_capabilities_stay_refused_without_a_provider() {
+        for path in ["eval-fake-agent", "eval-fake-gcu", "gcu-eval", ""] {
+            let path = Path::new(path);
+            assert!(admit_client(path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+            assert!(admit_scoped_backend(path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+            assert!(admit_fixture(path)
+                .unwrap_err()
+                .contains("provider_unavailable"));
+        }
+        assert!(!provider_gate_allows_process(false));
+        assert!(!provider_gate_allows_process(true));
+    }
+
+    #[test]
+    fn command_new_is_only_in_the_admission_module() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut command_hits = Vec::new();
+        let mut lifecycle_hits = Vec::new();
+        let mut fixture_hits = Vec::new();
+        let mut visit = |path: &Path, text: &str| {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let name = path
+                .file_name()
+                .and_then(|item| item.to_str())
+                .unwrap_or("");
+            let test_module = name == "tests.rs" || name.ends_with("_tests.rs");
+            let admission = rel.ends_with("src/boundary.rs");
+            if !test_module
+                && !admission
+                && !rel.starts_with("tests/")
+                && text.contains("Command::new")
+            {
+                command_hits.push(rel.clone());
+            }
+            let lifecycle = "mint_scope_lifecycle_test";
+            if text.contains(lifecycle) && !admission && !rel.ends_with("tests/scope_supervisor.rs")
+            {
+                // `lib.rs` may re-export the name. A call there is still a hit.
+                let reexport =
+                    rel.ends_with("src/lib.rs") && !text.contains(&format!("{lifecycle}("));
+                if !reexport {
+                    lifecycle_hits.push(rel.clone());
+                }
+            }
+            if text.contains("mint_test_fixture")
+                && !admission
+                && !rel.ends_with("src/prep_tests.rs")
+            {
+                fixture_hits.push(rel);
+            }
+        };
+        walk(&root.join("src"), &mut visit);
+        walk(&root.join("tests"), &mut visit);
+        assert!(
+            command_hits.is_empty(),
+            "Command::new outside the admission module: {command_hits:?}"
+        );
+        assert!(
+            lifecycle_hits.is_empty(),
+            "lifecycle mint escaped its test: {lifecycle_hits:?}"
+        );
+        // The mint and its re-export must not exist without the feature.
+        let gated = |file: &str, needle: &str| {
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            let at = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{file}: {needle}"));
+            let mut from = at.saturating_sub(240);
+            while !text.is_char_boundary(from) {
+                from += 1;
+            }
+            text[from..at].contains("#[cfg(feature = \"test-support\")]")
+        };
+        assert!(
+            gated("src/boundary.rs", "pub fn mint_scope_lifecycle_test"),
+            "the lifecycle mint must be behind the test-support feature"
+        );
+        assert!(
+            gated("src/lib.rs", "pub use boundary::mint_scope_lifecycle_test"),
+            "the lifecycle mint re-export must be behind the test-support feature"
+        );
+        assert!(
+            fixture_hits.is_empty(),
+            "fixture mint escaped its test: {fixture_hits:?}"
+        );
+    }
+
+    fn walk(dir: &Path, visit: &mut dyn FnMut(&Path, &str)) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, visit);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            visit(&path, &text);
+        }
     }
 }

@@ -5,7 +5,7 @@
 
 use crate::boundary::{launches_real_client, real_launch_block};
 use crate::launch::{
-    child_approval, child_env, client_command, grok_args, resolve_client, write_config_for,
+    child_approval, child_env, grok_args, resolve_client, write_config_for, ClientProgram,
 };
 use crate::oracle::{judge, EffectCheck, Verdict, World};
 use crate::runner::{
@@ -74,26 +74,50 @@ async fn execute_ready(
     }
     let args = grok_args(task, cfg);
     let started = Instant::now();
-    let mut command = client_command(&program);
-    command
-        .args(&args)
-        .env_clear()
-        .envs(&env_map)
-        .current_dir(&env.work);
     let limit = cfg
         .timeout
         .unwrap_or_else(|| Duration::from_secs(task.max_seconds));
-    // Read both pipes while the child runs. On Unix the child is in its own
-    // process group, and timeout or drop kills that group.
-    let finished = match crate::proc::run_command(&mut command, limit, 1_048_576, 65_536).await {
-        Ok(finished) => finished,
-        Err(err) => {
-            outcome.status = RunStatus::Crash;
-            outcome.reason = format!("spawn: {err}");
-            outcome.metrics.duration_ms = elapsed_ms(started);
-            return outcome;
+    let finished = match &program {
+        ClientProgram::BuiltinFake => {
+            crate::fake_agent::execute(&args, &env_map, &env.work, limit).await
+        }
+        ClientProgram::External(path) => {
+            // Recheck admission at command construction, including preflight.
+            let launch = match crate::boundary::admit_client(path) {
+                Ok(launch) => launch,
+                Err(reason) => {
+                    outcome.status = RunStatus::NotRun;
+                    outcome.reason = reason.into();
+                    return outcome;
+                }
+            };
+            let mut command = crate::boundary::tokio_command(launch);
+            command
+                .args(&args)
+                .env_clear()
+                .envs(&env_map)
+                .current_dir(&env.work);
+            match crate::proc::run_command(&mut command, limit, 1_048_576, 65_536).await {
+                Ok(finished) => finished,
+                Err(err) => {
+                    outcome.status = RunStatus::Crash;
+                    outcome.reason = format!("spawn: {err}");
+                    outcome.metrics.duration_ms = elapsed_ms(started);
+                    return outcome;
+                }
+            }
         }
     };
+    // Both in-process entry and successful external spawn count as client execution.
+    outcome.assurance.client_started = true;
+    if finished.worker_unconfirmed {
+        // The worker may still be inside a write that already passed its check.
+        // Do not score files or stdout from this attempt.
+        outcome.status = RunStatus::NotRun;
+        outcome.reason = crate::fake_agent::WORKER_UNCONFIRMED.into();
+        outcome.metrics.duration_ms = elapsed_ms(started);
+        return outcome;
+    }
     if finished.wait_failed {
         outcome.status = RunStatus::Crash;
         outcome.reason = "wait: client wait failed".into();

@@ -14,7 +14,7 @@ use gcu_eval::{
     block_on, builtin_fake_agent_exit, builtin_fake_gcu_exit, bundled_tasks_dir, compare_trials,
     host_platform, judge_release, load_tasks, parse_approval, parse_release_evidence, run_tasks,
     trials_from_summary, write_release_report, write_reports, RunConfig, RunStatus, SuiteReport,
-    ATTEST_REQUIRED, EXTERNAL_GCU_REFUSED, INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
+    INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -50,7 +50,7 @@ pub(crate) struct Cli {
     /// Report directory. Omitted reports are not written into the repo.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// `local` uses a temp directory for tests. `desktop` is interface-only.
+    /// `local` is fake-only. `desktop` records the unavailable disposable provider.
     #[arg(long, default_value = "local")]
     env: String,
     /// Override each task budget, in milliseconds.
@@ -86,15 +86,12 @@ pub(crate) struct Cli {
     /// Scripted client behavior. Hidden; tests and the fake agent use it.
     #[arg(long, hide = true)]
     behavior: Option<String>,
-    /// `fake` (default) uses the fake driver. `real` drives the real `gcu` driver and refuses to
-    /// start unless `--attest-disposable-desktop` is set.
+    /// `fake` (default) uses the fake driver. `real` remains not_run: no trusted
+    /// disposable provider or native S2/S4 integration is installed.
     #[arg(long, default_value = "fake")]
     driver: String,
-    /// Attest that this process is on a one-shot isolated desktop with egress control.
-    ///
-    /// Required before a real driver or any external client. A file named
-    /// `eval-fake-agent` is external. An environment variable cannot replace this
-    /// flag. It is not a confinement proof.
+    /// Legacy declaration, recorded for compatibility. Never boundary evidence
+    /// and never enables real/external clients, even their tool preflight.
     #[arg(long)]
     attest_disposable_desktop: bool,
     /// Fixture app started for each task when `--driver real`.
@@ -118,52 +115,16 @@ struct RealFlags {
 
 fn real_flags(cli: &Cli) -> Result<RealFlags, Stop> {
     match cli.driver.as_str() {
-        "fake" => {
-            if cli.builtin_fake {
-                if cli.gcu.is_some() && !cli.attest_disposable_desktop {
-                    return Err(Stop::Usage(EXTERNAL_GCU_REFUSED.into()));
-                }
-            } else if let Some(grok) = &cli.grok {
-                // A missing path never starts. Any file that is actually there is external.
-                let present = std::fs::symlink_metadata(grok).is_ok();
-                if present && !cli.attest_disposable_desktop {
-                    return Err(Stop::Usage(ATTEST_REQUIRED.into()));
-                }
-            }
-            Ok(RealFlags {
-                real_driver: false,
-                fixture_bin: None,
-                auth_seed: None,
-            })
-        }
-        "real" => {
-            if cli.grok.is_none() || cli.gcu.is_none() || cli.fixture.is_none() {
-                return Err(Stop::Usage(
-                    "--driver real needs --grok, --gcu and --fixture".into(),
-                ));
-            }
-            if cli.env != "local" {
-                return Err(Stop::Usage("--driver real needs --env local".into()));
-            }
-            if !cli.attest_disposable_desktop {
-                return Err(Stop::Usage(format!("--driver real: {ATTEST_REQUIRED}")));
-            }
-            if !cli.auto_approve {
-                return Err(Stop::Usage(
-                    "--driver real needs --auto-approve (an eval-autoapprove debug build)".into(),
-                ));
-            }
-            if cli.model != "fake" && cli.auth_seed.is_none() {
-                return Err(Stop::Usage(
-                    "--driver real with a real model needs --auth-seed".into(),
-                ));
-            }
-            Ok(RealFlags {
-                real_driver: true,
-                fixture_bin: cli.fixture.clone(),
-                auth_seed: cli.auth_seed.clone(),
-            })
-        }
+        "fake" => Ok(RealFlags {
+            real_driver: false,
+            fixture_bin: None,
+            auth_seed: None,
+        }),
+        "real" => Ok(RealFlags {
+            real_driver: true,
+            fixture_bin: cli.fixture.clone(),
+            auth_seed: cli.auth_seed.clone(),
+        }),
         other => Err(Stop::Usage(format!(
             "unknown --driver {other}; expected fake or real"
         ))),
@@ -311,8 +272,7 @@ fn core_tasks() -> Result<Vec<gcu_eval::Task>, Stop> {
 
 fn core_ab(cli: &Cli) -> Result<u8, Stop> {
     use gcu_eval::ab::{
-        decide, format_utc_date, not_run_report, parse_report, run_ab, write_reports, Conclusion,
-        ReportId,
+        decide, format_utc_date, parse_report, run_ab, write_reports, Conclusion, ReportId,
     };
     let platform = platform_label(cli)?;
     let id = ReportId {
@@ -339,30 +299,26 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
         let mut tasks = core_tasks()?;
         retain_only(&mut tasks, cli)?;
         let real = real_flags(cli)?;
-        if (!cli.builtin_fake && cli.grok.is_none()) || !run_local {
-            not_run_report(&tasks, &id)
-        } else {
-            let cfg = RunConfig {
-                real_driver: real.real_driver,
-                fixture_bin: real.fixture_bin,
-                auth_seed: real.auth_seed,
-                attest_disposable_desktop: cli.attest_disposable_desktop,
-                builtin_fake: cli.builtin_fake,
-                builtin_gcu: cli.builtin_fake && cli.gcu.is_none(),
-                grok_bin: cli.grok.clone(),
-                gcu_bin: cli.gcu.clone(),
-                model: cli.model.clone(),
-                platform: id.platform.clone(),
-                suite: "core".into(),
-                timeout: cli.timeout_ms.map(Duration::from_millis),
-                behavior: cli.behavior.clone(),
-                auto_approve: cli.auto_approve,
-                include_desktop: false,
-                run_local: true,
-                ..RunConfig::default()
-            };
-            block_on(run_ab(&tasks, &cfg, &id)).map_err(|err| Stop::Run(err.into()))?
-        }
+        let cfg = RunConfig {
+            real_driver: real.real_driver,
+            fixture_bin: real.fixture_bin,
+            auth_seed: real.auth_seed,
+            attest_disposable_desktop: cli.attest_disposable_desktop,
+            builtin_fake: cli.builtin_fake,
+            builtin_gcu: cli.builtin_fake && cli.gcu.is_none(),
+            grok_bin: cli.grok.clone(),
+            gcu_bin: cli.gcu.clone(),
+            model: cli.model.clone(),
+            platform: id.platform.clone(),
+            suite: "core".into(),
+            timeout: cli.timeout_ms.map(Duration::from_millis),
+            behavior: cli.behavior.clone(),
+            auto_approve: cli.auto_approve,
+            include_desktop: false,
+            run_local,
+            ..RunConfig::default()
+        };
+        block_on(run_ab(&tasks, &cfg, &id)).map_err(|err| Stop::Run(err.into()))?
     };
     let decision = decide(&report).map_err(|err| Stop::Run(err.into()))?;
     println!(
