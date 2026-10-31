@@ -28,6 +28,27 @@ pub struct FakeState {
     pub clipboard_safe: bool,
     /// Child HWND chosen by hit testing/focus.
     pub child: u64,
+    /// Child process id. Zero uses the window's pid so existing tests stay put.
+    pub child_pid: u32,
+    /// Child process creation time. Zero uses the window's creation time.
+    pub child_created: u64,
+    /// Exact screen points and the HWND under them. Checked before [`Self::hit_receiver`].
+    pub hit_at: Vec<(f64, f64, u64)>,
+    /// Mouse-capture owner. When set, every pointer query returns it.
+    pub capture_hwnd: Option<u64>,
+    /// Window under the pointer when capture and [`Self::hit_at`] do not match.
+    /// `None` means the receiver is unproved.
+    pub hit_receiver: Option<u64>,
+    /// Live HWND for publication recheck. Zero inherits the claim.
+    pub live_hwnd: u64,
+    /// Live window generation. Zero inherits the claim.
+    pub live_incarnation: u64,
+    /// Live owner pid. Zero inherits the claim.
+    pub live_pid: u32,
+    /// Live process creation time. Zero inherits the claim.
+    pub live_created: u64,
+    /// Live boot identity. Empty inherits the claim.
+    pub live_boot: String,
     /// Native class name.
     pub class: String,
     /// All attempted input events, including cleanup ups.
@@ -72,6 +93,16 @@ impl Default for FakeState {
         Self {
             clipboard_safe: false,
             child: 9,
+            child_pid: 0,
+            child_created: 0,
+            hit_at: Vec::new(),
+            capture_hwnd: None,
+            hit_receiver: None,
+            live_hwnd: 0,
+            live_incarnation: 0,
+            live_pid: 0,
+            live_created: 0,
+            live_boot: String::new(),
             class: "Edit".into(),
             sent: Vec::new(),
             activations: 0,
@@ -135,6 +166,80 @@ impl InputApi for FakeInput {
 
     async fn clipboard_safe(&self, _: Target, _: Option<NativeHandle>, _: String) -> Result<bool> {
         Ok(self.state().clipboard_safe)
+    }
+    async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
+        let state = self.state();
+        Ok((
+            if state.child_pid == 0 {
+                target.window.pid
+            } else {
+                state.child_pid
+            },
+            if state.child_created == 0 {
+                target.window.process_created
+            } else {
+                state.child_created
+            },
+        ))
+    }
+    async fn pointer_receiver(&self, point: WindowPoint) -> Result<Option<u64>> {
+        let state = self.state();
+        if let Some(hwnd) = state.capture_hwnd {
+            return Ok(Some(hwnd));
+        }
+        if let Some((_, _, hwnd)) = state
+            .hit_at
+            .iter()
+            .find(|(x, y, _)| *x == point.x && *y == point.y)
+        {
+            return Ok(Some(*hwnd));
+        }
+        Ok(state.hit_receiver)
+    }
+    fn recheck_publish(
+        &self,
+        hwnd: u64,
+        incarnation: u64,
+        pid: u32,
+        created: u64,
+        boot: &str,
+    ) -> Result<()> {
+        let state = self.state();
+        let live_hwnd = if state.live_hwnd == 0 {
+            hwnd
+        } else {
+            state.live_hwnd
+        };
+        let live_incarnation = if state.live_incarnation == 0 {
+            incarnation
+        } else {
+            state.live_incarnation
+        };
+        let live_pid = if state.live_pid == 0 {
+            pid
+        } else {
+            state.live_pid
+        };
+        let live_created = if state.live_created == 0 {
+            created
+        } else {
+            state.live_created
+        };
+        let live_boot = if state.live_boot.is_empty() {
+            boot
+        } else {
+            state.live_boot.as_str()
+        };
+        if live_hwnd == hwnd
+            && live_incarnation == incarnation
+            && live_pid == pid
+            && live_created == created
+            && live_boot == boot
+        {
+            Ok(())
+        } else {
+            Err(DriverError::ScopeDenied)
+        }
     }
     async fn resolve(
         &self,

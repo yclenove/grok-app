@@ -14,7 +14,10 @@ use gcu_core::{
 use gcu_protocol::{capabilities::*, AppInfo, WindowInfo};
 use std::{
     collections::BTreeMap,
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     time::Duration,
 };
 use tokio::sync::oneshot;
@@ -36,6 +39,13 @@ pub struct WindowsDriver {
     input: Option<Arc<crate::input::InputBackend>>,
     observer: Option<crate::uia::observe::Observer>,
     pub(crate) capture_backend: Option<Arc<crate::capture::CaptureBackend>>,
+    /// Set for the life of a [`gcu_core::scope::ScopedDriver`]. Observation has no pin.
+    session_scoped: AtomicBool,
+    /// Perform pin, copied into [`crate::scope_identity::JobScope`] once per action.
+    pinned: std::sync::Mutex<Option<crate::scope_identity::WindowClaim>>,
+    /// Test barrier between outer admission and the first content read.
+    /// Production leaves it empty. It is not inside the pointer gate.
+    native_barrier: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl WindowsDriver {
     /// Start independent native queues after refusing elevated/noninteractive
@@ -57,6 +67,9 @@ impl WindowsDriver {
             input: None,
             observer: None,
             capture_backend: None,
+            session_scoped: AtomicBool::new(false),
+            pinned: std::sync::Mutex::new(None),
+            native_barrier: std::sync::Mutex::new(None),
         })
     }
     /// Start the production Windows adapter in the default isolated mode.
@@ -122,6 +135,9 @@ impl WindowsDriver {
             discovery: None,
             observer: None,
             capture_backend: None,
+            session_scoped: AtomicBool::new(false),
+            pinned: std::sync::Mutex::new(None),
+            native_barrier: std::sync::Mutex::new(None),
         }
     }
     /// Start native threads inside this process. For the worker executable or
@@ -278,6 +294,53 @@ impl WindowsDriver {
         );
         Ok(driver?.with_safety(guard).with_overlay_exclusion(overlay))
     }
+    /// Install a barrier that runs after outer admission and before content.
+    ///
+    /// Production never sets it. A test uses it to replace the admitted
+    /// instance before UIA or capture runs. The callback must not block Stop
+    /// and is not invoked from the pointer gate.
+    pub fn set_native_barrier(&self, barrier: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self
+            .native_barrier
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = barrier;
+    }
+
+    /// Run the test barrier, if one was installed. Production returns immediately.
+    pub(super) fn run_native_barrier(&self) {
+        let barrier = self
+            .native_barrier
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier();
+        }
+    }
+
+    /// Copy scope once. A scoped session with no pin is [`crate::scope_identity::JobScope::Missing`].
+    pub(super) fn job_scope(&self) -> crate::scope_identity::JobScope {
+        if !self.session_scoped.load(Ordering::Acquire) {
+            return crate::scope_identity::JobScope::unscoped();
+        }
+        match self
+            .pinned
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+        {
+            Some(claim) => crate::scope_identity::JobScope::Scoped(claim),
+            None => crate::scope_identity::JobScope::Missing,
+        }
+    }
+
+    /// Whether [`gcu_core::scope::ScopedDriver`] wrapped this driver.
+    ///
+    /// Observation uses this flag and a discovery claim. It does not read the pin.
+    pub(super) fn session_is_scoped(&self) -> bool {
+        self.session_scoped.load(Ordering::Acquire)
+    }
+
     pub(crate) async fn call<T: Send + 'static>(
         &self,
         timeout: Duration,
@@ -377,8 +440,16 @@ impl InstanceEvidence for WindowsDriver {
 
     fn element_binding(&self, handle: &NativeHandle) -> Option<ElementBinding> {
         let element = handle.downcast_ref::<crate::uia::UiaElement>()?;
+        // The source record is the element's owner. The requested window is not.
+        let fact = self.observer.as_ref()?.fragment_now(element.node)?;
         let binding = self.window_binding(&element.window)?;
         let stamp = crate::scope_identity::parse_stamp(binding.native_id())?;
+        if fact.top_hwnd != element.hwnd
+            || fact.top_hwnd != stamp.hwnd
+            || fact.owner_pid != binding.owner().pid()
+        {
+            return None;
+        }
         let claim = crate::scope_identity::WindowClaim {
             hwnd: stamp.hwnd,
             incarnation: binding.incarnation(),
@@ -388,17 +459,38 @@ impl InstanceEvidence for WindowsDriver {
                 boot: binding.owner().boot().as_str().to_owned(),
             },
         };
-        // Same rule as the pure proof: a crossed HWND or a foreign owner is unproved.
         crate::scope_identity::prove_element(
             &claim,
             binding.native_id(),
             element.hwnd,
             &element.window.id,
-            Some(binding.owner().pid()),
+            Some(fact.owner_pid),
         )
         .ok()?;
         Some(ElementBinding::new(binding))
     }
+
+    fn pin_admitted(&self, binding: Option<&WindowBinding>) {
+        let claim = binding.and_then(claim_from_binding);
+        *self.pinned.lock().unwrap_or_else(|err| err.into_inner()) = claim;
+    }
+
+    fn note_scoped_session(&self) {
+        self.session_scoped.store(true, Ordering::Release);
+    }
+}
+
+fn claim_from_binding(binding: &WindowBinding) -> Option<crate::scope_identity::WindowClaim> {
+    let stamp = crate::scope_identity::parse_stamp(binding.native_id())?;
+    Some(crate::scope_identity::WindowClaim {
+        hwnd: stamp.hwnd,
+        incarnation: binding.incarnation(),
+        owner: crate::scope_identity::ProcessClaim {
+            pid: binding.owner().pid(),
+            created: binding.owner().start().ticks(),
+            boot: binding.owner().boot().as_str().to_owned(),
+        },
+    })
 }
 
 #[path = "driver_impl.rs"]

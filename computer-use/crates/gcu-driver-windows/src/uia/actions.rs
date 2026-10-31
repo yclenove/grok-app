@@ -32,12 +32,35 @@ pub async fn perform(
     req: &DriverAction,
     cancel: &Cancel,
 ) -> Result<Delivery> {
+    perform_scoped(
+        source,
+        hwnd,
+        req,
+        cancel,
+        &crate::scope_identity::JobScope::unscoped(),
+    )
+    .await
+}
+/// Semantic action under one scope copied by the caller.
+///
+/// [`JobScope::Unscoped`] keeps the historical route: a foreign owner and a
+/// missing probe still dispatch. A scoped job requires the element's own
+/// process and top-level window. A missing scope is refused and is not treated
+/// as unscoped.
+pub(crate) async fn perform_scoped(
+    source: &dyn UiaSource,
+    hwnd: u64,
+    req: &DriverAction,
+    cancel: &Cancel,
+    scope: &crate::scope_identity::JobScope,
+) -> Result<Delivery> {
     perform_until(
         source,
         hwnd,
         req,
         cancel,
         tokio::time::Instant::now() + DRIVER_DEADLINE,
+        scope,
     )
     .await
 }
@@ -47,6 +70,7 @@ pub(crate) async fn perform_until(
     req: &DriverAction,
     cancel: &Cancel,
     deadline: tokio::time::Instant,
+    scope: &crate::scope_identity::JobScope,
 ) -> Result<Delivery> {
     let budget = Budget {
         deadline,
@@ -61,17 +85,25 @@ pub(crate) async fn perform_until(
     let node = observed.node;
     let element_hwnd = observed.hwnd;
     let window_id = observed.window.id.clone();
-    let admitted_pid = observed.window.app.info.pid;
     let props = budget.read(source.validate(node, hwnd)).await?;
-    let owner = budget.read(source.owner_pid(node)).await?;
-    // After the stale-element check and before any pattern dispatch.
-    crate::scope_identity::admit_delivery_element(
-        hwnd,
-        element_hwnd,
-        &window_id,
-        owner,
-        admitted_pid,
-    )?;
+    // Unscoped work does not consult the owner probe. Scoped work proves the
+    // element's own process and top-level window before any pattern dispatch.
+    if let Some(claim) = scope.claim()? {
+        if crate::scope_identity::parse_stamp(&window_id)
+            .is_some_and(|stamp| stamp.hwnd != claim.hwnd)
+        {
+            return Err(DriverError::ScopeDenied);
+        }
+        let owner = budget.read(source.owner_pid(node)).await?;
+        let fact =
+            owner
+                .filter(|pid| *pid != 0)
+                .map(|owner_pid| crate::scope_identity::FragmentFact {
+                    owner_pid,
+                    top_hwnd: element_hwnd,
+                });
+        crate::scope_identity::admit_fragment(claim, fact)?;
+    }
     let result = match req {
         DriverAction::SetValue { value, .. } => {
             super::value::set(source, node, hwnd, &props, value, &budget).await

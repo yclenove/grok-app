@@ -59,6 +59,7 @@ windows = { version = "0.62", default-features = false, features = [
 
 [dev-dependencies]
 gcu-core = { workspace = true, features = ["testing"] }
+gcu-host-api = { workspace = true, features = ["testing"] }
 insta = { version = "1", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }
 

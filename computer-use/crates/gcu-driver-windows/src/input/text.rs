@@ -1,5 +1,11 @@
 //! Bounded long text and one-shot, explicitly foreground-authorized paste.
-use super::{api::*, clipboard::ClipboardApi, hotkey::SafetyGuard, ledger::InputLedger, messages};
+use super::{
+    api::*,
+    clipboard::{ClipboardApi, PublishProof},
+    hotkey::SafetyGuard,
+    ledger::InputLedger,
+    messages,
+};
 use crate::uia::patterns::ActionContext;
 use gcu_core::{driver::*, model::NativeHandle};
 use std::sync::Arc;
@@ -43,6 +49,11 @@ pub(super) struct Paste<'a> {
     pub text: String,
     pub context: ActionContext,
     pub safety: Option<Arc<SafetyGuard>>,
+    /// `Some` binds this paste to the admitted window. `None` is unscoped.
+    pub admitted: Option<AdmittedTarget>,
+    /// Live proof for [`ClipboardApi::stage_proved`]. Required when `admitted` is set
+    /// and no parent tracker owns publication.
+    pub proof: Option<PublishProof>,
 }
 impl Paste<'_> {
     fn check_stop(&self) -> Result<()> {
@@ -50,6 +61,34 @@ impl Paste<'_> {
             guard.check(true)?;
         }
         self.context.check()
+    }
+    async fn stage(&self) -> Result<u32> {
+        if let Some(admitted) = &self.admitted {
+            let Some(proof) = self.proof.clone() else {
+                return Err(DriverError::ScopeDenied);
+            };
+            if let Some(tracker) = &self.tracker {
+                tracker
+                    .clipboard_stage_admitted(
+                        self.target.clone(),
+                        self.text.clone(),
+                        Some(admitted.clone()),
+                    )
+                    .await
+            } else {
+                self.clipboard
+                    .stage_proved(self.text.clone(), self.context.clone(), proof)
+                    .await
+            }
+        } else if let Some(tracker) = &self.tracker {
+            tracker
+                .clipboard_stage(self.target.clone(), self.text.clone())
+                .await
+        } else {
+            self.clipboard
+                .stage(self.text.clone(), self.context.clone())
+                .await
+        }
     }
     async fn before_paste(&self) -> Result<()> {
         self.check_stop()?;
@@ -74,15 +113,7 @@ impl Paste<'_> {
             tracker: self.tracker.clone(),
         };
         let result = async {
-            let sequence = if let Some(tracker) = &self.tracker {
-                tracker
-                    .clipboard_stage(self.target.clone(), self.text.clone())
-                    .await?
-            } else {
-                self.clipboard
-                    .stage(self.text.clone(), self.context.clone())
-                    .await?
-            };
+            let sequence = self.stage().await?;
             self.check_stop()?;
             let packet = messages::chord_events(
                 &KeyChord::parse("ctrl+v").map_err(|_| DriverError::InvalidRequest)?,

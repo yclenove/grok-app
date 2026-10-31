@@ -8,6 +8,49 @@ use std::{
     time::Duration,
 };
 
+/// Window identity copied at admission and carried into one scoped UIA read.
+///
+/// It is not a search key. A later enumeration must not replace it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedWindow {
+    /// Top-level HWND.
+    pub hwnd: u64,
+    /// Window creation generation.
+    pub incarnation: u64,
+    /// Owner process id.
+    pub pid: u32,
+    /// Owner process creation time.
+    pub created: u64,
+    /// Boot-session identity. An empty value is unproved.
+    pub boot: String,
+}
+
+impl From<&crate::scope_identity::WindowClaim> for AdmittedWindow {
+    fn from(claim: &crate::scope_identity::WindowClaim) -> Self {
+        Self {
+            hwnd: claim.hwnd,
+            incarnation: claim.incarnation,
+            pid: claim.owner.pid,
+            created: claim.owner.created,
+            boot: claim.owner.boot.clone(),
+        }
+    }
+}
+
+impl From<&AdmittedWindow> for crate::scope_identity::WindowClaim {
+    fn from(admitted: &AdmittedWindow) -> Self {
+        Self {
+            hwnd: admitted.hwnd,
+            incarnation: admitted.incarnation,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: admitted.pid,
+                created: admitted.created,
+                boot: admitted.boot.clone(),
+            },
+        }
+    }
+}
+
 /// Worker-local element identity. A new root invalidates earlier generations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NodeId {
@@ -60,6 +103,32 @@ pub trait UiaSource: Send + Sync + 'static {
         after: Option<NodeId>,
         limit: usize,
     ) -> Result<ChildPage>;
+    /// Begin a read of `hwnd` for one admitted window.
+    ///
+    /// `admitted` is the claim copied at admission. The default ignores it and
+    /// calls [`UiaSource::root`], which is the unscoped route. A scoped source
+    /// proves the claim before it builds a content cache.
+    async fn open_root(
+        &self,
+        hwnd: u64,
+        admitted: Option<AdmittedWindow>,
+    ) -> Result<Option<NodeId>> {
+        let _ = admitted;
+        self.root(hwnd).await
+    }
+    /// Owner pid and top-level HWND of `node`, without its name or value.
+    ///
+    /// `Ok(None)` means this node was not proved. The default is unproved.
+    async fn fragment(&self, node: NodeId) -> Result<Option<(u32, u64)>> {
+        Ok(self.fragment_now(node))
+    }
+    /// Synchronous `(owner pid, top-level HWND)` recorded by a real query.
+    ///
+    /// No content read. `None` means this process has no source record for
+    /// `node`. Callers must not substitute the requested window's owner.
+    fn fragment_now(&self, _node: NodeId) -> Option<(u32, u64)> {
+        None
+    }
 }
 
 /// Owned fixture node. Flattened once by FakeUia, so large-tree tests are linear.
@@ -84,6 +153,10 @@ pub(super) struct FakeState {
     pub(super) actions: super::fake_actions::FakeActions,
     /// Reported owner. `None` means this fake has no owner probe.
     pub(super) owner_pid: Option<u32>,
+    /// Per-node owner and top-level window. Absent means the node is unproved.
+    fragments: BTreeMap<u64, crate::scope_identity::FragmentFact>,
+    /// `properties` calls per slot. Fragment queries do not increment this.
+    content_reads: BTreeMap<u64, usize>,
 }
 impl FakeState {
     pub(super) fn node(&self, slot: u64) -> NodeId {
@@ -136,6 +209,29 @@ impl FakeUia {
             s.child_error = Some((s.node(slot), error));
         }
     }
+    /// Record the fragment's own process and top-level window.
+    ///
+    /// This does not read a name or value. Slot numbers match [`FakeUia::new`]
+    /// insertion order, starting at 1 for the root.
+    pub fn set_fragment(&self, slot: u64, owner_pid: u32, top_hwnd: u64) {
+        if let Ok(mut state) = self.0.lock() {
+            state.fragments.insert(
+                slot,
+                crate::scope_identity::FragmentFact {
+                    owner_pid,
+                    top_hwnd,
+                },
+            );
+        }
+    }
+    /// Times [`UiaSource::properties`] read this slot. Fragment checks stay at zero.
+    pub fn content_reads(&self, slot: u64) -> usize {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|state| state.content_reads.get(&slot).copied())
+            .unwrap_or(0)
+    }
     /// Clear injected read failures so a new observation can prove recovery.
     pub fn clear_read_errors(&self) {
         if let Ok(mut s) = self.0.lock() {
@@ -166,6 +262,10 @@ impl FakeUia {
 }
 #[async_trait]
 impl UiaSource for FakeUia {
+    fn fragment_now(&self, node: NodeId) -> Option<(u32, u64)> {
+        let fact = self.0.lock().ok()?.fragments.get(&node.slot).copied()?;
+        Some((fact.owner_pid, fact.top_hwnd))
+    }
     async fn owner_pid(&self, _node: NodeId) -> Result<Option<u32>> {
         self.0
             .lock()
@@ -235,6 +335,7 @@ impl UiaSource for FakeUia {
             .get(&node)
             .map(|n| n.0.clone())
             .ok_or(DriverError::StaleElement)?;
+        *s.content_reads.entry(node.slot).or_insert(0) += 1;
         let runtime = s.actions.runtime(node);
         let hwnd = s.actions.hwnd;
         s.actions

@@ -27,6 +27,8 @@ use windows::Win32::{
 pub struct RealInput {
     worker: Worker<State>,
     uia: Arc<RealUia>,
+    /// Discovery API kept for publication recheck. The worker holds another clone.
+    api: Arc<dyn WinApi>,
 }
 /// Up-only sender and lazy clipboard owner for the isolated parent.
 /// Starts no COM/provider/input-action worker.
@@ -46,18 +48,20 @@ impl InputReleaser for NativeRelease {
 impl RealInput {
     /// Start the input MTA using the same stamped discovery API as the driver.
     pub async fn start(api: Arc<dyn WinApi>, uia: Arc<RealUia>) -> Result<Self> {
+        let worker_api = Arc::clone(&api);
         Ok(Self {
             worker: Worker::start(
                 move || {
                     Ok(State {
-                        _context: api.enter_thread()?,
-                        api,
+                        _context: worker_api.enter_thread()?,
+                        api: worker_api,
                     })
                 },
                 |_| {},
             )
             .await?,
             uia,
+            api,
         })
     }
 }
@@ -384,6 +388,114 @@ impl InputApi for RealInput {
                 s.resolve(window, point, recipient)
             })
             .await
+    }
+    async fn resolve_scoped(
+        &self,
+        window: NativeWindow,
+        point: Option<WindowPoint>,
+        focus: Option<NativeHandle>,
+        admitted_pid: u32,
+        admitted_hwnd: u64,
+    ) -> Result<Target> {
+        let recipient = if let Some(focus) = focus.as_ref() {
+            let element = focus
+                .downcast_ref::<UiaElement>()
+                .ok_or(DriverError::StaleElement)?;
+            let node = element.node;
+            let element_hwnd = element.hwnd;
+            let (pid, top) = self.uia.prove_fragment(node).await?;
+            if pid != admitted_pid || top != admitted_hwnd || element_hwnd != admitted_hwnd {
+                return Err(DriverError::ScopeDenied);
+            }
+            Some(self.uia.input_recipient(node, window.hwnd).await?)
+        } else {
+            None
+        };
+        self.worker
+            .call(move |s, r| {
+                r.check()?;
+                s.resolve(window, point, recipient)
+            })
+            .await
+    }
+    async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
+        self.worker
+            .call(move |s, r| {
+                r.check()?;
+                let mut pid = 0u32;
+                // SAFETY: borrowed numeric HWND and a writable pid slot. No process handle
+                // is kept. This runs on the input worker, outside the pointer gate.
+                let tid = unsafe { GetWindowThreadProcessId(hwnd(target.hwnd), Some(&mut pid)) };
+                if tid == 0 || pid == 0 {
+                    return Err(DriverError::ScopeDenied);
+                }
+                let created = s.api.process_security(pid)?.created;
+                Ok((pid, created))
+            })
+            .await
+    }
+    async fn pointer_receiver(&self, point: WindowPoint) -> Result<Option<u64>> {
+        self.worker
+            .call(move |_, r| {
+                r.check()?;
+                // SAFETY: numeric screen point and HWND queries. No message is sent.
+                // Capture wins over the window under the point. A null result is unproved.
+                unsafe {
+                    let captured = GetCapture();
+                    let hit = if !captured.0.is_null() {
+                        captured
+                    } else {
+                        WindowFromPoint(POINT {
+                            x: point.x.round() as i32,
+                            y: point.y.round() as i32,
+                        })
+                    };
+                    if hit.0.is_null() {
+                        return Ok(None);
+                    }
+                    let root = GetAncestor(hit, GA_ROOT);
+                    let id = id(root);
+                    Ok((id != 0).then_some(id))
+                }
+            })
+            .await
+    }
+    fn recheck_publish(
+        &self,
+        hwnd: u64,
+        incarnation: u64,
+        pid: u32,
+        created: u64,
+        boot: &str,
+    ) -> Result<()> {
+        let current = self
+            .api
+            .enum_windows()?
+            .into_iter()
+            .find(|window| window.hwnd == hwnd)
+            .ok_or(DriverError::WindowGone)?;
+        let owner = crate::desktop::window_process(self.api.as_ref(), &current)?;
+        let live_created = self.api.process_security(owner)?.created;
+        let live_boot = self.api.boot_identity()?;
+        let stored = crate::scope_identity::WindowClaim {
+            hwnd,
+            incarnation,
+            owner: crate::scope_identity::ProcessClaim {
+                pid,
+                created,
+                boot: boot.to_owned(),
+            },
+        };
+        let live = crate::scope_identity::WindowClaim {
+            hwnd: current.hwnd,
+            incarnation: current.created,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: owner,
+                created: live_created,
+                boot: live_boot,
+            },
+        };
+        crate::scope_identity::prove_window(&stored, &live)
     }
     async fn character_key(
         &self,

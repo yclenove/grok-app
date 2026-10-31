@@ -32,6 +32,109 @@ pub(crate) struct WindowClaim {
     pub(crate) owner: ProcessClaim,
 }
 
+/// Process and top-level window of one UIA fragment. No name, value, or pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FragmentFact {
+    /// `CurrentProcessId` of the fragment, not the requested window's pid.
+    pub(crate) owner_pid: u32,
+    /// Top-level HWND that contains the fragment.
+    pub(crate) top_hwnd: u64,
+}
+
+/// Scope copied once for one job. Later pin clears do not change this value.
+///
+/// [`JobScope::Missing`] is a scoped session with no binding. It is never
+/// treated as [`JobScope::Unscoped`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum JobScope {
+    /// Ordinary work. A foreign owner or a missing probe stays permitted.
+    Unscoped,
+    /// Admitted window, copied by value. Later lookups do not replace it.
+    Scoped(WindowClaim),
+    /// Scoped session whose binding is gone. The job must refuse.
+    Missing,
+}
+
+impl JobScope {
+    /// Work that was not admitted under a scope.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn unscoped() -> Self {
+        Self::Unscoped
+    }
+
+    /// `Ok(None)` is unscoped. `Ok(Some)` is the admitted window.
+    /// `Err` is a scoped job with no binding. The pin slot is not read.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation.
+    pub(crate) fn claim(&self) -> Result<Option<&WindowClaim>> {
+        match self {
+            Self::Unscoped => Ok(None),
+            Self::Scoped(claim) => Ok(Some(claim)),
+            Self::Missing => Err(DriverError::ScopeDenied),
+        }
+    }
+}
+
+/// The child that will receive input must be the admitted process instance.
+///
+/// Memory only. No blocking, timeout, or cancellation. A different creation
+/// time is a different process, including the same pid.
+pub(crate) fn admit_recipient(
+    admitted: &WindowClaim,
+    recipient_pid: u32,
+    recipient_created: u64,
+) -> Result<()> {
+    if !proved_process(&admitted.owner) || admitted.hwnd == 0 || admitted.incarnation == 0 {
+        return Err(DriverError::ScopeDenied);
+    }
+    if recipient_pid == 0
+        || recipient_created == 0
+        || recipient_pid != admitted.owner.pid
+        || recipient_created != admitted.owner.created
+    {
+        return Err(DriverError::ScopeDenied);
+    }
+    Ok(())
+}
+
+/// The fragment must belong to the admitted window. `None` is unproved.
+///
+/// Memory only. No blocking, timeout, or cancellation. The requested window's
+/// owner is not a substitute for a missing fact.
+pub(crate) fn admit_fragment(admitted: &WindowClaim, fact: Option<FragmentFact>) -> Result<()> {
+    if !proved_process(&admitted.owner) || admitted.hwnd == 0 || admitted.incarnation == 0 {
+        return Err(DriverError::ScopeDenied);
+    }
+    let Some(fact) = fact else {
+        return Err(DriverError::ScopeDenied);
+    };
+    if fact.owner_pid == 0
+        || fact.top_hwnd == 0
+        || fact.owner_pid != admitted.owner.pid
+        || fact.top_hwnd != admitted.hwnd
+    {
+        return Err(DriverError::ScopeDenied);
+    }
+    Ok(())
+}
+
+/// Boot identity is an OS boot-session id. The wall-clock origin is not one.
+///
+/// A missing, empty, oversized, or purely numeric session fails closed. The
+/// numeric form is the rejected uptime estimate and is never promoted into
+/// [`BootIdentity`]. Memory only. No blocking, timeout, or cancellation.
+pub(crate) fn boot_token(session: Option<&str>, wall_clock_origin: Option<u64>) -> Result<String> {
+    let _ = wall_clock_origin;
+    let Some(session) = session.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(DriverError::ScopeDenied);
+    };
+    if session.len() > 256 || session.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(DriverError::ScopeDenied);
+    }
+    Ok(session.to_owned())
+}
+
 /// Fields parsed from a discovery stamp. Class text is checked only so a
 /// non-stamp id does not parse; it is not compared as authorization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +454,30 @@ mod tests {
         let stored = process(7, 42, "boot-1");
         let live = process(7, 42, "boot-2");
         denied(prove_process(&stored, &live));
+    }
+
+    #[test]
+    fn boot_token_uses_the_session_and_ignores_the_wall_clock() {
+        let wall = 1_700_000_000_u64;
+        let first = boot_token(Some("boot-session-a"), Some(wall)).expect("session");
+        let second = boot_token(Some("boot-session-b"), Some(wall)).expect("other boot");
+        assert_ne!(first, second);
+        assert_eq!(
+            first,
+            boot_token(Some("boot-session-a"), Some(wall.saturating_add(50))).expect("same boot")
+        );
+        let numeric = wall.to_string();
+        for session in [
+            None,
+            Some(""),
+            Some("   "),
+            Some(numeric.as_str()),
+            Some("1700000000"),
+        ] {
+            let err = boot_token(session, Some(wall)).expect_err("unproved boot");
+            assert_eq!(err, DriverError::ScopeDenied);
+            assert!(!err.maybe_executed());
+        }
     }
 
     #[test]

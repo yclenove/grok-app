@@ -354,6 +354,73 @@ impl State {
         };
         crate::scope_identity::prove_window(&stored, &live)
     }
+
+    /// Copy the identity stored at discovery. A later enumeration does not replace it.
+    ///
+    /// Call only after [`Self::observation_window`] or [`Self::scope_close`].
+    /// Memory only besides the boot-identity read already cached by the adapter.
+    pub(super) fn carried_claim(
+        &self,
+        win: &WindowRef,
+    ) -> Result<crate::scope_identity::WindowClaim> {
+        let (old, pid, target_created, _) =
+            self.windows.get(&win.id).ok_or(DriverError::ScopeDenied)?;
+        let boot = self.api.boot_identity()?;
+        if old.hwnd == 0 || old.created == 0 || *pid == 0 || *target_created == 0 || boot.is_empty()
+        {
+            return Err(DriverError::ScopeDenied);
+        }
+        Ok(crate::scope_identity::WindowClaim {
+            hwnd: old.hwnd,
+            incarnation: old.created,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: *pid,
+                created: *target_created,
+                boot,
+            },
+        })
+    }
+
+    /// Re-read the live window and compare it to `stored`. Do not adopt a replacement.
+    ///
+    /// Product errors from a caller that ran [`Self::observation_window`] first keep
+    /// their priority. This function itself reports [`DriverError::ScopeDenied`].
+    pub(super) fn prove_carried(&self, stored: &crate::scope_identity::WindowClaim) -> Result<()> {
+        let boot = self.api.boot_identity()?;
+        let current = self
+            .api
+            .enum_windows()?
+            .into_iter()
+            .find(|item| item.hwnd == stored.hwnd)
+            .ok_or(DriverError::ScopeDenied)?;
+        let owner = match window_process(self.api.as_ref(), &current) {
+            Ok(owner) => owner,
+            Err(
+                DriverError::WindowGone
+                | DriverError::AppNotFound
+                | DriverError::AmbiguousApp
+                | DriverError::PermissionMissing { .. },
+            ) => return Err(DriverError::ScopeDenied),
+            Err(error) => return Err(error),
+        };
+        let created = match self.api.process_security(owner) {
+            Ok(security) => security.created,
+            Err(DriverError::WindowGone | DriverError::PermissionMissing { .. }) => {
+                return Err(DriverError::ScopeDenied);
+            }
+            Err(error) => return Err(error),
+        };
+        let live = crate::scope_identity::WindowClaim {
+            hwnd: current.hwnd,
+            incarnation: current.created,
+            owner: crate::scope_identity::ProcessClaim {
+                pid: owner,
+                created,
+                boot,
+            },
+        };
+        crate::scope_identity::prove_window(stored, &live)
+    }
 }
 pub(super) fn executable_name(path: &str) -> String {
     path.rsplit(['\\', '/'])

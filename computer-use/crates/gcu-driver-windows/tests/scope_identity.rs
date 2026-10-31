@@ -52,7 +52,7 @@ async fn evidence_ignores_path_and_rejects_pid_reuse_hwnd_reuse_and_a_forged_id(
         runtime_id: vec![1],
         fingerprint: 0,
     });
-    assert!(driver.element_binding(&handle).is_some());
+    assert!(driver.element_binding(&handle).is_none());
     let crossed = NativeHandle::new(UiaElement {
         window: win.clone(),
         node: NodeId {
@@ -251,7 +251,7 @@ async fn element(hwnd: u64, id: &str) -> (FakeUia, NativeHandle) {
 }
 
 #[tokio::test]
-async fn uia_invoke_rejects_owner_change_and_a_handle_that_crosses_windows() {
+async fn unscoped_uia_invoke_allows_a_foreign_owner_and_a_missing_probe() {
     let (source, handle) = element(8, "8").await;
     source.set_owner_pid(Some(7));
     assert!(actions::perform(
@@ -266,44 +266,49 @@ async fn uia_invoke_rejects_owner_change_and_a_handle_that_crosses_windows() {
 
     let (source, handle) = element(8, "8").await;
     source.set_owner_pid(Some(99));
-    denied(
-        actions::perform(
-            &source,
-            8,
-            &DriverAction::Press { el: handle },
-            &Cancel::default(),
-        )
-        .await
-        .unwrap_err(),
-    );
-    assert!(source.action_calls().is_empty());
+    actions::perform(
+        &source,
+        8,
+        &DriverAction::Press { el: handle },
+        &Cancel::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(source.action_calls().len(), 1);
+
+    let (source, handle) = element(8, "8").await;
+    actions::perform(
+        &source,
+        8,
+        &DriverAction::Press { el: handle },
+        &Cancel::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(source.action_calls().len(), 1);
 
     let (source, handle) = element(9, "8").await;
     source.set_owner_pid(Some(7));
-    denied(
-        actions::perform(
-            &source,
-            8,
-            &DriverAction::Press { el: handle },
-            &Cancel::default(),
-        )
-        .await
-        .unwrap_err(),
-    );
-    assert!(source.action_calls().is_empty());
+    actions::perform(
+        &source,
+        8,
+        &DriverAction::Press { el: handle },
+        &Cancel::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(source.action_calls().len(), 1);
 
     let foreign = HwndStamp::from(&window(9, 7)).id();
     let (source, handle) = element(8, &foreign).await;
     source.set_owner_pid(Some(7));
-    denied(
-        actions::perform(
-            &source,
-            8,
-            &DriverAction::Press { el: handle },
-            &Cancel::default(),
-        )
-        .await
-        .unwrap_err(),
-    );
-    assert!(source.action_calls().is_empty());
+    actions::perform(
+        &source,
+        8,
+        &DriverAction::Press { el: handle },
+        &Cancel::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(source.action_calls().len(), 1);
 }

@@ -147,6 +147,29 @@ impl InputBackend {
         cancel: &Cancel,
         deadline: tokio::time::Instant,
     ) -> Result<Delivery> {
+        self.perform_scoped(
+            window,
+            req,
+            cancel,
+            deadline,
+            &crate::scope_identity::JobScope::unscoped(),
+        )
+        .await
+    }
+    /// Deliver under one scope copied by the caller.
+    ///
+    /// [`crate::scope_identity::JobScope::Unscoped`] keeps the historical route.
+    /// A scoped job carries that claim through recipient, pointer, and clipboard
+    /// publication checks. A missing scope is refused and is not treated as unscoped.
+    /// Nothing here runs inside the pointer gate.
+    pub(crate) async fn perform_scoped(
+        &self,
+        window: NativeWindow,
+        req: &DriverAction,
+        cancel: &Cancel,
+        deadline: tokio::time::Instant,
+        scope: &crate::scope_identity::JobScope,
+    ) -> Result<Delivery> {
         // Reserve cleanup time inside the shared deadline, including queueing.
         let work_deadline = deadline - std::time::Duration::from_millis(110);
         let serial = tokio::select! { biased;
@@ -183,11 +206,29 @@ impl InputBackend {
             if let Some(guard) = &safety {
                 guard.check(false)?;
             }
-            let target = self
-                .api
-                .resolve(window, plan.point, plan.focus.clone())
-                .await?;
+            let target = if let Some(claim) = scope.claim()? {
+                self.api
+                    .resolve_scoped(
+                        window,
+                        plan.point,
+                        plan.focus.clone(),
+                        claim.owner.pid,
+                        claim.hwnd,
+                    )
+                    .await?
+            } else {
+                self.api
+                    .resolve(window, plan.point, plan.focus.clone())
+                    .await?
+            };
             context.check()?;
+            if let Some(claim) = scope.claim()? {
+                let (pid, created) = self.api.recipient_process(target.clone()).await?;
+                crate::scope_identity::admit_recipient(claim, pid, created)?;
+                if plan.foreground {
+                    confine_pointer(self.api.as_ref(), claim.hwnd, &plan.packets).await?;
+                }
+            }
             let foreground = plan.foreground;
             if !foreground
                 && (!target.message_capable || messages::ineffective_class(&target.class))
@@ -264,6 +305,7 @@ impl InputBackend {
                 Delivery::TargetedEvent
             };
             if let Some((clipboard, text, focus)) = paste {
+                let (admitted, proof) = publication(self.api.clone(), scope)?;
                 text::Paste {
                     api: self.api.as_ref(),
                     clipboard,
@@ -274,6 +316,8 @@ impl InputBackend {
                     text,
                     context: context.clone(),
                     safety: safety.clone(),
+                    admitted,
+                    proof,
                 }
                 .run()
                 .await?;
@@ -424,6 +468,54 @@ impl Drop for Cleanup<'_> {
             });
         }
     }
+}
+
+fn pointer_point(event: api::Event) -> Option<gcu_core::model::WindowPoint> {
+    match event {
+        api::Event::Move(point, _)
+        | api::Event::Button(_, _, point, _)
+        | api::Event::Wheel(_, _, point) => Some(point),
+        _ => None,
+    }
+}
+
+async fn confine_pointer(api: &dyn InputApi, hwnd: u64, packets: &[Vec<api::Event>]) -> Result<()> {
+    for packet in packets {
+        for event in packet {
+            let Some(point) = pointer_point(*event) else {
+                continue;
+            };
+            match api.pointer_receiver(point).await? {
+                Some(receiver) if receiver == hwnd => {}
+                _ => return Err(DriverError::ScopeDenied),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publication(
+    api: Arc<dyn InputApi>,
+    scope: &crate::scope_identity::JobScope,
+) -> Result<(Option<api::AdmittedTarget>, Option<clipboard::PublishProof>)> {
+    let Some(claim) = scope.claim()? else {
+        return Ok((None, None));
+    };
+    let admitted = api::AdmittedTarget {
+        hwnd: claim.hwnd,
+        incarnation: claim.incarnation,
+        pid: claim.owner.pid,
+        created: claim.owner.created,
+        boot: claim.owner.boot.clone(),
+    };
+    let hwnd = claim.hwnd;
+    let incarnation = claim.incarnation;
+    let pid = claim.owner.pid;
+    let created = claim.owner.created;
+    let boot = claim.owner.boot.clone();
+    let proof: clipboard::PublishProof =
+        Arc::new(move || api.recheck_publish(hwnd, incarnation, pid, created, &boot));
+    Ok((Some(admitted), Some(proof)))
 }
 
 async fn release_bounded(api: Arc<dyn InputApi>, ledger: Arc<ledger::InputLedger>) {

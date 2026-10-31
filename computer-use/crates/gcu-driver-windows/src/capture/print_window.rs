@@ -1,5 +1,5 @@
 //! PrintWindow adapter. All GDI ownership and calls live in `ffi`.
-use super::{ffi, CapturePath, CaptureSource, RawPixels, SourceWindow};
+use super::{ffi, CaptureAdmission, CapturePath, CaptureSource, RawPixels, SourceWindow};
 use async_trait::async_trait;
 use gcu_core::driver::{Cancel, Result};
 use std::time::Duration;
@@ -34,5 +34,16 @@ impl CaptureSource for PrintWindowCapture {
         cancel: &Cancel,
     ) -> Result<RawPixels> {
         self.worker.capture(window, deadline, cancel).await
+    }
+    async fn capture_admitted(
+        &self,
+        window: &SourceWindow,
+        deadline: Duration,
+        cancel: &Cancel,
+        admitted: &CaptureAdmission,
+    ) -> Result<RawPixels> {
+        self.worker
+            .capture_admitted(window, deadline, cancel, admitted.clone())
+            .await
     }
 }

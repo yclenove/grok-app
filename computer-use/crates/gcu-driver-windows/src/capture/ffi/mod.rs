@@ -1,7 +1,10 @@
 //! All native capture calls are confined to dedicated MTA/DPI-aware threads.
 pub(super) mod print_window;
 pub(super) mod wgc;
-use super::{check_display_affinity, native, permission, CapturePath, RawPixels, SourceWindow};
+use super::{
+    check_display_affinity, native, permission, CaptureAdmission, CapturePath, RawPixels,
+    SourceWindow,
+};
 use gcu_core::driver::{Cancel, DriverError, Result, DRIVER_DEADLINE};
 use std::{
     sync::{
@@ -12,13 +15,16 @@ use std::{
 };
 use tokio::sync::oneshot;
 use windows::{
-    core::Error,
+    core::{Error, PCWSTR},
     Win32::{
         Foundation::{HWND, RECT},
         System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
         UI::{
             HiDpi::GetDpiForWindow,
-            WindowsAndMessaging::{GetWindowDisplayAffinity, GetWindowRect, IsIconic, IsWindow},
+            WindowsAndMessaging::{
+                GetPropW, GetWindowDisplayAffinity, GetWindowRect, GetWindowThreadProcessId,
+                IsIconic, IsWindow,
+            },
         },
     },
 };
@@ -87,6 +93,8 @@ impl Drop for Abandon {
 struct Job {
     window: SourceWindow,
     request: Arc<Request>,
+    /// Claim copied at admission. `None` is the unscoped route.
+    admitted: Option<CaptureAdmission>,
     reply: oneshot::Sender<Result<RawPixels>>,
 }
 pub(super) struct Worker {
@@ -120,6 +128,9 @@ impl Worker {
                         continue;
                     }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Some(admitted) = &job.admitted {
+                            prove_admitted(&job.window, admitted, &job.request)?;
+                        }
                         let pixels = capture(&job.window, &job.request)?;
                         job.request.check()?;
                         Ok(pixels)
@@ -156,6 +167,28 @@ impl Worker {
         deadline: Duration,
         cancel: &Cancel,
     ) -> Result<RawPixels> {
+        self.submit(window, deadline, cancel, None).await
+    }
+    /// Queue one capture that must match `admitted` before pixels are read.
+    ///
+    /// The value is the claim copied at admission. The worker does not look up
+    /// a replacement.
+    pub(super) async fn capture_admitted(
+        &self,
+        window: &SourceWindow,
+        deadline: Duration,
+        cancel: &Cancel,
+        admitted: CaptureAdmission,
+    ) -> Result<RawPixels> {
+        self.submit(window, deadline, cancel, Some(admitted)).await
+    }
+    async fn submit(
+        &self,
+        window: &SourceWindow,
+        deadline: Duration,
+        cancel: &Cancel,
+        admitted: Option<CaptureAdmission>,
+    ) -> Result<RawPixels> {
         let budget = deadline.min(DRIVER_DEADLINE);
         let request = Arc::new(Request {
             abandoned: AtomicBool::new(false),
@@ -169,6 +202,7 @@ impl Worker {
             .try_send(Job {
                 window: *window,
                 request,
+                admitted,
                 reply,
             })
             .map_err(|_| DriverError::Crashed {
@@ -180,6 +214,49 @@ impl Worker {
             result = result => result.map_err(|_| DriverError::Crashed { maybe_executed: false })?,
         }
     }
+}
+/// Compare the queued claim with the window that is about to be read.
+///
+/// Runs on the capture thread, before `CreateForWindow` or `PrintWindow`.
+/// A miss is [`DriverError::ScopeDenied`] and does not read pixels.
+fn prove_admitted(
+    window: &SourceWindow,
+    admitted: &CaptureAdmission,
+    request: &Request,
+) -> Result<()> {
+    request.check()?;
+    if window.hwnd != admitted.hwnd
+        || admitted.hwnd == 0
+        || admitted.incarnation == 0
+        || admitted.pid == 0
+        || admitted.created == 0
+        || admitted.boot.is_empty()
+        || admitted.generation_property.last() != Some(&0)
+        || admitted.generation_property.len() < 2
+    {
+        return Err(DriverError::ScopeDenied);
+    }
+    let hwnd = HWND(admitted.hwnd as usize as *mut _);
+    let mut pid = 0u32;
+    // SAFETY: numeric HWND and a writable pid slot. No process handle is kept.
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if tid == 0 || pid != admitted.pid {
+        return Err(DriverError::ScopeDenied);
+    }
+    if crate::ffi::security::process_created(pid)? != admitted.created {
+        return Err(DriverError::ScopeDenied);
+    }
+    // SAFETY: the property is NUL-terminated. GetPropW does not send a message.
+    let marker = unsafe { GetPropW(hwnd, PCWSTR(admitted.generation_property.as_ptr())) };
+    if marker.is_invalid() || marker.0 as usize as u64 != admitted.incarnation {
+        return Err(DriverError::ScopeDenied);
+    }
+    let session = crate::ffi::read_boot_session().ok_or(DriverError::ScopeDenied)?;
+    let live = crate::scope_identity::boot_token(Some(&session), None)?;
+    if live != admitted.boot {
+        return Err(DriverError::ScopeDenied);
+    }
+    request.check()
 }
 pub(super) fn preflight(
     window: &SourceWindow,

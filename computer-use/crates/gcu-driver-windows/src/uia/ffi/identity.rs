@@ -1,5 +1,8 @@
 //! Worker-local observed RuntimeIds and action-time HWND/metadata revalidation.
-use super::super::{cache::Properties, source::NodeId};
+use super::super::{
+    cache::Properties,
+    source::{AdmittedWindow, NodeId},
+};
 use super::{native, properties, Request, State};
 use crate::{
     api::{NativeWindow, WinApi},
@@ -120,6 +123,39 @@ impl State {
         }
         Err(DriverError::StaleElement)
     }
+}
+/// Prove `admitted` against the live window. A different creation generation
+/// is refused and is not stored as this job's window.
+pub(super) fn window_matching(
+    api: &crate::RealWinApi,
+    admitted: &AdmittedWindow,
+    request: &Request,
+) -> Result<WindowIdentity> {
+    let _timing = crate::timing::Timing::provider("uia_window_matching");
+    request.check()?;
+    let window = api
+        .enum_windows()?
+        .into_iter()
+        .find(|item| item.hwnd == admitted.hwnd)
+        .ok_or(DriverError::WindowGone)?;
+    if window.created != admitted.incarnation {
+        return Err(DriverError::ScopeDenied);
+    }
+    request.check()?;
+    let pid = crate::desktop::window_process(api, &window)?;
+    WinGate.check(api, window.pid, false, None)?;
+    let target = WinGate.check(api, pid, false, None)?;
+    if pid != admitted.pid || target.created != admitted.created {
+        return Err(DriverError::ScopeDenied);
+    }
+    if api.boot_identity()? != admitted.boot {
+        return Err(DriverError::ScopeDenied);
+    }
+    Ok(WindowIdentity {
+        window,
+        target_pid: pid,
+        target_created: target.created,
+    })
 }
 pub(super) fn window(
     api: &crate::RealWinApi,

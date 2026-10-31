@@ -85,7 +85,8 @@ impl FakeUia {
         }
     }
     /// Report the element's owning process. `None` leaves the portable probe unset.
-    /// A mismatch with the admitted app pid refuses the action before dispatch.
+    /// Scoped admission refuses a mismatch or a missing probe. Unscoped admission
+    /// does not consult this value.
     pub fn set_owner_pid(&self, pid: Option<u32>) {
         if let Ok(mut state) = self.0.lock() {
             state.owner_pid = pid;

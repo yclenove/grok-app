@@ -233,11 +233,30 @@ impl Driver for WindowsDriver {
         let deadline = tokio::time::Instant::now() + opts.timeout.min(DRIVER_DEADLINE);
         let operation = async {
             let target = win.clone();
-            let window = self
+            let scoped = self.session_is_scoped();
+            let (window, carried) = self
                 .call(opts.timeout, Some(cancel), false, move |s| {
-                    s.observation_window(&target, false)
+                    let observed = s.observation_window(&target, false)?;
+                    if scoped {
+                        s.scope_close(&target)?;
+                        let claim = s.carried_claim(&target)?;
+                        Ok((observed, Some(claim)))
+                    } else {
+                        Ok((observed, None))
+                    }
                 })
                 .await?;
+            if let Some(claim) = carried.clone() {
+                // Replacement between admission and the UIA worker. The claim
+                // above is the value copied at admission, not a new lookup.
+                self.run_native_barrier();
+                let target = win.clone();
+                self.call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
+                    s.observation_window(&target, false)?;
+                    s.prove_carried(&claim)
+                })
+                .await?;
+            }
             let observer = self
                 .observer
                 .as_ref()
@@ -245,13 +264,17 @@ impl Driver for WindowsDriver {
             let mut remaining = opts.clone();
             remaining.timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
             let raw = observer
-                .snapshot(window.hwnd, win, &remaining, cancel)
+                .snapshot(window.hwnd, win, &remaining, cancel, carried.as_ref())
                 .await?;
             // Do not release tree payloads if identity/security changed during UIA.
             let target = win.clone();
             self.call(DRIVER_DEADLINE, Some(cancel), false, move |s| {
                 s.validate_window(&target, false)?;
-                s.scope_close(&target)
+                s.scope_close(&target)?;
+                if let Some(claim) = carried {
+                    s.prove_carried(&claim)?;
+                }
+                Ok(())
             })
             .await?;
             observer.remember(win, window.hwnd);
@@ -353,6 +376,7 @@ impl Driver for WindowsDriver {
             // The WorkerDriver owns the sole parent proof window and deadline.
             return worker.perform_until(req, cancel, deadline).await;
         }
+        let scope = self.job_scope();
         let foreground = crate::input::watchdog::foreground(req);
         // A proof can submit absolute mouse input. Preserve the common live
         // target gate and its error priority before any capability/proof check.
@@ -371,6 +395,9 @@ impl Driver for WindowsDriver {
                 },
             )
             .await?;
+        // Product errors above keep priority. A scoped session with no pin
+        // refuses here and is not dispatched as unscoped work.
+        scope.claim()?;
         self.check_safety(foreground)?;
         let mut lease = if foreground && !self.child {
             Some(
@@ -394,13 +421,13 @@ impl Driver for WindowsDriver {
                     .input
                     .as_ref()
                     .ok_or(DriverError::CapabilityUnavailable)?
-                    .perform(window, req, cancel, deadline)
+                    .perform_scoped(window, req, cancel, deadline, &scope)
                     .await;
             }
             self.observer
                 .as_ref()
                 .ok_or(DriverError::CapabilityUnavailable)?
-                .perform(window.hwnd, req, cancel, deadline)
+                .perform(window.hwnd, req, cancel, deadline, &scope)
                 .await
         };
         let result = operation.await;

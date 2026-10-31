@@ -99,6 +99,15 @@ impl CaptureSource for FakeCapture {
     fn path(&self) -> CapturePath {
         self.path
     }
+    async fn capture_admitted(
+        &self,
+        window: &SourceWindow,
+        deadline: Duration,
+        cancel: &Cancel,
+        _admitted: &super::CaptureAdmission,
+    ) -> Result<RawPixels> {
+        self.capture(window, deadline, cancel).await
+    }
     async fn capture(
         &self,
         window: &SourceWindow,

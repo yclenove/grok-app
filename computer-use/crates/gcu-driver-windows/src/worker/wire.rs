@@ -228,6 +228,9 @@ pub enum Reply {
         target: crate::input::api::Target,
         /// Private payload, never logged or included in observations.
         text: String,
+        /// Admitted window for a scoped paste. Absent means the unscoped route.
+        #[serde(default)]
+        admitted: Option<crate::input::api::AdmittedTarget>,
     },
     /// Conditional restore in the parent; never sent to the public Host API.
     ClipboardRestore,

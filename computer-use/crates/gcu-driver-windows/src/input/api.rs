@@ -21,6 +21,24 @@ pub struct Target {
     /// Whether the exact focus element has a native message recipient.
     pub message_capable: bool,
 }
+
+/// Admitted window copied into one scoped clipboard or input job.
+///
+/// Later enumeration must not replace these fields. Absent on an unscoped job.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedTarget {
+    /// Top-level HWND.
+    pub hwnd: u64,
+    /// Window creation generation.
+    pub incarnation: u64,
+    /// Owner process id.
+    pub pid: u32,
+    /// Owner process creation time.
+    pub created: u64,
+    /// Boot-session identity. Empty is unproved.
+    pub boot: String,
+}
 /// One physical/Unicode input. Debug output excludes text payloads.
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
@@ -64,6 +82,21 @@ pub trait InputTracker: Send + Sync + 'static {
     /// Stage text in the parent before acknowledging any paste. No retry.
     async fn clipboard_stage(&self, _target: Target, _text: String) -> Result<u32> {
         Err(DriverError::CapabilityUnavailable)
+    }
+    /// Stage scoped text only when `admitted` can be proved at publication.
+    ///
+    /// `Some` is the claim copied at admission. The default refuses it and does
+    /// not publish. `None` is the unscoped [`InputTracker::clipboard_stage`] route.
+    async fn clipboard_stage_admitted(
+        &self,
+        target: Target,
+        text: String,
+        admitted: Option<AdmittedTarget>,
+    ) -> Result<u32> {
+        if admitted.is_some() {
+            return Err(DriverError::ScopeDenied);
+        }
+        self.clipboard_stage(target, text).await
     }
     /// Restore the parent's transaction, including after cancelled dispatch.
     async fn clipboard_restore(&self) -> Result<()> {
@@ -132,6 +165,48 @@ pub trait InputApi: Send + Sync + 'static {
         point: Option<WindowPoint>,
         focus: Option<NativeHandle>,
     ) -> Result<Target>;
+    /// Resolve under an admitted window copied by the caller.
+    ///
+    /// The default is [`InputApi::resolve`]. A scoped focus element must be
+    /// proved before any of its content is read. `admitted_pid` and
+    /// `admitted_hwnd` are that copy, not a fresh lookup.
+    async fn resolve_scoped(
+        &self,
+        window: NativeWindow,
+        point: Option<WindowPoint>,
+        focus: Option<NativeHandle>,
+        _admitted_pid: u32,
+        _admitted_hwnd: u64,
+    ) -> Result<Target> {
+        self.resolve(window, point, focus).await
+    }
+    /// Process that owns the resolved recipient.
+    ///
+    /// The default is the top-level window owner. That is not proof of a child.
+    /// Native input overrides this and reads the child outside the pointer gate.
+    async fn recipient_process(&self, target: Target) -> Result<(u32, u64)> {
+        Ok((target.window.pid, target.window.process_created))
+    }
+    /// Top-level window under `point`, or the captured window when capture is set.
+    ///
+    /// `Ok(None)` means the receiver cannot be proved. Scoped foreground pointer
+    /// packets refuse that result. The default cannot prove a receiver.
+    async fn pointer_receiver(&self, _point: WindowPoint) -> Result<Option<u64>> {
+        Ok(None)
+    }
+    /// Live identity at a publication boundary. The default cannot prove it.
+    ///
+    /// Memory or a metadata read the implementor bounds. Not inside the pointer gate.
+    fn recheck_publish(
+        &self,
+        _hwnd: u64,
+        _incarnation: u64,
+        _pid: u32,
+        _created: u64,
+        _boot: &str,
+    ) -> Result<()> {
+        Err(DriverError::ScopeDenied)
+    }
     /// Resolve a character using the recipient keyboard layout before dispatch.
     async fn character_key(
         &self,

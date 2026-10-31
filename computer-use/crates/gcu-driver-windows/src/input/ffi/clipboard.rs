@@ -1,7 +1,7 @@
 //! Thread-affine clipboard owner and cross-process transaction mutex.
 mod data;
 mod text_formats;
-use super::super::clipboard::ClipboardApi;
+use super::super::clipboard::{ClipboardApi, PublishProof};
 use crate::uia::{patterns::ActionContext, worker::Worker};
 use async_trait::async_trait;
 use data::{Format, Open};
@@ -57,23 +57,15 @@ impl NativeClipboard {
 #[async_trait]
 impl ClipboardApi for NativeClipboard {
     async fn stage(&self, text: String, context: ActionContext) -> Result<u32> {
-        loop {
-            context.check()?;
-            let value = text.clone();
-            let action = context.clone();
-            if let Some(sequence) = self
-                .worker()
-                .await?
-                .call_action(context.clone(), move |s, r| {
-                    r.check()?;
-                    s.stage(value, action)
-                })
-                .await?
-            {
-                return Ok(sequence);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        self.stage_with(text, context, None).await
+    }
+    async fn stage_proved(
+        &self,
+        text: String,
+        context: ActionContext,
+        proof: PublishProof,
+    ) -> Result<u32> {
+        self.stage_with(text, context, Some(proof)).await
     }
     async fn matches(&self, sequence: u32, text: String) -> Result<bool> {
         self.worker()
@@ -98,6 +90,33 @@ impl ClipboardApi for NativeClipboard {
     }
     fn pending(&self) -> bool {
         self.pending.load(Ordering::Acquire)
+    }
+}
+impl NativeClipboard {
+    async fn stage_with(
+        &self,
+        text: String,
+        context: ActionContext,
+        proof: Option<PublishProof>,
+    ) -> Result<u32> {
+        loop {
+            context.check()?;
+            let value = text.clone();
+            let action = context.clone();
+            let proof = proof.clone();
+            if let Some(sequence) = self
+                .worker()
+                .await?
+                .call_action(context.clone(), move |s, r| {
+                    r.check()?;
+                    s.stage(value, action, proof)
+                })
+                .await?
+            {
+                return Ok(sequence);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
 
@@ -193,7 +212,12 @@ impl State {
             tracing::warn!("cancelled clipboard recovery pending");
         }
     }
-    fn stage(&mut self, text: String, context: ActionContext) -> Result<Option<u32>> {
+    fn stage(
+        &mut self,
+        text: String,
+        context: ActionContext,
+        proof: Option<PublishProof>,
+    ) -> Result<Option<u32>> {
         if self.transaction.is_some() {
             return Err(DriverError::CapabilityUnavailable);
         }
@@ -209,6 +233,9 @@ impl State {
             .collect::<Result<Vec<_>>>()?;
         let mut publication = text_formats::prepare(&text)?;
         context.check()?;
+        if let Some(proof) = proof {
+            proof()?;
+        }
         // SAFETY: this thread holds OpenClipboard and owns a non-null HWND.
         unsafe { EmptyClipboard() }.map_err(|_| failure())?;
         self.pending.store(true, Ordering::Release);
