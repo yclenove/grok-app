@@ -164,8 +164,23 @@ pub fn render_markdown(report: &AbReport, decision: &Decision) -> String {
     }
     for trial in &report.trials {
         if let Some(environment) = &trial.environment_contract {
-            out.push_str("\nEnvironment contract (normalized evidence):\n\n```json\n");
+            out.push_str(&format!(
+                "\nEnvironment contract (normalized evidence; task `{}`, arm {}, repeat {}):\n\n```json\n",
+                sanitize(&trial.task_id), trial.arm.as_str(), trial.repeat
+            ));
             if let Ok(json) = serde_json::to_string_pretty(environment) {
+                out.push_str(&json);
+            }
+            out.push_str("\n```\n");
+        }
+        if let Some(stop) = &trial.inherited_stop {
+            out.push_str(&format!(
+                "\nInherited run stop (task `{}`, arm {}, repeat {}):\n\n```json\n",
+                sanitize(&trial.task_id),
+                trial.arm.as_str(),
+                trial.repeat
+            ));
+            if let Ok(json) = serde_json::to_string_pretty(stop) {
                 out.push_str(&json);
             }
             out.push_str("\n```\n");

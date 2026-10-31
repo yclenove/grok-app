@@ -86,17 +86,19 @@ The decision passes only when B's success rate is at least A's, the median round
 
 Real evaluation remains stopped. This card installs no VM/provider adapter, trust roots, credentialed client entry, gateway, firewall rule, sandbox, or native permission. `--driver real` accepts either existing environment selector but always produces `not_run`; it no longer requires `--env local`. `--env desktop` never falls back to a local temp directory. `--attest-disposable-desktop` is retained as a legacy declaration in reports; neither it nor a self-declared `--disposable` is evidence. There is no manual override or attestation-file import that enables a run.
 
+The standalone `eval-fake-agent` and hidden fake-agent re-entry only invoke the verified `eval-fake-gcu` artifact or verified `gcu-eval` fake re-entry in the same build directory. `GCU_EVAL_ATTESTED`, `GCU_EVAL_BUILTIN_GCU`, and a re-entry marker cannot admit an arbitrary backend. External backends require the provider admission policy, whose runtime implementation remains unavailable.
+
 `gcu-eval::disposable` defines the provider/verifier contract. A trusted **external supervisor**, outside the guest and client, must own one attempt, its private control connection, and its whole lifetime. The library's offline supervisor exercises this ordering:
 
 1. Arm external owner-death cleanup before allocating anything. Reset a fresh disposable environment for every attempt, including A/B arms and repeats.
 2. Probe the environment **without a model or credentialed client**. Bind the evidence to a unique attempt, VM/device instance, boot, UID/desktop, image digest, policy digest, and exact private native scope ACK (run/generation/scope digest).
-3. Verify required external attestations against externally pinned trust. Verify the complete binding, claims and exclusive expiry; a model statement, local checkbox, same-UID file, or CLI flag has no authority.
+3. Verify required external attestations against externally pinned trust. Verify the complete binding and claims, then read a fresh clock after preparation and all authenticity verification to check exclusive expiry immediately before client admission; a model statement, local checkbox, same-UID file, or CLI flag has no authority.
 4. Only after all guarantees and the native ACK are established may credential seeding, fixture/client startup, **tool preflight**, and task dispatch begin. A cached tool listing cannot bypass this gate.
 5. On completion, timeout, cancellation, refusal, or owner death, revoke channels, kill/reap the **whole** tree/Job/VM, then erase all attempt storage and auth material. Return a receipt bound to the prepared subject. Missing receipts, wrong bindings, failed or unknown teardown results invalidate any oracle pass and stop later tasks, arms and repeats as `not_run`.
 
 The runtime runner has only the unavailable-provider implementation. Its gate precedes auth seeding, fixture startup and client-tool preflight. The fake provider and accepting fake verifier live in unit tests only; they cannot be selected from the CLI or `RunConfig`. Passing the offline contract tests does not install a real provider or satisfy S2/S4/S7.
 
-Each JSON/HTML task report (and runner A/B JSON/Markdown trial) records all five §4 rows:
+Tasks that reach the environment gate record all five §4 rows in JSON/HTML and runner A/B JSON/Markdown reports. Oracle self-test failures, platform skips, and local fake-only tasks can have no environment report. Rows halted by an earlier task carry explicit `inherited_stop` evidence naming the originating task/group/repeat and refusal/cleanup cause; they do not copy its checks, cleanup receipt, or telemetry. Their own telemetry remains unknown and unmeasured tool/unknown call counts stay null in task and suite JSON.
 
 | Guarantee | Required machine evidence | Required external evidence |
 | --- | --- | --- |
@@ -108,7 +110,7 @@ Each JSON/HTML task report (and runner A/B JSON/Markdown trial) records all five
 
 Every row has separate machine and external provenance: `checked`, `attested`, or `unknown`, plus normalized per-probe `passed`/`failed`/`unknown` observations. All five rows are critical. All required machine probes **and** trusted attestations are needed. A failed check cannot be overridden by a signed statement; missing/duplicate/unknown checks, missing required statements, expired/untrusted/replayed statements, or missing/mismatched ACK refuse the attempt. Reports contain fixed enums only, never raw statements, signatures, provider identities, paths, tokens or probe response payloads. Existing tool telemetry remains a tripwire, not isolation proof.
 
-Cleanup receipts separately record the trigger (`finished`, `refused`, `cancelled`, `parent_death`), binding match, whole-tree destruction, storage erasure and channel revocation. An unavailable provider allocates nothing; its no-resource receipt is **not** evidence of VM destruction. `LocalTempProvider` remains fake-only and makes no whole-tree/sandbox claim. A Unix process group cannot own descendants that escape it, and a Rust Drop handler cannot run after parent death. A real provider must implement external reclamation independently of this process and retain durable Stop outside snapshot/reset state; no automatic resume.
+Cleanup receipts separately record allocation disposition (`allocated`, `no_allocation`, or `unknown`), the trigger (`finished`, `refused`, `cancelled`, `parent_death`), binding match, whole-tree destruction, storage erasure and channel revocation. An unavailable provider allocates nothing; its explicit `no_allocation` receipt is **not** evidence of VM destruction and cannot complete an environment contract. `LocalTempProvider` remains fake-only and makes no whole-tree/sandbox claim. A Unix process group cannot own descendants that escape it, and a Rust Drop handler cannot run after parent death. A real provider must implement external reclamation independently of this process and retain durable Stop outside snapshot/reset state; no automatic resume.
 
 ### External VM / gateway template — documentation only, not runnable
 

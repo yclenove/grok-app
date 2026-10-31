@@ -184,14 +184,18 @@ pub struct AbTrial {
     /// Normalized ADR 0017 boundary evidence, without provider identities or paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_contract: Option<crate::disposable::EnvironmentReport>,
+    /// Stop evidence inherited from an earlier task/arm/repeat; not a local check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_stop: Option<crate::InheritedStop>,
 }
 
 impl AbTrial {
     fn status_for_report(&self) -> RunStatus {
-        if self
-            .environment_contract
-            .as_ref()
-            .is_some_and(|environment| !environment.complete())
+        if self.inherited_stop.is_some()
+            || self
+                .environment_contract
+                .as_ref()
+                .is_some_and(|environment| !environment.complete())
         {
             RunStatus::NotRun
         } else {
@@ -336,6 +340,7 @@ pub fn not_run_report(tasks: &[Task], id: &ReportId) -> AbReport {
                     violations: Vec::new(),
                     reason: "no client binary and no model credentials".into(),
                     environment_contract: Some(crate::disposable::unavailable_report()),
+                    inherited_stop: None,
                 });
             }
         }
@@ -379,6 +384,7 @@ pub fn trial_from_outcome(row: &TaskOutcome) -> Option<AbTrial> {
         violations: row.violations.clone(),
         reason: row.reason.clone(),
         environment_contract: row.assurance.environment.clone(),
+        inherited_stop: row.assurance.inherited_stop.clone(),
     })
 }
 
@@ -396,14 +402,14 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
         return not_run_report(tasks, id);
     }
     let mut report = blank_report(id, Provenance::NotRun, false);
-    let mut halted: Option<(String, Option<crate::disposable::EnvironmentReport>)> = None;
+    let mut halted: Option<(String, crate::InheritedStop)> = None;
     for (arm_id, arm) in [
         (ArmId::A, ArmConfig::baseline()),
         (ArmId::B, ArmConfig::candidate()),
     ] {
         for repeat in 0..REPEATS {
-            if let Some((reason, environment)) = &halted {
-                push_halted(&mut report, tasks, arm_id, repeat, reason, environment);
+            if let Some((reason, stop)) = &halted {
+                push_halted(&mut report, tasks, arm_id, repeat, reason, stop);
                 continue;
             }
             let mut cfg = base.clone();
@@ -415,16 +421,10 @@ pub async fn run_ab(tasks: &[Task], base: &RunConfig, id: &ReportId) -> AbReport
                 if row.assurance.client_started {
                     report.provenance = Provenance::Runner;
                 }
-                if row.assurance.cleanup_failed
-                    || row
-                        .assurance
-                        .environment
-                        .as_ref()
-                        .is_some_and(|gate| !gate.complete())
-                {
+                if let Some(stop) = crate::InheritedStop::from_outcome(&row) {
                     halted = Some((
                         format!("{}; remaining tasks were not started", row.reason),
-                        row.assurance.environment.clone(),
+                        stop,
                     ));
                 }
                 if let Some(trial) = trial_from_outcome(&row) {
@@ -442,7 +442,7 @@ fn push_halted(
     arm: ArmId,
     repeat: u32,
     reason: &str,
-    environment: &Option<crate::disposable::EnvironmentReport>,
+    stop: &crate::InheritedStop,
 ) {
     for task in tasks {
         report.trials.push(AbTrial {
@@ -463,7 +463,8 @@ fn push_halted(
             tool_result_bytes: 0,
             violations: Vec::new(),
             reason: reason.into(),
-            environment_contract: environment.clone(),
+            environment_contract: None,
+            inherited_stop: Some(stop.clone()),
         });
     }
 }

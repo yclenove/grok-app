@@ -176,60 +176,44 @@ fn builtin_fake_does_not_start_an_external_gcu_without_attestation() {
 }
 
 #[test]
-fn fake_agent_rejects_an_external_gcu_until_the_operator_attests() {
+fn both_fake_agent_entries_refuse_external_backends_despite_forged_markers() {
     let dir = scratch("direct-gcu");
     let marker = dir.join("gcu-started");
-    let log = dir.join("argv.log");
     let wrap = dir.join("gcu.sh");
-    touch_script(&wrap, &marker, Some(&log));
-    let task = named("native-form-01");
-    let grok = dir.join("grok");
-    std::fs::create_dir(&grok).unwrap();
-    let mut refused = Command::new(agent());
-    refused
-        .env("GCU_BIN", &wrap)
-        .env_remove("GCU_EVAL_ATTESTED")
-        .env_remove("GCU_EVAL_BUILTIN_GCU")
-        .env_remove("GCU_EVAL_GCU_REEXEC")
-        .env("GCU_EVAL_BEHAVIOR", "scripted")
-        .env("GCU_EVAL_PASS_SCRIPT", &task.pass_script)
-        .env("GCU_FIXTURE_STATE", dir.join("state.json"))
-        .env("GROK_HOME", &grok)
-        .env("GCU_EVAL_TOOL_LOG", dir.join("tools.log"))
-        .env("GCU_EVAL_SIDE_LOG", dir.join("side.log"));
-    let refused = refused.output().unwrap();
-    assert!(
-        !refused.status.success(),
-        "stderr {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert!(!marker.exists(), "unattested GCU_BIN ran");
-
-    let allowed = Command::new(agent())
-        .env("GCU_BIN", &wrap)
-        .env("GCU_EVAL_ATTESTED", "1")
-        .env_remove("GCU_EVAL_BUILTIN_GCU")
-        .env_remove("GCU_EVAL_GCU_REEXEC")
-        .env("GCU_EVAL_BEHAVIOR", "scripted")
-        .env("GCU_EVAL_PASS_SCRIPT", &task.pass_script)
-        .env("GCU_FIXTURE_STATE", dir.join("state.json"))
-        .env("GROK_HOME", &grok)
-        .env("GCU_EVAL_TOOL_LOG", dir.join("tools.log"))
-        .env("GCU_EVAL_SIDE_LOG", dir.join("side.log"))
-        .output()
-        .unwrap();
-    assert!(
-        allowed.status.success(),
-        "stderr {}",
-        String::from_utf8_lossy(&allowed.stderr)
-    );
-    assert!(marker.exists(), "attested GCU_BIN did not run");
-    let text = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<_> = text.lines().filter(|line| !line.is_empty()).collect();
-    assert!(lines.len() >= 2, "{text}");
-    for line in &lines {
-        assert!(line.contains("--driver"), "{line}");
-        assert!(line.contains("fake"), "{line}");
+    touch_script(&wrap, &marker, None);
+    for hidden in [false, true] {
+        for flags in 0..8 {
+            let mut command = Command::new(if hidden { bin("gcu-eval") } else { agent() });
+            if hidden {
+                command.arg(gcu_eval::INTERNAL_FAKE_AGENT);
+            }
+            let output = command
+                .env_clear()
+                .env("GCU_BIN", &wrap)
+                .env("GCU_EVAL_ATTESTED", if flags & 1 != 0 { "1" } else { "0" })
+                .env(
+                    "GCU_EVAL_BUILTIN_GCU",
+                    if flags & 2 != 0 { "1" } else { "0" },
+                )
+                .env(
+                    "GCU_EVAL_GCU_REEXEC",
+                    if flags & 4 != 0 { "1" } else { "0" },
+                )
+                // Crash reaches backend admission without fixture files.
+                .env("GCU_EVAL_BEHAVIOR", "crash")
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "hidden={hidden} flags={flags}"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("provider_unavailable"));
+            assert!(
+                !marker.exists(),
+                "external backend ran: hidden={hidden} flags={flags}"
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -272,7 +256,71 @@ fn cleanup_failure_does_not_start_the_next_client() {
     let root = report.tasks[0].env_root.as_ref().unwrap();
     assert!(root.exists(), "the failed cleanup removed the root");
     assert_eq!(report.tasks[1].status, RunStatus::NotRun);
-    assert!(!report.tasks[1].assurance.client_started);
+    let skipped = &report.tasks[1];
+    assert!(!skipped.assurance.client_started);
+    assert!(!skipped.assurance.cleanup_failed);
+    assert!(!skipped.assurance.capture_incomplete);
+    assert!(skipped.assurance.environment.is_none());
+    assert!(skipped.env_root.is_none());
+    let stop = skipped.assurance.inherited_stop.as_ref().unwrap();
+    assert_eq!(stop.task_id, first.id);
+    assert!(stop.cleanup_failed);
+    assert!(stop.environment_refusal.is_none());
+    for state in [
+        skipped.assurance.tool_telemetry,
+        skipped.assurance.side_telemetry,
+        skipped.assurance.state_telemetry,
+        skipped.assurance.transcript_telemetry,
+    ] {
+        assert_eq!(state, gcu_eval::TelemetryState::Unknown);
+    }
+    // Positive control: the preceding task really read its own telemetry.
+    assert_eq!(
+        report.tasks[0].assurance.tool_telemetry,
+        gcu_eval::TelemetryState::Available
+    );
+    assert_eq!(
+        report.tasks[0].assurance.side_telemetry,
+        gcu_eval::TelemetryState::Available
+    );
+    assert_eq!(
+        report.tasks[0].assurance.state_telemetry,
+        gcu_eval::TelemetryState::Available
+    );
+    assert_eq!(
+        report.tasks[0].assurance.transcript_telemetry,
+        gcu_eval::TelemetryState::Available
+    );
+    let reports = dir.join("reports");
+    gcu_eval::write_reports(&reports, &report).unwrap();
+    for path in [
+        reports.join(format!("{}.json", second.id)),
+        reports.join("summary.json"),
+    ] {
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let row = if json["tasks"].is_array() {
+            &json["tasks"][1]
+        } else {
+            &json
+        };
+        assert_eq!(row["status"], "not_run");
+        assert_eq!(row["client_started"], false);
+        assert!(row["tool_calls"].is_null());
+        assert!(row["unknown_calls"].is_null());
+        for key in [
+            "tool_telemetry",
+            "side_telemetry",
+            "state_telemetry",
+            "transcript_telemetry",
+        ] {
+            assert_eq!(row[key], "unknown");
+        }
+        assert!(row["environment_contract"].is_null());
+        assert_eq!(row["cleanup_failed"], false);
+        assert_eq!(row["inherited_stop"]["task_id"], first.id);
+        assert_eq!(row["inherited_stop"]["cleanup_failed"], true);
+    }
     assert!(
         report.tasks[1].reason.contains("remaining tasks"),
         "{}",

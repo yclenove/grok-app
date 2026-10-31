@@ -162,20 +162,13 @@ pub(crate) fn child_env(
     map
 }
 
-/// `GCU_BIN` and the flags that tell the fake agent whether that path is trusted.
+/// `GCU_BIN` and the fake gcu re-entry selector. The agent verifies the artifact.
 ///
 /// The built-in slot is the cargo artifact, or a re-exec of this process.
 /// Re-exec sets `GCU_EVAL_GCU_REEXEC` and points `GCU_BIN` at this process.
-/// `builtin_gcu: true` does not bless any other path. Attestation is a
-/// separate flag and does not make a path built-in.
+/// No environment declaration grants backend admission.
 fn insert_gcu_env(map: &mut BTreeMap<String, String>, cfg: &RunConfig) {
-    if cfg.attest_disposable_desktop {
-        map.insert("GCU_EVAL_ATTESTED".into(), "1".into());
-    }
     let reexec = cfg.builtin_fake && cfg.gcu_bin.is_none();
-    if crate::boundary::builtin_gcu_trusted(cfg) {
-        map.insert("GCU_EVAL_BUILTIN_GCU".into(), "1".into());
-    }
     if reexec {
         if let Ok(exe) = std::env::current_exe() {
             map.insert("GCU_BIN".into(), exe.display().to_string());
@@ -433,10 +426,8 @@ mod tests {
             ..RunConfig::default()
         };
         let reexec = child_env(&task, &reexec, &env, None);
-        assert_eq!(
-            reexec.get("GCU_EVAL_BUILTIN_GCU").map(String::as_str),
-            Some("1")
-        );
+        assert!(!reexec.contains_key("GCU_EVAL_BUILTIN_GCU"));
+        assert!(!reexec.contains_key("GCU_EVAL_ATTESTED"));
         assert_eq!(
             reexec.get("GCU_EVAL_GCU_REEXEC").map(String::as_str),
             Some("1")

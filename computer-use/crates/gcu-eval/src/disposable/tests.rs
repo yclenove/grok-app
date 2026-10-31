@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -39,6 +39,7 @@ struct FakeProvider {
     events: Rc<RefCell<Vec<&'static str>>>,
     root: Option<PathBuf>,
     workers: Vec<Child>,
+    prepare_clock: Option<(Rc<Cell<u64>>, u64)>,
 }
 
 impl FakeProvider {
@@ -68,6 +69,7 @@ impl FakeProvider {
             events: Rc::default(),
             root: None,
             workers: Vec::new(),
+            prepare_clock: None,
         }
     }
 }
@@ -75,6 +77,9 @@ impl FakeProvider {
 impl DisposableProvider for FakeProvider {
     fn prepare(&mut self) -> Prepared {
         self.events.borrow_mut().push("gate");
+        if let Some((clock, now)) = &self.prepare_clock {
+            clock.set(*now);
+        }
         self.prepared.clone()
     }
     fn teardown(&mut self, cause: CleanupCause) -> Option<CleanupProof> {
@@ -112,11 +117,17 @@ impl DisposableProvider for FakeProvider {
 
 fn run(fake: &mut FakeProvider) -> (Option<&'static str>, EnvironmentReport) {
     let events = fake.events.clone();
-    supervise(fake, Some(&binding()), 100, &FakeVerifier, || {
-        events.borrow_mut().push("credentialed_tool_preflight");
-        events.borrow_mut().push("task_client");
-        "oracle_pass"
-    })
+    supervise(
+        fake,
+        Some(&binding()),
+        || 100,
+        &FakeVerifier,
+        || {
+            events.borrow_mut().push("credentialed_tool_preflight");
+            events.borrow_mut().push("task_client");
+            "oracle_pass"
+        },
+    )
 }
 
 fn refuses(fake: &mut FakeProvider, reason: Refusal) -> EnvironmentReport {
@@ -213,6 +224,87 @@ fn unsigned_expired_replayed_and_wrong_subject_attestations_are_untrusted() {
 }
 
 #[test]
+fn expiry_during_prepare_or_authentication_refuses_at_final_admission() {
+    struct AdvancingVerifier {
+        clock: Rc<Cell<u64>>,
+        after: u64,
+        calls: Cell<usize>,
+    }
+    impl AttestationVerifier for AdvancingVerifier {
+        fn authentic(&self, proof: &Attestation) -> bool {
+            self.calls.set(self.calls.get() + 1);
+            // Even expiry crossed by the *last* verification must be caught.
+            if self.calls.get() == Guarantee::ALL.len() {
+                self.clock.set(self.after);
+            }
+            FakeVerifier.authentic(proof)
+        }
+    }
+
+    // Cover expiry during prepare, during verification, exact exclusive expiry,
+    // and a valid positive control. Time never depends on sleeps or the OS clock.
+    for (prepared_at, verified_at, admitted) in [
+        (102, 102, false),
+        (100, 102, false),
+        (100, 101, false),
+        (100, 100, true),
+    ] {
+        let clock = Rc::new(Cell::new(100));
+        let mut fake = FakeProvider::ready();
+        fake.prepare_clock = Some((clock.clone(), prepared_at));
+        fake.prepared.attestations[0].expires_at = 101;
+        let verifier = AdvancingVerifier {
+            clock: clock.clone(),
+            after: verified_at,
+            calls: Cell::new(0),
+        };
+        let events = fake.events.clone();
+        let (value, report) = supervise(
+            &mut fake,
+            Some(&binding()),
+            || clock.get(),
+            &verifier,
+            || {
+                events.borrow_mut().push("task_client");
+                "oracle_pass"
+            },
+        );
+        assert_eq!(value.is_some(), admitted);
+        assert_eq!(verifier.calls.get(), Guarantee::ALL.len());
+        assert_eq!(report.complete(), admitted);
+        let receipt = report.cleanup.as_ref().unwrap();
+        assert!(receipt.complete());
+        assert_eq!(receipt.disposition, CleanupDisposition::Allocated);
+        if admitted {
+            assert_eq!(receipt.cause, CleanupCause::Finished);
+            assert_eq!(report.refusal, None);
+            assert_eq!(
+                events.borrow().as_slice(),
+                ["gate", "task_client", "cleanup"]
+            );
+        } else {
+            assert_eq!(report.refusal, Some(Refusal::UntrustedAttestation));
+            assert_eq!(receipt.cause, CleanupCause::Refused);
+            assert!(report
+                .guarantees
+                .iter()
+                .all(|row| row.external == EvidenceState::Unknown));
+            assert_eq!(events.borrow().as_slice(), ["gate", "cleanup"]);
+            // The production report path must keep even a stored pass not_run.
+            let mut row = crate::runner::blank(
+                "expired",
+                "native",
+                &crate::RunConfig::default(),
+                crate::RunStatus::Pass,
+                "",
+            );
+            row.assurance.environment = Some(report);
+            assert_eq!(row.status_for_report(), crate::RunStatus::NotRun);
+        }
+    }
+}
+
+#[test]
 fn unavailable_incomplete_or_mismatched_environment_is_not_run() {
     let mut fake = FakeProvider::ready();
     fake.prepared.binding = None;
@@ -281,9 +373,13 @@ fn cleanup_still_runs_on_refusal_and_unwind() {
     assert_eq!(report.cleanup.unwrap().cause, CleanupCause::Refused);
     let mut fake = FakeProvider::ready();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        supervise(&mut fake, Some(&binding()), 100, &FakeVerifier, || {
-            panic!("cancel")
-        })
+        supervise(
+            &mut fake,
+            Some(&binding()),
+            || 100,
+            &FakeVerifier,
+            || panic!("cancel"),
+        )
     }));
     assert!(result.is_err());
     assert_eq!(fake.events.borrow().as_slice(), ["gate", "cleanup"]);
@@ -487,6 +583,7 @@ fn parent_death_child() {
             assert_eq!(std::io::stdin().read(&mut control).unwrap(), 0);
             let proof = fake.teardown(CleanupCause::ParentDeath).unwrap();
             let receipt = CleanupReceipt {
+                disposition: CleanupDisposition::Allocated,
                 cause: CleanupCause::ParentDeath,
                 binding_matches: proof.binding == Some(binding()),
                 whole_tree: proof.whole_tree,
@@ -575,6 +672,15 @@ fn json_html_and_ab_reports_render_all_rows_and_sanitized_cleanup() {
     assert_eq!(trial.environment_contract, row.assurance.environment);
     let unknown = unavailable_report();
     assert_eq!(unknown.refusal, Some(Refusal::ProviderUnavailable));
+    assert_eq!(
+        unknown.cleanup.as_ref().unwrap().disposition,
+        CleanupDisposition::NoAllocation
+    );
+    assert_eq!(
+        serde_json::to_value(&unknown).unwrap()["cleanup"]["disposition"],
+        "no_allocation"
+    );
+    assert!(!unknown.complete());
     assert!(
         unknown
             .guarantees
@@ -588,7 +694,7 @@ fn json_html_and_ab_reports_render_all_rows_and_sanitized_cleanup() {
 #[test]
 fn critical_unknown_or_incomplete_receipt_never_renders_or_scores_as_pass() {
     let (_, valid) = run(&mut FakeProvider::ready());
-    for variant in 0..8 {
+    for variant in 0..10 {
         let mut environment = valid.clone();
         match variant {
             0 => environment.guarantees[0].machine = EvidenceState::Unknown,
@@ -600,7 +706,11 @@ fn critical_unknown_or_incomplete_receipt_never_renders_or_scores_as_pass() {
             4 => environment.scope_ack = EvidenceState::Unknown,
             5 => environment.cleanup = None,
             6 => environment.cleanup.as_mut().unwrap().whole_tree = Check::Unknown,
-            _ => environment.cleanup.as_mut().unwrap().cause = CleanupCause::ParentDeath,
+            7 => environment.cleanup.as_mut().unwrap().cause = CleanupCause::ParentDeath,
+            8 => environment.cleanup.as_mut().unwrap().disposition = CleanupDisposition::Unknown,
+            _ => {
+                environment.cleanup.as_mut().unwrap().disposition = CleanupDisposition::NoAllocation
+            }
         }
         // A stale or dishonest stored "pass" with no explicit refusal is still
         // not_run, including the derived summary and A/B comparison inputs.
@@ -668,15 +778,24 @@ fn runner_gate_stops_the_whole_suite_without_local_fallback_or_credential_copy()
             let report =
                 crate::block_on(crate::run_tasks(&[task.clone(), later.clone()], &cfg)).unwrap();
             assert_eq!(report.summary.scored, 0);
-            for row in report.tasks {
+            for (index, row) in report.tasks.iter().enumerate() {
                 assert_eq!(row.status, crate::RunStatus::NotRun);
                 assert!(!row.assurance.client_started);
                 assert!(row.env_root.is_none());
                 assert!(row.home.is_empty() && row.grok_home.is_empty());
-                assert_eq!(
-                    row.assurance.environment.unwrap().refusal,
-                    Some(Refusal::ProviderUnavailable)
-                );
+                if index == 0 {
+                    assert_eq!(
+                        row.assurance.environment.as_ref().unwrap().refusal,
+                        Some(Refusal::ProviderUnavailable)
+                    );
+                    assert!(row.assurance.inherited_stop.is_none());
+                } else {
+                    assert!(row.assurance.environment.is_none());
+                    assert!(!row.assurance.cleanup_failed);
+                    let stop = row.assurance.inherited_stop.as_ref().unwrap();
+                    assert_eq!(stop.task_id, task.id);
+                    assert_eq!(stop.environment_refusal, Some(Refusal::ProviderUnavailable));
+                }
             }
         }
     }
@@ -719,16 +838,26 @@ fn runner_gate_stops_the_whole_suite_without_local_fallback_or_credential_copy()
     let ab = crate::block_on(crate::ab::run_ab(&[task], &cfg, &id)).unwrap();
     assert_eq!(ab.provenance, crate::ab::Provenance::NotRun);
     assert_eq!(ab.trials.len(), 6);
-    for trial in &ab.trials {
+    for (index, trial) in ab.trials.iter().enumerate() {
         assert_eq!(trial.status, crate::RunStatus::NotRun);
-        assert_eq!(
-            trial.environment_contract.as_ref().unwrap().refusal,
-            Some(Refusal::ProviderUnavailable)
-        );
+        if index == 0 {
+            assert_eq!(
+                trial.environment_contract.as_ref().unwrap().refusal,
+                Some(Refusal::ProviderUnavailable)
+            );
+        } else {
+            assert!(trial.environment_contract.is_none());
+            assert_eq!(
+                trial.inherited_stop.as_ref().unwrap().environment_refusal,
+                Some(Refusal::ProviderUnavailable)
+            );
+        }
     }
     let mut forged = ab;
     forged.trials[0].status = crate::RunStatus::Pass;
+    forged.trials[1].status = crate::RunStatus::Pass;
     let parsed = crate::ab::parse_report(&serde_json::to_vec(&forged).unwrap()).unwrap();
     assert_eq!(parsed.trials[0].status, crate::RunStatus::NotRun);
+    assert_eq!(parsed.trials[1].status, crate::RunStatus::NotRun);
     std::fs::remove_dir_all(root).unwrap();
 }

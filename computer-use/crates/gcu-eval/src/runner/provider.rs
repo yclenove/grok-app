@@ -95,6 +95,40 @@ pub struct Environment {
     pub transcript: PathBuf,
 }
 
+/// Earlier task's stop cause, separate from this task's unmeasured observations.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InheritedStop {
+    /// Task that caused the run to halt.
+    pub task_id: String,
+    /// Originating A/B group or arm.
+    pub group: String,
+    /// Originating repeat index.
+    pub repeat: u32,
+    /// That earlier task's cleanup failed; no cleanup was attempted for this row.
+    pub cleanup_failed: bool,
+    /// That earlier attempt's environment refusal, without copying its checks.
+    pub environment_refusal: Option<crate::disposable::Refusal>,
+}
+
+impl InheritedStop {
+    pub(crate) fn from_outcome(row: &TaskOutcome) -> Option<Self> {
+        let environment = row.assurance.environment.as_ref();
+        if !row.assurance.cleanup_failed && environment.is_none_or(|gate| gate.complete()) {
+            return None;
+        }
+        Some(Self {
+            task_id: row.id.clone(),
+            group: row.group.clone(),
+            repeat: row.repeat,
+            cleanup_failed: row.assurance.cleanup_failed,
+            environment_refusal: environment.map(|gate| {
+                gate.refusal
+                    .unwrap_or(crate::disposable::Refusal::CriticalUnknown)
+            }),
+        })
+    }
+}
+
 /// Fields a report records about how the launch was constrained.
 ///
 /// Missing telemetry is [`TelemetryState::Unknown`], never a measured zero.
@@ -108,6 +142,9 @@ pub struct Assurance {
     /// ADR 0017 §4 gate and cleanup evidence. None for local fake-only tasks.
     #[serde(default)]
     pub environment: Option<crate::disposable::EnvironmentReport>,
+    /// Run stopped by an earlier task; this row performed no checks or cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_stop: Option<InheritedStop>,
     /// `--attest-disposable-desktop` was set. This is not a confinement proof.
     #[serde(default)]
     pub attestation_provided: bool,
@@ -187,7 +224,8 @@ impl TaskOutcome {
     }
 
     pub(crate) fn status_for_report(&self) -> RunStatus {
-        if self.assurance.cleanup_failed
+        if self.assurance.inherited_stop.is_some()
+            || self.assurance.cleanup_failed
             || self
                 .assurance
                 .environment

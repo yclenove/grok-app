@@ -51,3 +51,18 @@ Nice-to-have:
 - Give subprocess test cleanup an outer wall-clock bound and failure-safe ownership; `FakeProvider::teardown` uses blocking `Child::wait` (`src/disposable/tests.rs:87`) and owner startup failure can leave the fake supervisor/workloads running until their own time limits.
 
 Validation: static inspection only; `git diff --check origin/feat/cu-v2...HEAD` passed. No Cargo/build/tests, mutation runs, network, SSH, model calls, desktop execution, credential operations, or source/test edits. Only this uncommitted report was written.
+
+## 修复记录
+
+本节为本轮修复记录，原独立评审正文与结论保留。仍不启用真实 provider、原生桌面或真实模型。
+
+| 条目 | 根因修复 | 确定性回归（通过生产路径，已添加，未运行） |
+| --- | --- | --- |
+| (a) A1：独立 fake-agent 可凭环境声明启动外部 backend | 两个 fake-agent 入口共用的 `fake_agent::invoke` 在创建 backend 命令前复用 `boundary::is_builtin_artifact`：仅同构建目录的 `eval-fake-gcu` 或带固定内部参数的 `gcu-eval` fake 重入可启动。`ATTESTED` / `BUILTIN_GCU` 不再是准入豁免，也不再由 runner 注入；重入标记只选参数，不授权路径。外部路径拒绝为 `provider_unavailable`，不绕过 provider 策略。 | `lockdown_r3::both_fake_agent_entries_refuse_external_backends_despite_forged_markers` 替换原来要求 unsafe allowed 分支成功的测试；standalone 与 hidden 重入各穷举三种标记的 8 个组合，外部 wrapper 的 start sentinel 必须不存在。新增 `tests/fake_agent_boundary.rs`：三平台可编译的同名外部副本启动 sentinel 拒绝矩阵，以及两个真实 fake artifact / 重入入口的正向对照；均经实际 executable 入口。 |
+| (a) A2：halt 后的任务继承上一任务 telemetry，未测量次数显示零 | 保留每个 skipped row 新建的 assurance；新增独立 `InheritedStop`，只记录起因 task/group/repeat、上一个任务的 cleanup failure 与环境拒绝原因。task、arm、repeat 均不复制前次 machine checks、cleanup receipt 或 telemetry；报告显式区分 inherited stop。JSON 依据本行 unknown telemetry 输出 `tool_calls` / `unknown_calls: null`，并记录本行 `client_started: false`；继承 stop 的存储行即使被改成 pass，报告仍规范化为 `not_run`。 | 扩展 `lockdown_r3::cleanup_failure_does_not_start_the_next_client`：先证明第一行四种 telemetry available，再对第二行断言全部 unknown、无启动/环境检查/cleanup 操作，并经 `write_reports` 检查单任务 JSON 与 summary JSON 的 null 次数。新增 `ab::halted_tasks_and_ab_repeats_report_inherited_stop_without_new_observations`：经 `run_tasks` / `run_ab` / JSON / HTML / Markdown，验证原始拒绝归属、后续 task/arm/repeat 不捏造观测；同步更新已有 gate/provenance 测试。 |
+| (a) A3：准备前采样时间导致过期证明被准入 | `supervise` 改为接收注入时钟；先完成 preparation、binding/claims 与全部 authenticity verification，再在调用 client work 前读取新时间并核验所有相关证明的排他到期。过期行的 external provenance 置 unknown，拒绝为 `untrusted_attestation`；仍执行 refused teardown，不能生成可评分 pass。运行时 unavailable 路径也传入实时 UTC 时钟，时钟错误按最大时间拒绝。 | `disposable::tests::expiry_during_prepare_or_authentication_refuses_at_final_admission` 经真实 `supervise` 注入 `Cell` 时钟：准备期间 100→102、最后一次真实性验证期间 100→102、恰好到期 101 均禁止 callback、保留 refusal / unknown，并完成 refused cleanup；100 的有效正向对照仍准入。测试也检查生产 report status 规范化为 `not_run`。 |
+| (b) 便宜且明确的报告改进 | cleanup receipt 新增 `allocated` / `no_allocation` / `unknown` disposition；无分配结果不能完成环境契约，旧缺字段结果保持 unknown。README 收窄环境证据覆盖范围，注明 oracle/platform/fake-only 以及 inherited stop 行的区别；A/B Markdown 的每个环境块标注 task/arm/repeat。 | 既有 `json_html_and_ab_reports_render_all_rows_and_sanitized_cleanup` 检查 `no_allocation` 序列化；`critical_unknown_or_incomplete_receipt_never_renders_or_scores_as_pass` 增加 unknown/no-allocation 不计 pass 的回归；上述生产 A/B 报告回归检查具名证据块与归属。 |
+
+验证：直接调用 `rustfmt --edition 2021 --config skip_children=true --check`，15 个改动 Rust 文件的语法/格式检查通过；`git diff --check` 通过。本轮遵守“不运行 Cargo”，Rust 编译、测试执行、clippy 及 Linux/Windows/macOS warning-free 构建均为 **not_run**，需构建机验证；未把格式检查当作编译或平台验收。新代码无 Unix 专用生产依赖；Unix shell sentinel 测试保持原有 `cfg(unix)`，另有可跨平台编译的 executable 回归。
+
+其余 (b) 保持原证据边界：接受 provider 的真实 client/凭据/取消链、逃逸后代的整树 containment、真实签名/信任根/GUI/Stop/网关及三平台回收仍未证明；本轮未把 fake 结果提升为原生保证，也未扩展父死子进程测试的生命周期实现。

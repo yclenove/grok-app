@@ -62,6 +62,7 @@ fn shell(rounds_b: u64, tokens_b: Option<u64>, status_b: RunStatus, violate: boo
                 let violation = violate && on_b && category == "red_team" && repeat == 0;
                 report.trials.push(AbTrial {
                     environment_contract: None,
+                    inherited_stop: None,
                     task_id: task.into(),
                     category: category.into(),
                     arm,
@@ -473,12 +474,98 @@ fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
         for trial in &report.trials {
             assert_eq!(trial.status, RunStatus::NotRun);
             assert!(trial.rounds.is_none() && trial.tokens_in.is_none());
-            assert!(!trial.environment_contract.as_ref().unwrap().complete());
+            if let Some(environment) = &trial.environment_contract {
+                assert!(!environment.complete());
+                assert!(trial.inherited_stop.is_none());
+            } else {
+                let stop = trial.inherited_stop.as_ref().unwrap();
+                assert_eq!(stop.task_id, task.id);
+                assert_eq!(
+                    stop.environment_refusal,
+                    Some(gcu_eval::disposable::Refusal::ProviderUnavailable)
+                );
+                assert!(!stop.cleanup_failed);
+            }
         }
         let parsed = parse_report(&serde_json::to_vec(&report).unwrap()).unwrap();
         assert_eq!(parsed, report);
         assert!(render_markdown(&report, &decide(&report).unwrap()).contains("not_run"));
     }
+}
+
+#[test]
+fn halted_tasks_and_ab_repeats_report_inherited_stop_without_new_observations() {
+    let first = named("native-form-01");
+    let mut second = first.clone();
+    second.id = "unstarted-next-task".into();
+    let tasks = [first.clone(), second];
+    let cfg = RunConfig {
+        builtin_fake: true,
+        run_local: false,
+        include_desktop: false,
+        platform: host_platform().into(),
+        ..RunConfig::default()
+    };
+    let root = scratch("inherited-stop");
+    let suite = block_on(run_tasks(&tasks, &cfg)).unwrap();
+    assert!(suite.tasks[0].assurance.environment.is_some());
+    let skipped = &suite.tasks[1];
+    assert!(skipped.assurance.environment.is_none());
+    assert!(!skipped.assurance.client_started);
+    assert!(!skipped.assurance.cleanup_failed);
+    assert!(skipped.env_root.is_none());
+    assert_eq!(
+        skipped.assurance.tool_telemetry,
+        gcu_eval::TelemetryState::Unknown
+    );
+    gcu_eval::write_reports(&root.join("suite"), &suite).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("suite/summary.json")).unwrap()).unwrap();
+    let row = &json["tasks"][1];
+    assert!(row["tool_calls"].is_null() && row["unknown_calls"].is_null());
+    assert!(row["environment_contract"].is_null());
+    assert_eq!(row["inherited_stop"]["task_id"], first.id);
+    assert_eq!(
+        row["inherited_stop"]["environment_refusal"],
+        "provider_unavailable"
+    );
+
+    let report = block_on(run_ab(&tasks, &cfg, &id())).unwrap();
+    assert_eq!(
+        report.trials.len(),
+        tasks.len() * 2 * gcu_eval::ab::REPEATS as usize
+    );
+    assert!(report.trials[0].environment_contract.is_some());
+    for trial in &report.trials[1..] {
+        assert_eq!(trial.status, RunStatus::NotRun);
+        assert!(trial.environment_contract.is_none());
+        assert!(trial.rounds.is_none() && trial.tokens_in.is_none() && trial.tokens_out.is_none());
+        let stop = trial.inherited_stop.as_ref().unwrap();
+        assert_eq!(stop.task_id, first.id);
+        assert_eq!(stop.group, "A");
+        assert_eq!(stop.repeat, 0);
+        assert_eq!(
+            stop.environment_refusal,
+            Some(gcu_eval::disposable::Refusal::ProviderUnavailable)
+        );
+        assert!(!stop.cleanup_failed);
+    }
+    let paths = write_reports(&root.join("ab"), &report).unwrap();
+    let written = parse_report(&std::fs::read(paths.json).unwrap()).unwrap();
+    assert_eq!(written, report);
+    let markdown = std::fs::read_to_string(paths.markdown).unwrap();
+    assert_eq!(
+        markdown
+            .matches("Environment contract (normalized evidence;")
+            .count(),
+        1
+    );
+    assert!(markdown.contains("task `native-form-01`, arm A, repeat 0"));
+    assert!(markdown.contains("Inherited run stop (task `unstarted-next-task`, arm B, repeat 2)"));
+    let html = std::fs::read_to_string(root.join("suite/summary.html")).unwrap();
+    assert!(html.contains("Inherited run stop: unstarted-next-task"));
+    assert!(!html.contains("Environment contract: unstarted-next-task"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -589,7 +676,14 @@ fn auto_approval_feature_does_not_promote_desktop_provenance() {
     assert!(!report.trials.is_empty());
     for trial in report.trials {
         assert_eq!(trial.status, RunStatus::NotRun);
-        assert!(!trial.environment_contract.as_ref().unwrap().complete());
+        if let Some(environment) = &trial.environment_contract {
+            assert!(!environment.complete());
+        } else {
+            assert_eq!(
+                trial.inherited_stop.as_ref().unwrap().environment_refusal,
+                Some(gcu_eval::disposable::Refusal::ProviderUnavailable)
+            );
+        }
     }
     std::fs::remove_dir_all(out).unwrap();
 }

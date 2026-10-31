@@ -100,7 +100,9 @@ fn task_body(task: &TaskOutcome) -> serde_json::Value {
         "state_telemetry": task.assurance.state_telemetry.as_str(),
         "transcript_telemetry": task.assurance.transcript_telemetry.as_str(),
         "cleanup_failed": task.assurance.cleanup_failed,
+        "client_started": task.assurance.client_started,
         "environment_contract": task.assurance.environment,
+        "inherited_stop": task.assurance.inherited_stop,
         "capture_incomplete": task.assurance.capture_incomplete,
         "tokens_in": task.metrics.tokens_in,
         "tokens_out": task.metrics.tokens_out,
@@ -168,6 +170,15 @@ pub fn render_html(report: &SuiteReport) -> String {
     }
     body.push_str("</table>");
     for task in &report.tasks {
+        if let Some(stop) = &task.assurance.inherited_stop {
+            body.push_str("<h2>Inherited run stop: ");
+            body.push_str(&escape_html(&task.id));
+            body.push_str("</h2><pre>");
+            if let Ok(json) = serde_json::to_string_pretty(stop) {
+                body.push_str(&escape_html(&json));
+            }
+            body.push_str("</pre>");
+        }
         if let Some(environment) = &task.assurance.environment {
             body.push_str("<h2>Environment contract: ");
             body.push_str(&escape_html(&task.id));

@@ -4,8 +4,8 @@
 //! not by the file name of a path. A path in that slot is trusted only when it
 //! is this crate's `eval-fake-agent` or `eval-fake-gcu` artifact beside the
 //! running executable. Every other executable, and every real-driver launch,
-//! refuses until `--attest-disposable-desktop` is set. The flag is an
-//! attestation, not a confinement proof. A same-named copy or wrapper outside
+//! requires the disposable provider gate, which currently refuses all external
+//! launches. Legacy declarations are not evidence. A same-named copy or wrapper outside
 //! that directory is an external client. A hard link that replaces the
 //! artifact in place is not detected.
 
@@ -23,7 +23,7 @@ pub const ATTEST_REQUIRED: &str = concat!(
 );
 
 /// Printed when the built-in fake agent would call an operator-supplied `gcu`.
-pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend without --attest-disposable-desktop: the built-in fake agent may call only the built-in fake gcu unless the operator attests a disposable desktop";
+pub const EXTERNAL_GCU_REFUSED: &str = "refusing an external gcu backend: provider_unavailable; --attest-disposable-desktop is not evidence; the built-in fake agent may call only verified offline artifacts";
 
 /// Printed when a real client would run a red-team task.
 ///

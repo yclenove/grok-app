@@ -309,26 +309,19 @@ impl Default for RunConfig {
 /// client budget. Cancellation: killing the client on timeout.
 pub async fn run_tasks(tasks: &[Task], cfg: &RunConfig) -> SuiteReport {
     let mut rows = Vec::with_capacity(tasks.len() + 1);
-    let mut halted: Option<(String, Assurance)> = None;
+    let mut halted: Option<(String, InheritedStop)> = None;
     for task in tasks {
-        if let Some((reason, assurance)) = &halted {
+        if let Some((reason, stop)) = &halted {
             let mut row = skipped(task, cfg, RunStatus::NotRun, reason);
-            row.assurance = assurance.clone();
-            row.assurance.client_started = false;
+            row.assurance.inherited_stop = Some(stop.clone());
             rows.push(row);
             continue;
         }
         let row = run_one(task, cfg).await;
-        if row.assurance.cleanup_failed
-            || row
-                .assurance
-                .environment
-                .as_ref()
-                .is_some_and(|gate| !gate.complete())
-        {
+        if let Some(stop) = InheritedStop::from_outcome(&row) {
             halted = Some((
                 format!("{}; remaining tasks were not started", row.reason),
-                row.assurance.clone(),
+                stop,
             ));
         }
         rows.push(row);

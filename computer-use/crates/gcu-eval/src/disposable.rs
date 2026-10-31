@@ -282,9 +282,25 @@ pub struct GuaranteeRecord {
     pub checks: Vec<(Probe, Check)>,
 }
 
+/// Whether cleanup concerns an allocated boundary or a no-resource refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupDisposition {
+    /// Older or incomplete evidence does not say whether resources existed.
+    #[default]
+    Unknown,
+    /// Preparation allocated nothing; passed checks do not measure destruction.
+    NoAllocation,
+    /// An allocated boundary required teardown; the checks report its result.
+    Allocated,
+}
+
 /// Sanitized cleanup receipt. No local paths, credentials or raw attestations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupReceipt {
+    /// Distinguishes no-resource cleanup from teardown of an allocated boundary.
+    #[serde(default)]
+    pub disposition: CleanupDisposition,
     /// Teardown trigger.
     pub cause: CleanupCause,
     /// Receipt belongs to the exact prepared subject.
@@ -300,7 +316,8 @@ pub struct CleanupReceipt {
 impl CleanupReceipt {
     /// All cleanup conditions were positively confirmed.
     pub fn complete(&self) -> bool {
-        self.binding_matches
+        self.disposition != CleanupDisposition::Unknown
+            && self.binding_matches
             && [self.whole_tree, self.storage, self.channels]
                 .iter()
                 .all(|check| *check == Check::Passed)
@@ -356,7 +373,9 @@ impl EnvironmentReport {
                         })
             })
             && self.cleanup.as_ref().is_some_and(|receipt| {
-                receipt.cause == CleanupCause::Finished && receipt.complete()
+                receipt.disposition == CleanupDisposition::Allocated
+                    && receipt.cause == CleanupCause::Finished
+                    && receipt.complete()
             })
     }
 }
@@ -364,7 +383,6 @@ impl EnvironmentReport {
 fn evaluate(
     prepared: &Prepared,
     expected: Option<&Binding>,
-    now: u64,
     verifier: &impl AttestationVerifier,
 ) -> EnvironmentReport {
     let mut refusal = match (&prepared.binding, expected) {
@@ -409,7 +427,6 @@ fn evaluate(
             && claims.iter().all(|attestation| {
                 Some(&attestation.binding) == expected
                     && attestation.binding.complete()
-                    && attestation.expires_at > now
                     && verifier.authentic(attestation)
             }) {
             EvidenceState::Attested
@@ -461,10 +478,12 @@ impl<P: DisposableProvider> Drop for Teardown<'_, P> {
 /// Shared ordering used by the stopped real-run path and fake contract tests.
 /// The callback represents *all* client work, including tool preflight. A value
 /// is withheld on cleanup failure, so it cannot turn into a scored pass.
+/// `clock` supplies current UTC Unix seconds at admission, after preparation and
+/// all authenticity verification. An entry-time sample is not sufficient.
 pub(crate) fn supervise<T>(
     provider: &mut impl DisposableProvider,
     expected: Option<&Binding>,
-    now: u64,
+    clock: impl FnOnce() -> u64,
     verifier: &impl AttestationVerifier,
     client_work: impl FnOnce() -> T,
 ) -> (Option<T>, EnvironmentReport) {
@@ -473,7 +492,18 @@ pub(crate) fn supervise<T>(
         closed: false,
     };
     let prepared = held.provider.prepare();
-    let mut report = evaluate(&prepared, expected, now, verifier);
+    let mut report = evaluate(&prepared, expected, verifier);
+    // Final admission boundary: preparation and even the last verifier call may
+    // have crossed an exclusive expiry. No verifier runs after this fresh read.
+    let now = clock();
+    for row in &mut report.guarantees {
+        if prepared.attestations.iter().any(|attestation| {
+            attestation.guarantees.contains(&row.guarantee) && attestation.expires_at <= now
+        }) {
+            row.external = EvidenceState::Unknown;
+            report.refusal.get_or_insert(Refusal::UntrustedAttestation);
+        }
+    }
     let mut value = None;
     let cause = if report.refusal.is_some() {
         CleanupCause::Refused
@@ -482,6 +512,11 @@ pub(crate) fn supervise<T>(
         CleanupCause::Finished
     };
     report.cleanup = held.provider.teardown(cause).map(|proof| CleanupReceipt {
+        disposition: if prepared.binding.is_some() {
+            CleanupDisposition::Allocated
+        } else {
+            CleanupDisposition::NoAllocation
+        },
         cause,
         binding_matches: proof.binding == prepared.binding,
         whole_tree: proof.whole_tree,
@@ -523,7 +558,18 @@ impl AttestationVerifier for Unavailable {
 
 /// There is deliberately no runtime provider/attestation import or override.
 pub(crate) fn unavailable_report() -> EnvironmentReport {
-    supervise(&mut Unavailable, None, 0, &Unavailable, || ()).1
+    supervise(
+        &mut Unavailable,
+        None,
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(u64::MAX, |time| time.as_secs())
+        },
+        &Unavailable,
+        || (),
+    )
+    .1
 }
 
 /// The runnable local surface is fake-only. No flag can substitute a provider.

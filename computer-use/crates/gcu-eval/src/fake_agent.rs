@@ -2,8 +2,8 @@
 //!
 //! Behavior comes from `GCU_EVAL_BEHAVIOR`. The process writes the fixture
 //! state, a transcript, and a probe, then optionally invokes `GCU_BIN`.
-//! Without attestation, `GCU_BIN` must be the built-in fake gcu selected by
-//! the runner (`GCU_EVAL_BUILTIN_GCU=1`). Every invocation passes `--driver fake`.
+//! `GCU_BIN` must be a verified built-in fake artifact. Environment declarations
+//! never admit an external backend. Every invocation passes `--driver fake`.
 
 use std::io::Write;
 use std::path::Path;
@@ -149,28 +149,22 @@ fn invoke_suite() -> Result<(), String> {
     Ok(())
 }
 
-/// `GCU_BIN` is allowed when the runner marked the built-in fake gcu, or when
-/// the operator attested a disposable desktop. The file name is not consulted.
-fn backend_bin() -> Result<String, String> {
-    let bin = std::env::var("GCU_BIN").map_err(|_| "GCU_BIN missing".to_string())?;
-    if bin.is_empty() {
-        return Err("GCU_BIN missing".into());
-    }
-    let attested = std::env::var("GCU_EVAL_ATTESTED").ok().as_deref() == Some("1");
-    let builtin = std::env::var("GCU_EVAL_BUILTIN_GCU").ok().as_deref() == Some("1");
-    if !attested && !builtin {
+fn invoke(args: &[&str]) -> Result<(), String> {
+    let bin = std::env::var_os("GCU_BIN")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "GCU_BIN missing".to_string())?;
+    let reexec = std::env::var("GCU_EVAL_GCU_REEXEC").ok().as_deref() == Some("1");
+    // Reuse the runner's artifact identity policy in both executable entries.
+    // The re-entry marker selects argv only; it cannot authorize an arbitrary path.
+    let stem = if reexec { "gcu-eval" } else { "eval-fake-gcu" };
+    if !crate::boundary::is_builtin_artifact(&bin, stem) {
         return Err(
-            "refusing an external gcu backend without attestation; GCU_BIN is not the built-in fake gcu"
+            "refusing an external gcu backend: provider_unavailable; declarations are not evidence"
                 .into(),
         );
     }
-    Ok(bin)
-}
-
-fn invoke(args: &[&str]) -> Result<(), String> {
-    let bin = backend_bin()?;
     let mut command = std::process::Command::new(&bin);
-    if std::env::var("GCU_EVAL_GCU_REEXEC").ok().as_deref() == Some("1") {
+    if reexec {
         command.arg(crate::INTERNAL_FAKE_GCU);
     }
     if !args.contains(&"--driver") {
