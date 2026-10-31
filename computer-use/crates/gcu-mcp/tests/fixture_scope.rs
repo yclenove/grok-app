@@ -624,12 +624,16 @@ impl ScriptRunner for ObserveRunner {
 }
 
 fn host(decisions: usize) -> Host {
+    recording_host(decisions).0
+}
+
+fn recording_host(decisions: usize) -> (Host, Arc<ScriptedApprovals>) {
     let approvals = Arc::new(ScriptedApprovals::new());
     for _ in 0..decisions {
         approvals.push_decision(ApprovalDecision::Session);
     }
-    Host {
-        approvals,
+    let host = Host {
+        approvals: approvals.clone(),
         policy: Arc::new(MemoryPolicyStore::new(PolicyConfig {
             sensitive_action_confirmation: ConfirmationLevel::Off,
             allow_foreground: ForegroundPolicy::Always,
@@ -638,14 +642,19 @@ fn host(decisions: usize) -> Host {
         })),
         events: Arc::new(RecordingEventSink::new()),
         activity: Arc::new(FakeUserActivity::new()),
-    }
+    };
+    (host, approvals)
 }
 
 async fn open_scoped(spy: Spy, profile: Profile) -> Connection {
+    open_scoped_with_host(spy, profile, host(32)).await
+}
+
+async fn open_scoped_with_host(spy: Spy, profile: Profile, host: Host) -> Connection {
     Connection::open_scoped(
         spy,
         ScopeLease::install(allowed_scope()),
-        host(32),
+        host,
         ServerConfig {
             profile,
             script: Some(Arc::new(ObserveRunner)),
@@ -849,7 +858,9 @@ async fn each_profile_dispatches_every_listed_tool_through_the_server() {
             for mode in ["targeted", "foreground", "clipboard"] {
                 let spy = Spy::new().input_mode(mode);
                 let probe = spy.clone();
-                let mut rpc = Rpc::serve(spy, profile).await;
+                let (host, approvals) = recording_host(32);
+                let mut rpc =
+                    Rpc::from_connection(open_scoped_with_host(spy, profile, host).await).await;
                 rpc.initialize().await;
                 let listed = rpc.request("tools/list", json!({})).await;
                 assert_rpc_clean("catalog", &listed);
@@ -881,6 +892,14 @@ async fn each_profile_dispatches_every_listed_tool_through_the_server() {
                                 assert_rpc_clean(&label, &result);
                             } else {
                                 assert_rpc_denied(&label, &result);
+                                assert!(
+                                    approvals.app_requests().is_empty(),
+                                    "{label}: requested app approval"
+                                );
+                                assert!(
+                                    approvals.confirm_requests().is_empty(),
+                                    "{label}: requested confirmation"
+                                );
                             }
                         }
                     }
@@ -976,6 +995,61 @@ async fn each_profile_dispatches_every_listed_tool_through_the_server() {
                         "{profile:?}/{mode}: outside {operation}"
                     );
                 }
+                rpc.close().await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn scoped_launch_dispatch_refuses_before_approval_with_default_policy_and_stop() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for app in ["fixture.a", "fixture.c"] {
+            for stopped in [false, true] {
+                let spy = Spy::new();
+                let probe = spy.clone();
+                let (mut host, approvals) = recording_host(0);
+                approvals.push_decision(ApprovalDecision::Deny);
+                approvals.push_confirm(false);
+                host.policy = Arc::new(MemoryPolicyStore::new(PolicyConfig::default()));
+                let activity = Arc::new(FakeUserActivity::new());
+                host.activity = activity.clone();
+                let mut rpc =
+                    Rpc::from_connection(open_scoped_with_host(spy, Profile::Default, host).await)
+                        .await;
+                rpc.initialize().await;
+                let discovery = probe.load(&probe.counts.discovery);
+                if stopped {
+                    activity.request_stop();
+                }
+                let result = rpc.call("launch_app", json!({"app":app})).await;
+                if stopped {
+                    assert_eq!(
+                        result["structuredContent"]["error"]["code"], "stopped_by_user",
+                        "{result}"
+                    );
+                    assert!(result["structuredContent"].get("state").is_none());
+                    assert!(result["structuredContent"]["error"].get("state").is_none());
+                    assert!(result["structuredContent"]["error"]
+                        .get("windows")
+                        .is_none());
+                    assert!(result["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|block| block["type"] == "text"));
+                } else {
+                    assert_rpc_denied(app, &result);
+                }
+                assert!(approvals.app_requests().is_empty());
+                assert!(approvals.confirm_requests().is_empty());
+                assert_eq!(probe.load(&probe.counts.discovery), discovery);
+                assert_eq!(probe.load(&probe.counts.content), 0);
+                assert_eq!(probe.load(&probe.counts.capture), 0);
+                assert_eq!(probe.load(&probe.counts.perform), 0);
+                assert_eq!(probe.load(&probe.counts.launch), 0);
                 rpc.close().await;
             }
         }

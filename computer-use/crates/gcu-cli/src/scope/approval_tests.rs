@@ -13,14 +13,74 @@ use gcu_core::{
 use gcu_driver_fake::FakeDriver;
 use gcu_host_api::{
     testing::{FakeUserActivity, RecordingEventSink},
-    ConfirmationLevel, ForegroundPolicy, PolicyConfig, PolicyStore, UserActivity,
+    ActionSummary, AppInfo, ApprovalDecision, ApprovalProvider, Cancel, ConfirmationLevel,
+    ForegroundPolicy, HandoffReason, ImageRef, ModelReason, PolicyConfig, PolicyStore, Risk,
+    SessionCtx, UserActivity,
 };
 use gcu_protocol::{tools::*, ErrorCode};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 
 const SCENE: &str = include_str!("../../../gcu-mcp/tests/fixture_scope/desktop.ron");
 const MODES: [&str; 3] = ["auto-allow-turn", "auto-allow-session", "auto-allow-always"];
+
+// Observe the real provider's entry points, including calls that eval would
+// immediately grant. A scope refusal must never ask either kind of approval.
+struct ApprovalProbe {
+    inner: Approvals,
+    forbidden: AtomicBool,
+    apps: AtomicUsize,
+    confirms: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl ApprovalProvider for ApprovalProbe {
+    async fn request_app(
+        &self,
+        session: &SessionCtx,
+        app: &AppInfo,
+        reason: Option<&ModelReason>,
+        risk: Risk,
+        cancel: &Cancel,
+    ) -> ApprovalDecision {
+        self.apps.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.forbidden.load(Ordering::SeqCst),
+            "scope refusal requested app approval"
+        );
+        self.inner
+            .request_app(session, app, reason, risk, cancel)
+            .await
+    }
+    async fn confirm_action(
+        &self,
+        session: &SessionCtx,
+        app: &AppInfo,
+        summary: &ActionSummary,
+        crop: Option<&ImageRef>,
+        cancel: &Cancel,
+    ) -> bool {
+        self.confirms.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.forbidden.load(Ordering::SeqCst),
+            "scope refusal requested confirmation"
+        );
+        self.inner
+            .confirm_action(session, app, summary, crop, cancel)
+            .await
+    }
+    async fn handoff(
+        &self,
+        session: &SessionCtx,
+        app: &AppInfo,
+        reason: HandoffReason,
+        cancel: &Cancel,
+    ) {
+        self.inner.handoff(session, app, reason, cancel).await;
+    }
+}
 
 async fn scope(evidence: &FakeEvidence, generation: u64) -> FixtureScope {
     let mut targets = Vec::new();
@@ -73,10 +133,19 @@ struct Fixture {
     lease: ScopeLease,
     activity: Arc<FakeUserActivity>,
     policy: Arc<HostPolicy>,
+    approvals: Arc<ApprovalProbe>,
     home: tempfile::TempDir,
 }
 impl Fixture {
     async fn open(mode: &str, config: PolicyConfig, targeted: bool, scene: &str) -> Self {
+        Self::open_with_mode(Some(mode), config, targeted, scene).await
+    }
+    async fn open_with_mode(
+        mode: Option<&str>,
+        config: PolicyConfig,
+        targeted: bool,
+        scene: &str,
+    ) -> Self {
         let home = tempfile::tempdir().unwrap();
         let policy = Arc::new(HostPolicy::open(config, home.path().join("approvals.json")));
         let driver = FakeDriver::from_ron(scene)
@@ -85,11 +154,17 @@ impl Fixture {
         let evidence = FakeEvidence::new(driver.clone()).await.unwrap();
         let lease = ScopeLease::install(scope(&evidence, 1).await);
         let activity = Arc::new(FakeUserActivity::new());
+        let approvals = Arc::new(ApprovalProbe {
+            inner: Approvals::new(mode.map(str::to_owned), policy.clone()),
+            forbidden: AtomicBool::new(false),
+            apps: AtomicUsize::new(0),
+            confirms: AtomicUsize::new(0),
+        });
         let router = ActionRouter::with_fixture_scope(
             evidence.clone(),
             lease.clone(),
             activity.clone(),
-            Arc::new(Approvals::new(Some(mode.into()), policy.clone())),
+            approvals.clone(),
             policy.clone(),
             Arc::new(RecordingEventSink::new()),
             WindowLocks::new(),
@@ -104,6 +179,7 @@ impl Fixture {
             lease,
             activity,
             policy,
+            approvals,
             home,
         }
     }
@@ -128,6 +204,91 @@ impl Fixture {
         call.settle_budget_ms = Some(0);
         self.router.execute(&self.session, call).await
     }
+}
+
+#[tokio::test]
+async fn scoped_launch_never_enters_production_approvals_in_core_or_mcp() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for mode in MODES.into_iter().map(Some).chain([None]) {
+            for app in ["fixture.a", "fixture.c"] {
+                for stopped in [false, true] {
+                    let f =
+                        Fixture::open_with_mode(mode, PolicyConfig::default(), true, SCENE).await;
+                    f.approvals.forbidden.store(true, Ordering::SeqCst);
+                    let mut connection = gcu_mcp::Connection::open_scoped(
+                        f.evidence.clone(),
+                        f.lease.clone(),
+                        gcu_mcp::Host {
+                            approvals: f.approvals.clone(),
+                            policy: f.policy.clone(),
+                            events: Arc::new(RecordingEventSink::new()),
+                            activity: f.activity.clone(),
+                        },
+                        gcu_mcp::ServerConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    if stopped {
+                        f.activity.request_stop();
+                    }
+                    let out = f
+                        .router
+                        .launch_app(
+                            &f.session,
+                            "launch",
+                            LaunchAppParams {
+                                app: app.into(),
+                                reason: None,
+                            },
+                        )
+                        .await;
+                    let expected = if stopped {
+                        ErrorCode::StoppedByUser
+                    } else {
+                        ErrorCode::AppDenied
+                    };
+                    let err = out.error.unwrap();
+                    assert_eq!(err.code, expected, "{mode:?}/{app}/{stopped}");
+                    if !stopped {
+                        assert_eq!(err.message, SCOPE_DENIED_MESSAGE);
+                    }
+                    assert!(err.state.is_none() && out.windows.is_empty());
+                    assert!(out.state.is_none() && out.action.target.is_none());
+                    assert_eq!(out.action.outcome, gcu_protocol::result::Outcome::Refused);
+                    assert_eq!(out.action.delivery, gcu_protocol::result::Delivery::None);
+                    let result = serde_json::to_value(
+                        connection.call("launch_app", json!({"app":app})).await,
+                    )
+                    .unwrap();
+                    let error = &result["structuredContent"]["error"];
+                    assert_eq!(
+                        error["code"],
+                        serde_json::to_value(expected).unwrap(),
+                        "{result}"
+                    );
+                    if !stopped {
+                        assert_eq!(error["message"], SCOPE_DENIED_MESSAGE);
+                    }
+                    assert_eq!(result["isError"], true);
+                    assert!(error.get("state").is_none() && error.get("windows").is_none());
+                    assert!(result["structuredContent"].get("state").is_none());
+                    assert!(result["structuredContent"].get("windows").is_none());
+                    assert!(result["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|block| block["type"] == "text"));
+                    assert_eq!(f.approvals.apps.load(Ordering::SeqCst), 0);
+                    assert_eq!(f.approvals.confirms.load(Ordering::SeqCst), 0);
+                    assert!(!f.home.path().join("approvals.json").exists());
+                    assert!(f.policy.load().always.is_empty());
+                    connection.close().await.unwrap();
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
 }
 fn config() -> PolicyConfig {
     PolicyConfig {
@@ -193,6 +354,7 @@ async fn auto_app_grants_intersect_scope_and_stop_and_never_write_always() {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         for mode in MODES {
             let f = Fixture::open(mode, config(), true, SCENE).await;
+            f.approvals.forbidden.store(true, Ordering::SeqCst);
             for (app, window) in [
                 ("fixture.c", "w-c"),
                 ("fixture.d", "w-d"),
@@ -204,6 +366,9 @@ async fn auto_app_grants_intersect_scope_and_stop_and_never_write_always() {
                 assert_eq!(error.message, SCOPE_DENIED_MESSAGE);
                 assert!(error.state.is_none());
             }
+            assert_eq!(f.approvals.apps.load(Ordering::SeqCst), 0);
+            assert_eq!(f.approvals.confirms.load(Ordering::SeqCst), 0);
+            f.approvals.forbidden.store(false, Ordering::SeqCst);
             for (app, window) in [
                 ("fixture.a", "w-a"),
                 ("fixture.a", "w-a2"),

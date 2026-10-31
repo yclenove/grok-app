@@ -118,6 +118,8 @@ async fn catalog_calls_on_external_targets_do_not_touch_content() {
             Target::Unregistered,
         ] {
             exercise(&world, &name, target).await;
+            assert!(world.approvals.app_requests().is_empty(), "{name}");
+            assert!(world.approvals.confirm_requests().is_empty(), "{name}");
         }
     }
     assert_eq!(
@@ -127,6 +129,58 @@ async fn catalog_calls_on_external_targets_do_not_touch_content() {
     );
     assert_eq!(world.spy.windows_none(), 0);
     assert_eq!(world.spy.resolve_calls(), 0);
+}
+
+#[tokio::test]
+async fn scoped_launch_refuses_before_resolution_or_approval_with_stop_priority() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for app in ["fixture.a", "fixture.c"] {
+            for stopped in [false, true] {
+                let world = World::open(Default::default());
+                // Return promptly and record any unexpected authorization.
+                world.approvals.push_confirm(false);
+                let before = world.spy.external();
+                let metadata = world.spy.metadata();
+                if stopped {
+                    world.activity.request_stop();
+                }
+                let out = world
+                    .router
+                    .launch_app(
+                        &world.session,
+                        "scope-launch",
+                        LaunchAppParams {
+                            app: app.into(),
+                            reason: None,
+                        },
+                    )
+                    .await;
+                let err = out.error.unwrap();
+                assert_eq!(
+                    err.code,
+                    if stopped {
+                        ErrorCode::StoppedByUser
+                    } else {
+                        ErrorCode::AppDenied
+                    }
+                );
+                if !stopped {
+                    assert_eq!(err.message, SCOPE_DENIED_MESSAGE);
+                }
+                assert!(err.state.is_none() && out.windows.is_empty());
+                assert!(out.state.is_none() && out.action.target.is_none());
+                assert_eq!(out.action.outcome, Outcome::Refused);
+                assert_eq!(out.action.delivery, gcu_protocol::result::Delivery::None);
+                assert!(world.approvals.app_requests().is_empty());
+                assert!(world.approvals.confirm_requests().is_empty());
+                assert_eq!(world.spy.external(), before);
+                assert_eq!(world.spy.metadata(), metadata);
+                assert_eq!(world.spy.resolve_calls(), 0);
+            }
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

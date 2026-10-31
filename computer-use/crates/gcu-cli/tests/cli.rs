@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus, Stdio};
 use tempfile::TempDir;
 #[cfg(target_os = "linux")]
 #[path = "support/resume.rs"]
@@ -420,7 +420,7 @@ fn config_malformed_or_invalid_values_exit_two() {
 struct Mcp {
     child: Child,
     input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    output: std::sync::mpsc::Receiver<std::io::Result<String>>,
     id: u64,
 }
 impl Mcp {
@@ -432,6 +432,9 @@ impl Mcp {
         )
     }
     fn start_with_approval(h: &TempDir, profile: &str, automatic: bool) -> Self {
+        Self::start_with_mode(h, profile, automatic.then_some("auto-allow-session"))
+    }
+    fn start_with_mode(h: &TempDir, profile: &str, mode: Option<&str>) -> Self {
         let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gcu"));
         c.args([
             "mcp",
@@ -456,13 +459,31 @@ impl Mcp {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-        if automatic {
-            c.env("GCU_APPROVAL", "auto-allow-session")
+        if let Some(mode) = mode {
+            c.env("GCU_APPROVAL", mode)
                 .env("GCU_EVAL_ORACLE_FILE", h.path().join("oracle.json"));
         }
         let mut child = c.spawn().unwrap();
         let input = child.stdin.take();
-        let output = BufReader::new(child.stdout.take().unwrap());
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let (lines, output) = std::sync::mpsc::sync_channel(1);
+        // A pipe read has no portable deadline. Keep it off the test thread;
+        // timeout/panic drops Mcp, kills the child and closes this reader's pipe.
+        let _reader = std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if lines.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = lines.send(Err(error));
+                    break;
+                }
+            }
+        });
         let mut m = Self {
             child,
             input,
@@ -480,8 +501,11 @@ impl Mcp {
     fn request(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
         self.send(json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params}));
-        let mut line = String::new();
-        assert!(self.output.read_line(&mut line).unwrap() > 0);
+        let line = self
+            .output
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("MCP response timed out or stdout closed")
+            .unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["id"], self.id, "{v}");
         assert!(v.get("error").is_none(), "{v}");
@@ -492,7 +516,23 @@ impl Mcp {
     }
     fn close(mut self) {
         self.input.take();
-        assert!(self.child.wait().unwrap().success());
+        let status = self
+            .wait_for_exit(std::time::Duration::from_secs(10))
+            .unwrap()
+            .expect("MCP child did not exit after stdin closed");
+        assert!(status.success(), "{status}");
+    }
+    fn wait_for_exit(&mut self, limit: std::time::Duration) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(Some(status));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -522,7 +562,7 @@ fn assert_form_oracle_unchanged(path: &std::path::Path) {
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
-fn call_form_click_is_verified_by_oracle_and_image_survives_exit() {
+fn call_form_sensitive_mutations_are_denied_and_observation_image_survives_exit() {
     let h = TempDir::new().unwrap();
     let oracle = h.path().join("oracle.json");
     for (tool, args) in [
@@ -683,7 +723,7 @@ fn call_config_denied_app_and_observation_limits_are_enforced() {
 impl Drop for Mcp {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.wait_for_exit(std::time::Duration::from_secs(2));
     }
 }
 
@@ -781,7 +821,7 @@ fn mcp_control_stop_persists_across_process_restart() {
 
 #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
 #[test]
-fn mcp_form_submit_process_is_verified_by_fake_oracle() {
+fn mcp_form_sensitive_mutations_are_denied_without_changing_fake_oracle() {
     // As in the one-shot test, the explicit Name click needs only the app grant;
     // unindexed typing (unknown policy target) and Submit need sensitive confirms.
     // Close a separate process after each refusal to check its independent oracle.
@@ -804,6 +844,83 @@ fn mcp_form_submit_process_is_verified_by_fake_oracle() {
         assert_confirmation_denied(&denied);
         m.close();
         assert_form_oracle_unchanged(&h.path().join("oracle.json"));
+    }
+}
+
+#[cfg(all(
+    unix,
+    feature = "script",
+    feature = "eval-autoapprove",
+    debug_assertions
+))]
+#[test]
+fn mcp_production_worker_and_batch_hard_stop_after_confirmation_denial() {
+    for mode in ["auto-allow-turn", "auto-allow-session", "auto-allow-always"] {
+        for script in [false, true] {
+            let h = TempDir::new().unwrap();
+            let mut m = Mcp::start_with_mode(&h, "full", Some(mode));
+            let seen = m.call(
+                "get_app_state",
+                json!({"app":"fake.form","include_screenshot":false}),
+            );
+            assert_eq!(seen["isError"], false, "{seen}");
+            if script {
+                // Both mutations run inside the actual supervised worker. The
+                // second would set Name if catching the first refusal cleared
+                // the worker's hard stop latch.
+                let result = m.call(
+                    "computer_script",
+                    json!({
+                        "code": r#"
+                        const app = await cu.app("fake.form");
+                        const state = await app.state({ screenshot: false });
+                        const submit = state.find({ name: "Submit" });
+                        const name = state.find({ role: "text_field" });
+                        try { await app.click(submit); } catch (e) {}
+                        await app.setValue(name, "later");
+                        return "after-refusal";
+                    "#,
+                        "timeout_ms": 5000
+                    }),
+                );
+                assert_eq!(result["isError"], true, "{mode}: {result}");
+                assert_eq!(
+                    result["structuredContent"]["error"]["code"], "approval_denied",
+                    "{result}"
+                );
+                assert!(!result.to_string().contains("after-refusal"), "{result}");
+            } else {
+                let result = m.call(
+                    "computer_batch",
+                    json!({
+                        "app":"fake.form",
+                        "steps":[
+                            {"click":{"element_index":3}},
+                            {"set_value":{"element_index":1,"value":"later"}}
+                        ],
+                        "stop_on_error":false,
+                        "final_state":false
+                    }),
+                );
+                assert_confirmation_denied(&result);
+                assert_eq!(result["structuredContent"]["failed_step"], 0, "{result}");
+                assert_eq!(
+                    result["structuredContent"]["steps"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            }
+            m.close();
+            assert_form_oracle_unchanged(&h.path().join("oracle.json"));
+            let grants = if cfg!(target_os = "macos") {
+                config_directory(&h).join("state/approvals.json")
+            } else {
+                h.path().join("state/grok-computer-use/approvals.json")
+            };
+            assert!(!grants.exists(), "{mode} persisted a grant");
+        }
     }
 }
 

@@ -40,3 +40,16 @@ Nice-to-have:
 - Rename the CLI tests still named “form submit/click ... verified by oracle” to describe their new confirmation-denial assertions (`gcu-cli/tests/cli.rs:525`, `:784`). Bound `Mcp::request`/`close` too (`:480`, `:493`): their synchronous read/wait currently has no local timeout, so a stalled child can stall this newly enabled CI test path.
 
 Validation: static inspection only; `git diff --check origin/feat/cu-v2...HEAD` passed. Cargo, compilation, tests, mutation runs and CI execution **not_run**; no network, SSH, model calls or desktop execution. Source/tests unchanged; only this uncommitted report was written.
+
+## 修复记录
+
+| 项目 | 修复 | 回归 / 验证 |
+| --- | --- | --- |
+| S5-A1：scope 禁止的 launch 先进入审批 | `ActionRouter::launch_queued` 在现有 Stop / closed-session 检查之后、resolve / authorize 之前直接返回固定 `ScopeDenied`；保留 `ScopedDriver::launch_app` 的独立拒绝。复查 observe、普通输入、wait / expect、batch 与 script 的路由：目标解析、窗口 / 观察来源检查均先于 authorize，未发现另一条同类的无条件 scope 拒绝后置路径；不改变投递前复验。 | core `scoped_launch_refuses_before_resolution_or_approval_with_stop_priority` 和真实 MCP 流 `scoped_launch_dispatch_refuses_before_approval_with_default_policy_and_stop` 覆盖 A / C、默认策略及 Stop；断言固定拒绝、无 state / windows / 图片、零审批 / 确认、零平台 read / capture / perform / launch，launch 连 discovery / resolve 都不进入。Stop 时要求 `stopped_by_user`。 |
+| S5-A1：生产 provider 与宽松矩阵的证据缺口 | 给真实 `Approvals` 加测试用计数代理；scope 拒绝用例只要进入 app / confirm 回调就立即失败。core 和 MCP 工具矩阵均保留审批记录，并在 scope 拒绝后断言两个回调的请求数为零；MCP 的允许目标正向阶段继续使用原有脚本授权。 | `scoped_launch_never_enters_production_approvals_in_core_or_mcp` 通过 direct core 和 `Connection::call` 的生产 dispatcher，覆盖三个 eval allow 模式及 mode 缺省、A / C、默认策略及 Stop，并检查无持久 grant。原生产 provider 的 C / D / A3 / forged-window 观察矩阵也加入零回调断言。 |
+| Nice-to-have：MCP 测试本地等待无界、旧测试名不符断言 | CLI 测试 `Mcp` 的 stdout 放到独立 reader thread，响应等待限 20 秒；close 使用 `try_wait`，限 10 秒；Drop kill 后回收轮询限 2 秒，不再无界 `wait` / join。两个旧 oracle 测试改名为敏感确认拒绝。 | 现有 CLI / stdio MCP 进程用例共用该有界 helper；新回归也使用同一路径。仅使用跨平台标准库 API，无 Unix-only import 泄漏。 |
+| Nice-to-have / (b)：生产 worker + eval 与 batch 组合 | 新增普通 stdio MCP 的真实生产 worker / batch 回归；三个 eval allow 模式下，观察 form 后拒绝 Submit，再尝试原本允许的 Name 写入。batch 显式 `stop_on_error=false`；JS 捕获首次拒绝后继续尝试写入。Linux 原有 script Clippy / test 步骤同时开启 `script,eval-autoapprove`，确保该测试被选中。 | `mcp_production_worker_and_batch_hard_stop_after_confirmation_denial` 要求 `approval_denied`、后续操作不执行、oracle 文本不变 / Submit 为零 / 无 held input / 无持久 grant。该进程回归使用 fake desktop、普通 MCP；与 scoped bootstrap / worker 的完整合成仍未执行，不外推原生或真实评测证据。 |
+
+本轮验证：固定工具链的直接 `rustfmt --check`（未调用 Cargo）、`git diff --check`、计划文档检查均 **PASS**。新增 Rust 回归、Clippy、Linux / Windows / macOS 编译和 CI、release-profile 环境门禁均 **not_run**（按任务要求不运行 Cargo）；跨平台结果仍须由对应 CI / 构建机确认。没有模型调用、SSH 或真实桌面操作；S1 / S3 已记录的原生投递、已交付缓存、Stop-waker 和发布活性残余不在本轮扩大修复范围。
+
+提交：尝试 `git add` 时，沙箱拒绝在工作树外的 `/home/claude/src/grok-app/.git/worktrees/cu2-s5/index.lock` 写入（`Read-only file system`）；按任务要求保留未提交改动，未推送。

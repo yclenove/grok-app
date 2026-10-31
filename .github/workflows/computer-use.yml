@@ -105,9 +105,9 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo clippy --locked --workspace --all-targets --features gcu-driver-linux/pipewire -- -D warnings
 
-      - name: cargo clippy (Linux script)
+      - name: cargo clippy (Linux script + eval-autoapprove)
         if: runner.os == 'Linux'
-        run: cargo clippy --locked -p gcu-cli -p gcu-mcp -p gcu-script --all-targets --features gcu-cli/script -- -D warnings
+        run: cargo clippy --locked -p gcu-cli -p gcu-mcp -p gcu-script --all-targets --features gcu-cli/script,gcu-cli/eval-autoapprove -- -D warnings
 
       # macos-webview compiles tao/wry for the helper onboarding window (ADR 0009).
       # Windows keeps the default feature set. Linux never enables this feature.
@@ -119,9 +119,9 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked --workspace --features gcu-driver-linux/pipewire
 
-      - name: cargo test (Linux script)
+      - name: cargo test (Linux script + eval-autoapprove)
         if: runner.os == 'Linux'
-        run: cargo test --locked -p gcu-cli -p gcu-mcp -p gcu-script --features gcu-cli/script
+        run: cargo test --locked -p gcu-cli -p gcu-mcp -p gcu-script --features gcu-cli/script,gcu-cli/eval-autoapprove
 
       - name: cargo test (non-Linux)
         if: runner.os != 'Linux'
