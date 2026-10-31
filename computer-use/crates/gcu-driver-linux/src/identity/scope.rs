@@ -803,15 +803,6 @@ impl ScopeBinding {
         &self.oracle
     }
 
-    /// Live instance of `app_id` when `pid` is the stored catalog right now.
-    ///
-    /// Delegates to [`Self::discovered_from`] with this binding's catalog.
-    /// An empty id or a zero pid is `None`. This does not call D-Bus or X11.
-    /// The clock may read `/proc`.
-    pub(crate) fn discovered_instance(&self, app_id: &str, pid: u32) -> Option<ProcessInstance> {
-        self.discovered_from(&self.gate, app_id, pid)
-    }
-
     /// Live instance of `app_id` when `pid` is `gate` right now.
     ///
     /// Every window of the app in `gate` must use this pid. The clock must
