@@ -67,6 +67,9 @@ pub trait ClipboardApi: Send + Sync + 'static {
     fn pending(&self) -> bool;
 }
 
+#[cfg(windows)]
+pub use super::ffi::clipboard::NativeClipboard;
+
 #[cfg(test)]
 mod tests {
     use super::{authorize_publish, bind_admitted_proof, PublishProof};
@@ -131,6 +134,3 @@ mod tests {
         assert!(!context.maybe_executed());
     }
 }
-
-#[cfg(windows)]
-pub use super::ffi::clipboard::NativeClipboard;

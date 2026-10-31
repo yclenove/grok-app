@@ -14,13 +14,14 @@ use gcu_driver_windows::{
     capture::{CaptureBackend, CapturePath, FakeCapture, Paint},
     desktop::HwndStamp,
     input::{fake::FakeInput, InputBackend},
-    testing::window,
+    testing::{window, FakeWinApi},
     uia::{
         actions,
         cache::{Patterns, Properties},
         source::{FakeNode, FakeUia, NodeId, UiaSource},
         UiaElement,
     },
+    WindowsDriver,
 };
 use gcu_protocol::AppInfo;
 use std::{sync::Arc, time::Duration};
@@ -95,19 +96,14 @@ async fn evidence_ignores_path_and_rejects_pid_reuse_hwnd_reuse_and_a_forged_id(
     );
 }
 
-#[tokio::test]
-async fn unproved_creation_time_does_not_capture_or_return_geometry() {
-    let (api, driver, app, _) = common::fixture().await;
+fn clear_creation_time(api: &FakeWinApi) {
     api.update(|state| {
         state.processes.get_mut(&7).unwrap().created = 0;
         state.windows[0].process_created = 0;
     });
-    let listed = driver.list_windows(Some(&app)).await.unwrap();
-    assert_eq!(listed.len(), 1);
-    let win = WindowRef {
-        app,
-        id: listed[0].id.clone(),
-    };
+}
+
+fn painted(driver: WindowsDriver) -> WindowsDriver {
     let wgc = Arc::new(FakeCapture::new(CapturePath::Wgc));
     let print = Arc::new(FakeCapture::new(CapturePath::PrintWindow));
     wgc.paint(
@@ -119,7 +115,29 @@ async fn unproved_creation_time_does_not_capture_or_return_geometry() {
             mark: None,
         },
     );
-    let driver = driver.with_capture(Arc::new(CaptureBackend::new(wgc, print)));
+    driver.with_capture(Arc::new(CaptureBackend::new(wgc, print)))
+}
+
+async fn unproved_window(api: &FakeWinApi, driver: &WindowsDriver, app: AppRef) -> WindowRef {
+    clear_creation_time(api);
+    let listed = driver.list_windows(Some(&app)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].id.starts_with("8:7:0:63:"),
+        "hwnd 8, pid 7, creation time 0, generation 99"
+    );
+    WindowRef {
+        app,
+        id: listed[0].id.clone(),
+    }
+}
+
+#[tokio::test]
+async fn unproved_creation_time_does_not_capture_or_return_geometry() {
+    let (api, driver, app, _) = common::fixture().await;
+    driver.note_scoped_session();
+    let win = unproved_window(&api, &driver, app).await;
+    let driver = painted(driver);
     denied(
         driver
             .capture(&win, &CaptureOpts::default(), &Cancel::default())
@@ -131,6 +149,31 @@ async fn unproved_creation_time_does_not_capture_or_return_geometry() {
     assert_eq!(stats.print_window_attempts, 0);
     assert_eq!(stats.published, 0);
     denied(driver.window_geometry(&win).await.unwrap_err());
+}
+
+#[tokio::test]
+async fn unscoped_unproved_creation_time_returns_geometry_and_capture() {
+    let (api, driver, app, _) = common::fixture().await;
+    let win = unproved_window(&api, &driver, app).await;
+    let driver = painted(driver);
+    let capture = driver
+        .capture(&win, &CaptureOpts::default(), &Cancel::default())
+        .await
+        .unwrap();
+    assert_eq!(capture.width, 800);
+    assert_eq!(capture.height, 600);
+    assert_eq!(capture.mime, "image/png");
+    assert!(!capture.bytes.is_empty());
+    assert_eq!(capture.geometry.frame.w, 800.0);
+    assert_eq!(capture.geometry.frame.h, 600.0);
+    assert_eq!(capture.geometry.scale, 1.0);
+    let stats = driver.capture_stats().unwrap();
+    assert_eq!(stats.wgc_attempts, 1);
+    assert_eq!(stats.print_window_attempts, 0);
+    assert_eq!(stats.published, 1);
+    let geometry = driver.window_geometry(&win).await.unwrap();
+    assert_eq!(geometry.frame, capture.geometry.frame);
+    assert_eq!(geometry.scale, capture.geometry.scale);
 }
 
 #[tokio::test]
