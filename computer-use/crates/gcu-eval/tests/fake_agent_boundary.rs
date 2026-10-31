@@ -47,14 +47,19 @@ impl Drop for OwnedChild {
     }
 }
 
-/// Windows copies of a freshly written executable can fail one `CreateProcess`
-/// with `ERROR_SHARING_VIOLATION` (32). Only that code is retried.
-fn is_sharing_violation(err: &std::io::Error) -> bool {
+/// A freshly written executable can fail one spawn while another thread still
+/// holds its write handle: `ERROR_SHARING_VIOLATION` (32) on Windows,
+/// `ETXTBSY` "Text file busy" (26) on Unix. Only that one code is retried.
+fn is_transient_spawn_error(err: &std::io::Error) -> bool {
     #[cfg(windows)]
     {
         err.raw_os_error() == Some(32)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(26)
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = err;
         false
@@ -77,7 +82,7 @@ fn bounded_output(command: &mut Command) -> Output {
                 spawned = Some(child);
                 break;
             }
-            Err(error) if is_sharing_violation(&error) && attempt < 4 => {
+            Err(error) if is_transient_spawn_error(&error) && attempt < 4 => {
                 last_error = Some(error);
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -85,7 +90,7 @@ fn bounded_output(command: &mut Command) -> Output {
         }
     }
     let child = spawned.unwrap_or_else(|| {
-        panic!("spawn sharing violation persisted: {last_error:?}");
+        panic!("transient spawn error persisted: {last_error:?}");
     });
     let mut child = OwnedChild(child);
     // Release the parent's file handles so Windows can remove the scratch root.
