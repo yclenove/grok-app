@@ -17,6 +17,9 @@ pub mod wayland;
 /// X11 window management, EWMH alignment, and window capture.
 pub mod x11;
 
+#[cfg(test)]
+mod scope_regressions;
+
 pub use driver::LinuxDriver;
 pub use identity::{needs_reauth, same_process_instance, AppIdentity};
 pub use wayland::{

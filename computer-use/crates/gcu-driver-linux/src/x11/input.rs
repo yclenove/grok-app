@@ -6,6 +6,7 @@ use crate::x11::{
         restore_remapped_keycode,
     },
     ledger::InputLedger,
+    scope::X11Scope,
     server::XServer,
 };
 use gcu_core::{
@@ -13,6 +14,7 @@ use gcu_core::{
     model::WindowPoint,
 };
 use gcu_protocol::{keys::KeyChord, tools::MouseButton as Button};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Threshold for chunking long text typing requests.
@@ -20,6 +22,36 @@ pub const TYPE_TEXT_CHUNK_SIZE: usize = 2000;
 /// How long to wait after remapping keycodes before typing with them, and again before
 /// restoring them, so the target client has refreshed its key table.
 const REMAP_SETTLE: Duration = Duration::from_millis(120);
+
+/// Prove the window, activate it, then prove it again before the first input event.
+///
+/// A refusal before focus is requested is [`DriverError::ScopeDenied`]. A refusal
+/// after an activate request was sent reports that delivery may have started.
+async fn gate_delivery(
+    x: &Arc<dyn XServer>,
+    xid: u32,
+    scope: Option<&X11Scope<'_>>,
+    cancel: &Cancel,
+) -> Result<(), DriverError> {
+    if let Some(scope) = scope {
+        scope.allow_live(x, xid).await?;
+    }
+    let was_active = matches!(x.active_window(), Ok(Some(active)) if active == xid);
+    activate_and_verify(x.as_ref(), xid, cancel).await?;
+    if let Some(scope) = scope {
+        if let Err(error) = scope.allow_live(x, xid).await {
+            return Err(if was_active {
+                error
+            } else {
+                DriverError::Native {
+                    message: "native driver failure".into(),
+                    maybe_executed: true,
+                }
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Activate target window using `_NET_ACTIVE_WINDOW` and verify activation succeeded.
 ///
@@ -82,8 +114,10 @@ pub async fn activate_and_verify(
 }
 
 /// Execute a physical pointer click via XTEST.
-pub async fn execute_pointer_click(
-    x: &dyn XServer,
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_pointer_click(
+    x: &Arc<dyn XServer>,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     at: WindowPoint,
@@ -91,7 +125,7 @@ pub async fn execute_pointer_click(
     count: u8,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let geom = x.window_geometry(xid).map_err(|e| DriverError::Native {
         message: e.to_string(),
@@ -121,7 +155,7 @@ pub async fn execute_pointer_click(
     let effective_count = count.max(1);
     for _ in 0..effective_count {
         if cancel.is_cancelled() {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Cancelled {
                 maybe_executed: true,
             });
@@ -130,7 +164,7 @@ pub async fn execute_pointer_click(
         // Record before send
         ledger.record_button_down(btn_code);
         if let Err(e) = x.xtest_fake_button(btn_code, true) {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: true,
@@ -139,7 +173,7 @@ pub async fn execute_pointer_click(
         tokio::time::sleep(Duration::from_millis(15)).await;
 
         if let Err(e) = x.xtest_fake_button(btn_code, false) {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: true,
@@ -159,8 +193,10 @@ pub async fn execute_pointer_click(
 }
 
 /// Execute pointer scroll events using X11 wheel buttons (4=up, 5=down, 6=left, 7=right).
-pub async fn execute_pointer_scroll(
-    x: &dyn XServer,
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_pointer_scroll(
+    x: &Arc<dyn XServer>,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     at: WindowPoint,
@@ -168,7 +204,7 @@ pub async fn execute_pointer_scroll(
     dy: i32,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let geom = x.window_geometry(xid).map_err(|e| DriverError::Native {
         message: e.to_string(),
@@ -194,7 +230,7 @@ pub async fn execute_pointer_scroll(
         let clicks = ((dy.abs() as f32) / 120.0).ceil().max(1.0) as usize;
         for _ in 0..clicks {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -212,7 +248,7 @@ pub async fn execute_pointer_scroll(
         let clicks = ((dx.abs() as f32) / 120.0).ceil().max(1.0) as usize;
         for _ in 0..clicks {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -228,8 +264,9 @@ pub async fn execute_pointer_scroll(
 }
 
 /// Execute an interpolated pointer drag along a path.
-pub async fn execute_pointer_drag(
-    x: &dyn XServer,
+pub(crate) async fn execute_pointer_drag(
+    x: &Arc<dyn XServer>,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     path: &[WindowPoint],
@@ -239,7 +276,7 @@ pub async fn execute_pointer_drag(
         return Err(DriverError::InvalidRequest);
     }
 
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let geom = x.window_geometry(xid).map_err(|e| DriverError::Native {
         message: e.to_string(),
@@ -264,7 +301,7 @@ pub async fn execute_pointer_drag(
     // Press button 1 (Left) with press-before-send accounting
     ledger.record_button_down(1);
     if let Err(e) = x.xtest_fake_button(1, true) {
-        ledger.release_all(x);
+        ledger.release_all(x.as_ref());
         return Err(DriverError::Native {
             message: e.to_string(),
             maybe_executed: true,
@@ -280,7 +317,7 @@ pub async fn execute_pointer_drag(
 
         for step in 1..=steps {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
                 });
@@ -299,7 +336,7 @@ pub async fn execute_pointer_drag(
 
     // Release button 1
     if let Err(e) = x.xtest_fake_button(1, false) {
-        ledger.release_all(x);
+        ledger.release_all(x.as_ref());
         return Err(DriverError::Native {
             message: e.to_string(),
             maybe_executed: true,
@@ -311,14 +348,15 @@ pub async fn execute_pointer_drag(
 }
 
 /// Execute a key chord with modifiers and key press/release.
-pub async fn execute_press_keys(
-    x: &dyn XServer,
+pub(crate) async fn execute_press_keys(
+    x: &Arc<dyn XServer>,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     chord: &KeyChord,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let mut held_mod_keycodes = Vec::new();
     let mut remapped_keycodes = Vec::new();
@@ -326,19 +364,19 @@ pub async fn execute_press_keys(
     // 1. Resolve and press modifiers
     for &m in &chord.modifiers {
         if cancel.is_cancelled() {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Cancelled {
                 maybe_executed: false,
             });
         }
         let sym = modifier_to_keysym(m);
-        let resolved = resolve_or_remap_keysym(x, sym)?;
+        let resolved = resolve_or_remap_keysym(x.as_ref(), sym)?;
         if let Some(r) = resolved.remapped_keycode {
             remapped_keycodes.push(r);
         }
         ledger.record_key_down(resolved.keycode);
         if let Err(e) = x.xtest_fake_key(resolved.keycode, true) {
-            ledger.release_all(x);
+            ledger.release_all(x.as_ref());
             return Err(DriverError::Native {
                 message: e.to_string(),
                 maybe_executed: true,
@@ -354,7 +392,7 @@ pub async fn execute_press_keys(
 
     // 2. Resolve and press main key
     let main_sym = key_to_keysym(&chord.key);
-    let main_resolved = resolve_or_remap_keysym(x, main_sym)?;
+    let main_resolved = resolve_or_remap_keysym(x.as_ref(), main_sym)?;
     if let Some(r) = main_resolved.remapped_keycode {
         remapped_keycodes.push(r);
     }
@@ -364,12 +402,12 @@ pub async fn execute_press_keys(
         && !held_mod_keycodes.iter().any(|&k| {
             // Shift keycode check
             let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
-            resolve_or_remap_keysym(x, shift_sym)
+            resolve_or_remap_keysym(x.as_ref(), shift_sym)
                 .map(|r| r.keycode == k)
                 .unwrap_or(false)
         }) {
         let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
-        if let Ok(sr) = resolve_or_remap_keysym(x, shift_sym) {
+        if let Ok(sr) = resolve_or_remap_keysym(x.as_ref(), shift_sym) {
             ledger.record_key_down(sr.keycode);
             let _ = x.xtest_fake_key(sr.keycode, true);
             Some(sr.keycode)
@@ -382,7 +420,7 @@ pub async fn execute_press_keys(
 
     ledger.record_key_down(main_resolved.keycode);
     if let Err(e) = x.xtest_fake_key(main_resolved.keycode, true) {
-        ledger.release_all(x);
+        ledger.release_all(x.as_ref());
         return Err(DriverError::Native {
             message: e.to_string(),
             maybe_executed: true,
@@ -416,32 +454,33 @@ pub async fn execute_press_keys(
 
     // 4. Restore any remapped keycodes
     for rkc in remapped_keycodes {
-        restore_remapped_keycode(x, rkc);
+        restore_remapped_keycode(x.as_ref(), rkc);
     }
 
     Ok(Delivery::Foreground)
 }
 
 /// Execute type_text via X11 XTEST keysyms, chunking long inputs without splitting grapheme clusters.
-pub async fn execute_type_text_x11(
-    x: &dyn XServer,
+pub(crate) async fn execute_type_text_x11(
+    x: &Arc<dyn XServer>,
+    scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
     xid: u32,
     text: &str,
     cancel: &Cancel,
 ) -> Result<Delivery, DriverError> {
-    activate_and_verify(x, xid, cancel).await?;
+    gate_delivery(x, xid, scope, cancel).await?;
 
     let chars: Vec<char> = text.chars().collect();
     let shift_sym = modifier_to_keysym(gcu_protocol::keys::Modifier::Shift);
-    let shift_kc = resolve_or_remap_keysym(x, shift_sym)
+    let shift_kc = resolve_or_remap_keysym(x.as_ref(), shift_sym)
         .map(|r| r.keycode)
         .unwrap_or(50); // standard X11 keycode for Shift_L
 
     let mut pos = 0;
     while pos < chars.len() {
         let end = (pos + TYPE_TEXT_CHUNK_SIZE).min(chars.len());
-        let plan = plan_text_chunk(x, &chars[pos..end])?;
+        let plan = plan_text_chunk(x.as_ref(), &chars[pos..end])?;
         if !plan.remapped.is_empty() {
             // Clients rebuild their key tables asynchronously after MappingNotify; type only
             // once they have had time to, and never change these keycodes mid-chunk.
@@ -449,9 +488,9 @@ pub async fn execute_type_text_x11(
         }
         for resolved in &plan.keys {
             if cancel.is_cancelled() {
-                ledger.release_all(x);
+                ledger.release_all(x.as_ref());
                 for &kc in &plan.remapped {
-                    restore_remapped_keycode(x, kc);
+                    restore_remapped_keycode(x.as_ref(), kc);
                 }
                 return Err(DriverError::Cancelled {
                     maybe_executed: true,
@@ -478,7 +517,7 @@ pub async fn execute_type_text_x11(
             // Let the application finish reading the last keystrokes before they change meaning.
             tokio::time::sleep(REMAP_SETTLE).await;
             for &kc in &plan.remapped {
-                restore_remapped_keycode(x, kc);
+                restore_remapped_keycode(x.as_ref(), kc);
             }
         }
         pos += plan.consumed;

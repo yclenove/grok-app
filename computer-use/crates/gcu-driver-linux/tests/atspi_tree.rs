@@ -194,7 +194,7 @@ async fn fake_tree_build_enforces_timeout() {
 
     let source = FakeSource {
         delay: Duration::from_millis(50),
-        error_on_id: None,
+        ..FakeSource::default()
     };
     let opts = TreeOpts {
         timeout: Duration::from_millis(10), // Insufficient timeout

@@ -237,9 +237,24 @@ pub trait InstanceEvidence: Send + Sync {
 
     /// Mark this driver scoped for the life of the wrapper.
     ///
-    /// The default does nothing. Memory only. No blocking, timeout, or
-    /// cancellation. This is not the perform pin: observation has no pin.
+    /// The default does nothing. A platform that can discover without a
+    /// binding must latch this and refuse that discovery; a missing binding
+    /// is not an unscoped session. The latch is not cleared. Memory only.
+    /// No blocking, timeout, or cancellation. This is not the perform pin:
+    /// observation has no pin.
     fn note_scoped_session(&self) {}
+
+    /// Refresh metadata before a scoped admission.
+    ///
+    /// The default is ready immediately and does not block. A platform may
+    /// read metadata off the control runtime. That wait is bounded by the
+    /// existing native-call ceiling. Dropping the future abandons the wait
+    /// and must not own `release_all_input`. No pixels and no input.
+    fn prepare_evidence<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 /// Where an attempt waits so a test can revoke before the next check.
@@ -451,13 +466,21 @@ impl FixtureScope {
         &self.control_lease
     }
 
-    pub(crate) fn admits_instance(&self, instance: &ProcessInstance) -> bool {
+    /// Whether `instance` is a registered target.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. Identity is pid,
+    /// start time, and boot id. Role and executable proof are not keys.
+    pub fn admits_instance(&self, instance: &ProcessInstance) -> bool {
         self.targets
             .iter()
             .any(|target| &target.instance == instance)
     }
 
-    pub(crate) fn admits_window(&self, binding: &WindowBinding) -> bool {
+    /// Whether `binding` is a window this scope registered on its owner.
+    ///
+    /// Memory only. No blocking, timeout, or cancellation. A window whose
+    /// owner is not a target is refused. This does not read the platform.
+    pub fn admits_window(&self, binding: &WindowBinding) -> bool {
         self.targets.iter().any(|target| {
             target.instance == binding.owner
                 && target
