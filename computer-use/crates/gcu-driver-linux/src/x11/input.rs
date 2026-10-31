@@ -114,7 +114,7 @@ pub async fn activate_and_verify(
 
 /// Execute a physical pointer click via XTEST.
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_pointer_click(
+pub(crate) async fn execute_pointer_click(
     x: &dyn XServer,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
@@ -193,7 +193,7 @@ pub async fn execute_pointer_click(
 
 /// Execute pointer scroll events using X11 wheel buttons (4=up, 5=down, 6=left, 7=right).
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_pointer_scroll(
+pub(crate) async fn execute_pointer_scroll(
     x: &dyn XServer,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
@@ -263,7 +263,7 @@ pub async fn execute_pointer_scroll(
 }
 
 /// Execute an interpolated pointer drag along a path.
-pub async fn execute_pointer_drag(
+pub(crate) async fn execute_pointer_drag(
     x: &dyn XServer,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
@@ -347,7 +347,7 @@ pub async fn execute_pointer_drag(
 }
 
 /// Execute a key chord with modifiers and key press/release.
-pub async fn execute_press_keys(
+pub(crate) async fn execute_press_keys(
     x: &dyn XServer,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
@@ -460,7 +460,7 @@ pub async fn execute_press_keys(
 }
 
 /// Execute type_text via X11 XTEST keysyms, chunking long inputs without splitting grapheme clusters.
-pub async fn execute_type_text_x11(
+pub(crate) async fn execute_type_text_x11(
     x: &dyn XServer,
     scope: Option<&X11Scope<'_>>,
     ledger: &InputLedger,
