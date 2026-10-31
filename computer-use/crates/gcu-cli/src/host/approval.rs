@@ -72,8 +72,12 @@ pub async fn confirm_for_test(req: &HookRequest<'_>) -> bool {
         return false;
     }
     let answer = async {
-        if let Some(decision) = eval_decision(req.mode) {
-            return !matches!(decision, ApprovalDecision::Deny | ApprovalDecision::Timeout);
+        if let Some(policy) = eval_policy(req.mode) {
+            // The Host API shares this callback between sensitive and foreground
+            // confirmations. Neither is implied by an app grant. Until trusted,
+            // action-bound manifest approvals exist, both default to deny; never
+            // infer the confirmation kind or permission from summary text.
+            return policy.sensitive && policy.foreground;
         }
         if let Some(hook) = req.autoclick {
             return match hook {
@@ -211,8 +215,8 @@ impl ApprovalProvider for Approvals {
 }
 
 async fn choose_app(req: &HookRequest<'_>) -> ApprovalDecision {
-    if let Some(decision) = eval_decision(req.mode) {
-        return decision;
+    if let Some(policy) = eval_policy(req.mode) {
+        return policy.app;
     }
     if let Some(hook) = req.autoclick {
         return match hook {
@@ -282,16 +286,32 @@ fn policy_store_key(identity: &gcu_host_api::AppIdentity) -> String {
     super::policy_store::storage_key(identity)
 }
 
-fn eval_decision(mode: Option<&str>) -> Option<ApprovalDecision> {
+struct EvalPolicy {
+    app: ApprovalDecision,
+    sensitive: bool,
+    foreground: bool,
+}
+
+fn eval_policy(mode: Option<&str>) -> Option<EvalPolicy> {
     #[cfg(all(feature = "eval-autoapprove", debug_assertions))]
-    match mode {
-        Some("auto-allow-turn") => return Some(ApprovalDecision::Turn),
-        Some("auto-allow-session" | "auto-allow-always") => return Some(ApprovalDecision::Session),
-        Some("auto-deny") => return Some(ApprovalDecision::Deny),
-        _ => {}
+    {
+        let app = match mode {
+            Some("auto-allow-turn") => Some(ApprovalDecision::Turn),
+            Some("auto-allow-session" | "auto-allow-always") => Some(ApprovalDecision::Session),
+            Some("auto-deny") => Some(ApprovalDecision::Deny),
+            _ => None,
+        };
+        app.map(|app| EvalPolicy {
+            app,
+            sensitive: false,
+            foreground: false,
+        })
     }
-    let _ = mode;
-    None
+    #[cfg(not(all(feature = "eval-autoapprove", debug_assertions)))]
+    {
+        let _ = mode;
+        None
+    }
 }
 
 fn desktop_available() -> bool {

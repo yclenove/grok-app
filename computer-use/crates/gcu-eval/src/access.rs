@@ -17,6 +17,8 @@ pub const GCU_ACCEPTED_APPROVAL: &[&str] = &[
 ];
 
 /// CU approval values accepted only by a debug `eval-autoapprove` build.
+/// Allow modes replace only app grants; sensitive and foreground confirmations
+/// remain denied by default and no mode writes a persistent Always grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalMode {
     /// Allow the current turn.
