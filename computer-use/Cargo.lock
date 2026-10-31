@@ -2256,6 +2256,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "gcu-core",
+ "gcu-host-api",
  "gcu-protocol",
  "insta",
  "png",
