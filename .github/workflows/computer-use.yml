@@ -37,7 +37,7 @@ jobs:
             name: Linux
           - os: windows-2022
             name: Windows
-          - os: macos-14
+          - os: macos-15
             name: macOS
     runs-on: ${{ matrix.os }}
     name: Computer Use (${{ matrix.name }})
