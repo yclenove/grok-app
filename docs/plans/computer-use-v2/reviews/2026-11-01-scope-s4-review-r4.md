@@ -59,3 +59,24 @@ The revoke/rebind/expiry/runtime-loss/replacement tests check paths or non-resid
 Existing tests do not force the final-pass, export-handoff, conflicting-bind, outer-lock/unlink, or close/reaper schedules above. Nor do they establish every claimed ticket/same-thread mutation: returning from the same-thread branch without recording a ticket needs a held-admission test with already-delivered artifacts; deleting the branch and falling through to `try_lock` may still pass on platforms returning WouldBlock. Add direct coverage. `resident()` correctly observes without sweeping in sequential assertions; it is a test-only raw mutex holder without an unlock flush, so concurrent use can itself strand a callback ticket. Keep that limitation explicit. The dead-weak test proves failed upgrade, not removal of the list entry itself.
 
 Validation: source diff whitespace check passed; the full replacement diff flags only the existing added EOF blank line in the r3 report. No cargo, compilation/clippy, Rust tests/mutations, network/SSH/model calls, personal agent-home access, or source/test edits. Only this report was written, uncommitted.
+
+## 第4轮处理
+
+上面的 5 个必修都针对租约回调和延迟清扫。该机制已整段删除，这些调度不再有对应代码，不把原文改写成已通过。
+
+`gcu-core` 回到第 1 轮基线：没有 `on_invalidated`，`publish` 不再调用回调。`gcu-mcp` 没有 `retire.rs`、清扫序号、`try_lock` 补扫或 `Arc<TempDir>`。统一原则：撤销之后不再提供；清理只发生在访问时和关闭时。没有后台所有者、回调、线程、任务或运行时。
+
+1. 撤销后新的 `export` 读到旧字节：导出不再先做一次可能失败的预扫、再在锁里无过滤地复制。`export` / `get` / `cached_image` / `export_private_files` 在持有 store 锁时按 `visible` 过滤，只复制仍属当前代次的行；失效行在同一次临界区摘出，unlink 在放下 store 锁之后。持锁方释放后、旧行还在账本里时抢到锁的导出，仍然不能返回旧字节。去掉 `take_stale` / `take_invisible` 里的 `visible` 判断，对应测试会拿到旧字节。
+2. 第八趟清扫把票据留到永远：没有清扫趟数，也没有留给“下一次解锁”的票据。无人再调用 get/export/close 时，行就留着。这是写进 ADR 的限制，不是漏掉的交接。
+3. 清理跑在外层输出锁里、排在释放输入之前：撤销、重绑和到期不再调用文件或图像回调，因此不会在快照互斥量里 unlink，也不会挡在 `release_all_input` 前面。磁盘删除只在 store 自己的 get/export（放锁之后）或 `close`/`Drop` 里发生。core 的发布路径不再挂回调。
+4. 并发 bind 留下错误租约的回调：没有回调可登记。`bind_lease` 只在 store 锁里保存租约。get/export 读的是当前保存的那一份。后一次 bind 覆盖前一次。撤销一个已经不再被 store 持有的租约，不会删掉新租约的行。
+5. `Arc<TempDir>` 保不住目录所有权：目录不再放进 `Arc`。`close` 和 `Drop` 在所有者锁和目录对象都还在时 unlink 已登记文件，Unix 上接着在放锁之前删掉目录。没有在放锁之后继续 `remove_file` 的 worker。Windows 上打开的 `.owner-lock` 会挡住删目录，所以只在这些文件 unlink 完成之后才放锁并重试删目录；不会先放锁再删已登记文件。
+
+仍写明的限制：撤销或重绑之后、下一次访问或关闭之前，原始文件路径在磁盘上仍可读，像素仍驻留内存。这与已经复制进响应的字节不回收同类。被动持有且无人访问的 store 不会自行清理。一次性虚拟机在每次评测结束时整台销毁。unlink 错误忽略，不回滚。A1–A4、活体代码身份读取、真实 helper/TCC/FD/SecCode、真实模型仍是 not_run。Stop 常量未改。无新 `Command::new`。无新依赖。S6 准入类型未动。
+
+会失败的测试（整体有 abort watchdog；握手用通道，不用 sleep）：
+
+- `export_after_a_lock_holder_releases_does_not_return_revoked_bytes`：持锁方不摘行就放锁，导出在此之前已宣布自己要抢锁。先断言路径不存在，再断言没有旧字节。去掉可见性过滤会返回 `old-bytes`。
+- `get_after_a_lock_holder_releases_does_not_return_revoked_pixels`：同样的交错。去掉可见性过滤会返回像素。
+- `revoke_then_export_and_get_reject_without_returning_old_bytes`、`binding_a_replacement_lease_hides_the_previous_epoch_on_access`：撤销或换租约 bind 之后、访问之前路径和像素都还在；访问时摘掉。先断言路径不存在，再断言被拒绝。旧租约撤销不删新租约的文件。
+- `close_deletes_every_registered_file_while_the_owner_lock_is_held` 与 `drop_deletes_every_registered_file_while_the_owner_lock_is_held`：探针在放锁和删目录之前观察。去掉 Drop 的 purge 后 `ran` 为 false；只靠 `TempDir` 的字段析构删目录不算通过。先放锁再 unlink 时 `lock_held` 为 false。
