@@ -290,9 +290,9 @@ async fn sleep_or_pending(sleep_for: Option<Duration>) {
 fn exit_on_drop(hooks: &DriveHooks) -> ExitOnDrop {
     #[cfg(test)]
     {
-        return ExitOnDrop {
+        ExitOnDrop {
             flag: hooks.exited.clone(),
-        };
+        }
     }
     #[cfg(not(test))]
     {
