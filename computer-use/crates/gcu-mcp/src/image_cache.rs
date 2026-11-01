@@ -5,7 +5,7 @@ use gcu_core::scope::ScopeLease;
 use gcu_host_protocol::messages::Image;
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
 };
 
 struct Slot {
@@ -18,6 +18,8 @@ pub(crate) struct ImageCache {
     /// Parks after the cache mutex is taken and before the entry is inserted.
     /// Production leaves it disarmed.
     gate: Arc<PublishGate>,
+    /// One invalidation task. Stays unset until a runtime can spawn it.
+    watch: AtomicBool,
 }
 
 /// Cache lock and private insertion, prepared before entering the lease lock.
@@ -69,20 +71,32 @@ impl Default for ImageCache {
                 lease: None,
             }),
             gate: PublishGate::new(),
+            watch: AtomicBool::new(false),
         }
     }
 }
 
 impl ImageCache {
-    /// Remember the lease that later `get` calls compare. Memory only.
+    /// Remember the lease that later `get` calls compare, and retire on invalidation.
     ///
     /// Call before taking this cache's lock for a commit. Replaces any previous
-    /// lease. No timeout or cancellation.
-    pub(crate) fn bind_lease(&self, lease: ScopeLease) {
+    /// lease. The watcher starts only when a runtime is current. No timeout or
+    /// cancellation in this call. A second bind does not start a second task.
+    pub(crate) fn bind_lease(self: &Arc<Self>, lease: ScopeLease) {
         self.slot
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .lease = Some(lease);
+            .lease = Some(lease.clone());
+        let cache = Arc::clone(self);
+        crate::retire::arm(&self.watch, lease, move || cache.release_stale());
+    }
+
+    /// Drop images whose epoch is no longer visible. Memory only.
+    ///
+    /// The cache lock is released before this returns. No timeout or cancellation.
+    pub(crate) fn release_stale(&self) {
+        let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
+        reclaim(&mut slot);
     }
 
     /// Acquire the cache lock and prepare an insertion without exposing pixels.
@@ -132,6 +146,20 @@ impl ImageCache {
             .unwrap_or_else(|err| err.into_inner())
             .images
             .clear();
+    }
+
+    /// True when `id` is still stored, without dropping stale rows.
+    ///
+    /// [`Self::get`] reclaims first, so it cannot prove the watcher released
+    /// the pixels. Memory only. No timeout or cancellation.
+    #[cfg(test)]
+    pub(crate) fn resident(&self, id: &str) -> bool {
+        self.slot
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .images
+            .iter()
+            .any(|(key, _, _)| key == id)
     }
 
     /// Pause used by [`Self::admission`]. Memory only. Production leaves it disarmed.

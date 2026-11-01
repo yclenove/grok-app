@@ -396,6 +396,9 @@ async fn revoke_before_commit_hides_the_spill_and_revoke_after_commit_reclaims_i
     watcher.join().unwrap();
     let rendered = serde_json::to_string(&published).unwrap();
     assert_eq!(published.is_error, Some(false), "{rendered}");
+    let paths = artifact_paths(&rendered);
+    assert!(!paths.is_empty(), "{rendered}");
+    wait_until_gone(&paths).await;
     assert!(
         files.export().unwrap().is_empty(),
         "revoked spill stayed readable: {rendered}"
@@ -541,6 +544,14 @@ async fn revoke_after_image_commit_hides_the_published_batch() {
     let result = results.state(state).await;
     watcher.join().unwrap();
     assert_eq!(result.is_error, Some(false));
+    let rendered = serde_json::to_string(&result).unwrap();
+    let paths = artifact_paths(&rendered);
+    assert!(!paths.is_empty(), "{rendered}");
+    wait_until_gone(&paths).await;
+    assert!(
+        !results.images.resident("i_private"),
+        "revoked pixels stayed resident"
+    );
     assert!(
         results.images.get("i_private").is_none(),
         "revoked generation stayed readable"
@@ -548,6 +559,32 @@ async fn revoke_after_image_commit_hides_the_published_batch() {
     assert!(results.files.export().unwrap().is_empty());
     assert!(!results.files.contains_bytes(b"CANARY-COMMITTED"));
     results.files.close().unwrap();
+}
+
+fn artifact_paths(rendered: &str) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for marker in ["full text: ", "Screenshot file: "] {
+        for chunk in rendered.split(marker).skip(1) {
+            let stop = chunk
+                .find(|ch: char| ch.is_whitespace() || matches!(ch, ']' | '\\' | '"' | ','))
+                .unwrap_or(chunk.len());
+            let path = chunk[..stop].trim();
+            if path.starts_with('/') {
+                paths.push(std::path::PathBuf::from(path));
+            }
+        }
+    }
+    paths
+}
+
+async fn wait_until_gone(paths: &[std::path::PathBuf]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while paths.iter().any(|path| path.exists()) {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("invalidation left a delivered file: {paths:?}");
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 #[derive(Debug, Default)]

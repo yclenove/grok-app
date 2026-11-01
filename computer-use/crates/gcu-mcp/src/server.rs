@@ -212,15 +212,16 @@ impl Server {
             activity,
             router.input_release(),
         ));
-        let images = crate::image_cache::ImageCache::default();
+        let images = Arc::new(crate::image_cache::ImageCache::default());
+        let files = Arc::new(files);
         let scope = router.fixture_lease();
         if let Some(lease) = scope.clone() {
             images.bind_lease(lease.clone());
             files.bind_lease(lease);
         }
         let results = Results {
-            images: Arc::new(images),
-            files: Arc::new(files),
+            images,
+            files,
             session: session.clone(),
             encoding: gcu_core::redact::EncodeOptions {
                 max_edge: policy.max_image_edge,

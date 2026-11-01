@@ -3,11 +3,11 @@ use crate::lease_view::{visible, Epoch};
 use gcu_core::scope::ScopeLease;
 use gcu_host_protocol::owner_only::{self, OwnerLock};
 #[cfg(test)]
-use std::sync::{Arc, Condvar};
+use std::sync::Condvar;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use tempfile::TempDir;
@@ -15,6 +15,8 @@ use tempfile::TempDir;
 const MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) struct SessionFiles {
     area: Mutex<Area>,
+    /// One invalidation task. Stays unset until a runtime can spawn it.
+    watch: AtomicBool,
     /// Test pause installed by [`SessionFiles::arm_file_gate`]. Absent in production.
     #[cfg(test)]
     gate: Mutex<Option<Arc<FilePause>>>,
@@ -82,6 +84,7 @@ impl SessionFiles {
                 files: Vec::new(),
                 lease: None,
             }),
+            watch: AtomicBool::new(false),
             #[cfg(test)]
             gate: Mutex::new(None),
         })
@@ -189,14 +192,52 @@ impl SessionFiles {
         })
     }
 
-    /// Remember the lease that later exports compare. Memory only.
+    /// Remember the lease that later exports compare, and retire on invalidation.
     ///
-    /// Call before taking the area lock for a commit. No timeout or cancellation.
-    pub(crate) fn bind_lease(&self, lease: ScopeLease) {
+    /// Call before taking the area lock for a commit. The watcher starts only
+    /// when a runtime is current. No timeout or cancellation in this call. A
+    /// second bind does not start a second task.
+    pub(crate) fn bind_lease(self: &Arc<Self>, lease: ScopeLease) {
         self.area
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .lease = Some(lease);
+            .lease = Some(lease.clone());
+        let files = Arc::clone(self);
+        crate::retire::arm(&self.watch, lease, move || files.release_stale());
+    }
+
+    /// Remove ledger rows that are no longer visible and delete their files.
+    ///
+    /// The area lock and the lease lock are both dropped before unlink. No
+    /// timeout or cancellation. A closed area leaves the disk to [`Self::close`].
+    pub(crate) fn release_stale(&self) {
+        let Ok(paths) = self.take_stale() else {
+            return;
+        };
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn take_stale(&self) -> io::Result<Vec<PathBuf>> {
+        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        if area.directory.is_none() {
+            return Err(io::Error::other("session closed"));
+        }
+        let lease = area.lease.clone();
+        let mut stale_len = 0usize;
+        let mut stale_paths = Vec::new();
+        area.files.retain(|row| {
+            if visible(lease.as_ref(), row.epoch.as_ref()) {
+                true
+            } else {
+                stale_len = stale_len.saturating_add(row.len);
+                stale_paths.push(row.path.clone());
+                false
+            }
+        });
+        area.bytes = area.bytes.saturating_sub(stale_len);
+        Ok(stale_paths)
     }
     /// Rename a staged file into the export ledger.
     ///
@@ -229,25 +270,13 @@ impl SessionFiles {
         Ok(path)
     }
     pub(crate) fn export(&self) -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        let stale = self.take_stale()?;
+        for path in stale {
+            let _ = std::fs::remove_file(path);
+        }
+        let area = self.area.lock().unwrap_or_else(|error| error.into_inner());
         if area.directory.is_none() {
             return Err(io::Error::other("session closed"));
-        }
-        let lease = area.lease.clone();
-        let mut stale_len = 0usize;
-        let mut stale_paths = Vec::new();
-        area.files.retain(|row| {
-            if visible(lease.as_ref(), row.epoch.as_ref()) {
-                true
-            } else {
-                stale_len = stale_len.saturating_add(row.len);
-                stale_paths.push(row.path.clone());
-                false
-            }
-        });
-        area.bytes = area.bytes.saturating_sub(stale_len);
-        for path in &stale_paths {
-            let _ = std::fs::remove_file(path);
         }
         area.files
             .iter()
