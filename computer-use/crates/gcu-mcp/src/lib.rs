@@ -16,7 +16,6 @@ mod lease_view;
 pub mod lifecycle;
 mod params;
 mod result;
-mod retire;
 mod scoped_stdio;
 mod script;
 mod server;
@@ -130,6 +129,8 @@ where
     }
 }
 
+#[cfg(test)]
+mod access_retire_tests;
 #[cfg(test)]
 mod lease_cache_tests;
 #[cfg(test)]

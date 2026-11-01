@@ -398,9 +398,17 @@ async fn revoke_before_commit_hides_the_spill_and_revoke_after_commit_reclaims_i
     assert_eq!(published.is_error, Some(false), "{rendered}");
     let paths = artifact_paths(&rendered);
     assert!(!paths.is_empty(), "{rendered}");
-    wait_until_gone(&paths).await;
     assert!(
-        files.export().unwrap().is_empty(),
+        paths.iter().all(|path| path.exists()),
+        "revoked bytes stay on disk until export: {paths:?}"
+    );
+    let exported = files.export().unwrap();
+    assert!(
+        paths.iter().all(|path| !path.exists()),
+        "export left a revoked file: {paths:?}"
+    );
+    assert!(
+        exported.is_empty(),
         "revoked spill stayed readable: {rendered}"
     );
     assert!(!files.contains_bytes(b"CANARY-AFTER"));
@@ -547,16 +555,26 @@ async fn revoke_after_image_commit_hides_the_published_batch() {
     let rendered = serde_json::to_string(&result).unwrap();
     let paths = artifact_paths(&rendered);
     assert!(!paths.is_empty(), "{rendered}");
-    wait_until_gone(&paths).await;
+    assert!(
+        paths.iter().all(|path| path.exists()),
+        "revoked files stay until export: {paths:?}"
+    );
+    assert!(
+        results.images.resident("i_private"),
+        "revoked pixels stay until get"
+    );
+    let exported = results.files.export().unwrap();
+    assert!(
+        paths.iter().all(|path| !path.exists()),
+        "export left a revoked file: {paths:?}"
+    );
+    assert!(exported.is_empty(), "revoked generation stayed readable");
+    let image = results.images.get("i_private");
     assert!(
         !results.images.resident("i_private"),
-        "revoked pixels stayed resident"
+        "get left the revoked row resident"
     );
-    assert!(
-        results.images.get("i_private").is_none(),
-        "revoked generation stayed readable"
-    );
-    assert!(results.files.export().unwrap().is_empty());
+    assert!(image.is_none(), "revoked generation stayed readable");
     assert!(!results.files.contains_bytes(b"CANARY-COMMITTED"));
     results.files.close().unwrap();
 }
@@ -641,16 +659,6 @@ fn artifact_paths_parse_json_strings_before_taking_absolute_paths() {
         assert!(paths.iter().any(|path| path == windows), "{paths:?}");
     } else {
         assert!(paths.iter().all(|path| path != windows), "{paths:?}");
-    }
-}
-
-async fn wait_until_gone(paths: &[std::path::PathBuf]) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while paths.iter().any(|path| path.exists()) {
-        if tokio::time::Instant::now() >= deadline {
-            panic!("invalidation left a delivered file: {paths:?}");
-        }
-        tokio::task::yield_now().await;
     }
 }
 

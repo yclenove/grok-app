@@ -91,11 +91,10 @@ fn delivered_image_is_unreadable_after_rebind_and_the_new_generation_is_readable
     assert!(cache.get("shot").is_some());
     let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();
     bound.rebind(next).unwrap();
-    assert!(
-        !cache.resident("shot"),
-        "rebind must drop pixels before get"
-    );
-    assert!(cache.get("shot").is_none());
+    assert!(cache.resident("shot"), "rebind leaves pixels until get");
+    let got = cache.get("shot");
+    assert!(!cache.resident("shot"), "get must drop the revoked row");
+    assert!(got.is_none(), "get returned revoked pixels");
     {
         let mut next_admission = cache.admission("shot".into(), image(5));
         next_admission.stamp(Some(epoch(2)));
@@ -120,14 +119,16 @@ async fn delivered_image_is_unreadable_after_lease_expiry() {
     tokio::time::advance(Duration::from_secs(3)).await;
     assert!(
         cache.resident("shot"),
-        "a passive cache stays until something reads the lease"
+        "a passive cache stays until get, even after the lease is read"
     );
     assert!(bound.current().is_none(), "the read publishes expiry");
     assert!(
-        !cache.resident("shot"),
-        "expiry must drop the pixels before get"
+        cache.resident("shot"),
+        "reading the lease does not drop pixels"
     );
-    assert!(cache.get("shot").is_none());
+    let got = cache.get("shot");
+    assert!(!cache.resident("shot"), "get must drop the expired row");
+    assert!(got.is_none(), "get returned expired pixels");
     assert!(!bound.same_epoch("run", 1));
 }
 
@@ -150,11 +151,13 @@ async fn delivered_file_is_unreadable_after_lease_expiry() {
     tokio::time::advance(Duration::from_secs(3)).await;
     assert!(
         path.exists(),
-        "a passive ledger stays until something reads the lease"
+        "a passive ledger stays until export, even after the lease is read"
     );
     assert_eq!(bound.remaining(), Some(Duration::ZERO));
-    assert!(!path.exists(), "expiry must delete the spill before export");
-    assert!(files.export().unwrap().is_empty());
+    assert!(path.exists(), "reading the lease does not delete the spill");
+    let exported = files.export().unwrap();
+    assert!(!path.exists(), "export must unlink the expired row");
+    assert!(exported.is_empty(), "export returned expired bytes");
     assert!(!files.contains_bytes(b"png-bytes"));
     files.close().unwrap();
 }
@@ -183,12 +186,13 @@ fn rebind_deletes_artifacts_while_the_session_stays_open() {
     assert!(cache.resident("shot"));
     let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();
     bound.rebind(next).unwrap();
-    assert!(!path.exists(), "rebind must delete the file before export");
-    assert!(
-        !cache.resident("shot"),
-        "rebind must drop pixels before get"
-    );
-    assert!(files.export().unwrap().is_empty());
-    assert!(cache.get("shot").is_none());
+    assert!(path.exists(), "rebind leaves the file until export");
+    assert!(cache.resident("shot"), "rebind leaves pixels until get");
+    let exported = files.export().unwrap();
+    assert!(!path.exists(), "export must unlink the revoked file");
+    assert!(exported.is_empty(), "export returned revoked bytes");
+    let got = cache.get("shot");
+    assert!(!cache.resident("shot"), "get must drop the revoked row");
+    assert!(got.is_none(), "get returned revoked pixels");
     files.close().unwrap();
 }
