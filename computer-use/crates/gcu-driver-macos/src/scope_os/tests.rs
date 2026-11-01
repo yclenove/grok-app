@@ -706,10 +706,13 @@ fn assert_cdhash(cdhash: &str) {
     );
 }
 
-/// Cargo's test binary is ad-hoc signed and has a cdhash. No fixture app.
+/// Smoke test: self lookup, rejection and concurrency only. It does not prove
+/// freshness or a live-image read (a cache would pass). Cargo's test binary is
+/// ad-hoc signed and has a cdhash. No fixture app. A controlled child with a
+/// replaced pathname is NOT_RUN until a Mac is available.
 #[cfg(target_os = "macos")]
 #[test]
-fn own_process_code_identity_is_present_and_reread() {
+fn own_process_code_identity_smoke() {
     use super::live::LiveOsFacts;
     let pid = std::process::id();
     let first_facts = LiveOsFacts::process_only();

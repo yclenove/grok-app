@@ -266,8 +266,12 @@ fn empty_unsigned() -> RawSigning {
 ///
 /// Blocks the caller inside Security.framework. No thread, timeout, or
 /// cancellation. Does not call `SecCodeCheckValidity`, show UI, or fetch
-/// trust. A path-based [`SecStaticCode`] read is not a fallback. Pid reuse
-/// is the caller's check: this function does not read the process start time.
+/// trust. This code has no application-level path-based fallback. Process
+/// instance binding and rechecks are the caller's job: this function does not
+/// read the process start time. The cdhash is the first `kSecCodeInfoCdHashes`
+/// entry (else `kSecCodeInfoUnique`), the same choice `cdhash_of` makes for
+/// expected identities. The result is guest-derived signing metadata, not an
+/// attested memory image.
 ///
 /// Returns `None` when `pid` is `0`, does not fit in a positive `pid_t`,
 /// does not exist, the call fails, or the identifier or cdhash is missing.
@@ -298,9 +302,9 @@ fn copy_guest(pid: i32) -> Option<CFType> {
     let attributes = CFDictionary::from_CFType_pairs(&[(key, CFNumber::from(pid))]);
     let mut guest: SecCodeRef = ptr::null_mut();
     // SAFETY: `attributes` is a live dictionary and is not retained by the call.
-    // A null host selects the caller. `guest` is a writable out-parameter.
-    // `DEFAULT_FLAGS` is `kSecCSDefaultFlags`: no UI and no network trust fetch.
-    // On success `guest` is +1. A non-null out-parameter on failure is also +1.
+    // A null host selects the system code-signing root of trust. `guest` is a
+    // writable out-parameter. `DEFAULT_FLAGS` is `kSecCSDefaultFlags`: no UI and
+    // no network trust fetch. Only a successful call transfers a +1 `guest`.
     let status = unsafe {
         SecCodeCopyGuestWithAttributes(
             ptr::null_mut(),
@@ -310,7 +314,6 @@ fn copy_guest(pid: i32) -> Option<CFType> {
         )
     };
     if status != ERR_SEC_SUCCESS {
-        drop(own_created(guest as CFTypeRef));
         return None;
     }
     own_created(guest as CFTypeRef)
@@ -318,11 +321,10 @@ fn copy_guest(pid: i32) -> Option<CFType> {
 
 fn copy_guest_info(code: &CFType) -> Option<(CFDictionaryRef, CFType)> {
     let mut dict: CFDictionaryRef = ptr::null_mut();
-    // SAFETY: `code` is a live SecCode. SecCode is a SecStaticCode, so the
-    // pointer is the argument `SecCodeCopySigningInformation` accepts.
-    // `SIGNING_INFORMATION` requests the info dictionary only. It is not
-    // `SecCodeCheckValidity`. On success `dict` is +1. A non-null
-    // out-parameter on failure is also +1.
+    // SAFETY: `code` is a live SecCode. The API accepts a dynamic code reference
+    // for its static-code parameter. `SIGNING_INFORMATION` requests the info
+    // dictionary only. It is not `SecCodeCheckValidity`. Only a successful call
+    // transfers a +1 `dict`; a failed call's out-parameter is not adopted.
     let status = unsafe {
         SecCodeCopySigningInformation(
             code.as_CFTypeRef() as SecStaticCodeRef,
@@ -331,7 +333,6 @@ fn copy_guest_info(code: &CFType) -> Option<(CFDictionaryRef, CFType)> {
         )
     };
     if status != ERR_SEC_SUCCESS {
-        drop(own_created(dict as CFTypeRef));
         return None;
     }
     let owner = own_created(dict as CFTypeRef)?;
