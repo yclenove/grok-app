@@ -20,6 +20,7 @@
 
 use gcu_core::scope::ScopeLease;
 use std::io;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
