@@ -1,7 +1,7 @@
 # real-eval 首个平台验收矩阵（ADR 0017 S7）
 
 > 状态：**草案，真实运行仍停止。** 本文只汇总已合入的离线实现与构建机证据，列出真实运行前必须补齐的原生证据、环境回执和所有者操作。它不批准任何真实运行，也不把 fake 通过当成原生保证。
-> 依据：[ADR 0017](adr/0017-real-eval-fixture-scope.md)（§3 审批与 Stop、§4 环境契约、§5 分卡及 macOS/Windows 安全声明）。已合入：S1（#168）、S2（#175）、S3（#172）、S5（#177）、S6（#180）、S9（#181）、S10（#182）。**S4（专用 helper 与连接装配、已交付缓存回收）待合入**，下表凡依赖 S4 的项一律记 `pending`。
+> 依据：[ADR 0017](adr/0017-real-eval-fixture-scope.md)（§3 审批与 Stop、§4 环境契约、§5 分卡及 macOS/Windows 安全声明）。已合入：S1（#168）、S2（#175）、S3（#172）、S5（#177）、S6（#180）、S9（#181）、S10（#182）、S4（#186）。S4 已合入，但**真实进程的代码身份读取未实现**（S12，所有者已批准、进行中），真实准入一律失败关闭。
 
 ## 1. 判定规则
 
@@ -17,14 +17,16 @@
 | 私有 bootstrap、引擎状态机与数据 relay（S3） | offline | scope 权威只来自继承的私有控制通道；Windows 私有管道运行时 **not_run**（Windows 下 scoped 引擎 fail-closed） |
 | 审批拆分（S5） | offline | `auto-allow-*` 只替代范围内 app grant；敏感/前台确认默认拒绝；不写 Always |
 | 一次性环境 provider 契约（S6） | offline | §4 五行 `checked/attested/unknown`；任何进程只能凭 `AdmittedLaunch` 启动；**当前没有接受型 provider，所有真实路径一律拒绝** |
-| 专用 helper、最终 native ACK、已交付缓存随 lease 回收（S4） | pending | 真实运行在 S4 合入并完成原生验收前不可能开启 |
+| 专用 scoped helper 与最终 native ACK（S4） | offline | 独立入口与身份；握手核对 pid + 启动时间 + boot session；ACK 写完并 flush 后该代次数据面才可用；控制 EOF、对端消失、旧代次一律撤权并 `release_all_input` |
+| 代码身份（identifier / team / cdhash，S4） | offline（`ScriptedFacts`）；**真实读取未实现** | 真实主机上 `ProcessFacts::code_identity` 返回 `None`，准入失败关闭；SecCode 实时读取由 S12 补 |
+| 已交付图片/文件随 lease 失效（S4） | offline（惰性回收） | 撤销/重绑后读取按租约代次过滤，失效行在同一次访问里摘出，unlink 在释放锁之后；`close`/`Drop` 删除全部。限制见第 4 节 |
 | Stop：热键/钩子、100 ms 锁存、500 ms 释放、真实用户恢复 | not_run | 常量未改；离线测试覆盖锁存与释放顺序，真实热键与钩子摘除需原生证据 |
 
 ## 3. 平台矩阵
 
 硬保证在三平台相同：**进程实例**（pid + 启动/创建时间 + boot 会话标识），在每个出口复验，缺一即固定 `ScopeDenied`。窗口级为尽力而为、失败即关闭。
 
-| 能力（scoped 模式） | macOS（S2，S4 pending） | Windows（S9） | Linux（S10） |
+| 能力（scoped 模式） | macOS（S2、S4） | Windows（S9） | Linux（S10） |
 | --- | --- | --- | --- |
 | 进程实例证明 | offline：`p_starttime` + `kern.bootsessionuuid` | offline：`GetProcessTimes` + boot-session GUID | offline：`/proc` start-time + boot_id |
 | 应用/窗口发现 | offline：窗口表以 CGWindowID 为 id，连续性 token 证明同一对象 | offline：PID + 创建时间 + HWND + owner | offline：唯一总线连接核验后才读名；名称读取绑定当前 lease epoch；窗口列表只用已验证证据 |
@@ -37,7 +39,7 @@
 | doctor / capabilities | offline：关闭项标为不可用 | offline | offline：scoped doctor 不做同步探测；缺平台绑定即拒绝 |
 | 构建机证据 | Linux 2029、macOS 599 | Linux 2080/393/445、Windows 786 + pointer_gate 8/8、macOS 772 | Linux 2112/393/445、Windows 527、macOS 559 |
 
-**诚实结论：** Linux scoped 目前几乎没有可用路线（真实 scoped 会话列不出窗口），只能作为“缺证据即关闭”的正确性样本；macOS 依赖 S4 才能装配真实连接；Windows 的离线面最完整，但私有管道运行时与原生证据仍 `not_run`。首个平台按 ADR 0017 推荐仍是 macOS 一次性访客机，开启前须 S4 合入。
+**诚实结论：** Linux scoped 目前几乎没有可用路线（真实 scoped 会话列不出窗口），只能作为“缺证据即关闭”的正确性样本；macOS 的 helper 与连接装配已离线完成（S4），但真实代码身份读取未实现（S12），真实准入目前必然拒绝；Windows 的离线面最完整，但私有管道运行时与原生证据仍 `not_run`。首个平台按 ADR 0017 推荐仍是 macOS 一次性访客机，开启前须 S4 合入。
 
 ## 4. 已接受残余与 OS 限制
 
@@ -46,6 +48,7 @@
 - **macOS（所有者 2026-10-30）**：A1 pid 定向事件不能把接收者绑定到准入窗口；A2 两次相同读取不是原子观察；A3 AX 写/文本追加在检查与写之间元素可能被 reparent；A4 `AXRaise` 按 pid/窗口号重新解析。
 - **Windows（所有者 2026-10-31）**：同进程窗口在最后一次检查后被替换或 HWND 复用；同进程 UIA 元素在进程复验后、缓存返回前 reparent；最后一次系统调用到投递的间隙。
 - **Linux**：`_NET_WM_PID` 由客户端自报，不作身份；X11/Wayland 窗口来源不可证，故关闭对应路线。
+- **已交付产物（S4）**：回收是惰性的。撤销或重绑之后、下一次访问或关闭之前，已交付文件在磁盘上仍可读；撤销前已交付给客户端的内容不能收回。由一次性访客机整体销毁兜底。
 - **共同**：夹具自身漏洞、被允许窗口触发的文件/网络副作用、模型 endpoint 本身作为泄漏通道，均不由 scope 阻止（ADR 0017 §6）。
 
 ## 5. 明确不支持（scoped）
@@ -86,6 +89,6 @@ cleanup receipt:                  # 进程树、临时目录、访客机回收
 
 ## 8. 开启真实运行的门槛
 
-S4 合入并通过评审 → 至少一个接受型 S6 provider（非 fake，且已接入并安装；目前一个都没有）→ 出网限制（只允许模型 endpoint）经本地受控探针验证（若需改网络或防火墙设置，动手前先问所有者）→ 在一次性访客机里先做**无模型**的确定性原生验收，把第 3 节对应行改为 `native-verified` 并附回执 → 所有者审阅 → 再安排真实 LLM 评测。任一环节缺失即保持停止。
+S12 实时代码身份读取合入并通过评审（S4 已合入） → 至少一个接受型 S6 provider（非 fake，且已接入并安装；目前一个都没有）→ 出网限制（只允许模型 endpoint）经本地受控探针验证（若需改网络或防火墙设置，动手前先问所有者）→ 在一次性访客机里先做**无模型**的确定性原生验收，把第 3 节对应行改为 `native-verified` 并附回执 → 所有者审阅 → 再安排真实 LLM 评测。任一环节缺失即保持停止。
 
 S11 设计提案：[ADR 0018 · Tart 一次性环境 provider](adr/0018-tart-disposable-provider.md)（含本矩阵 §6 回执扩展、S4/S12 前置依赖；Proposed，不改变上述门槛）。
