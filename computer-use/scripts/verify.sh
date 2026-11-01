@@ -8,6 +8,9 @@ cd "$(dirname "$0")/.."
 
 step() { printf '\n== %s\n' "$*"; }
 
+step "s11-0 probe stubs"
+bash scripts/test_s11_0_probe.sh
+
 step "fmt";    cargo fmt --all --check
 if [ "$(uname -s)" = "Linux" ] && ! pkg-config --exists libpipewire-0.3 2>/dev/null; then
   step "clippy (portable host without libpipewire)"
