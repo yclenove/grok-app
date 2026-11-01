@@ -56,3 +56,49 @@ Round 1, independent static review of `cu2/scope-s4` at `96fcf873`, against `ori
 | Zero ordinary-store touches | No for an uninstrumented ordinary-store call. Tests prove counter arithmetic and the hardcoded three touches, not actual I/O isolation. |
 
 Validation: `git diff --check bc2a2810...HEAD` passed. No cargo, compilation, test/candidate/mutation execution, network, SSH, model calls, desktop operations, personal agent-home access, or source/test edits. Real helper launch, TCC, FD inheritance and real-model runs remain **NOT_RUN by design**, not findings. Only this review was written, uncommitted.
+
+## 修复记录
+
+Round-1 repairs on `cu2/scope-s4` after this review. Findings above are unchanged. Each principle is its own commit: `d132bba0` (P1), `ca99c951` (P2), `187db283` plus `03d29e7a` and `ee5bf926` (P3), `f68dfdda` (P4), `ed42026f` (P5). `2c795806` keeps the test-only harness off the library clippy target. Stop constants, fail-closed refusal, S6 `Command::new` placement, and dependencies are unchanged. A1–A4 were not attempted.
+
+### 原则一 — 当前代码身份来自事实，不是声称
+
+`ProcessFacts::code_identity`（`gcu-driver-macos` 的 `scope_os/facts.rs`）在 admit、ACK 编码、ACK 校验和每次 recheck 读出该进程实例当前的 identifier、team、cdhash，并与期望比较。`None` 或读失败一律拒绝。真实访客 SecCode/codesign 读取 **not_run**：实现返回 `None`（文档写明缺失即拒绝），不用路径上的 `SecStaticCode` 伪造成功。`ScriptedFacts` 可以在握手之后改代码或丢掉代码读取。
+
+性质被破坏时会失败的测试：`unchanged_wire_live_code_is_refused_at_admit_ack_and_recheck`（线上声称不变，事实里的 cdhash、team、identifier 变化或读取失败，在 admit、ACK 待写、recheck 三处撤权并 `release_all_input`）；`unchanged_ack_wire_is_refused_when_live_code_changes`。原有只改 wire cdhash 的断言留在 `old_generation_replay_and_code_mismatch_revoke`。若把缺失观察当成通过，或只比较 wire，这些测试失败。
+
+### 原则二 — 该代次 ACK 写完并 flush 且对端仍匹配之后，数据才可用
+
+首次 install 与每次 rebind 都一样。`DataPlane` 只在 `open_generation` 之后对该代次 `allows`；`admit_data` 在不匹配时拒绝，且不 `arm_attempt`、不增加 effects。`write_acked` 在写和 flush 期间按 50ms 复查对端，并监视租约剩余时间。ACK 写失败、flush 失败或对端消失则撤权，外层 `release_all_input`。租约代次仍在 `apply` 时立即发布，不回退 S3「旧连接权威不能用于新代次」。库目标里只被测试调用的 `run_controlled` 和 `admit_data` 再导出是 `cfg(test)`；`confirm` 直接接收租约引用。
+
+性质被破坏时会失败的测试：`rebind_data_stays_closed_until_the_ack_flushes`（栅栏卡住第二个 ACK 时，新连接 `admit_data` 被拒、effects 不变；不放开栅栏就摘掉 supervisor，会被发现并释放输入）；`rebind_ack_flush_failure_releases_held_input`（flush 失败后持有输入为 0）；`data_factory_is_not_polled_until_ack_is_fully_flushed`；`fresh_accept_uses_the_admitted_generation_gate`（源码必须调用 `admit_data(&plane, &lease)`，`arm_attempt` 恰好两处）。去掉门控、或在 flush 完成前 `open_generation`，这些断言失败。`rebind_new_generation_invalidates_old_attempt` 仍要求 `apply` 后 generation 立即为 2。
+
+### 原则三 — 已交付产物由租约失效退役
+
+`gcu-mcp/src/retire.rs` 在 `bind_lease` 时武装一个 tokio 任务。撤销、重绑或到期后删除已登记文件并释放缓存图像。任务在 `subscribe` 之后先退役一次，避免发布发生在任务被 poll 之前就丢掉。磁盘清理在缓存或文件锁与租约锁都放下之后做。锁序仍是快照 → image cache → 文件账本 → 租约。登记仍只有 `commit_if_current` 里的盖章闭包。没有运行时的同步调用不置位，稍后的运行时仍能启动任务。
+
+性质被破坏时会失败的测试（连接保持打开，**先**断言路径或驻留，再 get/export）：`delivered_file_is_unreadable_after_lease_expiry`、`delivered_image_is_unreadable_after_lease_expiry`（`resident` 不回收）、`rebind_deletes_artifacts_while_the_session_stays_open`、`revoke_before_commit_hides_the_spill_and_revoke_after_commit_reclaims_it`、`revoke_after_image_commit_hides_the_published_batch`。失效后若文件还在或像素仍 `resident`，测试失败。先调用 export/get 会自己清掉，所以不能用来代替这些断言。到期前的那一次 export/get 只证明产物曾经存在。
+
+### 原则四 — 平台专有导入与其使用者同一个 cfg
+
+`scope_link_tests.rs` 里 `AsyncReadExt` 改为 `#[cfg(unix)]`。它只被 Unix 帧读取测试的 `.read()` 使用。`HeldFlush` 的 `AsyncRead` / `AsyncWrite` / `ReadBuf` 仍是全平台。本轮新增代码里没有另写只在 Unix 使用、却缺少 `cfg(all(test, unix))` 的辅助函数。
+
+去掉该 cfg 后，Windows 的 `clippy -D warnings` 会把未使用导入当成错误。Linux 上该测试会编译，所以本机构建看不出这个问题。
+
+### 原则五 — 隔离由源码守卫强制，不是计数
+
+删掉 `run_helper` 开头对自己 touch 三次再检查总数的伪检查，生产路径不再接收 `StoreLedger`。`StoreRole` / `StoreLedger` 仅 `cfg(test)`，计数测试只证明计数器算术。`scoped_modules_do_not_reference_ordinary_helper_stores` 用与 `command_new_is_only_in_the_admission_module` 相同的源码包含扫描，检查 `helper/scope_link.rs`、`helper/identity.rs`、`scope/mod.rs`、`scope/plane.rs`。注释也算。禁止 `config::load`、`LocalHost::new`、`open_local_host`、`stop_reason::state_dir`、`stop_reason::write_marker`、`private::state_dir`、`policy_store::`、`HostPolicy`、`launch_helper`、`launch_for_onboarding`、`run_agent`、`run_stdio_proxy`、`client_attach`、`start_listener`、`UnixListener::bind`、`UnixListener::from_std`、`std::os::unix::net::UnixListener`、`launch_command`。`identity.rs` 的纯路径比较和 `CodeSignature` 值比较不在清单里。ADR 0017 S4 行已改为「隔离由源码守卫强制，不是计数」，并写明观察代码身份、ACK 后才放行数据、失效退役。
+
+在上述四个文件里加入任一禁止符号（包括注释）会使该测试失败。`scope/data.rs` 不在扫描内，因为 S3 引擎宿主在那里 `open_local_host`；也不把 `TcpListener::bind` 当成普通 socket。
+
+### 仍是已知窗口
+
+- 真实访客 SecCode/codesign 读取 not_run，返回 `None`，缺失即拒绝。
+- Tart 内真实 helper 启动、TCC、真实 FD 移交与 ACK、真实模型评测仍 not_run。A1–A4 未做。
+- 已经复制进响应的字节不回收。unlink 错误被忽略。撤销前已经放行的读仍可能做完（评审残余，未扩大）。
+- 源码扫描不覆盖 `scope/data.rs`，也不覆盖 scoped MCP 的 loopback `TcpListener::bind`。
+- macOS / Windows 由总控验证。老辛没有 node，`gcu-driver-linux` compositor 测试不作为本次结论。
+
+### 验证（build-laoxin）
+
+本地 `cargo fmt --all --manifest-path computer-use/Cargo.toml` 已跑。`rcargo clippy` 的 `-D warnings` 必须写在 `--` 后面。工作区 clippy 与特性集 clippy（`gcu-cli/script`、`gcu-cli/eval-autoapprove`、`gcu-mcp/script`、`gcu-eval/eval-autoapprove`、`gcu-eval/test-support`）退出码都是 0。`rcargo test -p gcu-cli -p gcu-mcp -p gcu-core -p gcu-driver-macos --locked --no-fail-fast` 以及同一命令加上面的特性集，退出码都是 0。特性集下 `owned_js_worker_helper` 仍是既有 ignore。macOS / Windows 未在这台构建机上跑。
