@@ -7,7 +7,7 @@ use crate::helper::identity::{
     identities_are_distinct, ordinary_socket, scoped_socket, StoreLedger, StoreRole,
 };
 use crate::scope::DataPlane;
-use gcu_driver_macos::{CodeIdentity, ScriptedFacts};
+use gcu_driver_macos::{CodeIdentity, ProcessFacts, ScriptedFacts};
 use gcu_host_protocol::{
     codec,
     scope::{Ack, Control, Scope, LEASE, VERSION},
@@ -863,6 +863,31 @@ async fn rebind_ack_flush_failure_releases_held_input() {
     })
     .await
     .unwrap();
+}
+
+/// `normalize_cdhash` lowercases, so this observed hash still admits.
+///
+/// The ACK body must carry that observed spelling. Copying `expected.helper_code`
+/// into the body makes the cdhash assertion fail.
+#[test]
+fn ack_body_carries_observed_helper_cdhash_not_the_expected_copy() {
+    let facts = primed();
+    let ids = identities();
+    let mut observed_code = observed(&ids.helper_code);
+    observed_code.cdhash = observed_code.cdhash.to_ascii_uppercase();
+    assert_ne!(observed_code.cdhash, ids.helper_code.cdhash);
+    facts.set_code(ids.helper.pid, observed_code.clone());
+    assert!(super::admit(&good_hello(1), &ids, facts.as_ref()).is_ok());
+    let encoder = super::ack_encoder(Arc::clone(&facts) as Arc<dyn ProcessFacts>, ids.clone());
+    let expected = Ack {
+        run_id: "run".into(),
+        generation: 1,
+        scope_digest: scope_record().digest("run", 1).unwrap(),
+    };
+    let bytes = encoder(&expected).unwrap();
+    let body: super::ScopedAck = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body.code.cdhash, observed_code.cdhash);
+    assert_ne!(body.code.cdhash, ids.helper_code.cdhash);
 }
 
 /// Scoped sources must not name ordinary helper stores, launchers, or sockets.
